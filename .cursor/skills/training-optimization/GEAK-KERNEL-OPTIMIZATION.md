@@ -1,13 +1,13 @@
 ---
 name: geak-kernel-optimization
-description: Optional GEAK kernel optimization flow that extends the workload-optimization skill. After TraceLens identifies bottleneck kernels, this skill extracts kernel source code, submits to GEAK MCP for AI-driven kernel optimization, integrates results, and benchmarks. Use alongside the main workload-optimization skill when the user wants kernel-level optimization (not just code-level), or when TraceLens identifies custom kernels (Triton, HIP, fused ops) that have modifiable source. Does NOT apply to vendor BLAS (hipBLASLt) — those are already near-optimal.
+description: Optional GEAK kernel optimization flow that extends the training-optimization skill. After TraceLens identifies bottleneck kernels, this skill extracts kernel source code, submits to GEAK MCP for AI-driven kernel optimization, integrates results, and benchmarks. Use alongside the main training-optimization skill when the user wants kernel-level optimization (not just code-level), or when TraceLens identifies custom kernels (Triton, HIP, fused ops) that have modifiable source. Does NOT apply to vendor BLAS (hipBLASLt) — those are already near-optimal.
 ---
 
 # GEAK Kernel Optimization — Optional Extension
 
 ## Relationship to Main Skill
 
-This skill is an **optional extension** of `workload-optimization/SKILL.md`. It adds a kernel-level optimization path using GEAK MCP, complementing the config overrides and code patches in the main skill.
+This skill is an **optional extension** of `training-optimization/SKILL.md`. It adds a kernel-level optimization path using GEAK MCP, complementing the config overrides and code patches in the main skill.
 
 **Main skill** = config/code-level: config overrides (`moe_permute_fusion`, etc.), code patches (caching, fused ops), attention backend swaps
 **This skill** = kernel-level: rewrites the actual GPU kernel source (Triton or HIP) for a specific hot kernel
@@ -30,11 +30,11 @@ During the main optimization loop (after TraceLens profiling in Step 3, or after
 
 ## Prerequisites
 
-- GEAK MCP configured in `.cursor/mcp.json` (see `kernel-regression-analysis/mcp-config.md`)
-- Environment variables in `.env` at repo root:
+- GEAK MCP configured in `.cursor/mcp.json`
+- Environment variables in `.env` at repo root (see `.env.template`):
   ```
   LITELLM_API_KEY=sk-...          # LLM gateway key for GEAK's internal LLM
-  PRIMUS_SAFE_API_TOKEN=ak-...    # Auth token for GEAK endpoint
+  GEAK_AUTH_KEY=...               # Auth token for GEAK endpoint (used in mcp.json)
   ```
 - A TraceLens analysis already completed (trace file + kernel profile from main skill)
 - The source code for the candidate kernel (Triton `.py`, HIP `.hip`/`.cu`, or extracted from Python)
@@ -105,24 +105,6 @@ ls /tmp/torchinductor_*/*/triton/*.py
 1. Profiler trace (for Jarvis/TraceLens)
 2. Inductor-generated Triton kernels (for GEAK)
 
-If an `inductor_extract.py` utility is available (e.g., in `.cursor/agents/executors/`), use it:
-
-```python
-import sys; sys.path.insert(0, ".cursor/agents/executors")
-from inductor_extract import run_combined_pipeline
-results = run_combined_pipeline("<model_script_or_module>")
-# results contains:
-#   trace_path       → send to Jarvis/TraceLens
-#   inductor_files   → Triton source files in Inductor cache
-#   matched_kernels  → kernels matched to profile (sorted by GPU time)
-#   all_kernels      → all extracted kernel functions
-```
-
-Or from the command line:
-```bash
-python3 .cursor/agents/executors/inductor_extract.py <model_script_or_module>
-```
-
 **Note:** For distributed training (e.g., Primus/Megatron with `torchrun`), `torch.compile` extraction is harder to integrate — graph breaks are common with distributed ops. In that case, use manual extraction (below) with kernels found via the profiling trace from Step 3 of the main skill.
 
 **How it works:**
@@ -189,10 +171,10 @@ ls /tmp/torchinductor_*/*/triton/*.py | head -20
 ### 3a. Load credentials
 
 ```bash
-source .env  # loads LITELLM_API_KEY and PRIMUS_SAFE_API_TOKEN
+source .env  # loads LITELLM_API_KEY and GEAK_AUTH_KEY
 
 GEAK_URL="https://oci-slc.example-internal-host.invalid/control-plane/control-plane-dev/geak-agent-wvsbv/mcp/sse"
-GEAK_AUTH="Authorization: Bearer $PRIMUS_SAFE_API_TOKEN"
+GEAK_AUTH="Authorization: Bearer $GEAK_AUTH_KEY"
 ```
 
 ### 3b. Configure LLM backend (once per session)
@@ -336,21 +318,19 @@ If you used `inductor_extract.py` to auto-extract kernels from `torch.compile`, 
 **Step-by-step:**
 
 ```python
-import sys; sys.path.insert(0, ".cursor/agents/executors")
-from inductor_extract import patch_kernel_in_file
-
 # 1. Read GEAK's optimized kernel source
 with open("geak_output_kernel.py") as f:
     optimized_source = f.read()
 
 # 2. Patch it into the Inductor cache file
-#    (keeps same function name, replaces the kernel body)
-patch_kernel_in_file(
-    inductor_file="/tmp/inductor_geak_cache/sm/csm44...py",
-    original_kernel_name="triton_red_fused__to_copy_add_mean_mul_pow_rsqrt_0",
-    optimized_source=optimized_source,
-)
-# This also backs up the original and clears Triton binary cache
+#    Backup the original, replace the kernel body, clear binary cache
+import shutil, os
+inductor_file = "/tmp/inductor_geak_cache/sm/csm44...py"
+shutil.copy2(inductor_file, inductor_file + ".bak")
+# Replace the kernel function body with GEAK's optimized version
+# (see Phase 8 Strategy A in inference-optimization SKILL.md for the full patching script)
+# Clear Triton binary cache to force recompilation
+shutil.rmtree(os.path.expanduser("~/.triton/cache"), ignore_errors=True)
 ```
 
 **How to rebenchmark after patching:**
@@ -592,15 +572,15 @@ For most distributed training workloads, you'll use manual extraction (Phase 2) 
 | `geak_get_model_config` | Check LLM config | Debugging |
 
 ### GEAK Authentication
-- Requires `PRIMUS_SAFE_API_TOKEN` (not `LITELLM_API_KEY`) for the Bearer token
+- Requires `GEAK_AUTH_KEY` for the Bearer token in MCP requests
 - `LITELLM_API_KEY` is used internally by GEAK to call its LLM backend
-- Both must be set before submitting tasks
+- Both must be set in `.env` before submitting tasks
 
 ### GEAK Pod Scheduling — Use `control-plane-dev` Space
 GEAK MCP submits workloads to `control-plane-anthropic` by default, which is often resource-constrained. To avoid long queue times, launch workloads directly via the Primus-SaFE API targeting `control-plane-dev`:
 ```bash
 curl -sk -X POST "$PRIMUS_SAFE_API_URL/api/v1/workloads" \
-  -H "Authorization: Bearer $PRIMUS_SAFE_API_TOKEN" \
+  -H "Authorization: Bearer $GEAK_AUTH_KEY" \
   -H "Content-Type: application/json" \
   -d @payload.json
 ```

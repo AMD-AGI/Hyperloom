@@ -1,4 +1,4 @@
-# Workload Optimization Skill
+# Training Optimization Skill
 
 This folder contains skills for automated GPU training optimization in Cursor. `@`-reference the skill files in your Cursor chat to use them.
 
@@ -85,23 +85,18 @@ Give the agent a real distributed training workload (Primus/Megatron), and it wi
 - **Optional MCP servers** in `.cursor/mcp.json`:
   - `oci-traceLens-agent` (Jarvis) — for automated profiling analysis
   - `geak-agent` — for kernel optimization (see `GEAK-KERNEL-OPTIMIZATION.md`)
-- env setup for Primus-SaFE API token, LiteLLM API token
+- Environment: `GEAK_AUTH_KEY` and `LITELLM_API_KEY` set in `.env` (see `.env.template`)
 
 ## Quick Start
 
-> **Tip:** Reference the skill file in your Cursor chat with `@.cursor/skills/workload-optimization/SKILL.md` so the agent knows to follow it.
->mkdir -p ~/.cursor/skills
-
->ln -s /shared_nfs/nehaprakriya/agentic-rc/.cursor/skills/inference-optimization ~/.cursor/skills/inference-optimization
-
->ln -s /shared_nfs/nehaprakriya/agentic-rc/.cursor/skills/workload-optimization ~/.cursor/skills/workload-optimization
+> **Tip:** Reference the skill file in your Cursor chat with `@.cursor/skills/training-optimization/SKILL.md` so the agent knows to follow it.
 
 ### Example: Optimize GPT-OSS 20B Training
 
 Paste this into Cursor chat:
 
 ```
-Optimize GPT-OSS 20B training on 8× MI355X using the workload-optimization skill.
+Optimize GPT-OSS 20B training on 8× MI355X using the training-optimization skill.
 
 Container: rocm/primus-training-private:20260317_v26dot2_rc5
 Config: examples/megatron/configs/MI355X/gpt_oss_20B-BF16-pretrain.yaml
@@ -424,11 +419,6 @@ The agent produces:
 - **Sliding window**: Triton attention backend doesn't support `sink_sliding_window`, will crash
 
 ## Tips
-
-- The agent stops automatically when it hits diminishing returns, crashes, or time budget
-- You can interrupt anytime — it writes the report with whatever progress it has
-- Config overrides are safest; code patches are more invasive but sometimes necessary
-- The knowledge base in SKILL.md contains lessons from prior optimization runs — the agent uses these to avoid known pitfalls
 
 - The agent stops automatically when it hits diminishing returns, crashes, or time budget
 - You can interrupt anytime — it writes the report with whatever progress it has
