@@ -1,0 +1,18 @@
+attempt	ms_per_iter	speedup_pct	status	description
+0	12898.9	0.0	baseline	GPT-OSS 20B BF16 baseline (8×MI355X, EP=8, mock data, iter 6-10 avg, run_pretrain.sh)
+1	13119.8	-1.71	discard	moe_permute_fusion=true (iter 6 outlier from Triton compile, iter 7-10 marginal)
+2	12934.9400	-0.2794	discard	gradient_accumulation_fusion=true
+3	12849.9800	0.3793	keep	gradient_accumulation_fusion=true moe_use_fused_router_with_aux_score=true
+4	12743.5600	1.2043	keep	gradient_accumulation_fusion=true moe_use_fused_router_with_aux_score=true moe_permute_fusion=true
+5	13037.7800	-1.0767	discard	gradient_accumulation_fusion=true moe_use_fused_router_with_aux_score=true moe_permute_fusion=true use_sink_attention=false
+6	13393.4400	-3.8340	discard	use_sink_attention=false
+7	13057.7000	-1.2311	discard	gradient_accumulation_fusion=true cross_entropy_loss_fusion=true
+8	12758.8800	1.0855	keep	gradient_accumulation_fusion=true moe_permute_fusion=true moe_use_fused_router_with_aux_score=true cross_entropy_loss_fusion=true
+13	-1	0.0	crash	GPU_MAX_HW_QUEUES=4 + best
+14	-1	0.0	crash	GPU_MAX_HW_QUEUES=8 + best
+15	13695.5	-6.18	discard	NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=32 + best
+16	-1	0.0	crash	enable_primus_turbo + use_turbo_parallel_linear + best
+17	-1	0.0	crash	enable_primus_turbo + use_turbo_rms_norm + best
+18	28828.0	-123.49	discard	gradient_reduce_div_fusion + best
+19	12773.5	0.97	keep	CUDA_DEVICE_MAX_CONNECTIONS=2 + best
+20	-1	0.0	crash	full turbo: attention+linear+rms_norm + best

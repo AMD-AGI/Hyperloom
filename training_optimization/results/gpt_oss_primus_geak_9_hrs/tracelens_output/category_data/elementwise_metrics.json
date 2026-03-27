@@ -1,0 +1,2440 @@
+{
+  "category": "elementwise",
+  "status": "OK",
+  "total_time_ms": 707.879,
+  "percent_of_compute": 5.46,
+  "operation_count": 15541,
+  "average_efficiency_percent": 26.24,
+  "operations": [
+    {
+      "name": "aten::scatter_add_",
+      "count": 192,
+      "time_ms": 263.511,
+      "percent_of_category": 37.23,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::add_",
+      "count": 960,
+      "time_ms": 59.012,
+      "percent_of_category": 8.34,
+      "efficiency": {
+        "tflops_achieved": 0.27,
+        "tb_s_achieved": 2.74,
+        "efficiency_percent": 34.28,
+        "efficiency_label": "34.28% of peak HBM bandwidth (2.74 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.1,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1
+    },
+    {
+      "name": "aten::add_",
+      "count": 960,
+      "time_ms": 41.76,
+      "percent_of_category": 5.9,
+      "efficiency": {
+        "tflops_achieved": 0.2,
+        "tb_s_achieved": 2.0,
+        "efficiency_percent": 25.04,
+        "efficiency_label": "25.04% of peak HBM bandwidth (2.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.1,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1
+    },
+    {
+      "name": "aten::copy_",
+      "count": 192,
+      "time_ms": 34.524,
+      "percent_of_category": 4.88,
+      "efficiency": {
+        "tflops_achieved": 0.75,
+        "tb_s_achieved": 2.99,
+        "efficiency_percent": 37.37,
+        "efficiency_label": "37.37% of peak HBM bandwidth (2.99 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.25,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.25
+    },
+    {
+      "name": "aten::copy_",
+      "count": 192,
+      "time_ms": 34.154,
+      "percent_of_category": 4.82,
+      "efficiency": {
+        "tflops_achieved": 0.75,
+        "tb_s_achieved": 3.02,
+        "efficiency_percent": 37.75,
+        "efficiency_label": "37.75% of peak HBM bandwidth (3.02 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.25,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.25
+    },
+    {
+      "name": "aten::add_",
+      "count": 376,
+      "time_ms": 31.847,
+      "percent_of_category": 4.5,
+      "efficiency": {
+        "tflops_achieved": 1.11,
+        "tb_s_achieved": 6.69,
+        "efficiency_percent": 83.62,
+        "efficiency_label": "83.62% of peak HBM bandwidth (6.69 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::add_",
+      "count": 576,
+      "time_ms": 18.573,
+      "percent_of_category": 2.62,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.1,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1
+    },
+    {
+      "name": "aten::add",
+      "count": 200,
+      "time_ms": 18.145,
+      "percent_of_category": 2.56,
+      "efficiency": {
+        "tflops_achieved": 1.04,
+        "tb_s_achieved": 6.25,
+        "efficiency_percent": 78.06,
+        "efficiency_label": "78.06% of peak HBM bandwidth (6.25 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::copy_",
+      "count": 192,
+      "time_ms": 17.033,
+      "percent_of_category": 2.41,
+      "efficiency": {
+        "tflops_achieved": 1.51,
+        "tb_s_achieved": 6.06,
+        "efficiency_percent": 75.69,
+        "efficiency_label": "75.69% of peak HBM bandwidth (6.06 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.25,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.25
+    },
+    {
+      "name": "aten::add_",
+      "count": 392,
+      "time_ms": 16.969,
+      "percent_of_category": 2.4,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.01,
+        "efficiency_label": "0.01% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.1,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1
+    },
+    {
+      "name": "aten::add_",
+      "count": 192,
+      "time_ms": 15.412,
+      "percent_of_category": 2.18,
+      "efficiency": {
+        "tflops_achieved": 1.18,
+        "tb_s_achieved": 7.06,
+        "efficiency_percent": 88.2,
+        "efficiency_label": "88.20% of peak HBM bandwidth (7.06 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::add_",
+      "count": 192,
+      "time_ms": 15.17,
+      "percent_of_category": 2.14,
+      "efficiency": {
+        "tflops_achieved": 1.19,
+        "tb_s_achieved": 7.17,
+        "efficiency_percent": 89.6,
+        "efficiency_label": "89.60% of peak HBM bandwidth (7.17 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::add_",
+      "count": 192,
+      "time_ms": 12.364,
+      "percent_of_category": 1.75,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.01,
+        "efficiency_percent": 0.18,
+        "efficiency_label": "0.18% of peak HBM bandwidth (0.01 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.1,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1
+    },
+    {
+      "name": "aten::masked_select",
+      "count": 192,
+      "time_ms": 9.505,
+      "percent_of_category": 1.34,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::add_",
+      "count": 16,
+      "time_ms": 8.181,
+      "percent_of_category": 1.16,
+      "efficiency": {
+        "tflops_achieved": 0.56,
+        "tb_s_achieved": 5.64,
+        "efficiency_percent": 70.49,
+        "efficiency_label": "70.49% of peak HBM bandwidth (5.64 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.1,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1
+    },
+    {
+      "name": "aten::masked_select",
+      "count": 192,
+      "time_ms": 7.811,
+      "percent_of_category": 1.1,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::add_",
+      "count": 192,
+      "time_ms": 5.572,
+      "percent_of_category": 0.79,
+      "efficiency": {
+        "tflops_achieved": 0.51,
+        "tb_s_achieved": 5.09,
+        "efficiency_percent": 63.61,
+        "efficiency_label": "63.61% of peak HBM bandwidth (5.09 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.1,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1
+    },
+    {
+      "name": "aten::copy_",
+      "count": 192,
+      "time_ms": 5.353,
+      "percent_of_category": 0.76,
+      "efficiency": {
+        "tflops_achieved": 0.6,
+        "tb_s_achieved": 2.41,
+        "efficiency_percent": 30.13,
+        "efficiency_label": "30.13% of peak HBM bandwidth (2.41 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.25,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.25
+    },
+    {
+      "name": "aten::fill_",
+      "count": 192,
+      "time_ms": 5.325,
+      "percent_of_category": 0.75,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::fill_",
+      "count": 192,
+      "time_ms": 4.825,
+      "percent_of_category": 0.68,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::fill_",
+      "count": 192,
+      "time_ms": 4.784,
+      "percent_of_category": 0.68,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::copy_",
+      "count": 192,
+      "time_ms": 4.365,
+      "percent_of_category": 0.62,
+      "efficiency": {
+        "tflops_achieved": 0.74,
+        "tb_s_achieved": 2.96,
+        "efficiency_percent": 36.97,
+        "efficiency_label": "36.97% of peak HBM bandwidth (2.96 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.25,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.25
+    },
+    {
+      "name": "aten::add_",
+      "count": 192,
+      "time_ms": 4.159,
+      "percent_of_category": 0.59,
+      "efficiency": {
+        "tflops_achieved": 0.55,
+        "tb_s_achieved": 5.46,
+        "efficiency_percent": 68.31,
+        "efficiency_label": "68.31% of peak HBM bandwidth (5.46 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.1,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1
+    },
+    {
+      "name": "aten::fill_",
+      "count": 576,
+      "time_ms": 3.359,
+      "percent_of_category": 0.47,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::fill_",
+      "count": 192,
+      "time_ms": 2.893,
+      "percent_of_category": 0.41,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::copy_",
+      "count": 384,
+      "time_ms": 2.821,
+      "percent_of_category": 0.4,
+      "efficiency": {
+        "tflops_achieved": 0.14,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::mul_",
+      "count": 48,
+      "time_ms": 2.646,
+      "percent_of_category": 0.37,
+      "efficiency": {
+        "tflops_achieved": 0.9,
+        "tb_s_achieved": 7.22,
+        "efficiency_percent": 90.28,
+        "efficiency_label": "90.28% of peak HBM bandwidth (7.22 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.12,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1249999974882652
+    },
+    {
+      "name": "aten::copy_",
+      "count": 384,
+      "time_ms": 2.644,
+      "percent_of_category": 0.37,
+      "efficiency": {
+        "tflops_achieved": 0.16,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::mul",
+      "count": 384,
+      "time_ms": 2.628,
+      "percent_of_category": 0.37,
+      "efficiency": {
+        "tflops_achieved": 0.16,
+        "tb_s_achieved": 1.95,
+        "efficiency_percent": 24.37,
+        "efficiency_label": "24.37% of peak HBM bandwidth (1.95 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.08,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0833333333333333
+    },
+    {
+      "name": "aten::copy_",
+      "count": 384,
+      "time_ms": 2.585,
+      "percent_of_category": 0.37,
+      "efficiency": {
+        "tflops_achieved": 0.17,
+        "tb_s_achieved": 1.0,
+        "efficiency_percent": 12.53,
+        "efficiency_label": "12.53% of peak HBM bandwidth (1.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::copy_",
+      "count": 384,
+      "time_ms": 2.185,
+      "percent_of_category": 0.31,
+      "efficiency": {
+        "tflops_achieved": 0.19,
+        "tb_s_achieved": 1.11,
+        "efficiency_percent": 13.94,
+        "efficiency_label": "13.94% of peak HBM bandwidth (1.11 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::mul",
+      "count": 192,
+      "time_ms": 1.915,
+      "percent_of_category": 0.27,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.01,
+        "efficiency_label": "0.01% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.05,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.05
+    },
+    {
+      "name": "aten::copy_",
+      "count": 96,
+      "time_ms": 1.798,
+      "percent_of_category": 0.25,
+      "efficiency": {
+        "tflops_achieved": 0.89,
+        "tb_s_achieved": 5.32,
+        "efficiency_percent": 66.51,
+        "efficiency_label": "66.51% of peak HBM bandwidth (5.32 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::gather",
+      "count": 192,
+      "time_ms": 1.683,
+      "percent_of_category": 0.24,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::mul",
+      "count": 192,
+      "time_ms": 1.649,
+      "percent_of_category": 0.23,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.01,
+        "efficiency_label": "0.01% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.05,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.05
+    },
+    {
+      "name": "aten::copy_",
+      "count": 192,
+      "time_ms": 1.486,
+      "percent_of_category": 0.21,
+      "efficiency": {
+        "tflops_achieved": 0.14,
+        "tb_s_achieved": 0.54,
+        "efficiency_percent": 6.78,
+        "efficiency_label": "6.78% of peak HBM bandwidth (0.54 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.25,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.25
+    },
+    {
+      "name": "aten::normal_",
+      "count": 192,
+      "time_ms": 1.429,
+      "percent_of_category": 0.2,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::fill_",
+      "count": 1,
+      "time_ms": 1.398,
+      "percent_of_category": 0.2,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::_index_put_impl_",
+      "count": 192,
+      "time_ms": 1.397,
+      "percent_of_category": 0.2,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::mul_",
+      "count": 23,
+      "time_ms": 1.366,
+      "percent_of_category": 0.19,
+      "efficiency": {
+        "tflops_achieved": 0.87,
+        "tb_s_achieved": 6.94,
+        "efficiency_percent": 86.77,
+        "efficiency_label": "86.77% of peak HBM bandwidth (6.94 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.12,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1249999975739205
+    },
+    {
+      "name": "aten::add_",
+      "count": 192,
+      "time_ms": 1.34,
+      "percent_of_category": 0.19,
+      "efficiency": {
+        "tflops_achieved": 0.16,
+        "tb_s_achieved": 0.96,
+        "efficiency_percent": 12.04,
+        "efficiency_label": "12.04% of peak HBM bandwidth (0.96 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::fill_",
+      "count": 192,
+      "time_ms": 1.335,
+      "percent_of_category": 0.19,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::fill_",
+      "count": 192,
+      "time_ms": 1.325,
+      "percent_of_category": 0.19,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::div",
+      "count": 200,
+      "time_ms": 1.316,
+      "percent_of_category": 0.19,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.06,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0625
+    },
+    {
+      "name": "aten::scatter_",
+      "count": 192,
+      "time_ms": 1.312,
+      "percent_of_category": 0.19,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::mul",
+      "count": 192,
+      "time_ms": 1.31,
+      "percent_of_category": 0.19,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.08,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0833333333333333
+    },
+    {
+      "name": "aten::copy_",
+      "count": 192,
+      "time_ms": 1.303,
+      "percent_of_category": 0.18,
+      "efficiency": {
+        "tflops_achieved": 0.16,
+        "tb_s_achieved": 0.99,
+        "efficiency_percent": 12.37,
+        "efficiency_label": "12.37% of peak HBM bandwidth (0.99 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::copy_",
+      "count": 192,
+      "time_ms": 1.302,
+      "percent_of_category": 0.18,
+      "efficiency": {
+        "tflops_achieved": 0.16,
+        "tb_s_achieved": 1.31,
+        "efficiency_percent": 16.39,
+        "efficiency_label": "16.39% of peak HBM bandwidth (1.31 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.12,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.125
+    },
+    {
+      "name": "aten::copy_",
+      "count": 192,
+      "time_ms": 1.301,
+      "percent_of_category": 0.18,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::fill_",
+      "count": 192,
+      "time_ms": 1.288,
+      "percent_of_category": 0.18,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::mul",
+      "count": 192,
+      "time_ms": 1.275,
+      "percent_of_category": 0.18,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.06,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0625
+    },
+    {
+      "name": "aten::mul",
+      "count": 192,
+      "time_ms": 1.275,
+      "percent_of_category": 0.18,
+      "efficiency": {
+        "tflops_achieved": 0.02,
+        "tb_s_achieved": 0.09,
+        "efficiency_percent": 1.06,
+        "efficiency_label": "1.06% of peak HBM bandwidth (0.09 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.25,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.2499961853609411
+    },
+    {
+      "name": "aten::copy_",
+      "count": 192,
+      "time_ms": 1.268,
+      "percent_of_category": 0.18,
+      "efficiency": {
+        "tflops_achieved": 0.16,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::fill_",
+      "count": 1,
+      "time_ms": 1.167,
+      "percent_of_category": 0.16,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::copy_",
+      "count": 192,
+      "time_ms": 1.114,
+      "percent_of_category": 0.16,
+      "efficiency": {
+        "tflops_achieved": 0.02,
+        "tb_s_achieved": 0.37,
+        "efficiency_percent": 4.6,
+        "efficiency_label": "4.60% of peak HBM bandwidth (0.37 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.06,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0625
+    },
+    {
+      "name": "aten::mul",
+      "count": 192,
+      "time_ms": 1.11,
+      "percent_of_category": 0.16,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.06,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0625
+    },
+    {
+      "name": "aten::div",
+      "count": 192,
+      "time_ms": 1.11,
+      "percent_of_category": 0.16,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.06,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0625
+    },
+    {
+      "name": "aten::copy_",
+      "count": 192,
+      "time_ms": 1.102,
+      "percent_of_category": 0.16,
+      "efficiency": {
+        "tflops_achieved": 0.18,
+        "tb_s_achieved": 1.1,
+        "efficiency_percent": 13.76,
+        "efficiency_label": "13.76% of peak HBM bandwidth (1.1 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::add_",
+      "count": 192,
+      "time_ms": 1.097,
+      "percent_of_category": 0.15,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.08,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0833333333333333
+    },
+    {
+      "name": "aten::remainder",
+      "count": 192,
+      "time_ms": 1.09,
+      "percent_of_category": 0.15,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::div",
+      "count": 194,
+      "time_ms": 1.085,
+      "percent_of_category": 0.15,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.06,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0625
+    },
+    {
+      "name": "aten::mul",
+      "count": 192,
+      "time_ms": 1.046,
+      "percent_of_category": 0.15,
+      "efficiency": {
+        "tflops_achieved": 0.02,
+        "tb_s_achieved": 0.1,
+        "efficiency_percent": 1.22,
+        "efficiency_label": "1.22% of peak HBM bandwidth (0.1 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.25,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.2499961853609411
+    },
+    {
+      "name": "aten::fill_",
+      "count": 192,
+      "time_ms": 1.044,
+      "percent_of_category": 0.15,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::copy_",
+      "count": 96,
+      "time_ms": 1.037,
+      "percent_of_category": 0.15,
+      "efficiency": {
+        "tflops_achieved": 0.77,
+        "tb_s_achieved": 4.62,
+        "efficiency_percent": 57.75,
+        "efficiency_label": "57.75% of peak HBM bandwidth (4.62 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::copy_",
+      "count": 192,
+      "time_ms": 1.036,
+      "percent_of_category": 0.15,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.06,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0625
+    },
+    {
+      "name": "aten::copy_",
+      "count": 8,
+      "time_ms": 1.027,
+      "percent_of_category": 0.15,
+      "efficiency": {
+        "tflops_achieved": 0.74,
+        "tb_s_achieved": 2.94,
+        "efficiency_percent": 36.79,
+        "efficiency_label": "36.79% of peak HBM bandwidth (2.94 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.25,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.25
+    },
+    {
+      "name": "aten::ne",
+      "count": 74,
+      "time_ms": 0.411,
+      "percent_of_category": 0.06,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::mul_",
+      "count": 1,
+      "time_ms": 0.358,
+      "percent_of_category": 0.05,
+      "efficiency": {
+        "tflops_achieved": 0.8,
+        "tb_s_achieved": 6.43,
+        "efficiency_percent": 80.42,
+        "efficiency_label": "80.42% of peak HBM bandwidth (6.43 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.12,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1249999995663884
+    },
+    {
+      "name": "aten::mul_",
+      "count": 1,
+      "time_ms": 0.349,
+      "percent_of_category": 0.05,
+      "efficiency": {
+        "tflops_achieved": 0.83,
+        "tb_s_achieved": 6.61,
+        "efficiency_percent": 82.69,
+        "efficiency_label": "82.69% of peak HBM bandwidth (6.61 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.12,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1249999995663886
+    },
+    {
+      "name": "aten::eq",
+      "count": 74,
+      "time_ms": 0.251,
+      "percent_of_category": 0.04,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::copy_",
+      "count": 23,
+      "time_ms": 0.22,
+      "percent_of_category": 0.03,
+      "efficiency": {
+        "tflops_achieved": 0.68,
+        "tb_s_achieved": 4.05,
+        "efficiency_percent": 50.66,
+        "efficiency_label": "50.66% of peak HBM bandwidth (4.05 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::abs",
+      "count": 74,
+      "time_ms": 0.199,
+      "percent_of_category": 0.03,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::copy_",
+      "count": 24,
+      "time_ms": 0.095,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::mul_",
+      "count": 1,
+      "time_ms": 0.059,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": 0.88,
+        "tb_s_achieved": 7.02,
+        "efficiency_percent": 87.81,
+        "efficiency_label": "87.81% of peak HBM bandwidth (7.02 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.12,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1249999975740531
+    },
+    {
+      "name": "aten::copy_",
+      "count": 1,
+      "time_ms": 0.047,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": 0.77,
+        "tb_s_achieved": 4.62,
+        "efficiency_percent": 57.8,
+        "efficiency_label": "57.80% of peak HBM bandwidth (4.62 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::div_",
+      "count": 8,
+      "time_ms": 0.044,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::ne",
+      "count": 8,
+      "time_ms": 0.042,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::copy_",
+      "count": 8,
+      "time_ms": 0.039,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": 0.01,
+        "tb_s_achieved": 0.11,
+        "efficiency_percent": 1.35,
+        "efficiency_label": "1.35% of peak HBM bandwidth (0.11 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.06,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0625
+    },
+    {
+      "name": "aten::copy_",
+      "count": 1,
+      "time_ms": 0.039,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": 0.93,
+        "tb_s_achieved": 5.57,
+        "efficiency_percent": 69.66,
+        "efficiency_label": "69.66% of peak HBM bandwidth (5.57 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::copy_",
+      "count": 8,
+      "time_ms": 0.036,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": 0.01,
+        "tb_s_achieved": 0.06,
+        "efficiency_percent": 0.73,
+        "efficiency_label": "0.73% of peak HBM bandwidth (0.06 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.12,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.125
+    },
+    {
+      "name": "aten::mul",
+      "count": 8,
+      "time_ms": 0.035,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.01,
+        "tb_s_achieved": 0.09,
+        "efficiency_percent": 1.12,
+        "efficiency_label": "1.12% of peak HBM bandwidth (0.09 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.08,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0833333333333333
+    },
+    {
+      "name": "aten::copy_",
+      "count": 8,
+      "time_ms": 0.035,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::fill_",
+      "count": 16,
+      "time_ms": 0.035,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::mul",
+      "count": 8,
+      "time_ms": 0.033,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.01,
+        "tb_s_achieved": 0.1,
+        "efficiency_percent": 1.21,
+        "efficiency_label": "1.21% of peak HBM bandwidth (0.1 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.08,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0833333333333333
+    },
+    {
+      "name": "aten::add_",
+      "count": 8,
+      "time_ms": 0.03,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::eq",
+      "count": 8,
+      "time_ms": 0.027,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::div",
+      "count": 8,
+      "time_ms": 0.027,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::clamp",
+      "count": 8,
+      "time_ms": 0.023,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::mul",
+      "count": 8,
+      "time_ms": 0.022,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.08,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0833333333333333
+    },
+    {
+      "name": "aten::abs",
+      "count": 8,
+      "time_ms": 0.021,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::mul",
+      "count": 8,
+      "time_ms": 0.02,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.08,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0833333333333333
+    },
+    {
+      "name": "aten::mul",
+      "count": 8,
+      "time_ms": 0.02,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.08,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0833333333333333
+    },
+    {
+      "name": "aten::mul",
+      "count": 8,
+      "time_ms": 0.019,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.06,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0625
+    },
+    {
+      "name": "aten::div_",
+      "count": 8,
+      "time_ms": 0.016,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.06,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0625
+    },
+    {
+      "name": "aten::div",
+      "count": 8,
+      "time_ms": 0.014,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.06,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0625
+    },
+    {
+      "name": "aten::copy_",
+      "count": 1,
+      "time_ms": 0.01,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.64,
+        "tb_s_achieved": 3.86,
+        "efficiency_percent": 48.29,
+        "efficiency_label": "48.29% of peak HBM bandwidth (3.86 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::mul",
+      "count": 2,
+      "time_ms": 0.008,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.12,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.12
+    },
+    {
+      "name": "aten::fill_",
+      "count": 3,
+      "time_ms": 0.008,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::add_",
+      "count": 2,
+      "time_ms": 0.008,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.08,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0833333333333333
+    },
+    {
+      "name": "aten::fill_",
+      "count": 2,
+      "time_ms": 0.008,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::pow",
+      "count": 1,
+      "time_ms": 0.005,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::copy_",
+      "count": 1,
+      "time_ms": 0.004,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.05,
+        "efficiency_label": "0.05% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.17,
+        "compute_spec": "vector_bf16",
+        "resolved_peak_maf": 274,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.1666666666666666
+    },
+    {
+      "name": "aten::fill_",
+      "count": 1,
+      "time_ms": 0.004,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::add",
+      "count": 1,
+      "time_ms": 0.003,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.08,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0833333333333333
+    },
+    {
+      "name": "aten::div",
+      "count": 1,
+      "time_ms": 0.003,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 0.0,
+        "efficiency_label": "0.00% of peak HBM bandwidth (0.0 TB/s achieved vs 8.0 TB/s peak)",
+        "bound_type": "memory",
+        "flops_per_byte": 0.08,
+        "compute_spec": "vector_fp32",
+        "resolved_peak_maf": 137,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "FLOPS/Byte": 0.0833333333333333
+    },
+    {
+      "name": "aten::fill_",
+      "count": 1,
+      "time_ms": 0.002,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    }
+  ],
+  "category_specific": {
+    "peak_hbm_bw_tbs": 8.0
+  },
+  "impact_estimates": [
+    {
+      "operation": "aten::add_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 38.783,
+      "confidence": "high",
+      "efficiency_pct": 34.28,
+      "bound_type": "memory",
+      "time_ms": 59.012
+    },
+    {
+      "operation": "aten::add_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 31.303,
+      "confidence": "high",
+      "efficiency_pct": 25.04,
+      "bound_type": "memory",
+      "time_ms": 41.76
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 21.622,
+      "confidence": "high",
+      "efficiency_pct": 37.37,
+      "bound_type": "memory",
+      "time_ms": 34.524
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 21.261,
+      "confidence": "high",
+      "efficiency_pct": 37.75,
+      "bound_type": "memory",
+      "time_ms": 34.154
+    },
+    {
+      "operation": "aten::add_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 18.573,
+      "confidence": "high",
+      "efficiency_pct": 0.0,
+      "bound_type": "memory",
+      "time_ms": 18.573
+    },
+    {
+      "operation": "aten::add_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 16.967,
+      "confidence": "high",
+      "efficiency_pct": 0.01,
+      "bound_type": "memory",
+      "time_ms": 16.969
+    },
+    {
+      "operation": "aten::add_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 12.342,
+      "confidence": "high",
+      "efficiency_pct": 0.18,
+      "bound_type": "memory",
+      "time_ms": 12.364
+    },
+    {
+      "operation": "aten::add_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 5.217,
+      "confidence": "medium",
+      "efficiency_pct": 83.62,
+      "bound_type": "memory",
+      "time_ms": 31.847
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 4.141,
+      "confidence": "medium",
+      "efficiency_pct": 75.69,
+      "bound_type": "memory",
+      "time_ms": 17.033
+    },
+    {
+      "operation": "aten::add",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 3.981,
+      "confidence": "medium",
+      "efficiency_pct": 78.06,
+      "bound_type": "memory",
+      "time_ms": 18.145
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 3.74,
+      "confidence": "high",
+      "efficiency_pct": 30.13,
+      "bound_type": "memory",
+      "time_ms": 5.353
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 2.751,
+      "confidence": "medium",
+      "efficiency_pct": 36.97,
+      "bound_type": "memory",
+      "time_ms": 4.365
+    },
+    {
+      "operation": "aten::add_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 2.414,
+      "confidence": "medium",
+      "efficiency_pct": 70.49,
+      "bound_type": "memory",
+      "time_ms": 8.181
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 2.261,
+      "confidence": "medium",
+      "efficiency_pct": 12.53,
+      "bound_type": "memory",
+      "time_ms": 2.585
+    },
+    {
+      "operation": "aten::add_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 2.028,
+      "confidence": "high",
+      "efficiency_pct": 63.61,
+      "bound_type": "memory",
+      "time_ms": 5.572
+    },
+    {
+      "operation": "aten::mul",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.988,
+      "confidence": "medium",
+      "efficiency_pct": 24.37,
+      "bound_type": "memory",
+      "time_ms": 2.628
+    },
+    {
+      "operation": "aten::mul",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.915,
+      "confidence": "medium",
+      "efficiency_pct": 0.01,
+      "bound_type": "memory",
+      "time_ms": 1.915
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.88,
+      "confidence": "medium",
+      "efficiency_pct": 13.94,
+      "bound_type": "memory",
+      "time_ms": 2.185
+    },
+    {
+      "operation": "aten::add_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.819,
+      "confidence": "medium",
+      "efficiency_pct": 88.2,
+      "bound_type": "memory",
+      "time_ms": 15.412
+    },
+    {
+      "operation": "aten::mul",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.649,
+      "confidence": "medium",
+      "efficiency_pct": 0.01,
+      "bound_type": "memory",
+      "time_ms": 1.649
+    },
+    {
+      "operation": "aten::add_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.578,
+      "confidence": "medium",
+      "efficiency_pct": 89.6,
+      "bound_type": "memory",
+      "time_ms": 15.17
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.385,
+      "confidence": "medium",
+      "efficiency_pct": 6.78,
+      "bound_type": "memory",
+      "time_ms": 1.486
+    },
+    {
+      "operation": "aten::add_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.318,
+      "confidence": "medium",
+      "efficiency_pct": 68.31,
+      "bound_type": "memory",
+      "time_ms": 4.159
+    },
+    {
+      "operation": "aten::div",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.316,
+      "confidence": "medium",
+      "efficiency_pct": 0.0,
+      "bound_type": "memory",
+      "time_ms": 1.316
+    },
+    {
+      "operation": "aten::mul",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.31,
+      "confidence": "medium",
+      "efficiency_pct": 0.0,
+      "bound_type": "memory",
+      "time_ms": 1.31
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.301,
+      "confidence": "medium",
+      "efficiency_pct": 0.0,
+      "bound_type": "memory",
+      "time_ms": 1.301
+    },
+    {
+      "operation": "aten::mul",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.275,
+      "confidence": "medium",
+      "efficiency_pct": 0.0,
+      "bound_type": "memory",
+      "time_ms": 1.275
+    },
+    {
+      "operation": "aten::mul",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.261,
+      "confidence": "medium",
+      "efficiency_pct": 1.06,
+      "bound_type": "memory",
+      "time_ms": 1.275
+    },
+    {
+      "operation": "aten::add_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.179,
+      "confidence": "medium",
+      "efficiency_pct": 12.04,
+      "bound_type": "memory",
+      "time_ms": 1.34
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.142,
+      "confidence": "medium",
+      "efficiency_pct": 12.37,
+      "bound_type": "memory",
+      "time_ms": 1.303
+    },
+    {
+      "operation": "aten::mul",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.11,
+      "confidence": "medium",
+      "efficiency_pct": 0.0,
+      "bound_type": "memory",
+      "time_ms": 1.11
+    },
+    {
+      "operation": "aten::div",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.11,
+      "confidence": "medium",
+      "efficiency_pct": 0.0,
+      "bound_type": "memory",
+      "time_ms": 1.11
+    },
+    {
+      "operation": "aten::add_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.097,
+      "confidence": "medium",
+      "efficiency_pct": 0.0,
+      "bound_type": "memory",
+      "time_ms": 1.097
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.089,
+      "confidence": "medium",
+      "efficiency_pct": 16.39,
+      "bound_type": "memory",
+      "time_ms": 1.302
+    },
+    {
+      "operation": "aten::div",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.085,
+      "confidence": "medium",
+      "efficiency_pct": 0.0,
+      "bound_type": "memory",
+      "time_ms": 1.085
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.063,
+      "confidence": "medium",
+      "efficiency_pct": 4.6,
+      "bound_type": "memory",
+      "time_ms": 1.114
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.036,
+      "confidence": "medium",
+      "efficiency_pct": 0.0,
+      "bound_type": "memory",
+      "time_ms": 1.036
+    },
+    {
+      "operation": "aten::mul",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 1.033,
+      "confidence": "medium",
+      "efficiency_pct": 1.22,
+      "bound_type": "memory",
+      "time_ms": 1.046
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 0.95,
+      "confidence": "medium",
+      "efficiency_pct": 13.76,
+      "bound_type": "memory",
+      "time_ms": 1.102
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 0.649,
+      "confidence": "medium",
+      "efficiency_pct": 36.79,
+      "bound_type": "memory",
+      "time_ms": 1.027
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 0.602,
+      "confidence": "medium",
+      "efficiency_pct": 66.51,
+      "bound_type": "memory",
+      "time_ms": 1.798
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 0.438,
+      "confidence": "medium",
+      "efficiency_pct": 57.75,
+      "bound_type": "memory",
+      "time_ms": 1.037
+    },
+    {
+      "operation": "aten::mul_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 0.257,
+      "confidence": "medium",
+      "efficiency_pct": 90.28,
+      "bound_type": "memory",
+      "time_ms": 2.646
+    },
+    {
+      "operation": "aten::mul_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 0.181,
+      "confidence": "medium",
+      "efficiency_pct": 86.77,
+      "bound_type": "memory",
+      "time_ms": 1.366
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "savings_ms": 0.109,
+      "confidence": "medium",
+      "efficiency_pct": 50.66,
+      "bound_type": "memory",
+      "time_ms": 0.22
+    }
+  ]
+}

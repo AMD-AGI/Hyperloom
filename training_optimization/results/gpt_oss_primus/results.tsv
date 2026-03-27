@@ -1,0 +1,11 @@
+attempt	ms_per_iter	speedup_pct	status	description
+0	13265.3	0.0	baseline	GPT-OSS 20B BF16 baseline (8 GPU, EP=8, mock data, iter 6-10 avg)
+1	13107.0	1.19	keep	moe_permute_fusion=true (fused MoE token permutation)
+2	13349.6	-0.64	discard	use_turbo_grouped_mlp=true (fused SwiGLU - wide matrix regression)
+3	13109.5	1.17	keep	+moe_use_fused_router_with_aux_score=true (neutral, code cleanliness)
+4	13049.0	1.63	keep	+gradient_accumulation_fusion=true (fused wgrad + accumulation)
+5	13042.4	1.68	keep	+Cache get_args() in PrimusTurboGroupedMLP (minor Python overhead reduction)
+6	N/A	N/A	crash	sink_sliding_window=128 (Triton backend doesn't support sliding window)
+7	N/A	N/A	cancelled	PYTORCH_TUNABLEOP_ENABLED=1 (tuning too slow, >30min for first iter)
+8	13324.2	-0.44	discard	use_sink_attention=false (aiter v3 native slower than Triton+sink for this workload)
+9	13208.9	-1.28	discard	Pre-sort MoE tokens (argsort+index_select replaces fused Triton permute - more memory reads)

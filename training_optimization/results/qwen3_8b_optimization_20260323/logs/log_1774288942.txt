@@ -1,0 +1,1 @@
+Step 1 | loss:2.020024299621582 lr:5e-06 tokens_per_second_per_gpu:1431.428955078125 
