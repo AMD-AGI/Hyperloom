@@ -124,14 +124,14 @@ Step 8 (~2 min): Restart SGLang → benchmark → 653 tok/s (+14.4%)
 | + torch.compile (inductor) | 600.1 | 6.44ms | +5.0% |
 | + GEAK single-pass RMSNorm | 653.3 | 5.90ms | **+14.4%** |
 
-## How It Differs from workload-optimization
+## How It Differs from training-optimization
 
-| Aspect | workload-optimization | inference-optimization |
+| Aspect | training-optimization | inference-optimization |
 |--------|----------------------|----------------------|
 | Scenario | Training | Inference serving |
-| What gets modified | `workload.py` code | Kernels inside SGLang/vLLM |
-| Benchmark tool | `harness.py` | InferenceX `benchmark_serving` |
-| Optimization loop | Edit code → run harness → keep/revert | GEAK kernel → patch framework → restart server → benchmark → keep/revert |
+| What gets modified | Config/code in training stack | Kernels inside SGLang/vLLM |
+| Benchmark tool | `torchrun` (actual training) | InferenceX `benchmark_serving` |
+| Optimization loop | Config/code change → run training → keep/revert | GEAK kernel → patch framework → restart server → benchmark → keep/revert |
 | TraceLens role | Diagnose bottlenecks | Same — core of the loop |
 | GEAK role | Optional kernel tuning | Core — optimize serving-path kernels |
 | After optimization | Final report | Parameter sweep → Pareto curves → report |

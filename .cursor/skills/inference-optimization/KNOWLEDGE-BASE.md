@@ -523,4 +523,4 @@ export SAFETENSORS_FAST_GPU=1
 | Previous DP=2/TP=4 (unopt) | 2,794 | 349 | 84.9 ms | +99.1% (DP scaling) |
 | Projected DP=2/TP=4 (opt) | ~3,244 | ~406 | ~73 ms | ~+131% |
 
-Artifacts: `/shared_nfs/nehaprakriya/agentic-rc/yanyuan_runs/glm5_optimization/`
+Artifacts: `inference_optimization/results/glm5_optimization/`

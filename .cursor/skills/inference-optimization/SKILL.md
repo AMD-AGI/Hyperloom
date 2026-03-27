@@ -210,7 +210,7 @@ If the user specifies a model or parameters, use those instead of auto-detected 
 All scripts and outputs use fixed paths on shared NFS:
 
 ```bash
-SKILL_ROOT="${SKILL_ROOT:-/shared_nfs/xiaofei/agentic-rc/.cursor/skills/inference-optimization}"
+SKILL_ROOT="${SKILL_ROOT:-.cursor/skills/inference-optimization}"
 SCRIPTS_DIR="$SKILL_ROOT/scripts"
 
 # If the user specified MODEL/TP/CONC/ISL/OSL/FRAMEWORK explicitly, those values override auto-detection.
@@ -1415,7 +1415,7 @@ Args: {
     "kind": "PyTorchJob",
     "images": ["harbor.oci-slc.primus-safe.amd.com/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x"],
     "resources": [{"replica": 1, "cpu": "96", "gpu": "8", "memory": "1024Gi", "sharedMemory": "256Gi"}],
-    "entry_points": ["<base64 of: bash <agentic-rc>/.cursor/skills/inference-optimization/scripts/run_baseline.sh>"],
+    "entry_points": ["<base64 of: bash $SKILL_ROOT/scripts/run_baseline.sh>"],
     "env": {"MODEL": "...", "TP": "8", "CONC": "4", "ISL": "1024", "OSL": "1024",
             "INFERENCEX_PATH": "/shared_nfs/xiaofei/InferenceX",
             "RESULT_DIR": "/shared_nfs/inference-optimization/results/sweep_<timestamp>"},
