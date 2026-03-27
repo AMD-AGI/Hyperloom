@@ -1,0 +1,72 @@
+output_dir: /shared_nfs/nehaprakriya/results/llama4_scout_17b_optimization_20260323/checkpoints
+model:
+  _component_: torchtune.models.llama4.llama4_scout_17b_16e
+tensor_parallel_dim: 2
+tensor_parallel_plan:
+  _component_: torchtune.models.llama4.decoder_only_tp_plan
+data_parallel_shard_dim: -1
+data_parallel_replicate_dim: 1
+tokenizer:
+  _component_: torchtune.models.llama4.llama4_transform
+  path: /shared_nfs/sego/models/Llama-4-Scout-17B-16E/tokenizer.model
+  max_seq_len: 2048
+  max_num_tiles: 16
+checkpointer:
+  _component_: torchtune.training.FullModelHFCheckpointer
+  checkpoint_dir: /shared_nfs/sego/models/Llama-4-Scout-17B-16E
+  checkpoint_files:
+    filename_format: model-{}-of-{}.safetensors
+    max_filename: '00050'
+  recipe_checkpoint: null
+  output_dir: ${output_dir}
+  model_type: LLAMA4
+resume_from_checkpoint: false
+dataset:
+  _component_: torchtune.datasets.alpaca_cleaned_dataset
+  packed: true
+  split: train[:95%]
+seed: null
+shuffle: true
+run_val_every_n_steps: null
+dataset_val:
+  _component_: torchtune.datasets.alpaca_cleaned_dataset
+  split: train[95%:]
+batch_size_val: ${batch_size}
+epochs: 1
+max_steps_per_epoch: 15
+batch_size: 2
+gradient_accumulation_steps: 1
+optimizer:
+  _component_: torch.optim.AdamW
+  lr: 2.0e-05
+  fused: false
+optimizer_in_bwd: false
+loss:
+  _component_: torchtune.modules.loss.LinearCrossEntropyLoss
+clip_grad_norm: null
+device: cuda
+dtype: bf16
+enable_activation_checkpointing: false
+enable_activation_offloading: false
+fsdp_cpu_offload: false
+compile: false
+metric_logger:
+  _component_: torchtune.training.metric_logging.DiskLogger
+  log_dir: /shared_nfs/nehaprakriya/results/llama4_scout_17b_optimization_20260323/logs
+log_every_n_steps: 1
+log_peak_memory_stats: false
+log_level: INFO
+profiler:
+  _component_: torchtune.training.setup_torch_profiler
+  enabled: false
+  output_dir: /shared_nfs/nehaprakriya/results/llama4_scout_17b_optimization_20260323/traces
+  cpu: true
+  cuda: true
+  profile_memory: false
+  with_stack: false
+  record_shapes: true
+  with_flops: false
+  wait_steps: 5
+  warmup_steps: 3
+  active_steps: 2
+  num_cycles: 1

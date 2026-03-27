@@ -1,0 +1,347 @@
+{
+  "category": "triton",
+  "status": "OK",
+  "total_time_ms": 711.097,
+  "percent_of_compute": 5.48,
+  "operation_count": 1416,
+  "average_efficiency_percent": 0,
+  "operations": [
+    {
+      "name": "triton_poi_fused_add_cat_mul_rsub_sigmoid_silu_split_0",
+      "count": 192,
+      "time_ms": 230.026,
+      "percent_of_category": 32.35,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "bound_type": "memory",
+        "flops_per_byte": null
+      }
+    },
+    {
+      "name": "triton_red_fused_copy__exp_sub_sum_unsqueeze_2",
+      "count": 8,
+      "time_ms": 80.461,
+      "percent_of_category": 11.32,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "bound_type": "memory",
+        "flops_per_byte": null
+      }
+    },
+    {
+      "name": "triton_red_fused_mul_silu_split_sum_1",
+      "count": 192,
+      "time_ms": 73.129,
+      "percent_of_category": 10.28,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "bound_type": "memory",
+        "flops_per_byte": null
+      }
+    },
+    {
+      "name": "triton_poi_fused_mul_silu_split_0",
+      "count": 192,
+      "time_ms": 72.116,
+      "percent_of_category": 10.14,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "bound_type": "memory",
+        "flops_per_byte": null
+      }
+    },
+    {
+      "name": "triton_poi_fused_add_cat_mul_rsub_sigmoid_silu_split_0",
+      "count": 192,
+      "time_ms": 62.059,
+      "percent_of_category": 8.73,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "bound_type": "memory",
+        "flops_per_byte": null
+      }
+    },
+    {
+      "name": "triton_poi_fused__to_copy_copy__mul_unsqueeze_view_2",
+      "count": 8,
+      "time_ms": 41.418,
+      "percent_of_category": 5.82,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "bound_type": "memory",
+        "flops_per_byte": null
+      }
+    },
+    {
+      "name": "triton_poi_fused_add_0",
+      "count": 384,
+      "time_ms": 35.378,
+      "percent_of_category": 4.98,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "bound_type": "memory",
+        "flops_per_byte": null
+      }
+    },
+    {
+      "name": "triton_poi_fused_copy__div_split_unsqueeze_1",
+      "count": 8,
+      "time_ms": 35.129,
+      "percent_of_category": 4.94,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "bound_type": "memory",
+        "flops_per_byte": null
+      }
+    },
+    {
+      "name": "triton_poi_fused__to_copy_arange_index_index_put_rsub_sub_view_0",
+      "count": 8,
+      "time_ms": 33.845,
+      "percent_of_category": 4.76,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "bound_type": "memory",
+        "flops_per_byte": null
+      }
+    },
+    {
+      "name": "triton_red_fused__to_copy_max_0",
+      "count": 8,
+      "time_ms": 28.981,
+      "percent_of_category": 4.08,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "bound_type": "memory",
+        "flops_per_byte": null
+      }
+    },
+    {
+      "name": "triton_poi_fused_mul_silu_split_0",
+      "count": 192,
+      "time_ms": 18.385,
+      "percent_of_category": 2.59,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "bound_type": "memory",
+        "flops_per_byte": null
+      }
+    },
+    {
+      "name": "triton_poi_fused__to_copy_arange_index_index_put_rsub_sub_view_1",
+      "count": 8,
+      "time_ms": 0.057,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "bound_type": "memory",
+        "flops_per_byte": null
+      }
+    },
+    {
+      "name": "triton_poi_fused_arange_bitwise_or_ge_index_index_put_lift_fresh_lt_sub_unsqueeze_view_0",
+      "count": 8,
+      "time_ms": 0.038,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "bound_type": "memory",
+        "flops_per_byte": null
+      }
+    },
+    {
+      "name": "triton_poi_fused_arange_cat_index_index_put_lift_fresh_sub_unsqueeze_view_1",
+      "count": 8,
+      "time_ms": 0.037,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "bound_type": "memory",
+        "flops_per_byte": null
+      }
+    },
+    {
+      "name": "triton_poi_fused_log_split_sub_0",
+      "count": 8,
+      "time_ms": 0.037,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "bound_type": "memory",
+        "flops_per_byte": null
+      }
+    }
+  ],
+  "category_specific": {
+    "compute_bound_count": 0,
+    "memory_bound_count": 15,
+    "peak_maf_tflops": 1686,
+    "peak_hbm_bw_tbs": 8.0
+  },
+  "impact_estimates": []
+}

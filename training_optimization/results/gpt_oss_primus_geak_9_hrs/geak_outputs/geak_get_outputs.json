@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"task_id\": \"6f2d5f7e-4833-4b60-98e3-d4cead3b4c81\",\n  \"files\": [\n    {\n      \"path\": \"execution.log\",\n      \"size\": 61910,\n      \"modified_at\": \"2026-03-20T21:11:48.709362\"\n    }\n  ]\n}"
+      }
+    ]
+  }
+}

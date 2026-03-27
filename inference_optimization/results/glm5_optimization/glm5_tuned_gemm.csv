@@ -1,0 +1,17 @@
+cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio
+256,1,6144,3072,cktile,1,0,19.8235,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x128_intrawave_0x1x0_2,1.9,952.9,0.0
+256,1,6144,6144,cktile,1,0,36.5358,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x128_intrawave_0x1x0_2,2.07,1033.7,0.0
+256,2,6144,3072,cktile,1,0,19.8185,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x128_intrawave_0x1x0_2,3.81,953.91,0.0
+256,2,6144,6144,cktile,1,0,36.5444,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x128_intrawave_0x1x0_2,4.13,1033.96,0.0
+256,4,6144,3072,cktile,1,0,19.8577,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x128_intrawave_0x1x0_2,7.6,953.58,0.0
+256,4,6144,6144,cktile,2,0,36.6371,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x64_intrawave_0x1x0_1,8.24,1032.35,0.0
+256,8,6144,3072,cktile,1,0,19.9466,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x128_intrawave_0x1x0_2,15.14,952.41,0.0
+256,8,6144,6144,cktile,2,0,37.0057,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x64_intrawave_0x1x0_1,16.32,1024.06,0.0
+256,16,6144,3072,cktile,2,0,20.1239,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x64_intrawave_0x1x0_1,30.01,950.12,0.0
+256,16,6144,6144,cktile,1,0,37.498,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x128_intrawave_0x1x0_2,32.21,1014.55,0.0
+256,32,6144,3072,cktile,1,0,20.0292,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x128_intrawave_0x1x0_2,60.31,966.88,0.0
+256,32,6144,6144,cktile,1,0,37.1284,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x128_intrawave_0x1x0_2,65.07,1032.59,0.0
+256,64,6144,3072,cktile,2,0,20.1926,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x64_intrawave_0x1x0_1,119.64,983.4,0.0
+256,64,6144,6144,cktile,1,0,37.3009,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x128_intrawave_0x1x0_2,129.54,1043.63,0.0
+256,128,6144,3072,cktile,1,0,26.1098,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x128_intrawave_0x1x0_2,185.06,798.18,0.0
+256,128,6144,6144,cktile,3,0,48.8938,a8w8_blockscale_cktile_16x128x256_1x4x1_16x16x64_intrawave_0x1x0_2,197.65,820.31,0.0

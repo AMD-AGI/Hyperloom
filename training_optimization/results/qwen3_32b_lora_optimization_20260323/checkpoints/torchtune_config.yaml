@@ -1,0 +1,74 @@
+output_dir: /shared_nfs/nehaprakriya/results/qwen3_32b_lora_optimization_20260323/checkpoints
+model:
+  _component_: torchtune.models.qwen3.lora_qwen3_32b
+  lora_attn_modules:
+  - q_proj
+  - v_proj
+  - output_proj
+  apply_lora_to_mlp: true
+  apply_lora_to_output: false
+  lora_rank: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+tokenizer:
+  _component_: torchtune.models.qwen3.qwen3_tokenizer
+  path: /shared_nfs/models/Qwen-Qwen3-32B/vocab.json
+  merges_file: /shared_nfs/models/Qwen-Qwen3-32B/merges.txt
+  max_seq_len: 8192
+checkpointer:
+  _component_: torchtune.training.FullModelHFCheckpointer
+  checkpoint_dir: /shared_nfs/models/Qwen-Qwen3-32B
+  checkpoint_files:
+    filename_format: model-{}-of-{}.safetensors
+    max_filename: '00017'
+  recipe_checkpoint: null
+  output_dir: ${output_dir}
+  model_type: QWEN3
+resume_from_checkpoint: false
+dataset:
+  _component_: torchtune.datasets.alpaca_cleaned_dataset
+  packed: true
+seed: null
+shuffle: true
+batch_size: 2
+optimizer:
+  _component_: torch.optim.AdamW
+  fused: true
+  weight_decay: 0.01
+  lr: 0.0003
+lr_scheduler:
+  _component_: torchtune.training.lr_schedulers.get_cosine_schedule_with_warmup
+  num_warmup_steps: 100
+optimizer_in_bwd: false
+loss:
+  _component_: torchtune.modules.loss.LinearCrossEntropyLoss
+epochs: 1
+max_steps_per_epoch: 15
+gradient_accumulation_steps: 1
+clip_grad_norm: null
+compile: true
+metric_logger:
+  _component_: torchtune.training.metric_logging.DiskLogger
+  log_dir: /shared_nfs/nehaprakriya/results/qwen3_32b_lora_optimization_20260323/logs
+log_every_n_steps: 1
+log_peak_memory_stats: false
+log_level: INFO
+device: cuda
+dtype: bf16
+enable_activation_checkpointing: false
+enable_activation_offloading: false
+profiler:
+  _component_: torchtune.training.setup_torch_profiler
+  enabled: false
+  output_dir: /shared_nfs/nehaprakriya/results/qwen3_32b_lora_optimization_20260323/traces
+  cpu: true
+  cuda: true
+  profile_memory: false
+  with_stack: false
+  record_shapes: true
+  with_flops: false
+  wait_steps: 5
+  warmup_steps: 3
+  active_steps: 2
+  num_cycles: 1
+fsdp_reshard_after_forward: true

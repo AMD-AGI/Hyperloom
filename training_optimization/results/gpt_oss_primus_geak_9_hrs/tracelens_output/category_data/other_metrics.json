@@ -1,0 +1,921 @@
+{
+  "category": "other",
+  "status": "OK",
+  "total_time_ms": 9508.609,
+  "percent_of_compute": 73.33,
+  "operation_count": 8279,
+  "average_efficiency_percent": 0,
+  "operations": [
+    {
+      "name": "AiterFlashAttnFuncBackward",
+      "count": 192,
+      "time_ms": 2698.0,
+      "percent_of_category": 28.37,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "_GroupedLinearBackward",
+      "count": 192,
+      "time_ms": 1483.14,
+      "percent_of_category": 15.6,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "_GroupedLinearBackward",
+      "count": 192,
+      "time_ms": 970.132,
+      "percent_of_category": 10.2,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "_GroupedLinear",
+      "count": 192,
+      "time_ms": 740.831,
+      "percent_of_category": 7.79,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "_LinearBackward",
+      "count": 192,
+      "time_ms": 597.873,
+      "percent_of_category": 6.29,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "_LinearBackward",
+      "count": 384,
+      "time_ms": 541.672,
+      "percent_of_category": 5.7,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "AiterFlashAttnFunc",
+      "count": 192,
+      "time_ms": 329.71,
+      "percent_of_category": 3.47,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "_GroupedLinear",
+      "count": 192,
+      "time_ms": 294.612,
+      "percent_of_category": 3.1,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::index_add_",
+      "count": 192,
+      "time_ms": 239.218,
+      "percent_of_category": 2.52,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::cat",
+      "count": 576,
+      "time_ms": 237.478,
+      "percent_of_category": 2.5,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "_Linear",
+      "count": 192,
+      "time_ms": 224.928,
+      "percent_of_category": 2.37,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::cat",
+      "count": 576,
+      "time_ms": 217.238,
+      "percent_of_category": 2.28,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "_Linear",
+      "count": 192,
+      "time_ms": 112.881,
+      "percent_of_category": 1.19,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "_OperationFuserAutogradFunctionBackward",
+      "count": 192,
+      "time_ms": 105.904,
+      "percent_of_category": 1.11,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "_Linear",
+      "count": 192,
+      "time_ms": 100.108,
+      "percent_of_category": 1.05,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::cat",
+      "count": 192,
+      "time_ms": 75.349,
+      "percent_of_category": 0.79,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "FusedRoPEFunc",
+      "count": 192,
+      "time_ms": 60.397,
+      "percent_of_category": 0.64,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "_OperationFuserAutogradFunctionBackward",
+      "count": 200,
+      "time_ms": 59.22,
+      "percent_of_category": 0.62,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "_OperationFuserAutogradFunction",
+      "count": 192,
+      "time_ms": 57.552,
+      "percent_of_category": 0.61,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "_OperationFuserAutogradFunctionBackward",
+      "count": 192,
+      "time_ms": 55.957,
+      "percent_of_category": 0.59,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "FusedRoPEFuncBackward",
+      "count": 192,
+      "time_ms": 55.487,
+      "percent_of_category": 0.58,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::gather",
+      "count": 192,
+      "time_ms": 51.609,
+      "percent_of_category": 0.54,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::gather",
+      "count": 192,
+      "time_ms": 44.767,
+      "percent_of_category": 0.47,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "_OperationFuserAutogradFunction",
+      "count": 200,
+      "time_ms": 28.838,
+      "percent_of_category": 0.3,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "RouterGatingLinearFunctionBackward",
+      "count": 192,
+      "time_ms": 25.641,
+      "percent_of_category": 0.27,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::topk",
+      "count": 192,
+      "time_ms": 23.177,
+      "percent_of_category": 0.24,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::topk",
+      "count": 192,
+      "time_ms": 20.865,
+      "percent_of_category": 0.22,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "_OperationFuserAutogradFunction",
+      "count": 192,
+      "time_ms": 9.894,
+      "percent_of_category": 0.1,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "FusedRoPEFunc",
+      "count": 192,
+      "time_ms": 9.605,
+      "percent_of_category": 0.1,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "FusedRoPEFuncBackward",
+      "count": 192,
+      "time_ms": 8.863,
+      "percent_of_category": 0.09,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "RouterGatingLinearFunction",
+      "count": 192,
+      "time_ms": 8.093,
+      "percent_of_category": 0.09,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::masked_scatter_",
+      "count": 192,
+      "time_ms": 6.553,
+      "percent_of_category": 0.07,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::embedding_dense_backward",
+      "count": 8,
+      "time_ms": 6.372,
+      "percent_of_category": 0.07,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::_softmax",
+      "count": 384,
+      "time_ms": 2.318,
+      "percent_of_category": 0.02,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::arange",
+      "count": 384,
+      "time_ms": 1.995,
+      "percent_of_category": 0.02,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::arange",
+      "count": 192,
+      "time_ms": 1.144,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::_local_scalar_dense",
+      "count": 148,
+      "time_ms": 0.561,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::gather",
+      "count": 8,
+      "time_ms": 0.455,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::cat",
+      "count": 8,
+      "time_ms": 0.071,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::_local_scalar_dense",
+      "count": 16,
+      "time_ms": 0.058,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::_local_scalar_dense",
+      "count": 9,
+      "time_ms": 0.036,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::_local_scalar_dense",
+      "count": 1,
+      "time_ms": 0.004,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    },
+    {
+      "name": "aten::cat",
+      "count": 1,
+      "time_ms": 0.003,
+      "percent_of_category": 0.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "classification": {
+        "sub_category": "miscellaneous"
+      }
+    }
+  ],
+  "category_specific": {
+    "communication_count": 0,
+    "graph_count": 0,
+    "miscellaneous_count": 43,
+    "peak_maf_tflops": 1686,
+    "peak_hbm_bw_tbs": 8.0
+  },
+  "impact_estimates": []
+}
