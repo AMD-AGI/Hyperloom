@@ -675,6 +675,8 @@ COMBINED_ARGS="$WINNER1_ARGS $WINNER2_ARGS $WINNER3_ARGS"
 
 **Why combining is essential:** Individual gains do NOT predict combined gains. Switches that affect different pipeline stages (e.g., a kernel backend + a scheduling mode) can produce super-linear synergy because one change amplifies the benefit of the other. For example, a scheduling change that feeds more tokens per forward pass amplifies a kernel switch that processes each token faster. Always test the full combination — do not assume gains are simply additive.
 
+**After combining backend winners, re-profile to identify new GEAK candidates.** Backend switches that replace vendor C++ kernels (aiter, CK, hipBLASLt) with Triton implementations create new optimization surface for GEAK that did not exist in the original baseline. For example, switching `--attention-backend` from `aiter` to `triton` puts Triton attention kernels on the hot path — these are now GEAK-optimizable, whereas the original aiter C++ kernels were not. Always re-run Phase 3-5 (profile → TraceLens → identify candidates) after backend exploration settles, before proceeding to Phase 7 (GEAK).
+
 ### Step 6: Kernel tuning for the model's specific shapes
 
 After backend exploration, tune the vendor kernels for the model's exact tensor shapes. This is especially important when the model has unusual dimensions:
