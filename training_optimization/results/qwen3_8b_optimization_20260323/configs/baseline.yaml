@@ -1,0 +1,88 @@
+# Qwen3 8B Full Finetune Distributed — Baseline Config
+# Platform: 8× AMD Instinct MI355X (gfx950, CDNA4)
+# Weights: /shared_nfs/models/Qwen3-8B/ (read-only)
+# All outputs: /shared_nfs/nehaprakriya/results/qwen3_8b_optimization_20260323/
+
+output_dir: /shared_nfs/nehaprakriya/results/qwen3_8b_optimization_20260323/checkpoints
+
+# Tokenizer
+tokenizer:
+  _component_: torchtune.models.qwen3.qwen3_tokenizer
+  path: /shared_nfs/models/Qwen3-8B/vocab.json
+  merges_file: /shared_nfs/models/Qwen3-8B/merges.txt
+  max_seq_len: null
+
+# Dataset — real alpaca_cleaned, full scale, no proxies
+dataset:
+  _component_: torchtune.datasets.alpaca_cleaned_dataset
+  packed: False
+seed: null
+shuffle: True
+
+# Model
+model:
+  _component_: torchtune.models.qwen3.qwen3_8b_instruct
+
+checkpointer:
+  _component_: torchtune.training.FullModelHFCheckpointer
+  checkpoint_dir: /shared_nfs/models/Qwen3-8B
+  checkpoint_files: [
+    model-00001-of-00005.safetensors,
+    model-00002-of-00005.safetensors,
+    model-00003-of-00005.safetensors,
+    model-00004-of-00005.safetensors,
+    model-00005-of-00005.safetensors,
+  ]
+  recipe_checkpoint: null
+  output_dir: ${output_dir}
+  model_type: QWEN3
+resume_from_checkpoint: False
+
+# Fine-tuning arguments — stock defaults, no shortcuts
+batch_size: 2
+epochs: 1
+optimizer:
+  _component_: torch.optim.AdamW
+  fused: True
+  lr: 5e-6
+loss:
+  _component_: torchtune.modules.loss.LinearCrossEntropyLoss
+max_steps_per_epoch: 15
+gradient_accumulation_steps: 8
+clip_grad_norm: null
+compile: False
+optimizer_in_bwd: False
+
+# Training env
+device: cuda
+
+# Memory management
+enable_activation_checkpointing: True
+enable_activation_offloading: False
+
+# Reduced precision
+dtype: bf16
+
+# Logging
+metric_logger:
+  _component_: torchtune.training.metric_logging.DiskLogger
+  log_dir: /shared_nfs/nehaprakriya/results/qwen3_8b_optimization_20260323/logs
+log_every_n_steps: 1
+log_peak_memory_stats: True
+log_level: INFO
+
+# Profiler (disabled for baseline timing run)
+profiler:
+  _component_: torchtune.training.setup_torch_profiler
+  enabled: False
+  output_dir: /shared_nfs/nehaprakriya/results/qwen3_8b_optimization_20260323/traces
+  cpu: True
+  cuda: True
+  profile_memory: False
+  with_stack: False
+  record_shapes: True
+  with_flops: False
+  wait_steps: 5
+  warmup_steps: 3
+  active_steps: 2
+  num_cycles: 1

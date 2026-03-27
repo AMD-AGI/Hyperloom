@@ -1,0 +1,29 @@
+{
+  "138093": {
+    "op_name": "aten::copy_",
+    "ex_uid": 138093,
+    "input_dims": "((4096, 8, 2880), (4096, 8, 2880), ())",
+    "parent_chain": [],
+    "subtree": [],
+    "fusion_opportunity": false,
+    "notes": "Tree traversal simplified - using CSV data"
+  },
+  "25": {
+    "op_name": "aten::copy_",
+    "ex_uid": 25,
+    "input_dims": "((8, 1, 4096, 4096), (8, 1, 4096, 4096), ())",
+    "parent_chain": [],
+    "subtree": [],
+    "fusion_opportunity": false,
+    "notes": "Tree traversal simplified - using CSV data"
+  },
+  "138099": {
+    "op_name": "aten::copy_",
+    "ex_uid": 138099,
+    "input_dims": "((32768, 2880), (32768, 2880), ())",
+    "parent_chain": [],
+    "subtree": [],
+    "fusion_opportunity": false,
+    "notes": "Tree traversal simplified - using CSV data"
+  }
+}

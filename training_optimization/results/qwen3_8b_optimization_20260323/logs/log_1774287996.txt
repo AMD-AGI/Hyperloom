@@ -1,0 +1,15 @@
+Step 1 | loss:1.9914515018463135 lr:5e-06 tokens_per_second_per_gpu:2326.368408203125 
+Step 2 | loss:1.8284680843353271 lr:5e-06 tokens_per_second_per_gpu:13049.224609375 
+Step 3 | loss:1.6736150979995728 lr:5e-06 tokens_per_second_per_gpu:14825.80078125 
+Step 4 | loss:1.601658821105957 lr:5e-06 tokens_per_second_per_gpu:14729.58203125 
+Step 5 | loss:1.5416854619979858 lr:5e-06 tokens_per_second_per_gpu:14781.97265625 
+Step 6 | loss:1.4910017251968384 lr:5e-06 tokens_per_second_per_gpu:14755.775390625 
+Step 7 | loss:1.464011311531067 lr:5e-06 tokens_per_second_per_gpu:14775.234375 
+Step 8 | loss:1.4174418449401855 lr:5e-06 tokens_per_second_per_gpu:14858.6162109375 
+Step 9 | loss:1.3841452598571777 lr:5e-06 tokens_per_second_per_gpu:14862.55859375 
+Step 10 | loss:1.3573945760726929 lr:5e-06 tokens_per_second_per_gpu:14587.5732421875 
+Step 11 | loss:1.3373757600784302 lr:5e-06 tokens_per_second_per_gpu:14720.662109375 
+Step 12 | loss:1.3101181983947754 lr:5e-06 tokens_per_second_per_gpu:14850.607421875 
+Step 13 | loss:1.2792006731033325 lr:5e-06 tokens_per_second_per_gpu:14663.02734375 
+Step 14 | loss:1.2883437871932983 lr:5e-06 tokens_per_second_per_gpu:14929.416015625 
+Step 15 | loss:1.2497516870498657 lr:5e-06 tokens_per_second_per_gpu:14511.06640625 

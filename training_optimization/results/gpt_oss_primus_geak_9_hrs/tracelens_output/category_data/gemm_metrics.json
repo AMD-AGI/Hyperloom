@@ -1,0 +1,120 @@
+{
+  "category": "gemm",
+  "status": "OK",
+  "total_time_ms": 312.41,
+  "percent_of_compute": 2.41,
+  "operation_count": 24,
+  "average_efficiency_percent": 86.15,
+  "operations": [
+    {
+      "name": "aten::mm",
+      "count": 8,
+      "time_ms": 107.986,
+      "percent_of_category": 34.57,
+      "efficiency": {
+        "tflops_achieved": 1399.72,
+        "tb_s_achieved": 0.54,
+        "efficiency_percent": 83.02,
+        "efficiency_label": "83.02% of peak MAF (1399.72 TFLOPS achieved vs 1686 TFLOPS peak)",
+        "bound_type": "compute",
+        "flops_per_byte": 2579.11,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((100096, 32768), (32768, 2880))",
+      "has_perf_model": true,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::mm",
+      "count": 8,
+      "time_ms": 102.615,
+      "percent_of_category": 32.85,
+      "efficiency": {
+        "tflops_achieved": 1473.12,
+        "tb_s_achieved": 0.57,
+        "efficiency_percent": 87.37,
+        "efficiency_label": "87.37% of peak MAF (1473.12 TFLOPS achieved vs 1686 TFLOPS peak)",
+        "bound_type": "compute",
+        "flops_per_byte": 2579.11,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((32768, 100096), (100096, 2880))",
+      "has_perf_model": true,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::mm",
+      "count": 8,
+      "time_ms": 101.809,
+      "percent_of_category": 32.59,
+      "efficiency": {
+        "tflops_achieved": 1484.61,
+        "tb_s_achieved": 0.58,
+        "efficiency_percent": 88.06,
+        "efficiency_label": "88.06% of peak MAF (1484.61 TFLOPS achieved vs 1686 TFLOPS peak)",
+        "bound_type": "compute",
+        "flops_per_byte": 2579.11,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((32768, 2880), (2880, 100096))",
+      "has_perf_model": true,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    }
+  ],
+  "category_specific": {
+    "quantized_count": 0,
+    "missing_perf_model_count": 0,
+    "peak_maf_tflops": 1686,
+    "peak_hbm_bw_tbs": 8.0
+  },
+  "impact_estimates": [
+    {
+      "operation": "aten::mm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "savings_ms": 18.336,
+      "confidence": "medium",
+      "efficiency_pct": 83.02,
+      "bound_type": "compute",
+      "time_ms": 107.986
+    },
+    {
+      "operation": "aten::mm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "savings_ms": 12.96,
+      "confidence": "medium",
+      "efficiency_pct": 87.37,
+      "bound_type": "compute",
+      "time_ms": 102.615
+    },
+    {
+      "operation": "aten::mm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "savings_ms": 12.156,
+      "confidence": "medium",
+      "efficiency_pct": 88.06,
+      "bound_type": "compute",
+      "time_ms": 101.809
+    }
+  ]
+}
