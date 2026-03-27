@@ -90,7 +90,7 @@ Reference a skill file in your Cursor chat with `@` and describe the workload:
 
 **Training:**
 ```
-@.cursor/skills/workload-optimization/SKILL.md
+@.cursor/skills/training-optimization/SKILL.md
 Optimize GPT-OSS 20B training on 8x MI355X.
 Config: examples/megatron/configs/MI355X/gpt_oss_20B-BF16-pretrain.yaml
 Results: /shared_nfs/nehaprakriya/results/gpt_oss/
@@ -114,7 +114,7 @@ Each domain has a comprehensive skill file with the full optimization protocol, 
 
 | Domain | Skill | Detailed README |
 |--------|-------|-----------------|
-| **Training** | [SKILL.md](.cursor/skills/workload-optimization/SKILL.md) | [README](.cursor/skills/workload-optimization/README.md) |
+| **Training** | [SKILL.md](.cursor/skills/training-optimization/SKILL.md) | [README](.cursor/skills/training-optimization/README.md) |
 | **Inference** | [SKILL.md](.cursor/skills/inference-optimization/SKILL.md) | [README](.cursor/skills/inference-optimization/README.md) |
 
 The skill files are the agent's instructions. They encode the full optimization methodology — setup, profiling protocol, what to try, how to measure, when to stop, and how to report. The knowledge base sections are updated live during runs with new pitfalls and validated results.
@@ -127,20 +127,19 @@ The skill files are the agent's instructions. They encode the full optimization 
 PRISM/
 ├── .cursor/
 │   ├── mcp.json                          # MCP server config (TraceLens + GEAK)
-│   ├── skills/
-│   │   ├── workload-optimization/        # Training optimization skill + knowledge base
-│   │   ├── inference-optimization/       # Inference optimization skill + scripts
-│   │   └── kernel-regression-analysis/   # Kernel regression analysis skill
-│   └── agents/                           # Agent configs + executor scripts
+│   └── skills/
+│       ├── training-optimization/        # Training optimization skill + knowledge base
+│       └── inference-optimization/       # Inference optimization skill + scripts
 ├── training_optimization/
-│   ├── results/                          # Full results from optimization runs
-│   │   ├── gpt_oss_4hr_20260322/        # GPT-OSS 20B, 57 attempts, +4.7%
-│   │   ├── gpt_oss_primus/              # GPT-OSS 20B, 9 attempts, +1.7%
-│   │   ├── gpt_oss_primus_geak_9_hrs/   # GPT-OSS 20B with GEAK kernels
-│   │   ├── qwen3_8b_optimization/       # Qwen3 8B full finetune, 21.9x
-│   │   ├── qwen3_32b_lora_optimization/ # Qwen3 32B LoRA, 10.7x
-│   │   ├── llama4_scout_17b_optimization/# Llama 4 Scout MoE, 8.6x
-│   │   └── torchtune/                   # TorchTune cross-model summary
+│   ├── results/                                    # Full results from optimization runs
+│   │   ├── gpt_oss_4hr_20260322/                   # GPT-OSS 20B, 57 attempts, +4.7%
+│   │   ├── gpt_oss_primus/                         # GPT-OSS 20B, 9 attempts, +1.7%
+│   │   ├── gpt_oss_primus_geak_9_hrs/              # GPT-OSS 20B with GEAK kernels
+│   │   ├── qwen3_8b_optimization_20260323/         # Qwen3 8B full finetune, 21.9x
+│   │   ├── qwen3_32b_lora_optimization_20260323/   # Qwen3 32B LoRA, 10.7x
+│   │   ├── llama4_scout_17b_optimization_20260323/ # Llama 4 Scout MoE, 8.6x
+│   │   ├── llama3.1_8b_optimization_20260322/      # Llama 3.1 8B
+│   │   └── torchtune/                              # TorchTune cross-model summary
 │   └── turboquant/                       # Quantization evaluation library
 ├── inference_optimization/
 │   ├── InferenceX/                       # Inference benchmarking framework

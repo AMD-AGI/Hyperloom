@@ -51,7 +51,7 @@ ls "$AITER_PATH/ops/"    # Python dispatch wrappers
 ### Authentication
 
 Requires two keys:
-- `PRIMUS_SAFE_API_TOKEN` — Bearer token for GEAK endpoint
+- `GEAK_AUTH_KEY` — Bearer token for GEAK endpoint (set in `.env`)
 - `LITELLM_API_KEY` — Used internally by GEAK to call its LLM backend
 
 ### Tool sequence
