@@ -1,5 +1,5 @@
 ---
-name: workload-optimization
+name: training-optimization
 description: Iterative, closed-loop GPU training optimization. Takes a real distributed training workload (Primus/Megatron stack), profiles with torch.profiler and TraceLens (mandatory), diagnoses bottlenecks, then enters an optimization loop where the agent applies config overrides, code patches, or GEAK kernel-level rewrites one at a time, measures ms/iter from actual training, keeps improvements, reverts regressions, and iterates until no further gains. Global batch size must remain constant throughout — only config/code efficiency improvements are valid. Use when the user asks to optimize a workload, speed up training, reduce iteration time, or find bottlenecks.
 ---
 
@@ -194,7 +194,7 @@ After profiling, scan the top-20 GPU kernels for GEAK candidates. GEAK uses an A
 **Decision rule:** If a kernel is in the top-5 by GPU time, has modifiable source code, and is NOT vendor BLAS or vendor attention, it's a GEAK candidate.
 
 If you find candidates, read the full GEAK skill for the detailed flow:
-`@.cursor/skills/workload-optimization/GEAK-KERNEL-OPTIMIZATION.md`
+`@.cursor/skills/training-optimization/GEAK-KERNEL-OPTIMIZATION.md`
 
 GEAK tasks take 10–30 minutes (GPU pod scheduling + agent steps). **Kick them off early** and continue the config/code optimization loop in parallel. When GEAK results arrive, integrate them as a normal optimization attempt — benchmark, keep or revert.
 
