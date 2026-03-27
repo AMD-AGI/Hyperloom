@@ -1,6 +1,6 @@
 ---
 name: llm-kernel-optimization
-description: Optional LLM-based kernel optimization that extends the workload-optimization skill. Instead of sending kernels to GEAK MCP (remote GPU pod), this flow sends kernel source to an LLM (Claude, GPT, etc.) via your existing LiteLLM gateway and gets back optimized code. No CLI tools or GPU required for the LLM call. Faster turnaround than GEAK (no pod scheduling). Use alongside the main workload-optimization skill as an alternative to GEAK when you want faster iteration or GEAK pods are unavailable.
+description: Optional LLM-based kernel optimization that extends the training-optimization skill. Instead of sending kernels to GEAK MCP (remote GPU pod), this flow sends kernel source to an LLM (Claude, GPT, etc.) via your existing LiteLLM gateway and gets back optimized code. No CLI tools or GPU required for the LLM call. Faster turnaround than GEAK (no pod scheduling). Use alongside the main training-optimization skill as an alternative to GEAK when you want faster iteration or GEAK pods are unavailable.
 ---
 
 # LLM Kernel Optimization — Optional Extension
@@ -35,7 +35,7 @@ You can use **both** in parallel: kick off GEAK for complex kernels while using 
 
 **Minimum (LiteLLM backend — default, recommended):**
 - `pip install openai` (likely already installed)
-- `LITELLM_API_KEY` and `LITELLM_BASE_URL` in your `.env` file (already configured in agentic-rc)
+- `LITELLM_API_KEY` and `LITELLM_BASE_URL` in your `.env` file (see `.env.template`)
 - That's it. No CLI tools, no Node.js, no separate auth flows.
 
 **Optional (agentic backends — only if you want the agent to read/write files autonomously):**
@@ -72,59 +72,9 @@ Save the kernel source to a working directory (e.g., `/tmp/claude_kernel_opt/<ke
 
 ## Phase 3: Run the LLM Optimization
 
-### Option A: Helper Script with LiteLLM Gateway (Default — Simplest)
+### Option A: Inline Python Call via LiteLLM Gateway (Default — Simplest)
 
-The helper script at `.cursor/agents/executors/agent_kernel_optimizer.py` uses your existing LiteLLM gateway. **No extra CLI tools needed** — just the `openai` Python package (already installed).
-
-It reads credentials from your `.env` file automatically (`LITELLM_API_KEY`, `LITELLM_BASE_URL`, `LITELLM_MODEL`).
-
-```bash
-# Simplest — uses .env config, default model (claude-opus-4-6)
-python3 .cursor/agents/executors/agent_kernel_optimizer.py \
-  --kernel-source /path/to/kernel.py \
-  --task-dir /tmp/kernel_opt/triton_rmsnorm/
-
-# With profiling context (better results)
-python3 .cursor/agents/executors/agent_kernel_optimizer.py \
-  --kernel-source /path/to/kernel.py \
-  --task-dir /tmp/kernel_opt/triton_rmsnorm/ \
-  --hardware "MI355X (gfx950, CDNA4)" \
-  --shapes "x: [8192, 2880] bf16, weight: [2880] bf16" \
-  --gpu-time-pct 4.2 \
-  --call-count 128
-
-# With multiple refinement iterations
-python3 .cursor/agents/executors/agent_kernel_optimizer.py \
-  --kernel-source /path/to/kernel.py \
-  --task-dir /tmp/kernel_opt/triton_rmsnorm/ \
-  --max-iterations 3
-
-# Dry run (show prompt, no LLM call, no GPU needed)
-python3 .cursor/agents/executors/agent_kernel_optimizer.py \
-  --kernel-source /path/to/kernel.py \
-  --task-dir /tmp/kernel_opt/triton_rmsnorm/ \
-  --dry-run
-
-# Explicit model/credentials (override .env)
-python3 .cursor/agents/executors/agent_kernel_optimizer.py \
-  --kernel-source /path/to/kernel.py \
-  --task-dir /tmp/kernel_opt/triton_rmsnorm/ \
-  --model claude-opus-4-6 \
-  --base-url https://example-internal-host.invalid/llm-gateway/v1 \
-  --api-key sk-...
-```
-
-The script:
-1. Reads the kernel source and your `.env` config
-2. Copies source to `task_dir/baseline.py`
-3. Sends it to the LLM via a standard OpenAI-compatible chat completions call
-4. Extracts the optimized kernel code from the LLM response
-5. Writes it to `task_dir/solution.py`
-6. Saves metadata to `task_dir/agent_result.json`
-
-**No GPU needed for the LLM call.** GPUs are only needed later when you benchmark the result via `torchrun`.
-
-### Option B: Inline Python Call (for scripting)
+Uses your existing LiteLLM gateway. **No extra CLI tools needed** — just the `openai` Python package (already installed). Reads credentials from your `.env` file (`LITELLM_API_KEY`, `LITELLM_BASE_URL`, `LITELLM_MODEL`).
 
 ```python
 from pathlib import Path
@@ -151,16 +101,9 @@ optimized_code = response.choices[0].message.content
 # Extract code from ```python ... ``` block and write to solution.py
 ```
 
-### Option C: Claude Code SDK (Agentic — Needs CLI Installed)
+### Option B: Claude Code SDK (Agentic — Needs CLI Installed)
 
-Only use this if you have Claude Code CLI installed and want the agent to autonomously read/write files:
-
-```bash
-python3 .cursor/agents/executors/agent_kernel_optimizer.py \
-  --kernel-source /path/to/kernel.py \
-  --task-dir /tmp/kernel_opt/triton_rmsnorm/ \
-  --agent claude --model claude-sonnet-4-6
-```
+Only use this if you have Claude Code CLI installed and want the agent to autonomously read/write files.
 
 Requires: `pip install claude-code-sdk` + `ANTHROPIC_API_KEY` or `claude auth login`.
 

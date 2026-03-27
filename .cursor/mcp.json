@@ -1,4 +1,5 @@
 {
+  "mcpServers": {
     "oci-traceLens-agent": {
       "command": "npx",
       "args": [
@@ -13,8 +14,8 @@
     "geak-agent": {
       "url": "https://oci-slc.example-internal-host.invalid/control-plane/control-plane-dev/geak-agent-wvsbv/mcp/sse",
       "headers": {
-        "Authorization": "$YOUR_KEY"
+        "Authorization": "Bearer ${GEAK_AUTH_KEY}"
       }
     }
+  }
 }
-
