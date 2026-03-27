@@ -1,0 +1,15 @@
+Step 1 | loss:1.978149175643921 lr:5e-06 tokens_per_second_per_gpu:585.7427978515625 peak_memory_active:10.393188953399658 peak_memory_alloc:10.393188953399658 peak_memory_reserved:18.087890625 
+Step 2 | loss:1.7599554061889648 lr:5e-06 tokens_per_second_per_gpu:888.0547485351562 peak_memory_active:14.180846691131592 peak_memory_alloc:14.180846691131592 peak_memory_reserved:20.416015625 
+Step 3 | loss:1.7128878831863403 lr:5e-06 tokens_per_second_per_gpu:938.6376342773438 peak_memory_active:14.168997287750244 peak_memory_alloc:14.168997287750244 peak_memory_reserved:20.416015625 
+Step 4 | loss:1.560741662979126 lr:5e-06 tokens_per_second_per_gpu:841.7734375 peak_memory_active:14.304033756256104 peak_memory_alloc:14.304033756256104 peak_memory_reserved:20.416015625 
+Step 5 | loss:1.5592066049575806 lr:5e-06 tokens_per_second_per_gpu:924.504150390625 peak_memory_active:14.241618633270264 peak_memory_alloc:14.241618633270264 peak_memory_reserved:20.416015625 
+Step 6 | loss:1.5139362812042236 lr:5e-06 tokens_per_second_per_gpu:929.404541015625 peak_memory_active:14.029908180236816 peak_memory_alloc:14.029908180236816 peak_memory_reserved:20.416015625 
+Step 7 | loss:1.4946322441101074 lr:5e-06 tokens_per_second_per_gpu:792.74658203125 peak_memory_active:14.152191638946533 peak_memory_alloc:14.152191638946533 peak_memory_reserved:20.416015625 
+Step 8 | loss:1.4261672496795654 lr:5e-06 tokens_per_second_per_gpu:849.1970825195312 peak_memory_active:13.97076416015625 peak_memory_alloc:13.97076416015625 peak_memory_reserved:20.416015625 
+Step 9 | loss:1.3917477130889893 lr:5e-06 tokens_per_second_per_gpu:896.1578369140625 peak_memory_active:14.134175300598145 peak_memory_alloc:14.134175300598145 peak_memory_reserved:20.416015625 
+Step 10 | loss:1.410133719444275 lr:5e-06 tokens_per_second_per_gpu:891.7708740234375 peak_memory_active:14.157124996185303 peak_memory_alloc:14.157124996185303 peak_memory_reserved:20.416015625 
+Step 11 | loss:1.3234003782272339 lr:5e-06 tokens_per_second_per_gpu:931.0122680664062 peak_memory_active:14.247368812561035 peak_memory_alloc:14.247368812561035 peak_memory_reserved:20.416015625 
+Step 12 | loss:1.2586286067962646 lr:5e-06 tokens_per_second_per_gpu:901.0993041992188 peak_memory_active:14.052009582519531 peak_memory_alloc:14.052009582519531 peak_memory_reserved:20.416015625 
+Step 13 | loss:1.3633105754852295 lr:5e-06 tokens_per_second_per_gpu:795.7688598632812 peak_memory_active:14.011786937713623 peak_memory_alloc:14.011786937713623 peak_memory_reserved:20.416015625 
+Step 14 | loss:1.252718448638916 lr:5e-06 tokens_per_second_per_gpu:767.6663208007812 peak_memory_active:14.219698429107666 peak_memory_alloc:14.219698429107666 peak_memory_reserved:20.416015625 
+Step 15 | loss:1.2484476566314697 lr:5e-06 tokens_per_second_per_gpu:871.492431640625 peak_memory_active:14.060574054718018 peak_memory_alloc:14.060574054718018 peak_memory_reserved:20.416015625 

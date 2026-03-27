@@ -1,0 +1,38 @@
+{
+  "138287": {
+    "op_name": "triton_poi_fused_add_cat_mul_rsub_sigmoid_silu_split_0",
+    "ex_uid": 138287,
+    "input_dims": "((131072, 2880), (131072, 1), (131072, 5760), (131072, 5760), ())",
+    "parent_chain": [],
+    "subtree": [],
+    "fusion_opportunity": false,
+    "notes": "Tree traversal simplified - using CSV data"
+  },
+  "17082": {
+    "op_name": "triton_red_fused_copy__exp_sub_sum_unsqueeze_2",
+    "ex_uid": 17082,
+    "input_dims": "((4096, 8, 100096), (4096, 8), (4096, 8), (4096, 8, 100096), (4096, 8, 100096), (), ())",
+    "parent_chain": [],
+    "subtree": [],
+    "fusion_opportunity": false,
+    "notes": "Tree traversal simplified - using CSV data"
+  },
+  "138288": {
+    "op_name": "triton_red_fused_mul_silu_split_sum_1",
+    "ex_uid": 138288,
+    "input_dims": "((131072, 5760), (131072, 2880), (131072, 1), (), ())",
+    "parent_chain": [],
+    "subtree": [],
+    "fusion_opportunity": false,
+    "notes": "Tree traversal simplified - using CSV data"
+  },
+  "715": {
+    "op_name": "triton_poi_fused_mul_silu_split_0",
+    "ex_uid": 715,
+    "input_dims": "((131072, 5760), (131072, 1), (131072, 2880), ())",
+    "parent_chain": [],
+    "subtree": [],
+    "fusion_opportunity": false,
+    "notes": "Tree traversal simplified - using CSV data"
+  }
+}
