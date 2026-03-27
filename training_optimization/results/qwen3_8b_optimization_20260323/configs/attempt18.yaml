@@ -1,0 +1,80 @@
+# Best config + optimizer_in_bwd with selective compile
+output_dir: /shared_nfs/nehaprakriya/results/qwen3_8b_optimization_20260323/checkpoints
+
+tokenizer:
+  _component_: torchtune.models.qwen3.qwen3_tokenizer
+  path: /shared_nfs/models/Qwen3-8B/vocab.json
+  merges_file: /shared_nfs/models/Qwen3-8B/merges.txt
+  max_seq_len: 4096
+
+dataset:
+  _component_: torchtune.datasets.alpaca_cleaned_dataset
+  packed: True
+seed: null
+shuffle: True
+
+model:
+  _component_: torchtune.models.qwen3.qwen3_8b_instruct
+
+checkpointer:
+  _component_: torchtune.training.FullModelHFCheckpointer
+  checkpoint_dir: /shared_nfs/models/Qwen3-8B
+  checkpoint_files: [
+    model-00001-of-00005.safetensors,
+    model-00002-of-00005.safetensors,
+    model-00003-of-00005.safetensors,
+    model-00004-of-00005.safetensors,
+    model-00005-of-00005.safetensors,
+  ]
+  recipe_checkpoint: null
+  output_dir: ${output_dir}
+  model_type: QWEN3
+resume_from_checkpoint: False
+
+batch_size: 8
+epochs: 1
+optimizer:
+  _component_: torch.optim.AdamW
+  fused: True
+  lr: 5e-6
+loss:
+  _component_: torchtune.modules.loss.LinearCrossEntropyLoss
+max_steps_per_epoch: 15
+gradient_accumulation_steps: 1
+clip_grad_norm: null
+
+compile:
+  model: True
+  loss: True
+  optimizer_step: False
+  scale_grads: False
+
+optimizer_in_bwd: True
+
+device: cuda
+fsdp_reshard_after_forward: False
+enable_activation_checkpointing: False
+enable_activation_offloading: False
+dtype: bf16
+
+metric_logger:
+  _component_: torchtune.training.metric_logging.DiskLogger
+  log_dir: /shared_nfs/nehaprakriya/results/qwen3_8b_optimization_20260323/logs
+log_every_n_steps: 1
+log_peak_memory_stats: False
+log_level: INFO
+
+profiler:
+  _component_: torchtune.training.setup_torch_profiler
+  enabled: False
+  output_dir: /shared_nfs/nehaprakriya/results/qwen3_8b_optimization_20260323/traces
+  cpu: True
+  cuda: True
+  profile_memory: False
+  with_stack: False
+  record_shapes: True
+  with_flops: False
+  wait_steps: 5
+  warmup_steps: 3
+  active_steps: 2
+  num_cycles: 1

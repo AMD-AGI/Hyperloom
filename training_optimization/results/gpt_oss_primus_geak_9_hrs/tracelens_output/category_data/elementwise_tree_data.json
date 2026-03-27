@@ -1,0 +1,11 @@
+{
+  "797": {
+    "op_name": "aten::scatter_add_",
+    "ex_uid": 797,
+    "input_dims": "((32768, 2880), (), (131072, 2880), (131072, 2880))",
+    "parent_chain": [],
+    "subtree": [],
+    "fusion_opportunity": false,
+    "notes": "Tree traversal simplified - using CSV data"
+  }
+}

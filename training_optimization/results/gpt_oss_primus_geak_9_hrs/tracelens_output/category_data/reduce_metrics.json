@@ -1,0 +1,321 @@
+{
+  "category": "reduce",
+  "status": "OK",
+  "total_time_ms": 24.314,
+  "percent_of_compute": 0.19,
+  "operation_count": 1829,
+  "average_efficiency_percent": 0,
+  "operations": [
+    {
+      "name": "aten::sum",
+      "count": 192,
+      "time_ms": 5.619,
+      "percent_of_category": 23.11,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::sum",
+      "count": 192,
+      "time_ms": 3.522,
+      "percent_of_category": 14.49,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::sum",
+      "count": 192,
+      "time_ms": 3.209,
+      "percent_of_category": 13.2,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::linalg_vector_norm",
+      "count": 48,
+      "time_ms": 2.789,
+      "percent_of_category": 11.47,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::linalg_vector_norm",
+      "count": 23,
+      "time_ms": 1.489,
+      "percent_of_category": 6.13,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::sum",
+      "count": 200,
+      "time_ms": 1.411,
+      "percent_of_category": 5.8,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::sum",
+      "count": 192,
+      "time_ms": 1.272,
+      "percent_of_category": 5.23,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::sum",
+      "count": 192,
+      "time_ms": 1.238,
+      "percent_of_category": 5.09,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::sum",
+      "count": 192,
+      "time_ms": 1.044,
+      "percent_of_category": 4.29,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::sum",
+      "count": 192,
+      "time_ms": 1.037,
+      "percent_of_category": 4.27,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::sum",
+      "count": 192,
+      "time_ms": 0.811,
+      "percent_of_category": 3.33,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::linalg_vector_norm",
+      "count": 1,
+      "time_ms": 0.335,
+      "percent_of_category": 1.38,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::linalg_vector_norm",
+      "count": 1,
+      "time_ms": 0.317,
+      "percent_of_category": 1.3,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::sum",
+      "count": 16,
+      "time_ms": 0.142,
+      "percent_of_category": 0.59,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::linalg_vector_norm",
+      "count": 1,
+      "time_ms": 0.063,
+      "percent_of_category": 0.26,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::sum",
+      "count": 2,
+      "time_ms": 0.009,
+      "percent_of_category": 0.04,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::sum",
+      "count": 1,
+      "time_ms": 0.006,
+      "percent_of_category": 0.02,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 1686,
+        "warning": null,
+        "is_anomaly": false
+      }
+    }
+  ],
+  "category_specific": {
+    "softmax_count": 0,
+    "peak_hbm_bw_tbs": 8.0
+  },
+  "impact_estimates": []
+}
