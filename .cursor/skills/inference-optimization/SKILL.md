@@ -810,11 +810,24 @@ If the combined result is worse than individual winners, test subsets to find co
 
 After finding best combined config, use it as the new baseline for Phase 7 (GEAK) and Phase 9 (sweep). See [`KNOWLEDGE-BASE.md`](KNOWLEDGE-BASE.md) for model-specific validated results.
 
-## Phase 7: Multi-Round GEAK Optimization Loop
+## Phase 7: Multi-Round Kernel Optimization Loop (GEAK or LLM)
 
-**⚠️ FLOW GUARD: Do NOT skip this phase** unless Phase 5 confirmed no GEAK candidates (all checklist items passed, all kernels >3% are vendor C++). If candidates exist, you MUST complete Phase 7-8 BEFORE proceeding to Phase 9. Running the sweep with unoptimized kernels wastes 1-2 hours of compute. The correct order is strictly: Phase 5 (identify) → Phase 6 (server tune) → Phase 7 (GEAK optimize) → Phase 8 (integrate + benchmark + decide) → Phase 9 (sweep with final optimized version).
+**⚠️ FLOW GUARD: Do NOT skip this phase** unless Phase 5 confirmed no candidates (all checklist items passed, all kernels >3% are vendor C++). If candidates exist, you MUST complete Phase 7-8 BEFORE proceeding to Phase 9. Running the sweep with unoptimized kernels wastes 1-2 hours of compute. The correct order is strictly: Phase 5 (identify) → Phase 6 (server tune) → Phase 7 (optimize) → Phase 8 (integrate + benchmark + decide) → Phase 9 (sweep with final optimized version).
 
-This phase follows the **THINK → TRY → MEASURE → DECIDE → REPEAT** pattern. Each round: profile → find hot kernels → GEAK optimize → patch → benchmark → re-profile. Repeat until stopping criteria.
+**Two kernel optimization backends are available — run BOTH in parallel, best result wins:**
+
+| | GEAK | LLM (PRISM SAFE proxy) |
+|---|---|---|
+| **How** | GEAK MCP → remote GPU pod with AI agent | Direct API call → Claude / GPT |
+| **Latency** | 10–30 min (pod scheduling + execution) | 1–30s (direct API call) |
+| **GPU access** | Yes — hardware-in-loop micro-benchmark | No — LLM writes code, you benchmark locally |
+| **Best for** | Complex HIP kernels, final polish | Fast iteration, Triton rewrites, multi-model diversity |
+
+**Strategy: parallel race.** For each candidate kernel, submit to GEAK **and** LLM simultaneously. LLM results arrive in seconds; GEAK results arrive in minutes. While waiting for GEAK, verify + micro-benchmark LLM results locally. When both are done, **pick the result with the best micro-benchmark speedup** (or E2E gain if micro-benchmarks are close). This maximizes optimization quality without adding wall-clock time, since GEAK pod scheduling is the bottleneck.
+
+For LLM-specific details (prompt templates, multi-model parallel, reflection loop), see `LLM-INFERENCE-KERNEL.md`.
+
+This phase follows the **THINK → TRY → MEASURE → DECIDE → REPEAT** pattern. Each round: profile → find hot kernels → optimize (GEAK + LLM in parallel) → patch best result → benchmark → re-profile. Repeat until stopping criteria.
 
 ### 7a. Locate kernel source
 
@@ -953,32 +966,112 @@ OUTPUT: Write COMPLETE file to output dir as {output_filename}.",
 
 **SUBMIT ALL top 5 candidates to GEAK IN PARALLEL.** Each kernel is independent — GEAK tasks run on separate pods. Parallel submission total time = max(single task) ≈ 3-5 min, vs serial = 5 × 3 = 15 min.
 
-**Expected GEAK round count per E2E run:**
-- Round 1: Submit ALL top 5 candidates in parallel → wait for all to complete → patch each INDIVIDUALLY + benchmark
+**Expected round count per E2E run:**
+- Round 1: Submit ALL top 5 candidates to GEAK + LLM in parallel → compare results → patch best per kernel INDIVIDUALLY + benchmark
 - Round 2 (if any kept): Re-profile → submit new candidates
-- Typical: 5-8 total submissions, ~5-10 min total GEAK wall clock
-- Each submission: step_limit=50
+- Typical: 5–10 total submissions per backend, ~5–10 min total wall clock (bounded by GEAK pod scheduling)
+- GEAK: step_limit=50 per task; LLM: up to 3 models in parallel per kernel
 
 **Step-by-step:**
 
-#### Step 1: SUBMIT ALL candidates to GEAK in parallel
+#### Step 1: SUBMIT ALL candidates to GEAK + LLM in parallel
 
-Extract source from STANDALONE kernel files for ALL top 5 candidates. Submit ALL to GEAK simultaneously using `geak_create_task` + `geak_submit_task` for each. Poll ALL tasks in a single loop.
+Extract source from STANDALONE kernel files for ALL top 5 candidates. For each candidate, submit to **both** backends simultaneously:
+- **GEAK**: `geak_create_task` + `geak_submit_task` (returns in 5–30 min)
+- **LLM**: Call PRISM SAFE proxy with `claude-opus-4-6`, `claude-opus-4.5`, and `gpt-4.1` in parallel (returns in 1–30s)
+
+LLM results arrive first. **While waiting for GEAK**, immediately verify + micro-benchmark each LLM result (see Step 2).
 
 ```python
-# Submit ALL candidates in parallel
-tasks = []
+import concurrent.futures
+from openai import OpenAI
+import httpx, os
+
+# --- LLM setup ---
+http_client = httpx.Client(verify=False, timeout=180)
+llm_client = OpenAI(
+    base_url="https://oci-slc.example-internal-host.invalid/api/v1/llm-proxy/v1",
+    api_key=os.environ["LLM_PROXY_API_KEY"],
+    http_client=http_client,
+)
+LLM_MODELS = ["claude-opus-4-6", "claude-opus-4.5", "gpt-4.1"]
+
+def call_llm(model, system_prompt, user_prompt):
+    resp = llm_client.chat.completions.create(
+        model=model,
+        messages=[{"role": "system", "content": system_prompt},
+                  {"role": "user", "content": user_prompt}],
+        max_tokens=8192, temperature=0.0,
+    )
+    return model, resp.choices[0].message.content
+
+# --- Submit ALL candidates to BOTH backends in parallel ---
+geak_tasks = {}   # kernel -> task_id
+llm_results = {}  # kernel -> [(model, code), ...]
+
 for kernel in top_5_candidates:
     standalone_file = find_standalone_file(kernel)
-    task = geak_create_task(standalone_file, prompt_for_kernel_type(kernel))
-    geak_submit_task(task.id)
-    tasks.append((kernel, task.id))
+    prompt = prompt_for_kernel_type(kernel)
 
-# Poll ALL tasks until all complete (max 15 min)
+    # GEAK submission
+    task = geak_create_task(standalone_file, prompt)
+    geak_submit_task(task.id)
+    geak_tasks[kernel] = task.id
+
+    # LLM submission (all models in parallel)
+    system_prompt, user_prompt = build_llm_prompts(kernel, standalone_file)
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        futures = [pool.submit(call_llm, m, system_prompt, user_prompt) for m in LLM_MODELS]
+        llm_results[kernel] = [f.result() for f in concurrent.futures.as_completed(futures)]
+```
+
+#### Step 2: VERIFY + MICRO-BENCHMARK LLM results (while GEAK runs)
+
+LLM results are back immediately. For each candidate, test every LLM result:
+1. Extract code from markdown code block
+2. Verify compilation (`exec()`)
+3. Verify correctness (max_diff < 1e-2)
+4. Micro-benchmark (200 iterations, compare vs original)
+
+Track the **best LLM result** per kernel (highest micro-benchmark speedup that passes correctness).
+
+```python
+best_per_kernel = {}  # kernel -> {"source": "llm", "model": ..., "code": ..., "speedup": ...}
+
+for kernel in top_5_candidates:
+    best_speedup = 0
+    for model, raw_output in llm_results[kernel]:
+        code = extract_python_code(raw_output)
+        if not code:
+            continue
+        try:
+            compile_ok = verify_compilation(code)
+            correct = verify_correctness(code, kernel)
+            if compile_ok and correct:
+                speedup = micro_benchmark(code, kernel)
+                print(f"  LLM {model}: kernel speedup = {speedup:+.1f}%")
+                if speedup > best_speedup:
+                    best_speedup = speedup
+                    best_per_kernel[kernel] = {
+                        "source": "llm", "model": model,
+                        "code": code, "speedup": speedup
+                    }
+        except Exception as e:
+            print(f"  LLM {model}: FAILED ({e})")
+```
+
+If an LLM result shows >5% kernel speedup, it is a **viable candidate** but do NOT patch yet — wait for GEAK to finish for comparison.
+
+If no LLM result compiles/passes, feed errors back for 1 reflection round (max 3 iterations per model, see LLM-INFERENCE-KERNEL.md).
+
+#### Step 3: POLL GEAK tasks until complete
+
+```python
+# Poll ALL GEAK tasks until all complete (max 15 min)
 for _ in range(15):
     sleep(60)
     all_done = True
-    for kernel, task_id in tasks:
+    for kernel, task_id in geak_tasks.items():
         status = geak_get_task(task_id)["status"]
         if status in ("running", "pending"):
             all_done = False
@@ -986,95 +1079,76 @@ for _ in range(15):
         break
 ```
 
-#### Step 2: VERIFY + PATCH each completed task individually
+**GEAK retry strategy**: If a GEAK task fails, retry up to 3 times alternating workspaces (`control-plane-prod` → default → `control-plane-prod`). If all 3 fail, the LLM result (if any) stands as the sole candidate.
 
-For each completed GEAK task, verify output then patch standalone files + benchmark ONE AT A TIME to isolate E2E impact. Use the retry strategy below if GEAK submission fails.
+#### Step 4: VERIFY GEAK output + compare with LLM
 
-**GEAK submission retry (max 3 attempts per kernel):**
+For each completed GEAK task:
+1. Download optimized kernel, verify function name + signature match
+2. Verify correctness
+3. Micro-benchmark
 
-**Retry strategy**: Each kernel gets up to 3 GEAK submission attempts, alternating workspaces. If all 3 fail, mark kernel as failed and move to next candidate.
+Then **compare GEAK vs best LLM result** for this kernel:
 
 ```python
-WORKSPACE_ROTATION = ["control-plane-prod", None, "control-plane-prod"]  # alternate workspaces
+for kernel in top_5_candidates:
+    geak_code = download_geak_output(geak_tasks[kernel])
+    if geak_code and verify_correctness(geak_code, kernel):
+        geak_speedup = micro_benchmark(geak_code, kernel)
+        print(f"  GEAK: kernel speedup = {geak_speedup:+.1f}%")
 
-def submit_geak_with_retry(kernel, prompt_template, max_retries=3):
-    """Submit to GEAK with retry. Returns (task_id, status) or (None, 'failed')."""
-    for attempt in range(max_retries):
-        ws = WORKSPACE_ROTATION[attempt]
-        ws_label = ws or "default"
-        print(f"GEAK attempt {attempt+1}/{max_retries} on workspace={ws_label}")
-        
-        # Create and submit
-        kwargs = {"workspace_id": ws} if ws else {}
-        task = geak_create_task(kernel, prompt_template, **kwargs)
-        geak_submit_task(task.id)
-        
-        # Poll (max 15 min per attempt)
-        for poll in range(15):
-            sleep(60)
-            task_status = geak_get_task(task.id)
-            status = task_status["status"]
-            
-            if status == "completed":
-                return task.id, "completed"
-            elif status == "failed":
-                print(f"  Attempt {attempt+1} failed on {ws_label}")
-                break  # → next retry
-            # "running" or "pending" → keep polling
+        llm_entry = best_per_kernel.get(kernel)
+        llm_speedup = llm_entry["speedup"] if llm_entry else 0
+
+        if geak_speedup > llm_speedup:
+            best_per_kernel[kernel] = {
+                "source": "geak", "task_id": geak_tasks[kernel],
+                "code": geak_code, "speedup": geak_speedup
+            }
+            print(f"  WINNER: GEAK ({geak_speedup:+.1f}% > LLM {llm_speedup:+.1f}%)")
         else:
-            # Timed out after 15 min
-            print(f"  Attempt {attempt+1} timed out on {ws_label}")
-    
-    # All retries exhausted
-    return None, "failed"
-
-# Usage per kernel:
-task_id, status = submit_geak_with_retry(kernel, prompt_template)
-if status != "completed":
-    log(kernel, "discard", f"GEAK failed after {max_retries} retries")
-    # → go to Step 7 (next kernel)
+            print(f"  WINNER: LLM {llm_entry['model']} ({llm_speedup:+.1f}% > GEAK {geak_speedup:+.1f}%)")
+    else:
+        print(f"  GEAK: FAILED or incorrect → using LLM result if available")
 ```
 
-#### Step 3: VERIFY GEAK output
+#### Step 5: PATCH best result per kernel
 
-Download the optimized kernel and verify:
-- Function name matches original exactly
-- Parameter list (count + names) matches original exactly
-- If mismatch: re-submit with stricter prompt (max 3 attempts per kernel, see 7d)
-
-#### Step 4: PATCH (Phase 7)
-
+For each kernel with a winner (speedup > 0):
 - Use `patch_standalone_kernels()` from Strategy A (Phase 8a) — patches STANDALONE files only.
 - The function adapts `xnumel` per file and skips graph modules automatically.
 - Kill server, wait 10s, clear `.so`/`.json`/Triton cache.
 
-#### Step 5: BENCHMARK
+Patch + benchmark ONE kernel at a time to isolate E2E impact.
+
+#### Step 6: BENCHMARK
 
 Restart server with same params as baseline. Run same benchmark (same CONC/ISL/OSL/num_prompts).
 
-#### Step 6: DECIDE
+#### Step 7: DECIDE
 
 ```python
 gain = (new_tput - baseline_tput) / baseline_tput * 100
+winner = best_per_kernel[kernel]
 if gain > 0:
-    # KEEP: update baseline, log, move to next kernel
+    # KEEP: update baseline, log source (GEAK vs LLM model), move to next kernel
     baseline_tput = new_tput
+    log(kernel, "keep", f"{winner['source']} ({winner.get('model','')}) speedup={winner['speedup']:.1f}%")
 elif attempt < 3:
-    # REVERT + re-submit GEAK with "REGRESSION" prompt fix
+    # REVERT + re-submit to BOTH backends with "REGRESSION" prompt fix (see 7d)
     revert_all_bak_files()
-    # → go back to Step 2 with improved prompt
 else:
     # REVERT + mark as discard, move to next kernel
     revert_all_bak_files()
 ```
 
-#### Step 7: CHECK stopping criteria
+#### Step 8: CHECK stopping criteria
 
 If not met → go to Step 1 with next kernel. If met → proceed to Phase 9.
 
-### 7d. GEAK re-submission prompt fixes
+### 7d. Re-submission prompt fixes (GEAK and LLM)
 
-When re-submitting after a failed attempt, append to the original prompt:
+When re-submitting after a failed attempt (to either backend), append to the original prompt. For LLM, append as a follow-up user message in the same conversation; for GEAK, append to the `prompt` field:
 
 | Issue | Append to prompt |
 |-------|-----------------|
@@ -1084,7 +1158,8 @@ When re-submitting after a failed attempt, append to the original prompt:
 | Regression (reduction kernel) | `"PREVIOUS ATTEMPT was SLOWER ({gain}%). Try STRUCTURAL changes: (1) hoist loop-invariant computations OUT of loops, (2) merge dual-pass into single-pass, (3) eliminate redundant .to(tl.float32) casts."` |
 | Regression (template kernel) | `"PREVIOUS ATTEMPT was SLOWER ({gain}%). Do NOT change block sizes — Inductor autotuner already picked near-optimal values. Focus ONLY on loop body optimizations: precompute strides, remove redundant index calculations."` |
 | Correctness fail | `"PREVIOUS ATTEMPT produced wrong output (max diff={diff}). Ensure numerical equivalence. Do NOT change the computation logic, only optimize memory access and scheduling."` |
-| GEAK task failed | Retry up to 3 times, alternating workspaces (`control-plane-prod` → default → `control-plane-prod`). If all 3 fail, skip this kernel. |
+| GEAK task failed | Retry up to 3 times, alternating workspaces (`control-plane-prod` → default → `control-plane-prod`). If all 3 fail, use the best LLM result if one passed. If no LLM result either, skip this kernel. |
+| LLM compilation failure | Feed the error back as a reflection message (max 3 rounds). If all models fail after reflection, rely on the GEAK result. |
 
 ### 7e. Stopping criteria
 
@@ -1329,11 +1404,11 @@ actual_e2e = (new_tput - baseline_tput) / baseline_tput * 100
 
 **Log to results.tsv:**
 ```
-round | attempt | kernel | gpu_pct | kernel_speedup | actual_e2e | status | description
-1     | 1       | fused_mm_0 | 22.2% | +35% | +8.1% | keep | GEAK: BLOCK_M=4 simplified grid
-1     | 2       | rmsnorm    | 6.7%  | +60% | +4.2% | keep | GEAK: hoisted rsqrt
-1     | 3       | fused_mm_1 | 7.2%  | +20% | -0.1% | discard | GEAK: no E2E gain
-2     | 4       | topkGate   | 4.7%  | +15% | +0.5% | keep | GEAK round 2: new top kernel
+round | attempt | kernel | gpu_pct | kernel_speedup | actual_e2e | status | source | description
+1     | 1       | fused_mm_0 | 22.2% | +35% | +8.1% | keep | GEAK | BLOCK_M=4 simplified grid (GEAK +35% > LLM +22%)
+1     | 2       | rmsnorm    | 6.7%  | +60% | +4.2% | keep | LLM:opus-4-6 | single-pass (LLM +60% > GEAK +45%)
+1     | 3       | fused_mm_1 | 7.2%  | +20% | -0.1% | discard | GEAK | no E2E gain (LLM failed compilation)
+2     | 4       | topkGate   | 4.7%  | +15% | +0.5% | keep | LLM:opus-4.5 | routing fusion (GEAK timed out)
 ```
 
 ### Cumulative gain and re-profile
@@ -1450,40 +1525,40 @@ Write to `$WORK_DIR/optimization_report.md`:
 |----------|--------------|---|-----------------|
 | ... | ... | ... | ... |
 
-## GEAK Kernel Optimization (Top 5 Candidates)
+## Kernel Optimization (Top 5 Candidates — GEAK + LLM Parallel Race)
 
 ### Gain Breakdown (per kernel)
-| # | Kernel | GPU % | Kernel Speedup | Theoretical E2E | Actual E2E | Status |
-|---|--------|-------|---------------|----------------|-----------|--------|
-| 1 | (name) | X% | Y% | Z% | W% | keep/discard |
-| ... | ... | ... | ... | ... | ... | ... |
-| N | (name) | X% | Y% | Z% | W% | keep/discard |
+| # | Kernel | GPU % | GEAK Speedup | LLM Best Speedup | Winner | Actual E2E | Status |
+|---|--------|-------|-------------|-----------------|--------|-----------|--------|
+| 1 | (name) | X% | Y% | Y'% (model) | GEAK/LLM | W% | keep/discard |
+| ... | ... | ... | ... | ... | ... | ... | ... |
+| N | (name) | X% | Y% | Y'% (model) | GEAK/LLM | W% | keep/discard |
 
 Gain formulas:
-- **Kernel Speedup** = (orig_ms - geak_ms) / orig_ms × 100% (micro-benchmark)
+- **Kernel Speedup** = (orig_ms - optimized_ms) / orig_ms × 100% (micro-benchmark, reported for both GEAK and LLM)
 - **Theoretical E2E** = Kernel Speedup × GPU time % (upper bound)
 - **Actual E2E** = (new_tput - prev_tput) / prev_tput × 100% (measured)
 - **Cumulative E2E** = (final_tput - original_baseline) / original_baseline × 100%
 
 **Cumulative gain: +X.X%** (baseline {baseline_tput} → final {final_tput} tok/s)
 
-### Micro-benchmark Results
-| Kernel | Original (ms) | GEAK (ms) | Speedup | Correctness |
-|--------|-------------|-----------|---------|-------------|
-| ... | ... | ... | ... | PASS/FAIL |
+### Micro-benchmark Results (GEAK vs LLM)
+| Kernel | Original (ms) | GEAK (ms) | LLM Best (ms) | LLM Model | Winner | Speedup | Correctness |
+|--------|-------------|-----------|--------------|-----------|--------|---------|-------------|
+| ... | ... | ... | ... | ... | GEAK/LLM | ... | PASS/FAIL |
 
-### GEAK Task IDs
-| Kernel | Task ID | step_limit | Duration |
-|--------|---------|-----------|----------|
-| ... | ... | 50 | ...min |
+### Task IDs & Sources
+| Kernel | GEAK Task ID | LLM Models Tried | Winner |
+|--------|-------------|-----------------|--------|
+| ... | ... (or N/A) | opus-4-6, opus-4.5, gpt-4.1 | GEAK/LLM:model |
 
 ## Optimization Journey (Full Log)
-| # | Description | tok/s | Change vs Baseline | Status |
-|---|-------------|-------|-------------------|--------|
-| 0 | Baseline | ... | — | baseline |
-| 1 | GEAK: kernel_1 | ... | +X% | keep |
-| 2 | GEAK: kernel_2 | ... | +Y% | keep |
-| 3 | GEAK: kernel_3 | ... | -Z% | discard |
+| # | Description | Source | tok/s | Change vs Baseline | Status |
+|---|-------------|--------|-------|-------------------|--------|
+| 0 | Baseline | — | ... | — | baseline |
+| 1 | kernel_1 single-pass | LLM:opus-4-6 | ... | +X% | keep |
+| 2 | kernel_2 block tuning | GEAK | ... | +Y% | keep |
+| 3 | kernel_3 fusion | LLM:opus-4.5 | ... | -Z% | discard |
 
 ## Parameter Sweep (Optimized Version)
 ### ISL=1024 / OSL=1024
