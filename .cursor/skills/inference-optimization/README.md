@@ -4,9 +4,10 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 
 | File | Description |
 |------|-------------|
-| `SKILL.md` | Main skill — phases 0-10: classify → baseline → profile → analyze → tune → GEAK → patch → sweep → report |
+| `SKILL.md` | Main skill — phases 0-10: classify → baseline → profile → analyze → tune → GEAK/LLM → patch → sweep → report |
 | `KNOWLEDGE-BASE.md` | Model-specific configs, validated results, pitfalls, benchmark fairness case studies |
-| `GEAK-INFERENCE-KERNEL.md` | Deep reference — GEAK MCP details, kernel extraction, integration paths |
+| `GEAK-INFERENCE-KERNEL.md` | Deep reference — GEAK MCP details, kernel extraction, integration paths (remote GPU pod) |
+| `LLM-INFERENCE-KERNEL.md` | Deep reference — LLM proxy details, prompt templates, multi-model parallel (fast turnaround) |
 | `scripts/common.sh` | Shared functions — kill_server, wait_for_health, check_benchmark_lib, filter_trace, check_gpu_memory |
 | `scripts/run_baseline.sh` | Baseline benchmark + profiling (single server launch) |
 | `scripts/run_profile.sh` | Profiling run against an already-running server |
@@ -29,7 +30,7 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 4. Send trace to **TraceLens** for kernel-level bottleneck analysis (Phase 4)
 5. Identify hot kernels that GEAK can optimize (Phase 5)
 6. Tune server parameters — CUDA graph coverage, decode-steps, memory (Phase 6)
-7. Submit kernels to **GEAK** for AI-driven optimization (Phase 7)
+7. Submit kernels to **GEAK** or **LLM proxy** (Claude/GPT) for AI-driven optimization (Phase 7)
 8. Patch optimized kernels, re-benchmark, **keep improvements, revert regressions** (Phase 8)
 9. Sweep parameters (CONC, ISL/OSL) with the optimized version (Phase 9)
 10. Generate report with optimization history, Pareto curves, and comparison (Phase 10)
