@@ -30,6 +30,17 @@ def is_standalone_kernel(content: str) -> bool:
             "def call(" not in content)
 
 
+def extract_function_signature(source: str, func_name: str) -> list[str] | None:
+    """Extract parameter names from 'def func_name(param1, param2, ...)'."""
+    pattern = rf'def\s+{re.escape(func_name)}\s*\(([^)]*)\)'
+    match = re.search(pattern, source)
+    if match:
+        params = [p.strip().split(':')[0].split('=')[0].strip()
+                  for p in match.group(1).split(',')]
+        return [p for p in params if p]
+    return None
+
+
 def extract_function_body(source: str, func_name: str) -> str | None:
     """Extract everything from '@triton.jit' + 'def func_name(...)' to end of function."""
     pattern = rf'(@triton\.jit\s*\ndef\s+{re.escape(func_name)}\s*\([^)]*\).*)'
@@ -100,6 +111,15 @@ def patch_single_file(
 
     if kernel_name not in content:
         print(f"ERROR: kernel '{kernel_name}' not found in {target_file}")
+        return False
+
+    geak_sig = extract_function_signature(geak_source, kernel_name)
+    target_sig = extract_function_signature(content, kernel_name)
+    if geak_sig and target_sig and geak_sig != target_sig:
+        print(f"ERROR: Signature mismatch — GEAK has {len(geak_sig)} params "
+              f"({', '.join(geak_sig[:4])}...) but target has {len(target_sig)} "
+              f"({', '.join(target_sig[:4])}...). "
+              f"Same kernel name, different shape variant. Skipping.")
         return False
 
     new_content = replace_function_body(content, kernel_name, new_body)
