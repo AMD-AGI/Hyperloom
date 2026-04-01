@@ -125,7 +125,7 @@ All values below are the **single source of truth**. All actions reference these
 
 ### GEAK Image Selection — ALL kernels MUST use framework image
 
-**ALWAYS pass a framework image to GEAK, regardless of kernel type.** GEAK prompts specify the kernel file's exact path on the serving container. The GEAK pod must use the same image to ensure these paths exist.
+**ALWAYS pass a framework image to GEAK, regardless of kernel type.** For kernels whose source exists in the image (e.g., `/sgl-workspace/aiter/`), the GEAK pod uses the same image to access these paths. For runtime-generated kernels (e.g., `/tmp/torchinductor_root/` from `torch.compile`), these paths do NOT exist in the image — do NOT include `kernel_url`/`kernel_repo` in the prompt; copy files to shared NFS or rely on `files[].content` only.
 
 | Condition | Local Mode | Claw Mode |
 |-----------|-----------|-----------|
