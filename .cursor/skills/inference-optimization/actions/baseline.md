@@ -11,6 +11,15 @@ python3 $SKILL_ROOT/kb/kb_query.py "$MODEL_NAME torch.compile baseline" --top-k 
 
 ## Procedure
 
+> **[CLAW MODE]** All commands below must be wrapped with `exec_on_gpu`. Example:
+> ```bash
+> exec_on_gpu "export MODEL='$MODEL' TP=$TP CONC=$CONC FRAMEWORK=sglang \
+>   SGLANG_EXTRA_ARGS='--enable-torch-compile --mem-fraction-static 0.6' \
+>   RESULT_DIR='$RESULT_DIR' TRACE_DIR='$TRACE_DIR' INFERENCEX_PATH='$INFERENCEX_PATH' && \
+>   bash $SCRIPTS_DIR/run_baseline.sh"
+> ```
+> Trace files and results are written to shared NFS — accessible from both Claw client and Ray cluster.
+
 **Try torch.compile first, then fall back if incompatible.**
 
 ### Step 1: Try with torch.compile

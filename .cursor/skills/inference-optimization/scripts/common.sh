@@ -12,6 +12,17 @@
 # Requires: FRAMEWORK (sglang|vllm) for kill_server and wait_for_health.
 # =============================================================================
 
+# Mode detection
+MODE="${MODE:-local}"
+if [ "$MODE" = "claw" ]; then
+    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/shared_nfs/inference-optimization}"
+else
+    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace/inference-optimization}"
+fi
+
+# Constants
+SERVER_KILL_WAIT_S="${SERVER_KILL_WAIT_S:-10}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Kill serving stack. Uses global FRAMEWORK (sglang|vllm).
@@ -32,7 +43,7 @@ kill_server() {
     else
         ps aux | grep "[p]ython3 -m sglang" | awk '{print $2}' | xargs -r kill -TERM 2>/dev/null || true
     fi
-    sleep 15
+    sleep "$SERVER_KILL_WAIT_S"
     # Force kill anything still alive
     if [ "$FRAMEWORK" = "vllm" ]; then
         ps aux | grep "[v]llm" | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
@@ -43,7 +54,7 @@ kill_server() {
     ps aux | grep "[m]ultiprocessing.spawn" | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
     # Kill any orphaned torch/python GPU processes
     ps aux | grep "[p]ython3.*torch" | grep -v grep | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
-    sleep 8
+    sleep "$SERVER_KILL_WAIT_S"
 }
 
 # Wait until http://0.0.0.0:<port>/health responds. Args: port log_file pid [timeout_sec]
