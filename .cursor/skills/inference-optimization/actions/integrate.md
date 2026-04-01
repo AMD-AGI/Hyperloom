@@ -14,9 +14,11 @@ Per-kernel integration phase. Called by `kernel-opt.md` for each GEAK result.
 > exec_on_gpu "python3 $SCRIPTS_DIR/patch_inductor.py patch \
 >     --kernel-name $KERNEL_NAME \
 >     --geak-file $GEAK_OUTPUT_PATH \
->     --target-file $STANDALONE_FILE_PATH"
+>     --target-file $STANDALONE_FILE_PATH \
+>     --best-config '{\"XBLOCK\": 4, \"R0_BLOCK\": 2048, \"num_warps\": 4}'"
 > ```
 > GEAK output is on shared NFS: `/shared_nfs/geak/tasks/<user_hash>/<task_id>/output/`.
+> The `--best-config` JSON values should match the block sizes and warp count from the GEAK-optimized kernel.
 
 ### Choose patching strategy
 
@@ -88,17 +90,28 @@ def patch_standalone_kernels(kernel_name, geak_source_path, target_signature_pat
 **Alternative: Use `patch_inductor.py` (recommended, IR-8):**
 
 ```bash
-# Patch a single standalone kernel file
+# Patch a single standalone kernel file (kernel source only)
 python3 $SCRIPTS_DIR/patch_inductor.py patch \
     --kernel-name <kernel_name> \
     --geak-file <geak_output.py> \
     --target-file <standalone_file_path>
 
-# Revert if benchmark shows regression:
+# Patch kernel source AND update .best_config tiling parameters
+python3 $SCRIPTS_DIR/patch_inductor.py patch \
+    --kernel-name <kernel_name> \
+    --geak-file <geak_output.py> \
+    --target-file <standalone_file_path> \
+    --best-config '{"XBLOCK": 4, "R0_BLOCK": 2048, "num_warps": 4}'
+
+# Revert if benchmark shows regression (reverts both .py and .best_config):
 python3 $SCRIPTS_DIR/patch_inductor.py revert --target-file <standalone_file_path>
 ```
 
 `patch_inductor.py` preserves the original `@triton_heuristics` decorator and `inductor_meta` — it only replaces the `@triton.jit def kernel_name(...)` function body. This is critical because `inductor_meta` contains launcher configuration that Triton's CachingAutotuner depends on.
+
+**`.best_config` updates (CRITICAL):** Inductor standalone kernels have a companion `.best_config` file in the same directory that controls tiling parameters (`XBLOCK`, `R0_BLOCK`, `BLOCK_N`, `BLOCK_K`, `num_warps`, `num_stages`, etc.). When GEAK optimizes a kernel with different block sizes or warp counts, the `.best_config` MUST be updated to match. Patching only the `.py` without updating `.best_config` causes numerical corruption (garbled model output) because the autotuner launches the kernel with mismatched tiling parameters. Use `--best-config` to update both atomically.
+
+**How to determine `.best_config` values:** Read the GEAK-optimized kernel source for block size constants (e.g., `XBLOCK: tl.constexpr`, `R0_BLOCK`, `BLOCK_K`) and `num_warps`/`num_stages` in the `@triton.jit` decorator or meta. These values go into the `--best-config` JSON.
 
 **Signature Validation (auto-enforced):** `patch_inductor.py` automatically rejects patches when the GEAK kernel and target file have different function signatures (different parameter count/names). The same kernel name can map to multiple shape variants with different signatures — e.g. a `triton_red_fused_*` kernel may have 3-param (no residual) and 5-param (with residual) variants. Patching the wrong variant causes `AttributeError` crashes during torch.compile recompilation. If `patch_inductor.py` reports a signature mismatch, skip that file and find the correct variant.
 
