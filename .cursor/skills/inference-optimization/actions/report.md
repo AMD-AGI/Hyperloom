@@ -79,12 +79,12 @@ python3 $SKILL_ROOT/kb/kb_ingest.py \
 ## Heuristic Update
 N/A — terminal action.
 
-### [CLAW] Cleanup — Delete RayJob
+### [CLAW] Cleanup — Stop RayJob
 
-**Skip in local mode.** After the optimization is complete and the report is generated, clean up the RayJob:
+**Skip in local mode.** After the optimization is complete and the report is generated, stop the RayJob:
 
 ```
-Tool: workload_delete
+Tool: workload_stop
 Args: { "workload_id": "<RAYJOB_ID>" }
 ```
 

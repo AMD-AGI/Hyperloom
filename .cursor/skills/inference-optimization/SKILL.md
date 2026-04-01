@@ -98,7 +98,7 @@ python3 scripts/ray_submit.py --ray-address ... --command "..."
 
 ### IR-8: Use `patch_inductor.py --target-file` for Inductor patching
 
-Always use `scripts/patch_inductor.py` with `--target-file` (not `--cache-dir`). `--cache-dir` risks patching multiple shape variants of the same kernel name.
+Always use `scripts/patch_inductor.py` with `--target-file`. The `--cache-dir` option has been removed.
 
 ## GEAK & Tooling Constants
 
@@ -106,7 +106,7 @@ All values below are the **single source of truth**. All actions reference these
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `GEAK_STEP_LIMIT` | 150 | Max agent steps per GEAK task |
+| `GEAK_STEP_LIMIT` | 100 | Max agent steps per GEAK task |
 | `GEAK_WORKSPACE` | `control-plane-moe` | GEAK workspace (user can override) |
 | `GEAK_MAX_RETRIES` | 3 | Max submission retries per kernel |
 | `GEAK_MAX_SUBMISSIONS` | 15 | Total GEAK submissions budget per run |
@@ -254,7 +254,7 @@ runs to completion before the orchestrator re-scores. The "parallel" aspect is w
 ## Autonomy Rules
 
 **This skill runs end-to-end without human confirmation.** Do NOT ask the user before:
-- Creating/deleting RayJob on SaFE (claw mode)
+- Creating/stopping RayJob on SaFE (claw mode)
 - Running baseline/profiling scripts via Ray (claw mode) or locally
 - Submitting GEAK tasks
 - Killing/restarting servers (inside RayJob or locally)
