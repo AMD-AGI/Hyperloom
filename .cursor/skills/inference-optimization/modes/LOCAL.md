@@ -46,7 +46,7 @@ When `GEAK_LOCAL=true`, GEAK runs locally as a subprocess — no Docker image ne
 
 ## IR-8: patch_inductor.py
 
-Always use `--target-file` (not `--cache-dir`) to patch a specific standalone kernel file:
+Always use `--target-file` to patch a specific standalone kernel file:
 
 ```bash
 python3 $SCRIPTS_DIR/patch_inductor.py patch \
