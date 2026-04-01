@@ -119,7 +119,31 @@ def get_function_line_range(source, func_name):
     return None, None
 ```
 
-### Re-Benchmark (CRITICAL FAIRNESS)
+### Re-Baseline (CRITICAL FAIRNESS)
+
+**Use `run_baseline.sh` to re-baseline.** There is no `run_benchmark.sh` — `run_baseline.sh` is used for all phases (initial baseline, re-baseline after patching, backend tests). Just change `RESULT_DIR` to distinguish outputs.
+
+**[LOCAL MODE]:**
+```bash
+# Kill server, extend health timeout for torch.compile recompilation
+kill_server
+export HEALTH_TIMEOUT=1800
+
+# Re-baseline with EXACTLY same env vars as baseline, only change RESULT_DIR
+export RESULT_DIR="$RESULT_DIR/optimized_${KERNEL_NAME}"
+bash $SCRIPTS_DIR/run_baseline.sh
+```
+
+**[CLAW MODE]:**
+```bash
+exec_on_gpu "
+export HEALTH_TIMEOUT=1800
+export MODEL='$MODEL' TP=$TP CONC=$CONC FRAMEWORK=$FRAMEWORK
+export SGLANG_EXTRA_ARGS='$TUNED_SERVER_ARGS'
+export RESULT_DIR='$RESULT_DIR/optimized_$KERNEL_NAME'
+bash $SCRIPTS_DIR/run_baseline.sh
+"
+```
 
 **MUST use EXACTLY the same server config AND benchmark params as baseline:**
 - `--num-continuous-decode-steps` must match
@@ -180,7 +204,7 @@ find /sgl-workspace/aiter -name '__pycache__' -exec rm -rf {} + 2>/dev/null
 
 For multi-node RayJob, revert on ALL nodes using the same `patch_on_node` pattern above.
 
-### Re-Benchmark: torch.compile recompilation timeout
+### Re-Baseline: torch.compile recompilation timeout
 
 **CRITICAL:** `patch_inductor.py` clears ALL `.so` binary cache files and `~/.triton/cache`. Server restart triggers FULL torch.compile recompilation (5-30 minutes). Set `HEALTH_TIMEOUT=1800` to allow completion before health check times out.
 
