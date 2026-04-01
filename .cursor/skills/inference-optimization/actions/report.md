@@ -18,7 +18,8 @@ Generate the final optimization report and contribute new knowledge to the KB.
 
 ## Executive Summary
 - **Model**: {model_id} ({param_count})
-- **Hardware**: {gpu_count}x {gpu_type}
+- **Hardware**: {gpu_count}x {gpu_type} ({num_nodes} nodes)
+- **Mode**: {Local | Claw (SaFE RayJob, {num_nodes} nodes, TP={tp})}
 - **Framework**: {framework} v{version}
 - **Optimization attempts**: {N} ({kept} kept, {discarded} discarded, {crashed} crashed)
 - **Total improvement**: {total_pct}% (baseline → optimized)
@@ -77,3 +78,21 @@ python3 $SKILL_ROOT/kb/kb_ingest.py \
 
 ## Heuristic Update
 N/A — terminal action.
+
+### [CLAW] Cleanup — Delete RayJob
+
+**Skip in local mode.** After the optimization is complete and the report is generated, clean up the RayJob:
+
+```
+Tool: workload_delete
+Args: { "workload_id": "<RAYJOB_ID>" }
+```
+
+**Also clean up any parallel sweep workloads** (if SaFE Option B was used):
+
+```python
+sweep_workloads = workload_list(workspace_id=WORKSPACE_ID, kind="PyTorchJob")
+for wl in sweep_workloads:
+    if wl["displayName"].startswith("sweep-"):
+        workload_delete(wl["workloadId"])
+```

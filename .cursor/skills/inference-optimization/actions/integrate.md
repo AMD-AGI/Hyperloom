@@ -9,6 +9,15 @@ Per-kernel integration phase. Called by `kernel-opt.md` for each GEAK result.
 
 ## Procedure
 
+> **[CLAW MODE]** All patch commands go through `exec_on_gpu`:
+> ```bash
+> exec_on_gpu "python3 $SCRIPTS_DIR/patch_inductor.py patch \
+>     --kernel-name $KERNEL_NAME \
+>     --geak-file $GEAK_OUTPUT_PATH \
+>     --target-file $STANDALONE_FILE_PATH"
+> ```
+> GEAK output is on shared NFS: `/shared_nfs/geak/tasks/<user_hash>/<task_id>/output/`.
+
 ### Choose patching strategy
 
 | Condition | Strategy |
@@ -76,6 +85,21 @@ def patch_standalone_kernels(kernel_name, geak_source_path, target_signature_pat
     return patched, skipped
 ```
 
+**Alternative: Use `patch_inductor.py` (recommended, IR-8):**
+
+```bash
+# Patch a single standalone kernel file
+python3 $SCRIPTS_DIR/patch_inductor.py patch \
+    --kernel-name <kernel_name> \
+    --geak-file <geak_output.py> \
+    --target-file <standalone_file_path>
+
+# Revert if benchmark shows regression:
+python3 $SCRIPTS_DIR/patch_inductor.py revert --target-file <standalone_file_path>
+```
+
+`patch_inductor.py` preserves the original `@triton_heuristics` decorator and `inductor_meta` — it only replaces the `@triton.jit def kernel_name(...)` function body. This is critical because `inductor_meta` contains launcher configuration that Triton's CachingAutotuner depends on.
+
 ### Strategy B: Direct Source Edit with AST
 
 **CRITICAL:** Use Python AST for function boundary detection — aiter source has module-level variables between functions.
@@ -117,6 +141,48 @@ else:
     # REVERT: restore .bak files
     revert_all_bak_files()
 ```
+
+### [CLAW] Multi-Node Kernel Patching
+
+For multi-node RayJob, kernel patching requires attention:
+- **Inductor cache** (Strategy A): Cache is local to each node. Must patch on ALL nodes, OR use a shared Inductor cache directory on NFS (`TORCHINDUCTOR_CACHE_DIR=/shared_nfs/inductor_cache`).
+- **Framework source** (Strategy B): If framework is installed on shared NFS, patching on head is sufficient.
+
+For multi-node patching, submit patch command to each node via Ray:
+
+```python
+import ray
+
+@ray.remote
+def patch_on_node(patch_script):
+    import subprocess
+    return subprocess.run(patch_script, shell=True, capture_output=True, text=True)
+
+nodes = ray.nodes()
+futures = [patch_on_node.options(
+    resources={f"node:{node['NodeManagerAddress'].split(':')[0]}": 0.001}
+).remote(patch_script) for node in nodes if node['Alive']]
+results = ray.get(futures)
+```
+
+### [CLAW MODE] Revert on Ray cluster
+
+```bash
+exec_on_gpu "
+# Strategy A (Inductor cache): restore .bak files
+find /tmp/torchinductor_root -name '*.bak' -exec sh -c 'cp \"\$1\" \"\${1%.bak}\"' _ {} \\;
+
+# Strategy B (framework source): restore backup
+cp /path/to/kernel.py.bak /path/to/kernel.py
+find /sgl-workspace/aiter -name '__pycache__' -exec rm -rf {} + 2>/dev/null
+"
+```
+
+For multi-node RayJob, revert on ALL nodes using the same `patch_on_node` pattern above.
+
+### Re-Benchmark: torch.compile recompilation timeout
+
+**CRITICAL:** `patch_inductor.py` clears ALL `.so` binary cache files and `~/.triton/cache`. Server restart triggers FULL torch.compile recompilation (5-30 minutes). Set `HEALTH_TIMEOUT=1800` to allow completion before health check times out.
 
 ## Accuracy Validation
 Run accuracy gate after each patch. Compare output text with `accuracy_reference.json`.
