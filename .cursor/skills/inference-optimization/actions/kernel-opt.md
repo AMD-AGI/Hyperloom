@@ -43,6 +43,12 @@ find /opt/venv -path "*/sglang/srt/layers/*.py" -exec grep -l "@triton.jit" {} \
 find /sgl-workspace/aiter -name "*.py" -exec grep -l "@triton.jit" {} \;
 ```
 
+> **[CLAW MODE]** Kernel source lives on the RayJob. Use `exec_on_gpu` for all find/cat commands:
+> ```bash
+> exec_on_gpu "find /tmp/torchinductor_root -name '*.py' | while read f; do ..."
+> exec_on_gpu "cat /path/to/standalone_kernel.py"
+> ```
+
 ### Step 2: Submit ALL top candidates to GEAK in parallel
 
 Each kernel is independent — GEAK tasks run on separate pods. Parallel: ~5 min vs serial: ~15 min.
@@ -53,6 +59,18 @@ Use prompt templates:
 - **Template/GEMM kernels**: Low priority, Inductor autotuner already near-optimal
 
 See `GEAK-INFERENCE-KERNEL.md` for full prompt templates.
+
+**GEAK prompt rules — apply to ALL kernel types (MANDATORY for every geak_create_task):**
+
+1. **MUST include the kernel's absolute file path (actual path in the inference serving environment)** — The path must be the actual location inside the inference serving environment (container or local machine). GEAK runs with the same image as the inference server, so paths are identical. Example: `"The kernel source file is at /tmp/torchinductor_root/xx/cxx/triton_red_fused_xxx.py"`.
+2. **MUST include the kernel repo's absolute path (actual path in the inference serving environment)** — Same rule. Examples: `"The kernel repo is at /sgl-workspace/aiter/"` or `"The kernel repo is at /tmp/torchinductor_root/"`.
+3. **MUST specify heterogeneous mode and max_rounds** — Always include: `"Use heterogeneous mode. Set max_rounds to 3."` in the prompt.
+4. **MUST specify 1.5x minimum speedup target** — Always include: `"The kernel MUST be optimized to at least 1.5x speedup."` in the prompt.
+
+Additional rules:
+5. **Always say "Do NOT search the filesystem with find / or grep -r /"** — GEAK agents default to broad filesystem searches which hang 30+ min on NFS.
+6. **Always pass framework image** — In claw mode, use `GEAK_IMAGE_SGLANG_RAY` (for SGLang) or `GEAK_IMAGE_VLLM` (for vLLM). In local mode, use `GEAK_IMAGE_SGLANG` or `GEAK_IMAGE_VLLM`, or skip image if `GEAK_LOCAL=true`.
+7. **Always embed full source in `files[].content`** — the absolute path in the prompt tells GEAK where to find the file, AND the source content is embedded in `files[].content` for direct access. Both are required.
 
 ### Step 3: Verify + Patch each result individually
 
