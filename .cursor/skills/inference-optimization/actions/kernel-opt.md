@@ -66,7 +66,7 @@ See `GEAK-INFERENCE-KERNEL.md` for full prompt templates.
    - If the kernel source file **exists in the Docker image** (e.g., `/sgl-workspace/aiter/...`, `/opt/venv/...`), **MUST include** the kernel's absolute file path and repo path in the prompt. GEAK runs with the same image, so paths are identical. Example: `"The kernel source file is at /sgl-workspace/aiter/jit/core/compile.py"`, `"The kernel repo is at /sgl-workspace/aiter/"`.
    - If the kernel source is **runtime-generated** (e.g., `/tmp/torchinductor_root/...` from `torch.compile` Inductor cache), **DO NOT include** `kernel_url` or `kernel_repo` in the prompt. These files only exist in the running inference server's ephemeral storage, not in the Docker image. Instead, copy kernel files to a shared NFS path and reference the NFS path, OR omit these paths entirely and rely on `files[].content`.
    - **How to tell:** paths under `/tmp/`, `/root/.cache/`, or any `torchinductor_*` directory are runtime-generated. Paths under `/sgl-workspace/`, `/opt/`, `/usr/` are part of the image.
-2. **MUST specify heterogeneous mode and max_rounds** — Always include: `"Use heterogeneous mode. Set max_rounds to 3."` in the prompt.
+2. **MUST specify heterogeneous mode and max_rounds** — Always include: `"Use heterogeneous mode. Set max_rounds to 1."` in the prompt.
 3. **MUST specify 1.5x minimum speedup target** — Always include: `"The kernel MUST be optimized to at least 1.5x speedup."` in the prompt.
 
 Additional rules:
