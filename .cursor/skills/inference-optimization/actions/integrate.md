@@ -100,6 +100,8 @@ python3 $SCRIPTS_DIR/patch_inductor.py revert --target-file <standalone_file_pat
 
 `patch_inductor.py` preserves the original `@triton_heuristics` decorator and `inductor_meta` — it only replaces the `@triton.jit def kernel_name(...)` function body. This is critical because `inductor_meta` contains launcher configuration that Triton's CachingAutotuner depends on.
 
+**Signature Validation (auto-enforced):** `patch_inductor.py` automatically rejects patches when the GEAK kernel and target file have different function signatures (different parameter count/names). The same kernel name can map to multiple shape variants with different signatures — e.g. a `triton_red_fused_*` kernel may have 3-param (no residual) and 5-param (with residual) variants. Patching the wrong variant causes `AttributeError` crashes during torch.compile recompilation. If `patch_inductor.py` reports a signature mismatch, skip that file and find the correct variant.
+
 ### Strategy B: Direct Source Edit with AST
 
 **CRITICAL:** Use Python AST for function boundary detection — aiter source has module-level variables between functions.
