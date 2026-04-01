@@ -60,7 +60,7 @@ Submit the kernel source **exactly as extracted**. Do NOT strip decorators, chan
 
 ### IR-3: Integration (Phase 8) is MANDATORY
 
-After GEAK returns optimized kernels, you MUST execute the integrate action (patch → re-benchmark → decide). Skipping means GEAK results are never validated end-to-end.
+After GEAK returns optimized kernels, you MUST execute the integrate action (patch → re-baseline → decide). Skipping means GEAK results are never validated end-to-end. Re-baseline uses `run_baseline.sh` — there is no `run_benchmark.sh`. See `actions/integrate.md` for details.
 
 ### IR-4: Always kill_server + check_gpu_memory before server launch
 
@@ -173,7 +173,7 @@ Claw Client --> Skill (this file)
 SKILL.md (this file)          — DFS orchestrator: loop, heuristic, dispatch
 actions/*.md                   — Self-contained action modules (11 actions)
 kb/                            — RAG knowledge base (JSONL + query/ingest scripts)
-scripts/                       — Benchmark/profiling shell scripts (unchanged)
+scripts/                       — Baseline/profiling shell scripts (run_baseline.sh is also used for re-baseline after kernel patching)
 GEAK-INFERENCE-KERNEL.md       — GEAK MCP deep reference
 KNOWLEDGE-BASE.md              — Legacy KB (archived, seeded into kb/entries.jsonl)
 ```

@@ -31,7 +31,7 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 5. Identify hot kernels that GEAK can optimize (Phase 5)
 6. Tune server parameters — CUDA graph coverage, decode-steps, memory (Phase 6)
 7. Submit kernels to **GEAK** or **LLM proxy** (Claude/GPT) for AI-driven optimization (Phase 7)
-8. Patch optimized kernels, re-benchmark, **keep improvements, revert regressions** (Phase 8)
+8. Patch optimized kernels, re-baseline, **keep improvements, revert regressions** (Phase 8)
 9. Sweep parameters (CONC, ISL/OSL) with the optimized version (Phase 9)
 10. Generate report with optimization history, Pareto curves, and comparison (Phase 10)
 
