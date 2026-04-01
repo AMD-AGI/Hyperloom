@@ -220,16 +220,20 @@ shutil.rmtree(os.path.expanduser("~/.triton/cache"), ignore_errors=True)
 **Recommended: Use `patch_inductor.py` (IR-8):**
 
 ```bash
+# Patch kernel source + update .best_config tiling parameters
 python3 $SCRIPTS_DIR/patch_inductor.py patch \
     --kernel-name <name> \
     --geak-file <geak_output.py> \
-    --target-file <inductor_standalone_file.py>
+    --target-file <inductor_standalone_file.py> \
+    --best-config '{"XBLOCK": 4, "R0_BLOCK": 2048, "num_warps": 4}'
 
-# Revert:
+# Revert (restores both .py and .best_config from .bak):
 python3 $SCRIPTS_DIR/patch_inductor.py revert --target-file <inductor_standalone_file.py>
 ```
 
 `patch_inductor.py` preserves `@triton_heuristics`, `inductor_meta`, and launcher config while only replacing the `@triton.jit def` function body.
+
+**CRITICAL:** Always pass `--best-config` when the GEAK-optimized kernel uses different block sizes or warp counts than the original. The `.best_config` file controls Inductor's autotuner launch parameters — a mismatch between kernel code and `.best_config` causes numerical corruption.
 
 ## Correctness Verification
 
@@ -295,6 +299,7 @@ Before patching any GEAK output into the serving environment:
 - [ ] Block sizes within IR-8 constraints (not exceeding 2x original)
 - [ ] Source code is actual code, not comments or path references
 - [ ] `files[].content` contains the full source (not truncated)
+- [ ] `.best_config` values identified from GEAK output (XBLOCK, R0_BLOCK, BLOCK_N, BLOCK_K, num_warps, num_stages) and passed via `--best-config`
 
 ## Troubleshooting
 
