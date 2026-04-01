@@ -23,11 +23,11 @@ fi
 
 ## RayJob Lifecycle
 
-### Step 1: Create persistent RayJob (exactly ONE)
+### Step 1: Create a NEW RayJob
 
 See `SKILL.md` Constants for the image to use. See `actions/setup.md` [CLAW] section for the full `workload_create` payloads (single-node and multi-node).
 
-**Create exactly ONE RayJob for the entire optimization run.** The setup action lists two templates (single-node / multi-node) — these are alternatives, pick ONE based on `NUM_NODES`. Before creating, check if a RayJob already exists in the workspace and reuse it.
+**Exactly ONE RayJob per skill execution.** At the start, create a new RayJob and use it throughout the entire run. Do NOT create a second one mid-execution. Do NOT reuse RayJobs left over from previous skill executions (they may have stale state). After the run completes, `workload_stop` the RayJob.
 
 Key points:
 - `kind: "RayJob"` (IR-7: NEVER use PyTorchJob for the main inference workload)

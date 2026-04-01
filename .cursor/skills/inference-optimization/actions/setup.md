@@ -68,12 +68,7 @@ export INFERENCEX_PATH="$INFERENCEX_PATH"
 >
 > Base64 encoding: `echo -n "tail -f /dev/null" | base64` → `dGFpbCAtZiAvZGV2L251bGw=`
 
-> **ONE RayJob only.** Create exactly ONE RayJob for the entire optimization run. The two templates below (single-node / multi-node) are alternatives — pick ONE based on `NUM_NODES`. Before creating, check if a RayJob already exists:
-> ```python
-> existing = workload_list(workspace_id=WORKSPACE_ID, kind="RayJob", phase="Running")
-> if any(wl["displayName"].startswith("inference-opt-") for wl in existing.get("items", [])):
->     RAYJOB_ID = ...  # reuse existing
-> ```
+> **Exactly ONE RayJob per skill execution.** At the start, create a new RayJob and use it for the entire run. Do NOT create a second one — if you already created one in this execution, reuse it. Do NOT reuse RayJobs from previous skill executions. After optimization is complete, `workload_stop` the RayJob.
 
 **Single node (NUM_NODES=1):**
 
