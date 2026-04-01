@@ -87,13 +87,58 @@ def _find_cache_root(file_path: str) -> str | None:
     return None
 
 
+def _find_best_config(target_file: str) -> str | None:
+    """Find the .best_config file in the same directory as target_file."""
+    target_dir = os.path.dirname(os.path.abspath(target_file))
+    configs = glob.glob(os.path.join(target_dir, "*.best_config"))
+    return configs[0] if configs else None
+
+
+def _update_best_config(target_file: str, config_updates: dict, dry_run: bool = False) -> bool:
+    """Update .best_config file in the same directory as target_file.
+
+    config_updates: dict of keys to update, e.g. {"XBLOCK": 4, "R0_BLOCK": 2048, "num_warps": 4}
+    Only specified keys are updated; other keys are preserved.
+    """
+    import json
+
+    config_path = _find_best_config(target_file)
+    if not config_path:
+        print(f"WARNING: No .best_config found in {os.path.dirname(target_file)}")
+        return False
+
+    with open(config_path) as f:
+        cfg = json.load(f)
+
+    before = {k: cfg.get(k) for k in config_updates}
+
+    if dry_run:
+        print(f"DRY-RUN would update {config_path}: {before} -> {config_updates}")
+        return True
+
+    shutil.copy2(config_path, config_path + ".bak")
+    cfg.update(config_updates)
+    with open(config_path, "w") as f:
+        json.dump(cfg, f)
+
+    print(f"UPDATED .best_config: {config_path}")
+    for k, v in config_updates.items():
+        print(f"  {k}: {before[k]} -> {v}")
+    return True
+
+
 def patch_single_file(
     kernel_name: str,
     geak_source: str,
     target_file: str,
+    best_config: dict | None = None,
     dry_run: bool = False,
 ) -> bool:
-    """Patch exactly one standalone file. Returns True on success."""
+    """Patch exactly one standalone file. Returns True on success.
+
+    If best_config is provided, also updates the .best_config file in the same
+    directory with the given tiling parameters (e.g. XBLOCK, R0_BLOCK, num_warps).
+    """
     new_body = extract_function_body(geak_source, kernel_name)
     if not new_body:
         print(f"ERROR: Could not find function '{kernel_name}' in GEAK output")
@@ -129,11 +174,16 @@ def patch_single_file(
 
     if dry_run:
         print(f"DRY-RUN would patch: {target_file}")
+        if best_config:
+            _update_best_config(target_file, best_config, dry_run=True)
         return True
 
     shutil.copy2(target_file, target_file + ".bak")
     open(target_file, "w").write(new_content)
     print(f"PATCHED: {target_file}")
+
+    if best_config:
+        _update_best_config(target_file, best_config)
 
     cache_dir = _find_cache_root(target_file)
     if cache_dir:
@@ -142,15 +192,28 @@ def patch_single_file(
 
 
 def revert_file(target_file: str) -> bool:
-    """Revert a single file from its .bak backup."""
+    """Revert a single file and its .best_config from .bak backups."""
+    reverted_any = False
+
     bak = target_file + ".bak"
-    if not os.path.isfile(bak):
+    if os.path.isfile(bak):
+        shutil.copy2(bak, target_file)
+        os.remove(bak)
+        print(f"Reverted: {target_file}")
+        reverted_any = True
+    else:
         print(f"No backup found: {bak}")
-        return False
-    shutil.copy2(bak, target_file)
-    os.remove(bak)
-    print(f"Reverted: {target_file}")
-    return True
+
+    config_path = _find_best_config(target_file)
+    if config_path:
+        config_bak = config_path + ".bak"
+        if os.path.isfile(config_bak):
+            shutil.copy2(config_bak, config_path)
+            os.remove(config_bak)
+            print(f"Reverted: {config_path}")
+            reverted_any = True
+
+    return reverted_any
 
 
 def main():
@@ -161,15 +224,19 @@ def main():
     p_patch.add_argument("--kernel-name", required=True)
     p_patch.add_argument("--geak-file", required=True, help="GEAK optimized kernel file")
     p_patch.add_argument("--target-file", required=True, help="Exact standalone file to patch")
+    p_patch.add_argument("--best-config", default=None,
+                         help='JSON dict of .best_config overrides, e.g. \'{"XBLOCK":4,"num_warps":4}\'')
     p_patch.add_argument("--dry-run", action="store_true")
 
-    p_revert = sub.add_parser("revert", help="Revert patches")
+    p_revert = sub.add_parser("revert", help="Revert patches (kernel .py + .best_config)")
     p_revert.add_argument("--target-file", required=True, help="Revert a single file")
 
     args = parser.parse_args()
     if args.command == "patch":
+        import json as _json
         geak_source = open(args.geak_file).read()
-        ok = patch_single_file(args.kernel_name, geak_source, args.target_file, args.dry_run)
+        bc = _json.loads(args.best_config) if args.best_config else None
+        ok = patch_single_file(args.kernel_name, geak_source, args.target_file, bc, args.dry_run)
         sys.exit(0 if ok else 1)
     elif args.command == "revert":
         ok = revert_file(args.target_file)
