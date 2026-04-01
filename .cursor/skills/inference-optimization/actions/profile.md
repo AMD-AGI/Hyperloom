@@ -14,6 +14,17 @@ python3 $SKILL_ROOT/kb/kb_query.py --category pitfall --tags TraceLens --compact
 
 ## Procedure
 
+> **[CLAW MODE]** All profiling commands run via `exec_on_gpu`. When using `run_profile.sh` separately:
+> ```bash
+> exec_on_gpu "export RUN_CONTEXT_FILE='$RESULT_DIR/run_context.env' && \
+>   bash $SCRIPTS_DIR/run_profile.sh"
+> ```
+> After profiling, unset profiler env vars inside the Ray cluster:
+> ```bash
+> exec_on_gpu "unset PROFILE SGLANG_TORCH_PROFILER_DIR VLLM_TORCH_PROFILER_DIR"
+> ```
+> Trace files are written to `$TRACE_DIR` on shared NFS — accessible from both Claw client and TraceLens MCP.
+
 ### Step 1: Profile with torch.profiler
 
 **NOTE:** `run_baseline.sh` already handles profiling in one run. It pre-sets `SGLANG_TORCH_PROFILER_DIR` at server launch, runs the clean baseline, then activates profiling via `/start_profile` HTTP endpoint.
@@ -24,6 +35,22 @@ RUN_CONTEXT_FILE="$RESULT_DIR/run_context.env" bash "$SCRIPTS_DIR/run_profile.sh
 ```
 
 **vLLM V1 caveat:** `multiprocessing.spawn` workers — main process profiler gets empty traces. Use `/start_profile` + `/stop_profile` HTTP endpoints instead.
+
+**vLLM v0.17+ `--profiler-config` format:**
+
+vLLM v0.17 changed the profiling interface. The `/start_profile` endpoint requires `--profiler-config` at server launch time. The config MUST be JSON format:
+
+```bash
+# CORRECT — JSON format (vLLM v0.17+)
+python3 -m vllm.entrypoints.openai.api_server \
+    --profiler-config '{"profiler": "torch", "trace_dir": "/workspace/traces"}' \
+    ...
+
+# WRONG — key=value format (will fail with "invalid JSON")
+python3 -m vllm.entrypoints.openai.api_server \
+    --profiler-config 'profiler=torch,trace_dir=/workspace/traces' \
+    ...
+```
 
 **ALWAYS `unset PROFILE SGLANG_TORCH_PROFILER_DIR` after profiling** — leaked env vars cause 30x slowdown.
 
@@ -43,6 +70,8 @@ Args: {
     "output_dir": "$TRACE_DIR/tracelens_output"
 }
 ```
+
+**TraceLens `other` category trap:** Triton kernels launched via `hipModuleLaunchKernel` appear in the `other` category, NOT in `triton`. Check `other_metrics.json` for individual `hipModuleLaunchKernel::*` entries — these may be significant GEAK candidates hidden under a misleading category name. Always drill into `other` before dismissing it.
 
 ### Step 3: Identify GEAK candidates
 
@@ -105,6 +134,14 @@ else:
 - [ ] Searched aiter source: `find /sgl-workspace/aiter -name "*.py" -exec grep -l "@triton.jit" {} \;`
 - [ ] Verified ALL kernels >3% GPU time are vendor C++
 - [ ] Searched for FUSED kernels that could replace multi-step pipelines
+
+> **[CLAW MODE]** All filesystem searches for kernel source must go through `exec_on_gpu`:
+> ```bash
+> exec_on_gpu "find /sgl-workspace /opt/venv /tmp/torchinductor_root -name '*.py' \
+>   -exec grep -l 'KERNEL_NAME' {} \\; 2>/dev/null"
+> exec_on_gpu "cat /path/to/standalone_kernel.py"  # read source content
+> ```
+> Trace parsing can be done on the Claw side (traces are on shared NFS).
 
 ## Accuracy Validation
 N/A — profiling is read-only, no changes to validate.
