@@ -100,6 +100,8 @@ python3 scripts/ray_submit.py --ray-address ... --command "..."
 
 Always use `scripts/patch_inductor.py` with `--target-file`. The `--cache-dir` option has been removed.
 
+**CRITICAL:** When GEAK changes block sizes or warp counts, you MUST also pass `--best-config` with the updated tiling parameters. Patching only the kernel `.py` without updating `.best_config` causes numerical corruption (garbled output). See `actions/integrate.md` for details.
+
 ## GEAK & Tooling Constants
 
 All values below are the **single source of truth**. All actions reference these by name.
