@@ -32,6 +32,18 @@ User-specified values override auto-detected ones.
 SKILL_ROOT="${SKILL_ROOT:-.cursor/skills/inference-optimization}"
 SCRIPTS_DIR="$SKILL_ROOT/scripts"
 
+# Mode detection
+if [ "${GEAK_LOCAL:-true}" = "true" ]; then
+    MODE="local"
+    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace/inference-optimization}"
+else
+    MODE="claw"
+    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/shared_nfs/inference-optimization}"
+fi
+
+# Source executor backend (enables exec_on_gpu for local/claw dispatch)
+source "$SCRIPTS_DIR/executor.sh"
+
 export MODEL="$MODEL"
 export TP="$TP"
 export CONC="$CONC"
@@ -47,6 +59,10 @@ export INFERENCEX_PATH="$INFERENCEX_PATH"
 - All environment variables set
 - `$SKILL_ROOT`, `$SCRIPTS_DIR` paths validated
 - `$RESULT_DIR` created
+
+**Claw mode:** After environment setup, create the RayJob before proceeding. See
+[`../modes/CLAW.md`](../modes/CLAW.md) "RayJob Lifecycle" for the full `workload_create`
+payloads, wait logic, and claw execution environment setup.
 
 ## Failure Handling
 - If no model found: ask user for MODEL path

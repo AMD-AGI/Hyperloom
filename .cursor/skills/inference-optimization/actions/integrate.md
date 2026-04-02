@@ -9,6 +9,8 @@ Per-kernel integration phase. Called by `kernel-opt.md` for each GEAK result.
 
 ## Procedure
 
+**Claw mode:** All patch, re-baseline, and revert commands go through `exec_on_gpu`. See [`../modes/CLAW.md`](../modes/CLAW.md) "Integrate" section for wrapper syntax and multi-node patching.
+
 ### Choose patching strategy
 
 | Condition | Strategy |
@@ -76,6 +78,34 @@ def patch_standalone_kernels(kernel_name, geak_source_path, target_signature_pat
     return patched, skipped
 ```
 
+**Alternative: Use `patch_inductor.py` (recommended, IR-8):**
+
+```bash
+# Patch a single standalone kernel file (kernel source only)
+python3 $SCRIPTS_DIR/patch_inductor.py patch \
+    --kernel-name <kernel_name> \
+    --geak-file <geak_output.py> \
+    --target-file <standalone_file_path>
+
+# Patch kernel source AND update .best_config tiling parameters
+python3 $SCRIPTS_DIR/patch_inductor.py patch \
+    --kernel-name <kernel_name> \
+    --geak-file <geak_output.py> \
+    --target-file <standalone_file_path> \
+    --best-config '{"XBLOCK": 4, "R0_BLOCK": 2048, "num_warps": 4}'
+
+# Revert if benchmark shows regression (reverts both .py and .best_config):
+python3 $SCRIPTS_DIR/patch_inductor.py revert --target-file <standalone_file_path>
+```
+
+`patch_inductor.py` preserves the original `@triton_heuristics` decorator and `inductor_meta` — it only replaces the `@triton.jit def kernel_name(...)` function body. This is critical because `inductor_meta` contains launcher configuration that Triton's CachingAutotuner depends on.
+
+**`.best_config` updates (CRITICAL):** Inductor standalone kernels have a companion `.best_config` file in the same directory that controls tiling parameters (`XBLOCK`, `R0_BLOCK`, `BLOCK_N`, `BLOCK_K`, `num_warps`, `num_stages`, etc.). When GEAK optimizes a kernel with different block sizes or warp counts, the `.best_config` MUST be updated to match. Patching only the `.py` without updating `.best_config` causes numerical corruption (garbled model output) because the autotuner launches the kernel with mismatched tiling parameters. Use `--best-config` to update both atomically.
+
+**How to determine `.best_config` values:** Read the GEAK-optimized kernel source for block size constants (e.g., `XBLOCK: tl.constexpr`, `R0_BLOCK`, `BLOCK_K`) and `num_warps`/`num_stages` in the `@triton.jit` decorator or meta. These values go into the `--best-config` JSON.
+
+**Signature Validation (auto-enforced):** `patch_inductor.py` automatically rejects patches when the GEAK kernel and target file have different function signatures (different parameter count/names). The same kernel name can map to multiple shape variants with different signatures — e.g. a `triton_red_fused_*` kernel may have 3-param (no residual) and 5-param (with residual) variants. Patching the wrong variant causes `AttributeError` crashes during torch.compile recompilation. If `patch_inductor.py` reports a signature mismatch, skip that file and find the correct variant.
+
 ### Strategy B: Direct Source Edit with AST
 
 **CRITICAL:** Use Python AST for function boundary detection — aiter source has module-level variables between functions.
@@ -95,7 +125,19 @@ def get_function_line_range(source, func_name):
     return None, None
 ```
 
-### Re-Benchmark (CRITICAL FAIRNESS)
+### Re-Baseline (CRITICAL FAIRNESS)
+
+**Use `run_baseline.sh` to re-baseline.** There is no `run_benchmark.sh` — `run_baseline.sh` is used for all phases (initial baseline, re-baseline after patching, backend tests). Just change `RESULT_DIR` to distinguish outputs.
+
+```bash
+# Kill server, extend health timeout for torch.compile recompilation
+kill_server
+export HEALTH_TIMEOUT=1800
+
+# Re-baseline with EXACTLY same env vars as baseline, only change RESULT_DIR
+export RESULT_DIR="$RESULT_DIR/optimized_${KERNEL_NAME}"
+bash $SCRIPTS_DIR/run_baseline.sh
+```
 
 **MUST use EXACTLY the same server config AND benchmark params as baseline:**
 - `--num-continuous-decode-steps` must match
@@ -117,6 +159,10 @@ else:
     # REVERT: restore .bak files
     revert_all_bak_files()
 ```
+
+### Re-Baseline: torch.compile recompilation timeout
+
+**CRITICAL:** `patch_inductor.py` clears ALL `.so` binary cache files and `~/.triton/cache`. Server restart triggers FULL torch.compile recompilation (5-30 minutes). Set `HEALTH_TIMEOUT=1800` to allow completion before health check times out.
 
 ## Accuracy Validation
 Run accuracy gate after each patch. Compare output text with `accuracy_reference.json`.

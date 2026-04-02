@@ -13,6 +13,8 @@ python3 $SKILL_ROOT/kb/kb_query.py --category backend_exploration --model "$MODE
 
 ## Procedure
 
+**Claw mode:** `ServerArgs` inspection and all backend test commands must run via `exec_on_gpu`. See [`../modes/CLAW.md`](../modes/CLAW.md) "Backends" section for wrapper syntax.
+
 ### Step 1: Discover all backend and scheduling flags
 
 ```bash

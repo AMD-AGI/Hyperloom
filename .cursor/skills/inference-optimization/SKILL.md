@@ -25,13 +25,89 @@ function. The search is fully autonomous — no human prompting required.
 **Optional target:** if an external baseline is provided (e.g. NVIDIA B200), the target
 gap acts as an urgency multiplier on all action scores.
 
+## Execution Mode
+
+This skill supports two execution modes. **Read the mode-specific document for your mode
+before starting:**
+
+- **Local mode** (Cursor IDE, direct shell): see [`modes/LOCAL.md`](modes/LOCAL.md)
+- **Claw mode** (SaFE RayJob, `exec_on_gpu`): see [`modes/CLAW.md`](modes/CLAW.md)
+
+**Auto-detection:** `GEAK_LOCAL=true` → local mode (default). Claw client context → claw mode.
+
+## Iron Rules (non-negotiable)
+
+These rules apply to ALL modes. Violating any invalidates the optimization run.
+
+### IR-1: Submit ALL GEAK candidates in parallel
+
+The kernel-opt action MUST submit `GEAK_TOP_CANDIDATES` (default 5) tasks **simultaneously** via parallel `geak_create_task` + `geak_submit_task` calls. Submitting only 1 task when multiple candidates exist = violation.
+
+### IR-2: NEVER modify kernel source before GEAK submission
+
+Submit the kernel source **exactly as extracted**. Do NOT strip decorators, change strides, replace `@triton_heuristics` with `@triton.jit`, or make any "cleanup" edits. GEAK's agent handles kernel adaptation internally.
+
+### IR-3: Integration (Phase 8) is MANDATORY
+
+After GEAK returns optimized kernels, you MUST execute the integrate action (patch → re-baseline → decide). Skipping means GEAK results are never validated end-to-end. Re-baseline uses `run_baseline.sh` — there is no `run_benchmark.sh`. See `actions/integrate.md` for details.
+
+### IR-4: Always kill_server + check_gpu_memory before server launch
+
+Every server launch must be preceded by killing any existing server process and verifying GPU memory is free.
+
+### IR-5: Safe process management
+
+**NEVER use `pkill -f sglang`** — it kills Ray workers in claw mode. Only use:
+
+```bash
+kill $(pgrep -f 'python.*-m sglang.launch_server') 2>/dev/null
+# or for vLLM:
+kill $(pgrep -f 'python.*-m vllm.entrypoints') 2>/dev/null
+```
+
+Wait `SERVER_KILL_WAIT_S` seconds between kill and relaunch. Always `unset PROFILE SGLANG_TORCH_PROFILER_DIR` after profiling.
+
+### IR-6: Use `patch_inductor.py --target-file` for Inductor patching
+
+Always use `scripts/patch_inductor.py` with `--target-file`. The `--cache-dir` option has been removed.
+
+**CRITICAL:** When GEAK changes block sizes or warp counts, you MUST also pass `--best-config` with the updated tiling parameters. Patching only the kernel `.py` without updating `.best_config` causes numerical corruption (garbled output). See `actions/integrate.md` for details.
+
+**Additional claw-mode Iron Rules (IR-7, IR-8) are defined in [`modes/CLAW.md`](modes/CLAW.md).**
+
+## GEAK & Tooling Constants
+
+All values below are the **single source of truth**. All actions reference these by name.
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `GEAK_STEP_LIMIT` | 100 | Max agent steps per GEAK task |
+| `GEAK_WORKSPACE` | `control-plane-moe` | GEAK workspace (user can override) |
+| `GEAK_MAX_RETRIES` | 3 | Max submission retries per kernel |
+| `GEAK_MAX_SUBMISSIONS` | 15 | Total GEAK submissions budget per run |
+| `GEAK_TOP_CANDIDATES` | 5 | Number of top kernel candidates to submit |
+| `GEAK_CONSECUTIVE_DISCARDS` | 5 | Stop after this many consecutive discards |
+| `GEAK_WALL_CLOCK_MIN` | 120 | Max wall-clock minutes for kernel-opt action |
+| `GEAK_POLL_INTERVAL_S` | 60 | Seconds between GEAK task status polls |
+| `GEAK_POLL_TIMEOUT_MIN` | 15 | Max minutes to poll a single GEAK task |
+| `MIN_GPU_PCT` | 3 | Minimum GPU time % to consider a kernel as GEAK candidate |
+| `SERVER_KILL_WAIT_S` | 10 | Seconds to wait between server kill and relaunch |
+| `FILTERED_TRACE_NAME` | `filtered-TP-0.trace.json.gz` | Preferred trace file for TraceLens analysis |
+| `GEAK_IMAGE_SGLANG` | `harbor.oci-slc.example-internal-host.invalid/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x` | Default GEAK image for SGLang |
+| `GEAK_IMAGE_VLLM` | `harbor.oci-slc.example-internal-host.invalid/proxy/vllm/vllm-openai-rocm:v0.17.0` | Default GEAK image for vLLM |
+
+**ALWAYS pass a framework image to GEAK, regardless of kernel type.** For kernels whose source exists in the image (e.g., `/sgl-workspace/aiter/`), the GEAK pod uses the same image. For runtime-generated kernels (e.g., `/tmp/torchinductor_root/` from `torch.compile`), do NOT include `kernel_url`/`kernel_repo` in the prompt; copy files to shared NFS or rely on `files[].content` only.
+
+**Claw-mode GEAK images and constants are in [`modes/CLAW.md`](modes/CLAW.md).**
+
 ## Architecture
 
 ```
 SKILL.md (this file)          — DFS orchestrator: loop, heuristic, dispatch
 actions/*.md                   — Self-contained action modules (11 actions)
 kb/                            — RAG knowledge base (JSONL + query/ingest scripts)
-scripts/                       — Benchmark/profiling shell scripts (unchanged)
+scripts/                       — Baseline/profiling shell scripts (run_baseline.sh also used for re-baseline after kernel patching)
+modes/                         — Mode-specific execution details (LOCAL.md, CLAW.md)
 GEAK-INFERENCE-KERNEL.md       — GEAK MCP deep reference
 KNOWLEDGE-BASE.md              — Legacy KB (archived, seeded into kb/entries.jsonl)
 ```
@@ -108,6 +184,25 @@ the default starting structure — the agent should actively look for opportunit
 **Communication:** This is a single-agent sequential loop, not async multi-agent. Each action
 runs to completion before the orchestrator re-scores. The "parallel" aspect is within actions
 (e.g., GEAK submits 5 kernels in parallel), not between actions.
+
+## Autonomy Rules
+
+**Execute autonomously — no human confirmation needed.** Do NOT ask the user before:
+- Creating/stopping RayJob on SaFE (claw mode)
+- Running baseline/profiling scripts via Ray (claw mode) or locally
+- Submitting GEAK tasks
+- Killing/restarting servers (inside RayJob or locally)
+- Patching kernels (Inductor cache or source files)
+- Reverting failed patches
+
+**Autonomy means don't ask permission, NOT skip steps.** Every numbered step in the
+Orchestrator Loop (1–11) is **MANDATORY**, including:
+- Step 3: TARGET ANALYSIS (if target data provided)
+- Step 4: KB WARM-UP (always — query KB before proceeding to baseline)
+- Step 11: KNOWLEDGE HOOK (always — ingest findings after report)
+
+Skipping any mandatory step invalidates the run. Present the **final optimization report**
+to the user once all steps are complete.
 
 ## Heuristic Scoring Function
 
@@ -345,7 +440,7 @@ These are the most important validated lessons. Full details in KB and action mo
 ## Reference: Process Management
 
 - **Never use `pkill -f "sglang.launch_server"` inside scripts** — kills the script itself.
-- **Wait 8+ seconds** between server kill and relaunch.
+- **Wait `SERVER_KILL_WAIT_S` seconds** (default 10) between server kill and relaunch.
 - **Always `unset PROFILE SGLANG_TORCH_PROFILER_DIR`** after profiling.
 - **Always use filtered traces** for TraceLens (raw: 349MB, filtered: 5MB).
 - TraceLens does NOT support `rocprofv3` format — only PyTorch Kineto.
