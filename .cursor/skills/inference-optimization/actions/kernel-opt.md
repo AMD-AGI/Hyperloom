@@ -43,6 +43,8 @@ find /opt/venv -path "*/sglang/srt/layers/*.py" -exec grep -l "@triton.jit" {} \
 find /sgl-workspace/aiter -name "*.py" -exec grep -l "@triton.jit" {} \;
 ```
 
+**Claw mode:** Kernel source lives on the RayJob. Use `exec_on_gpu` for all find/cat commands. See [`../modes/CLAW.md`](../modes/CLAW.md) "Kernel Optimization" section.
+
 ### Step 2: Submit ALL top candidates to GEAK in parallel
 
 Each kernel is independent — GEAK tasks run on separate pods. Parallel: ~5 min vs serial: ~15 min.
@@ -53,6 +55,20 @@ Use prompt templates:
 - **Template/GEMM kernels**: Low priority, Inductor autotuner already near-optimal
 
 See `GEAK-INFERENCE-KERNEL.md` for full prompt templates.
+
+**GEAK prompt rules — apply to ALL kernel types (MANDATORY for every geak_create_task):**
+
+1. **Kernel path — conditional on image availability:**
+   - If the kernel source file **exists in the Docker image** (e.g., `/sgl-workspace/aiter/...`, `/opt/venv/...`), **MUST include** the kernel's absolute file path and repo path in the prompt. GEAK runs with the same image, so paths are identical. Example: `"The kernel source file is at /sgl-workspace/aiter/jit/core/compile.py"`, `"The kernel repo is at /sgl-workspace/aiter/"`.
+   - If the kernel source is **runtime-generated** (e.g., `/tmp/torchinductor_root/...` from `torch.compile` Inductor cache), **DO NOT include** `kernel_url` or `kernel_repo` in the prompt. These files only exist in the running inference server's ephemeral storage, not in the Docker image. Instead, copy kernel files to a shared NFS path and reference the NFS path, OR omit these paths entirely and rely on `files[].content`.
+   - **How to tell:** paths under `/tmp/`, `/root/.cache/`, or any `torchinductor_*` directory are runtime-generated. Paths under `/sgl-workspace/`, `/opt/`, `/usr/` are part of the image.
+2. **MUST specify heterogeneous mode and max_rounds** — Always include: `"Use heterogeneous mode. Set max_rounds to 1."` in the prompt.
+3. **MUST specify 1.5x minimum speedup target** — Always include: `"The kernel MUST be optimized to at least 1.5x speedup."` in the prompt.
+
+Additional rules:
+4. **Always say "Do NOT search the filesystem with find / or grep -r /"** — GEAK agents default to broad filesystem searches which hang 30+ min on NFS.
+5. **Always pass framework image** — Use `GEAK_IMAGE_SGLANG` or `GEAK_IMAGE_VLLM`. In claw mode, use `GEAK_IMAGE_SGLANG_RAY` instead (see [`../modes/CLAW.md`](../modes/CLAW.md)). In local mode with `GEAK_LOCAL=true`, image is optional.
+6. **Always embed full source in `files[].content`** — GEAK always receives the kernel source via `files[].content`. If the path also exists in the image, include it in the prompt for GEAK's preprocessor. If the path is runtime-generated, `files[].content` is the sole source of truth.
 
 ### Step 3: Verify + Patch each result individually
 

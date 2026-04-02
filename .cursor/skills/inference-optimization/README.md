@@ -31,7 +31,7 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 5. Identify hot kernels that GEAK can optimize (Phase 5)
 6. Tune server parameters — CUDA graph coverage, decode-steps, memory (Phase 6)
 7. Submit kernels to **GEAK** or **LLM proxy** (Claude/GPT) for AI-driven optimization (Phase 7)
-8. Patch optimized kernels, re-benchmark, **keep improvements, revert regressions** (Phase 8)
+8. Patch optimized kernels, re-baseline, **keep improvements, revert regressions** (Phase 8)
 9. Sweep parameters (CONC, ISL/OSL) with the optimized version (Phase 9)
 10. Generate report with optimization history, Pareto curves, and comparison (Phase 10)
 
@@ -39,8 +39,8 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 
 - **GPU**: AMD Instinct MI355X / MI325X / MI300X (ROCm 7.0+)
 - **Framework**: SGLang v0.5.9+ installed
-- **InferenceX**: Cloned (e.g. `/shared_nfs/xiaofei/InferenceX`)
-- **Model**: Downloaded locally (e.g. `/shared_nfs/xiaofei/models/DeepSeek-R1-0528`)
+- **InferenceX**: Cloned (e.g. `/shared_nfs/InferenceX`)
+- **Model**: Downloaded locally (e.g. `/shared_nfs/models/DeepSeek-R1-0528`)
 - **MCP servers**:
   - TraceLens — kernel profiling analysis
   - GEAK — kernel optimization
@@ -51,8 +51,8 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 
 ```
 @inference-optimization Optimize Qwen3-30B-A3B inference on MI355X.
-Model: /shared_nfs/xiaofei/models/Qwen3-30B-A3B
-InferenceX: /shared_nfs/xiaofei/InferenceX
+Model: /shared_nfs/models/Qwen3-30B-A3B
+InferenceX: /shared_nfs/InferenceX
 
 Run the full torch.compile + GEAK pipeline:
 1. Baseline (no torch.compile)
@@ -71,7 +71,7 @@ This follows the **verified best path**: torch.compile generates Triton kernels 
 
 ```
 @inference-optimization Profile DeepSeek-R1 inference bottlenecks.
-Model: /shared_nfs/xiaofei/models/DeepSeek-R1-0528
+Model: /shared_nfs/models/DeepSeek-R1-0528
 Just run baseline + TraceLens analysis. Show kernel breakdown.
 No GEAK optimization or parameter sweep needed.
 ```
@@ -80,7 +80,7 @@ No GEAK optimization or parameter sweep needed.
 
 ```
 @inference-optimization Sweep DeepSeek-R1 inference across CONC=4,8,16,32,64.
-Model: /shared_nfs/xiaofei/models/DeepSeek-R1-0528
+Model: /shared_nfs/models/DeepSeek-R1-0528
 ISL/OSL: 1k/1k and 8k/1k. Skip TraceLens/GEAK, just benchmark.
 ```
 
