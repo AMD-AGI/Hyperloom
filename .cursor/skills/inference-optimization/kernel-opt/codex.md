@@ -18,7 +18,8 @@ good for Triton structural rewrites (dual-loop to single-pass, block-size tuning
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `CODEX_MAX_TURNS` | 20 | Max agent turns per task |
+| `OOB_ROUND_ITERATIONS` | 3 | Iterations per round (submit → benchmark → feedback) |
+| `CODEX_MAX_TURNS` | 20 | Max agent turns per task (per iteration) |
 | `CODEX_POLL_INTERVAL_S` | 10 | Seconds between status polls |
 | `CODEX_POLL_TIMEOUT_MIN` | 5 | Max minutes to poll before cancel |
 
@@ -27,9 +28,10 @@ good for Triton structural rewrites (dual-loop to single-pass, block-size tuning
 | | Codex (this) | GEAK | Claude | LLM Proxy |
 |---|---|---|---|---|
 | **MCP** | OOB Agent | GEAK | OOB Agent | Direct API |
-| **Latency** | 30–120s | 10–30 min | 1–5 min | 1–30s |
+| **Latency (per iter)** | 30–120s | N/A | 1–5 min | 1–30s |
+| **Latency (full round)** | 2–6 min | 10–30 min | 3–15 min | 1–30s |
 | **GPU on pod** | No | Yes | No | No |
-| **Output** | Unverified | Verified on pod | Unverified | Unverified |
+| **Output** | Locally verified | Verified on pod | Locally verified | Unverified |
 | **Tool use** | File I/O, shell | Bash, profiling, submit | File I/O, shell | None |
 | **Best for** | Fast Triton rewrites | Complex HIP, final polish | Multi-step autonomous | Quick iteration |
 
@@ -150,41 +152,142 @@ Return the COMPLETE optimized file — do not return partial snippets.
 - The prompt MUST instruct Codex to use this filename
 - Use `agent_get_outputs` to list files, then `agent_download_file` to retrieve
 
-## Verification (Caller Responsibility)
+## Iterative Refinement Loop
 
-Codex has no GPU — it cannot compile or benchmark. The calling skill MUST:
+Codex and Claude have **no GPU** — they cannot compile or benchmark their own output.
+The calling skill runs an iterative loop: submit → local benchmark → feed results back.
 
-1. **Compilation check**: `exec(open("solution.py").read())`
-2. **Correctness check**: `torch.allclose(original_output, optimized_output, atol=1e-2, rtol=1e-2)`
-3. **Micro-benchmark**: compare kernel latency against original
-4. **Integration**: patch via `patch_inductor.py` (see `actions/integrate.md`)
+### Overview
+
+```
+One Round = OOB_ROUND_ITERATIONS (default 3) iterations.
+Each iteration:
+  1. Submit optimization task (with accumulated feedback context)
+  2. Poll + download optimized kernel
+  3. LOCAL verification: compile → correctness → micro-benchmark
+  4. Record result: {iteration, speedup, status, error_if_any}
+  5. Append result to feedback context for next iteration
+
+After all iterations: pick the result with the best verified speedup.
+```
+
+### Iteration Flow (pseudocode)
+
+```python
+best_result = None
+feedback_context = ""
+
+for i in range(OOB_ROUND_ITERATIONS):
+    # 1. Build prompt with accumulated feedback
+    prompt = base_prompt
+    if feedback_context:
+        prompt += f"\n\n--- PREVIOUS ITERATION RESULTS ---\n{feedback_context}"
+        prompt += "\nUse these results to improve your optimization. Avoid repeating failed approaches."
+
+    # 2. Submit task
+    task = agent_create_task(
+        agent="codex",  # or "claude"
+        prompt=prompt,
+        files=[{"filename": "kernel.py", "content": original_kernel_source}],
+        max_turns=CODEX_MAX_TURNS,
+    )
+    agent_submit_task(task_id=task["task_id"])
+
+    # 3. Poll until done
+    result = poll_until_complete(task["task_id"])
+    if result["status"] == "failed":
+        feedback_context += f"\nIteration {i+1}: FAILED — task error: {result.get('error')}"
+        continue
+
+    # 4. Download optimized kernel
+    optimized_code = download_optimized_kernel(task["task_id"])
+    if not optimized_code:
+        feedback_context += f"\nIteration {i+1}: FAILED — no output file produced"
+        continue
+
+    # 5. LOCAL verification (on the inference server or RayJob)
+    compile_ok, compile_err = check_compilation(optimized_code)
+    if not compile_ok:
+        feedback_context += f"\nIteration {i+1}: COMPILE_FAIL — {compile_err}"
+        continue
+
+    correct, correctness_err = check_correctness(optimized_code)
+    if not correct:
+        feedback_context += f"\nIteration {i+1}: CORRECTNESS_FAIL — {correctness_err}"
+        continue
+
+    speedup = run_micro_benchmark(optimized_code, original_code)
+    feedback_context += f"\nIteration {i+1}: speedup={speedup:.2f}x"
+
+    if speedup > 1.0 and (best_result is None or speedup > best_result["speedup"]):
+        best_result = {"iteration": i+1, "speedup": speedup, "code": optimized_code}
+
+# 6. Return best result from the round
+return best_result  # None if all iterations failed
+```
+
+### Feedback Context Format
+
+Each iteration appends exactly one line to the feedback context:
+
+```
+Iteration 1: speedup=1.32x
+Iteration 2: COMPILE_FAIL — NameError: name 'libdevice' is not defined
+Iteration 3: CORRECTNESS_FAIL — torch.allclose failed: max diff=0.15
+Iteration 4: speedup=1.51x
+Iteration 5: speedup=1.48x
+```
+
+This gives the agent visibility into what worked and what failed, enabling it to:
+- Avoid repeating compilation errors (e.g., add missing imports)
+- Try different optimization strategies after low-speedup results
+- Build on successful approaches from prior iterations
+
+### Key Rules
+
+1. **Always use the ORIGINAL kernel source** in `files[].content` — never pass a
+   previous iteration's output as the source. The agent should generate each attempt
+   from scratch based on the original + feedback.
+2. **Each iteration is a NEW task** (`agent_create_task` + `agent_submit_task`).
+   Do not try to resume or modify a previous task.
+3. **Verification runs locally** (on the machine with GPU access — the inference
+   server in local mode, or the RayJob in claw mode).
+4. **Stop early** if `speedup >= 2.0x` — no need to exhaust all iterations.
+5. **Stop early** if all iterations produce compilation errors — likely
+   a fundamental issue with the kernel type for this backend.
+
+### Verification Steps (per iteration)
+
+| Step | Method | Failure → feedback |
+|------|--------|-------------------|
+| Compilation | `exec(compile(code, "kernel.py", "exec"))` | `COMPILE_FAIL — {error}` |
+| Correctness | `torch.allclose(orig_out, opt_out, atol=1e-2, rtol=1e-2)` | `CORRECTNESS_FAIL — max diff={diff}` |
+| Micro-benchmark | Time kernel execution (median of 100 runs, 10 warmup) | `speedup={x:.2f}x` |
 
 ## Behavioral Notes
 
-- Typically completes in **1 turn** (~60 seconds) — Codex treats kernel optimization
-  as a single code-generation task
+- Codex typically completes in **1 turn** (~60 seconds) per iteration
 - Output quality is strong for **Triton structural rewrites**: dual-loop to single-pass
   merges, block-size tuning, loop-invariant hoisting
 - Handles `libdevice.rsqrt` import fallback correctly
 - May struggle with complex HIP/C++ kernels — use GEAK for those
-- No reflection loop built-in — if compilation fails, create a new task with the
-  error message appended to the prompt
+- With feedback, later iterations often fix compilation issues from early iterations
+- Best results typically appear in iterations 2–5 (after initial feedback)
 
 ## Troubleshooting
 
 ### Task completes but no optimized_kernel.py in outputs
 - Check `agent_get_outputs` — file may have a different name
-- Re-submit with explicit instruction: "Write the COMPLETE file to optimized_kernel.py"
+- Next iteration prompt will include this failure, prompting explicit file output
 
 ### Task fails immediately
 - Check `agent_get_task` `error` field
 - Verify prompt is not empty and `files` array contains valid content
 
-### Output does not compile
-- Create a new task with the compilation error appended:
-  `"Previous attempt failed to compile: {error}. Fix the issue."`
-- Include both the original kernel and the failed attempt in `files`
+### All iterations produce compilation errors
+- Kernel may be too complex for this backend (e.g., HIP/C++)
+- Fall back to GEAK which has on-pod GPU compilation
 
-### Output compiles but is slower
-- Log as `discard`, try next backend result
-- Consider providing more specific hardware constraints in the prompt
+### Best speedup is < 1.0x across all iterations
+- Log as `discard` for this backend
+- The other parallel backends (GEAK, LLM) may produce better results
