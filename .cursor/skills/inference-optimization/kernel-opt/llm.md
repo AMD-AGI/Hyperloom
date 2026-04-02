@@ -5,7 +5,7 @@ description: LLM-based kernel optimization for inference serving, run in paralle
 
 # LLM Inference Kernel Optimization — Deep Reference
 
-This document provides detailed reference material for LLM-based kernel optimization in the inference optimization loop defined in `SKILL.md`. LLM and GEAK are **run in parallel** for each candidate kernel — same candidate selection, same integration paths, but the result with the best micro-benchmark speedup wins. See also `GEAK-INFERENCE-KERNEL.md` for GEAK-specific details.
+This document provides detailed reference material for LLM-based kernel optimization in the inference optimization loop defined in `SKILL.md`. LLM and GEAK are **run in parallel** for each candidate kernel — same candidate selection, same integration paths, but the result with the best micro-benchmark speedup wins. See also [`geak.md`](geak.md) for GEAK-specific details.
 
 ## Relationship to GEAK
 
@@ -247,7 +247,7 @@ for model, code in results:
 
 ## Integration Paths (Same as GEAK)
 
-After the LLM returns optimized code, integrate using the same paths as `GEAK-INFERENCE-KERNEL.md`:
+After the LLM returns optimized code, integrate using the same paths as [`geak.md`](geak.md):
 
 ### Strategy A: Standalone File Patching (torch.compile mode)
 
@@ -348,7 +348,7 @@ SSL: Must use httpx.Client(verify=False)
 
 ### When LLM Kernel Optimization Is Not Worth It
 
-Same criteria as GEAK (see `GEAK-INFERENCE-KERNEL.md`):
+Same criteria as GEAK (see [`geak.md`](geak.md)):
 - Kernel is <3% of total GPU time
 - Kernel is from vendor library (aiter, hipBLASLt, CK)
 - All compute is in vendor C++/ASM (>50% GPU time)
