@@ -12,22 +12,7 @@ python3 $SKILL_ROOT/kb/kb_query.py --category server_params --compact
 
 ## Procedure
 
-> **[CLAW MODE]** All server kill/restart + benchmark commands must use `exec_on_gpu`. Full loop per parameter:
-> ```bash
-> exec_on_gpu "
-> # Kill server (safe pattern — do NOT pkill -f sglang)
-> ps aux | grep 'python3 -m sglang' | grep -v grep | grep -v bash | awk '{print \$2}' | xargs -r kill -9 2>/dev/null
-> sleep $SERVER_KILL_WAIT_S
->
-> # Restart with new param
-> export MODEL='$MODEL' TP=$TP CONC=$CONC FRAMEWORK=$FRAMEWORK
-> export SGLANG_EXTRA_ARGS='$BASELINE_ARGS $NEW_PARAM'
-> export RESULT_DIR='$RESULT_DIR/param_test_$PARAM_NAME'
-> export INFERENCEX_PATH='$INFERENCEX_PATH'
-> bash $SCRIPTS_DIR/run_baseline.sh
-> "
-> ```
-> After killing, verify Ray cluster is alive: `exec_on_gpu "curl -s http://localhost:8265/api/cluster_status"`
+**Claw mode:** All server kill/restart + benchmark commands must use `exec_on_gpu`. See [`../modes/CLAW.md`](../modes/CLAW.md) "Server Params" section for wrapper syntax.
 
 ### SGLang parameter grid
 
