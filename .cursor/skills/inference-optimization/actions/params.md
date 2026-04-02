@@ -12,6 +12,8 @@ python3 $SKILL_ROOT/kb/kb_query.py --category server_params --compact
 
 ## Procedure
 
+**Claw mode:** All server kill/restart + benchmark commands must use `exec_on_gpu`. See [`../modes/CLAW.md`](../modes/CLAW.md) "Server Params" section for wrapper syntax.
+
 ### SGLang parameter grid
 
 Test each parameter independently on top of the winning backend config:
