@@ -14,16 +14,7 @@ python3 $SKILL_ROOT/kb/kb_query.py --category pitfall --tags TraceLens --compact
 
 ## Procedure
 
-> **[CLAW MODE]** All profiling commands run via `exec_on_gpu`. When using `run_profile.sh` separately:
-> ```bash
-> exec_on_gpu "export RUN_CONTEXT_FILE='$RESULT_DIR/run_context.env' && \
->   bash $SCRIPTS_DIR/run_profile.sh"
-> ```
-> After profiling, unset profiler env vars inside the Ray cluster:
-> ```bash
-> exec_on_gpu "unset PROFILE SGLANG_TORCH_PROFILER_DIR VLLM_TORCH_PROFILER_DIR"
-> ```
-> Trace files are written to `$TRACE_DIR` on shared NFS — accessible from both Claw client and TraceLens MCP.
+**Claw mode:** All profiling and filesystem commands must run via `exec_on_gpu`. See [`../modes/CLAW.md`](../modes/CLAW.md) "Profile" section for wrapper syntax.
 
 ### Step 1: Profile with torch.profiler
 
@@ -134,14 +125,6 @@ else:
 - [ ] Searched aiter source: `find /sgl-workspace/aiter -name "*.py" -exec grep -l "@triton.jit" {} \;`
 - [ ] Verified ALL kernels >3% GPU time are vendor C++
 - [ ] Searched for FUSED kernels that could replace multi-step pipelines
-
-> **[CLAW MODE]** All filesystem searches for kernel source must go through `exec_on_gpu`:
-> ```bash
-> exec_on_gpu "find /sgl-workspace /opt/venv /tmp/torchinductor_root -name '*.py' \
->   -exec grep -l 'KERNEL_NAME' {} \\; 2>/dev/null"
-> exec_on_gpu "cat /path/to/standalone_kernel.py"  # read source content
-> ```
-> Trace parsing can be done on the Claw side (traces are on shared NFS).
 
 ## Accuracy Validation
 N/A — profiling is read-only, no changes to validate.
