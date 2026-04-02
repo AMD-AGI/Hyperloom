@@ -79,20 +79,5 @@ python3 $SKILL_ROOT/kb/kb_ingest.py \
 ## Heuristic Update
 N/A — terminal action.
 
-### [CLAW] Cleanup — Stop RayJob
-
-**Skip in local mode.** After the optimization is complete and the report is generated, stop the RayJob:
-
-```
-Tool: workload_stop
-Args: { "workload_id": "<RAYJOB_ID>" }
-```
-
-**Also clean up any parallel sweep workloads** (if SaFE Option B was used):
-
-```python
-sweep_workloads = workload_list(workspace_id=WORKSPACE_ID, kind="PyTorchJob")
-for wl in sweep_workloads:
-    if wl["displayName"].startswith("sweep-"):
-        workload_delete(wl["workloadId"])
-```
+**Claw mode:** After the report is generated, stop the RayJob and clean up any parallel
+sweep workloads. See [`../modes/CLAW.md`](../modes/CLAW.md) "Cleanup" section.
