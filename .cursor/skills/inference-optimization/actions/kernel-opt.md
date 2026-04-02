@@ -1,9 +1,15 @@
-# Action: Kernel Optimization (GEAK / LLM)
+# Action: Kernel Optimization
 
-Multi-round kernel optimization loop. See also: [`../GEAK-INFERENCE-KERNEL.md`](../GEAK-INFERENCE-KERNEL.md) for GEAK MCP details.
+Multi-round kernel optimization loop using configurable backends.
+
+Backend references:
+- [`../kernel-opt/geak.md`](../kernel-opt/geak.md) — GEAK MCP (remote GPU pod)
+- [`../kernel-opt/codex.md`](../kernel-opt/codex.md) — Codex via OOB Agent MCP
+- [`../kernel-opt/claude.md`](../kernel-opt/claude.md) — Claude Code via OOB Agent MCP
+- [`../kernel-opt/llm.md`](../kernel-opt/llm.md) — LLM Proxy (direct API)
 
 ## Inputs
-- GEAK candidates from `profile.md` (kernel_name, gpu_pct, source_location)
+- Kernel candidates from `profile.md` (kernel_name, gpu_pct, source_location)
 - Current best config (backends + params)
 - `baseline_tput_per_gpu` (after backends + params)
 
@@ -16,14 +22,6 @@ python3 $SKILL_ROOT/kb/kb_query.py --category kernel_optimization --compact
 ## Procedure
 
 **FLOW GUARD:** Do NOT skip this action if candidates exist. Running sweep with unoptimized kernels wastes compute.
-
-### Four optimization backends (run ALL in parallel)
-
-| | GEAK | LLM Proxy | Claude Code | Codex |
-|---|---|---|---|---|
-| **How** | GEAK MCP → remote GPU pod | Direct API → Claude/GPT | `claude-code-sdk` agent | `codex exec` agent |
-| **Latency** | 10–30 min | 1–30s | 1–5 min | 1–5 min |
-| **Best for** | Complex HIP, final polish | Fast iteration, Triton rewrites | Full autonomy with tool use | Full autonomy with tool use |
 
 ### Step 1: Locate kernel source
 
@@ -45,34 +43,61 @@ find /sgl-workspace/aiter -name "*.py" -exec grep -l "@triton.jit" {} \;
 
 **Claw mode:** Kernel source lives on the RayJob. Use `exec_on_gpu` for all find/cat commands. See [`../modes/CLAW.md`](../modes/CLAW.md) "Kernel Optimization" section.
 
-### Step 2: Submit ALL top candidates to GEAK in parallel
+### Step 2: Submit candidates to active backends in parallel
 
-Each kernel is independent — GEAK tasks run on separate pods. Parallel: ~5 min vs serial: ~15 min.
+`KERNEL_OPT_BACKENDS` (default `geak,codex`) controls which backends run. User can
+override in prompt (e.g., `"Use only geak"`, `"Use geak,codex,claude"`).
+All active backends run **simultaneously** for every candidate kernel.
 
-Use prompt templates:
-- **RMSNorm / reduction kernels**: TRUE single-pass template (eliminate second loop, 2x memory reduction → +9-14% E2E)
+| Backend | MCP | Latency | GPU on pod | Reference |
+|---------|-----|---------|------------|-----------|
+| `geak` | GEAK (`geak_create_task`) | 10–30 min | Yes | [`../kernel-opt/geak.md`](../kernel-opt/geak.md) |
+| `codex` | OOB Agent (`agent_create_task(agent="codex")`) | 30–120s | No | [`../kernel-opt/codex.md`](../kernel-opt/codex.md) |
+| `claude` | OOB Agent (`agent_create_task(agent="claude")`) | 1–5 min | No | [`../kernel-opt/claude.md`](../kernel-opt/claude.md) |
+| `llm` | Direct OpenAI API (LLM Proxy) | 1–30s | No | [`../kernel-opt/llm.md`](../kernel-opt/llm.md) |
+
+**For each candidate kernel, in parallel:**
+
+1. If `geak` active: `geak_create_task` + `geak_submit_task`
+2. If `codex` active: `agent_create_task(agent="codex")` + `agent_submit_task`
+3. If `claude` active: `agent_create_task(agent="claude")` + `agent_submit_task`
+4. If `llm` active: `openai.Client.chat.completions.create` (multi-model, see `llm.md`)
+
+**Poll all tasks until done. Collect valid results. For each result:**
+- Compilation check (import/exec)
+- Correctness check (torch.allclose)
+- Micro-benchmark
+
+**Pick the result with the best verified micro-benchmark speedup. Proceed to Step 3.**
+
+Use prompt templates per kernel type:
+- **RMSNorm / reduction kernels**: TRUE single-pass template (eliminate second loop, 2x memory reduction)
 - **General dual-loop kernels**: Merge redundant memory loads
 - **Template/GEMM kernels**: Low priority, Inductor autotuner already near-optimal
 
-See `GEAK-INFERENCE-KERNEL.md` for full prompt templates.
+See each backend reference for full prompt templates and MCP tool details.
 
-**GEAK prompt rules — apply to ALL kernel types (MANDATORY for every geak_create_task):**
+#### Prompt rules — shared across all backends
+
+These rules apply to **every** kernel optimization submission regardless of backend.
 
 1. **Kernel path — conditional on image availability:**
-   - If the kernel source file **exists in the Docker image** (e.g., `/sgl-workspace/aiter/...`, `/opt/venv/...`), **MUST include** the kernel's absolute file path and repo path in the prompt. GEAK runs with the same image, so paths are identical. Example: `"The kernel source file is at /sgl-workspace/aiter/jit/core/compile.py"`, `"The kernel repo is at /sgl-workspace/aiter/"`.
+   - If the kernel source file **exists in the Docker image** (e.g., `/sgl-workspace/aiter/...`, `/opt/venv/...`), **MUST include** the kernel's absolute file path and repo path in the prompt. Example: `"The kernel source file is at /sgl-workspace/aiter/jit/core/compile.py"`, `"The kernel repo is at /sgl-workspace/aiter/"`.
    - If the kernel source is **runtime-generated** (e.g., `/tmp/torchinductor_root/...` from `torch.compile` Inductor cache), **DO NOT include** `kernel_url` or `kernel_repo` in the prompt. These files only exist in the running inference server's ephemeral storage, not in the Docker image. Instead, copy kernel files to a shared NFS path and reference the NFS path, OR omit these paths entirely and rely on `files[].content`.
    - **How to tell:** paths under `/tmp/`, `/root/.cache/`, or any `torchinductor_*` directory are runtime-generated. Paths under `/sgl-workspace/`, `/opt/`, `/usr/` are part of the image.
-2. **MUST specify homogeneous mode and max_rounds** — Always include: `"Use homogeneous mode. Set max_rounds to 1."` in the prompt.
-3. **MUST specify 1.5x minimum speedup target** — Always include: `"The kernel MUST be optimized to at least 1.5x speedup."` in the prompt.
+2. **1.5x minimum speedup target** — Always include: `"The kernel MUST be optimized to at least 1.5x speedup."` in the prompt.
+3. **No broad filesystem searches** — Always say: `"Do NOT search the filesystem with find / or grep -r /"`.
+4. **Embed full source in files** — All backends receive the kernel source via `files[].content` (or inline in the prompt for `llm`).
 
-Additional rules:
-4. **Always say "Do NOT search the filesystem with find / or grep -r /"** — GEAK agents default to broad filesystem searches which hang 30+ min on NFS.
-5. **Always pass framework image** — Use `GEAK_IMAGE_SGLANG` or `GEAK_IMAGE_VLLM`. In claw mode, use `GEAK_IMAGE_SGLANG_RAY` instead (see [`../modes/CLAW.md`](../modes/CLAW.md)). In local mode with `GEAK_LOCAL=true`, image is optional.
-6. **Always embed full source in `files[].content`** — GEAK always receives the kernel source via `files[].content`. If the path also exists in the image, include it in the prompt for GEAK's preprocessor. If the path is runtime-generated, `files[].content` is the sole source of truth.
+#### Prompt rules — backend-specific
+
+5. **`geak` only: mode and max_rounds** — Include: `"Use homogeneous mode. Set max_rounds to 1."` GEAK's optimization engine uses these parameters. Other backends ignore them.
+6. **`geak` only: framework image** — Use `GEAK_IMAGE_SGLANG` or `GEAK_IMAGE_VLLM`. In claw mode, use `GEAK_IMAGE_SGLANG_RAY` instead (see [`../modes/CLAW.md`](../modes/CLAW.md)). In local mode with `GEAK_LOCAL=true`, image is optional.
+7. **`codex` / `claude` only: explicit output filename** — Include: `"Write the COMPLETE optimized file to optimized_kernel.py."` These backends need an explicit output path.
 
 ### Step 3: Verify + Patch each result individually
 
-For each GEAK output:
+For each winning backend output:
 1. Verify function name + signature matches original exactly
 2. If mismatch: re-submit with stricter prompt (max 3 attempts)
 3. Patch standalone files using AST-based replacement
@@ -101,7 +126,7 @@ Kernel rankings shift after optimization. Re-profile to find new bottlenecks.
 | 5 consecutive discards | Stop — diminishing returns |
 | 2+ crashes during patching | Stop — environment unstable |
 | Wall clock > 120 min | Stop — time budget |
-| Total GEAK submissions > 15 | Stop — cost budget |
+| Total submissions > `GEAK_MAX_SUBMISSIONS` | Stop — cost budget |
 
 ## Accuracy Validation
 After EACH kept kernel patch, run the accuracy gate:
@@ -124,18 +149,19 @@ else:
 Kernel modifications have accuracy_risk = 0.15 (reduction kernels) to 0.05 (pointwise). REVERT immediately on accuracy failure.
 
 ## Outputs
-- Per-kernel results: (kernel_name, speedup, e2e_gain, status)
+- Per-kernel results: (kernel_name, speedup, e2e_gain, status, winning_backend)
 - `cumulative_gain_pct`: total improvement from all kept kernels
 - Updated baseline with all kept patches applied
 
 ## Heuristic Update
 - Each kept kernel: boost similar kernel type scores (other reduction kernels likely optimizable too)
 - Each discarded kernel: reduce scores for that kernel type
-- After 2+ discards on vendor-type kernels: reduce all GEAK scores to near-zero
+- After 2+ discards on vendor-type kernels: reduce all kernel-opt scores to near-zero
 - Re-profiled new candidates get fresh scores based on new gpu_pct
 
 ## Failure Handling
 - GEAK workspace unavailable: retry on alternate workspace (3 attempts)
-- GEAK produces wrong signature: re-submit with explicit constraint
+- Codex/Claude task fails: fall back to other active backends
+- All backends produce wrong signature: re-submit with explicit constraint
 - Register OOM during Triton compile: reduce block sizes in prompt
 - Server crash after patch: revert, log crash, skip kernel
