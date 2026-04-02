@@ -14,6 +14,8 @@ python3 $SKILL_ROOT/kb/kb_query.py --category pitfall --tags TraceLens --compact
 
 ## Procedure
 
+**Claw mode:** All profiling and filesystem commands must run via `exec_on_gpu`. See [`../modes/CLAW.md`](../modes/CLAW.md) "Profile" section for wrapper syntax.
+
 ### Step 1: Profile with torch.profiler
 
 **NOTE:** `run_baseline.sh` already handles profiling in one run. It pre-sets `SGLANG_TORCH_PROFILER_DIR` at server launch, runs the clean baseline, then activates profiling via `/start_profile` HTTP endpoint.
@@ -24,6 +26,22 @@ RUN_CONTEXT_FILE="$RESULT_DIR/run_context.env" bash "$SCRIPTS_DIR/run_profile.sh
 ```
 
 **vLLM V1 caveat:** `multiprocessing.spawn` workers — main process profiler gets empty traces. Use `/start_profile` + `/stop_profile` HTTP endpoints instead.
+
+**vLLM v0.17+ `--profiler-config` format:**
+
+vLLM v0.17 changed the profiling interface. The `/start_profile` endpoint requires `--profiler-config` at server launch time. The config MUST be JSON format:
+
+```bash
+# CORRECT — JSON format (vLLM v0.17+)
+python3 -m vllm.entrypoints.openai.api_server \
+    --profiler-config '{"profiler": "torch", "trace_dir": "/workspace/traces"}' \
+    ...
+
+# WRONG — key=value format (will fail with "invalid JSON")
+python3 -m vllm.entrypoints.openai.api_server \
+    --profiler-config 'profiler=torch,trace_dir=/workspace/traces' \
+    ...
+```
 
 **ALWAYS `unset PROFILE SGLANG_TORCH_PROFILER_DIR` after profiling** — leaked env vars cause 30x slowdown.
 
@@ -43,6 +61,8 @@ Args: {
     "output_dir": "$TRACE_DIR/tracelens_output"
 }
 ```
+
+**TraceLens `other` category trap:** Triton kernels launched via `hipModuleLaunchKernel` appear in the `other` category, NOT in `triton`. Check `other_metrics.json` for individual `hipModuleLaunchKernel::*` entries — these may be significant GEAK candidates hidden under a misleading category name. Always drill into `other` before dismissing it.
 
 ### Step 3: Identify GEAK candidates
 
