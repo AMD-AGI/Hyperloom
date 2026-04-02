@@ -44,7 +44,7 @@ fi
 
 When `GEAK_LOCAL=true`, GEAK runs locally as a subprocess — no Docker image needed. The `image` parameter in `geak_create_task` is ignored. Kernel paths must be actual paths on the local machine.
 
-## IR-8: patch_inductor.py
+## IR-6: patch_inductor.py
 
 Always use `--target-file` to patch a specific standalone kernel file:
 

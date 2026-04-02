@@ -27,24 +27,13 @@ gap acts as an urgency multiplier on all action scores.
 
 ## Execution Mode
 
-This skill supports two execution modes:
+This skill supports two execution modes. **Read the mode-specific document for your mode
+before starting:**
 
-| Aspect | Local Mode | Claw Mode |
-|--------|-----------|-----------|
-| Client | Cursor IDE | Claw |
-| Inference serving | Local process | RayJob on SaFE (multi-node TP) |
-| Command execution | Direct shell | `exec_on_gpu` via `ray_submit.py` |
-| Storage (`WORKSPACE_ROOT`) | `/workspace/inference-optimization` | `/shared_nfs/inference-optimization` |
-| Multi-node | Not supported | Supported (cross-node TP) |
-| SaFE MCP | Not used for inference | Used for RayJob lifecycle |
-| GEAK MCP | Same | Same (remote SaFE PyTorchJob) |
-| TraceLens MCP | Same | Same (traces on shared NFS) |
+- **Local mode** (Cursor IDE, direct shell): see [`modes/LOCAL.md`](modes/LOCAL.md)
+- **Claw mode** (SaFE RayJob, `exec_on_gpu`): see [`modes/CLAW.md`](modes/CLAW.md)
 
-**Auto-detection:**
-- `GEAK_LOCAL=true` → local mode (default for Cursor IDE)
-- Claw client context or user specifies `Mode: claw` → claw mode
-
-See [`modes/LOCAL.md`](modes/LOCAL.md) and [`modes/CLAW.md`](modes/CLAW.md) for mode-specific details.
+**Auto-detection:** `GEAK_LOCAL=true` → local mode (default). Claw client context → claw mode.
 
 ## Iron Rules (non-negotiable)
 
@@ -78,29 +67,13 @@ kill $(pgrep -f 'python.*-m vllm.entrypoints') 2>/dev/null
 
 Wait `SERVER_KILL_WAIT_S` seconds between kill and relaunch. Always `unset PROFILE SGLANG_TORCH_PROFILER_DIR` after profiling.
 
-### IR-6: [CLAW] Use `exec_on_gpu` for ALL GPU-side commands
-
-**Claw mode only.** After `source scripts/executor.sh`, ALL commands that run on the Ray cluster MUST go through `exec_on_gpu()` or `exec_on_gpu_bg()`. **NEVER** manually call `ray_submit.py` directly.
-
-```bash
-# CORRECT
-exec_on_gpu "export MODEL='$MODEL' ... && bash $SCRIPTS_DIR/run_baseline.sh"
-
-# WRONG — manual ray_submit.py
-python3 scripts/ray_submit.py --ray-address ... --command "..."
-```
-
-### IR-7: [CLAW] Main inference workload MUST use `kind: "RayJob"`
-
-**Claw mode only.** The persistent inference cluster **MUST** be `kind: "RayJob"`. The only places where `PyTorchJob` is acceptable:
-1. GEAK kernel optimization (GEAK MCP creates PyTorchJob internally)
-2. Parallel sweep workloads (short-lived, NOT the main inference cluster)
-
-### IR-8: Use `patch_inductor.py --target-file` for Inductor patching
+### IR-6: Use `patch_inductor.py --target-file` for Inductor patching
 
 Always use `scripts/patch_inductor.py` with `--target-file`. The `--cache-dir` option has been removed.
 
 **CRITICAL:** When GEAK changes block sizes or warp counts, you MUST also pass `--best-config` with the updated tiling parameters. Patching only the kernel `.py` without updating `.best_config` causes numerical corruption (garbled output). See `actions/integrate.md` for details.
+
+**Additional claw-mode Iron Rules (IR-7, IR-8) are defined in [`modes/CLAW.md`](modes/CLAW.md).**
 
 ## GEAK & Tooling Constants
 
@@ -120,54 +93,12 @@ All values below are the **single source of truth**. All actions reference these
 | `MIN_GPU_PCT` | 3 | Minimum GPU time % to consider a kernel as GEAK candidate |
 | `SERVER_KILL_WAIT_S` | 10 | Seconds to wait between server kill and relaunch |
 | `FILTERED_TRACE_NAME` | `filtered-TP-0.trace.json.gz` | Preferred trace file for TraceLens analysis |
-| `GEAK_IMAGE_SGLANG` | `harbor.oci-slc.example-internal-host.invalid/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x` | Default GEAK image for SGLang (local mode) |
+| `GEAK_IMAGE_SGLANG` | `harbor.oci-slc.example-internal-host.invalid/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x` | Default GEAK image for SGLang |
 | `GEAK_IMAGE_VLLM` | `harbor.oci-slc.example-internal-host.invalid/proxy/vllm/vllm-openai-rocm:v0.17.0` | Default GEAK image for vLLM |
-| `GEAK_IMAGE_SGLANG_RAY` | `harbor.oci-slc.example-internal-host.invalid/custom/lmsysorg/sglang:202603270958` | Claw mode: SGLang image with Ray 2.44.1 fix |
-| `RAY_CLIENT_PORT` | 10001 | Claw mode: Ray Client port on RayJob head node |
 
-### GEAK Image Selection — ALL kernels MUST use framework image
+**ALWAYS pass a framework image to GEAK, regardless of kernel type.** For kernels whose source exists in the image (e.g., `/sgl-workspace/aiter/`), the GEAK pod uses the same image. For runtime-generated kernels (e.g., `/tmp/torchinductor_root/` from `torch.compile`), do NOT include `kernel_url`/`kernel_repo` in the prompt; copy files to shared NFS or rely on `files[].content` only.
 
-**ALWAYS pass a framework image to GEAK, regardless of kernel type.** For kernels whose source exists in the image (e.g., `/sgl-workspace/aiter/`), the GEAK pod uses the same image to access these paths. For runtime-generated kernels (e.g., `/tmp/torchinductor_root/` from `torch.compile`), these paths do NOT exist in the image — do NOT include `kernel_url`/`kernel_repo` in the prompt; copy files to shared NFS or rely on `files[].content` only.
-
-| Condition | Local Mode | Claw Mode |
-|-----------|-----------|-----------|
-| User specified a custom image | Use user-specified | Use user-specified |
-| `FRAMEWORK=sglang` (default) | `GEAK_IMAGE_SGLANG` | `GEAK_IMAGE_SGLANG_RAY` |
-| `FRAMEWORK=vllm` | `GEAK_IMAGE_VLLM` | `GEAK_IMAGE_VLLM` |
-
-**Claw mode MUST use `GEAK_IMAGE_SGLANG_RAY`** (not `GEAK_IMAGE_SGLANG`) for SGLang — the Ray-patched image matches the RayJob serving environment.
-
-### [CLAW] Image Build (Dockerfile)
-
-The custom SGLang image (`GEAK_IMAGE_SGLANG_RAY`) is based on upstream SGLang with Ray compatibility fixes:
-
-```dockerfile
-FROM harbor.oci-slc.example-internal-host.invalid/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x
-RUN python -m pip install ray[default]==2.44.1 click==8.1.7
-```
-
-**Why:** Upstream SGLang image ships a Ray version with a `copy.deepcopy` / `Sentinel` enum crash bug that breaks RayJob's `ray start` and `ray-job-submitter`. `click==8.1.7` pins click to avoid API incompatibilities with Ray CLI.
-
-### [CLAW] RayJob Architecture
-
-```
-Claw Client --> Skill (this file)
-                 |-> SaFE MCP (workload_create kind="RayJob")
-                 |     |-> Creates Ray Cluster: head (1 pod) + workers (N pods)
-                 |     |-> Exposes Ray Client port (10001)
-                 |     \-> env.RAY_JOB_ENTRYPOINT = "tail -f /dev/null" (keeps cluster alive)
-                 |
-                 |-> exec_on_gpu (scripts/executor.sh)
-                 |     \-> ray_submit.py -> ray.init("ray://<head>:10001") -> run on cluster
-                 |
-                 |-> GEAK MCP (remote, unchanged)
-                 |     \-> SaFE API -> PyTorchJob -> kernel optimization
-                 |
-                 |-> TraceLens MCP (remote, unchanged)
-                 |     \-> Reads traces from shared NFS
-                 |
-                 \-> Benchmark results on shared NFS
-```
+**Claw-mode GEAK images and constants are in [`modes/CLAW.md`](modes/CLAW.md).**
 
 ## Architecture
 
@@ -175,7 +106,8 @@ Claw Client --> Skill (this file)
 SKILL.md (this file)          — DFS orchestrator: loop, heuristic, dispatch
 actions/*.md                   — Self-contained action modules (11 actions)
 kb/                            — RAG knowledge base (JSONL + query/ingest scripts)
-scripts/                       — Baseline/profiling shell scripts (run_baseline.sh is also used for re-baseline after kernel patching)
+scripts/                       — Baseline/profiling shell scripts (run_baseline.sh also used for re-baseline after kernel patching)
+modes/                         — Mode-specific execution details (LOCAL.md, CLAW.md)
 GEAK-INFERENCE-KERNEL.md       — GEAK MCP deep reference
 KNOWLEDGE-BASE.md              — Legacy KB (archived, seeded into kb/entries.jsonl)
 ```
@@ -255,7 +187,7 @@ runs to completion before the orchestrator re-scores. The "parallel" aspect is w
 
 ## Autonomy Rules
 
-**This skill runs end-to-end without human confirmation.** Do NOT ask the user before:
+**Execute autonomously — no human confirmation needed.** Do NOT ask the user before:
 - Creating/stopping RayJob on SaFE (claw mode)
 - Running baseline/profiling scripts via Ray (claw mode) or locally
 - Submitting GEAK tasks
@@ -263,7 +195,14 @@ runs to completion before the orchestrator re-scores. The "parallel" aspect is w
 - Patching kernels (Inductor cache or source files)
 - Reverting failed patches
 
-Execute the full DFS pipeline autonomously. Present only the **final optimization report** to the user.
+**Autonomy means don't ask permission, NOT skip steps.** Every numbered step in the
+Orchestrator Loop (1–11) is **MANDATORY**, including:
+- Step 3: TARGET ANALYSIS (if target data provided)
+- Step 4: KB WARM-UP (always — query KB before proceeding to baseline)
+- Step 11: KNOWLEDGE HOOK (always — ingest findings after report)
+
+Skipping any mandatory step invalidates the run. Present the **final optimization report**
+to the user once all steps are complete.
 
 ## Heuristic Scoring Function
 
