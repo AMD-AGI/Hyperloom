@@ -1,8 +1,0 @@
-attempt	tok_per_sec_per_gpu	speedup_pct	status	description
-0	19.90	0.0	ok	Stock baseline (TP=2, AC, bs=1, no compile, no cpu_offload)
-1	-1	0.0	crash	torch.compile
-1	-1	0.0	crash	torch.compile
-1	-1	0.0	crash	torch.compile — MoE routing guard failure (data-dependent expression)
-2	24.19	21.6	ok	Disable activation checkpointing
-3	170.38	756.2	ok	Packed dataset (seq_len=2048, no AC)
-4	343.71	1627.2	ok	Packed + no AC + bs=2

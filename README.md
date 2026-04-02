@@ -25,11 +25,9 @@ All benchmarks: ISL=1024, OSL=1024 on MI355X (gfx950). "vs B200" shows best conc
 |----------|------|----------|-----------|---------|----------|
 | GPT-OSS 20B (MoE, BF16) | 8x MI355X | 13,708 ms/iter | 13,060 ms/iter | **+4.7%** | 57 (4hr) |
 | GPT-OSS 20B (MoE, BF16) | 8x MI355X | 13,265 ms/iter | 13,042 ms/iter | **+1.7%** | 9 (1hr) |
-| Qwen3 8B (full finetune) | 8x MI355X | 863 tok/s/gpu | 18,860 tok/s/gpu | **21.9x** | 19 |
-| Qwen3 32B (LoRA) | 8x MI355X | 467 tok/s/gpu | 4,984 tok/s/gpu | **10.7x** | 19 |
-| Llama 4 Scout 17B-16E (MoE) | 8x MI355X | 20 tok/s/gpu | 170 tok/s/gpu | **8.6x** | 18 |
-
-Each result directory in `training_optimization/results/` and `inference_optimization/results/` contains the full optimization report, `results.tsv` with every attempt, and the final configuration.
+| Qwen3 8B (full finetune) | 8x MI355X | 863 tok/s/gpu | 18,860 tok/s/gpu | **+2,085%** | 19 |
+| Qwen3 32B (LoRA) | 8x MI355X | 467 tok/s/gpu | 4,984 tok/s/gpu | **+967%** | 19 |
+| Llama 4 Scout 17B-16E (MoE) | 8x MI355X | 20 tok/s/gpu | 170 tok/s/gpu | **+750%** | 18 |
 
 ---
 
@@ -79,20 +77,21 @@ cp .env.template .env
 
 Reference a skill file in your Cursor chat with `@` and describe the workload:
 
+**Inference:**
+```
+@.cursor/skills/inference-optimization/SKILL.md
+Optimize Qwen3-30B-A3B inference on MI355X.
+Target: (Specify throughput targets)
+Model: /path/to/Qwen3-30B-A3B
+InferenceX: /path/to/InferenceX
+```
+
 **Training:**
 ```
 @.cursor/skills/training-optimization/SKILL.md
 Optimize GPT-OSS 20B training on 8x MI355X.
 Config: examples/megatron/configs/MI355X/gpt_oss_20B-BF16-pretrain.yaml
 Results: /shared_nfs/nehaprakriya/results/gpt_oss/
-```
-
-**Inference:**
-```
-@.cursor/skills/inference-optimization/SKILL.md
-Optimize Qwen3-30B-A3B inference on MI355X.
-Model: /path/to/Qwen3-30B-A3B
-InferenceX: /path/to/InferenceX
 ```
 
 The agent takes it from there — baseline, profile, loop, report.
@@ -133,32 +132,13 @@ PRISM/
 │   └── skills/
 │       ├── training-optimization/        # Training optimization skill + knowledge base
 │       └── inference-optimization/       # Inference optimization skill + scripts
-├── training_optimization/
-│   ├── results/                                    # Full results from optimization runs
-│   │   ├── gpt_oss_4hr_20260322/                   # GPT-OSS 20B, 57 attempts, +4.7%
-│   │   ├── gpt_oss_primus/                         # GPT-OSS 20B, 9 attempts, +1.7%
-│   │   ├── gpt_oss_primus_geak_9_hrs/              # GPT-OSS 20B with GEAK kernels
-│   │   ├── qwen3_8b_optimization_20260323/         # Qwen3 8B full finetune, 21.9x
-│   │   ├── qwen3_32b_lora_optimization_20260323/   # Qwen3 32B LoRA, 10.7x
-│   │   ├── llama4_scout_17b_optimization_20260323/ # Llama 4 Scout MoE, 8.6x
-│   │   ├── llama3.1_8b_optimization_20260322/      # Llama 3.1 8B
-│   │   └── torchtune/                              # TorchTune cross-model summary
-│   └── turboquant/                       # Quantization evaluation library
 ├── inference_optimization/
-│   ├── InferenceX/                       # Inference benchmarking framework
-│   └── results/                          # Per-model optimization reports
+│   └── InferenceX/                       # Inference benchmarking framework
+├── training_optimization/
+│   └── turboquant/                       # Quantization evaluation library
 ├── dashboards/                            # Interactive optimization dashboard (HTML)
 ├── slides/                               # Architecture diagrams
 ├── .env.template                         # Environment variables
 └── README.md
 ```
 
----
-
-## Prerequisites
-
-- **Hardware**: AMD Instinct MI300X / MI325X / MI355X with ROCm 7.0+
-- **Training stack**: Primus/Megatron-LM or TorchTune
-- **Inference stack**: SGLang v0.5.6+ or vLLM
-- **Cursor IDE** with MCP support
-- **Node.js** for TraceLens MCP transport
