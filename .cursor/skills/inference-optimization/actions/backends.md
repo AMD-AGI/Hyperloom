@@ -13,18 +13,7 @@ python3 $SKILL_ROOT/kb/kb_query.py --category backend_exploration --model "$MODE
 
 ## Procedure
 
-> **[CLAW MODE]** All filesystem searches and `ServerArgs` inspection must run via `exec_on_gpu`:
-> ```bash
-> exec_on_gpu "python3 -c \"
-> from sglang.srt.server_args import ServerArgs
-> import inspect
-> src = inspect.getsource(ServerArgs.__init__)
-> for line in src.split('\\\\n'):
->     if '--' in line and ('backend' in line.lower() or 'enable' in line.lower()):
->         print(line.strip())
-> \""
-> ```
-> The `server_args.py` file and framework source live inside the RayJob container, not on the Claw client. All `grep`, `python3`, and test commands in this phase must be wrapped with `exec_on_gpu` when in claw mode.
+**Claw mode:** `ServerArgs` inspection and all backend test commands must run via `exec_on_gpu`. See [`../modes/CLAW.md`](../modes/CLAW.md) "Backends" section for wrapper syntax.
 
 ### Step 1: Discover all backend and scheduling flags
 
@@ -85,23 +74,6 @@ grep -i "allreduce\|custom_ar\|quick\|AiterCustom\|NCCL" $SERVER_LOG | head -20
 
 For each backend switch:
 1. Kill server → restart with baseline + this one change → warmup → benchmark
-
-> **[CLAW MODE]** Full backend test loop per switch:
-> ```bash
-> exec_on_gpu "
-> # Kill server (safe pattern)
-> ps aux | grep 'python3 -m sglang' | grep -v grep | grep -v bash | awk '{print \$2}' | xargs -r kill -9 2>/dev/null
-> sleep $SERVER_KILL_WAIT_S
->
-> # Restart with new backend
-> export MODEL='$MODEL' TP=$TP CONC=$CONC FRAMEWORK=$FRAMEWORK
-> export SGLANG_EXTRA_ARGS='$BASELINE_ARGS $NEW_BACKEND_SWITCH'
-> export RESULT_DIR='$RESULT_DIR/backend_test_$SWITCH_NAME'
-> bash $SCRIPTS_DIR/run_baseline.sh
-> "
-> ```
-> After killing, verify Ray cluster is alive: `exec_on_gpu "curl -s http://localhost:8265/api/cluster_status"`
-
 2. Compare `tput_per_gpu` against baseline
 3. If > +1%, mark as **WINNER**
 
