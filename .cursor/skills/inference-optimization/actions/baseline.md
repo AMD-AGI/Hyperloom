@@ -11,6 +11,8 @@ python3 $SKILL_ROOT/kb/kb_query.py "$MODEL_NAME torch.compile baseline" --top-k 
 
 ## Procedure
 
+**Claw mode:** Wrap all commands below with `exec_on_gpu`. See [`../modes/CLAW.md`](../modes/CLAW.md) "Baseline" section for the exact wrapper syntax.
+
 **Try torch.compile first, then fall back if incompatible.**
 
 ### Step 1: Try with torch.compile
