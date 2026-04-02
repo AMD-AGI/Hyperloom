@@ -39,9 +39,9 @@ before starting:**
 
 These rules apply to ALL modes. Violating any invalidates the optimization run.
 
-### IR-1: Submit ALL GEAK candidates in parallel
+### IR-1: Submit ALL kernel candidates in parallel
 
-The kernel-opt action MUST submit `GEAK_TOP_CANDIDATES` (default 5) tasks **simultaneously** via parallel `geak_create_task` + `geak_submit_task` calls. Submitting only 1 task when multiple candidates exist = violation.
+The kernel-opt action MUST submit `GEAK_TOP_CANDIDATES` (default 5) candidates to ALL active backends (`KERNEL_OPT_BACKENDS`) **simultaneously**. Submitting only 1 candidate when multiple exist, or submitting to backends sequentially instead of in parallel = violation.
 
 ### IR-2: NEVER modify kernel source before GEAK submission
 
@@ -81,6 +81,8 @@ All values below are the **single source of truth**. All actions reference these
 
 | Constant | Value | Description |
 |----------|-------|-------------|
+| `KERNEL_OPT_BACKENDS` | `geak,codex` | Comma-separated active backends. Any combination of: `geak`, `codex`, `claude`, `llm`. User can override in prompt. |
+| `OOB_ROUND_ITERATIONS` | 3 | Iterations per Codex/Claude round (submit → local benchmark → feedback → re-submit). Best result wins. |
 | `GEAK_STEP_LIMIT` | 100 | Max agent steps per GEAK task |
 | `GEAK_WORKSPACE` | `control-plane-moe` | GEAK workspace (user can override) |
 | `GEAK_MAX_RETRIES` | 3 | Max submission retries per kernel |
@@ -105,10 +107,14 @@ All values below are the **single source of truth**. All actions reference these
 ```
 SKILL.md (this file)          — DFS orchestrator: loop, heuristic, dispatch
 actions/*.md                   — Self-contained action modules (11 actions)
+kernel-opt/                    — Per-backend kernel optimization references
+  geak.md                      — GEAK MCP (remote GPU pod)
+  codex.md                     — Codex via OOB Agent MCP
+  claude.md                    — Claude Code via OOB Agent MCP
+  llm.md                       — LLM Proxy (direct API)
 kb/                            — RAG knowledge base (JSONL + query/ingest scripts)
-scripts/                       — Baseline/profiling shell scripts (run_baseline.sh also used for re-baseline after kernel patching)
+scripts/                       — Baseline/profiling shell scripts
 modes/                         — Mode-specific execution details (LOCAL.md, CLAW.md)
-GEAK-INFERENCE-KERNEL.md       — GEAK MCP deep reference
 KNOWLEDGE-BASE.md              — Legacy KB (archived, seeded into kb/entries.jsonl)
 ```
 
