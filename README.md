@@ -1,8 +1,58 @@
 # PRISM — Profile, Rewrite, Iterate, Speedup, Measure
 
-An agentic system that autonomously optimizes LLM training and inference on AMD GPUs. PRISM treats optimization as a **search problem**: given a workload, it builds a tree of candidate optimizations — backend swaps, server parameters, GEMM tuning, kernel rewrites, parallelism configs — scores each by expected gain and cost, then explores depth-first, always measuring against the real workload.
 
-![PRISM Architecture](slides/fig1_architecture.png)
+**Blocks 1–4: Automated Workload Analysis & Planning (TraceLens Agent)**
+ROCm Hyperloom agent fully automates the journey from raw workload input to a prioritized optimization plan, no manual profiling or gap analysis required. Simply provide your workload and the agent handles model performance analysis, identifies gaps against peak hardware potential, and produces a ranked bridge plan that tells you exactly where optimization will have the highest impact. This dramatically reduces the time engineers spend figuring out what to optimize, so the team can focus entirely on execution.
+
+Block 1 - Workload Ingestion: Submit your workload as the starting point for the agent 
+
+Block 2 - Workload Profiling: Agent profiles the workload end-to-end, capturing kernel-level GPU utilization and bottlenecks 
+
+Block 3 - Gap Analysis & Bridge Planning: Agent compares actual performance against roofline targets and produces a structured bridge plan 
+
+Block 4 - Kernel Breakdown & Roofline: Agent decomposes the workload into prioritized kernels ranked by optimization opportunity and hardware ceiling
+
+**Read more about TraceLens Agent:** [AMD-AGI/TraceLens-internal: Private internal copy of TraceLens](https://github.com/AMD-AGI/TraceLens-internal)
+
+
+<img width="1000" height="800" alt="image" src="https://github.com/user-attachments/assets/94fce2e4-f0e2-4fc7-a6de-ee20b21e6597" />
+
+
+**Block 5: Autonomous Kernel Optimization Engine (GEAK Agent)**
+
+Once the priority kernels are identified, the agent takes over optimization autonomously. It requires zero configuration to start, automatically discovers tests, checkpoints progress at every step for instant rollback, and runs patches in parallel, selecting only the best-performing result. The underlying architecture exposes profiling, benchmarking, and verification as modular MCP tools, while a three-tier configuration system governs behavior at project and workspace scopes to reduce variance and maximize kernel performance discovery.
+
+**Read more about GEAK Agent:** https://github.com/AMD-AGI/GEAK/tree/dev
+
+**Block 6: Iterative Optimization Loop (Think → Try → Measure → Decide)**
+
+This is the core intelligence loop where the agent iterates one idea at a time until exit criteria are met. Each cycle follows a disciplined four-step pattern:
+
+Think: Agent selects one optimization idea, a config override, code patch, or variable change 
+
+Try: Agent applies the change and runs the workload via torchrun 
+
+Measure: Agent captures performance in ms/iter across 6–10 runs 
+
+Decide: Agent keeps the change if it improves performance, or rolls back and tries the next idea 
+
+The loop continues until stopping criteria are met, such as five consecutive runs under 0.5% gain, two crashes, three consecutive discards, or a Roofline signal from TraceLens Jarvis.
+
+**Blocks 7 & 8: Automated Integration & Delivery**
+
+Once the optimization loop exits with a winning kernel, the agent handles the entire delivery pipeline without human intervention — from validation to merge.
+
+Block 7: Submit PR with Optimized Kernels: Agent automatically packages the optimized kernels, runs final correctness validation, and submits a pull request to the target repository 
+
+Block 8: Merge into Original Framework: Upon PR approval, the agent merges the optimized kernels back into the original framework (vLLM, SGLang, or other), completing the full optimization cycle
+
+**Scope:**
+
+Framework: vLLM and SGLang
+
+Kernel Languages: HIP and Triton
+
+Workloads: Inference and Training
 
 ## Key Results
 
