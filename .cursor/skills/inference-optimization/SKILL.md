@@ -82,6 +82,7 @@ All values below are the **single source of truth**. All actions reference these
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `KERNEL_OPT_BACKENDS` | `geak,codex` | Comma-separated active backends. Any combination of: `geak`, `codex`, `claude`, `llm`. User can override in prompt. |
+| `OOB_ROUND_ITERATIONS` | 3 | Iterations per Codex/Claude round (submit → local benchmark → feedback → re-submit). Best result wins. |
 | `GEAK_STEP_LIMIT` | 100 | Max agent steps per GEAK task |
 | `GEAK_WORKSPACE` | `control-plane-moe` | GEAK workspace (user can override) |
 | `GEAK_MAX_RETRIES` | 3 | Max submission retries per kernel |
