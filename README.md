@@ -1,4 +1,4 @@
-# PRISM — Profile, Rewrite, Iterate, Speedup, Measure
+# ROCm Hyperloom
 
 
 **Blocks 1–4: Automated Workload Analysis & Planning (TraceLens Agent)**
