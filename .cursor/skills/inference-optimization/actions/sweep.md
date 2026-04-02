@@ -8,6 +8,8 @@ Full ISL/OSL/CONC sweep with the optimized version to map the Pareto frontier.
 
 ## Procedure
 
+**Claw mode:** Multiple sweep execution options (serial via `exec_on_gpu`, SaFE parallel, Ray submit). See [`../modes/CLAW.md`](../modes/CLAW.md) "Sweep" section for all options.
+
 ### Using the sweep script
 
 ```bash
@@ -26,20 +28,6 @@ bash "$SCRIPTS_DIR/run_sweep.sh"
 - Smart ordering: configs sorted by estimated cost, short first
 - Auto-skip extreme combos: `num_prompts × OSL > MAX_OUTPUT_TOKENS` (default 2M)
 - Progress: `[N/total +elapsed]` and total wall time
-
-### SaFE MCP parallel sweep (faster)
-
-For maximum speed, create one SaFE workload per config:
-```
-Tool: workload_create
-Args: {
-    "display_name": "sweep-<model>-<isl><osl>-c<conc>",
-    "workspace_id": "control-plane-prod",
-    ...
-}
-```
-
-15 configs × 15 nodes = all parallel, ~10 min total vs ~75 min serial.
 
 ## Accuracy Validation
 N/A — sweep uses the same optimized binary, no new changes to validate.
