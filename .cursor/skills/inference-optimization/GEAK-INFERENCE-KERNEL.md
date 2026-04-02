@@ -71,9 +71,9 @@ Requires two keys:
 
 - `input_type` is **required** — use `"file"`
 - The instruction field is `prompt`, NOT `instructions`
-- `step_limit` controls agent iterations (**use 50** for kernel optimization — GEAK needs room to analyze, write, compile, fix errors, benchmark, and iterate. 20 is often not enough for a verified result; 5 is completely insufficient)
+- `step_limit` controls agent iterations (**use 100** for kernel optimization — GEAK needs room to analyze, write, compile, fix errors, benchmark, and iterate. 20 is often not enough for a verified result; 5 is completely insufficient)
 - `gpu_count` defaults to 1
-- **`workspace_id`**: Always specify `"control-plane-prod"` for reliable scheduling. Default workspace is often resource-constrained.
+- **`workspace_id`**: Always specify `GEAK_WORKSPACE` (constant from `SKILL.md`; default `"control-plane-moe"`) for reliable scheduling. Default workspace is often resource-constrained.
 - Include ALL dependent files in the `files` array (GEAK needs self-contained code)
 
 ### Prompt template for inference kernels
@@ -105,7 +105,31 @@ OPTIMIZATION TARGETS (prioritized):
 Write the COMPLETE file (imports, decorator, function) to the output directory.
 ```
 
-**Always pass `workspace_id: "control-plane-prod"` in `geak_create_task`.**
+**GEAK prompt rules — apply to ALL kernel types (MANDATORY for every geak_create_task):**
+
+1. **Kernel path — conditional on image availability:**
+   - If the kernel source file **exists in the Docker image** (e.g., `/sgl-workspace/aiter/...`, `/opt/venv/...`), **MUST include** the kernel's absolute file path and repo path in the prompt. Example: `"The kernel source file is at /sgl-workspace/aiter/jit/core/compile.py"`, `"The kernel repo is at /sgl-workspace/aiter/"`.
+   - If the kernel source is **runtime-generated** and only exists at runtime (e.g., `/tmp/torchinductor_root/...` from `torch.compile` Inductor cache), **DO NOT include** `kernel_url` or `kernel_repo` in the prompt. These files do not exist in the GEAK pod's image. Instead, copy the kernel files to a shared NFS path and reference the NFS path, OR omit these paths entirely and rely solely on `files[].content`.
+   - **How to tell:** paths under `/tmp/`, `/root/.cache/`, or any `torchinductor_*` directory are runtime-generated. Paths under `/sgl-workspace/`, `/opt/`, `/usr/` are part of the image.
+2. **MUST specify heterogeneous mode and max_rounds** — Always include: `"Use heterogeneous mode. Set max_rounds to 1."` in the prompt.
+3. **MUST specify 1.5x minimum speedup target** — Always include: `"The kernel MUST be optimized to at least 1.5x speedup."` in the prompt.
+
+Additional rules:
+4. **Always say "Do NOT search the filesystem with find / or grep -r /"** — GEAK agents default to broad filesystem searches which hang 30+ min on NFS.
+5. **Always pass framework image** — In claw mode, use `GEAK_IMAGE_SGLANG_RAY` (for SGLang) or `GEAK_IMAGE_VLLM` (for vLLM). In local mode, use `GEAK_IMAGE_SGLANG` or `GEAK_IMAGE_VLLM`.
+6. **Always embed full source in `files[].content`** — GEAK always receives the kernel source via `files[].content`. If the path also exists in the image, include it in the prompt for GEAK's preprocessor. If the path is runtime-generated, the `files[].content` is the sole source of truth.
+
+### GEAK Image Selection
+
+| Condition | Local Mode | Claw Mode |
+|-----------|-----------|-----------|
+| User specified a custom image | Use user-specified | Use user-specified |
+| `FRAMEWORK=sglang` (default) | `GEAK_IMAGE_SGLANG` | `GEAK_IMAGE_SGLANG_RAY` |
+| `FRAMEWORK=vllm` | `GEAK_IMAGE_VLLM` | `GEAK_IMAGE_VLLM` |
+
+**Claw mode MUST use `GEAK_IMAGE_SGLANG_RAY`** (not `GEAK_IMAGE_SGLANG`) for SGLang.
+
+**Always pass `workspace_id: GEAK_WORKSPACE` (default `"control-plane-moe"`) in `geak_create_task`.** User can override.
 
 ### GEAK latency breakdown
 
@@ -193,6 +217,24 @@ shutil.rmtree(os.path.expanduser("~/.triton/cache"), ignore_errors=True)
 - GEAK must preserve the exact function signature (args + constexprs)
 - Clear `.json` metadata files to force Inductor to reload source
 
+**Recommended: Use `patch_inductor.py` (IR-8):**
+
+```bash
+# Patch kernel source + update .best_config tiling parameters
+python3 $SCRIPTS_DIR/patch_inductor.py patch \
+    --kernel-name <name> \
+    --geak-file <geak_output.py> \
+    --target-file <inductor_standalone_file.py> \
+    --best-config '{"XBLOCK": 4, "R0_BLOCK": 2048, "num_warps": 4}'
+
+# Revert (restores both .py and .best_config from .bak):
+python3 $SCRIPTS_DIR/patch_inductor.py revert --target-file <inductor_standalone_file.py>
+```
+
+`patch_inductor.py` preserves `@triton_heuristics`, `inductor_meta`, and launcher config while only replacing the `@triton.jit def` function body.
+
+**CRITICAL:** Always pass `--best-config` when the GEAK-optimized kernel uses different block sizes or warp counts than the original. The `.best_config` file controls Inductor's autotuner launch parameters — a mismatch between kernel code and `.best_config` causes numerical corruption.
+
 ## Correctness Verification
 
 Always verify before benchmarking:
@@ -246,6 +288,19 @@ print(f"Original: {orig_ms:.3f} ms | GEAK: {geak_ms:.3f} ms | Speedup: {(orig_ms
 
 If micro-benchmark shows regression, skip full integration.
 
+## GEAK Output Validation Checklist
+
+Before patching any GEAK output into the serving environment:
+
+- [ ] Function name matches original exactly (not renamed)
+- [ ] Function signature (parameters, constexprs) matches original
+- [ ] Decorators preserved (`@triton_heuristics`, `@triton.jit`, etc.)
+- [ ] No new imports that don't exist in the target environment
+- [ ] Block sizes within IR-8 constraints (not exceeding 2x original)
+- [ ] Source code is actual code, not comments or path references
+- [ ] `files[].content` contains the full source (not truncated)
+- [ ] `.best_config` values identified from GEAK output (XBLOCK, R0_BLOCK, BLOCK_N, BLOCK_K, num_warps, num_stages) and passed via `--best-config`
+
 ## Troubleshooting
 
 ### GEAK output doesn't compile
@@ -264,4 +319,4 @@ If micro-benchmark shows regression, skip full integration.
 ### GEAK task stuck in pending
 - Pod scheduling can take 15+ min if cluster is loaded
 - Check with `geak_get_task` — if `updated_at` hasn't changed in 30 min, cancel and retry
-- Always use `workspace_id: "control-plane-prod"` for reliable scheduling (default workspace is resource-constrained)
+- Always use `workspace_id: GEAK_WORKSPACE` for reliable scheduling (default `"control-plane-moe"` from `SKILL.md`; default workspace is resource-constrained)

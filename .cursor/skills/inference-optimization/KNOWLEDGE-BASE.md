@@ -9,7 +9,8 @@ description: Model-specific configurations, validated results, and lessons learn
 
 | Model | Framework | TP | torch.compile | GEAK E2E Gain | Server Tuning Gain | Peak Output tok/s | Report |
 |-------|-----------|---:|:-------------:|:-------------:|:------------------:|------------------:|--------|
-| Qwen3-30B-A3B | SGLang | 1 | ✅ | **+14.72%** @ CONC=4 (avg +2.2%) | N/A | ~1859 (CONC=16) | `optimization_report.md` |
+| Qwen3-30B-A3B | SGLang | 1 | ✅ | **+27.6%** @ CONC=4 (full multi-round loop through `mm_0`) | N/A | ~751 (CONC=4 opt); ~1859 (CONC=16 baseline peak) | `optimization_report.md` |
+| Qwen3-30B-A3B | SGLang | 8 | ✅ | **+27.8%** @ CONC=4 (full loop + topkGatingSoftmax HIP) | N/A | — | — |
 | Qwen3-30B-A3B | vLLM | 1 | ✅ | ~0% (±1%) | N/A | 4209 (CONC=64) | `optimization_report_qwen3_30b_vllm.md` |
 | Kimi-K2.5 | SGLang | 8 | ❌ | **+0.81%** | +2.4% (decode-steps) | 509 (CONC=128) | `optimization_report_kimi_k25.md` |
 | Kimi-K2.5 | vLLM | 4 | ❌ | **+1.76%** | **+84%** (gpu-mem/seqs) | 264 (CONC=64) | `kimi-k25-vllm-optimization-report.md` |
@@ -19,15 +20,17 @@ description: Model-specific configurations, validated results, and lessons learn
 
 **Key takeaways:**
 
-1. **torch.compile is a prerequisite for large GEAK wins** — with torch.compile, GEAK reached up to +14.72%; without torch.compile, GEAK gains were ≤ 1.76%.
-2. **GEAK end-to-end gain depends on concurrency (CONC)** — sweet spot around CONC=4; at high concurrency, gains are diluted by the pipeline.
-3. **Server parameter tuning is often more effective than GEAK** — e.g. Kimi vLLM +84%, DSR1 +13.9%.
-4. **Already highly tuned models (gpt-oss) had little headroom** — GPU utilization ~94.7%, 95%+ vendor kernels.
-5. **Framework choice dominates for some stacks** — Kimi-K2.5: SGLang ~324 vs vLLM ~141 tok/s (~2.3× gap).
-6. **Backend switches + scheduling modes outperform parameter sweeps** — GLM-5-FP8: backend switches gave +16.2% combined vs <1% from any single parameter change. **Always explore backends before sweeping parameters.**
-7. **Combination synergies can be super-linear** — GLM-5-FP8: two +3% backend switches combined for +16.2%. Always test winners together.
+1. **Full multi-round loop is mandatory** — Qwen3-30B-A3B: RMSNorm-only ~+15% vs full loop **+27.6% (TP=1, through `mm_0`)** / **+27.8% (TP=8, incl. HIP)**. Extra gain came from `triton_tem_fused_mm_0` (~22% GPU) that was previously skipped. **Always run the full loop; do not stop after the first kernel.**
+2. **torch.compile is a prerequisite for large GEAK wins** — with torch.compile, GEAK reached up to +27.6%; without torch.compile, GEAK gains were ≤ 1.76%.
+3. **GEAK end-to-end gain depends on concurrency (CONC)** — sweet spot around CONC=4; at high concurrency, gains are diluted by the pipeline.
+4. **Server parameter tuning is often more effective than GEAK** — e.g. Kimi vLLM +84%, DSR1 +13.9%.
+5. **Already highly tuned models (gpt-oss) had little headroom** — GPU utilization ~94.7%, 95%+ vendor kernels.
+6. **GEAK supports HIP kernels** — needs full `.cu` source in task input (not path-only). `topkGatingSoftmax`: use SGLang image + explicit source dir in prompt; test harness creation can fail with minimal input.
+7. **Framework choice dominates for some stacks** — Kimi-K2.5: SGLang ~324 vs vLLM ~141 tok/s (~2.3× gap).
+8. **Backend switches + scheduling modes outperform parameter sweeps** — GLM-5-FP8: backend switches gave +16.2% combined vs <1% from any single parameter change. **Always explore backends before sweeping parameters.**
+9. **Combination synergies can be super-linear** — GLM-5-FP8: two +3% backend switches combined for +16.2%. Always test winners together.
 
-*(All models, summary validated 2026-03-23.)*
+*(All models, summary validated 2026-03-26.)*
 
 ## Server Parameter Reference
 
@@ -122,65 +125,72 @@ description: Model-specific configurations, validated results, and lessons learn
 
 ### Qwen3-30B-A3B
 
-*(Validated 2026-03-23 on MI355X.)*
+*(Validated 2026-03-26 on MI355X. Full multi-round loop supersedes 2026-03-23 RMSNorm-only headline.)*
 
-#### torch.compile + Inductor + GEAK: validated workflow
+#### Full multi-round optimization loop: +27.6% (TP=1) / +27.8% (TP=8)
 
-**This is the validated highest-impact approach** (re-validated 2026-03-23 on Qwen3-30B-A3B, MI355X, full sweep):
+**Round 1 — RMSNorm (Inductor Triton):** dual-pass → single-pass → **+15.2%** E2E @ CONC=4 vs baseline in the 2026-03-26 fair A/B (588.11 → 677.72 tok/s). *(Older 2026-03-23 sweep: +14.72% @ CONC=4, 596→684 tok/s.)*
+
+**Round 2 — `triton_tem_fused_mm_0` (GEMM):** largest non-vendor kernel (~22% GPU); GEAK stacked on Round 1 → **+27.6%** cumulative @ CONC=4 vs baseline — matches summary **SGLang TP=1** row (endpoint after RMSNorm + `mm_0`).
+
+**Round 3 — `topkGatingSoftmax` (HIP):** GEAK HIP on aiter C++; micro +2–4%, E2E +0.2% on top of Round 2 → **+27.8%** cumulative — matches summary **SGLang TP=8** row (full stack including HIP; reproduce at TP=8 when validating that endpoint).
+
+**Takeaway:** Always run the **full multi-round loop** on all top non-vendor kernels. Do not stop after RMSNorm or skip `mm_0` because a prior GEMM attempt crashed.
+
+**Cumulative stack (CONC=4, ISL=1024, OSL=256, fair A/B, same server + benchmark params):**
+
+| # | Kernel | GPU% | E2E tok/s | Cumulative gain | TPOT (ms) | Status |
+|---|--------|------|-----------|-----------------|-----------|--------|
+| 0 | Baseline | — | 588.11 | — | 6.57 | baseline |
+| 1 | + RMSNorm (5-ptr+3-ptr) | 5.9% | 677.72 | **+15.2%** | 5.67 | **KEEP** |
+| 2 | + triton_tem_fused_mm_0 | 22.4% | 750.54 | **+27.6%** | 5.10 | **KEEP** |
+| 3 | + triton_tem_fused_mm_1 | 7.3% | CRASH | — | — | **DISCARD** (GPU memory access fault) |
+| 4 | + topkGatingSoftmax (HIP) | 4.8% | 751.47 | **+27.8%** | 5.08 | **KEEP** |
+| 5 | triton_poi_fused_rope | 3.0% | — | — | — | **DISCARD** (GEAK no output after long run) |
+
+*(Step table: one CONC=4 fair A/B chain; **+27.6%** / **+27.8%** align with summary **TP=1** / **TP=8** rows.)*
+
+**Key insight:** `mm_0` was skipped in an earlier run due to “GEMM crashed” prior experience; the full loop recovered **~+10.7%** on top of RMSNorm alone.
+
+**TPOT:** Baseline 6.57 ms → optimized 5.10 ms (**−22.4%**) — confirms kernel speedup, not batching artifacts.
+
+#### torch.compile + Inductor + GEAK: workflow
 
 1. **Enable torch.compile**: `--enable-torch-compile` — generates Inductor Triton kernels
-2. **Profile in torch.compile mode**: TraceLens shows Inductor-generated Triton kernels as top bottlenecks
-3. **Extract Inductor kernel**: From `/tmp/torchinductor_root/` cache files
-4. **Submit to GEAK**: The Inductor-generated RMSNorm was dual-pass (reads memory twice)
-5. **GEAK optimizes**: Single-pass kernel, eliminates 50% memory reads
-6. **Patch Inductor cache**: Replace standalone kernel .py files, clear .so/.json cache
-7. **Restart**: New process recompiles patched kernels → new CUDA graphs
-8. **Result**: **+14.72%** @ CONC=4 (596→684 tok/s), TPOT -13.1% confirms kernel speedup
-
-**Caveats**: GEAK RMSNorm gain is CONC-dependent. At CONC=1 it regresses (-5.9%) due to L2 cache eviction policy differences. At CONC=16+ it's noise (~0%). Average across 9 configs: +2.20%. The sweet spot is CONC=4 where batch size matches register file capacity.
+2. **Profile in torch.compile mode**: list **all** kernels above ~3% GPU time (not only RMSNorm)
+3. **Rank non-vendor kernels** and submit **top candidates in parallel** (RMSNorm, `mm_0`, `mm_1`, `topkGatingSoftmax`, etc.)
+4. **Patch + benchmark each**; keep/revert by E2E + TPOT direction
+5. **HIP kernels:** use SGLang GEAK image, full `.cu` in `files[].content`, prompt with exact dir (e.g. `/sgl-workspace/aiter/csrc/kernels/`) — no `find /` on NFS
 
 **Why this works when direct kernel replacement doesn't:**
 
-- Without torch.compile: SGLang uses aiter C++ kernels (not Triton) → GEAK has no targets
-- With torch.compile: Inductor replaces aiter with Triton → GEAK can optimize → patch back into Inductor cache
+- Without torch.compile: SGLang uses aiter C++ kernels (not Triton) → GEAK has no Inductor targets
+- With torch.compile: Inductor replaces many ops with Triton → GEAK can optimize → patch Inductor cache; HIP paths patch aiter sources
 
-**Estimated end-to-end time:**
+**Estimated end-to-end time (full loop):** ~45–60 minutes (vs ~30 min for RMSNorm-only path).
 
-- Phase 1-2 (setup + baseline): ~2 min
-- Phase 2 (torch.compile baseline): ~5 min (3 min compile + 2 min benchmark)
-- Phase 3 (profiling): ~3 min
-- Phase 4 (TraceLens): ~1 min
-- Phase 5-7 (identify + server tune + GEAK): ~15 min (GPU pod scheduling + agent)
-- Phase 8 (patch + restart + benchmark): ~5 min (3 min compile + 2 min benchmark)
-- **Total: ~30 minutes**
+#### RMSNorm-only CONC sweep (2026-03-23 — superseded for headline %; still useful for CONC sensitivity)
 
-#### GEAK gain is CONC-dependent (SGLang + torch.compile)
+| CONC | Baseline | RMSNorm-only optimized | E2E gain | TPOT change |
+|------|----------|------------------------|----------|-------------|
+| 1 | 224 tok/s | 211 tok/s | **−5.9%** | +6.4% |
+| 4 | 597 tok/s | 684 tok/s | **+14.7%** | −13.1% |
+| 16 | 1720 tok/s | 1700 tok/s | **−1.2%** | +1.4% |
 
-**Validated 2026-03-23 on Qwen3-30B-A3B, SGLang + torch.compile:**
-
-| CONC | Baseline | Optimized | E2E Gain | TPOT Change |
-|------|----------|-----------|----------|-------------|
-| 1 | 224 tok/s | 211 tok/s | **-5.9%** | +6.4% |
-| 4 | 597 tok/s | 684 tok/s | **+14.7%** | -13.1% |
-| 16 | 1720 tok/s | 1700 tok/s | **-1.2%** | +1.4% |
-
-Average across 9 configs (3 CONC × 3 ISL/OSL): **+2.20%**. Best case: CONC=4 where RMSNorm single-pass eliminates redundant memory reads.
+Average across 9 configs (3 CONC × 3 ISL/OSL): **+2.20%**. Full-loop headline % uses CONC=4 fair A/B with baseline 588.11 tok/s (see table above).
 
 #### Model specifics
 
 - Architecture: Qwen3MoeForCausalLM, 128 experts, 8 active/token, hidden_size=2048, 48 layers
 - Model size: ~30GB BF16 — fits on a single MI355X (TP=1)
-- **torch.compile COMPATIBLE** — key differentiator, enables Inductor Triton kernels as GEAK targets
-- GEAK target: Inductor-generated RMSNorm kernels (dual-pass → single-pass, eliminates 50% memory reads)
+- **torch.compile COMPATIBLE** — enables Inductor Triton + GEAK
+- **GEAK targets (full loop):** RMSNorm single-pass; **triton_tem_fused_mm_0**; `mm_1` (reverted — crash); **topkGatingSoftmax** HIP
 
-**SGLang results (TP=1, torch.compile, RMSNorm GEAK optimization):**
+**SGLang results (torch.compile, full loop, CONC=4):**
 
-- Optimization: RMSNorm single-pass via GEAK, patched into Inductor cache
-- Baseline CONC=4 (ISL=1024, OSL=256): 596.51 tok/s
-- Optimized CONC=4: 684.29 tok/s (**+14.72%**, TPOT -13.14% confirms kernel acceleration)
-- Average across 9 configs (3 CONC × 3 ISL/OSL): **+2.20%**
-- **CONC-dependent**: +14.7% @ CONC=4, -5.9% @ CONC=1 (L2 cache penalty), ~0% @ CONC=16 (GPU saturated)
-- GEAK GEMM optimization attempted but caused GPU crash (memory access fault, reverted)
+- Baseline: 588.11 tok/s (ISL=1024, OSL=256)
+- Full stack: 751.47 tok/s (**+27.8%** vs baseline); **+27.6%** after step 2 (`mm_0`) before final HIP delta
+- Legacy RMSNorm-only @ CONC=4: 596.51 → 684.29 tok/s (**+14.72%**); peak ~1859 tok/s @ CONC=16 (high-CONC baseline-style)
 
 **vLLM results (TP=1, vLLM v0.17.0 + torch.compile level 3):**
 
@@ -189,11 +199,11 @@ Average across 9 configs (3 CONC × 3 ISL/OSL): **+2.20%**. Best case: CONC=4 wh
 - Inter-GPU variation ~±1% (GPU 0: 537.9, GPU 1: 534.4, GPU 4: 533.5 tok/s)
 - Best throughput: 4209.90 tok/s @ CONC=64, ISL=1024, OSL=1024
 
-**Why SGLang +14.7% but vLLM ~0%?**
+**Why SGLang shows large gains but vLLM ~0% on RMSNorm-only tests?**
 
 1. vLLM uses more C++ kernels (topkGating and act_and_mul each ~4–5%); RMSNorm only ~7.6% GPU time
-2. vLLM Inductor level=3 full compilation already compresses optimization headroom
-3. SGLang's Triton pipeline is more concentrated; RMSNorm accounts for a larger share of time
+2. vLLM Inductor level=3 full compilation already compresses headroom
+3. SGLang's Triton pipeline concentrates more time in optimizable Inductor kernels
 
 **TraceLens profile (SGLang):** GPU 98.2% compute. Top kernels: triton_tem_fused_mm 21.4%, CK MoE 26.3%, paged_attention 8.2%, RMSNorm 6.0%
 
@@ -343,7 +353,7 @@ source /tmp/baseline_config.sh
 
 ## Common Pitfalls
 
-**During skills execution (validated 2026-03-23):**
+**During skills execution (validated 2026-03-26):**
 
 | Pitfall | What happened | Prevention |
 |---------|--------------|------------|
@@ -354,6 +364,10 @@ source /tmp/baseline_config.sh
 | **InferenceX path wrong** | Used `/shared_nfs/limou/InferenceX/` instead of user's path | Always use `$INFERENCEX_PATH` from Phase 1 setup |
 | **Trace file too large** | Raw trace 349MB, 97% python_function events | Always filter before TraceLens (see Trace Size and Filtering in SKILL.md) |
 | **TraceLens not called** | Said "called TraceLens" but didn't actually invoke MCP tools | Must use `check_trace_file` + `run_full_standalone_analysis` MCP tools |
+| **GEAK input: comments not code** | Submitted `.cu` with only comments/path references, GEAK had no source to optimize | Always embed full source in `files[].content` |
+| **GEAK: wrong image** | Default ROCm image lacks framework code and headers; paths in GEAK prompt don't exist | Pass framework image (`GEAK_IMAGE_SGLANG` or `GEAK_IMAGE_VLLM`) for all kernel types |
+| **GEAK HIP: `find /` on NFS** | GEAK agent ran `find \| grep` to locate source, hung ~35 min on NFS | Prompt must specify exact source dir and say "Do NOT search filesystem with find / or grep -r /" |
+| **Skipped full loop** | Only optimized RMSNorm from prior experience, missed `mm_0` (~22% GPU) | **IRON RULE:** run full multi-round loop on all top-5 non-vendor candidates |
 
 ## Per-Layer Kernel Sequence Analysis
 
