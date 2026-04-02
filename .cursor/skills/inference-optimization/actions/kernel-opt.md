@@ -49,26 +49,39 @@ find /sgl-workspace/aiter -name "*.py" -exec grep -l "@triton.jit" {} \;
 override in prompt (e.g., `"Use only geak"`, `"Use geak,codex,claude"`).
 All active backends run **simultaneously** for every candidate kernel.
 
-| Backend | MCP | Latency | GPU on pod | Reference |
-|---------|-----|---------|------------|-----------|
+| Backend | MCP | Full round latency | GPU on pod | Reference |
+|---------|-----|--------------------|------------|-----------|
 | `geak` | GEAK (`geak_create_task`) | 10–30 min | Yes | [`../kernel-opt/geak.md`](../kernel-opt/geak.md) |
-| `codex` | OOB Agent (`agent_create_task(agent="codex")`) | 30–120s | No | [`../kernel-opt/codex.md`](../kernel-opt/codex.md) |
-| `claude` | OOB Agent (`agent_create_task(agent="claude")`) | 1–5 min | No | [`../kernel-opt/claude.md`](../kernel-opt/claude.md) |
+| `codex` | OOB Agent (`agent_create_task(agent="codex")`) | 2–6 min (3 iters) | No | [`../kernel-opt/codex.md`](../kernel-opt/codex.md) |
+| `claude` | OOB Agent (`agent_create_task(agent="claude")`) | 3–15 min (3 iters) | No | [`../kernel-opt/claude.md`](../kernel-opt/claude.md) |
 | `llm` | Direct OpenAI API (LLM Proxy) | 1–30s | No | [`../kernel-opt/llm.md`](../kernel-opt/llm.md) |
 
-**For each candidate kernel, in parallel:**
+**For each candidate kernel, launch all active backends CONCURRENTLY (not sequentially):**
 
-1. If `geak` active: `geak_create_task` + `geak_submit_task`
-2. If `codex` active: `agent_create_task(agent="codex")` + `agent_submit_task`
-3. If `claude` active: `agent_create_task(agent="claude")` + `agent_submit_task`
-4. If `llm` active: `openai.Client.chat.completions.create` (multi-model, see `llm.md`)
+```
+                     ┌─ geak:  single task → poll → done
+                     │
+candidate kernel ────┼─ codex: iterative loop (10 iters, each: submit→benchmark→feedback)
+                     │
+                     ├─ claude: iterative loop (10 iters, same as codex)
+                     │
+                     └─ llm:   single API call → done
+                     
+All 4 branches run in parallel. Each branch is independent.
+Wait for ALL branches to finish. Collect best result from each.
+Pick the one with highest verified speedup → Step 3.
+```
 
-**Poll all tasks until done. Collect valid results. For each result:**
-- Compilation check (import/exec)
-- Correctness check (torch.allclose)
-- Micro-benchmark
+**Per-backend execution:**
 
-**Pick the result with the best verified micro-benchmark speedup. Proceed to Step 3.**
+1. **`geak`**: `geak_create_task` + `geak_submit_task` → poll until done (single submission, GEAK verifies on-pod)
+2. **`codex`**: iterative refinement loop — `OOB_ROUND_ITERATIONS` (3) iterations, each: submit → download → **local benchmark** → feed result back as context. Take best speedup from all iterations. See [`../kernel-opt/codex.md`](../kernel-opt/codex.md).
+3. **`claude`**: same iterative refinement loop as codex, with `agent="claude"`. See [`../kernel-opt/claude.md`](../kernel-opt/claude.md).
+4. **`llm`**: `openai.Client.chat.completions.create` (multi-model parallel). See [`../kernel-opt/llm.md`](../kernel-opt/llm.md).
+
+**IMPORTANT:** Do NOT run backends sequentially (geak first, then codex, then claude...).
+Launch all active backends at the same time. The iterative loops within codex/claude
+are internal to each backend — they do NOT block other backends.
 
 Use prompt templates per kernel type:
 - **RMSNorm / reduction kernels**: TRUE single-pass template (eliminate second loop, 2x memory reduction)
