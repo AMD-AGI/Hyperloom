@@ -165,7 +165,15 @@ else:
 **CRITICAL:** `patch_inductor.py` clears ALL `.so` binary cache files and `~/.triton/cache`. Server restart triggers FULL torch.compile recompilation (5-30 minutes). Set `HEALTH_TIMEOUT=1800` to allow completion before health check times out.
 
 ## Accuracy Validation
-Run accuracy gate after each patch. Compare output text with `accuracy_reference.json`.
+Integration patches modify computation — accuracy_risk = 0.15. **After the re-baseline
+benchmark passes, run the GSM8K accuracy gate:**
+```bash
+EVAL_TASK=gsm8k NUM_FEWSHOT=5 PORT=$PORT MODEL=$MODEL \
+  RESULTS_DIR="$RESULT_DIR/eval_gsm8k_integrate_${KERNEL_NAME}" \
+  bash "$SKILL_ROOT/scripts/eval_accuracy.sh"
+```
+Compare `exact_match` against `state.baseline_accuracy`. If accuracy drops by more than
+`accuracy_threshold` (default 0.01): REVERT the patch immediately, mark REVERT.
 
 ## Outputs
 - `actual_e2e_pct`: measured gain

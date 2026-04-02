@@ -74,7 +74,15 @@ If combined result is worse than individual winners, test subsets to find confli
 ## Accuracy Validation
 Server parameter changes (decode-steps, cuda-graph-max-bs, mem-fraction) have accuracy_risk = 0.0 — they affect scheduling, not computation. No accuracy gate needed for pure scheduling params.
 
-For precision-affecting params (kv-cache-dtype fp8): accuracy_risk = 0.3, run full accuracy gate.
+For precision-affecting params (kv-cache-dtype fp8): accuracy_risk = 0.3. **Run the GSM8K
+accuracy gate:**
+```bash
+EVAL_TASK=gsm8k NUM_FEWSHOT=5 PORT=$PORT MODEL=$MODEL \
+  RESULTS_DIR="$RESULT_DIR/eval_gsm8k_param_${PARAM_NAME}" \
+  bash "$SKILL_ROOT/scripts/eval_accuracy.sh"
+```
+Compare `exact_match` against `state.baseline_accuracy`. If accuracy drops by more than
+`accuracy_threshold` (default 0.01): REVERT the param change, mark FAIL.
 
 ## Outputs
 - `winning_params`: list of parameter flags that improved throughput
