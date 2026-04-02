@@ -1,37 +1,23 @@
 # PRISM — Profile, Rewrite, Iterate, Speedup, Measure
 
-An autonomous, iterative closed-loop code optimization system for training and inference workloads. Given a real training or inference workload, PRISM's agent establishes a baseline, profiles it, then enters a **think → apply one change → measure → keep or revert → repeat** loop until it has squeezed the most performance out of the hardware. Every optimization is validated against the actual workload — no synthetic microbenchmarks, no guesswork.
-
-This is the core novelty: **a general-purpose optimization loop that works across both training and inference**, generating and testing ideas autonomously — config overrides, code patches, framework-level changes, parallelism strategies — one at a time, always measuring real end-to-end impact.
+An agentic system that autonomously optimizes LLM training and inference on AMD GPUs. PRISM treats optimization as a **search problem**: given a workload, it builds a tree of candidate optimizations — backend swaps, server parameters, GEMM tuning, kernel rewrites, parallelism configs — scores each by expected gain and cost, then explores depth-first, always measuring against the real workload.
 
 ![PRISM Architecture](slides/fig1_architecture.png)
 
-The agent is the loop controller. It decides what to try next based on the profile, what's already been tried, the framework source code, and a knowledge base of lessons from prior runs. It runs **actual training or serving** as the benchmark — the real workload is both the test and the measurement.
-
-### What the Agent Changes
-
-The agent generates and tests ideas across multiple levels of the stack:
-
-| Level | Training examples | Inference examples |
-|-------|------------------|-------------------|
-| **Config overrides** | `moe_permute_fusion=true`, `gradient_accumulation_fusion=true`, RoPE fusion | `--num-continuous-decode-steps`, `--mem-fraction-static`, CUDA graph coverage |
-| **Code patches** | Cache hot per-forward lookups, fuse MoE dispatch, swap attention backends | Patch Inductor cache, swap attention backends, enable torch.compile |
-| **Parallelism / data** | Micro batch size tuning (preserving GBS), packed sequences | DP/TP/EP configuration, concurrency tuning |
-| **Kernel-level** | Triton kernel rewrites via GEAK (when hot kernels are identified) | Inductor-generated Triton kernels via GEAK |
-| **Environment** | NCCL tuning, `CUDA_DEVICE_MAX_CONNECTIONS` | Server parameters, memory allocation |
-
-### Stopping Criteria
-
-The loop is not open-ended. It stops when:
-- Last 5 attempts yield < 0.5% total improvement (plateau)
-- 3 consecutive discards (local minimum)
-- Time budget exceeded
-- Total speedup exceeds target threshold
-- 2+ crashes (unstable environment)
-
----
-
 ## Key Results
+
+### Inference Optimization — InferenceX Challenge
+
+PRISM optimized 4 flagship models for the [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) benchmark on AMD Instinct MI355X, matching target performance on 3 out of 4 models.
+
+| Model | Best tok/s/GPU | vs MI355X Baseline | vs NVIDIA B200 |
+|-------|---------------:|:------------------:|:--------------:|
+| DeepSeek-R1-0528 (671B MoE) | **1,476** | — | **+97% ahead** |
+| GLM-5-FP8 (756B MoE+NSA) | **509** | **+193%** | **+27% ahead** |
+| Qwen3.5-397B (397B MoE) | **350** | **+40%** | **+2.5% ahead** |
+| MiniMax-M2.5 (MoE 256E) | **2,276** | **+6.5%** | **+5.7% ahead** |
+
+All benchmarks: ISL=1024, OSL=1024 on MI355X (gfx950). "vs B200" shows best concurrency point. Full concurrency/ISL/OSL sweeps, patches, configs, and reproduction scripts: **[Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX)**.
 
 ### Training Optimization
 
@@ -43,18 +29,23 @@ The loop is not open-ended. It stops when:
 | Qwen3 32B (LoRA) | 8x MI355X | 467 tok/s/gpu | 4,984 tok/s/gpu | **10.7x** | 19 |
 | Llama 4 Scout 17B-16E (MoE) | 8x MI355X | 20 tok/s/gpu | 170 tok/s/gpu | **8.6x** | 18 |
 
-### Inference Optimization
-
-| Workload | GPUs | Baseline | Optimized | Speedup | Method |
-|----------|------|----------|-----------|---------|--------|
-| GLM-5 FP8 (756B MoE) | 8x MI355X | 1,379 tok/s | 2,794 tok/s | **+102.6%** | DP/TP config + server tuning |
-| Qwen3-30B-A3B | 1x MI355X | 571 tok/s | 653 tok/s | **+14.4%** | torch.compile + kernel optimization |
-
 Each result directory in `training_optimization/results/` and `inference_optimization/results/` contains the full optimization report, `results.tsv` with every attempt, and the final configuration.
 
 ---
 
-## Quick Start
+## Quickstart — Hyperloom UI
+
+The fastest way to start is through the hosted **AMD Hyperloom** web interface:
+
+1. Go to **[oci-slc.example-internal-host.invalid/hyperloom](https://oci-slc.example-internal-host.invalid/hyperloom/)**
+2. Select **[PrimusClaw](https://oci-slc.example-internal-host.invalid/hyperloom/claw)** from the sidebar
+3. Start chatting — the Quick Start panel offers guided options and example tasks
+
+![Hyperloom PrimusClaw UI](slides/hyperloom_claw_quickstart.png)
+
+---
+
+## Quickstart — Local Optimization (Cursor / Claude / VS Code)
 
 ### 1. Configure MCP Servers
 
@@ -108,6 +99,18 @@ The agent takes it from there — baseline, profile, loop, report.
 
 ---
 
+### How It Works
+
+1. **Classify** — Identify the model architecture (MoE, MLA, hybrid attention, etc.) and assign score priors to each optimization category based on what has worked for similar models.
+2. **Profile** — Run the workload, collect kernel-level traces, find bottlenecks.
+3. **DFS Loop** — Pop the highest-scored candidate, apply it, benchmark end-to-end. **Keep** if it improves throughput, **discard** if not. Re-score remaining candidates based on what was learned (wins boost similar actions, failures suppress them).
+4. **Stop** — When 5 consecutive actions fail to improve, all scores drop below threshold, or a time/crash budget is hit.
+5. **Report** — Emit the final config, the full search tree, and a reproducible benchmark script.
+
+The search tree and scoring heuristic are the core of PRISM — the agent doesn't just try random things, it navigates a structured space where each result informs what to explore next.
+
+---
+
 ## Detailed Skill Documentation
 
 Each domain has a comprehensive skill file with the full optimization protocol, examples, and a knowledge base of lessons learned from prior runs:
@@ -143,7 +146,8 @@ PRISM/
 │   └── turboquant/                       # Quantization evaluation library
 ├── inference_optimization/
 │   ├── InferenceX/                       # Inference benchmarking framework
-│   └── results/glm5_optimization/        # GLM-5 FP8, +102.6%
+│   └── results/                          # Per-model optimization reports
+├── dashboards/                            # Interactive optimization dashboard (HTML)
 ├── slides/                               # Architecture diagrams
 ├── .env.template                         # Environment variables
 └── README.md
