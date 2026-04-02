@@ -104,6 +104,15 @@ curl -s http://localhost:$PORT/v1/completions \
 
 Backend switches change code paths — accuracy_risk = 0.1.
 
+**After throughput benchmark passes, run the GSM8K accuracy gate:**
+```bash
+EVAL_TASK=gsm8k NUM_FEWSHOT=5 PORT=$PORT MODEL=$MODEL \
+  RESULTS_DIR="$RESULT_DIR/eval_gsm8k_backend_${BACKEND_NAME}" \
+  bash "$SKILL_ROOT/scripts/eval_accuracy.sh"
+```
+Compare `exact_match` against `state.baseline_accuracy`. If accuracy drops by more than
+`accuracy_threshold` (default 0.01): REVERT backend flags, mark FAIL.
+
 ## Outputs
 - `winning_backends`: list of backend flags that improved throughput
 - `combined_tput_per_gpu`: throughput with all winners combined
