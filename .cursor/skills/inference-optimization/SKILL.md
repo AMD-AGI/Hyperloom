@@ -113,83 +113,20 @@ kernel-opt/                    — Per-backend kernel optimization references
   claude.md                    — Claude Code via OOB Agent MCP
   llm.md                       — LLM Proxy (direct API)
 kb/                            — RAG knowledge base (JSONL + query/ingest scripts)
-scripts/                       — Baseline/profiling shell scripts
+scripts/                       — Baseline/profiling/accuracy shell scripts
 modes/                         — Mode-specific execution details (LOCAL.md, CLAW.md)
 KNOWLEDGE-BASE.md              — Legacy KB (archived, seeded into kb/entries.jsonl)
 ```
 
 ## DFS Search Tree
 
-```
-                        ┌──────────┐
-                        │  SETUP   │
-                        └────┬─────┘
-                             │
-                        ┌────▼─────┐
-                        │ CLASSIFY │
-                        └────┬─────┘
-                             │
-                   ┌─────────▼─────────┐
-                   │  TARGET ANALYSIS   │ ← optional, if target dir provided
-                   └─────────┬─────────┘
-                             │
-                        ┌────▼─────┐
-                        │ BASELINE │
-                        └────┬─────┘
-                             │
-                        ┌────▼─────┐
-                        │ PROFILE  │
-                        └────┬─────┘
-                             │
-              ┌──────────────▼──────────────┐
-              │      HEURISTIC SCORING      │
-              │   score each candidate action│
-              └──────────────┬──────────────┘
-                             │
-              ┌──────────────▼──────────────┐
-              │   PICK HIGHEST-SCORED ACTION │
-              │                              │
-              │  ┌─────────┐ ┌──────────┐   │
-              │  │BACKENDS │ │ PARAMS   │   │
-              │  └────┬────┘ └────┬─────┘   │
-              │       │           │          │
-              │  ┌────▼────┐ ┌───▼──────┐   │
-              │  │KERNEL   │ │ SWEEP    │   │
-              │  │  OPT    │ │          │   │
-              │  └────┬────┘ └──────────┘   │
-              │       │                      │
-              │  ┌────▼────┐                 │
-              │  │INTEGRATE│                 │
-              │  └─────────┘                 │
-              └──────────────┬──────────────┘
-                             │
-                      ┌──────▼──────┐
-                      │  RE-SCORE   │ ← update heuristic, loop back
-                      └──────┬──────┘
-                             │
-                     ┌───────▼───────┐
-                     │ STOPPING MET? │
-                     └───────┬───────┘
-                             │ yes
-                        ┌────▼────┐
-                        │ REPORT  │
-                        └─────────┘
-```
+**Phases:** SETUP → CLASSIFY → TARGET ANALYSIS (optional) → BASELINE (+ GSM8K accuracy) → PROFILE → HEURISTIC SCORING → DFS LOOP (pick highest-scored action → execute → re-score → repeat) → SWEEP → REPORT
 
-**How the DFS works:** The orchestrator maintains a **priority stack** of candidate actions.
-After each action completes, the stack is re-scored and the highest-scored action is popped
-next. This is DFS because each action can push new sub-actions (e.g., PROFILE pushes
-GEAK candidates, BACKENDS pushes combination tests). The agent explores depth-first along
-the most promising branch, but can backtrack if scores shift.
+**DFS loop actions:** backends, params, kernel-opt, integrate, sweep — scored by heuristic, popped highest-first. Each action can push sub-actions (e.g., PROFILE pushes GEAK candidates, BACKENDS pushes combination tests). The agent explores depth-first along the most promising branch and backtracks if scores shift.
 
-**Exploration beyond the tree:** The agent is NOT limited to the pre-defined actions. If
-profiling reveals an unexpected bottleneck or a KB query suggests a novel technique, the
-agent can create ad-hoc actions and score them with the same heuristic. The tree above is
-the default starting structure — the agent should actively look for opportunities outside it.
+The agent is NOT limited to pre-defined actions. Ad-hoc actions can be created and scored with the same heuristic if profiling reveals unexpected bottlenecks or KB suggests novel techniques.
 
-**Communication:** This is a single-agent sequential loop, not async multi-agent. Each action
-runs to completion before the orchestrator re-scores. The "parallel" aspect is within actions
-(e.g., GEAK submits 5 kernels in parallel), not between actions.
+This is a single-agent sequential loop. Each action runs to completion before re-scoring. Parallelism is within actions (e.g., GEAK submits 5 kernels in parallel), not between them.
 
 ## Autonomy Rules
 
@@ -275,6 +212,8 @@ state = {
 
     "torch_compile_status": None,  # success / failed / skipped
     "accuracy_reference": None,    # path to reference output
+    "baseline_accuracy": None,     # GSM8K exact_match score (0.0–1.0) from baseline eval
+    "accuracy_threshold": 0.01,    # max allowed accuracy drop (absolute) before REVERT
 
     "action_stack": [],            # priority stack of (score, action_name, params)
     "completed_actions": [],       # log of (action_name, gain_pct, status)
@@ -312,6 +251,7 @@ PROCEDURE optimize():
   5. BASELINE
      → Execute actions/baseline.md
      → Set baseline_tput_per_gpu, torch_compile_status, accuracy_reference
+     → Run GSM8K eval → set baseline_accuracy (MANDATORY — this is the accuracy floor)
 
   6. PROFILE
      → Execute actions/profile.md
@@ -325,8 +265,11 @@ PROCEDURE optimize():
      WHILE action_stack is not empty AND NOT stopping_criteria_met():
        a. Pop highest-scored action
        b. Execute the action (dispatch to actions/*.md)
-       c. ACCURACY GATE: if action modified computation, verify accuracy
-          - If accuracy degraded: REVERT immediately, mark action as FAIL
+       c. ACCURACY GATE: if action has accuracy_risk > 0:
+          - Run GSM8K eval via scripts/eval_accuracy.sh
+          - Compare new score against state.baseline_accuracy
+          - If drop > accuracy_threshold (default 0.01): REVERT, mark FAIL
+          - See "Accuracy Gate Protocol" section below
        d. Measure result: new_tput_per_gpu
        e. Update state: current_tput_per_gpu, cumulative_gain_pct
        f. RE-SCORE all remaining actions (gains shift after each optimization)
@@ -346,27 +289,64 @@ PROCEDURE optimize():
 
 ## Accuracy Gate Protocol
 
-**Every action that modifies computation** must pass the accuracy gate before KEEP:
+Actions are gated by their `accuracy_risk` value. **Baseline GSM8K accuracy is measured
+during step 5 (BASELINE) and stored in `state.baseline_accuracy`.** Every subsequent action
+with `accuracy_risk > 0` must pass the accuracy gate before KEEP.
 
-1. **Kernel-level check** (for GEAK/kernel mods):
-   ```python
-   # torch.allclose on kernel micro-benchmark output
-   assert torch.allclose(original_output, optimized_output, atol=1e-3, rtol=1e-3)
-   ```
+### Which actions trigger the gate
 
-2. **E2E output check** (for all actions):
+| accuracy_risk | Actions | Gate required |
+|:-------------:|---------|:-------------:|
+| 0.0 | Server scheduling params (decode-steps, cuda-graph-max-bs, mem-fraction, chunked-prefill) | No |
+| 0.05–0.15 | Kernel modifications (GEAK), GEMM tuning | **Yes** |
+| 0.1 | Backend switches (aiter, alter, attention backends) | **Yes** |
+| 0.3 | Precision-affecting params (kv-cache-dtype fp8, quantization changes) | **Yes** |
+
+### Gate procedure
+
+For any action with `accuracy_risk > 0`, after the throughput benchmark succeeds:
+
+1. **Run GSM8K eval** against the running server using InferenceX's lm-evaluation-harness:
    ```bash
-   curl -s http://localhost:$PORT/v1/completions \
-     -H "Content-Type: application/json" \
-     -d '{"model":"'$MODEL'","prompt":"The capital of France is","max_tokens":20,"temperature":0}'
-   # Compare with $RESULT_DIR/accuracy_reference.json
+   EVAL_TASK=gsm8k NUM_FEWSHOT=5 PORT=$PORT MODEL=$MODEL \
+     RESULTS_DIR="$RESULT_DIR/eval_gsm8k_${ACTION_NAME}" \
+     bash "$SKILL_ROOT/scripts/eval_accuracy.sh"
    ```
 
-3. **If accuracy fails:** REVERT immediately. Log to KB as `accuracy_risk=1.0` for this
-   specific action + model combination.
+2. **Extract the score** from the eval summary:
+   ```bash
+   new_accuracy=$(python3 -c "
+   import json, glob
+   f = sorted(glob.glob('$RESULT_DIR/eval_gsm8k_${ACTION_NAME}/eval_summary_gsm8k.json'))[-1]
+   d = json.load(open(f))
+   scores = list(d['scores'].values())[0]
+   print(scores.get('exact_match,strict-match', scores.get('exact_match,none', 0)))
+   ")
+   ```
 
-**Actions that do NOT need accuracy gate:** setup, classify, profile, sweep (read-only),
-server params that only affect scheduling (decode-steps, cuda-graph-max-bs, mem-fraction).
+3. **Compare with baseline:**
+   ```
+   accuracy_drop = baseline_accuracy - new_accuracy
+   if accuracy_drop > accuracy_threshold (default 0.01 = 1 percentage point):
+       REVERT immediately
+       Log to KB: accuracy_risk=1.0 for this action+model
+       Mark action as FAIL (accuracy degradation)
+   else:
+       KEEP — accuracy within tolerance
+   ```
+
+### Kernel-level pre-check (optional, for GEAK/kernel mods only)
+
+Before the full GSM8K eval, a fast micro-benchmark sanity check can catch obvious breakage:
+```python
+assert torch.allclose(original_output, optimized_output, atol=1e-3, rtol=1e-3)
+```
+This does NOT replace the GSM8K gate — it's an early-exit optimization.
+
+### Actions that skip the gate
+
+**setup, classify, profile, sweep, report** — these are read-only and never modify the
+serving computation path. Pure scheduling params (accuracy_risk=0.0) also skip.
 
 ## Stopping Criteria
 
