@@ -20,7 +20,8 @@ may be intermittent. **Fallback to `codex` if `claude` is unavailable.**
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `CLAUDE_MAX_TURNS` | 30 | Max agent turns per task |
+| `OOB_ROUND_ITERATIONS` | 3 | Iterations per round — shared with Codex (see [`codex.md`](codex.md)) |
+| `CLAUDE_MAX_TURNS` | 30 | Max agent turns per task (per iteration) |
 | `CLAUDE_POLL_INTERVAL_S` | 15 | Seconds between status polls |
 | `CLAUDE_POLL_TIMEOUT_MIN` | 10 | Max minutes to poll before cancel |
 
@@ -29,7 +30,8 @@ may be intermittent. **Fallback to `codex` if `claude` is unavailable.**
 | | Claude (this) | Codex | GEAK | LLM Proxy |
 |---|---|---|---|---|
 | **MCP** | OOB Agent | OOB Agent | GEAK | Direct API |
-| **Latency** | 1–5 min | 30–120s | 10–30 min | 1–30s |
+| **Latency (per iter)** | 1–5 min | 30–120s | N/A | 1–30s |
+| **Latency (full round)** | 3–15 min | 2–6 min | 10–30 min | 1–30s |
 | **GPU on pod** | No | No | Yes | No |
 | **Tool use** | File I/O, shell, multi-step | File I/O, shell | Bash, profiling, submit | None |
 | **Multi-turn** | Yes (up to 30 turns) | Yes (typically 1) | Yes (up to 100 steps) | No |
@@ -105,9 +107,19 @@ Write the COMPLETE optimized file to optimized_kernel.py.
 
 Same as Codex: optimized kernel written to `optimized_kernel.py`.
 
-## Verification (Caller Responsibility)
+## Iterative Refinement Loop
 
-Same as Codex — no GPU, caller must verify. See [`codex.md`](codex.md) Verification section.
+Claude uses the **same iterative refinement loop** as Codex. See [`codex.md`](codex.md)
+"Iterative Refinement Loop" section for the full flow, pseudocode, feedback context
+format, and key rules.
+
+The only difference: use `agent="claude"` and Claude-specific constants
+(`CLAUDE_MAX_TURNS`, `CLAUDE_POLL_INTERVAL_S`, `CLAUDE_POLL_TIMEOUT_MIN`).
+
+Claude's multi-turn capability means it may produce higher quality output per
+iteration (at the cost of higher latency). With feedback from prior iterations,
+Claude is particularly effective at fixing compilation errors and avoiding
+previously-failed approaches.
 
 ## Behavioral Notes
 
@@ -116,8 +128,10 @@ Same as Codex — no GPU, caller must verify. See [`codex.md`](codex.md) Verific
 - **Tool use**: Claude can read the input file, write intermediate analysis, and
   iterate on the solution within a single task. This makes it better at complex
   optimizations that require structural understanding.
-- **Higher latency**: 1–5 minutes vs Codex's 30–120 seconds. The extra time is
-  spent on multi-step reasoning and internal verification.
+- **Higher latency**: 1–5 minutes vs Codex's 30–120 seconds per iteration. Total
+  round time: ~3–15 min for 3 iterations (vs Codex ~2–6 min).
+- **Feedback responsive**: Claude excels at incorporating iteration feedback —
+  typically fixes compilation errors within 1–2 feedback iterations.
 - **Experimental**: If `agent_create_task(agent="claude")` returns an error, fall
   back to `codex` automatically.
 
@@ -129,8 +143,8 @@ Same as Codex — no GPU, caller must verify. See [`codex.md`](codex.md) Verific
 
 ### Task runs but produces no output file
 - Claude may have spent all turns on analysis without writing a file.
-- Re-submit with a more directive prompt: "Write the optimized kernel NOW to
-  optimized_kernel.py. Do not spend turns on analysis."
+- Feedback context will capture this, and the next iteration prompt will be more
+  directive. If persistent, the early-stop rule (5 consecutive failures) triggers.
 
 ### Other issues
 - Same troubleshooting as Codex (see [`codex.md`](codex.md) Troubleshooting section).
