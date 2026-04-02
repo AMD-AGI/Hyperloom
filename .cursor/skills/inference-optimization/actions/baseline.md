@@ -53,29 +53,60 @@ export VLLM_EXTRA_ARGS="--max-model-len 4096 --enforce-eager"
 bash "$SCRIPTS_DIR/run_baseline.sh"
 ```
 
-### Step 3: Record baseline and capture accuracy reference
+### Step 3: Record baseline throughput
 
 ```bash
 # Extract baseline throughput
 baseline_tput=$(python3 -c "import json; d=json.load(open('$RESULT_DIR/baseline_*.json')); print(d['output_throughput'])")
 baseline_tput_per_gpu=$(python3 -c "print($baseline_tput / $TP)")
+```
 
-# Capture reference output for accuracy gate
-curl -s http://localhost:8888/v1/completions \
+### Step 4: Run baseline accuracy evaluation (GSM8K)
+
+**This is mandatory.** The baseline GSM8K score is the reference for all subsequent
+accuracy gates. Any action with `accuracy_risk > 0` will be compared against this score.
+
+```bash
+# Run GSM8K 5-shot eval against the baseline server
+EVAL_TASK=gsm8k NUM_FEWSHOT=5 PORT=$PORT MODEL=$MODEL \
+  RESULTS_DIR="$RESULT_DIR/eval_gsm8k_baseline" \
+  bash "$SKILL_ROOT/scripts/eval_accuracy.sh"
+
+# Extract baseline accuracy
+baseline_accuracy=$(python3 -c "
+import json, glob
+f = sorted(glob.glob('$RESULT_DIR/eval_gsm8k_baseline/eval_summary_gsm8k.json'))[-1]
+d = json.load(open(f))
+scores = list(d['scores'].values())[0]
+print(scores.get('exact_match,strict-match', scores.get('exact_match,none', 0)))
+")
+echo "Baseline GSM8K accuracy: $baseline_accuracy"
+```
+
+Set `state.baseline_accuracy = baseline_accuracy`. This becomes the hard floor — any
+action that drops accuracy by more than `accuracy_threshold` (default 1 percentage point)
+is automatically reverted.
+
+### Step 5: Capture greedy reference output (fast sanity check)
+
+```bash
+curl -s http://localhost:$PORT/v1/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"'$MODEL'","prompt":"The capital of France is","max_tokens":20,"temperature":0}' \
   > $RESULT_DIR/accuracy_reference.json
 ```
 
-## Accuracy Validation
-Baseline establishes the accuracy reference. No validation needed at this step — all subsequent actions compare against this reference.
+This is a lightweight reference for quick sanity checks during the DFS loop. It does NOT
+replace the GSM8K gate — see the Accuracy Gate Protocol in SKILL.md.
 
 ## Outputs
 - `baseline_tput_per_gpu`: tok/s/GPU
+- `baseline_accuracy`: GSM8K exact_match score (0.0–1.0)
 - `torch_compile_status`: success / failed (with reason)
 - `$RESULT_DIR/baseline_*.json`: benchmark results
 - `$RESULT_DIR/server_baseline.log`: server log
-- `$RESULT_DIR/accuracy_reference.json`: reference output for accuracy gate
+- `$RESULT_DIR/eval_gsm8k_baseline/`: full GSM8K eval results + summary
+- `$RESULT_DIR/accuracy_reference.json`: greedy reference output (fast sanity check)
 - Server stays running for profiling
 
 ## Heuristic Update
