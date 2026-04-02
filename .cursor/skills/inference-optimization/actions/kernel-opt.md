@@ -61,9 +61,9 @@ All active backends run **simultaneously** for every candidate kernel.
 ```
                      ┌─ geak:  single task → poll → done
                      │
-candidate kernel ────┼─ codex: iterative loop (10 iters, each: submit→benchmark→feedback)
+candidate kernel ────┼─ codex: iterative loop (3 iters, each: submit→benchmark→feedback)
                      │
-                     ├─ claude: iterative loop (10 iters, same as codex)
+                     ├─ claude: iterative loop (3 iters, same as codex)
                      │
                      └─ llm:   single API call → done
                      
