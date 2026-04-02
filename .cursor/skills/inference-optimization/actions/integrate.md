@@ -9,16 +9,7 @@ Per-kernel integration phase. Called by `kernel-opt.md` for each GEAK result.
 
 ## Procedure
 
-> **[CLAW MODE]** All patch commands go through `exec_on_gpu`:
-> ```bash
-> exec_on_gpu "python3 $SCRIPTS_DIR/patch_inductor.py patch \
->     --kernel-name $KERNEL_NAME \
->     --geak-file $GEAK_OUTPUT_PATH \
->     --target-file $STANDALONE_FILE_PATH \
->     --best-config '{\"XBLOCK\": 4, \"R0_BLOCK\": 2048, \"num_warps\": 4}'"
-> ```
-> GEAK output is on shared NFS: `/shared_nfs/geak/tasks/<user_hash>/<task_id>/output/`.
-> The `--best-config` JSON values should match the block sizes and warp count from the GEAK-optimized kernel.
+**Claw mode:** All patch, re-baseline, and revert commands go through `exec_on_gpu`. See [`../modes/CLAW.md`](../modes/CLAW.md) "Integrate" section for wrapper syntax and multi-node patching.
 
 ### Choose patching strategy
 
@@ -138,7 +129,6 @@ def get_function_line_range(source, func_name):
 
 **Use `run_baseline.sh` to re-baseline.** There is no `run_benchmark.sh` — `run_baseline.sh` is used for all phases (initial baseline, re-baseline after patching, backend tests). Just change `RESULT_DIR` to distinguish outputs.
 
-**[LOCAL MODE]:**
 ```bash
 # Kill server, extend health timeout for torch.compile recompilation
 kill_server
@@ -147,17 +137,6 @@ export HEALTH_TIMEOUT=1800
 # Re-baseline with EXACTLY same env vars as baseline, only change RESULT_DIR
 export RESULT_DIR="$RESULT_DIR/optimized_${KERNEL_NAME}"
 bash $SCRIPTS_DIR/run_baseline.sh
-```
-
-**[CLAW MODE]:**
-```bash
-exec_on_gpu "
-export HEALTH_TIMEOUT=1800
-export MODEL='$MODEL' TP=$TP CONC=$CONC FRAMEWORK=$FRAMEWORK
-export SGLANG_EXTRA_ARGS='$TUNED_SERVER_ARGS'
-export RESULT_DIR='$RESULT_DIR/optimized_$KERNEL_NAME'
-bash $SCRIPTS_DIR/run_baseline.sh
-"
 ```
 
 **MUST use EXACTLY the same server config AND benchmark params as baseline:**
@@ -180,44 +159,6 @@ else:
     # REVERT: restore .bak files
     revert_all_bak_files()
 ```
-
-### [CLAW] Multi-Node Kernel Patching
-
-For multi-node RayJob, kernel patching requires attention:
-- **Inductor cache** (Strategy A): Cache is local to each node. Must patch on ALL nodes, OR use a shared Inductor cache directory on NFS (`TORCHINDUCTOR_CACHE_DIR=/shared_nfs/inductor_cache`).
-- **Framework source** (Strategy B): If framework is installed on shared NFS, patching on head is sufficient.
-
-For multi-node patching, submit patch command to each node via Ray:
-
-```python
-import ray
-
-@ray.remote
-def patch_on_node(patch_script):
-    import subprocess
-    return subprocess.run(patch_script, shell=True, capture_output=True, text=True)
-
-nodes = ray.nodes()
-futures = [patch_on_node.options(
-    resources={f"node:{node['NodeManagerAddress'].split(':')[0]}": 0.001}
-).remote(patch_script) for node in nodes if node['Alive']]
-results = ray.get(futures)
-```
-
-### [CLAW MODE] Revert on Ray cluster
-
-```bash
-exec_on_gpu "
-# Strategy A (Inductor cache): restore .bak files
-find /tmp/torchinductor_root -name '*.bak' -exec sh -c 'cp \"\$1\" \"\${1%.bak}\"' _ {} \\;
-
-# Strategy B (framework source): restore backup
-cp /path/to/kernel.py.bak /path/to/kernel.py
-find /sgl-workspace/aiter -name '__pycache__' -exec rm -rf {} + 2>/dev/null
-"
-```
-
-For multi-node RayJob, revert on ALL nodes using the same `patch_on_node` pattern above.
 
 ### Re-Baseline: torch.compile recompilation timeout
 

@@ -43,11 +43,7 @@ find /opt/venv -path "*/sglang/srt/layers/*.py" -exec grep -l "@triton.jit" {} \
 find /sgl-workspace/aiter -name "*.py" -exec grep -l "@triton.jit" {} \;
 ```
 
-> **[CLAW MODE]** Kernel source lives on the RayJob. Use `exec_on_gpu` for all find/cat commands:
-> ```bash
-> exec_on_gpu "find /tmp/torchinductor_root -name '*.py' | while read f; do ..."
-> exec_on_gpu "cat /path/to/standalone_kernel.py"
-> ```
+**Claw mode:** Kernel source lives on the RayJob. Use `exec_on_gpu` for all find/cat commands. See [`../modes/CLAW.md`](../modes/CLAW.md) "Kernel Optimization" section.
 
 ### Step 2: Submit ALL top candidates to GEAK in parallel
 
@@ -71,7 +67,7 @@ See `GEAK-INFERENCE-KERNEL.md` for full prompt templates.
 
 Additional rules:
 4. **Always say "Do NOT search the filesystem with find / or grep -r /"** — GEAK agents default to broad filesystem searches which hang 30+ min on NFS.
-5. **Always pass framework image** — In claw mode, use `GEAK_IMAGE_SGLANG_RAY` (for SGLang) or `GEAK_IMAGE_VLLM` (for vLLM). In local mode, use `GEAK_IMAGE_SGLANG` or `GEAK_IMAGE_VLLM`, or skip image if `GEAK_LOCAL=true`.
+5. **Always pass framework image** — Use `GEAK_IMAGE_SGLANG` or `GEAK_IMAGE_VLLM`. In claw mode, use `GEAK_IMAGE_SGLANG_RAY` instead (see [`../modes/CLAW.md`](../modes/CLAW.md)). In local mode with `GEAK_LOCAL=true`, image is optional.
 6. **Always embed full source in `files[].content`** — GEAK always receives the kernel source via `files[].content`. If the path also exists in the image, include it in the prompt for GEAK's preprocessor. If the path is runtime-generated, `files[].content` is the sole source of truth.
 
 ### Step 3: Verify + Patch each result individually
