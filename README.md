@@ -2,9 +2,9 @@
 
 An agentic system that autonomously optimizes LLM inference and training on AMD GPUs. Hyperloom treats optimization as a **search problem**: given a workload, it builds a tree of candidate optimizations — backend swaps, server parameters, GEMM tuning, kernel rewrites, parallelism configs — scores each by expected gain and cost, then explores depth-first, always measuring against the real workload. Simply provide your workload and the agent delivers a fully optimized codebase — profiling against peak hardware potential, identifying bottlenecks, and iteratively rewriting code to maximize throughput on AMD GPUs, so the team gets production-ready optimized code.
 
-<img width="500" height="400" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" />
+<p align="center"><img width="500" height="400" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" /></p>
 
-Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens-internal/), capture bottlenecks and roofline targets.
+Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens-internal/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets.
 
 Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scored tree of candidates — config overrides, code patches, backend switches, kernel rewrites — and explores depth-first, one change at a time: **Think → Implement → Benchmark → Decide**. Each result re-scores the remaining tree. In parallel, hot kernels are asynchronously optimized via external backends ([GEAK](https://github.com/AMD-AGI/GEAK/tree/main), Claude Code, OpenAI Codex) and patched back in.
 
@@ -36,11 +36,13 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 
 1. Go to **[oci-slc.primus-safe.amd.com/hyperloom](https://oci-slc.primus-safe.amd.com/hyperloom/)**
 2. Select **Claw Agent** or **Get Started** from the landing page to enter PrimusClaw
-   ![Hyperloom Landing](slides/hyperloom_landing.png)
-3. Hyperloom (tab): End-to-end Model Performance/gap analysis and code/kernel optimization
-   ![Hyperloom PrimusClaw UI](slides/hyperloom_claw_quickstart.png)
-4. TraceLens (tab): Model Performance/gap analysis and bridge planning
-5. GEAK: Kernel optimization
+   <p align="center"><img width="500" alt="Hyperloom Landing" src="slides/hyperloom_landing.png" /></p>
+3. Hyperloom (tab): End-to-end Model Performance Optimization
+   <p align="center"><img width="500" alt="Hyperloom PrimusClaw UI" src="slides/hyperloom_claw_quickstart.png" /></p>
+4. TraceLens-only (tab): Model Performance/gap analysis and bridge planning
+   <p align="center"><img width="500" alt="TraceLens Config" src="slides/tracelens_quickstart.png" /></p>
+5. GEAK-only: Kernel optimization
+   <p align="center"><img width="500" alt="GEAK Config" src="slides/geak_quickstart.png" /></p>
 
 ---
 
