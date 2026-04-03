@@ -75,7 +75,6 @@ InferenceX: /path/to/InferenceX
 @.cursor/skills/training-optimization/SKILL.md
 Optimize GPT-OSS 20B training on 8x MI355X.
 Config: examples/megatron/configs/MI355X/gpt_oss_20B-BF16-pretrain.yaml
-Results: /shared_nfs/nehaprakriya/results/gpt_oss/
 ```
 
 The agent takes it from there — baseline, profile, loop, report.
