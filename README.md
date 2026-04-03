@@ -8,7 +8,7 @@ Block 1-3 - Workload understanding and profiling: Submit your workload as the st
 
 Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scored tree of candidates — config overrides, code patches, backend switches, kernel rewrites — and explores depth-first, one change at a time: **Think → Implement → Benchmark → Decide**. Each result re-scores the remaining tree. In parallel, hot kernels are asynchronously optimized via external backends ([GEAK](https://github.com/AMD-AGI/GEAK/tree/main), Claude Code, OpenAI Codex) and patched back in.
 
-Block 7-8 - Validated Delivery: The agent optimizes for throughput while maintaining accuracy — every change is correctness-gated before acceptance. Once the loop exits, the agent packages the optimized code, submits a PR to your repo, and merges into your codebase, completing the full loop.
+Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintaining accuracy — every change is correctness-gated before acceptance. Once the loop exits, the agent packages the optimized code, submits a PR to your repo, and merges into your codebase, completing the full loop.
 
 ### Learn More
 
@@ -37,8 +37,10 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 1. Go to **[oci-slc.primus-safe.amd.com/hyperloom](https://oci-slc.primus-safe.amd.com/hyperloom/)**
 2. Select **Claw Agent** or **Get Started** from the landing page to enter PrimusClaw
    ![Hyperloom Landing](slides/hyperloom_landing.png)
-3. Start chatting — the Quick Start panel offers guided options and example tasks
+3. Hyperloom (tab): End-to-end Model Performance/gap analysis and code/kernel optimization
    ![Hyperloom PrimusClaw UI](slides/hyperloom_claw_quickstart.png)
+4. TraceLens (tab): Model Performance/gap analysis and bridge planning
+5. GEAK: Kernel optimization
 
 ---
 
