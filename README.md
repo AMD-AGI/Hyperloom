@@ -21,12 +21,19 @@ Block 7-8 - Validated Delivery: The agent optimizes for throughput while maintai
 
 ---
 
-## Quickstart — Hyperloom UI
+## Quickstart — Hyperloom UI (PrimusClaw)
 
-The fastest way to start is through the hosted **AMD Hyperloom** web interface:
+The fastest way to start is through the hosted **AMD Hyperloom** web interface — powered by **PrimusClaw**, the hosted online mode designed for **large-scale reachability**. Any team member can launch an optimization through the browser without local GPU setup or environment configuration.
 
-1. Go to **[oci-slc.primus-safe.amd.com/hyperloom](https://oci-slc.primus-safe.amd.com/hyperloom/)**
-2. Select **[PrimusClaw](https://oci-slc.primus-safe.amd.com/hyperloom/claw)** from the sidebar
+- **Easy to scale** — each job runs in isolated sandboxed containers (GPU or CPU). Single-node optimizations run in-sandbox; multi-node workloads fan out via RayJob for distributed benchmarking.
+- **Data flywheel** — every optimization run feeds results back through Minio storage and Langfuse observability, creating a closed feedback loop that continuously improves the agent's knowledge base and scoring heuristics.
+- **Full MCP + Skills support** — sandboxes connect to BenchMark/RayJob, TraceLens Jarvis, GEAK, OOB, and InferenceX via MCP (local and remote), and load optimization Skills on demand, giving the agent the same profiling, kernel-rewrite, and domain-specific capabilities at cloud scale.
+
+1. Go to **[oci-slc.primus-safe.amd.com/hyperloom](https://oci-slc.primus-safe.amd.com/hyperloom/)** and bind your LLM Gateway key to Hyperloom
+2. Select **Claw Agent** or **Get Started** from the landing page to enter PrimusClaw
+
+![Hyperloom Landing](slides/hyperloom_landing.png)
+
 3. Start chatting — the Quick Start panel offers guided options and example tasks
 
 ![Hyperloom PrimusClaw UI](slides/hyperloom_claw_quickstart.png)
@@ -53,8 +60,6 @@ Update the GEAK authorization key in `.cursor/mcp.json`:
   }
 }
 ```
-
-TraceLens requires Node.js (uses `npx mcp-remote` transport).
 
 ### 2. Environment
 
