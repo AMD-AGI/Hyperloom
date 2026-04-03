@@ -25,7 +25,7 @@
 
   <!-- Title -->
   <text x="700" y="40" text-anchor="middle" fill="#f8fafc" font-size="24" font-weight="700">Workload Optimization: Iterative Closed-Loop Architecture</text>
-  <text x="700" y="62" text-anchor="middle" fill="#94a3b8" font-size="13">Agent-driven optimization with MCP tool integrations (TraceLens Jarvis + GEAK / Claude / OpenAI)</text>
+  <text x="700" y="62" text-anchor="middle" fill="#94a3b8" font-size="13">Agent-driven optimization with MCP tool integrations (TraceLens Agentic Analysis + GEAK / Claude / OpenAI)</text>
 
   <!-- ============================================================ -->
   <!-- ROW 1: SETUP PHASE (horizontal, top)                         -->
@@ -63,13 +63,13 @@
 
   <line x1="730" y1="142" x2="760" y2="142" stroke="#3b82f6" stroke-width="2" marker-end="url(#ab)"/>
 
-  <!-- TraceLens Jarvis -->
+  <!-- TraceLens Agentic Analysis -->
   <rect x="760" y="110" width="160" height="56" rx="10" fill="#172554" stroke="#3b82f6" stroke-width="2" filter="url(#sh)"/>
   <text x="780" y="128" fill="#3b82f6" font-size="8" font-weight="700">MCP SERVER</text>
-  <text x="840" y="142" text-anchor="middle" fill="#93c5fd" font-size="12" font-weight="700">TraceLens Jarvis</text>
+  <text x="840" y="142" text-anchor="middle" fill="#93c5fd" font-size="12" font-weight="700">TraceLens Agentic Analysis</text>
   <text x="840" y="158" text-anchor="middle" fill="#60a5fa" font-size="8">run_full_standalone_analysis</text>
 
-  <!-- Jarvis -> Magpie call -->
+  <!-- TraceLens -> Magpie call -->
   <line x1="920" y1="138" x2="940" y2="138" stroke="#3b82f6" stroke-width="2" marker-end="url(#ab)"/>
 
   <!-- Magpie -->
@@ -216,7 +216,7 @@
   <text x="90" y="728" fill="#f87171" font-size="10">1. Plateau: last 5 under 0.5% gain</text>
   <text x="90" y="748" fill="#f87171" font-size="10">2. Two or more crashes</text>
   <text x="90" y="768" fill="#f87171" font-size="10">3. Three consecutive discards</text>
-  <text x="310" y="728" fill="#f87171" font-size="10">4. Roofline from Jarvis</text>
+  <text x="310" y="728" fill="#f87171" font-size="10">4. Roofline from TraceLens</text>
 
   <!-- Arrow from loop to stopping -->
   <line x1="250" y1="620" x2="250" y2="680" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="4,3"/>
@@ -268,7 +268,7 @@
   <rect x="1140" y="733" width="220" height="88" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1"/>
   <text x="1250" y="753" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600">Agent Skills (4)</text>
   <text x="1155" y="772" fill="#94a3b8" font-size="9">1. Optimization loop + orchestration</text>
-  <text x="1155" y="788" fill="#94a3b8" font-size="9">2. TraceLens Jarvis</text>
+  <text x="1155" y="788" fill="#94a3b8" font-size="9">2. TraceLens Agentic Analysis</text>
   <text x="1155" y="804" fill="#94a3b8" font-size="9">3. Magpie</text>
   <text x="1155" y="820" fill="#94a3b8" font-size="9">4. Kernel Optimization (GEAK / Claude / OpenAI)</text>
 
