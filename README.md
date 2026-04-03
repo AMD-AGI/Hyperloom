@@ -9,42 +9,9 @@ Block 1-3 - Workload understanding and profiling: Submit your workload as the st
 
 Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scored tree of candidates — config overrides, code patches, backend switches, kernel rewrites — and explores depth-first, one change at a time: **Think → Implement → Benchmark → Decide**. Each result re-scores the remaining tree. In parallel, hot kernels are asynchronously optimized via external backends ([GEAK](https://github.com/AMD-AGI/GEAK/tree/main), Claude Code, OpenAI Codex) and patched back in.
 
-Block 7-8 - Validated Delivery: The agent optimizes for throughput while maintaining accuracy — every change is correctness-gated before acceptance. Once the loop exits, the agent packages the optimized code, submits a PR to your repo, and merges into your codebase (vLLM, SGLang, or other), completing the full cycle.
+Block 7-8 - Validated Delivery: The agent optimizes for throughput while maintaining accuracy — every change is correctness-gated before acceptance. Once the loop exits, the agent packages the optimized code, submits a PR to your repo, and merges into your codebase, completing the full loop.
 
-**Read more:** [TraceLens Agent](https://github.com/AMD-AGI/TraceLens-internal) · [GEAK Agent](https://github.com/AMD-AGI/GEAK/tree/main)
 
-**Scope:**
-
-Framework: vLLM and SGLang
-
-Kernel Languages: HIP and Triton
-
-Workloads: Inference and Training
-
-## Key Results
-
-### Inference Optimization — InferenceX Challenge
-
-PRISM optimized 4 flagship models for the [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) benchmark on AMD Instinct MI355X, matching target performance on 3 out of 4 models.
-
-| Model | Best tok/s/GPU | vs MI355X Baseline | vs NVIDIA B200 |
-|-------|---------------:|:------------------:|:--------------:|
-| DeepSeek-R1-0528 (671B MoE) | **1,476** | — | **+97% ahead** |
-| GLM-5-FP8 (756B MoE+NSA) | **509** | **+193%** | **+27% ahead** |
-| Qwen3.5-397B (397B MoE) | **350** | **+40%** | **+2.5% ahead** |
-| MiniMax-M2.5 (MoE 256E) | **2,276** | **+6.5%** | **+5.7% ahead** |
-
-All benchmarks: ISL=1024, OSL=1024 on MI355X (gfx950). "vs B200" shows best concurrency point. Full concurrency/ISL/OSL sweeps, patches, configs, and reproduction scripts: **[Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX)**.
-
-### Training Optimization
-
-| Workload | GPUs | Baseline | Optimized | Speedup | Attempts |
-|----------|------|----------|-----------|---------|----------|
-| GPT-OSS 20B (MoE, BF16) | 8x MI355X | 13,708 ms/iter | 13,060 ms/iter | **+4.7%** | 57 (4hr) |
-| GPT-OSS 20B (MoE, BF16) | 8x MI355X | 13,265 ms/iter | 13,042 ms/iter | **+1.7%** | 9 (1hr) |
-| Qwen3 8B (full finetune) | 8x MI355X | 863 tok/s/gpu | 18,860 tok/s/gpu | **+2,085%** | 19 |
-| Qwen3 32B (LoRA) | 8x MI355X | 467 tok/s/gpu | 4,984 tok/s/gpu | **+967%** | 19 |
-| Llama 4 Scout 17B-16E (MoE) | 8x MI355X | 20 tok/s/gpu | 170 tok/s/gpu | **+750%** | 18 |
 
 ---
 
@@ -114,6 +81,32 @@ Results: /shared_nfs/nehaprakriya/results/gpt_oss/
 The agent takes it from there — baseline, profile, loop, report.
 
 ---
+
+## Key Results
+
+### Inference Optimization — InferenceX Challenge
+
+PRISM optimized 4 flagship models for the [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) benchmark on AMD Instinct MI355X, matching target performance on 3 out of 4 models.
+
+| Model | Best tok/s/GPU | vs MI355X Baseline | vs NVIDIA B200 |
+|-------|---------------:|:------------------:|:--------------:|
+| DeepSeek-R1-0528 (671B MoE) | **1,476** | — | **+97% ahead** |
+| GLM-5-FP8 (756B MoE+NSA) | **509** | **+193%** | **+27% ahead** |
+| Qwen3.5-397B (397B MoE) | **350** | **+40%** | **+2.5% ahead** |
+| MiniMax-M2.5 (MoE 256E) | **2,276** | **+6.5%** | **+5.7% ahead** |
+
+All benchmarks: ISL=1024, OSL=1024 on MI355X (gfx950). "vs B200" shows best concurrency point. Full concurrency/ISL/OSL sweeps, patches, configs, and reproduction scripts: **[Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX)**.
+
+### Training Optimization
+
+| Workload | GPUs | Baseline | Optimized | Speedup | Attempts |
+|----------|------|----------|-----------|---------|----------|
+| GPT-OSS 20B (MoE, BF16) | 8x MI355X | 13,708 ms/iter | 13,060 ms/iter | **+4.7%** | 57 (4hr) |
+| GPT-OSS 20B (MoE, BF16) | 8x MI355X | 13,265 ms/iter | 13,042 ms/iter | **+1.7%** | 9 (1hr) |
+| Qwen3 8B (full finetune) | 8x MI355X | 863 tok/s/gpu | 18,860 tok/s/gpu | **+2,085%** | 19 |
+| Qwen3 32B (LoRA) | 8x MI355X | 467 tok/s/gpu | 4,984 tok/s/gpu | **+967%** | 19 |
+| Llama 4 Scout 17B-16E (MoE) | 8x MI355X | 20 tok/s/gpu | 170 tok/s/gpu | **+750%** | 18 |
+
 
 ## Detailed Skill Documentation
 
