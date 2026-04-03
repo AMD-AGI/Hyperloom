@@ -80,6 +80,8 @@ Results: /shared_nfs/nehaprakriya/results/gpt_oss/
 
 The agent takes it from there — baseline, profile, loop, report.
 
+**New to Hyperloom?** See the **[Inference Quick Start Guide](QUICKSTART_INFERENCE.md)** — a complete walkthrough of how we optimized gpt-oss-120b to beat the B200 by 34%, with step-by-step instructions for running the skill on your own model.
+
 ---
 
 ## Key Results
@@ -94,8 +96,9 @@ PRISM optimized 4 flagship models for the [InferenceX](https://github.com/SemiAn
 | GLM-5-FP8 (756B MoE+NSA) | **509** | **+193%** | **+27% ahead** |
 | Qwen3.5-397B (397B MoE) | **350** | **+40%** | **+2.5% ahead** |
 | MiniMax-M2.5 (MoE 256E) | **2,276** | **+6.5%** | **+5.7% ahead** |
+| gpt-oss-120b (120B MoE, mxfp4) | **11,643** | — | **+34% ahead** |
 
-All benchmarks: ISL=1024, OSL=1024 on MI355X (gfx950). "vs B200" shows best concurrency point. Full concurrency/ISL/OSL sweeps, patches, configs, and reproduction scripts: **[Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX)**.
+All benchmarks: ISL=1024, OSL=1024 on MI355X (gfx950). "vs B200" shows best concurrency point. Full concurrency/ISL/OSL sweeps, patches, configs, and reproduction scripts: **[Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX)**. For deep dives into how the agent found these optimizations, see the case studies: **[GLM-5](docs/CASE_STUDY_GLM5.md)** (cross-repo GEMM discovery + kernel patches) and **[DeepSeek-R1](docs/CASE_STUDY_DEEPSEEK_R1.md)** (fast config-space exploration + MTP scheduling fix).
 
 ### Training Optimization
 
