@@ -21,6 +21,12 @@ Block 7-8 - Validated Delivery: The agent optimizes for throughput while maintai
 
 ---
 
+## Prerequisites
+
+Bind your **[LLM Gateway](https://llm.amd.com/)** key to **[Hyperloom](https://oci-slc.primus-safe.amd.com/hyperloom/)** to obtain your `AK_Your_API_KEY`. This key is required for both the Hyperloom UI and the local optimization workflow — it provides access to TraceLens, GEAK, and OOB services.
+
+---
+
 ## Quickstart — Hyperloom UI (PrimusClaw)
 
 The fastest way to start is through the hosted **AMD Hyperloom** web interface — powered by **PrimusClaw**, the hosted online mode designed for **large-scale reachability**. Any team member can launch an optimization through the browser without local GPU setup or environment configuration.
@@ -29,7 +35,7 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 - **Data flywheel** — every optimization run feeds results back through Minio storage and Langfuse observability, creating a closed feedback loop that continuously improves the agent's knowledge base and scoring heuristics.
 - **Full MCP + Skills support** — sandboxes connect to BenchMark/RayJob, TraceLens Jarvis, GEAK, OOB, and InferenceX via MCP (local and remote), and load optimization Skills on demand, giving the agent the same profiling, kernel-rewrite, and domain-specific capabilities at cloud scale.
 
-1. Go to **[oci-slc.primus-safe.amd.com/hyperloom](https://oci-slc.primus-safe.amd.com/hyperloom/)** and bind your LLM Gateway key to Hyperloom
+1. Go to **[oci-slc.primus-safe.amd.com/hyperloom](https://oci-slc.primus-safe.amd.com/hyperloom/)**
 2. Select **Claw Agent** or **Get Started** from the landing page to enter PrimusClaw
 
 ![Hyperloom Landing](slides/hyperloom_landing.png)
@@ -55,7 +61,7 @@ Update the GEAK authorization key in `.cursor/mcp.json`:
 {
   "geak-agent": {
     "headers": {
-      "Authorization": "$YOUR_KEY"
+      "Authorization": "$AK_Your_API_KEY"
     }
   }
 }
@@ -63,9 +69,16 @@ Update the GEAK authorization key in `.cursor/mcp.json`:
 
 ### 2. Environment
 
+A GPU node is required to run benchmarks. You can either use a local GPU machine or request an Authoring Pod on **[Primus-SaFE](https://oci-slc.primus-safe.amd.com/authoring)**. For example, an inference optimization workload typically runs on an image like:
+
+```bash
+docker run --rm -it --device=/dev/kfd --device=/dev/dri --group-add video \
+  rocm/sgl-dev:v0.5.9-rocm720-mi35x-20260324
+```
+
 ```bash
 cp .env.template .env
-# Edit .env — set GEAK auth key and LiteLLM API key
+# Edit .env — set AK_Your_API_KEY for TraceLens, GEAK, and OOB
 ```
 
 ### 3. Run an Optimization
