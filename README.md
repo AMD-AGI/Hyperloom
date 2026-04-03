@@ -4,9 +4,9 @@ An agentic system that autonomously optimizes LLM inference and training on AMD 
 
 <img width="500" height="400" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" />
 
-Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Jarvis](https://github.com/AMD-AGI/TraceLens-internal), capture bottlenecks and roofline targets.
+Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Jarvis](https://github.com/AMD-AGI/TraceLens-internal) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets.
 
-Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scored tree of candidates — config overrides, code patches, backend switches, kernel rewrites — and explores depth-first, one change at a time: **Think → Implement → Benchmark → Decide**. Each result re-scores the remaining tree. In parallel, hot kernels are asynchronously optimized via external backends ([GEAK](https://github.com/AMD-AGI/GEAK/tree/main), Claude Code, OpenAI Codex) and patched back in.
+Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scored tree of candidates — config overrides, code patches, backend switches, kernel rewrites — and explores depth-first, one change at a time: **Think → Implement → Benchmark → Decide**. Each result re-scores the remaining tree. In parallel, hot kernels are asynchronously optimized via external backends ([GEAK](https://github.com/AMD-AGI/GEAK/tree/main), and OOB kernel optimization via Claude Code and OpenAI Codex relying on kernel optimization flow of [Apex](https://github.com/AMD-AGI/Apex)). Kernel profiling and validation is powered by [Magpie](https://github.com/AMD-AGI/Magpie), which relies on [IntelliKit](https://github.com/AMDResearch/intellikit) for some of low-level GPU profiling tools.
 
 Block 7-8 - Validated Delivery: The agent optimizes for throughput while maintaining accuracy — every change is correctness-gated before acceptance. Once the loop exits, the agent packages the optimized code, submits a PR to your repo, and merges into your codebase, completing the full loop.
 
@@ -48,7 +48,7 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 
 Hyperloom uses two external tools as MCP servers, configured in `.cursor/mcp.json`:
 
-- **TraceLens (Jarvis)** — for profiling analysis (kernel breakdown, roofline modeling). Used during the profile phase.
+- **TraceLens (Jarvis)** — for profiling analysis (kernel breakdown, roofline modeling). Relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection. Used during the profile phase.
 - **GEAK** — for kernel-level optimization (rewrites Triton/HIP source). Used when the agent identifies hot custom kernels worth optimizing.
 
 Update the GEAK authorization key in `.cursor/mcp.json`:
