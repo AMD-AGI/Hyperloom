@@ -49,6 +49,7 @@ ax.text(0.5, 1.005, 'CONC=64  ·  ISL/OSL=1024  ·  MTP speculative decoding',
         transform=ax.transAxes, ha='center', fontsize=9, color='#484f58')
 
 fig.tight_layout()
-out = '/shared_nfs/nehaprakriya/Hyperloom/docs/figs/deepseek_r1_comparison.png'
+import os
+out = os.path.join(os.path.dirname(__file__), '..', 'docs', 'figs', 'deepseek_r1_comparison.png')
 fig.savefig(out, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
 print(f'Saved to {out}')

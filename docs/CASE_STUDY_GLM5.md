@@ -91,7 +91,8 @@ In return, GLM-5's findings — the super-linear backend synergy, the missing GE
 ## Reproduce
 
 ```bash
-cd /shared_nfs/nehaprakriya/Agentic-InferenceX/glm5-optimized
+git clone https://github.com/AMD-AGI/Agentic-InferenceX.git
+cd Agentic-InferenceX/glm5-optimized
 bash scripts/apply_patches.sh                  # GEMM config + kernel patch + stability fix
 bash scripts/launch_server.sh --background     # TP=4, 4x MI355X
 bash scripts/run_benchmark.sh                  # Expected: ~2,039 tok/s (509 tok/s/GPU)
