@@ -118,7 +118,7 @@
   <text x="635" y="477" fill="#fed7aa" font-size="10">Metric: ms/iter (lower = better)  "  Config overrides + code patches + kernels</text>
 
   <rect x="625" y="492" width="510" height="28" rx="5" fill="#351c06"/>
-  <text x="635" y="511" fill="#fed7aa" font-size="10">MCP: TraceLens Jarvis (profiling analysis) + GEAK (kernel optimization)</text>
+  <text x="635" y="511" fill="#fed7aa" font-size="10">MCP: TraceLens Agentic Analysis (profiling analysis) + GEAK (kernel optimization)</text>
 
   <rect x="625" y="526" width="510" height="28" rx="5" fill="#351c06"/>
   <text x="635" y="545" fill="#fed7aa" font-size="10">Domain knowledge base: validated overrides, known pitfalls, kernel guide</text>
