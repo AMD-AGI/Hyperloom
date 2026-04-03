@@ -28,7 +28,7 @@ Bind your **[LLM Gateway](https://llm.amd.com/)** key to **[Hyperloom](https://o
 
 ## Quickstart — Hyperloom UI (PrimusClaw)
 
-The fastest way to start is through the hosted **AMD Hyperloom** web interface — powered by **PrimusClaw**, the hosted online mode designed for **large-scale reachability**. Any team member can launch an optimization through the browser without local GPU setup or environment configuration.
+The fastest way to start is through the hosted **AMD Hyperloom** web interface — powered by **[PrimusClaw](https://github.com/AMD-AGI/Primus-Claw)**, the hosted online mode designed for **large-scale reachability**. Any team member can launch an optimization through the browser without local GPU setup or environment configuration.
 
 - **Easy to scale** — each job runs in isolated sandboxed containers (GPU or CPU). Single-node optimizations run in-sandbox; multi-node workloads fan out via RayJob for distributed benchmarking.
 - **Data flywheel** — every optimization run feeds results back through Minio storage and Langfuse observability, creating a closed feedback loop that continuously improves the agent's knowledge base and scoring heuristics.
