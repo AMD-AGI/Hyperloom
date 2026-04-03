@@ -80,6 +80,14 @@ All values in tok/s/GPU. ISL=1024, OSL=1024, FP8 weights.
 
 ---
 
+## Getting Faster Over Time
+
+The GLM-5 run was not the agent's first optimization. Prior runs on DeepSeek-R1, Kimi-K2.5, Qwen3, and others had already populated a structured knowledge base with validated lessons — "torch.compile is incompatible with MLA+FP8," "vendor aiter kernels resist rewriting," "backend switches outperform parameter sweeps on MoE models." These entries pruned dead branches before the first benchmark: the agent never attempted torch.compile on GLM-5 and deprioritized vendor kernel modifications, saving hours of exploration.
+
+In return, GLM-5's findings — the super-linear backend synergy, the missing GEMM config pattern, the FP8 kernel eviction trick — were ingested back into the knowledge base. Future MoE+MLA+NSA models will start with higher-confidence priors for these actions, converging faster than GLM-5 did.
+
+---
+
 ## Reproduce
 
 ```bash
