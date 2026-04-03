@@ -11,7 +11,13 @@ Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scor
 
 Block 7-8 - Validated Delivery: The agent optimizes for throughput while maintaining accuracy — every change is correctness-gated before acceptance. Once the loop exits, the agent packages the optimized code, submits a PR to your repo, and merges into your codebase, completing the full loop.
 
+### Learn More
 
+| | |
+|---|---|
+| **[How the Optimization Loop Works](docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md)** | Scoring heuristics, stack mechanics, dynamic branching, and the self-evolving knowledge base |
+| **[GLM-5 — Discovering Optimizations Hard to Spot Manually](docs/CASE_STUDY_GLM5.md)** | Hidden GEMM configs, cross-repo kernel patches, +193% throughput |
+| **[DeepSeek-R1 — Fast Scale-Up on a New Workload](docs/CASE_STUDY_DEEPSEEK_R1.md)** | 7 configs to optimal in one session, MTP scheduling fix, +97% over B200 |
 
 ---
 
@@ -79,8 +85,6 @@ Config: examples/megatron/configs/MI355X/gpt_oss_20B-BF16-pretrain.yaml
 
 The agent takes it from there — baseline, profile, loop, report.
 
-**New to Hyperloom?** See the **[Inference Quick Start Guide](QUICKSTART_INFERENCE.md)** — a complete walkthrough of how we optimized gpt-oss-120b to beat the B200 by 34%, with step-by-step instructions for running the skill on your own model. For a deeper look at how the optimization loop works — scoring, stack mechanics, dynamic branching — see **[How the Optimization Loop Works](docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md)**.
-
 ---
 
 ## Key Results
@@ -97,7 +101,7 @@ PRISM optimized 4 flagship models for the [InferenceX](https://github.com/SemiAn
 | MiniMax-M2.5 (MoE 256E) | **2,276** | **+6.5%** | **+5.7% ahead** |
 | gpt-oss-120b (120B MoE, mxfp4) | **11,643** | — | **+34% ahead** |
 
-All benchmarks: ISL=1024, OSL=1024 on MI355X (gfx950). "vs B200" shows best concurrency point. Full concurrency/ISL/OSL sweeps, patches, configs, and reproduction scripts: **[Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX)**. For deep dives into how the agent found these optimizations, see the case studies: **[GLM-5](docs/CASE_STUDY_GLM5.md)** (cross-repo GEMM discovery + kernel patches) and **[DeepSeek-R1](docs/CASE_STUDY_DEEPSEEK_R1.md)** (fast config-space exploration + MTP scheduling fix).
+All benchmarks: ISL=1024, OSL=1024 on MI355X (gfx950). "vs B200" shows best concurrency point. Full concurrency/ISL/OSL sweeps, patches, configs, and reproduction scripts: **[Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX)**.
 
 ### Training Optimization
 
