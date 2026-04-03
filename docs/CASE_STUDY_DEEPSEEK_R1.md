@@ -67,7 +67,8 @@ DeepSeek-R1's findings fed back: the MTP scheduling interaction (TTFT spike unde
 ## Reproduce
 
 ```bash
-cd /shared_nfs/nehaprakriya/Agentic-InferenceX/DeepSeek-R1-0528-optimized
+git clone https://github.com/AMD-AGI/Agentic-InferenceX.git
+cd Agentic-InferenceX/DeepSeek-R1-0528-optimized
 bash scripts/launch_server.sh --background mtp    # MTP-optimized config
 bash scripts/run_sweep.sh                          # Full concurrency sweep
 ```

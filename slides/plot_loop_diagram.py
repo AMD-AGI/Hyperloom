@@ -87,6 +87,7 @@ ax.text(3.55, 4.25, 'DFS LOOP', fontsize=10, fontweight='bold', color='#ff6e40',
         ha='left', va='center', alpha=0.5)
 
 fig.tight_layout()
-out = '/shared_nfs/nehaprakriya/Hyperloom/docs/figs/optimization_loop.png'
+import os
+out = os.path.join(os.path.dirname(__file__), '..', 'docs', 'figs', 'optimization_loop.png')
 fig.savefig(out, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
 print(f'Saved to {out}')
