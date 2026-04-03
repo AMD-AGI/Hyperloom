@@ -22,7 +22,7 @@ Block 7-8 - Validated Delivery: The agent optimizes for throughput while maintai
 
 ## Prerequisites
 
-Bind your **[LLM Gateway](https://llm.amd.com/)** key to **[Hyperloom](https://oci-slc.primus-safe.amd.com/hyperloom/)** to obtain your `AK_Your_API_KEY`. This key is required for both the Hyperloom UI and the local optimization workflow — it provides access to TraceLens, GEAK, and OOB services.
+Bind your **[LLM Gateway](https://llm.amd.com/)** key to **[Hyperloom](https://oci-slc.primus-safe.amd.com/hyperloom/)** to obtain your `AK_YOUR_API_KEY`. This key is required for both the Hyperloom UI and the local optimization workflow — it provides access to TraceLens, GEAK, and OOB services.
 
 ---
 
@@ -57,7 +57,7 @@ Update the GEAK authorization key in `.cursor/mcp.json`:
 {
   "geak-agent": {
     "headers": {
-      "Authorization": "$AK_Your_API_KEY"
+      "Authorization": "$AK_YOUR_API_KEY"
     }
   }
 }
@@ -76,7 +76,7 @@ Then configure your API key:
 
 ```bash
 cp .env.template .env
-# Edit .env — set AK_Your_API_KEY for TraceLens, GEAK, and OOB
+# Edit .env — set AK_YOUR_API_KEY for TraceLens, GEAK, and OOB
 ```
 
 ### 3. Run an Optimization
