@@ -80,7 +80,7 @@ Results: /shared_nfs/nehaprakriya/results/gpt_oss/
 
 The agent takes it from there — baseline, profile, loop, report.
 
-**New to Hyperloom?** See the **[Inference Quick Start Guide](QUICKSTART_INFERENCE.md)** — a complete walkthrough of how we optimized gpt-oss-120b to beat the B200 by 34%, with step-by-step instructions for running the skill on your own model.
+**New to Hyperloom?** See the **[Inference Quick Start Guide](QUICKSTART_INFERENCE.md)** — a complete walkthrough of how we optimized gpt-oss-120b to beat the B200 by 34%, with step-by-step instructions for running the skill on your own model. For a deeper look at how the optimization loop works — scoring, stack mechanics, dynamic branching — see **[How the Optimization Loop Works](docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md)**.
 
 ---
 
