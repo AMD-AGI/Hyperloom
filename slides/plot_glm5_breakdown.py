@@ -49,6 +49,7 @@ ax.text(0.5, 1.01, 'CONC=64  ·  ISL/OSL=1024',
         transform=ax.transAxes, ha='center', fontsize=9, color='#484f58')
 
 fig.tight_layout()
-out = '/shared_nfs/nehaprakriya/Hyperloom/docs/figs/glm5_optimization_breakdown.png'
+import os
+out = os.path.join(os.path.dirname(__file__), '..', 'docs', 'figs', 'glm5_optimization_breakdown.png')
 fig.savefig(out, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
 print(f'Saved to {out}')
