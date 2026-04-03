@@ -102,7 +102,7 @@ ls /tmp/torchinductor_*/*/triton/*.py
 ### PREFERRED: Auto-Extract from torch.compile (Inductor)
 
 **This is the recommended approach** when the training stack supports `torch.compile`. Instead of hand-writing Triton kernels, use `torch.compile` to generate them automatically. One run gives you BOTH:
-1. Profiler trace (for Jarvis/TraceLens)
+1. Profiler trace (for TraceLens)
 2. Inductor-generated Triton kernels (for GEAK)
 
 **Note:** For distributed training (e.g., Primus/Megatron with `torchrun`), `torch.compile` extraction is harder to integrate — graph breaks are common with distributed ops. In that case, use manual extraction (below) with kernels found via the profiling trace from Step 3 of the main skill.
