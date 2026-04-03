@@ -1,50 +1,17 @@
 # ROCm Hyperloom
 
+An agentic system that autonomously optimizes LLM inference and training on AMD GPUs. Hyperloom treats optimization as a **search problem**: given a workload, it builds a tree of candidate optimizations — backend swaps, server parameters, GEMM tuning, kernel rewrites, parallelism configs — scores each by expected gain and cost, then explores depth-first, always measuring against the real workload. Simply provide your workload and the agent delivers a fully optimized codebase — profiling against peak hardware potential, identifying bottlenecks, and iteratively rewriting code to maximize throughput on AMD GPUs, so the team gets production-ready optimized code.
 
-**Blocks 1–4: Automated Workload Analysis & Planning (TraceLens Agent)**
-ROCm Hyperloom agent fully automates the journey from raw workload input to a prioritized optimization plan, no manual profiling or gap analysis required. Simply provide your workload and the agent handles model performance analysis, identifies gaps against peak hardware potential, and produces a ranked bridge plan that tells you exactly where optimization will have the highest impact. This dramatically reduces the time engineers spend figuring out what to optimize, so the team can focus entirely on execution.
+<img width="500" height="400" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" />
 
-Block 1 - Workload Ingestion: Submit your workload as the starting point for the agent 
-
-Block 2 - Workload Profiling: Agent profiles the workload end-to-end, capturing kernel-level GPU utilization and bottlenecks 
-
-Block 3 - Gap Analysis & Bridge Planning: Agent compares actual performance against roofline targets and produces a structured bridge plan 
-
-Block 4 - Kernel Breakdown & Roofline: Agent decomposes the workload into prioritized kernels ranked by optimization opportunity and hardware ceiling
-
-**Read more about TraceLens Agent:** [AMD-AGI/TraceLens-internal: Private internal copy of TraceLens](https://github.com/AMD-AGI/TraceLens-internal)
+Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Jarvis](https://github.com/AMD-AGI/TraceLens-internal), capture bottlenecks and roofline targets.
 
 
-<img width="1000" height="800" alt="image" src="https://github.com/user-attachments/assets/94fce2e4-f0e2-4fc7-a6de-ee20b21e6597" />
+Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scored tree of candidates — config overrides, code patches, backend switches, kernel rewrites — and explores depth-first, one change at a time: **Think → Implement → Benchmark → Decide**. Each result re-scores the remaining tree. In parallel, hot kernels are asynchronously optimized via external backends ([GEAK](https://github.com/AMD-AGI/GEAK/tree/main), Claude Code, OpenAI Codex) and patched back in.
 
+Block 7-8 - Validated Delivery: The agent optimizes for throughput while maintaining accuracy — every change is correctness-gated before acceptance. Once the loop exits, the agent packages the optimized code, submits a PR to your repo, and merges into your codebase (vLLM, SGLang, or other), completing the full cycle.
 
-**Block 5: Autonomous Kernel Optimization Engine (GEAK Agent)**
-
-Once the priority kernels are identified, the agent takes over optimization autonomously. It requires zero configuration to start, automatically discovers tests, checkpoints progress at every step for instant rollback, and runs patches in parallel, selecting only the best-performing result. The underlying architecture exposes profiling, benchmarking, and verification as modular MCP tools, while a three-tier configuration system governs behavior at project and workspace scopes to reduce variance and maximize kernel performance discovery.
-
-**Read more about GEAK Agent:** https://github.com/AMD-AGI/GEAK/tree/dev
-
-**Block 6: Iterative Optimization Loop (Think → Try → Measure → Decide)**
-
-This is the core intelligence loop where the agent iterates one idea at a time until exit criteria are met. Each cycle follows a disciplined four-step pattern:
-
-Think: Agent selects one optimization idea, a config override, code patch, or variable change 
-
-Try: Agent applies the change and runs the workload via torchrun 
-
-Measure: Agent captures performance in ms/iter across 6–10 runs 
-
-Decide: Agent keeps the change if it improves performance, or rolls back and tries the next idea 
-
-The loop continues until stopping criteria are met, such as five consecutive runs under 0.5% gain, two crashes, three consecutive discards, or a Roofline signal from TraceLens Jarvis.
-
-**Blocks 7 & 8: Automated Integration & Delivery**
-
-Once the optimization loop exits with a winning kernel, the agent handles the entire delivery pipeline without human intervention — from validation to merge.
-
-Block 7: Submit PR with Optimized Kernels: Agent automatically packages the optimized kernels, runs final correctness validation, and submits a pull request to the target repository 
-
-Block 8: Merge into Original Framework: Upon PR approval, the agent merges the optimized kernels back into the original framework (vLLM, SGLang, or other), completing the full optimization cycle
+**Read more:** [TraceLens Agent](https://github.com/AMD-AGI/TraceLens-internal) · [GEAK Agent](https://github.com/AMD-AGI/GEAK/tree/main)
 
 **Scope:**
 
@@ -145,18 +112,6 @@ Results: /shared_nfs/nehaprakriya/results/gpt_oss/
 ```
 
 The agent takes it from there — baseline, profile, loop, report.
-
----
-
-### How It Works
-
-1. **Classify** — Identify the model architecture (MoE, MLA, hybrid attention, etc.) and assign score priors to each optimization category based on what has worked for similar models.
-2. **Profile** — Run the workload, collect kernel-level traces, find bottlenecks.
-3. **DFS Loop** — Pop the highest-scored candidate, apply it, benchmark end-to-end. **Keep** if it improves throughput, **discard** if not. Re-score remaining candidates based on what was learned (wins boost similar actions, failures suppress them).
-4. **Stop** — When 5 consecutive actions fail to improve, all scores drop below threshold, or a time/crash budget is hit.
-5. **Report** — Emit the final config, the full search tree, and a reproducible benchmark script.
-
-The search tree and scoring heuristic are the core of PRISM — the agent doesn't just try random things, it navigates a structured space where each result informs what to explore next.
 
 ---
 
