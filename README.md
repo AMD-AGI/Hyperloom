@@ -6,7 +6,6 @@ An agentic system that autonomously optimizes LLM inference and training on AMD 
 
 Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Jarvis](https://github.com/AMD-AGI/TraceLens-internal), capture bottlenecks and roofline targets.
 
-
 Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scored tree of candidates — config overrides, code patches, backend switches, kernel rewrites — and explores depth-first, one change at a time: **Think → Implement → Benchmark → Decide**. Each result re-scores the remaining tree. In parallel, hot kernels are asynchronously optimized via external backends ([GEAK](https://github.com/AMD-AGI/GEAK/tree/main), Claude Code, OpenAI Codex) and patched back in.
 
 Block 7-8 - Validated Delivery: The agent optimizes for throughput while maintaining accuracy — every change is correctness-gated before acceptance. Once the loop exits, the agent packages the optimized code, submits a PR to your repo, and merges into your codebase, completing the full loop.
@@ -21,15 +20,25 @@ Block 7-8 - Validated Delivery: The agent optimizes for throughput while maintai
 
 ---
 
-## Quickstart — Hyperloom UI
+## Prerequisites
 
-The fastest way to start is through the hosted **AMD Hyperloom** web interface:
+Bind your **[LLM Gateway](https://llm.amd.com/)** key to **[Hyperloom](https://oci-slc.primus-safe.amd.com/hyperloom/)** to obtain your `AK_YOUR_API_KEY`. This key is required for both the Hyperloom UI and the local optimization workflow — it provides access to TraceLens, GEAK, and OOB services.
+
+---
+
+## Quickstart — Hyperloom UI (PrimusClaw)
+
+The fastest way to start is through the hosted **AMD Hyperloom** web interface — powered by **[PrimusClaw](https://github.com/AMD-AGI/Primus-Claw)**, the hosted online mode designed for **large-scale reachability**. Any team member can launch an optimization through the browser without local GPU setup or environment configuration.
+
+- **Easy to scale** — each job runs in isolated sandboxed containers (GPU or CPU). Single-node optimizations run in-sandbox; multi-node workloads fan out via RayJob for distributed benchmarking.
+- **Data flywheel** — every optimization run feeds results back through Minio storage and Langfuse observability, creating a closed feedback loop that continuously improves the agent's knowledge base and scoring heuristics.
+- **Full MCP + Skills support** — sandboxes connect to BenchMark/RayJob, TraceLens Jarvis, GEAK, OOB, and InferenceX via MCP (local and remote), and load optimization Skills on demand, giving the agent the same profiling, kernel-rewrite, and domain-specific capabilities at cloud scale.
 
 1. Go to **[oci-slc.primus-safe.amd.com/hyperloom](https://oci-slc.primus-safe.amd.com/hyperloom/)**
-2. Select **[PrimusClaw](https://oci-slc.primus-safe.amd.com/hyperloom/claw)** from the sidebar
+2. Select **Claw Agent** or **Get Started** from the landing page to enter PrimusClaw
+   ![Hyperloom Landing](slides/hyperloom_landing.png)
 3. Start chatting — the Quick Start panel offers guided options and example tasks
-
-![Hyperloom PrimusClaw UI](slides/hyperloom_claw_quickstart.png)
+   ![Hyperloom PrimusClaw UI](slides/hyperloom_claw_quickstart.png)
 
 ---
 
@@ -37,7 +46,7 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface:
 
 ### 1. Configure MCP Servers
 
-PRISM uses two external tools as MCP servers, configured in `.cursor/mcp.json`:
+Hyperloom uses two external tools as MCP servers, configured in `.cursor/mcp.json`:
 
 - **TraceLens (Jarvis)** — for profiling analysis (kernel breakdown, roofline modeling). Used during the profile phase.
 - **GEAK** — for kernel-level optimization (rewrites Triton/HIP source). Used when the agent identifies hot custom kernels worth optimizing.
@@ -48,19 +57,26 @@ Update the GEAK authorization key in `.cursor/mcp.json`:
 {
   "geak-agent": {
     "headers": {
-      "Authorization": "$YOUR_KEY"
+      "Authorization": "$AK_YOUR_API_KEY"
     }
   }
 }
 ```
 
-TraceLens requires Node.js (uses `npx mcp-remote` transport).
-
 ### 2. Environment
+
+A GPU node is required to run benchmarks. You can either use a local GPU machine or request an Authoring Pod on **[Primus-SaFE](https://oci-slc.primus-safe.amd.com/authoring)**. For example, an inference optimization workload typically runs on an image like:
+
+```bash
+docker run --rm -it --device=/dev/kfd --device=/dev/dri --group-add video \
+  rocm/sgl-dev:v0.5.9-rocm720-mi35x-20260324
+```
+
+Then configure your API key:
 
 ```bash
 cp .env.template .env
-# Edit .env — set GEAK auth key and LiteLLM API key
+# Edit .env — set AK_YOUR_API_KEY for TraceLens, GEAK, and OOB
 ```
 
 ### 3. Run an Optimization
@@ -91,7 +107,7 @@ The agent takes it from there — baseline, profile, loop, report.
 
 ### Inference Optimization — InferenceX Challenge
 
-PRISM optimized 4 flagship models for the [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) benchmark on AMD Instinct MI355X, matching or beating NVIDIA B200 on 3 out of 4 models.
+Hyperloom optimized 4 flagship models for the [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) benchmark on AMD Instinct MI355X, matching or beating NVIDIA B200 on 3 out of 4 models.
 
 | Model | Best tok/s/GPU | vs MI355X Baseline | vs NVIDIA B200 |
 |-------|---------------:|:------------------:|:--------------:|
@@ -113,7 +129,6 @@ All benchmarks: ISL=1024, OSL=1024 on MI355X (gfx950). "vs B200" shows best conc
 | Qwen3 32B (LoRA) | 8x MI355X | 467 tok/s/gpu | 4,984 tok/s/gpu | **+967%** | 19 |
 | Llama 4 Scout 17B-16E (MoE) | 8x MI355X | 20 tok/s/gpu | 170 tok/s/gpu | **+750%** | 18 |
 
-
 ## Detailed Skill Documentation
 
 Each domain has a comprehensive skill file with the full optimization protocol, examples, and a knowledge base of lessons learned from prior runs:
@@ -130,7 +145,7 @@ The skill files are the agent's instructions. They encode the full optimization 
 ## Repo Structure
 
 ```
-PRISM/
+Hyperloom/
 ├── .cursor/
 │   ├── mcp.json                          # MCP server config (TraceLens + GEAK)
 │   └── skills/
