@@ -80,6 +80,70 @@ check_env_vars() {
     fi
 }
 
+# --------------------------------
+# TraceLens patching
+# --------------------------------
+
+# Apply TraceLens patches to the running inference framework for graph-capture
+# profiling and roofline annotations.
+#
+# Activation: set TRACELENS_PATCHES=1 to enable (no-op otherwise).
+#
+# The script will use TRACELENS_REPO if set, otherwise it clones
+# TraceLens-internal automatically into /tmp/TraceLens-internal.
+#
+# Env vars:
+#   TRACELENS_PATCHES=1        enable patching (required)
+#   TRACELENS_REPO             path to existing local clone (optional)
+#   TRACELENS_GIT_URL           clone URL override (default: AMD-AGI/TraceLens-internal)
+#   TRACELENS_GIT_REF           branch/tag (default: main)
+#   FRAMEWORK                  "vllm" or "sglang" (auto-detected if unset)
+#   TRACELENS_VLLM_VERSION     override vLLM version for patch selection
+#
+# Idempotent — a marker file prevents double-patching in the same container.
+TRACELENS_APPLIED_MARKER="/tmp/.tracelens_patches_applied"
+
+apply_tracelens_patches() {
+    if [[ "${TRACELENS_PATCHES:-0}" != "1" ]]; then
+        return 0
+    fi
+    if [[ -f "$TRACELENS_APPLIED_MARKER" ]]; then
+        echo "[TraceLens] Patches already applied in this environment, skipping."
+        return 0
+    fi
+
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../utils" && pwd)"
+    local patch_script="$script_dir/apply_tracelens_patches.sh"
+
+    if [[ ! -x "$patch_script" ]]; then
+        echo "WARNING: TraceLens patch script not found: $patch_script" >&2
+        return 1
+    fi
+
+    local args=()
+
+    # If TRACELENS_REPO is set, pass it through; otherwise the script
+    # will clone TraceLens-internal on its own.
+    if [[ -n "${TRACELENS_REPO:-}" ]]; then
+        args+=(--tracelens "$TRACELENS_REPO")
+    fi
+    if [[ -n "${FRAMEWORK:-}" ]]; then
+        local fw_arg
+        case "$FRAMEWORK" in
+            *sglang*) fw_arg="sglang" ;;
+            *)        fw_arg="vllm" ;;
+        esac
+        args+=(--framework "$fw_arg")
+    fi
+    if [[ -n "${TRACELENS_VLLM_VERSION:-}" ]]; then
+        args+=(--version "$TRACELENS_VLLM_VERSION")
+    fi
+
+    bash "$patch_script" "${args[@]}"
+    touch "$TRACELENS_APPLIED_MARKER"
+}
+
 # Wait for server to be ready by polling the health endpoint
 # All parameters are required
 # Parameters:
