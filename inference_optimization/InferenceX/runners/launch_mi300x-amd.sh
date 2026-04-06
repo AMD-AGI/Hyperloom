@@ -9,10 +9,9 @@ server_name="bmk-server"
 
 TRACELENS_ARGS=()
 if [[ -n "${TRACELENS_REPO:-}" && -d "${TRACELENS_REPO}" ]]; then
-    TRACELENS_ARGS+=(-v "${TRACELENS_REPO}:/workspace/TraceLens-internal:ro")
-    TRACELENS_ARGS+=(-e TRACELENS_REPO=/workspace/TraceLens-internal)
+    TRACELENS_ARGS+=(-v "${TRACELENS_REPO}:/workspace/TraceLens:ro")
+    TRACELENS_ARGS+=(-e TRACELENS_REPO=/workspace/TraceLens)
 fi
-# When TRACELENS_PATCHES=1 but no local repo, the container will clone it
 TRACELENS_ARGS+=(-e TRACELENS_PATCHES -e TRACELENS_GIT_URL -e TRACELENS_GIT_REF -e TRACELENS_VLLM_VERSION)
 
 set -x

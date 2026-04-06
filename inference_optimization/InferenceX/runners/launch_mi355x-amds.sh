@@ -183,11 +183,9 @@ else
 
     CONTAINER_MOUNTS="$GITHUB_WORKSPACE:/workspace/,$HF_HUB_CACHE_MOUNT:$HF_HUB_CACHE"
     if [[ -n "${TRACELENS_REPO:-}" && -d "${TRACELENS_REPO}" ]]; then
-        CONTAINER_MOUNTS="${CONTAINER_MOUNTS},${TRACELENS_REPO}:/workspace/TraceLens-internal"
-        export TRACELENS_REPO=/workspace/TraceLens-internal
+        CONTAINER_MOUNTS="${CONTAINER_MOUNTS},${TRACELENS_REPO}:/workspace/TraceLens"
+        export TRACELENS_REPO=/workspace/TraceLens
     fi
-    # TRACELENS_PATCHES, TRACELENS_GIT_URL, TRACELENS_GIT_REF are forwarded
-    # via --export=ALL on the srun line below
 
     srun --jobid=$JOB_ID \
         --container-image=$SQUASH_FILE \

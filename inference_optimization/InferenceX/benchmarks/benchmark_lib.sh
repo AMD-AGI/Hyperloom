@@ -90,15 +90,15 @@ check_env_vars() {
 # Activation: set TRACELENS_PATCHES=1 to enable (no-op otherwise).
 #
 # The script will use TRACELENS_REPO if set, otherwise it clones
-# TraceLens-internal automatically into /tmp/TraceLens-internal.
+# AMD-AGI/TraceLens (public) automatically into /tmp/TraceLens.
 #
 # Env vars:
 #   TRACELENS_PATCHES=1        enable patching (required)
 #   TRACELENS_REPO             path to existing local clone (optional)
-#   TRACELENS_GIT_URL           clone URL override (default: AMD-AGI/TraceLens-internal)
+#   TRACELENS_GIT_URL           clone URL (default: https://github.com/AMD-AGI/TraceLens.git)
 #   TRACELENS_GIT_REF           branch/tag (default: main)
 #   FRAMEWORK                  "vllm" or "sglang" (auto-detected if unset)
-#   TRACELENS_VLLM_VERSION     override vLLM version for patch selection
+#   TRACELENS_VLLM_VERSION     override vLLM version for patch selection (e.g. v0.18, v0.19)
 #
 # Idempotent — a marker file prevents double-patching in the same container.
 TRACELENS_APPLIED_MARKER="/tmp/.tracelens_patches_applied"
@@ -143,6 +143,9 @@ apply_tracelens_patches() {
     bash "$patch_script" "${args[@]}"
     touch "$TRACELENS_APPLIED_MARKER"
 }
+
+# Auto-apply when this file is sourced (no-op unless TRACELENS_PATCHES=1)
+apply_tracelens_patches
 
 # Wait for server to be ready by polling the health endpoint
 # All parameters are required

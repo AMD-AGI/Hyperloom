@@ -2,47 +2,46 @@
 #
 # Apply TraceLens inference-analysis patches to the current Python environment.
 #
-# This script patches vLLM or SGLang (in-place, inside a container or venv)
-# so that profiling traces include:
-#   - CUDA graph capture traces (per batch-size, per capture mode)
-#   - Roofline annotations (sq, sk, sqsq, sqsk per context/generation group)
+# Patches vLLM or SGLang in-place (inside a container) so profiling traces
+# include CUDA graph capture traces and roofline annotations.
 #
-# It also installs the TraceLens package (--no-deps) for post-collection
-# analysis (report generation, trace splitting, etc.).
+# The patch source is the public AMD-AGI/TraceLens repo by default.  The
+# script will clone it automatically if no local copy is available.
 #
 # Usage:
 #   bash apply_tracelens_patches.sh [OPTIONS]
 #
 # Options:
-#   --framework  vllm|sglang   (default: auto-detect from $FRAMEWORK or probe Python)
-#   --version    v0.13|v0.14|v0.15|v0.16|v0.17  (vLLM only; default: auto-detect)
-#   --tracelens  /path/to/TraceLens-internal     (overrides $TRACELENS_REPO)
-#   --clone-to   /path/to/dir   clone TraceLens-internal here if not already present
-#   --git-ref    branch/tag/sha to clone (default: main)
-#   --install    also pip-install TraceLens       (default: true)
-#   --no-install skip TraceLens pip install
+#   --framework  vllm|sglang          auto-detect from $FRAMEWORK or Python
+#   --version    v0.18|v0.19|...      vLLM only; auto-detect if omitted
+#   --tracelens  /path/to/TraceLens   use existing local clone
+#   --clone-to   /path/to/dir         clone destination (default: /tmp/TraceLens)
+#   --git-ref    branch/tag/sha       clone ref (default: main)
+#   --install    pip-install TraceLens (default)
+#   --no-install skip pip install
 #   --dry-run    show what would happen without applying
+#   --list       list available patches and exit
 #
 # Environment variables (all optional):
-#   TRACELENS_REPO      path to existing local TraceLens-internal clone
-#   TRACELENS_GIT_URL   git URL to clone from (default: AMD-AGI/TraceLens-internal on GitHub)
-#   TRACELENS_GIT_REF   branch/tag/sha (default: main)
-#   FRAMEWORK           "vllm" or "sglang" — skips auto-detection
+#   TRACELENS_REPO      path to existing local TraceLens clone
+#   TRACELENS_GIT_URL   clone URL (default: https://github.com/AMD-AGI/TraceLens.git)
+#   TRACELENS_GIT_REF   branch/tag (default: main)
+#   FRAMEWORK           "vllm" or "sglang"
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-TRACELENS_GIT_URL="${TRACELENS_GIT_URL:-https://github.com/AMD-AGI/TraceLens-internal.git}"
+TRACELENS_GIT_URL="${TRACELENS_GIT_URL:-https://github.com/AMD-AGI/TraceLens.git}"
 TRACELENS_GIT_REF="${TRACELENS_GIT_REF:-main}"
 
-# Defaults
 FRAMEWORK_ARG=""
 VLLM_VERSION_ARG=""
 TRACELENS_REPO="${TRACELENS_REPO:-}"
 CLONE_TO=""
 DO_INSTALL=true
 DRY_RUN=false
+LIST_PATCHES=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -54,6 +53,7 @@ while [[ $# -gt 0 ]]; do
         --install)     DO_INSTALL=true; shift ;;
         --no-install)  DO_INSTALL=false; shift ;;
         --dry-run)     DRY_RUN=true; shift ;;
+        --list)        LIST_PATCHES=true; shift ;;
         -h|--help)
             sed -n '2,/^$/{ s/^# //; s/^#$//; p; }' "$0"
             exit 0
@@ -62,42 +62,39 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ── Resolve or clone TraceLens repo ──────────────────────────────────────────
+# ── Resolve or clone TraceLens repo ───────────────────────────────────────────
 
 PATCH_SUBDIR="examples/custom_workflows/inference_analysis"
 
 ensure_tracelens_repo() {
-    # Already have a valid local path — nothing to do
     if [[ -n "$TRACELENS_REPO" && -d "$TRACELENS_REPO/$PATCH_SUBDIR" ]]; then
         echo "[TraceLens] Using existing repo: $TRACELENS_REPO"
         return 0
     fi
 
-    # Determine clone destination
     local dest="${CLONE_TO:-}"
     if [[ -z "$dest" ]]; then
         if [[ -n "$TRACELENS_REPO" ]]; then
             dest="$TRACELENS_REPO"
         else
-            dest="/tmp/TraceLens-internal"
+            dest="/tmp/TraceLens"
         fi
     fi
 
-    # If already cloned at dest, reuse it
     if [[ -d "$dest/$PATCH_SUBDIR" ]]; then
         echo "[TraceLens] Found existing clone at $dest"
         TRACELENS_REPO="$dest"
         return 0
     fi
 
-    echo "[TraceLens] TraceLens-internal not found locally. Cloning..."
+    echo "[TraceLens] Cloning TraceLens..."
     echo "[TraceLens]   URL: $TRACELENS_GIT_URL"
     echo "[TraceLens]   Ref: $TRACELENS_GIT_REF"
-    echo "[TraceLens]   Destination: $dest"
+    echo "[TraceLens]   Dest: $dest"
 
     if ! command -v git &>/dev/null; then
-        echo "ERROR: git is not available — cannot clone TraceLens-internal." >&2
-        echo "       Either install git or mount/copy TraceLens-internal manually." >&2
+        echo "ERROR: git not available — cannot clone TraceLens." >&2
+        echo "       Mount or copy TraceLens manually, then pass --tracelens /path" >&2
         exit 1
     fi
 
@@ -105,14 +102,39 @@ ensure_tracelens_repo() {
     TRACELENS_REPO="$dest"
 
     if [[ ! -d "$TRACELENS_REPO/$PATCH_SUBDIR" ]]; then
-        echo "ERROR: Cloned repo is missing $PATCH_SUBDIR — wrong repo or branch?" >&2
+        echo "ERROR: Cloned repo missing $PATCH_SUBDIR — wrong repo or branch?" >&2
         exit 1
     fi
-
     echo "[TraceLens] Clone successful"
 }
 
 ensure_tracelens_repo
+
+# ── Discover available patches ────────────────────────────────────────────────
+
+PATCH_DIR="$TRACELENS_REPO/$PATCH_SUBDIR"
+
+discover_vllm_patches() {
+    local -a patches=()
+    for f in "$PATCH_DIR"/*vllm*.patch; do
+        [[ -f "$f" ]] || continue
+        patches+=("$(basename "$f")")
+    done
+    printf '%s\n' "${patches[@]}" | sort -V
+}
+
+if $LIST_PATCHES; then
+    echo "Available vLLM patches:"
+    discover_vllm_patches | while read -r p; do echo "  $p"; done
+    echo ""
+    if [[ -d "$PATCH_DIR/sglang_roofline_patches" ]]; then
+        echo "Available SGLang patches:"
+        for f in "$PATCH_DIR/sglang_roofline_patches/"*.patch; do
+            [[ -f "$f" ]] && echo "  $(basename "$f")"
+        done
+    fi
+    exit 0
+fi
 
 # ── Detect framework ─────────────────────────────────────────────────────────
 
@@ -132,7 +154,7 @@ detect_framework() {
     elif python3 -c "import sglang" 2>/dev/null; then
         echo "sglang"
     else
-        echo "ERROR: Cannot detect framework. Neither vllm nor sglang is importable." >&2
+        echo "ERROR: Cannot detect framework. Neither vllm nor sglang importable." >&2
         echo "       Pass --framework vllm|sglang explicitly." >&2
         exit 1
     fi
@@ -141,7 +163,7 @@ detect_framework() {
 FW="$(detect_framework)"
 echo "[TraceLens] Detected framework: $FW"
 
-# ── Framework-specific logic ──────────────────────────────────────────────────
+# ── vLLM patching ────────────────────────────────────────────────────────────
 
 apply_vllm_patches() {
     local pkg_dir
@@ -149,48 +171,66 @@ apply_vllm_patches() {
     pkg_dir="$(cd "$pkg_dir" && pwd)"
     echo "[TraceLens] vLLM package root: $pkg_dir"
 
-    # Auto-detect vLLM version if not specified
+    # ── Resolve version → patch file ──
     local ver="$VLLM_VERSION_ARG"
+    local raw_ver=""
+
     if [[ -z "$ver" ]]; then
-        local raw_ver
         raw_ver="$(python3 -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "unknown")"
         echo "[TraceLens] Detected vLLM version: $raw_ver"
+
+        # Extract minor version: 0.18.x → v0.18, 0.19.1 → v0.19, etc.
         case "$raw_ver" in
-            0.13.*) ver="v0.13" ;;
-            0.14.*) ver="v0.14" ;;
-            0.15.*) ver="v0.15" ;;
-            0.16.*) ver="v0.16" ;;
-            0.17.*) ver="v0.17" ;;
+            0.*.*)
+                local minor
+                minor="$(echo "$raw_ver" | cut -d. -f1-2)"
+                ver="v${minor}"
+                ;;
             *)
-                echo "ERROR: Cannot map vLLM version '$raw_ver' to a known patch." >&2
-                echo "       Available patches: v0.13, v0.14, v0.15, v0.16, v0.17" >&2
-                echo "       Pass --version v0.XX explicitly." >&2
-                exit 1
+                ver=""
                 ;;
         esac
     fi
 
-    # Map short version to patch filename
-    local patch_file
+    # Normalize user-supplied short forms: v18 → v0.18, v19 → v0.19
     case "$ver" in
-        v0.13|v13) patch_file="vllm_v0.13.0.patch" ;;
-        v0.14|v14) patch_file="vllm_v0.14.0.patch" ;;
-        v0.15|v15) patch_file="vllm_v0.15.0.patch" ;;
-        v0.16|v16) patch_file="vllm_v0.16.0.patch" ;;
-        v0.17|v17) patch_file="vllm_v0.17.0.patch" ;;
-        *)
-            echo "ERROR: Unknown vLLM version tag '$ver'." >&2
-            exit 1
-            ;;
+        v18) ver="v0.18" ;;
+        v19) ver="v0.19" ;;
     esac
 
-    local patch_path="$TRACELENS_REPO/$PATCH_SUBDIR/$patch_file"
-    if [[ ! -f "$patch_path" ]]; then
-        echo "ERROR: Patch file not found: $patch_path" >&2
+    # Search for a matching patch file.  Try two naming conventions:
+    #   config_vllm_v0.XX.0.patch  (public TraceLens)
+    #   vllm_v0.XX.0.patch         (TraceLens-internal)
+    local patch_file=""
+    if [[ -n "$ver" ]]; then
+        local minor_num="${ver#v0.}"  # e.g. "18", "19"
+        for candidate in \
+            "config_vllm_v0.${minor_num}.0.patch" \
+            "vllm_v0.${minor_num}.0.patch"; do
+            if [[ -f "$PATCH_DIR/$candidate" ]]; then
+                patch_file="$candidate"
+                break
+            fi
+        done
+    fi
+
+    if [[ -z "$patch_file" ]]; then
+        echo ""
+        echo "ERROR: No matching patch found for vLLM version '${raw_ver:-$ver}'." >&2
+        echo ""
+        echo "Available patches in $PATCH_DIR:" >&2
+        discover_vllm_patches | while read -r p; do echo "  $p" >&2; done
+        echo ""
+        echo "You can select one explicitly with --version, e.g.:" >&2
+        echo "  --version v0.18" >&2
+        echo "  --version v0.19" >&2
         exit 1
     fi
 
-    echo "[TraceLens] Applying $patch_file to $pkg_dir"
+    local patch_path="$PATCH_DIR/$patch_file"
+    echo "[TraceLens] Selected patch: $patch_file"
+    echo "[TraceLens] Applying to: $pkg_dir"
+
     if $DRY_RUN; then
         echo "[DRY RUN] cd $pkg_dir && git apply --check $patch_path"
         cd "$pkg_dir" && git apply --check "$patch_path" 2>&1 || true
@@ -199,15 +239,18 @@ apply_vllm_patches() {
 
     cd "$pkg_dir"
     if git apply "$patch_path" 2>/dev/null; then
-        echo "[TraceLens] Patch applied successfully via git apply"
+        echo "[TraceLens] Patch applied via git apply"
     elif patch -p1 --fuzz=10 < "$patch_path"; then
-        echo "[TraceLens] Patch applied successfully via patch -p1 (fallback)"
+        echo "[TraceLens] Patch applied via patch -p1 (fallback)"
     else
         echo "ERROR: Failed to apply $patch_file" >&2
-        echo "       The vLLM version may not match the patch exactly." >&2
+        echo "       The installed vLLM may not match the patch." >&2
+        echo "       Try --version to select a different patch." >&2
         exit 1
     fi
 }
+
+# ── SGLang patching ───────────────────────────────────────────────────────────
 
 apply_sglang_patches() {
     local pkg_dir
@@ -215,18 +258,18 @@ apply_sglang_patches() {
     pkg_dir="$(cd "$pkg_dir" && pwd)"
     echo "[TraceLens] SGLang package root: $pkg_dir"
 
-    local patch_dir="$TRACELENS_REPO/$PATCH_SUBDIR/sglang_roofline_patches"
-    if [[ ! -d "$patch_dir" ]]; then
-        echo "ERROR: SGLang patch directory not found: $patch_dir" >&2
+    local sglang_patch_dir="$PATCH_DIR/sglang_roofline_patches"
+    if [[ ! -d "$sglang_patch_dir" ]]; then
+        echo "ERROR: SGLang patch directory not found: $sglang_patch_dir" >&2
         exit 1
     fi
 
-    local patch_count=0
-    for patch_path in "$patch_dir"/*.patch; do
+    local count=0
+    for patch_path in "$sglang_patch_dir"/*.patch; do
         [[ -f "$patch_path" ]] || continue
-        patch_count=$((patch_count + 1))
-        local patch_name
-        patch_name="$(basename "$patch_path")"
+        count=$((count + 1))
+        local name
+        name="$(basename "$patch_path")"
 
         if $DRY_RUN; then
             echo "[DRY RUN] cd $pkg_dir && git apply --check $patch_path"
@@ -234,18 +277,17 @@ apply_sglang_patches() {
             continue
         fi
 
-        echo "[TraceLens] Applying $patch_name ..."
+        echo "[TraceLens] Applying $name ..."
         cd "$pkg_dir"
         if ! git apply "$patch_path"; then
-            echo "ERROR: Failed to apply $patch_name" >&2
+            echo "ERROR: Failed to apply $name" >&2
             exit 1
         fi
     done
-
-    echo "[TraceLens] Applied $patch_count SGLang patch(es)"
+    echo "[TraceLens] Applied $count SGLang patch(es)"
 }
 
-# ── Apply patches ─────────────────────────────────────────────────────────────
+# ── Dispatch ──────────────────────────────────────────────────────────────────
 
 case "$FW" in
     vllm)   apply_vllm_patches ;;
@@ -257,9 +299,18 @@ esac
 
 if $DO_INSTALL && ! $DRY_RUN; then
     echo "[TraceLens] Installing TraceLens package (--no-deps) ..."
-    pip install --no-deps --break-system-packages "$TRACELENS_REPO" 2>/dev/null \
-        || pip install --no-deps "$TRACELENS_REPO"
-    echo "[TraceLens] TraceLens installed successfully"
+    install_src="$TRACELENS_REPO"
+    if ! touch "$TRACELENS_REPO/.write_test" 2>/dev/null; then
+        install_src="/tmp/TraceLens-install"
+        echo "[TraceLens] Repo is read-only, copying to $install_src for pip install ..."
+        rm -rf "$install_src"
+        cp -r "$TRACELENS_REPO" "$install_src"
+    else
+        rm -f "$TRACELENS_REPO/.write_test"
+    fi
+    pip install --no-deps --break-system-packages "$install_src" 2>/dev/null \
+        || pip install --no-deps "$install_src"
+    echo "[TraceLens] TraceLens installed"
 fi
 
 echo "[TraceLens] Done."
