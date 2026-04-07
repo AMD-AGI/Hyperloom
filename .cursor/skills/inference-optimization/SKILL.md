@@ -124,6 +124,47 @@ All values below are the **single source of truth**. All actions reference these
 
 **Claw-mode constants are in [`modes/CLAW.md`](modes/CLAW.md).**
 
+### Magpie Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `MAGPIE_PATH` | `/shared_nfs/xiaofei/Magpie` | Magpie installation path |
+| `MAGPIE_RUN_MODE` | `local` | Benchmark execution mode (local, no Docker) |
+| `MAGPIE_DFS_NUM_PROMPTS_MULTIPLIER` | 3 | NUM_PROMPTS = CONC × this for DFS loop (short runs) |
+| `MAGPIE_BASELINE_NUM_PROMPTS_MULTIPLIER` | 10 | NUM_PROMPTS = CONC × this for baseline (default) |
+| `MAGPIE_PROFILE_NUM_PROMPTS` | `min(CONC, 16)` | NUM_PROMPTS for profiling runs (small for trace size) |
+
+## Magpie Integration
+
+All throughput benchmarks and profiling use **Magpie** (`magpie benchmark` CLI) instead of
+raw InferenceX shell scripts. Magpie wraps InferenceX with structured results, built-in
+TraceLens trace analysis, and gap analysis.
+
+**Prerequisites:**
+```bash
+pip install -e "$MAGPIE_PATH"  # e.g. /shared_nfs/xiaofei/Magpie
+```
+
+**Key CLI pattern for all benchmarks:**
+```bash
+magpie benchmark $FRAMEWORK \
+  -m "$MODEL" --tp $TP --concurrency $CONC \
+  --input-len $ISL --output-len $OSL \
+  --run-mode local --inferencex-path "$INFERENCEX_PATH" \
+  --extra-envs "EXTRA_SGLANG_ARGS=..." "NUM_PROMPTS=..." \
+  -o "$RESULT_DIR/<action_name>"
+```
+
+**Results:** Each run produces `benchmark_report.json` in the workspace with structured
+`throughput` (output_throughput, request_throughput, duration_seconds) and `latency`
+(TTFT, TPOT, ITL, E2EL — each with mean/median/p99/std in ms).
+
+**Server lifecycle:** Magpie launches and kills the server within each benchmark call.
+For accuracy evaluation (GSM8K), start a dedicated server manually (see action docs).
+
+**DFS short runs:** Pass `--extra-envs NUM_PROMPTS=$((CONC * 3))` to reduce benchmark
+duration. Default is `CONC * 10`.
+
 ## Architecture
 
 ```
@@ -477,12 +518,35 @@ These are the most important validated lessons. Full details in KB and action mo
 
 ## Reference: Benchmark Metrics
 
-| Metric | Unit | Meaning |
-|--------|------|---------|
-| `output_throughput` | tok/s | Output tokens per second |
-| `tput_per_gpu` | tok/s/GPU | `output_throughput / TP` |
-| `mean_tpot_ms` | ms | Time Per Output Token (decode latency) |
-| `mean_ttft_ms` | ms | Time to First Token (prefill latency) |
+Metrics come from Magpie's `benchmark_report.json` (structured JSON):
+
+| Metric | JSON Path | Unit | Meaning |
+|--------|-----------|------|---------|
+| `output_throughput` | `throughput.output_throughput` | tok/s | Output tokens per second |
+| `tput_per_gpu` | derived: `throughput.output_throughput / TP` | tok/s/GPU | Primary optimization target |
+| `request_throughput` | `throughput.request_throughput` | req/s | Requests per second |
+| `completed_requests` | `throughput.completed_requests` | count | Successfully completed requests |
+| `mean_tpot_ms` | `latency.tpot.mean_ms` | ms | Time Per Output Token (decode latency) |
+| `p99_tpot_ms` | `latency.tpot.p99_ms` | ms | P99 decode latency |
+| `mean_ttft_ms` | `latency.ttft.mean_ms` | ms | Time to First Token (prefill latency) |
+| `p99_ttft_ms` | `latency.ttft.p99_ms` | ms | P99 prefill latency |
+| `mean_itl_ms` | `latency.itl.mean_ms` | ms | Inter-Token Latency |
+| `mean_e2el_ms` | `latency.e2el.mean_ms` | ms | End-to-End Latency |
+
+### Extracting metrics from Magpie results
+
+```bash
+WORKSPACE=$(ls -td "$RESULT_DIR"/<action>/benchmark_* | head -1)
+python3 -c "
+import json
+d = json.load(open('$WORKSPACE/benchmark_report.json'))
+tp = $TP
+print(f'output_throughput: {d[\"throughput\"][\"output_throughput\"]:.2f} tok/s')
+print(f'tput_per_gpu: {d[\"throughput\"][\"output_throughput\"]/tp:.2f} tok/s/GPU')
+print(f'TPOT mean: {d[\"latency\"][\"tpot\"][\"mean_ms\"]:.2f} ms')
+print(f'TTFT mean: {d[\"latency\"][\"ttft\"][\"mean_ms\"]:.2f} ms')
+"
+```
 
 ## Reference: Server Parameter Tables
 

@@ -9,6 +9,13 @@
 python3 $SKILL_ROOT/kb/kb_query.py "$MODEL_NAME torch.compile baseline" --top-k 3 --compact
 ```
 
+## Prerequisites
+
+Magpie must be installed in the runtime environment:
+```bash
+pip install -e "$MAGPIE_PATH"  # e.g. /shared_nfs/xiaofei/Magpie
+```
+
 ## Procedure
 
 **Claw mode:** Wrap all commands below with `exec_on_gpu`. See [`../modes/CLAW.md`](../modes/CLAW.md) "Baseline" section for the exact wrapper syntax.
@@ -19,19 +26,25 @@ python3 $SKILL_ROOT/kb/kb_query.py "$MODEL_NAME torch.compile baseline" --top-k 
 
 **For SGLang:**
 ```bash
-export FRAMEWORK=sglang
-export SGLANG_EXTRA_ARGS="--enable-torch-compile --mem-fraction-static 0.6 --chunked-prefill-size 32768 --max-prefill-tokens 32768"
-bash "$SCRIPTS_DIR/run_baseline.sh"
+magpie benchmark sglang \
+  -m "$MODEL" --tp $TP --concurrency $CONC \
+  --input-len $ISL --output-len $OSL \
+  --run-mode local --inferencex-path "$INFERENCEX_PATH" \
+  --extra-envs "EXTRA_SGLANG_ARGS=--enable-torch-compile --mem-fraction-static 0.6 --chunked-prefill-size 32768 --max-prefill-tokens 32768" \
+  -o "$RESULT_DIR/baseline_compile"
 ```
 
 **For vLLM (torch.compile enabled by default at level=3):**
 ```bash
-export FRAMEWORK=vllm
-export VLLM_EXTRA_ARGS="--max-model-len 4096"
-bash "$SCRIPTS_DIR/run_baseline.sh"
+magpie benchmark vllm \
+  -m "$MODEL" --tp $TP --concurrency $CONC \
+  --input-len $ISL --output-len $OSL \
+  --run-mode local --inferencex-path "$INFERENCEX_PATH" \
+  --extra-envs "EXTRA_VLLM_ARGS=--max-model-len 4096" \
+  -o "$RESULT_DIR/baseline_compile"
 ```
 
-**NOTE:** `--mem-fraction-static` is model-dependent. torch.compile needs extra memory — use 0.6 (vs 0.8 without compile). Override via `MEM_FRACTION` env var.
+**NOTE:** `--mem-fraction-static` is model-dependent. torch.compile needs extra memory — use 0.6 (vs 0.8 without compile).
 
 ### Step 2: Check for torch.compile failure
 
@@ -41,23 +54,39 @@ bash "$SCRIPTS_DIR/run_baseline.sh"
 | `CUDA error: out of memory` during Triton compilation | Model too large for 0.6 mem fraction | Try 0.5, then fall back |
 | `Triton compilation failed` / `inductor error` | Unsupported op | Fall back |
 
+Check `$RESULT_DIR/baseline_compile/benchmark_*/benchmark_stderr.log` for error patterns.
+
 **If torch.compile fails (SGLang):**
 ```bash
-export SGLANG_EXTRA_ARGS="--chunked-prefill-size 196608 --max-prefill-tokens 196608 --mem-fraction-static 0.8"
-bash "$SCRIPTS_DIR/run_baseline.sh"
+magpie benchmark sglang \
+  -m "$MODEL" --tp $TP --concurrency $CONC \
+  --input-len $ISL --output-len $OSL \
+  --run-mode local --inferencex-path "$INFERENCEX_PATH" \
+  --extra-envs "EXTRA_SGLANG_ARGS=--chunked-prefill-size 196608 --max-prefill-tokens 196608 --mem-fraction-static 0.8" \
+  -o "$RESULT_DIR/baseline_eager"
 ```
 
 **If torch.compile fails (vLLM):**
 ```bash
-export VLLM_EXTRA_ARGS="--max-model-len 4096 --enforce-eager"
-bash "$SCRIPTS_DIR/run_baseline.sh"
+magpie benchmark vllm \
+  -m "$MODEL" --tp $TP --concurrency $CONC \
+  --input-len $ISL --output-len $OSL \
+  --run-mode local --inferencex-path "$INFERENCEX_PATH" \
+  --extra-envs "EXTRA_VLLM_ARGS=--max-model-len 4096 --enforce-eager" \
+  -o "$RESULT_DIR/baseline_eager"
 ```
 
 ### Step 3: Record baseline throughput
 
+Magpie writes structured results to `benchmark_report.json` in the workspace:
+
 ```bash
-# Extract baseline throughput
-baseline_tput=$(python3 -c "import json; d=json.load(open('$RESULT_DIR/baseline_*.json')); print(d['output_throughput'])")
+WORKSPACE=$(ls -td "$RESULT_DIR"/baseline_*/benchmark_* | head -1)
+baseline_tput=$(python3 -c "
+import json
+d = json.load(open('$WORKSPACE/benchmark_report.json'))
+print(d['throughput']['output_throughput'])
+")
 baseline_tput_per_gpu=$(python3 -c "print($baseline_tput / $TP)")
 ```
 
@@ -66,11 +95,27 @@ baseline_tput_per_gpu=$(python3 -c "print($baseline_tput / $TP)")
 **This is mandatory.** The baseline GSM8K score is the reference for all subsequent
 accuracy gates. Any action with `accuracy_risk > 0` will be compared against this score.
 
+Since Magpie kills the server after benchmark completes, start a dedicated server for eval:
+
 ```bash
-# Run GSM8K 5-shot eval against the baseline server
+# Launch server for accuracy eval (same config as baseline)
+# Use the same EXTRA_*_ARGS that produced the baseline
+kill_server 2>/dev/null; check_gpu_memory || exit 1
+
+# Start server (SGLang example)
+python3 -m sglang.launch_server \
+    --model-path "$MODEL" --host=0.0.0.0 --port $PORT \
+    --tensor-parallel-size $TP --trust-remote-code \
+    --mem-fraction-static 0.8 --disable-radix-cache \
+    $BASELINE_SGLANG_ARGS > "$RESULT_DIR/server_eval.log" 2>&1 &
+EVAL_SERVER_PID=$!
+# Wait for health...
+
 EVAL_TASK=gsm8k NUM_FEWSHOT=5 PORT=$PORT MODEL=$MODEL \
   RESULTS_DIR="$RESULT_DIR/eval_gsm8k_baseline" \
   bash "$SKILL_ROOT/scripts/eval_accuracy.sh"
+
+kill $EVAL_SERVER_PID 2>/dev/null
 
 # Extract baseline accuracy
 baseline_accuracy=$(python3 -c "
@@ -89,6 +134,7 @@ is automatically reverted.
 
 ### Step 5: Capture greedy reference output (fast sanity check)
 
+Run a quick inference before killing the eval server (or start a temporary one):
 ```bash
 curl -s http://localhost:$PORT/v1/completions \
   -H "Content-Type: application/json" \
@@ -103,17 +149,40 @@ replace the GSM8K gate — see the Accuracy Gate Protocol in SKILL.md.
 - `baseline_tput_per_gpu`: tok/s/GPU
 - `baseline_accuracy`: GSM8K exact_match score (0.0–1.0)
 - `torch_compile_status`: success / failed (with reason)
-- `$RESULT_DIR/baseline_*.json`: benchmark results
-- `$RESULT_DIR/server_baseline.log`: server log
+- `$WORKSPACE/benchmark_report.json`: Magpie structured results (throughput + latency)
+- `$WORKSPACE/benchmark_stdout.log`: benchmark output
 - `$RESULT_DIR/eval_gsm8k_baseline/`: full GSM8K eval results + summary
 - `$RESULT_DIR/accuracy_reference.json`: greedy reference output (fast sanity check)
-- Server stays running for profiling
+
+## Magpie Result Schema
+
+```json
+{
+  "throughput": {
+    "output_throughput": 1234.56,
+    "request_throughput": 12.34,
+    "total_token_throughput": 2345.67,
+    "completed_requests": 96,
+    "duration_seconds": 45.2
+  },
+  "latency": {
+    "ttft": {"mean_ms": 45.2, "median_ms": 42.0, "p99_ms": 120.5, "std_ms": 15.3},
+    "tpot": {"mean_ms": 8.1, "median_ms": 7.5, "p99_ms": 15.2, "std_ms": 3.1},
+    "itl":  {"mean_ms": 8.3, "median_ms": 7.8, "p99_ms": 16.0, "std_ms": 3.4},
+    "e2el": {"mean_ms": 850.0, "median_ms": 820.0, "p99_ms": 1200.0, "std_ms": 150.0}
+  }
+}
+```
+
+Key mapping to skill state:
+- `state.baseline_tput_per_gpu = throughput.output_throughput / TP`
+- `state.current_tput_per_gpu = throughput.output_throughput / TP`
 
 ## Heuristic Update
 - If torch.compile succeeded: boost GEAK kernel optimization scores (Inductor targets available)
 - If torch.compile failed: reduce GEAK scores, boost backend exploration and server param scores
 
 ## Failure Handling
-- If server fails to start: check model compatibility, reduce mem-fraction, try different attention backend
-- If benchmark times out: reduce num_prompts, check server health
+- If server fails to start: check `benchmark_stderr.log`, reduce mem-fraction, try different attention backend
+- If benchmark times out: reduce num_prompts via `--extra-envs NUM_PROMPTS=48`, check server health
 - Retry up to 3 times with progressively more conservative settings
