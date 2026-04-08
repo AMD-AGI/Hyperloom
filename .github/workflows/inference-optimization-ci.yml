@@ -1,0 +1,128 @@
+name: Inference Optimization CI
+
+on:
+  schedule:
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+    inputs:
+      models:
+        description: 'Comma-separated model keys (empty = all from ci-config.yaml)'
+        required: false
+        default: ''
+      trigger_reason:
+        description: 'Trigger reason'
+        required: false
+        default: 'manual'
+
+env:
+  HARBOR_PREFIX: ${{ secrets.HARBOR_PREFIX }}
+  GEAK_WORKSPACE: ${{ secrets.GEAK_WORKSPACE }}
+  CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
+  WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+
+jobs:
+  prepare:
+    name: Prepare Model Matrix
+    runs-on: self-hosted
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate matrix
+        id: matrix
+        working-directory: ci
+        env:
+          INPUT_MODELS: ${{ github.event.inputs.models }}
+        run: |
+          pip install -q pyyaml
+          python3 << 'PYEOF'
+          import yaml, json, sys, os
+
+          config = yaml.safe_load(open("ci-config.yaml"))
+          models = config.get("models", [])
+
+          selected = os.environ.get("INPUT_MODELS", "").strip()
+          if selected:
+              keys = set(selected.split(","))
+              models = [m for m in models if m["inferenceX_key"] in keys]
+
+          matrix = [{"key": m["inferenceX_key"]} for m in models]
+          print(f"Models: {[m['key'] for m in matrix]}", file=sys.stderr)
+
+          output_file = os.environ["GITHUB_OUTPUT"]
+          with open(output_file, "a") as f:
+              f.write(f"matrix={json.dumps({'include': matrix})}\n")
+          PYEOF
+
+  optimize:
+    name: "${{ matrix.key }}"
+    needs: prepare
+    runs-on: self-hosted
+    timeout-minutes: 300  # 5h per model
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          cache-dependency-path: ci/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r ci/requirements.txt
+
+      - name: Run optimization
+        working-directory: ci
+        run: |
+          TRIGGER="${{ github.event.inputs.trigger_reason || 'scheduled' }}"
+          python orchestrator.py \
+            --trigger "$TRIGGER" \
+            --models "${{ matrix.key }}" \
+            --output-dir "${{ github.workspace }}/ci-output"
+
+      - name: Upload model report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ matrix.key }}
+          path: |
+            ci-output/ci_report.md
+            ci-output/ci_summary.json
+            ci-output/github_summary.md
+            ci-output/*/optimization_report.md
+          retention-days: 90
+
+  detect-inferenceX:
+    name: Check InferenceX Updates
+    runs-on: self-hosted
+    if: github.event_name == 'schedule'
+    steps:
+      - name: Check for changes
+        id: check
+        run: |
+          LATEST=$(git ls-remote https://github.com/SemiAnalysisAI/InferenceX.git refs/heads/main | cut -f1)
+          CACHED=""
+          STATE_FILE="/tmp/inferenceX_last_sha"
+          if [ -f "$STATE_FILE" ]; then
+            CACHED=$(cat "$STATE_FILE")
+          fi
+          if [ "$LATEST" != "$CACHED" ] && [ -n "$LATEST" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "$LATEST" > "$STATE_FILE"
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Trigger optimization
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          gh workflow run inference-optimization-ci.yml \
+            -f trigger_reason=inferenceX -f models=""
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
