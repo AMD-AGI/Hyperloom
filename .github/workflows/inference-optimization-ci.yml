@@ -23,7 +23,7 @@ env:
 jobs:
   prepare:
     name: Prepare Model Matrix
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
@@ -58,7 +58,7 @@ jobs:
   optimize:
     name: "${{ matrix.key }}"
     needs: prepare
-    runs-on: self-hosted
+    runs-on: hyperloom-qn7cd
     timeout-minutes: 300  # 5h per model
     strategy:
       fail-fast: false
@@ -100,7 +100,7 @@ jobs:
 
   detect-inferenceX:
     name: Check InferenceX Updates
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
     steps:
       - name: Check for changes
