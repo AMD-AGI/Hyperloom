@@ -181,9 +181,15 @@ else
 
     export VLLM_CACHE_ROOT="/it-share/gharunners/.cache/vllm"
 
+    CONTAINER_MOUNTS="$GITHUB_WORKSPACE:/workspace/,$HF_HUB_CACHE_MOUNT:$HF_HUB_CACHE"
+    if [[ -n "${TRACELENS_REPO:-}" && -d "${TRACELENS_REPO}" ]]; then
+        CONTAINER_MOUNTS="${CONTAINER_MOUNTS},${TRACELENS_REPO}:/workspace/TraceLens"
+        export TRACELENS_REPO=/workspace/TraceLens
+    fi
+
     srun --jobid=$JOB_ID \
         --container-image=$SQUASH_FILE \
-        --container-mounts=$GITHUB_WORKSPACE:/workspace/,$HF_HUB_CACHE_MOUNT:$HF_HUB_CACHE \
+        --container-mounts=$CONTAINER_MOUNTS \
         --container-mount-home \
         --container-writable \
         --container-workdir=/workspace/ \
