@@ -27,6 +27,11 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update -qq && apt-get install -y -qq git python3 python3-pip >/dev/null 2>&1 || \
+          yum install -y git python3 python3-pip 2>/dev/null || true
+
       - uses: actions/checkout@v4
 
       - name: Generate matrix
@@ -35,7 +40,7 @@ jobs:
         env:
           INPUT_MODELS: ${{ github.event.inputs.models }}
         run: |
-          pip install -q pyyaml
+          pip3 install -q pyyaml 2>/dev/null || pip install -q pyyaml
           python3 << 'PYEOF'
           import yaml, json, sys, os
 
@@ -65,23 +70,22 @@ jobs:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
 
     steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update -qq && apt-get install -y -qq git python3 python3-pip >/dev/null 2>&1 || \
+          yum install -y git python3 python3-pip 2>/dev/null || \
+          echo "Package manager not found, assuming deps are present"
+
       - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-          cache: 'pip'
-          cache-dependency-path: ci/requirements.txt
-
-      - name: Install dependencies
-        run: pip install -r ci/requirements.txt
+      - name: Install Python dependencies
+        run: pip install pyyaml requests sseclient-py
 
       - name: Run optimization
         working-directory: ci
         run: |
           TRIGGER="${{ github.event.inputs.trigger_reason || 'scheduled' }}"
-          python orchestrator.py \
+          python3 orchestrator.py \
             --trigger "$TRIGGER" \
             --models "${{ matrix.key }}" \
             --output-dir "${{ github.workspace }}/ci-output"
