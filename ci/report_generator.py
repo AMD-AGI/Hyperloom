@@ -60,6 +60,21 @@ def extract_optimization_data(result_dir: str) -> dict:
         data["report_exists"] = True
         data["report_content"] = report_path.read_text()
 
+    # Priority 1: ci_metrics.json (structured, written by agent per prompt)
+    ci_metrics_path = rd / "ci_metrics.json"
+    if ci_metrics_path.exists():
+        try:
+            metrics = json.loads(ci_metrics_path.read_text())
+            log.info("Loaded ci_metrics.json from %s", result_dir)
+            data["baseline_throughput"] = metrics.get("baseline_throughput")
+            data["optimized_throughput"] = metrics.get("optimized_throughput")
+            data["gain_pct"] = metrics.get("gain_pct")
+            data["actions"] = metrics.get("actions_taken", [])
+            return data
+        except (json.JSONDecodeError, KeyError) as e:
+            log.warning("Failed to parse ci_metrics.json in %s: %s", result_dir, e)
+
+    # Priority 2: state.json (legacy)
     state_path = rd / "state.json"
     if state_path.exists():
         try:
@@ -74,10 +89,11 @@ def extract_optimization_data(result_dir: str) -> dict:
         except (json.JSONDecodeError, KeyError) as e:
             log.warning("Failed to parse state.json in %s: %s", result_dir, e)
 
+    # Priority 3: parse from optimization_report.md
     if data["gain_pct"] is None and data.get("report_content"):
         parsed = _parse_metrics_from_report(data["report_content"])
         if parsed:
-            log.info("Extracted metrics from report markdown: %s", parsed)
+            log.info("Extracted metrics from report markdown (fallback): %s", parsed)
             for k, v in parsed.items():
                 if data.get(k) is None:
                     data[k] = v
