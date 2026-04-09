@@ -28,6 +28,7 @@ class ClawClient:
         })
         if api_key:
             self._session.headers["Authorization"] = f"Bearer {api_key}"
+        self._session.verify = os.environ.get("SSL_CERT_FILE", os.environ.get("REQUESTS_CA_BUNDLE", True))
 
     @classmethod
     def from_config(cls, claw_cfg: dict) -> ClawClient:
