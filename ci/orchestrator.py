@@ -142,7 +142,7 @@ def run_model(
     status = status_holder["status"]
     log.info("Session %s finished with status: %s", session_id, status)
 
-    # Step 3: Download results from Claw
+    # Step 3: Download optimization report from Claw
     report_content = None
     try:
         files = claw.list_files(session_id)
@@ -150,11 +150,12 @@ def run_model(
         os.makedirs(result_dir, exist_ok=True)
         for f in files:
             fpath = f["path"]
+            if not fpath.endswith("optimization_report.md"):
+                continue
             local = os.path.join(result_dir, os.path.basename(fpath))
             try:
                 claw.download_file_to(session_id, fpath, local)
-                if fpath.endswith("optimization_report.md"):
-                    report_content = Path(local).read_text()
+                report_content = Path(local).read_text()
             except Exception as e:
                 log.warning("Failed to download %s: %s", fpath, e)
     except Exception as e:
