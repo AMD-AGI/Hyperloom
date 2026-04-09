@@ -27,19 +27,19 @@ def _parse_metrics_from_report(content: str) -> dict:
     if gain_m:
         result["gain_pct"] = float(gain_m.group(1))
 
-    tput_row = re.search(
-        r'Output\s+Throughput\s*\(tok/s\)\s*\|\s*~?([\d.]+)\s*(?:\([^)]*\))?\s*\|\s*~?([\d.]+)',
+    gpu_row = re.search(
+        r'tok/s/GPU\s*\|\s*~?([\d.]+)\s*(?:\([^)]*\))?\s*\|\s*~?([\d.]+)',
         content)
-    if tput_row:
-        result["baseline_throughput"] = float(tput_row.group(1))
-        result["optimized_throughput"] = float(tput_row.group(2))
+    if gpu_row:
+        result["baseline_throughput"] = float(gpu_row.group(1))
+        result["optimized_throughput"] = float(gpu_row.group(2))
     else:
-        gpu_row = re.search(
-            r'tok/s/GPU\s*\|\s*~?([\d.]+)\s*(?:\([^)]*\))?\s*\|\s*~?([\d.]+)',
+        tput_row = re.search(
+            r'Output\s+Throughput\s*\(tok/s\)\s*\|\s*~?([\d.]+)\s*(?:\([^)]*\))?\s*\|\s*~?([\d.]+)',
             content)
-        if gpu_row:
-            result["baseline_throughput"] = float(gpu_row.group(1))
-            result["optimized_throughput"] = float(gpu_row.group(2))
+        if tput_row:
+            result["baseline_throughput"] = float(tput_row.group(1))
+            result["optimized_throughput"] = float(tput_row.group(2))
 
     return result
 
@@ -66,31 +66,16 @@ def extract_optimization_data(result_dir: str) -> dict:
         try:
             metrics = json.loads(ci_metrics_path.read_text())
             log.info("Loaded ci_metrics.json from %s", result_dir)
-            data["baseline_throughput"] = metrics.get("baseline_throughput")
-            data["optimized_throughput"] = metrics.get("optimized_throughput")
+            data["baseline_throughput"] = metrics.get("tok_per_gpu_baseline") or metrics.get("baseline_throughput")
+            data["optimized_throughput"] = metrics.get("tok_per_gpu_optimized") or metrics.get("optimized_throughput")
             data["gain_pct"] = metrics.get("gain_pct")
             data["actions"] = metrics.get("actions_taken", [])
             return data
         except (json.JSONDecodeError, KeyError) as e:
             log.warning("Failed to parse ci_metrics.json in %s: %s", result_dir, e)
 
-    # Priority 2: state.json (legacy)
-    state_path = rd / "state.json"
-    if state_path.exists():
-        try:
-            state = json.loads(state_path.read_text())
-            data["baseline_throughput"] = state.get("baseline_throughput")
-            data["optimized_throughput"] = state.get("optimized_throughput")
-            if data["baseline_throughput"] and data["optimized_throughput"]:
-                data["gain_pct"] = round(
-                    (data["optimized_throughput"] - data["baseline_throughput"])
-                    / data["baseline_throughput"] * 100, 1)
-            data["actions"] = state.get("actions_taken", [])
-        except (json.JSONDecodeError, KeyError) as e:
-            log.warning("Failed to parse state.json in %s: %s", result_dir, e)
-
-    # Priority 3: parse from optimization_report.md
-    if data["gain_pct"] is None and data.get("report_content"):
+    # Priority 2: parse from optimization_report.md
+    if data.get("report_content"):
         parsed = _parse_metrics_from_report(data["report_content"])
         if parsed:
             log.info("Extracted metrics from report markdown (fallback): %s", parsed)
