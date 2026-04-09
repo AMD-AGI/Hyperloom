@@ -22,6 +22,8 @@ Must optimize at least {min_kernels} kernels
 Requirements:
 Save all results and the optimization report to {result_dir}
 Execute the full skill pipeline (Phase 0-10), including parameter sweep.
+After writing optimization_report.md, also write {result_dir}/ci_metrics.json with EXACTLY this schema:
+{{"baseline_throughput": <total output tok/s>, "optimized_throughput": <total output tok/s>, "gain_pct": <float>, "tok_per_gpu_baseline": <float>, "tok_per_gpu_optimized": <float>, "actions_taken": ["action1", "action2"]}}
 
 InferenceX Baseline:
 Target GPU: {target_gpu}
