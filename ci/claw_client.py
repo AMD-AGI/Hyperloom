@@ -187,33 +187,31 @@ class ClawClient:
                 if on_event:
                     on_event(event_data)
 
-                if event_type == "sandboxStatus":
-                    phase = event_data.get("phase", "")
-                    sb_status = event_data.get("status", "")
-                    log.info("Session %s sandbox: phase=%s status=%s", session_id, phase, sb_status)
-                    if sb_status == "failed":
-                        log.error("Session %s sandbox creation failed. Full event: %s",
-                                  session_id, json.dumps(event_data, indent=2, default=str))
-                    continue
+                log.info("Session %s [%.0fs] SSE event: %s",
+                         session_id, elapsed, json.dumps(event_data, default=str))
 
-                if event_type == "statusUpdate":
-                    agent_status = event_data.get("agentStatus", "")
-                    if agent_status == "stopped":
-                        brief = event_data.get("brief", "")
-                        status = "failed" if "failed" in brief.lower() else "completed"
-                        log.info("Session %s %s after %.0fs (%s)",
-                                 session_id, status, elapsed, brief)
+                if event_type in ("sandboxStatus", "error", "statusUpdate"):
+                    _dump = json.dumps(event_data, indent=2, default=str)
+
+                    if event_type == "sandboxStatus":
+                        sb_status = event_data.get("status", "")
+                        if sb_status == "failed":
+                            log.error(">>> SANDBOX FAILED <<< session=%s\n%s", session_id, _dump)
+                        continue
+
+                    if event_type == "error":
+                        log.error(">>> ERROR EVENT <<< session=%s\n%s", session_id, _dump)
+                        status = "failed"
                         break
 
-                elif event_type == "chatDelta":
-                    if event_data.get("finished"):
-                        log.info("Session %s chatDelta finished after %.0fs", session_id, elapsed)
-
-                elif event_type == "error":
-                    log.error("Session %s error event: %s",
-                              session_id, json.dumps(event_data, indent=2, default=str))
-                    status = "failed"
-                    break
+                    if event_type == "statusUpdate":
+                        agent_status = event_data.get("agentStatus", "")
+                        if agent_status == "stopped":
+                            brief = event_data.get("brief", "")
+                            status = "failed" if "failed" in brief.lower() else "completed"
+                            log.info(">>> SESSION %s <<< after %.0fs (%s)",
+                                     status.upper(), elapsed, brief)
+                            break
 
                 if time.time() - last_heartbeat > heartbeat_interval:
                     log.info("Session %s still running... (%.0f min)", session_id, elapsed / 60)
