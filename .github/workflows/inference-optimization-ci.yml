@@ -77,21 +77,34 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
     steps:
+      - name: Restore cached SHA
+        uses: actions/cache/restore@v4
+        with:
+          path: .inferenceX_last_sha
+          key: inferenceX-sha
+
       - name: Check for changes
         id: check
         run: |
           LATEST=$(git ls-remote https://github.com/SemiAnalysisAI/InferenceX.git refs/heads/main | cut -f1)
           CACHED=""
-          STATE_FILE="/tmp/inferenceX_last_sha"
-          if [ -f "$STATE_FILE" ]; then
-            CACHED=$(cat "$STATE_FILE")
+          if [ -f ".inferenceX_last_sha" ]; then
+            CACHED=$(cat ".inferenceX_last_sha")
           fi
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
           if [ "$LATEST" != "$CACHED" ] && [ -n "$LATEST" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "$LATEST" > "$STATE_FILE"
+            echo "$LATEST" > .inferenceX_last_sha
           else
             echo "changed=false" >> $GITHUB_OUTPUT
           fi
+
+      - name: Save cached SHA
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .inferenceX_last_sha
+          key: inferenceX-sha-${{ steps.check.outputs.latest }}
 
       - name: Trigger optimization
         if: steps.check.outputs.changed == 'true'
