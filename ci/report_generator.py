@@ -11,6 +11,39 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
+def _parse_metrics_from_report(content: str) -> dict:
+    """Fallback: extract baseline/optimized throughput from optimization_report.md.
+
+    Parses the Executive Summary table:
+        | Output Throughput (tok/s) | 2313.52 | ~2497 (avg) | **+7.9%** |
+        | tok/s/GPU | 289.19 | ~312 (avg) | **+7.9%** |
+    Prefers total throughput over per-GPU.
+    """
+    import re
+
+    result: dict[str, Any] = {}
+
+    gain_m = re.search(r'\*\*\+?([\d.]+)%\*\*', content)
+    if gain_m:
+        result["gain_pct"] = float(gain_m.group(1))
+
+    tput_row = re.search(
+        r'Output\s+Throughput\s*\(tok/s\)\s*\|\s*~?([\d.]+)\s*(?:\([^)]*\))?\s*\|\s*~?([\d.]+)',
+        content)
+    if tput_row:
+        result["baseline_throughput"] = float(tput_row.group(1))
+        result["optimized_throughput"] = float(tput_row.group(2))
+    else:
+        gpu_row = re.search(
+            r'tok/s/GPU\s*\|\s*~?([\d.]+)\s*(?:\([^)]*\))?\s*\|\s*~?([\d.]+)',
+            content)
+        if gpu_row:
+            result["baseline_throughput"] = float(gpu_row.group(1))
+            result["optimized_throughput"] = float(gpu_row.group(2))
+
+    return result
+
+
 def extract_optimization_data(result_dir: str) -> dict:
     """Extract key metrics from a Hyperloom optimization result directory."""
     rd = Path(result_dir)
@@ -41,6 +74,14 @@ def extract_optimization_data(result_dir: str) -> dict:
         except (json.JSONDecodeError, KeyError) as e:
             log.warning("Failed to parse state.json in %s: %s", result_dir, e)
 
+    if data["gain_pct"] is None and data.get("report_content"):
+        parsed = _parse_metrics_from_report(data["report_content"])
+        if parsed:
+            log.info("Extracted metrics from report markdown: %s", parsed)
+            for k, v in parsed.items():
+                if data.get(k) is None:
+                    data[k] = v
+
     return data
 
 
@@ -55,7 +96,7 @@ def build_model_result(
     ifx_reference: dict | None = None,
 ) -> dict:
     """Build a complete result dict for one model."""
-    opt_data = extract_optimization_data(result_dir) if status == "completed" else {}
+    opt_data = extract_optimization_data(result_dir)
 
     result = {
         "model": model_name,
