@@ -191,6 +191,9 @@ class ClawClient:
                     phase = event_data.get("phase", "")
                     sb_status = event_data.get("status", "")
                     log.info("Session %s sandbox: phase=%s status=%s", session_id, phase, sb_status)
+                    if sb_status == "failed":
+                        log.error("Session %s sandbox creation failed. Full event: %s",
+                                  session_id, json.dumps(event_data, indent=2, default=str))
                     continue
 
                 if event_type == "statusUpdate":
@@ -207,8 +210,8 @@ class ClawClient:
                         log.info("Session %s chatDelta finished after %.0fs", session_id, elapsed)
 
                 elif event_type == "error":
-                    msg = event_data.get("message", "unknown error")
-                    log.error("Session %s error: %s", session_id, msg)
+                    log.error("Session %s error event: %s",
+                              session_id, json.dumps(event_data, indent=2, default=str))
                     status = "failed"
                     break
 
