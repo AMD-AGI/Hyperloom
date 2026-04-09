@@ -49,15 +49,7 @@ jobs:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
 
     steps:
-      - name: Install AMD CA certificates
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/AMD-AGI/Primus-SaFE/main/Scripts/setup-certs/setup.sh | sudo bash || \
-          curl -fsSL https://raw.githubusercontent.com/AMD-AGI/Primus-SaFE/main/Scripts/setup-certs/setup.sh | bash || true
-
       - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: pip3 install pyyaml requests sseclient-py certifi
 
       - name: Run optimization
         working-directory: ci
