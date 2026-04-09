@@ -115,10 +115,11 @@ def run_model(
         def _on_event(evt):
             sse_events.append(evt)
             evt_type = evt.get("type", "")
-            if evt_type == "chat" and evt.get("sender") == "assistant":
-                content = evt.get("content", "")
-                if content:
-                    log.info("[%s] Agent: %s", model_name, content[:150])
+            if evt_type == "chatDelta" and evt.get("sender") == "assistant":
+                delta = evt.get("delta", {})
+                content = delta.get("content", "") if isinstance(delta, dict) else ""
+                if content and len(content) > 20:
+                    log.info("[%s] Agent: ...%s", model_name, content[:150])
             elif evt_type == "toolUsed":
                 log.info("[%s] Tool: %s", model_name, evt.get("tool", "unknown"))
 
