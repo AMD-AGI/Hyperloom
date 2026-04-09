@@ -179,19 +179,41 @@ class ClawClient:
         last_heartbeat = start
         status = "running"
 
+        got_agent_response = False
+
         try:
             for event_data in self.subscribe_sse(session_id, effective_timeout):
                 elapsed = time.time() - start
-                event_type = event_data.get("type", "")
+
+                try:
+                    event_type = event_data.get("type", "") if isinstance(event_data, dict) else ""
+                except Exception:
+                    log.warning("Session %s [%.0fs] unparseable event: %s",
+                                session_id, elapsed, repr(event_data)[:500])
+                    continue
 
                 if on_event:
-                    on_event(event_data)
+                    try:
+                        on_event(event_data)
+                    except Exception as cb_err:
+                        log.warning("Session %s on_event callback error: %s", session_id, cb_err)
 
-                log.info("Session %s [%.0fs] SSE event: %s",
-                         session_id, elapsed, json.dumps(event_data, default=str))
+                try:
+                    log.info("Session %s [%.0fs] SSE %s: %s",
+                             session_id, elapsed, event_type,
+                             json.dumps(event_data, default=str))
+                except Exception:
+                    log.info("Session %s [%.0fs] SSE %s: (unserializable event)",
+                             session_id, elapsed, event_type)
+
+                if event_type == "chatDelta":
+                    got_agent_response = True
 
                 if event_type in ("sandboxStatus", "error", "statusUpdate"):
-                    _dump = json.dumps(event_data, indent=2, default=str)
+                    try:
+                        _dump = json.dumps(event_data, indent=2, default=str)
+                    except Exception:
+                        _dump = repr(event_data)
 
                     if event_type == "sandboxStatus":
                         sb_status = event_data.get("status", "")
@@ -226,7 +248,12 @@ class ClawClient:
                 status = "failed"
                 log.error("Session %s connection lost after %.0fs: %s", session_id, elapsed, e)
         except Exception as e:
-            status = "failed"
-            log.error("Session %s monitoring error: %s", session_id, e)
+            log.error("Session %s monitoring error: %s: %s", session_id, type(e).__name__, e)
+            if status == "running" and got_agent_response:
+                status = "completed"
+                log.info("Session %s had agent responses before error, marking as completed",
+                         session_id)
+            else:
+                status = "failed"
 
         return status
