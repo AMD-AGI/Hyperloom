@@ -24,7 +24,7 @@ defaults:
   mode: local
   geak_step_limit: 100
   geak_workspace: ${GEAK_WORKSPACE}
-  min_kernels: 5
+  min_kernels: 3
   ep: 1
   inferencex_path: /hyperloom/InferenceX
   kernel_opt_backends: geak
