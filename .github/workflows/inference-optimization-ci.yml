@@ -36,29 +36,12 @@ jobs:
           INPUT_MODELS: ${{ github.event.inputs.models }}
         run: |
           pip3 install -q pyyaml 2>/dev/null || pip install -q pyyaml
-          python3 << 'PYEOF'
-          import yaml, json, sys, os
-
-          config = yaml.safe_load(open("ci-config.yaml"))
-          models = config.get("models", [])
-
-          selected = os.environ.get("INPUT_MODELS", "").strip()
-          if selected:
-              keys = set(selected.split(","))
-              models = [m for m in models if m["inferenceX_key"] in keys]
-
-          matrix = [{"key": m["inferenceX_key"]} for m in models]
-          print(f"Models: {[m['key'] for m in matrix]}", file=sys.stderr)
-
-          output_file = os.environ["GITHUB_OUTPUT"]
-          with open(output_file, "a") as f:
-              f.write(f"matrix={json.dumps({'include': matrix})}\n")
-          PYEOF
+          python3 generate_matrix.py
 
   optimize:
     name: "${{ matrix.key }}"
     needs: prepare
-    runs-on: self-hosted
+    runs-on: hyperloom-qn7cd
     timeout-minutes: 300
     strategy:
       fail-fast: false
