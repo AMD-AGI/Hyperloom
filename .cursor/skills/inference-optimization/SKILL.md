@@ -73,7 +73,26 @@ Always use `scripts/patch_inductor.py` with `--target-file`. The `--cache-dir` o
 
 **CRITICAL:** When GEAK changes block sizes or warp counts, you MUST also pass `--best-config` with the updated tiling parameters. Patching only the kernel `.py` without updating `.best_config` causes numerical corruption (garbled output). See `actions/integrate.md` for details.
 
-**Additional claw-mode Iron Rules (IR-7, IR-8) are defined in [`modes/CLAW.md`](modes/CLAW.md).**
+### IR-7: NEVER modify GEAK configuration
+
+GEAK is an external service — treat it as **read-only infrastructure**. The skill MUST NOT
+modify any GEAK configuration files, settings, or parameters beyond what is passed as
+arguments to `geak_create_task`. Specifically:
+
+- **Do NOT** modify GEAK server config, workspace settings, or API configuration
+- **Do NOT** write to or alter any files under the GEAK config/settings directories
+- **Do NOT** change `GEAK_WORKSPACE`, `GEAK_STEP_LIMIT`, or other GEAK constants
+  at runtime (use the values from the constants table above or user overrides)
+- **Do NOT** modify the GEAK MCP server configuration (`cursor_mcp_config.json`, etc.)
+- **Do NOT** modify any test data, results, or configuration files belonging to GEAK
+  (e.g., `tests/test_data/`, `server/config.py`, `server/templates/`)
+
+The ONLY interaction allowed is through GEAK MCP tool calls (`geak_create_task`,
+`geak_submit_task`, `geak_get_task`, `geak_get_outputs`, `geak_download_file`).
+
+Violation = immediate run invalidation.
+
+**Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11) and [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12).**
 
 ## GEAK & Tooling Constants
 

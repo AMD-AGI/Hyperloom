@@ -169,8 +169,14 @@ class ClawClient:
         timeout: int | None = None,
         heartbeat_interval: int = 300,
         on_event: Any = None,
+        reconnect_retries: int = 3,
+        reconnect_wait_s: int = 180,
     ) -> str:
         """Monitor a session's SSE stream until completion.
+
+        On transient disconnects (Claw service restart, network blip), waits
+        ``reconnect_wait_s`` seconds and retries up to ``reconnect_retries``
+        times before declaring failure.
 
         Returns final status: 'completed', 'failed', 'timeout'.
         """
@@ -178,94 +184,130 @@ class ClawClient:
         start = time.time()
         last_heartbeat = start
         status = "running"
-
         got_agent_response = False
+        retries_left = reconnect_retries
 
-        try:
-            for event_data in self.subscribe_sse(session_id, effective_timeout):
-                elapsed = time.time() - start
+        while True:
+            try:
+                remaining = effective_timeout - (time.time() - start)
+                if remaining <= 0:
+                    status = "timeout"
+                    log.warning("Session %s global timeout reached (%.0fs)",
+                                session_id, time.time() - start)
+                    break
 
-                try:
-                    event_type = event_data.get("type", "") if isinstance(event_data, dict) else ""
-                except Exception:
-                    log.warning("Session %s [%.0fs] unparseable event: %s",
-                                session_id, elapsed, repr(event_data)[:500])
-                    continue
+                for event_data in self.subscribe_sse(session_id, int(remaining)):
+                    elapsed = time.time() - start
+                    retries_left = reconnect_retries
 
-                if on_event:
                     try:
-                        on_event(event_data)
-                    except Exception as cb_err:
-                        log.warning("Session %s on_event callback error: %s", session_id, cb_err)
-
-                try:
-                    log.info("Session %s [%.0fs] SSE %s: %s",
-                             session_id, elapsed, event_type,
-                             json.dumps(event_data, default=str))
-                except Exception:
-                    log.info("Session %s [%.0fs] SSE %s: (unserializable event)",
-                             session_id, elapsed, event_type)
-
-                if event_type == "chatDelta":
-                    got_agent_response = True
-
-                if event_type in ("sandboxStatus", "error", "statusUpdate"):
-                    try:
-                        _dump = json.dumps(event_data, indent=2, default=str)
+                        event_type = event_data.get("type", "") if isinstance(event_data, dict) else ""
                     except Exception:
-                        _dump = repr(event_data)
-
-                    if event_type == "sandboxStatus":
-                        sb_status = event_data.get("status", "")
-                        if sb_status == "failed":
-                            log.error(">>> SANDBOX FAILED <<< session=%s\n%s", session_id, _dump)
+                        log.warning("Session %s [%.0fs] unparseable event: %s",
+                                    session_id, elapsed, repr(event_data)[:500])
                         continue
 
-                    if event_type == "error":
-                        log.error(">>> ERROR EVENT <<< session=%s\n%s", session_id, _dump)
-                        status = "failed"
-                        break
+                    if on_event:
+                        try:
+                            on_event(event_data)
+                        except Exception as cb_err:
+                            log.warning("Session %s on_event callback error: %s", session_id, cb_err)
 
-                    if event_type == "statusUpdate":
-                        agent_status = event_data.get("agentStatus", "")
-                        if agent_status == "stopped":
-                            brief = event_data.get("brief", "")
-                            status = "failed" if "failed" in brief.lower() else "completed"
-                            log.info(">>> SESSION %s <<< after %.0fs (%s)",
-                                     status.upper(), elapsed, brief)
+                    try:
+                        log.info("Session %s [%.0fs] SSE %s: %s",
+                                 session_id, elapsed, event_type,
+                                 json.dumps(event_data, default=str))
+                    except Exception:
+                        log.info("Session %s [%.0fs] SSE %s: (unserializable event)",
+                                 session_id, elapsed, event_type)
+
+                    if event_type == "chatDelta":
+                        got_agent_response = True
+
+                    if event_type in ("sandboxStatus", "error", "statusUpdate"):
+                        try:
+                            _dump = json.dumps(event_data, indent=2, default=str)
+                        except Exception:
+                            _dump = repr(event_data)
+
+                        if event_type == "sandboxStatus":
+                            sb_status = event_data.get("status", "")
+                            if sb_status == "failed":
+                                log.error(">>> SANDBOX FAILED <<< session=%s\n%s", session_id, _dump)
+                            continue
+
+                        if event_type == "error":
+                            log.error(">>> ERROR EVENT <<< session=%s\n%s", session_id, _dump)
+                            status = "failed"
                             break
 
-                if time.time() - last_heartbeat > heartbeat_interval:
-                    log.info("Session %s still running... (%.0f min)", session_id, elapsed / 60)
-                    last_heartbeat = time.time()
+                        if event_type == "statusUpdate":
+                            agent_status = event_data.get("agentStatus", "")
+                            if agent_status == "stopped":
+                                brief = event_data.get("brief", "")
+                                status = "failed" if "failed" in brief.lower() else "completed"
+                                log.info(">>> SESSION %s <<< after %.0fs (%s)",
+                                         status.upper(), elapsed, brief)
+                                break
 
-        except (requests.exceptions.ReadTimeout,
-                requests.exceptions.ConnectionError,
-                requests.exceptions.ChunkedEncodingError) as e:
-            elapsed = time.time() - start
-            if elapsed >= effective_timeout * 0.9:
-                status = "timeout"
-                log.warning("Session %s timeout after %.0fs", session_id, elapsed)
-            else:
-                status = "failed"
-                log.error("Session %s connection lost after %.0fs: %s", session_id, elapsed, e)
-        except Exception as e:
-            elapsed = time.time() - start
-            log.error("Session %s monitoring error after %.0fs: %s: %s",
-                      session_id, elapsed, type(e).__name__, e)
-            if elapsed >= effective_timeout * 0.9:
-                status = "timeout"
-            else:
-                status = "failed"
+                    if time.time() - last_heartbeat > heartbeat_interval:
+                        log.info("Session %s still running... (%.0f min)", session_id, elapsed / 60)
+                        last_heartbeat = time.time()
 
-        if status == "running":
-            elapsed = time.time() - start
-            if elapsed >= effective_timeout * 0.8:
-                status = "timeout"
-                log.warning("Session %s SSE stream ended after %.0fs with no terminal event, marking as timeout",
-                            session_id, elapsed)
-            else:
-                log.warning("Session %s SSE stream ended after %.0fs with status still 'running'",
-                            session_id, elapsed)
+                if status != "running":
+                    break
+
+                elapsed = time.time() - start
+                if elapsed >= effective_timeout * 0.8:
+                    status = "timeout"
+                    log.warning("Session %s SSE stream ended after %.0fs with no terminal event, marking as timeout",
+                                session_id, elapsed)
+                    break
+
+                log.warning("Session %s SSE stream ended after %.0fs with status still 'running', "
+                            "will attempt reconnect", session_id, elapsed)
+
+            except (requests.exceptions.ReadTimeout,
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.ChunkedEncodingError) as e:
+                elapsed = time.time() - start
+                if elapsed >= effective_timeout * 0.9:
+                    status = "timeout"
+                    log.warning("Session %s timeout after %.0fs", session_id, elapsed)
+                    break
+
+                retries_left -= 1
+                if retries_left <= 0:
+                    status = "failed"
+                    log.error("Session %s connection lost after %.0fs (exhausted %d reconnect attempts): %s",
+                              session_id, elapsed, reconnect_retries, e)
+                    break
+
+                log.warning("Session %s SSE disconnected after %.0fs: %s — "
+                            "waiting %ds then reconnecting (attempt %d/%d)",
+                            session_id, elapsed, e, reconnect_wait_s,
+                            reconnect_retries - retries_left + 1, reconnect_retries)
+                time.sleep(reconnect_wait_s)
+                continue
+
+            except Exception as e:
+                elapsed = time.time() - start
+                log.error("Session %s monitoring error after %.0fs: %s: %s",
+                          session_id, elapsed, type(e).__name__, e)
+                if elapsed >= effective_timeout * 0.9:
+                    status = "timeout"
+                else:
+                    retries_left -= 1
+                    if retries_left <= 0:
+                        status = "failed"
+                        log.error("Session %s exhausted %d reconnect attempts after unrecoverable errors",
+                                  session_id, reconnect_retries)
+                    else:
+                        log.warning("Session %s waiting %ds before reconnect (attempt %d/%d)",
+                                    session_id, reconnect_wait_s,
+                                    reconnect_retries - retries_left + 1, reconnect_retries)
+                        time.sleep(reconnect_wait_s)
+                        continue
+                break
 
         return status
