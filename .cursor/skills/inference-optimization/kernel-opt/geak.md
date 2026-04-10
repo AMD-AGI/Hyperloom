@@ -46,6 +46,14 @@ ls "$AITER_PATH/jit/"    # Compiled .so files
 ls "$AITER_PATH/ops/"    # Python dispatch wrappers
 ```
 
+## GEAK Configuration — DO NOT MODIFY (IR-10)
+
+**GEAK is external read-only infrastructure.** The skill MUST NOT modify any GEAK
+configuration files, server settings, workspace configs, test data, or results files.
+The ONLY allowed interaction is through GEAK MCP tool calls listed below. Modifying
+GEAK config (e.g., `server/config.py`, `cursor_mcp_config.json`, `tests/test_data/`,
+workspace settings) is an Iron Rule violation and invalidates the entire run.
+
 ## GEAK MCP Tool Reference
 
 ### Authentication
