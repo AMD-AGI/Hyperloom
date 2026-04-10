@@ -210,10 +210,14 @@ def generate_github_summary(results: list[dict], trigger: str, ifx_commit: str) 
         lines.append(f"Image: `{r['image']}`")
         lines.append("")
 
-        if r["status"] != "completed":
+        if r["status"] not in ("completed", "timeout"):
             lines.append(f"**Status: {r['status']}**")
             lines.append("")
             continue
+
+        if r["status"] == "timeout":
+            lines.append(f"**Status: timeout** (sandbox_timeout reached)")
+            lines.append("")
 
         lines.append("| Metric | Value |")
         lines.append("|--------|-------|")
@@ -225,10 +229,12 @@ def generate_github_summary(results: list[dict], trigger: str, ifx_commit: str) 
         if r.get("gain_pct") is not None:
             lines.append(f"| **Optimization Gain** | **+{r['gain_pct']:.1f}%** |")
         if r.get("inferenceX_tok_per_gpu") is not None:
-            lines.append(f"| InferenceX MI355X (output tok/s/GPU) | {r['inferenceX_tok_per_gpu']:.2f} |")
+            gpu_label = (r.get("target_gpu") or "MI355X").upper()
+            lines.append(f"| InferenceX {gpu_label} (output tok/s/GPU) | {r['inferenceX_tok_per_gpu']:.2f} |")
         if r.get("vs_inferenceX_pct") is not None:
+            gpu_label = (r.get("target_gpu") or "MI355X").upper()
             sign = "+" if r["vs_inferenceX_pct"] >= 0 else ""
-            lines.append(f"| **vs InferenceX MI355X** | **{sign}{r['vs_inferenceX_pct']:.1f}%** |")
+            lines.append(f"| **vs InferenceX {gpu_label}** | **{sign}{r['vs_inferenceX_pct']:.1f}%** |")
         lines.append("")
 
         if r.get("actions"):
