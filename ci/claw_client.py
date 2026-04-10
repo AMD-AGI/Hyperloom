@@ -239,7 +239,9 @@ class ClawClient:
                     log.info("Session %s still running... (%.0f min)", session_id, elapsed / 60)
                     last_heartbeat = time.time()
 
-        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+        except (requests.exceptions.ReadTimeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ChunkedEncodingError) as e:
             elapsed = time.time() - start
             if elapsed >= effective_timeout * 0.9:
                 status = "timeout"
@@ -248,11 +250,11 @@ class ClawClient:
                 status = "failed"
                 log.error("Session %s connection lost after %.0fs: %s", session_id, elapsed, e)
         except Exception as e:
-            log.error("Session %s monitoring error: %s: %s", session_id, type(e).__name__, e)
-            if status == "running" and got_agent_response:
-                status = "completed"
-                log.info("Session %s had agent responses before error, marking as completed",
-                         session_id)
+            elapsed = time.time() - start
+            log.error("Session %s monitoring error after %.0fs: %s: %s",
+                      session_id, elapsed, type(e).__name__, e)
+            if elapsed >= effective_timeout * 0.9:
+                status = "timeout"
             else:
                 status = "failed"
 
