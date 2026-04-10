@@ -1,0 +1,54 @@
+diff --git a/primus/backends/megatron/training/evaluator.py b/primus/backends/megatron/training/evaluator.py
+index f7df2870..24d59cc7 100644
+--- a/primus/backends/megatron/training/evaluator.py
++++ b/primus/backends/megatron/training/evaluator.py
+@@ -49,7 +49,9 @@ def primus_evaluate(
+     rerun_mode = rerun_state_machine.get_mode()
+     rerun_state_machine.set_mode(RerunMode.DISABLED)
+ 
+-    total_loss_dict = {}
++    # Accumulate numerator and denominator separately across all eval iterations
++    total_loss_numerators = {}
++    total_loss_denominators = {}
+ 
+     # make validation batch size independent from training batch size
+     eval_batch_size = args.global_batch_size
+@@ -93,7 +95,7 @@ def primus_evaluate(
+                 torch.cuda.empty_cache()
+ 
+             if is_pipeline_stage_containing_loss():
+-                # Average loss across microbatches.
++                # Accumulate loss across microbatches for this iteration.
+                 for key in loss_dicts[0].keys():
+                     numerator = 0
+                     denominator = 0
+@@ -109,7 +111,12 @@ def primus_evaluate(
+                             # and so the denominator is 1.
+                             numerator += val
+                             denominator += 1
+-                    total_loss_dict[key] = numerator / denominator
++                    # Accumulate across all eval iterations
++                    if key not in total_loss_numerators:
++                        total_loss_numerators[key] = 0
++                        total_loss_denominators[key] = 0
++                    total_loss_numerators[key] += numerator
++                    total_loss_denominators[key] += denominator
+ 
+             args.consumed_valid_samples += eval_batch_size
+ 
+@@ -125,6 +132,15 @@ def primus_evaluate(
+                     log_rank_0("Exiting during evaluation, timelimit reached")
+                     return None, None, True
+ 
++        # Compute final average loss across all eval iterations
++        total_loss_dict = {}
++        if is_pipeline_stage_containing_loss():
++            for key in total_loss_numerators.keys():
++                if total_loss_denominators[key] > 0:
++                    total_loss_dict[key] = total_loss_numerators[key] / total_loss_denominators[key]
++                else:
++                    total_loss_dict[key] = 0.0
++
+         collected_non_loss_data = None
+         if non_loss_data_func is not None:
+             collected_non_loss_data = non_loss_data_func(model)
