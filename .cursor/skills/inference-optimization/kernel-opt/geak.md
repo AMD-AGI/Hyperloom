@@ -46,13 +46,16 @@ ls "$AITER_PATH/jit/"    # Compiled .so files
 ls "$AITER_PATH/ops/"    # Python dispatch wrappers
 ```
 
-## GEAK Configuration — DO NOT MODIFY (IR-10)
+## GEAK Configuration — DO NOT MODIFY (IR-7)
 
 **GEAK is external read-only infrastructure.** The skill MUST NOT modify any GEAK
 configuration files, server settings, workspace configs, test data, or results files.
-The ONLY allowed interaction is through GEAK MCP tool calls listed below. Modifying
-GEAK config (e.g., `server/config.py`, `cursor_mcp_config.json`, `tests/test_data/`,
-workspace settings) is an Iron Rule violation and invalidates the entire run.
+Modifying GEAK config is an Iron Rule violation and invalidates the entire run.
+
+**CRITICAL: Do NOT call `geak_set_model_config`.** The GEAK LLM model configuration
+is pre-set by the administrator. The skill MUST use whatever model is already
+configured. Calling `geak_set_model_config` to change the LLM backend violates IR-7
+and risks setting a non-existent model (e.g., `claude-haiku-4-5-20251001` on VertexAI).
 
 ## GEAK MCP Tool Reference
 
@@ -66,14 +69,15 @@ Requires two keys:
 
 | Step | Tool | Purpose |
 |------|------|---------|
-| 1 | `geak_set_model_config` | Configure LLM backend (once per session) |
+| 1 | `geak_get_model_config` | **Read-only**: verify LLM backend is configured |
 | 2 | `geak_create_task` | Create task with source + instructions |
 | 3 | `geak_submit_task` | Start optimization |
 | 4 | `geak_get_task` | Poll status (every 30s) |
 | 5 | `geak_get_outputs` | List output files |
 | 6 | `geak_download_file` | Download optimized code |
 | - | `geak_list_tasks` | Debug: list all tasks |
-| - | `geak_get_model_config` | Debug: check LLM config |
+
+**FORBIDDEN:** `geak_set_model_config` — NEVER call this tool. Use existing config.
 
 ### geak_create_task — critical details
 
