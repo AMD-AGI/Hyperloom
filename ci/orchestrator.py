@@ -141,6 +141,10 @@ def run_model(
     # Wait for completion
     monitor_thread.join(timeout=sandbox_timeout + 60)
     status = status_holder["status"]
+    if status == "running":
+        status = "timeout"
+        log.warning("Session %s still running after sandbox_timeout (%ds), marking as timeout",
+                     session_id, sandbox_timeout)
     log.info("Session %s finished with status: %s", session_id, status)
 
     # Step 3: Download optimization report from Claw
@@ -175,6 +179,7 @@ def run_model(
     result = build_model_result(
         model_name, merged["inferenceX_key"], merged["image"],
         merged["precision"], status, timestamp, result_dir, ifx_ref)
+    result["target_gpu"] = merged.get("target_gpu", "")
     if report_content and not result.get("report_content"):
         result["report_content"] = report_content
         result["report_exists"] = True
@@ -316,9 +321,11 @@ def main():
         if webhook:
             _send_webhook(webhook, json_summary)
 
-    # Exit non-zero if all models failed
+    # Exit non-zero if no models completed (failed + timeout = all bad)
     if json_summary["stats"]["completed"] == 0:
-        log.error("All models failed!")
+        timeout_count = json_summary["stats"].get("timeout", 0)
+        failed_count = json_summary["stats"].get("failed", 0)
+        log.error("All models failed! (failed=%d, timeout=%d)", failed_count, timeout_count)
         sys.exit(1)
 
 
