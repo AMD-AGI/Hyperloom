@@ -19,6 +19,7 @@ env:
   GEAK_WORKSPACE: ${{ secrets.GEAK_WORKSPACE }}
   CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
   WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+  SANDBOX_WORKSPACE: ${{ secrets.SANDBOX_WORKSPACE }}
 
 jobs:
   prepare:

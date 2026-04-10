@@ -1,6 +1,7 @@
 claw:
   endpoint: https://oci-slc.example-internal-host.invalid/claw-api/v1
   api_key_env: CLAW_API_KEY
+  sandbox_workspace_env: SANDBOX_WORKSPACE
   sandbox_timeout: 28800
   agent_id: agent_default
   tools: [16, 18]
