@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "oci-geak-agent": {
+      "headers": {
+        "Authorization": "Bearer <SAFE_API_KEY>ak-xxxxx"
+      },
+      "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/geak-agent-wvsbv/mcp/sse"
+    },
+    "oci-oob-agent": {
+      "headers": {
+        "Authorization": "Bearer <SAFE_API_KEY>ak-xxxxx"
+      },
+      "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-sandbox/agent-mcp-server-zr29p/"
+    },
+    "oci-primus-safe": {
+      "headers": {
+        "Authorization": "Bearer <SAFE_API_KEY>ak-xxxxx"
+      },
+      "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/safe-mcp-zm7cc/"
+    },
+    "oci-traceLens-agent": {
+      "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/trace-lens-agent-qqpfv/mcp"
+    }
+  }
+}
