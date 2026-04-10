@@ -85,6 +85,7 @@ class ClawClient:
             "taskMode": task_mode,
             "attachments": [],
             "tools": tools if tools is not None else self.default_tools,
+            "workspaceId": "control-plane-sandbox",
         }
         resp = self._session.post(
             self._url(f"/sessions/{session_id}/messages"),
