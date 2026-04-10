@@ -256,4 +256,14 @@ class ClawClient:
             else:
                 status = "failed"
 
+        if status == "running":
+            elapsed = time.time() - start
+            if elapsed >= effective_timeout * 0.8:
+                status = "timeout"
+                log.warning("Session %s SSE stream ended after %.0fs with no terminal event, marking as timeout",
+                            session_id, elapsed)
+            else:
+                log.warning("Session %s SSE stream ended after %.0fs with status still 'running'",
+                            session_id, elapsed)
+
         return status
