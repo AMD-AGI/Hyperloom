@@ -87,8 +87,12 @@ arguments to `geak_create_task`. Specifically:
 - **Do NOT** modify any test data, results, or configuration files belonging to GEAK
   (e.g., `tests/test_data/`, `server/config.py`, `server/templates/`)
 
-The ONLY interaction allowed is through GEAK MCP tool calls (`geak_create_task`,
-`geak_submit_task`, `geak_get_task`, `geak_get_outputs`, `geak_download_file`).
+The ONLY interaction allowed is through these GEAK MCP tool calls:
+`geak_get_model_config` (read-only), `geak_create_task`, `geak_submit_task`,
+`geak_get_task`, `geak_get_outputs`, `geak_download_file`, `geak_list_tasks`.
+
+**NEVER call `geak_set_model_config`** — the LLM backend is pre-configured by the
+administrator. Changing it risks setting a non-existent model and breaking all tasks.
 
 Violation = immediate run invalidation.
 
@@ -136,6 +140,28 @@ scripts/                       — Baseline/profiling/accuracy shell scripts
 modes/                         — Mode-specific execution details (LOCAL.md, CLAW.md)
 KNOWLEDGE-BASE.md              — Legacy KB (archived, seeded into kb/entries.jsonl)
 ```
+
+## Common Pitfalls (validated from CI logs)
+
+These are recurring errors observed in production CI runs. **Read before executing.**
+
+1. **PATH: Always `export PATH="/opt/venv/bin:$PATH"` first.** The system python3
+   (`/usr/bin/python3`) does NOT have sglang/vllm/numpy. Every bash command must
+   prepend the venv. Failure mode: `ModuleNotFoundError: No module named 'sglang'`.
+
+2. **Never override user-specified TP.** If the prompt says TP=8, use TP=8. Do NOT
+   auto-detect GPU_COUNT and override to TP=1 — large models (120B+) cannot run on
+   a single GPU. Failure mode: OOM or server crash.
+
+3. **vLLM flags differ from SGLang.** Common mistake: `--disable-log-requests` is NOT
+   a valid vLLM flag. Use `--disable-log-stats` for vLLM. Always check `vllm serve --help`
+   before using unfamiliar flags. Failure mode: `unrecognized arguments` → server crash.
+
+4. **Use `run_baseline.sh` instead of manual server launch.** The script handles
+   server startup, health wait, benchmark, and profiling in a tested sequence. Manual
+   launch skips health checks and often hits Exit code 144 (SIGTERM from stale processes).
+
+5. **Never call `geak_set_model_config`.** See IR-7. GEAK LLM backend is pre-configured.
 
 ## DFS Search Tree
 
