@@ -16,10 +16,12 @@ log = logging.getLogger(__name__)
 
 class ClawClient:
     def __init__(self, endpoint: str, api_key: str | None = None,
-                 timeout: int = 14400, agent_id: str = "agent_default"):
+                 timeout: int = 14400, agent_id: str = "agent_default",
+                 sandbox_workspace: str | None = None):
         self.endpoint = endpoint.rstrip("/")
         self.timeout = timeout
         self.agent_id = agent_id
+        self.sandbox_workspace = sandbox_workspace
         self.default_tools: list[int] = []
         self._session = requests.Session()
         self._session.headers.update({
@@ -37,7 +39,9 @@ class ClawClient:
         api_key = os.environ.get(api_key_env)
         timeout = claw_cfg.get("sandbox_timeout", 14400)
         agent_id = claw_cfg.get("agent_id", "agent_default")
-        client = cls(endpoint, api_key, timeout, agent_id)
+        sandbox_ws_env = claw_cfg.get("sandbox_workspace_env", "SANDBOX_WORKSPACE")
+        sandbox_workspace = os.environ.get(sandbox_ws_env)
+        client = cls(endpoint, api_key, timeout, agent_id, sandbox_workspace)
         client.default_tools = claw_cfg.get("tools", [])
         return client
 
@@ -85,7 +89,7 @@ class ClawClient:
             "taskMode": task_mode,
             "attachments": [],
             "tools": tools if tools is not None else self.default_tools,
-            "workspaceId": "control-plane-sandbox",
+            "workspaceId": self.sandbox_workspace or "control-plane-sandbox",
         }
         resp = self._session.post(
             self._url(f"/sessions/{session_id}/messages"),
