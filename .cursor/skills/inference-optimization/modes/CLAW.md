@@ -4,8 +4,8 @@ This document contains ALL claw-mode-specific instructions. Read this **before s
 when using Claw client with SaFE cluster.
 
 **Agent:** Read `SKILL.md` for the orchestrator loop and shared Iron Rules (IR-1 through
-IR-6). This file defines claw-specific Iron Rules (IR-7, IR-8), constants, architecture,
-and per-action execution overrides.
+IR-7). This file defines claw-specific Iron Rules (IR-8 through IR-11), constants,
+architecture, and per-action execution overrides.
 
 ## Environment
 
@@ -29,7 +29,7 @@ fi
 
 ## Claw-Mode Iron Rules
 
-### IR-7: Use `exec_on_gpu` for ALL GPU-side commands
+### IR-8: Use `exec_on_gpu` for ALL GPU-side commands
 
 After `source scripts/executor.sh`, ALL commands that run on the Ray cluster MUST go
 through `exec_on_gpu()` or `exec_on_gpu_bg()`. **NEVER** manually call `ray_submit.py`
@@ -43,12 +43,33 @@ exec_on_gpu "export MODEL='$MODEL' ... && bash $SCRIPTS_DIR/run_baseline.sh"
 python3 scripts/ray_submit.py --ray-address ... --command "..."
 ```
 
-### IR-8: Main inference workload MUST use `kind: "RayJob"`
+### IR-9: Main inference workload MUST use `kind: "RayJob"`
 
-The persistent inference cluster **MUST** be `kind: "RayJob"`. The only places where
-`PyTorchJob` is acceptable:
-1. GEAK kernel optimization (GEAK MCP creates PyTorchJob internally)
-2. Parallel sweep workloads (short-lived, NOT the main inference cluster)
+The persistent inference cluster **MUST** be `kind: "RayJob"`. PyTorchJob is ONLY
+created internally by GEAK MCP for kernel optimization — the skill itself MUST NOT
+create PyTorchJob workloads.
+
+### IR-10: SaFE MCP — ONLY `workload_create(kind="RayJob")` and `workload_stop`
+
+In Claw mode, the skill may use SaFE MCP **only** for:
+
+- **`workload_create`** with `kind: "RayJob"` — to create the inference cluster
+- **`workload_get`** / **`workload_list`** — to check workload status
+- **`workload_stop`** — to stop the RayJob after optimization is complete
+
+**FORBIDDEN SaFE MCP operations:**
+
+- **`workload_delete`** — NEVER delete workloads; use `workload_stop` instead
+- **`workload_create` with any kind other than `"RayJob"`** — no PyTorchJob, no other
+  types. GEAK creates its own PyTorchJobs internally via GEAK MCP; the skill MUST NOT
+  create them directly.
+
+Violation = immediate run invalidation.
+
+### IR-11: GEAK configuration is read-only
+
+Same as IR-7 in `SKILL.md` — NEVER modify GEAK configuration, test data, or settings.
+Interact with GEAK exclusively through GEAK MCP tool calls.
 
 ---
 
@@ -216,13 +237,13 @@ Tool: workload_stop
 Args: { "workload_id": "<RAYJOB_ID>" }
 ```
 
-Also clean up any parallel sweep workloads (if SaFE Option B was used):
+Also stop any parallel sweep workloads (if SaFE Option B was used):
 
 ```python
-sweep_workloads = workload_list(workspace_id=WORKSPACE_ID, kind="PyTorchJob")
+sweep_workloads = workload_list(workspace_id=WORKSPACE_ID, kind="RayJob")
 for wl in sweep_workloads:
     if wl["displayName"].startswith("sweep-"):
-        workload_delete(wl["workloadId"])
+        workload_stop(wl["workloadId"])
 ```
 
 ---
@@ -423,21 +444,12 @@ exec_on_gpu "export MODEL='$MODEL' TP=$TP INFERENCEX_PATH='$INFERENCEX_PATH' \
   bash $SCRIPTS_DIR/run_sweep.sh"
 ```
 
-**Option B: SaFE MCP parallel sweep (faster):**
+**~~Option B: SaFE MCP parallel sweep~~ — DEPRECATED (violates IR-10)**
 
-Create one SaFE workload per config:
-```
-Tool: workload_create
-Args: {
-    "display_name": "sweep-<model>-<isl><osl>-c<conc>",
-    "workspace_id": "GEAK_WORKSPACE",
-    ...
-}
-```
+> Per IR-10, the skill MUST NOT create SaFE workloads other than the main RayJob.
+> Use Option A (serial) or Option C (Ray submit) instead.
 
-15 configs × 15 nodes = all parallel, ~10 min total vs ~75 min serial.
-
-**Option C: Parallel sweep via Ray submit:**
+**Option B: Parallel sweep via Ray submit:**
 
 Submit each config as a separate Ray task (uses the existing RayJob cluster):
 
