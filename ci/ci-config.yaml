@@ -1,7 +1,7 @@
 claw:
   endpoint: https://oci-slc.primus-safe.amd.com/claw-api/v1
   api_key_env: CLAW_API_KEY
-  sandbox_timeout: 14400
+  sandbox_timeout: 28800
   agent_id: agent_default
   tools: [16, 18]
 
@@ -37,7 +37,7 @@ models:
     model_path_override: /hyperloom/models/DeepSeek-R1-0528
     optimization_depth: full
     kernel_opt_backends: geak, claude
-    target_gpu: b200
+    target_gpu: mi355x
 
   # ── gpt-oss 120B (FP4, TP=8, vLLM) ──
   - inferenceX_key: gptoss-fp4-mi355x-vllm
@@ -45,7 +45,7 @@ models:
     model_path_override: /hyperloom/models/gpt-oss-120b
     optimization_depth: full
     kernel_opt_backends: geak, claude
-    target_gpu: b200
+    target_gpu: mi355x
 
   # ── Kimi K2.5 (INT4, TP=8, vLLM) ──
   - inferenceX_key: kimik2.5-int4-mi355x-vllm
@@ -53,7 +53,7 @@ models:
     model_path_override: /hyperloom/models/Kimi-K2.5
     optimization_depth: full
     kernel_opt_backends: geak, claude
-    target_gpu: b200
+    target_gpu: mi355x
 
   # ── MiniMax M2.5 (FP8, TP=8, vLLM) ──
   - inferenceX_key: minimaxm2.5-fp8-mi355x-vllm
@@ -61,7 +61,7 @@ models:
     model_path_override: /hyperloom/models/MiniMaxAI-MiniMax-M2.5
     optimization_depth: full
     kernel_opt_backends: geak, claude
-    target_gpu: b200
+    target_gpu: mi355x
 
   # ── GLM 5 (FP8, TP=8) ──
   - inferenceX_key: glm5-fp8-mi355x-sglang
@@ -69,7 +69,7 @@ models:
     model_path_override: /hyperloom/models/zai-org-GLM-5
     optimization_depth: full
     kernel_opt_backends: geak, claude
-    target_gpu: b200
+    target_gpu: mi355x
 
   # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
   - inferenceX_key: qwen3.5-bf16-mi355x-sglang
@@ -77,5 +77,5 @@ models:
     model_path_override: /hyperloom/models/Qwen-Qwen3.5-397B-A17B
     optimization_depth: full
     kernel_opt_backends: geak, claude
-    target_gpu: b200
+    target_gpu: mi355x
 
