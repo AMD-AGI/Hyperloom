@@ -35,6 +35,8 @@ Raw performance values:
 
 Optimize and push ahead of {target_gpu}. Use InferenceX data from Hyperloom as starting point for sglang {runner} baseline.
 
-IMPORTANT: Use --random-range-ratio 0.8 for ALL benchmarks (baseline, DFS, sweep). This matches InferenceX's official benchmark parameters. Do NOT use 1.0.
+IMPORTANT benchmark parameters (must match InferenceX):
+- Use --random-range-ratio 0.8 for ALL benchmarks (baseline, DFS, sweep). Do NOT use 1.0.
+- Use --num-prompts equal to CONC * 10 (e.g. CONC=512 → 5120 prompts). Do NOT use CONC * 3.
 
 CRITICAL: For the baseline benchmark, you MUST use the InferenceX benchmark script listed above (if available). It contains platform-specific server parameters (attention backends, env vars, memory settings, expert parallelism flags) that are essential for accurate baseline numbers. Do NOT construct vLLM/SGLang server launch commands manually — the InferenceX scripts already have the optimal configuration. Read the script, extract the server launch command and env vars, and use them directly.
