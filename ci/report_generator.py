@@ -66,10 +66,34 @@ def extract_optimization_data(result_dir: str) -> dict:
         try:
             metrics = json.loads(ci_metrics_path.read_text())
             log.info("Loaded ci_metrics.json from %s", result_dir)
-            data["baseline_throughput"] = metrics.get("tok_per_gpu_baseline") or metrics.get("baseline_throughput")
-            data["optimized_throughput"] = metrics.get("tok_per_gpu_optimized") or metrics.get("optimized_throughput")
-            data["gain_pct"] = metrics.get("gain_pct")
-            data["actions"] = metrics.get("actions_taken", [])
+
+            # Flat schema (requested): tok_per_gpu_baseline, baseline_throughput, gain_pct
+            bl = (metrics.get("tok_per_gpu_baseline")
+                  or metrics.get("baseline_throughput"))
+            opt = (metrics.get("tok_per_gpu_optimized")
+                   or metrics.get("optimized_throughput"))
+            gain = metrics.get("gain_pct")
+
+            # Nested schema (agent sometimes writes):
+            #   baseline.tok_s_per_gpu / baseline.output_throughput_tok_s
+            #   optimized.tok_s_per_gpu / optimized.output_throughput_tok_s
+            #   improvement.output_throughput_pct / improvement.tok_s_per_gpu_pct
+            if bl is None and isinstance(metrics.get("baseline"), dict):
+                b = metrics["baseline"]
+                bl = b.get("tok_s_per_gpu") or b.get("output_throughput_tok_s")
+            if opt is None and isinstance(metrics.get("optimized"), dict):
+                o = metrics["optimized"]
+                opt = o.get("tok_s_per_gpu") or o.get("output_throughput_tok_s")
+            if gain is None and isinstance(metrics.get("improvement"), dict):
+                imp = metrics["improvement"]
+                gain = imp.get("output_throughput_pct") or imp.get("tok_s_per_gpu_pct")
+            if gain is None and bl and opt and bl > 0:
+                gain = round((opt - bl) / bl * 100, 2)
+
+            data["baseline_throughput"] = bl
+            data["optimized_throughput"] = opt
+            data["gain_pct"] = gain
+            data["actions"] = metrics.get("actions_taken") or metrics.get("actions", [])
             return data
         except (json.JSONDecodeError, KeyError) as e:
             log.warning("Failed to parse ci_metrics.json in %s: %s", result_dir, e)
