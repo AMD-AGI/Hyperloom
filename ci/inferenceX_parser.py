@@ -103,8 +103,13 @@ def find_benchmark(
     isl: int,
     osl: int,
     precision: str | None = None,
+    image: str | None = None,
 ) -> dict | None:
     """Find the best benchmark entry matching hardware/ISL/OSL/precision.
+
+    When ``image`` is provided, prefer entries from the same image to
+    avoid comparing across frameworks (e.g. sglang vs atom).  Falls
+    back to all candidates if no same-image match exists.
 
     When multiple concurrency levels exist, returns the one with the
     highest tput_per_gpu.
@@ -119,6 +124,12 @@ def find_benchmark(
             candidates.append(b)
     if not candidates:
         return None
+
+    if image:
+        same_image = [b for b in candidates if image in (b.get("image") or "")]
+        if same_image:
+            candidates = same_image
+
     return max(candidates,
                key=lambda x: (x.get("metrics") or {}).get("tput_per_gpu") or 0)
 
@@ -173,12 +184,13 @@ def format_benchmark_for_prompt(
     isl: int,
     osl: int,
     precision: str,
+    image: str | None = None,
 ) -> str:
     """Format InferenceX benchmark data as text for the Claw prompt.
 
     API response nests performance data under a 'metrics' sub-object.
     """
-    target = find_benchmark(benchmarks, target_gpu, isl, osl, precision)
+    target = find_benchmark(benchmarks, target_gpu, isl, osl, precision, image)
     if not target:
         return f"# No InferenceX data for {target_gpu} at ISL={isl}/OSL={osl}/{precision}"
 
@@ -245,7 +257,7 @@ def merge_model_config(
         "mode": defaults.get("mode", "local"),
         "gpu_type": parsed["runner"].upper(),
         "inferencex_path": defaults.get("inferencex_path", "/hyperloom/InferenceX"),
-        "result_dir": "/workspace/hyperloom/",
+        "result_dir": "/workspace/hyperloom",
         "inferenceX_benchmarks": ifx_benchmarks,
         "inferenceX_api_name": model_cfg.get("inferenceX_api_name", ""),
         "inferenceX_key": model_cfg.get("inferenceX_key", ""),
