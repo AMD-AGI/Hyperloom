@@ -11,7 +11,7 @@ architecture, and per-action execution overrides.
 
 - **Client**: Claw (internal platform, Claude Code-like)
 - **Runtime**: SaFE cluster with multi-node GPU
-- **MCP Servers**: SaFE MCP + GEAK MCP + TraceLens MCP (all remote HTTP)
+- **MCP Servers**: SaFE MCP + GEAK MCP + OOB GPU Optimizer MCP + TraceLens MCP (all remote HTTP)
 - **Storage**: Shared NFS (`/shared_nfs/` inside Pod, maps to NFS root)
 
 ## Mode Detection
@@ -79,19 +79,13 @@ These supplement the shared constants in `SKILL.md`.
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `GEAK_IMAGE_SGLANG_RAY` | `harbor.oci-slc.example-internal-host.invalid/custom/lmsysorg/sglang:202603270958` | SGLang image with Ray 2.44.1 fix |
 | `RAY_CLIENT_PORT` | 10001 | Ray Client port on RayJob head node |
 
-### GEAK Image Selection (Claw Mode)
+### Image Selection (Claw Mode)
 
-| Condition | Image |
-|-----------|-------|
-| User specified a custom image | Use user-specified |
-| `FRAMEWORK=sglang` (default) | `GEAK_IMAGE_SGLANG_RAY` (NOT `GEAK_IMAGE_SGLANG`) |
-| `FRAMEWORK=vllm` | `GEAK_IMAGE_VLLM` |
-
-**Claw mode MUST use `GEAK_IMAGE_SGLANG_RAY`** for SGLang — the Ray-patched image matches
-the RayJob serving environment.
+Use `KERNEL_OPT_IMAGE` (provided by CI or user). In claw mode, CI should supply the
+Ray-patched image for SGLang (e.g., `harbor.../custom/lmsysorg/sglang:202603270958` with
+Ray 2.44.1 fix). The same image is used for both the RayJob and kernel-opt backends.
 
 ### Image Build (Dockerfile)
 
@@ -152,7 +146,7 @@ Args: {
     "display_name": "inference-opt-<model_short_name>",
     "workspace_id": "<user_workspace_id>",
     "kind": "RayJob",
-    "images": ["GEAK_IMAGE_SGLANG_RAY"],
+    "images": ["KERNEL_OPT_IMAGE"],
     "resources": [
         {"replica": 1, "cpu": "96", "gpu": "8", "memory": "1024Gi", "sharedMemory": "500Gi", "ephemeralStorage": "500Gi"}
     ],
@@ -170,7 +164,7 @@ Args: {
     "display_name": "inference-opt-<model_short_name>",
     "workspace_id": "<user_workspace_id>",
     "kind": "RayJob",
-    "images": ["GEAK_IMAGE_SGLANG_RAY", "GEAK_IMAGE_SGLANG_RAY"],
+    "images": ["KERNEL_OPT_IMAGE", "KERNEL_OPT_IMAGE"],
     "resources": [
         {"replica": 1, "cpu": "96", "gpu": "8", "memory": "1024Gi", "sharedMemory": "256Gi", "ephemeralStorage": "500Gi"},
         {"replica": 1, "cpu": "96", "gpu": "8", "memory": "1024Gi", "sharedMemory": "256Gi", "ephemeralStorage": "500Gi"}
@@ -363,7 +357,7 @@ exec_on_gpu "find /tmp/torchinductor_root -name '*.py' | while read f; do ..."
 exec_on_gpu "cat /path/to/standalone_kernel.py"
 ```
 
-GEAK image selection: use `GEAK_IMAGE_SGLANG_RAY` (for SGLang) or `GEAK_IMAGE_VLLM` (for vLLM).
+Image selection: use `KERNEL_OPT_IMAGE` (provided by CI or user).
 
 ### Integrate (`actions/integrate.md`)
 

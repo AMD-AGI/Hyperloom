@@ -17,8 +17,8 @@ Baseline Benchmark Script:
 
 Kernel Optimization:
 KERNEL_OPT_BACKENDS: {kernel_opt_backends}
-GEAK image: {geak_image}
-GEAK_WORKSPACE: {geak_workspace}
+KERNEL_OPT_IMAGE: {kernel_opt_image}
+KERNEL_OPT_WORKSPACE: {kernel_opt_workspace}
 GEAK step_limit: {geak_step_limit}
 Must optimize at least {min_kernels} kernels
 

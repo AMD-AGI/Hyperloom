@@ -26,12 +26,12 @@ pip install -r requirements.txt
 
 # Dry-run：只生成 prompt，不执行
 HARBOR_PREFIX=harbor.oci-slc.example-internal-host.invalid/proxy \
-GEAK_WORKSPACE=control-plane-sandbox \
+KERNEL_OPT_WORKSPACE=control-plane-sandbox \
   python orchestrator.py --dry-run
 
 # 实际执行（单个模型）
 HARBOR_PREFIX=harbor.oci-slc.example-internal-host.invalid/proxy \
-GEAK_WORKSPACE=control-plane-sandbox \
+KERNEL_OPT_WORKSPACE=control-plane-sandbox \
 CLAW_API_KEY=ak-xxx \
   python orchestrator.py --models qwen3.5-bf16-mi355x-sglang --output-dir ./results
 
@@ -44,7 +44,7 @@ python orchestrator.py --trigger manual --output-dir ./results
 | 变量 | 必须 | 说明 |
 |------|------|------|
 | `HARBOR_PREFIX` | 是 | 镜像仓库前缀，如 `harbor.oci-slc.example-internal-host.invalid/proxy` |
-| `GEAK_WORKSPACE` | 是 | GEAK 执行的 workspace，如 `control-plane-sandbox` |
+| `KERNEL_OPT_WORKSPACE` | 是 | Kernel 优化执行的 workspace（GEAK + OOB 共享），如 `control-plane-sandbox` |
 | `CLAW_API_KEY` | 是 | SaFE API Key（`ak-` 前缀） |
 | `WEBHOOK_URL` | 否 | 通知 webhook（Slack / Teams Incoming Webhook 均兼容） |
 
@@ -85,7 +85,7 @@ Settings → Secrets and variables → Actions → New repository secret：
 | Secret | 值 |
 |--------|---|
 | `HARBOR_PREFIX` | `harbor.oci-slc.example-internal-host.invalid/proxy` |
-| `GEAK_WORKSPACE` | `control-plane-sandbox` |
+| `KERNEL_OPT_WORKSPACE` | `control-plane-sandbox` |
 | `CLAW_API_KEY` | `ak-xxx` |
 | `WEBHOOK_URL` | Teams/Slack Incoming Webhook URL（可选） |
 

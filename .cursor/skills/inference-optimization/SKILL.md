@@ -1,5 +1,5 @@
 ---
-name: inference-optimization
+name: inference-optimization-CI
 description: |
   Autonomous DFS-guided inference optimization for LLM serving on AMD MI355X GPUs.
   Uses heuristic-scored depth-first search to systematically explore optimization actions
@@ -81,7 +81,7 @@ arguments to `geak_create_task`. Specifically:
 
 - **Do NOT** modify GEAK server config, workspace settings, or API configuration
 - **Do NOT** write to or alter any files under the GEAK config/settings directories
-- **Do NOT** change `GEAK_WORKSPACE`, `GEAK_STEP_LIMIT`, or other GEAK constants
+- **Do NOT** change `KERNEL_OPT_WORKSPACE`, `GEAK_STEP_LIMIT`, or other constants
   at runtime (use the values from the constants table above or user overrides)
 - **Do NOT** modify the GEAK MCP server configuration (`cursor_mcp_config.json`, etc.)
 - **Do NOT** modify any test data, results, or configuration files belonging to GEAK
@@ -98,7 +98,7 @@ Violation = immediate run invalidation.
 
 **Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11) and [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12).**
 
-## GEAK & Tooling Constants
+## Kernel Optimization & Tooling Constants
 
 All values below are the **single source of truth**. All actions reference these by name.
 
@@ -106,8 +106,9 @@ All values below are the **single source of truth**. All actions reference these
 |----------|-------|-------------|
 | `KERNEL_OPT_BACKENDS` | `geak,codex` | Comma-separated active backends. Any combination of: `geak`, `codex`, `claude`, `llm`. User can override in prompt. |
 | `OOB_ROUND_ITERATIONS` | 3 | Iterations per Codex/Claude round (submit → local benchmark → feedback → re-submit). Best result wins. |
+| `KERNEL_OPT_IMAGE` | *(provided by CI or user)* | Framework image for all kernel-opt backends (GEAK + OOB). One image per run, determined by framework (SGLang/vLLM). |
+| `KERNEL_OPT_WORKSPACE` | `control-plane-moe` | SaFE workspace for kernel-opt backends (GEAK + OOB). User can override. |
 | `GEAK_STEP_LIMIT` | 100 | Max agent steps per GEAK task |
-| `GEAK_WORKSPACE` | `control-plane-moe` | GEAK workspace (user can override) |
 | `GEAK_MAX_RETRIES` | 3 | Max submission retries per kernel |
 | `GEAK_MAX_SUBMISSIONS` | 15 | Total GEAK submissions budget per run |
 | `GEAK_TOP_CANDIDATES` | 5 | Number of top kernel candidates to submit |
@@ -118,12 +119,10 @@ All values below are the **single source of truth**. All actions reference these
 | `MIN_GPU_PCT` | 3 | Minimum GPU time % to consider a kernel as GEAK candidate |
 | `SERVER_KILL_WAIT_S` | 10 | Seconds to wait between server kill and relaunch |
 | `FILTERED_TRACE_NAME` | `filtered-TP-0.trace.json.gz` | Preferred trace file for TraceLens analysis |
-| `GEAK_IMAGE_SGLANG` | `harbor.oci-slc.example-internal-host.invalid/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x` | Default GEAK image for SGLang |
-| `GEAK_IMAGE_VLLM` | `harbor.oci-slc.example-internal-host.invalid/proxy/vllm/vllm-openai-rocm:v0.17.0` | Default GEAK image for vLLM |
 
-**ALWAYS pass a framework image to GEAK, regardless of kernel type.** For kernels whose source exists in the image (e.g., `/sgl-workspace/aiter/`), the GEAK pod uses the same image. For runtime-generated kernels (e.g., `/tmp/torchinductor_root/` from `torch.compile`), do NOT include `kernel_url`/`kernel_repo` in the prompt; copy files to shared NFS or rely on `files[].content` only.
+**ALWAYS pass `KERNEL_OPT_IMAGE` to all kernel-opt backends (GEAK + OOB), regardless of kernel type.** For kernels whose source exists in the image (e.g., `/sgl-workspace/aiter/`), the pod uses the same image. For runtime-generated kernels (e.g., `/tmp/torchinductor_root/` from `torch.compile`), do NOT include `kernel_url`/`kernel_repo` in the prompt; copy files to shared NFS or rely on `files[].content` only.
 
-**Claw-mode GEAK images and constants are in [`modes/CLAW.md`](modes/CLAW.md).**
+**Claw-mode constants are in [`modes/CLAW.md`](modes/CLAW.md).**
 
 ## Architecture
 
@@ -132,8 +131,8 @@ SKILL.md (this file)          — DFS orchestrator: loop, heuristic, dispatch
 actions/*.md                   — Self-contained action modules (11 actions)
 kernel-opt/                    — Per-backend kernel optimization references
   geak.md                      — GEAK MCP (remote GPU pod)
-  codex.md                     — Codex via OOB Agent MCP
-  claude.md                    — Claude Code via OOB Agent MCP
+  codex.md                     — Codex via OOB GPU Optimizer MCP
+  claude.md                    — Claude Code via OOB GPU Optimizer MCP
   llm.md                       — LLM Proxy (direct API)
 kb/                            — RAG knowledge base (JSONL + query/ingest scripts)
 scripts/                       — Baseline/profiling/accuracy shell scripts
