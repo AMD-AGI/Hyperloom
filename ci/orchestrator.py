@@ -365,26 +365,11 @@ def main():
     if json_summary["stats"]["avg_gain_pct"] is not None:
         log.info("Average gain: %.1f%%", json_summary["stats"]["avg_gain_pct"])
 
-    # Chart generation
-    chart_path = out_dir / "ci_chart.png"
-    try:
-        from chart_generator import generate_chart
-        generate_chart(str(out_dir / "ci_summary.json"), str(chart_path))
-    except Exception as e:
-        log.warning("Chart generation failed (matplotlib may not be installed): %s", e)
-        chart_path = None
-
     # Webhook notification (Slack / Teams / custom)
     webhook_env = config.get("notification", {}).get("webhook_env")
     if webhook_env:
         webhook = os.environ.get(webhook_env)
         if webhook:
-            if chart_path and chart_path.exists():
-                try:
-                    from chart_generator import send_chart_webhook
-                    send_chart_webhook(webhook, str(chart_path), json_summary)
-                except Exception as e:
-                    log.warning("Chart webhook failed: %s", e)
             _send_webhook(webhook, json_summary)
 
     # Exit non-zero if no models completed (failed + timeout = all bad)
