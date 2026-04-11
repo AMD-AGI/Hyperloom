@@ -7,7 +7,7 @@ Run the full Hyperloom inference optimization loop on your local machine.
 - Docker with AMD ROCm support, or K8s cluster with AMD GPU nodes
 - Cursor IDE with Remote SSH extension
 - LLM API key for GEAK kernel optimization
-- (Optional) Anthropic / OpenAI API key for OOB Agent MCP (Claude Code / Codex backends)
+- OOB API key and base URL for OOB Agent MCP (Claude Code / Codex backends)
 
 ## Quick Start (Docker)
 
@@ -17,21 +17,21 @@ Run the full Hyperloom inference optimization loop on your local machine.
 docker run -d --shm-size=16g \
   --device=/dev/kfd --device=/dev/dri \
   -v /path/to/models:/models \
-  -p 20022:22 -p 20001:8001 -p 20002:8002 -p 20003:8003 \
+  -p 20022:22 \
   -e LLM_API_KEY=<your-api-key> \
   -e LLM_API_BASE=https://api.openai.com/v1 \
   hyperloom-local:sglang-latest
 ```
+
+> `LLM_API_KEY` and `LLM_API_BASE` are only used by the `geak` kernel optimization backend. If you use OOB `codex` / `claude` backends, configure `OOB_API_KEY` and `OOB_BASE_URL`.
 
 **Optional env vars** (add as needed):
 
 | Env var | Purpose |
 |---------|---------|
 | `HIP_VISIBLE_DEVICES=0,1` | Limit to specific GPUs |
-| `ANTHROPIC_API_KEY=<key>` | Enable Claude Code kernel backend |
-| `ANTHROPIC_BASE_URL=<url>` | Claude API endpoint (omit to use api.anthropic.com) |
-| `OPENAI_API_KEY=<key>` | Enable Codex kernel backend |
-| `OPENAI_BASE_URL=<url>` | OpenAI API endpoint (omit to use api.openai.com) |
+| `OOB_API_KEY=<key>` | Unified OOB API key (used by both Claude/Codex) |
+| `OOB_BASE_URL=<url>` | Unified OOB API endpoint (recommended) |
 
 > `--shm-size=16g` is required for multi-GPU inference (RCCL uses shared memory). Default 64MB will cause errors.
 
@@ -54,6 +54,8 @@ Host hyperloom
 2. Open folder: `/opt/hyperloom`
 3. Skills and MCP servers load automatically
 
+> On first open of this workspace, MCP toggles may be OFF by default. Follow Cursor prompts and enable `tracelens`, `geak`, and `oob-agent` before starting optimization.
+
 ### 4. Run optimization
 
 Type in Cursor chat:
@@ -75,14 +77,25 @@ Execute the full skill pipeline (Phase 0-10), including parameter sweep.
 Save results to /opt/hyperloom/results/
 ```
 
-**Kernel optimization backends** — default is GEAK. To use Codex or Claude instead, say so in the prompt:
+**Kernel optimization backends** — use `KERNEL_OPT_BACKENDS` or prompt instructions to select backends; multiple backends can run in parallel and the best result is kept:
+
+| Backend | Description | Duration | Dependency |
+|---------|-------------|----------|------------|
+| `geak` | Local subprocess with GPU access and hardware validation | 2-3 hours | `LLM_API_KEY` |
+| `codex` | Codex code generation + local benchmark | ~1 hour | `OOB_API_KEY` + `OOB_BASE_URL` |
+| `claude` | Claude Code generation + local benchmark | ~1 hour | `OOB_API_KEY` + `OOB_BASE_URL` |
+
+Specify backend in prompt (default `geak`, can also be changed by `KERNEL_OPT_BACKENDS`):
 
 ```
 @inference-optimization Optimize /models/Qwen3-30B-A3B
-Use Codex as the kernel optimization backend.
-```
 
-> Replace `Codex` with `Claude` for the Claude Code backend. Requires `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` passed to the container.
+# Use Codex backend (requires OOB_API_KEY + OOB_BASE_URL)
+Use only codex as the kernel optimization backend.
+
+# Use Claude backend (requires OOB_API_KEY + OOB_BASE_URL)
+Use only claude as the kernel optimization backend.
+```
 
 ## Kubernetes Deployment
 
@@ -118,12 +131,14 @@ spec:
           key: llm-api-key
     - name: LLM_API_BASE
       value: "https://api.deepseek.com/v1"
-    - name: ANTHROPIC_API_KEY
+    - name: OOB_API_KEY
       valueFrom:
         secretKeyRef:
           name: hyperloom-secrets
-          key: anthropic-api-key
+          key: oob-api-key
           optional: true
+    - name: OOB_BASE_URL
+      value: "https://api.openai.com/v1"
     resources:
       limits:
         amd.com/gpu: 1
@@ -148,18 +163,6 @@ spec:
     port: 22
     targetPort: 22
     nodePort: 30022
-  - name: tracelens
-    port: 8001
-    targetPort: 8001
-    nodePort: 30001
-  - name: geak
-    port: 8002
-    targetPort: 8002
-    nodePort: 30002
-  - name: oob-agent
-    port: 8003
-    targetPort: 8003
-    nodePort: 30003
 ```
 
 Connect via Cursor Remote SSH → `<node-ip>:30022`, open `/opt/hyperloom`.
@@ -173,8 +176,6 @@ Connect via Cursor Remote SSH → `<node-ip>:30022`, open `/opt/hyperloom`.
 | 8002 | GEAK MCP |
 | 8003 | OOB Agent MCP (Claude Code / Codex) |
 
-> Map to any host/external port via `docker run -p` or K8s NodePort/LoadBalancer.
-
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -185,10 +186,8 @@ Connect via Cursor Remote SSH → `<node-ip>:30022`, open `/opt/hyperloom`.
 | `TRACELENS_PORT` | `8001` | TraceLens MCP port |
 | `GEAK_MCP_PORT` | `8002` | GEAK MCP port |
 | `OOB_MCP_PORT` | `8003` | OOB Agent MCP port |
-| `ANTHROPIC_API_KEY` | — | Anthropic API key (for Claude Code backend) |
-| `ANTHROPIC_BASE_URL` | — | Anthropic API endpoint (for enterprise LLM gateway) |
-| `OPENAI_API_KEY` | — | OpenAI API key (for Codex backend) |
-| `OPENAI_BASE_URL` | — | OpenAI API endpoint |
+| `OOB_API_KEY` | — | Unified OOB API key (used by both Claude/Codex) |
+| `OOB_BASE_URL` | — | Unified OOB API endpoint (recommended) |
 | `HIP_VISIBLE_DEVICES` | — | Comma-separated GPU indices (e.g. `0,1,2`) |
 | `GPUS_PER_NODE` | — | Override GPU count for entrypoint display |
 
