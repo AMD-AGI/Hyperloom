@@ -81,3 +81,22 @@ N/A — terminal action.
 
 **Claw mode:** After the report is generated, stop the RayJob and clean up any parallel
 sweep workloads. See [`../modes/CLAW.md`](../modes/CLAW.md) "Cleanup" section.
+
+### CI Mode: Write ci_metrics.json
+
+If the prompt specifies a `ci_metrics.json` output path, write it with a **flat**
+top-level schema (the CI report parser requires this exact format):
+
+```json
+{
+  "baseline_throughput": <total output tok/s across all GPUs>,
+  "optimized_throughput": <total output tok/s across all GPUs>,
+  "gain_pct": <float, 0.0 if no improvement>,
+  "tok_per_gpu_baseline": <output tok/s per GPU>,
+  "tok_per_gpu_optimized": <output tok/s per GPU>,
+  "actions_taken": ["action1_description", "action2_description"]
+}
+```
+
+Do NOT nest baseline/optimized into sub-objects. If no optimization improved
+over baseline, set `gain_pct` to `0.0` and optimized values equal to baseline.
