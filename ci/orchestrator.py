@@ -7,6 +7,7 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -20,6 +21,7 @@ from inferenceX_parser import (
     fetch_amd_master_yaml,
     fetch_benchmarks,
     find_benchmark,
+    find_benchmark_script,
     format_benchmark_for_prompt,
     get_latest_commit,
     merge_model_config,
@@ -50,6 +52,21 @@ def render_prompt(merged: dict) -> str:
         merged["inferenceX_benchmarks"],
         merged["target_gpu"], isl, osl, merged["precision"],
     )
+    script = merged.get("benchmark_script")
+    if script:
+        bss = (
+            f"MANDATORY: Use the InferenceX benchmark script for baseline:\n"
+            f"  $INFERENCEX_PATH/{script}\n"
+            f"Run it with: MODEL={merged['model_path']} TP={merged['tp']} "
+            f"EP_SIZE={merged['ep']} CONC=$CONC ISL={isl} OSL={osl} "
+            f"MAX_MODEL_LEN=4096 RANDOM_RANGE_RATIO=0.8 "
+            f"RESULT_FILENAME=baseline bash {merged['inferencex_path']}/{script}\n"
+            f"This script contains critical platform-specific server params "
+            f"(attention backend, env vars, memory config, expert parallelism)."
+        )
+    else:
+        bss = "No InferenceX benchmark script found. Construct server launch manually."
+
     return PROMPT_TEMPLATE.format(
         model_hf=merged["model_hf"],
         mode=merged["mode"],
@@ -73,6 +90,7 @@ def render_prompt(merged: dict) -> str:
         target_gpu=merged["target_gpu"],
         inferenceX_data=ifx_text,
         runner=merged["runner"],
+        benchmark_script_section=bss,
     )
 
 
@@ -226,6 +244,28 @@ def main():
     amd_master = fetch_amd_master_yaml(ifx_cfg["repo"], ifx_cfg["config_path"])
     log.info("InferenceX commit: %s", ifx_commit[:7])
 
+    # Find benchmark scripts from InferenceX repo (uses a separate shallow clone)
+    scripts_path = ifx_cfg.get("scripts_path", "benchmarks/single_node")
+    ifx_scripts: dict[str, str | None] = {}
+    try:
+        import tempfile as _tmpmod
+        with _tmpmod.TemporaryDirectory() as _tmpdir:
+            subprocess.run(
+                ["git", "clone", "--depth=1", "--branch=main",
+                 ifx_cfg["repo"], _tmpdir],
+                check=True, capture_output=True, text=True,
+            )
+            for model_cfg in model_list:
+                ifx_key = model_cfg["inferenceX_key"]
+                script = find_benchmark_script(_tmpdir, ifx_key, scripts_path)
+                ifx_scripts[ifx_key] = script
+                if script:
+                    log.info("Found benchmark script for %s: %s", ifx_key, script)
+                else:
+                    log.warning("No benchmark script found for %s", ifx_key)
+    except Exception as e:
+        log.warning("Failed to discover benchmark scripts: %s", e)
+
     # Merge configs and fetch API data
     merged_models = []
     for model_cfg in model_list:
@@ -246,6 +286,7 @@ def main():
 
         merged = merge_model_config(
             model_cfg, amd_master[ifx_key], defaults, harbor_prefix, ifx_benchmarks)
+        merged["benchmark_script"] = ifx_scripts.get(ifx_key)
         merged_models.append(merged)
 
     if not merged_models:
