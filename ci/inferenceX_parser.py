@@ -104,15 +104,19 @@ def find_benchmark(
     osl: int,
     precision: str | None = None,
     image: str | None = None,
+    tp: int | None = None,
+    conc: int | None = None,
 ) -> dict | None:
     """Find the best benchmark entry matching hardware/ISL/OSL/precision.
 
-    When ``image`` is provided, prefer entries from the same image to
-    avoid comparing across frameworks (e.g. sglang vs atom).  Falls
-    back to all candidates if no same-image match exists.
+    Applies progressive filtering with fallback:
+      1. hardware + ISL + OSL + precision  (required)
+      2. image   (prefer same image, fall back if none)
+      3. tp      (prefer same TP via ``decode_tp``, fall back if none)
+      4. conc    (prefer same concurrency, fall back if none)
 
-    When multiple concurrency levels exist, returns the one with the
-    highest tput_per_gpu.
+    Among remaining candidates, returns the one with the highest
+    ``output_tput_per_gpu`` (or ``tput_per_gpu`` as fallback).
     """
     candidates = []
     for b in benchmarks:
@@ -130,8 +134,21 @@ def find_benchmark(
         if same_image:
             candidates = same_image
 
-    return max(candidates,
-               key=lambda x: (x.get("metrics") or {}).get("tput_per_gpu") or 0)
+    if tp is not None:
+        same_tp = [b for b in candidates if b.get("decode_tp") == tp]
+        if same_tp:
+            candidates = same_tp
+
+    if conc is not None:
+        same_conc = [b for b in candidates if b.get("conc") == conc]
+        if same_conc:
+            candidates = same_conc
+
+    def _sort_key(x):
+        m = x.get("metrics") or {}
+        return m.get("output_tput_per_gpu") or m.get("tput_per_gpu") or 0
+
+    return max(candidates, key=_sort_key)
 
 
 def find_benchmark_script(
@@ -185,12 +202,15 @@ def format_benchmark_for_prompt(
     osl: int,
     precision: str,
     image: str | None = None,
+    tp: int | None = None,
+    conc: int | None = None,
 ) -> str:
     """Format InferenceX benchmark data as text for the Claw prompt.
 
     API response nests performance data under a 'metrics' sub-object.
     """
-    target = find_benchmark(benchmarks, target_gpu, isl, osl, precision, image)
+    target = find_benchmark(benchmarks, target_gpu, isl, osl, precision, image,
+                            tp=tp, conc=conc)
     if not target:
         return f"# No InferenceX data for {target_gpu} at ISL={isl}/OSL={osl}/{precision}"
 
