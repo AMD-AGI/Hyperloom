@@ -24,7 +24,8 @@ Must optimize at least {min_kernels} kernels
 
 Requirements:
 Save all results and the optimization report to {result_dir}
-Execute the full skill pipeline (Phase 0-10), including parameter sweep.
+Execute the full skill pipeline, including parameter sweep.
+Even if the baseline already exceeds the InferenceX target, you MUST still run the sweep phase and write the report.
 After writing optimization_report.md, also write {result_dir}/ci_metrics.json.
 The JSON MUST use this EXACT flat schema — do NOT nest baseline/optimized into sub-objects:
 ```json
