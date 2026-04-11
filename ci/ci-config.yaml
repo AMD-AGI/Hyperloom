@@ -4,7 +4,7 @@ claw:
   sandbox_workspace_env: SANDBOX_WORKSPACE
   sandbox_timeout: 28800
   agent_id: agent_default
-  tools: [16, 18]
+  tools: [22,23]
 
 inferenceX:
   repo: https://github.com/SemiAnalysisAI/InferenceX.git
