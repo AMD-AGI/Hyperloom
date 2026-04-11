@@ -32,7 +32,7 @@ def _parse_metrics_from_report(content: str) -> dict:
 
     result: dict[str, Any] = {}
 
-    gain_m = re.search(r'\*\*\+?([\d.]+)%\*\*', content)
+    gain_m = re.search(r'\*\*([+-]?[\d.]+)%\*\*', content)
     if gain_m:
         result["gain_pct"] = float(gain_m.group(1))
 
@@ -190,7 +190,7 @@ def generate_markdown_report(
     for r in results:
         baseline = f"{r['baseline_tok_per_gpu']:.1f} tok/s/GPU" if r.get("baseline_tok_per_gpu") else "N/A"
         optimized = f"{r['optimized_tok_per_gpu']:.1f} tok/s/GPU" if r.get("optimized_tok_per_gpu") else "N/A"
-        gain = f"+{r['gain_pct']:.1f}%" if r.get("gain_pct") is not None else "N/A"
+        gain = f"{r['gain_pct']:+.1f}%" if r.get("gain_pct") is not None else "N/A"
         vs_ifx = f"{r['vs_inferenceX_pct']:+.1f}%" if r.get("vs_inferenceX_pct") is not None else "N/A"
         status_icon = {"completed": "✅", "failed": "❌", "timeout": "⏱️"}.get(r["status"], "❓")
 
@@ -271,14 +271,13 @@ def generate_github_summary(results: list[dict], trigger: str, ifx_commit: str) 
         if r.get("optimized_tok_per_gpu") is not None:
             lines.append(f"| Optimized (output tok/s/GPU) | {r['optimized_tok_per_gpu']:.2f} |")
         if r.get("gain_pct") is not None:
-            lines.append(f"| **Optimization Gain** | **+{r['gain_pct']:.1f}%** |")
+            lines.append(f"| **Optimization Gain** | **{r['gain_pct']:+.1f}%** |")
         if r.get("inferenceX_tok_per_gpu") is not None:
             gpu_label = (r.get("target_gpu") or "MI355X").upper()
             lines.append(f"| InferenceX {gpu_label} (output tok/s/GPU) | {r['inferenceX_tok_per_gpu']:.2f} |")
         if r.get("vs_inferenceX_pct") is not None:
             gpu_label = (r.get("target_gpu") or "MI355X").upper()
-            sign = "+" if r["vs_inferenceX_pct"] >= 0 else ""
-            lines.append(f"| **vs InferenceX {gpu_label}** | **{sign}{r['vs_inferenceX_pct']:.1f}%** |")
+            lines.append(f"| **vs InferenceX {gpu_label}** | **{r['vs_inferenceX_pct']:+.1f}%** |")
         lines.append("")
 
         if r.get("actions"):
@@ -307,7 +306,7 @@ def generate_github_summary(results: list[dict], trigger: str, ifx_commit: str) 
         for r in completed:
             bl = f"{r['baseline_tok_per_gpu']:.1f}" if r.get("baseline_tok_per_gpu") else "N/A"
             opt = f"{r['optimized_tok_per_gpu']:.1f}" if r.get("optimized_tok_per_gpu") else "N/A"
-            gain = f"+{r['gain_pct']:.1f}%" if r.get("gain_pct") is not None else "N/A"
+            gain = f"{r['gain_pct']:+.1f}%" if r.get("gain_pct") is not None else "N/A"
             vs = f"{r['vs_inferenceX_pct']:+.1f}%" if r.get("vs_inferenceX_pct") is not None else "N/A"
             lines.append(f"| {r['model']} | {r['precision']} | {bl} | {opt} | {gain} | {vs} |")
         lines.append("")
