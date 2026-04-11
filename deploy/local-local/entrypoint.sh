@@ -65,7 +65,7 @@ export OPENAI_BASE_URL="${OOB_BASE_URL:-}"
     for var in MODE FRAMEWORK GEAK_LOCAL KERNEL_OPT_BACKENDS NFS_BASE_PATH DATABASE_PATH \
                INFERENCEX_PATH LLM_API_KEY LLM_API_BASE AMD_LLM_API_KEY LLM_GATEWAY_KEY \
                TRACELENS_PORT GEAK_MCP_PORT OOB_MCP_PORT AGENT_WORKSPACE_ROOT \
-               OOB_API_KEY OOB_BASE_URL \
+               OOB_API_KEY OOB_BASE_URL OOB_LOCAL \
                HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES GPUS_PER_NODE; do
         [ -n "${!var:-}" ] && echo "export ${var}='${!var}'"
     done
@@ -152,6 +152,7 @@ CODEX_EOF
 
     PYTHONPATH=/opt/oob-mcp \
     MCP_PORT=$OOB_MCP_PORT \
+    OOB_LOCAL="${OOB_LOCAL:-true}" \
     AGENT_WORKSPACE_ROOT="${AGENT_WORKSPACE_ROOT:-/tmp/agent-workspaces}" \
     ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
     ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-}" \
@@ -232,6 +233,7 @@ while true; do
         echo "[$(date)] OOB Agent MCP crashed, restarting..."
         PYTHONPATH=/opt/oob-mcp \
         MCP_PORT=$OOB_MCP_PORT \
+        OOB_LOCAL="${OOB_LOCAL:-true}" \
         AGENT_WORKSPACE_ROOT="${AGENT_WORKSPACE_ROOT:-/tmp/agent-workspaces}" \
         ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
         ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-}" \
