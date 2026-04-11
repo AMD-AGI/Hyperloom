@@ -116,7 +116,7 @@ def build_model_result(
 
     if ifx_reference and result["optimized_tok_per_gpu"]:
         metrics = ifx_reference.get("metrics", {})
-        ifx_tput = metrics.get("tput_per_gpu") or metrics.get("output_tput_per_gpu")
+        ifx_tput = metrics.get("output_tput_per_gpu") or metrics.get("tput_per_gpu")
         if ifx_tput:
             result["inferenceX_tok_per_gpu"] = ifx_tput
             result["vs_inferenceX_pct"] = round(
