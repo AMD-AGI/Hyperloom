@@ -416,12 +416,12 @@ def _send_webhook(webhook: str, summary: dict):
         ]},
         _row("Baseline (output tok/s/GPU)", _val("baseline_tok_per_gpu")),
         _row("Optimized (output tok/s/GPU)", _val("optimized_tok_per_gpu")),
-        _row("**Optimization Gain**", f"**{'+' if gain and gain>0 else ''}{_val('gain_pct', '.1f')}%**", gain_color),
+        _row("**Optimization Gain**", f"**{gain:+.1f}%**" if gain is not None else "N/A", gain_color),
     ]
     if r.get("inferenceX_tok_per_gpu"):
         rows.append(_row("InferenceX (output tok/s/GPU)", _val("inferenceX_tok_per_gpu")))
         rows.append(_row("**vs InferenceX**",
-                         f"**{'+' if vs_ifx and vs_ifx>0 else ''}{_val('vs_inferenceX_pct', '.1f')}%**", vs_color))
+                         f"**{vs_ifx:+.1f}%**" if vs_ifx is not None else "N/A", vs_color))
 
     status_emoji = {"completed": "\u2705", "failed": "\u274c", "timeout": "\u23f1"}.get(status, "\u2753")
 
@@ -447,7 +447,7 @@ def _send_webhook(webhook: str, summary: dict):
         resp = req.post(webhook, json=card, timeout=10)
         if resp.status_code >= 300:
             req.post(webhook, json={
-                "text": f"{status_emoji} Hyperloom CI [{model}]: {status} | Gain: {_val('gain_pct','.1f')}%"
+                "text": f"{status_emoji} Hyperloom CI [{model}]: {status} | Gain: {_val('gain_pct','+.1f')}%"
             }, timeout=10)
     except Exception as e:
         log.warning("Webhook notification failed: %s", e)
