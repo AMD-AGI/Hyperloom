@@ -54,12 +54,18 @@ if [ -n "${LLM_API_KEY:-}" ]; then
     export LLM_GATEWAY_KEY="${LLM_GATEWAY_KEY:-$LLM_API_KEY}"
 fi
 
+# --- Map OOB vars to provider-specific runtime vars ---
+export ANTHROPIC_API_KEY="${OOB_API_KEY:-}"
+export OPENAI_API_KEY="${OOB_API_KEY:-}"
+export ANTHROPIC_BASE_URL="${OOB_BASE_URL:-}"
+export OPENAI_BASE_URL="${OOB_BASE_URL:-}"
+
 # --- Export env vars for SSH sessions (docker run -e vars are invisible to sshd) ---
 {
     for var in MODE FRAMEWORK GEAK_LOCAL KERNEL_OPT_BACKENDS NFS_BASE_PATH DATABASE_PATH \
                INFERENCEX_PATH LLM_API_KEY LLM_API_BASE AMD_LLM_API_KEY LLM_GATEWAY_KEY \
                TRACELENS_PORT GEAK_MCP_PORT OOB_MCP_PORT AGENT_WORKSPACE_ROOT \
-               ANTHROPIC_API_KEY ANTHROPIC_BASE_URL OPENAI_API_KEY OPENAI_BASE_URL \
+               OOB_API_KEY OOB_BASE_URL \
                HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES GPUS_PER_NODE; do
         [ -n "${!var:-}" ] && echo "export ${var}='${!var}'"
     done

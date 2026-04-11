@@ -10,6 +10,12 @@ if [ -z "$HYPERLOOM_STARTED" ] && [ -f /opt/entrypoint.sh ]; then
         export LLM_GATEWAY_KEY="${LLM_GATEWAY_KEY:-$LLM_API_KEY}"
     fi
 
+    # Map OOB vars to provider-specific runtime vars
+    export ANTHROPIC_API_KEY="${OOB_API_KEY:-}"
+    export OPENAI_API_KEY="${OOB_API_KEY:-}"
+    export ANTHROPIC_BASE_URL="${OOB_BASE_URL:-}"
+    export OPENAI_BASE_URL="${OOB_BASE_URL:-}"
+
     if ! curl -s --max-time 1 http://localhost:${TRACELENS_PORT:-8001}/mcp > /dev/null 2>&1; then
         echo "[Hyperloom] Starting TraceLens MCP..."
         TRACELENS_PORT=${TRACELENS_PORT:-8001} TRACELENS_HOST=0.0.0.0 \
