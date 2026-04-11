@@ -123,6 +123,50 @@ def find_benchmark(
                key=lambda x: (x.get("metrics") or {}).get("tput_per_gpu") or 0)
 
 
+def find_benchmark_script(
+    repo_path: Path | str,
+    ifx_key: str,
+    scripts_path: str = "benchmarks/single_node",
+) -> str | None:
+    """Find the InferenceX benchmark script for a given model key.
+
+    Tries exact match first (e.g. minimaxm2.5_fp8_mi355x.sh),
+    then falls back to prefix-based glob.
+    """
+    scripts_dir = Path(repo_path) / scripts_path
+    if not scripts_dir.is_dir():
+        return None
+
+    normalized = ifx_key.replace("-", "_").replace(".", "")
+    for sh in sorted(scripts_dir.glob("*.sh")):
+        stem = sh.stem.replace(".", "")
+        if stem == normalized:
+            return f"{scripts_path}/{sh.name}"
+
+    prefix = normalized.rsplit("_", 1)[0] if "_" in normalized else normalized
+    for sh in sorted(scripts_dir.glob("*.sh")):
+        stem = sh.stem.replace(".", "")
+        if stem.startswith(prefix):
+            return f"{scripts_path}/{sh.name}"
+
+    return None
+
+
+def find_benchmark_script_from_clone(
+    repo_url: str,
+    ifx_key: str,
+    scripts_path: str = "benchmarks/single_node",
+    ref: str = "main",
+) -> str | None:
+    """Clone InferenceX (shallow) and find the benchmark script path."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        subprocess.run(
+            ["git", "clone", "--depth=1", f"--branch={ref}", repo_url, tmpdir],
+            check=True, capture_output=True, text=True,
+        )
+        return find_benchmark_script(tmpdir, ifx_key, scripts_path)
+
+
 def format_benchmark_for_prompt(
     benchmarks: list[dict],
     target_gpu: str,
@@ -188,7 +232,7 @@ def merge_model_config(
         "framework": parsed["framework"],
         "runner": parsed["runner"],
         "tp": parsed["tp"],
-        "ep": model_cfg.get("ep", defaults.get("ep", parsed["ep"])),
+        "ep": model_cfg.get("ep", parsed["ep"]),
         "conc": parsed["conc_end"],
         "isl_osl_configs": parsed["isl_osl_configs"],
         "optimization_depth": model_cfg.get("optimization_depth", "full"),
