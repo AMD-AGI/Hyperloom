@@ -7,8 +7,8 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 | `SKILL.md` | Main skill — phases 0-10: classify → baseline → profile → analyze → tune → GEAK/LLM → patch → sweep → report |
 | `KNOWLEDGE-BASE.md` | Model-specific configs, validated results, pitfalls, benchmark fairness case studies |
 | `kernel-opt/geak.md` | Deep reference — GEAK MCP details, kernel extraction, integration paths (remote GPU pod) |
-| `kernel-opt/codex.md` | Deep reference — Codex backend via OOB Agent MCP (fast Triton rewrites) |
-| `kernel-opt/claude.md` | Deep reference — Claude Code backend via OOB Agent MCP (multi-step, experimental) |
+| `kernel-opt/codex.md` | Deep reference — Codex backend via OOB GPU Optimizer MCP (fast Triton rewrites) |
+| `kernel-opt/claude.md` | Deep reference — Claude Code backend via OOB GPU Optimizer MCP (multi-step, experimental) |
 | `kernel-opt/llm.md` | Deep reference — LLM proxy details, prompt templates, multi-model parallel (fast turnaround) |
 | `scripts/common.sh` | Shared functions — kill_server, wait_for_health, check_benchmark_lib, filter_trace, check_gpu_memory |
 | `scripts/run_baseline.sh` | Baseline benchmark + profiling (single server launch) |
@@ -45,7 +45,8 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 - **Model**: Downloaded locally (e.g. `/shared_nfs/models/DeepSeek-R1-0528`)
 - **MCP servers**:
   - TraceLens — kernel profiling analysis
-  - GEAK — kernel optimization
+  - GEAK — kernel optimization (remote GPU pod)
+  - OOB GPU Optimizer — kernel optimization (Codex/Claude backends)
 
 ## Quick Start
 

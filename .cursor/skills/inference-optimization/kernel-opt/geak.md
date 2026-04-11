@@ -85,7 +85,7 @@ Requires two keys:
 - The instruction field is `prompt`, NOT `instructions`
 - `step_limit` controls agent iterations (**use 100** for kernel optimization — GEAK needs room to analyze, write, compile, fix errors, benchmark, and iterate. 20 is often not enough for a verified result; 5 is completely insufficient)
 - `gpu_count` defaults to 1
-- **`workspace_id`**: Always specify `GEAK_WORKSPACE` (constant from `SKILL.md`; default `"control-plane-moe"`) for reliable scheduling. Default workspace is often resource-constrained.
+- **`workspace_id`**: Always specify `KERNEL_OPT_WORKSPACE` (constant from `SKILL.md`; default `"control-plane-moe"`) for reliable scheduling. Default workspace is often resource-constrained.
 - Include ALL dependent files in the `files` array (GEAK needs self-contained code)
 
 ### Prompt template for inference kernels
@@ -128,20 +128,14 @@ Write the COMPLETE file (imports, decorator, function) to the output directory.
 
 Additional rules:
 4. **Always say "Do NOT search the filesystem with find / or grep -r /"** — GEAK agents default to broad filesystem searches which hang 30+ min on NFS.
-5. **Always pass framework image** — In claw mode, use `GEAK_IMAGE_SGLANG_RAY` (for SGLang) or `GEAK_IMAGE_VLLM` (for vLLM). In local mode, use `GEAK_IMAGE_SGLANG` or `GEAK_IMAGE_VLLM`.
+5. **Always pass framework image** — Use `KERNEL_OPT_IMAGE` (provided by CI or user prompt). This single image is shared across all kernel-opt backends (GEAK + OOB).
 6. **Always embed full source in `files[].content`** — GEAK always receives the kernel source via `files[].content`. If the path also exists in the image, include it in the prompt for GEAK's preprocessor. If the path is runtime-generated, the `files[].content` is the sole source of truth.
 
-### GEAK Image Selection
+### Image and Workspace
 
-| Condition | Local Mode | Claw Mode |
-|-----------|-----------|-----------|
-| User specified a custom image | Use user-specified | Use user-specified |
-| `FRAMEWORK=sglang` (default) | `GEAK_IMAGE_SGLANG` | `GEAK_IMAGE_SGLANG_RAY` |
-| `FRAMEWORK=vllm` | `GEAK_IMAGE_VLLM` | `GEAK_IMAGE_VLLM` |
+Use `KERNEL_OPT_IMAGE` (provided by CI or user prompt) for all `geak_create_task` calls. This is the same framework image used by all kernel-opt backends.
 
-**Claw mode MUST use `GEAK_IMAGE_SGLANG_RAY`** (not `GEAK_IMAGE_SGLANG`) for SGLang.
-
-**Always pass `workspace_id: GEAK_WORKSPACE` (default `"control-plane-moe"`) in `geak_create_task`.** User can override.
+**Always pass `workspace_id: KERNEL_OPT_WORKSPACE` (default `"control-plane-moe"`) in `geak_create_task`.** User can override.
 
 ### GEAK latency breakdown
 
@@ -331,4 +325,4 @@ Before patching any GEAK output into the serving environment:
 ### GEAK task stuck in pending
 - Pod scheduling can take 15+ min if cluster is loaded
 - Check with `geak_get_task` — if `updated_at` hasn't changed in 30 min, cancel and retry
-- Always use `workspace_id: GEAK_WORKSPACE` for reliable scheduling (default `"control-plane-moe"` from `SKILL.md`; default workspace is resource-constrained)
+- Always use `workspace_id: KERNEL_OPT_WORKSPACE` for reliable scheduling (default `"control-plane-moe"` from `SKILL.md`; default workspace is resource-constrained)
