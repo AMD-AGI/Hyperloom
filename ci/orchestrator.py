@@ -50,18 +50,20 @@ def render_prompt(merged: dict) -> str:
     ifx_text = format_benchmark_for_prompt(
         merged["inferenceX_benchmarks"],
         merged["target_gpu"], isl, osl, merged["precision"],
+        image=merged.get("image"),
     )
     script = merged.get("benchmark_script")
     if script:
         bss = (
-            f"MANDATORY: Use the InferenceX benchmark script for baseline:\n"
-            f"  $INFERENCEX_PATH/{script}\n"
-            f"Run it with: MODEL={merged['model_path']} TP={merged['tp']} "
-            f"EP_SIZE={merged['ep']} CONC=$CONC ISL={isl} OSL={osl} "
+            f"MANDATORY: Read the InferenceX benchmark script and replicate its server config:\n"
+            f"  {merged['inferencex_path']}/{script}\n"
+            f"Key env vars for this run: MODEL={merged['model_path']} TP={merged['tp']} "
+            f"EP_SIZE={merged['ep']} CONC={merged['conc']} ISL={isl} OSL={osl} "
             f"MAX_MODEL_LEN=4096 RANDOM_RANGE_RATIO=0.8 "
-            f"RESULT_FILENAME=baseline bash {merged['inferencex_path']}/{script}\n"
-            f"This script contains critical platform-specific server params "
-            f"(attention backend, env vars, memory config, expert parallelism)."
+            f"RESULT_FILENAME=baseline\n"
+            f"DO NOT run the script directly (it depends on benchmark_lib.sh and hf download).\n"
+            f"Instead: read the script, extract the server launch command, env vars, and "
+            f"server flags, then use them to launch the server and run the benchmark yourself."
         )
     else:
         bss = "No InferenceX benchmark script found. Construct server launch manually."
@@ -191,7 +193,8 @@ def run_model(
         isl, osl = merged["isl_osl_configs"][0]
         ifx_ref = find_benchmark(
             merged["inferenceX_benchmarks"],
-            merged["target_gpu"], isl, osl, merged["precision"])
+            merged["target_gpu"], isl, osl, merged["precision"],
+            image=merged.get("image"))
 
     result = build_model_result(
         model_name, merged["inferenceX_key"], merged["image"],
