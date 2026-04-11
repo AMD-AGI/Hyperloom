@@ -49,7 +49,7 @@ launch_server() {
         vllm serve "$MODEL" \
             --host 0.0.0.0 --port $PORT --tensor-parallel-size $TP \
             --trust-remote-code \
-            --gpu-memory-utilization 0.85 --disable-log-stats \
+            --gpu-memory-utilization ${VLLM_GPU_MEM_UTIL:-0.85} --disable-log-stats \
             $VLLM_EXTRA_ARGS \
             > "$LOG_FILE" 2>&1 &
         SERVER_PID=$!
@@ -146,11 +146,11 @@ while IFS=' ' read -r COST ISL OSL CONC NUM_PROMPTS; do
     RESULT_FILENAME="${FRAMEWORK}_tp${TP}_conc${CONC}_isl${ISL}_osl${OSL}"
     echo "--- [$DONE/$TOTAL_CONFIGS +${ELAPSED}s] $RESULT_FILENAME (n=$NUM_PROMPTS, ~${COST} output tokens) ---"
 
-    export RANDOM_RANGE_RATIO=1.0 RESULT_FILENAME
-    # --backend vllm: InferenceX benchmark uses "vllm" for any OpenAI-compatible API (both SGLang and vLLM)
+    RANDOM_RANGE_RATIO="${RANDOM_RANGE_RATIO:-1.0}"
+    export RANDOM_RANGE_RATIO RESULT_FILENAME
     run_benchmark_serving \
         --model "$MODEL" --port "$PORT" --backend vllm \
-        --input-len "$ISL" --output-len "$OSL" --random-range-ratio 1.0 \
+        --input-len "$ISL" --output-len "$OSL" --random-range-ratio "$RANDOM_RANGE_RATIO" \
         --num-prompts "$NUM_PROMPTS" --max-concurrency "$CONC" \
         --trust-remote-code \
         --result-filename "$RESULT_FILENAME" --result-dir "$RESULT_DIR/"
