@@ -100,7 +100,7 @@ if [ "$FRAMEWORK" = "vllm" ]; then
     vllm serve "$MODEL" \
         --host 0.0.0.0 --port $PORT --tensor-parallel-size $TP \
         --trust-remote-code \
-        --gpu-memory-utilization 0.85 --disable-log-stats \
+        --gpu-memory-utilization ${VLLM_GPU_MEM_UTIL:-0.85} --disable-log-stats \
         $VLLM_EXTRA_ARGS \
         > "$RESULT_DIR/server.log" 2>&1 &
     SERVER_PID=$!
@@ -136,12 +136,12 @@ fi
 # --- Phase 2: Baseline benchmark (profiler NOT active, clean numbers) ---
 echo ""
 echo "[2/4] Running baseline benchmark ($NUM_PROMPTS prompts, no profiling)..."
-export RANDOM_RANGE_RATIO=1.0 RESULT_FILENAME
+RANDOM_RANGE_RATIO="${RANDOM_RANGE_RATIO:-1.0}"
+export RANDOM_RANGE_RATIO RESULT_FILENAME
 
-# --backend vllm: InferenceX benchmark uses "vllm" for any OpenAI-compatible API (both SGLang and vLLM)
 run_benchmark_serving \
     --model "$MODEL" --port "$PORT" --backend vllm \
-    --input-len "$ISL" --output-len "$OSL" --random-range-ratio 1.0 \
+    --input-len "$ISL" --output-len "$OSL" --random-range-ratio "$RANDOM_RANGE_RATIO" \
     --num-prompts "$NUM_PROMPTS" --max-concurrency "$CONC" \
     --result-filename "$RESULT_FILENAME" --result-dir "$RESULT_DIR/" \
     --trust-remote-code
@@ -171,7 +171,7 @@ export RESULT_FILENAME="profile_run"
 python3 "$INFERENCEX_PATH/utils/bench_serving/benchmark_serving.py" \
     --model "$MODEL" --backend vllm --base-url "http://0.0.0.0:$PORT" \
     --dataset-name random --random-input-len "$ISL" --random-output-len "$OSL" \
-    --random-range-ratio 1.0 --num-prompts "$PROFILE_PROMPTS" \
+    --random-range-ratio "$RANDOM_RANGE_RATIO" --num-prompts "$PROFILE_PROMPTS" \
     --max-concurrency "$PROFILE_PROMPTS" --request-rate inf --ignore-eos \
     --num-warmups 0 --save-result \
     --result-dir "$RESULT_DIR/" --result-filename profile_run \
