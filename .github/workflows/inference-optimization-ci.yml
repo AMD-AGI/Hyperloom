@@ -55,6 +55,7 @@ jobs:
       - name: Run optimization
         working-directory: ci
         run: |
+          pip install -q matplotlib 2>/dev/null || true
           TRIGGER="${{ github.event.inputs.trigger_reason || 'scheduled' }}"
           python3 orchestrator.py \
             --trigger "$TRIGGER" \
@@ -69,6 +70,7 @@ jobs:
           path: |
             ci-output/ci_report.md
             ci-output/ci_summary.json
+            ci-output/ci_chart.png
             ci-output/github_summary.md
             ci-output/*/optimization_report.md
           retention-days: 90
