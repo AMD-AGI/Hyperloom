@@ -11,6 +11,15 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
+def _first_of(d: dict, *keys: str) -> Any | None:
+    """Return the first non-None value found for the given keys."""
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            return v
+    return None
+
+
 def _parse_metrics_from_report(content: str) -> dict:
     """Fallback: extract baseline/optimized throughput from optimization_report.md.
 
@@ -67,26 +76,30 @@ def extract_optimization_data(result_dir: str) -> dict:
             metrics = json.loads(ci_metrics_path.read_text())
             log.info("Loaded ci_metrics.json from %s", result_dir)
 
-            # Flat schema (requested): tok_per_gpu_baseline, baseline_throughput, gain_pct
-            bl = (metrics.get("tok_per_gpu_baseline")
-                  or metrics.get("baseline_throughput"))
-            opt = (metrics.get("tok_per_gpu_optimized")
-                   or metrics.get("optimized_throughput"))
-            gain = metrics.get("gain_pct")
+            bl = _first_of(metrics,
+                           "tok_per_gpu_baseline", "baseline_throughput",
+                           "baseline_output_tput_per_gpu", "baseline_output_tput_tok_s",
+                           "baseline_tok_per_gpu")
+            opt = _first_of(metrics,
+                            "tok_per_gpu_optimized", "optimized_throughput",
+                            "optimized_output_tput_per_gpu", "optimized_output_tput_tok_s",
+                            "optimized_tok_per_gpu")
+            gain = _first_of(metrics,
+                             "gain_pct", "improvement_pct", "total_improvement_pct")
 
-            # Nested schema (agent sometimes writes):
-            #   baseline.tok_s_per_gpu / baseline.output_throughput_tok_s
-            #   optimized.tok_s_per_gpu / optimized.output_throughput_tok_s
-            #   improvement.output_throughput_pct / improvement.tok_s_per_gpu_pct
+            # Nested schema fallback
             if bl is None and isinstance(metrics.get("baseline"), dict):
                 b = metrics["baseline"]
-                bl = b.get("tok_s_per_gpu") or b.get("output_throughput_tok_s")
+                bl = _first_of(b, "tok_s_per_gpu", "output_throughput_tok_s",
+                               "output_tput_per_gpu", "tput_per_gpu")
             if opt is None and isinstance(metrics.get("optimized"), dict):
                 o = metrics["optimized"]
-                opt = o.get("tok_s_per_gpu") or o.get("output_throughput_tok_s")
+                opt = _first_of(o, "tok_s_per_gpu", "output_throughput_tok_s",
+                                "output_tput_per_gpu", "tput_per_gpu")
             if gain is None and isinstance(metrics.get("improvement"), dict):
                 imp = metrics["improvement"]
-                gain = imp.get("output_throughput_pct") or imp.get("tok_s_per_gpu_pct")
+                gain = _first_of(imp, "output_throughput_pct", "tok_s_per_gpu_pct",
+                                 "gain_pct", "pct")
             if gain is None and bl and opt and bl > 0:
                 gain = round((opt - bl) / bl * 100, 2)
 
@@ -94,7 +107,10 @@ def extract_optimization_data(result_dir: str) -> dict:
             data["optimized_throughput"] = opt
             data["gain_pct"] = gain
             data["actions"] = metrics.get("actions_taken") or metrics.get("actions", [])
-            return data
+            if bl is not None and opt is not None:
+                return data
+            log.warning("ci_metrics.json loaded but missing key metrics (bl=%s, opt=%s), "
+                        "falling back to report markdown", bl, opt)
         except (json.JSONDecodeError, KeyError) as e:
             log.warning("Failed to parse ci_metrics.json in %s: %s", result_dir, e)
 

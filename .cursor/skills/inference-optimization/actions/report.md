@@ -85,7 +85,9 @@ sweep workloads. See [`../modes/CLAW.md`](../modes/CLAW.md) "Cleanup" section.
 ### CI Mode: Write ci_metrics.json
 
 If the prompt specifies a `ci_metrics.json` output path, write it with a **flat**
-top-level schema (the CI report parser requires this exact format):
+top-level schema. The CI report parser (`report_generator.py`) requires these
+**EXACT field names** — using different names (e.g. `baseline_output_tput_tok_s`)
+will cause gain=N/A in the CI report.
 
 ```json
 {
@@ -98,5 +100,15 @@ top-level schema (the CI report parser requires this exact format):
 }
 ```
 
-Do NOT nest baseline/optimized into sub-objects. If no optimization improved
-over baseline, set `gain_pct` to `0.0` and optimized values equal to baseline.
+**CRITICAL field name rules:**
+- Use `baseline_throughput`, NOT `baseline_output_tput_tok_s`
+- Use `tok_per_gpu_baseline`, NOT `baseline_output_tput_per_gpu`
+- Use `optimized_throughput`, NOT `optimized_output_tput_tok_s`
+- Use `tok_per_gpu_optimized`, NOT `optimized_output_tput_per_gpu`
+- Use `gain_pct`, NOT `improvement_pct` or `total_improvement_pct`
+- Use `actions_taken`, NOT `actions` or `optimization_actions`
+
+Do NOT nest baseline/optimized into sub-objects. You may add extra metadata
+fields (model, framework, gpu_type, etc.) but the six fields above MUST be
+present with these exact names. If no optimization improved over baseline,
+set `gain_pct` to `0.0` and optimized values equal to baseline.
