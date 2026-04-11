@@ -57,6 +57,7 @@ COPY deploy/local-local/hyperloom-autostart.sh /etc/profile.d/hyperloom.sh
 RUN chmod +x /opt/entrypoint.sh /etc/profile.d/hyperloom.sh
 ENV MODE=local \
     GEAK_LOCAL=true \
+    OOB_LOCAL=true \
     KERNEL_OPT_BACKENDS=geak \
     NFS_BASE_PATH=/tmp/geak-data \
     DATABASE_PATH=/tmp/geak-data/geak.db \
