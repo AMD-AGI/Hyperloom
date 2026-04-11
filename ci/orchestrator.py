@@ -51,6 +51,8 @@ def render_prompt(merged: dict) -> str:
         merged["inferenceX_benchmarks"],
         merged["target_gpu"], isl, osl, merged["precision"],
         image=merged.get("image"),
+        tp=merged.get("tp"),
+        conc=merged.get("conc"),
     )
     script = merged.get("benchmark_script")
     if script:
@@ -199,7 +201,9 @@ def run_model(
         ifx_ref = find_benchmark(
             merged["inferenceX_benchmarks"],
             merged["target_gpu"], isl, osl, merged["precision"],
-            image=merged.get("image"))
+            image=merged.get("image"),
+            tp=merged.get("tp"),
+            conc=merged.get("conc"))
 
     result = build_model_result(
         model_name, merged["inferenceX_key"], merged["image"],
