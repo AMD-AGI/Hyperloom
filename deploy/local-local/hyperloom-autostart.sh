@@ -59,6 +59,7 @@ if [ -z "$HYPERLOOM_STARTED" ] && [ -f /opt/entrypoint.sh ]; then
         fi
         PYTHONPATH=/opt/oob-mcp \
         MCP_PORT=${OOB_MCP_PORT:-8003} \
+        OOB_LOCAL="${OOB_LOCAL:-true}" \
         AGENT_WORKSPACE_ROOT="${AGENT_WORKSPACE_ROOT:-/tmp/agent-workspaces}" \
         ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
         ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-}" \
