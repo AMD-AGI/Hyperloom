@@ -16,7 +16,7 @@ on:
 
 env:
   HARBOR_PREFIX: ${{ secrets.HARBOR_PREFIX }}
-  GEAK_WORKSPACE: ${{ secrets.GEAK_WORKSPACE }}
+  KERNEL_OPT_WORKSPACE: ${{ secrets.KERNEL_OPT_WORKSPACE }}
   CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
   WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
   SANDBOX_WORKSPACE: ${{ secrets.SANDBOX_WORKSPACE }}
