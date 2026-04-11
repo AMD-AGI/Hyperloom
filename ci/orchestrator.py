@@ -167,6 +167,11 @@ def run_model(
     log.info("Session %s finished with status: %s", session_id, status)
 
     # Step 3: Download optimization report from Claw
+    # Wait for report upload to finalize before querying files
+    wait_secs = 300
+    log.info("Waiting %ds for report upload to finalize...", wait_secs)
+    time.sleep(wait_secs)
+
     report_content = None
     try:
         files = claw.list_files(session_id)
