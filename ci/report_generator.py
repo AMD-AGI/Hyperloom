@@ -100,8 +100,12 @@ def extract_optimization_data(result_dir: str) -> dict:
                 imp = metrics["improvement"]
                 gain = _first_of(imp, "output_throughput_pct", "tok_s_per_gpu_pct",
                                  "gain_pct", "pct")
-            if gain is None and bl and opt and bl > 0:
-                gain = round((opt - bl) / bl * 100, 2)
+            if bl and opt and bl > 0:
+                computed_gain = round((opt - bl) / bl * 100, 2)
+                if gain is not None and abs(gain - computed_gain) > 1.0:
+                    log.warning("gain_pct from agent (%.2f%%) disagrees with computed (%.2f%%), using computed",
+                                gain, computed_gain)
+                gain = computed_gain
 
             data["baseline_throughput"] = bl
             data["optimized_throughput"] = opt
