@@ -227,8 +227,8 @@ def merge_model_config(
     parsed = parse_model_entry(ifx_entry)
     model_hf = parsed["model_hf"]
 
-    geak_ws = resolve_var(
-        model_cfg.get("geak_workspace", defaults.get("geak_workspace", "")))
+    kernel_opt_ws = resolve_var(
+        model_cfg.get("kernel_opt_workspace", defaults.get("kernel_opt_workspace", "")))
     min_k = model_cfg.get("min_kernels", defaults.get("min_kernels", 5))
     kern_backends = model_cfg.get(
         "kernel_opt_backends", defaults.get("kernel_opt_backends", "geak"))
@@ -248,8 +248,8 @@ def merge_model_config(
         "conc": parsed["conc_end"],
         "isl_osl_configs": parsed["isl_osl_configs"],
         "optimization_depth": model_cfg.get("optimization_depth", "full"),
-        "geak_workspace": geak_ws,
-        "geak_image": f"{harbor_prefix}/{parsed['image']}" if harbor_prefix else parsed["image"],
+        "kernel_opt_workspace": kernel_opt_ws,
+        "kernel_opt_image": f"{harbor_prefix}/{parsed['image']}" if harbor_prefix else parsed["image"],
         "geak_step_limit": model_cfg.get("geak_step_limit", defaults.get("geak_step_limit", 100)),
         "kernel_opt_backends": kern_backends,
         "min_kernels": min_k,
