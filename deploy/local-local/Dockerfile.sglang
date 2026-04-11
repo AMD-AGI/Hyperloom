@@ -1,0 +1,72 @@
+# Hyperloom Local-Local Mode — SGLang base image
+# Bundles: TraceLens MCP + GEAK MCP + InferenceX + Skills + SSH
+#
+# Build context: repo root (/shared_nfs/lss/Hyperloom/)
+#   Requires: cp -r /hyperloom/TraceLens-internal TraceLens-internal
+#   docker build -f deploy/local-local/Dockerfile.sglang -t hyperloom-local:sglang-latest .
+
+FROM harbor.oci-slc.primus-safe.amd.com/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x
+
+# --- Layer 1: system deps + Node.js 20 (rarely changes, best cache hit) ---
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openssh-server curl gnupg ca-certificates \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && curl -fsSL https://raw.githubusercontent.com/AMD-AGI/Primus-SaFE/main/Scripts/setup-certs/amd-root-ca.crt \
+        -o /usr/local/share/ca-certificates/amd-root-ca.crt \
+    && curl -fsSL https://raw.githubusercontent.com/AMD-AGI/Primus-SaFE/main/Scripts/setup-certs/amd-issuing-ca.crt \
+        -o /usr/local/share/ca-certificates/amd-issuing-ca.crt \
+    && update-ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd /opt/hyperloom/.cursor/skills /tmp/geak-data /tmp/agent-workspaces \
+    && echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config \
+    && echo 'root:root' | chpasswd
+
+# --- Layer 2: GEAK + intellikit (pinned branches, single layer) ---
+RUN git clone --branch feature/xiaofei/claw --depth 1 \
+        https://github.com/AMD-AGI/GEAK.git /opt/geak \
+    && git clone --depth 1 \
+        https://github.com/AMDResearch/intellikit.git /opt/intellikit \
+    && cd /opt/geak && pip install --no-cache-dir -e . \
+    && pip install --no-cache-dir -r server/requirements.txt \
+    && pip install --no-cache-dir -e /opt/intellikit/metrix/
+
+# --- Layer 3: TraceLens (changes moderately) ---
+COPY TraceLens-internal /opt/TraceLens
+RUN cd /opt/TraceLens && pip install --no-cache-dir -e . \
+    && pip install --no-cache-dir -r TraceLens/AgenticMode/MCPServer/requirements.txt
+
+# --- Layer 3.5: OOB Agent MCP deps (Node CLIs + Python SDK) ---
+COPY deploy/local-local/OOB_mcp_server/requirements.txt /tmp/oob-requirements.txt
+RUN pip install --no-cache-dir -r /tmp/oob-requirements.txt \
+    && CERTIFI_BUNDLE=$(python3 -c "import certifi; print(certifi.where())" 2>/dev/null) \
+    && if [ -n "$CERTIFI_BUNDLE" ]; then \
+         cat /usr/local/share/ca-certificates/amd-root-ca.crt \
+             /usr/local/share/ca-certificates/amd-issuing-ca.crt >> "$CERTIFI_BUNDLE"; \
+       fi \
+    && npm install -g @anthropic-ai/claude-code @openai/codex@0.100.0
+
+# --- Layer 4: lightweight copies (change most often, minimal rebuild) ---
+COPY inference_optimization/InferenceX /opt/hyperloom/InferenceX
+COPY .cursor/skills/inference-optimization \
+     /opt/hyperloom/.cursor/skills/inference-optimization
+COPY deploy/local-local/OOB_mcp_server /opt/oob-mcp/agent_mcp_server
+COPY deploy/local-local/mcp.json /opt/hyperloom/.cursor/mcp.json
+COPY deploy/local-local/entrypoint.sh /opt/entrypoint.sh
+COPY deploy/local-local/hyperloom-autostart.sh /etc/profile.d/hyperloom.sh
+RUN chmod +x /opt/entrypoint.sh /etc/profile.d/hyperloom.sh
+ENV MODE=local \
+    GEAK_LOCAL=true \
+    KERNEL_OPT_BACKENDS=geak \
+    NFS_BASE_PATH=/tmp/geak-data \
+    DATABASE_PATH=/tmp/geak-data/geak.db \
+    INFERENCEX_PATH=/opt/hyperloom/InferenceX \
+    FRAMEWORK=sglang \
+    OOB_MCP_PORT=8003 \
+    AGENT_WORKSPACE_ROOT=/tmp/agent-workspaces \
+    PYTHONPATH=/opt/oob-mcp \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
+
+EXPOSE 22 8001 8002 8003
+CMD ["/opt/entrypoint.sh"]
