@@ -18,7 +18,6 @@ import yaml
 
 from claw_client import ClawClient
 from inferenceX_parser import (
-    fetch_amd_master_yaml,
     fetch_benchmarks,
     find_benchmark,
     find_benchmark_script,
@@ -238,33 +237,32 @@ def main():
 
     log.info("Models to process: %s", [m["inferenceX_key"] for m in model_list])
 
-    # Fetch InferenceX config from GitHub
-    log.info("Fetching InferenceX amd-master.yaml from main...")
+    # Fetch InferenceX config + benchmark scripts in a single shallow clone
+    log.info("Fetching InferenceX config from main...")
     ifx_commit = get_latest_commit(ifx_cfg["repo"])
-    amd_master = fetch_amd_master_yaml(ifx_cfg["repo"], ifx_cfg["config_path"])
-    log.info("InferenceX commit: %s", ifx_commit[:7])
-
-    # Find benchmark scripts from InferenceX repo (uses a separate shallow clone)
     scripts_path = ifx_cfg.get("scripts_path", "benchmarks/single_node")
     ifx_scripts: dict[str, str | None] = {}
-    try:
-        import tempfile as _tmpmod
-        with _tmpmod.TemporaryDirectory() as _tmpdir:
-            subprocess.run(
-                ["git", "clone", "--depth=1", "--branch=main",
-                 ifx_cfg["repo"], _tmpdir],
-                check=True, capture_output=True, text=True,
-            )
-            for model_cfg in model_list:
-                ifx_key = model_cfg["inferenceX_key"]
-                script = find_benchmark_script(_tmpdir, ifx_key, scripts_path)
-                ifx_scripts[ifx_key] = script
-                if script:
-                    log.info("Found benchmark script for %s: %s", ifx_key, script)
-                else:
-                    log.warning("No benchmark script found for %s", ifx_key)
-    except Exception as e:
-        log.warning("Failed to discover benchmark scripts: %s", e)
+
+    import tempfile as _tmpmod
+    with _tmpmod.TemporaryDirectory() as _tmpdir:
+        subprocess.run(
+            ["git", "clone", "--depth=1", "--branch=main",
+             ifx_cfg["repo"], _tmpdir],
+            check=True, capture_output=True, text=True,
+        )
+        yaml_path = Path(_tmpdir) / ifx_cfg["config_path"]
+        with open(yaml_path) as f:
+            amd_master = yaml.safe_load(f)
+        log.info("InferenceX commit: %s", ifx_commit[:7])
+
+        for model_cfg in model_list:
+            ifx_key = model_cfg["inferenceX_key"]
+            script = find_benchmark_script(_tmpdir, ifx_key, scripts_path)
+            ifx_scripts[ifx_key] = script
+            if script:
+                log.info("Found benchmark script for %s: %s", ifx_key, script)
+            else:
+                log.warning("No benchmark script found for %s", ifx_key)
 
     # Merge configs and fetch API data
     merged_models = []
