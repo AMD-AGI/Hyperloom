@@ -7,7 +7,7 @@ Applies when running on a single machine with direct GPU access.
 
 - **Client**: Cursor IDE
 - **Runtime**: Local GPU machine (single node)
-- **MCP Servers**: GEAK MCP + TraceLens MCP (local or remote HTTP)
+- **MCP Servers**: GEAK MCP + OOB GPU Optimizer MCP + TraceLens MCP (local or remote HTTP)
 - **Storage**: Local disk (`/workspace/inference-optimization` or `/tmp`)
 
 ## Mode Detection
