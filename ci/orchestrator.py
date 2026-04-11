@@ -326,7 +326,7 @@ def main():
         results.append(result)
         log.info("Result for %s: status=%s, gain=%s",
                  result["model"], result["status"],
-                 f"{result['gain_pct']}%" if result.get("gain_pct") else "N/A")
+                 f"{result['gain_pct']}%" if result.get("gain_pct") is not None else "N/A")
 
     # Generate reports
     ci_run_id = f"ci-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}"
