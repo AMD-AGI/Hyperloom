@@ -27,23 +27,17 @@ Save all results and the optimization report to {result_dir}
 Execute the full skill pipeline, including parameter sweep.
 Even if the baseline already exceeds the InferenceX target, you MUST still run the sweep phase and write the report.
 After writing optimization_report.md, also write {result_dir}/ci_metrics.json.
-Copy-paste this template and fill in the numbers. Do NOT rename fields or nest objects:
+Here is an example from a previous successful run — copy this structure exactly, only change the numbers:
 ```json
-{{
-  "baseline_throughput": REPLACE_WITH_NUMBER,
-  "optimized_throughput": REPLACE_WITH_NUMBER,
-  "gain_pct": REPLACE_WITH_NUMBER,
-  "tok_per_gpu_baseline": REPLACE_WITH_NUMBER,
-  "tok_per_gpu_optimized": REPLACE_WITH_NUMBER,
-  "actions_taken": ["action1", "action2"]
-}}
+{{"baseline_throughput": 8053.90, "optimized_throughput": 8850.12, "gain_pct": 9.88, "tok_per_gpu_baseline": 4026.95, "tok_per_gpu_optimized": 4425.06, "actions_taken": ["params_max_num_seqs_512", "kernel_fused_moe_kept"]}}
 ```
 Rules:
 - baseline_throughput / optimized_throughput = total output tok/s (all GPUs combined)
-- tok_per_gpu_baseline / tok_per_gpu_optimized = output tok/s divided by TP (={tp})
+- tok_per_gpu_baseline = baseline_throughput / {tp}. tok_per_gpu_optimized = optimized_throughput / {tp}
 - gain_pct = (optimized - baseline) / baseline * 100. Use 0.0 if no improvement.
-- All six fields above are MANDATORY with these exact names. The CI will show N/A if any are missing.
-- Do NOT nest into sub-objects. Do NOT rename fields.
+- All six field names are MANDATORY. The CI will show N/A if any are missing or renamed.
+
+SAFETY: Do NOT run broad kill commands like `kill -9 $(ps aux | grep "vllm|ray")`. This will kill the sandbox executor. Use the skill's kill_server function or kill specific PIDs only.
 
 InferenceX Baseline:
 Target GPU: {target_gpu}
