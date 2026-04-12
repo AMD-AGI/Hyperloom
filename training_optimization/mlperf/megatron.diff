@@ -1,0 +1,129 @@
+diff --git a/megatron/legacy/data/data_samplers.py b/megatron/legacy/data/data_samplers.py
+index 1bf1bf5ee..466da3041 100644
+--- a/megatron/legacy/data/data_samplers.py
++++ b/megatron/legacy/data/data_samplers.py
+@@ -12,7 +12,7 @@ from megatron.core import mpu
+ from megatron.core.datasets.utils import Split
+ 
+ 
+-def build_pretraining_data_loader(dataset, consumed_samples):
++def build_pretraining_data_loader(dataset, consumed_samples, name=""):
+     """Build dataloader given an input dataset."""
+ 
+     if dataset is None:
+@@ -26,9 +26,12 @@ def build_pretraining_data_loader(dataset, consumed_samples):
+     else:
+         split = None
+ 
+-    if split == Split.valid and args.full_validation:
++    is_validation = (split == Split.valid) or (name == "validation")
++    if is_validation:
++        eval_samples = args.eval_iters * args.global_batch_size  # 64 * 16 = 1024
++        total_samples = min(len(dataset), eval_samples)  # Cap at 1024 even if dataset is larger
+         batch_sampler = MegatronPretrainingSampler(
+-            total_samples=len(dataset),
++            total_samples=total_samples,
+             consumed_samples=0,
+             micro_batch_size=args.micro_batch_size,
+             data_parallel_rank=mpu.get_data_parallel_rank(),
+diff --git a/megatron/training/training.py b/megatron/training/training.py
+index 23a6ba617..a3013ad60 100644
+--- a/megatron/training/training.py
++++ b/megatron/training/training.py
+@@ -919,16 +919,22 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
+     ):
+         for model_module in model:
+             model_module.cuda(torch.cuda.current_device())
++        if torch.cuda.is_available():
++            torch.cuda.synchronize()
+ 
+     # Fp16 conversion.
+     if args.fp16 or args.bf16:
+         config = get_model_config(model[0])
+         model = [Float16Module(config, model_module) for model_module in model]
++        if torch.cuda.is_available():
++            torch.cuda.synchronize()
+ 
+     # Materialize tensors on meta device (GPU allocation) if not using FSDP2 and not using Megatron FSDP.
+     if args.init_model_with_meta_device and not args.use_torch_fsdp2 and not args.use_megatron_fsdp:
+         #for model_module in model:
+         model = [to_empty_if_meta_device(model_module, device=torch.device("cuda")) for model_module in model]
++        if torch.cuda.is_available():
++            torch.cuda.synchronize()
+ 
+ 
+ 
+@@ -939,8 +945,11 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
+     #               the amax_history back.
+     # After TE2.x: Below function is an empty function and does nothing.
+     correct_amax_history_if_needed(model)
++    if torch.cuda.is_available():
++        torch.cuda.synchronize()
+ 
+     if wrap_with_ddp:
++
+         if args.use_torch_fsdp2:
+             assert HAVE_FSDP2, "Torch FSDP2 requires torch>=2.4.0"
+             DP = torch_FSDP
+@@ -989,6 +998,12 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
+             if not ddp_config.overlap_grad_reduce:
+                 ddp_config.bucket_size = None
+ 
++        # Flush all streams before DDP ctor: vanilla Megatron wraps DP in a new stream; Primus
++        # may replace torch.cuda.stream with a no-op (default stream). Either way, ensure prior
++        # init and correct_amax kernels finished before param remap / copy_.
++        if torch.cuda.is_available():
++            torch.cuda.synchronize()
++
+         with torch.cuda.stream(torch.cuda.Stream()):
+             model = [
+                 DP(
+@@ -1003,11 +1018,18 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
+                 for (model_chunk_idx, model_chunk) in enumerate(model)
+             ]
+ 
++        if torch.cuda.is_available():
++            torch.cuda.synchronize()
++
+         # Broadcast params from data parallel src rank to other data parallel ranks.
+         if args.data_parallel_random_init:
+             for model_module in model:
+                 model_module.broadcast_params()
+ 
++        if torch.cuda.is_available():
++            torch.cuda.synchronize()
++
++
+     return model
+ 
+ 
+@@ -2719,8 +2741,7 @@ def get_train_valid_test_num_samples():
+     if args.full_validation:
+         eval_samples = None
+     else:
+-        eval_iters = (args.train_iters // args.eval_interval + 1) * args.eval_iters
+-        eval_samples = eval_iters * args.global_batch_size
++        eval_samples = args.eval_iters * args.global_batch_size
+     test_iters = args.eval_iters
+ 
+     return (train_samples, eval_samples, test_iters * args.global_batch_size)
+@@ -2775,14 +2796,11 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
+ 
+         valid_dataloaders = []
+         for valid_d in valid_ds:
+-            if args.skip_train or args.full_validation:
+-                valid_dataloaders.append(build_pretraining_data_loader(valid_d, 0))
+-            else:
+-                if args.multiple_validation_sets:
+-                    # TODO(bnorick): for multiple validation sets without full validation, args.consumed_valid_samples is not
+-                    # correct and needs to be calculated/set per validation set
+-                    raise NotImplementedError("--multiple-validation-sets currently requires --full-validation")
+-                valid_dataloaders.append(build_pretraining_data_loader(valid_d, args.consumed_valid_samples))
++            if args.multiple_validation_sets and not args.full_validation:
++                # TODO(bnorick): for multiple validation sets without full validation, args.consumed_valid_samples is not
++                # correct and needs to be calculated/set per validation set
++                raise NotImplementedError("--multiple-validation-sets currently requires --full-validation")
++            valid_dataloaders.append(build_pretraining_data_loader(valid_d, 0, "validation"))
+         if not args.multiple_validation_sets:
+             assert len(valid_dataloaders) == 1
+         test_dataloader = build_pretraining_data_loader(test_ds, 0)
