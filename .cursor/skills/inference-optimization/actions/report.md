@@ -84,31 +84,26 @@ sweep workloads. See [`../modes/CLAW.md`](../modes/CLAW.md) "Cleanup" section.
 
 ### CI Mode: Write ci_metrics.json
 
-If the prompt specifies a `ci_metrics.json` output path, write it with a **flat**
-top-level schema. The CI report parser (`report_generator.py`) requires these
-**EXACT field names** — using different names (e.g. `baseline_output_tput_tok_s`)
-will cause gain=N/A in the CI report.
+If the prompt specifies a `ci_metrics.json` output path, copy this template
+and replace the placeholders with actual numbers:
 
 ```json
 {
-  "baseline_throughput": <total output tok/s across all GPUs>,
-  "optimized_throughput": <total output tok/s across all GPUs>,
-  "gain_pct": <float, 0.0 if no improvement>,
-  "tok_per_gpu_baseline": <output tok/s per GPU>,
-  "tok_per_gpu_optimized": <output tok/s per GPU>,
-  "actions_taken": ["action1_description", "action2_description"]
+  "baseline_throughput": REPLACE,
+  "optimized_throughput": REPLACE,
+  "gain_pct": REPLACE,
+  "tok_per_gpu_baseline": REPLACE,
+  "tok_per_gpu_optimized": REPLACE,
+  "actions_taken": ["action1", "action2"]
 }
 ```
 
-**CRITICAL field name rules:**
-- Use `baseline_throughput`, NOT `baseline_output_tput_tok_s`
-- Use `tok_per_gpu_baseline`, NOT `baseline_output_tput_per_gpu`
-- Use `optimized_throughput`, NOT `optimized_output_tput_tok_s`
-- Use `tok_per_gpu_optimized`, NOT `optimized_output_tput_per_gpu`
-- Use `gain_pct`, NOT `improvement_pct` or `total_improvement_pct`
-- Use `actions_taken`, NOT `actions` or `optimization_actions`
+**How to compute each value:**
+- `baseline_throughput` = `output_throughput` from baseline benchmark JSON (total, all GPUs)
+- `optimized_throughput` = `output_throughput` from final optimized benchmark JSON
+- `tok_per_gpu_baseline` = `baseline_throughput / TP` (per GPU, NOT total)
+- `tok_per_gpu_optimized` = `optimized_throughput / TP`
+- `gain_pct` = `(optimized_throughput - baseline_throughput) / baseline_throughput * 100`
 
-Do NOT nest baseline/optimized into sub-objects. You may add extra metadata
-fields (model, framework, gpu_type, etc.) but the six fields above MUST be
-present with these exact names. If no optimization improved over baseline,
-set `gain_pct` to `0.0` and optimized values equal to baseline.
+**The CI parser will show N/A if any of the six fields are missing or renamed.**
+Do NOT use alternative names. Do NOT nest into sub-objects.
