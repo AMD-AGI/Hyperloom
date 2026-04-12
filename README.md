@@ -105,6 +105,26 @@ Optimize GPT-OSS 20B training on 8x MI355X.
 Config: examples/megatron/configs/MI355X/gpt_oss_20B-BF16-pretrain.yaml
 ```
 
+**MLPerf Training (GPT-OSS-20B):**
+
+> **Image:** `harbor.oci-slc.example-internal-host.invalid/custom/tasimage/primus:202604070309`
+>
+> Before running, configure two API keys:
+> 1. `training_optimization/mlperf/config_MI355X_1x8x1_fp8.sh` line 29 — set `HF_TOKEN` to your HuggingFace token
+> 2. `.cursor/mcp.json` — replace all `<SAFE_API_KEY>ak-xxxxx` with your SAFE API key
+>
+> See the [MLPerf skill Readme](.cursor/skills/mlperf-optimization/Readme.MD) for full setup instructions.
+
+```
+@.cursor/skills/mlperf-optimization/SKILL.md
+Use the mlperf-optimization skill to optimize GPT-OSS-20B MLPerf training performance.
+Benchmark: gpt-oss-20b (MLPerf Training 5.1.0)
+Quality target: validation log perplexity = 3.34
+MLPERF_DIR: /root/Hyperloom-plus-mlperf/training_optimization/mlperf
+Config script: config_MI355X_1x8x1_fp8.sh
+GPU: 8x MI355X, 1 node
+```
+
 The agent takes it from there — baseline, profile, loop, report.
 
 ---
@@ -143,6 +163,7 @@ Each domain has a comprehensive skill file with the full optimization protocol, 
 |--------|-------|-----------------|
 | **Training** | [SKILL.md](.cursor/skills/training-optimization/SKILL.md) | [README](.cursor/skills/training-optimization/README.md) |
 | **Inference** | [SKILL.md](.cursor/skills/inference-optimization/SKILL.md) | [README](.cursor/skills/inference-optimization/README.md) |
+| **MLPerf Training** | [SKILL.md](.cursor/skills/mlperf-optimization/SKILL.md) | [Readme](.cursor/skills/mlperf-optimization/Readme.MD) |
 
 The skill files are the agent's instructions. They encode the full optimization methodology — setup, profiling protocol, what to try, how to measure, when to stop, and how to report. The knowledge base sections are updated live during runs with new pitfalls and validated results.
 
@@ -156,11 +177,13 @@ Hyperloom/
 │   ├── mcp.json                          # MCP server config (TraceLens + GEAK)
 │   └── skills/
 │       ├── training-optimization/        # Training optimization skill + knowledge base
-│       └── inference-optimization/       # Inference optimization skill + scripts
+│       ├── inference-optimization/       # Inference optimization skill + scripts
+│       └── mlperf-optimization/          # MLPerf training optimization skill
 ├── inference_optimization/
 │   └── InferenceX/                       # Inference benchmarking framework
 ├── training_optimization/
-│   └── turboquant/                       # Quantization evaluation library
+│   ├── turboquant/                       # Quantization evaluation library
+│   └── mlperf/                           # MLPerf GPT-OSS-20B benchmark code
 ├── dashboards/                            # Interactive optimization dashboard (HTML)
 ├── slides/                               # Architecture diagrams
 ├── .env.template                         # Environment variables
