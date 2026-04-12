@@ -27,19 +27,23 @@ Save all results and the optimization report to {result_dir}
 Execute the full skill pipeline, including parameter sweep.
 Even if the baseline already exceeds the InferenceX target, you MUST still run the sweep phase and write the report.
 After writing optimization_report.md, also write {result_dir}/ci_metrics.json.
-The JSON MUST use this EXACT flat schema — do NOT nest baseline/optimized into sub-objects:
+Copy-paste this template and fill in the numbers. Do NOT rename fields or nest objects:
 ```json
 {{
-  "baseline_throughput": <total output tok/s across all GPUs>,
-  "optimized_throughput": <total output tok/s across all GPUs>,
-  "gain_pct": <float, 0.0 if no improvement>,
-  "tok_per_gpu_baseline": <output tok/s per GPU>,
-  "tok_per_gpu_optimized": <output tok/s per GPU>,
-  "actions_taken": ["action1_description", "action2_description"]
+  "baseline_throughput": REPLACE_WITH_NUMBER,
+  "optimized_throughput": REPLACE_WITH_NUMBER,
+  "gain_pct": REPLACE_WITH_NUMBER,
+  "tok_per_gpu_baseline": REPLACE_WITH_NUMBER,
+  "tok_per_gpu_optimized": REPLACE_WITH_NUMBER,
+  "actions_taken": ["action1", "action2"]
 }}
 ```
-Do NOT use nested objects like {{"baseline": {{"tok_s_per_gpu": ...}}}} — the CI parser requires flat top-level keys.
-If no optimization improved over baseline, set gain_pct to 0.0 and set optimized values equal to baseline values.
+Rules:
+- baseline_throughput / optimized_throughput = total output tok/s (all GPUs combined)
+- tok_per_gpu_baseline / tok_per_gpu_optimized = output tok/s divided by TP (={tp})
+- gain_pct = (optimized - baseline) / baseline * 100. Use 0.0 if no improvement.
+- All six fields above are MANDATORY with these exact names. The CI will show N/A if any are missing.
+- Do NOT nest into sub-objects. Do NOT rename fields.
 
 InferenceX Baseline:
 Target GPU: {target_gpu}
