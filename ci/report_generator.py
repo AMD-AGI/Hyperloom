@@ -161,7 +161,21 @@ def build_model_result(
     if ifx_reference and result["optimized_tok_per_gpu"]:
         metrics = ifx_reference.get("metrics", {})
         ifx_tput = metrics.get("output_tput_per_gpu") or metrics.get("tput_per_gpu")
-        if ifx_tput:
+        if ifx_tput and ifx_tput > 0:
+            ratio = result["optimized_tok_per_gpu"] / ifx_tput
+            if ratio > 3.0:
+                tp = ifx_reference.get("decode_tp") or 1
+                if tp > 1:
+                    log.warning(
+                        "optimized (%.1f) is %.0fx InferenceX (%.1f) — likely total "
+                        "throughput instead of per-GPU. Dividing by TP=%d.",
+                        result["optimized_tok_per_gpu"], ratio, ifx_tput, tp)
+                    result["baseline_tok_per_gpu"] = round(result["baseline_tok_per_gpu"] / tp, 2) if result["baseline_tok_per_gpu"] else None
+                    result["optimized_tok_per_gpu"] = round(result["optimized_tok_per_gpu"] / tp, 2)
+                    if result.get("gain_pct") is not None and result["baseline_tok_per_gpu"]:
+                        result["gain_pct"] = round(
+                            (result["optimized_tok_per_gpu"] - result["baseline_tok_per_gpu"])
+                            / result["baseline_tok_per_gpu"] * 100, 2)
             result["inferenceX_tok_per_gpu"] = ifx_tput
             result["vs_inferenceX_pct"] = round(
                 (result["optimized_tok_per_gpu"] - ifx_tput) / ifx_tput * 100, 1)
