@@ -416,12 +416,12 @@ def _send_webhook(webhook: str, summary: dict):
         ]},
         _row("Baseline (output tok/s/GPU)", _val("baseline_tok_per_gpu")),
         _row("Optimized (output tok/s/GPU)", _val("optimized_tok_per_gpu")),
-        _row("**Optimization Gain**", f"**{gain:+.1f}%**" if gain is not None else "N/A", gain_color),
+        _row("**Optimization Gain**", f"**{'--' if gain is not None and abs(gain) < 0.05 else f'{gain:+.1f}%' if gain is not None else 'N/A'}**", gain_color),
     ]
     if r.get("inferenceX_tok_per_gpu"):
         rows.append(_row("InferenceX (output tok/s/GPU)", _val("inferenceX_tok_per_gpu")))
         rows.append(_row("**vs InferenceX**",
-                         f"**{vs_ifx:+.1f}%**" if vs_ifx is not None else "N/A", vs_color))
+                         f"**{'--' if vs_ifx is not None and abs(vs_ifx) < 0.05 else f'{vs_ifx:+.1f}%' if vs_ifx is not None else 'N/A'}**", vs_color))
 
     status_emoji = {"completed": "\u2705", "failed": "\u274c", "timeout": "\u23f1"}.get(status, "\u2753")
 
