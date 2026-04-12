@@ -52,9 +52,9 @@ kill_server() {
     fi
     # Kill lingering multiprocessing workers (both vLLM and SGLang)
     ps aux | grep "[m]ultiprocessing.spawn" | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
-    # Note: Do NOT kill Ray workers globally — in Claw/sandbox mode, Ray
-    # processes are managed by the platform. Killing them can SIGKILL the
-    # executor itself. The process-group kill above handles vLLM workers.
+    # Kill Ray workers spawned by vLLM TP/EP (use [bracket] pattern to avoid matching self)
+    ps aux | grep "[r]ay::RayWorkerWrapper" | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
+    ps aux | grep "[v]llm.worker" | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
     # Kill any orphaned torch/python GPU processes
     ps aux | grep "[p]ython3.*torch" | grep -v grep | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
     sleep "$SERVER_KILL_WAIT_S"
