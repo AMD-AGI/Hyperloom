@@ -17,6 +17,7 @@ InferenceX is an open-source, automated benchmarking system that continuously tr
 │   ├── launch_b200/h100/h200-*.sh     # NVIDIA launcher scripts
 │   └── launch_mi*.sh                  # AMD launcher scripts
 ├── utils/                   # Python utilities
+│   ├── apply_tracelens_patches.sh  # Applies TraceLens patches for graph-capture profiling
 │   ├── matrix_logic/        # Config generation and validation
 │   │   ├── generate_sweep_configs.py  # CLI for generating benchmark matrix
 │   │   ├── validation.py              # Pydantic validation models
@@ -161,7 +162,7 @@ When working with benchmark configurations, use these valid values:
 ### Bash
 
 - Source shared utilities: `source benchmark_lib.sh`
-- Functions: `check_env_vars()`, `wait_for_server_ready()`, `run_benchmark_serving()`, `run_eval()`, `append_lm_eval_summary()`
+- Functions: `check_env_vars()`, `wait_for_server_ready()`, `run_benchmark_serving()`, `run_eval()`, `append_lm_eval_summary()`, `apply_tracelens_patches()`
 - Parameters passed via environment variables
 
 ### Git
@@ -422,6 +423,72 @@ These patches are applied via `sitecustomize.py` in `PYTHONPATH`.
 - `benchmarks/benchmark_lib.sh` - Shared benchmark/eval utilities
 - `utils/evals/` - Eval task definitions (gsm8k.yaml, math500.yaml)
 - `utils/collect_eval_results.py` - Aggregates eval results into JSON/table
+
+## TraceLens Patch Integration
+
+InferenceX can automatically apply [TraceLens](https://github.com/AMD-AGI/TraceLens) patches to vLLM/SGLang at container startup. These patches add CUDA graph capture profiling and roofline annotations to profiler traces, enabling deeper performance analysis.
+
+### How It Works
+
+1. `benchmark_lib.sh` auto-calls `apply_tracelens_patches()` when sourced
+2. If `TRACELENS_PATCHES=1`, the script clones `AMD-AGI/TraceLens` (public) into the container at `/tmp/TraceLens`
+3. It auto-detects the installed vLLM version and selects the matching patch (e.g., `config_vllm_v0.18.0.patch` for vLLM 0.18.x)
+4. Applies the patch via `git apply` to the container's system Python
+5. Optionally installs the TraceLens Python package for post-collection analysis
+
+If `TRACELENS_PATCHES` is unset or `0`, the function is a no-op — existing benchmarks are unaffected.
+
+### What the Patches Add
+
+| File | Change |
+|------|--------|
+| `vllm/config/profiler.py` | Adds `capture_torch_profiler_dir` and `detailed_trace_annotation` config fields |
+| `vllm/v1/worker/gpu_model_runner.py` | Profiles CUDA graph capture with per-batch-size `record_function` annotations |
+| `vllm/v1/worker/gpu_worker.py` | Adds roofline annotations (sq, sk, sqsq, sqsk per context/generation group) |
+
+### Usage
+
+Set the env var before launching the runner:
+
+```bash
+export TRACELENS_PATCHES=1
+export PROFILE=1
+bash ./runners/launch_mi300x-amd.sh
+```
+
+To mount a local TraceLens clone instead of cloning inside the container:
+
+```bash
+export TRACELENS_PATCHES=1
+export TRACELENS_REPO=/path/to/TraceLens
+bash ./runners/launch_mi300x-amd.sh
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TRACELENS_PATCHES` | `0` | Set to `1` to enable patching |
+| `TRACELENS_REPO` | *(empty)* | Path to local TraceLens clone (skips cloning) |
+| `TRACELENS_GIT_URL` | `https://github.com/AMD-AGI/TraceLens.git` | Clone URL override |
+| `TRACELENS_GIT_REF` | `main` | Branch/tag to clone |
+| `TRACELENS_VLLM_VERSION` | *(auto-detected)* | Override vLLM version for patch selection (e.g., `v0.18`, `v0.19`) |
+
+### Supported Patches
+
+Available patches depend on the TraceLens repo. The public repo currently has:
+- `config_vllm_v0.18.0.patch` — for vLLM 0.18.x
+- `config_vllm_v0.19.0.patch` — for vLLM 0.19.x
+- `sglang_roofline_patches/*.patch` — for SGLang v0.5.9
+
+### Key Files
+
+| File | Role |
+|------|------|
+| `utils/apply_tracelens_patches.sh` | Standalone script: clones TraceLens, detects version, applies patches |
+| `benchmarks/benchmark_lib.sh` | Wrapper function `apply_tracelens_patches()` — auto-called when sourced |
+| `runners/launch_mi300x-amd.sh` | Passes `TRACELENS_*` env vars and mounts into Docker |
+| `runners/launch_mi355x-amds.sh` | Same for Slurm/Enroot containers |
 
 ## Testing
 
