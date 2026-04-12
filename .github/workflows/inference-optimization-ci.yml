@@ -20,6 +20,7 @@ env:
   CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
   WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
   SANDBOX_WORKSPACE: ${{ secrets.SANDBOX_WORKSPACE }}
+  LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
 
 jobs:
   prepare:

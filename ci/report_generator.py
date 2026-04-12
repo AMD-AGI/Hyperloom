@@ -11,6 +11,61 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
+LLM_ENDPOINT = "https://oci-slc.primus-safe.amd.com/api/v1/llm-proxy/v1/chat/completions"
+
+
+def _extract_metrics_via_llm(report_content: str) -> dict:
+    """Use LLM to extract baseline/optimized throughput from optimization report."""
+    import os
+    api_key = os.environ.get("LLM_API_KEY")
+    if not api_key:
+        return {}
+
+    try:
+        import requests
+        prompt = (
+            "Extract performance metrics from this optimization report. "
+            "Return ONLY a JSON object with these exact fields:\n"
+            '{"baseline_throughput": <number>, "optimized_throughput": <number>, '
+            '"tok_per_gpu_baseline": <number>, "tok_per_gpu_optimized": <number>, '
+            '"gain_pct": <number>}\n'
+            "- baseline_throughput and optimized_throughput are total output tok/s (all GPUs)\n"
+            "- tok_per_gpu values are per-GPU (divided by TP)\n"
+            "- gain_pct is the percentage improvement\n"
+            "- If baseline equals optimized, gain_pct should be 0.0\n"
+            "Return ONLY the JSON, no markdown fences, no explanation.\n\n"
+            f"Report:\n{report_content[:4000]}"
+        )
+
+        resp = requests.post(
+            LLM_ENDPOINT,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+            json={"model": "openai/gpt-4.1-mini", "messages": [{"role": "user", "content": prompt}],
+                  "temperature": 0, "max_tokens": 200},
+            timeout=30, verify=False,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+        result = json.loads(content)
+        out = {}
+        for k in ("baseline_throughput", "optimized_throughput", "tok_per_gpu_baseline",
+                   "tok_per_gpu_optimized", "gain_pct"):
+            v = result.get(k)
+            if isinstance(v, (int, float)):
+                out[k] = v
+        if "tok_per_gpu_baseline" in out:
+            out["baseline_throughput"] = out.get("baseline_throughput") or out["tok_per_gpu_baseline"]
+        if "tok_per_gpu_optimized" in out:
+            out["optimized_throughput"] = out.get("optimized_throughput") or out["tok_per_gpu_optimized"]
+        return out
+    except Exception as e:
+        log.warning("LLM metrics extraction failed: %s", e)
+        return {}
+
+
 def _first_of(d: dict, *keys: str) -> Any | None:
     """Return the first non-None value found for the given keys."""
     for k in keys:
@@ -118,12 +173,22 @@ def extract_optimization_data(result_dir: str) -> dict:
         except (json.JSONDecodeError, KeyError) as e:
             log.warning("Failed to parse ci_metrics.json in %s: %s", result_dir, e)
 
-    # Priority 2: parse from optimization_report.md
+    # Priority 2: parse from optimization_report.md (regex)
     if data.get("report_content"):
         parsed = _parse_metrics_from_report(data["report_content"])
         if parsed:
-            log.info("Extracted metrics from report markdown (fallback): %s", parsed)
+            log.info("Extracted metrics from report markdown (regex fallback): %s", parsed)
             for k, v in parsed.items():
+                if data.get(k) is None:
+                    data[k] = v
+
+    # Priority 3: LLM extraction from report (if regex missed key fields)
+    if (data.get("baseline_throughput") is None or data.get("optimized_throughput") is None) \
+            and data.get("report_content"):
+        llm_parsed = _extract_metrics_via_llm(data["report_content"])
+        if llm_parsed:
+            log.info("Extracted metrics via LLM fallback: %s", llm_parsed)
+            for k, v in llm_parsed.items():
                 if data.get(k) is None:
                     data[k] = v
 
