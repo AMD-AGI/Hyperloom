@@ -30,6 +30,10 @@ declare -A LABELS=(
   ["priority:high"]="d93f0b"
   ["priority:medium"]="fbca04"
   ["priority:low"]="0e8a16"
+  # release:
+  ["release:v0.2"]="5319e7"
+  ["release:v0.3"]="5319e7"
+  ["release:v0.4"]="5319e7"
   # status:
   ["needs-triage"]="e4e669"
   ["auto-answered"]="bfdadc"
@@ -49,6 +53,9 @@ declare -A DESCRIPTIONS=(
   ["priority:high"]="Important, should be addressed soon"
   ["priority:medium"]="Normal priority"
   ["priority:low"]="Nice to have, no rush"
+  ["release:v0.2"]="Release v0.2"
+  ["release:v0.3"]="Release v0.3"
+  ["release:v0.4"]="Release v0.4"
   ["needs-triage"]="New issue awaiting classification"
   ["auto-answered"]="Answered automatically by QA bot"
 )
@@ -81,23 +88,13 @@ migrate_label "question"      "type:question"
 migrate_label "Task"          "type:task"
 
 echo ""
-echo "=== Step 3: Create Milestones and migrate Release labels ==="
+echo "=== Step 3: Migrate Release labels to new format ==="
 
 for version in "v0.2" "v0.3"; do
-  echo "  Creating milestone: $version"
-  gh api repos/$REPO/milestones --method POST \
-    -f title="$version" -f state="open" -f description="Release $version" 2>/dev/null || true
-
-  milestone_number=$(gh api repos/$REPO/milestones --jq ".[] | select(.title==\"$version\") | .number" 2>/dev/null)
-
-  label="Release-$version"
-  echo "  Migrating $label -> milestone $version (#$milestone_number)"
-  issues=$(gh issue list --repo "$REPO" --label "$label" --state all --json number --jq '.[].number' 2>/dev/null || true)
-  for num in $issues; do
-    echo "    Issue #$num: setting milestone $version, removing label $label"
-    gh api repos/$REPO/issues/$num --method PATCH -F milestone="$milestone_number" 2>/dev/null || true
-    gh issue edit "$num" --repo "$REPO" --remove-label "$label" 2>/dev/null || true
-  done
+  old_label="Release-$version"
+  new_label="release:$version"
+  echo "  Migrating: $old_label -> $new_label"
+  migrate_label "$old_label" "$new_label"
 done
 
 echo ""
