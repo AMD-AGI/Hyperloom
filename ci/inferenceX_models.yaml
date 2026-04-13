@@ -1,0 +1,45 @@
+# InferenceX API model name mapping (verified 2026-04-08)
+#
+# Website display name → API `model` parameter
+# API: https://inferencex.semianalysis.com/api/v1/benchmarks?model=<api_name>
+
+models:
+  - display_name: DeepSeek R1 0528
+    api_name: DeepSeek-R1-0528
+    hf_model: deepseek-ai/DeepSeek-R1-0528
+    model_prefix: dsr1
+    verified_count: 1738
+
+  - display_name: Qwen 3.5 397B-A17B
+    api_name: Qwen-3.5-397B-A17B
+    hf_model: Qwen/Qwen3.5-397B-A17B
+    model_prefix: qwen3.5
+    verified_count: 178
+
+  - display_name: GLM 5
+    api_name: GLM-5
+    hf_model: zai-org/GLM-5-FP8
+    model_prefix: glm5
+    verified_count: 58
+
+  - display_name: Kimi K2.5 1T
+    api_name: Kimi-K2.5
+    hf_model: moonshotai/Kimi-K2.5
+    model_prefix: kimik2.5
+    verified_count: 145
+
+  - display_name: MiniMax M2.5 230B-A10B
+    api_name: MiniMax-M2.5
+    hf_model: MiniMaxAI/MiniMax-M2.5
+    model_prefix: minimaxm2.5
+    verified_count: 280
+
+  - display_name: gpt-oss 120B
+    api_name: gpt-oss-120b
+    hf_model: openai/gpt-oss-120b
+    model_prefix: gptoss
+    verified_count: 611
+
+# ── 以下模型 InferenceX 暂无数据 ──
+# GLM 4.7 — InferenceX 上没有
+# Qwen3-Next-80B — InferenceX 上没有
