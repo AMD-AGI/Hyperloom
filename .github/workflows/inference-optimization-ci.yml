@@ -16,9 +16,11 @@ on:
 
 env:
   HARBOR_PREFIX: ${{ secrets.HARBOR_PREFIX }}
-  GEAK_WORKSPACE: ${{ secrets.GEAK_WORKSPACE }}
+  KERNEL_OPT_WORKSPACE: ${{ secrets.KERNEL_OPT_WORKSPACE }}
   CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
   WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+  SANDBOX_WORKSPACE: ${{ secrets.SANDBOX_WORKSPACE }}
+  LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
 
 jobs:
   prepare:
@@ -27,11 +29,6 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - name: Install system dependencies
-        run: |
-          apt-get update -qq && apt-get install -y -qq git python3 python3-pip >/dev/null 2>&1 || \
-          yum install -y git python3 python3-pip 2>/dev/null || true
-
       - uses: actions/checkout@v4
 
       - name: Generate matrix
@@ -41,45 +38,20 @@ jobs:
           INPUT_MODELS: ${{ github.event.inputs.models }}
         run: |
           pip3 install -q pyyaml 2>/dev/null || pip install -q pyyaml
-          python3 << 'PYEOF'
-          import yaml, json, sys, os
-
-          config = yaml.safe_load(open("ci-config.yaml"))
-          models = config.get("models", [])
-
-          selected = os.environ.get("INPUT_MODELS", "").strip()
-          if selected:
-              keys = set(selected.split(","))
-              models = [m for m in models if m["inferenceX_key"] in keys]
-
-          matrix = [{"key": m["inferenceX_key"]} for m in models]
-          print(f"Models: {[m['key'] for m in matrix]}", file=sys.stderr)
-
-          output_file = os.environ["GITHUB_OUTPUT"]
-          with open(output_file, "a") as f:
-              f.write(f"matrix={json.dumps({'include': matrix})}\n")
-          PYEOF
+          python3 generate_matrix.py
 
   optimize:
     name: "${{ matrix.key }}"
     needs: prepare
     runs-on: hyperloom-qn7cd
-    timeout-minutes: 300  # 5h per model
+    timeout-minutes: 510
     strategy:
       fail-fast: false
+      max-parallel: 6
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
 
     steps:
-      - name: Install system dependencies
-        run: |
-          apt-get update -qq && apt-get install -y -qq git python3 python3-pip >/dev/null 2>&1 || \
-          yum install -y git python3 python3-pip 2>/dev/null || \
-          echo "Package manager not found, assuming deps are present"
-
       - uses: actions/checkout@v4
-
-      - name: Install Python dependencies
-        run: pip install pyyaml requests sseclient-py
 
       - name: Run optimization
         working-directory: ci
@@ -107,21 +79,34 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
     steps:
+      - name: Restore cached SHA
+        uses: actions/cache/restore@v4
+        with:
+          path: .inferenceX_last_sha
+          key: inferenceX-sha
+
       - name: Check for changes
         id: check
         run: |
           LATEST=$(git ls-remote https://github.com/SemiAnalysisAI/InferenceX.git refs/heads/main | cut -f1)
           CACHED=""
-          STATE_FILE="/tmp/inferenceX_last_sha"
-          if [ -f "$STATE_FILE" ]; then
-            CACHED=$(cat "$STATE_FILE")
+          if [ -f ".inferenceX_last_sha" ]; then
+            CACHED=$(cat ".inferenceX_last_sha")
           fi
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
           if [ "$LATEST" != "$CACHED" ] && [ -n "$LATEST" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "$LATEST" > "$STATE_FILE"
+            echo "$LATEST" > .inferenceX_last_sha
           else
             echo "changed=false" >> $GITHUB_OUTPUT
           fi
+
+      - name: Save cached SHA
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .inferenceX_last_sha
+          key: inferenceX-sha-${{ steps.check.outputs.latest }}
 
       - name: Trigger optimization
         if: steps.check.outputs.changed == 'true'

@@ -81,3 +81,21 @@ N/A — terminal action.
 
 **Claw mode:** After the report is generated, stop the RayJob and clean up any parallel
 sweep workloads. See [`../modes/CLAW.md`](../modes/CLAW.md) "Cleanup" section.
+
+### CI Mode: Write ci_metrics.json
+
+If the prompt specifies a `ci_metrics.json` output path, copy this example
+and change only the numbers:
+
+```json
+{"baseline_throughput": 8053.90, "optimized_throughput": 8850.12, "gain_pct": 9.88, "tok_per_gpu_baseline": 4026.95, "tok_per_gpu_optimized": 4425.06, "actions_taken": ["params_max_num_seqs_512", "kernel_fused_moe_kept"]}
+```
+
+How to compute:
+- `baseline_throughput` = `output_throughput` from baseline benchmark JSON (total, all GPUs)
+- `optimized_throughput` = `output_throughput` from final optimized benchmark JSON
+- `tok_per_gpu_baseline` = `baseline_throughput / TP` (divide by TP, NOT total)
+- `tok_per_gpu_optimized` = `optimized_throughput / TP`
+- `gain_pct` = `(optimized - baseline) / baseline * 100`
+
+The CI parser requires these exact six field names. Missing or renamed fields → N/A.

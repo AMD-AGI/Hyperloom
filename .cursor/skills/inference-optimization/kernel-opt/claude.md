@@ -1,18 +1,18 @@
 ---
 name: claude-inference-kernel-reference
-description: Claude Code backend for kernel optimization via OOB Agent MCP. Multi-turn agent with tool-use capability. No GPU — verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
+description: Claude Code backend for kernel optimization via OOB GPU Optimizer MCP. Multi-turn agent with tool-use capability. Verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
 ---
 
 # Claude Code — Kernel Optimization Backend
 
-Claude Code backend for kernel optimization via the OOB Agent MCP (`oci-oob-agent`).
-Multi-turn agent with tool-use capability (file I/O, shell commands). No GPU access —
-the calling skill is responsible for compilation checking, correctness verification,
+Claude Code backend for kernel optimization via the OOB GPU Optimizer MCP (`oob-gpu-optimizer`).
+Multi-turn agent with tool-use capability (file I/O, shell commands).
+The calling skill is responsible for compilation checking, correctness verification,
 and micro-benchmarking.
 
 ## Status: Experimental
 
-Claude Code support in the OOB Agent MCP is under active development. The tool
+Claude Code support in the OOB GPU Optimizer MCP is under active development. The tool
 interface is identical to Codex (`agent_create_task(agent="claude")`), but availability
 may be intermittent. **Fallback to `codex` if `claude` is unavailable.**
 
@@ -29,7 +29,7 @@ may be intermittent. **Fallback to `codex` if `claude` is unavailable.**
 
 | | Claude (this) | Codex | GEAK | LLM Proxy |
 |---|---|---|---|---|
-| **MCP** | OOB Agent | OOB Agent | GEAK | Direct API |
+| **MCP** | OOB GPU Optimizer | OOB GPU Optimizer | GEAK | Direct API |
 | **Latency (per iter)** | 1–5 min | 30–120s | N/A | 1–30s |
 | **Latency (full round)** | 3–15 min | 2–6 min | 10–30 min | 1–30s |
 | **GPU on pod** | No | No | Yes | No |
@@ -58,7 +58,8 @@ Identical to Codex — same MCP, different `agent` parameter.
 - `max_turns`: use `CLAUDE_MAX_TURNS` (default 30, higher than Codex because Claude
   benefits from multi-step reasoning)
 - `system_prompt`: recommended — Claude responds well to detailed persona prompts
-- There is NO `image`, `workspace_id`, or `gpu_count` — Claude has no GPU pod
+- `image`: optional — use `KERNEL_OPT_IMAGE` (shared with GEAK)
+- `workspace_id`: optional — use `KERNEL_OPT_WORKSPACE` (shared with GEAK, default `"control-plane-moe"`)
 
 ### Example
 
@@ -71,7 +72,9 @@ Args: {
         {"filename": "kernel.py", "content": "<full kernel source>"}
     ],
     "max_turns": 30,
-    "system_prompt": "<GPU expert persona — see codex.md>"
+    "system_prompt": "<GPU expert persona — see codex.md>",
+    "image": "KERNEL_OPT_IMAGE",
+    "workspace_id": "KERNEL_OPT_WORKSPACE"
 }
 ```
 
@@ -90,7 +93,7 @@ Use `CLAUDE_POLL_INTERVAL_S` and `CLAUDE_POLL_TIMEOUT_MIN` instead of Codex cons
 
 Same core prompt as Codex (see [`codex.md`](codex.md) Prompt Template section). All shared
 prompt rules from `actions/kernel-opt.md` apply. No GEAK-specific directives (no `mode`,
-no `max_rounds`, no `image`).
+no `max_rounds`). Image is passed as MCP parameter, not in prompt text.
 
 Claude benefits from more detailed reasoning prompts. Consider adding:
 
