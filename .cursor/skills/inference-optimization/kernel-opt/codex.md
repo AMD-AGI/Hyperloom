@@ -1,13 +1,13 @@
 ---
 name: codex-inference-kernel-reference
-description: Codex backend for kernel optimization via OOB Agent MCP. Code generation without GPU — verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
+description: Codex backend for kernel optimization via OOB GPU Optimizer MCP. Code generation with optional GPU — verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
 ---
 
 # Codex — Kernel Optimization Backend
 
-Codex backend for kernel optimization via the OOB Agent MCP (`oci-oob-agent`).
-Generates optimized kernel code without GPU access. The calling skill is responsible
-for compilation checking, correctness verification, and micro-benchmarking.
+Codex backend for kernel optimization via the OOB GPU Optimizer MCP (`oob-gpu-optimizer`).
+Generates optimized kernel code. The calling skill is responsible for compilation
+checking, correctness verification, and micro-benchmarking.
 
 ## Status: Stable
 
@@ -27,7 +27,7 @@ good for Triton structural rewrites (dual-loop to single-pass, block-size tuning
 
 | | Codex (this) | GEAK | Claude | LLM Proxy |
 |---|---|---|---|---|
-| **MCP** | OOB Agent | GEAK | OOB Agent | Direct API |
+| **MCP** | OOB GPU Optimizer | GEAK | OOB GPU Optimizer | Direct API |
 | **Latency (per iter)** | 30–120s | N/A | 1–5 min | 1–30s |
 | **Latency (full round)** | 2–6 min | 10–30 min | 3–15 min | 1–30s |
 | **GPU on pod** | No | Yes | No | No |
@@ -53,7 +53,8 @@ good for Triton structural rewrites (dual-loop to single-pass, block-size tuning
 - `files`: array of `{filename, content}` — full kernel source embedded here
 - `max_turns`: use `CODEX_MAX_TURNS` (default 20)
 - `system_prompt`: optional — GPU-expert persona can improve output quality
-- There is NO `image`, `workspace_id`, or `gpu_count` — Codex has no GPU pod
+- `image`: optional — use `KERNEL_OPT_IMAGE` (shared with GEAK)
+- `workspace_id`: optional — use `KERNEL_OPT_WORKSPACE` (shared with GEAK, default `"control-plane-moe"`)
 
 ### Example
 
@@ -65,7 +66,9 @@ Args: {
     "files": [
         {"filename": "kernel.py", "content": "<full kernel source>"}
     ],
-    "max_turns": 20
+    "max_turns": 20,
+    "image": "KERNEL_OPT_IMAGE",
+    "workspace_id": "KERNEL_OPT_WORKSPACE"
 }
 ```
 
@@ -103,7 +106,7 @@ The core optimization prompt is shared with GEAK (see `actions/kernel-opt.md` fo
 the shared prompt rules). Codex-specific differences:
 
 - **No `mode` or `max_rounds`** — Codex has no concept of optimization modes
-- **No `image` reference** — Codex has no Docker image context
+- **No `image` in prompt text** — image is passed as MCP parameter (`image`), not mentioned in the prompt body
 - **Explicit output filename** — must tell Codex where to write
 
 ```
@@ -190,6 +193,8 @@ for i in range(OOB_ROUND_ITERATIONS):
         prompt=prompt,
         files=[{"filename": "kernel.py", "content": original_kernel_source}],
         max_turns=CODEX_MAX_TURNS,
+        image=KERNEL_OPT_IMAGE,
+        workspace_id=KERNEL_OPT_WORKSPACE,
     )
     agent_submit_task(task_id=task["task_id"])
 
