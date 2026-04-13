@@ -1,8 +1,5 @@
 {
   "mcpServers": {
-    "oci-traceLens-agent": {
-      "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-prod/trace-lens-agent-bwrmr/mcp",
-    },
     "oci-oob-agent": {
       "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-sandbox/agent-mcp-server-zr29p/",
       "headers": {
