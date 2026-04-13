@@ -187,10 +187,10 @@ wait_for_port "$GEAK_MCP_PORT" "GEAK MCP"
 # --- Auto-configure GEAK LLM from env vars ---
 if [ -n "${LLM_API_KEY:-}" ] && [ -n "${LLM_API_BASE:-}" ]; then
     echo "Configuring GEAK LLM backend..."
-    curl -s -X POST http://localhost:8000/api/v1/config/model \
+    curl -s -X PUT http://localhost:8000/api/v1/config/model \
       -H "Content-Type: application/json" \
-      -H "X-API-Key: local-mcp" \
-      -d "{\"model_class\":\"litellm\",\"model_name\":\"openai/gpt-4\",\"model_kwargs\":{\"api_base\":\"${LLM_API_BASE}\",\"api_key\":\"${LLM_API_KEY}\"}}" \
+      -H "Authorization: Bearer local-mcp" \
+      -d "{\"model_class\":\"litellm\",\"model_name\":\"claude-opus-4-6\",\"model_kwargs\":{\"api_base\":\"${LLM_API_BASE}\",\"api_key\":\"${LLM_API_KEY}\"}}" \
       > /dev/null 2>&1 && echo "  [OK]   GEAK LLM configured" || echo "  [WARN] GEAK LLM config failed"
 fi
 
