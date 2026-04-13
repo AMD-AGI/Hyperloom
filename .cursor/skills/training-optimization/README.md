@@ -32,7 +32,7 @@ Give the agent a real distributed training workload (Primus/Megatron), and it wi
          ▼
   ┌───────────────────────┐
   │ Profile + TraceLens   │  torch.profiler trace → kernel breakdown
-  │ Agentic Analysis      │  Optional: TraceLens MCP for automated analysis
+  │ Agentic Analysis      │  TraceLens CLI for automated analysis
   └──────┬────────────────┘
          ▼
   ┌──────────────────────────────────────────────┐
@@ -82,8 +82,8 @@ Give the agent a real distributed training workload (Primus/Megatron), and it wi
 - **Training stack**: Primus/Megatron-LM installed in `/workspace/Primus/`
 - **Container**: `rocm/primus-training-private` or equivalent with ROCm + PyTorch + Node.js
 - **Config file**: YAML config for the model (e.g., `examples/megatron/configs/MI355X/gpt_oss_20B-BF16-pretrain.yaml`)
+- **TraceLens CLI**: `pip install -e /hyperloom/TraceLens-internal` for automated profiling analysis
 - **Optional MCP servers** in `.cursor/mcp.json`:
-  - `oci-traceLens-agent` — for automated profiling analysis
   - `geak-agent` — for kernel optimization (see `GEAK-KERNEL-OPTIMIZATION.md`)
 - Environment: `GEAK_AUTH_KEY` and `LITELLM_API_KEY` set in `.env` (see `.env.template`)
 
