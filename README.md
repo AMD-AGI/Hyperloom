@@ -34,7 +34,7 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 
 - **Easy to scale** — each job runs in isolated sandboxed containers (GPU or CPU). Single-node optimizations run in-sandbox; multi-node workloads fan out via RayJob for distributed benchmarking.
 - **Data flywheel** — every optimization run feeds results back through Minio storage and Langfuse observability, creating a closed feedback loop that continuously improves the agent's knowledge base and scoring heuristics.
-- **Full MCP + Skills support** — sandboxes connect to BenchMark/RayJob, TraceLens Jarvis, GEAK, OOB, and InferenceX via MCP (local and remote), and load optimization Skills on demand, giving the agent the same profiling, kernel-rewrite, and domain-specific capabilities at cloud scale.
+- **Full MCP + Skills support** — sandboxes connect to BenchMark/RayJob, GEAK, OOB, and InferenceX via MCP (local and remote), run TraceLens profiling via local CLI, and load optimization Skills on demand, giving the agent the same profiling, kernel-rewrite, and domain-specific capabilities at cloud scale.
 
 1. Go to **[oci-slc.primus-safe.amd.com/hyperloom](https://oci-slc.primus-safe.amd.com/hyperloom/)**
 2. Select **Claw Agent** or **Get Started** from the landing page to enter PrimusClaw
@@ -50,12 +50,18 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 
 ## Quickstart — Local Optimization (Cursor / Claude / VS Code)
 
-### 1. Configure MCP Servers
+### 1. Configure MCP Servers & TraceLens CLI
 
-Hyperloom uses two external tools as MCP servers, configured in `.cursor/mcp.json`:
+Hyperloom uses MCP servers for kernel optimization, configured in `.cursor/mcp.json`:
 
-- **TraceLens Agentic Analysis** — for profiling analysis (kernel breakdown, roofline modeling). Used during the profile phase.
 - **GEAK** — for kernel-level optimization (rewrites Triton/HIP source). Used when the agent identifies hot custom kernels worth optimizing.
+- **OOB GPU Optimizer** — for kernel optimization via Codex/Claude Code agents.
+
+TraceLens profiling analysis now runs via **local CLI** (no MCP needed):
+```bash
+cd /hyperloom/TraceLens-internal && pip install -e .
+# Verify: TraceLens_generate_perf_report_pytorch --help
+```
 
 Update the GEAK authorization key in `.cursor/mcp.json`:
 
@@ -174,7 +180,7 @@ The skill files are the agent's instructions. They encode the full optimization 
 ```
 Hyperloom/
 ├── .cursor/
-│   ├── mcp.json                          # MCP server config (TraceLens + GEAK)
+│   ├── mcp.json                          # MCP server config (GEAK + OOB)
 │   └── skills/
 │       ├── training-optimization/        # Training optimization skill + knowledge base
 │       ├── inference-optimization/       # Inference optimization skill + scripts
