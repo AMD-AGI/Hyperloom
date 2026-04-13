@@ -89,9 +89,9 @@ jobs:
 
           # Build the type instruction based on whether a template was used
           if [ "$FROM_TEMPLATE" = "none" ]; then
-            TYPE_INSTRUCTION='- "kind": one of "kind:bug", "kind:feature", "kind:question", "kind:task", "kind:docs". Pick the best match.'
+            TYPE_INSTRUCTION='- "type": one of "type:bug", "type:feature", "type:question", "type:task", "type:docs". Pick the best match.'
           else
-            TYPE_INSTRUCTION='- "kind": leave as empty string (already determined by template).'
+            TYPE_INSTRUCTION='- "type": leave as empty string (already determined by template).'
           fi
 
           PROMPT=$(cat <<PROMPT_END
@@ -133,7 +133,7 @@ jobs:
           echo "LLM output: $LLM_OUTPUT"
 
           # Parse LLM JSON output
-          TYPE_LABEL=$(echo "$LLM_OUTPUT" | jq -r '.kind // empty')
+          TYPE_LABEL=$(echo "$LLM_OUTPUT" | jq -r '.type // empty')
           DOMAIN_LABELS=$(echo "$LLM_OUTPUT" | jq -r '.domains[]? // empty' | paste -sd ',' -)
 
           LABELS=""

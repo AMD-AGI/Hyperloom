@@ -1,6 +1,6 @@
 name: "Feature Request"
 description: "Suggest a new capability or improvement to Hyperloom"
-labels: ["kind:feature"]
+labels: ["type:feature"]
 body:
   - type: markdown
     attributes:
