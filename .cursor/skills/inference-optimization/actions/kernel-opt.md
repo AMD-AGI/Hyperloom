@@ -4,8 +4,8 @@ Multi-round kernel optimization loop using configurable backends.
 
 Backend references:
 - [`../kernel-opt/geak.md`](../kernel-opt/geak.md) — GEAK MCP (remote GPU pod)
-- [`../kernel-opt/codex.md`](../kernel-opt/codex.md) — Codex via OOB Agent MCP
-- [`../kernel-opt/claude.md`](../kernel-opt/claude.md) — Claude Code via OOB Agent MCP
+- [`../kernel-opt/codex.md`](../kernel-opt/codex.md) — Codex via OOB GPU Optimizer MCP
+- [`../kernel-opt/claude.md`](../kernel-opt/claude.md) — Claude Code via OOB GPU Optimizer MCP
 - [`../kernel-opt/llm.md`](../kernel-opt/llm.md) — LLM Proxy (direct API)
 
 ## Inputs
@@ -52,8 +52,8 @@ All active backends run **simultaneously** for every candidate kernel.
 | Backend | MCP | Full round latency | GPU on pod | Reference |
 |---------|-----|--------------------|------------|-----------|
 | `geak` | GEAK (`geak_create_task`) | 10–30 min | Yes | [`../kernel-opt/geak.md`](../kernel-opt/geak.md) |
-| `codex` | OOB Agent (`agent_create_task(agent="codex")`) | 2–6 min (3 iters) | No | [`../kernel-opt/codex.md`](../kernel-opt/codex.md) |
-| `claude` | OOB Agent (`agent_create_task(agent="claude")`) | 3–15 min (3 iters) | No | [`../kernel-opt/claude.md`](../kernel-opt/claude.md) |
+| `codex` | OOB GPU Optimizer (`agent_create_task(agent="codex")`) | 2–6 min (3 iters) | No | [`../kernel-opt/codex.md`](../kernel-opt/codex.md) |
+| `claude` | OOB GPU Optimizer (`agent_create_task(agent="claude")`) | 3–15 min (3 iters) | No | [`../kernel-opt/claude.md`](../kernel-opt/claude.md) |
 | `llm` | Direct OpenAI API (LLM Proxy) | 1–30s | No | [`../kernel-opt/llm.md`](../kernel-opt/llm.md) |
 
 **For each candidate kernel, launch all active backends CONCURRENTLY (not sequentially):**
@@ -105,8 +105,9 @@ These rules apply to **every** kernel optimization submission regardless of back
 #### Prompt rules — backend-specific
 
 5. **`geak` only: mode and max_rounds** — Include: `"Use homogeneous mode. Set max_rounds to 1."` GEAK's optimization engine uses these parameters. Other backends ignore them.
-6. **`geak` only: framework image** — Use `GEAK_IMAGE_SGLANG` or `GEAK_IMAGE_VLLM`. In claw mode, use `GEAK_IMAGE_SGLANG_RAY` instead (see [`../modes/CLAW.md`](../modes/CLAW.md)). In local mode with `GEAK_LOCAL=true`, image is optional.
-7. **`codex` / `claude` only: explicit output filename** — Include: `"Write the COMPLETE optimized file to optimized_kernel.py."` These backends need an explicit output path.
+6. **`geak` + `codex` + `claude`: framework image** — Use `KERNEL_OPT_IMAGE` (provided by CI or user). This single image is shared across all kernel-opt backends.
+7. **`geak` + `codex` + `claude`: workspace** — Use `KERNEL_OPT_WORKSPACE` (default `"control-plane-moe"`). Shared across all kernel-opt backends.
+8. **`codex` / `claude` only: explicit output filename** — Include: `"Write the COMPLETE optimized file to optimized_kernel.py."` These backends need an explicit output path.
 
 ### Step 3: Verify + Patch each result individually
 
