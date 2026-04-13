@@ -25,18 +25,10 @@ declare -A LABELS=(
   ["domain:training"]="c5def5"
   ["domain:mcp"]="c5def5"
   ["domain:ui"]="c5def5"
-  # priority:
-  ["priority:critical"]="b60205"
-  ["priority:high"]="d93f0b"
-  ["priority:medium"]="fbca04"
-  ["priority:low"]="0e8a16"
   # release:
   ["release:v0.2"]="5319e7"
   ["release:v0.3"]="5319e7"
   ["release:v0.4"]="5319e7"
-  # status:
-  ["needs-triage"]="e4e669"
-  ["auto-answered"]="bfdadc"
 )
 
 declare -A DESCRIPTIONS=(
@@ -49,15 +41,9 @@ declare -A DESCRIPTIONS=(
   ["domain:training"]="Related to training optimization"
   ["domain:mcp"]="Related to MCP tools"
   ["domain:ui"]="Related to UI / PrimusClaw"
-  ["priority:critical"]="Production issue or blocker"
-  ["priority:high"]="Important, should be addressed soon"
-  ["priority:medium"]="Normal priority"
-  ["priority:low"]="Nice to have, no rush"
   ["release:v0.2"]="Release v0.2"
   ["release:v0.3"]="Release v0.3"
   ["release:v0.4"]="Release v0.4"
-  ["needs-triage"]="New issue awaiting classification"
-  ["auto-answered"]="Answered automatically by QA bot"
 )
 
 for label in "${!LABELS[@]}"; do
@@ -100,7 +86,7 @@ done
 echo ""
 echo "=== Step 4: Delete old labels ==="
 
-OLD_LABELS=("Bug" "Feature" "Enhancement" "documentation" "question" "Task" "Release-v0.2" "Release-v0.3")
+OLD_LABELS=("Bug" "Feature" "Enhancement" "documentation" "question" "Task" "Release-v0.2" "Release-v0.3" "duplicate" "invalid" "wontfix")
 for label in "${OLD_LABELS[@]}"; do
   echo "  Deleting: $label"
   gh label delete "$label" --repo "$REPO" --yes 2>/dev/null || true
