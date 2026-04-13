@@ -190,7 +190,7 @@ if [ -n "${LLM_API_KEY:-}" ] && [ -n "${LLM_API_BASE:-}" ]; then
     curl -s -X PUT http://localhost:8000/api/v1/config/model \
       -H "Content-Type: application/json" \
       -H "Authorization: Bearer local-mcp" \
-      -d "{\"model_class\":\"litellm\",\"model_name\":\"claude-opus-4-6\",\"model_kwargs\":{\"api_base\":\"${LLM_API_BASE}\",\"api_key\":\"${LLM_API_KEY}\"}}" \
+      -d "{\"model_class\":\"litellm\",\"model_name\":\"openai/claude-opus-4-6\",\"model_kwargs\":{\"api_base\":\"${LLM_API_BASE}\",\"api_key\":\"${LLM_API_KEY}\"}}" \
       > /dev/null 2>&1 && echo "  [OK]   GEAK LLM configured" || echo "  [WARN] GEAK LLM config failed"
 fi
 
