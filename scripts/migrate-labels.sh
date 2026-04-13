@@ -14,12 +14,12 @@ REPO="AMD-AGI/Hyperloom"
 echo "=== Step 1: Create new labels ==="
 
 declare -A LABELS=(
-  # kind:
-  ["kind:bug"]="d73a4a"
-  ["kind:feature"]="a2eeef"
-  ["kind:question"]="d876e3"
-  ["kind:task"]="0075ca"
-  ["kind:docs"]="0075ca"
+  # type:
+  ["type:bug"]="d73a4a"
+  ["type:feature"]="a2eeef"
+  ["type:question"]="d876e3"
+  ["type:task"]="0075ca"
+  ["type:docs"]="0075ca"
   # domain:
   ["domain:inference"]="c5def5"
   ["domain:training"]="c5def5"
@@ -32,11 +32,11 @@ declare -A LABELS=(
 )
 
 declare -A DESCRIPTIONS=(
-  ["kind:bug"]="Something is broken or not working as expected"
-  ["kind:feature"]="New capability or improvement"
-  ["kind:question"]="Further information is requested"
-  ["kind:task"]="Internal task or chore"
-  ["kind:docs"]="Documentation improvements"
+  ["type:bug"]="Something is broken or not working as expected"
+  ["type:feature"]="New capability or improvement"
+  ["type:question"]="Further information is requested"
+  ["type:task"]="Internal task or chore"
+  ["type:docs"]="Documentation improvements"
   ["domain:inference"]="Related to inference optimization"
   ["domain:training"]="Related to training optimization"
   ["domain:mcp"]="Related to MCP tools"
@@ -66,12 +66,12 @@ migrate_label() {
   done
 }
 
-migrate_label "Bug"           "kind:bug"
-migrate_label "Feature"       "kind:feature"
-migrate_label "Enhancement"   "kind:feature"
-migrate_label "documentation" "kind:docs"
-migrate_label "question"      "kind:question"
-migrate_label "Task"          "kind:task"
+migrate_label "Bug"           "type:bug"
+migrate_label "Feature"       "type:feature"
+migrate_label "Enhancement"   "type:feature"
+migrate_label "documentation" "type:docs"
+migrate_label "question"      "type:question"
+migrate_label "Task"          "type:task"
 
 echo ""
 echo "=== Step 3: Migrate Release labels to new format ==="
