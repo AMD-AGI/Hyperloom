@@ -165,7 +165,8 @@ def extract_optimization_data(result_dir: str) -> dict:
             data["baseline_throughput"] = bl
             data["optimized_throughput"] = opt
             data["gain_pct"] = gain
-            data["actions"] = metrics.get("actions_taken") or metrics.get("actions", [])
+            raw_actions = metrics.get("actions_taken") or metrics.get("actions", [])
+            data["actions"] = list(raw_actions) if isinstance(raw_actions, (list, tuple)) else [str(raw_actions)] if raw_actions else []
             if bl is not None and opt is not None:
                 return data
             log.warning("ci_metrics.json loaded but missing key metrics (bl=%s, opt=%s), "
@@ -285,8 +286,12 @@ def generate_markdown_report(
     lines.extend(["", "## Per-Model Details"])
     for r in results:
         lines.append(f"- **{r['model']}**: status={r['status']}, report={'✅' if r.get('report_exists') else '❌'}")
-        if r.get("actions"):
-            lines.append(f"  - Actions: {', '.join(str(a) for a in r['actions'])}")
+        actions = r.get("actions")
+        if actions:
+            if isinstance(actions, (list, tuple)):
+                lines.append(f"  - Actions: {', '.join(str(a) for a in actions)}")
+            else:
+                lines.append(f"  - Actions: {actions}")
 
     return "\n".join(lines)
 
@@ -359,10 +364,12 @@ def generate_github_summary(results: list[dict], trigger: str, ifx_commit: str) 
             lines.append(f"| **vs InferenceX {gpu_label}** | **{_fmt_pct(r['vs_inferenceX_pct'])}** |")
         lines.append("")
 
-        if r.get("actions"):
+        actions = r.get("actions")
+        if actions:
+            action_list = list(actions) if isinstance(actions, (list, tuple)) else [str(actions)]
             lines.append("<details><summary>Optimization Actions</summary>")
             lines.append("")
-            for a in r["actions"]:
+            for a in action_list:
                 lines.append(f"- {a}")
             lines.append("")
             lines.append("</details>")
