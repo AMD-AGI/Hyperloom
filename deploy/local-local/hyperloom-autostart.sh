@@ -73,10 +73,10 @@ if [ -z "$HYPERLOOM_STARTED" ] && [ -f /opt/entrypoint.sh ]; then
     if [ -n "${LLM_API_KEY:-}" ] && [ -n "${LLM_API_BASE:-}" ]; then
         (
             sleep 5
-            curl -s -X POST http://localhost:8000/api/v1/config/model \
+            curl -s -X PUT http://localhost:8000/api/v1/config/model \
               -H "Content-Type: application/json" \
-              -H "X-API-Key: local-mcp" \
-              -d "{\"model_class\":\"litellm\",\"model_name\":\"openai/gpt-4\",\"model_kwargs\":{\"api_base\":\"${LLM_API_BASE}\",\"api_key\":\"${LLM_API_KEY}\"}}" \
+              -H "Authorization: Bearer local-mcp" \
+              -d "{\"model_class\":\"litellm\",\"model_name\":\"openai/claude-opus-4-6\",\"model_kwargs\":{\"api_base\":\"${LLM_API_BASE}\",\"api_key\":\"${LLM_API_KEY}\"}}" \
               > /dev/null 2>&1 && echo "[Hyperloom] GEAK LLM configured" || echo "[Hyperloom] GEAK LLM config failed"
         ) &
     fi
