@@ -22,6 +22,14 @@ jobs:
         run: |
           LABELS=""
 
+          # --- Detect target release from "Target release" dropdown ---
+          if echo "$ISSUE_BODY" | grep -qi "Target release"; then
+            release_val=$(echo "$ISSUE_BODY" | grep -A1 "Target release" | tail -1 | xargs)
+            case "$release_val" in
+              v0.2|v0.3|v0.4) LABELS="$LABELS,release:$release_val" ;;
+            esac
+          fi
+
           # --- Detect domain from "Optimization domain" dropdown ---
           if echo "$ISSUE_BODY" | grep -qi "Optimization domain"; then
             domain_val=$(echo "$ISSUE_BODY" | grep -A1 "Optimization domain" | tail -1 | xargs)
