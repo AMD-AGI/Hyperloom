@@ -1,6 +1,6 @@
 name: "Bug Report"
 description: "Report a bug, failed run, hang, performance regression, or system issue"
-labels: ["kind:bug", "needs-triage"]
+labels: ["kind:bug"]
 body:
   - type: markdown
     attributes:
