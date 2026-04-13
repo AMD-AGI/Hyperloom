@@ -1,0 +1,81 @@
+claw:
+  endpoint: https://oci-slc.example-internal-host.invalid/claw-api/v1
+  api_key_env: CLAW_API_KEY
+  sandbox_workspace_env: SANDBOX_WORKSPACE
+  sandbox_timeout: 28800
+  agent_id: agent_default
+  tools: [22,23]
+
+inferenceX:
+  repo: https://github.com/SemiAnalysisAI/InferenceX.git
+  config_path: .github/configs/amd-master.yaml
+  scripts_path: benchmarks/single_node
+  api_url: https://inferencex.semianalysis.com/api/v1/benchmarks
+  harbor_prefix: ${HARBOR_PREFIX}
+
+results:
+  result_dir: /workspace/hyperloom/
+  nfs_base: /hyperloom/results/ci
+  artifact_retention_days: 90
+
+notification:
+  webhook_env: WEBHOOK_URL                # Slack / Teams Incoming Webhook 均可
+
+defaults:
+  mode: local
+  geak_step_limit: 100
+  kernel_opt_workspace: ${KERNEL_OPT_WORKSPACE}
+  min_kernels: 5
+  inferencex_path: /hyperloom/InferenceX
+  kernel_opt_backends: geak
+  random_range_ratio: 0.8
+
+models:
+  # ── DeepSeek R1 (FP8, TP=8) ──
+  - inferenceX_key: dsr1-fp8-mi355x-sglang
+    inferenceX_api_name: DeepSeek-R1-0528
+    model_path_override: /hyperloom/models/DeepSeek-R1-0528
+    optimization_depth: full
+    kernel_opt_backends: claude
+    target_gpu: mi355x
+
+  # ── gpt-oss 120B (FP4, TP=8, vLLM) ──
+  - inferenceX_key: gptoss-fp4-mi355x-vllm
+    inferenceX_api_name: gpt-oss-120b
+    model_path_override: /hyperloom/models/gpt-oss-120b
+    optimization_depth: full
+    kernel_opt_backends: claude
+    target_gpu: mi355x
+
+  # ── Kimi K2.5 (INT4, TP=8, vLLM) ──
+  - inferenceX_key: kimik2.5-int4-mi355x-vllm
+    inferenceX_api_name: Kimi-K2.5
+    model_path_override: /hyperloom/models/Kimi-K2.5
+    optimization_depth: full
+    kernel_opt_backends: claude
+    target_gpu: mi355x
+
+  # ── MiniMax M2.5 (FP8, TP=8, vLLM) ──
+  - inferenceX_key: minimaxm2.5-fp8-mi355x-vllm
+    inferenceX_api_name: MiniMax-M2.5
+    model_path_override: /hyperloom/models/MiniMaxAI-MiniMax-M2.5
+    optimization_depth: full
+    kernel_opt_backends: claude
+    target_gpu: mi355x
+
+  # ── GLM 5 (FP8, TP=8) ──
+  - inferenceX_key: glm5-fp8-mi355x-sglang
+    inferenceX_api_name: GLM-5
+    model_path_override: /hyperloom/models/zai-org-GLM-5
+    optimization_depth: full
+    kernel_opt_backends: claude
+    target_gpu: mi355x
+
+  # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
+  - inferenceX_key: qwen3.5-bf16-mi355x-sglang
+    inferenceX_api_name: Qwen-3.5-397B-A17B
+    model_path_override: /hyperloom/models/Qwen-Qwen3.5-397B-A17B
+    optimization_depth: full
+    kernel_opt_backends: claude
+    target_gpu: mi355x
+

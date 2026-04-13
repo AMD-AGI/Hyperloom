@@ -365,7 +365,7 @@ source /tmp/baseline_config.sh
 | **Trace file too large** | Raw trace 349MB, 97% python_function events | Always filter before TraceLens (see Trace Size and Filtering in SKILL.md) |
 | **TraceLens not called** | Said "called TraceLens" but didn't actually invoke MCP tools | Must use `check_trace_file` + `run_full_standalone_analysis` MCP tools |
 | **GEAK input: comments not code** | Submitted `.cu` with only comments/path references, GEAK had no source to optimize | Always embed full source in `files[].content` |
-| **GEAK: wrong image** | Default ROCm image lacks framework code and headers; paths in GEAK prompt don't exist | Pass framework image (`GEAK_IMAGE_SGLANG` or `GEAK_IMAGE_VLLM`) for all kernel types |
+| **GEAK: wrong image** | Default ROCm image lacks framework code and headers; paths in GEAK prompt don't exist | Pass framework image (`KERNEL_OPT_IMAGE`) for all kernel types |
 | **GEAK HIP: `find /` on NFS** | GEAK agent ran `find \| grep` to locate source, hung ~35 min on NFS | Prompt must specify exact source dir and say "Do NOT search filesystem with find / or grep -r /" |
 | **Skipped full loop** | Only optimized RMSNorm from prior experience, missed `mm_0` (~22% GPU) | **IRON RULE:** run full multi-round loop on all top-5 non-vendor candidates |
 
