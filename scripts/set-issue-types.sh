@@ -76,11 +76,11 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
   labels=$(echo "$issue" | jq -r '.labels[].name' 2>/dev/null | tr '\n' ',' || true)
 
   # Determine type based on labels (check both old and new label names)
-  if echo "$labels" | grep -qiE "bug|kind:bug|Bug"; then
+  if echo "$labels" | grep -qiE "bug|type:bug|Bug"; then
     set_issue_type "$node_id" "$BUG_TYPE_ID" "$num" "Bug"
-  elif echo "$labels" | grep -qiE "feature|kind:feature|Feature|Enhancement"; then
+  elif echo "$labels" | grep -qiE "feature|type:feature|Feature|Enhancement"; then
     set_issue_type "$node_id" "$FEATURE_TYPE_ID" "$num" "Feature"
-  elif echo "$labels" | grep -qiE "task|kind:task|Task"; then
+  elif echo "$labels" | grep -qiE "task|type:task|Task"; then
     set_issue_type "$node_id" "$TASK_TYPE_ID" "$num" "Task"
   else
     echo "    #$num: no matching label, skipping (title: $title)"
