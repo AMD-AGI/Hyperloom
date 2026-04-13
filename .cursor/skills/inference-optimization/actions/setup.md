@@ -5,9 +5,21 @@
 
 ## Procedure
 
+### Step 0 (CRITICAL): Set PATH for venv
+
+**ALWAYS prepend `/opt/venv/bin` to PATH before any python3 command.** The system
+`/usr/bin/python3` does NOT have sglang/vllm/numpy installed. Every bash command
+in this skill MUST start with:
+
+```bash
+export PATH="/opt/venv/bin:$PATH"
+```
+
 ### Step 1: Auto-detect environment
 
 ```bash
+export PATH="/opt/venv/bin:$PATH"
+
 MODEL=$(ls -d /shared_nfs/*/models/*/ 2>/dev/null | head -1)
 GPU_COUNT=$(amd-smi list 2>/dev/null | grep "^GPU:" | wc -l)
 GPU_TYPE=$(rocm-smi --showproductname 2>/dev/null | grep "GFX Version" | head -1 | grep -o "gfx[0-9]*")
@@ -24,7 +36,8 @@ TP=$GPU_COUNT
 if [ "$TP" -le 1 ]; then CONC=4; elif [ "$TP" -le 4 ]; then CONC=32; else CONC=64; fi
 ```
 
-User-specified values override auto-detected ones.
+User-specified values override auto-detected ones. **NEVER override user-specified TP**
+— if the prompt says TP=8, use TP=8 even if GPU_COUNT differs.
 
 ### Step 2: Set paths and env vars
 

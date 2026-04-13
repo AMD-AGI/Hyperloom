@@ -7,7 +7,7 @@ Applies when running on a single machine with direct GPU access.
 
 - **Client**: Cursor IDE
 - **Runtime**: Local GPU machine (single node)
-- **MCP Servers**: GEAK MCP + TraceLens MCP (local or remote HTTP)
+- **MCP Servers**: GEAK MCP + OOB GPU Optimizer MCP + TraceLens MCP (local or remote HTTP)
 - **Storage**: Local disk (`/workspace/inference-optimization` or `/tmp`)
 
 ## Mode Detection
@@ -24,10 +24,19 @@ fi
 ## Key Differences from Claw
 
 - All commands run directly in the local shell (no `exec_on_gpu` wrapper)
-- GEAK runs as a local subprocess or remote SaFE PyTorchJob
+- GEAK runs as a local subprocess (via GEAK MCP)
 - No RayJob lifecycle management
 - Traces and results stored on local disk
 - `patch_inductor.py` operates on local Inductor cache
+
+## IR-12: SaFE MCP is FORBIDDEN in Local Mode
+
+**Do NOT call any SaFE MCP tool in local mode.** This includes `workload_create`,
+`workload_get`, `workload_stop`, and any other SaFE MCP operation. Do NOT create
+RayJobs, PyTorchJobs, or any SaFE workload. GEAK kernel optimization uses GEAK MCP
+only — the skill itself must NEVER directly interact with SaFE in local mode.
+
+Violation = immediate run invalidation.
 
 ## Phase-by-Phase Notes
 
@@ -35,7 +44,7 @@ fi
 |-------|-------|
 | Setup | No RayJob creation, direct env setup |
 | Baseline/Profile | Direct `bash $SCRIPTS_DIR/run_baseline.sh` |
-| GEAK | `GEAK_LOCAL=true` → runs as subprocess; otherwise remote SaFE PyTorchJob |
+| GEAK | `GEAK_LOCAL=true` → runs as subprocess via GEAK MCP (no SaFE) |
 | Integrate | `patch_inductor.py --target-file` on local Inductor cache |
 | Sweep | Serial via `run_sweep.sh` (no SaFE parallel option) |
 | Report | No RayJob cleanup needed |
