@@ -41,7 +41,7 @@ echo "  Task    ID: $TASK_TYPE_ID"
 echo ""
 echo "=== Step 2: Fetch all open issues ==="
 
-ISSUES=$(gh issue list --repo "$REPO" --state all --json number,title,labels,nodeId --limit 200)
+ISSUES=$(gh issue list --repo "$REPO" --state all --json number,title,labels,id --limit 200)
 ISSUE_COUNT=$(echo "$ISSUES" | jq length)
 echo "  Found $ISSUE_COUNT issues"
 
@@ -72,7 +72,7 @@ set_issue_type() {
 echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
   num=$(echo "$issue" | jq -r '.number')
   title=$(echo "$issue" | jq -r '.title')
-  node_id=$(echo "$issue" | jq -r '.nodeId')
+  node_id=$(echo "$issue" | jq -r '.id')
   labels=$(echo "$issue" | jq -r '.labels[].name' 2>/dev/null | tr '\n' ',' || true)
 
   # Determine type based on labels (check both old and new label names)
