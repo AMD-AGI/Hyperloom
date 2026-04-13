@@ -73,9 +73,32 @@ Always use `scripts/patch_inductor.py` with `--target-file`. The `--cache-dir` o
 
 **CRITICAL:** When GEAK changes block sizes or warp counts, you MUST also pass `--best-config` with the updated tiling parameters. Patching only the kernel `.py` without updating `.best_config` causes numerical corruption (garbled output). See `actions/integrate.md` for details.
 
-**Additional claw-mode Iron Rules (IR-7, IR-8) are defined in [`modes/CLAW.md`](modes/CLAW.md).**
+### IR-7: NEVER modify GEAK configuration
 
-## GEAK & Tooling Constants
+GEAK is an external service — treat it as **read-only infrastructure**. The skill MUST NOT
+modify any GEAK configuration files, settings, or parameters beyond what is passed as
+arguments to `geak_create_task`. Specifically:
+
+- **Do NOT** modify GEAK server config, workspace settings, or API configuration
+- **Do NOT** write to or alter any files under the GEAK config/settings directories
+- **Do NOT** change `KERNEL_OPT_WORKSPACE`, `GEAK_STEP_LIMIT`, or other constants
+  at runtime (use the values from the constants table above or user overrides)
+- **Do NOT** modify the GEAK MCP server configuration (`cursor_mcp_config.json`, etc.)
+- **Do NOT** modify any test data, results, or configuration files belonging to GEAK
+  (e.g., `tests/test_data/`, `server/config.py`, `server/templates/`)
+
+The ONLY interaction allowed is through these GEAK MCP tool calls:
+`geak_get_model_config` (read-only), `geak_create_task`, `geak_submit_task`,
+`geak_get_task`, `geak_get_outputs`, `geak_download_file`, `geak_list_tasks`.
+
+**NEVER call `geak_set_model_config`** — the LLM backend is pre-configured by the
+administrator. Changing it risks setting a non-existent model and breaking all tasks.
+
+Violation = immediate run invalidation.
+
+**Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11) and [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12).**
+
+## Kernel Optimization & Tooling Constants
 
 All values below are the **single source of truth**. All actions reference these by name.
 
@@ -83,8 +106,9 @@ All values below are the **single source of truth**. All actions reference these
 |----------|-------|-------------|
 | `KERNEL_OPT_BACKENDS` | `geak,codex` | Comma-separated active backends. Any combination of: `geak`, `codex`, `claude`, `llm`. User can override in prompt. |
 | `OOB_ROUND_ITERATIONS` | 3 | Iterations per Codex/Claude round (submit → local benchmark → feedback → re-submit). Best result wins. |
+| `KERNEL_OPT_IMAGE` | *(provided by CI or user)* | Framework image for all kernel-opt backends (GEAK + OOB). One image per run, determined by framework (SGLang/vLLM). |
+| `KERNEL_OPT_WORKSPACE` | `control-plane-moe` | SaFE workspace for kernel-opt backends (GEAK + OOB). User can override. |
 | `GEAK_STEP_LIMIT` | 100 | Max agent steps per GEAK task |
-| `GEAK_WORKSPACE` | `control-plane-moe` | GEAK workspace (user can override) |
 | `GEAK_MAX_RETRIES` | 3 | Max submission retries per kernel |
 | `GEAK_MAX_SUBMISSIONS` | 15 | Total GEAK submissions budget per run |
 | `GEAK_TOP_CANDIDATES` | 5 | Number of top kernel candidates to submit |
@@ -95,12 +119,10 @@ All values below are the **single source of truth**. All actions reference these
 | `MIN_GPU_PCT` | 3 | Minimum GPU time % to consider a kernel as GEAK candidate |
 | `SERVER_KILL_WAIT_S` | 10 | Seconds to wait between server kill and relaunch |
 | `FILTERED_TRACE_NAME` | `filtered-TP-0.trace.json.gz` | Preferred trace file for TraceLens analysis |
-| `GEAK_IMAGE_SGLANG` | `harbor.oci-slc.primus-safe.amd.com/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x` | Default GEAK image for SGLang |
-| `GEAK_IMAGE_VLLM` | `harbor.oci-slc.primus-safe.amd.com/proxy/vllm/vllm-openai-rocm:v0.17.0` | Default GEAK image for vLLM |
 
-**ALWAYS pass a framework image to GEAK, regardless of kernel type.** For kernels whose source exists in the image (e.g., `/sgl-workspace/aiter/`), the GEAK pod uses the same image. For runtime-generated kernels (e.g., `/tmp/torchinductor_root/` from `torch.compile`), do NOT include `kernel_url`/`kernel_repo` in the prompt; copy files to shared NFS or rely on `files[].content` only.
+**ALWAYS pass `KERNEL_OPT_IMAGE` to all kernel-opt backends (GEAK + OOB), regardless of kernel type.** For kernels whose source exists in the image (e.g., `/sgl-workspace/aiter/`), the pod uses the same image. For runtime-generated kernels (e.g., `/tmp/torchinductor_root/` from `torch.compile`), do NOT include `kernel_url`/`kernel_repo` in the prompt; copy files to shared NFS or rely on `files[].content` only.
 
-**Claw-mode GEAK images and constants are in [`modes/CLAW.md`](modes/CLAW.md).**
+**Claw-mode constants are in [`modes/CLAW.md`](modes/CLAW.md).**
 
 ## Architecture
 
@@ -109,14 +131,36 @@ SKILL.md (this file)          — DFS orchestrator: loop, heuristic, dispatch
 actions/*.md                   — Self-contained action modules (11 actions)
 kernel-opt/                    — Per-backend kernel optimization references
   geak.md                      — GEAK MCP (remote GPU pod)
-  codex.md                     — Codex via OOB Agent MCP
-  claude.md                    — Claude Code via OOB Agent MCP
+  codex.md                     — Codex via OOB GPU Optimizer MCP
+  claude.md                    — Claude Code via OOB GPU Optimizer MCP
   llm.md                       — LLM Proxy (direct API)
 kb/                            — RAG knowledge base (JSONL + query/ingest scripts)
 scripts/                       — Baseline/profiling/accuracy shell scripts
 modes/                         — Mode-specific execution details (LOCAL.md, CLAW.md)
 KNOWLEDGE-BASE.md              — Legacy KB (archived, seeded into kb/entries.jsonl)
 ```
+
+## Common Pitfalls (validated from CI logs)
+
+These are recurring errors observed in production CI runs. **Read before executing.**
+
+1. **PATH: Always `export PATH="/opt/venv/bin:$PATH"` first.** The system python3
+   (`/usr/bin/python3`) does NOT have sglang/vllm/numpy. Every bash command must
+   prepend the venv. Failure mode: `ModuleNotFoundError: No module named 'sglang'`.
+
+2. **Never override user-specified TP.** If the prompt says TP=8, use TP=8. Do NOT
+   auto-detect GPU_COUNT and override to TP=1 — large models (120B+) cannot run on
+   a single GPU. Failure mode: OOM or server crash.
+
+3. **vLLM flags differ from SGLang.** Common mistake: `--disable-log-requests` is NOT
+   a valid vLLM flag. Use `--disable-log-stats` for vLLM. Always check `vllm serve --help`
+   before using unfamiliar flags. Failure mode: `unrecognized arguments` → server crash.
+
+4. **Use `run_baseline.sh` instead of manual server launch.** The script handles
+   server startup, health wait, benchmark, and profiling in a tested sequence. Manual
+   launch skips health checks and often hits Exit code 144 (SIGTERM from stale processes).
+
+5. **Never call `geak_set_model_config`.** See IR-7. GEAK LLM backend is pre-configured.
 
 ## DFS Search Tree
 
