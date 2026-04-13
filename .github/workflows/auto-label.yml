@@ -99,12 +99,6 @@ jobs:
 
           Analyze the following issue and return a JSON object with these fields:
           $TYPE_INSTRUCTION
-          - "priority": one of "priority:critical", "priority:high", "priority:medium", "priority:low".
-            Guidelines:
-              - critical: production outage, data loss, complete failure blocking all users
-              - high: major functionality broken, no workaround, affects many users
-              - medium: bug with workaround, or important feature request
-              - low: minor issue, cosmetic, nice-to-have feature
           - "domains": array of applicable domains from ["domain:inference", "domain:training", "domain:mcp", "domain:ui"]. Can be empty.
 
           Issue title: $ISSUE_TITLE
@@ -140,12 +134,10 @@ jobs:
 
           # Parse LLM JSON output
           TYPE_LABEL=$(echo "$LLM_OUTPUT" | jq -r '.kind // empty')
-          PRIORITY_LABEL=$(echo "$LLM_OUTPUT" | jq -r '.priority // empty')
           DOMAIN_LABELS=$(echo "$LLM_OUTPUT" | jq -r '.domains[]? // empty' | paste -sd ',' -)
 
           LABELS=""
           [ -n "$TYPE_LABEL" ] && LABELS="$TYPE_LABEL"
-          [ -n "$PRIORITY_LABEL" ] && LABELS="${LABELS:+$LABELS,}$PRIORITY_LABEL"
           [ -n "$DOMAIN_LABELS" ] && LABELS="${LABELS:+$LABELS,}$DOMAIN_LABELS"
 
           echo "llm_labels=$LABELS" >> "$GITHUB_OUTPUT"
