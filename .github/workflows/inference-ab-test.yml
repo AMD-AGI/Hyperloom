@@ -1,10 +1,12 @@
-name: Inference Optimization CI
+name: Inference A/B Test
 
 on:
-  schedule:
-    - cron: '0 2 * * 6'
   workflow_dispatch:
     inputs:
+      tools:
+        description: 'Claw tool IDs (comma-separated, e.g. 22,23)'
+        required: false
+        default: '22,23'
       models:
         description: 'Comma-separated model keys (empty = all from ci-config.yaml)'
         required: false
@@ -12,7 +14,7 @@ on:
       trigger_reason:
         description: 'Trigger reason'
         required: false
-        default: 'manual'
+        default: 'ab-test'
 
 env:
   HARBOR_PREFIX: ${{ secrets.HARBOR_PREFIX }}
@@ -41,7 +43,7 @@ jobs:
           python3 generate_matrix.py
 
   optimize:
-    name: "${{ matrix.key }}"
+    name: "${{ matrix.key }} (tools=${{ github.event.inputs.tools }})"
     needs: prepare
     runs-on: hyperloom-qn7cd
     timeout-minutes: 510
@@ -56,62 +58,21 @@ jobs:
       - name: Run optimization
         working-directory: ci
         run: |
-          TRIGGER="${{ github.event.inputs.trigger_reason || 'scheduled' }}"
+          TRIGGER="${{ github.event.inputs.trigger_reason || 'ab-test' }}"
           python3 orchestrator.py \
             --trigger "$TRIGGER" \
             --models "${{ matrix.key }}" \
+            --tools "${{ github.event.inputs.tools }}" \
             --output-dir "${{ github.workspace }}/ci-output"
 
       - name: Upload model report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: report-${{ matrix.key }}
+          name: ab-${{ github.event.inputs.tools }}-${{ matrix.key }}
           path: |
             ci-output/ci_report.md
             ci-output/ci_summary.json
             ci-output/github_summary.md
             ci-output/*/optimization_report.md
           retention-days: 90
-
-  detect-inferenceX:
-    name: Check InferenceX Updates
-    runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
-    steps:
-      - name: Restore cached SHA
-        uses: actions/cache/restore@v4
-        with:
-          path: .inferenceX_last_sha
-          key: inferenceX-sha
-
-      - name: Check for changes
-        id: check
-        run: |
-          LATEST=$(git ls-remote https://github.com/SemiAnalysisAI/InferenceX.git refs/heads/main | cut -f1)
-          CACHED=""
-          if [ -f ".inferenceX_last_sha" ]; then
-            CACHED=$(cat ".inferenceX_last_sha")
-          fi
-          echo "latest=$LATEST" >> $GITHUB_OUTPUT
-          if [ "$LATEST" != "$CACHED" ] && [ -n "$LATEST" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "$LATEST" > .inferenceX_last_sha
-          else
-            echo "changed=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Save cached SHA
-        if: steps.check.outputs.changed == 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: .inferenceX_last_sha
-          key: inferenceX-sha-${{ steps.check.outputs.latest }}
-
-      - name: Trigger optimization
-        if: steps.check.outputs.changed == 'true'
-        run: |
-          gh workflow run inference-optimization-ci.yml \
-            -f trigger_reason=inferenceX -f models=""
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
