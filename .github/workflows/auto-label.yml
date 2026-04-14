@@ -13,15 +13,17 @@ jobs:
     permissions:
       issues: write
     steps:
-      - name: Rule-based labeling from template fields
+      - name: Rule-based labeling
         id: rules
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
           GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
         run: |
           LABELS=""
+          HAS_TYPE="false"
 
-          # --- Detect target release from "Target release" dropdown ---
+          # --- Detect target release ---
           if echo "$ISSUE_BODY" | grep -qi "Target release"; then
             release_val=$(echo "$ISSUE_BODY" | grep -A1 "Target release" | tail -1 | xargs)
             case "$release_val" in
@@ -29,13 +31,15 @@ jobs:
             esac
           fi
 
-          # --- Detect domain from "Optimization domain" dropdown ---
-          if echo "$ISSUE_BODY" | grep -qi "Optimization domain"; then
-            domain_val=$(echo "$ISSUE_BODY" | grep -A1 "Optimization domain" | tail -1 | xargs)
+          # --- Detect domain from "Optimization domain" or "Related area" dropdown ---
+          if echo "$ISSUE_BODY" | grep -qiE "Optimization domain|Related area"; then
+            domain_val=$(echo "$ISSUE_BODY" | grep -A1 -iE "Optimization domain|Related area" | tail -1 | xargs)
             case "$domain_val" in
-              Inference) LABELS="$LABELS,domain:inference" ;;
-              Training)  LABELS="$LABELS,domain:training" ;;
-              Both)      LABELS="$LABELS,domain:inference,domain:training" ;;
+              Inference)          LABELS="$LABELS,domain:inference" ;;
+              Training)           LABELS="$LABELS,domain:training" ;;
+              Both)               LABELS="$LABELS,domain:inference,domain:training" ;;
+              "MCP tools")        LABELS="$LABELS,domain:mcp" ;;
+              "UI / PrimusClaw")  LABELS="$LABELS,domain:ui" ;;
             esac
           fi
 
@@ -52,6 +56,29 @@ jobs:
           if echo "$ISSUE_BODY" | grep -qi "Hyperloom UI (PrimusClaw)"; then
             if ! echo "$LABELS" | grep -q "domain:ui"; then
               LABELS="$LABELS,domain:ui"
+            fi
+          fi
+
+          # --- Detect type from General template "What kind of issue" dropdown ---
+          if echo "$ISSUE_BODY" | grep -qi "What kind of issue"; then
+            kind_val=$(echo "$ISSUE_BODY" | grep -A1 "What kind of issue" | tail -1 | xargs)
+            case "$kind_val" in
+              "Suggestion / Feature idea") LABELS="$LABELS,type:feature"; HAS_TYPE="true" ;;
+              "Question")                  LABELS="$LABELS,type:question"; HAS_TYPE="true" ;;
+              "Task / Chore")              LABELS="$LABELS,type:task"; HAS_TYPE="true" ;;
+              "Documentation")             LABELS="$LABELS,type:docs"; HAS_TYPE="true" ;;
+            esac
+          fi
+
+          # --- Keyword fallback for blank issues (no template) ---
+          if [ "$HAS_TYPE" = "false" ]; then
+            COMBINED="$ISSUE_TITLE $ISSUE_BODY"
+            if echo "$COMBINED" | grep -qiE "crash|error|fail|broken|hang|regression|not work"; then
+              LABELS="$LABELS,type:bug"
+            elif echo "$COMBINED" | grep -qiE "suggest|improvement|would be nice|should support|add support|please add"; then
+              LABELS="$LABELS,type:feature"
+            elif echo "$COMBINED" | grep -qiE "how to|how do|question|help|what is|where is"; then
+              LABELS="$LABELS,type:question"
             fi
           fi
 
