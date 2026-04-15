@@ -8,12 +8,45 @@ Precision: {precision}
 Inference params: ISL={isl}, OSL={osl}, CONC={conc}, RANDOM_RANGE_RATIO=0.8
 TP={tp}, EP={ep}
 GPU type: {gpu_type}
+Runner type: {runner}
 InferenceX path: {inferencex_path}
+Magpie path: {magpie_path}
 
 SandboxImage: {sandbox_image}
 
-Baseline Benchmark Script:
+Benchmarking with Magpie:
+Install Magpie first: `pip install -e {magpie_path}`
+ALL benchmarks (baseline, DFS, profile, sweep) MUST use `magpie benchmark --benchmark-config <yaml>`.
+Generate a YAML config file, then run: `magpie benchmark --benchmark-config /path/to/config.yaml -o /path/to/output`
+
 {benchmark_script_section}
+
+Example baseline YAML config:
+```yaml
+benchmark:
+  framework: {framework}
+  model: {model_path}
+  precision: {precision}
+  run_mode: local
+  runner_type: {runner}
+  inferencex_path: {inferencex_path}
+  benchmark_script: {framework}_{runner}.sh
+  envs:
+    TP: {tp}
+    CONC: {conc}
+    ISL: {isl}
+    OSL: {osl}
+    RANDOM_RANGE_RATIO: 0.8
+    NUM_PROMPTS: {num_prompts}
+    MAX_MODEL_LEN: 4096
+  profiler:
+    torch_profiler:
+      enabled: false
+  timeout_seconds: 3600
+```
+
+Do NOT launch servers manually or use run_baseline.sh / run_sweep.sh.
+Magpie handles server lifecycle (start, health check, benchmark, cleanup) automatically.
 
 Kernel Optimization:
 KERNEL_OPT_BACKENDS: {kernel_opt_backends}
@@ -44,10 +77,10 @@ Target GPU: {target_gpu}
 Raw performance values:
 {inferenceX_data}
 
-Optimize and push ahead of {target_gpu}. Use InferenceX data from Hyperloom as starting point for sglang {runner} baseline.
+Optimize and push ahead of {target_gpu}. Use InferenceX data from Hyperloom as starting point for {framework} {runner} baseline.
 
 IMPORTANT benchmark parameters (must match InferenceX):
-- Use --random-range-ratio 0.8 for ALL benchmarks (baseline, DFS, sweep). Do NOT use 1.0.
-- Use --num-prompts equal to CONC * 10 (e.g. CONC=512 → 5120 prompts). Do NOT use CONC * 3.
+- Set RANDOM_RANGE_RATIO: 0.8 in the YAML envs for ALL benchmarks (baseline, DFS, sweep). Do NOT use 1.0.
+- Set NUM_PROMPTS equal to CONC * 10 in the YAML envs (e.g. CONC=512 → NUM_PROMPTS: 5120). Do NOT use CONC * 3.
 
-CRITICAL: For the baseline, you MUST read the InferenceX benchmark script listed above and replicate its server configuration exactly. The script contains platform-specific params (attention backends, env vars, memory settings, expert parallelism flags) essential for accurate baselines. Do NOT guess server params — extract them from the script. Do NOT run the script directly (it has external dependencies like benchmark_lib.sh). Instead: cat the script, identify the server launch command and export env vars, then reproduce them in your own launch.
+CRITICAL: For the baseline, read the InferenceX benchmark script to extract server configuration (attention backends, env vars, memory settings, expert parallelism flags). Put these as EXTRA_{framework_upper}_ARGS in the YAML envs section. Do NOT run the InferenceX script directly.

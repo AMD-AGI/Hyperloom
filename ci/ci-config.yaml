@@ -4,7 +4,7 @@ claw:
   sandbox_workspace_env: SANDBOX_WORKSPACE
   sandbox_timeout: 28800
   agent_id: agent_default
-  tools: [22,23]
+  tools: [20,22]
 
 inferenceX:
   repo: https://github.com/SemiAnalysisAI/InferenceX.git
@@ -27,6 +27,7 @@ defaults:
   kernel_opt_workspace: ${KERNEL_OPT_WORKSPACE}
   min_kernels: 5
   inferencex_path: /hyperloom/InferenceX
+  magpie_path: /shared_nfs/Magpie
   kernel_opt_backends: geak
   random_range_ratio: 0.8
 

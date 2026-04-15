@@ -277,6 +277,7 @@ def merge_model_config(
         "mode": defaults.get("mode", "local"),
         "gpu_type": parsed["runner"].upper(),
         "inferencex_path": defaults.get("inferencex_path", "/hyperloom/InferenceX"),
+        "magpie_path": defaults.get("magpie_path", "/shared_nfs/Magpie"),
         "result_dir": "/workspace/hyperloom",
         "inferenceX_benchmarks": ifx_benchmarks,
         "inferenceX_api_name": model_cfg.get("inferenceX_api_name", ""),
