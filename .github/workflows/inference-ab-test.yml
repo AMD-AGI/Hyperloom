@@ -1,0 +1,186 @@
+name: "Inference A/B Test: TraceLens MCP vs CLI"
+
+on:
+  workflow_dispatch:
+    inputs:
+      tools_a:
+        description: 'A group: Claw tool IDs (default: current MCP-based)'
+        required: false
+        default: '22,23'
+      tools_b:
+        description: 'B group: Claw tool IDs (default: CLI-based)'
+        required: false
+        default: '24,25'
+      models:
+        description: 'Comma-separated model keys (empty = all from ci-config.yaml)'
+        required: false
+        default: ''
+
+env:
+  HARBOR_PREFIX: ${{ secrets.HARBOR_PREFIX }}
+  KERNEL_OPT_WORKSPACE: ${{ secrets.KERNEL_OPT_WORKSPACE }}
+  CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
+  WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+  SANDBOX_WORKSPACE: ${{ secrets.SANDBOX_WORKSPACE }}
+  LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+
+jobs:
+  prepare:
+    name: Prepare Model Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate matrix
+        id: matrix
+        working-directory: ci
+        env:
+          INPUT_MODELS: ${{ github.event.inputs.models }}
+        run: |
+          pip3 install -q pyyaml 2>/dev/null || pip install -q pyyaml
+          python3 generate_matrix.py
+
+  group-a:
+    name: "A: ${{ matrix.key }}"
+    needs: prepare
+    runs-on: hyperloom-qn7cd
+    timeout-minutes: 510
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run optimization (Group A)
+        working-directory: ci
+        run: |
+          python3 orchestrator.py \
+            --trigger "ab-test-A" \
+            --models "${{ matrix.key }}" \
+            --tools "${{ github.event.inputs.tools_a }}" \
+            --output-dir "${{ github.workspace }}/ci-output"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: A-${{ matrix.key }}
+          path: |
+            ci-output/ci_report.md
+            ci-output/ci_summary.json
+            ci-output/github_summary.md
+            ci-output/*/optimization_report.md
+          retention-days: 90
+
+  group-b:
+    name: "B: ${{ matrix.key }}"
+    needs: prepare
+    runs-on: hyperloom-qn7cd
+    timeout-minutes: 510
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run optimization (Group B)
+        working-directory: ci
+        run: |
+          python3 orchestrator.py \
+            --trigger "ab-test-B" \
+            --models "${{ matrix.key }}" \
+            --tools "${{ github.event.inputs.tools_b }}" \
+            --output-dir "${{ github.workspace }}/ci-output"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: B-${{ matrix.key }}
+          path: |
+            ci-output/ci_report.md
+            ci-output/ci_summary.json
+            ci-output/github_summary.md
+            ci-output/*/optimization_report.md
+          retention-days: 90
+
+  compare:
+    name: "Compare A vs B"
+    needs: [group-a, group-b]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate comparison
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, glob
+
+          def load_summary(prefix):
+              results = {}
+              for f in glob.glob(f"artifacts/{prefix}-*/ci_summary.json"):
+                  data = json.load(open(f))
+                  for m in data.get("models", []):
+                      results[m["model"]] = m
+              return results
+
+          a = load_summary("A")
+          b = load_summary("B")
+          models = sorted(set(list(a.keys()) + list(b.keys())))
+
+          lines = []
+          lines.append("## A/B Test Results: TraceLens MCP (A) vs CLI (B)\n")
+          lines.append(f"- **Group A tools**: `${{ github.event.inputs.tools_a }}`")
+          lines.append(f"- **Group B tools**: `${{ github.event.inputs.tools_b }}`\n")
+          lines.append("| Model | A Baseline | A Optimized | A Gain | B Baseline | B Optimized | B Gain | Winner |")
+          lines.append("|-------|-----------|-------------|--------|-----------|-------------|--------|--------|")
+
+          for model in models:
+              ra = a.get(model, {})
+              rb = b.get(model, {})
+              a_bl = ra.get("baseline_tok_per_gpu")
+              a_opt = ra.get("optimized_tok_per_gpu")
+              a_gain = ra.get("gain_pct")
+              b_bl = rb.get("baseline_tok_per_gpu")
+              b_opt = rb.get("optimized_tok_per_gpu")
+              b_gain = rb.get("gain_pct")
+
+              def fmt(v, suffix=""): return f"{v:.1f}{suffix}" if v is not None else "N/A"
+
+              if a_opt is not None and b_opt is not None:
+                  winner = "A" if a_opt > b_opt else "B" if b_opt > a_opt else "Tie"
+                  winner = f"**{winner}** ({abs(a_opt - b_opt):.1f} tok/s)"
+              else:
+                  winner = "N/A"
+
+              lines.append(f"| {model} | {fmt(a_bl)} | {fmt(a_opt)} | {fmt(a_gain, '%')} | {fmt(b_bl)} | {fmt(b_opt)} | {fmt(b_gain, '%')} | {winner} |")
+
+          report = "\n".join(lines)
+          print(report)
+
+          os.makedirs("comparison", exist_ok=True)
+          with open("comparison/ab_comparison.md", "w") as f:
+              f.write(report)
+
+          summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_file:
+              with open(summary_file, "a") as f:
+                  f.write(report)
+          PYEOF
+
+      - name: Upload comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ab-comparison
+          path: comparison/
+          retention-days: 90
