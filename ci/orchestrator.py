@@ -222,6 +222,7 @@ def main():
     parser.add_argument("--config", default=None, help="Path to ci-config.yaml")
     parser.add_argument("--models", default=None, help="Comma-separated model subset (inferenceX_key)")
     parser.add_argument("--trigger", default="manual", help="Trigger type: scheduled/manual/inferenceX")
+    parser.add_argument("--tools", default=None, help="Comma-separated Claw tool IDs (overrides ci-config)")
     parser.add_argument("--dry-run", action="store_true", help="Print prompts without executing")
     parser.add_argument("--output-dir", default="ci-output", help="Output directory for reports")
     args = parser.parse_args()
@@ -314,6 +315,11 @@ def main():
             print(f"{'=' * 60}")
             print(prompt)
         sys.exit(0)
+
+    # Override tools if provided via CLI
+    if args.tools:
+        claw_cfg["tools"] = [int(t.strip()) for t in args.tools.split(",")]
+        log.info("Overriding Claw tools from CLI: %s", claw_cfg["tools"])
 
     # Execute
     claw = ClawClient.from_config(claw_cfg)
