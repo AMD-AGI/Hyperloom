@@ -1,6 +1,6 @@
-# Hyperloom Local-Local Mode
+# Hyperloom Fully Local Mode
 
-Run the full Hyperloom inference optimization loop on your local machine.
+> **Local node support for user-owned infrastructure** — run the full Hyperloom inference optimization loop entirely on your own GPU nodes (Docker or K8s), without depending on AMD-hosted PrimusClaw sandboxes or Primus-SaFE authoring pods. See [DESIGN.md](DESIGN.md) for architecture details.
 
 ## Prerequisites
 
