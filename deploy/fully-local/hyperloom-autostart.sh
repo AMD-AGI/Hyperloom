@@ -1,6 +1,9 @@
 #!/bin/bash
 # Auto-start Hyperloom MCP services on login (idempotent)
 # Uses port checks instead of pgrep (pgrep is unreliable with hostPID: true)
+if ! command -v python &>/dev/null && command -v python3 &>/dev/null; then
+    ln -s "$(command -v python3)" /usr/local/bin/python
+fi
 if [ -z "$HYPERLOOM_STARTED" ] && [ -f /opt/entrypoint.sh ]; then
     mkdir -p /var/log/hyperloom "${NFS_BASE_PATH:-/tmp/geak-data}"
 
