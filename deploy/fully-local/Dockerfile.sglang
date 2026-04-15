@@ -1,14 +1,14 @@
-# Hyperloom Local-Local Mode — vLLM base image
+# Hyperloom Fully Local Mode — SGLang base image
 # Bundles: TraceLens MCP + GEAK MCP + OOB Agent MCP + InferenceX + Skills + SSH
 #
 # No local build context needed — all repo artifacts come from hyperloom-src.
 #   Prereq: docker pull docker.io/primussafe/hyperloom-src:<tag>
-#   docker build -f deploy/local-local/Dockerfile.vllm -t hyperloom-local:vllm-latest .
+#   docker build -f deploy/fully-local/Dockerfile.sglang -t hyperloom-local:sglang-latest .
 
 # Stage 0: repo source bundle (OOB, TraceLens, InferenceX, skills, deploy scripts)
-FROM primussafe/hyperloom-src:v1.0.2 AS hyperloom-src
+FROM primussafe/hyperloom-src:v1.0.3 AS hyperloom-src
 
-FROM vllm/vllm-openai-rocm:v0.17.0
+FROM lmsysorg/sglang:v0.5.9-rocm700-mi35x
 
 # --- Layer 1: system deps + Node.js 20 (rarely changes, best cache hit) ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -60,11 +60,12 @@ COPY --from=hyperloom-src /deploy/hyperloom-autostart.sh /etc/profile.d/hyperloo
 RUN chmod +x /opt/entrypoint.sh /etc/profile.d/hyperloom.sh
 ENV MODE=local \
     GEAK_LOCAL=true \
+    OOB_LOCAL=true \
     KERNEL_OPT_BACKENDS=geak \
     NFS_BASE_PATH=/tmp/geak-data \
     DATABASE_PATH=/tmp/geak-data/geak.db \
     INFERENCEX_PATH=/opt/hyperloom/InferenceX \
-    FRAMEWORK=vllm \
+    FRAMEWORK=sglang \
     OOB_MCP_PORT=8003 \
     AGENT_WORKSPACE_ROOT=/tmp/agent-workspaces \
     PYTHONPATH=/opt/oob-mcp \
