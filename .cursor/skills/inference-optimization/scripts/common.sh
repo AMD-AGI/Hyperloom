@@ -2,10 +2,10 @@
 # =============================================================================
 # inference-optimization/scripts/common.sh
 #
-# Shared helpers for run_baseline.sh, run_profile.sh, and run_sweep.sh:
+# Shared helpers for inference-optimization actions (server management, GPU
+# checks, trace filtering):
 #   - kill_server          - tear down vLLM or SGLang serving processes
 #   - wait_for_health      - HTTP /health wait with PID and log checks
-#   - check_benchmark_lib  - verify and source InferenceX benchmark_lib.sh
 #   - filter_trace         - shrink Chrome trace JSON for TraceLens
 #   - check_gpu_memory     - optional free-memory gate before starting server
 #
@@ -84,19 +84,6 @@ wait_for_health() {
         fi
         sleep 5
     done
-}
-
-# Ensure benchmarks/benchmark_lib.sh exists under the InferenceX repo, then source it.
-check_benchmark_lib() {
-    local inference_root="${1:?InferenceX repo path required}"
-    local lib="${inference_root}/benchmarks/benchmark_lib.sh"
-    if [ ! -f "$lib" ]; then
-        echo "ERROR: benchmark library not found: $lib" >&2
-        echo "Set INFERENCEX_PATH to the InferenceX repository root (must contain benchmarks/benchmark_lib.sh)." >&2
-        return 1
-    fi
-    # shellcheck disable=SC1090
-    source "$lib"
 }
 
 # Filter a Chrome trace JSON.gz for TraceLens (drop noisy python_function events).

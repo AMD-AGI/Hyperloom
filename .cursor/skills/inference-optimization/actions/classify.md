@@ -53,16 +53,19 @@ arch = text_cfg.get('architectures', config.get('architectures', ['']))[0]
 has_mla = text_cfg.get('kv_lora_rank', 0) > 0 or text_cfg.get('q_lora_rank', 0) > 0
 has_moe = text_cfg.get('n_routed_experts', 0) > 0 or text_cfg.get('num_local_experts', 0) > 0 or text_cfg.get('num_experts', 0) > 0
 has_swa = 'sliding_attention' in str(text_cfg.get('layer_types', [])) or text_cfg.get('sliding_window_size', 0) > 0
+has_mamba = text_cfg.get('num_linear_attention_heads', 0) > 0 or 'mamba' in arch.lower() or 'hybrid' in str(text_cfg.get('model_type', '')).lower()
 hidden = text_cfg.get('hidden_size', 0)
 n_heads = text_cfg.get('num_attention_heads', 0)
 print(f'Architecture: {arch}')
-print(f'MoE: {has_moe} | MLA: {has_mla} | SWA: {has_swa} | Hidden: {hidden} | Heads: {n_heads}')
+print(f'MoE: {has_moe} | MLA: {has_mla} | SWA: {has_swa} | Mamba/Hybrid: {has_mamba} | Hidden: {hidden} | Heads: {n_heads}')
 if has_mla and n_heads > 0:
     for tp in [1,2,4,8]:
         hpt = n_heads // tp
         ok = 'OK' if hpt % 16 == 0 else 'NEED split backend (decode=triton, prefill=aiter)'
         print(f'  TP={tp}: {hpt} heads/partition -> {ok}')
-if has_swa:
+if has_mamba:
+    print('WARNING: Mamba/hybrid model — torch.compile INCOMPATIBLE, needs --mamba-scheduler-strategy no_buffer on ROCm')
+elif has_swa:
     print('WARNING: SWA models are torch.compile/FP8-KV/aiter-attn INCOMPATIBLE')
 elif has_mla:
     print('WARNING: MLA models are likely torch.compile INCOMPATIBLE')
@@ -78,6 +81,7 @@ elif has_mla:
 | **MoE + SWA** | **Incompatible** | **Low** | **CUDA graph coverage + backend exploration + server params** |
 | **MoE + MLA** | **Skip** | **Low (~0-2%)** | **Backend exploration → server param tuning + 1 GEAK round** |
 | **MoE + MLA + custom attention** | **Skip** | **Low** | **Backend exploration → kernel tuning → combined testing** |
+| **MoE + Mamba/Hybrid** | **Incompatible** | **Medium** (Triton FLA kernels) | **GEAK on FLA Triton kernels + server params. ROCm: MUST pass `--mamba-scheduler-strategy no_buffer`** |
 | Any model after vendor kernel >50% | — | Skip GEAK | **Backend exploration → server parameter tuning** |
 
 ### Step 3: CUDA graph coverage check (always run after baseline launch)

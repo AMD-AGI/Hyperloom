@@ -76,12 +76,29 @@ For each backend switch, use Magpie to run a short benchmark (fewer prompts for 
 
 ```bash
 # Example: test a single backend switch
-magpie benchmark $FRAMEWORK \
-  -m "$MODEL" --tp $TP --concurrency $CONC \
-  --input-len $ISL --output-len $OSL \
-  --run-mode local --inferencex-path "$INFERENCEX_PATH" \
-  --extra-envs "EXTRA_SGLANG_ARGS=$BASE_ARGS --attention-backend aiter" \
-               "NUM_PROMPTS=$((CONC * 3))" \
+EXTRA_ARGS_KEY="EXTRA_$(echo $FRAMEWORK | tr '[:lower:]' '[:upper:]')_ARGS"
+cat > "$RESULT_DIR/backend_aiter_config.yaml" <<EOF
+benchmark:
+  framework: $FRAMEWORK
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: ${FRAMEWORK}_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    NUM_PROMPTS: $((CONC * 3))
+    $EXTRA_ARGS_KEY: "$BASE_ARGS --attention-backend aiter"
+  profiler:
+    torch_profiler:
+      enabled: false
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/backend_aiter_config.yaml" \
   -o "$RESULT_DIR/backend_aiter"
 
 # Extract throughput from Magpie result
@@ -98,12 +115,28 @@ Individual gains do NOT predict combined gains — switches affecting different 
 
 ```bash
 # Test combined winners
-magpie benchmark $FRAMEWORK \
-  -m "$MODEL" --tp $TP --concurrency $CONC \
-  --input-len $ISL --output-len $OSL \
-  --run-mode local --inferencex-path "$INFERENCEX_PATH" \
-  --extra-envs "EXTRA_SGLANG_ARGS=$BASE_ARGS $ALL_WINNING_FLAGS" \
-               "NUM_PROMPTS=$((CONC * 3))" \
+cat > "$RESULT_DIR/backend_combined_config.yaml" <<EOF
+benchmark:
+  framework: $FRAMEWORK
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: ${FRAMEWORK}_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    NUM_PROMPTS: $((CONC * 3))
+    $EXTRA_ARGS_KEY: "$BASE_ARGS $ALL_WINNING_FLAGS"
+  profiler:
+    torch_profiler:
+      enabled: false
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/backend_combined_config.yaml" \
   -o "$RESULT_DIR/backend_combined"
 ```
 
@@ -112,13 +145,34 @@ magpie benchmark $FRAMEWORK \
 Backend switches that replace vendor C++ kernels with Triton implementations create new GEAK optimization surface. Re-run profiling with Magpie after backend exploration settles:
 
 ```bash
-magpie benchmark $FRAMEWORK \
-  -m "$MODEL" --tp $TP --concurrency $CONC \
-  --input-len $ISL --output-len $OSL \
-  --run-mode local --inferencex-path "$INFERENCEX_PATH" \
-  --torch-profiler --tracelens --gap-analysis \
-  --extra-envs "EXTRA_SGLANG_ARGS=$BASE_ARGS $ALL_WINNING_FLAGS" \
-               "NUM_PROMPTS=$((CONC < 16 ? CONC : 16))" \
+REPROFILE_PROMPTS=$((CONC < 16 ? CONC : 16))
+cat > "$RESULT_DIR/backend_reprofile_config.yaml" <<EOF
+benchmark:
+  framework: $FRAMEWORK
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: ${FRAMEWORK}_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    NUM_PROMPTS: $REPROFILE_PROMPTS
+    $EXTRA_ARGS_KEY: "$BASE_ARGS $ALL_WINNING_FLAGS"
+  profiler:
+    torch_profiler:
+      enabled: true
+    tracelens:
+      enabled: true
+  gap_analysis:
+    enabled: true
+    top_k: 30
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/backend_reprofile_config.yaml" \
   -o "$RESULT_DIR/backend_reprofile"
 ```
 

@@ -58,12 +58,29 @@ For each parameter, use Magpie to run a short benchmark:
 
 ```bash
 # Example: test --num-continuous-decode-steps 16
-magpie benchmark $FRAMEWORK \
-  -m "$MODEL" --tp $TP --concurrency $CONC \
-  --input-len $ISL --output-len $OSL \
-  --run-mode local --inferencex-path "$INFERENCEX_PATH" \
-  --extra-envs "EXTRA_SGLANG_ARGS=$WINNING_BACKEND_ARGS --num-continuous-decode-steps 16" \
-               "NUM_PROMPTS=$((CONC * 3))" \
+EXTRA_ARGS_KEY="EXTRA_$(echo $FRAMEWORK | tr '[:lower:]' '[:upper:]')_ARGS"
+cat > "$RESULT_DIR/param_decode_steps_16_config.yaml" <<EOF
+benchmark:
+  framework: $FRAMEWORK
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: ${FRAMEWORK}_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    NUM_PROMPTS: $((CONC * 3))
+    $EXTRA_ARGS_KEY: "$WINNING_BACKEND_ARGS --num-continuous-decode-steps 16"
+  profiler:
+    torch_profiler:
+      enabled: false
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/param_decode_steps_16_config.yaml" \
   -o "$RESULT_DIR/param_decode_steps_16"
 
 # Extract result
@@ -84,12 +101,28 @@ Compare output_throughput and TPOT against backend-optimized baseline:
 Test the full combination of all winning backends + all winning params together:
 
 ```bash
-magpie benchmark $FRAMEWORK \
-  -m "$MODEL" --tp $TP --concurrency $CONC \
-  --input-len $ISL --output-len $OSL \
-  --run-mode local --inferencex-path "$INFERENCEX_PATH" \
-  --extra-envs "EXTRA_SGLANG_ARGS=$WINNING_BACKEND_ARGS $ALL_WINNING_PARAMS" \
-               "NUM_PROMPTS=$((CONC * 3))" \
+cat > "$RESULT_DIR/param_combined_config.yaml" <<EOF
+benchmark:
+  framework: $FRAMEWORK
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: ${FRAMEWORK}_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    NUM_PROMPTS: $((CONC * 3))
+    $EXTRA_ARGS_KEY: "$WINNING_BACKEND_ARGS $ALL_WINNING_PARAMS"
+  profiler:
+    torch_profiler:
+      enabled: false
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/param_combined_config.yaml" \
   -o "$RESULT_DIR/param_combined"
 ```
 

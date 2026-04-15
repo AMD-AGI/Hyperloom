@@ -1,5 +1,5 @@
 ---
-name: inference-optimization
+name: inference-optimization-magpie
 description: |
   Autonomous DFS-guided inference optimization for LLM serving on AMD MI355X GPUs.
   Uses heuristic-scored depth-first search to systematically explore optimization actions
@@ -49,7 +49,7 @@ Submit the kernel source **exactly as extracted**. Do NOT strip decorators, chan
 
 ### IR-3: Integration (Phase 8) is MANDATORY
 
-After GEAK returns optimized kernels, you MUST execute the integrate action (patch → re-baseline → decide). Skipping means GEAK results are never validated end-to-end. Re-baseline uses `run_baseline.sh` — there is no `run_benchmark.sh`. See `actions/integrate.md` for details.
+After GEAK returns optimized kernels, you MUST execute the integrate action (patch → re-baseline → decide). Skipping means GEAK results are never validated end-to-end. Re-baseline uses `magpie benchmark --benchmark-config` with the same YAML envs as the original baseline. See `actions/integrate.md` for details.
 
 ### IR-4: Always kill_server + check_gpu_memory before server launch
 
@@ -128,7 +128,7 @@ All values below are the **single source of truth**. All actions reference these
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `MAGPIE_PATH` | `/shared_nfs/xiaofei/Magpie` | Magpie installation path |
+| `MAGPIE_PATH` | `/shared_nfs/Magpie` | Magpie installation path |
 | `MAGPIE_RUN_MODE` | `local` | Benchmark execution mode (local, no Docker) |
 | `MAGPIE_DFS_NUM_PROMPTS_MULTIPLIER` | 3 | NUM_PROMPTS = CONC × this for DFS loop (short runs) |
 | `MAGPIE_BASELINE_NUM_PROMPTS_MULTIPLIER` | 10 | NUM_PROMPTS = CONC × this for baseline (default) |
@@ -136,24 +136,44 @@ All values below are the **single source of truth**. All actions reference these
 
 ## Magpie Integration
 
-All throughput benchmarks and profiling use **Magpie** (`magpie benchmark` CLI) instead of
-raw InferenceX shell scripts. Magpie wraps InferenceX with structured results, built-in
+All throughput benchmarks, profiling, and parameter sweeps use **Magpie** (`magpie benchmark`
+CLI) as the sole execution engine. Magpie wraps InferenceX with structured results, built-in
 TraceLens trace analysis, and gap analysis.
 
 **Prerequisites:**
 ```bash
-pip install -e "$MAGPIE_PATH"  # e.g. /shared_nfs/xiaofei/Magpie
+pip install -e "$MAGPIE_PATH"
 ```
 
-**Key CLI pattern for all benchmarks:**
+**Key pattern for all benchmarks — generate YAML config, then run:**
 ```bash
-magpie benchmark $FRAMEWORK \
-  -m "$MODEL" --tp $TP --concurrency $CONC \
-  --input-len $ISL --output-len $OSL \
-  --run-mode local --inferencex-path "$INFERENCEX_PATH" \
-  --extra-envs "EXTRA_SGLANG_ARGS=..." "NUM_PROMPTS=..." \
-  -o "$RESULT_DIR/<action_name>"
+cat > "$RESULT_DIR/config.yaml" <<EOF
+benchmark:
+  framework: $FRAMEWORK
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: ${FRAMEWORK}_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    EXTRA_SGLANG_ARGS: "..."
+    NUM_PROMPTS: ...
+  profiler:
+    torch_profiler:
+      enabled: false
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/config.yaml" -o "$RESULT_DIR/<action_name>"
 ```
+
+**`benchmark_script`:** Always specify the Magpie-authored script (e.g.,
+`sglang_mi355x.sh`) to ensure `EXTRA_SGLANG_ARGS` / `EXTRA_VLLM_ARGS` are respected.
+Without this field, Magpie may select an InferenceX native script that ignores extra args.
 
 **Results:** Each run produces `benchmark_report.json` in the workspace with structured
 `throughput` (output_throughput, request_throughput, duration_seconds) and `latency`
@@ -162,8 +182,8 @@ magpie benchmark $FRAMEWORK \
 **Server lifecycle:** Magpie launches and kills the server within each benchmark call.
 For accuracy evaluation (GSM8K), start a dedicated server manually (see action docs).
 
-**DFS short runs:** Pass `--extra-envs NUM_PROMPTS=$((CONC * 3))` to reduce benchmark
-duration. Default is `CONC * 10`.
+**DFS short runs:** Set `NUM_PROMPTS: $((CONC * 3))` in the YAML `envs` to reduce
+benchmark duration. Default is `CONC * 10`.
 
 ## Architecture
 
@@ -197,8 +217,8 @@ These are recurring errors observed in production CI runs. **Read before executi
    a valid vLLM flag. Use `--disable-log-stats` for vLLM. Always check `vllm serve --help`
    before using unfamiliar flags. Failure mode: `unrecognized arguments` → server crash.
 
-4. **Use `run_baseline.sh` instead of manual server launch.** The script handles
-   server startup, health wait, benchmark, and profiling in a tested sequence. Manual
+4. **Use `magpie benchmark --benchmark-config` instead of manual server launch.** Magpie
+   handles server startup, health wait, benchmark, and cleanup in a tested sequence. Manual
    launch skips health checks and often hits Exit code 144 (SIGTERM from stale processes).
 
 5. **Never call `geak_set_model_config`.** See IR-7. GEAK LLM backend is pre-configured.

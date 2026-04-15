@@ -10,10 +10,7 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 | `kernel-opt/codex.md` | Deep reference — Codex backend via OOB GPU Optimizer MCP (fast Triton rewrites) |
 | `kernel-opt/claude.md` | Deep reference — Claude Code backend via OOB GPU Optimizer MCP (multi-step, experimental) |
 | `kernel-opt/llm.md` | Deep reference — LLM proxy details, prompt templates, multi-model parallel (fast turnaround) |
-| `scripts/common.sh` | Shared functions — kill_server, wait_for_health, check_benchmark_lib, filter_trace, check_gpu_memory |
-| `scripts/run_baseline.sh` | Baseline benchmark + profiling (single server launch) |
-| `scripts/run_profile.sh` | Profiling run against an already-running server |
-| `scripts/run_sweep.sh` | Parameter sweep (CONC/ISL/OSL grid with server reuse) |
+| `scripts/common.sh` | Shared functions — kill_server, wait_for_health, filter_trace, check_gpu_memory |
 | `README.md` | This file — usage guide |
 
 ### Output directories (on shared NFS)

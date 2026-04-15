@@ -9,16 +9,9 @@
 python3 $SKILL_ROOT/kb/kb_query.py "$MODEL_NAME torch.compile baseline" --top-k 3 --compact
 ```
 
-## Prerequisites
-
-Magpie must be installed in the runtime environment:
-```bash
-pip install -e "$MAGPIE_PATH"  # e.g. /shared_nfs/xiaofei/Magpie
-```
-
 ## Procedure
 
-**Claw mode:** Wrap all commands below with `exec_on_gpu`. See [`../modes/CLAW.md`](../modes/CLAW.md) "Baseline" section for the exact wrapper syntax.
+**Claw mode:** Wrap all `magpie benchmark` commands below with `exec_on_gpu`. See [`../modes/CLAW.md`](../modes/CLAW.md) "Baseline" section for the exact wrapper syntax.
 
 **Try torch.compile first, then fall back if incompatible.**
 
@@ -26,22 +19,52 @@ pip install -e "$MAGPIE_PATH"  # e.g. /shared_nfs/xiaofei/Magpie
 
 **For SGLang:**
 ```bash
-magpie benchmark sglang \
-  -m "$MODEL" --tp $TP --concurrency $CONC \
-  --input-len $ISL --output-len $OSL \
-  --run-mode local --inferencex-path "$INFERENCEX_PATH" \
-  --extra-envs "EXTRA_SGLANG_ARGS=--enable-torch-compile --mem-fraction-static 0.6 --chunked-prefill-size 32768 --max-prefill-tokens 32768" \
-  -o "$RESULT_DIR/baseline_compile"
+cat > "$RESULT_DIR/baseline_compile_config.yaml" <<EOF
+benchmark:
+  framework: sglang
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: sglang_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    EXTRA_SGLANG_ARGS: "--enable-torch-compile --mem-fraction-static 0.6 --chunked-prefill-size 32768 --max-prefill-tokens 32768"
+  profiler:
+    torch_profiler:
+      enabled: false
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/baseline_compile_config.yaml" -o "$RESULT_DIR/baseline_compile"
 ```
 
 **For vLLM (torch.compile enabled by default at level=3):**
 ```bash
-magpie benchmark vllm \
-  -m "$MODEL" --tp $TP --concurrency $CONC \
-  --input-len $ISL --output-len $OSL \
-  --run-mode local --inferencex-path "$INFERENCEX_PATH" \
-  --extra-envs "EXTRA_VLLM_ARGS=--max-model-len 4096" \
-  -o "$RESULT_DIR/baseline_compile"
+cat > "$RESULT_DIR/baseline_compile_config.yaml" <<EOF
+benchmark:
+  framework: vllm
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: vllm_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    EXTRA_VLLM_ARGS: "--max-model-len 4096"
+  profiler:
+    torch_profiler:
+      enabled: false
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/baseline_compile_config.yaml" -o "$RESULT_DIR/baseline_compile"
 ```
 
 **NOTE:** `--mem-fraction-static` is model-dependent. torch.compile needs extra memory — use 0.6 (vs 0.8 without compile).
@@ -58,22 +81,52 @@ Check `$RESULT_DIR/baseline_compile/benchmark_*/benchmark_stderr.log` for error 
 
 **If torch.compile fails (SGLang):**
 ```bash
-magpie benchmark sglang \
-  -m "$MODEL" --tp $TP --concurrency $CONC \
-  --input-len $ISL --output-len $OSL \
-  --run-mode local --inferencex-path "$INFERENCEX_PATH" \
-  --extra-envs "EXTRA_SGLANG_ARGS=--chunked-prefill-size 196608 --max-prefill-tokens 196608 --mem-fraction-static 0.8" \
-  -o "$RESULT_DIR/baseline_eager"
+cat > "$RESULT_DIR/baseline_eager_config.yaml" <<EOF
+benchmark:
+  framework: sglang
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: sglang_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    EXTRA_SGLANG_ARGS: "--chunked-prefill-size 196608 --max-prefill-tokens 196608 --mem-fraction-static 0.8"
+  profiler:
+    torch_profiler:
+      enabled: false
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/baseline_eager_config.yaml" -o "$RESULT_DIR/baseline_eager"
 ```
 
 **If torch.compile fails (vLLM):**
 ```bash
-magpie benchmark vllm \
-  -m "$MODEL" --tp $TP --concurrency $CONC \
-  --input-len $ISL --output-len $OSL \
-  --run-mode local --inferencex-path "$INFERENCEX_PATH" \
-  --extra-envs "EXTRA_VLLM_ARGS=--max-model-len 4096 --enforce-eager" \
-  -o "$RESULT_DIR/baseline_eager"
+cat > "$RESULT_DIR/baseline_eager_config.yaml" <<EOF
+benchmark:
+  framework: vllm
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: vllm_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    EXTRA_VLLM_ARGS: "--max-model-len 4096 --enforce-eager"
+  profiler:
+    torch_profiler:
+      enabled: false
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/baseline_eager_config.yaml" -o "$RESULT_DIR/baseline_eager"
 ```
 
 ### Step 3: Record baseline throughput
@@ -184,5 +237,5 @@ Key mapping to skill state:
 
 ## Failure Handling
 - If server fails to start: check `benchmark_stderr.log`, reduce mem-fraction, try different attention backend
-- If benchmark times out: reduce num_prompts via `--extra-envs NUM_PROMPTS=48`, check server health
+- If benchmark times out: reduce num_prompts by adding `NUM_PROMPTS: 48` to the YAML `envs`, check server health
 - Retry up to 3 times with progressively more conservative settings

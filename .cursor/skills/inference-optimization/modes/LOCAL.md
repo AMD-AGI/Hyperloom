@@ -44,10 +44,10 @@ Violation = immediate run invalidation.
 | Phase | Notes |
 |-------|-------|
 | Setup | No RayJob creation, direct env setup |
-| Baseline/Profile | Direct `bash $SCRIPTS_DIR/run_baseline.sh` |
+| Baseline/Profile | Direct `magpie benchmark` CLI |
 | GEAK | `GEAK_LOCAL=true` → runs as subprocess via GEAK MCP (no SaFE) |
 | Integrate | `patch_inductor.py --target-file` on local Inductor cache |
-| Sweep | Serial via `run_sweep.sh` (no SaFE parallel option) |
+| Sweep | Serial `magpie benchmark` loop (no SaFE parallel option) |
 | Report | No RayJob cleanup needed |
 
 ## GEAK in Local Mode
