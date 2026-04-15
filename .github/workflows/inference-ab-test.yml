@@ -175,6 +175,62 @@ jobs:
           if summary_file:
               with open(summary_file, "a") as f:
                   f.write(report)
+
+          webhook_url = os.environ.get("WEBHOOK_URL")
+          if webhook_url:
+              import requests
+              rows = []
+              for model in models:
+                  ra = a.get(model, {})
+                  rb = b.get(model, {})
+                  a_opt = ra.get("optimized_tok_per_gpu")
+                  b_opt = rb.get("optimized_tok_per_gpu")
+                  a_gain = ra.get("gain_pct")
+                  b_gain = rb.get("gain_pct")
+                  if a_opt is not None and b_opt is not None:
+                      winner = "A (MCP)" if a_opt > b_opt else "B (CLI)" if b_opt > a_opt else "Tie"
+                      diff = abs(a_opt - b_opt)
+                  else:
+                      winner, diff = "N/A", 0
+                  def v(x, s=""): return f"{x:.1f}{s}" if x is not None else "N/A"
+                  rows.append({
+                      "type": "TableRow", "cells": [
+                          {"type": "TableCell", "items": [{"type": "TextBlock", "text": model}]},
+                          {"type": "TableCell", "items": [{"type": "TextBlock", "text": f"{v(a_opt)} ({v(a_gain, '%')})"}]},
+                          {"type": "TableCell", "items": [{"type": "TextBlock", "text": f"{v(b_opt)} ({v(b_gain, '%')})"}]},
+                          {"type": "TableCell", "items": [{"type": "TextBlock", "text": f"{winner} (+{diff:.1f})", "weight": "Bolder",
+                              "color": "Good" if winner != "N/A" else "Default"}]},
+                      ]
+                  })
+              card = {
+                  "type": "message",
+                  "attachments": [{
+                      "contentType": "application/vnd.microsoft.card.adaptive",
+                      "content": {
+                          "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                          "type": "AdaptiveCard", "version": "1.4",
+                          "body": [
+                              {"type": "TextBlock", "weight": "Bolder", "size": "Large",
+                               "text": "A/B Test: TraceLens MCP (A) vs CLI (B)"},
+                              {"type": "TextBlock", "isSubtle": True, "spacing": "None",
+                               "text": f"Tools A: ${{ github.event.inputs.tools_a }} | Tools B: ${{ github.event.inputs.tools_b }}"},
+                              {"type": "Table", "columns": [{"width": 2}, {"width": 2}, {"width": 2}, {"width": 2}],
+                               "rows": [
+                                   {"type": "TableRow", "style": "accent", "cells": [
+                                       {"type": "TableCell", "items": [{"type": "TextBlock", "text": "Model", "weight": "Bolder"}]},
+                                       {"type": "TableCell", "items": [{"type": "TextBlock", "text": "A (MCP)", "weight": "Bolder"}]},
+                                       {"type": "TableCell", "items": [{"type": "TextBlock", "text": "B (CLI)", "weight": "Bolder"}]},
+                                       {"type": "TableCell", "items": [{"type": "TextBlock", "text": "Winner", "weight": "Bolder"}]},
+                                   ]}
+                               ] + rows},
+                          ],
+                      },
+                  }],
+              }
+              try:
+                  requests.post(webhook_url, json=card, timeout=10)
+              except Exception as e:
+                  print(f"Webhook failed: {e}")
           PYEOF
 
       - name: Upload comparison
