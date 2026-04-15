@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+# Ensure `python` is available even if only `python3` exists
+if ! command -v python &>/dev/null && command -v python3 &>/dev/null; then
+    ln -s "$(command -v python3)" /usr/local/bin/python
+fi
+
 LOG_DIR=/var/log/hyperloom
 mkdir -p "$LOG_DIR" "${NFS_BASE_PATH:-/tmp/geak-data}"
 
@@ -142,7 +147,7 @@ CODEX_EOF
         LLM_PATH=$(echo "$ANTHROPIC_BASE_URL" | grep -oP '(?<=://)[^/]+(/.+)' | grep -oP '/.*' || true)
         export AUTH_PROXY_PORT=4002
         export PROXY_AUTH_TOKEN="${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}"
-        python3 /opt/oob-mcp/agent_mcp_server/auth_proxy.py \
+        python /opt/oob-mcp/agent_mcp_server/auth_proxy.py \
           > "$LOG_DIR/oob-auth-proxy.log" 2>&1 &
         AUTH_PROXY_PID=$!
         sleep 1
