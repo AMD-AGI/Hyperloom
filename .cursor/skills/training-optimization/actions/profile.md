@@ -89,7 +89,6 @@ TraceLens is **mandatory** for every profile. Use the TraceLens CLI tools direct
 **Ensure TraceLens CLI is installed:**
 ```bash
 TraceLens_generate_perf_report_pytorch --help >/dev/null 2>&1 || \
-  pip install /hyperloom/TraceLens-internal 2>/dev/null || \
   (cp -r /hyperloom/TraceLens-internal /tmp/TraceLens-internal && pip install -e /tmp/TraceLens-internal)
 ```
 
@@ -173,5 +172,5 @@ if categories["elementwise"] > 5:
 ## Failure Handling
 - If no trace produced: check profile=true was set, check output directory
 - If trace too large: filter using `scripts/common.sh:filter_trace()`
-- TraceLens CLI not installed: run `pip install /hyperloom/TraceLens-internal` (NFS fallback: copy to `/tmp` first)
+- TraceLens CLI not installed: copy to `/tmp` and install (`cp -r /hyperloom/TraceLens-internal /tmp/ && pip install -e /tmp/TraceLens-internal`)
 - TraceLens CLI fails: fall back to manual kernel analysis (Step 3)
