@@ -21,6 +21,14 @@ results:
 notification:
   webhook_env: WEBHOOK_URL                # Slack / Teams Incoming Webhook 均可
 
+pr_submission:
+  repo_url: https://github.com/lishuoshuo-amd/InferenceX.git
+  repo_owner: lishuoshuo-amd
+  repo_name: InferenceX
+  base_branch: main
+  token_env: INFERENCEX_FORK_TOKEN
+  min_gain_pct: 3.0
+
 defaults:
   mode: local
   geak_step_limit: 100
