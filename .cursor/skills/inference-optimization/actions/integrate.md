@@ -151,6 +151,7 @@ benchmark:
     RANDOM_RANGE_RATIO: 0.5
     NUM_PROMPTS: $((CONC * 3))
     $EXTRA_ARGS_KEY: "$TUNED_SERVER_ARGS"
+  timeout_seconds: 3600
   profiler:
     torch_profiler:
       enabled: false

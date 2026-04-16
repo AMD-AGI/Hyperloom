@@ -39,6 +39,7 @@ benchmark:
     OSL: $OSL_VAL
     RANDOM_RANGE_RATIO: 0.5
     $EXTRA_ARGS_KEY: "$WINNING_BACKEND_ARGS $ALL_WINNING_PARAMS"
+  timeout_seconds: 3600
   profiler:
     torch_profiler:
       enabled: false

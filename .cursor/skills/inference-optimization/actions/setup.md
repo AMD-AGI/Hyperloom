@@ -70,8 +70,38 @@ export CONC="$CONC"
 export ISL="${ISL:-1024}"
 export OSL="${OSL:-256}"
 export FRAMEWORK="${FRAMEWORK:-sglang}"
-export INFERENCEX_PATH="$INFERENCEX_PATH"
 export RUNNER_TYPE="$RUNNER_TYPE"
+
+# ── Read-only path mirroring ──────────────────────────────────────────────
+# InferenceX and Magpie may reside on a read-only mount (NFS / container
+# overlay). Copy them to /tmp when not writable so that benchmark scripts
+# can create temp files, logs, and cleanup markers inside the tree.
+_mirror_if_readonly() {
+    local src="$1" dst="$2"
+    [ -z "$src" ] && return 1
+    if touch "$src/.rw_probe" 2>/dev/null; then
+        rm -f "$src/.rw_probe"
+        echo "$src"
+    else
+        if [ ! -d "$dst" ]; then
+            echo "Mirroring $src → $dst (source is read-only)" >&2
+            cp -a "$src" "$dst"
+        fi
+        echo "$dst"
+    fi
+}
+
+INFERENCEX_PATH=$(_mirror_if_readonly "$INFERENCEX_PATH" "/tmp/InferenceX")
+export INFERENCEX_PATH
+
+MAGPIE_PATH="${MAGPIE_PATH:-/shared_nfs/Magpie}"
+MAGPIE_PATH=$(_mirror_if_readonly "$MAGPIE_PATH" "/tmp/Magpie")
+export MAGPIE_PATH
+
+# Install Magpie CLI
+if ! command -v magpie &>/dev/null; then
+    pip install -e "$MAGPIE_PATH" 2>&1 | tail -3
+fi
 ```
 
 Environment variables are set in the YAML config `envs` section and passed via `magpie benchmark --benchmark-config`. Each benchmark call generates its own YAML config file.

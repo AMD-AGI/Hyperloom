@@ -48,35 +48,3 @@ models:
     kernel_opt_backends: claude
     target_gpu: mi355x
 
-  # ── Kimi K2.5 (INT4, TP=8, vLLM) ──
-  - inferenceX_key: kimik2.5-int4-mi355x-vllm
-    inferenceX_api_name: Kimi-K2.5
-    model_path_override: /hyperloom/models/Kimi-K2.5
-    optimization_depth: full
-    kernel_opt_backends: claude
-    target_gpu: mi355x
-
-  # ── MiniMax M2.5 (FP8, TP=8, vLLM) ──
-  - inferenceX_key: minimaxm2.5-fp8-mi355x-vllm
-    inferenceX_api_name: MiniMax-M2.5
-    model_path_override: /hyperloom/models/MiniMaxAI-MiniMax-M2.5
-    optimization_depth: full
-    kernel_opt_backends: claude
-    target_gpu: mi355x
-
-  # ── GLM 5 (FP8, TP=8) ──
-  - inferenceX_key: glm5-fp8-mi355x-sglang
-    inferenceX_api_name: GLM-5
-    model_path_override: /hyperloom/models/zai-org-GLM-5
-    optimization_depth: full
-    kernel_opt_backends: claude
-    target_gpu: mi355x
-
-  # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
-  - inferenceX_key: qwen3.5-bf16-mi355x-sglang
-    inferenceX_api_name: Qwen-3.5-397B-A17B
-    model_path_override: /hyperloom/models/Qwen-Qwen3.5-397B-A17B
-    optimization_depth: full
-    kernel_opt_backends: claude
-    target_gpu: mi355x
-

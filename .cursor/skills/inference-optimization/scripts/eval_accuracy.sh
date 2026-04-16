@@ -25,7 +25,22 @@ MODEL="${MODEL:?MODEL must be set}"
 PORT="${PORT:-8888}"
 EVAL_TASK="${EVAL_TASK:-gsm8k}"
 CONC="${CONC:-32}"
-INFERENCEX_PATH="${INFERENCEX_PATH:-/shared_nfs/nehaprakriya/PRISM/inference_optimization/InferenceX}"
+# Prefer the already-mirrored INFERENCEX_PATH set by setup.md.
+# Fallback to a common NFS location if unset.
+_INFERENCEX_DEFAULT="/shared_nfs/nehaprakriya/PRISM/inference_optimization/InferenceX"
+INFERENCEX_PATH="${INFERENCEX_PATH:-$_INFERENCEX_DEFAULT}"
+
+# Mirror to /tmp when the path is read-only (same logic as setup.md)
+if [ -d "$INFERENCEX_PATH" ] && ! touch "$INFERENCEX_PATH/.rw_probe" 2>/dev/null; then
+    _TMP_IX="/tmp/InferenceX"
+    if [ ! -d "$_TMP_IX" ]; then
+        echo "eval_accuracy: mirroring $INFERENCEX_PATH → $_TMP_IX (read-only source)"
+        cp -a "$INFERENCEX_PATH" "$_TMP_IX"
+    fi
+    INFERENCEX_PATH="$_TMP_IX"
+else
+    rm -f "$INFERENCEX_PATH/.rw_probe" 2>/dev/null
+fi
 RESULTS_DIR="${RESULTS_DIR:-${RESULT_DIR:-.}/eval_${EVAL_TASK}}"
 NUM_FEWSHOT="${NUM_FEWSHOT:-}"
 MAX_GEN_TOKENS="${MAX_GEN_TOKENS:-}"

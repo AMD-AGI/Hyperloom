@@ -128,11 +128,12 @@ All values below are the **single source of truth**. All actions reference these
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `MAGPIE_PATH` | `/shared_nfs/Magpie` | Magpie installation path |
+| `MAGPIE_PATH` | `/shared_nfs/Magpie` | Magpie installation path (auto-mirrored to `/tmp/Magpie` when read-only) |
 | `MAGPIE_RUN_MODE` | `local` | Benchmark execution mode (local, no Docker) |
 | `MAGPIE_DFS_NUM_PROMPTS_MULTIPLIER` | 3 | NUM_PROMPTS = CONC × this for DFS loop (short runs) |
 | `MAGPIE_BASELINE_NUM_PROMPTS_MULTIPLIER` | 10 | NUM_PROMPTS = CONC × this for baseline (default) |
 | `MAGPIE_PROFILE_NUM_PROMPTS` | `min(CONC, 16)` | NUM_PROMPTS for profiling runs (small for trace size) |
+| `MAGPIE_TIMEOUT_S` | 3600 | Bash/YAML timeout for all magpie benchmark calls (must cover server startup) |
 
 ## Magpie Integration
 
@@ -140,9 +141,20 @@ All throughput benchmarks, profiling, and parameter sweeps use **Magpie** (`magp
 CLI) as the sole execution engine. Magpie wraps InferenceX with structured results, built-in
 TraceLens trace analysis, and gap analysis.
 
-**Prerequisites:**
+**Prerequisites — Install Magpie:**
+
+`actions/setup.md` Step 2 automatically mirrors `MAGPIE_PATH` and `INFERENCEX_PATH`
+to `/tmp` when the source is read-only (NFS / container overlay). After setup, both
+variables point to writable copies, so `pip install -e "$MAGPIE_PATH"` and all
+`inferencex_path: $INFERENCEX_PATH` YAML references work without further handling.
+
 ```bash
-pip install -e "$MAGPIE_PATH"
+# Already handled by setup.md _mirror_if_readonly helper.
+# Manual fallback (only if setup was skipped):
+if ! command -v magpie &>/dev/null; then
+    cp -r "$MAGPIE_PATH" /tmp/Magpie 2>/dev/null || true
+    pip install -e /tmp/Magpie 2>&1 | tail -3
+fi
 ```
 
 **Key pattern for all benchmarks — generate YAML config, then run:**
@@ -164,12 +176,17 @@ benchmark:
     RANDOM_RANGE_RATIO: 0.5
     EXTRA_SGLANG_ARGS: "..."
     NUM_PROMPTS: ...
+  timeout_seconds: 3600
   profiler:
     torch_profiler:
       enabled: false
 EOF
 magpie benchmark --benchmark-config "$RESULT_DIR/config.yaml" -o "$RESULT_DIR/<action_name>"
 ```
+
+**CRITICAL — Bash timeout:** Every `magpie benchmark` call includes server startup (up
+to 45 min for large models). Set Bash `timeout` to at least **3600 seconds (1 hour)**.
+Without this, the Claw executor kills the process before the server finishes loading.
 
 **`benchmark_script`:** Always specify the Magpie-authored script (e.g.,
 `sglang_mi355x.sh`) to ensure `EXTRA_SGLANG_ARGS` / `EXTRA_VLLM_ARGS` are respected.

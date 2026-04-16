@@ -35,6 +35,7 @@ benchmark:
     OSL: $OSL
     RANDOM_RANGE_RATIO: 0.5
     EXTRA_SGLANG_ARGS: "--enable-torch-compile --mem-fraction-static 0.6 --chunked-prefill-size 32768 --max-prefill-tokens 32768"
+  timeout_seconds: 3600
   profiler:
     torch_profiler:
       enabled: false
@@ -60,6 +61,7 @@ benchmark:
     OSL: $OSL
     RANDOM_RANGE_RATIO: 0.5
     EXTRA_VLLM_ARGS: "--max-model-len 4096"
+  timeout_seconds: 3600
   profiler:
     torch_profiler:
       enabled: false
@@ -97,6 +99,7 @@ benchmark:
     OSL: $OSL
     RANDOM_RANGE_RATIO: 0.5
     EXTRA_SGLANG_ARGS: "--chunked-prefill-size 196608 --max-prefill-tokens 196608 --mem-fraction-static 0.8"
+  timeout_seconds: 3600
   profiler:
     torch_profiler:
       enabled: false
@@ -122,6 +125,7 @@ benchmark:
     OSL: $OSL
     RANDOM_RANGE_RATIO: 0.5
     EXTRA_VLLM_ARGS: "--max-model-len 4096 --enforce-eager"
+  timeout_seconds: 3600
   profiler:
     torch_profiler:
       enabled: false
