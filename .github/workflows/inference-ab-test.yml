@@ -7,10 +7,18 @@ on:
         description: 'A group: Claw tool IDs (default: current MCP-based)'
         required: false
         default: '22,23'
+      label_a:
+        description: 'A group label (shown in comparison table)'
+        required: false
+        default: 'MCP TraceLens'
       tools_b:
         description: 'B group: Claw tool IDs (default: CLI-based)'
         required: false
         default: '24,25'
+      label_b:
+        description: 'B group label (shown in comparison table)'
+        required: false
+        default: 'CLI TraceLens'
       models:
         description: 'Comma-separated model keys (empty = all from ci-config.yaml)'
         required: false
@@ -137,12 +145,18 @@ jobs:
           b = load_summary("B")
           models = sorted(set(list(a.keys()) + list(b.keys())))
 
+          label_a = "${{ github.event.inputs.label_a }}" or "A"
+          label_b = "${{ github.event.inputs.label_b }}" or "B"
+          tools_a = "${{ github.event.inputs.tools_a }}"
+          tools_b = "${{ github.event.inputs.tools_b }}"
+
           lines = []
-          lines.append("## A/B Test Results: TraceLens MCP (A) vs CLI (B)\n")
-          lines.append(f"- **Group A tools**: `${{ github.event.inputs.tools_a }}`")
-          lines.append(f"- **Group B tools**: `${{ github.event.inputs.tools_b }}`\n")
-          lines.append("| Model | A Baseline | A Optimized | A Gain | B Baseline | B Optimized | B Gain | Winner |")
-          lines.append("|-------|-----------|-------------|--------|-----------|-------------|--------|--------|")
+          lines.append(f"## A/B Test: {label_a} vs {label_b}\n")
+          lines.append(f"| | A: {label_a} | B: {label_b} |")
+          lines.append("|---|---|---|")
+          lines.append(f"| **Config** | tools: `{tools_a}` | tools: `{tools_b}` |\n")
+          lines.append(f"| Model | A Optimized (Gain) | B Optimized (Gain) | Winner |")
+          lines.append("|-------|--------------------|--------------------|---------")
 
           for model in models:
               ra = a.get(model, {})
@@ -162,7 +176,7 @@ jobs:
               else:
                   winner = "N/A"
 
-              lines.append(f"| {model} | {fmt(a_bl)} | {fmt(a_opt)} | {fmt(a_gain, '%')} | {fmt(b_bl)} | {fmt(b_opt)} | {fmt(b_gain, '%')} | {winner} |")
+              lines.append(f"| {model} | {fmt(a_opt)} ({fmt(a_gain, '%')}) | {fmt(b_opt)} ({fmt(b_gain, '%')}) | {winner} |")
 
           report = "\n".join(lines)
           print(report)
@@ -211,15 +225,15 @@ jobs:
                           "type": "AdaptiveCard", "version": "1.4",
                           "body": [
                               {"type": "TextBlock", "weight": "Bolder", "size": "Large",
-                               "text": "A/B Test: TraceLens MCP (A) vs CLI (B)"},
+                               "text": f"A/B Test: {label_a} vs {label_b}"},
                               {"type": "TextBlock", "isSubtle": True, "spacing": "None",
-                               "text": f"Tools A: ${{ github.event.inputs.tools_a }} | Tools B: ${{ github.event.inputs.tools_b }}"},
+                               "text": f"A: tools {tools_a} | B: tools {tools_b}"},
                               {"type": "Table", "columns": [{"width": 2}, {"width": 2}, {"width": 2}, {"width": 2}],
                                "rows": [
                                    {"type": "TableRow", "style": "accent", "cells": [
                                        {"type": "TableCell", "items": [{"type": "TextBlock", "text": "Model", "weight": "Bolder"}]},
-                                       {"type": "TableCell", "items": [{"type": "TextBlock", "text": "A (MCP)", "weight": "Bolder"}]},
-                                       {"type": "TableCell", "items": [{"type": "TextBlock", "text": "B (CLI)", "weight": "Bolder"}]},
+                                       {"type": "TableCell", "items": [{"type": "TextBlock", "text": f"A: {label_a}", "weight": "Bolder"}]},
+                                       {"type": "TableCell", "items": [{"type": "TextBlock", "text": f"B: {label_b}", "weight": "Bolder"}]},
                                        {"type": "TableCell", "items": [{"type": "TextBlock", "text": "Winner", "weight": "Bolder"}]},
                                    ]}
                                ] + rows},
