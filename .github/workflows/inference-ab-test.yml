@@ -130,7 +130,7 @@ jobs:
   compare:
     name: "Compare A vs B"
     needs: [group-a, group-b]
-    if: always()
+    if: always() && github.event.inputs.mode != 'single'
     runs-on: hyperloom-qn7cd
     steps:
       - uses: actions/download-artifact@v4
