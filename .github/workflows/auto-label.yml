@@ -94,14 +94,14 @@ jobs:
         run: |
           BODY_TRUNCATED=$(echo "$ISSUE_BODY" | head -c 3000)
 
-          RESPONSE=$(curl -s https://models.inference.ai.azure.com/chat/completions \
+          RESPONSE=$(curl -s https://models.github.ai/inference/chat/completions \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -d "$(jq -n \
               --arg title "$ISSUE_TITLE" \
               --arg body "$BODY_TRUNCATED" \
               '{
-                model: "gpt-4o-mini",
+                model: "openai/gpt-4o-mini",
                 messages: [{
                   role: "user",
                   content: ("You are a GitHub issue classifier for Hyperloom, an AI-powered performance optimization platform for AMD GPUs.\n\nAnalyze this issue and return ONLY a JSON object (no markdown fences):\n- \"type\": one of \"type:bug\", \"type:feature\", \"type:question\", \"type:task\", \"type:docs\"\n- \"domains\": array from [\"domain:inference\", \"domain:training\", \"domain:mcp\", \"domain:ui\"], can be empty\n\nIssue title: " + $title + "\n\nIssue body:\n" + $body)
