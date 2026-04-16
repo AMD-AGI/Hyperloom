@@ -130,12 +130,48 @@ jobs:
   compare:
     name: "Compare A vs B"
     needs: [group-a, group-b]
-    if: always() && github.event.inputs.mode != 'single'
+    if: always()
     runs-on: hyperloom-qn7cd
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Fetch last CI run as group A (single mode)
+        if: github.event.inputs.mode == 'single'
+        run: |
+          pip3 install -q requests 2>/dev/null || true
+          python3 - <<'FETCH_A'
+          import requests, json, os, zipfile, io
+          token = os.environ.get("GITHUB_TOKEN", "")
+          api_key = os.environ.get("CLAW_API_KEY", "")
+          headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+          runs = requests.get(
+              "https://api.github.com/repos/AMD-AGI/Hyperloom/actions/workflows/inference-optimization-ci.yml/runs?per_page=10&status=completed",
+              headers=headers).json()
+          success_run = next((r for r in runs.get("workflow_runs", []) if r["conclusion"] == "success"), None)
+          if not success_run:
+              print("No successful CI run found, skipping A data")
+              exit(0)
+          print(f"Using CI run {success_run['id']} from {success_run['created_at']} as group A")
+          artifacts = requests.get(
+              f"https://api.github.com/repos/AMD-AGI/Hyperloom/actions/runs/{success_run['id']}/artifacts",
+              headers=headers).json()
+          for art in artifacts.get("artifacts", []):
+              if not art["name"].startswith("report-"):
+                  continue
+              model_key = art["name"].replace("report-", "")
+              out_dir = f"artifacts/A-{model_key}"
+              os.makedirs(out_dir, exist_ok=True)
+              dl = requests.get(
+                  f"https://api.github.com/repos/AMD-AGI/Hyperloom/actions/artifacts/{art['id']}/zip",
+                  headers=headers)
+              with zipfile.ZipFile(io.BytesIO(dl.content)) as zf:
+                  zf.extractall(out_dir)
+              print(f"  Downloaded {art['name']} -> {out_dir}")
+          FETCH_A
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate comparison
         run: |
@@ -212,7 +248,8 @@ jobs:
           b = load_summary("B")
           models = sorted(set(list(a.keys()) + list(b.keys())))
 
-          label_a = "${{ github.event.inputs.label_a }}" or "A"
+          mode = "${{ github.event.inputs.mode }}" or "ab"
+          label_a = "Last CI (baseline)" if mode == "single" else ("${{ github.event.inputs.label_a }}" or "A")
           label_b = "${{ github.event.inputs.label_b }}" or "B"
           tools_a = "${{ github.event.inputs.tools_a }}"
           tools_b = "${{ github.event.inputs.tools_b }}"
