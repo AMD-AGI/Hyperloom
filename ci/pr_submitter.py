@@ -87,105 +87,147 @@ def _llm_extract_changes(report_content: str, api_key: str) -> dict:
         return {}
 
 
-# ── Diff-based extraction (primary, no LLM cost) ──
-
-_SERVER_CMD_RE = re.compile(
-    r"```(?:bash)?\s*\n((?:export\s+\S+=\S+\n)*"
-    r"(?:python3?\s+-m\s+\S+\.launch_server|vllm\s+serve)\b.*?)\n```",
-    re.DOTALL,
-)
+# ── Multi-format extraction (handles real CI report formats) ──
 
 
-def _parse_server_block(block: str) -> tuple[dict[str, str], dict[str, str]]:
-    """Parse a server launch block into (env_vars, flags)."""
+def _parse_flags_string(s: str) -> dict[str, str]:
+    """Parse '--flag1 val1 --flag2 val2 ...' into a dict."""
+    flags: dict[str, str] = {}
+    try:
+        tokens = shlex.split(s.replace("\\\n", " "), posix=True)
+    except ValueError:
+        tokens = s.replace("\\\n", " ").split()
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("--"):
+            if "=" in tok:
+                k, v = tok.split("=", 1)
+                flags[k] = v
+            elif i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+                flags[tok] = tokens[i + 1]
+                i += 1
+            else:
+                flags[tok] = ""
+        elif tok.startswith("-") and "." in tok:
+            flags[tok] = ""
+        i += 1
+    return flags
+
+
+def _extract_optimized_flags(report: str) -> dict[str, str]:
+    """Extract the final/optimized flag set from the report.
+
+    Supports: EXTRA_SGLANG_ARGS="...", EXTRA_VLLM_ARGS in YAML,
+    and full bash blocks with launch_server/vllm serve.
+    """
+    m = re.search(r'EXTRA_SGLANG_ARGS="([^"]+)"', report)
+    if m:
+        log.debug("Extracted flags from EXTRA_SGLANG_ARGS")
+        return _parse_flags_string(m.group(1))
+
+    m = re.search(
+        r"EXTRA_VLLM_ARGS:\s*>-?\s*\n((?:\s+.*\n)+)",
+        report,
+    )
+    if m:
+        args_text = " ".join(line.strip() for line in m.group(1).splitlines() if line.strip())
+        log.debug("Extracted flags from EXTRA_VLLM_ARGS YAML")
+        return _parse_flags_string(args_text)
+
+    cmd_re = re.compile(
+        r"```(?:bash)?\s*\n((?:export\s+\S+=\S+\n)*"
+        r"(?:python3?\s+-m\s+\S+\.launch_server|vllm\s+serve)\b.*?)\n```",
+        re.DOTALL,
+    )
+    blocks = cmd_re.findall(report)
+    if blocks:
+        block = blocks[-1].replace("\\\n", " ")
+        log.debug("Extracted flags from bash launch command")
+        return _parse_flags_string(block)
+
+    return {}
+
+
+def _parse_script_flags(script_content: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Extract env vars and server flags from an InferenceX .sh script."""
     env_vars: dict[str, str] = {}
     flags: dict[str, str] = {}
 
-    joined = block.replace("\\\n", " ")
-    for line in joined.splitlines():
-        line = line.strip()
-        m = re.match(r"export\s+(\w+)=(.+)", line)
-        if m:
-            env_vars[m.group(1)] = m.group(2).strip().strip("'\"")
-            continue
-        if not line or line.startswith("#"):
-            continue
-        tokens = shlex.split(line, posix=True)
-        i = 0
-        while i < len(tokens):
-            tok = tokens[i]
-            if tok.startswith("--"):
-                if "=" in tok:
-                    k, v = tok.split("=", 1)
-                    flags[k] = v
-                elif i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
-                    flags[tok] = tokens[i + 1]
-                    i += 1
-                else:
-                    flags[tok] = ""
-            i += 1
+    for m in re.finditer(r"^export\s+(\w+)=(\S+)", script_content, re.MULTILINE):
+        env_vars[m.group(1)] = m.group(2).strip("'\"")
+
+    joined = script_content.replace("\\\n", " ")
+    launch_m = re.search(
+        r"(python3?\s+-m\s+\S+\.launch_server|vllm\s+serve)\s+(.*?)(?:>|$)",
+        joined, re.DOTALL,
+    )
+    if launch_m:
+        cmd_part = launch_m.group(2)
+        cmd_part = re.sub(r'\$\{?\w+\}?', '__VAR__', cmd_part)
+        flags = _parse_flags_string(cmd_part)
+
+    for m_var in re.finditer(r'^(\w+)="([^"]*)"', script_content, re.MULTILINE):
+        vname, vval = m_var.group(1), m_var.group(2)
+        if vname in ("ATTN_BACKEND", "FUSE_ROPE_KVCACHE"):
+            flags.update(_parse_flags_string(vval))
+
     return env_vars, flags
 
 
-def _diff_server_commands(report: str) -> dict:
-    """Extract changes by diffing baseline vs optimized server commands."""
-    blocks = _SERVER_CMD_RE.findall(report)
-    if len(blocks) < 2:
-        return {}
+def _diff_flags(baseline: dict[str, str],
+                optimized: dict[str, str]) -> list[dict]:
+    """Compare two flag dicts, return add/modify changes only.
 
-    baseline_env, baseline_flags = _parse_server_block(blocks[0])
-    opt_env, opt_flags = _parse_server_block(blocks[-1])
-
-    flag_changes = []
-    for flag, new_val in opt_flags.items():
-        old_val = baseline_flags.get(flag)
-        if old_val is None:
-            flag_changes.append({"flag": flag, "value": new_val, "action": "add"})
-        elif old_val != new_val:
-            flag_changes.append({"flag": flag, "old_value": old_val,
-                                 "new_value": new_val, "action": "modify"})
-    for flag in baseline_flags:
-        if flag not in opt_flags:
-            flag_changes.append({"flag": flag, "action": "remove"})
-
-    env_changes = []
-    for var, val in opt_env.items():
-        if var not in baseline_env:
-            env_changes.append({"var": var, "value": val, "action": "add"})
-        elif baseline_env[var] != val:
-            env_changes.append({"var": var, "old_value": baseline_env[var],
-                                "new_value": val, "action": "modify"})
-    for var in baseline_env:
-        if var not in opt_env:
-            env_changes.append({"var": var, "action": "remove"})
-
-    if not flag_changes and not env_changes:
-        return {}
-
-    return {
-        "flag_changes": flag_changes,
-        "env_var_changes": env_changes,
-        "baseline_command": blocks[0],
-        "optimized_command": blocks[-1],
-    }
-
-
-def extract_changes(report_content: str, api_key: str | None = None) -> dict:
-    """Extract config changes from an optimization report.
-
-    Tries diff-based extraction first; falls back to LLM if diff yields nothing.
+    Does not generate 'remove' actions because EXTRA_*_ARGS in reports
+    only contain the subset of flags, not the full command.
     """
-    result = _diff_server_commands(report_content)
-    if result and (result.get("flag_changes") or result.get("env_var_changes")):
-        log.info("Extracted changes via command diff")
-        return result
+    changes = []
+    skip = {"--model-path", "--model", "--host", "--port",
+            "--tensor-parallel-size", "--trust-remote-code"}
+    for flag, new_val in optimized.items():
+        if flag in skip:
+            continue
+        old_val = baseline.get(flag)
+        if old_val is None:
+            changes.append({"flag": flag, "value": new_val, "action": "add"})
+        elif old_val != new_val and old_val != "__VAR__":
+            changes.append({"flag": flag, "old_value": old_val,
+                            "new_value": new_val, "action": "modify"})
+    return changes
 
-    if api_key:
-        log.info("Diff extraction empty, trying LLM fallback")
-        return _llm_extract_changes(report_content, api_key)
 
-    log.warning("No changes extracted (no diff, no LLM key)")
-    return {}
+def extract_changes_vs_script(report_content: str,
+                              script_content: str | None,
+                              api_key: str | None = None) -> dict:
+    """Extract config changes by comparing report's optimized config vs script.
+
+    Primary: parse report final config + diff against InferenceX script.
+    Fallback: LLM-based extraction.
+    """
+    opt_flags = _extract_optimized_flags(report_content)
+    if not opt_flags:
+        if api_key:
+            log.info("No optimized flags found, trying LLM fallback")
+            return _llm_extract_changes(report_content, api_key)
+        log.warning("No optimized flags extracted from report")
+        return {}
+
+    if script_content:
+        _script_env, script_flags = _parse_script_flags(script_content)
+        flag_changes = _diff_flags(script_flags, opt_flags)
+    else:
+        flag_changes = [{"flag": f, "value": v, "action": "add"}
+                        for f, v in opt_flags.items()
+                        if f not in ("--model-path", "--host", "--port",
+                                     "--tensor-parallel-size", "--trust-remote-code")]
+
+    if not flag_changes:
+        log.info("No flag differences found between report and script")
+        return {}
+
+    log.info("Extracted %d flag change(s) vs InferenceX script", len(flag_changes))
+    return {"flag_changes": flag_changes, "env_var_changes": []}
 
 
 # ── Benchmark script modification ──
@@ -200,19 +242,29 @@ def _apply_flag_to_script(content: str, flag: str, value: str | None,
         if pattern.search(content):
             return pattern.sub(rf"\g<1>{value}", content)
 
-    if action == "add" and value is not None:
+    if action == "add":
         flag_str = f"{flag} {value}" if value else flag
-        m = re.search(
-            r"(python3?\s+-m\s+\S+\.launch_server\b.*?)(>.*$|\n)",
-            content, re.DOTALL,
-        )
-        if m:
-            insert_pos = m.end(1)
-            indent = " " * 4
-            content = (content[:insert_pos] +
-                       f" \\\n{indent}{flag_str}" +
-                       content[insert_pos:])
-            return content
+        lines = content.split("\n")
+        cmd_start = cmd_end = -1
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if re.match(r"(?:python3?\s+-m\s+\S+\.launch_server|vllm\s+serve)\b", stripped):
+                cmd_start = i
+            if cmd_start >= 0 and i >= cmd_start and not stripped.endswith("\\"):
+                cmd_end = i
+                break
+        if cmd_start >= 0 and cmd_end >= 0:
+            indent = "    "
+            for j in range(cmd_start + 1, cmd_end + 1):
+                m_indent = re.match(r"^(\s+)", lines[j])
+                if m_indent:
+                    indent = m_indent.group(1)
+                    break
+            prev = cmd_end - 1 if cmd_end > cmd_start else cmd_start
+            if not lines[prev].rstrip().endswith("\\"):
+                lines[prev] = lines[prev].rstrip() + " \\"
+            lines.insert(cmd_end, f"{indent}{flag_str} \\")
+            return "\n".join(lines)
 
     if action == "remove":
         pattern = re.compile(
@@ -473,16 +525,27 @@ def _find_script_in_repo(repo_dir: Path, ifx_key: str,
     return None
 
 
+def _load_report(model_result: dict, reports_dir: Path) -> str:
+    """Load report content from inline data or file."""
+    content = model_result.get("report_content", "")
+    if content:
+        return content
+    model_name = model_result.get("model", "")
+    report_path = reports_dir / model_name / "optimization_report.md"
+    if report_path.exists():
+        return report_path.read_text()
+    return ""
+
+
 def process_results(
     ci_summary: dict,
     reports_dir: Path,
     config: dict,
     dry_run: bool = False,
 ) -> list[dict]:
-    """Process CI results and return models eligible for PR submission."""
+    """Filter CI results by gain threshold; return candidates for PR."""
     pr_cfg = config.get("pr_submission", {})
     min_gain = pr_cfg.get("min_gain_pct", 3.0)
-    api_key = os.environ.get("LLM_API_KEY")
 
     eligible = []
     for model_result in ci_summary.get("models", []):
@@ -498,30 +561,16 @@ def process_results(
                      gain or 0, min_gain)
             continue
 
-        report_content = model_result.get("report_content", "")
-        if not report_content:
-            model_name = model_result.get("model", "")
-            report_path = reports_dir / model_name / "optimization_report.md"
-            if report_path.exists():
-                report_content = report_path.read_text()
-
+        report_content = _load_report(model_result, reports_dir)
         if not report_content:
             log.warning("No report for %s, skipping", model_result.get("model"))
             continue
 
-        changes = extract_changes(report_content, api_key)
-        if not changes or (not changes.get("flag_changes") and
-                           not changes.get("env_var_changes")):
-            log.info("No config changes found for %s", model_result.get("model"))
-            continue
-
-        model_result["_changes"] = changes
+        model_result["_report"] = report_content
         eligible.append(model_result)
-        log.info("Eligible: %s (gain=%.1f%%, vs_ifx=%s, %d flag changes, %d env changes)",
+        log.info("Candidate: %s (gain=%.1f%%, vs_ifx=%s)",
                  model_result["inferenceX_key"], gain,
-                 f"{vs_ifx:+.1f}%" if vs_ifx is not None else "N/A",
-                 len(changes.get("flag_changes", [])),
-                 len(changes.get("env_var_changes", [])))
+                 f"{vs_ifx:+.1f}%" if vs_ifx is not None else "N/A")
 
     return eligible
 
@@ -546,52 +595,70 @@ def submit_pr(
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
     branch_name = f"hyperloom/ci-{ts}"
 
-    config_keys = [m["inferenceX_key"] for m in eligible]
-    descriptions = []
-    for m in eligible:
-        key = m["inferenceX_key"]
-        gain = m.get("gain_pct", 0)
-        changes = m.get("_changes", {})
-        desc_parts = []
-        for fc in changes.get("flag_changes", []):
-            if fc["action"] == "modify":
-                desc_parts.append(f"{fc['flag']}: {fc.get('old_value')} → {fc.get('new_value')}")
-            elif fc["action"] == "add":
-                desc_parts.append(f"Add {fc['flag']} {fc.get('value', '')}")
-        for ec in changes.get("env_var_changes", []):
-            if ec["action"] == "add":
-                desc_parts.append(f"Add {ec['var']}={ec.get('value', '')}")
-        summary = "; ".join(desc_parts) if desc_parts else f"+{gain:.1f}% optimization"
-        descriptions.append(f"{key}: {summary}")
-
-    title_models = ", ".join(config_keys)
-    if len(title_models) > 60:
-        title_models = f"{len(config_keys)} AMD models"
-    pr_title = f"[Hyperloom] Optimize {title_models}"
-
-    if dry_run:
-        log.info("=== DRY RUN ===")
-        log.info("Branch: %s", branch_name)
-        log.info("Title: %s", pr_title)
-        log.info("Config keys: %s", config_keys)
-        for d in descriptions:
-            log.info("  - %s", d)
-        log.info("PR body preview:\n%s", _generate_pr_body(eligible)[:500])
-        return
-
     with tempfile.TemporaryDirectory() as tmpdir:
         log.info("Cloning %s...", repo_url)
         clone_fork(repo_url, tmpdir, base_branch)
         create_pr_branch(tmpdir, branch_name)
 
+        api_key = os.environ.get("LLM_API_KEY")
         any_changed = False
+        actually_eligible = []
         for m in eligible:
             key = m["inferenceX_key"]
             script_path = _find_script_in_repo(Path(tmpdir), key, scripts_path)
-            changes = m.get("_changes", {})
+            report_content = m.get("_report", "")
+
+            script_content = script_path.read_text() if script_path else None
+            changes = extract_changes_vs_script(report_content, script_content, api_key)
+            if not changes or not changes.get("flag_changes"):
+                log.info("No actionable changes for %s, skipping", key)
+                continue
+
+            m["_changes"] = changes
+            actually_eligible.append(m)
+            log.info("Eligible: %s (%d flag changes)",
+                     key, len(changes.get("flag_changes", [])))
 
             if script_path and apply_changes_to_script(script_path, changes):
                 any_changed = True
+
+        eligible = actually_eligible
+        if not eligible:
+            log.info("No models with actionable changes after extraction")
+            return
+
+        config_keys = [m["inferenceX_key"] for m in eligible]
+        descriptions = []
+        for m in eligible:
+            key = m["inferenceX_key"]
+            gain = m.get("gain_pct", 0)
+            changes = m.get("_changes", {})
+            desc_parts = []
+            for fc in changes.get("flag_changes", []):
+                if fc["action"] == "modify":
+                    desc_parts.append(f"{fc['flag']}: {fc.get('old_value')} → {fc.get('new_value')}")
+                elif fc["action"] == "add":
+                    desc_parts.append(f"Add {fc['flag']} {fc.get('value', '')}")
+            for ec in changes.get("env_var_changes", []):
+                if ec["action"] == "add":
+                    desc_parts.append(f"Add {ec['var']}={ec.get('value', '')}")
+            summary = "; ".join(desc_parts) if desc_parts else f"+{gain:.1f}% optimization"
+            descriptions.append(f"{key}: {summary}")
+
+        title_models = ", ".join(config_keys)
+        if len(title_models) > 60:
+            title_models = f"{len(config_keys)} AMD models"
+        pr_title = f"[AMD/Hyperloom] Optimize {title_models}"
+
+        if dry_run:
+            log.info("=== DRY RUN ===")
+            log.info("Branch: %s", branch_name)
+            log.info("Title: %s", pr_title)
+            log.info("Config keys: %s", config_keys)
+            for d in descriptions:
+                log.info("  - %s", d)
+            log.info("PR body preview:\n%s", _generate_pr_body(eligible)[:800])
+            return
 
         changelog_path = Path(tmpdir) / "perf-changelog.yaml"
         append_perf_changelog(changelog_path, config_keys, descriptions)
