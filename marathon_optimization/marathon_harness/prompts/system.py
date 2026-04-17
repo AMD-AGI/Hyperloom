@@ -21,6 +21,29 @@ BENCHMARK INTEGRITY — the orchestrator is the ONLY benchmark authority:
   the server with the correct config and run a controlled benchmark.
 """
 
+# Hard-enforcement blocklist: these patterns are checked at the Claw session
+# level to reject bash commands before they execute.  Prompt-based constraints
+# are necessary but not sufficient — the LLM can and does ignore them.
+BLOCKED_BASH_COMMANDS = [
+    "vllm serve",
+    "vllm.entrypoints",
+    "sglang.launch_server",
+    "sglang.srt",
+    "python -m vllm",
+    "python3 -m vllm",
+    "benchmark_serving.py",
+    "bench_serving",
+    "pkill -f vllm",
+    "pkill -f sglang",
+    "pkill -9",
+    "kill -9",
+    "fuser -k /dev/dri",
+    "serve_tp1.sh",
+    "serve_tp2.sh",
+    "serve_tp4.sh",
+    "serve_tp8.sh",
+]
+
 MANDATORY_CONSTRAINTS = """\
 MANDATORY CONSTRAINTS (must appear in every kernel optimization):
 - Function name EXACTLY matches the original
