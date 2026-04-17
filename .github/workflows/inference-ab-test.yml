@@ -7,10 +7,26 @@ on:
         description: 'A group: Claw tool IDs (default: current MCP-based)'
         required: false
         default: '22,23'
+      label_a:
+        description: 'A group label (shown in comparison table)'
+        required: false
+        default: 'MCP TraceLens'
       tools_b:
         description: 'B group: Claw tool IDs (default: CLI-based)'
         required: false
         default: '24,25'
+      label_b:
+        description: 'B group label (shown in comparison table)'
+        required: false
+        default: 'CLI TraceLens'
+      mode:
+        description: 'ab = run both A and B, single = run B only (cheaper)'
+        required: false
+        default: 'ab'
+        type: choice
+        options:
+          - ab
+          - single
       models:
         description: 'Comma-separated model keys (empty = all from ci-config.yaml)'
         required: false
@@ -45,6 +61,7 @@ jobs:
   group-a:
     name: "A: ${{ matrix.key }}"
     needs: prepare
+    if: github.event.inputs.mode != 'single'
     runs-on: hyperloom-qn7cd
     timeout-minutes: 510
     strategy:
@@ -114,16 +131,53 @@ jobs:
     name: "Compare A vs B"
     needs: [group-a, group-b]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: hyperloom-qn7cd
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
+      - name: Fetch last CI run as group A (single mode)
+        if: github.event.inputs.mode == 'single'
+        run: |
+          pip3 install -q requests 2>/dev/null || true
+          python3 - <<'FETCH_A'
+          import requests, json, os, zipfile, io
+          token = os.environ.get("GITHUB_TOKEN", "")
+          api_key = os.environ.get("CLAW_API_KEY", "")
+          headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+          runs = requests.get(
+              "https://api.github.com/repos/AMD-AGI/Hyperloom/actions/workflows/inference-optimization-ci.yml/runs?per_page=10&status=completed",
+              headers=headers).json()
+          success_run = next((r for r in runs.get("workflow_runs", []) if r["conclusion"] == "success"), None)
+          if not success_run:
+              print("No successful CI run found, skipping A data")
+              exit(0)
+          print(f"Using CI run {success_run['id']} from {success_run['created_at']} as group A")
+          artifacts = requests.get(
+              f"https://api.github.com/repos/AMD-AGI/Hyperloom/actions/runs/{success_run['id']}/artifacts",
+              headers=headers).json()
+          for art in artifacts.get("artifacts", []):
+              if not art["name"].startswith("report-"):
+                  continue
+              model_key = art["name"].replace("report-", "")
+              out_dir = f"artifacts/A-{model_key}"
+              os.makedirs(out_dir, exist_ok=True)
+              dl = requests.get(
+                  f"https://api.github.com/repos/AMD-AGI/Hyperloom/actions/artifacts/{art['id']}/zip",
+                  headers=headers)
+              with zipfile.ZipFile(io.BytesIO(dl.content)) as zf:
+                  zf.extractall(out_dir)
+              print(f"  Downloaded {art['name']} -> {out_dir}")
+          FETCH_A
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Generate comparison
         run: |
+          pip3 install -q requests 2>/dev/null || true
           python3 - <<'PYEOF'
-          import json, os, glob
+          import json, os, glob, ssl, urllib.request
 
           def load_summary(prefix):
               results = {}
@@ -133,48 +187,176 @@ jobs:
                       results[m["model"]] = m
               return results
 
+          def fetch_tool_configs(tool_ids_str):
+              api_key = os.environ.get("CLAW_API_KEY", "")
+              api_url = "https://oci-slc.example-internal-host.invalid/api/tools/api/v1/tools?offset=0&limit=100&order=desc"
+              ctx = ssl.create_default_context()
+              ctx.check_hostname = False
+              ctx.verify_mode = ssl.CERT_NONE
+              req = urllib.request.Request(api_url, headers={"Authorization": f"Bearer {api_key}"})
+              with urllib.request.urlopen(req, context=ctx) as resp:
+                  data = json.loads(resp.read())
+              all_tools = {t["id"]: t for t in data.get("tools", [])}
+              tool_ids = [int(x.strip()) for x in tool_ids_str.split(",")]
+              servers = {}
+              skill_name = None
+              for tid in tool_ids:
+                  t = all_tools.get(tid)
+                  if not t: continue
+                  if t["type"] == "mcp":
+                      for name, cfg in (t.get("config", {}).get("mcpServers", {})).items():
+                          servers[cfg.get("url", "")] = name
+                  elif t["type"] == "skill":
+                      skill_name = t["name"]
+              return servers, skill_name
+
+          def build_config_diff(tools_a_str, tools_b_str, label_a, label_b):
+              try:
+                  a_urls, a_skill = fetch_tool_configs(tools_a_str)
+                  b_urls, b_skill = fetch_tool_configs(tools_b_str)
+              except Exception as e:
+                  print(f"API fetch failed, using labels only: {e}")
+                  return [], f"A: {label_a} (tools {tools_a_str}) | B: {label_b} (tools {tools_b_str})"
+
+              all_urls = sorted(set(list(a_urls.keys()) + list(b_urls.keys())))
+              diff_rows = []
+              diff_items = []
+              for url in all_urls:
+                  a_name = a_urls.get(url)
+                  b_name = b_urls.get(url)
+                  label = (a_name or b_name or "").replace("oci-", "").replace("-agent", "").replace("agent-mcp-", "").upper()
+                  if a_name and b_name:
+                      diff_rows.append((label, "Same", "Same", False))
+                  elif a_name:
+                      diff_rows.append((label, "Remote MCP", "N/A", True))
+                      diff_items.append(f"{label}: A=MCP, B=N/A")
+                  elif b_name:
+                      diff_rows.append((label, "N/A", "Remote MCP", True))
+                      diff_items.append(f"{label}: A=N/A, B=MCP")
+
+              if a_skill != b_skill:
+                  a_short = (a_skill or "").replace("inference-optimization-", "")
+                  b_short = (b_skill or "").replace("inference-optimization-", "")
+                  diff_rows.append(("Skill", a_short, b_short, True))
+              else:
+                  diff_rows.append(("Skill", "Same", "Same", False))
+
+              subtitle = " | ".join(diff_items) if diff_items else f"tools {tools_a_str} vs {tools_b_str}"
+              return diff_rows, subtitle
+
           a = load_summary("A")
           b = load_summary("B")
           models = sorted(set(list(a.keys()) + list(b.keys())))
 
+          mode = "${{ github.event.inputs.mode }}" or "ab"
+          label_a = "Last CI (baseline)" if mode == "single" else ("${{ github.event.inputs.label_a }}" or "A")
+          label_b = "${{ github.event.inputs.label_b }}" or "B"
+          tools_a = "${{ github.event.inputs.tools_a }}"
+          tools_b = "${{ github.event.inputs.tools_b }}"
+
+          config_diff, subtitle = build_config_diff(tools_a, tools_b, label_a, label_b)
+
+          def fmt(v, suffix=""): return f"{v:.1f}{suffix}" if v is not None else "N/A"
+
           lines = []
-          lines.append("## A/B Test Results: TraceLens MCP (A) vs CLI (B)\n")
-          lines.append(f"- **Group A tools**: `${{ github.event.inputs.tools_a }}`")
-          lines.append(f"- **Group B tools**: `${{ github.event.inputs.tools_b }}`\n")
-          lines.append("| Model | A Baseline | A Optimized | A Gain | B Baseline | B Optimized | B Gain | Winner |")
-          lines.append("|-------|-----------|-------------|--------|-----------|-------------|--------|--------|")
-
+          lines.append(f"## A/B Test: {label_a} vs {label_b}\n")
+          if config_diff:
+              lines.append("| Config | A | B |")
+              lines.append("|--------|---|---|")
+              for comp, va, vb, is_diff in config_diff:
+                  marker = " **<--**" if is_diff else ""
+                  lines.append(f"| {'**'+comp+'**' if is_diff else comp} | {va} | {vb} |{marker}")
+              lines.append("")
+          lines.append(f"| Model | A Optimized (Gain) | B Optimized (Gain) | Winner |")
+          lines.append("|-------|--------------------|--------------------|---------")
           for model in models:
-              ra = a.get(model, {})
-              rb = b.get(model, {})
-              a_bl = ra.get("baseline_tok_per_gpu")
-              a_opt = ra.get("optimized_tok_per_gpu")
-              a_gain = ra.get("gain_pct")
-              b_bl = rb.get("baseline_tok_per_gpu")
-              b_opt = rb.get("optimized_tok_per_gpu")
-              b_gain = rb.get("gain_pct")
-
-              def fmt(v, suffix=""): return f"{v:.1f}{suffix}" if v is not None else "N/A"
-
+              ra, rb = a.get(model, {}), b.get(model, {})
+              a_opt, a_gain = ra.get("optimized_tok_per_gpu"), ra.get("gain_pct")
+              b_opt, b_gain = rb.get("optimized_tok_per_gpu"), rb.get("gain_pct")
               if a_opt is not None and b_opt is not None:
-                  winner = "A" if a_opt > b_opt else "B" if b_opt > a_opt else "Tie"
-                  winner = f"**{winner}** ({abs(a_opt - b_opt):.1f} tok/s)"
+                  winner = f"**A** (+{abs(a_opt-b_opt):.1f})" if a_opt > b_opt else f"**B** (+{abs(b_opt-a_opt):.1f})" if b_opt > a_opt else "Tie"
               else:
                   winner = "N/A"
-
-              lines.append(f"| {model} | {fmt(a_bl)} | {fmt(a_opt)} | {fmt(a_gain, '%')} | {fmt(b_bl)} | {fmt(b_opt)} | {fmt(b_gain, '%')} | {winner} |")
+              lines.append(f"| {model} | {fmt(a_opt)} ({fmt(a_gain, '%')}) | {fmt(b_opt)} ({fmt(b_gain, '%')}) | {winner} |")
 
           report = "\n".join(lines)
           print(report)
-
           os.makedirs("comparison", exist_ok=True)
           with open("comparison/ab_comparison.md", "w") as f:
               f.write(report)
-
           summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
           if summary_file:
               with open(summary_file, "a") as f:
                   f.write(report)
+
+          webhook_url = os.environ.get("WEBHOOK_URL")
+          if webhook_url:
+              import requests as req
+              def v(x, s=""): return f"{x:.1f}{s}" if x is not None else "N/A"
+              def cell(text, **kw):
+                  return {"type": "TableCell", "items": [{"type": "TextBlock", "text": text, **kw}]}
+              def make_row(label, va, vb, bold=False, color=None):
+                  sa, sb = {}, {}
+                  if bold: sa["weight"] = sb["weight"] = "Bolder"
+                  if color: sa["color"] = sb["color"] = color
+                  return {"type": "TableRow", "cells": [cell(label), cell(str(va), **sa), cell(str(vb), **sb)]}
+
+              config_card_rows = [{"type": "TableRow", "style": "accent", "cells": [
+                  cell("Config", weight="Bolder"), cell("A", weight="Bolder"), cell("B", weight="Bolder")]}]
+              for comp, va, vb, is_diff in config_diff:
+                  if is_diff:
+                      config_card_rows.append({"type": "TableRow", "cells": [
+                          cell(comp, weight="Bolder"), cell(va, color="Accent"), cell(vb, color="Accent")]})
+                  else:
+                      config_card_rows.append({"type": "TableRow", "cells": [cell(comp), cell(va), cell(vb)]})
+
+              body = [
+                  {"type": "TextBlock", "weight": "Bolder", "size": "Large",
+                   "text": f"A/B Test: {label_a} vs {label_b}"},
+                  {"type": "Table", "columns": [{"width": 2}, {"width": 2}, {"width": 2}],
+                   "rows": config_card_rows},
+              ]
+
+              a_wins = b_wins = ties = 0
+              for model in models:
+                  ra, rb = a.get(model, {}), b.get(model, {})
+                  a_bl, a_opt, a_gain, a_vs = ra.get("baseline_tok_per_gpu"), ra.get("optimized_tok_per_gpu"), ra.get("gain_pct"), ra.get("vs_inferenceX_pct")
+                  b_bl, b_opt, b_gain, b_vs = rb.get("baseline_tok_per_gpu"), rb.get("optimized_tok_per_gpu"), rb.get("gain_pct"), rb.get("vs_inferenceX_pct")
+                  if a_opt is not None and b_opt is not None:
+                      if a_opt > b_opt: winner = f"A (+{abs(a_opt-b_opt):.1f} tok/s)"; a_wins += 1
+                      elif b_opt > a_opt: winner = f"B (+{abs(b_opt-a_opt):.1f} tok/s)"; b_wins += 1
+                      else: winner = "Tie"; ties += 1
+                  else:
+                      winner = "N/A"
+                  precision = ra.get("precision") or rb.get("precision") or ""
+                  model_title = f"{model} ({precision})" if precision else model
+                  body.append({"type": "TextBlock", "weight": "Bolder", "size": "Medium",
+                               "text": model_title, "spacing": "Medium"})
+                  body.append({"type": "Table", "columns": [{"width": 2}, {"width": 2}, {"width": 2}],
+                      "rows": [
+                          {"type": "TableRow", "style": "accent", "cells": [
+                              cell("Metric", weight="Bolder"), cell(f"A: {label_a}", weight="Bolder"), cell(f"B: {label_b}", weight="Bolder")]},
+                          make_row("Baseline (tok/s/GPU)", v(a_bl), v(b_bl)),
+                          make_row("Optimized (tok/s/GPU)", v(a_opt), v(b_opt), bold=True),
+                          make_row("Optimization Gain", v(a_gain, "%"), v(b_gain, "%"), color="Good"),
+                          make_row("vs InferenceX", v(a_vs, "%"), v(b_vs, "%"), color="Good"),
+                          {"type": "TableRow", "style": "accent", "cells": [
+                              cell("Winner", weight="Bolder"),
+                              cell(winner, weight="Bolder", color="Good" if winner != "N/A" else "Default", size="Medium"),
+                              cell("")]},
+                      ]})
+
+              body.append({"type": "TextBlock", "spacing": "Medium", "weight": "Bolder",
+                           "text": f"Overall: A wins {a_wins} | B wins {b_wins} | Tie {ties}"})
+
+              card = {"type": "message", "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive",
+                  "content": {"$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                      "type": "AdaptiveCard", "version": "1.4", "body": body}}]}
+              try:
+                  req.post(webhook_url, json=card, timeout=10, verify=False)
+                  print("Webhook sent successfully")
+              except Exception as e:
+                  print(f"Webhook failed: {e}")
           PYEOF
 
       - name: Upload comparison
