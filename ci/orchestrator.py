@@ -55,36 +55,38 @@ def render_prompt(merged: dict) -> str:
         conc=merged.get("conc"),
     )
     script = merged.get("benchmark_script")
+    conc = merged["conc"]
+    num_prompts = conc * 10
+    framework_upper = merged["framework"].upper()
     if script:
         bss = (
-            f"MANDATORY: Read the InferenceX benchmark script and replicate its server config:\n"
+            f"Read the InferenceX benchmark script to extract server configuration:\n"
             f"  {merged['inferencex_path']}/{script}\n"
-            f"Key env vars for this run: MODEL={merged['model_path']} TP={merged['tp']} "
-            f"EP_SIZE={merged['ep']} CONC={merged['conc']} ISL={isl} OSL={osl} "
-            f"MAX_MODEL_LEN=4096 RANDOM_RANGE_RATIO=0.8 "
-            f"NUM_PROMPTS_MULTIPLIER=10 RESULT_FILENAME=baseline\n"
-            f"Also export: RANDOM_RANGE_RATIO=0.8 NUM_PROMPTS_MULTIPLIER=10 "
-            f"before running skill scripts (run_baseline.sh / run_sweep.sh).\n"
-            f"DO NOT run the script directly (it depends on benchmark_lib.sh and hf download).\n"
-            f"Instead: read the script, extract the server launch command, env vars, and "
-            f"server flags, then use them to launch the server and run the benchmark yourself."
+            f"Extract server launch flags (attention backends, env vars, memory settings, "
+            f"expert parallelism) and put them as EXTRA_{framework_upper}_ARGS in the "
+            f"Magpie YAML config envs section.\n"
+            f"Do NOT run the script directly. Do NOT launch servers manually."
         )
     else:
-        bss = "No InferenceX benchmark script found. Construct server launch manually."
+        bss = "No InferenceX benchmark script found. Construct YAML config envs manually."
 
     return PROMPT_TEMPLATE.format(
         model_hf=merged["model_hf"],
         mode=merged["mode"],
         model_path=merged["model_path"],
         framework=merged["framework"],
+        framework_upper=framework_upper,
         precision=merged["precision"],
         isl=isl,
         osl=osl,
-        conc=merged["conc"],
+        conc=conc,
         tp=merged["tp"],
         ep=merged["ep"],
         gpu_type=merged["gpu_type"],
+        runner=merged["runner"],
         inferencex_path=merged["inferencex_path"],
+        magpie_path=merged.get("magpie_path", "/shared_nfs/Magpie"),
+        num_prompts=num_prompts,
         sandbox_image=merged["sandbox_image"],
         kernel_opt_backends=merged["kernel_opt_backends"],
         kernel_opt_image=merged["kernel_opt_image"],
@@ -94,7 +96,6 @@ def render_prompt(merged: dict) -> str:
         result_dir=merged["result_dir"],
         target_gpu=merged["target_gpu"],
         inferenceX_data=ifx_text,
-        runner=merged["runner"],
         benchmark_script_section=bss,
     )
 

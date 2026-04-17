@@ -54,10 +54,41 @@ VLLM_PARAM_GRID=(
 
 ### Test each parameter
 
-For each parameter:
-1. Kill server → restart with winning backends + this param → warmup → benchmark
-2. Compare output_throughput and TPOT against backend-optimized baseline
-3. If improvement > 1%, mark as **KEEP**
+For each parameter, use Magpie to run a short benchmark:
+
+```bash
+# Example: test --num-continuous-decode-steps 16
+EXTRA_ARGS_KEY="EXTRA_$(echo $FRAMEWORK | tr '[:lower:]' '[:upper:]')_ARGS"
+cat > "$RESULT_DIR/param_decode_steps_16_config.yaml" <<EOF
+benchmark:
+  framework: $FRAMEWORK
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: ${FRAMEWORK}_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    NUM_PROMPTS: $((CONC * 3))
+    $EXTRA_ARGS_KEY: "$WINNING_BACKEND_ARGS --num-continuous-decode-steps 16"
+  profiler:
+    torch_profiler:
+      enabled: false
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/param_decode_steps_16_config.yaml" \
+  -o "$RESULT_DIR/param_decode_steps_16"
+
+# Extract result
+WORKSPACE=$(ls -td "$RESULT_DIR"/param_decode_steps_16/benchmark_* | head -1)
+new_tput=$(python3 -c "import json; d=json.load(open('$WORKSPACE/benchmark_report.json')); print(d['throughput']['output_throughput'])")
+```
+
+Compare output_throughput and TPOT against backend-optimized baseline:
 
 | Result | Action |
 |--------|--------|
@@ -67,7 +98,33 @@ For each parameter:
 
 ### Combine all winning parameters
 
-Test the full combination of all winning backends + all winning params together.
+Test the full combination of all winning backends + all winning params together:
+
+```bash
+cat > "$RESULT_DIR/param_combined_config.yaml" <<EOF
+benchmark:
+  framework: $FRAMEWORK
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: ${FRAMEWORK}_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    NUM_PROMPTS: $((CONC * 3))
+    $EXTRA_ARGS_KEY: "$WINNING_BACKEND_ARGS $ALL_WINNING_PARAMS"
+  profiler:
+    torch_profiler:
+      enabled: false
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/param_combined_config.yaml" \
+  -o "$RESULT_DIR/param_combined"
+```
 
 If combined result is worse than individual winners, test subsets to find conflicting pairs.
 
@@ -75,11 +132,22 @@ If combined result is worse than individual winners, test subsets to find confli
 Server parameter changes (decode-steps, cuda-graph-max-bs, mem-fraction) have accuracy_risk = 0.0 — they affect scheduling, not computation. No accuracy gate needed for pure scheduling params.
 
 For precision-affecting params (kv-cache-dtype fp8): accuracy_risk = 0.3. **Run the GSM8K
-accuracy gate:**
+accuracy gate** by starting a dedicated eval server (Magpie kills its server after benchmark):
 ```bash
+kill_server 2>/dev/null; check_gpu_memory || exit 1
+
+python3 -m sglang.launch_server \
+    --model-path "$MODEL" --host=0.0.0.0 --port $PORT \
+    --tensor-parallel-size $TP --trust-remote-code \
+    $WINNING_BACKEND_ARGS $ALL_WINNING_PARAMS > "$RESULT_DIR/server_eval.log" 2>&1 &
+EVAL_PID=$!
+# Wait for health...
+
 EVAL_TASK=gsm8k NUM_FEWSHOT=5 PORT=$PORT MODEL=$MODEL \
   RESULTS_DIR="$RESULT_DIR/eval_gsm8k_param_${PARAM_NAME}" \
   bash "$SKILL_ROOT/scripts/eval_accuracy.sh"
+
+kill $EVAL_PID 2>/dev/null
 ```
 Compare `exact_match` against `state.baseline_accuracy`. If accuracy drops by more than
 `accuracy_threshold` (default 0.01): REVERT the param change, mark FAIL.

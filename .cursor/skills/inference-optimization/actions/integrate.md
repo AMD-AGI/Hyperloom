@@ -127,24 +127,45 @@ def get_function_line_range(source, func_name):
 
 ### Re-Baseline (CRITICAL FAIRNESS)
 
-**Use `run_baseline.sh` to re-baseline.** There is no `run_benchmark.sh` — `run_baseline.sh` is used for all phases (initial baseline, re-baseline after patching, backend tests). Just change `RESULT_DIR` to distinguish outputs.
+**Use `magpie benchmark --benchmark-config` to re-baseline.** Use the same YAML envs that
+produced the original baseline — only change the `-o` output directory.
 
 ```bash
-# Kill server, extend health timeout for torch.compile recompilation
-kill_server
-export HEALTH_TIMEOUT=1800
+EXTRA_ARGS_KEY="EXTRA_$(echo $FRAMEWORK | tr '[:lower:]' '[:upper:]')_ARGS"
 
-# Re-baseline with EXACTLY same env vars as baseline, only change RESULT_DIR
-export RESULT_DIR="$RESULT_DIR/optimized_${KERNEL_NAME}"
-bash $SCRIPTS_DIR/run_baseline.sh
+kill_server
+cat > "$RESULT_DIR/optimized_${KERNEL_NAME}_config.yaml" <<EOF
+benchmark:
+  framework: $FRAMEWORK
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: ${FRAMEWORK}_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    NUM_PROMPTS: $((CONC * 3))
+    $EXTRA_ARGS_KEY: "$TUNED_SERVER_ARGS"
+  timeout_seconds: 3600
+  profiler:
+    torch_profiler:
+      enabled: false
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/optimized_${KERNEL_NAME}_config.yaml" \
+  -o "$RESULT_DIR/optimized_${KERNEL_NAME}"
 ```
 
-**MUST use EXACTLY the same server config AND benchmark params as baseline:**
+**MUST use EXACTLY the same YAML envs as baseline for fairness:**
 - `--num-continuous-decode-steps` must match
 - `--mem-fraction-static` must match
 - `--cuda-graph-max-bs` must match
-- `--max-concurrency $CONC` must match (NEVER omit)
-- `--num-prompts $((CONC * 3))` must match
+- `--concurrency $CONC` must match (NEVER omit)
+- `NUM_PROMPTS=$((CONC * 3))` must match
 
 **Red flag:** If TPOT INCREASES, throughput gain is from higher batching, NOT faster kernels.
 

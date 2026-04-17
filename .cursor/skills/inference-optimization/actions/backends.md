@@ -72,18 +72,109 @@ grep -i "allreduce\|custom_ar\|quick\|AiterCustom\|NCCL" $SERVER_LOG | head -20
 
 ### Step 5: Test backends individually, then combine winners
 
-For each backend switch:
-1. Kill server → restart with baseline + this one change → warmup → benchmark
-2. Compare `tput_per_gpu` against baseline
-3. If > +1%, mark as **WINNER**
+For each backend switch, use Magpie to run a short benchmark (fewer prompts for fast iteration):
+
+```bash
+# Example: test a single backend switch
+EXTRA_ARGS_KEY="EXTRA_$(echo $FRAMEWORK | tr '[:lower:]' '[:upper:]')_ARGS"
+cat > "$RESULT_DIR/backend_aiter_config.yaml" <<EOF
+benchmark:
+  framework: $FRAMEWORK
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: ${FRAMEWORK}_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    NUM_PROMPTS: $((CONC * 3))
+    $EXTRA_ARGS_KEY: "$BASE_ARGS --attention-backend aiter"
+  profiler:
+    torch_profiler:
+      enabled: false
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/backend_aiter_config.yaml" \
+  -o "$RESULT_DIR/backend_aiter"
+
+# Extract throughput from Magpie result
+WORKSPACE=$(ls -td "$RESULT_DIR"/backend_aiter/benchmark_* | head -1)
+new_tput=$(python3 -c "import json; d=json.load(open('$WORKSPACE/benchmark_report.json')); print(d['throughput']['output_throughput'])")
+new_tput_per_gpu=$(python3 -c "print($new_tput / $TP)")
+```
+
+Compare `new_tput_per_gpu` against `baseline_tput_per_gpu`. If > +1%, mark as **WINNER**.
 
 **CRITICAL: Combine ALL winners in a single experiment.**
 
 Individual gains do NOT predict combined gains — switches affecting different pipeline stages produce super-linear synergy (validated: GLM-5 +3.1% + +2.9% → +16.2% combined).
 
+```bash
+# Test combined winners
+cat > "$RESULT_DIR/backend_combined_config.yaml" <<EOF
+benchmark:
+  framework: $FRAMEWORK
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: ${FRAMEWORK}_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    NUM_PROMPTS: $((CONC * 3))
+    $EXTRA_ARGS_KEY: "$BASE_ARGS $ALL_WINNING_FLAGS"
+  profiler:
+    torch_profiler:
+      enabled: false
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/backend_combined_config.yaml" \
+  -o "$RESULT_DIR/backend_combined"
+```
+
 ### Step 6: After combining, re-profile
 
-Backend switches that replace vendor C++ kernels with Triton implementations create new GEAK optimization surface. Always re-run profiling after backend exploration settles.
+Backend switches that replace vendor C++ kernels with Triton implementations create new GEAK optimization surface. Re-run profiling with Magpie after backend exploration settles:
+
+```bash
+REPROFILE_PROMPTS=$((CONC < 16 ? CONC : 16))
+cat > "$RESULT_DIR/backend_reprofile_config.yaml" <<EOF
+benchmark:
+  framework: $FRAMEWORK
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: ${FRAMEWORK}_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    NUM_PROMPTS: $REPROFILE_PROMPTS
+    $EXTRA_ARGS_KEY: "$BASE_ARGS $ALL_WINNING_FLAGS"
+  profiler:
+    torch_profiler:
+      enabled: true
+    tracelens:
+      enabled: true
+  gap_analysis:
+    enabled: true
+    top_k: 30
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/backend_reprofile_config.yaml" \
+  -o "$RESULT_DIR/backend_reprofile"
+```
 
 ### Step 7: Check for code-level bypasses and fast-path blockers
 
@@ -93,23 +184,30 @@ grep -n "is_hip\|_is_hip\|is_cuda" /sgl-workspace/sglang/python/sglang/srt/serve
 ```
 
 ## Accuracy Validation
-After each backend switch, run the accuracy gate:
-```bash
-curl -s http://localhost:$PORT/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"'$MODEL'","prompt":"The capital of France is","max_tokens":20,"temperature":0}' \
-  > $RESULT_DIR/accuracy_check.json
-# Compare with accuracy_reference.json
-```
 
 Backend switches change code paths — accuracy_risk = 0.1.
 
-**After throughput benchmark passes, run the GSM8K accuracy gate:**
+**After throughput benchmark passes, run the GSM8K accuracy gate.** Since Magpie kills the
+server after benchmark, start a dedicated eval server:
+
 ```bash
+kill_server 2>/dev/null; check_gpu_memory || exit 1
+
+# Start server with winning backend config
+python3 -m sglang.launch_server \
+    --model-path "$MODEL" --host=0.0.0.0 --port $PORT \
+    --tensor-parallel-size $TP --trust-remote-code \
+    $BASE_ARGS $ALL_WINNING_FLAGS > "$RESULT_DIR/server_eval.log" 2>&1 &
+EVAL_PID=$!
+# Wait for health...
+
 EVAL_TASK=gsm8k NUM_FEWSHOT=5 PORT=$PORT MODEL=$MODEL \
   RESULTS_DIR="$RESULT_DIR/eval_gsm8k_backend_${BACKEND_NAME}" \
   bash "$SKILL_ROOT/scripts/eval_accuracy.sh"
+
+kill $EVAL_PID 2>/dev/null
 ```
+
 Compare `exact_match` against `state.baseline_accuracy`. If accuracy drops by more than
 `accuracy_threshold` (default 0.01): REVERT backend flags, mark FAIL.
 

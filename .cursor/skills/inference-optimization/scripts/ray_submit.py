@@ -2,7 +2,7 @@
 """Submit commands to a running RayJob cluster.
 
 Usage:
-    python ray_submit.py --ray-address ray://<head>:10001 --command "bash run_baseline.sh"
+    python ray_submit.py --ray-address ray://<head>:10001 --command "magpie benchmark --benchmark-config /path/to/config.yaml -o ..."
     python ray_submit.py --ray-address ray://<head>:10001 --command "curl -X POST http://localhost:8888/start_profile"
 
 Used by executor.sh in Claw mode to dispatch operations to the RayJob cluster

@@ -13,7 +13,7 @@
 # Usage:
 #   source executor.sh
 #   exec_on_gpu "python3 -m sglang.launch_server --model $MODEL --tp $TP"
-#   exec_on_gpu "bash \$SCRIPTS_DIR/run_baseline.sh"
+#   exec_on_gpu "magpie benchmark --benchmark-config \$CONFIG -o \$RESULT_DIR/baseline"
 # =============================================================================
 
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -1,5 +1,5 @@
 ---
-name: inference-optimization
+name: inference-optimization-magpie
 description: |
   Autonomous DFS-guided inference optimization for LLM serving on AMD MI355X GPUs.
   Uses heuristic-scored depth-first search to systematically explore optimization actions
@@ -49,7 +49,7 @@ Submit the kernel source **exactly as extracted**. Do NOT strip decorators, chan
 
 ### IR-3: Integration (Phase 8) is MANDATORY
 
-After GEAK returns optimized kernels, you MUST execute the integrate action (patch → re-baseline → decide). Skipping means GEAK results are never validated end-to-end. Re-baseline uses `run_baseline.sh` — there is no `run_benchmark.sh`. See `actions/integrate.md` for details.
+After GEAK returns optimized kernels, you MUST execute the integrate action (patch → re-baseline → decide). Skipping means GEAK results are never validated end-to-end. Re-baseline uses `magpie benchmark --benchmark-config` with the same YAML envs as the original baseline. See `actions/integrate.md` for details.
 
 ### IR-4: Always kill_server + check_gpu_memory before server launch
 
@@ -124,6 +124,152 @@ All values below are the **single source of truth**. All actions reference these
 
 **Claw-mode constants are in [`modes/CLAW.md`](modes/CLAW.md).**
 
+### Magpie Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `MAGPIE_PATH` | `/shared_nfs/Magpie` | Magpie installation path (auto-mirrored to `/tmp/Magpie` when read-only) |
+| `MAGPIE_RUN_MODE` | `local` | Benchmark execution mode (local, no Docker) |
+| `MAGPIE_DFS_NUM_PROMPTS_MULTIPLIER` | 3 | NUM_PROMPTS = CONC × this for DFS loop (short runs) |
+| `MAGPIE_BASELINE_NUM_PROMPTS_MULTIPLIER` | 10 | NUM_PROMPTS = CONC × this for baseline (default) |
+| `MAGPIE_PROFILE_NUM_PROMPTS` | `CONC * 10` | NUM_PROMPTS for profiling runs (steady-state windowing controls trace size) |
+| `MAGPIE_TIMEOUT_S` | 3600 | Bash/YAML timeout for all magpie benchmark calls (must cover server startup) |
+
+### TraceLens Profiler Constants
+
+Profiling for TraceLens analysis requires specific settings beyond basic torch profiling.
+See `actions/profile.md` for the full profiling procedure.
+
+| Constant | Formula / Value | Description |
+|----------|-----------------|-------------|
+| `MAX_ITERS` | `min(1024, max(256, 16 * OSL / CONC))` | Execution steps to profile (steady-state window size) |
+| `DELAY_ITERS` | `(((R+1)/2) * 5 * OSL) - (MAX_ITERS/2)` | Step at which profiling begins (R = NUM_PROMPTS / CONC) |
+| `PROFILE_NUM_PROMPTS` | `CONC * 10` | Overrides InferenceX default via env var (prevents cap to max_concurrency) |
+| `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` | 1200 | Required for vLLM when profiling is enabled |
+
+**SGLang-specific env vars (set in Magpie YAML `envs`):**
+
+| Env var | Value | Purpose |
+|---------|-------|---------|
+| `SGLANG_PROFILE_WITH_STACK` | `true` | Enable callstack recording in traces |
+| `SGLANG_PROFILE_RECORD_SHAPE` | `true` | Enable tensor shape recording in traces |
+| `PROFILE_EXTRA_BODY` | JSON string | Override `extra_body` in InferenceX benchmark_serving.py start_profile request |
+
+**SGLang server args (append to `EXTRA_SGLANG_ARGS`):**
+- `--enable-profile-cuda-graph` — enable graph capture tracing
+- `--enable-shape-discovery-for-cuda-graph-profile` — shape discovery for captured graphs
+
+**vLLM server args (append to `EXTRA_VLLM_ARGS`):**
+- `--profiler-config.capture_torch_profiler_dir <dir>` — graph capture trace output directory
+- `--profiler-config.detailed_trace_annotation True` — enable detailed annotations
+- `--profiler-config.delay_iterations <N>` — start profiling after N steps
+- `--profiler-config.max_iterations <N>` — profile for N steps
+- `--profiler-config.ignore_frontend True` — skip frontend profiling overhead
+
+## Magpie Integration
+
+All throughput benchmarks, profiling, and parameter sweeps use **Magpie** (`magpie benchmark`
+CLI) as the sole execution engine. Magpie wraps InferenceX with structured results, built-in
+TraceLens trace analysis, and gap analysis.
+
+**Prerequisites — Install Magpie:**
+
+`actions/setup.md` Step 2 automatically mirrors `MAGPIE_PATH` and `INFERENCEX_PATH`
+to `/tmp` when the source is read-only (NFS / container overlay). After setup, both
+variables point to writable copies, so `pip install -e "$MAGPIE_PATH"` and all
+`inferencex_path: $INFERENCEX_PATH` YAML references work without further handling.
+
+```bash
+# Already handled by setup.md _mirror_if_readonly helper.
+# Manual fallback (only if setup was skipped):
+if ! command -v magpie &>/dev/null; then
+    cp -r "$MAGPIE_PATH" /tmp/Magpie 2>/dev/null || true
+    pip install -e /tmp/Magpie 2>&1 | tail -3
+fi
+```
+
+**Key pattern for all benchmarks — generate YAML config, then run:**
+```bash
+cat > "$RESULT_DIR/config.yaml" <<EOF
+benchmark:
+  framework: $FRAMEWORK
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: ${FRAMEWORK}_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    EXTRA_SGLANG_ARGS: "..."
+    NUM_PROMPTS: ...
+  timeout_seconds: 3600
+  profiler:
+    torch_profiler:
+      enabled: false
+EOF
+magpie benchmark --benchmark-config "$RESULT_DIR/config.yaml" -o "$RESULT_DIR/<action_name>"
+```
+
+**CI baseline YAML template (with placeholders for `render_prompt`):**
+
+All CI benchmark runs use this template. Install Magpie first: `pip install -e $MAGPIE_PATH`.
+ALL benchmarks (baseline, DFS, profile, sweep) MUST use `magpie benchmark --benchmark-config <yaml>`.
+Do NOT launch servers manually or use `run_baseline.sh` / `run_sweep.sh`.
+Magpie handles server lifecycle (start, health check, benchmark, cleanup) automatically.
+
+```yaml
+benchmark:
+  framework: $FRAMEWORK
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: ${FRAMEWORK}_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.8
+    NUM_PROMPTS: $NUM_PROMPTS
+    MAX_MODEL_LEN: 4096
+  profiler:
+    torch_profiler:
+      enabled: false
+  timeout_seconds: 3600
+```
+
+**CI benchmark rules:**
+- Set `RANDOM_RANGE_RATIO: 0.8` in YAML envs for ALL benchmarks. Do NOT use 1.0.
+- Set `NUM_PROMPTS` equal to `CONC * 10` in YAML envs. Do NOT use `CONC * 3`.
+- Read the InferenceX benchmark script to extract server configuration (attention backends,
+  env vars, memory settings, expert parallelism flags). Put these as `EXTRA_{FRAMEWORK}_ARGS`
+  in the YAML envs section. Do NOT run the InferenceX script directly.
+
+**CRITICAL — Bash timeout:** Every `magpie benchmark` call includes server startup (up
+to 45 min for large models). Set Bash `timeout` to at least **3600 seconds (1 hour)**.
+Without this, the Claw executor kills the process before the server finishes loading.
+
+**`benchmark_script`:** Always specify the Magpie-authored script (e.g.,
+`sglang_mi355x.sh`) to ensure `EXTRA_SGLANG_ARGS` / `EXTRA_VLLM_ARGS` are respected.
+Without this field, Magpie may select an InferenceX native script that ignores extra args.
+
+**Results:** Each run produces `benchmark_report.json` in the workspace with structured
+`throughput` (output_throughput, request_throughput, duration_seconds) and `latency`
+(TTFT, TPOT, ITL, E2EL — each with mean/median/p99/std in ms).
+
+**Server lifecycle:** Magpie launches and kills the server within each benchmark call.
+For accuracy evaluation (GSM8K), start a dedicated server manually (see action docs).
+
+**DFS short runs:** Set `NUM_PROMPTS: $((CONC * 3))` in the YAML `envs` to reduce
+benchmark duration. Default is `CONC * 10`.
+
 ## Architecture
 
 ```
@@ -156,8 +302,8 @@ These are recurring errors observed in production CI runs. **Read before executi
    a valid vLLM flag. Use `--disable-log-stats` for vLLM. Always check `vllm serve --help`
    before using unfamiliar flags. Failure mode: `unrecognized arguments` → server crash.
 
-4. **Use `run_baseline.sh` instead of manual server launch.** The script handles
-   server startup, health wait, benchmark, and profiling in a tested sequence. Manual
+4. **Use `magpie benchmark --benchmark-config` instead of manual server launch.** Magpie
+   handles server startup, health wait, benchmark, and cleanup in a tested sequence. Manual
    launch skips health checks and often hits Exit code 144 (SIGTERM from stale processes).
 
 5. **Never call `geak_client.py set-model-config`.** See IR-7. GEAK LLM backend is pre-configured.
@@ -477,12 +623,35 @@ These are the most important validated lessons. Full details in KB and action mo
 
 ## Reference: Benchmark Metrics
 
-| Metric | Unit | Meaning |
-|--------|------|---------|
-| `output_throughput` | tok/s | Output tokens per second |
-| `tput_per_gpu` | tok/s/GPU | `output_throughput / TP` |
-| `mean_tpot_ms` | ms | Time Per Output Token (decode latency) |
-| `mean_ttft_ms` | ms | Time to First Token (prefill latency) |
+Metrics come from Magpie's `benchmark_report.json` (structured JSON):
+
+| Metric | JSON Path | Unit | Meaning |
+|--------|-----------|------|---------|
+| `output_throughput` | `throughput.output_throughput` | tok/s | Output tokens per second |
+| `tput_per_gpu` | derived: `throughput.output_throughput / TP` | tok/s/GPU | Primary optimization target |
+| `request_throughput` | `throughput.request_throughput` | req/s | Requests per second |
+| `completed_requests` | `throughput.completed_requests` | count | Successfully completed requests |
+| `mean_tpot_ms` | `latency.tpot.mean_ms` | ms | Time Per Output Token (decode latency) |
+| `p99_tpot_ms` | `latency.tpot.p99_ms` | ms | P99 decode latency |
+| `mean_ttft_ms` | `latency.ttft.mean_ms` | ms | Time to First Token (prefill latency) |
+| `p99_ttft_ms` | `latency.ttft.p99_ms` | ms | P99 prefill latency |
+| `mean_itl_ms` | `latency.itl.mean_ms` | ms | Inter-Token Latency |
+| `mean_e2el_ms` | `latency.e2el.mean_ms` | ms | End-to-End Latency |
+
+### Extracting metrics from Magpie results
+
+```bash
+WORKSPACE=$(ls -td "$RESULT_DIR"/<action>/benchmark_* | head -1)
+python3 -c "
+import json
+d = json.load(open('$WORKSPACE/benchmark_report.json'))
+tp = $TP
+print(f'output_throughput: {d[\"throughput\"][\"output_throughput\"]:.2f} tok/s')
+print(f'tput_per_gpu: {d[\"throughput\"][\"output_throughput\"]/tp:.2f} tok/s/GPU')
+print(f'TPOT mean: {d[\"latency\"][\"tpot\"][\"mean_ms\"]:.2f} ms')
+print(f'TTFT mean: {d[\"latency\"][\"ttft\"][\"mean_ms\"]:.2f} ms')
+"
+```
 
 ## Reference: Server Parameter Tables
 
