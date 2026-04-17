@@ -215,6 +215,43 @@ EOF
 magpie benchmark --benchmark-config "$RESULT_DIR/config.yaml" -o "$RESULT_DIR/<action_name>"
 ```
 
+**CI baseline YAML template (with placeholders for `render_prompt`):**
+
+All CI benchmark runs use this template. Install Magpie first: `pip install -e $MAGPIE_PATH`.
+ALL benchmarks (baseline, DFS, profile, sweep) MUST use `magpie benchmark --benchmark-config <yaml>`.
+Do NOT launch servers manually or use `run_baseline.sh` / `run_sweep.sh`.
+Magpie handles server lifecycle (start, health check, benchmark, cleanup) automatically.
+
+```yaml
+benchmark:
+  framework: $FRAMEWORK
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: ${FRAMEWORK}_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.8
+    NUM_PROMPTS: $NUM_PROMPTS
+    MAX_MODEL_LEN: 4096
+  profiler:
+    torch_profiler:
+      enabled: false
+  timeout_seconds: 3600
+```
+
+**CI benchmark rules:**
+- Set `RANDOM_RANGE_RATIO: 0.8` in YAML envs for ALL benchmarks. Do NOT use 1.0.
+- Set `NUM_PROMPTS` equal to `CONC * 10` in YAML envs. Do NOT use `CONC * 3`.
+- Read the InferenceX benchmark script to extract server configuration (attention backends,
+  env vars, memory settings, expert parallelism flags). Put these as `EXTRA_{FRAMEWORK}_ARGS`
+  in the YAML envs section. Do NOT run the InferenceX script directly.
+
 **CRITICAL — Bash timeout:** Every `magpie benchmark` call includes server startup (up
 to 45 min for large models). Set Bash `timeout` to at least **3600 seconds (1 hour)**.
 Without this, the Claw executor kills the process before the server finishes loading.
