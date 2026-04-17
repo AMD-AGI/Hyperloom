@@ -96,6 +96,7 @@ fi
 ```bash
 if [[ "$FRAMEWORK" == "vllm" ]]; then
     PROFILER_VLLM_ARGS="$BASELINE_SERVER_ARGS"
+    PROFILER_VLLM_ARGS="$PROFILER_VLLM_ARGS --enforce-eager"
     PROFILER_VLLM_ARGS="$PROFILER_VLLM_ARGS --profiler-config.capture_torch_profiler_dir ${TRACE_DIR}/capture_traces"
     PROFILER_VLLM_ARGS="$PROFILER_VLLM_ARGS --profiler-config.detailed_trace_annotation True"
     PROFILER_VLLM_ARGS="$PROFILER_VLLM_ARGS --profiler-config.delay_iterations $DELAY_ITERS"
@@ -144,6 +145,7 @@ without oversized traces. Throughput numbers include profiling overhead — use 
 baseline numbers from `baseline.md` for performance tracking.
 
 **Key profiler settings enabled for TraceLens:**
+- **Eager mode** (vLLM): `--enforce-eager` disables CUDA graphs so trace shows actual kernels instead of opaque `hipGraphLaunch` calls
 - **Shape & callstack profiling** (SGLang): `SGLANG_PROFILE_WITH_STACK`, `SGLANG_PROFILE_RECORD_SHAPE`
 - **Graph capture tracing**: SGLang `--enable-profile-cuda-graph`, vLLM `--profiler-config.capture_torch_profiler_dir`
 - **Detailed annotations**: SGLang `extra_body.roofline_annotations`, vLLM `--profiler-config.detailed_trace_annotation`
