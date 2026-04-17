@@ -76,4 +76,5 @@ ENV MODE=local \
     NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
 EXPOSE 22 8001 8002 8003
-CMD ["/opt/entrypoint.sh"]
+ENTRYPOINT ["/opt/entrypoint.sh"]
+CMD []
