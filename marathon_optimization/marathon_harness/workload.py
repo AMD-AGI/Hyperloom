@@ -152,13 +152,15 @@ def _clear_server_pid() -> None:
         pass
 
 
+_marathon_owns_server = False
+
 async def kill_rogue_servers(port: int = 8888) -> int:
     """Kill any vLLM/sglang servers NOT launched by the orchestrator.
 
     Returns the number of rogue processes killed.
     """
+    global _marathon_owns_server
     authorized_pid = _read_server_pid()
-    killed = 0
 
     proc = await asyncio.create_subprocess_shell(
         "ps -eo pid,args | grep -E 'vllm serve|vllm.entrypoints|sglang.srt|sglang.launch_server' | grep -v grep",
@@ -168,17 +170,31 @@ async def kill_rogue_servers(port: int = 8888) -> int:
     if not stdout:
         return 0
 
+    pids_found = []
     for line in stdout.decode(errors="replace").strip().splitlines():
         parts = line.strip().split(None, 1)
         if not parts:
             continue
         try:
-            pid = int(parts[0])
+            pids_found.append((int(parts[0]), parts[1] if len(parts) > 1 else "?"))
         except ValueError:
             continue
+
+    if not pids_found:
+        return 0
+
+    # If the marathon owns a server and the PID file is stale/missing,
+    # re-register the first matching process rather than killing it.
+    if _marathon_owns_server and authorized_pid is None and len(pids_found) >= 1:
+        new_pid = pids_found[0][0]
+        _write_server_pid(new_pid, port)
+        authorized_pid = new_pid
+
+    killed = 0
+    for pid, cmd in pids_found:
         if pid == authorized_pid:
             continue
-        log.warning("Killing ROGUE server process: pid=%d cmd=%s", pid, (parts[1] if len(parts) > 1 else "?")[:120])
+        log.warning("Killing ROGUE server process: pid=%d cmd=%s", pid, cmd[:120])
         try:
             os.kill(pid, 9)
             killed += 1
@@ -703,6 +719,7 @@ class InferenceXWorkload:
         baked in.  Patches are applied first if a patch script was detected.
         """
         await self.kill_server()
+        await asyncio.sleep(5)  # let processes fully exit before rogue scan
         rogues = await kill_rogue_servers(port=self.port)
         if rogues:
             log.warning("Cleaned up %d rogue server(s) before starting", rogues)
@@ -824,8 +841,10 @@ class InferenceXWorkload:
 
     async def _record_running_server_pid(self) -> None:
         """Find the actual server process PID (after a sprint-script fork) and record it."""
+        global _marathon_owns_server
+        _marathon_owns_server = True
         proc = await asyncio.create_subprocess_shell(
-            "ps -eo pid,args | grep -E 'vllm serve|vllm.entrypoints|sglang.srt' | grep -v grep | head -1",
+            "ps -eo pid,args | grep -E 'vllm serve|vllm.entrypoints|sglang.srt|sglang.launch_server' | grep -v grep | head -1",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
         stdout, _ = await proc.communicate()
@@ -869,8 +888,10 @@ class InferenceXWorkload:
             return False
 
     async def kill_server(self) -> bool:
+        global _marathon_owns_server
+        _marathon_owns_server = False
         log.info("Killing inference server …")
-        kill_patterns = ["sglang.srt", "vllm.entrypoints"]
+        kill_patterns = ["sglang.srt", "sglang.launch_server", "vllm.entrypoints"]
         fw = self.framework.lower()
         if fw not in ("sglang", "vllm"):
             kill_patterns.append(f"{fw}.")
