@@ -464,11 +464,30 @@ def get_tokenizer(
         return MistralTokenizer.from_pretrained(
             str(pretrained_model_name_or_path))
     else:
-        return AutoTokenizer.from_pretrained(
-            pretrained_model_name_or_path,
-            trust_remote_code=trust_remote_code,
-            **kwargs,
-        )
+        try:
+            return AutoTokenizer.from_pretrained(
+                pretrained_model_name_or_path,
+                trust_remote_code=trust_remote_code,
+                **kwargs,
+            )
+        except ValueError:
+            from pathlib import Path
+            from transformers import PreTrainedTokenizerFast
+            from tokenizers import Tokenizer as _Tokenizer
+            tok_json = Path(pretrained_model_name_or_path) / "tokenizer.json"
+            if tok_json.exists():
+                _tok_obj = _Tokenizer.from_file(str(tok_json))
+                tokenizer = PreTrainedTokenizerFast(tokenizer_object=_tok_obj)
+                import json as _json
+                _cfg_path = Path(pretrained_model_name_or_path) / "tokenizer_config.json"
+                if _cfg_path.exists():
+                    _cfg = _json.loads(_cfg_path.read_text())
+                    if _cfg.get("eos_token"):
+                        tokenizer.eos_token = _cfg["eos_token"]
+                    if _cfg.get("pad_token"):
+                        tokenizer.pad_token = _cfg["pad_token"]
+                return tokenizer
+            raise
 
 
 ASYNC_REQUEST_FUNCS = {
