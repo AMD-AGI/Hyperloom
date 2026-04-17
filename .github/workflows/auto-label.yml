@@ -94,7 +94,7 @@ jobs:
         run: |
           BODY_TRUNCATED=$(echo "$ISSUE_BODY" | head -c 3000)
 
-          RESPONSE=$(curl -s https://models.github.ai/inference/chat/completions \
+          RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" https://models.github.ai/inference/chat/completions \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -d "$(jq -n \
@@ -110,7 +110,15 @@ jobs:
                 max_tokens: 150
               }')")
 
-          LLM_OUTPUT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty')
+          echo "===== Raw API response ====="
+          echo "$RESPONSE"
+          echo "============================"
+
+          HTTP_STATUS=$(echo "$RESPONSE" | grep "HTTP_STATUS:" | cut -d: -f2)
+          BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS:/d')
+          echo "HTTP status: $HTTP_STATUS"
+
+          LLM_OUTPUT=$(echo "$BODY" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
 
           if [ -z "$LLM_OUTPUT" ]; then
             echo "LLM returned empty response"
