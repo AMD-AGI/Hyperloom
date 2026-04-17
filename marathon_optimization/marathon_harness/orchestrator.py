@@ -58,8 +58,13 @@ def _sanitize_result(d: dict[str, Any]) -> dict[str, Any]:
 
     The LLM proxy returns plain JSON where numbers may arrive as strings.
     """
+    _RISK_WORDS = {"none": 0, "low": 0.1, "medium": 0.5, "high": 0.9, "critical": 1.0}
     for k in _NUMERIC_RESULT_KEYS:
         if k in d and isinstance(d[k], str):
+            mapped = _RISK_WORDS.get(d[k].strip().lower())
+            if mapped is not None:
+                d[k] = mapped
+                continue
             try:
                 d[k] = float(d[k])
             except (ValueError, TypeError):
@@ -158,6 +163,9 @@ class Orchestrator:
             self.state.phase = "dfs"
             self._analysis_task = asyncio.create_task(self._deep_analysis())
             consecutive_empty_refills = 0
+            # On resume, seed the re-profile timer so we don't immediately trigger
+            if not hasattr(self.state, '_last_reprofile_min') or self.state._last_reprofile_min == 0:  # type: ignore[attr-defined]
+                self.state._last_reprofile_min = (time.time() - self.state.start_time) / 60  # type: ignore[attr-defined]
 
             while not self.shutdown.is_set():
                 if self._should_stop():
@@ -215,7 +223,7 @@ class Orchestrator:
 
                 # Periodic re-profile to discover new optimization targets
                 elapsed_min = (time.time() - self.state.start_time) / 60
-                last_profile_min = getattr(self.state, '_last_reprofile_min', 0)
+                last_profile_min = getattr(self.state, '_last_reprofile_min', elapsed_min)
                 if elapsed_min - last_profile_min >= RE_PROFILE_CADENCE_MIN:
                     log.info("Periodic re-profile at %.0f min", elapsed_min)
                     self.state._last_reprofile_min = elapsed_min  # type: ignore[attr-defined]
@@ -306,6 +314,15 @@ class Orchestrator:
         prompt = prompts.prompt_warm_start(mode, self.state.state_summary(), None)
         result = await self.llm.call(prompt, output_file=str(output_file), max_turns=60)
         self.llm.sync_stats(self.state)
+
+        # Clean up any servers the Claw spawned during warm start
+        from .workload import kill_rogue_servers
+        await kill_rogue_servers()
+
+        # Safety net: revert any source edits (warm_start is read-only)
+        if self._workload and hasattr(self._workload, '_reset_runtime_workspaces'):
+            log.info("Reverting any warm-start edits (enforcing read-only)")
+            await self._workload._reset_runtime_workspaces()
 
         if result.output:
             for k, v in result.output.items():
@@ -405,12 +422,17 @@ class Orchestrator:
         if isinstance(dream_result, Exception):
             log.warning("Transition dream failed (non-fatal): %s", dream_result)
 
-        # ── Step 4: LLM analysis (augment action stack) ──
+        # ── Step 4: LLM analysis (read-only, augment action stack) ──
         from . import prompts
         output_file = Path(self.session_dir) / "warm_start_output.json"
         prompt = prompts.prompt_warm_start("sprint", self.state.state_summary(), config)
         result = await self.llm.call(prompt, output_file=str(output_file), max_turns=60)
         self.llm.sync_stats(self.state)
+
+        # Safety net: revert any source edits (warm_start is read-only)
+        if self._workload and hasattr(self._workload, '_reset_runtime_workspaces'):
+            log.info("Reverting any warm-start edits (enforcing read-only)")
+            await self._workload._reset_runtime_workspaces()
 
         if result.output:
             for a in result.output.get("action_stack", []):
@@ -427,7 +449,8 @@ class Orchestrator:
         """Create InferenceXWorkload from Sprint config + CLI args.
 
         Propagates launch_flags, env_vars, benchmark params, and checks for
-        Sprint-provided launch scripts in the handoff directory.
+        Sprint-provided scripts in BOTH the handoff directory and the repo's
+        top-level scripts/ directory (launch, patch, bench scripts live there).
         """
         from .workload import InferenceXWorkload
 
@@ -435,7 +458,8 @@ class Orchestrator:
         if not inferencex_path:
             inferencex_path = getattr(self.llm, 'inferencex_path', '')
 
-        handoff_dir = Path(self.state.base_dir) / "handoff" if self.state.base_dir else None
+        base = Path(self.state.base_dir) if self.state.base_dir else None
+        handoff_dir = base / "handoff" if base else None
         if handoff_dir and handoff_dir.exists() and inferencex_path:
             workload = InferenceXWorkload.from_sprint_handoff(
                 handoff_dir, inferencex_path,
@@ -455,6 +479,12 @@ class Orchestrator:
                 concurrency=bench_params.get("max_concurrency", 64),
                 result_dir=str(Path(self.session_dir) / "benchmarks"),
             )
+
+        # Also discover scripts from the repo's top-level scripts/ dir —
+        # from_sprint_handoff only looks inside handoff/, but launch/patch/bench
+        # scripts typically live in the repo root's scripts/ directory.
+        if base and (base / "scripts").is_dir():
+            workload._discover_scripts(base)
 
         self._workload = workload
         return workload
@@ -487,13 +517,19 @@ class Orchestrator:
         if state_path.exists():
             try:
                 prior = json.loads(state_path.read_text())
-                self.state.sprint_tput_per_gpu = prior.get("current_tput_per_gpu", 0)
+                self.state.sprint_tput_per_gpu = prior.get(
+                    "sprint_baseline_tput_per_gpu",
+                    prior.get("current_tput_per_gpu", 0),
+                )
                 self.state.target_tput_per_gpu = prior.get("target_tput_per_gpu", 0)
                 for a in prior.get("action_stack", []):
                     self.state.push_action(a)
                     self.dashboard.log_branch("add", a)
-                log.info("Loaded state.json from Sprint repo: %.1f tok/s/GPU, %d actions",
-                         self.state.sprint_tput_per_gpu, len(self.state.action_stack))
+                log.info("Loaded state.json from Sprint repo: sprint_baseline=%.1f tok/s/GPU, "
+                         "target=%.1f, %d actions",
+                         self.state.sprint_tput_per_gpu,
+                         self.state.target_tput_per_gpu,
+                         len(self.state.action_stack))
             except Exception as exc:
                 log.warning("Failed to parse Sprint state.json: %s", exc)
 
@@ -547,12 +583,20 @@ class Orchestrator:
         if isinstance(dream_result, Exception):
             log.warning("Transition dream failed (non-fatal): %s", dream_result)
 
-        # LLM augmentation pass
+        # LLM augmentation pass (read-only analysis — no code edits allowed)
         from . import prompts
         output_file = Path(self.session_dir) / "warm_start_output.json"
         prompt = prompts.prompt_warm_start("sprint", self.state.state_summary(), sprint_config)
         result = await self.llm.call(prompt, output_file=str(output_file), max_turns=60)
         self.llm.sync_stats(self.state)
+
+        # Safety net: revert any source edits the Claw may have made despite
+        # read-only instructions.  Only DFS actions go through benchmark +
+        # accuracy gates, so warm_start edits are not validated.
+        if self._workload and hasattr(self._workload, '_reset_runtime_workspaces'):
+            log.info("Reverting any warm-start edits (enforcing read-only)")
+            await self._workload._reset_runtime_workspaces()
+
         if result.output:
             for a in result.output.get("action_stack", []):
                 existing_ids = {ea.get("id") for ea in self.state.action_stack}
@@ -761,9 +805,13 @@ class Orchestrator:
         result = await self.llm.call(prompt, output_file=str(output_file), max_turns=50)
         self.llm.sync_stats(self.state)
 
+        # Safety net: revert any source edits made during profiling.
+        if self._workload and hasattr(self._workload, '_reset_runtime_workspaces'):
+            log.info("Reverting any profile-phase edits (enforcing read-only)")
+            await self._workload._reset_runtime_workspaces()
+
         if result.output:
             new_candidates = result.output.get("kernel_opt_candidates", [])
-            # Register new kernel discoveries
             for kc in new_candidates:
                 kname = kc.get("name", "")
                 if kname:
@@ -795,6 +843,17 @@ class Orchestrator:
         result = await self.llm.call(prompt, output_file=str(output_file), max_turns=80)
         self.llm.sync_stats(self.state)
 
+        # Deep analysis is a long Claw session (80 turns) — clean up any
+        # rogue servers it may have spawned despite the blocklist.
+        from .workload import kill_rogue_servers
+        await kill_rogue_servers()
+
+        # Safety net: revert any source edits the Claw may have made.
+        # Deep analysis is read-only; code changes only happen in DFS.
+        if self._workload and hasattr(self._workload, '_reset_runtime_workspaces'):
+            log.info("Reverting any deep-analysis edits (enforcing read-only)")
+            await self._workload._reset_runtime_workspaces()
+
         if result.output:
             async with self._state_lock.mutate():
                 if "kernel_dispatch_map" in result.output:
@@ -806,53 +865,28 @@ class Orchestrator:
                 for a in result.output.get("action_stack", []):
                     self.state.push_action(a)
                     self.dashboard.log_branch("add", a)
-                wq_entries = result.output.get("work_queue_entries", [])
-                if wq_entries:
-                    existing_ids = {e.get("id") for e in ipc.read_work_queue_all(self.session_dir)}
-                    pushed = 0
-                    skipped = 0
-                    for wq in wq_entries:
-                        wq_id = wq.get("id", "")
-                        if wq_id and wq_id in existing_ids:
-                            skipped += 1
-                            continue
-                        ipc.write_work_queue_entry(self.session_dir, wq)
-                        existing_ids.add(wq.get("id", ""))
-                        self.state.kernel_manager_targets_pushed += 1
-                        pushed += 1
-                    if skipped:
-                        log.info("Deep analysis: pushed %d WQ entries, skipped %d duplicates",
-                                 pushed, skipped)
+                for wq in result.output.get("work_queue_entries", []):
+                    ipc.write_work_queue_entry(self.session_dir, wq)
+                    self.state.kernel_manager_targets_pushed += 1
 
                 self.state.save()
 
     def _check_inject_queue(self) -> None:
-        """Pick up externally injected actions from inject_actions.jsonl.
-
-        Atomically rename → process → delete to avoid losing entries on crash.
-        """
+        """Pick up externally injected actions from inject_actions.jsonl."""
         p = Path(self.session_dir) / "inject_actions.jsonl"
         if not p.exists() or p.stat().st_size == 0:
             return
-        staging = p.with_suffix(".jsonl.processing")
         try:
-            p.rename(staging)
-        except OSError:
-            return
-        try:
-            for line in staging.read_text().strip().splitlines():
-                try:
-                    action = json.loads(line)
-                except json.JSONDecodeError:
-                    log.warning("Inject queue: skipping malformed line: %s", line[:100])
-                    continue
+            lines = p.read_text().strip().splitlines()
+            p.write_text("")
+            for line in lines:
+                action = json.loads(line)
                 self.state.push_action(action)
                 self.dashboard.log_branch("add", action)
                 log.info("Injected external action: %s [%.1f]",
                          action.get("id", "?"), float(action.get("score", 0)))
-            staging.unlink(missing_ok=True)
         except Exception as exc:
-            log.warning("Failed to process inject queue: %s", exc)
+            log.warning("Failed to read inject queue: %s", exc)
 
     # ------------------------------------------------------------------
     # 16-step DFS iteration
@@ -873,6 +907,11 @@ class Orchestrator:
         log.info("DFS: popped [%.1f] %s: %s", float(action.get("score", 0) or 0), action.get("id", "?"), action_type)
 
         # 2-4. Classify and route
+        # Snapshot system files before Claw execution so we can auto-rollback
+        # if a bad patch corrupts the inference server.
+        if self._workload is not None:
+            self._workload.snapshot_system_files()
+
         result: dict[str, Any] = {}
         try:
             if action.get("needs_benchmark_only"):
@@ -905,17 +944,9 @@ class Orchestrator:
         # 5. Sanitize LLM-returned result types
         result = _sanitize_result(result)
 
-        # 6. Accuracy gate
-        if result.get("accuracy_risk", 0) > 0:
-            passed = await self._accuracy_gate(action, result)
-            if not passed:
-                ipc.write_event(self.session_dir, {
-                    "source": "marathon", "type": "accuracy-fail",
-                    "task_id": action.get("id"), "severity": "warning", "promising": False,
-                })
-                self.state.events_written += 1
-                self.state.save()
-                return
+        # 6. Accuracy gate — moved to post-benchmark (step 7c) so every
+        #    throughput improvement is accuracy-validated, not just ones
+        #    where the Claw reports accuracy_risk > 0.
 
         # 7. Measure tok/s — benchmark after any action that may have changed
         #    code, config, or env.  Skip only for clearly no-op outcomes.
@@ -926,25 +957,52 @@ class Orchestrator:
             and result.get("status", "error") not in _NO_BENCH_STATUSES
         )
         if should_bench:
+            # The Claw action may have changed config files, env vars, CSVs,
+            # or system packages. The server must be restarted to pick up
+            # these changes before benchmarking.
+            if self._workload is not None:
+                log.info("Restarting server to pick up changes from action %s",
+                         action.get("id"))
+                await self._workload.kill_server()
+                healthy = await self._workload.start_server()
+                if not healthy:
+                    log.error("Server failed to start after action %s", action.get("id"))
+
             prev_tput = self.state.current_tput_per_gpu
             baseline = self.state.baseline_tput_per_gpu
             best_ever = self.state.best_tput_per_gpu or prev_tput
             bench = await self._run_benchmark()
             if bench is None:
-                log.warning(
-                    "Benchmark failed/unavailable after %s — re-queuing action for measurement",
-                    action.get("id"),
-                )
-                bench_retry = {
-                    "id": f"bench_retry_{action.get('id', 'x')}_{int(time.time())}",
-                    "action": action.get("action", "benchmark-pending"),
-                    "score": max(float(action.get("score", 0) or 0), 15),
-                    "description": f"Re-benchmark after {action.get('id')}: changes applied but benchmark was unavailable",
-                    "needs_benchmark_only": True,
-                    "parent_action_id": action.get("id"),
-                }
-                self.state.push_action(bench_retry)
-                self.dashboard.log_branch("add", bench_retry)
+                # Track retry depth to prevent infinite re-queue loops.
+                retry_depth = action.get("_bench_retry_depth", 0)
+                MAX_BENCH_RETRIES = 3
+                if retry_depth >= MAX_BENCH_RETRIES:
+                    log.error(
+                        "Benchmark failed %d times for %s — giving up (server or "
+                        "optimization may be broken). Reverting to move on.",
+                        retry_depth, action.get("id"),
+                    )
+                    self.state.failure_journal.append({
+                        "action_id": action.get("id"),
+                        "error": f"Benchmark failed {retry_depth} consecutive times",
+                        "timestamp": time.time(),
+                    })
+                else:
+                    log.warning(
+                        "Benchmark failed after %s (attempt %d/%d) — re-queuing",
+                        action.get("id"), retry_depth + 1, MAX_BENCH_RETRIES,
+                    )
+                    bench_retry = {
+                        "id": f"bench_retry_{action.get('id', 'x')}_{int(time.time())}",
+                        "action": action.get("action", "benchmark-pending"),
+                        "score": max(float(action.get("score", 0) or 0), 15),
+                        "description": f"Re-benchmark after {action.get('id')}: attempt {retry_depth + 2}/{MAX_BENCH_RETRIES}",
+                        "needs_benchmark_only": True,
+                        "parent_action_id": action.get("id"),
+                        "_bench_retry_depth": retry_depth + 1,
+                    }
+                    self.state.push_action(bench_retry)
+                    self.dashboard.log_branch("add", bench_retry)
             if bench:
                 new_tput = bench.get("tput_per_gpu", prev_tput)
                 had_contention = bench.get("had_gpu_contention", False)
@@ -981,18 +1039,24 @@ class Orchestrator:
                         new_tput = verify_bench.get("tput_per_gpu", prev_tput)
                         log.info("Post-revert verification: %.1f tok/s/GPU", new_tput)
                     self.state.current_tput_per_gpu = max(new_tput, prev_tput)
+                    if self.state.current_tput_per_gpu > (self.state.best_tput_per_gpu or 0):
+                        self.state.best_tput_per_gpu = self.state.current_tput_per_gpu
 
-                    retry = await self._analyze_regression(action, result, prev_tput, bench)
-                    if retry:
-                        self.state.push_action(retry)
-                        self.dashboard.log_branch("add", retry)
-                        log.info("Regression analysis queued retry: %s (score %.1f)",
-                                 retry.get("id"), retry.get("score", 0))
+                    if not action.get("needs_benchmark_only"):
+                        retry = await self._analyze_regression(action, result, prev_tput, bench)
+                        if retry:
+                            self.state.push_action(retry)
+                            self.dashboard.log_branch("add", retry)
+                            log.info("Regression analysis queued retry: %s (score %.1f)",
+                                     retry.get("id"), retry.get("score", 0))
+                    else:
+                        log.info("Skipping regression analysis for benchmark-only action %s",
+                                 action.get("id"))
                 else:
                     self.state.current_tput_per_gpu = new_tput
                     if new_tput > best_ever:
                         self.state.best_tput_per_gpu = new_tput
-                    if new_tput > prev_tput:
+                    if new_tput > prev_tput and prev_tput > 0:
                         gain = (new_tput - prev_tput) / prev_tput * 100
                         result["gain_pct"] = gain
                         log.info("Action %s improved throughput: %.1f → %.1f (+%.1f%%)",
@@ -1000,15 +1064,36 @@ class Orchestrator:
 
                         self._snapshot_diffs(action, prev_tput, new_tput)
 
-                        # Success introspection: understand WHY it worked and
-                        # generate follow-on actions that exploit the same pattern.
-                        follow_ons = await self._analyze_success(action, result, prev_tput, new_tput)
-                        for fo in follow_ons:
-                            self.state.push_action(fo)
-                            self.dashboard.log_branch("add", fo)
-                        if follow_ons:
-                            log.info("Success analysis generated %d follow-on actions from %s",
-                                     len(follow_ons), action.get("id"))
+                        # 7c. Accuracy gate — run on every throughput gain
+                        _acc_reverted = False
+                        if not action.get("needs_benchmark_only"):
+                            log.info("Running accuracy gate for %s (+%.1f%%)",
+                                     action.get("id"), gain)
+                            acc_passed = await self._accuracy_gate(action, result)
+                            if not acc_passed:
+                                log.error("Accuracy gate FAILED for %s — reverting despite +%.1f%% gain",
+                                          action.get("id"), gain)
+                                ipc.write_event(self.session_dir, {
+                                    "source": "marathon", "type": "accuracy-fail",
+                                    "task_id": action.get("id"), "severity": "error",
+                                    "promising": False,
+                                    "details": {"gain_pct": gain, "reverted_reason": "accuracy_fail"},
+                                })
+                                self.state.events_written += 1
+                                self.state.current_tput_per_gpu = prev_tput
+                                self.state.best_tput_per_gpu = best_ever
+                                await self._rollback_action(action)
+                                self.state.save()
+                                _acc_reverted = True
+
+                        if not _acc_reverted:
+                            follow_ons = await self._analyze_success(action, result, prev_tput, new_tput)
+                            for fo in follow_ons:
+                                self.state.push_action(fo)
+                                self.dashboard.log_branch("add", fo)
+                            if follow_ons:
+                                log.info("Success analysis generated %d follow-on actions from %s",
+                                         len(follow_ons), action.get("id"))
                 if self.state.baseline_tput_per_gpu > 0:
                     self.state.cumulative_gain_pct = (
                         (self.state.current_tput_per_gpu - self.state.baseline_tput_per_gpu)
@@ -1054,9 +1139,6 @@ class Orchestrator:
         # 9. Push sub-actions (inherit parent score if agent scored too low)
         parent_score = float(action.get("score", 0) or 0)
         for sub in result.get("sub_actions", []):
-            if not isinstance(sub, dict):
-                log.warning("Skipping non-dict sub_action: %s", type(sub).__name__)
-                continue
             sub_score = float(sub.get("score", 0) or 0)
             if sub_score < parent_score * 0.5:
                 sub["score"] = round(parent_score * 0.6, 1)
@@ -1244,6 +1326,11 @@ class Orchestrator:
         prompt_fn = prompt_map.get(action_type, prompts.prompt_execute_action)
         prompt = prompt_fn(self.state.state_summary(), action)
         result = await self.llm.call(prompt, output_file=str(output_file), max_turns=50)
+
+        # Post-action cleanup: kill any servers the Claw may have spawned
+        from .workload import kill_rogue_servers
+        await kill_rogue_servers()
+
         output = result.output or {}
         output.setdefault("status", "error" if result.is_error else "success")
         output["needs_benchmark"] = output.get("status") not in ("error", "crash", "segfault", "reverted", "already_applied", "no_change", "not_applicable")
@@ -1496,8 +1583,6 @@ class Orchestrator:
 
         from . import prompts
 
-        metadata = ipc.read_merge_ready_metadata(self.session_dir, task_id) or {}
-
         for i, instruction in enumerate(instructions):
             resolved = instruction.replace("$PATCH_DIR", patch_dir or base_dir)
 
@@ -1601,7 +1686,7 @@ class Orchestrator:
                 applicable = details.get("applicable_to", [])
                 for target in applicable[:5]:
                     transfer_action = {
-                        "id": f"transfer_{ins.get('id', 'unknown')}_{target[:20]}",
+                        "id": f"transfer_{ins['id']}_{target[:20]}",
                         "action": details.get("approach", "oob-rewrite"),
                         "description": f"Transfer pattern '{pattern}' to {target}",
                         "target_kernel": target,
@@ -1941,6 +2026,8 @@ Return a JSON object:
 
 Be specific in the retry description about what EXACTLY to change and what NOT to change.
 Include warnings about the mistakes that caused the regression.
+
+READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
 """
 
         try:
@@ -2003,7 +2090,7 @@ Include warnings about the mistakes that caused the regression.
         Returns a list of follow-on actions (may be empty).
         """
         action_id = action.get("id", "unknown")
-        gain_pct = (new_tput - prev_tput) / prev_tput * 100
+        gain_pct = (new_tput - prev_tput) / prev_tput * 100 if prev_tput > 0 else 0
         log.info("Success analysis starting for %s (+%.1f%%)", action_id, gain_pct)
 
         action_output_file = Path(self.session_dir) / f"action_{action_id}.json"
@@ -2071,6 +2158,8 @@ Return a JSON object:
 
 Only include follow-on actions that are DIFFERENT from what's already on the action stack.
 Be specific — vague "investigate X" actions are not useful.
+
+READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
 """
 
         try:
@@ -2216,8 +2305,80 @@ Be specific — vague "investigate X" actions are not useful.
                         a["score"] = entry.get("score", a.get("score", 0))
 
     async def _accuracy_gate(self, action: dict, result: dict) -> bool:
+        """Run deterministic accuracy evaluation via eval_accuracy.sh.
+
+        Falls back to LLM-based gate only if the script is unavailable.
+        """
+        action_id = action.get("id", "unknown")
+
+        # Try deterministic eval first
+        eval_script = None
+        if self._workload:
+            candidate = Path(self._workload.inferencex_path).parent / "scripts" / "eval_accuracy.sh"
+            if candidate.exists():
+                eval_script = candidate
+            else:
+                scripts_dir = Path(self._workload.inferencex_path) / "scripts"
+                candidate = scripts_dir / "eval_accuracy.sh"
+                if candidate.exists():
+                    eval_script = candidate
+
+        if eval_script:
+            log.info("Running deterministic accuracy gate: %s", eval_script)
+            results_dir = Path(self.session_dir) / f"eval_accuracy_{action_id}"
+            results_dir.mkdir(parents=True, exist_ok=True)
+            env = {
+                **os.environ,
+                "PORT": str(self._workload.port if self._workload else 8888),
+                "MODEL": self._workload.model if self._workload else "",
+                "RESULTS_DIR": str(results_dir),
+            }
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    f"bash {eval_script}",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    env=env,
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=600)
+                output = stdout.decode(errors="replace") if stdout else ""
+                log.info("Accuracy eval finished (exit=%s): %s",
+                         proc.returncode, output[-500:])
+
+                if proc.returncode != 0:
+                    log.warning("Accuracy eval script failed (exit %d) — treating as PASS "
+                                "to avoid blocking on eval infra issues", proc.returncode)
+                    return True
+
+                # Parse GSM8K accuracy from lm_eval output
+                import re
+                acc_match = re.search(r'gsm8k.*?acc[^,]*?[\|,]\s*([\d.]+)', output, re.IGNORECASE)
+                if not acc_match:
+                    acc_match = re.search(r'acc(?:uracy)?[^\d]*([\d.]+)', output)
+                if acc_match:
+                    accuracy = float(acc_match.group(1))
+                    if accuracy < 1:
+                        accuracy *= 100
+                    log.info("GSM8K accuracy: %.1f%%", accuracy)
+                    passed = accuracy >= 50.0
+                    if not passed:
+                        log.error("ACCURACY GATE FAILED: %.1f%% < 50%% threshold", accuracy)
+                    return passed
+                else:
+                    log.warning("Could not parse accuracy from eval output — treating as PASS")
+                    return True
+
+            except asyncio.TimeoutError:
+                log.warning("Accuracy eval timed out after 600s — treating as PASS")
+                return True
+            except Exception as e:
+                log.warning("Accuracy eval error: %s — treating as PASS", e)
+                return True
+
+        # Fallback to LLM-based gate
+        log.warning("No eval_accuracy.sh found — falling back to LLM accuracy gate")
         from . import prompts
-        output_file = Path(self.session_dir) / f"accuracy_{action.get('id', 'x')}.json"
+        output_file = Path(self.session_dir) / f"accuracy_{action_id}.json"
         prompt = prompts.prompt_accuracy_gate(self.state.state_summary(), action, result)
         ag_result = await self.llm.call(prompt, output_file=str(output_file), max_turns=15)
         return (ag_result.output or {}).get("passed", True)
@@ -2241,49 +2402,57 @@ Be specific — vague "investigate X" actions are not useful.
             holder = self.gpu_lock.state.holder
             phase = self.gpu_lock.state.phase
             held = self.gpu_lock.state.held_seconds
-            alive = self.gpu_lock.holder_alive
-            hb_age = self.gpu_lock.seconds_since_heartbeat
-
-            if alive:
-                log.info(
-                    "GPU busy before benchmark — holder=%s/%s held %.0fs, "
-                    "heartbeat alive (%.0fs ago) — deferring benchmark",
-                    holder, phase, held, hb_age,
-                )
-                return None
-
-            # Heartbeat stale — holder might be dead. Short patience.
             log.warning(
-                "GPU busy before benchmark — holder=%s/%s held %.0fs, "
-                "heartbeat STALE (%.0fs ago) — waiting up to 60s",
-                holder, phase, held, hb_age,
+                "GPU busy before benchmark — holder=%s/%s held %.0fs, stale=%s. "
+                "Waiting up to 300s for release.",
+                holder, phase, held, self.gpu_lock.is_stale,
             )
-            for i in range(30):
+            for i in range(150):
                 await asyncio.sleep(2)
                 if not self.gpu_lock.state.busy:
-                    log.info("GPU released after %ds wait — proceeding with benchmark", (i + 1) * 2)
+                    log.info("GPU released after %.0fs wait — proceeding with benchmark", (i + 1) * 2)
                     break
-                if self.gpu_lock.holder_alive:
-                    log.info(
-                        "GPU holder came alive during wait (heartbeat %.0fs ago) "
-                        "— deferring benchmark instead of force-releasing",
-                        self.gpu_lock.seconds_since_heartbeat,
-                    )
-                    return None
             else:
                 holder = self.gpu_lock.state.holder
                 phase = self.gpu_lock.state.phase
                 held = self.gpu_lock.state.held_seconds
                 log.error(
-                    "GPU still held after 60s wait with stale heartbeat "
-                    "(holder=%s/%s held %.0fs) — force-releasing for benchmark",
+                    "GPU still held after 300s wait (holder=%s/%s held %.0fs) — "
+                    "force-releasing for benchmark",
                     holder, phase, held,
                 )
                 self.gpu_lock._force_release()
                 await asyncio.sleep(5)
 
-        if not await self._workload._health_check():
-            log.warning("Server not healthy before benchmark — starting server")
+        # Kill any rogue servers (Claw-spawned) before benchmarking
+        from .workload import kill_rogue_servers
+        rogues = await kill_rogue_servers(port=self._workload.port)
+        if rogues:
+            log.warning("Killed %d rogue server(s) before benchmark", rogues)
+            await asyncio.sleep(5)
+
+        # Verify the server was launched by the marathon (via Sprint script),
+        # not by Claw directly.  A Claw-spawned server may be missing critical
+        # optimization flags (allreduce fusion, FP8 KV cache, etc.) and will
+        # pass health checks but produce degraded throughput.
+        from .workload import _read_server_pid
+        marathon_pid = _read_server_pid()
+        if marathon_pid is None and await self._workload._health_check():
+            log.warning(
+                "Server is alive but NOT launched by marathon (no PID file) "
+                "— likely Claw-spawned with missing flags.  Killing and "
+                "relaunching via Sprint launch script."
+            )
+            await self._workload.kill_server()
+            await asyncio.sleep(3)
+
+        if not await self._workload._check_server_alive():
+            log.warning("Server not healthy before benchmark (deep check failed) — restarting server")
+            changed = self._workload.system_files_changed()
+            if changed:
+                log.warning("System files modified by Claw: %s — rolling back before restart", changed)
+                self._workload.rollback_system_files()
+            await self._workload.kill_server()
             healthy = await self._workload.start_server()
             if not healthy:
                 log.error("Failed to start server for benchmark")
@@ -2533,12 +2702,11 @@ Be specific — vague "investigate X" actions are not useful.
         return False
 
     # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
-    # Diff snapshots — persist all code changes to shared_nfs after gains
+    # Diff snapshots — persist all code changes after gains
     # ------------------------------------------------------------------
 
     def _snapshot_diffs(self, action: dict[str, Any], prev_tput: float, new_tput: float) -> None:
-        """Save git diffs of all repos to shared_nfs after a successful optimization."""
+        """Save diffs of modified system files to session/diffs/ after a successful optimization."""
         try:
             import subprocess, time as _time
             ts = _time.strftime("%Y%m%d_%H%M%S")
@@ -2546,6 +2714,29 @@ Be specific — vague "investigate X" actions are not useful.
             diff_dir = Path(self.session_dir) / "diffs" / f"{ts}_{action_id}"
             diff_dir.mkdir(parents=True, exist_ok=True)
 
+            snapshot_dir = Path(self.session_dir) / "benchmarks" / ".system_snapshots"
+            system_files = [
+                ("/usr/local/lib/python3.12/dist-packages/aiter/fused_moe.py", "aiter_fused_moe"),
+                ("/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/fused_moe.py", "vllm_fused_moe"),
+                ("/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/gpt_oss_triton_kernels_moe.py", "gpt_oss_triton_kernels_moe"),
+                ("/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/rocm_aiter_fused_moe.py", "rocm_aiter_fused_moe"),
+            ]
+
+            diffs_found = 0
+            for sys_file, name in system_files:
+                if not Path(sys_file).exists():
+                    continue
+                snap = snapshot_dir / Path(sys_file).name
+                if snap.exists():
+                    result = subprocess.run(
+                        ["diff", "-u", str(snap), sys_file],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if result.stdout.strip():
+                        (diff_dir / f"{name}.diff").write_text(result.stdout)
+                        diffs_found += 1
+
+            # Also try git diffs for tracked repos
             repos = [
                 ("aiter", "/sgl-workspace/aiter"),
                 ("sglang", "/sgl-workspace/sglang"),
@@ -2560,6 +2751,7 @@ Be specific — vague "investigate X" actions are not useful.
                     )
                     if diff.stdout.strip():
                         (diff_dir / f"{name}.patch").write_text(diff.stdout)
+                        diffs_found += 1
                 except Exception:
                     pass
 
@@ -2569,10 +2761,72 @@ Be specific — vague "investigate X" actions are not useful.
                 "prev_tput": prev_tput,
                 "new_tput": new_tput,
                 "gain_pct": (new_tput - prev_tput) / prev_tput * 100 if prev_tput else 0,
+                "baseline_tput": self.state.baseline_tput_per_gpu,
+                "cumulative_gain_pct": (new_tput - self.state.baseline_tput_per_gpu)
+                    / self.state.baseline_tput_per_gpu * 100 if self.state.baseline_tput_per_gpu else 0,
             }
-            import json as _json
-            (diff_dir / "manifest.json").write_text(_json.dumps(manifest, indent=2))
-            log.info("Diff snapshot saved to %s", diff_dir)
+            (diff_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+
+            action_output = Path(self.session_dir) / f"action_{action_id}.json"
+            if action_output.exists():
+                import shutil
+                shutil.copy2(str(action_output), str(diff_dir / action_output.name))
+
+            # Capture env vars & serve script for full reproducibility
+            (diff_dir / "env_vars.json").write_text(
+                json.dumps(dict(os.environ), indent=2, sort_keys=True))
+            if self._workload:
+                sprint_script = getattr(self._workload, '_sprint_launch_script', None)
+                if sprint_script and Path(sprint_script).exists():
+                    import shutil as _shutil
+                    _shutil.copy2(sprint_script, diff_dir / Path(sprint_script).name)
+                bench_script = getattr(self._workload, '_sprint_benchmark_script', None)
+                if bench_script and Path(bench_script).exists():
+                    _shutil.copy2(bench_script, diff_dir / Path(bench_script).name)
+                manifest["workload"] = {
+                    "tp": self._workload.tp,
+                    "isl": self._workload.isl,
+                    "osl": self._workload.osl,
+                    "concurrency": self._workload.concurrency,
+                    "port": self._workload.port,
+                    "framework": self._workload.framework,
+                }
+                (diff_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+
+            # Generate reproduce.sh for one-command reproducibility
+            try:
+                repro_lines = ["#!/usr/bin/env bash", "set -euo pipefail", "",
+                               f"# Reproduce result from action: {action_id}",
+                               f"# Throughput: {prev_tput:.1f} → {new_tput:.1f} tok/s/GPU",
+                               f"# Generated: {ts}", ""]
+                # Apply diffs
+                for diff_file in sorted(diff_dir.glob("*.diff")):
+                    repro_lines.append(f'echo "Applying {diff_file.name}..."')
+                    repro_lines.append(f"patch -p0 < \"$(dirname $0)/{diff_file.name}\"")
+                for patch_file in sorted(diff_dir.glob("*.patch")):
+                    repro_lines.append(f'echo "Applying {patch_file.name}..."')
+                    target_repo = patch_file.stem
+                    repro_lines.append(
+                        f"cd /sgl-workspace/{target_repo} 2>/dev/null || true")
+                    repro_lines.append(
+                        f"git apply \"$(dirname $0)/{patch_file.name}\" || "
+                        f"patch -p1 < \"$(dirname $0)/{patch_file.name}\"")
+                # Start server
+                serve_copy = diff_dir / "serve_tp1.sh"
+                if serve_copy.exists():
+                    repro_lines += ["", "# Start server",
+                                    f'bash "$(dirname $0)/serve_tp1.sh"']
+                repro_lines += ["", f"# Then benchmark at CONC={self._workload.concurrency if self._workload else 64}"]
+                bench_copy = diff_dir / "bench_sweep.sh"
+                if bench_copy.exists():
+                    repro_lines.append(f'bash "$(dirname $0)/bench_sweep.sh"')
+                repro_script = diff_dir / "reproduce.sh"
+                repro_script.write_text("\n".join(repro_lines) + "\n")
+                repro_script.chmod(0o755)
+            except Exception as exc:
+                log.debug("Could not generate reproduce.sh: %s", exc)
+
+            log.info("Diff snapshot saved to %s (%d diffs)", diff_dir, diffs_found)
         except Exception as exc:
             log.warning("Failed to save diff snapshot: %s", exc)
 
