@@ -16,32 +16,138 @@ python3 $SKILL_ROOT/kb/kb_query.py --category pitfall --tags TraceLens --compact
 
 **Claw mode:** All profiling and filesystem commands must run via `exec_on_gpu`. See [`../modes/CLAW.md`](../modes/CLAW.md) "Profile" section for wrapper syntax.
 
-### Step 1: Profile with torch.profiler
+### Step 1: Profile with Magpie (torch.profiler + TraceLens + Gap Analysis in one shot)
 
-**NOTE:** `run_baseline.sh` already handles profiling in one run. It pre-sets `SGLANG_TORCH_PROFILER_DIR` at server launch, runs the clean baseline, then activates profiling via `/start_profile` HTTP endpoint.
+Magpie handles the full profiling pipeline: server launch → profiling → trace collection → TraceLens analysis → gap analysis → cleanup. No manual profiler HTTP endpoints needed.
 
-If running separately:
-```bash
-RUN_CONTEXT_FILE="$RESULT_DIR/run_context.env" bash "$SCRIPTS_DIR/run_profile.sh"
-```
+#### Step 1a: Compute steady-state profiling window
 
-**vLLM V1 caveat:** `multiprocessing.spawn` workers — main process profiler gets empty traces. Use `/start_profile` + `/stop_profile` HTTP endpoints instead.
-
-**vLLM v0.17+ `--profiler-config` format:**
-
-vLLM v0.17 changed the profiling interface. The `/start_profile` endpoint requires `--profiler-config` at server launch time. The config MUST be JSON format:
+Instead of profiling the entire run (which produces oversized traces), profile only a
+representative steady-state window controlled by `DELAY_ITERS` and `MAX_ITERS`.
 
 ```bash
-# CORRECT — JSON format (vLLM v0.17+)
-python3 -m vllm.entrypoints.openai.api_server \
-    --profiler-config '{"profiler": "torch", "trace_dir": "/workspace/traces"}' \
-    ...
+EXTRA_ARGS_KEY="EXTRA_$(echo $FRAMEWORK | tr '[:lower:]' '[:upper:]')_ARGS"
 
-# WRONG — key=value format (will fail with "invalid JSON")
-python3 -m vllm.entrypoints.openai.api_server \
-    --profiler-config 'profiler=torch,trace_dir=/workspace/traces' \
-    ...
+# Steady-state window: profile only a representative slice of execution
+_raw_max=$((16 * OSL / CONC))
+MAX_ITERS=$(( _raw_max < 256 ? 256 : (_raw_max > 1024 ? 1024 : _raw_max) ))
+
+PROFILE_NUM_PROMPTS=$((CONC * 10))
+# R = PROFILE_NUM_PROMPTS / CONC (request multiplier)
+_R=$((PROFILE_NUM_PROMPTS / CONC))
+DELAY_ITERS=$(( (((_R + 1) / 2) * 5 * OSL) - (MAX_ITERS / 2) ))
+if [[ $DELAY_ITERS -lt 0 ]]; then DELAY_ITERS=0; fi
+
+TRACE_DIR="$RESULT_DIR/profile_traces"
+mkdir -p "$TRACE_DIR"
 ```
+
+#### Step 1b: Build framework-specific profiler args
+
+**For SGLang:**
+```bash
+if [[ "$FRAMEWORK" == "sglang" ]]; then
+    PROFILER_SERVER_ARGS="--enable-profile-cuda-graph --enable-shape-discovery-for-cuda-graph-profile"
+    PROFILER_EXTRA_ARGS="$BASELINE_SERVER_ARGS $PROFILER_SERVER_ARGS"
+
+    PROFILER_EXTRA_BODY=$(python3 -c "import json; print(json.dumps({
+        'shape_discovery': True,
+        'roofline_annotations': True,
+        'start_step': $DELAY_ITERS,
+        'num_steps': $MAX_ITERS,
+        'merge_profiles': False,
+        'profile_by_stage': False
+    }))")
+
+cat > "$RESULT_DIR/profile_config.yaml" <<EOF
+benchmark:
+  framework: sglang
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: sglang_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    PROFILE_NUM_PROMPTS: $PROFILE_NUM_PROMPTS
+    EXTRA_SGLANG_ARGS: "$PROFILER_EXTRA_ARGS"
+    SGLANG_PROFILE_WITH_STACK: "true"
+    SGLANG_PROFILE_RECORD_SHAPE: "true"
+    PROFILE_EXTRA_BODY: '$PROFILER_EXTRA_BODY'
+  profiler:
+    torch_profiler:
+      enabled: true
+    tracelens:
+      enabled: true
+  gap_analysis:
+    enabled: true
+    top_k: 30
+  timeout_seconds: 1800
+EOF
+fi
+```
+
+**For vLLM:**
+```bash
+if [[ "$FRAMEWORK" == "vllm" ]]; then
+    PROFILER_VLLM_ARGS="$BASELINE_SERVER_ARGS"
+    PROFILER_VLLM_ARGS="$PROFILER_VLLM_ARGS --profiler-config.capture_torch_profiler_dir ${TRACE_DIR}/capture_traces"
+    PROFILER_VLLM_ARGS="$PROFILER_VLLM_ARGS --profiler-config.detailed_trace_annotation True"
+    PROFILER_VLLM_ARGS="$PROFILER_VLLM_ARGS --profiler-config.delay_iterations $DELAY_ITERS"
+    PROFILER_VLLM_ARGS="$PROFILER_VLLM_ARGS --profiler-config.max_iterations $MAX_ITERS"
+    PROFILER_VLLM_ARGS="$PROFILER_VLLM_ARGS --profiler-config.ignore_frontend True"
+
+cat > "$RESULT_DIR/profile_config.yaml" <<EOF
+benchmark:
+  framework: vllm
+  model: $MODEL
+  precision: fp8
+  run_mode: local
+  runner_type: $RUNNER_TYPE
+  inferencex_path: $INFERENCEX_PATH
+  benchmark_script: vllm_${RUNNER_TYPE}.sh
+  envs:
+    TP: $TP
+    CONC: $CONC
+    ISL: $ISL
+    OSL: $OSL
+    RANDOM_RANGE_RATIO: 0.5
+    PROFILE_NUM_PROMPTS: $PROFILE_NUM_PROMPTS
+    EXTRA_VLLM_ARGS: "$PROFILER_VLLM_ARGS"
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: 1200
+  profiler:
+    torch_profiler:
+      enabled: true
+    tracelens:
+      enabled: true
+  gap_analysis:
+    enabled: true
+    top_k: 30
+  timeout_seconds: 1800
+EOF
+fi
+```
+
+#### Step 1c: Run the profiling benchmark
+```bash
+magpie benchmark --benchmark-config "$RESULT_DIR/profile_config.yaml" -o "$RESULT_DIR/profile"
+```
+
+**NOTE:** The profiling run uses `CONC * 10` prompts (via `PROFILE_NUM_PROMPTS`) with
+steady-state windowing (`DELAY_ITERS`/`MAX_ITERS`) to capture a representative slice
+without oversized traces. Throughput numbers include profiling overhead — use clean
+baseline numbers from `baseline.md` for performance tracking.
+
+**Key profiler settings enabled for TraceLens:**
+- **Shape & callstack profiling** (SGLang): `SGLANG_PROFILE_WITH_STACK`, `SGLANG_PROFILE_RECORD_SHAPE`
+- **Graph capture tracing**: SGLang `--enable-profile-cuda-graph`, vLLM `--profiler-config.capture_torch_profiler_dir`
+- **Detailed annotations**: SGLang `extra_body.roofline_annotations`, vLLM `--profiler-config.detailed_trace_annotation`
+- **Steady-state window**: SGLang `extra_body.start_step/num_steps`, vLLM `--profiler-config.delay_iterations/max_iterations`
 
 **ALWAYS `unset PROFILE SGLANG_TORCH_PROFILER_DIR` after profiling** — leaked env vars cause 30x slowdown.
 

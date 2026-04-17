@@ -394,13 +394,17 @@ async def benchmark(
 
     if profile:
         print("Starting profiler...")
+        profile_extra_body = {"num_steps": 1, "merge_profiles": True, "profile_by_stage": True}
+        env_extra = os.environ.get("PROFILE_EXTRA_BODY")
+        if env_extra:
+            profile_extra_body.update(json.loads(env_extra))
         profile_input = RequestFuncInput(model=model_id,
                                          model_name=model_name,
                                          prompt=test_prompt,
                                          api_url=base_url + "/start_profile",
                                          prompt_len=test_prompt_len,
                                          output_len=test_output_len,
-                                         extra_body={"num_steps": 1, "merge_profiles": True, "profile_by_stage": True},
+                                         extra_body=profile_extra_body,
                                          logprobs=logprobs,
                                          best_of=best_of,
                                          multi_modal_content=test_mm_content,

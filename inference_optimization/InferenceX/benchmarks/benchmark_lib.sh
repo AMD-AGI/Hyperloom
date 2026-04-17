@@ -368,8 +368,8 @@ run_benchmark_serving() {
         workspace_dir=$(pwd)
     fi
 
-    # Profiling support: when PROFILE=1, ensure profiler dir exists, add --profile flag,
-    # and cap num_prompts to keep traces small.
+    # Profiling support: when PROFILE=1, ensure profiler dir exists and add --profile flag.
+    # If PROFILE_NUM_PROMPTS is set, use it; otherwise fall back to max_concurrency.
     local profile_flag=()
     if [[ "${PROFILE:-}" == "1" ]]; then
         local _prof_dir="${SGLANG_TORCH_PROFILER_DIR:-${VLLM_TORCH_PROFILER_DIR:-}}"
@@ -377,7 +377,7 @@ run_benchmark_serving() {
             mkdir -p "$_prof_dir"
         fi
         profile_flag+=(--profile)
-        num_prompts="$max_concurrency"
+        num_prompts="${PROFILE_NUM_PROMPTS:-$max_concurrency}"
     fi
 
     # Build benchmark command

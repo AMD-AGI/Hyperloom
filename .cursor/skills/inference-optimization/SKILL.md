@@ -132,8 +132,39 @@ All values below are the **single source of truth**. All actions reference these
 | `MAGPIE_RUN_MODE` | `local` | Benchmark execution mode (local, no Docker) |
 | `MAGPIE_DFS_NUM_PROMPTS_MULTIPLIER` | 3 | NUM_PROMPTS = CONC × this for DFS loop (short runs) |
 | `MAGPIE_BASELINE_NUM_PROMPTS_MULTIPLIER` | 10 | NUM_PROMPTS = CONC × this for baseline (default) |
-| `MAGPIE_PROFILE_NUM_PROMPTS` | `min(CONC, 16)` | NUM_PROMPTS for profiling runs (small for trace size) |
+| `MAGPIE_PROFILE_NUM_PROMPTS` | `CONC * 10` | NUM_PROMPTS for profiling runs (steady-state windowing controls trace size) |
 | `MAGPIE_TIMEOUT_S` | 3600 | Bash/YAML timeout for all magpie benchmark calls (must cover server startup) |
+
+### TraceLens Profiler Constants
+
+Profiling for TraceLens analysis requires specific settings beyond basic torch profiling.
+See `actions/profile.md` for the full profiling procedure.
+
+| Constant | Formula / Value | Description |
+|----------|-----------------|-------------|
+| `MAX_ITERS` | `min(1024, max(256, 16 * OSL / CONC))` | Execution steps to profile (steady-state window size) |
+| `DELAY_ITERS` | `(((R+1)/2) * 5 * OSL) - (MAX_ITERS/2)` | Step at which profiling begins (R = NUM_PROMPTS / CONC) |
+| `PROFILE_NUM_PROMPTS` | `CONC * 10` | Overrides InferenceX default via env var (prevents cap to max_concurrency) |
+| `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` | 1200 | Required for vLLM when profiling is enabled |
+
+**SGLang-specific env vars (set in Magpie YAML `envs`):**
+
+| Env var | Value | Purpose |
+|---------|-------|---------|
+| `SGLANG_PROFILE_WITH_STACK` | `true` | Enable callstack recording in traces |
+| `SGLANG_PROFILE_RECORD_SHAPE` | `true` | Enable tensor shape recording in traces |
+| `PROFILE_EXTRA_BODY` | JSON string | Override `extra_body` in InferenceX benchmark_serving.py start_profile request |
+
+**SGLang server args (append to `EXTRA_SGLANG_ARGS`):**
+- `--enable-profile-cuda-graph` — enable graph capture tracing
+- `--enable-shape-discovery-for-cuda-graph-profile` — shape discovery for captured graphs
+
+**vLLM server args (append to `EXTRA_VLLM_ARGS`):**
+- `--profiler-config.capture_torch_profiler_dir <dir>` — graph capture trace output directory
+- `--profiler-config.detailed_trace_annotation True` — enable detailed annotations
+- `--profiler-config.delay_iterations <N>` — start profiling after N steps
+- `--profiler-config.max_iterations <N>` — profile for N steps
+- `--profiler-config.ignore_frontend True` — skip frontend profiling overhead
 
 ## Magpie Integration
 
