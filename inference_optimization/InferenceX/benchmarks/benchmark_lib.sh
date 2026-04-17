@@ -368,8 +368,8 @@ run_benchmark_serving() {
         workspace_dir=$(pwd)
     fi
 
-    # Profiling support: when PROFILE=1, ensure profiler dir exists and add --profile flag.
-    # If PROFILE_NUM_PROMPTS is set, use it; otherwise fall back to max_concurrency.
+    # Profiling support: when PROFILE=1, ensure profiler dir exists, add --profile flag,
+    # set TraceLens-required defaults, and allow user override via env vars.
     local profile_flag=()
     if [[ "${PROFILE:-}" == "1" ]]; then
         local _prof_dir="${SGLANG_TORCH_PROFILER_DIR:-${VLLM_TORCH_PROFILER_DIR:-}}"
@@ -378,6 +378,12 @@ run_benchmark_serving() {
         fi
         profile_flag+=(--profile)
         num_prompts="${PROFILE_NUM_PROMPTS:-$max_concurrency}"
+
+        # TraceLens defaults: enable shape/callstack profiling for SGLang
+        export SGLANG_PROFILE_WITH_STACK="${SGLANG_PROFILE_WITH_STACK:-true}"
+        export SGLANG_PROFILE_RECORD_SHAPE="${SGLANG_PROFILE_RECORD_SHAPE:-true}"
+        # TraceLens default: extend vLLM model execution timeout for profiling
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1200}"
     fi
 
     # Build benchmark command

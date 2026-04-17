@@ -394,7 +394,13 @@ async def benchmark(
 
     if profile:
         print("Starting profiler...")
-        profile_extra_body = {"num_steps": 1, "merge_profiles": True, "profile_by_stage": True}
+        profile_extra_body = {
+            "num_steps": 1,
+            "merge_profiles": False,
+            "profile_by_stage": False,
+            "shape_discovery": True,
+            "roofline_annotations": True,
+        }
         env_extra = os.environ.get("PROFILE_EXTRA_BODY")
         if env_extra:
             profile_extra_body.update(json.loads(env_extra))
