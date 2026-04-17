@@ -89,6 +89,28 @@ description: |
 | `ROCM_QUICK_REDUCE_QUANTIZATION=INT4` | Recommended | Faster collectives |
 | `SGLANG_TORCH_PROFILER_DIR=<path>` | For profiling only | Must set BEFORE server launch |
 
+### CRITICAL: Server Launch Rules
+
+**NEVER launch a server manually by constructing `python3 -m sglang.launch_server ...` or
+`vllm serve ...` commands.**  The Sprint repo's launch script (in `scripts/`) is the single
+source of truth for all optimization flags, environment variables, and model-specific
+configuration.  Missing a single flag (e.g. `--enable-aiter-allreduce-fusion` or
+`--kv-cache-dtype fp8_e4m3`) can cause 20-30% throughput regression that passes health
+checks but silently degrades benchmark results.
+
+**Always use the Sprint repo's launch script:**
+```bash
+# Find the launch script (detected by content, not name)
+LAUNCH=$(ls scripts/*.sh | head -1)  # or whichever the marathon detected
+bash "$LAUNCH" --background
+```
+
+Similarly, always run the patch/apply script BEFORE launching the server — the launch
+script assumes patches are already applied.
+
+If you need to modify server flags, edit the launch script and relaunch via it — never
+construct commands ad-hoc.
+
 ### Server Parameter Tuning Results
 
 **Validated 2026-03-22:**
