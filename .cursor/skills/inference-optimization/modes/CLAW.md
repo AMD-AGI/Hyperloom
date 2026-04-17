@@ -67,10 +67,11 @@ In Claw mode, the skill may use SaFE MCP **only** for:
 
 Violation = immediate run invalidation.
 
-### IR-11: GEAK configuration is read-only
+### IR-11: GEAK configuration — same as IR-7
 
-Same as IR-7 in `SKILL.md` — NEVER modify GEAK configuration, test data, or settings.
-Interact with GEAK exclusively through GEAK MCP tool calls.
+Same as IR-7 in `SKILL.md`, applies equally in claw mode. The conditional
+`geak_set_model_config` call at SETUP (only when `geak` is in `KERNEL_OPT_BACKENDS`)
+and all guardrails apply unchanged.
 
 ---
 

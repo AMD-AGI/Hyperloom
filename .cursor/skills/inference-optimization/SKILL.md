@@ -73,26 +73,65 @@ Always use `scripts/patch_inductor.py` with `--target-file`. The `--cache-dir` o
 
 **CRITICAL:** When GEAK changes block sizes or warp counts, you MUST also pass `--best-config` with the updated tiling parameters. Patching only the kernel `.py` without updating `.best_config` causes numerical corruption (garbled output). See `actions/integrate.md` for details.
 
-### IR-7: NEVER modify GEAK configuration
+### IR-7: Configure GEAK `model_config` at setup (conditional), then read-only
 
-GEAK is an external service — treat it as **read-only infrastructure**. The skill MUST NOT
-modify any GEAK configuration files, settings, or parameters beyond what is passed as
-arguments to `geak_create_task`. Specifically:
+**Precondition** — this rule applies ONLY when `geak` is in `KERNEL_OPT_BACKENDS`
+(case-insensitive). OOB-only runs (e.g. `codex` / `claude` / `llm`) skip it
+entirely: no token read, no MCP call, no abort.
 
-- **Do NOT** modify GEAK server config, workspace settings, or API configuration
-- **Do NOT** write to or alter any files under the GEAK config/settings directories
-- **Do NOT** change `KERNEL_OPT_WORKSPACE`, `GEAK_STEP_LIMIT`, or other constants
-  at runtime (use the values from the constants table above or user overrides)
-- **Do NOT** modify the GEAK MCP server configuration (`cursor_mcp_config.json`, etc.)
-- **Do NOT** modify any test data, results, or configuration files belonging to GEAK
-  (e.g., `tests/test_data/`, `server/config.py`, `server/templates/`)
+When the precondition holds, the skill MUST call `geak_set_model_config` **exactly
+once** during SETUP with the canonical config below, then verify via
+`geak_get_model_config` before any `geak_create_task`:
 
-The ONLY interaction allowed is through these GEAK MCP tool calls:
-`geak_get_model_config` (read-only), `geak_create_task`, `geak_submit_task`,
+```yaml
+model_config:
+  model_class: "litellm"
+  model_name: "claude-opus-4-6"
+  model_kwargs:
+    max_tokens: 16384
+    api_base: "https://oci-slc.primus-safe.amd.com/llm-gateway"
+    api_key: "<EXPANDED VALUE OF $ANTHROPIC_AUTH_TOKEN>"
+```
+
+**Procedure (executed inline during SETUP, step 1 of Orchestrator Loop):**
+
+```bash
+BACKENDS_LC=$(echo "${KERNEL_OPT_BACKENDS:-geak,codex}" | tr 'A-Z' 'a-z')
+if echo ",$BACKENDS_LC," | grep -q ',geak,'; then
+    [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] && { echo "FATAL (IR-7): ANTHROPIC_AUTH_TOKEN unset"; exit 1; }
+    # Agent: call geak_set_model_config with the canonical config,
+    # substituting $ANTHROPIC_AUTH_TOKEN's expanded value into api_key.
+    # Then call geak_get_model_config and verify:
+    #   - model_name == "claude-opus-4-6"
+    #   - api_base  == "https://oci-slc.primus-safe.amd.com/llm-gateway"
+    #   - max_tokens == 16384
+    #   - api_key is a masked real key (not starting with `${` or `<`,
+    #     and does not contain the substring "ANTHROPIC_AUTH_TOKEN").
+    # On any verification failure → abort.
+fi
+```
+
+**Key contracts:**
+
+- The GEAK MCP does NOT expand shell variables. Passing the literal string
+  `"${ANTHROPIC_AUTH_TOKEN}"` as `api_key` bricks the shared config for all
+  users (every subsequent LLM call returns 401). The agent MUST substitute the
+  expanded env var value before the MCP call.
+- `geak_set_model_config` is permitted ONLY with the exact canonical config
+  above, at most ONCE per run, during SETUP only.
+- **Phase 0 TODO title** must match the precondition. Include
+  `set GEAK model config` in the title iff this rule fires; otherwise show
+  `Phase 0: SETUP - Read skill docs, configure environment` alone.
+
+**Guardrails (apply regardless of precondition):** aside from the single
+conditional `geak_set_model_config` call described above, GEAK state is
+read-only. Do NOT modify GEAK server config, workspace settings, `KERNEL_OPT_WORKSPACE`
+or `GEAK_STEP_LIMIT` at runtime, the MCP server config (`cursor_mcp_config.json`
+etc.), or any GEAK test data / results / config files
+(`tests/test_data/`, `server/config.py`, `server/templates/`). The ONLY GEAK MCP
+tool calls allowed are: `geak_set_model_config` (conditional, once, canonical
+config only), `geak_get_model_config`, `geak_create_task`, `geak_submit_task`,
 `geak_get_task`, `geak_get_outputs`, `geak_download_file`, `geak_list_tasks`.
-
-**NEVER call `geak_set_model_config`** — the LLM backend is pre-configured by the
-administrator. Changing it risks setting a non-existent model and breaking all tasks.
 
 Violation = immediate run invalidation.
 
@@ -160,7 +199,10 @@ These are recurring errors observed in production CI runs. **Read before executi
    server startup, health wait, benchmark, and profiling in a tested sequence. Manual
    launch skips health checks and often hits Exit code 144 (SIGTERM from stale processes).
 
-5. **Never call `geak_set_model_config`.** See IR-7. GEAK LLM backend is pre-configured.
+5. **`geak_set_model_config` is conditional (IR-7).** Call it exactly once during
+   SETUP with the canonical config, but ONLY when `geak` is in `KERNEL_OPT_BACKENDS`.
+   OOB-only runs must NOT call it (saves one API round-trip and avoids
+   overwriting shared server state).
 
 ## DFS Search Tree
 
@@ -279,6 +321,7 @@ PROCEDURE optimize():
   1. SETUP
      → Execute actions/setup.md
      → Set MODEL, TP, CONC, FRAMEWORK, paths
+     → Execute IR-7 procedure (conditional on geak ∈ KERNEL_OPT_BACKENDS)
 
   2. CLASSIFY
      → Execute actions/classify.md

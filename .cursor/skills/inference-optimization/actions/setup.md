@@ -68,6 +68,14 @@ export INFERENCEX_PATH="$INFERENCEX_PATH"
 
 `run_baseline.sh` writes `run_context.env` into `$RESULT_DIR`. Reuse it for subsequent steps.
 
+### Step 3: GEAK model_config (conditional)
+
+If `geak` is in `KERNEL_OPT_BACKENDS`, execute the IR-7 procedure (canonical
+`geak_set_model_config` call + `geak_get_model_config` verification) — see
+[`SKILL.md` IR-7](../SKILL.md#ir-7-configure-geak-model_config-at-setup-conditional-then-read-only)
+for the exact config, bash gate, and verification contract. For OOB-only runs,
+skip this step entirely.
+
 ## Outputs
 - All environment variables set
 - `$SKILL_ROOT`, `$SCRIPTS_DIR` paths validated
