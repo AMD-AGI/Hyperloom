@@ -2,7 +2,7 @@
 
 ## Overview
 
-Submits hot GPU kernels to GEAK MCP for AI-driven kernel-level optimization.
+Submits hot GPU kernels to GEAK CLI (REST API) for AI-driven kernel-level optimization.
 This action is **optional** — only triggered when profiling identifies custom kernels
 (Triton, HIP) that consume >2% of total GPU time and are NOT vendor-optimized.
 
@@ -56,14 +56,14 @@ Create a standalone file with:
 3. Hardware context (MI355X / gfx950 / CDNA4)
 4. Current performance (GPU time %, call count)
 
-### Step 3: Submit to GEAK via MCP
+### Step 3: Submit to GEAK via CLI
 
-See `GEAK-KERNEL-OPTIMIZATION.md` Phase 3 for the full MCP tool sequence:
-1. `geak_set_model_config` — configure LLM backend
-2. `geak_create_task` — with `input_type: "file"`, kernel source, and optimization prompt
-3. `geak_submit_task` — start optimization
-4. Poll `geak_get_task` every 30s until complete (10–30 min)
-5. `geak_get_outputs` + `geak_download_file` — retrieve optimized kernel
+See `GEAK-KERNEL-OPTIMIZATION.md` Phase 3 for the full CLI command sequence:
+1. `$GEAK_CLI set-model-config` — configure LLM backend
+2. `$GEAK_CLI create-task --input-type file --file kernel.py --prompt "..." --step-limit 100` — create task
+3. `$GEAK_CLI submit-task TASK_ID` — start optimization
+4. `$GEAK_CLI poll-task TASK_ID --interval 30` — wait for completion (10–30 min)
+5. `$GEAK_CLI get-outputs TASK_ID` + `$GEAK_CLI download-file TASK_ID FILE_PATH` — retrieve optimized kernel
 
 **Submit one kernel per GEAK task.** Multi-kernel tasks produce worse results.
 

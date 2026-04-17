@@ -11,7 +11,7 @@ architecture, and per-action execution overrides.
 
 - **Client**: Claw (internal platform, Claude Code-like)
 - **Runtime**: SaFE cluster with multi-node GPU
-- **MCP Servers**: SaFE MCP + GEAK MCP + OOB GPU Optimizer MCP
+- **MCP Servers**: SaFE MCP + OOB GPU Optimizer MCP; **GEAK**: CLI (REST API via `geak_client.py`)
 - **TraceLens**: Local CLI (`pip install -e /hyperloom/TraceLens-internal`)
 - **Storage**: Shared NFS (`/shared_nfs/` inside Pod, maps to NFS root)
 
@@ -47,7 +47,7 @@ python3 scripts/ray_submit.py --ray-address ... --command "..."
 ### IR-9: Main inference workload MUST use `kind: "RayJob"`
 
 The persistent inference cluster **MUST** be `kind: "RayJob"`. PyTorchJob is ONLY
-created internally by GEAK MCP for kernel optimization — the skill itself MUST NOT
+created internally by GEAK for kernel optimization — the skill itself MUST NOT
 create PyTorchJob workloads.
 
 ### IR-10: SaFE MCP — ONLY `workload_create(kind="RayJob")` and `workload_stop`
@@ -62,7 +62,7 @@ In Claw mode, the skill may use SaFE MCP **only** for:
 
 - **`workload_delete`** — NEVER delete workloads; use `workload_stop` instead
 - **`workload_create` with any kind other than `"RayJob"`** — no PyTorchJob, no other
-  types. GEAK creates its own PyTorchJobs internally via GEAK MCP; the skill MUST NOT
+  types. GEAK creates its own PyTorchJobs internally via the GEAK service; the skill MUST NOT
   create them directly.
 
 Violation = immediate run invalidation.
@@ -70,7 +70,7 @@ Violation = immediate run invalidation.
 ### IR-11: GEAK configuration is read-only
 
 Same as IR-7 in `SKILL.md` — NEVER modify GEAK configuration, test data, or settings.
-Interact with GEAK exclusively through GEAK MCP tool calls.
+Interact with GEAK exclusively through GEAK CLI commands (`geak_client.py`).
 
 ---
 
@@ -115,7 +115,7 @@ Claw Client --> Skill (SKILL.md)
                  |-> exec_on_gpu (scripts/executor.sh)
                  |     \-> ray_submit.py -> ray.init("ray://<head>:10001") -> run on cluster
                  |
-                 |-> GEAK MCP (remote, unchanged)
+                 |-> GEAK CLI (remote REST API)
                  |     \-> SaFE API -> PyTorchJob -> kernel optimization
                  |
                  |-> TraceLens CLI (local, pip install -e)
@@ -503,7 +503,7 @@ GEAK optimization output and RayJob must share the same NFS:
 - RayJob's patch step reads from the same NFS path
 - Ensure RayJob's volume mount includes GEAK's storage path
 
-If GEAK uses separate storage, download kernel via `geak_download_file` before patching.
+If GEAK uses separate storage, download kernel via `$GEAK_CLI download-file` before patching.
 
 ## Safe Process Management
 

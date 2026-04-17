@@ -34,7 +34,7 @@ SKILL.md (this file)          — DFS orchestrator: loop, heuristic, dispatch
 actions/*.md                   — Self-contained action modules (11 actions)
 kb/                            — RAG knowledge base (JSONL + query/ingest scripts)
 scripts/                       — Training benchmark/profiling shell scripts
-GEAK-KERNEL-OPTIMIZATION.md   — GEAK MCP deep reference for kernel optimization
+GEAK-KERNEL-OPTIMIZATION.md   — GEAK CLI deep reference for kernel optimization
 ```
 
 ## DFS Search Tree

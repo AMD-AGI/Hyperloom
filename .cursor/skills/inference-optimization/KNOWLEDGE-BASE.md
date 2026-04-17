@@ -359,7 +359,7 @@ source /tmp/baseline_config.sh
 |---------|--------------|------------|
 | **Concurrency mismatch** | GEAK benchmark omitted `--max-concurrency`, sending 128 requests at once vs baseline's 64 | Always include `--max-concurrency $CONC` |
 | **Server param drift** | GEAK server used decode-steps=8 while baseline used 4 | Save baseline config to file, source it for all re-tests |
-| **GEAK output path confusion** | GEAK agent wrote output to input file path instead of output dir | Always check `geak_get_outputs` and download from the correct path |
+| **GEAK output path confusion** | GEAK agent wrote output to input file path instead of output dir | Always check `$GEAK_CLI get-outputs` and download from the correct path |
 | **benchmark_serving.py args** | Used `--output-file` (wrong) instead of `--save-result --result-dir --result-filename` | Check InferenceX script's `--help` first |
 | **InferenceX path wrong** | Used `/shared_nfs/limou/InferenceX/` instead of user's path | Always use `$INFERENCEX_PATH` from Phase 1 setup |
 | **Trace file too large** | Raw trace 349MB, 97% python_function events | Always filter before TraceLens (see Trace Size and Filtering in SKILL.md) |

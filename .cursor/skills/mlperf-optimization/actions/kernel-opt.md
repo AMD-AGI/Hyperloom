@@ -2,7 +2,7 @@
 
 ## Overview
 
-Submits hot GPU kernels to GEAK MCP for AI-driven kernel-level optimization.
+Submits hot GPU kernels to GEAK CLI (REST API) for AI-driven kernel-level optimization.
 This action is **optional** — only triggered when profiling identifies custom kernels
 (Triton, HIP) that consume >2% of total GPU time and are NOT vendor-optimized.
 
@@ -30,7 +30,7 @@ For the full GEAK workflow, see the training-optimization skill's
 Same as training-optimization skill's `actions/kernel-opt.md`:
 1. Find kernel source
 2. Extract with context (shapes, dtypes)
-3. Submit to GEAK via MCP
+3. Submit to GEAK via CLI
 4. Validate GEAK output (compile, correctness, micro-benchmark)
 5. If passes, dispatch to `actions/integrate.md`
 

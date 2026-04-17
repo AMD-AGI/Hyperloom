@@ -52,41 +52,50 @@ ls "$AITER_PATH/ops/"    # Python dispatch wrappers
 configuration files, server settings, workspace configs, test data, or results files.
 Modifying GEAK config is an Iron Rule violation and invalidates the entire run.
 
-**CRITICAL: Do NOT call `geak_set_model_config`.** The GEAK LLM model configuration
-is pre-set by the administrator. The skill MUST use whatever model is already
-configured. Calling `geak_set_model_config` to change the LLM backend violates IR-7
+**CRITICAL: Do NOT call `geak_client.py set-model-config`.** The GEAK LLM model
+configuration is pre-set by the administrator. The skill MUST use whatever model is
+already configured. Calling `set-model-config` to change the LLM backend violates IR-7
 and risks setting a non-existent model (e.g., `claude-haiku-4-5-20251001` on VertexAI).
 
-## GEAK MCP Tool Reference
+## GEAK CLI Reference
+
+GEAK is accessed via direct REST API calls using the `geak_client.py` CLI wrapper.
+The script lives at `$SKILL_ROOT/../shared/scripts/geak_client.py` and requires
+no dependencies beyond Python stdlib.
 
 ### Authentication
 
-Requires two keys:
-- `GEAK_AUTH_KEY` — Bearer token for GEAK endpoint (set in `.env`)
+Requires environment variables (set in `.env`):
+- `GEAK_API_URL` — GEAK service base URL (e.g. `https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/geak-agent-wvsbv`)
+- `GEAK_AUTH_KEY` — Bearer token for GEAK endpoint (ak-xxx)
 - `LITELLM_API_KEY` — Used internally by GEAK to call its LLM backend
 
-### Tool sequence
+### Command sequence
 
-| Step | Tool | Purpose |
-|------|------|---------|
-| 1 | `geak_get_model_config` | **Read-only**: verify LLM backend is configured |
-| 2 | `geak_create_task` | Create task with source + instructions |
-| 3 | `geak_submit_task` | Start optimization |
-| 4 | `geak_get_task` | Poll status (every 30s) |
-| 5 | `geak_get_outputs` | List output files |
-| 6 | `geak_download_file` | Download optimized code |
-| - | `geak_list_tasks` | Debug: list all tasks |
+```bash
+GEAK_CLI="python3 $SKILL_ROOT/../shared/scripts/geak_client.py"
+```
 
-**FORBIDDEN:** `geak_set_model_config` — NEVER call this tool. Use existing config.
+| Step | Command | Purpose |
+|------|---------|---------|
+| 1 | `$GEAK_CLI get-model-config` | **Read-only**: verify LLM backend is configured |
+| 2 | `$GEAK_CLI create-task --input-type file --file kernel.py --prompt "..." --step-limit 100 --workspace-id $KERNEL_OPT_WORKSPACE --image $KERNEL_OPT_IMAGE` | Create task with source + instructions |
+| 3 | `$GEAK_CLI submit-task TASK_ID` | Start optimization |
+| 4 | `$GEAK_CLI poll-task TASK_ID --interval 30 --timeout 1800` | Poll status until completion |
+| 5 | `$GEAK_CLI get-outputs TASK_ID` | List output files |
+| 6 | `$GEAK_CLI download-file TASK_ID FILE_PATH --output-dir $WORK_DIR/kernels` | Download optimized code |
+| - | `$GEAK_CLI list-tasks --status running` | Debug: list all tasks |
 
-### geak_create_task — critical details
+**FORBIDDEN:** `$GEAK_CLI set-model-config` — NEVER call this command. Use existing config.
 
-- `input_type` is **required** — use `"file"`
-- The instruction field is `prompt`, NOT `instructions`
-- `step_limit` controls agent iterations (**use 100** for kernel optimization — GEAK needs room to analyze, write, compile, fix errors, benchmark, and iterate. 20 is often not enough for a verified result; 5 is completely insufficient)
-- `gpu_count` defaults to 1
-- **`workspace_id`**: Always specify `KERNEL_OPT_WORKSPACE` (constant from `SKILL.md`; default `"control-plane-moe"`) for reliable scheduling. Default workspace is often resource-constrained.
-- Include ALL dependent files in the `files` array (GEAK needs self-contained code)
+### create-task — critical details
+
+- `--input-type` is **required** — use `file`
+- `--prompt` provides optimization instructions (NOT `--instructions`)
+- `--step-limit` controls agent iterations (**use 100** for kernel optimization — GEAK needs room to analyze, write, compile, fix errors, benchmark, and iterate. 20 is often not enough for a verified result; 5 is completely insufficient)
+- `--gpu-count` defaults to 1
+- **`--workspace-id`**: Always specify `KERNEL_OPT_WORKSPACE` (constant from `SKILL.md`; default `"control-plane-moe"`) for reliable scheduling. Default workspace is often resource-constrained.
+- Include ALL dependent files via repeated `--file` flags (GEAK needs self-contained code)
 
 ### Prompt template for inference kernels
 
@@ -117,7 +126,7 @@ OPTIMIZATION TARGETS (prioritized):
 Write the COMPLETE file (imports, decorator, function) to the output directory.
 ```
 
-**GEAK prompt rules — apply to ALL kernel types (MANDATORY for every geak_create_task):**
+**GEAK prompt rules — apply to ALL kernel types (MANDATORY for every create-task):**
 
 1. **Kernel path — conditional on image availability:**
    - If the kernel source file **exists in the Docker image** (e.g., `/sgl-workspace/aiter/...`, `/opt/venv/...`), **MUST include** the kernel's absolute file path and repo path in the prompt. Example: `"The kernel source file is at /sgl-workspace/aiter/jit/core/compile.py"`, `"The kernel repo is at /sgl-workspace/aiter/"`.
@@ -128,14 +137,14 @@ Write the COMPLETE file (imports, decorator, function) to the output directory.
 
 Additional rules:
 4. **Always say "Do NOT search the filesystem with find / or grep -r /"** — GEAK agents default to broad filesystem searches which hang 30+ min on NFS.
-5. **Always pass framework image** — Use `KERNEL_OPT_IMAGE` (provided by CI or user prompt). This single image is shared across all kernel-opt backends (GEAK + OOB).
-6. **Always embed full source in `files[].content`** — GEAK always receives the kernel source via `files[].content`. If the path also exists in the image, include it in the prompt for GEAK's preprocessor. If the path is runtime-generated, the `files[].content` is the sole source of truth.
+5. **Always pass framework image** — Use `--image $KERNEL_OPT_IMAGE` (provided by CI or user prompt). This single image is shared across all kernel-opt backends (GEAK + OOB).
+6. **Always embed full source via `--file`** — GEAK always receives the kernel source via the files you pass with `--file`. If the path also exists in the image, include it in the prompt for GEAK's preprocessor. If the path is runtime-generated, the `--file` content is the sole source of truth.
 
 ### Image and Workspace
 
-Use `KERNEL_OPT_IMAGE` (provided by CI or user prompt) for all `geak_create_task` calls. This is the same framework image used by all kernel-opt backends.
+Use `--image $KERNEL_OPT_IMAGE` (provided by CI or user prompt) for all `create-task` calls. This is the same framework image used by all kernel-opt backends.
 
-**Always pass `workspace_id: KERNEL_OPT_WORKSPACE` (default `"control-plane-moe"`) in `geak_create_task`.** User can override.
+**Always pass `--workspace-id $KERNEL_OPT_WORKSPACE` (default `"control-plane-moe"`) in `create-task`.** User can override.
 
 ### GEAK latency breakdown
 
@@ -304,7 +313,7 @@ Before patching any GEAK output into the serving environment:
 - [ ] No new imports that don't exist in the target environment
 - [ ] Block sizes within IR-8 constraints (not exceeding 2x original)
 - [ ] Source code is actual code, not comments or path references
-- [ ] `files[].content` contains the full source (not truncated)
+- [ ] `--file` content contains the full source (not truncated)
 - [ ] `.best_config` values identified from GEAK output (XBLOCK, R0_BLOCK, BLOCK_N, BLOCK_K, num_warps, num_stages) and passed via `--best-config`
 
 ## Troubleshooting
@@ -324,5 +333,5 @@ Before patching any GEAK output into the serving environment:
 
 ### GEAK task stuck in pending
 - Pod scheduling can take 15+ min if cluster is loaded
-- Check with `geak_get_task` — if `updated_at` hasn't changed in 30 min, cancel and retry
-- Always use `workspace_id: KERNEL_OPT_WORKSPACE` for reliable scheduling (default `"control-plane-moe"` from `SKILL.md`; default workspace is resource-constrained)
+- Check with `$GEAK_CLI get-task TASK_ID` — if `updated_at` hasn't changed in 30 min, cancel and retry
+- Always use `--workspace-id $KERNEL_OPT_WORKSPACE` for reliable scheduling (default `"control-plane-moe"` from `SKILL.md`; default workspace is resource-constrained)

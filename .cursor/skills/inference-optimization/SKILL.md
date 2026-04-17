@@ -77,21 +77,21 @@ Always use `scripts/patch_inductor.py` with `--target-file`. The `--cache-dir` o
 
 GEAK is an external service — treat it as **read-only infrastructure**. The skill MUST NOT
 modify any GEAK configuration files, settings, or parameters beyond what is passed as
-arguments to `geak_create_task`. Specifically:
+arguments to `geak_client.py create-task`. Specifically:
 
 - **Do NOT** modify GEAK server config, workspace settings, or API configuration
 - **Do NOT** write to or alter any files under the GEAK config/settings directories
 - **Do NOT** change `KERNEL_OPT_WORKSPACE`, `GEAK_STEP_LIMIT`, or other constants
   at runtime (use the values from the constants table above or user overrides)
-- **Do NOT** modify the GEAK MCP server configuration (`cursor_mcp_config.json`, etc.)
+- **Do NOT** modify the GEAK server configuration (`cursor_mcp_config.json`, etc.)
 - **Do NOT** modify any test data, results, or configuration files belonging to GEAK
   (e.g., `tests/test_data/`, `server/config.py`, `server/templates/`)
 
-The ONLY interaction allowed is through these GEAK MCP tool calls:
-`geak_get_model_config` (read-only), `geak_create_task`, `geak_submit_task`,
-`geak_get_task`, `geak_get_outputs`, `geak_download_file`, `geak_list_tasks`.
+The ONLY interaction allowed is through these GEAK CLI commands:
+`get-model-config` (read-only), `create-task`, `submit-task`,
+`poll-task`, `get-task`, `get-outputs`, `download-file`, `list-tasks`.
 
-**NEVER call `geak_set_model_config`** — the LLM backend is pre-configured by the
+**NEVER call `geak_client.py set-model-config`** — the LLM backend is pre-configured by the
 administrator. Changing it risks setting a non-existent model and breaking all tasks.
 
 Violation = immediate run invalidation.
@@ -130,7 +130,7 @@ All values below are the **single source of truth**. All actions reference these
 SKILL.md (this file)          — DFS orchestrator: loop, heuristic, dispatch
 actions/*.md                   — Self-contained action modules (11 actions)
 kernel-opt/                    — Per-backend kernel optimization references
-  geak.md                      — GEAK MCP (remote GPU pod)
+  geak.md                      — GEAK CLI (remote GPU pod via REST API)
   codex.md                     — Codex via OOB GPU Optimizer MCP
   claude.md                    — Claude Code via OOB GPU Optimizer MCP
   llm.md                       — LLM Proxy (direct API)
@@ -160,7 +160,7 @@ These are recurring errors observed in production CI runs. **Read before executi
    server startup, health wait, benchmark, and profiling in a tested sequence. Manual
    launch skips health checks and often hits Exit code 144 (SIGTERM from stale processes).
 
-5. **Never call `geak_set_model_config`.** See IR-7. GEAK LLM backend is pre-configured.
+5. **Never call `geak_client.py set-model-config`.** See IR-7. GEAK LLM backend is pre-configured.
 
 ## DFS Search Tree
 

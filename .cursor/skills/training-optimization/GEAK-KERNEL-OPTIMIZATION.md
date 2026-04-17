@@ -1,13 +1,13 @@
 ---
 name: geak-kernel-optimization
-description: Optional GEAK kernel optimization flow that extends the training-optimization skill. After TraceLens identifies bottleneck kernels, this skill extracts kernel source code, submits to GEAK MCP for AI-driven kernel optimization, integrates results, and benchmarks. Use alongside the main training-optimization skill when the user wants kernel-level optimization (not just code-level), or when TraceLens identifies custom kernels (Triton, HIP, fused ops) that have modifiable source. Does NOT apply to vendor BLAS (hipBLASLt) — those are already near-optimal.
+description: Optional GEAK kernel optimization flow that extends the training-optimization skill. After TraceLens identifies bottleneck kernels, this skill extracts kernel source code, submits to GEAK CLI (REST API) for AI-driven kernel optimization, integrates results, and benchmarks. Use alongside the main training-optimization skill when the user wants kernel-level optimization (not just code-level), or when TraceLens identifies custom kernels (Triton, HIP, fused ops) that have modifiable source. Does NOT apply to vendor BLAS (hipBLASLt) — those are already near-optimal.
 ---
 
 # GEAK Kernel Optimization — Optional Extension
 
 ## Relationship to Main Skill
 
-This skill is an **optional extension** of `training-optimization/SKILL.md`. It adds a kernel-level optimization path using GEAK MCP, complementing the config overrides and code patches in the main skill.
+This skill is an **optional extension** of `training-optimization/SKILL.md`. It adds a kernel-level optimization path using GEAK CLI (REST API), complementing the config overrides and code patches in the main skill.
 
 **Main skill** = config/code-level: config overrides (`moe_permute_fusion`, etc.), code patches (caching, fused ops), attention backend swaps
 **This skill** = kernel-level: rewrites the actual GPU kernel source (Triton or HIP) for a specific hot kernel
@@ -30,11 +30,12 @@ During the main optimization loop (after TraceLens profiling in Step 3, or after
 
 ## Prerequisites
 
-- GEAK MCP configured in `.cursor/mcp.json`
+- GEAK CLI available: `python3 $SKILL_ROOT/../shared/scripts/geak_client.py --help`
 - Environment variables in `.env` at repo root (see `.env.template`):
   ```
+  GEAK_API_URL=https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/geak-agent-wvsbv
+  GEAK_AUTH_KEY=ak-...            # Bearer token for GEAK REST API
   LITELLM_API_KEY=sk-...          # LLM gateway key for GEAK's internal LLM
-  GEAK_AUTH_KEY=...               # Auth token for GEAK endpoint (used in mcp.json)
   ```
 - A TraceLens analysis already completed (trace file + kernel profile from main skill)
 - The source code for the candidate kernel (Triton `.py`, HIP `.hip`/`.cu`, or extracted from Python)
@@ -168,67 +169,46 @@ ls /tmp/torchinductor_*/*/triton/*.py | head -20
 
 ## Phase 3: Submit to GEAK
 
+GEAK is accessed via the `geak_client.py` CLI wrapper which calls the GEAK REST API
+directly (no MCP server dependency).
+
 ### 3a. Load credentials
 
 ```bash
-source .env  # loads LITELLM_API_KEY and GEAK_AUTH_KEY
+source .env  # loads GEAK_API_URL, GEAK_AUTH_KEY, LITELLM_API_KEY
 
-GEAK_URL="https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/geak-agent-wvsbv/mcp/sse"
-GEAK_AUTH="Authorization: Bearer $GEAK_AUTH_KEY"
+GEAK_CLI="python3 $SKILL_ROOT/../shared/scripts/geak_client.py"
 ```
 
 ### 3b. Configure LLM backend (once per session)
 
 ```bash
-curl -sk -X POST "$GEAK_URL" \
-  -H "Content-Type: application/json" \
-  -H "$GEAK_AUTH" \
-  -d '{
-    "jsonrpc":"2.0","id":1,"method":"tools/call",
-    "params":{
-      "name":"geak_set_model_config",
-      "arguments":{
-        "model_class":"litellm",
-        "model_name":"openai/claude-opus-4-6",
-        "model_kwargs":{
-          "api_base":"https://tw325.primus-safe.amd.com/llm-gateway/v1",
-          "api_key":"'"$LITELLM_API_KEY"'",
-          "max_tokens":8192,
-          "temperature":0.0
-        }
-      }
-    }
+$GEAK_CLI set-model-config \
+  --model-class litellm \
+  --model-name "openai/claude-opus-4-6" \
+  --model-kwargs '{
+    "api_base": "https://tw325.primus-safe.amd.com/llm-gateway/v1",
+    "api_key": "'"$LITELLM_API_KEY"'",
+    "max_tokens": 8192,
+    "temperature": 0.0
   }'
 ```
 
 ### 3c. Create task with kernel source + context
 
-The key to good GEAK results is providing **rich context** in the `prompt` argument.
+The key to good GEAK results is providing **rich context** in the `--prompt` argument.
 
-**CRITICAL API notes (learned from testing):**
-- The argument is `prompt`, NOT `instructions` (the latter causes an error)
-- `input_type` is **required** — use `"file"` when providing files
-- `step_limit` controls agent iterations (default 20; use 5 for quick tests)
-- `gpu_count` defaults to 1
-
-Use Python to build the JSON payload (avoids bash escaping headaches):
+**CRITICAL CLI notes (learned from testing):**
+- `--prompt` provides optimization instructions (NOT `--instructions`)
+- `--input-type` is **required** — use `file` when providing files
+- `--step-limit` controls agent iterations (default 20; use 5 for quick tests)
+- `--gpu-count` defaults to 1
 
 ```bash
-curl -sk -X POST "$GEAK_URL" \
-  -H "Content-Type: application/json" \
-  -H "$GEAK_AUTH" \
-  -d "$(python3 -c "
-import json
-with open('kernel_candidate.py') as f:
-    src = f.read()
-payload = {
-    'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call',
-    'params': {
-        'name': 'geak_create_task',
-        'arguments': {
-            'input_type': 'file',
-            'files': [{'filename': 'kernel_candidate.py', 'content': src}],
-            'prompt': '''Optimize this GPU kernel for AMD MI355X (gfx950, CDNA4).
+$GEAK_CLI create-task \
+  --input-type file \
+  --file kernel_candidate.py \
+  --prompt 'Optimize this GPU kernel for AMD MI355X (gfx950, CDNA4).
 
 Hardware: 304 CUs, 256 VGPR/CU, HBM3e ~8 TB/s, MFMA instructions.
 Input shapes: [describe exact shapes from profile]
@@ -238,17 +218,12 @@ Called N times per training iteration, X% of total GPU time.
 Goals: (1) maximize throughput, (2) minimize register pressure,
 (3) vectorized loads for HBM3e, (4) optimal block sizes for gfx950.
 Return optimized kernel with same function signature.
-Write output to the output directory.''',
-            'step_limit': 5,
-            'gpu_count': 1
-        }
-    }
-}
-print(json.dumps(payload))
-")"
+Write output to the output directory.' \
+  --step-limit 5 \
+  --gpu-count 1
 ```
 
-**Tip:** If the kernel imports from other modules, include those as additional files in the `files` array. GEAK works best with self-contained code.
+**Tip:** If the kernel imports from other modules, include those as additional `--file` flags. GEAK works best with self-contained code.
 
 ### 3d. Submit and poll
 
@@ -257,54 +232,20 @@ print(json.dumps(payload))
 TASK_ID="<from create response>"
 
 # Submit
-curl -sk -X POST "$GEAK_URL" \
-  -H "Content-Type: application/json" \
-  -H "$GEAK_AUTH" \
-  -d '{
-    "jsonrpc":"2.0","id":3,"method":"tools/call",
-    "params":{"name":"geak_submit_task","arguments":{"task_id":"'"$TASK_ID"'"}}
-  }'
+$GEAK_CLI submit-task "$TASK_ID"
 
 # Poll until complete (typically 10-30 minutes — GPU pod scheduling + agent steps)
-for i in $(seq 1 30); do
-  sleep 30
-  STATUS=$(curl -sk -X POST "$GEAK_URL" \
-    -H "Content-Type: application/json" \
-    -H "$GEAK_AUTH" \
-    -d '{
-      "jsonrpc":"2.0","id":4,"method":"tools/call",
-      "params":{"name":"geak_get_task","arguments":{"task_id":"'"$TASK_ID"'"}}
-    }')
-  echo "Poll $i: $STATUS"
-  if echo "$STATUS" | grep -q '"completed"'; then
-    break
-  fi
-done
+$GEAK_CLI poll-task "$TASK_ID" --interval 30 --timeout 1800
 
 # Get outputs
-curl -sk -X POST "$GEAK_URL" \
-  -H "Content-Type: application/json" \
-  -H "$GEAK_AUTH" \
-  -d '{
-    "jsonrpc":"2.0","id":5,"method":"tools/call",
-    "params":{"name":"geak_get_outputs","arguments":{"task_id":"'"$TASK_ID"'"}}
-  }'
+$GEAK_CLI get-outputs "$TASK_ID"
 ```
 
 ### 3e. Download optimized kernel
 
 ```bash
-# For each output file from geak_get_outputs:
-curl -sk -X POST "$GEAK_URL" \
-  -H "Content-Type: application/json" \
-  -H "$GEAK_AUTH" \
-  -d '{
-    "jsonrpc":"2.0","id":6,"method":"tools/call",
-    "params":{"name":"geak_download_file","arguments":{
-      "task_id":"'"$TASK_ID"'",
-      "filename":"<output_filename>"
-    }}
-  }'
+# For each output file from get-outputs:
+$GEAK_CLI download-file "$TASK_ID" "<output_filename>" --output-dir ./geak_outputs
 ```
 
 ## Phase 4: Reintroduce GEAK-Optimized Kernels
@@ -541,7 +482,7 @@ Expect **10-30 minutes** per task. The breakdown:
 - Pod scheduling on K8s: 2-15+ min (depends on cluster load and GPU availability)
 - Docker image pull: 1-5 min (the ROCm PyTorch image is ~15 GB)
 - Agent execution: 3-10 min (depends on step_limit and LLM response time)
-Poll every 30 seconds. The `updated_at` timestamp stays frozen until the pod actually starts running; once it changes, the agent has started. If stuck for >30 min with no update, the cluster may be overloaded — cancel and retry later.
+Use `$GEAK_CLI poll-task` which handles polling automatically. The `updated_at` timestamp stays frozen until the pod actually starts running; once it changes, the agent has started. If stuck for >30 min with no update, the cluster may be overloaded — cancel and retry later.
 
 ### torch.compile + GEAK Interaction
 If the workload uses `torch.compile` (rare for distributed Primus/Megatron training due to graph breaks, but possible for submodules), Inductor may already be generating optimized Triton kernels for the ops you want to GEAK. In this case:
@@ -558,26 +499,28 @@ For most distributed training workloads, you'll use manual extraction (Phase 2) 
 - Kernel is from a vendor library (aiter, hipBLASLt, CK) — switch backend instead
 - The workload is GEMM-dominated (>60% GEMM) — code-level optimizations matter more
 
-### GEAK MCP Tool Reference
+### GEAK CLI Reference
 
-| Tool | Purpose | When to use |
-|------|---------|-------------|
-| `geak_set_model_config` | Configure LLM backend | Once per session |
-| `geak_create_task` | Create task with source files + instructions | Per kernel candidate |
-| `geak_submit_task` | Start optimization | After create |
-| `geak_get_task` | Poll status | Every 10s after submit |
-| `geak_get_outputs` | List output files | After task completes |
-| `geak_download_file` | Download optimized code | For each output file |
-| `geak_list_tasks` | List all tasks | Debugging / cleanup |
-| `geak_get_model_config` | Check LLM config | Debugging |
+| Command | Purpose | When to use |
+|---------|---------|-------------|
+| `$GEAK_CLI set-model-config` | Configure LLM backend | Once per session |
+| `$GEAK_CLI create-task` | Create task with source files + instructions | Per kernel candidate |
+| `$GEAK_CLI submit-task` | Start optimization | After create |
+| `$GEAK_CLI poll-task` | Poll status until terminal state | After submit |
+| `$GEAK_CLI get-task` | Check status once | Debugging |
+| `$GEAK_CLI get-outputs` | List output files | After task completes |
+| `$GEAK_CLI download-file` | Download optimized code | For each output file |
+| `$GEAK_CLI list-tasks` | List all tasks | Debugging / cleanup |
+| `$GEAK_CLI get-model-config` | Check LLM config | Debugging |
 
 ### GEAK Authentication
-- Requires `GEAK_AUTH_KEY` for the Bearer token in MCP requests
+- Requires `GEAK_API_URL` for the GEAK service base URL
+- Requires `GEAK_AUTH_KEY` for the Bearer token in REST API requests
 - `LITELLM_API_KEY` is used internally by GEAK to call its LLM backend
-- Both must be set in `.env` before submitting tasks
+- All three must be set in `.env` before submitting tasks
 
 ### GEAK Pod Scheduling — Use `control-plane-dev` Space
-GEAK MCP submits workloads to `control-plane-anthropic` by default, which is often resource-constrained. To avoid long queue times, launch workloads directly via the Primus-SaFE API targeting `control-plane-dev`:
+GEAK CLI submits workloads to `control-plane-anthropic` by default, which is often resource-constrained. To avoid long queue times, launch workloads directly via the Primus-SaFE API targeting `control-plane-dev`:
 ```bash
 curl -sk -X POST "$PRIMUS_SAFE_API_URL/api/v1/workloads" \
   -H "Authorization: Bearer $GEAK_AUTH_KEY" \

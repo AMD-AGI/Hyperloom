@@ -5,12 +5,6 @@
       "headers": {
         "Authorization": "Bearer ${AK_YOUR_API_KEY}"
       }
-    },
-    "geak-agent": {
-      "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/geak-agent-wvsbv/mcp/sse",
-      "headers": {
-        "Authorization": "Bearer ${AK_YOUR_API_KEY}"
-      }
     }
   }
 }

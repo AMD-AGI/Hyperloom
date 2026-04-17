@@ -83,9 +83,9 @@ Give the agent a real distributed training workload (Primus/Megatron), and it wi
 - **Container**: `rocm/primus-training-private` or equivalent with ROCm + PyTorch + Node.js
 - **Config file**: YAML config for the model (e.g., `examples/megatron/configs/MI355X/gpt_oss_20B-BF16-pretrain.yaml`)
 - **TraceLens CLI**: `pip install -e /hyperloom/TraceLens-internal` for automated profiling analysis
-- **Optional MCP servers** in `.cursor/mcp.json`:
-  - `geak-agent` — for kernel optimization (see `GEAK-KERNEL-OPTIMIZATION.md`)
-- Environment: `GEAK_AUTH_KEY` and `LITELLM_API_KEY` set in `.env` (see `.env.template`)
+- **GEAK CLI** for kernel optimization (see `GEAK-KERNEL-OPTIMIZATION.md`):
+  - Uses `geak_client.py` to call GEAK REST API directly (no MCP server required)
+- Environment: `GEAK_API_URL`, `GEAK_AUTH_KEY`, and `LITELLM_API_KEY` set in `.env` (see `.env.template`)
 
 ## Quick Start
 

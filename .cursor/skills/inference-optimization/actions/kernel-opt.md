@@ -3,7 +3,7 @@
 Multi-round kernel optimization loop using configurable backends.
 
 Backend references:
-- [`../kernel-opt/geak.md`](../kernel-opt/geak.md) — GEAK MCP (remote GPU pod)
+- [`../kernel-opt/geak.md`](../kernel-opt/geak.md) — GEAK CLI (remote GPU pod via REST API)
 - [`../kernel-opt/codex.md`](../kernel-opt/codex.md) — Codex via OOB GPU Optimizer MCP
 - [`../kernel-opt/claude.md`](../kernel-opt/claude.md) — Claude Code via OOB GPU Optimizer MCP
 - [`../kernel-opt/llm.md`](../kernel-opt/llm.md) — LLM Proxy (direct API)
@@ -49,9 +49,9 @@ find /sgl-workspace/aiter -name "*.py" -exec grep -l "@triton.jit" {} \;
 override in prompt (e.g., `"Use only geak"`, `"Use geak,codex,claude"`).
 All active backends run **simultaneously** for every candidate kernel.
 
-| Backend | MCP | Full round latency | GPU on pod | Reference |
-|---------|-----|--------------------|------------|-----------|
-| `geak` | GEAK (`geak_create_task`) | 10–30 min | Yes | [`../kernel-opt/geak.md`](../kernel-opt/geak.md) |
+| Backend | Interface | Full round latency | GPU on pod | Reference |
+|---------|-----------|-------------------|------------|-----------|
+| `geak` | GEAK CLI (`geak_client.py create-task`) | 10–30 min | Yes | [`../kernel-opt/geak.md`](../kernel-opt/geak.md) |
 | `codex` | OOB GPU Optimizer (`agent_create_task(agent="codex")`) | 2–6 min (3 iters) | No | [`../kernel-opt/codex.md`](../kernel-opt/codex.md) |
 | `claude` | OOB GPU Optimizer (`agent_create_task(agent="claude")`) | 3–15 min (3 iters) | No | [`../kernel-opt/claude.md`](../kernel-opt/claude.md) |
 | `llm` | Direct OpenAI API (LLM Proxy) | 1–30s | No | [`../kernel-opt/llm.md`](../kernel-opt/llm.md) |
@@ -74,7 +74,7 @@ Pick the one with highest verified speedup → Step 3.
 
 **Per-backend execution:**
 
-1. **`geak`**: `geak_create_task` + `geak_submit_task` → poll until done (single submission, GEAK verifies on-pod)
+1. **`geak`**: `geak_client.py create-task` + `geak_client.py submit-task` → `geak_client.py poll-task` until done (single submission, GEAK verifies on-pod)
 2. **`codex`**: iterative refinement loop — `OOB_ROUND_ITERATIONS` (3) iterations, each: submit → download → **local benchmark** → feed result back as context. Take best speedup from all iterations. See [`../kernel-opt/codex.md`](../kernel-opt/codex.md).
 3. **`claude`**: same iterative refinement loop as codex, with `agent="claude"`. See [`../kernel-opt/claude.md`](../kernel-opt/claude.md).
 4. **`llm`**: `openai.Client.chat.completions.create` (multi-model parallel). See [`../kernel-opt/llm.md`](../kernel-opt/llm.md).
@@ -100,7 +100,7 @@ These rules apply to **every** kernel optimization submission regardless of back
    - **How to tell:** paths under `/tmp/`, `/root/.cache/`, or any `torchinductor_*` directory are runtime-generated. Paths under `/sgl-workspace/`, `/opt/`, `/usr/` are part of the image.
 2. **1.5x minimum speedup target** — Always include: `"The kernel MUST be optimized to at least 1.5x speedup."` in the prompt.
 3. **No broad filesystem searches** — Always say: `"Do NOT search the filesystem with find / or grep -r /"`.
-4. **Embed full source in files** — All backends receive the kernel source via `files[].content` (or inline in the prompt for `llm`).
+4. **Embed full source in files** — All backends receive the kernel source via `--file` flags / `files[].content` (or inline in the prompt for `llm`).
 
 #### Prompt rules — backend-specific
 
@@ -183,7 +183,7 @@ Compare `exact_match` against `state.baseline_accuracy`. If accuracy drops by mo
 - Re-profiled new candidates get fresh scores based on new gpu_pct
 
 ## Failure Handling
-- GEAK workspace unavailable: retry on alternate workspace (3 attempts)
+- GEAK workspace unavailable: retry with alternate `--workspace-id` (3 attempts)
 - Codex/Claude task fails: fall back to other active backends
 - All backends produce wrong signature: re-submit with explicit constraint
 - Register OOM during Triton compile: reduce block sizes in prompt

@@ -49,12 +49,13 @@ docker run --rm -it \
 export HF_TOKEN="your_api_key"      # ← Replace with your HuggingFace API token ,W&B key is not compulsory
 ```
 
-**SAFE API Key** — required for MCP server access (GEAK, OOB, etc.). Edit `.cursor/mcp.json` and replace all `<SAFE_API_KEY>ak-xxxxx` placeholders with your actual SAFE API key:
+**SAFE API Key** — required for OOB MCP server access and GEAK CLI. Edit `.cursor/mcp.json` for OOB, and `.env` for GEAK. Replace all `<SAFE_API_KEY>ak-xxxxx` placeholders with your actual SAFE API key:
 
+For **OOB MCP** — edit `.cursor/mcp.json`:
 ```json
 {
   "mcpServers": {
-    "oci-geak-agent": {
+    "oci-oob-agent": {
       "headers": {
         "Authorization": "Bearer ak-YOUR_ACTUAL_KEY_HERE"
       },
@@ -64,7 +65,13 @@ export HF_TOKEN="your_api_key"      # ← Replace with your HuggingFace API toke
 }
 ```
 
-Two MCP servers require the key: `oci-geak-agent` and `oci-oob-agent`. TraceLens now runs via local CLI (`pip install -e /hyperloom/TraceLens-internal`).
+For **GEAK CLI** — edit `.env`:
+```
+GEAK_API_URL=https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/geak-agent-wvsbv
+GEAK_AUTH_KEY=ak-YOUR_ACTUAL_KEY_HERE
+```
+
+OOB MCP server `oci-oob-agent` requires the key in `.cursor/mcp.json`. GEAK now uses CLI (REST API) via `geak_client.py` — no MCP config needed. TraceLens runs via local CLI (`pip install -e /hyperloom/TraceLens-internal`).
 
 ### 3. Prepare runtime directories
 
@@ -197,7 +204,8 @@ The agent produces (saved to `/root/mlperf_results/`):
 |------|---------------|-----|
 | `training_optimization/mlperf/config_MI355X_1x8x1_fp8.sh:29` | `HF_TOKEN="your_key"` | HuggingFace model/data access |
 | `training_optimization/mlperf/config_MI355X_1x8x1_fp8.sh:30` | `WANDB_API_KEY="your_key"` | W&B logging (optional) |
-| `.cursor/mcp.json` | Replace `<SAFE_API_KEY>ak-xxxxx` | MCP server auth (GEAK, OOB Agent, SAFE) |
+| `.cursor/mcp.json` | Replace `<SAFE_API_KEY>ak-xxxxx` | MCP server auth (OOB Agent) |
+| `.env` | Set `GEAK_API_URL` and `GEAK_AUTH_KEY` | GEAK CLI auth (REST API) |
 
 ## MLPerf Compliance
 

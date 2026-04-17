@@ -7,7 +7,7 @@ Applies when running on a single machine with direct GPU access.
 
 - **Client**: Cursor IDE
 - **Runtime**: Local GPU machine (single node)
-- **MCP Servers**: GEAK MCP + OOB GPU Optimizer MCP
+- **GEAK**: CLI (REST API via `geak_client.py`); **OOB**: MCP (`oci-oob-agent`)
 - **TraceLens**: Local CLI (`pip install -e /hyperloom/TraceLens-internal`)
 - **Storage**: Local disk (`/workspace/inference-optimization` or `/tmp`)
 
@@ -25,7 +25,7 @@ fi
 ## Key Differences from Claw
 
 - All commands run directly in the local shell (no `exec_on_gpu` wrapper)
-- GEAK runs as a local subprocess (via GEAK MCP)
+- GEAK runs as a local subprocess (via GEAK CLI)
 - No RayJob lifecycle management
 - Traces and results stored on local disk
 - `patch_inductor.py` operates on local Inductor cache
@@ -34,7 +34,7 @@ fi
 
 **Do NOT call any SaFE MCP tool in local mode.** This includes `workload_create`,
 `workload_get`, `workload_stop`, and any other SaFE MCP operation. Do NOT create
-RayJobs, PyTorchJobs, or any SaFE workload. GEAK kernel optimization uses GEAK MCP
+RayJobs, PyTorchJobs, or any SaFE workload. GEAK kernel optimization uses GEAK CLI
 only — the skill itself must NEVER directly interact with SaFE in local mode.
 
 Violation = immediate run invalidation.
@@ -45,14 +45,14 @@ Violation = immediate run invalidation.
 |-------|-------|
 | Setup | No RayJob creation, direct env setup |
 | Baseline/Profile | Direct `bash $SCRIPTS_DIR/run_baseline.sh` |
-| GEAK | `GEAK_LOCAL=true` → runs as subprocess via GEAK MCP (no SaFE) |
+| GEAK | `GEAK_LOCAL=true` → runs as subprocess via GEAK CLI (no SaFE) |
 | Integrate | `patch_inductor.py --target-file` on local Inductor cache |
 | Sweep | Serial via `run_sweep.sh` (no SaFE parallel option) |
 | Report | No RayJob cleanup needed |
 
 ## GEAK in Local Mode
 
-When `GEAK_LOCAL=true`, GEAK runs locally as a subprocess — no Docker image needed. The `image` parameter in `geak_create_task` is ignored. Kernel paths must be actual paths on the local machine.
+When `GEAK_LOCAL=true`, GEAK runs locally as a subprocess — no Docker image needed. The `--image` parameter in `geak_client.py create-task` is ignored. Kernel paths must be actual paths on the local machine.
 
 ## IR-6: patch_inductor.py
 

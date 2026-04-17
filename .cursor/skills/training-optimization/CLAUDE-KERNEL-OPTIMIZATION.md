@@ -1,6 +1,6 @@
 ---
 name: llm-kernel-optimization
-description: Optional LLM-based kernel optimization that extends the training-optimization skill. Instead of sending kernels to GEAK MCP (remote GPU pod), this flow sends kernel source to an LLM (Claude, GPT, etc.) via your existing LiteLLM gateway and gets back optimized code. No CLI tools or GPU required for the LLM call. Faster turnaround than GEAK (no pod scheduling). Use alongside the main training-optimization skill as an alternative to GEAK when you want faster iteration or GEAK pods are unavailable.
+description: Optional LLM-based kernel optimization that extends the training-optimization skill. Instead of sending kernels to GEAK CLI (remote GPU pod), this flow sends kernel source to an LLM (Claude, GPT, etc.) via your existing LiteLLM gateway and gets back optimized code. No CLI tools or GPU required for the LLM call. Faster turnaround than GEAK (no pod scheduling). Use alongside the main training-optimization skill as an alternative to GEAK when you want faster iteration or GEAK pods are unavailable.
 ---
 
 # LLM Kernel Optimization — Optional Extension
@@ -11,8 +11,8 @@ This skill is an **alternative** to `GEAK-KERNEL-OPTIMIZATION.md`. Both extend t
 
 | | GEAK | LLM (this skill) |
 |---|---|---|
-| **Backend** | GEAK MCP → remote GPU pod | LiteLLM gateway → Claude / GPT / any model |
-| **Install needed** | GEAK MCP configured | Just `pip install openai` (likely already installed) |
+| **Backend** | GEAK CLI → remote GPU pod (REST API) | LiteLLM gateway → Claude / GPT / any model |
+| **Install needed** | GEAK CLI (`geak_client.py`) + env vars | Just `pip install openai` (likely already installed) |
 | **Latency** | 10–30 min (pod scheduling + execution) | 30s–5 min (direct API call) |
 | **GPU access** | Yes — dedicated pod with target GPU | No — LLM writes code, you benchmark in your training env |
 | **Micro-benchmark** | GEAK runs its own benchmarks | You run benchmarks via `torchrun` (same as other optimization attempts) |

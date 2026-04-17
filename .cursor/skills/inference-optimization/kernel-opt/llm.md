@@ -11,7 +11,7 @@ This document provides detailed reference material for LLM-based kernel optimiza
 
 | | GEAK | LLM (this skill) |
 |---|---|---|
-| **Backend** | GEAK MCP → remote GPU pod with AI agent | PRISM SAFE LLM proxy → Claude / GPT |
+| **Backend** | GEAK CLI → remote GPU pod with AI agent (REST API) | PRISM SAFE LLM proxy → Claude / GPT |
 | **Latency** | 10–30 min (pod scheduling + agent) | 1–30s (direct API call) |
 | **GPU access** | Yes — hardware-in-loop micro-benchmark | No — LLM writes code, you benchmark in your serving env |
 | **Output** | Verified kernel (compiled + benchmarked on pod) | Unverified kernel (must compile + benchmark locally) |

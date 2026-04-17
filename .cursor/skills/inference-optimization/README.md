@@ -6,7 +6,7 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 |------|-------------|
 | `SKILL.md` | Main skill — phases 0-10: classify → baseline → profile → analyze → tune → GEAK/LLM → patch → sweep → report |
 | `KNOWLEDGE-BASE.md` | Model-specific configs, validated results, pitfalls, benchmark fairness case studies |
-| `kernel-opt/geak.md` | Deep reference — GEAK MCP details, kernel extraction, integration paths (remote GPU pod) |
+| `kernel-opt/geak.md` | Deep reference — GEAK CLI details, kernel extraction, integration paths (remote GPU pod via REST API) |
 | `kernel-opt/codex.md` | Deep reference — Codex backend via OOB GPU Optimizer MCP (fast Triton rewrites) |
 | `kernel-opt/claude.md` | Deep reference — Claude Code backend via OOB GPU Optimizer MCP (multi-step, experimental) |
 | `kernel-opt/llm.md` | Deep reference — LLM proxy details, prompt templates, multi-model parallel (fast turnaround) |
