@@ -12,23 +12,33 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       issues: write
+      models: read
     steps:
       - name: Rule-based labeling from template fields
         id: rules
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
-          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
         run: |
           LABELS=""
 
-          # --- Detect domain from "Optimization domain" dropdown ---
-          if echo "$ISSUE_BODY" | grep -qi "Optimization domain"; then
-            domain_val=$(echo "$ISSUE_BODY" | grep -A1 "Optimization domain" | tail -1 | xargs)
+          # --- Detect target release ---
+          if echo "$ISSUE_BODY" | grep -qi "Target release"; then
+            release_val=$(echo "$ISSUE_BODY" | grep -A1 "Target release" | tail -1 | xargs)
+            case "$release_val" in
+              v0.2|v0.3|v0.4) LABELS="$LABELS,release:$release_val" ;;
+            esac
+          fi
+
+          # --- Detect domain from "Optimization domain" or "Related area" dropdown ---
+          if echo "$ISSUE_BODY" | grep -qiE "Optimization domain|Related area"; then
+            domain_val=$(echo "$ISSUE_BODY" | grep -A1 -iE "Optimization domain|Related area" | tail -1 | xargs)
             case "$domain_val" in
-              Inference) LABELS="$LABELS,domain:inference" ;;
-              Training)  LABELS="$LABELS,domain:training" ;;
-              Both)      LABELS="$LABELS,domain:inference,domain:training" ;;
+              Inference)          LABELS="$LABELS,domain:inference" ;;
+              Training)           LABELS="$LABELS,domain:training" ;;
+              Both)               LABELS="$LABELS,domain:inference,domain:training" ;;
+              "MCP tools")        LABELS="$LABELS,domain:mcp" ;;
+              "UI / PrimusClaw")  LABELS="$LABELS,domain:ui" ;;
             esac
           fi
 
@@ -48,76 +58,56 @@ jobs:
             fi
           fi
 
+          # --- Detect type from General template ---
+          if echo "$ISSUE_BODY" | grep -qi "What kind of issue"; then
+            kind_val=$(echo "$ISSUE_BODY" | grep -A1 "What kind of issue" | tail -1 | xargs)
+            case "$kind_val" in
+              "Suggestion / Feature idea") LABELS="$LABELS,type:feature" ;;
+              "Question")                  LABELS="$LABELS,type:question" ;;
+              "Task / Chore")              LABELS="$LABELS,type:task" ;;
+              "Documentation")             LABELS="$LABELS,type:docs" ;;
+            esac
+          fi
+
           # Clean up leading comma
           LABELS=$(echo "$LABELS" | sed 's/^,//')
 
           echo "rule_labels=$LABELS" >> "$GITHUB_OUTPUT"
 
-          # Check if this issue came from a known template
-          if echo "$ISSUE_BODY" | grep -qi "How were you running Hyperloom"; then
-            echo "from_template=bug" >> "$GITHUB_OUTPUT"
-          elif echo "$ISSUE_BODY" | grep -qi "Problem / use case"; then
-            echo "from_template=feature" >> "$GITHUB_OUTPUT"
+          # Determine if type was already set by template
+          EXISTING_LABELS="${{ join(github.event.issue.labels.*.name, ',') }}"
+          if echo "$EXISTING_LABELS" | grep -q "type:"; then
+            echo "has_type=true" >> "$GITHUB_OUTPUT"
+          elif echo "$LABELS" | grep -q "type:"; then
+            echo "has_type=true" >> "$GITHUB_OUTPUT"
           else
-            echo "from_template=none" >> "$GITHUB_OUTPUT"
+            echo "has_type=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: LLM-based labeling
+      - name: LLM classification via GitHub Models
         id: llm
+        if: steps.rules.outputs.has_type != 'true'
         env:
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
-          FROM_TEMPLATE: ${{ steps.rules.outputs.from_template }}
         run: |
-          if [ -z "$LLM_API_KEY" ]; then
-            echo "LLM_API_KEY not set, skipping LLM labeling"
-            echo "llm_labels=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Truncate body to avoid token limits
           BODY_TRUNCATED=$(echo "$ISSUE_BODY" | head -c 3000)
 
-          # Build the type instruction based on whether a template was used
-          if [ "$FROM_TEMPLATE" = "none" ]; then
-            TYPE_INSTRUCTION='- "type": one of "type:bug", "type:feature", "type:question", "type:task", "type:docs". Pick the best match.'
-          else
-            TYPE_INSTRUCTION='- "type": leave as empty string (already determined by template).'
-          fi
-
-          PROMPT=$(cat <<PROMPT_END
-          You are a GitHub issue classifier for Hyperloom, an AI-powered performance optimization platform for AMD GPUs.
-
-          Analyze the following issue and return a JSON object with these fields:
-          $TYPE_INSTRUCTION
-          - "priority": one of "priority:critical", "priority:high", "priority:medium", "priority:low".
-            Guidelines:
-              - critical: production outage, data loss, complete failure blocking all users
-              - high: major functionality broken, no workaround, affects many users
-              - medium: bug with workaround, or important feature request
-              - low: minor issue, cosmetic, nice-to-have feature
-          - "domains": array of applicable domains from ["domain:inference", "domain:training", "domain:mcp", "domain:ui"]. Can be empty.
-
-          Issue title: $ISSUE_TITLE
-
-          Issue body:
-          $BODY_TRUNCATED
-
-          Respond with ONLY the JSON object, no markdown fences, no explanation.
-          PROMPT_END
-          )
-
-          RESPONSE=$(curl -sk https://oci-slc.example-internal-host.invalid/api/v1/llm-proxy/v1/chat/completions \
+          RESPONSE=$(curl -s https://models.github.ai/inference/chat/completions \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $LLM_API_KEY" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
             -d "$(jq -n \
-              --arg prompt "$PROMPT" \
+              --arg title "$ISSUE_TITLE" \
+              --arg body "$BODY_TRUNCATED" \
               '{
-                model: "openai/gpt-5.2",
-                messages: [{role: "user", content: $prompt}],
+                model: "openai/gpt-4o-mini",
+                messages: [{
+                  role: "user",
+                  content: ("You are a GitHub issue classifier for Hyperloom, an AI-powered performance optimization platform for AMD GPUs.\n\nAnalyze this issue and return ONLY a JSON object (no markdown fences):\n- \"type\": one of \"type:bug\", \"type:feature\", \"type:question\", \"type:task\", \"type:docs\"\n- \"domains\": array from [\"domain:inference\", \"domain:training\", \"domain:mcp\", \"domain:ui\"], can be empty\n\nIssue title: " + $title + "\n\nIssue body:\n" + $body)
+                }],
                 temperature: 0,
-                max_tokens: 200
+                max_tokens: 150
               }')")
 
           LLM_OUTPUT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty')
@@ -130,14 +120,11 @@ jobs:
 
           echo "LLM output: $LLM_OUTPUT"
 
-          # Parse LLM JSON output
-          TYPE_LABEL=$(echo "$LLM_OUTPUT" | jq -r '.type // empty')
-          PRIORITY_LABEL=$(echo "$LLM_OUTPUT" | jq -r '.priority // empty')
-          DOMAIN_LABELS=$(echo "$LLM_OUTPUT" | jq -r '.domains[]? // empty' | paste -sd ',' -)
+          TYPE_LABEL=$(echo "$LLM_OUTPUT" | jq -r '.type // empty' 2>/dev/null)
+          DOMAIN_LABELS=$(echo "$LLM_OUTPUT" | jq -r '.domains[]? // empty' 2>/dev/null | paste -sd ',' -)
 
           LABELS=""
           [ -n "$TYPE_LABEL" ] && LABELS="$TYPE_LABEL"
-          [ -n "$PRIORITY_LABEL" ] && LABELS="${LABELS:+$LABELS,}$PRIORITY_LABEL"
           [ -n "$DOMAIN_LABELS" ] && LABELS="${LABELS:+$LABELS,}$DOMAIN_LABELS"
 
           echo "llm_labels=$LABELS" >> "$GITHUB_OUTPUT"
@@ -149,7 +136,6 @@ jobs:
           LLM_LABELS: ${{ steps.llm.outputs.llm_labels }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          # Combine and deduplicate labels
           ALL_LABELS=$(echo "$RULE_LABELS,$LLM_LABELS" | tr ',' '\n' | grep -v '^$' | sort -u | paste -sd ',' -)
 
           if [ -z "$ALL_LABELS" ]; then
