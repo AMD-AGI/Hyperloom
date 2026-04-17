@@ -49,7 +49,7 @@ docker run --rm -it \
 export HF_TOKEN="your_api_key"      # ← Replace with your HuggingFace API token ,W&B key is not compulsory
 ```
 
-**SAFE API Key** — required for MCP server access (GEAK, TraceLens, etc.). Edit `.cursor/mcp.json` and replace all `<SAFE_API_KEY>ak-xxxxx` placeholders with your actual SAFE API key:
+**SAFE API Key** — required for MCP server access (GEAK, OOB, etc.). Edit `.cursor/mcp.json` and replace all `<SAFE_API_KEY>ak-xxxxx` placeholders with your actual SAFE API key:
 
 ```json
 {
@@ -64,7 +64,7 @@ export HF_TOKEN="your_api_key"      # ← Replace with your HuggingFace API toke
 }
 ```
 
-Three MCP servers require the key: `oci-geak-agent`, `oci-oob-agent`, and `oci-primus-safe`. The `oci-traceLens-agent` does not require authentication.
+Two MCP servers require the key: `oci-geak-agent` and `oci-oob-agent`. TraceLens now runs via local CLI (`pip install -e /hyperloom/TraceLens-internal`).
 
 ### 3. Prepare runtime directories
 

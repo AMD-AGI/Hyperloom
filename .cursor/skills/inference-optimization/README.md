@@ -97,7 +97,8 @@ ISL/OSL: 1k/1k and 8k/1k. Skip TraceLens/GEAK, just benchmark.
 2. **Model**: Qwen3-30B-A3B downloaded to local path
 3. **SGLang**: v0.5.6+ with torch.compile support
 4. **InferenceX**: Cloned for benchmark_serving.py
-5. **MCP servers**: GEAK + TraceLens configured in `.cursor/mcp.json`
+5. **MCP servers**: GEAK + OOB configured in `.cursor/mcp.json`
+6. **TraceLens**: `pip install -e /hyperloom/TraceLens-internal` (CLI tools)
 
 ### What the agent does (8 steps, ~40 min)
 
