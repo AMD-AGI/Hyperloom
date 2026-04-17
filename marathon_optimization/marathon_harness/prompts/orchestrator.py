@@ -25,6 +25,16 @@ _SCOPING_CONSTRAINT = (
     "- Stay focused on THIS model's scripts, configs, and results.\n"
 )
 
+_READ_ONLY_CONSTRAINT = (
+    "\n\nREAD-ONLY MODE — CRITICAL:\n"
+    "- This is an ANALYSIS-ONLY phase. Do NOT modify any source files.\n"
+    "- Do NOT use the Edit tool or write to any .py, .sh, .csv, .json source files.\n"
+    "- Do NOT apply patches, change configs, or modify launch scripts.\n"
+    "- You may ONLY read files, run read-only bash commands, and write to $OUTPUT_FILE.\n"
+    "- All code changes MUST happen in the DFS phase where they go through "
+    "benchmark and accuracy gates.\n"
+)
+
 
 def prompt_warm_start(
     mode: str,
@@ -47,6 +57,7 @@ def prompt_warm_start(
             f"register-pressure-fixable +3, shape-tuning-untested +2, oob-untested +2\n"
             f"4. Write scored action_stack to $OUTPUT_FILE as JSON\n"
             f"{_SCOPING_CONSTRAINT}"
+            f"{_READ_ONLY_CONSTRAINT}"
         )
     elif mode == "baseline":
         return (
@@ -60,6 +71,7 @@ def prompt_warm_start(
             f"4. Apply any patches from $BASE_DIR/patches/ if they exist\n"
             f"5. Write initial state to $OUTPUT_FILE as JSON\n"
             f"{_SCOPING_CONSTRAINT}"
+            f"{_READ_ONLY_CONSTRAINT}"
         )
     else:
         return (
@@ -71,6 +83,7 @@ def prompt_warm_start(
             f"3. Find model launch script under $BASE_DIR/scripts/\n"
             f"4. Write initial state to $OUTPUT_FILE as JSON\n"
             f"{_SCOPING_CONSTRAINT}"
+            f"{_READ_ONLY_CONSTRAINT}"
         )
 
 
@@ -108,6 +121,7 @@ def prompt_re_profile(state_summary: str, trace_path: str = "") -> str:
         f"7. Write to $OUTPUT_FILE: kernel_breakdown, tier_summary, "
         f"kernel_opt_candidates (>1% GPU), trace_path\n"
         f"{_SCOPING_CONSTRAINT}"
+        f"{_READ_ONLY_CONSTRAINT}"
     )
 
 
@@ -235,6 +249,7 @@ def prompt_deep_analysis(state_summary: str, kernel_candidates: list[dict]) -> s
         f"  dispatch_bugs_found: int count\n"
         f"  untuned_shapes: list of shape strings missing config entries\n"
         f"  optimization_reasoning: dict mapping kernel_name → reasoning summary\n"
+        f"{_READ_ONLY_CONSTRAINT}"
     )
 
 
@@ -372,6 +387,7 @@ def prompt_accuracy_gate(state_summary: str, action: dict, result: dict) -> str:
         f"3. If deviation > threshold → REVERT\n\n"
         f"Write to $OUTPUT_FILE: passed (bool), accuracy, deviation, "
         f"revert_needed (bool)\n"
+        f"{_READ_ONLY_CONSTRAINT}"
     )
 
 
@@ -396,6 +412,7 @@ def prompt_rescore(state_summary: str, action_stack: list[dict]) -> str:
         f"5. Never zero ALL kernel-opt from one backend\n"
         f"6. Add new actions if analysis reveals opportunities\n\n"
         f"Write to $OUTPUT_FILE: rescored_stack (list of {{id, score}} dicts)\n"
+        f"{_READ_ONLY_CONSTRAINT}"
     )
 
 
@@ -489,6 +506,7 @@ def prompt_dream(state_summary: str, completed_since_last: list[dict],
         f"  defensive_rules: list of {{trigger, check, rationale}} from negative results\n"
         f"  kb_entries: list of knowledge base entries\n"
         f"  dream_summary: string summary of strategic thinking\n"
+        f"{_READ_ONLY_CONSTRAINT}"
     )
 
 
@@ -505,6 +523,7 @@ def prompt_sweep(state_summary: str, server_config: dict) -> str:
         f"- Concurrency: 4, 8, 16, 32, 64, 128\n"
         f"- ISL/OSL: 1024:1024, 8192:1024, 1024:8192\n\n"
         f"Write to $OUTPUT_FILE: results_tsv, pareto_points, best_config\n"
+        f"{_READ_ONLY_CONSTRAINT}"
     )
 
 
@@ -523,6 +542,7 @@ def prompt_report(state_summary: str, completed_actions: list[dict]) -> str:
         f"Parameter Sweep, Recommendations\n\n"
         f"Write report to $RESULT_DIR/optimization_report.md\n"
         f"Write to $OUTPUT_FILE: report_path, kb_entries\n"
+        f"{_READ_ONLY_CONSTRAINT}"
     )
 
 
@@ -601,6 +621,7 @@ def prompt_re_explore(state_summary: str, loop_signatures: list[str],
         f"Score formula: (expected_gain / cost_minutes) * (1-risk) * gap_mult\n"
         f"Set scores between 3-9. Prefer variety over one strategy.\n\n"
         f"Write to $OUTPUT_FILE: novel_actions (list, MIN 5), diagnosis (string)\n"
+        f"{_READ_ONLY_CONSTRAINT}"
     )
 
 
@@ -644,6 +665,7 @@ def prompt_exploratory_probe(state_summary: str, visit_map: dict,
         f"  design_spaces: list of unexplored design dimensions\n"
         f"  visit_log: list of file paths you read\n"
         f"  insights: list of insight objects to write to insight bus\n"
+        f"{_READ_ONLY_CONSTRAINT}"
     )
 
 
@@ -771,6 +793,7 @@ def prompt_diagnose_failure(state_summary: str, action: dict[str, Any],
         f"  rca_constraints: dict (constraint, avoid list, compiler_flags) or null\n"
         f"  fix_description: string (what to change for retry)\n"
         f"  insights: string (what we learned)\n"
+        f"{_READ_ONLY_CONSTRAINT}"
     )
 
 
