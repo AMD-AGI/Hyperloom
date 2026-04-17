@@ -319,6 +319,11 @@ class Orchestrator:
         from .workload import kill_rogue_servers
         await kill_rogue_servers()
 
+        # Safety net: revert any source edits (warm_start is read-only)
+        if self._workload and hasattr(self._workload, '_reset_runtime_workspaces'):
+            log.info("Reverting any warm-start edits (enforcing read-only)")
+            await self._workload._reset_runtime_workspaces()
+
         if result.output:
             for k, v in result.output.items():
                 if hasattr(self.state, k):
@@ -417,12 +422,17 @@ class Orchestrator:
         if isinstance(dream_result, Exception):
             log.warning("Transition dream failed (non-fatal): %s", dream_result)
 
-        # ── Step 4: LLM analysis (augment action stack) ──
+        # ── Step 4: LLM analysis (read-only, augment action stack) ──
         from . import prompts
         output_file = Path(self.session_dir) / "warm_start_output.json"
         prompt = prompts.prompt_warm_start("sprint", self.state.state_summary(), config)
         result = await self.llm.call(prompt, output_file=str(output_file), max_turns=60)
         self.llm.sync_stats(self.state)
+
+        # Safety net: revert any source edits (warm_start is read-only)
+        if self._workload and hasattr(self._workload, '_reset_runtime_workspaces'):
+            log.info("Reverting any warm-start edits (enforcing read-only)")
+            await self._workload._reset_runtime_workspaces()
 
         if result.output:
             for a in result.output.get("action_stack", []):
@@ -573,12 +583,20 @@ class Orchestrator:
         if isinstance(dream_result, Exception):
             log.warning("Transition dream failed (non-fatal): %s", dream_result)
 
-        # LLM augmentation pass
+        # LLM augmentation pass (read-only analysis — no code edits allowed)
         from . import prompts
         output_file = Path(self.session_dir) / "warm_start_output.json"
         prompt = prompts.prompt_warm_start("sprint", self.state.state_summary(), sprint_config)
         result = await self.llm.call(prompt, output_file=str(output_file), max_turns=60)
         self.llm.sync_stats(self.state)
+
+        # Safety net: revert any source edits the Claw may have made despite
+        # read-only instructions.  Only DFS actions go through benchmark +
+        # accuracy gates, so warm_start edits are not validated.
+        if self._workload and hasattr(self._workload, '_reset_runtime_workspaces'):
+            log.info("Reverting any warm-start edits (enforcing read-only)")
+            await self._workload._reset_runtime_workspaces()
+
         if result.output:
             for a in result.output.get("action_stack", []):
                 existing_ids = {ea.get("id") for ea in self.state.action_stack}
@@ -787,9 +805,13 @@ class Orchestrator:
         result = await self.llm.call(prompt, output_file=str(output_file), max_turns=50)
         self.llm.sync_stats(self.state)
 
+        # Safety net: revert any source edits made during profiling.
+        if self._workload and hasattr(self._workload, '_reset_runtime_workspaces'):
+            log.info("Reverting any profile-phase edits (enforcing read-only)")
+            await self._workload._reset_runtime_workspaces()
+
         if result.output:
             new_candidates = result.output.get("kernel_opt_candidates", [])
-            # Register new kernel discoveries
             for kc in new_candidates:
                 kname = kc.get("name", "")
                 if kname:
@@ -825,6 +847,12 @@ class Orchestrator:
         # rogue servers it may have spawned despite the blocklist.
         from .workload import kill_rogue_servers
         await kill_rogue_servers()
+
+        # Safety net: revert any source edits the Claw may have made.
+        # Deep analysis is read-only; code changes only happen in DFS.
+        if self._workload and hasattr(self._workload, '_reset_runtime_workspaces'):
+            log.info("Reverting any deep-analysis edits (enforcing read-only)")
+            await self._workload._reset_runtime_workspaces()
 
         if result.output:
             async with self._state_lock.mutate():
@@ -1998,6 +2026,8 @@ Return a JSON object:
 
 Be specific in the retry description about what EXACTLY to change and what NOT to change.
 Include warnings about the mistakes that caused the regression.
+
+READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
 """
 
         try:
@@ -2128,6 +2158,8 @@ Return a JSON object:
 
 Only include follow-on actions that are DIFFERENT from what's already on the action stack.
 Be specific — vague "investigate X" actions are not useful.
+
+READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
 """
 
         try:
