@@ -107,39 +107,25 @@ class OOBBackends:
         target: dict[str, Any],
         files: dict[str, str] | None = None,
     ) -> OOBResult:
-        t0 = time.monotonic()
         try:
             if backend == "geak":
-                result = await self._dispatch_geak(prompt, target, files)
+                return await self._dispatch_geak(prompt, target, files)
             elif backend == "codex":
-                result = await self._dispatch_codex(prompt, target)
+                return await self._dispatch_codex(prompt, target)
             elif backend == "claude":
                 result = await self._dispatch_claude(prompt, target)
                 if result.status == "error":
-                    log.warning("Claude failed (%.1fs, err=%s), falling back to Codex",
-                                result.duration_s, (result.error or "")[:100])
-                    result = await self._dispatch_codex(prompt, target)
+                    log.warning("Claude failed, falling back to Codex")
+                    return await self._dispatch_codex(prompt, target)
+                return result
             else:
-                result = OOBResult(backend=backend, status="error", error=f"Unknown backend: {backend}")
-
-            elapsed = time.monotonic() - t0
-            if result.duration_s == 0:
-                result.duration_s = elapsed
-            log.info("OOB dispatch done: backend=%s status=%s duration=%.1fs",
-                     result.backend, result.status, result.duration_s)
-            return result
+                return OOBResult(backend=backend, status="error", error=f"Unknown backend: {backend}")
         except asyncio.CancelledError:
-            elapsed = time.monotonic() - t0
-            log.warning("OOB dispatch cancelled (backend=%s, %.1fs)", backend, elapsed)
-            return OOBResult(backend=backend, status="error",
-                             error="cancelled (shutdown)", duration_s=elapsed)
+            log.warning("OOB dispatch cancelled (backend=%s)", backend)
+            return OOBResult(backend=backend, status="error", error="cancelled (shutdown)")
         except Exception as exc:
-            elapsed = time.monotonic() - t0
             self.failure_counts[backend] = self.failure_counts.get(backend, 0) + 1
-            log.error("OOB dispatch EXCEPTION (backend=%s, %.1fs): %s: %s",
-                      backend, elapsed, type(exc).__name__, exc)
-            return OOBResult(backend=backend, status="error",
-                             error=f"{type(exc).__name__}: {exc}", duration_s=elapsed)
+            return OOBResult(backend=backend, status="error", error=str(exc))
 
     def record_result(self, backend: str, success: bool) -> None:
         if success:
@@ -153,18 +139,17 @@ class OOBBackends:
 
     async def _dispatch_via_claw(self, prompt: str, backend_label: str) -> OOBResult:
         """Send prompt to Primus-Claw session, wait for result, extract code."""
-        from .llm import ClawClient
+        from .llm import ClawClient, _BASH_BLOCKLIST_PREAMBLE
 
         t0 = time.monotonic()
         auth = self.env.get("CLAW_AUTH_TOKEN", "")
-        log.debug("Claw dispatch starting (backend=%s, url=%s)", backend_label, self.claw_url)
-        client = ClawClient(self.claw_url, auth_token=auth)
+        ca_bundle = self.env.get("CLAW_CA_BUNDLE", "")
+        client = ClawClient(self.claw_url, auth_token=auth, ca_bundle=ca_bundle)
+        prompt = _BASH_BLOCKLIST_PREAMBLE + "\n" + prompt
         result = await client.run(prompt)
         duration = time.monotonic() - t0
 
         if result.is_error:
-            log.warning("Claw dispatch error (backend=%s, %.1fs): %s",
-                        backend_label, duration, (result.error_message or "")[:200])
             return OOBResult(
                 backend=backend_label, status="error",
                 error=result.error_message, duration_s=duration,
@@ -173,12 +158,8 @@ class OOBBackends:
         code = self._extract_code_block(result.text)
         if code:
             self.failure_counts[backend_label] = 0
-            log.info("Claw dispatch success (backend=%s, %.1fs, code=%d chars)",
-                     backend_label, duration, len(code))
             return OOBResult(backend=backend_label, status="success", code=code, duration_s=duration)
 
-        log.info("Claw dispatch no-code (backend=%s, %.1fs, text=%d chars)",
-                 backend_label, duration, len(result.text or ""))
         return OOBResult(
             backend=backend_label, status="error",
             error="No code block in Claw response", duration_s=duration,
