@@ -40,6 +40,10 @@ OOB_MCP_PORT=${OOB_MCP_PORT:-8003}
 OOB_MCP_PID=0
 AUTH_PROXY_PID=0
 
+# Default OOB CLI client target to the local OOB service
+export OOB_API_URL="${OOB_API_URL:-http://localhost:${OOB_MCP_PORT}}"
+export OOB_AUTH_KEY="${OOB_AUTH_KEY:-${OOB_API_KEY:-local-dev-key}}"
+
 echo "============================================"
 echo "  Hyperloom — Local Mode (containerized)"
 echo "============================================"
@@ -70,7 +74,7 @@ export OPENAI_BASE_URL="${OOB_BASE_URL:-}"
     for var in MODE FRAMEWORK GEAK_LOCAL KERNEL_OPT_BACKENDS NFS_BASE_PATH DATABASE_PATH \
                INFERENCEX_PATH LLM_API_KEY LLM_API_BASE AMD_LLM_API_KEY LLM_GATEWAY_KEY \
                TRACELENS_PORT GEAK_MCP_PORT OOB_MCP_PORT AGENT_WORKSPACE_ROOT \
-               OOB_API_KEY OOB_BASE_URL OOB_LOCAL \
+               OOB_API_KEY OOB_BASE_URL OOB_LOCAL OOB_API_URL OOB_AUTH_KEY \
                HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES GPUS_PER_NODE; do
         [ -n "${!var:-}" ] && echo "export ${var}='${!var}'"
     done
@@ -106,7 +110,7 @@ DATABASE_PATH="${DATABASE_PATH:-/tmp/geak-data/geak.db}" \
   > "$LOG_DIR/geak-mcp.log" 2>&1 &
 GEAK_MCP_PID=$!
 
-# --- OOB Agent MCP (Claude Code + Codex backends) ---
+# --- OOB Agent service (Claude Code + Codex backends; accessed via REST API by the skill) ---
 if [ -d /opt/oob-mcp/agent_mcp_server ]; then
     mkdir -p "${AGENT_WORKSPACE_ROOT:-/tmp/agent-workspaces}"
 
@@ -235,7 +239,7 @@ while true; do
         GEAK_MCP_PID=$!
     fi
     if [ "$OOB_MCP_PID" -gt 0 ] && ! kill -0 "$OOB_MCP_PID" 2>/dev/null; then
-        echo "[$(date)] OOB Agent MCP crashed, restarting..."
+        echo "[$(date)] OOB Agent service crashed, restarting..."
         PYTHONPATH=/opt/oob-mcp \
         MCP_PORT=$OOB_MCP_PORT \
         OOB_LOCAL="${OOB_LOCAL:-true}" \

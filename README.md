@@ -34,7 +34,7 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 
 - **Easy to scale** — each job runs in isolated sandboxed containers (GPU or CPU). Single-node optimizations run in-sandbox; multi-node workloads fan out via RayJob for distributed benchmarking.
 - **Data flywheel** — every optimization run feeds results back through Minio storage and Langfuse observability, creating a closed feedback loop that continuously improves the agent's knowledge base and scoring heuristics.
-- **Full MCP + CLI + Skills support** — sandboxes connect to BenchMark/RayJob, OOB, and InferenceX via MCP, GEAK via CLI (REST API), run TraceLens profiling via local CLI, and load optimization Skills on demand, giving the agent the same profiling, kernel-rewrite, and domain-specific capabilities at cloud scale.
+- **Full MCP + CLI + Skills support** — sandboxes connect to BenchMark/RayJob and InferenceX via MCP, GEAK and OOB via CLI (REST API), run TraceLens profiling via local CLI, and load optimization Skills on demand, giving the agent the same profiling, kernel-rewrite, and domain-specific capabilities at cloud scale.
 
 1. Go to **[oci-slc.primus-safe.amd.com/hyperloom](https://oci-slc.primus-safe.amd.com/hyperloom/)**
 2. Select **Claw Agent** or **Get Started** from the landing page to enter PrimusClaw
@@ -52,10 +52,12 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 
 ### 1. Configure MCP Servers & TraceLens CLI
 
-Hyperloom uses MCP servers for kernel optimization, configured in `.cursor/mcp.json`:
+Hyperloom uses the following kernel optimization backends:
 
-- **GEAK** — for kernel-level optimization (rewrites Triton/HIP source). Accessed via CLI (`geak_client.py`) calling the GEAK REST API — no MCP server needed.
-- **OOB GPU Optimizer** — for kernel optimization via Codex/Claude Code agents (MCP).
+- **GEAK** — for kernel-level optimization (rewrites Triton/HIP source). Accessed via CLI (`geak_client.py`) calling the GEAK REST API. Configure via `GEAK_API_URL` + `GEAK_AUTH_KEY` in `.env`.
+- **OOB GPU Optimizer** — for kernel optimization via Codex/Claude Code agents. Accessed via CLI (`oob_client.py`) calling the OOB REST API. Configure via `OOB_API_URL` + `OOB_AUTH_KEY` in `.env`.
+
+Neither backend requires `.cursor/mcp.json` configuration — both are pure REST clients.
 
 TraceLens profiling analysis now runs via **local CLI** (no MCP needed):
 ```bash
@@ -63,11 +65,14 @@ cd /hyperloom/TraceLens-internal && pip install -e .
 # Verify: TraceLens_generate_perf_report_pytorch --help
 ```
 
-Update the GEAK environment variables in `.env`:
+Update the GEAK and OOB environment variables in `.env` (same SaFE `ak-` key for both):
 
 ```bash
 GEAK_API_URL=https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/geak-agent-wvsbv
 GEAK_AUTH_KEY=$AK_YOUR_API_KEY
+
+OOB_API_URL=https://oci-slc.primus-safe.amd.com/control-plane/control-plane-sandbox/agent-mcp-server-zr29p
+OOB_AUTH_KEY=$AK_YOUR_API_KEY
 ```
 
 ### 2. Environment
@@ -132,7 +137,7 @@ The agent takes it from there — baseline, profile, loop, report.
 
 ## Quickstart — Fully Local Mode (Docker / K8s)
 
-Run Hyperloom on your own GPU infrastructure — a single container bundles all MCP services (TraceLens, GEAK, OOB Agent), InferenceX, and Skills. No manual MCP or environment setup required.
+Run Hyperloom on your own GPU infrastructure — a single container bundles GEAK MCP, OOB CLI backend, TraceLens (local), InferenceX, and Skills. No manual MCP or environment setup required.
 
 ```bash
 docker run -d --shm-size=16g \
@@ -199,7 +204,7 @@ The skill files are the agent's instructions. They encode the full optimization 
 ```
 Hyperloom/
 ├── .cursor/
-│   ├── mcp.json                          # MCP server config (OOB only; GEAK uses CLI)
+│   ├── mcp.json                          # MCP server config (empty; both GEAK and OOB use CLI)
 │   └── skills/
 │       ├── training-optimization/        # Training optimization skill + knowledge base
 │       ├── inference-optimization/       # Inference optimization skill + scripts

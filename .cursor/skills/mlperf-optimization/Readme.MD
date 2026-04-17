@@ -49,29 +49,17 @@ docker run --rm -it \
 export HF_TOKEN="your_api_key"      # ← Replace with your HuggingFace API token ,W&B key is not compulsory
 ```
 
-**SAFE API Key** — required for OOB MCP server access and GEAK CLI. Edit `.cursor/mcp.json` for OOB, and `.env` for GEAK. Replace all `<SAFE_API_KEY>ak-xxxxx` placeholders with your actual SAFE API key:
+**SAFE API Key** — required for GEAK CLI and OOB CLI. Edit `.env` to set both. The same `ak-` key is used for both services:
 
-For **OOB MCP** — edit `.cursor/mcp.json`:
-```json
-{
-  "mcpServers": {
-    "oci-oob-agent": {
-      "headers": {
-        "Authorization": "Bearer ak-YOUR_ACTUAL_KEY_HERE"
-      },
-      ...
-    }
-  }
-}
-```
-
-For **GEAK CLI** — edit `.env`:
 ```
 GEAK_API_URL=https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/geak-agent-wvsbv
 GEAK_AUTH_KEY=ak-YOUR_ACTUAL_KEY_HERE
+
+OOB_API_URL=https://oci-slc.primus-safe.amd.com/control-plane/control-plane-sandbox/agent-mcp-server-zr29p
+OOB_AUTH_KEY=ak-YOUR_ACTUAL_KEY_HERE
 ```
 
-OOB MCP server `oci-oob-agent` requires the key in `.cursor/mcp.json`. GEAK now uses CLI (REST API) via `geak_client.py` — no MCP config needed. TraceLens runs via local CLI (`pip install -e /hyperloom/TraceLens-internal`).
+Both GEAK and OOB now use CLI (REST API) via `geak_client.py` and `oob_client.py` — no MCP config required. TraceLens also runs via local CLI (`pip install -e /hyperloom/TraceLens-internal`).
 
 ### 3. Prepare runtime directories
 

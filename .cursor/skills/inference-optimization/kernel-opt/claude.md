@@ -1,19 +1,24 @@
 ---
 name: claude-inference-kernel-reference
-description: Claude Code backend for kernel optimization via OOB GPU Optimizer MCP. Multi-turn agent with tool-use capability. Verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
+description: Claude Code backend for kernel optimization via OOB GPU Optimizer CLI. Multi-turn agent with tool-use capability. Verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
 ---
 
 # Claude Code — Kernel Optimization Backend
 
-Claude Code backend for kernel optimization via the OOB GPU Optimizer MCP (`oob-gpu-optimizer`).
+Claude Code backend for kernel optimization via the OOB GPU Optimizer CLI (`oob_client.py`).
 Multi-turn agent with tool-use capability (file I/O, shell commands).
 The calling skill is responsible for compilation checking, correctness verification,
 and micro-benchmarking.
 
+OOB is accessed via direct REST API calls using the `oob_client.py` CLI wrapper.
+The script lives at `$SKILL_ROOT/../shared/scripts/oob_client.py` and requires
+no dependencies beyond Python stdlib. Authentication via `OOB_API_URL` + `OOB_AUTH_KEY`
+env vars — see [`codex.md`](codex.md) for details.
+
 ## Status: Experimental
 
-Claude Code support in the OOB GPU Optimizer MCP is under active development. The tool
-interface is identical to Codex (`agent_create_task(agent="claude")`), but availability
+Claude Code support in the OOB service is under active development. The CLI
+interface is identical to Codex (`create-task --agent claude`), but availability
 may be intermittent. **Fallback to `codex` if `claude` is unavailable.**
 
 ## Constants
@@ -29,7 +34,7 @@ may be intermittent. **Fallback to `codex` if `claude` is unavailable.**
 
 | | Claude (this) | Codex | GEAK | LLM Proxy |
 |---|---|---|---|---|
-| **MCP** | OOB GPU Optimizer | OOB GPU Optimizer | GEAK | Direct API |
+| **Interface** | OOB CLI | OOB CLI | GEAK CLI | Direct API |
 | **Latency (per iter)** | 1–5 min | 30–120s | N/A | 1–30s |
 | **Latency (full round)** | 3–15 min | 2–6 min | 10–30 min | 1–30s |
 | **GPU on pod** | No | No | Yes | No |
@@ -37,63 +42,66 @@ may be intermittent. **Fallback to `codex` if `claude` is unavailable.**
 | **Multi-turn** | Yes (up to 30 turns) | Yes (typically 1) | Yes (up to 100 steps) | No |
 | **Best for** | Multi-step: analyze, write, verify compilation | Fast single-pass rewrites | Complex HIP, hardware-verified | Quick iteration |
 
-## Tool Sequence
+## Command Sequence
 
-Identical to Codex — same MCP, different `agent` parameter.
+Identical to Codex — same CLI, different `--agent` value.
 
-| Step | Tool | Purpose |
-|------|------|---------|
-| 1 | `agent_create_task` | Create task with kernel source + prompt |
-| 2 | `agent_submit_task` | Start execution |
-| 3 | `agent_get_task` | Poll status (every `CLAUDE_POLL_INTERVAL_S`) |
-| 4 | `agent_get_outputs` | List output files |
-| 5 | `agent_download_file` | Download optimized kernel |
-| - | `agent_cancel_task` | Cancel if stuck past `CLAUDE_POLL_TIMEOUT_MIN` |
+```bash
+OOB_CLI="python3 $SKILL_ROOT/../shared/scripts/oob_client.py"
+```
 
-## agent_create_task — Critical Details
+| Step | Command | Purpose |
+|------|---------|---------|
+| 1 | `$OOB_CLI create-task --agent claude --file kernel.py --prompt "..." --workspace-id $KERNEL_OPT_WORKSPACE --image $KERNEL_OPT_IMAGE --max-turns 30` | Create task with kernel source + prompt |
+| 2 | `$OOB_CLI submit-task TASK_ID` | Start execution |
+| 3 | `$OOB_CLI poll-task TASK_ID --interval 15 --timeout 600` | Poll until completion |
+| 4 | `$OOB_CLI get-outputs TASK_ID` | List output files |
+| 5 | `$OOB_CLI download-file TASK_ID FILE_PATH --output-dir $WORK_DIR/kernels` | Download optimized kernel |
+| - | `$OOB_CLI cancel-task TASK_ID` | Cancel if stuck past `CLAUDE_POLL_TIMEOUT_MIN` |
 
-- `agent`: `"claude"` (required)
-- `prompt`: kernel optimization instructions (same core as Codex — see [`codex.md`](codex.md))
-- `files`: array of `{filename, content}` — full kernel source embedded here
-- `max_turns`: use `CLAUDE_MAX_TURNS` (default 30, higher than Codex because Claude
+## create-task — Critical Details
+
+- `--agent claude` (required for this backend)
+- `--prompt` — kernel optimization instructions (same core as Codex — see [`codex.md`](codex.md))
+- `--file` — repeatable; full kernel source embedded here
+- `--max-turns` — use `CLAUDE_MAX_TURNS` (default 30, higher than Codex because Claude
   benefits from multi-step reasoning)
-- `system_prompt`: recommended — Claude responds well to detailed persona prompts
-- `image`: optional — use `KERNEL_OPT_IMAGE` (shared with GEAK)
-- `workspace_id`: optional — use `KERNEL_OPT_WORKSPACE` (shared with GEAK, default `"control-plane-moe"`)
+- `--system-prompt` — recommended; Claude responds well to detailed persona prompts
+- `--image` — use `$KERNEL_OPT_IMAGE` (shared with GEAK)
+- `--workspace-id` — required; use `$KERNEL_OPT_WORKSPACE` (shared with GEAK, default `"control-plane-moe"`)
 
 ### Example
 
-```
-Tool: agent_create_task
-Args: {
-    "agent": "claude",
-    "prompt": "<optimization instructions — same template as codex.md>",
-    "files": [
-        {"filename": "kernel.py", "content": "<full kernel source>"}
-    ],
-    "max_turns": 30,
-    "system_prompt": "<GPU expert persona — see codex.md>",
-    "image": "KERNEL_OPT_IMAGE",
-    "workspace_id": "KERNEL_OPT_WORKSPACE"
-}
-```
+```bash
+$OOB_CLI create-task \
+  --agent claude \
+  --prompt "<optimization instructions — same template as codex.md>" \
+  --file kernel.py \
+  --max-turns 30 \
+  --system-prompt "<GPU expert persona — see codex.md>" \
+  --image "$KERNEL_OPT_IMAGE" \
+  --workspace-id "$KERNEL_OPT_WORKSPACE"
 
-Then:
-```
-Tool: agent_submit_task
-Args: { "task_id": "<task_id from create>" }
+# Then submit using the task_id from the response:
+$OOB_CLI submit-task <TASK_ID>
 ```
 
 ### Polling and Downloading
 
 Same pattern as Codex. See [`codex.md`](codex.md) for polling loop and download examples.
-Use `CLAUDE_POLL_INTERVAL_S` and `CLAUDE_POLL_TIMEOUT_MIN` instead of Codex constants.
+Use `CLAUDE_POLL_INTERVAL_S` and `CLAUDE_POLL_TIMEOUT_MIN` instead of Codex constants:
+
+```bash
+$OOB_CLI poll-task <TASK_ID> \
+  --interval $CLAUDE_POLL_INTERVAL_S \
+  --timeout $((CLAUDE_POLL_TIMEOUT_MIN * 60))
+```
 
 ## Prompt Template
 
 Same core prompt as Codex (see [`codex.md`](codex.md) Prompt Template section). All shared
 prompt rules from `actions/kernel-opt.md` apply. No GEAK-specific directives (no `mode`,
-no `max_rounds`). Image is passed as MCP parameter, not in prompt text.
+no `max_rounds`). Image is passed as `--image` CLI parameter, not in prompt text.
 
 Claude benefits from more detailed reasoning prompts. Consider adding:
 
@@ -116,7 +124,7 @@ Claude uses the **same iterative refinement loop** as Codex. See [`codex.md`](co
 "Iterative Refinement Loop" section for the full flow, pseudocode, feedback context
 format, and key rules.
 
-The only difference: use `agent="claude"` and Claude-specific constants
+The only difference: use `--agent claude` and Claude-specific constants
 (`CLAUDE_MAX_TURNS`, `CLAUDE_POLL_INTERVAL_S`, `CLAUDE_POLL_TIMEOUT_MIN`).
 
 Claude's multi-turn capability means it may produce higher quality output per
@@ -135,14 +143,14 @@ previously-failed approaches.
   round time: ~3–15 min for 3 iterations (vs Codex ~2–6 min).
 - **Feedback responsive**: Claude excels at incorporating iteration feedback —
   typically fixes compilation errors within 1–2 feedback iterations.
-- **Experimental**: If `agent_create_task(agent="claude")` returns an error, fall
-  back to `codex` automatically.
+- **Experimental**: If `$OOB_CLI create-task --agent claude` returns an error, fall
+  back to `--agent codex` automatically.
 
 ## Troubleshooting
 
-### agent_create_task returns error
+### create-task returns error
 - Claude backend may be unavailable. Fall back to Codex:
-  `agent_create_task(agent="codex", ...)` with the same prompt and files.
+  `$OOB_CLI create-task --agent codex ...` with the same prompt and files.
 
 ### Task runs but produces no output file
 - Claude may have spent all turns on analysis without writing a file.

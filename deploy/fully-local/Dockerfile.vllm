@@ -1,5 +1,5 @@
 # Hyperloom Fully Local Mode — vLLM base image
-# Bundles: TraceLens MCP + GEAK MCP + OOB Agent MCP + InferenceX + Skills + SSH
+# Bundles: TraceLens MCP + GEAK MCP + OOB Agent (REST) + InferenceX + Skills + SSH
 #
 # No local build context needed — all repo artifacts come from hyperloom-src.
 #   Prereq: docker pull docker.io/primussafe/hyperloom-src:<tag>

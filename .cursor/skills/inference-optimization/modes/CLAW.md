@@ -11,7 +11,7 @@ architecture, and per-action execution overrides.
 
 - **Client**: Claw (internal platform, Claude Code-like)
 - **Runtime**: SaFE cluster with multi-node GPU
-- **MCP Servers**: SaFE MCP + OOB GPU Optimizer MCP; **GEAK**: CLI (REST API via `geak_client.py`)
+- **MCP Servers**: SaFE MCP; **GEAK**: CLI (REST API via `geak_client.py`); **OOB**: CLI (REST API via `oob_client.py`)
 - **TraceLens**: Local CLI (`pip install -e /hyperloom/TraceLens-internal`)
 - **Storage**: Shared NFS (`/shared_nfs/` inside Pod, maps to NFS root)
 

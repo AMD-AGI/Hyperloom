@@ -8,7 +8,7 @@
 
 Fully Local mode lets users run the full Hyperloom inference optimization loop on their **own GPU infrastructure**, without depending on AMD-hosted PrimusClaw sandboxes or Primus-SaFE Authoring Pods.
 
-"Fully Local" means **local Agent + local GPU** — the Agent (Cursor IDE) runs locally, benchmarks execute on local GPUs, and all MCP services (TraceLens, GEAK, OOB Agent) run inside the same container.
+"Fully Local" means **local Agent + local GPU** — the Agent (Cursor IDE) runs locally, benchmarks execute on local GPUs, and all backend services (TraceLens MCP, GEAK MCP, OOB REST API) run inside the same container.
 
 ### 1.2 Why Fully Local
 
@@ -87,9 +87,10 @@ User Laptop / Workstation                User GPU Node
 - SSH is Cursor Remote's native protocol — zero additional adaptation
 - `/opt/hyperloom` inside the container serves as the complete Cursor workspace
 
-**All MCP services local**: TraceLens, GEAK, and OOB Agent MCP servers all run inside the container, communicating over localhost.
-- Eliminates network latency and availability dependency on external MCP services
+**All backend services local**: TraceLens MCP, GEAK MCP, and OOB REST API all run inside the container, communicating over localhost.
+- Eliminates network latency and availability dependency on external services
 - GEAK in local mode can directly access GPUs for kernel compilation and validation
+- OOB exposed via HTTP REST at `localhost:8003/tools/{tool_name}` — the skill agent uses `oob_client.py` (no MCP protocol)
 - OOB Agent in local mode directly invokes the in-container `claude` / `codex` CLIs
 
 ---
@@ -105,7 +106,7 @@ User Laptop / Workstation                User GPU Node
 │ Packages repo artifacts into a runtime-free image so downstream │
 │ Dockerfiles need no local build context — just COPY --from.     │
 │                                                                 │
-│ Artifacts: OOB MCP / TraceLens / InferenceX / Skills / scripts  │
+│ Artifacts: OOB / TraceLens / InferenceX / Skills / scripts      │
 └─────────────────────────────────────────────────────────────────┘
                               │
                     COPY --from=hyperloom-src
@@ -146,7 +147,7 @@ The same `hyperloom-src` artifacts feed into two inference framework base images
 | TraceLens MCP | 8001 | Performance analysis (kernel breakdown, roofline) |
 | GEAK REST API | 8000 | Kernel optimization task management backend |
 | GEAK MCP | 8002 | GEAK MCP protocol adapter |
-| OOB Agent MCP | 8003 | Claude Code / Codex code generation backend |
+| OOB Agent service | 8003 | Claude Code / Codex code generation backend (exposes both MCP and REST; accessed via `oob_client.py` CLI) |
 
 ### 4.2 Lifecycle
 

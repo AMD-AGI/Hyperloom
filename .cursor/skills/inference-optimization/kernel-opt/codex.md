@@ -1,13 +1,25 @@
 ---
 name: codex-inference-kernel-reference
-description: Codex backend for kernel optimization via OOB GPU Optimizer MCP. Code generation with optional GPU — verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
+description: Codex backend for kernel optimization via OOB GPU Optimizer CLI. Code generation with optional GPU — verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
 ---
 
 # Codex — Kernel Optimization Backend
 
-Codex backend for kernel optimization via the OOB GPU Optimizer MCP (`oob-gpu-optimizer`).
+Codex backend for kernel optimization via the OOB GPU Optimizer CLI (`oob_client.py`).
 Generates optimized kernel code. The calling skill is responsible for compilation
 checking, correctness verification, and micro-benchmarking.
+
+OOB is accessed via direct REST API calls using the `oob_client.py` CLI wrapper.
+The script lives at `$SKILL_ROOT/../shared/scripts/oob_client.py` and requires
+no dependencies beyond Python stdlib.
+
+### Authentication
+
+Requires environment variables (set in `.env`):
+- `OOB_API_URL` — OOB service base URL
+  - Remote: `https://oci-slc.primus-safe.amd.com/control-plane/control-plane-sandbox/agent-mcp-server-zr29p`
+  - Local: `http://localhost:8003`
+- `OOB_AUTH_KEY` — Bearer token (shares the SaFE ak- key with GEAK)
 
 ## Status: Stable
 
@@ -27,7 +39,7 @@ good for Triton structural rewrites (dual-loop to single-pass, block-size tuning
 
 | | Codex (this) | GEAK | Claude | LLM Proxy |
 |---|---|---|---|---|
-| **MCP** | OOB GPU Optimizer | GEAK | OOB GPU Optimizer | Direct API |
+| **Interface** | OOB CLI | GEAK CLI | OOB CLI | Direct API |
 | **Latency (per iter)** | 30–120s | N/A | 1–5 min | 1–30s |
 | **Latency (full round)** | 2–6 min | 10–30 min | 3–15 min | 1–30s |
 | **GPU on pod** | No | Yes | No | No |
@@ -35,69 +47,63 @@ good for Triton structural rewrites (dual-loop to single-pass, block-size tuning
 | **Tool use** | File I/O, shell | Bash, profiling, submit | File I/O, shell | None |
 | **Best for** | Fast Triton rewrites | Complex HIP, final polish | Multi-step autonomous | Quick iteration |
 
-## Tool Sequence
+## Command Sequence
 
-| Step | Tool | Purpose |
-|------|------|---------|
-| 1 | `agent_create_task` | Create task with kernel source + prompt |
-| 2 | `agent_submit_task` | Start execution |
-| 3 | `agent_get_task` | Poll status (every `CODEX_POLL_INTERVAL_S`) |
-| 4 | `agent_get_outputs` | List output files |
-| 5 | `agent_download_file` | Download optimized kernel |
-| - | `agent_cancel_task` | Cancel if stuck past `CODEX_POLL_TIMEOUT_MIN` |
+```bash
+OOB_CLI="python3 $SKILL_ROOT/../shared/scripts/oob_client.py"
+```
 
-## agent_create_task — Critical Details
+| Step | Command | Purpose |
+|------|---------|---------|
+| 1 | `$OOB_CLI create-task --agent codex --file kernel.py --prompt "..." --workspace-id $KERNEL_OPT_WORKSPACE --image $KERNEL_OPT_IMAGE --max-turns 20` | Create task with kernel source + prompt |
+| 2 | `$OOB_CLI submit-task TASK_ID` | Start execution |
+| 3 | `$OOB_CLI poll-task TASK_ID --interval 10 --timeout 300` | Poll status (every `CODEX_POLL_INTERVAL_S`) |
+| 4 | `$OOB_CLI get-outputs TASK_ID` | List output files |
+| 5 | `$OOB_CLI download-file TASK_ID FILE_PATH --output-dir $WORK_DIR/kernels` | Download optimized kernel |
+| - | `$OOB_CLI cancel-task TASK_ID` | Cancel if stuck past `CODEX_POLL_TIMEOUT_MIN` |
 
-- `agent`: `"codex"` (required)
-- `prompt`: kernel optimization instructions (see Prompt Template below)
-- `files`: array of `{filename, content}` — full kernel source embedded here
-- `max_turns`: use `CODEX_MAX_TURNS` (default 20)
-- `system_prompt`: optional — GPU-expert persona can improve output quality
-- `image`: optional — use `KERNEL_OPT_IMAGE` (shared with GEAK)
-- `workspace_id`: optional — use `KERNEL_OPT_WORKSPACE` (shared with GEAK, default `"control-plane-moe"`)
+## create-task — Critical Details
+
+- `--agent codex` (required for this backend)
+- `--prompt` — kernel optimization instructions (see Prompt Template below)
+- `--file` — repeatable; full kernel source embedded here
+- `--max-turns` — use `CODEX_MAX_TURNS` (default 20)
+- `--system-prompt` — optional, GPU-expert persona can improve output quality
+- `--image` — use `$KERNEL_OPT_IMAGE` (shared with GEAK)
+- `--workspace-id` — required; use `$KERNEL_OPT_WORKSPACE` (shared with GEAK, default `"control-plane-moe"`)
 
 ### Example
 
-```
-Tool: agent_create_task
-Args: {
-    "agent": "codex",
-    "prompt": "<optimization instructions — see template below>",
-    "files": [
-        {"filename": "kernel.py", "content": "<full kernel source>"}
-    ],
-    "max_turns": 20,
-    "image": "KERNEL_OPT_IMAGE",
-    "workspace_id": "KERNEL_OPT_WORKSPACE"
-}
-```
+```bash
+$OOB_CLI create-task \
+  --agent codex \
+  --prompt "<optimization instructions — see template below>" \
+  --file kernel.py \
+  --max-turns 20 \
+  --image "$KERNEL_OPT_IMAGE" \
+  --workspace-id "$KERNEL_OPT_WORKSPACE"
 
-Then:
-```
-Tool: agent_submit_task
-Args: { "task_id": "<task_id from create>" }
+# Then submit using the task_id from the response:
+$OOB_CLI submit-task <TASK_ID>
 ```
 
 ### Polling
 
-```python
-for attempt in range(CODEX_POLL_TIMEOUT_MIN * 60 // CODEX_POLL_INTERVAL_S):
-    result = agent_get_task(task_id=TASK_ID)
-    if result["status"] == "completed":
-        break
-    elif result["status"] == "failed":
-        raise RuntimeError(f"Codex task failed: {result.get('error')}")
-    time.sleep(CODEX_POLL_INTERVAL_S)
+```bash
+$OOB_CLI poll-task <TASK_ID> \
+  --interval $CODEX_POLL_INTERVAL_S \
+  --timeout $((CODEX_POLL_TIMEOUT_MIN * 60))
 ```
+
+`poll-task` loops `get-task` and exits when the task reaches `completed`,
+`failed`, or `cancelled`. Exit code 2 on timeout.
 
 ### Downloading Results
 
-```python
-outputs = agent_get_outputs(task_id=TASK_ID)
-for f in outputs["files"]:
-    if f["path"].endswith(".py") and "optimized" in f["path"]:
-        result = agent_download_file(task_id=TASK_ID, file_path=f["path"])
-        optimized_code = result["content"]
+```bash
+$OOB_CLI get-outputs <TASK_ID>
+# Find the optimized file and download:
+$OOB_CLI download-file <TASK_ID> "optimized_kernel.py" --output-dir "$WORK_DIR/kernels"
 ```
 
 ## Prompt Template
@@ -153,7 +159,7 @@ Return the COMPLETE optimized file — do not return partial snippets.
 
 - Codex writes the optimized kernel to `optimized_kernel.py` in its workspace
 - The prompt MUST instruct Codex to use this filename
-- Use `agent_get_outputs` to list files, then `agent_download_file` to retrieve
+- Use `$OOB_CLI get-outputs` to list files, then `$OOB_CLI download-file` to retrieve
 
 ## Iterative Refinement Loop
 
@@ -174,61 +180,54 @@ Each iteration:
 After all iterations: pick the result with the best verified speedup.
 ```
 
-### Iteration Flow (pseudocode)
+### Iteration Flow (pseudocode, shell)
 
-```python
-best_result = None
-feedback_context = ""
+```bash
+best_speedup=0
+best_iter=""
+feedback_context=""
 
-for i in range(OOB_ROUND_ITERATIONS):
+for i in $(seq 1 $OOB_ROUND_ITERATIONS); do
     # 1. Build prompt with accumulated feedback
-    prompt = base_prompt
-    if feedback_context:
-        prompt += f"\n\n--- PREVIOUS ITERATION RESULTS ---\n{feedback_context}"
-        prompt += "\nUse these results to improve your optimization. Avoid repeating failed approaches."
+    prompt="$base_prompt"
+    if [ -n "$feedback_context" ]; then
+        prompt+="\n\n--- PREVIOUS ITERATION RESULTS ---\n$feedback_context\n"
+        prompt+="Use these results to improve your optimization. Avoid repeating failed approaches."
+    fi
 
     # 2. Submit task
-    task = agent_create_task(
-        agent="codex",  # or "claude"
-        prompt=prompt,
-        files=[{"filename": "kernel.py", "content": original_kernel_source}],
-        max_turns=CODEX_MAX_TURNS,
-        image=KERNEL_OPT_IMAGE,
-        workspace_id=KERNEL_OPT_WORKSPACE,
-    )
-    agent_submit_task(task_id=task["task_id"])
+    RESULT=$($OOB_CLI create-task \
+        --agent codex \
+        --prompt "$prompt" \
+        --file kernel.py \
+        --max-turns $CODEX_MAX_TURNS \
+        --image "$KERNEL_OPT_IMAGE" \
+        --workspace-id "$KERNEL_OPT_WORKSPACE")
+    TASK_ID=$(echo "$RESULT" | jq -r '.task_id // .id')
+    $OOB_CLI submit-task "$TASK_ID"
 
     # 3. Poll until done
-    result = poll_until_complete(task["task_id"])
-    if result["status"] == "failed":
-        feedback_context += f"\nIteration {i+1}: FAILED — task error: {result.get('error')}"
+    $OOB_CLI poll-task "$TASK_ID" --interval 10 --timeout 300 > /tmp/poll_result.json || {
+        feedback_context+="\nIteration $i: FAILED — task timed out"
         continue
+    }
+    STATUS=$(jq -r '.status' /tmp/poll_result.json)
+    [ "$STATUS" != "completed" ] && {
+        feedback_context+="\nIteration $i: FAILED — $STATUS"
+        continue
+    }
 
     # 4. Download optimized kernel
-    optimized_code = download_optimized_kernel(task["task_id"])
-    if not optimized_code:
-        feedback_context += f"\nIteration {i+1}: FAILED — no output file produced"
-        continue
+    $OOB_CLI download-file "$TASK_ID" "optimized_kernel.py" --output-dir "$WORK_DIR/iter_$i"
 
     # 5. LOCAL verification (on the inference server or RayJob)
-    compile_ok, compile_err = check_compilation(optimized_code)
-    if not compile_ok:
-        feedback_context += f"\nIteration {i+1}: COMPILE_FAIL — {compile_err}"
-        continue
-
-    correct, correctness_err = check_correctness(optimized_code)
-    if not correct:
-        feedback_context += f"\nIteration {i+1}: CORRECTNESS_FAIL — {correctness_err}"
-        continue
-
-    speedup = run_micro_benchmark(optimized_code, original_code)
-    feedback_context += f"\nIteration {i+1}: speedup={speedup:.2f}x"
-
-    if speedup > 1.0 and (best_result is None or speedup > best_result["speedup"]):
-        best_result = {"iteration": i+1, "speedup": speedup, "code": optimized_code}
+    # check_compilation / check_correctness / run_micro_benchmark are skill-side helpers
+    # Record result in feedback_context per iteration:
+    #   "Iteration $i: speedup=1.32x"
+    #   "Iteration $i: COMPILE_FAIL — NameError: ..."
+done
 
 # 6. Return best result from the round
-return best_result  # None if all iterations failed
 ```
 
 ### Feedback Context Format
@@ -250,10 +249,10 @@ This gives the agent visibility into what worked and what failed, enabling it to
 
 ### Key Rules
 
-1. **Always use the ORIGINAL kernel source** in `files[].content` — never pass a
+1. **Always use the ORIGINAL kernel source** via `--file` — never pass a
    previous iteration's output as the source. The agent should generate each attempt
    from scratch based on the original + feedback.
-2. **Each iteration is a NEW task** (`agent_create_task` + `agent_submit_task`).
+2. **Each iteration is a NEW task** (`$OOB_CLI create-task` + `$OOB_CLI submit-task`).
    Do not try to resume or modify a previous task.
 3. **Verification runs locally** (on the machine with GPU access — the inference
    server in local mode, or the RayJob in claw mode).
@@ -282,12 +281,12 @@ This gives the agent visibility into what worked and what failed, enabling it to
 ## Troubleshooting
 
 ### Task completes but no optimized_kernel.py in outputs
-- Check `agent_get_outputs` — file may have a different name
+- Check `$OOB_CLI get-outputs` — file may have a different name
 - Next iteration prompt will include this failure, prompting explicit file output
 
 ### Task fails immediately
-- Check `agent_get_task` `error` field
-- Verify prompt is not empty and `files` array contains valid content
+- Check `$OOB_CLI get-task` `error` field
+- Verify prompt is not empty and at least one `--file` argument is provided
 
 ### All iterations produce compilation errors
 - Kernel may be too complex for this backend (e.g., HIP/C++)

@@ -47,7 +47,7 @@ if [ -z "$HYPERLOOM_STARTED" ] && [ -f /opt/entrypoint.sh ]; then
     fi
     if [ -d /opt/oob-mcp/agent_mcp_server ] && \
        ! curl -s --max-time 1 http://localhost:${OOB_MCP_PORT:-8003}/ > /dev/null 2>&1; then
-        echo "[Hyperloom] Starting OOB Agent MCP..."
+        echo "[Hyperloom] Starting OOB Agent service..."
         if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
             mkdir -p /root/.claude
             printf '{"theme":"dark","hasCompletedOnboarding":true,"primaryApiKey":"%s"}' \

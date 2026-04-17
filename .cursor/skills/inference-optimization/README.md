@@ -7,8 +7,8 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 | `SKILL.md` | Main skill — phases 0-10: classify → baseline → profile → analyze → tune → GEAK/LLM → patch → sweep → report |
 | `KNOWLEDGE-BASE.md` | Model-specific configs, validated results, pitfalls, benchmark fairness case studies |
 | `kernel-opt/geak.md` | Deep reference — GEAK CLI details, kernel extraction, integration paths (remote GPU pod via REST API) |
-| `kernel-opt/codex.md` | Deep reference — Codex backend via OOB GPU Optimizer MCP (fast Triton rewrites) |
-| `kernel-opt/claude.md` | Deep reference — Claude Code backend via OOB GPU Optimizer MCP (multi-step, experimental) |
+| `kernel-opt/codex.md` | Deep reference — Codex backend via OOB GPU Optimizer CLI (fast Triton rewrites) |
+| `kernel-opt/claude.md` | Deep reference — Claude Code backend via OOB GPU Optimizer CLI (multi-step, experimental) |
 | `kernel-opt/llm.md` | Deep reference — LLM proxy details, prompt templates, multi-model parallel (fast turnaround) |
 | `scripts/common.sh` | Shared functions — kill_server, wait_for_health, check_benchmark_lib, filter_trace, check_gpu_memory |
 | `scripts/run_baseline.sh` | Baseline benchmark + profiling (single server launch) |
@@ -43,10 +43,10 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 - **Framework**: SGLang v0.5.9+ installed
 - **InferenceX**: Cloned (e.g. `/shared_nfs/InferenceX`)
 - **Model**: Downloaded locally (e.g. `/shared_nfs/models/DeepSeek-R1-0528`)
-- **MCP servers**:
-  - TraceLens — kernel profiling analysis
-  - GEAK — kernel optimization (remote GPU pod)
-  - OOB GPU Optimizer — kernel optimization (Codex/Claude backends)
+- **Backend services**:
+  - TraceLens — kernel profiling analysis (local CLI)
+  - GEAK — kernel optimization (remote GPU pod via `geak_client.py` REST CLI)
+  - OOB GPU Optimizer — kernel optimization (Codex/Claude backends via `oob_client.py` REST CLI)
 
 ## Quick Start
 
@@ -97,7 +97,7 @@ ISL/OSL: 1k/1k and 8k/1k. Skip TraceLens/GEAK, just benchmark.
 2. **Model**: Qwen3-30B-A3B downloaded to local path
 3. **SGLang**: v0.5.6+ with torch.compile support
 4. **InferenceX**: Cloned for benchmark_serving.py
-5. **MCP servers**: GEAK + OOB configured in `.cursor/mcp.json`
+5. **Backend CLIs**: `GEAK_API_URL`/`GEAK_AUTH_KEY` and `OOB_API_URL`/`OOB_AUTH_KEY` configured in `.env`
 6. **TraceLens**: `pip install -e /hyperloom/TraceLens-internal` (CLI tools)
 
 ### What the agent does (8 steps, ~40 min)

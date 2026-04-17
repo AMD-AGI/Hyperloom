@@ -131,8 +131,8 @@ SKILL.md (this file)          — DFS orchestrator: loop, heuristic, dispatch
 actions/*.md                   — Self-contained action modules (11 actions)
 kernel-opt/                    — Per-backend kernel optimization references
   geak.md                      — GEAK CLI (remote GPU pod via REST API)
-  codex.md                     — Codex via OOB GPU Optimizer MCP
-  claude.md                    — Claude Code via OOB GPU Optimizer MCP
+  codex.md                     — Codex via OOB GPU Optimizer CLI
+  claude.md                    — Claude Code via OOB GPU Optimizer CLI
   llm.md                       — LLM Proxy (direct API)
 kb/                            — RAG knowledge base (JSONL + query/ingest scripts)
 scripts/                       — Baseline/profiling/accuracy shell scripts

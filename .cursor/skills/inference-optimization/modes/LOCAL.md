@@ -7,7 +7,7 @@ Applies when running on a single machine with direct GPU access.
 
 - **Client**: Cursor IDE
 - **Runtime**: Local GPU machine (single node)
-- **GEAK**: CLI (REST API via `geak_client.py`); **OOB**: MCP (`oci-oob-agent`)
+- **GEAK**: CLI (REST API via `geak_client.py`); **OOB**: CLI (REST API via `oob_client.py`)
 - **TraceLens**: Local CLI (`pip install -e /hyperloom/TraceLens-internal`)
 - **Storage**: Local disk (`/workspace/inference-optimization` or `/tmp`)
 

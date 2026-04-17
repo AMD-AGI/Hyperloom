@@ -4,8 +4,8 @@ Multi-round kernel optimization loop using configurable backends.
 
 Backend references:
 - [`../kernel-opt/geak.md`](../kernel-opt/geak.md) — GEAK CLI (remote GPU pod via REST API)
-- [`../kernel-opt/codex.md`](../kernel-opt/codex.md) — Codex via OOB GPU Optimizer MCP
-- [`../kernel-opt/claude.md`](../kernel-opt/claude.md) — Claude Code via OOB GPU Optimizer MCP
+- [`../kernel-opt/codex.md`](../kernel-opt/codex.md) — Codex via OOB GPU Optimizer CLI
+- [`../kernel-opt/claude.md`](../kernel-opt/claude.md) — Claude Code via OOB GPU Optimizer CLI
 - [`../kernel-opt/llm.md`](../kernel-opt/llm.md) — LLM Proxy (direct API)
 
 ## Inputs
@@ -52,8 +52,8 @@ All active backends run **simultaneously** for every candidate kernel.
 | Backend | Interface | Full round latency | GPU on pod | Reference |
 |---------|-----------|-------------------|------------|-----------|
 | `geak` | GEAK CLI (`geak_client.py create-task`) | 10–30 min | Yes | [`../kernel-opt/geak.md`](../kernel-opt/geak.md) |
-| `codex` | OOB GPU Optimizer (`agent_create_task(agent="codex")`) | 2–6 min (3 iters) | No | [`../kernel-opt/codex.md`](../kernel-opt/codex.md) |
-| `claude` | OOB GPU Optimizer (`agent_create_task(agent="claude")`) | 3–15 min (3 iters) | No | [`../kernel-opt/claude.md`](../kernel-opt/claude.md) |
+| `codex` | OOB CLI (`oob_client.py create-task --agent codex`) | 2–6 min (3 iters) | No | [`../kernel-opt/codex.md`](../kernel-opt/codex.md) |
+| `claude` | OOB CLI (`oob_client.py create-task --agent claude`) | 3–15 min (3 iters) | No | [`../kernel-opt/claude.md`](../kernel-opt/claude.md) |
 | `llm` | Direct OpenAI API (LLM Proxy) | 1–30s | No | [`../kernel-opt/llm.md`](../kernel-opt/llm.md) |
 
 **For each candidate kernel, launch all active backends CONCURRENTLY (not sequentially):**
@@ -76,7 +76,7 @@ Pick the one with highest verified speedup → Step 3.
 
 1. **`geak`**: `geak_client.py create-task` + `geak_client.py submit-task` → `geak_client.py poll-task` until done (single submission, GEAK verifies on-pod)
 2. **`codex`**: iterative refinement loop — `OOB_ROUND_ITERATIONS` (3) iterations, each: submit → download → **local benchmark** → feed result back as context. Take best speedup from all iterations. See [`../kernel-opt/codex.md`](../kernel-opt/codex.md).
-3. **`claude`**: same iterative refinement loop as codex, with `agent="claude"`. See [`../kernel-opt/claude.md`](../kernel-opt/claude.md).
+3. **`claude`**: same iterative refinement loop as codex, with `--agent claude`. See [`../kernel-opt/claude.md`](../kernel-opt/claude.md).
 4. **`llm`**: `openai.Client.chat.completions.create` (multi-model parallel). See [`../kernel-opt/llm.md`](../kernel-opt/llm.md).
 
 **IMPORTANT:** Do NOT run backends sequentially (geak first, then codex, then claude...).

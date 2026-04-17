@@ -7,7 +7,7 @@
 - Docker with AMD ROCm support, or K8s cluster with AMD GPU nodes
 - Cursor IDE with Remote SSH extension
 - LLM API key for GEAK kernel optimization
-- OOB API key and base URL for OOB Agent MCP (Claude Code / Codex backends)
+- OOB API key and base URL for OOB Agent CLI (Claude Code / Codex backends)
 
 ## Quick Start (Docker)
 
@@ -54,7 +54,7 @@ Host hyperloom
 2. Open folder: `/opt/hyperloom`
 3. Skills and MCP servers load automatically
 
-> On first open of this workspace, MCP toggles may be OFF by default. Follow Cursor prompts and enable `tracelens`, `geak`, and `oob-agent` before starting optimization.
+> On first open of this workspace, MCP toggles may be OFF by default. Follow Cursor prompts and enable `tracelens` and `geak` before starting optimization. OOB is accessed via local CLI (`oob_client.py` pointing to `http://localhost:8003`) — no MCP toggle needed.
 
 ### 4. Run optimization
 
@@ -174,7 +174,7 @@ Connect via Cursor Remote SSH → `<node-ip>:30022`, open `/opt/hyperloom`.
 | 22   | SSH (Cursor Remote SSH) |
 | 8001 | TraceLens MCP |
 | 8002 | GEAK MCP |
-| 8003 | OOB Agent MCP (Claude Code / Codex) |
+| 8003 | OOB Agent service (REST API for Claude Code / Codex; accessed via `oob_client.py`) |
 
 ## Environment Variables
 
