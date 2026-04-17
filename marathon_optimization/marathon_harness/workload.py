@@ -37,23 +37,47 @@ _BENCH_CONTENT = (
     "benchmark_serving", "bench_serving", "--num-prompts",
     "--request-rate", "run_bench",
 )
-
+_PATCH_CONTENT = (
+    "git apply", "git am ", "apply_patches", "apply_patch",
+    "patch -p", ".patch", "git merge", "git cherry-pick",
+)
 
 _ORCHESTRATOR_SIGNALS = ("bash \"$SCRIPT_DIR/", "bash $SCRIPT_DIR/", "Phase 1:", "Phase 2:")
 
 
 def _classify_script(path: Path) -> str:
-    """Classify a shell script as 'launch', 'bench', 'orchestrator', or 'other' by content."""
+    """Classify a shell script by scoring which category has the most pattern hits.
+
+    Uses non-comment lines only.  Ties broken by priority:
+    orchestrator > launch > bench > patch > other.
+    """
     try:
-        text = path.read_text(errors="ignore")[:4096]
+        raw = path.read_text(errors="ignore")[:4096]
     except OSError:
         return "other"
+    # Strip comment lines and echo/printf strings to avoid matching doc references
+    lines = []
+    for line in raw.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        # Remove echo/printf string contents to avoid matching incidental mentions
+        import re
+        cleaned = re.sub(r'(echo|printf)\s+["\'].*?["\']', '', stripped)
+        lines.append(cleaned)
+    text = "\n".join(lines)
+
     if any(p in text for p in _ORCHESTRATOR_SIGNALS):
         return "orchestrator"
-    if any(p in text for p in _LAUNCH_CONTENT):
-        return "launch"
-    if any(p in text for p in _BENCH_CONTENT):
-        return "bench"
+
+    scores = {
+        "launch": sum(1 for p in _LAUNCH_CONTENT if p in text),
+        "bench":  sum(1 for p in _BENCH_CONTENT if p in text),
+        "patch":  sum(1 for p in _PATCH_CONTENT if p in text),
+    }
+    best = max(scores, key=scores.get)
+    if scores[best] > 0:
+        return best
     return "other"
 
 
@@ -90,13 +114,109 @@ def _find_script_by_content(directory: Path, kind: str,
 
 HEALTH_POLL_S = 3
 SERVER_KILL_WAIT_S = 10
-DEFAULT_SERVER_TIMEOUT_S = 900  # Large MoE models (e.g. DeepSeek-R1) can take 10-12 min to load
+DEFAULT_SERVER_TIMEOUT_S = 1500  # GLM-5 on MI355X: ~3min weight load + ~15min CUDA graph capture
+
+# Path to the singleton server PID file.  Only the orchestrator writes this.
+_SERVER_PID_FILE = Path("/tmp/.marathon_server.pid")
+_SERVER_OWNER_SENTINEL = "marathon-orchestrator"
+
+
+def _read_server_pid() -> int | None:
+    """Read the PID of the server that the orchestrator launched."""
+    try:
+        data = json.loads(_SERVER_PID_FILE.read_text())
+        pid = int(data.get("pid", 0))
+        if pid > 0 and Path(f"/proc/{pid}").exists():
+            return pid
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return None
+
+
+def _write_server_pid(pid: int, port: int) -> None:
+    """Record the orchestrator-launched server PID."""
+    _SERVER_PID_FILE.write_text(json.dumps({
+        "pid": pid,
+        "port": port,
+        "owner": _SERVER_OWNER_SENTINEL,
+        "started_at": time.time(),
+    }))
+    log.info("Server PID file written: pid=%d port=%d", pid, port)
+
+
+def _clear_server_pid() -> None:
+    """Remove the server PID file after killing the server."""
+    try:
+        _SERVER_PID_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+_marathon_owns_server = False
+
+async def kill_rogue_servers(port: int = 8888) -> int:
+    """Kill any vLLM/sglang servers NOT launched by the orchestrator.
+
+    Returns the number of rogue processes killed.
+    """
+    global _marathon_owns_server
+    authorized_pid = _read_server_pid()
+
+    proc = await asyncio.create_subprocess_shell(
+        "ps -eo pid,args | grep -E 'vllm serve|vllm.entrypoints|sglang.srt|sglang.launch_server' | grep -v grep",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+    if not stdout:
+        return 0
+
+    pids_found = []
+    for line in stdout.decode(errors="replace").strip().splitlines():
+        parts = line.strip().split(None, 1)
+        if not parts:
+            continue
+        try:
+            pids_found.append((int(parts[0]), parts[1] if len(parts) > 1 else "?"))
+        except ValueError:
+            continue
+
+    if not pids_found:
+        return 0
+
+    # If the marathon owns a server and the PID file is stale/missing,
+    # re-register the first matching process rather than killing it.
+    if _marathon_owns_server and authorized_pid is None and len(pids_found) >= 1:
+        new_pid = pids_found[0][0]
+        _write_server_pid(new_pid, port)
+        authorized_pid = new_pid
+
+    killed = 0
+    for pid, cmd in pids_found:
+        if pid == authorized_pid:
+            continue
+        log.warning("Killing ROGUE server process: pid=%d cmd=%s", pid, cmd[:120])
+        try:
+            os.kill(pid, 9)
+            killed += 1
+        except OSError:
+            pass
+
+    if killed:
+        await asyncio.sleep(3)
+        log.info("Killed %d rogue server process(es)", killed)
+    return killed
 
 # System-level Python packages that Claw agents may modify.  We snapshot these
 # before each action so we can auto-revert if a patch corrupts the server.
 _WATCHED_SYSTEM_FILES = [
     "/usr/local/lib/python3.12/dist-packages/aiter/fused_moe.py",
     "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/fused_moe.py",
+    "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/mxfp4.py",
+    "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/rocm_aiter_fused_moe.py",
+    "/usr/local/lib/python3.12/dist-packages/aiter/ops/shuffle.py",
+    "/usr/local/lib/python3.12/dist-packages/aiter/ops/norm.py",
+    "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_worker.py",
+    "/usr/local/lib/python3.12/dist-packages/vllm/compilation/backends.py",
 ]
 
 
@@ -212,10 +332,11 @@ class InferenceXWorkload:
 
         # Try to extract model/tp from launch script for metadata
         model = ""
-        tp = 8
+        tp = tp_hint or 8
         framework = "sglang"
         if launch_script and launch_script.exists():
             content = launch_script.read_text()
+            import re
             for line in content.splitlines():
                 stripped = line.strip()
                 if stripped.startswith("MODEL=") and ":-" in stripped:
@@ -225,10 +346,16 @@ class InferenceXWorkload:
                         tp = int(stripped.split(":-")[1].rstrip('}"'))
                     except ValueError:
                         pass
+            # Also check --tensor-parallel-size=N in the actual vllm/sglang command
+            tp_match = re.search(r'--tensor-parallel-size[=\s]+(\d+)', content)
+            if tp_match:
+                tp = int(tp_match.group(1))
             if "vllm serve" in content or "vllm.entrypoints" in content:
                 framework = "vllm"
             elif "sglang" in content:
                 framework = "sglang"
+        log.info("Parsed from launch script: tp=%d, framework=%s, model=%s",
+                 tp, framework, model[:60] if model else "(empty)")
 
         wl = cls(
             inferencex_path=str(inferencex_path),
@@ -238,10 +365,21 @@ class InferenceXWorkload:
             result_dir=result_dir or str(repo / "results"),
         )
 
+        wl._sprint_repo_dir = str(repo)
+
         # Sprint repo scripts are the source of truth
         if launch_script and launch_script.exists():
             wl._sprint_launch_script = str(launch_script)
             log.info("Using Sprint repo launch script: %s", launch_script)
+        else:
+            log.error(
+                "No launch script found in %s — server will start with "
+                "bare-minimum flags and throughput WILL be degraded", scripts_dir)
+
+        patch_script = _find_script_by_content(scripts_dir, "patch")
+        if patch_script:
+            wl._sprint_patch_script = str(patch_script)
+            log.info("Using Sprint repo patch script: %s", patch_script)
 
         bench_script = _find_script_by_content(scripts_dir, "bench")
         if bench_script:
@@ -268,7 +406,8 @@ class InferenceXWorkload:
         return wl
 
     def _discover_scripts(self, search_dir: Path) -> None:
-        """Find Sprint-provided launch and benchmark scripts by content."""
+        """Find Sprint-provided launch, patch, and benchmark scripts by content."""
+        self._sprint_repo_dir = str(search_dir)
         for d in (search_dir, search_dir / "scripts"):
             if not d.is_dir():
                 continue
@@ -277,6 +416,11 @@ class InferenceXWorkload:
                 if found:
                     self._sprint_launch_script = str(found)
                     log.info("Found Sprint launch script: %s", found)
+            if not getattr(self, "_sprint_patch_script", None):
+                found = _find_script_by_content(d, "patch")
+                if found:
+                    self._sprint_patch_script = str(found)
+                    log.info("Found Sprint patch script: %s", found)
             if not getattr(self, "_sprint_benchmark_script", None):
                 found = _find_script_by_content(d, "bench")
                 if found:
@@ -361,6 +505,14 @@ class InferenceXWorkload:
     }
 
     def _build_server_cmd(self) -> list[str]:
+        """Bare-minimum server command — FALLBACK ONLY.
+
+        The Sprint launch script (detected by content, not name) is the
+        single source of truth for optimization flags, env vars, and
+        model-specific config.  This method only runs when no Sprint
+        script was found and produces a minimal command that will start
+        but is almost certainly missing critical flags.
+        """
         fw = self.framework.lower()
         if fw in self._FRAMEWORK_LAUNCH:
             module, model_flag = self._FRAMEWORK_LAUNCH[fw]
@@ -368,6 +520,15 @@ class InferenceXWorkload:
             module = f"{fw}.entrypoints.openai.api_server"
             model_flag = "--model"
             log.warning("Unknown framework %r — guessing launch module %s", fw, module)
+
+        log.error(
+            "PERFORMANCE WARNING: No Sprint launch script found — using "
+            "bare-minimum server command.  This WILL be missing model-specific "
+            "optimization flags (allreduce fusion, KV cache dtype, backend "
+            "selection, etc.) and throughput will be degraded.  Fix: ensure "
+            "the Sprint repo has a scripts/*.sh launch script."
+        )
+
         return [
             "python3", "-m", module,
             model_flag, self.model,
@@ -387,19 +548,185 @@ class InferenceXWorkload:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(str(os.getpid()))
 
+    async def _reset_runtime_workspaces(self) -> None:
+        """Reset sglang and aiter repos to their clean HEAD state.
+
+        Previous marathon/agent runs may have left stale modifications
+        (e.g. stream-overlap patches that break CUDA graph capture).
+        We reset to HEAD so the Sprint's apply_patches.sh starts from a
+        known-good baseline.  Also clears __pycache__ to avoid stale bytecode.
+        """
+        for repo in ["/sgl-workspace/sglang", "/sgl-workspace/aiter"]:
+            if not Path(repo).is_dir():
+                continue
+            proc = await asyncio.create_subprocess_shell(
+                f"cd {repo} && git checkout -- . && "
+                f"find . -name __pycache__ -type d -exec rm -rf {{}} + 2>/dev/null; true",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode == 0:
+                log.info("Reset %s to clean HEAD", repo)
+            else:
+                log.warning("git checkout failed for %s: %s",
+                            repo, (stdout or b"").decode()[:200])
+
+    async def _apply_extra_patch_files(self, sprint_dir: str) -> None:
+        """Apply any .patch files in the Sprint repo's patches/ dir that
+        weren't covered by the main apply_patches.sh script.
+
+        This handles cases where the Sprint repo has patches that were added
+        after the apply script was written (e.g. glm5_model_type_fix.patch).
+        """
+        patches_dir = Path(sprint_dir) / "patches"
+        if not patches_dir.is_dir():
+            return
+
+        sglang_dir = "/sgl-workspace/sglang"
+        aiter_dir = "/sgl-workspace/aiter"
+
+        for pf in sorted(patches_dir.glob("*.patch")):
+            # Try sglang first, then aiter
+            applied = False
+            for repo_name, repo_dir in [("sglang", sglang_dir), ("aiter", aiter_dir)]:
+                if not Path(repo_dir).is_dir():
+                    continue
+                check = await asyncio.create_subprocess_shell(
+                    f"cd {repo_dir} && git apply --check {pf} 2>/dev/null",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                await check.communicate()
+                if check.returncode == 0:
+                    apply = await asyncio.create_subprocess_shell(
+                        f"cd {repo_dir} && git apply {pf}",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                    )
+                    out, _ = await apply.communicate()
+                    if apply.returncode == 0:
+                        log.info("Applied extra patch %s to %s", pf.name, repo_name)
+                        applied = True
+                        break
+            if not applied:
+                log.debug("Patch %s: already applied or not applicable", pf.name)
+
+    async def apply_sprint_patches(self) -> bool:
+        """Reset runtime repos to clean state, run the Sprint patch script,
+        then apply any extra .patch files from the Sprint repo.
+
+        Must be called BEFORE start_server.  Returns True on success.
+        """
+        sprint_dir = getattr(self, '_sprint_repo_dir', None)
+
+        # Step 1: reset sglang/aiter to clean HEAD
+        await self._reset_runtime_workspaces()
+
+        # Step 2: run the Sprint's apply_patches.sh if detected
+        patch_script = getattr(self, '_sprint_patch_script', None)
+        if patch_script and Path(patch_script).exists():
+            log.info("Applying Sprint patches: %s", patch_script)
+            env = {**os.environ, **self.env_vars}
+            proc = await asyncio.create_subprocess_shell(
+                f"bash {patch_script}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+            except asyncio.TimeoutError:
+                proc.kill()
+                log.error("Patch script timed out after 300s")
+                return False
+
+            output = (stdout or b"").decode(errors="replace")
+            if proc.returncode != 0:
+                log.error("Patch script failed (exit %d): %s",
+                          proc.returncode, output[-500:])
+                return False
+            log.info("Patches applied successfully")
+
+        # Step 3: apply any extra .patch files not covered by the script
+        if sprint_dir:
+            await self._apply_extra_patch_files(sprint_dir)
+
+        # Step 4: container compatibility hotfixes
+        await self._apply_container_hotfixes()
+
+        return True
+
+    async def _apply_container_hotfixes(self) -> None:
+        """Apply runtime compatibility fixes for the container environment.
+
+        Handles models whose tokenizer_config.json specifies a tokenizer class
+        (e.g. TokenizersBackend) not recognized by the installed transformers.
+        """
+        hf_utils = Path("/sgl-workspace/sglang/python/sglang/srt/utils/"
+                        "hf_transformers_utils.py")
+        if not hf_utils.exists():
+            return
+
+        content = hf_utils.read_text()
+        if "PreTrainedTokenizerFast(tokenizer_object=" in content:
+            return
+
+        # The upstream sglang ValueError handler re-raises unconditionally
+        # when trust_remote_code=True.  Replace with a fallback that loads
+        # the tokenizer directly from tokenizer.json if available.
+        old = (
+            '        else:\n'
+            '            raise e\n'
+            '\n'
+            '    if not isinstance(tokenizer, PreTrainedTokenizerFast):'
+        )
+        new = (
+            '        else:\n'
+            '            from pathlib import Path as _P\n'
+            '            _tj = _P(tokenizer_name) / "tokenizer.json"\n'
+            '            if _tj.exists():\n'
+            '                logger.warning("Tokenizer class not found (%s). "\n'
+            '                    "Falling back to PreTrainedTokenizerFast.", e)\n'
+            '                from tokenizers import Tokenizer as _Tok\n'
+            '                tokenizer = PreTrainedTokenizerFast(\n'
+            '                    tokenizer_object=_Tok.from_file(str(_tj)))\n'
+            '                import json as _j\n'
+            '                _cp = _P(tokenizer_name) / "tokenizer_config.json"\n'
+            '                if _cp.exists():\n'
+            '                    _cc = _j.loads(_cp.read_text())\n'
+            '                    for _k in ("eos_token", "pad_token"):\n'
+            '                        if _cc.get(_k):\n'
+            '                            setattr(tokenizer, _k, _cc[_k])\n'
+            '            else:\n'
+            '                raise e\n'
+            '\n'
+            '    if not isinstance(tokenizer, PreTrainedTokenizerFast):'
+        )
+        if old in content:
+            content = content.replace(old, new, 1)
+            hf_utils.write_text(content)
+            log.info("Applied tokenizer fallback hotfix to hf_transformers_utils.py")
+        else:
+            log.debug("Tokenizer hotfix: target pattern not found, skipping")
+
     async def start_server(self, extra_args: list[str] | None = None,
                            timeout_s: float = DEFAULT_SERVER_TIMEOUT_S) -> bool:
         """Start the inference server and wait until healthy.
 
-        If Sprint provided a launch script, use it directly (it already has
-        the correct flags, env vars, and model path baked in).  When the
-        script supports --background mode it runs its own health-check loop
-        internally, so we wait for the *script* to exit and then verify
-        health once — avoiding a duplicate polling race.  Otherwise build
-        the command from config.json fields and poll ourselves.
+        If Sprint provided a launch script (detected by content, not name),
+        use it directly — it has all the flags, env vars, and model path
+        baked in.  Patches are applied first if a patch script was detected.
         """
         await self.kill_server()
+        await asyncio.sleep(5)  # let processes fully exit before rogue scan
+        rogues = await kill_rogue_servers(port=self.port)
+        if rogues:
+            log.warning("Cleaned up %d rogue server(s) before starting", rogues)
         self._write_server_owner_pid()
+
+        # Apply patches before launching (launch scripts assume patches are applied)
+        await self.apply_sprint_patches()
 
         sprint_script = getattr(self, '_sprint_launch_script', None)
         if sprint_script and Path(sprint_script).exists():
@@ -413,7 +740,8 @@ class InferenceXWorkload:
         cmd = " ".join(cmd_parts)
 
         env = {**os.environ, **self.env_vars,
-               "INFERENCEX_PATH": str(self.inferencex_path)}
+               "INFERENCEX_PATH": str(self.inferencex_path),
+               "MODEL_PATH": self.model}
         log_path = Path(self.result_dir) / "server.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         self._server_log_path = str(log_path)
@@ -424,6 +752,8 @@ class InferenceXWorkload:
             self._server_proc = await asyncio.create_subprocess_shell(
                 cmd, stdout=log_fh, stderr=asyncio.subprocess.STDOUT, env=env,
             )
+            if self._server_proc.pid:
+                _write_server_pid(self._server_proc.pid, self.port)
 
             healthy = await self.wait_healthy(timeout_s=timeout_s)
             if not healthy:
@@ -443,7 +773,8 @@ class InferenceXWorkload:
         and retries once.
         """
         env = {**os.environ, **self.env_vars,
-               "INFERENCEX_PATH": str(self.inferencex_path)}
+               "INFERENCEX_PATH": str(self.inferencex_path),
+               "MODEL_PATH": self.model}
         log_path = Path(self.result_dir) / "server.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         self._server_log_path = str(log_path)
@@ -467,15 +798,30 @@ class InferenceXWorkload:
         finally:
             log_fh.close()
 
+        # The Sprint script backgrounds the server via nohup then runs a
+        # health-check loop with curl.  If the script has 'set -e', curl
+        # failing with exit 7 (connection refused) kills the script even
+        # though the server process is alive.  Treat any non-zero exit as
+        # "script died early" and fall through to our own health polling.
         if retcode == 0:
             if await self._health_check():
                 log.info("Server healthy (confirmed after sprint script)")
-                return True
-            log.warning("Sprint script exited 0 but health check failed, polling for 60s")
-            if await self.wait_healthy(timeout_s=60):
+                await self._record_running_server_pid()
                 return True
 
-        # Server failed. Check if Claw modified system files.
+        if retcode != 0:
+            log.warning(
+                "Sprint script exited %d (likely set -e killed the health "
+                "loop); checking if server process is alive", retcode)
+
+        # The server was forked by the script — give it time to load the
+        # model, warm up CUDA graphs, and become healthy (up to 15 min).
+        log.info("Polling for server health (up to 900s)...")
+        if await self.wait_healthy(timeout_s=900):
+            await self._record_running_server_pid()
+            return True
+
+        # Server truly failed. Check if Claw modified system files.
         if not _is_rollback_retry:
             changed = self.system_files_changed()
             if changed:
@@ -490,9 +836,25 @@ class InferenceXWorkload:
                     cmd, timeout_s, _is_rollback_retry=True,
                 )
 
-        if retcode != 0:
-            log.error("Sprint launch script failed (exit %d)", retcode)
+        log.error("Sprint launch script failed (exit %d)", retcode)
         return False
+
+    async def _record_running_server_pid(self) -> None:
+        """Find the actual server process PID (after a sprint-script fork) and record it."""
+        global _marathon_owns_server
+        _marathon_owns_server = True
+        proc = await asyncio.create_subprocess_shell(
+            "ps -eo pid,args | grep -E 'vllm serve|vllm.entrypoints|sglang.srt|sglang.launch_server' | grep -v grep | head -1",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        if stdout:
+            parts = stdout.decode(errors="replace").strip().split(None, 1)
+            try:
+                pid = int(parts[0])
+                _write_server_pid(pid, self.port)
+            except (ValueError, IndexError):
+                pass
 
     async def wait_healthy(self, timeout_s: float = 300) -> bool:
         elapsed = 0.0
@@ -526,8 +888,10 @@ class InferenceXWorkload:
             return False
 
     async def kill_server(self) -> bool:
+        global _marathon_owns_server
+        _marathon_owns_server = False
         log.info("Killing inference server …")
-        kill_patterns = ["sglang.srt", "vllm.entrypoints"]
+        kill_patterns = ["sglang.srt", "sglang.launch_server", "vllm.entrypoints"]
         fw = self.framework.lower()
         if fw not in ("sglang", "vllm"):
             kill_patterns.append(f"{fw}.")
@@ -555,6 +919,7 @@ class InferenceXWorkload:
             await asyncio.sleep(3)
 
         self._server_proc = None
+        _clear_server_pid()
         return not await self._health_check()
 
     # ------------------------------------------------------------------
@@ -563,7 +928,7 @@ class InferenceXWorkload:
 
     async def run_benchmark(self, num_prompts: int | None = None,
                             result_filename: str = "",
-                            timeout_s: float = 600) -> BenchmarkResult:
+                            timeout_s: float = 1200) -> BenchmarkResult:
         """Run benchmark using InferenceX benchmark_serving.py directly.
 
         Always uses the deterministic direct path so baseline and DFS
@@ -840,7 +1205,38 @@ class InferenceXWorkload:
                       proc.returncode, (stdout or b"").decode()[:500])
             return BenchmarkResult()
 
-        return self.parse_result(str(result_dir / f"{result_filename}.json"))
+        result_path = result_dir / f"{result_filename}.json"
+        bench_result = self.parse_result(str(result_path))
+
+        # Augment benchmark JSON with reproducibility metadata
+        if result_path.exists() and bench_result.output_throughput > 0:
+            try:
+                raw = json.loads(result_path.read_text())
+                _REPRO_ENV_KEYS = [
+                    "CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES",
+                    "AMDGCN_USE_BUFFER_OPS", "VLLM_ROCM_USE_AITER",
+                    "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
+                    "VLLM_ROCM_USE_AITER_TRITON_ROPE",
+                    "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
+                    "AITER_CONFIG_FMOE", "CU_NUM",
+                ]
+                raw["_marathon_meta"] = {
+                    "tp": self.tp,
+                    "resolved_tp": bench_result.tput_per_gpu and round(
+                        bench_result.output_throughput / bench_result.tput_per_gpu),
+                    "isl": self.isl,
+                    "osl": self.osl,
+                    "concurrency": self.concurrency,
+                    "port": self.port,
+                    "framework": self.framework,
+                    "env_vars": {k: os.environ.get(k, "") for k in _REPRO_ENV_KEYS},
+                    "serve_script": getattr(self, '_sprint_launch_script', None),
+                }
+                result_path.write_text(json.dumps(raw, indent=2))
+            except Exception:
+                pass
+
+        return bench_result
 
     async def _check_server_alive(self, retries: int = 3, delay: float = 5.0) -> bool:
         """Deep health check: verify /health AND a single-token inference round-trip.
@@ -1020,7 +1416,22 @@ class InferenceXWorkload:
 
         output_tput = float(data.get("output_throughput", 0))
         total_tput = float(data.get("total_token_throughput", 0))
-        tput_per_gpu = output_tput / max(self.tp, 1)
+
+        # Resolve TP: prefer live server value, fall back to self.tp
+        tp = self.tp
+        try:
+            import urllib.request
+            resp = urllib.request.urlopen(
+                f"http://{self.host}:{self.port}/v1/models", timeout=5)
+            models = json.loads(resp.read())
+            live_tp = models.get("data", [{}])[0].get("tensor_parallel_size")
+            if live_tp and int(live_tp) != tp:
+                log.warning("TP mismatch: self.tp=%d but server reports tp=%d — using server value",
+                            tp, int(live_tp))
+                tp = int(live_tp)
+        except Exception:
+            pass
+        tput_per_gpu = total_tput / max(tp, 1)
 
         return BenchmarkResult(
             output_throughput=output_tput,
