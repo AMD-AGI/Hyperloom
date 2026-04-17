@@ -14,24 +14,39 @@ import json
 import logging
 import os
 import shutil
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-if sys.version_info >= (3, 11):
-    _BaseExceptionGroup = BaseExceptionGroup
-else:
-    try:
-        from exceptiongroup import BaseExceptionGroup as _BaseExceptionGroup
-    except ImportError:
-        _BaseExceptionGroup = None  # type: ignore[assignment,misc]
-
 log = logging.getLogger(__name__)
 
 CLAUDE_CLI_TIMEOUT_S = 3600
-CLAW_SSE_TIMEOUT_S = 900  # 15 min per Claw call; OOB round timeout handles overall cap
+CLAW_SSE_TIMEOUT_S = 3600
+
+# Injected into every Claw/SDK prompt to hard-block dangerous commands.
+_BASH_BLOCKLIST_PREAMBLE = """\
+╔══════════════════════════════════════════════════════════════════════╗
+║  ABSOLUTE CONSTRAINTS — VIOLATION = IMMEDIATE SESSION TERMINATION  ║
+╠══════════════════════════════════════════════════════════════════════╣
+║ You MUST NOT execute any of the following commands or patterns:     ║
+║                                                                    ║
+║  • vllm serve / python -m vllm / python3 -m vllm                  ║
+║  • sglang.launch_server / sglang.srt                               ║
+║  • benchmark_serving.py / bench_serving                            ║
+║  • pkill -f vllm / pkill -f sglang / pkill -9 / kill -9           ║
+║  • fuser -k /dev/dri                                               ║
+║  • serve_tp1.sh / serve_tp2.sh / serve_tp4.sh / serve_tp8.sh      ║
+║  • Any command that starts, stops, or restarts an inference server  ║
+║  • Any command that runs an E2E throughput benchmark                ║
+║  • curl with /v1/completions or /v1/chat/completions payloads      ║
+║    (small /health checks are OK)                                   ║
+║                                                                    ║
+║ The Marathon orchestrator EXCLUSIVELY owns server lifecycle and     ║
+║ benchmarking.  Your job is ONLY to read code, apply patches,       ║
+║ edit configs, and report what changed.  Set needs_benchmark=true.  ║
+╚══════════════════════════════════════════════════════════════════════╝
+"""
 
 _HAS_SDK = False
 try:
@@ -100,9 +115,12 @@ class ClawClient:
       4. DELETE /v1/sessions/{id}         → cleanup
     """
 
-    def __init__(self, base_url: str, auth_token: str = ""):
+    def __init__(self, base_url: str, auth_token: str = "", ca_bundle: str = "",
+                 role: str = "claw"):
         self.base_url = base_url.rstrip("/")
         self.auth_token = auth_token
+        self._ca_bundle = ca_bundle
+        self.role = role
         self._headers: dict[str, str] = {}
         if auth_token:
             self._headers["Authorization"] = f"Bearer {auth_token}"
@@ -121,15 +139,16 @@ class ClawClient:
         session_id = ""
 
         try:
+            ssl_verify: bool | str = self._ca_bundle if self._ca_bundle else True
             async with httpx.AsyncClient(
                 base_url=self.base_url,
                 headers=self._headers,
                 timeout=httpx.Timeout(30.0, read=timeout_s),
-                verify=False,
+                verify=ssl_verify,
             ) as client:
                 # 1) Create session
                 create_body: dict[str, Any] = {
-                    "name": prompt[:60],
+                    "name": f"[marathon-{self.role}] {prompt[:40]}",
                     "mode": "claw",
                 }
                 if system_prompt:
@@ -140,49 +159,41 @@ class ClawClient:
                 session_id = session_data["session_id"]
                 log.info("Claw session created: %s", session_id)
 
+                # 2) Send message (triggers executor)
+                msg_body = {
+                    "content": prompt,
+                    "messageType": "text",
+                    "taskMode": "agent",
+                }
+                resp = await client.post(
+                    f"/v1/sessions/{session_id}/messages",
+                    json=msg_body,
+                )
+                resp.raise_for_status()
+                log.info("Claw message sent to session %s", session_id)
+
+                # 3) Subscribe to SSE stream
+                result = await self._consume_sse(client, session_id, timeout_s)
+                result.duration_ms = int((time.monotonic() - t0) * 1000)
+
+                # 4) Cleanup session
                 try:
-                    # 2) Send message (triggers executor)
-                    msg_body = {
-                        "content": prompt,
-                        "messageType": "text",
-                        "taskMode": "agent",
-                    }
-                    resp = await client.post(
-                        f"/v1/sessions/{session_id}/messages",
-                        json=msg_body,
-                    )
-                    resp.raise_for_status()
-                    log.info("Claw message sent to session %s", session_id)
+                    await client.delete(f"/v1/sessions/{session_id}")
+                except Exception:
+                    pass
 
-                    # 3) Subscribe to SSE stream
-                    result = await self._consume_sse(client, session_id, timeout_s)
-                    result.duration_ms = int((time.monotonic() - t0) * 1000)
-                    return result
+                return result
 
-                finally:
-                    # Always clean up session, even on exception/cancellation
-                    try:
-                        await asyncio.wait_for(
-                            client.delete(f"/v1/sessions/{session_id}"),
-                            timeout=10,
-                        )
-                    except Exception:
-                        log.debug("Session cleanup failed for %s", session_id)
-
-        except BaseException as exc:
+        except asyncio.CancelledError:
             duration_ms = int((time.monotonic() - t0) * 1000)
-            # httpx 0.28+ wraps CancelledError inside ExceptionGroup.
-            # Unwrap and re-raise so shutdown signals propagate correctly.
-            if isinstance(exc, asyncio.CancelledError):
-                log.warning("Claw call cancelled (session=%s, %dms)", session_id or "(none)", duration_ms)
-                raise
-            if _BaseExceptionGroup is not None and isinstance(exc, _BaseExceptionGroup):
-                cancelled = exc.subgroup(asyncio.CancelledError)
-                if cancelled is not None:
-                    log.warning("Claw call cancelled [wrapped] (session=%s, %dms)", session_id or "(none)", duration_ms)
-                    raise asyncio.CancelledError() from cancelled
-            if not isinstance(exc, Exception):
-                raise
+            log.warning("Claw call cancelled (session=%s, %dms)", session_id or "(none)", duration_ms)
+            return LLMResult(
+                is_error=True,
+                error_message="Claw call cancelled (shutdown or timeout)",
+                duration_ms=duration_ms,
+            )
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - t0) * 1000)
             log.error("Claw call failed (session=%s): %s", session_id or "(none)", exc)
             return LLMResult(
                 is_error=True,
@@ -206,11 +217,6 @@ class ClawClient:
         turns = 0
 
         deadline = time.monotonic() + timeout_s
-        last_event_time = time.monotonic()
-        # If no SSE event arrives within this window, assume the session is
-        # dead/garbage-collected and bail out instead of blocking until the
-        # global httpx read timeout (which can be 3600s).
-        idle_timeout_s = 120
         url = f"/v1/chat/sessions/{session_id}/messages"
 
         async with client.stream("GET", url) as resp:
@@ -219,7 +225,6 @@ class ClawClient:
             data_buf = ""
 
             async for raw_line in resp.aiter_lines():
-                last_event_time = time.monotonic()
                 if time.monotonic() > deadline:
                     log.warning("Claw SSE timeout after %.0fs", timeout_s)
                     break
@@ -345,6 +350,7 @@ class LLMClient:
         inferencex_path: str = "",
         base_dir: str = "",
         claw_url: str = "",
+        role: str = "orchestrator",
     ):
         self.model = model
         self.cwd = cwd
@@ -353,6 +359,7 @@ class LLMClient:
         self.default_system_prompt = system_prompt
         self.inferencex_path = inferencex_path
         self.base_dir = base_dir
+        self.role = role
         self._total_cost = 0.0
         self._total_calls = 0
         self._total_turns = 0
@@ -361,7 +368,8 @@ class LLMClient:
         self._claw: ClawClient | None = None
         if claw_url:
             auth = self.env.get("CLAW_AUTH_TOKEN", "")
-            self._claw = ClawClient(claw_url, auth_token=auth)
+            ca_bundle = self.env.get("CLAW_CA_BUNDLE", "")
+            self._claw = ClawClient(claw_url, auth_token=auth, ca_bundle=ca_bundle, role=role)
 
         # CLI fallback
         _bin = (self.env.get("CLAUDE_CODE_BIN") or "").strip()
@@ -450,9 +458,9 @@ class LLMClient:
         assert self._claw is not None
         effective_system = system_prompt or self.default_system_prompt or ""
 
-        full_prompt = prompt
+        full_prompt = _BASH_BLOCKLIST_PREAMBLE + "\n" + prompt
         if effective_system:
-            full_prompt = f"{effective_system}\n\n---\n\n{prompt}"
+            full_prompt = f"{effective_system}\n\n{_BASH_BLOCKLIST_PREAMBLE}\n\n---\n\n{prompt}"
         if output_file:
             full_prompt += (
                 f"\n\nWhen done, write the final JSON object to this path exactly: {output_file}"
@@ -497,6 +505,12 @@ class LLMClient:
         from claude_code_sdk import query, ClaudeCodeOptions
 
         effective_system_prompt = system_prompt or self.default_system_prompt or None
+        if effective_system_prompt:
+            effective_system_prompt = _BASH_BLOCKLIST_PREAMBLE + "\n" + effective_system_prompt
+        else:
+            effective_system_prompt = _BASH_BLOCKLIST_PREAMBLE
+        prompt = _BASH_BLOCKLIST_PREAMBLE + "\n" + prompt
+
         opts = ClaudeCodeOptions(
             model=model or self.model,
             max_turns=max_turns,
@@ -573,9 +587,9 @@ class LLMClient:
             )
 
         effective_system = system_prompt or self.default_system_prompt or ""
-        full_prompt = prompt
+        full_prompt = _BASH_BLOCKLIST_PREAMBLE + "\n" + prompt
         if effective_system:
-            full_prompt = f"{effective_system}\n\n---\n\n{prompt}"
+            full_prompt = f"{effective_system}\n\n{_BASH_BLOCKLIST_PREAMBLE}\n\n---\n\n{prompt}"
         if output_file:
             full_prompt += (
                 f"\n\nWhen done, write the final JSON object to this path exactly: {output_file}"
