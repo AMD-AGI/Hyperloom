@@ -82,19 +82,44 @@ for name, t in kernel_time.items():
         categories["other"] += pct
 ```
 
-### Step 5: REQUIRED — TraceLens analysis
+### Step 5: REQUIRED — TraceLens analysis (CLI)
 
-TraceLens is **mandatory** for every profile. Use the `oci-traceLens-agent` MCP server:
+TraceLens is **mandatory** for every profile. Use the TraceLens CLI tools directly.
 
+**Ensure TraceLens CLI is installed:**
+```bash
+TraceLens_generate_perf_report_pytorch --help >/dev/null 2>&1 || \
+  (cp -r /hyperloom/TraceLens-internal /tmp/TraceLens-internal && pip install -e /tmp/TraceLens-internal)
 ```
-Tool: run_full_standalone_analysis
-Arguments:
-  trace_path: <path to .pt.trace.json>
-  platform: "MI355X"
-  trace_type: "pytorch"
-  output_dir: $RESULT_DIR/tracelens_output/baseline
-  cleanup: false
+
+**Generate performance report:**
+```bash
+mkdir -p "$RESULT_DIR/tracelens_output/baseline"
+TraceLens_generate_perf_report_pytorch \
+  --profile_json_path "$TRACE_FILE" \
+  --output_xlsx_path "$RESULT_DIR/tracelens_output/baseline/perf_report.xlsx" \
+  --output_csvs_dir "$RESULT_DIR/tracelens_output/baseline/perf_report_csvs" \
+  --gpu_arch_json_path /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/utils/arch/MI355X.json \
+  --enable_pseudo_ops \
+  --group_by_num_kernels
 ```
+
+**Prepare category data (GPU utilization, top ops, tree data, category filtering):**
+```bash
+python3 /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/orchestrator_prepare.py \
+  --trace-path "$TRACE_FILE" \
+  --platform MI355X \
+  --output-dir "$RESULT_DIR/tracelens_output/baseline"
+```
+
+**Run standalone analysis subagents:**
+
+Read the skill file `/hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md` and follow Steps 6–10 (system-level analysis, compute kernel analysis, validation, aggregation, and report generation) using:
+- Output directory: `$RESULT_DIR/tracelens_output/baseline`
+- Platform: `MI355X`
+- Analysis mode: `default`
+
+The final standalone analysis report will be at `$RESULT_DIR/tracelens_output/baseline/standalone_analysis.md`.
 
 ### Step 6: Identify GEAK candidates
 
@@ -147,4 +172,5 @@ if categories["elementwise"] > 5:
 ## Failure Handling
 - If no trace produced: check profile=true was set, check output directory
 - If trace too large: filter using `scripts/common.sh:filter_trace()`
-- If TraceLens MCP unavailable: fall back to manual kernel analysis (Step 3)
+- TraceLens CLI not installed: copy to `/tmp` and install (`cp -r /hyperloom/TraceLens-internal /tmp/ && pip install -e /tmp/TraceLens-internal`)
+- TraceLens CLI fails: fall back to manual kernel analysis (Step 3)
