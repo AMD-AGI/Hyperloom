@@ -53,11 +53,133 @@ def _detect_warm_start_mode(base_dir: str | None) -> str:
 
 
 def _make_session_dir(base_dir: str) -> str:
-    """Create timestamped session dir inside base_dir/sessions/."""
+    """Create timestamped session dir as a sibling of base_dir.
+
+    Sessions are stored OUTSIDE the Sprint repo to keep it immutable:
+      /path/to/glm5-optimized/            ← Sprint repo (read-only)
+      /path/to/glm5-optimized-sessions/   ← Marathon sessions
+    """
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    d = Path(base_dir) / "sessions" / ts
+    bd = Path(base_dir).resolve()
+    sessions_root = bd.parent / f"{bd.name}-sessions"
+    d = sessions_root / ts
     d.mkdir(parents=True, exist_ok=True)
     return str(d)
+
+
+def _snapshot_session_environment(session_dir: str, base_dir: str, args: Any) -> None:
+    """Capture full environment snapshot so every session is reproducible.
+
+    Writes to session_dir/environment/:
+      - env_vars.json        — all environment variables at launch
+      - launch_args.json     — CLI args used to start the marathon
+      - serve_script.sh      — copy of the launch script
+      - bench_script.sh      — copy of the benchmark script
+      - pip_freeze.txt       — installed Python packages
+      - rocm_info.txt        — GPU hardware/driver info
+      - git_state.json       — git branch, commit, dirty files for base_dir
+      - system_packages.json — key system package versions (aiter, vllm, torch)
+    """
+    env_dir = Path(session_dir) / "environment"
+    env_dir.mkdir(parents=True, exist_ok=True)
+
+    import shutil
+    import subprocess
+
+    # 1. All env vars
+    (env_dir / "env_vars.json").write_text(
+        json.dumps(dict(os.environ), indent=2, sort_keys=True))
+
+    # 2. CLI args
+    try:
+        (env_dir / "launch_args.json").write_text(
+            json.dumps(vars(args), indent=2, default=str))
+    except Exception:
+        pass
+
+    # 3. Copy sprint scripts
+    scripts_dir = Path(base_dir) / "scripts"
+    if scripts_dir.is_dir():
+        for script in scripts_dir.glob("*.sh"):
+            shutil.copy2(script, env_dir / script.name)
+
+    # 4. Copy optimization CSVs / config files
+    opt_dir = Path(base_dir) / "optimizations"
+    if opt_dir.is_dir():
+        opt_snap = env_dir / "optimizations"
+        opt_snap.mkdir(exist_ok=True)
+        for f in opt_dir.iterdir():
+            if f.is_file() and f.stat().st_size < 1_000_000:
+                shutil.copy2(f, opt_snap / f.name)
+
+    # 5. pip freeze
+    try:
+        result = subprocess.run(
+            ["pip", "freeze"], capture_output=True, text=True, timeout=30)
+        (env_dir / "pip_freeze.txt").write_text(result.stdout)
+    except Exception:
+        pass
+
+    # 6. ROCm / GPU info
+    try:
+        result = subprocess.run(
+            ["rocm-smi", "--showproductname", "--showdriverversion"],
+            capture_output=True, text=True, timeout=15)
+        (env_dir / "rocm_info.txt").write_text(result.stdout + result.stderr)
+    except Exception:
+        pass
+
+    # 7. Git state of base_dir
+    try:
+        git_info = {}
+        for key, cmd in [
+            ("branch", ["git", "-C", base_dir, "rev-parse", "--abbrev-ref", "HEAD"]),
+            ("commit", ["git", "-C", base_dir, "rev-parse", "HEAD"]),
+            ("diff_stat", ["git", "-C", base_dir, "diff", "--stat"]),
+        ]:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            git_info[key] = r.stdout.strip()
+        r = subprocess.run(
+            ["git", "-C", base_dir, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10)
+        git_info["dirty_files"] = r.stdout.strip().splitlines()
+        (env_dir / "git_state.json").write_text(json.dumps(git_info, indent=2))
+    except Exception:
+        pass
+
+    # 8. Key system package versions
+    pkg_versions = {}
+    for pkg in ["vllm", "torch", "aiter", "triton", "transformers"]:
+        try:
+            mod = __import__(pkg)
+            pkg_versions[pkg] = getattr(mod, "__version__", "installed (no __version__)")
+        except ImportError:
+            pkg_versions[pkg] = "NOT INSTALLED"
+    (env_dir / "system_packages.json").write_text(json.dumps(pkg_versions, indent=2))
+
+    # 9. Snapshot key system files that optimizations may modify
+    sys_files = {}
+    for path_str in [
+        "/usr/local/lib/python3.12/dist-packages/aiter/fused_moe.py",
+        "/usr/local/lib/python3.12/dist-packages/aiter/ops/triton/fused_moe.py",
+    ]:
+        p = Path(path_str)
+        if p.exists():
+            try:
+                import hashlib
+                content = p.read_bytes()
+                sys_files[path_str] = {
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size": len(content),
+                    "mtime": p.stat().st_mtime,
+                }
+            except Exception:
+                pass
+    if sys_files:
+        (env_dir / "system_files.json").write_text(json.dumps(sys_files, indent=2))
+
+    log.info("Session environment snapshot saved to %s (%d files)",
+             env_dir, len(list(env_dir.rglob("*"))))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -264,6 +386,8 @@ async def async_main(args: argparse.Namespace) -> None:
     state.session_id = Path(session_dir).name
     state.save()
 
+    _snapshot_session_environment(session_dir, args.base_dir, args)
+
     mode = _detect_warm_start_mode(args.base_dir)
     log.info("Model: %s | Class: %s | Warm-start: %s", args.model_name, args.model_class, mode)
 
@@ -274,10 +398,22 @@ async def async_main(args: argparse.Namespace) -> None:
         framework=args.framework,
     )
 
-    llm = LLMClient(
+    # Each component gets its own LLM client tagged with its role so
+    # Claw sessions are identifiable and isolated.
+    llm_orch = LLMClient(
         model=args.llm_model, env=env, system_prompt=system_prompt,
         inferencex_path=inferencex_path, base_dir=args.base_dir,
-        claw_url=claw_url,
+        claw_url=claw_url, role="orchestrator",
+    )
+    llm_km = LLMClient(
+        model=args.llm_model, env=env, system_prompt=system_prompt,
+        inferencex_path=inferencex_path, base_dir=args.base_dir,
+        claw_url=claw_url, role="kernel-manager",
+    )
+    llm_wd = LLMClient(
+        model=args.llm_model, env=env, system_prompt=system_prompt,
+        inferencex_path=inferencex_path, base_dir=args.base_dir,
+        claw_url=claw_url, role="watchdog",
     )
 
     oob = OOBBackends(env=env, claw_url=claw_url)
@@ -295,19 +431,25 @@ async def async_main(args: argparse.Namespace) -> None:
 
     from . import server
     from .gpu_lock import GpuLock
+    from .workload import kill_rogue_servers
     gpu_lock = GpuLock()
     gpu_lock.start_watchdog()
 
+    # Kill any rogue inference servers left from previous runs or Claw sessions
+    rogues = await kill_rogue_servers()
+    if rogues:
+        log.warning("Cleaned up %d rogue server(s) at marathon startup", rogues)
+
     orch = Orchestrator(
-        state, llm, session_dir, server, oob, dashboard, shutdown,
+        state, llm_orch, session_dir, server, oob, dashboard, shutdown,
         max_cost_usd=args.max_cost_usd,
         max_wall_hours=args.max_hours,
         inferencex_path=inferencex_path,
         gpu_lock=gpu_lock,
     )
-    km = KernelManager(state, llm, session_dir, oob, dashboard, shutdown,
+    km = KernelManager(state, llm_km, session_dir, oob, dashboard, shutdown,
                        gpu_lock=gpu_lock)
-    wd = Watchdog(state, llm, session_dir, env, dashboard, shutdown)
+    wd = Watchdog(state, llm_wd, session_dir, env, dashboard, shutdown)
 
     if args.dry_run:
         print(json.dumps({
