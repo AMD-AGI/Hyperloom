@@ -76,8 +76,7 @@ Always use `scripts/patch_inductor.py` with `--target-file`. The `--cache-dir` o
 ### IR-7: Configure GEAK `model_config` at setup (conditional), then read-only
 
 **Precondition** — this rule applies ONLY when `geak` is in `KERNEL_OPT_BACKENDS`
-(case-insensitive). OOB-only runs (e.g. `codex` / `claude` / `llm`) skip it
-entirely: no token read, no MCP call, no abort.
+(case-insensitive). OOB-only runs skip IR-7 entirely.
 
 When the precondition holds, the skill MUST call `geak_set_model_config` **exactly
 once** during SETUP with the canonical config below, then verify via
