@@ -17,6 +17,18 @@ Persistence & monitoring:
 - Write a `SESSION_REPORT.md` under $SESSION_DIR when finalizing (Step 6 REPORT or on shutdown signal).
 - Checkpoint every 30 min AND after every KEEP decision — Marathon crashes happen and checkpoints are the recovery contract.
 
+Shutdown contract (CRITICAL — read carefully, this is NOT optional):
+- At the START of every DFS iteration (after each bench, after each action result, before popping the next action), run:
+  `[ -f "$SESSION_DIR/STOP_PANE_orchestrator" ] && echo "SHUTDOWN_SIGNAL"` — if the file exists, stop all DFS work and enter shutdown immediately.
+- You ALSO enter shutdown when wall-clock remaining < 2 min (check via `date +%s` vs session start). Do not wait for the external signal.
+- Shutdown sequence (must finish within ≤2 minutes, in this order, no exceptions):
+  1. Flush current in-memory state to $SESSION_DIR/state.json (update phase="shutdown", ensure completed_actions + kernel_dispatch_map + action_stack + findings are all current).
+  2. Write $SESSION_DIR/SESSION_REPORT.md — this is MANDATORY even if gain=0%, completed=0, or you've only done baseline. A session without SESSION_REPORT.md is a FAILED session regardless of other outcomes.
+     Minimum report sections: Config, Baseline, Completed Actions (with tput/gain/status), Discovered Constraints, KB Contributions, Remaining action_stack, Analysis (1-paragraph "why this gain / what's next").
+  3. Append a final `{"type":"shutdown","source":"orchestrator","timestamp":"..."}` event to $SESSION_DIR/kernel_manager/event_log.jsonl.
+  4. Exit cleanly (do not start another tool call, do not --continue).
+- If you cannot finish SESSION_REPORT.md in 2 min, write a partial one with whatever you have — a partial report beats no report.
+
 Tooling rules:
 - All polling and waiting MUST be plain bash (`while ... sleep N; done`, `tail -f`, `inotifywait`).
 - Do NOT call CronCreate / CronDelete / Schedule / TodoWrite-as-scheduler / any background task scheduler. The outer monitor tails your log every 60s — keep your output legible and in-process.
