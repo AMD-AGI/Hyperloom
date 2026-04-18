@@ -119,6 +119,16 @@ Read the skill file `/hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standal
 - Platform: `MI355X`
 - Analysis mode: `default`
 
+**Hard requirements when executing the skill (do not relax, even if a category looks trivial or LLM-dominated):**
+1. **Strictly follow the step order** in the skill file — do NOT skip any step and do NOT merge steps. This applies to LLM-heavy categories (e.g. kernel fusion, elementwise) which are the most commonly skipped.
+2. **In Step 6 and Step 7, each category MUST be executed by an independent Task subagent** (`subagent_type: generalPurpose`) to ensure context isolation. Launch them in parallel exactly as the skill specifies; never analyze multiple categories inside a single subagent turn or inline in the orchestrator.
+3. **Each subagent MUST write out its findings file following the sub-agent template** defined in the skill:
+   - Step 6 (system-level) → `$RESULT_DIR/tracelens_output/baseline/system_findings/<name>_findings.md`
+   - Step 7 (compute kernel) → `$RESULT_DIR/tracelens_output/baseline/category_findings/<category>_findings.md`
+4. **The final aggregated report MUST follow the report template** in the skill and be written to `$RESULT_DIR/tracelens_output/baseline/standalone_analysis.md`.
+
+These requirements apply identically whether the skill is invoked in TraceLens Standalone mode or as part of the Hyperloom E2E flow.
+
 The final standalone analysis report will be at `$RESULT_DIR/tracelens_output/baseline/standalone_analysis.md`.
 
 ### Step 6: Identify GEAK candidates
