@@ -747,7 +747,8 @@ def submit_pr(
 
         title_models = ", ".join(config_keys)
         if len(title_models) > 60:
-            title_models = f"{len(config_keys)} AMD models"
+            prefixes = list(dict.fromkeys(k.split("-")[0] for k in config_keys))
+            title_models = ", ".join(prefixes) + " (mi355x)"
         pr_title = f"[AMD/Hyperloom] Optimize {title_models}"
 
         if dry_run:
