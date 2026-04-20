@@ -2,34 +2,66 @@
 
 ## Overview
 
-MLPerf time-to-train is `ms/iter × iterations_to_converge + eval_overhead`; this action reduces the second and third terms by shaping the path to `eval_loss = 3.34` and cutting eval wall time, including secondary hyperparameter fine-tuning (warmup, eval interval, weight decay) within the already-chosen GBS/LR/parallelism configuration. It is **convergence-affecting**: Layer 2 uses `loss_efficiency` (Tier 2) to filter candidates; Layer 3 uses `projected_ttt` (Tier 3) for keep/discard. Run it after config selection (Step 9) and before the sweep (Step 10).
+MLPerf time-to-train is `ms/iter × iterations_to_converge + eval_overhead`; this action
+reduces the second and third terms by shaping the path to `eval_loss = 3.34` and cutting
+eval wall time, within the already-chosen GBS/LR/parallelism configuration. It is
+**convergence-affecting**: Layer 2 uses `loss_efficiency` (Tier 2) to filter candidates;
+Layer 3 uses `projected_ttt` (Tier 3) for keep/discard. Run it after config selection
+(Step 9) and before the sweep (Step 10).
+
+## Scope (MLPerf IR-9 compliance)
+
+Under MLPerf GPT-OSS-20B + AdamW rules (see `SKILL.md` IR-9), the vast majority of
+hyperparameters are fixed or derived. The only remaining convergence knobs this action
+may touch are:
+
+| Dimension | Primus variable | Constraint |
+|-----------|------------------|------------|
+| Eval cadence | `EVAL_SAMPLES_INTERVAL` / `PRIMUS_EVAL_INTERVAL` | Measurement cadence, not a hyperparameter |
+| Warmup steps | `PRIMUS_LR_WARMUP_ITERS` | `unconstrained` |
+| Peak LR | `PRIMUS_LR` | `unconstrained`; `PRIMUS_MIN_LR` MUST be updated to `PRIMUS_LR × 0.1` |
+
+**Forbidden in this action (IR-9 violations — do NOT test):**
+
+- `PRIMUS_WEIGHT_DECAY` — fixed at `0.1`.
+- `PRIMUS_CLIP_GRAD` — fixed at `1.0`.
+- `PRIMUS_MIN_LR` as an independent knob — it is `PRIMUS_LR × 0.1`, period.
+- `PRIMUS_LR_DECAY_ITERS` as an independent knob — it is
+  `PRIMUS_TRAIN_ITERS − PRIMUS_LR_WARMUP_ITERS`, always.
+- `PRIMUS_TRAIN_ITERS` — fixed at `1_200_000`.
+- AdamW betas/epsilon, dropout, sequence length.
+
+Any ad-hoc sub-action that proposes to vary those must be rejected before launching a
+trial.
 
 ## Inputs
 
-- Winning config from config-selection (GBS, LR, EP, TP)
+- Winning config from config-selection (GBS, LR, EP, TP) with `MIN_LR = LR × 0.1`
 - Baseline TTT and ms/iter
 - Baseline loss-vs-samples curve (from Tier 3 or Tier 4)
-- Current `eval_interval`, `warmup`, `weight_decay`, and LR schedule settings
+- Current `EVAL_SAMPLES_INTERVAL` and `PRIMUS_LR_WARMUP_ITERS`
 
 ## KB Query
 
 ```bash
-python3 $SKILL_ROOT/kb/kb_query.py "GPT-OSS-20B convergence LR schedule warmup" --top-k 5 --compact
+python3 $SKILL_ROOT/kb/kb_query.py "GPT-OSS-20B convergence warmup eval interval peak LR" --top-k 5 --compact
 ```
 
 ## Procedure
 
 ### Dimension 1: Eval interval optimization
 
-Eval overhead is pure wall time with no convergence benefit. Each eval is on the order of tens of seconds (64 eval iters × MBS × GPUs).
+Eval overhead is pure wall time with no convergence benefit. Each eval is on the order
+of tens of seconds (64 eval iters × MBS × GPUs). Eval cadence does not affect training
+math — only measurement cadence.
 
 #### Current configuration
 
 | Setting | Value | Impact |
 |---------|-------|--------|
-| `EVAL_SAMPLES_INTERVAL` | 16384 | Eval every 16384 samples |
-| `PRIMUS_EVAL_INTERVAL` | 512 (at GBS=32) | Eval every 512 iterations |
-| Eval duration | ~30s per eval | ~6.4 min total (~13 evals to converge at 220k iters) |
+| `EVAL_SAMPLES_INTERVAL` | 12288 | Eval every 12,288 samples |
+| `PRIMUS_EVAL_INTERVAL` | `EVAL_SAMPLES_INTERVAL / GBS` | Eval every N iterations |
+| Eval duration | ~30s per eval | Multiple minutes over full run |
 
 Use `compute_eval_overhead()` from `common.sh`:
 
@@ -44,27 +76,36 @@ If eval interval changes are significant, verify with Tier 3:
 
 ```bash
 source "$SKILL_ROOT/scripts/common.sh"
-run_mlperf_trial "eval_interval_32768" 3 "" \
-    "EVAL_SAMPLES_INTERVAL=32768"
+run_mlperf_trial "eval_interval_24576" 3 "" \
+    "EVAL_SAMPLES_INTERVAL=24576"
 ```
 
 Verify the loss trajectory matches baseline (eval interval does not affect training math).
 
-### Dimension 2: Warmup iterations
+### Dimension 2: Warmup iterations (`opt_learning_rate_warmup_steps`)
+
+**Unconstrained** per MLPerf rules. When `PRIMUS_LR_WARMUP_ITERS` changes,
+`PRIMUS_LR_DECAY_ITERS` MUST be updated to `PRIMUS_TRAIN_ITERS − PRIMUS_LR_WARMUP_ITERS`.
 
 | Warmup | Notes |
 |--------|-------|
 | 64 | Aggressive — higher risk of early NaN with FP8 |
 | 128 | Current default |
 | 256 | More conservative |
+| 512 | Very conservative |
 
 **Stage 1: Tier 2 quick filter (500 iters) — `loss_efficiency`**
 
 ```bash
 source "$SKILL_ROOT/scripts/common.sh"
-run_mlperf_trial "warmup_64" 2 500 "PRIMUS_LR_WARMUP_ITERS=64"
-run_mlperf_trial "warmup_128" 2 500 "PRIMUS_LR_WARMUP_ITERS=128"
-run_mlperf_trial "warmup_256" 2 500 "PRIMUS_LR_WARMUP_ITERS=256"
+
+# When overriding warmup, always pair with matching decay_iters (IR-9 derived constraint).
+run_mlperf_trial "warmup_64"  2 500 \
+    "PRIMUS_LR_WARMUP_ITERS=64  PRIMUS_LR_DECAY_ITERS=$((PRIMUS_TRAIN_ITERS-64))"
+run_mlperf_trial "warmup_128" 2 500 \
+    "PRIMUS_LR_WARMUP_ITERS=128 PRIMUS_LR_DECAY_ITERS=$((PRIMUS_TRAIN_ITERS-128))"
+run_mlperf_trial "warmup_256" 2 500 \
+    "PRIMUS_LR_WARMUP_ITERS=256 PRIMUS_LR_DECAY_ITERS=$((PRIMUS_TRAIN_ITERS-256))"
 
 baseline_eff=$(compute_loss_efficiency "$RESULT_DIR/attempt_baseline_raw.log")
 for label in warmup_64 warmup_128 warmup_256; do
@@ -73,146 +114,87 @@ for label in warmup_64 warmup_128 warmup_256; do
 done
 ```
 
-Discard any candidate where `loss_efficiency < baseline_eff × 0.85`.
+Discard any candidate where `loss_efficiency < baseline_eff × LOSS_EFFICIENCY_DISCARD_RATIO`
+(0.85).
 
 **Stage 2: Tier 3 projected TTT for survivors (2500 iters)**
 
 ```bash
-run_mlperf_trial "warmup_<best>_proj" 3 "" "PRIMUS_LR_WARMUP_ITERS=<best>"
+run_mlperf_trial "warmup_<best>_proj" 3 "" \
+    "PRIMUS_LR_WARMUP_ITERS=<best> PRIMUS_LR_DECAY_ITERS=$((PRIMUS_TRAIN_ITERS-<best>))"
 projected=$(project_ttt "$RESULT_DIR/attempt_warmup_<best>_proj_raw.log" "$GBS")
 ttt_gain=$(compute_ttt_gain_pct "$BASELINE_PROJECTED_TTT" "$(echo $projected | cut -f1)")
 echo "Warmup <best>: projected_ttt gain = ${ttt_gain}%"
 ```
 
-**Decision metric:** `projected_ttt` from Tier 3, not `eval_loss` at iteration 500. KEEP only if `ttt_gain_pct > 0%`.
+**Decision metric:** `projected_ttt` from Tier 3, not `eval_loss` at iteration 500.
+KEEP only if `ttt_gain_pct > TTT_GAIN_KEEP_THRESHOLD_PCT` (0%).
 
-**NaN gate:** If warmup < 128 causes NaN in the first 100 iterations (`TRIAL_STATUS`), discard immediately.
+**NaN gate:** If warmup < 128 causes NaN in the first 100 iterations (`TRIAL_STATUS=nan`),
+discard immediately.
 
-### Dimension 3: Weight decay
+### Dimension 3: Peak LR (`opt_base_learning_rate`)
 
-Weight decay affects regularization strength. Lower values may speed early convergence but risk late-stage instability near the target.
+**Unconstrained** per MLPerf rules. `PRIMUS_MIN_LR` MUST be updated to
+`PRIMUS_LR × 0.1` (IR-9 derived constraint — the `opt_end_learning_rate` rule).
 
-**Stage 1: Tier 2 quick filter (500 iters)**
+Because both `lr_decay_iters` and `min_lr` are locked to `lr` and `train_iters`, peak LR
+is the **only** LR-schedule knob available. The cosine schedule anneals from `lr` down
+to `lr × 0.1` over `TRAIN_ITERS − WARMUP_ITERS` steps — this shape is fixed; only its
+amplitude (`lr`) moves.
 
-```bash
-run_mlperf_trial "wd_001" 2 500 "PRIMUS_WEIGHT_DECAY=0.01"
-run_mlperf_trial "wd_005" 2 500 "PRIMUS_WEIGHT_DECAY=0.05"
-run_mlperf_trial "wd_02" 2 500 "PRIMUS_WEIGHT_DECAY=0.2"
+| Peak LR | `MIN_LR` (= `LR × 0.1`) | Notes |
+|---------|-------------------------|-------|
+| 2.0e-4 | 2.0e-5 | Lower — safer, slower early progress |
+| 4.0e-4 | 4.0e-5 | Baseline default |
+| 5.0e-4 | 5.0e-5 | Moderate bump |
+| 6.0e-4 | 6.0e-5 | Aggressive — higher NaN risk under FP8 |
+| 8.0e-4 | 8.0e-5 | Very aggressive |
 
-for label in wd_001 wd_005 wd_02; do
-    eff=$(compute_loss_efficiency "$RESULT_DIR/attempt_${label}_raw.log")
-    echo "$label: loss_efficiency=$eff"
-done
-```
-
-Discard if `loss_efficiency < baseline × 0.85`.
-
-**Stage 2: Tier 3 projected TTT for survivors**
-
-```bash
-run_mlperf_trial "wd_<best>_proj" 3 "" "PRIMUS_WEIGHT_DECAY=<best>"
-projected=$(project_ttt "$RESULT_DIR/attempt_wd_<best>_proj_raw.log" "$GBS")
-ttt_gain=$(compute_ttt_gain_pct "$BASELINE_PROJECTED_TTT" "$(echo $projected | cut -f1)")
-```
-
-KEEP only if `ttt_gain_pct > 0%`.
-
-### Dimension 4: Gradient clipping
-
-With FP8 hybrid precision, gradient magnitudes can spike. Tighter clipping reduces wasted iterations from loss spikes.
-
-```bash
-run_mlperf_trial "clip_05" 2 500 "PRIMUS_CLIP_GRAD=0.5"
-run_mlperf_trial "clip_15" 2 500 "PRIMUS_CLIP_GRAD=1.5"
-```
-
-Only test if baseline Tier 3 runs showed loss spikes.
-
-### Dimension 5: LR schedule (decay window, floor, peak)
-
-Three sub-dimensions interact: **decay window**, **min LR floor**, and **peak LR**. Tune in this order; later knobs assume earlier ones are fixed.
-
-#### 5A: LR decay window (`lr_decay_iters`)
-
-If `lr_decay_iters` is much larger than projected convergence iters (e.g. default 1.2M vs ~7200 actual iters), the cosine schedule is essentially flat — LR barely decays during training. However, setting `lr_decay_iters` too close to convergence iters (1.0–1.2×) is also problematic: cosine decay reaches near-`min_lr` by the convergence point, leaving the model with insufficient per-step learning capacity in the critical final phase where it approaches the loss target. For MLPerf's "reach target loss ASAP" objective, each late-stage iteration at very low LR wastes wall time.
-
-The optimal range is **2–5×** projected convergence iters. This provides meaningful annealing (LR at convergence ≈ 55–91% of peak) while preserving enough late-stage learning rate to efficiently push toward the target.
-
-| Multiplier | LR at convergence (% of peak) | Character |
-|------------|-------------------------------|-----------|
-| 1.0–1.2× | 10–19% | Too aggressive — late-stage stall |
-| **2×** | **~55%** | **Strong annealing, good balance** |
-| **3×** | **~78%** | **Moderate annealing, safe default** |
-| **5×** | **~91%** | **Gentle annealing** |
-| 10×+ | >97% | Essentially no decay |
-
-**Trial plan:** Test three decay windows spanning the 2–5× range.
+**Stage 1: Tier 2 loss_efficiency filter (500 iters, NaN gate)**
 
 ```bash
 source "$SKILL_ROOT/scripts/common.sh"
-converge_est=$((state_baseline_projected_iters))  # e.g. 7200
 
-run_mlperf_trial "decay_2x" 3 "" \
-    "PRIMUS_LR_DECAY_ITERS=$((converge_est * 2))"
+run_mlperf_trial "lr_5e4" 2 500 "PRIMUS_LR=5.0e-4 PRIMUS_MIN_LR=5.0e-5"
+run_mlperf_trial "lr_6e4" 2 500 "PRIMUS_LR=6.0e-4 PRIMUS_MIN_LR=6.0e-5"
+run_mlperf_trial "lr_8e4" 2 500 "PRIMUS_LR=8.0e-4 PRIMUS_MIN_LR=8.0e-5"
 
-run_mlperf_trial "decay_3x" 3 "" \
-    "PRIMUS_LR_DECAY_ITERS=$((converge_est * 3))"
-
-run_mlperf_trial "decay_5x" 3 "" \
-    "PRIMUS_LR_DECAY_ITERS=$((converge_est * 5))"
+baseline_eff=$(compute_loss_efficiency "$RESULT_DIR/attempt_baseline_raw.log")
+for label in lr_5e4 lr_6e4 lr_8e4; do
+    eff=$(compute_loss_efficiency "$RESULT_DIR/attempt_${label}_raw.log")
+    echo "$label: loss_efficiency=$eff (baseline=$baseline_eff)"
+done
 ```
 
-**IMPORTANT:** This change **requires** Tier 3 (2500+ iters). Tier 2 (500 iters) is not informative — all decay windows look the same in warmup/early training. Compare `projected_ttt` from Tier 3.
+Discard any candidate where:
 
-#### 5B: MIN_LR floor (`min_lr`)
+- `TRIAL_STATUS=nan` (NaN in first 200 iters → revert immediately, log to KB), OR
+- `loss_efficiency < baseline_eff × LOSS_EFFICIENCY_DISCARD_RATIO` (0.85)
 
-After the decay window is set, `min_lr` determines the LR floor at the end of the cosine schedule. The optimal floor depends on the decay window chosen in 5A: a wider window (e.g. 5×) already keeps late-stage LR high, so min_lr matters less; a tighter window (e.g. 2×) makes min_lr the dominant factor for late-stage learning capacity. Explore **both** lower and higher floors relative to the baseline (10% of peak).
-
-| MIN_LR | Ratio to LR | Effect |
-|--------|-------------|--------|
-| 1.0e-5 | 2.5% | Deep decay — aggressive late-stage annealing |
-| 2.0e-5 | 5% | Moderate-low floor |
-| 4.0e-5 | 10% | Baseline default |
-| 1.2e-4 | 30% | Elevated floor — preserves late-stage learning capacity |
-| 2.0e-4 | 50% | High floor — minimal effective LR range, use with tight (2×) decay window |
+**Stage 2: Tier 3 projected TTT for survivors (2500 iters)**
 
 ```bash
-run_mlperf_trial "min_lr_1e5" 3 "" \
-    "PRIMUS_LR_DECAY_ITERS=<best_from_5A> PRIMUS_MIN_LR=1.0e-5"
-run_mlperf_trial "min_lr_2e5" 3 "" \
-    "PRIMUS_LR_DECAY_ITERS=<best_from_5A> PRIMUS_MIN_LR=2.0e-5"
-run_mlperf_trial "min_lr_12e5" 3 "" \
-    "PRIMUS_LR_DECAY_ITERS=<best_from_5A> PRIMUS_MIN_LR=1.2e-4"
-run_mlperf_trial "min_lr_2e4" 3 "" \
-    "PRIMUS_LR_DECAY_ITERS=<best_from_5A> PRIMUS_MIN_LR=2.0e-4"
+run_mlperf_trial "lr_<best>_proj" 3 "" "PRIMUS_LR=<best> PRIMUS_MIN_LR=<best×0.1>"
+projected=$(project_ttt "$RESULT_DIR/attempt_lr_<best>_proj_raw.log" "$GBS")
+ttt_gain=$(compute_ttt_gain_pct "$BASELINE_PROJECTED_TTT" "$(echo $projected | cut -f1)")
+echo "LR <best>: projected_ttt gain = ${ttt_gain}%"
 ```
 
-If 5A chose a tight window (2×), prioritize the higher-floor trials (1.2e-4, 2.0e-4). If 5A chose a wide window (5×), prioritize the lower-floor trials (1e-5, 2e-5) to explore whether deeper annealing helps.
-
-#### 5C: Peak LR (`lr`)
-
-With a meaningful annealing schedule, the model may tolerate a higher peak LR. Test after 5A and 5B.
-
-```bash
-run_mlperf_trial "lr_5e4" 3 "" \
-    "PRIMUS_LR=5.0e-4 PRIMUS_MIN_LR=<best> PRIMUS_LR_DECAY_ITERS=<best>"
-run_mlperf_trial "lr_6e4" 3 "" \
-    "PRIMUS_LR=6.0e-4 PRIMUS_MIN_LR=<best> PRIMUS_LR_DECAY_ITERS=<best>"
-```
-
-**NaN gate:** Higher LR with FP8 increases NaN risk. If NaN occurs in the first 200 iters, discard and keep the current LR.
-
-**Decision:** Across 5A→5B→5C survivors, keep the combination with lowest `projected_ttt` from Tier 3.
+KEEP only if `ttt_gain_pct > TTT_GAIN_KEEP_THRESHOLD_PCT` (0%).
 
 ### Combined validation
 
-Apply all winning convergence tweaks together:
+Apply all winning convergence tweaks together. Only three knobs can legally appear in
+this combination:
 
 ```bash
+# IR-9: MIN_LR = LR × 0.1 and DECAY_ITERS = TRAIN_ITERS − WARMUP_ITERS must hold.
 run_mlperf_trial "convergence_combined" 3 "" \
-    "PRIMUS_LR=<best> PRIMUS_MIN_LR=<best> \
-     PRIMUS_LR_DECAY_ITERS=<best> PRIMUS_LR_WARMUP_ITERS=<best> \
-     PRIMUS_WEIGHT_DECAY=<best> EVAL_SAMPLES_INTERVAL=<best>"
+    "PRIMUS_LR=<best_lr> PRIMUS_MIN_LR=<best_lr_times_0.1> \
+     PRIMUS_LR_WARMUP_ITERS=<best_warmup> \
+     PRIMUS_LR_DECAY_ITERS=$((PRIMUS_TRAIN_ITERS-<best_warmup>)) \
+     EVAL_SAMPLES_INTERVAL=<best_eval>"
 projected=$(project_ttt "$RESULT_DIR/attempt_convergence_combined_raw.log" "$GBS")
 echo "Projected TTT: $projected"
 ```
@@ -221,23 +203,27 @@ Compare against baseline projected TTT.
 
 ## Outputs
 
-- Optimal `eval_interval`, `warmup_iters`, `weight_decay`, `clip_grad`
-- Optimal `lr`, `min_lr`, `lr_decay_iters` (from Dimension 5)
+- Optimal `EVAL_SAMPLES_INTERVAL`
+- Optimal `PRIMUS_LR_WARMUP_ITERS` (with matching `PRIMUS_LR_DECAY_ITERS`)
+- Optimal `PRIMUS_LR` (with matching `PRIMUS_MIN_LR = PRIMUS_LR × 0.1`)
 - Projected TTT savings (seconds and percentage)
 - Updated environment variables in `state.kept_env_vars`
-- Updated `state.optimal_eval_interval`
-- Updated `state.eval_overhead_seconds`
-- Updated `state.lr_decay_iters`, `state.min_lr`, `state.lr` (if changed)
+- Updated `state.optimal_eval_interval`, `state.eval_overhead_seconds`
+- Updated `state.lr`, `state.min_lr` (if changed; always paired)
 
 ## Heuristic Update
 
-- LR decay window improvement: boost `min_lr` and `peak_lr` sub-dimensions by 1.5× (Score Update Rule #12)
-- After convergence-speed completes: update `state.eval_overhead_seconds`, `state.optimal_eval_interval` (Rule #9)
+- Peak LR improvement: boost remaining untested LR candidates in the vicinity by 1.3×
+- Warmup improvement: boost remaining untested warmup candidates by 1.3×
+- After convergence-speed completes: update `state.eval_overhead_seconds`,
+  `state.optimal_eval_interval` (Score Update Rule #9)
 - If no dimension improves projected TTT: reduce convergence-speed score by 0.7×
 
 ## Failure Handling
 
-- If aggressive warmup (< 128) causes NaN: revert; keep default 128
-- If weight decay change degrades the eval loss trajectory: revert; keep default 0.1
-- If eval interval change does not affect the loss trajectory (expected): keep the interval that minimizes total wall time
-- These are low-risk tunings — if none improve projected TTT, keep defaults
+- Aggressive warmup (< 128) causes NaN → revert; keep default 128
+- Peak LR bump causes NaN in first 200 iters → revert; keep prior LR, log to KB as unsafe
+- Eval interval change must not affect loss trajectory (expected) → keep the interval
+  that minimizes total wall time
+- These are low-risk tunings within MLPerf-compliant bounds — if none improve projected
+  TTT, keep baseline defaults
