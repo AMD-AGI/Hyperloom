@@ -3,11 +3,20 @@
 ## Overview
 
 Explores training configuration parameters that affect per-iteration performance
-without changing hyperparameters or parallelism.
+without changing hyperparameters or parallelism. FP8 knobs: see
+[fp8-recipe-tuning.md](fp8-recipe-tuning.md). Gradient clipping: see
+[convergence-speed.md](convergence-speed.md).
 
 ## Inputs
+
 - Current config and kept_overrides
 - Profile data
+
+## KB Query
+
+```
+python3 $SKILL_ROOT/kb/kb_query.py "GPT-OSS-20B training parameters MBS recompute" --top-k 5 --compact
+```
 
 ## Parameter Matrix
 
@@ -33,15 +42,6 @@ without changing hyperparameters or parallelism.
 | `enable_primus_turbo` | true | — | Master switch, already on |
 | `turbo_sync_free_moe_stage` | 0 | 0–3 | Sync-free MoE pipeline |
 | `turbo_deepep_num_cu` | 64 | 32–128 | CUs for DeepEP |
-
-### FP8 Knobs
-
-| Parameter | Current | Options | Notes |
-|-----------|---------|---------|-------|
-| `fp8` | hybrid | hybrid/e4m3/e5m2 | FP8 recipe |
-| `clip_grad` | 1.0 | 0.5–2.0 | Gradient clipping |
-| `NVTE_USE_CAST_TRANSPOSE_TRITON` | 0 | 0/1 | Triton FP8 ops |
-| `NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE` | 1 | 0/1 | Optimized HIP FP8 |
 
 ## Procedure
 
@@ -76,12 +76,6 @@ For winners (gain > 1%), validate with Tier 2:
 run_mlperf_trial "param_NAME_validate" 2 500
 ```
 
-For FP8 knob changes (higher stability risk), always use Tier 2:
-
-```bash
-run_mlperf_trial "fp8_knob_NAME" 2 500
-```
-
 ### Step 3: GBS verification for MBS changes
 
 When changing MBS, verify GBS is maintained:
@@ -95,6 +89,13 @@ assert new_ga * new_mbs * dp == baseline_gbs
 - Per-parameter gain percentages
 - Updated config
 
+## Heuristic Update
+
+- MBS improvement: boost remaining MBS candidates
+- Sync-free MoE gain > 1%: boost turbo_sync_free_moe_stage=3 candidate
+- All params neutral: reduce params score by 0.7x
+
 ## Failure Handling
+
 - OOM on larger MBS: revert, try intermediate value
-- Loss divergence on FP8 changes: revert to hybrid
+- Loss divergence: revert to prior config
