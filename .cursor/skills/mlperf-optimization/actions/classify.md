@@ -1,7 +1,18 @@
 # Action: Model Classification
 
+## Overview
+
+Parses the training config to identify model architecture, parallelism topology,
+and batch configuration, then sets initial DFS heuristic score priors.
+
 ## Inputs
 - `$EXP` — training YAML config path
+
+## KB Query
+
+```
+python3 $SKILL_ROOT/kb/kb_query.py "GPT-OSS-20B architecture classification" --top-k 5 --compact
+```
 
 ## Procedure
 
@@ -51,11 +62,13 @@ ga_steps = gbs // (mbs * dp)
 ```python
 priors = {
     "fusion-flags": 9,        # Highest for MoE
-    "hyperparams": 8,         # GBS/LR tuning critical for time-to-target
-    "parallelism": 6,         # EP/TP configuration
+    "config-selection": 8,    # GBS/LR/parallelism joint tuning
+    "convergence-speed": 7,   # LR schedule, warmup, eval interval
+    "fp8-recipe-tuning": 6,   # FP8 knobs
     "runtime-tunables": 5,    # System knobs
     "params": 5,              # MBS, recompute, overlap
-    "kernel-opt": 3,          # Limited for MoE (GEMM-dominated)
+    "comm-tuning": 6,         # NCCL/RCCL/DeepEP/AllReduce (always runs)
+    "kernel-opt": 5,          # All non-vendor kernels explored
     "sweep": 1,               # Final exploration
 }
 ```
@@ -78,6 +91,11 @@ moe_enable_deepep = overrides.get("moe_enable_deepep", False)
 - Heuristic score priors
 - Flags already enabled (to avoid redundant testing)
 
+## Heuristic Update
+
+N/A — classify sets initial priors, does not update them.
+
 ## Failure Handling
+
 - If config cannot be parsed: check YAML syntax, check env var interpolation
 - If parallelism values don't match GPU count: verify PRIMUS_TP/PP/EP env vars
