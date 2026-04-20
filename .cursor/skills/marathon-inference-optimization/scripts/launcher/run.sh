@@ -453,17 +453,30 @@ MAX_RESTARTS=\${PANE_MAX_RESTARTS:-200}
 # ~1-2h natural exit cadence with extra margin so transient API hangs are
 # bounded. Adjustable via PANE_CLAUDE_TIMEOUT_S env var.
 CLAUDE_TIMEOUT_S=\${PANE_CLAUDE_TIMEOUT_S:-1800}
+# Optional: enable Anthropic SDK debug logging (HTTP request/response, SSE
+# stream events) so the next time a hang happens we can pinpoint whether
+# it's API-server-side stream death, NAT/proxy idle drop, or claude CLI
+# state-machine deadlock. Off by default — adds ~MB/min to log size.
+CLAUDE_DEBUG=\${PANE_CLAUDE_DEBUG:-0}
+DIAG_DIR="\$SESSION_DIR/diagnostics/${name}"
+mkdir -p "\$DIAG_DIR" 2>/dev/null || true
 ATTEMPT=0
 CONTINUE_FLAG=""
 USER_MSG=${um_q}
 
-echo "[\$(date -Iseconds)] [pane:${name}] launcher starting (max_restarts=\$MAX_RESTARTS claude_timeout=\${CLAUDE_TIMEOUT_S}s)" >> "\$LOG"
+echo "[\$(date -Iseconds)] [pane:${name}] launcher starting (max_restarts=\$MAX_RESTARTS claude_timeout=\${CLAUDE_TIMEOUT_S}s debug=\$CLAUDE_DEBUG)" >> "\$LOG"
 while [ ! -f "\$STOP_FILE" ] && [ \$ATTEMPT -lt \$MAX_RESTARTS ]; do
     ATTEMPT=\$((ATTEMPT + 1))
     echo "[\$(date -Iseconds)] [pane:${name}] attempt=\$ATTEMPT continue=\$CONTINUE_FLAG" >> "\$LOG"
+    CLAUDE_START=\$(date +%s)
     # \`timeout --signal=TERM\` lets claude shut down cleanly on the wallclock cap;
     # \`--kill-after=30s\` escalates to SIGKILL if it ignores TERM. Exit code 124 = timed out.
-    timeout --signal=TERM --kill-after=30s "\$CLAUDE_TIMEOUT_S" claude --print \\
+    # \`env -S\` here lets us conditionally inject ANTHROPIC_LOG=debug without polluting the parent shell.
+    DEBUG_ENV=""
+    if [ "\$CLAUDE_DEBUG" = "1" ]; then
+        DEBUG_ENV="ANTHROPIC_LOG=debug"
+    fi
+    env \$DEBUG_ENV timeout --signal=TERM --kill-after=30s "\$CLAUDE_TIMEOUT_S" claude --print \\
         --output-format stream-json --verbose \\
         \$CONTINUE_FLAG \\
         --model "$MODEL_ARG" \\
@@ -479,10 +492,37 @@ while [ ! -f "\$STOP_FILE" ] && [ \$ATTEMPT -lt \$MAX_RESTARTS ]; do
         \$USER_MSG \\
         >> "\$LOG" 2>&1 < /dev/null
     EXIT=\$?
+    CLAUDE_DURATION=\$(( \$(date +%s) - CLAUDE_START ))
     if [ "\$EXIT" = "124" ] || [ "\$EXIT" = "137" ]; then
-        echo "[\$(date -Iseconds)] [pane:${name}] WARN: claude --print exceeded \${CLAUDE_TIMEOUT_S}s wallclock (exit=\$EXIT) — likely a hung SSE/MCP/API stream; restarting with --continue" >> "\$LOG"
+        echo "[\$(date -Iseconds)] [pane:${name}] WARN: claude --print exceeded \${CLAUDE_TIMEOUT_S}s wallclock (exit=\$EXIT, ran for \${CLAUDE_DURATION}s) — likely a hung SSE/MCP/API stream; restarting with --continue" >> "\$LOG"
+        # Post-mortem snapshot: capture process tree + open TCP sockets + last
+        # log mtime so we can later diagnose where the hang lived (Anthropic
+        # API, MCP, or middlebox). Best-effort, never fail the loop.
+        DIAG_FILE="\$DIAG_DIR/hang_attempt\${ATTEMPT}_\$(date +%Y%m%dT%H%M%S).txt"
+        {
+            echo "=== Hang post-mortem for [pane:${name}] attempt=\$ATTEMPT ==="
+            echo "timestamp: \$(date -Iseconds)"
+            echo "duration_seconds: \$CLAUDE_DURATION"
+            echo "timeout_setting: \$CLAUDE_TIMEOUT_S"
+            echo "exit_code: \$EXIT"
+            echo
+            echo "--- claude/node processes (post-SIGTERM, may already be reaped) ---"
+            ps -eo pid,ppid,etime,stat,cmd 2>/dev/null | grep -E '\\b(claude|node)\\b' | grep -v grep | head -20 || echo "(none)"
+            echo
+            echo "--- ESTABLISHED TCP to candidate hang targets ---"
+            (ss -tnp 2>/dev/null || netstat -tnp 2>/dev/null) | grep -E 'ESTAB|ESTABLISHED' | grep -E 'anthropic|claude|amd\\.com|primus|oci-' | head -20 || echo "(none)"
+            echo
+            echo "--- log mtime (gap from now = idle window) ---"
+            stat -c '%y %n' "\$LOG" 2>/dev/null || echo "(stat failed)"
+            echo "now:    \$(date -Iseconds)"
+            echo
+            echo "--- last 20 lines of pane log ---"
+            tail -20 "\$LOG" 2>/dev/null
+            echo "=== end ==="
+        } > "\$DIAG_FILE" 2>&1
+        echo "[\$(date -Iseconds)] [pane:${name}] hang diagnostic snapshot → \$DIAG_FILE" >> "\$LOG"
     else
-        echo "[\$(date -Iseconds)] [pane:${name}] claude exit=\$EXIT" >> "\$LOG"
+        echo "[\$(date -Iseconds)] [pane:${name}] claude exit=\$EXIT (ran for \${CLAUDE_DURATION}s)" >> "\$LOG"
     fi
     [ -f "\$STOP_FILE" ] && break
     sleep 15
