@@ -482,6 +482,12 @@ B64
 
 LOG="$log_file"
 STOP_FILE="$SESSION_DIR/STOP_PANE_${name}"
+# PID file for the currently-running \`claude --print\` invocation.
+# Used by run.sh's monitor to forcibly kill a wedged inner claude when
+# orchestrator sets state.json:km_requested_restart=true after detecting
+# pane silence > KM_HEARTBEAT_RESTART_MIN.  The outer while loop here
+# survives the kill and re-launches with \`--continue\`.
+PID_FILE="$SESSION_DIR/.pane_${name}.pid"
 # Bumped from 50 → 200 because each \`claude --print\` is now wallclock-bounded
 # (default 30min via timeout below). 18h × 2 restarts/h = 36; 24h = 48; with
 # headroom for retries-after-API-errors, 200 leaves plenty of slack. The real
@@ -519,6 +525,8 @@ while [ ! -f "\$STOP_FILE" ] && [ \$ATTEMPT -lt \$MAX_RESTARTS ]; do
     if [ "\$CLAUDE_DEBUG" = "1" ]; then
         DEBUG_ENV="ANTHROPIC_LOG=debug"
     fi
+    # Run inner claude in the background so we can publish its PID for
+    # external soft-kill (orchestrator-driven pane restart on KM hang).
     env \$DEBUG_ENV timeout --signal=TERM --kill-after=30s "\$CLAUDE_TIMEOUT_S" claude --print \\
         --output-format stream-json --verbose \\
         \$CONTINUE_FLAG \\
@@ -533,8 +541,12 @@ while [ ! -f "\$STOP_FILE" ] && [ \$ATTEMPT -lt \$MAX_RESTARTS ]; do
         --allowedTools "$ALLOWED_TOOLS" \\
         --system-prompt "\$SYSTEM_PROMPT" \\
         \$USER_MSG \\
-        >> "\$LOG" 2>&1 < /dev/null
+        >> "\$LOG" 2>&1 < /dev/null &
+    INNER_PID=\$!
+    echo \$INNER_PID > "\$PID_FILE"
+    wait \$INNER_PID
     EXIT=\$?
+    rm -f "\$PID_FILE" 2>/dev/null || true
     CLAUDE_DURATION=\$(( \$(date +%s) - CLAUDE_START ))
     if [ "\$EXIT" = "124" ] || [ "\$EXIT" = "137" ]; then
         echo "[\$(date -Iseconds)] [pane:${name}] WARN: claude --print exceeded \${CLAUDE_TIMEOUT_S}s wallclock (exit=\$EXIT, ran for \${CLAUDE_DURATION}s) — likely a hung SSE/MCP/API stream; restarting with --continue" >> "\$LOG"
@@ -718,8 +730,41 @@ BUDGET=$(awk "BEGIN{printf \"%d\", $MAX_HOURS * 3600}")
 LAST_REPORT=0
 log "monitor: budget=${MAX_HOURS}h  report every ${REPORT_INTERVAL_S}s"
 
+KM_LAST_RESTART=0
 while tmux has-session -t marathon 2>/dev/null; do
     NOW=$(date +%s); ELAPSED=$(( NOW - START ))
+
+    # ----- kernel-mgr soft-restart on heartbeat-stale -----
+    # Orchestrator's _check_km_heartbeat() sets state.json:km_requested_restart=true
+    # after KM_HEARTBEAT_RESTART_MIN of silence on results/event_log/work_queue.jsonl.
+    # We respond by SIGTERMing the pane's current `claude --print` PID; the pane's
+    # outer while-loop will sleep 15s and re-launch with --continue.  Throttled to
+    # at most one restart per 5 min so a flapping orchestrator can't loop-kill.
+    if [[ -f "$SESSION_DIR/state.json" ]] \
+        && [[ $(( NOW - KM_LAST_RESTART )) -ge 300 ]] \
+        && jq -e '.km_requested_restart == true' "$SESSION_DIR/state.json" >/dev/null 2>&1; then
+        KM_PID_FILE="$SESSION_DIR/.pane_kernel-mgr.pid"
+        if [[ -f "$KM_PID_FILE" ]]; then
+            KM_PID=$(cat "$KM_PID_FILE" 2>/dev/null || true)
+            if [[ -n "$KM_PID" ]] && kill -0 "$KM_PID" 2>/dev/null; then
+                log "monitor: km_requested_restart=true → SIGTERM inner claude pid=$KM_PID (pane outer loop will --continue)"
+                kill -TERM "$KM_PID" 2>/dev/null || true
+                # Give it 30s to die gracefully; outer `timeout --kill-after=30s` is the backstop.
+                for _ in 1 2 3 4 5 6; do
+                    kill -0 "$KM_PID" 2>/dev/null || break
+                    sleep 5
+                done
+                kill -KILL "$KM_PID" 2>/dev/null || true
+                KM_LAST_RESTART=$NOW
+            else
+                # PID file exists but no live process; clean it up so we don't loop.
+                rm -f "$KM_PID_FILE" 2>/dev/null || true
+            fi
+        else
+            log "monitor: km_requested_restart=true but no PID file at $KM_PID_FILE; skipping (orchestrator will clear flag if KM revives)"
+            KM_LAST_RESTART=$NOW
+        fi
+    fi
 
     if [[ $(( NOW - LAST_REPORT )) -ge $REPORT_INTERVAL_S ]]; then
         printf "[%s elapsed=%dmin]" "$(date +%H:%M:%S)" $(( ELAPSED / 60 ))
