@@ -1,8 +1,19 @@
 # Action: Target Analysis
 
+## Overview
+
+Analyzes external performance targets to quantify the optimization gap and adjust
+DFS action priorities accordingly.
+
 ## Inputs
 - `$TARGET_DIR` or target time-to-train numbers (optional)
 - Baseline ms/iter and time_to_train from current run
+
+## KB Query
+
+```
+python3 $SKILL_ROOT/kb/kb_query.py "GPT-OSS-20B target comparison" --top-k 5 --compact
+```
 
 ## Procedure
 
@@ -44,7 +55,7 @@ if target_techniques:
         if "fusion" in tech.lower():
             priors["fusion-flags"] *= 1.5
         if "gbs" in tech.lower() or "batch" in tech.lower():
-            priors["hyperparams"] *= 1.5
+            priors["config-selection"] *= 1.5
 ```
 
 ## Outputs
@@ -53,5 +64,11 @@ if target_techniques:
 - `target_gap_multiplier`: urgency multiplier
 - Updated heuristic priors
 
+## Heuristic Update
+
+- Large gap (>30%): multiply all DFS scores by target_gap_multiplier
+- Target techniques identified: boost corresponding action scores by 1.5x
+
 ## Failure Handling
+
 - If TARGET_DIR not found: skip target analysis, use default gap multiplier of 1.0
