@@ -41,11 +41,56 @@ as an urgency multiplier on all action scores.
 - **Precision:** BF16 / FP8 hybrid (E4M3 activations/weights, E5M2 gradients)
 - **Ruleset:** MLPerf Training 5.1.0
 
+## MCP Server References
+
+The following MCP servers are used during optimization. The agent MUST reference
+these by their exact server names when calling `CallMcpTool`. Connectivity is
+verified and **self-healed** in `actions/setup.md` Step 8 (see below).
+
+| Server | Name in mcp.json | Auth | Role | Used By |
+|--------|-------------------|------|------|---------|
+| TraceLens | `oci-traceLens-agent` | Bearer token (same domain) | Profiling | profile.md, re-profile.md, report.md, comm-tuning.md |
+| OOB Agent | `oob-optimizer-dev` | Bearer token | Kernel opt (parallel backend) | kernel-opt/oob-claude.md, kernel-opt/oob-codex.md |
+| GEAK | `oci-geak-agent` | Bearer token | Kernel opt (parallel backend) | kernel-opt/geak.md |
+
+**TraceLens tools:** `check_trace_file`, `run_full_standalone_analysis`, `run_comparative_analysis`
+
+**TraceLens fallback:** When TraceLens MCP is unavailable, the local profiling pipeline
+(`scripts/run_profile.sh` + `scripts/parse_trace.py`) operates independently. It sets
+`tensorboard_dir` to a deterministic path (`$RESULT_DIR/tb_traces`), discovers trace files
+via a two-level strategy (known dir first, then `discover_trace()` with relaxed fallback),
+and generates `categories.json` + `geak_candidates.json` for category-based heuristic
+adjustments. TraceLens-specific metrics (roofline, overlap, MFMA utilization) are skipped;
+`compute_heuristic_adjustments()` applies category-only rules automatically.
+
+**OOB Agent tools:** `agent_create_task`, `agent_submit_task`, `agent_get_task`,
+`agent_get_outputs`, `agent_download_file`, `agent_cancel_task`
+
+**GEAK tools:** `geak_set_model_config`, `geak_create_task`, `geak_submit_task`,
+`geak_get_task`, `geak_get_outputs`, `geak_download_file`
+
+### MCP Self-Healing (setup.md Step 8)
+
+Setup runs a Python script that probes each server using both MCP transports:
+**Streamable HTTP** (POST JSON-RPC directly to the URL) and **SSE** (GET to
+obtain a message endpoint, then POST). Different servers use different transports
+(e.g., TraceLens uses Streamable HTTP at `.../mcp`; GEAK and OOB use SSE at
+`.../sse`). The probe tries both transports automatically — **server URLs are
+never modified**. The only auto-heal is **auth propagation** from sibling servers
+on the same domain when a server has no Authorization header. Results populate
+`state["mcp_status"]`, `state["mcp_tools"]`, and per-server boolean flags that
+control downstream action dispatch.
+
+If a service is genuinely offline after the probe, the agent records it as `down`
+and falls back gracefully — no user intervention needed.
+
 ## Architecture
 
 ```
 SKILL.md (this file)                — DFS orchestrator: loop, heuristic, dispatch
-actions/*.md                         — Self-contained action modules (12 actions)
+actions/*.md                         — Self-contained action modules (17 actions)
+kernel-opt/                          — Per-backend kernel optimization references (geak, oob-claude, oob-codex)
+scripts/parse_trace.py               — Trace analysis (operator summary, kernel categorization, heuristics)
 kb/                                  — RAG knowledge base (JSONL + query/ingest scripts)
 scripts/common.sh                    — Tiered trial runner + metric extraction helpers
 scripts/trial_monitor.py             — Stdin log filter + progress display + anomaly detection
@@ -53,7 +98,7 @@ scripts/apply_quiet_config.sh        — YAML quiet/restore for noise reduction
 scripts/run_baseline.sh              — Standalone baseline script
 scripts/run_sweep.sh                 — GBS × LR sweep script
 scripts/run_trial.sh                 — CLI wrapper for run_mlperf_trial
-scripts/run_profile.sh               — Profiling run script
+scripts/run_profile.sh               — Profiling run script (sets tensorboard_dir, discovers traces, runs parse_trace.py)
 ```
 
 ## DFS Search Tree
@@ -75,9 +120,9 @@ scripts/run_profile.sh               — Profiling run script
                         │ BASELINE │
                         └────┬─────┘
                              │
-                        ┌────▼─────┐
-                        │ PROFILE  │
-                        └────┬─────┘
+                   ┌─────────▼─────────┐
+                   │ PROFILE + TRACELENS│ ← TraceLens roofline + overlap analysis (local fallback if TraceLens down)
+                   └─────────┬─────────┘
                              │
               ┌──────────────▼──────────────┐
               │      HEURISTIC SCORING      │
@@ -88,42 +133,59 @@ scripts/run_profile.sh               — Profiling run script
               │   PICK HIGHEST-SCORED ACTION │
               │                              │
               │  ┌──────────┐ ┌───────────┐ │
-              │  │ FUSION   │ │PARALLELISM│ │
+              │  │ FUSION   │ │  PARAMS   │ │
               │  │ FLAGS    │ │           │ │
               │  └────┬─────┘ └─────┬─────┘ │
               │       │             │        │
               │  ┌────▼────┐  ┌────▼─────┐  │
-              │  │ PARAMS  │  │ KERNEL   │  │
-              │  │         │  │  OPT     │  │
+              │  │ KERNEL  │  │ RUNTIME  │  │
+              │  │  OPT    │  │ TUNABLES │  │
               │  └────┬────┘  └────┬─────┘  │
               │       │            │         │
-              │  ┌────▼────┐ ┌────▼─────┐   │
-              │  │RUNTIME  │ │ HYPERP   │   │
-              │  │TUNABLES │ │  TUNE    │   │
-              │  └────┬────┘ └────┬─────┘   │
-              │       │           │          │
-              │  ┌────▼────┐ ┌───▼──────┐   │
-              │  │INTEGRATE│ │  SWEEP   │   │
-              │  └─────────┘ └──────────┘   │
+              │  ┌────▼────┐  ┌────▼─────┐  │
+              │  │FP8 RECIPE│ │INTEGRATE │  │
+              │  └────┬────┘  └────┬─────┘  │
+              │       └──────┬─────┘         │
               └──────────────┬──────────────┘
                              │
                       ┌──────▼──────┐
                       │  RE-SCORE   │ ← update heuristic, loop back
                       └──────┬──────┘
                              │
+                    ┌────────▼────────┐
+                    │  RE-PROFILE?    │ ← if gain > 2%, refresh bottlenecks
+                    └────────┬────────┘
+                             │
                      ┌───────▼───────┐
                      │ STOPPING MET? │
                      └───────┬───────┘
                              │ yes
+                   ┌─────────▼─────────┐
+                   │  CONFIG SELECTION  │ ← GBS/LR/TP/EP/DP (Tier 1→2L→3)
+                   └─────────┬─────────┘
+                             │
+                   ┌─────────▼─────────┐
+                   │CONVERGENCE SPEED  │ ← eval interval, LR schedule, warmup
+                   └─────────┬─────────┘
+                             │
+                   ┌─────────▼─────────┐
+                   │   COMM TUNING     │ ← NCCL/DeepEP/AllReduce (always runs)
+                   │  COMM OVERLAP     │ ← TraceLens-guided overlap optimization
+                   └─────────┬─────────┘
+                             │
                         ┌────▼────┐
-                        │ REPORT  │
+                        │ SWEEP   │ ← MBS / eval interval refinement
+                        └────┬────┘
+                             │
+                        ┌────▼────┐
+                        │ REPORT  │ ← TraceLens comparative analysis
                         └─────────┘
 ```
 
 **How the DFS works:** The orchestrator maintains a **priority stack** of candidate actions.
 After each action completes, the stack is re-scored and the highest-scored action is popped
 next. This is DFS because each action can push new sub-actions (e.g., PROFILE pushes
-GEAK candidates, FUSION-FLAGS pushes combination tests). The agent explores depth-first
+kernel optimization candidates, FUSION-FLAGS pushes combination tests). The agent explores depth-first
 along the most promising branch, but can backtrack if scores shift.
 
 **Exploration beyond the tree:** The agent is NOT limited to the pre-defined actions. If
@@ -150,17 +212,72 @@ score = (expected_time_reduction_pct / cost_minutes)
 | `crash_risk` | From KB (parallelism changes = 0.3, env vars = 0.05) | 0.0–1.0 |
 | `target_gap_multiplier` | `1 + min(target_gap_pct, 100) / 100` | 1.0–2.0 |
 
+## Action Classification
+
+Every action is classified as either **throughput-only** or **convergence-affecting**.
+This determines which evaluation layers apply during the DFS loop.
+
+| Category | Actions | Evaluation Path |
+|----------|---------|-----------------|
+| throughput-only | fusion-flags, kernel-opt, runtime-tunables, comm-tuning, params (MBS/recompute/overlap) | Layer 1 only (ms/iter via Tier 1) |
+| convergence-affecting | config-selection, convergence-speed, fp8-recipe-tuning | Layer 2 (loss_efficiency via Tier 2) + Layer 3 (projected_ttt via Tier 2.5) |
+
+**Throughput-only** actions change kernel efficiency, communication overhead, or system-level
+settings without altering training dynamics. Their effect is fully captured by ms/iter.
+
+**Convergence-affecting** actions change the loss trajectory — they may not change ms/iter at all
+but can dramatically shift iterations-to-converge. Examples: LR halving has zero ms/iter impact
+but may save 500 iterations; GBS changes affect both ms/iter and sample efficiency.
+
+The `classify_action()` helper in `scripts/common.sh` implements this classification.
+
+## Three-Layer Evaluation Metric
+
+The DFS loop uses a three-layer metric system instead of the single-dimensional ms/iter gain:
+
+**Layer 1 — ms/iter gain** (throughput-only actions):
+```
+gain_pct = (baseline_ms_per_iter - new_ms_per_iter) / baseline_ms_per_iter × 100
+```
+Measured via Tier 1 trial (100 iters). Positive = faster. This is the sole metric for
+throughput-only actions.
+
+**Layer 2 — loss_efficiency** (convergence-affecting actions, quick filter):
+```
+loss_efficiency = (first_eval_loss - last_eval_loss) / wall_time_seconds
+```
+Measured via Tier 2 trial (500 iters). Higher = faster convergence per unit time. Used to
+quickly discard clearly inferior candidates without running expensive Tier 2.5 trials.
+Threshold: discard if `candidate_efficiency < baseline_efficiency × 0.85` (15% worse).
+
+**Layer 3 — projected_ttt** (convergence-affecting actions, final decision):
+```
+ttt_gain_pct = (baseline_projected_ttt - candidate_projected_ttt) / baseline_projected_ttt × 100
+```
+Measured via Tier 2.5 trial (1500 iters). Uses `project_ttt()` to extrapolate time-to-target
+from the loss-vs-samples curve. Positive = faster convergence. This is the final keep/discard
+criterion for convergence-affecting actions.
+
+**Composite gain for score updates:**
+```
+For throughput-only:       gain = ms_per_iter_gain_pct
+For convergence-affecting: gain = ttt_gain_pct (from Layer 3)
+```
+
 ### Initial Score Priors (GPT-OSS-20B MoE on MI355X)
 
 | Action | Score | Rationale |
 |--------|-------|-----------|
 | fusion-flags | **9** | Highest impact for MoE: permute fusion, GA fusion |
-| hyperparams | **8** | GBS, LR, warmup can dramatically change time-to-target |
-| parallelism | 6 | EP/TP/DeepEP configuration |
+| config-selection | **8** | GBS/LR/TP/EP/DP — biggest convergence-speed lever |
+| convergence-speed | **7** | LR decay window + min_lr + peak LR + eval interval + warmup/wd fine-tuning |
+| fp8-recipe-tuning | **6** | FP8 knobs affect both ms/iter and convergence |
 | runtime-tunables | 5 | System-level knobs (NUMA, hugepages, NCCL) |
 | params (training) | 5 | MBS, recompute, overlap flags |
-| kernel-opt (GEAK) | 3 | MoE model → limited kernel opt opportunity |
+| comm-tuning | **6** | NCCL/RCCL/DeepEP/AllReduce comm tuning + TraceLens-guided overlap (always runs, post-config-selection) |
+| kernel-opt (GEAK/OOB-Claude/OOB-Codex) | 5 | All non-vendor kernels explored; GEMM-dominated but optimization surface always tested |
 | sweep | 1 | Final exploration of operating points |
+| re-profile | — | Not scored independently; triggered by score update rules |
 
 Scores update after each action based on measured results.
 
@@ -170,61 +287,31 @@ After each action completes:
 
 1. **Action succeeded (gain > 0%):** Boost similar actions. E.g., if `fusion-flags` gained
    +1.5%, boost remaining untested fusion flags by 1.5×.
-2. **Action failed (gain ≤ 0%):** Reduce similar actions by 0.5×.
+2. **Action failed (gain ≤ 0%):**
+   - Throughput-only actions: Reduce similar actions by 0.7×.
+   - Convergence-affecting actions: Reduce similar actions by 0.85×.
+     (Convergence effects are harder to measure in short trials; softer penalty avoids
+     premature abandonment of promising hyperparameter directions.)
 3. **After 2+ fusion flag wins:** Push `combined_fusion_test` with score = sum(individual) × 1.5
-4. **After all fusion flags tested:** Push `re-profile` (to discover new kernel targets)
-5. **After kernel opt kept:** Push `re-profile + next-kernel` with boosted score
-6. **After kernel opt discarded:** Reduce remaining kernel scores by 0.7×
-7. **When all action scores < 1.0:** Proceed to sweep → report
+4. **After all fusion flags tested:** Push `re-profile` via [`actions/re-profile.md`](actions/re-profile.md) to discover new kernel targets
+5. **After kernel opt kept:** Push `re-profile + next-kernel` via [`actions/re-profile.md`](actions/re-profile.md) with boosted score
+6. **After kernel opt discarded:** Reduce remaining kernel scores by 0.7×, but kernel-opt
+   score never falls below 0.5 (floor). Even with multiple negative adjustments, kernel-opt
+   is never removed from the stack.
+7. **After any action with gain > 2%:** Push `re-profile` onto stack with score = `max(remaining_scores) × 0.8`
+8. **After FP8 knob succeeds:** Boost remaining untested FP8 knobs by 1.3×
+9. **After convergence-speed action:** Update `state.eval_overhead_seconds` and `state.optimal_eval_interval`
+10. **When all action scores < 0.3 AND dfs_iteration_count ≥ 12:** Proceed to sweep → report.
+    The iteration floor ensures at least 12 DFS iterations before stopping, even if scores are low.
+11. **KB negative entry adjustment cap:** When a KB entry shows a prior negative result for
+    an action, reduce the action's `expected_time_reduction_pct` by at most 30%. Never zero
+    out an action based solely on KB history. The agent MUST still test the action if it has
+    not been tested in this run.
+12. **After LR schedule change (Dimension 5):** If `lr_decay_iters` change improved projected_ttt,
+    boost `min_lr` and `peak_lr` sub-dimensions by 1.5× (they build on the decay window).
+    Update `state.lr_decay_ratio`. If the ratio was previously > 5.0 (decay window >> convergence
+    window), this is likely a high-value action — log it prominently. Target ratio: 2–5×.
 
-## State Schema
-
-The orchestrator maintains this state throughout the run:
-
-```python
-state = {
-    "model_name": "GPT-OSS-20B",
-    "model_class": "moe_gqa",           # MoE + GQA + SWA
-    "framework": "primus",
-    "num_gpus": 8,
-    "tp": 1, "pp": 1, "ep": 1,          # parallelism config (from config)
-    "gpu_type": "MI355X",
-
-    "baseline_ms_per_iter": 0.0,
-    "baseline_time_to_train": 0.0,       # wall seconds (MLLOG run_start → run_stop)
-    "current_ms_per_iter": 0.0,
-    "current_time_to_train": 0.0,
-    "cumulative_gain_pct": 0.0,
-
-    "global_batch_size": 32,             # can be tuned (unlike training-optimization)
-    "micro_batch_size": 2,
-    "seq_length": 8192,
-    "eval_interval": 384,                # iterations between eval
-
-    "target_eval_loss": 3.34,            # MLPerf quality target
-    "baseline_eval_loss": None,          # from baseline run
-    "fp8_mode": "hybrid",
-
-    "target_time_to_train": None,        # from target-analysis, if available
-    "target_gap_pct": None,
-
-    "config_yaml": "",                   # path to training YAML
-    "config_sh": "",                     # path to shell config
-    "kept_overrides": [],                # accumulated config overrides
-    "kept_patches": [],                  # code patches that improved perf
-    "kept_env_vars": {},                 # environment variable changes
-
-    "action_stack": [],                  # priority stack of (score, action_name, params)
-    "completed_actions": [],             # log of (action_name, gain_pct, status)
-    "kernel_candidates": [],             # from profiling
-    "winning_flags": [],                 # from fusion flag exploration
-    "winning_params": [],                # from param tuning
-
-    "total_wall_minutes": 0,
-    "total_geak_submissions": 0,
-    "consecutive_discards": 0,
-}
-```
 
 ## Orchestrator Loop
 
@@ -236,6 +323,8 @@ PROCEDURE optimize():
      → Set framework, config paths, GPU count
      → Setup symlinks, verify data paths, kill stale processes
      → Validate trial_monitor.py and quiet_yaml functions
+     → MCP self-healing: HTTP pre-flight → auto-fix mcp.json → reload → verify
+     → Populate state["mcp_status"] and fallback flags (tracelens/oob/geak_available)
      → === REVIEW CHECKPOINT RC-1 ===
 
   2. CLASSIFY
@@ -246,62 +335,127 @@ PROCEDURE optimize():
      → Execute actions/target-analysis.md
      → Set target_time_to_train, target_gap_pct, target_gap_multiplier
 
-  4. KB WARM-UP
+  4. KB WARM-UP (REFERENCE ONLY)
      → Query KB for this model: python3 kb/kb_query.py --model "GPT-OSS-20B" --top-k 20
-     → Apply KB-informed adjustments to score priors
+     → KB entries are REFERENCE ONLY — they inform priors but do NOT skip actions.
+       Even if KB reports a prior result for the exact same action (e.g., "already
+       tested, gain=0"), the agent MUST still run its own trial to verify under
+       current conditions (hardware state, driver version, container image may differ).
+     → PENALTY CAP (Score Update Rule #11): KB negative entries may only reduce an
+       action's expected_time_reduction_pct by at most 30%. Never zero out an action
+       based solely on KB history. MUST NOT reduce any action score below 1.0 or
+       remove an action from the stack entirely.
 
-  5. BASELINE
+  5. BASELINE (MANDATORY FULL RUN)
      → Execute actions/baseline.md
-     → Uses Tier 1 trial: run_mlperf_trial "baseline" 1
-     → Parse TRIAL_RESULT for baseline_ms_per_iter, GBS verification
+     → MUST run Tier 3 (full convergence): run_mlperf_trial "baseline" 3
+       - Do NOT use Tier 1 or Tier 2 for baseline.
+       - The baseline MUST train to convergence (eval_loss ≤ 3.34) or exhaust all iters.
+       - This establishes the real baseline TTT that all optimizations compare against.
+     → Extract baseline_time_to_train (actual TTT), baseline_ms_per_iter, baseline_eval_loss
+     → Reference: current best known TTT = 206 min (must be re-verified by this baseline)
      → === REVIEW CHECKPOINT RC-2 ===
 
-  6. PROFILE
+  6. PROFILE + TRACELENS
      → Execute actions/profile.md (Tier 1 with profiling enabled)
-     → Populate kernel_candidates with (name, gpu_pct, source)
+     → Populate kernel_candidates with (name, gpu_pct, bound_type, source)
+     → Run TraceLens standalone analysis via CallMcpTool on MCP server "oci-traceLens-agent"
+       Tool: run_full_standalone_analysis  (MANDATORY — do NOT skip)
+     → Extract: comm_compute_overlap, mfma_utilization, memory_bound_kernel_pct
+     → Store TraceLens metrics in state
+     → Also compute baseline_loss_efficiency and baseline_projected_ttt from the
+       baseline Tier 3 log using compute_loss_efficiency() and project_ttt()
      → === REVIEW CHECKPOINT RC-3 ===
 
   7. BUILD ACTION STACK
      → Score all candidate actions using the heuristic
+     → Include convergence-speed, fp8-recipe-tuning, and comm-tuning in candidates
+     → Include comm-tuning (both Part A and Part B) unconditionally
      → Push onto action_stack sorted by score (highest first)
 
   8. DFS LOOP:
      SET dfs_iteration_count = 0
-     WHILE action_stack is not empty AND NOT stopping_criteria_met():
+     WHILE action_stack is not empty AND (dfs_iteration_count < 12 OR NOT stopping_criteria_met()):
        a. Pop highest-scored action
-       b. Execute the action with Tier 1 trial
-       c. Parse TRIAL_RESULT: check status (nan → REVERT, no_data → skip)
-       d. Measure: new_ms_per_iter from TRIAL_RESULT
-       e. Compute gain: compute_gain_pct(baseline, new_ms_per_iter)
-       f. CONVERGENCE GATE:
-          - If gain > 1%: Escalate to Tier 2 trial for convergence validation
-          - If Tier 2 TRIAL_RESULT shows eval_loss diverging: REVERT
-       g. Update state: current_ms_per_iter, cumulative_gain_pct
-       h. RE-SCORE all remaining actions
-       i. Push any new sub-actions discovered during execution
-       j. Log to completed_actions
-       k. INCREMENT dfs_iteration_count
-       l. IF dfs_iteration_count % 3 == 0:
+       b. Classify action as throughput-only or convergence-affecting (see Action Classification)
+
+       c. IF throughput-only:
+          c1. Execute with Tier 1 trial (100 iters)
+          c2. Parse TRIAL_RESULT: check status (nan → REVERT, no_data → skip)
+          c3. Measure: new_ms_per_iter from TRIAL_RESULT
+          c4. Compute gain: compute_gain_pct(baseline_ms, new_ms_per_iter)
+          c5. CONVERGENCE GATE: If gain > 1%, escalate to Tier 2 for convergence check
+          c6. If Tier 2 shows eval_loss diverging: REVERT
+
+       d. IF convergence-affecting:
+          d1. Execute with Tier 2 trial (500 iters)
+          d2. Parse TRIAL_RESULT: check status (nan → REVERT, no_data → skip)
+          d3. Measure both ms_per_iter AND eval_loss trajectory
+          d4. Compute loss_efficiency: compute_loss_efficiency(candidate_log)
+          d5. QUICK FILTER: If loss_efficiency < baseline_loss_efficiency × 0.85 → DISCARD
+          d6. Escalate to Tier 2.5 trial (1500 iters) for projected TTT
+          d7. Compute: projected_ttt via project_ttt(candidate_log, GBS)
+          d8. Compute gain: compute_ttt_gain_pct(baseline_projected_ttt, candidate_projected_ttt)
+          d9. If ttt_gain_pct ≤ 0%: DISCARD. If > 0%: KEEP
+
+       e. Update state: current_ms_per_iter, cumulative_gain_pct, projected_ttt (if applicable)
+       f. RE-SCORE all remaining actions using the appropriate gain metric
+       g. RE-PROFILE TRIGGER: If gain > 2%, push re-profile onto action_stack
+          with score = max(remaining_scores) × 0.8 (see actions/re-profile.md)
+       h. Push any new sub-actions discovered during execution
+       i. Log to completed_actions with (action, gain_pct, gain_type, status)
+       j. INCREMENT dfs_iteration_count
+       k. IF dfs_iteration_count % 3 == 0:
           → === REVIEW CHECKPOINT RC-4 ===
 
-  9. PRE-SWEEP REVIEW
+  9. CONFIG SELECTION (GBS / LR / TP / EP / DP)
+     → Execute actions/config-selection.md:
+       a. Stage 1 (Tier 1 filter): Run each candidate config for 100 iters.
+          Discard crash/NaN/OOM. Record ms/iter.
+       b. Stage 2 (Tier 2L comparison): Run survivors for 2500 iters each.
+          Extract loss-vs-samples curves, eval_loss trajectory, projected TTT.
+          Rank candidates by projected TTT (lowest = best).
+       c. Stage 3 (Tier 3 top-2 verification): Run only the top-2 candidates
+          to full convergence. Measure actual TTT.
+       d. Apply the winning config as the new baseline for subsequent steps.
+     → === REVIEW CHECKPOINT RC-4.5 ===
+
+  9.5 CONVERGENCE SPEED (on winning config)
+     → Execute actions/convergence-speed.md
+     → Dimension 1: Eval interval optimization
+     → Dimension 2: LR warmup iters
+     → Dimension 3: Weight decay
+     → Dimension 4: Gradient clipping
+     → Dimension 5: LR schedule (decay window → min_lr → peak LR) — highest leverage
+     → Combined validation of all winning convergence tweaks
+     → Update state: optimal_eval_interval, eval_overhead_seconds, lr_decay_iters, min_lr, lr
+
+  9.6 COMM TUNING (always runs — explores all topologies including pure DP)
+     → Execute actions/comm-tuning.md
+     → Part A: NCCL/RCCL parameter tuning + DeepEP (if EP > 1)
+     → Part B: TraceLens-guided overlap optimization (always runs; overlap metric is advisory context)
+
+ 10. PRE-SWEEP REVIEW
      → === REVIEW CHECKPOINT RC-5 ===
-     → Execute actions/sweep.md (Tier 2 trials for GBS × MBS sweep)
+     → Execute actions/sweep.md (Tier 2 trials for remaining param sweep)
      → === REVIEW CHECKPOINT RC-6 ===
 
- 10. REPORT
+ 11. REPORT
      → Execute actions/report.md:
        a. Run Tier 3: run_mlperf_trial "final" 3
           - Do NOT interrupt. Wait for training to naturally finish.
           - Training ends when eval_loss reaches 3.34 (status=success)
             or all iterations are exhausted (status=aborted).
-       b. === REVIEW CHECKPOINT RC-7 ===
+       b. Re-profile optimized config (Tier 1, 10 iters)
+       c. TraceLens comparative analysis (baseline vs optimized)
+       d. === REVIEW CHECKPOINT RC-7 ===
           - Verify run_stop status from MLLOG
           - Extract time-to-train (TTT) as the primary result
           - Extract final eval_loss
-       c. Generate optimization report with TTT comparison vs baseline projection
+       e. Generate optimization report with TTT comparison vs baseline
+          and TraceLens before/after kernel analysis
 
- 11. KNOWLEDGE HOOK
+ 12. KNOWLEDGE HOOK
      → Ingest any new knowledge discovered during the run via kb_ingest.py
 ```
 
@@ -313,10 +467,13 @@ PROCEDURE optimize():
    is measurable. If the `trial_monitor.py` emits `[ALERT] NaN`, REVERT immediately.
 2. **Check loss trajectory:** The `[ITER N/100] loss=X.XX` progress lines must show decreasing loss.
 3. **Convergence validation (Tier 2):** For winners (gain > 1%) or high-risk changes
-   (GBS/LR/FP8), run a 100-iteration trial with eval enabled. Check that eval_loss
+   (FP8 flags), run a 500-iteration trial with eval enabled. Check that eval_loss
    is on track toward 3.34.
-4. **Full verification (Tier 3):** Only for the final report — run the complete training
-   to confirm the target is actually reached.
+4. **Long convergence comparison (Tier 2L):** For config selection (GBS/LR/TP/EP/DP),
+   run 2500-iteration trials per candidate. Compare loss-vs-samples curves and
+   project TTT to rank candidates.
+5. **Full verification (Tier 3):** Only for the final report and config selection top-2 —
+   run the complete training to confirm the target is actually reached.
 
 **What invalidates a run:**
 - `TRIAL_RESULT` shows `status=nan` (NaN/Inf detected by trial_monitor)
@@ -329,7 +486,7 @@ kernel-opt (same config, different kernel code), runtime-tunables (system-level 
 
 ## Trial Tier Protocol
 
-All training runs during optimization use one of three trial tiers. This enables rapid
+All training runs during optimization use one of four trial tiers. This enables rapid
 iteration without waiting for full MLPerf runs.
 
 ### Tier 1: Quick Trial (ms/iter measurement)
@@ -360,6 +517,41 @@ iteration without waiting for full MLPerf runs.
 
 **Use for:** Validating winners, hyperparameter tuning, FP8 stability checks, sweep.
 
+### Tier 2L: Long Convergence Trial (Config Selection)
+
+| Parameter | Value |
+|-----------|-------|
+| `PRIMUS_TRAIN_ITERS` | 2500 |
+| `PRIMUS_EVAL_INTERVAL` | 50 (triggers dense eval curve) |
+| `MLLOG_TRAIN_LOSS_LOG_FREQ` | **1** |
+| `stderr_sink_level` | WARNING (quiet YAML) |
+| `log_interval` | 999999 (quiet YAML) |
+| Timeout | 4 hours (14400s) |
+| Output | ms/iter, loss-vs-samples curve, eval_loss trajectory, projected TTT, `TRIAL_RESULT` line |
+
+**Use for:** Comparing GBS/LR/TP/EP/DP candidates. At GBS=32, 2500 iters = 80,000 samples
+(~6 eval cycles). At GBS=16, 2500 iters = 40,000 samples (~3 eval cycles). Enough to
+compare loss-vs-samples curves, detect FP8/parallelism numerical drift, and project TTT.
+
+### Tier 2.5: Convergence Projection Trial
+
+| Parameter | Value |
+|-----------|-------|
+| `PRIMUS_TRAIN_ITERS` | 1500 |
+| `PRIMUS_EVAL_INTERVAL` | 50 (triggers multiple evals for curve fitting) |
+| `MLLOG_TRAIN_LOSS_LOG_FREQ` | **1** |
+| `stderr_sink_level` | WARNING (quiet YAML) |
+| `log_interval` | 999999 (quiet YAML) |
+| Timeout | 3 hours (10800s) |
+| Output | ms/iter, loss-vs-samples curve, eval_loss trajectory, projected TTT, `TRIAL_RESULT` line |
+
+**Use for:** Evaluating convergence-affecting actions (GBS, LR, warmup, weight_decay,
+fp8-recipe) during the DFS loop. At GBS=32, 1500 iters = 48,000 samples (~4 eval cycles
+at default interval). Enough to fit a loss curve and project TTT via `project_ttt()`.
+This tier is shorter than Tier 2L (2500 iters) but longer than Tier 2 (500 iters),
+balancing accuracy of TTT projection against wall-time cost (~45 min per trial at
+current ms/iter).
+
 ### Tier 3: Full Verification (Run to Convergence)
 
 | Parameter | Value |
@@ -373,7 +565,7 @@ iteration without waiting for full MLPerf runs.
 | Exit condition | `run_stop` with `status=success` (target reached) or all iterations exhausted |
 | Output | **time-to-train (TTT)**, final eval_loss, full MLLOG compliance log |
 
-**Use for:** Final report generation only. The training MUST run until the model either
+**Use for:** Final report generation AND config selection top-2 verification. The training MUST run until the model either
 reaches the target validation loss of 3.34 (`status=success`) or exhausts all iterations
 (`status=aborted`). Do NOT interrupt or early-stop a Tier 3 run — the entire purpose is
 to measure the actual time-to-target under the optimized configuration.
@@ -385,16 +577,33 @@ to measure the actual time-to-target under the optimized configuration.
 ### Tier Escalation
 
 ```
+THROUGHPUT-ONLY actions (fusion-flags, kernel-opt, runtime-tunables, comm-tuning, params):
 Tier 1 (100 iters)  →  gain > 1%?  →  Tier 2 (500 iters)  →  converges?  →  KEEP
                    →  gain ≤ 0%?  →  DISCARD
                    →  NaN/crash?  →  REVERT + log to KB
+
+CONVERGENCE-AFFECTING actions (config-selection, convergence-speed, fp8-recipe-tuning):
+Tier 2 (500 iters)  →  loss_efficiency < baseline × 0.85?  →  DISCARD
+                   →  loss_efficiency acceptable?  →  Tier 2.5 (1500 iters)
+   ↓
+Tier 2.5  →  projected_ttt improved?  →  KEEP
+          →  projected_ttt worse?     →  DISCARD
+
+Config selection (GBS/LR/TP/EP/DP):
+Tier 1 (100 iters)  →  crash/NaN?  →  DISCARD
+   ↓ survivors
+Tier 2 (500 iters)  →  loss_efficiency filter  →  DISCARD clearly worse
+   ↓ survivors
+Tier 2L (2500 iters)  →  rank by projected TTT  →  top 2
+   ↓ top 2
+Tier 3 (full run)  →  actual TTT  →  WINNER
 ```
 
 ### MLLOG_TRAIN_LOSS_LOG_FREQ Override (CRITICAL)
 
 The shell config sets `MLLOG_TRAIN_LOSS_LOG_FREQ=32`, which means `train_loss` events
 are only emitted at iterations divisible by 32. For short trials, this yields very few
-events and makes `extract_ms_per_iter` unreliable. Tier 1 and 2 MUST override this to `1`.
+events and makes `extract_ms_per_iter` unreliable. Tier 1, 2, and 2L MUST override this to `1`.
 
 ### Running a Trial
 
@@ -434,9 +643,10 @@ If any check fails, STOP and investigate before proceeding.
 | Checkpoint | After | Must Verify |
 |------------|-------|-------------|
 | RC-1 | setup | Env clean, symlinks valid, no stale processes, `quiet_yaml`/`restore_yaml` functional |
-| RC-2 | baseline | ms/iter in expected range (1000–5000 ms for this model), loss decreasing, GBS matches config |
-| RC-3 | profile | Profile trace exists, top-5 kernels identified, compute vs comm breakdown plausible |
+| RC-2 | baseline (Tier 3 full run) | `run_stop status=success` (converged), actual TTT recorded, ms/iter in expected range, GBS matches config. Compare TTT against reference 206 min. |
+| RC-3 | profile | Profile trace exists, kernel candidates identified (all non-vendor kernels ranked by GPU time), compute vs comm breakdown plausible |
 | RC-4 | Every 3 DFS iterations | Cumulative gain positive, no false-positive gains from noise, all reverts were clean |
+| RC-4.5 | After config selection | Winning config identified, projected TTT validated by Tier 3 actual TTT, loss-vs-samples comparison documented |
 | RC-5 | Before sweep | Summarize all kept optimizations, verify each individual gain, check they compose correctly |
 | RC-6 | After sweep | Optimal config identified, projected TTT is <= baseline TTT |
 | RC-7 | After Tier 3 completes | `run_stop` status is `success` (target 3.34 reached), TTT extracted, MLLOG compliance log complete. If `status=aborted`, analyze final eval_loss and document why target was not reached. |
@@ -445,11 +655,12 @@ If any check fails, STOP and investigate before proceeding.
 
 | Condition | Action |
 |-----------|--------|
-| All action scores < 1.0 | Proceed to sweep |
-| Cumulative ms/iter gain > 15% | Proceed to sweep |
-| 5 consecutive discards across all actions | Proceed to sweep |
-| Wall clock > 180 min total | Proceed to sweep |
+| All action scores < 0.3 AND `dfs_iteration_count ≥ 12` | Proceed to sweep |
+| Cumulative ms/iter gain > 15% AND `dfs_iteration_count ≥ 8` | Proceed to sweep |
+| 10 consecutive discards across all actions | Proceed to sweep |
+| Wall clock > 240 min total | Proceed to sweep |
 | Target exceeded (gap ≤ 0%) | Proceed to sweep |
+| `projected_ttt` unchanged for 3 consecutive convergence-affecting actions | Proceed to sweep |
 | 2+ training crashes | Emergency stop, report partial results |
 
 ## KB Integration
@@ -459,6 +670,12 @@ Before each action, query the KB for relevant knowledge:
 ```bash
 python3 $SKILL_ROOT/kb/kb_query.py "GPT-OSS-20B $ACTION_NAME" --top-k 5 --compact
 ```
+
+**KB is advisory, not authoritative.** Prior KB entries reflect earlier runs that may
+have different hardware state, driver versions, or container images. The agent MUST:
+- Always run its own trial even if KB shows a prior result for the same action
+- Never skip an untested action solely because KB says it was tested before
+- Use KB to inform score priors (±30% adjustment) but never to zero out an action
 
 After each action with new findings, ingest into KB:
 
@@ -471,22 +688,25 @@ python3 $SKILL_ROOT/kb/kb_ingest.py \
 
 ## Action Dispatch
 
-| Action | Module | Trial Tier | When |
-|--------|--------|-----------|------|
-| Setup | [`actions/setup.md`](actions/setup.md) | — | Always first (RC-1) |
-| Classify | [`actions/classify.md`](actions/classify.md) | — | Always second |
-| Target Analysis | [`actions/target-analysis.md`](actions/target-analysis.md) | — | If target provided |
-| Baseline | [`actions/baseline.md`](actions/baseline.md) | Tier 1 | After classify (RC-2) |
-| Profile | [`actions/profile.md`](actions/profile.md) | Tier 1 | After baseline (RC-3) |
-| Fusion Flags | [`actions/fusion-flags.md`](actions/fusion-flags.md) | Tier 1 → 2 | DFS loop |
-| Parallelism | [`actions/parallelism.md`](actions/parallelism.md) | Tier 1 → 2 | DFS loop |
-| Training Params | [`actions/params.md`](actions/params.md) | Tier 1 → 2 | DFS loop |
-| Hyperparameter Tuning | [`actions/hyperparams.md`](actions/hyperparams.md) | Tier 2 | DFS loop |
-| Runtime Tunables | [`actions/runtime-tunables.md`](actions/runtime-tunables.md) | Tier 1 | DFS loop |
-| Kernel Optimization | [`actions/kernel-opt.md`](actions/kernel-opt.md) | Tier 1 → 2 | DFS loop |
-| Integration | [`actions/integrate.md`](actions/integrate.md) | Tier 1 → 2 | Per-kernel sub-action |
-| Parameter Sweep | [`actions/sweep.md`](actions/sweep.md) | Tier 2 | After DFS loop (RC-5/6) |
-| Report | [`actions/report.md`](actions/report.md) | Tier 3 | Always last (RC-7) |
+| Action | Module | Category | Trial Tier | When |
+|--------|--------|----------|-----------|------|
+| Setup | [`actions/setup.md`](actions/setup.md) | — | — | Always first (RC-1) |
+| Classify | [`actions/classify.md`](actions/classify.md) | — | — | Always second |
+| Target Analysis | [`actions/target-analysis.md`](actions/target-analysis.md) | — | — | If target provided |
+| Baseline | [`actions/baseline.md`](actions/baseline.md) | — | **Tier 3** (full run) | After classify (RC-2) |
+| Profile + TraceLens | [`actions/profile.md`](actions/profile.md) | — | Tier 1 | After baseline (RC-3) |
+| Fusion Flags | [`actions/fusion-flags.md`](actions/fusion-flags.md) | throughput | Tier 1 → 2 | DFS loop |
+| FP8 Recipe Tuning | [`actions/fp8-recipe-tuning.md`](actions/fp8-recipe-tuning.md) | convergence | Tier 2 → 2.5 | DFS loop |
+| Training Params | [`actions/params.md`](actions/params.md) | throughput | Tier 1 → 2 | DFS loop |
+| Runtime Tunables | [`actions/runtime-tunables.md`](actions/runtime-tunables.md) | throughput | Tier 1 | DFS loop |
+| Kernel Optimization (GEAK/OOB-Claude/OOB-Codex) | [`actions/kernel-opt.md`](actions/kernel-opt.md) | throughput | Tier 1 → 2 | DFS loop |
+| Integration | [`actions/integrate.md`](actions/integrate.md) | throughput | Tier 1 → 2 | Per-kernel sub-action |
+| Re-Profile | [`actions/re-profile.md`](actions/re-profile.md) | — | Tier 1 | After gain > 2% or all fusion flags |
+| Config Selection | [`actions/config-selection.md`](actions/config-selection.md) | convergence | Tier 1 → 2 → 2L → 3 | After DFS loop (RC-4.5) |
+| Convergence Speed | [`actions/convergence-speed.md`](actions/convergence-speed.md) | convergence | Tier 2 → 2.5 | After config selection |
+| Comm Tuning | [`actions/comm-tuning.md`](actions/comm-tuning.md) | throughput | Tier 1 → 2 | After config selection (always) |
+| Parameter Sweep | [`actions/sweep.md`](actions/sweep.md) | — | Tier 2 | After config selection (RC-5/6) |
+| Report | [`actions/report.md`](actions/report.md) | — | Tier 3 | Always last (RC-7) |
 
 ## Reference: MLPerf Run Commands
 
@@ -512,6 +732,10 @@ run_mlperf_trial "validate_name" 2
 
 # Tier 2 with custom iters
 run_mlperf_trial "validate_name" 2 300
+
+# Tier 2L: Long convergence for config selection (2500 iters, eval enabled, 4hr timeout)
+run_mlperf_trial "gbs32_ep1" 2L
+run_mlperf_trial "gbs16_ep1" 2L "" "PRIMUS_GLOBAL_BATCH_SIZE=16 PRIMUS_LR=2.0e-4"
 
 # Tier 1 with extra env vars
 run_mlperf_trial "gbs64" 1 100 "PRIMUS_GLOBAL_BATCH_SIZE=64 PRIMUS_LR=5.6e-4"
@@ -670,7 +894,7 @@ Or modify the YAML config directly for Primus-level overrides (fusion flags, MoE
    Larger GBS means fewer iterations to process the same data, but each iteration is slower.
    The optimal GBS balances iteration time vs convergence speed.
 
-2. **Eval overhead matters.** At GBS=32, eval runs every 384 iters. Each eval takes ~30s
+2. **Eval overhead matters.** At GBS=32, eval runs every 512 iters. Each eval takes ~30s
    (64 eval iters). Reducing eval frequency saves wall time but risks overshooting target.
 
 3. **FP8 stability is critical.** FP8 hybrid mode can cause loss spikes or NaN with certain
@@ -689,6 +913,42 @@ Or modify the YAML config directly for Primus-level overrides (fusion flags, MoE
    compatibility (permute fusion, FP8 context, TopK router, etc.).
 
 8. **hipBLASLt GEMMs dominate (60–70% GPU time).** Gains come from reducing everything else.
+
+9. **Current best known TTT is 206 minutes.** This is the reference convergence time with
+   the current config. The baseline run MUST re-verify this number — do not assume it.
+
+10. **`NVTE_USE_CAST_TRANSPOSE_TRITON=1` yields ~0.2% improvement.** Confirmed prior result.
+    This enables Triton-based FP8 cast+transpose kernels. Apply early in optimization.
+
+11. **TraceLens comm-compute overlap informs tuning priority.** High overlap (>0.7) suggests
+    smaller gains expected from Part B, but the agent still runs it to verify — gains from
+    NCCL buffer/channel tuning can exist even with high measured overlap.
+
+12. **Eval interval optimization saves 2–5 minutes at zero convergence risk.**
+    Each eval cycle costs ~30s — reducing from 16 to 8 evals saves ~4 min.
+
+13. **ms/iter gain alone is insufficient for convergence-affecting actions.** LR, GBS, warmup,
+    and weight_decay changes can have zero ms/iter impact but dramatically change
+    iterations-to-converge. Always use the three-layer evaluation (ms/iter →
+    loss_efficiency → projected_ttt) for these actions. The DFS loop classifies each
+    action and applies the appropriate metric path automatically.
+
+14. **LR decay window mismatch is a common high-impact blind spot.** When `lr_decay_iters`
+    is set to `train_iters` (e.g. 1.2M) but convergence occurs at ~7200 iters, cosine
+    decay barely reduces LR during actual training (essentially flat). However, setting
+    `lr_decay_iters` too close to convergence iters (1.0–1.2×) is equally problematic:
+    the cosine schedule reaches near-`min_lr` by convergence, starving the model of
+    learning capacity in the final push toward the loss target. Set `lr_decay_iters` to
+    **2–5×** the projected convergence iters (LR at convergence ≈ 55–91% of peak). This
+    provides meaningful annealing without late-stage stall. After fixing the decay window,
+    tune `min_lr` in both directions (lower for deeper annealing, higher to preserve
+    late-stage capacity with tight windows), then try increasing peak LR.
+
+15. **LR schedule knobs must be explored sequentially, not independently.** The three
+    sub-dimensions (decay window → min_lr → peak LR) depend on each other. Always tune
+    the decay window first, then adjust min_lr, then try increasing peak LR. Testing
+    peak LR without first fixing a mismatched decay window will produce misleading results
+    (higher LR with flat decay = instability; higher LR with proper decay = faster convergence).
 
 ## Reference: Process Management
 
