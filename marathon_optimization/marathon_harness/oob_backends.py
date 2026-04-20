@@ -199,13 +199,19 @@ class OOBBackends:
         # launch vllm / run ShareGPT bench / do multi-GPU work will
         # stall the pod for 30 min and return nothing.  Reject such
         # prompts locally so the round-level timeout never fires.
+        #
+        # Do NOT bump failure_counts here: pollution is an upstream
+        # prompt-construction bug (orchestrator gave an over-wide target,
+        # or session_history leaked banned words), not a backend fault.
+        # Counting it against the backend would trip the
+        # BACKEND_FAILURE_THRESHOLD=5 and evict the backend from use on
+        # unrelated follow-up targets.
         pollution = _scan_prompt_for_pollution(prompt)
         if pollution is not None:
             log.warning(
                 "OOB dispatch aborted (backend=%s, kernel=%s) — prompt-pollution: %s",
                 backend, target.get("kernel_name", "?"), pollution,
             )
-            self.failure_counts[backend] = self.failure_counts.get(backend, 0) + 1
             return OOBResult(
                 backend=backend, status="error",
                 error=f"prompt-pollution: {pollution}",
@@ -218,7 +224,16 @@ class OOBBackends:
                 return await self._dispatch_codex(prompt, target)
             elif backend == "claude":
                 result = await self._dispatch_claude(prompt, target)
-                if result.status == "error":
+                # Only fall back to Codex on genuine backend errors.
+                # prompt-pollution is upstream — Codex will hit the same
+                # regex and fail after another round-trip; short-circuit.
+                # Likewise on hard SDK timeout: if Claude's 15-min wrap
+                # fired, the underlying MCP is misbehaving and Codex
+                # won't do better within the caller's round budget.
+                if (
+                    result.status == "error"
+                    and not (result.error or "").startswith("prompt-pollution:")
+                ):
                     log.warning("Claude failed, falling back to Codex")
                     return await self._dispatch_codex(prompt, target)
                 return result
