@@ -3077,6 +3077,27 @@ READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
         if self.state.kernel_manager_targets_pushed <= 0:
             return
 
+        # Idle-vs-hung gate: silence on a KM with NO pending work is normal
+        # (we pushed targets, it finished them, queue is empty).  Treating
+        # that as a hang would restart a healthy idle pane every
+        # RESTART_MIN — visible as runaway km_restart_count on long runs.
+        # Only arm stale/restart checks when there IS pending work, OR when
+        # a restart is already in flight and we still need the auto-clear
+        # path below to run.
+        pending_km_targets = 0
+        try:
+            wq = ipc.read_work_queue_all(self.session_dir)
+        except Exception:
+            wq = []
+        processed = set(getattr(self.state, "kernel_manager_processed_ids", []) or [])
+        for t in wq:
+            if t.get("status") == "pending" and t.get("id") not in processed:
+                pending_km_targets += 1
+        if pending_km_targets <= 0 and not getattr(
+            self.state, "km_requested_restart", False
+        ):
+            return
+
         session_path = Path(self.session_dir)
         # Probe KM-exclusive files only (see docstring above).
         heartbeat_sources = [
@@ -3134,6 +3155,7 @@ READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
                         "silence_min": round(silence_min, 1),
                         "restart_count": self.state.km_restart_count,
                         "threshold_min": KM_HEARTBEAT_RESTART_MIN,
+                        "pending_km_targets": pending_km_targets,
                     },
                 })
                 self.state.events_written += 1
