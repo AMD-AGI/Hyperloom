@@ -225,6 +225,13 @@ class MarathonState:
 
     # --- error ---
     consecutive_failures: int = 0
+    # `consecutive_failures` counts CRASHED actions; it triggers re-analyze.
+    # `consecutive_regressions` counts actions that ran-clean but lost
+    # throughput (and were reverted).  The DFS branch may be exhausted /
+    # over-committed even when no action crashes — without this counter
+    # the orchestrator can spin forever trying near-relatives of the
+    # same losing hypothesis.  Triggers a forced re-explore.
+    consecutive_regressions: int = 0
     actions_since_gain: int = 0
     actions_since_rescore: int = 0
     actions_since_bench: int = 0
