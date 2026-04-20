@@ -141,7 +141,7 @@ jobs:
 
       - name: Apply labels
         env:
-          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           RULE_LABELS: ${{ steps.rules.outputs.rule_labels }}
           LLM_LABELS: ${{ steps.llm.outputs.llm_labels }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
