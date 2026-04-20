@@ -434,8 +434,22 @@ class InferenceXWorkload:
     def _snapshot_dir(self) -> Path:
         return Path(self.result_dir) / ".system_snapshots"
 
+    def _all_watched_files(self) -> list[str]:
+        """System files + sprint repo scripts to protect from bad Claw patches."""
+        watched = list(_WATCHED_SYSTEM_FILES)
+        for attr in ("_sprint_launch_script", "_sprint_patch_script",
+                      "_sprint_benchmark_script"):
+            path = getattr(self, attr, None)
+            if path and Path(path).exists() and path not in watched:
+                watched.append(path)
+        return watched
+
+    @staticmethod
+    def _snap_name(src_path: str) -> str:
+        return src_path.replace("/", "__").lstrip("_")
+
     def snapshot_system_files(self) -> list[str]:
-        """Copy watched system files to a snapshot directory.
+        """Copy watched system files + sprint scripts to a snapshot directory.
 
         Called before handing off to the Claw agent so we can revert if
         the agent's patches break the inference server.
@@ -443,10 +457,10 @@ class InferenceXWorkload:
         snap_dir = self._snapshot_dir()
         snap_dir.mkdir(parents=True, exist_ok=True)
         saved: list[str] = []
-        for src_path in _WATCHED_SYSTEM_FILES:
+        for src_path in self._all_watched_files():
             src = Path(src_path)
             if src.exists():
-                dest = snap_dir / src.name
+                dest = snap_dir / self._snap_name(src_path)
                 try:
                     shutil.copy2(str(src), str(dest))
                     saved.append(src_path)
@@ -457,14 +471,14 @@ class InferenceXWorkload:
         return saved
 
     def rollback_system_files(self) -> list[str]:
-        """Restore system files from the last snapshot."""
+        """Restore system files + sprint scripts from the last snapshot."""
         snap_dir = self._snapshot_dir()
         if not snap_dir.is_dir():
             return []
         restored: list[str] = []
-        for src_path in _WATCHED_SYSTEM_FILES:
+        for src_path in self._all_watched_files():
             src = Path(src_path)
-            backup = snap_dir / src.name
+            backup = snap_dir / self._snap_name(src_path)
             if backup.exists():
                 try:
                     shutil.copy2(str(backup), str(src))
@@ -480,9 +494,9 @@ class InferenceXWorkload:
         if not snap_dir.is_dir():
             return []
         changed: list[str] = []
-        for src_path in _WATCHED_SYSTEM_FILES:
+        for src_path in self._all_watched_files():
             src = Path(src_path)
-            backup = snap_dir / src.name
+            backup = snap_dir / self._snap_name(src_path)
             if not src.exists() or not backup.exists():
                 continue
             try:
@@ -647,15 +661,139 @@ class InferenceXWorkload:
                           proc.returncode, output[-500:])
                 return False
             log.info("Patches applied successfully")
+            for line in output.splitlines():
+                if any(k in line for k in ("OK", "SKIP", "WARN", "ERROR")):
+                    log.info("  apply_patches.sh: %s", line.strip())
 
-        # Step 3: apply any extra .patch files not covered by the script
-        if sprint_dir:
-            await self._apply_extra_patch_files(sprint_dir)
+        # Step 3: required sglang/aiter patches
+        await self._apply_required_sglang_patches(sprint_dir)
+        await self._apply_required_aiter_patches(sprint_dir)
 
-        # Step 4: container compatibility hotfixes
+        # Step 4: container compatibility hotfixes (tokenizer fallback)
         await self._apply_container_hotfixes()
 
         return True
+
+    async def _apply_git_patch(self, patch_file: Path, repo_dir: str) -> bool:
+        """Try to git-apply a patch. Returns True if applied or already present."""
+        proc = await asyncio.create_subprocess_exec(
+            "git", "apply", "--check", str(patch_file),
+            cwd=repo_dir,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.wait()
+        if proc.returncode == 0:
+            proc2 = await asyncio.create_subprocess_exec(
+                "git", "apply", str(patch_file),
+                cwd=repo_dir,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await proc2.wait()
+            if proc2.returncode == 0:
+                log.info("Applied %s", patch_file.name)
+                return True
+            log.warning("Failed to apply %s", patch_file.name)
+            return False
+        log.info("%s already applied or incompatible", patch_file.name)
+        return True
+
+    async def _apply_required_sglang_patches(self, sprint_dir: Optional[str]) -> None:
+        """Apply sglang patches that apply_patches.sh doesn't cover."""
+        if not sprint_dir:
+            return
+        sglang_dir = "/sgl-workspace/sglang"
+        if not Path(sglang_dir).exists():
+            return
+        patches_dir = Path(sprint_dir) / "patches"
+
+        # Model type registration for glm_moe_dsa architecture
+        p = patches_dir / "glm5_model_type_fix.patch"
+        if p.exists():
+            await self._apply_git_patch(p, sglang_dir)
+
+        # FP8 KV cache reshape fix — also fixes mla_decode_fwd positional arg
+        # mismatch (kv_last_page_lens missing, sm_scale/logit_cap as kwargs)
+        p = patches_dir / "aiter_fp8_kv_cache_reshape_fix.patch"
+        if p.exists():
+            await self._apply_git_patch(p, sglang_dir)
+
+    async def _apply_required_aiter_patches(self, sprint_dir: Optional[str]) -> None:
+        """Apply aiter patches as a safety net (in case apply_patches.sh missed them)."""
+        self._ensure_gluon_mqa_bypass()
+
+    def _ensure_gluon_mqa_bypass(self) -> None:
+        """Directly patch pa_mqa_logits.py to bypass broken gluon kernel compilation.
+
+        Uses string replacement instead of git-apply so it survives concurrent
+        Claw edits to the same file. Called both at patch time and just before
+        server launch.
+        """
+        target = Path("/sgl-workspace/aiter/aiter/ops/triton/attention/pa_mqa_logits.py")
+        if not target.exists():
+            return
+        content = target.read_text()
+        if "if enable_gluon_pa_mqa_logits:" in content and "if False:" not in content:
+            content = content.replace(
+                "if enable_gluon_pa_mqa_logits:",
+                "if False:  # gluon bypass — broken kernel compilation on MI355X",
+                1)
+            target.write_text(content)
+            log.info("Applied gluon MQA bypass (direct edit)")
+
+    async def _fix_fp8_cuda_graph_safety(self, sglang_dir: str) -> None:
+        """Fix the FP8 dequant path in nsa_backend.py for CUDA graph capture.
+
+        The aiter_fp8_kv_cache_reshape_fix patch adds FP8 KV cache support but
+        uses dynamic tensor ops (.item(), tensor-indexed slicing, dynamic arange)
+        that break HIP stream capture. Replace with fixed-size buffer ops.
+        """
+        nsa = Path(sglang_dir) / "python/sglang/srt/layers/attention/nsa_backend.py"
+        if not nsa.exists():
+            return
+        content = nsa.read_text()
+        changed = False
+
+        # 1. Add pre-allocated sequential indices buffer
+        if "cuda_graph_seq_kv_indices" not in content:
+            old_buf = (
+                "        self.cuda_graph_aiter_kv_indices = torch.zeros(\n"
+                "            max_bs * self.max_context_len,\n"
+                "            dtype=torch.int32,\n"
+                "            device=self.device,\n"
+                "        )\n"
+            )
+            new_buf = old_buf + (
+                "        self.cuda_graph_seq_kv_indices = torch.arange(\n"
+                "            max_bs * self.max_context_len,\n"
+                "            dtype=torch.int32,\n"
+                "            device=self.device,\n"
+                "        )\n"
+            )
+            content = content.replace(old_buf, new_buf)
+            changed = True
+
+        # 2. Replace the dynamic FP8 decode path (.item() variant)
+        new_fp8_block = (
+            "            kv_cache_bf16 = dequantize_k_cache_paged(kv_cache, kv_indices)\n"
+            "            kv_cache_for_attn = kv_cache_bf16.view(-1, 1, 1, layer.head_dim)\n"
+            "            seq_kv_indices = self.cuda_graph_seq_kv_indices[:kv_indices.shape[0]]\n"
+            "            mla_decode_fwd("
+        )
+        # Match the .item() variant from the patch
+        marker = "total_kv_tokens = int(kv_indptr[bs].item())"
+        if marker in content:
+            start = content.index(marker)
+            # Find the mla_decode_fwd call that follows
+            end_marker = "            mla_decode_fwd("
+            end_idx = content.index(end_marker, start)
+            content = content[:start] + new_fp8_block[12:] + content[end_idx + len(end_marker):]
+            changed = True
+
+        if changed:
+            nsa.write_text(content)
+            log.info("Fixed FP8 decode path for CUDA graph safety in nsa_backend.py")
+        else:
+            log.info("FP8 decode path already fixed or not present")
 
     async def _apply_container_hotfixes(self) -> None:
         """Apply runtime compatibility fixes for the container environment.
@@ -710,6 +848,52 @@ class InferenceXWorkload:
         else:
             log.debug("Tokenizer hotfix: target pattern not found, skipping")
 
+    async def _apply_cuda_graph_hotfix(self) -> None:
+        """Fix nsa_backend.py .item() call that breaks CUDA graph capture on ROCm.
+
+        The FP8 KV cache dequantization path uses kv_indptr[bs].item() which
+        triggers CPU-GPU sync during HIP stream capture. Replace with tensor
+        slicing to keep everything on-device.
+        """
+        nsa_path = Path("/sgl-workspace/sglang/python/sglang/srt/layers/"
+                        "attention/nsa_backend.py")
+        if not nsa_path.exists():
+            return
+
+        content = nsa_path.read_text()
+        old_pattern = "total_kv_tokens = int(kv_indptr[bs].item())"
+        if old_pattern not in content:
+            return
+
+        content = content.replace(
+            "            total_kv_tokens = int(kv_indptr[bs].item())\n"
+            "            if total_kv_tokens > 0:\n"
+            "                # dequantize_k_cache_paged gathers kv_indices rows from the packed FP8 buffer and\n"
+            "                # dequantizes them to BF16, producing a compact sequential tensor of shape (total_kv, 1, head_dim)\n"
+            "                kv_cache_bf16 = dequantize_k_cache_paged(\n"
+            "                    kv_cache, kv_indices[:total_kv_tokens]\n"
+            "                )\n"
+            "                # kv_cache_bf16: (total_kv_tokens, 1, head_dim) in bf16, reshape for mla_decode_fwd\n"
+            "                kv_cache_for_attn = kv_cache_bf16.view(-1, 1, 1, layer.head_dim)\n"
+            "                # Use sequential indices since we've already gathered and compacted the KV tokens\n"
+            "                seq_kv_indices = torch.arange(\n"
+            "                    total_kv_tokens, dtype=kv_indices.dtype, device=kv_indices.device\n"
+            "                )\n"
+            "            else:\n"
+            "                kv_cache_for_attn = kv_cache.view(-1, 1, 1, layer.head_dim)\n"
+            "                seq_kv_indices = kv_indices",
+            "            total_kv_tokens_t = kv_indptr[bs]\n"
+            "            kv_cache_bf16 = dequantize_k_cache_paged(\n"
+            "                kv_cache, kv_indices[:total_kv_tokens_t]\n"
+            "            )\n"
+            "            kv_cache_for_attn = kv_cache_bf16.view(-1, 1, 1, layer.head_dim)\n"
+            "            seq_kv_indices = torch.arange(\n"
+            "                total_kv_tokens_t, dtype=kv_indices.dtype, device=kv_indices.device\n"
+            "            )",
+        )
+        nsa_path.write_text(content)
+        log.info("Applied CUDA graph hotfix to nsa_backend.py (removed .item() in FP8 KV decode)")
+
     async def start_server(self, extra_args: list[str] | None = None,
                            timeout_s: float = DEFAULT_SERVER_TIMEOUT_S) -> bool:
         """Start the inference server and wait until healthy.
@@ -727,6 +911,9 @@ class InferenceXWorkload:
 
         # Apply patches before launching (launch scripts assume patches are applied)
         await self.apply_sprint_patches()
+
+        # Last-mile safety: ensure gluon bypass survives any concurrent edits
+        self._ensure_gluon_mqa_bypass()
 
         sprint_script = getattr(self, '_sprint_launch_script', None)
         if sprint_script and Path(sprint_script).exists():
@@ -779,6 +966,29 @@ class InferenceXWorkload:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         self._server_log_path = str(log_path)
 
+        # The Sprint launch script uses SCRIPT_DIR/REPO_DIR to resolve paths.
+        # When run from a temp copy or different CWD, REPO_DIR would be wrong.
+        # Create a temp copy with REPO_DIR fixed to the actual Sprint repo.
+        sprint_script = getattr(self, '_sprint_launch_script', None)
+        if sprint_script and Path(sprint_script).exists():
+            import tempfile, shutil
+            sprint_repo = str(Path(sprint_script).resolve().parent.parent)
+            tmp_script = Path(tempfile.mktemp(suffix="_launch.sh"))
+            shutil.copy2(sprint_script, tmp_script)
+            script_text = tmp_script.read_text()
+            script_text = script_text.replace(
+                'REPO_DIR="$(dirname "$SCRIPT_DIR")"',
+                f'REPO_DIR="{sprint_repo}"')
+            # Preserve the sprint's KV cache dtype — the aiter attention
+            # kernels lack heuristics for BF16 with certain GQA/block_size combos.
+            if '--num-continuous-decode-steps' not in script_text:
+                script_text = script_text.replace(
+                    '    --model-path $MODEL_PATH \\',
+                    '    --num-continuous-decode-steps 2 \\\n    --model-path $MODEL_PATH \\')
+            tmp_script.write_text(script_text)
+            cmd = cmd.replace(sprint_script, str(tmp_script))
+            log.info("Using Sprint launch script with REPO_DIR=%s", sprint_repo)
+
         log.info("Starting server (sprint script): %s", cmd[:200])
         log_fh = open(log_path, "w")
         proc = await asyncio.create_subprocess_shell(
@@ -813,6 +1023,13 @@ class InferenceXWorkload:
             log.warning(
                 "Sprint script exited %d (likely set -e killed the health "
                 "loop); checking if server process is alive", retcode)
+
+        # Mark server as ours immediately so kill_rogue_servers (which may
+        # run from parallel tasks like warm_start) doesn't kill it while
+        # CUDA graphs are still being captured.
+        global _marathon_owns_server
+        _marathon_owns_server = True
+        await self._record_running_server_pid()
 
         # The server was forked by the script — give it time to load the
         # model, warm up CUDA graphs, and become healthy (up to 15 min).
@@ -891,7 +1108,10 @@ class InferenceXWorkload:
         global _marathon_owns_server
         _marathon_owns_server = False
         log.info("Killing inference server …")
-        kill_patterns = ["sglang.srt", "sglang.launch_server", "vllm.entrypoints"]
+        kill_patterns = [
+            "sglang.srt", "sglang.launch_server",
+            "vllm.entrypoints", "vllm serve",
+        ]
         fw = self.framework.lower()
         if fw not in ("sglang", "vllm"):
             kill_patterns.append(f"{fw}.")
@@ -904,12 +1124,14 @@ class InferenceXWorkload:
             await proc.wait()
         await asyncio.sleep(SERVER_KILL_WAIT_S)
 
+        await self._kill_orphaned_workers()
+
         proc = await asyncio.create_subprocess_shell(
             "fuser -v /dev/dri/renderD* 2>&1 || true",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
         stdout, _ = await proc.communicate()
-        if stdout and b"python" in stdout.lower():
+        if stdout and any(tok in stdout.lower() for tok in [b"python", b"vllm", b"sglang", b"worker"]):
             log.warning("GPU processes lingering, force-killing")
             await asyncio.create_subprocess_shell(
                 "fuser -k /dev/dri/renderD* 2>/dev/null || true",
@@ -921,6 +1143,54 @@ class InferenceXWorkload:
         self._server_proc = None
         _clear_server_pid()
         return not await self._health_check()
+
+    async def _kill_orphaned_workers(self) -> None:
+        """Kill VLLM::Worker / multiprocessing child processes that survive API server death."""
+        for pattern in ["VLLM::Worker", "VLLM::EngineCore",
+                        "multiprocessing.spawn", "multiprocessing.forkserver"]:
+            proc = await asyncio.create_subprocess_exec(
+                "pgrep", "-f", pattern,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+            pids = stdout.decode().split()
+            if pids:
+                log.info("Killing %d orphaned worker process(es) matching '%s'", len(pids), pattern)
+                kill_proc = await asyncio.create_subprocess_exec(
+                    "kill", "-9", *pids,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await kill_proc.wait()
+        await asyncio.sleep(1)
+        for prefix in ["vllm", "nccl", "cuda", "rocm"]:
+            proc = await asyncio.create_subprocess_shell(
+                f"rm -f /dev/shm/{prefix}* 2>/dev/null || true",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+
+    async def _verify_gpu_memory_freed(self, max_wait_s: float = 30) -> bool:
+        """Wait for GPU VRAM to drop below idle threshold after server kill."""
+        IDLE_GB = 2.0
+        elapsed = 0.0
+        while elapsed < max_wait_s:
+            proc = await asyncio.create_subprocess_shell(
+                "rocm-smi --showmeminfo vram 2>/dev/null | grep 'Used Memory' | awk '{print $NF}'",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+            try:
+                vals = [int(x) / 1e9 for x in stdout.decode().split() if x.strip().isdigit()]
+                max_used = max(vals) if vals else 999
+            except (ValueError, IndexError):
+                max_used = 999
+            if max_used < IDLE_GB:
+                log.info("GPU memory freed (max %.1f GB used)", max_used)
+                return True
+            await asyncio.sleep(2)
+            elapsed += 2
+        log.warning("GPU memory still held after %.0fs (max %.1f GB)", elapsed, max_used)
+        return False
 
     # ------------------------------------------------------------------
     # Benchmark
