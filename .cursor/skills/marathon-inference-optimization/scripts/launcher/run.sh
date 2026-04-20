@@ -736,10 +736,12 @@ while tmux has-session -t marathon 2>/dev/null; do
 
     # ----- kernel-mgr soft-restart on heartbeat-stale -----
     # Orchestrator's _check_km_heartbeat() sets state.json:km_requested_restart=true
-    # after KM_HEARTBEAT_RESTART_MIN of silence on results/event_log/work_queue.jsonl.
-    # We respond by SIGTERMing the pane's current `claude --print` PID; the pane's
-    # outer while-loop will sleep 15s and re-launch with --continue.  Throttled to
-    # at most one restart per 5 min so a flapping orchestrator can't loop-kill.
+    # after KM_HEARTBEAT_RESTART_MIN of silence on KM-exclusive sources
+    # (logs/kernel-mgr.log, kernel_manager/results.jsonl) WHILE pending work still
+    # exists in the work queue.  We respond by SIGTERMing the pane's current
+    # `claude --print` PID; the pane's outer while-loop will sleep 15s and re-launch
+    # with --continue.  Throttled to at most one restart per 5 min so a flapping
+    # orchestrator can't loop-kill.
     if [[ -f "$SESSION_DIR/state.json" ]] \
         && [[ $(( NOW - KM_LAST_RESTART )) -ge 300 ]] \
         && jq -e '.km_requested_restart == true' "$SESSION_DIR/state.json" >/dev/null 2>&1; then
