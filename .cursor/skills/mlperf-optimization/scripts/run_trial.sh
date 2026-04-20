@@ -10,6 +10,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 # Usage:
 #   ./run_trial.sh --label test --tier 1
 #   ./run_trial.sh --label gbs64 --tier 2 --iters 500 --env "PRIMUS_GLOBAL_BATCH_SIZE=64"
+#   ./run_trial.sh --label cfg_A --tier 2L --env "PRIMUS_GLOBAL_BATCH_SIZE=32"
 #   ./run_trial.sh --label final --tier 3
 #
 # Required env vars: MLPERF_DIR, CONFIG_SH
@@ -31,7 +32,7 @@ while [[ $# -gt 0 ]]; do
         --iters)  ITERS="$2"; shift 2 ;;
         --env)    EXTRA_ENV="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: $0 --label NAME --tier 1|2|3 [--iters N] [--env 'KEY=VAL ...']"
+            echo "Usage: $0 --label NAME --tier 1|2|2L|3 [--iters N] [--env 'KEY=VAL ...']"
             exit 0
             ;;
         *)
