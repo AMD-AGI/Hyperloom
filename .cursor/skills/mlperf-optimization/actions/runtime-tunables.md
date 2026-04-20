@@ -6,8 +6,15 @@ System-level tuning that doesn't modify the training config. These are safe to a
 and usually provide a consistent baseline improvement.
 
 ## Inputs
+
 - System access level (sudo available?)
 - Current system configuration
+
+## KB Query
+
+```
+python3 $SKILL_ROOT/kb/kb_query.py "GPT-OSS-20B runtime tunables NCCL" --top-k 5 --compact
+```
 
 ## Tunable Matrix
 
@@ -57,7 +64,7 @@ fi
 
 ```bash
 source "$SKILL_ROOT/scripts/common.sh"
-run_mlperf_trial "nccl_tuned" 1 15 "NCCL_BUFFSIZE=16777216 RCCL_MSCCL_ENABLE=1"
+run_mlperf_trial "nccl_tuned" 1 "" "NCCL_BUFFSIZE=16777216 RCCL_MSCCL_ENABLE=1"
 
 eval "$(parse_trial_result "$(grep TRIAL_RESULT $RESULT_DIR/attempt_nccl_tuned.log)")"
 gain=$(compute_gain_pct "$baseline_ms_per_iter" "$TRIAL_MS_PER_ITER")
@@ -66,7 +73,7 @@ gain=$(compute_gain_pct "$baseline_ms_per_iter" "$TRIAL_MS_PER_ITER")
 ### Step 3: Test HSA pool size increase (Tier 1)
 
 ```bash
-run_mlperf_trial "hsa_pool_64m" 1 15 "HSA_KERNARG_POOL_SIZE=67108864"
+run_mlperf_trial "hsa_pool_64m" 1 "" "HSA_KERNARG_POOL_SIZE=67108864"
 ```
 
 ## Outputs
@@ -74,6 +81,12 @@ run_mlperf_trial "hsa_pool_64m" 1 15 "HSA_KERNARG_POOL_SIZE=67108864"
 - NCCL/RCCL optimal settings
 - Environment variable overrides
 
+## Heuristic Update
+
+- Large gains (>5%): boost similar system-level tuning scores
+- All tunables < 1%: proceed to next action category
+
 ## Failure Handling
+
 - If sudo not available: skip CPU/memory tunables
 - If NCCL tuning causes hangs: revert to defaults

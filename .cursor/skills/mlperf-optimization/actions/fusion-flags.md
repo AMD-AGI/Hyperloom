@@ -7,10 +7,17 @@ This is the **highest-impact action for MoE models** — each flag is a single c
 zero code changes, zero crash risk.
 
 ## Inputs
+
 - Baseline ms/iter and kept_overrides from prior attempts
 - Model class from classify step
 - Profile data (which kernels dominate)
 - Current YAML config state
+
+## KB Query
+
+```
+python3 $SKILL_ROOT/kb/kb_query.py "GPT-OSS-20B fusion flags MoE" --top-k 5 --compact
+```
 
 ## Pre-Check: Already-Enabled Flags
 
@@ -52,7 +59,7 @@ Test flags NOT already enabled:
 
 | Flag | Expected Impact | Notes |
 |------|----------------|-------|
-| `NVTE_USE_CAST_TRANSPOSE_TRITON=1` | Variable | Triton-based FP8 cast+transpose |
+| `NVTE_USE_CAST_TRANSPOSE_TRITON=1` | **+0.2% (confirmed)** | Triton-based FP8 cast+transpose. Known prior result — apply early. |
 | `NVTE_ROCM_ENABLE_MXFP8=1` | Variable | MX-FP8 (newer format, not all kernels support) |
 
 ### Flags to AVOID
@@ -116,7 +123,15 @@ If combined result is better than individual best, the combination is the new ba
 - Updated YAML config with winning flags
 - KB entries for each tested flag
 
+## Heuristic Update
+
+- Individual flag gain > 1%: boost remaining untested flags by 1.5x
+- All flags neutral/negative: reduce fusion-flags score by 0.7x
+- After 2+ wins: push combined_fusion_test (Score Update Rule #3)
+- After all flags tested: push re-profile (Score Update Rule #4)
+
 ## Failure Handling
+
 - If a flag crashes: log the error, mark as `crash`, revert YAML
 - If a flag causes loss divergence: mark as `convergence_fail`, revert
-- If all flags fail: move to parallelism or kernel-opt
+- If all flags fail: move to comm-tuning or kernel-opt
