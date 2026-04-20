@@ -2,11 +2,11 @@
 
 ## Overview
 
-Selects the optimal GBS/LR/EP/TP/DP combination using a three-stage elimination workflow. GBS, LR, and parallelism interact, so they are tested jointly. Tier 1 filters crashes and measures ms/iter; Tier 2L compares convergence; Tier 3 verifies full time-to-train on the top two.
+Selects the optimal GBS/LR/EP/TP/DP combination using a three-stage elimination workflow. GBS, LR, and parallelism interact, so they are tested jointly. Tier 1 filters crashes and measures ms/iter; Tier 3 compares convergence; Tier 4 verifies full time-to-train on the top two.
 
 ## Inputs
 
-- Baseline TTT and ms/iter (from Tier 3 baseline full run)
+- Baseline TTT and ms/iter (from Tier 4 baseline full run)
 - Current config: GBS=32, LR=4.0e-4, EP=1, DP=8, TP=1
 - Profile data (compute vs communication breakdown)
 
@@ -75,7 +75,7 @@ Discard candidates with nan/no_data/crash. Revert YAML between candidates.
 
 ### Stage 1.5: Tier 2 Loss Efficiency Filter (500 iters per survivor)
 
-Run each Stage 1 survivor for 500 iterations to compute `loss_efficiency`. This is a quick filter to eliminate candidates that are clearly worse at convergence before investing in costly Tier 2L runs.
+Run each Stage 1 survivor for 500 iterations to compute `loss_efficiency`. This is a quick filter to eliminate candidates that are clearly worse at convergence before investing in costly Tier 3 runs.
 
 ```bash
 source "$SKILL_ROOT/scripts/common.sh"
@@ -93,7 +93,7 @@ done
 (30% worse). This is a looser threshold than the DFS loop's 15% because config-selection
 candidates involve larger changes (GBS/EP) where early loss trajectory is less predictive.
 
-### Stage 2: Tier 2L Long Convergence Comparison (2500 iters per survivor)
+### Stage 2: Tier 3 Long Convergence Comparison (2500 iters per survivor)
 
 Run each surviving candidate for 2500 iterations. The dense eval schedule (every 50
 iters) produces loss-vs-samples curves for direct comparison.
@@ -101,26 +101,26 @@ iters) produces loss-vs-samples curves for direct comparison.
 ```bash
 # For each surviving candidate:
 # 1. Apply parallelism changes to YAML if needed
-# 2. Run Tier 2L trial with GBS/LR overrides
+# 2. Run Tier 3 trial with GBS/LR overrides
 
-run_mlperf_trial "cfg_A_2L" 2L
-run_mlperf_trial "cfg_B_2L" 2L "" \
+run_mlperf_trial "cfg_A_t3" 3
+run_mlperf_trial "cfg_B_t3" 3 "" \
     "PRIMUS_GLOBAL_BATCH_SIZE=16 PRIMUS_LR=2.0e-4 PRIMUS_MIN_LR=2.0e-5 PRIMUS_LR_WARMUP_ITERS=256"
 # ... etc for each survivor
 ```
 
-**After each Tier 2L trial completes, extract:**
+**After each Tier 3 trial completes, extract:**
 
 1. **ms/iter** — from TRIAL_RESULT
 2. **samples/sec** — `GBS / (ms_per_iter / 1000)`
 3. **Loss-vs-samples curve** — from `train_loss` MLLOG events in raw log:
    ```bash
-   extract_losses "$RESULT_DIR/attempt_cfg_A_2L_raw.log"
+   extract_losses "$RESULT_DIR/attempt_cfg_A_t3_raw.log"
    ```
 4. **Eval loss trajectory** — from `eval_accuracy` MLLOG events
 5. **Projected TTT** — from `project_ttt()` helper:
    ```bash
-   project_ttt "$RESULT_DIR/attempt_cfg_A_2L_raw.log" 32
+   project_ttt "$RESULT_DIR/attempt_cfg_A_t3_raw.log" 32
    ```
 
 **Ranking:**
@@ -136,18 +136,18 @@ run_mlperf_trial "cfg_B_2L" 2L "" \
 | A | ... | ... | ... | ... | ... |
 | B | ... | ... | ... | ... | ... |
 
-### Stage 3: Tier 3 Top-2 Full Verification
+### Stage 3: Tier 4 Top-2 Full Verification
 
 Run only the top-2 candidates to full convergence. The actual TTT is the ground truth.
 
 ```bash
 # Top-1 candidate:
 # Apply its config (YAML + env), then:
-run_mlperf_trial "cfg_winner1_full" 3
+run_mlperf_trial "cfg_winner1_full" 4
 
 # Top-2 candidate:
 # Apply its config, then:
-run_mlperf_trial "cfg_winner2_full" 3
+run_mlperf_trial "cfg_winner2_full" 4
 ```
 
 **Do NOT interrupt these runs.** Wait for `run_stop` with `status=success` or
@@ -171,7 +171,7 @@ After selecting the winner:
    - Record winning env vars in `state.kept_env_vars`
    - Update `state.global_batch_size`, `state.tp`, `state.ep`
 2. Re-run baseline with winning config (Tier 1) to establish the new baseline ms/iter
-   (a full Tier 3 re-baseline is only required if the winning config is substantially different)
+   (a full Tier 4 re-baseline is only required if the winning config is substantially different)
 3. All subsequent actions (sweep, report) use the winning config
 
 ## Outputs

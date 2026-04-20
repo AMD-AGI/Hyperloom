@@ -83,7 +83,7 @@ Decision:
 - NaN → DISCARD, revert, log to KB as unsafe
 - `loss_efficiency < baseline × 0.85` → DISCARD
 - ms/iter improved + convergence stable → KEEP
-- Ambiguous (±15%) → escalate to Tier 2.5, KEEP if `ttt_gain_pct > 0%`
+- Ambiguous (±15%) → escalate to Tier 3, KEEP if `ttt_gain_pct > 0%`
 
 ### Step 3: MX-FP8 exploration (Tier 3 knob)
 
@@ -96,8 +96,8 @@ eval "$(parse_trial_result "$(grep TRIAL_RESULT $RESULT_DIR/attempt_fp8_mxfp8_ch
 if [ "$TRIAL_STATUS" = "nan" ] || [ "$TRIAL_STATUS" = "no_data" ]; then
     echo "MX-FP8 failed NaN check — skipping"
 else
-    # Extended convergence check (Tier 2L)
-    run_mlperf_trial "fp8_mxfp8_conv" 2L "" "NVTE_ROCM_ENABLE_MXFP8=1"
+    # Extended convergence check (Tier 3)
+    run_mlperf_trial "fp8_mxfp8_conv" 3 "" "NVTE_ROCM_ENABLE_MXFP8=1"
 fi
 ```
 
@@ -109,7 +109,7 @@ Apply all winning FP8 knobs together:
 FP8_COMBINED="NVTE_USE_CAST_TRANSPOSE_TRITON=1"
 # Append other winners as discovered in Steps 2-3
 
-run_mlperf_trial "fp8_combined" 2L "" "$FP8_COMBINED"
+run_mlperf_trial "fp8_combined" 3 "" "$FP8_COMBINED"
 ```
 
 Project TTT from the combined trial:

@@ -3,7 +3,8 @@
 ## Overview
 
 Initializes the MLPerf optimization environment: sources config, creates symlinks,
-validates data/Primus paths, verifies trial infrastructure, and checks MCP connectivity.
+validates data/Primus paths, verifies trial infrastructure, checks MCP connectivity,
+and verifies TraceLens CLI availability.
 
 ## Inputs
 - User-specified config shell script path (default: `config_MI355X_1x8x1_fp8.sh`)
@@ -116,7 +117,6 @@ import subprocess, json, re, sys
 MCP_JSON = ".cursor/mcp.json"
 
 REQUIRED_SERVERS = {
-    "oci-traceLens-agent": "TraceLens profiling",
     "oob-optimizer-dev":   "OOB Agent (Codex/Claude kernel opt)",
     "oci-geak-agent":      "GEAK (GPU kernel opt)",
 }
@@ -261,14 +261,21 @@ json.dump(results, open("/tmp/mcp_probe_results.json", "w"), indent=2)
 After the script completes, set state from the results:
 
 ```python
-import json
+import json, subprocess
 r = json.load(open("/tmp/mcp_probe_results.json"))
 state["mcp_status"] = {name: v["status"] for name, v in r.items()}
 state["mcp_tools"] = {name: v.get("tools", []) for name, v in r.items()}
-state["tracelens_available"] = r.get("oci-traceLens-agent", {}).get("status") == "ok"
 state["oob_available"]       = r.get("oob-optimizer-dev", {}).get("status") == "ok"
 state["geak_available"]      = r.get("oci-geak-agent", {}).get("status") == "ok"
 state["kernel_opt_available"] = state["oob_available"] or state["geak_available"]
+
+# TraceLens now runs via local CLI, not MCP
+state["tracelens_cli_available"] = subprocess.run(
+    ["TraceLens_generate_perf_report_pytorch", "--help"],
+    capture_output=True, timeout=10
+).returncode == 0
+if not state["tracelens_cli_available"]:
+    print("TraceLens CLI not found. Install: cp -r /hyperloom/TraceLens-internal /tmp/TraceLens-internal && pip install -e /tmp/TraceLens-internal")
 ```
 
 ## Outputs
@@ -276,7 +283,8 @@ state["kernel_opt_available"] = state["oob_available"] or state["geak_available"
 - `trial_monitor.py`, `quiet_yaml`/`restore_yaml`, `common.sh` validated
 - `state["mcp_status"]` — per-server status (`ok` / `down` / `missing`)
 - `state["mcp_tools"]` — per-server tool name list (for `CallMcpTool` reference)
-- `state["tracelens_available"]`, `state["oob_available"]`, `state["geak_available"]` — boolean flags
+- `state["tracelens_cli_available"]` — boolean: TraceLens CLI installed and runnable
+- `state["oob_available"]`, `state["geak_available"]` — boolean flags for MCP servers
 - `mcp.json` auto-patched if fixable issues detected
 
 ## Heuristic Update
@@ -289,7 +297,7 @@ N/A — setup is a prerequisite, not an optimization action.
 - MCP server `down`: the probe tried both Streamable HTTP and SSE transports on the
   configured URL. The only auto-heal is auth propagation from sibling servers on the
   same domain. Server URLs are **never modified** — each server's URL in `mcp.json`
-  reflects its own transport (e.g., TraceLens uses Streamable HTTP at `.../mcp`,
-  GEAK/OOB use SSE at `.../sse`). If still down after auth heal, the service is
-  genuinely offline — downstream actions fall back gracefully (TraceLens → local
-  parse_trace.py; GEAK/OOB → whichever is available; both down → kernel-opt skipped)
+  reflects its own transport (GEAK/OOB use SSE at `.../sse`). If still down after
+  auth heal, the service is genuinely offline — downstream actions fall back
+  gracefully (GEAK/OOB → whichever is available; both down → kernel-opt skipped)
+- TraceLens CLI not installed: `cp -r /hyperloom/TraceLens-internal /tmp/TraceLens-internal && pip install -e /tmp/TraceLens-internal`; if still fails → downstream actions use `parse_trace.py` only (category-based heuristics without roofline/overlap)
