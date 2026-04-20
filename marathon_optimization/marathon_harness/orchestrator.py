@@ -3042,8 +3042,8 @@ READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
     # ------------------------------------------------------------------
 
     def _check_km_heartbeat(self) -> None:
-        """Watch kernel_manager/{results,event_log,work_queue}.jsonl mtimes
-        and request a pane restart when activity goes silent for too long.
+        """Watch KM-owned mtimes and request a pane restart when activity
+        goes silent for too long.
 
         Why this exists: PANE_CLAUDE_TIMEOUT_S=1800 in run.sh only bounds
         a single `claude --print` invocation — it does NOT detect a
@@ -3052,9 +3052,20 @@ READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
         tight no-op turn loop, MCP wedged on a state machine bug, etc.).
         Two-stage response: WARN at KM_HEARTBEAT_STALE_MIN, REQUEST
         RESTART at KM_HEARTBEAT_RESTART_MIN.  The actual pane restart is
-        performed by run.sh's monitor (it touches STOP_PANE_kernel-mgr
-        once it sees `km_requested_restart=true` in state.json; the
-        pane's outer while-loop then re-launches with `--continue`).
+        performed by run.sh's monitor (it sees `km_requested_restart=true`
+        in state.json, SIGTERMs the pane's current `claude --print` PID,
+        and the pane's outer while-loop re-launches with `--continue`).
+
+        Heartbeat sources — CRITICALLY must be files that ONLY the KM
+        pane writes.  `event_log.jsonl` and `work_queue.jsonl` are
+        shared with the orchestrator (we ourselves write branch-exhausted,
+        km-stale, accuracy-fail events; we push targets to work_queue).
+        Using those as "liveness" would self-cancel: the moment we wrote
+        a km-stale event, the file mtime would refresh and the next
+        check would consider KM alive again.  The only reliable sources:
+          * logs/kernel-mgr.log — pane stream-json stdout (inner claude
+            writes it directly; goes silent the instant the pane dies)
+          * kernel_manager/results.jsonl — written ONLY by KM
         """
         now = time.monotonic()
         last_check = getattr(self, "_km_heartbeat_last_check_mono", 0.0)
@@ -3066,10 +3077,14 @@ READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
         if self.state.kernel_manager_targets_pushed <= 0:
             return
 
-        km_dir = Path(self.session_dir) / "kernel_manager"
+        session_path = Path(self.session_dir)
+        # Probe KM-exclusive files only (see docstring above).
+        heartbeat_sources = [
+            session_path / "logs" / "kernel-mgr.log",
+            session_path / "kernel_manager" / "results.jsonl",
+        ]
         latest_mtime = 0.0
-        for fname in ("results.jsonl", "event_log.jsonl", "work_queue.jsonl"):
-            p = km_dir / fname
+        for p in heartbeat_sources:
             if not p.exists():
                 continue
             try:
@@ -3078,7 +3093,7 @@ READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
                 continue
 
         if latest_mtime <= 0:
-            return  # KM dir not even created yet — too early to call stale.
+            return  # Pane log not yet created — too early to call stale.
 
         silence_min = (time.time() - latest_mtime) / 60
 
