@@ -28,6 +28,11 @@ pr_submission:
   base_branch: main
   token_env: INFERENCEX_FORK_TOKEN
   min_gain_pct: 3.0
+  # Sync fork's base_branch from upstream right before creating PR so
+  # sweep runs against the freshest master config / baseline. ff-only;
+  # any conflict aborts the PR (fork should never have own commits).
+  upstream_repo_url: https://github.com/SemiAnalysisAI/InferenceX.git
+  sync_upstream_before_pr: true
   # Labels applied after PR creation. `sweep-enabled` triggers fork's
   # run-sweep.yml which re-runs the full InferenceX benchmark matrix on
   # perf-changelog.yaml changes and posts compare-results back to the PR.

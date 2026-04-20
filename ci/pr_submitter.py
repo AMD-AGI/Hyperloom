@@ -417,9 +417,48 @@ def _run_git(args: list[str], cwd: str, check: bool = True) -> subprocess.Comple
 
 def clone_fork(fork_url: str, target_dir: str, branch: str = "main"):
     subprocess.run(
-        ["git", "clone", "--depth=1", f"--branch={branch}", fork_url, target_dir],
+        ["git", "clone", f"--branch={branch}", fork_url, target_dir],
         check=True, capture_output=True, text=True,
     )
+
+
+def sync_fork_from_upstream(repo_dir: str, upstream_url: str,
+                            branch: str, token: str | None) -> None:
+    """Fast-forward fork's branch from upstream and push back.
+
+    Fail-fast: any non-ff state means fork was hand-modified; abort PR flow.
+    Requires the clone to have full history (no --depth=1).
+    """
+    _run_git(["remote", "add", "upstream", upstream_url], repo_dir, check=False)
+    _run_git(["fetch", "upstream", branch], repo_dir)
+    _run_git(["checkout", branch], repo_dir)
+
+    behind = _run_git(
+        ["rev-list", "--count", f"{branch}..upstream/{branch}"], repo_dir,
+    ).stdout.strip()
+    if behind == "0":
+        log.info("Fork %s is already up-to-date with upstream", branch)
+        return
+
+    log.info("Fork %s is %s commit(s) behind upstream, fast-forwarding",
+             branch, behind)
+    _run_git(["merge", "--ff-only", f"upstream/{branch}"], repo_dir)
+
+    push_url = None
+    if token:
+        remote = _run_git(["remote", "get-url", "origin"], repo_dir)
+        url = remote.stdout.strip()
+        if url.startswith("https://"):
+            push_url = url.replace("https://", f"https://x-access-token:{token}@")
+        elif url.startswith("git@github.com:"):
+            repo_path = url.replace("git@github.com:", "")
+            push_url = f"https://x-access-token:{token}@github.com/{repo_path}"
+
+    if push_url:
+        _run_git(["push", push_url, branch], repo_dir)
+    else:
+        _run_git(["push", "origin", branch], repo_dir)
+    log.info("Synced fork %s with upstream and pushed", branch)
 
 
 def create_pr_branch(repo_dir: str, branch_name: str):
@@ -650,6 +689,15 @@ def submit_pr(
     with tempfile.TemporaryDirectory() as tmpdir:
         log.info("Cloning %s...", repo_url)
         clone_fork(repo_url, tmpdir, base_branch)
+
+        if pr_cfg.get("sync_upstream_before_pr", True):
+            upstream_url = pr_cfg.get("upstream_repo_url")
+            if upstream_url:
+                log.info("Syncing fork from upstream %s before PR", upstream_url)
+                sync_fork_from_upstream(tmpdir, upstream_url, base_branch, token)
+            else:
+                log.warning("sync_upstream_before_pr=true but upstream_repo_url not set")
+
         create_pr_branch(tmpdir, branch_name)
 
         api_key = os.environ.get("LLM_API_KEY")
