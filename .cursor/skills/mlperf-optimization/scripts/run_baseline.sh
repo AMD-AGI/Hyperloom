@@ -5,9 +5,9 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 # =============================================================================
 # MLPerf Optimization — Baseline Run (Full Convergence)
 #
-# Runs a Tier 3 full convergence trial to establish the real baseline TTT.
+# Runs a Tier 4 full convergence trial to establish the real baseline TTT.
 # The baseline MUST run to convergence (eval_loss ≤ 3.34) or exhaust all iters.
-# Do NOT use Tier 1/2 for baseline — only Tier 3 provides a valid TTT reference.
+# Do NOT use Tier 1/2/3 for baseline — only Tier 4 provides a valid TTT reference.
 #
 # Reference: current best known TTT ~206 min (must be re-verified).
 #
@@ -24,7 +24,7 @@ RESULT_DIR="${RESULT_DIR:-/root/mlperf_results/${TIMESTAMP}}"
 mkdir -p "$RESULT_DIR"
 
 echo "============================================================"
-echo "MLPerf Optimization — Baseline (Tier 3 Full Convergence)"
+echo "MLPerf Optimization — Baseline (Tier 4 Full Convergence)"
 echo "Config: $CONFIG_SH"
 echo "Reference TTT: ~206 min"
 echo "Results: $RESULT_DIR"
@@ -33,8 +33,8 @@ echo ""
 echo "WARNING: This is a full convergence run. Do NOT interrupt."
 echo ""
 
-# --- Baseline run (Tier 3 — full convergence, no timeout) ---
-run_mlperf_trial "baseline" 3
+# --- Baseline run (Tier 4 — full convergence, no timeout) ---
+run_mlperf_trial "baseline" 4
 
 # --- Parse TRIAL_RESULT ---
 RESULT_LINE=$(grep "^TRIAL_RESULT" "$RESULT_DIR/attempt_baseline.log" || echo "")
