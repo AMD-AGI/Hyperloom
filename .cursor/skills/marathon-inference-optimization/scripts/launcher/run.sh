@@ -748,13 +748,21 @@ while tmux has-session -t marathon 2>/dev/null; do
             KM_PID=$(cat "$KM_PID_FILE" 2>/dev/null || true)
             if [[ -n "$KM_PID" ]] && kill -0 "$KM_PID" 2>/dev/null; then
                 log "monitor: km_requested_restart=true → SIGTERM inner claude pid=$KM_PID (pane outer loop will --continue)"
+                # Only SIGTERM: the pane already wraps claude in `timeout --signal=TERM
+                # --kill-after=30s`, so the TERM we send propagates to claude; if claude
+                # ignores it, timeout's own --kill-after=30s escalates to SIGKILL without
+                # us needing to reach in and risk orphaning claude by killing the timeout
+                # wrapper directly. Allow 60s for that full chain (TERM → 30s grace →
+                # timeout-driven KILL → process exit).
                 kill -TERM "$KM_PID" 2>/dev/null || true
-                # Give it 30s to die gracefully; outer `timeout --kill-after=30s` is the backstop.
-                for _ in 1 2 3 4 5 6; do
+                for _ in $(seq 1 12); do
                     kill -0 "$KM_PID" 2>/dev/null || break
                     sleep 5
                 done
-                kill -KILL "$KM_PID" 2>/dev/null || true
+                if kill -0 "$KM_PID" 2>/dev/null; then
+                    log "monitor: km pid=$KM_PID still alive after 60s SIGTERM grace — escalating to SIGKILL (claude may be orphaned until reaped by init)"
+                    kill -KILL "$KM_PID" 2>/dev/null || true
+                fi
                 KM_LAST_RESTART=$NOW
             else
                 # PID file exists but no live process; clean it up so we don't loop.
