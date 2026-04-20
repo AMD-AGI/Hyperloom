@@ -439,16 +439,31 @@ B64
 
 LOG="$log_file"
 STOP_FILE="$SESSION_DIR/STOP_PANE_${name}"
-MAX_RESTARTS=50
+# Bumped from 50 → 200 because each \`claude --print\` is now wallclock-bounded
+# (default 30min via timeout below). 18h × 2 restarts/h = 36; 24h = 48; with
+# headroom for retries-after-API-errors, 200 leaves plenty of slack. The real
+# stop conditions are STOP_FILE (graceful) and MAX_HOURS (run.sh wall budget).
+MAX_RESTARTS=\${PANE_MAX_RESTARTS:-200}
+# Wallclock cap on each \`claude --print\` call. CRITICAL for survival of long
+# runs: without it, a single hung SSE / MCP / API stream pins the inner
+# claude process forever, the outer while-loop never re-checks STOP_FILE,
+# never sends \`--continue\`, and the pane is dead until run.sh kills it
+# at MAX_HOURS — the entire marathon produces nothing past that point.
+# Default 1800s (30min): matches OK 6h-session's empirically observed
+# ~1-2h natural exit cadence with extra margin so transient API hangs are
+# bounded. Adjustable via PANE_CLAUDE_TIMEOUT_S env var.
+CLAUDE_TIMEOUT_S=\${PANE_CLAUDE_TIMEOUT_S:-1800}
 ATTEMPT=0
 CONTINUE_FLAG=""
 USER_MSG=${um_q}
 
-echo "[\$(date -Iseconds)] [pane:${name}] launcher starting" >> "\$LOG"
+echo "[\$(date -Iseconds)] [pane:${name}] launcher starting (max_restarts=\$MAX_RESTARTS claude_timeout=\${CLAUDE_TIMEOUT_S}s)" >> "\$LOG"
 while [ ! -f "\$STOP_FILE" ] && [ \$ATTEMPT -lt \$MAX_RESTARTS ]; do
     ATTEMPT=\$((ATTEMPT + 1))
     echo "[\$(date -Iseconds)] [pane:${name}] attempt=\$ATTEMPT continue=\$CONTINUE_FLAG" >> "\$LOG"
-    claude --print \\
+    # \`timeout --signal=TERM\` lets claude shut down cleanly on the wallclock cap;
+    # \`--kill-after=30s\` escalates to SIGKILL if it ignores TERM. Exit code 124 = timed out.
+    timeout --signal=TERM --kill-after=30s "\$CLAUDE_TIMEOUT_S" claude --print \\
         --output-format stream-json --verbose \\
         \$CONTINUE_FLAG \\
         --model "$MODEL_ARG" \\
@@ -464,13 +479,17 @@ while [ ! -f "\$STOP_FILE" ] && [ \$ATTEMPT -lt \$MAX_RESTARTS ]; do
         \$USER_MSG \\
         >> "\$LOG" 2>&1 < /dev/null
     EXIT=\$?
-    echo "[\$(date -Iseconds)] [pane:${name}] claude exit=\$EXIT" >> "\$LOG"
+    if [ "\$EXIT" = "124" ] || [ "\$EXIT" = "137" ]; then
+        echo "[\$(date -Iseconds)] [pane:${name}] WARN: claude --print exceeded \${CLAUDE_TIMEOUT_S}s wallclock (exit=\$EXIT) — likely a hung SSE/MCP/API stream; restarting with --continue" >> "\$LOG"
+    else
+        echo "[\$(date -Iseconds)] [pane:${name}] claude exit=\$EXIT" >> "\$LOG"
+    fi
     [ -f "\$STOP_FILE" ] && break
     sleep 15
     CONTINUE_FLAG="--continue"
     USER_MSG="Continue. Read \$SESSION_DIR/state.json to resume; then proceed with the next protocol step."
 done
-echo "[\$(date -Iseconds)] [pane:${name}] launcher exiting" >> "\$LOG"
+echo "[\$(date -Iseconds)] [pane:${name}] launcher exiting (attempt=\$ATTEMPT stop_file=\$([ -f \"\$STOP_FILE\" ] && echo yes || echo no))" >> "\$LOG"
 PANE
     chmod +x "$script_path"
     echo "$script_path"
