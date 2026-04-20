@@ -57,7 +57,8 @@ run_mlperf_trial "kernel_NAME_validate" 2 500
 
 ### Step 5: Post-integration re-profile (if kept)
 
-Push a `re-profile` action to discover if the optimization exposed new bottlenecks.
+Push a re-profile trigger ([`profile.md § Re-Profile Trigger`](profile.md#re-profile-trigger))
+to discover if the optimization exposed new bottlenecks.
 
 ## Outputs
 - `actual_e2e_pct`: actual end-to-end speedup percentage
