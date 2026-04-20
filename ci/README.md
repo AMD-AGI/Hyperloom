@@ -1,116 +1,125 @@
 # Hyperloom Inference Optimization CI/CD
 
-自动化推理优化流水线：从 InferenceX 拉取配置和基准数据，通过 Claw 调度 Agent 执行 Hyperloom Skill，生成优化报告。
+Automated inference optimization pipeline: fetch configuration and benchmark
+data from InferenceX, launch a Claw Agent to run the Hyperloom skill, and
+generate optimization reports.
 
-## 文件结构
+## File Layout
 
 ```
 ci/
-├── orchestrator.py          # 编排主程序（入口）
-├── claw_client.py           # Claw API 封装（session/message/SSE/files）
-├── inferenceX_parser.py     # InferenceX 配置解析 + API 数据获取
-├── report_generator.py      # 报告生成（markdown + JSON + GitHub Summary）
-├── ci-config.yaml           # 模型列表 + 运行配置
-├── prompt_template.md       # 发给 Claw Agent 的 prompt 模板
-├── inferenceX_models.yaml   # InferenceX API model 名称映射表
-├── claw-integration.md      # Claw 调用流程文档（给 Claw 团队对接）
-├── test_claw_flow.py        # Claw API 端到端测试脚本
-├── requirements.txt         # Python 依赖
+├── orchestrator.py          # Main orchestrator entry point
+├── claw_client.py           # Claw API wrapper (session/message/SSE/files)
+├── inferenceX_parser.py     # InferenceX config parsing + API data fetching
+├── report_generator.py      # Report generation (markdown + JSON + GitHub Summary)
+├── ci-config.yaml           # Model list + runtime configuration
+├── prompt_template.md       # Prompt template sent to the Claw Agent
+├── inferenceX_models.yaml   # InferenceX API model name mapping
+├── claw-integration.md      # Claw integration flow doc (for Claw team coordination)
+├── AB_TEST.md               # A/B test usage guide (for GEAK/TraceLens and related teams)
+├── test_claw_flow.py        # End-to-end Claw API test script
+├── requirements.txt         # Python dependencies
 └── README.md
 ```
 
-## 快速开始
+> For A/B testing (comparing the optimization effect of two tool combinations),
+> see **[AB_TEST.md](AB_TEST.md)**.
+
+## Quick Start
 
 ```bash
 pip install -r requirements.txt
 
-# Dry-run：只生成 prompt，不执行
+# Dry run: generate prompts only, do not execute
 HARBOR_PREFIX=harbor.oci-slc.example-internal-host.invalid/proxy \
 KERNEL_OPT_WORKSPACE=control-plane-sandbox \
   python orchestrator.py --dry-run
 
-# 实际执行（单个模型）
+# Actual execution (single model)
 HARBOR_PREFIX=harbor.oci-slc.example-internal-host.invalid/proxy \
 KERNEL_OPT_WORKSPACE=control-plane-sandbox \
 CLAW_API_KEY=ak-xxx \
   python orchestrator.py --models qwen3.5-bf16-mi355x-sglang --output-dir ./results
 
-# 执行全部模型
+# Run all models
 python orchestrator.py --trigger manual --output-dir ./results
 ```
 
-## 环境变量
+## Environment Variables
 
-| 变量 | 必须 | 说明 |
+| Variable | Required | Description |
 |------|------|------|
-| `HARBOR_PREFIX` | 是 | 镜像仓库前缀，如 `harbor.oci-slc.example-internal-host.invalid/proxy` |
-| `KERNEL_OPT_WORKSPACE` | 是 | Kernel 优化执行的 workspace（GEAK + OOB 共享），如 `control-plane-sandbox` |
-| `CLAW_API_KEY` | 是 | SaFE API Key（`ak-` 前缀） |
-| `WEBHOOK_URL` | 否 | 通知 webhook（Slack / Teams Incoming Webhook 均兼容） |
+| `HARBOR_PREFIX` | Yes | Image registry prefix, for example `harbor.oci-slc.example-internal-host.invalid/proxy` |
+| `KERNEL_OPT_WORKSPACE` | Yes | Workspace used for kernel optimization (shared by GEAK + OOB), for example `control-plane-sandbox` |
+| `CLAW_API_KEY` | Yes | SaFE API key (with `ak-` prefix) |
+| `WEBHOOK_URL` | No | Notification webhook (compatible with Slack / Teams Incoming Webhook) |
 
-## CLI 参数
+## CLI Arguments
 
 ```
 python orchestrator.py [OPTIONS]
 
---config PATH        指定 ci-config.yaml 路径（默认同目录下）
---models KEYS        逗号分隔的模型 key，只跑子集
---trigger TYPE       触发类型：manual / scheduled / inferenceX
---dry-run            只打印 prompt 不执行
---output-dir DIR     报告输出目录（默认 ci-output/）
+--config PATH        Path to ci-config.yaml (defaults to the local ci/ directory)
+--models KEYS        Comma-separated model keys; run only a subset
+--trigger TYPE       Trigger type: manual / scheduled / inferenceX
+--dry-run            Print prompts only; do not execute
+--output-dir DIR     Output directory for reports (default: ci-output/)
 ```
 
-## 添加模型
+## Adding a Model
 
-1. 查 `inferenceX_models.yaml` 确认 API model 名
-2. 查 InferenceX `amd-master.yaml` 确认 key
-3. 确认模型已下载到 `/hyperloom/models/`
-4. 在 `ci-config.yaml` 的 `models` 下添加：
+1. Check `inferenceX_models.yaml` to confirm the API model name
+2. Check InferenceX `amd-master.yaml` to confirm the key
+3. Make sure the model is already downloaded to `/hyperloom/models/`
+4. Add a new entry under `models` in `ci-config.yaml`:
 
 ```yaml
-- inferenceX_key: dsr1-fp8-mi355x-sglang       # amd-master.yaml 中的 key
-  inferenceX_api_name: DeepSeek-R1-0528          # InferenceX API model 参数
-  model_path_override: /hyperloom/models/xxx     # 本地模型路径
-  optimization_depth: full                       # full / param-only / baseline-only
-  kernel_opt_backends: geak, claude              # kernel 优化后端
-  target_gpu: b200                               # 对比的竞品 GPU
+- inferenceX_key: dsr1-fp8-mi355x-sglang       # Key in amd-master.yaml
+  inferenceX_api_name: DeepSeek-R1-0528        # InferenceX API model name
+  model_path_override: /hyperloom/models/xxx   # Local model path
+  optimization_depth: full                     # full / param-only / baseline-only
+  kernel_opt_backends: geak, claude            # Kernel optimization backends
+  target_gpu: b200                             # Competitor GPU used for comparison
 ```
 
 ## GitHub Actions
 
-### 配置 Secrets
+### Configure Secrets
 
-Settings → Secrets and variables → Actions → New repository secret：
+Settings → Secrets and variables → Actions → New repository secret:
 
-| Secret | 值 |
+| Secret | Value |
 |--------|---|
 | `HARBOR_PREFIX` | `harbor.oci-slc.example-internal-host.invalid/proxy` |
 | `KERNEL_OPT_WORKSPACE` | `control-plane-sandbox` |
 | `CLAW_API_KEY` | `ak-xxx` |
-| `WEBHOOK_URL` | Teams/Slack Incoming Webhook URL（可选） |
+| `WEBHOOK_URL` | Teams/Slack Incoming Webhook URL (optional) |
 
-### 触发方式
+### Trigger Methods
 
-- **定时**：每周一 UTC 02:00
-- **手动**：Actions → Run workflow → 可选填模型子集
-- **InferenceX 变更**：定时任务中检测 main 分支新 commit
+- **Scheduled**: every Monday at 02:00 UTC
+- **Manual**: Actions → Run workflow → optionally enter a subset of models
+- **InferenceX update**: checked by the scheduled workflow against new commits on `main`
 
-### 运行方式
+### Execution Model
 
-每个模型一个独立 Job（matrix 策略），互不影响。一个失败不影响其他。
+Each model runs in an independent job (matrix strategy). One failed model does
+not affect the others.
 
-### 输出
+### Outputs
 
-- **GitHub Summary**：每个模型 Job 页面显示对比表格
-- **Artifact `report-{model_key}`**：每个模型的 `optimization_report.md` + 摘要
-- 报告保留 90 天
+- **GitHub Summary**: comparison table shown on each model job page
+- **Artifact `report-{model_key}`**: per-model `optimization_report.md` + summary
+- Reports are retained for 90 days
 
-## Webhook 通知
+## Webhook Notifications
 
-支持 Slack 和 Teams 的 Incoming Webhook，每个模型完成后发送一条通知：
+Slack and Teams Incoming Webhooks are supported. One notification is sent after
+each model finishes:
 
 ```
 Hyperloom CI [Qwen3.5-397B-A17B]: completed | Gain: +3.0% | Trigger: manual
 ```
 
-Teams 配置：Teams Channel → Connectors → Incoming Webhook → 复制 URL → 填入 `WEBHOOK_URL` Secret。
+Teams setup: Teams Channel → Connectors → Incoming Webhook → copy the URL →
+store it in the `WEBHOOK_URL` secret.
