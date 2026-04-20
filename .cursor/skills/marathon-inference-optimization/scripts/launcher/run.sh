@@ -565,20 +565,15 @@ cleanup() {
     for name in watchdog orchestrator kernel-mgr; do
         touch "$SESSION_DIR/STOP_PANE_$name" 2>/dev/null || true
     done
-    # Graded grace window for SESSION_REPORT.md:
-    #   Phase 1 (0-180s):  let the orchestrator pane write its proper report
-    #                      after seeing STOP_PANE_orchestrator (best path).
-    #   Phase 2 (>180s):   pane is stuck in a long tool call (compile/bench).
-    #                      run.sh writes a fallback SESSION_REPORT.md from
-    #                      state.json so we never end with zero report.
-    #   Then proceed to TERM/KILL of pane claude processes (Phase 3).
-    local waited=0
-    while [[ $waited -lt 180 ]]; do
-        [[ -f "$SESSION_DIR/SESSION_REPORT.md" ]] && { log "  SESSION_REPORT.md present after ${waited}s (pane wrote it)"; break; }
-        sleep 5; waited=$((waited + 5))
-    done
+    # NOTE: SESSION_REPORT.md is now written in the FINALIZE step (before
+    # `[run.sh] Done`) rather than here. cleanup() runs from the EXIT trap,
+    # which on sandbox runs races against container teardown — the snapshot
+    # daemon starts copying the moment the polling agent sees `Done` and
+    # returns. Doing the 60s grace + fallback writer in FINALIZE guarantees
+    # SESSION_REPORT.md exists in $SESSION_DIR before the snapshot fires.
+    # If a fallback was needed, this trap is now best-effort progress only.
     if [[ ! -f "$SESSION_DIR/SESSION_REPORT.md" ]]; then
-        log "  pane did not write SESSION_REPORT.md within 180s; using fallback"
+        log "  cleanup: SESSION_REPORT.md still missing — last-ditch fallback attempt"
         generate_fallback_report
     fi
     # Kill pane claude processes BEFORE tmux kill, so they don't reparent to PID 1 as zombies.
@@ -678,6 +673,40 @@ done
 
 # ========== STEP 6 — FINALIZE ==========
 log "marathon complete"
+
+# CRITICAL ORDERING: SESSION_REPORT.md must exist BEFORE we print `[run.sh] Done`.
+#
+# Why this happens here (not in cleanup()): the polling agent that drives this
+# marathon is contractually required by the skill's SKILL.md to stop polling
+# the moment it sees `[run.sh] Done` in /tmp/marathon.log. On the Claw sandbox,
+# the agent finishing its turn triggers an immediate executor snapshot+teardown
+# of the container — typically within 5s of the final assistant message. The
+# EXIT-trap `cleanup()` in this script never gets the wall-clock budget it
+# needs (180s grace + jq-driven fallback writer) before the container dies and
+# the unsynced state of $SESSION_DIR is what S3 captures. Result: 18h runs
+# kept ending with zero SESSION_REPORT.md on S3 even though state.json was fine.
+#
+# Doing the grace-window + fallback writer here, synchronously inside the main
+# script body, guarantees SESSION_REPORT.md is on disk (and flushed) BEFORE the
+# `Done` line is printed.
+if [[ ! -f "$SESSION_DIR/SESSION_REPORT.md" ]]; then
+    log "finalize: 60s grace window for orchestrator pane to produce SESSION_REPORT.md"
+    waited=0
+    while [[ $waited -lt 60 ]]; do
+        [[ -f "$SESSION_DIR/SESSION_REPORT.md" ]] && { log "  pane wrote SESSION_REPORT.md after ${waited}s"; break; }
+        sleep 5; waited=$((waited + 5))
+    done
+fi
+if [[ ! -f "$SESSION_DIR/SESSION_REPORT.md" ]]; then
+    log "finalize: pane never produced SESSION_REPORT.md within grace; invoking fallback writer"
+    generate_fallback_report
+fi
+# Best-effort flush so the sandbox S3-sync daemon picks up the new file BEFORE
+# container teardown. `sync` flushes filesystem buffers; the short sleep gives
+# the periodic S3 syncer a window to upload SESSION_REPORT.md.
+sync 2>/dev/null || true
+sleep 5
+
 echo ""
 echo "============================================"
 echo "  MARATHON FINAL"
