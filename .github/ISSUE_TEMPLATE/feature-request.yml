@@ -1,11 +1,23 @@
 name: "Feature Request"
 description: "Suggest a new capability or improvement to Hyperloom"
-labels: ["type:feature", "needs-triage"]
+labels: ["type:feature"]
 body:
   - type: markdown
     attributes:
       value: |
         Thanks for the suggestion. Please check [existing issues](../../issues) first to avoid duplicates.
+
+  - type: dropdown
+    id: target_release
+    attributes:
+      label: Target release
+      options:
+        - v0.2
+        - v0.3
+        - v0.4
+        - Unsure
+    validations:
+      required: true
 
   - type: dropdown
     id: domain
