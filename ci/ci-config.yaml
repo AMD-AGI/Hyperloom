@@ -28,6 +28,11 @@ pr_submission:
   base_branch: main
   token_env: INFERENCEX_FORK_TOKEN
   min_gain_pct: 3.0
+  # Labels applied after PR creation. `sweep-enabled` triggers fork's
+  # run-sweep.yml which re-runs the full InferenceX benchmark matrix on
+  # perf-changelog.yaml changes and posts compare-results back to the PR.
+  labels:
+    - sweep-enabled
 
 defaults:
   mode: local

@@ -500,6 +500,58 @@ def create_github_pr(owner: str, repo: str, branch: str, base: str,
     return None
 
 
+def _parse_pr_number(pr_url: str) -> int | None:
+    """Extract the numeric PR id from a GitHub PR URL."""
+    m = re.search(r"/pull/(\d+)", pr_url or "")
+    return int(m.group(1)) if m else None
+
+
+def add_pr_labels(owner: str, repo: str, pr_url: str,
+                  labels: list[str], token: str) -> bool:
+    """Attach labels to an existing PR; triggers fork's labeled-event workflows.
+
+    Prefers `gh pr edit` since PAT scopes are already verified for push;
+    falls back to REST API POST /issues/{n}/labels.
+    """
+    if not labels:
+        return True
+    pr_number = _parse_pr_number(pr_url)
+    if not pr_number:
+        log.warning("Could not parse PR number from %s, skipping labels", pr_url)
+        return False
+
+    try:
+        args = ["gh", "pr", "edit", str(pr_number),
+                "--repo", f"{owner}/{repo}"]
+        for lbl in labels:
+            args += ["--add-label", lbl]
+        result = subprocess.run(
+            args, capture_output=True, text=True,
+            env={**os.environ, "GH_TOKEN": token},
+        )
+        if result.returncode == 0:
+            log.info("Labels attached via gh: %s", labels)
+            return True
+        log.warning("gh pr edit failed (rc=%d): %s",
+                    result.returncode, result.stderr.strip())
+    except FileNotFoundError:
+        log.info("gh CLI not found for labels, falling back to API")
+
+    import requests
+    resp = requests.post(
+        f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/labels",
+        headers={"Authorization": f"Bearer {token}",
+                 "Accept": "application/vnd.github+json"},
+        json={"labels": labels},
+        timeout=30,
+    )
+    if resp.status_code in (200, 201):
+        log.info("Labels attached via API: %s", labels)
+        return True
+    log.error("Failed to attach labels: %s %s", resp.status_code, resp.text)
+    return False
+
+
 # ── Main orchestration ──
 
 def load_config(path: str | None = None) -> dict:
@@ -685,6 +737,9 @@ def submit_pr(
 
         if pr_url:
             log.info("PR submitted: %s", pr_url)
+            labels = pr_cfg.get("labels") or []
+            if labels:
+                add_pr_labels(repo_owner, repo_name, pr_url, labels, token)
 
 
 def main():
