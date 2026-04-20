@@ -12,11 +12,7 @@ Framework: primus (Megatron-based)
 GPU: 8× MI355X 
 
 Known prior results:
-Reference TTT: ~206 min (must re-verify via Tier 3 baseline)
-
-Profiling: ROCm uses RPD backend — produces .rpd files, NOT .pt.trace.json.
-Use discover_trace() from common.sh which handles all formats automatically. 
-If Tracelens is not reachable, use torch.profiler instead.
+Reference TTT: ~206 min (must re-verify via Tier 4 baseline)
 
 Kernel Optimization:
 KERNEL_OPT_BACKENDS: geak,oob-claude,oob-codex
@@ -33,5 +29,5 @@ Must optimize at least 5 kernels
 
 Requirements:
 Save results to /root/mlperf_results/
-Baseline and final run MUST be Tier 3 full convergence — never Tier 1/2.
+Baseline and final run MUST be Tier 4 full convergence — never Tier 1/2/3.
 Follow all review checkpoints.
