@@ -54,6 +54,20 @@ RE_PROFILE_CADENCE_MIN = 180     # re-profile every 3h for new targets
 MAX_CRASH_COUNT = 10
 MAX_SELF_RETRY = 3               # Orchestrator self-diagnosis retry cap per action
 
+# kernel-mgr liveness probe.  Inner-claude pane wallclock timeout
+# (PANE_CLAUDE_TIMEOUT_S=1800s in run.sh) only bounds a SINGLE
+# `claude --print` call; it does not detect "the work-loop hasn't
+# produced anything for hours".  Watch the kernel_manager/{results,
+# event_log,work_queue}.jsonl mtimes and request a pane restart when
+# they go silent for too long.  The restart is performed by run.sh's
+# monitor loop (touches STOP_PANE_kernel-mgr; the pane's outer
+# while-loop then re-launches `claude --print --continue` with fresh
+# context).  This is a soft restart — it preserves the pane's
+# accumulated history.
+KM_HEARTBEAT_CHECK_INTERVAL_S = 300   # don't stat files every cycle
+KM_HEARTBEAT_STALE_MIN = 60           # warn (event_log only)
+KM_HEARTBEAT_RESTART_MIN = 120        # request pane restart
+
 _NUMERIC_RESULT_KEYS = frozenset({
     "accuracy_risk", "crash_risk", "gain_pct", "micro_speedup",
     "score", "gpu_time_pct", "priority", "tput_per_gpu",
@@ -241,6 +255,7 @@ class Orchestrator:
                     if self._analysis_task is None or self._analysis_task.done():
                         self._analysis_task = asyncio.create_task(self._deep_analysis())
 
+                self._check_km_heartbeat()
                 self._check_tier_boundary()
                 await self._dfs_iteration()
                 # Yield to event loop and throttle when repeatedly failing
@@ -3025,6 +3040,122 @@ READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
     # ------------------------------------------------------------------
     # Stopping conditions + tier checks
     # ------------------------------------------------------------------
+
+    def _check_km_heartbeat(self) -> None:
+        """Watch kernel_manager/{results,event_log,work_queue}.jsonl mtimes
+        and request a pane restart when activity goes silent for too long.
+
+        Why this exists: PANE_CLAUDE_TIMEOUT_S=1800 in run.sh only bounds
+        a single `claude --print` invocation — it does NOT detect a
+        work-loop that's still making periodic `claude --print` calls but
+        whose calls aren't producing useful work (inner claude in a
+        tight no-op turn loop, MCP wedged on a state machine bug, etc.).
+        Two-stage response: WARN at KM_HEARTBEAT_STALE_MIN, REQUEST
+        RESTART at KM_HEARTBEAT_RESTART_MIN.  The actual pane restart is
+        performed by run.sh's monitor (it touches STOP_PANE_kernel-mgr
+        once it sees `km_requested_restart=true` in state.json; the
+        pane's outer while-loop then re-launches with `--continue`).
+        """
+        now = time.monotonic()
+        last_check = getattr(self, "_km_heartbeat_last_check_mono", 0.0)
+        if now - last_check < KM_HEARTBEAT_CHECK_INTERVAL_S:
+            return
+        self._km_heartbeat_last_check_mono = now
+
+        # KM hasn't been used yet — nothing to monitor.
+        if self.state.kernel_manager_targets_pushed <= 0:
+            return
+
+        km_dir = Path(self.session_dir) / "kernel_manager"
+        latest_mtime = 0.0
+        for fname in ("results.jsonl", "event_log.jsonl", "work_queue.jsonl"):
+            p = km_dir / fname
+            if not p.exists():
+                continue
+            try:
+                latest_mtime = max(latest_mtime, p.stat().st_mtime)
+            except OSError:
+                continue
+
+        if latest_mtime <= 0:
+            return  # KM dir not even created yet — too early to call stale.
+
+        silence_min = (time.time() - latest_mtime) / 60
+
+        # Auto-clear the restart flag if KM has come back to life
+        # (pane restart succeeded and produced fresh output).
+        if (getattr(self.state, "km_requested_restart", False)
+                and silence_min < KM_HEARTBEAT_STALE_MIN):
+            log.info(
+                "kernel-mgr heartbeat recovered (silence %.1f min < %d) — "
+                "clearing restart request",
+                silence_min, KM_HEARTBEAT_STALE_MIN,
+            )
+            self.state.km_requested_restart = False
+            self.state.save()
+            return
+
+        # Already requested restart — wait for run.sh to act and KM to revive.
+        if getattr(self.state, "km_requested_restart", False):
+            return
+
+        if silence_min >= KM_HEARTBEAT_RESTART_MIN:
+            log.error(
+                "kernel-mgr heartbeat: %.1f min of silence (>= %d) — "
+                "requesting pane restart via run.sh monitor",
+                silence_min, KM_HEARTBEAT_RESTART_MIN,
+            )
+            self.state.km_requested_restart = True
+            self.state.km_restart_count = (
+                getattr(self.state, "km_restart_count", 0) + 1
+            )
+            try:
+                ipc.write_event(self.session_dir, {
+                    "source": "marathon",
+                    "type": "km-restart-requested",
+                    "severity": "error",
+                    "promising": False,
+                    "details": {
+                        "silence_min": round(silence_min, 1),
+                        "restart_count": self.state.km_restart_count,
+                        "threshold_min": KM_HEARTBEAT_RESTART_MIN,
+                    },
+                })
+                self.state.events_written += 1
+            except Exception as exc:
+                log.warning("Failed to write km-restart-requested event: %s", exc)
+            try:
+                # Persist immediately so run.sh's monitor sees the flag
+                # on its next 10s poll, not whenever the orchestrator
+                # next decides to checkpoint.
+                self.state.save()
+            except Exception as exc:
+                log.warning("Failed to save state after km-restart request: %s", exc)
+            return
+
+        if silence_min >= KM_HEARTBEAT_STALE_MIN:
+            # Throttle warn events: at most one per 30 min of continuing silence.
+            last_warn = getattr(self, "_km_stale_last_warn_min", 0.0)
+            if silence_min - last_warn >= 30:
+                log.warning(
+                    "kernel-mgr heartbeat stale: %.1f min of silence (>= %d)",
+                    silence_min, KM_HEARTBEAT_STALE_MIN,
+                )
+                self._km_stale_last_warn_min = silence_min
+                try:
+                    ipc.write_event(self.session_dir, {
+                        "source": "marathon",
+                        "type": "km-stale",
+                        "severity": "warning",
+                        "promising": False,
+                        "details": {
+                            "silence_min": round(silence_min, 1),
+                            "threshold_min": KM_HEARTBEAT_STALE_MIN,
+                        },
+                    })
+                    self.state.events_written += 1
+                except Exception as exc:
+                    log.warning("Failed to write km-stale event: %s", exc)
 
     def _should_stop(self) -> bool:
         """Five stopping conditions from SKILL.md + shutdown signal."""
