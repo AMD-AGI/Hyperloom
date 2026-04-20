@@ -2,8 +2,8 @@
 
 ## Overview
 
-Establishes the real, measured TTT via a Tier 3 full convergence run. All subsequent
-optimizations compare against this baseline. The baseline MUST be Tier 3 (not Tier 1/2).
+Establishes the real, measured TTT via a Tier 4 full convergence run. All subsequent
+optimizations compare against this baseline. The baseline MUST be Tier 4 (not Tier 1/2/3).
 Reference TTT: ~206 minutes — this run re-verifies it.
 
 ## Inputs
@@ -20,19 +20,19 @@ Reference TTT: ~206 minutes — this run re-verifies it.
 source "$SKILL_ROOT/scripts/common.sh"
 ```
 
-### Step 2: Run baseline training (Tier 3 — full convergence)
+### Step 2: Run baseline training (Tier 4 — full convergence)
 
 This runs with the current config, no overrides, no timeout. Training continues
 until either the target eval_loss of 3.34 is reached (`run_stop status=success`)
 or all iterations are exhausted (`run_stop status=aborted`).
 
 ```bash
-run_mlperf_trial "baseline" 3
+run_mlperf_trial "baseline" 4
 ```
 
 **Do NOT interrupt this run.** It must complete naturally to establish a valid baseline.
 
-Tier 3 runs with:
+Tier 4 runs with:
 - Original `PRIMUS_TRAIN_ITERS` (full iteration count from config)
 - Original `PRIMUS_EVAL_INTERVAL` (standard eval cadence)
 - `MLLOG_TRAIN_LOSS_LOG_FREQ=32` (original)
@@ -105,7 +105,7 @@ EOF
 - `baseline_ms_per_iter`: average ms/iter (from TRIAL_RESULT)
 - `baseline_gbs`: verified global batch size
 - `baseline_run_status`: `success` (converged) or `aborted`
-- `$RESULT_DIR/attempt_baseline_raw.log`: full raw training log (complete Tier 3 run)
+- `$RESULT_DIR/attempt_baseline_raw.log`: full raw training log (complete Tier 4 run)
 - `$RESULT_DIR/attempt_baseline.log`: filtered training log
 - `$RESULT_DIR/results.tsv`: initialized results tracking with TTT
 
