@@ -108,6 +108,48 @@ MUST NOT:
 The only interaction allowed is the documented MCP tool calls listed in
 `## MCP Server References`.
 
+### IR-9: Respect MLPerf GPT-OSS-20B hyperparameter bounds (closed division)
+
+The MLPerf Training 5.1 / v6.0 rules for `gpt_oss_20b` + AdamW fix most hyperparameters.
+Only four are `unconstrained` (tunable); the rest are either hard-fixed or **derived** from
+tunable ones. Violating any invalidates the submission.
+
+| Parameter | Status | Fixed value / formula | Primus variable |
+|-----------|--------|------------------------|------------------|
+| `global_batch_size` | **unconstrained** | any | `PRIMUS_GLOBAL_BATCH_SIZE` |
+| `gradient_accumulation_steps` | **unconstrained** | derived: `GBS / (MBS × DP)` | (computed) |
+| `opt_learning_rate_warmup_steps` | **unconstrained** | any | `PRIMUS_LR_WARMUP_ITERS` |
+| `opt_base_learning_rate` | **unconstrained** | any | `PRIMUS_LR` |
+| `opt_end_learning_rate` | **derived** | `opt_base_learning_rate × 0.1` | `PRIMUS_MIN_LR` (must = `PRIMUS_LR × 0.1`) |
+| `opt_learning_rate_decay_steps` | **derived** | `1_200_000 − opt_learning_rate_warmup_steps` | `PRIMUS_LR_DECAY_ITERS` (must = `PRIMUS_TRAIN_ITERS − PRIMUS_LR_WARMUP_ITERS`) |
+| `opt_adamw_beta_1` | **fixed** | `0.9` | (YAML `adam_beta1`) |
+| `opt_adamw_beta_2` | **fixed** | `0.95` | (YAML `adam_beta2`) |
+| `opt_adamw_epsilon` | **fixed** | `1e-5` | (YAML `adam_eps`) |
+| `opt_gradient_clip_norm` | **fixed** | `1.0` | `PRIMUS_CLIP_GRAD` |
+| `opt_adamw_weight_decay` | **fixed** | `0.1` | `PRIMUS_WEIGHT_DECAY` |
+| `dropout` | **fixed** | `0.0` | (YAML) |
+| `sequence_length` | **fixed** | `8192` | (YAML) |
+| `max_steps` | **fixed** | `1_200_000` | `PRIMUS_TRAIN_ITERS` |
+
+Absolute prohibitions:
+
+- NEVER set `PRIMUS_WEIGHT_DECAY` to anything other than `0.1`.
+- NEVER set `PRIMUS_CLIP_GRAD` to anything other than `1.0`.
+- NEVER change `PRIMUS_MIN_LR` independently — it is a function of `PRIMUS_LR`.
+  Whenever `PRIMUS_LR` changes, `PRIMUS_MIN_LR` MUST be updated to `PRIMUS_LR × 0.1`.
+- NEVER change `PRIMUS_LR_DECAY_ITERS` independently — it is a function of `PRIMUS_LR_WARMUP_ITERS`.
+  Whenever `PRIMUS_LR_WARMUP_ITERS` changes, `PRIMUS_LR_DECAY_ITERS` MUST be updated to
+  `PRIMUS_TRAIN_ITERS − PRIMUS_LR_WARMUP_ITERS`.
+- NEVER change `PRIMUS_TRAIN_ITERS` (= `max_steps` = 1,200,000).
+- NEVER change AdamW betas, epsilon, dropout, or `sequence_length` anywhere (YAML or env).
+
+Any action (DFS or ad-hoc) that proposes a trial touching the fixed/derived rows above
+MUST be rejected before `run_mlperf_trial` is invoked. The sole optimization knobs on the
+hyperparameter axis are: `GBS`, `LR` (with `MIN_LR = LR × 0.1` auto-followed), warmup
+steps (with `DECAY_ITERS = TRAIN_ITERS − WARMUP_ITERS` auto-followed), `MBS` (which only
+shifts `GA` while keeping GBS constant), and eval interval (a measurement-cadence knob,
+not a training hyperparameter).
+
 ## Constants
 
 All thresholds, iteration counts, timeouts, and magic numbers used by the orchestrator are
@@ -193,7 +235,7 @@ The orchestrator maintains a state dict with these field groups:
 | Target | `target_time_to_train`, `target_gap_pct`, `target_gap_multiplier` |
 | DFS | `action_stack`, `completed_actions`, `dfs_iteration_count`, `kernel_candidates` |
 | MCP | `mcp_status`, `mcp_tools`, `tracelens_cli_available`, `oob_available`, `geak_available` |
-| Convergence | `optimal_eval_interval`, `eval_overhead_seconds`, `lr_decay_iters`, `lr_decay_ratio`, `min_lr` |
+| Convergence | `optimal_eval_interval`, `eval_overhead_seconds`, `lr`, `min_lr` (= `lr × 0.1`, IR-9), `warmup_iters`, `lr_decay_iters` (= `train_iters − warmup_iters`, IR-9) |
 | Counters | `total_wall_minutes`, `consecutive_discards` |
 
 Full field list with default values and inline comments: see
@@ -359,7 +401,7 @@ Keep only if `ttt_gain_pct > TTT_GAIN_KEEP_THRESHOLD_PCT`.
 |--------|-------|-----------|
 | fusion-flags | **9** | Highest impact for MoE: permute fusion, GA fusion |
 | config-selection | **8** | GBS/LR/TP/EP/DP — biggest convergence-speed lever |
-| convergence-speed | **7** | LR decay window + min_lr + peak LR + eval interval + warmup/wd fine-tuning |
+| convergence-speed | **7** | Peak LR + warmup steps + eval interval (only IR-9-allowed knobs; `min_lr` and `lr_decay_iters` are derived, NOT independent) |
 | fp8-recipe-tuning | **6** | FP8 knobs affect both ms/iter and convergence |
 | comm-tuning | **6** | NCCL/RCCL/DeepEP/AllReduce + TraceLens-guided overlap (always runs, post-config-selection) |
 | runtime-tunables | 5 | System-level knobs (NUMA, hugepages, NCCL) |
