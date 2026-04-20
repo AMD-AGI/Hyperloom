@@ -38,7 +38,16 @@ RESCORE_INTERVAL = 3
 PERIODIC_BENCH_INTERVAL = 3      # force E2E benchmark every N completed actions
 PLATEAU_THRESHOLD = 6            # consecutive no-gain actions → re-explore
 LOOP_DETECT_WINDOW = 8
-CIRCUIT_BREAKER = 5              # consecutive failures → re-analyze
+CIRCUIT_BREAKER = 5              # consecutive failures (crashes) → re-analyze
+# Independent from CIRCUIT_BREAKER above: CIRCUIT_BREAKER counts CRASHES,
+# this counts actions that completed cleanly but LOST throughput (and were
+# reverted by the zero-tolerance gate at line ~1022).  Without an
+# independent counter, a hypothesis that produces 5 in-a-row regressions
+# but never crashes will keep generating near-relatives of itself via
+# _analyze_regression(); the marathon then burns hours on a doomed
+# branch.  Hitting the cap forces a re-explore (jump to a fresh
+# hypothesis tree) and emits a `branch-exhausted` event.
+CONSECUTIVE_REGRESSION_CAP = 3
 MAX_WALL_HOURS = 24
 MAX_CONSECUTIVE_RE_EXPLORES = 3
 RE_PROFILE_CADENCE_MIN = 180     # re-profile every 3h for new targets
@@ -1034,6 +1043,9 @@ class Orchestrator:
                         action, symptom="dfs-action regression",
                         root_cause=f"new_tput={new_tput:.1f} < best={best_ever:.1f} (-{drop_pct:.2f}%)",
                     )
+                    self.state.consecutive_regressions = (
+                        getattr(self.state, "consecutive_regressions", 0) + 1
+                    )
                     verify_bench = await self._run_benchmark()
                     if verify_bench:
                         new_tput = verify_bench.get("tput_per_gpu", prev_tput)
@@ -1061,6 +1073,10 @@ class Orchestrator:
                         result["gain_pct"] = gain
                         log.info("Action %s improved throughput: %.1f → %.1f (+%.1f%%)",
                                  action.get("id"), prev_tput, new_tput, gain)
+                        # Real throughput gain proves the current branch is
+                        # alive — clear the regression streak so the
+                        # circuit-breaker only fires on uninterrupted losses.
+                        self.state.consecutive_regressions = 0
 
                         self._snapshot_diffs(action, prev_tput, new_tput)
 
@@ -1275,6 +1291,40 @@ class Orchestrator:
 
         # Check plateau -> re-explore
         if self.state.actions_since_gain >= PLATEAU_THRESHOLD:
+            await self._re_explore()
+
+        # Regression circuit breaker: branch is exhausted if we got
+        # CONSECUTIVE_REGRESSION_CAP clean-but-losing actions in a row.
+        # Force a re-explore to jump out of the dead hypothesis tree;
+        # write a branch-exhausted event so the watchdog can surface a
+        # systemic finding (e.g. "stop trying X-class actions on Y").
+        cr = getattr(self.state, "consecutive_regressions", 0)
+        if cr >= CONSECUTIVE_REGRESSION_CAP:
+            log.warning(
+                "Regression circuit breaker: %d consecutive regressions "
+                "(>= %d) — branch exhausted, forcing re-explore",
+                cr, CONSECUTIVE_REGRESSION_CAP,
+            )
+            try:
+                ipc.write_event(self.session_dir, {
+                    "source": "marathon",
+                    "type": "branch-exhausted",
+                    "task_id": action.get("id"),
+                    "severity": "warning",
+                    "promising": False,
+                    "details": {
+                        "consecutive_regressions": cr,
+                        "cap": CONSECUTIVE_REGRESSION_CAP,
+                        "last_action_id": action.get("id"),
+                        "last_action_type": action.get("action"),
+                        "current_tput": self.state.current_tput_per_gpu,
+                        "best_tput": self.state.best_tput_per_gpu,
+                    },
+                })
+                self.state.events_written += 1
+            except Exception as exc:
+                log.warning("Failed to write branch-exhausted event: %s", exc)
+            self.state.consecutive_regressions = 0
             await self._re_explore()
 
         # Log completion
