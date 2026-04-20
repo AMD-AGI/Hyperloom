@@ -2,13 +2,20 @@
 
 ## Overview
 
-Integrates a GEAK-optimized or manually-optimized kernel into the MLPerf training stack
-and benchmarks it as a normal optimization attempt.
+Integrates a GEAK-optimized, OOB-Claude-optimized, OOB-Codex-optimized, or manually-optimized
+kernel into the MLPerf training stack and benchmarks it as a normal optimization attempt.
 
 ## Inputs
-- Optimized kernel source (from GEAK or manual optimization)
+
+- Optimized kernel source (from GEAK, OOB-Claude, OOB-Codex, or manual optimization)
 - Original kernel location (path in training stack)
 - Current kept_overrides and kept_patches
+
+## KB Query
+
+```
+python3 $SKILL_ROOT/kb/kb_query.py "GPT-OSS-20B kernel integration" --top-k 5 --compact
+```
 
 ## Procedure
 
@@ -57,7 +64,13 @@ Push a `re-profile` action to discover if the optimization exposed new bottlenec
 - KEEP/REVERT decision
 - Backup files for revert
 
+## Heuristic Update
+
+- Kept kernel (gain > 1%): push re-profile, boost kernel-opt for similar types
+- Reverted kernel: reduce this kernel's score by 0.7x (floor at 0.5)
+
 ## Failure Handling
+
 - If patch breaks import: revert from backup
 - If training hangs: kill after timeout, revert
 - If numerical differences in loss: revert (kernel not functionally correct)
