@@ -7,7 +7,8 @@ Autonomous DFS-guided training optimization for the MLPerf GPT-OSS-20B benchmark
 | `SKILL.md` | Main skill — DFS orchestrator with tiered trial system and review checkpoints |
 | `prompt_for_MLperf.MD` | Quick-start prompt template for Cursor chat |
 | `Readme.MD` | This file — setup guide and usage |
-| `actions/*.md` | 14 self-contained action modules (setup, baseline, profile, fusion-flags, etc.) |
+| `actions/*.md` | 19 self-contained action modules (setup, baseline, profile, fusion-flags, convergence-speed, fp8-recipe-tuning, comm-overlap, re-profile, etc.) |
+| `kernel-opt/` | Per-backend kernel optimization references (geak.md, oob-codex.md, oob-claude.md) |
 | `scripts/common.sh` | Tiered trial runner (`run_mlperf_trial`) + metric extraction helpers |
 | `scripts/trial_monitor.py` | Real-time log filter — preserves :::MLLOG, suppresses noise, tracks progress |
 | `scripts/apply_quiet_config.sh` | YAML quiet/restore for reducing Megatron debug verbosity |
@@ -49,14 +50,20 @@ docker run --rm -it \
 export HF_TOKEN="your_api_key"      # ← Replace with your HuggingFace API token ,W&B key is not compulsory
 ```
 
-**SAFE API Key** — required for MCP server access (GEAK, OOB, etc.). Edit `.cursor/mcp.json` and replace all `<SAFE_API_KEY>ak-xxxxx` placeholders with your actual SAFE API key:
+**SAFE API Key** — required for MCP server access (OOB Optimizer, GEAK, TraceLens, etc.). Edit `.cursor/mcp.json` and replace all Bearer token placeholders with your actual SAFE API keys:
 
 ```json
 {
   "mcpServers": {
+    "oob-optimizer-dev": {
+      "headers": {
+        "Authorization": "Bearer ak-YOUR_OOB_KEY_HERE"
+      },
+      ...
+    },
     "oci-geak-agent": {
       "headers": {
-        "Authorization": "Bearer ak-YOUR_ACTUAL_KEY_HERE"
+        "Authorization": "Bearer ak-YOUR_GEAK_KEY_HERE"
       },
       ...
     }
@@ -64,7 +71,7 @@ export HF_TOKEN="your_api_key"      # ← Replace with your HuggingFace API toke
 }
 ```
 
-Two MCP servers require the key: `oci-geak-agent` and `oci-oob-agent`. TraceLens now runs via local CLI (`pip install -e /hyperloom/TraceLens-internal`).
+`oob-optimizer-dev` (OOB-Claude/OOB-Codex kernel optimization) and `oci-geak-agent` (GEAK kernel optimization) both require Bearer tokens. `oci-traceLens-agent` does not require authentication. All three kernel-opt backends run in parallel. Connectivity is verified automatically in setup Step 8.
 
 ### 3. Prepare runtime directories
 
@@ -124,36 +131,46 @@ The agent runs the full MLPerf optimization pipeline autonomously:
  └──────┬──────┘
         ▼
  ┌──────────────┐
- │ Baseline     │  Tier 1 trial (100 iters) → establish ms/iter
+ │ Baseline     │  Tier 3 full run → establish real TTT (ref: ~206 min)
  │ (RC-2)       │
  └──────┬───────┘
         ▼
- ┌──────────────┐
- │ Profile      │  Tier 1 trial with PyTorch profiler → kernel breakdown
- │ (RC-3)       │
- └──────┬───────┘
+ ┌────────────────────┐
+ │ Profile + TraceLens│  Tier 1 + TraceLens roofline/overlap analysis
+ │ (RC-3)             │
+ └──────┬─────────────┘
         ▼
  ┌──────────────────────────────────────────────────┐
- │  DFS Optimization Loop                           │
+ │  DFS Optimization Loop (three-layer evaluation)  │
  │                                                  │
  │  For each candidate action (sorted by heuristic):│
- │  1. Run Tier 1 trial (100 iters) → ms/iter      │
- │  2. If gain > 1%: validate with Tier 2 (500 iters)│
- │  3. Check convergence: loss trajectory + eval    │
- │  4. KEEP or REVERT                               │
- │  5. Every 3 iterations: RC-4 checkpoint          │
  │                                                  │
- │  Actions tried:                                  │
- │  • Fusion flags (fused router, turbo attention)  │
- │  • Parallelism (EP=8, DeepEP)                    │
- │  • Training params (MBS, precision knobs)        │
- │  • Hyperparameters (GBS, LR scaling)             │
- │  • Runtime tunables (NCCL, HSA, CPU governor)    │
- │  • Kernel optimization (GEAK)                    │
+ │  THROUGHPUT-ONLY (fusion, kernel, runtime, comm):│
+ │  1. Tier 1 (100 iters) → ms/iter gain           │
+ │  2. If gain > 1%: Tier 2 convergence gate        │
+ │  3. KEEP or DISCARD                              │
+ │                                                  │
+ │  CONVERGENCE-AFFECTING (GBS/LR/warmup/WD/FP8):  │
+ │  1. Tier 2 (500 iters) → loss_efficiency filter  │
+ │  2. Tier 2.5 (1500 iters) → projected_ttt       │
+ │  3. KEEP or DISCARD based on TTT projection      │
+ │                                                  │
+ │  If gain > 2%: trigger RE-PROFILE                │
+ │  Every 3 iterations: RC-4 checkpoint             │
  └──────────────┬───────────────────────────────────┘
                 ▼
+ ┌────────────────────────┐
+ │ Config Selection       │  GBS/LR/TP/EP/DP selection (Tier 1→2L→3)
+ │ (RC-4.5)               │
+ └──────┬─────────────────┘
+        ▼
+ ┌────────────────────────┐
+ │ Convergence Speed      │  Eval interval, LR schedule, warmup optimization
+ │ + Comm Tuning          │  NCCL/RCCL/DeepEP + TraceLens-guided overlap (always)
+ └──────┬─────────────────┘
+        ▼
  ┌──────────────────┐
- │ Sweep (RC-5/RC-6)│  GBS × LR grid search with Tier 2 trials
+ │ Sweep (RC-5/RC-6)│  MBS / eval interval refinement with Tier 2 trials
  └──────┬───────────┘
         ▼
  ┌──────────────────┐
@@ -161,10 +178,25 @@ The agent runs the full MLPerf optimization pipeline autonomously:
  │                  │  NO early stop — wait for run_stop status=success
  └──────┬───────────┘
         ▼
- ┌──────────────┐
- │ Report       │  Optimization report with TTT, all attempts, recommendations
- └──────────────┘
+ ┌──────────────────┐
+ │ Report           │  Optimization report with TTT + TraceLens before/after
+ └──────────────────┘
 ```
+
+## MCP Integrations
+
+**TraceLens** (`oci-traceLens-agent`, no auth): roofline classification, comm-compute
+overlap measurement, and MFMA utilization analysis. The report step uses TraceLens
+comparative analysis for before/after kernel breakdown. If unreachable, the pipeline
+degrades gracefully to local Python-based kernel analysis.
+
+**GEAK** (`oci-geak-agent`, Bearer token), **OOB-Claude** and **OOB-Codex**
+(`oob-optimizer-dev`, Bearer token): three parallel kernel optimization backends.
+All run simultaneously for each kernel candidate; the result with the highest
+verified micro-benchmark speedup is selected for integration. GEAK runs on a GPU
+pod (can compile and benchmark on-pod). OOB-Claude and OOB-Codex generate code
+without GPU access — verification is done locally. If all backends are unreachable,
+kernel-opt is skipped.
 
 ## Trial Tier System
 
@@ -172,12 +204,15 @@ All training runs use `run_mlperf_trial` from `scripts/common.sh`, never raw `to
 
 | Tier | Iterations | Eval | Timeout | Use Case |
 |------|-----------|------|---------|----------|
-| **Tier 1** (Quick) | 100 | Suppressed | 10 min | Initial measurement, crash detection |
-| **Tier 2** (Convergence) | 500 | Enabled | 60 min | Validate winners, hyperparameter tuning |
+| **Tier 1** (Quick) | 100 | Suppressed | 60 min | Initial ms/iter measurement, crash detection |
+| **Tier 2** (Convergence) | 500 | Enabled | 120 min | Loss_efficiency filter, convergence gate |
+| **Tier 2.5** (Projection) | 1500 | Enabled | 3 hr | Projected TTT for convergence-affecting actions |
+| **Tier 2L** (Long) | 2500 | Enabled | 4 hr | Config selection comparison |
 | **Tier 3** (Full) | Original config | Original | None | Final report — run to convergence |
 
 Key features:
-- `MLLOG_TRAIN_LOSS_LOG_FREQ=1` override for Tier 1/2 (fixes a bug where `=32` produces zero `train_loss` events in short trials)
+- **Three-layer evaluation**: throughput-only actions use ms/iter (Tier 1); convergence-affecting actions use loss_efficiency (Tier 2) + projected_ttt (Tier 2.5)
+- `MLLOG_TRAIN_LOSS_LOG_FREQ=1` override for Tier 1/2/2.5 (fixes a bug where `=32` produces zero `train_loss` events in short trials)
 - Real-time progress via `trial_monitor.py`: `[ITER 5/100] loss=11.23 lr=1.6e-5 | elapsed=42s`
 - Anomaly detection: NaN/Inf loss → immediate alert
 - Structured output: `TRIAL_RESULT label=baseline ms_per_iter=1643.9 gbs=32 ...`
@@ -197,7 +232,7 @@ The agent produces (saved to `/root/mlperf_results/`):
 |------|---------------|-----|
 | `training_optimization/mlperf/config_MI355X_1x8x1_fp8.sh:29` | `HF_TOKEN="your_key"` | HuggingFace model/data access |
 | `training_optimization/mlperf/config_MI355X_1x8x1_fp8.sh:30` | `WANDB_API_KEY="your_key"` | W&B logging (optional) |
-| `.cursor/mcp.json` | Replace `<SAFE_API_KEY>ak-xxxxx` | MCP server auth (GEAK, OOB Agent, SAFE) |
+| `.cursor/mcp.json` | Replace Bearer token values | MCP server auth (OOB and GEAK require tokens; TraceLens does not) |
 
 ## MLPerf Compliance
 
