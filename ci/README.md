@@ -14,10 +14,13 @@ ci/
 ├── prompt_template.md       # 发给 Claw Agent 的 prompt 模板
 ├── inferenceX_models.yaml   # InferenceX API model 名称映射表
 ├── claw-integration.md      # Claw 调用流程文档（给 Claw 团队对接）
+├── AB_TEST.md               # A/B test 使用指南（GEAK/TraceLens 等团队对接）
 ├── test_claw_flow.py        # Claw API 端到端测试脚本
 ├── requirements.txt         # Python 依赖
 └── README.md
 ```
+
+> 想做 A/B 对比测试（对比两套工具组合的优化效果），见 **[AB_TEST.md](AB_TEST.md)**。
 
 ## 快速开始
 
