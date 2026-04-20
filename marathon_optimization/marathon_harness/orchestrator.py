@@ -153,7 +153,15 @@ class Orchestrator:
         try:
             # Step 0: WARM-START
             self.state.phase = "warm_start"
+            if self._workload is not None:
+                self._workload.snapshot_system_files()
             await self._warm_start()
+            if self._workload is not None:
+                changed = self._workload.system_files_changed()
+                if changed:
+                    log.warning("Warm-start modified %d system file(s): %s — rolling back",
+                                len(changed), changed)
+                    self._workload.rollback_system_files()
 
             # Step 1: RE-PROFILE
             self.state.phase = "profile"
@@ -1036,11 +1044,13 @@ class Orchestrator:
                     )
                     verify_bench = await self._run_benchmark()
                     if verify_bench:
-                        new_tput = verify_bench.get("tput_per_gpu", prev_tput)
-                        log.info("Post-revert verification: %.1f tok/s/GPU", new_tput)
-                    self.state.current_tput_per_gpu = max(new_tput, prev_tput)
-                    if self.state.current_tput_per_gpu > (self.state.best_tput_per_gpu or 0):
-                        self.state.best_tput_per_gpu = self.state.current_tput_per_gpu
+                        verify_tput = verify_bench.get("tput_per_gpu", 0)
+                        log.info("Post-revert verification: %.1f tok/s/GPU (health-check only, "
+                                 "not updating current which stays at %.1f)",
+                                 verify_tput, prev_tput)
+                        if verify_tput <= 0:
+                            log.error("Post-revert server unhealthy (0 tput)")
+                    self.state.current_tput_per_gpu = prev_tput
 
                     if not action.get("needs_benchmark_only"):
                         retry = await self._analyze_regression(action, result, prev_tput, bench)
