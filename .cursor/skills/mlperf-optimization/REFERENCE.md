@@ -32,7 +32,7 @@ run_mlperf_trial "validate_name" 2 300
 
 # Tier 3: Long convergence for config selection + projected TTT (2500 iters, eval enabled, 4hr timeout)
 run_mlperf_trial "gbs32_ep1" 3
-run_mlperf_trial "gbs16_ep1" 3 "" "PRIMUS_GLOBAL_BATCH_SIZE=16 PRIMUS_LR=2.0e-4"
+run_mlperf_trial "gbs16_ep1" 3 "" "PRIMUS_GLOBAL_BATCH_SIZE=16 PRIMUS_LR=2.0e-4 PRIMUS_MIN_LR=2.0e-5"  # IR-9: MIN_LR = LR × 0.1
 
 # Tier 1 with extra env vars
 run_mlperf_trial "gbs64" 1 100 "PRIMUS_GLOBAL_BATCH_SIZE=64 PRIMUS_LR=5.6e-4"
@@ -61,11 +61,16 @@ DATADIR=/shared_nfs/huangwei/gpt_oss_20b/data
 MODELDIR=/shared_nfs/huangwei/gpt_oss_20b/model
 LOGDIR=/root/mlperf_primus/logs
 
-# Training
+# Training (see SKILL.md IR-9 for MLPerf hyperparameter bounds)
 PRIMUS_MICRO_BATCH_SIZE=2
-PRIMUS_GLOBAL_BATCH_SIZE=32
-PRIMUS_LR=4.0e-4
-PRIMUS_TRAIN_ITERS=1200000
+PRIMUS_GLOBAL_BATCH_SIZE=32          # unconstrained
+PRIMUS_LR=4.0e-4                     # unconstrained
+PRIMUS_MIN_LR=4.0e-5                 # DERIVED: MUST equal PRIMUS_LR × 0.1
+PRIMUS_LR_WARMUP_ITERS=128           # unconstrained
+PRIMUS_LR_DECAY_ITERS=1199872        # DERIVED: MUST equal PRIMUS_TRAIN_ITERS − PRIMUS_LR_WARMUP_ITERS
+PRIMUS_TRAIN_ITERS=1200000           # FIXED by MLPerf (max_steps)
+PRIMUS_WEIGHT_DECAY=0.1              # FIXED by MLPerf (do NOT change)
+PRIMUS_CLIP_GRAD=1.0                 # FIXED by MLPerf (do NOT change)
 PRIMUS_FP8_RECIPE=hybrid
 
 # MLPerf
@@ -81,16 +86,23 @@ NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=1
 
 ## Config Override Syntax
 
-For MLPerf, overrides are set via environment variables **before** sourcing the config:
+For MLPerf, overrides are set via environment variables **before** sourcing the config.
+Remember to maintain the IR-9 derived pairings (`MIN_LR = LR × 0.1`,
+`DECAY_ITERS = TRAIN_ITERS − WARMUP_ITERS`):
 
 ```bash
 export PRIMUS_GLOBAL_BATCH_SIZE=64
 export PRIMUS_MICRO_BATCH_SIZE=4
 export PRIMUS_LR=8.0e-4
+export PRIMUS_MIN_LR=8.0e-5          # = PRIMUS_LR × 0.1 (IR-9)
+export PRIMUS_LR_WARMUP_ITERS=256
+export PRIMUS_LR_DECAY_ITERS=1199744 # = PRIMUS_TRAIN_ITERS − PRIMUS_LR_WARMUP_ITERS (IR-9)
 source config_MI355X_1x8x1_fp8.sh
 ```
 
 Or modify the YAML config directly for Primus-level overrides (fusion flags, MoE settings).
+Do NOT override `PRIMUS_WEIGHT_DECAY`, `PRIMUS_CLIP_GRAD`, AdamW betas/epsilon, dropout,
+or `sequence_length` — see `SKILL.md` IR-9.
 
 ## MLLOG Output Format
 
@@ -301,9 +313,9 @@ and operational hints (troubleshooting, integration). `SKILL.md § Lessons` poin
 | 1 | decision | **GBS is tunable in MLPerf** (unlike training-optimization where GBS is fixed). Larger GBS → fewer iterations but each iteration is slower. Optimal balance is via config-selection. | Critical #1 |
 | 2 | decision | **Eval overhead matters.** At `DEFAULT_GBS`, eval runs every 512 iters; each eval ~30s (64 eval iters). Reducing frequency saves 2–5 min at zero convergence risk — but requires convergence-speed Dimension 1 validation. | Critical #2 |
 | 3 | decision | **TraceLens comm-compute overlap informs tuning priority** (comm-tuning Part B). High overlap (>0.7) suggests smaller gains from Part B — still run Part A (NCCL buffer/channel tuning) unconditionally. | Critical #3 |
-| 4 | decision | **ms/iter gain alone is insufficient for convergence-affecting actions.** LR / GBS / warmup / weight_decay can have zero ms/iter impact but dramatically change iterations-to-converge. Always use the three-layer evaluation (ms/iter → loss_efficiency → projected_ttt). The DFS loop classifies and applies this automatically. | Critical #4 |
-| 5 | decision | **LR decay window mismatch is a common high-impact blind spot.** When `lr_decay_iters = train_iters` (e.g. 1.2M) but convergence occurs at ~7200 iters, cosine decay is essentially flat over the real training window. Setting the window too close to convergence (1.0–1.2×) is also bad — LR hits `min_lr` too early, starving late-stage learning. Target ratio: **2–5×** the projected convergence iters (LR at convergence ≈ 55–91% of peak). After fixing the window, tune `min_lr`, then try raising peak LR. | Critical #5 |
-| 6 | decision | **LR schedule knobs must be explored sequentially, not independently.** Decay window → `min_lr` → peak LR. Testing peak LR without first fixing a mismatched decay window produces misleading results (flat decay + high LR = instability; proper decay + high LR = faster convergence). | Critical #6 |
+| 4 | decision | **ms/iter gain alone is insufficient for convergence-affecting actions.** LR / GBS / warmup can have zero ms/iter impact but dramatically change iterations-to-converge. Always use the three-layer evaluation (ms/iter → loss_efficiency → projected_ttt). The DFS loop classifies and applies this automatically. | Critical #4 |
+| 5 | decision | **The LR-schedule shape is FIXED by MLPerf rules (IR-9).** `opt_end_learning_rate = opt_base_learning_rate × 0.1` and `opt_learning_rate_decay_steps = 1_200_000 − warmup_steps`. This means the cosine curve always goes from peak LR down to `LR × 0.1` over `TRAIN_ITERS − WARMUP_ITERS`. Its *shape* is non-negotiable — only its *amplitude* (peak LR) and its *start* (warmup length) move. Do NOT tune `lr_decay_iters` or `min_lr` as independent knobs. | Critical #5 |
+| 6 | decision | **Peak LR and warmup are the only LR-schedule knobs.** When `PRIMUS_LR` changes, `PRIMUS_MIN_LR` MUST be updated to `PRIMUS_LR × 0.1`. When `PRIMUS_LR_WARMUP_ITERS` changes, `PRIMUS_LR_DECAY_ITERS` MUST be updated to `PRIMUS_TRAIN_ITERS − PRIMUS_LR_WARMUP_ITERS`. These pairings are IR-9 compliance, not heuristics. | Critical #6 |
 | 7 | operational | **FP8 stability matters.** FP8 hybrid can cause loss spikes or NaN with certain configs. Always Tier 2 after FP8 change. (See also Common Pitfall #4 in SKILL.md.) | Operational #1 |
 | 8 | operational | **DeepEP can overlap communication.** With `moe_enable_deepep=true` and `turbo_deepep_num_cu=64`, expert parallelism communication overlaps with compute. | Operational #2 |
 | 9 | operational | **Primus patches are auto-applied.** 16 patches applied at startup for ROCm compatibility (permute fusion, FP8 context, TopK router). Do NOT manually re-apply. (See also Common Pitfall #5 in SKILL.md.) | Operational #3 |
@@ -340,9 +352,11 @@ After every action completes, apply these rules in order. The summary in
     `dfs_iteration_count ≥ MIN_DFS_ITERATIONS` → proceed to sweep → report.
 11. **KB penalty cap (IR-4):** KB negative entries reduce `expected_time_reduction_pct` by
     at most `KB_PENALTY_CAP`. Never zero out, never remove from stack.
-12. **After LR schedule change (Dim 5):** If `lr_decay_iters` improved `projected_ttt`,
-    boost `min_lr` and `peak_lr` sub-dimensions by 1.5×. Update `state.lr_decay_ratio`.
-    Target ratio: 2–5× projected convergence iters.
+12. **After LR / warmup change (convergence-speed Dim 2 or 3):** If peak LR improved
+    `projected_ttt`, boost remaining peak-LR candidates in the vicinity by 1.3×. If
+    warmup change improved `projected_ttt`, boost remaining warmup candidates by 1.3×.
+    Per IR-9, `min_lr` and `lr_decay_iters` are derived, not independent — do NOT score
+    them as separate sub-dimensions.
 
 ## Orchestrator Loop (Full)
 
@@ -413,8 +427,9 @@ PROCEDURE optimize():
      → === REVIEW CHECKPOINT RC-4.5 ===
 
   9.5 CONVERGENCE SPEED
-     → Execute actions/convergence-speed.md (5-dimension LR/schedule optimization)
-     → Update state.optimal_eval_interval, eval_overhead_seconds, lr_decay_iters, min_lr
+     → Execute actions/convergence-speed.md (3-dimension: eval interval, warmup, peak LR)
+     → Update state.optimal_eval_interval, eval_overhead_seconds, lr, min_lr
+     → (min_lr tracked only as the IR-9 derived pair of lr; not independently tunable)
 
   9.6 COMM TUNING (always runs)
      → Execute actions/comm-tuning.md (NCCL/RCCL/DeepEP Part A + TraceLens-guided overlap Part B)
@@ -469,9 +484,10 @@ state = {
 
     "optimal_eval_interval": None,  # from convergence-speed
     "eval_overhead_seconds": 0.0,
-    "lr_decay_iters": None,
-    "lr_decay_ratio": None,
-    "min_lr": None,
+    "lr": None,                     # IR-9 unconstrained; updated by convergence-speed
+    "min_lr": None,                 # IR-9 derived: must equal lr × 0.1
+    "warmup_iters": None,           # IR-9 unconstrained
+    "lr_decay_iters": None,         # IR-9 derived: train_iters − warmup_iters (never tuned independently)
 
     "total_wall_minutes": 0,
     "consecutive_discards": 0,
