@@ -3,7 +3,7 @@
 ## Overview
 
 After [`config-selection.md`](config-selection.md) fixes EP/TP/DP, this action
-first tunes NCCL/RCCL and DeepEP for that topology, then uses TraceLens overlap
+first tunes NCCL/RCCL and DeepEP for that topology, then uses TraceLens CLI overlap
 metrics to drive buffer/channel and verification steps when communication is not
 fully hidden behind compute. **Prerequisite:** config selection is complete and
 the winning parallelism config is applied.
@@ -123,18 +123,21 @@ B2 show a clear mismatch (large residual non-overlapped comm).
 run_mlperf_trial "overlap_verify" 1 10
 ```
 
-```python
-CallMcpTool(
-    server="oci-traceLens-agent",
-    toolName="run_full_standalone_analysis",
-    arguments={
-        "trace_path": f"{RESULT_DIR}/overlap_verify_filtered.json.gz",
-        "platform": "MI355X",
-        "trace_type": "pytorch",
-        "output_dir": f"{RESULT_DIR}/tracelens_output/overlap_verify",
-        "cleanup": False,
-    }
-)
+```bash
+gzip -kf "$RESULT_DIR/overlap_verify_filtered.json" 2>/dev/null || true
+
+mkdir -p "$RESULT_DIR/tracelens_output/overlap_verify/perf_report_csvs"
+TraceLens_generate_perf_report_pytorch \
+  --profile_json_path "$RESULT_DIR/overlap_verify_filtered.json.gz" \
+  --output_csvs_dir "$RESULT_DIR/tracelens_output/overlap_verify/perf_report_csvs" \
+  --gpu_arch_json_path /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/utils/arch/MI355X.json \
+  --enable_pseudo_ops
+
+PYTHONPATH="/hyperloom/TraceLens-internal:$PYTHONPATH" \
+python3 /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/orchestrator_prepare.py \
+  --trace-path "$RESULT_DIR/overlap_verify_filtered.json.gz" \
+  --platform MI355X \
+  --output-dir "$RESULT_DIR/tracelens_output/overlap_verify"
 ```
 
 Keep settings if overlap improves; else revert and log to KB.
@@ -164,4 +167,4 @@ run_mlperf_trial "overlap_combined" 2 500 "<all_winning_settings>"
 - DeepEP: OOM / instability → reduce CU or SMS; avoid untested CU stacks with
   other big memory changes.
 - No gain on ms/iter or overlap → defaults, KB log, lower comm-tuning score.
-- If TraceLens/MCP missing: run Part B blind (try default buffer/channel grid without overlap measurement).
+- If TraceLens CLI not installed or fails: run Part B without overlap measurement; try default buffer/channel grid.

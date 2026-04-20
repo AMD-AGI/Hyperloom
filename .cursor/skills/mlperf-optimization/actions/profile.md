@@ -2,7 +2,7 @@
 
 ## Overview
 
-This action runs a short `torch.profiler` capture and TraceLens standalone analysis on Chrome JSON traces to locate bottlenecks (roofline, comm–compute overlap, stalls). Results feed **GEAK** candidate selection and **DFS** heuristic updates for subsequent trials.
+This action runs a short `torch.profiler` capture and TraceLens CLI analysis on Chrome JSON traces to locate bottlenecks (roofline, comm-compute overlap, stalls). Results feed **GEAK** candidate selection and **DFS** heuristic updates for subsequent trials.
 
 ## Inputs
 
@@ -147,39 +147,69 @@ python3 "$SKILL_ROOT/scripts/parse_trace.py" \
 
 Outputs: `profiler_summary.json`, `categories.json`, `kernel_breakdown.json`, `geak_candidates.json`.
 
-### Step 6: TraceLens Trace Validation
+### Step 6: TraceLens CLI — Install check and trace validation
 
-```python
-CallMcpTool(
-    server="oci-traceLens-agent",
-    toolName="check_trace_file",
-    arguments={"trace_path": f"{RESULT_DIR}/filtered_trace.json.gz"}
-)
+**Ensure TraceLens CLI is installed:**
+```bash
+TraceLens_generate_perf_report_pytorch --help >/dev/null 2>&1 || \
+  (cp -r /hyperloom/TraceLens-internal /tmp/TraceLens-internal && pip install -e /tmp/TraceLens-internal)
 ```
 
-If `check_trace_file` fails, log a warning and continue with local-only analysis (Step 5). Do not block the pipeline.
-
-### Step 7: TraceLens Standalone Analysis
-
-```python
-CallMcpTool(
-    server="oci-traceLens-agent",
-    toolName="run_full_standalone_analysis",
-    arguments={
-        "trace_path": f"{RESULT_DIR}/filtered_trace.json.gz",
-        "platform": "MI355X",
-        "trace_type": "pytorch",
-        "output_dir": f"{RESULT_DIR}/tracelens_output/baseline",
-        "cleanup": False,
-    }
-)
+**Validate trace file:**
+```bash
+python3 -c "
+import gzip, json, sys
+path = '$RESULT_DIR/filtered_trace.json.gz'
+try:
+    with gzip.open(path) as f: data = json.load(f)
+    print(f'Trace OK: {len(data.get(\"traceEvents\", []))} events')
+except Exception as e:
+    print(f'Trace validation failed: {e}', file=sys.stderr); sys.exit(1)
+"
 ```
 
-### Step 8: Parse TraceLens Results
+If validation fails, log a warning and continue with local-only analysis (Step 5). Do not block the pipeline.
 
-Extract metrics into a structured dict; save as `tracelens_metrics.json` for Step 10.
+### Step 7: TraceLens CLI — Generate performance report and category data
+
+**Generate performance report:**
+```bash
+mkdir -p "$RESULT_DIR/tracelens_output/baseline/perf_report_csvs"
+TraceLens_generate_perf_report_pytorch \
+  --profile_json_path "$RESULT_DIR/filtered_trace.json.gz" \
+  --output_csvs_dir "$RESULT_DIR/tracelens_output/baseline/perf_report_csvs" \
+  --gpu_arch_json_path /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/utils/arch/MI355X.json \
+  --enable_pseudo_ops
+```
+
+**Prepare category data (GPU utilization, top ops, tree data, category filtering):**
+```bash
+PYTHONPATH="/hyperloom/TraceLens-internal:$PYTHONPATH" \
+python3 /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/orchestrator_prepare.py \
+  --trace-path "$RESULT_DIR/filtered_trace.json.gz" \
+  --platform MI355X \
+  --output-dir "$RESULT_DIR/tracelens_output/baseline"
+```
+
+**Run standalone analysis subagents:**
+
+Read the skill file `/hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md` and follow Steps 6-10 (system-level analysis, compute kernel analysis, validation, aggregation, and report generation) using:
+- Output directory: `$RESULT_DIR/tracelens_output/baseline`
+- Platform: `MI355X`
+- Analysis mode: `default`
+
+The final standalone analysis report will be at `$RESULT_DIR/tracelens_output/baseline/standalone_analysis.md`.
+
+### Step 8: Parse TraceLens CLI Results
+
+Extract metrics from the CLI output files into a structured dict; save as `tracelens_metrics.json` for Step 10.
 
 ```python
+import json, os
+
+tl_dir = f"{RESULT_DIR}/tracelens_output/baseline"
+manifest_path = os.path.join(tl_dir, "category_data", "category_manifest.json")
+
 tracelens = {
     "roofline": {},             # per-kernel: "compute_bound" or "memory_bound"
     "comm_compute_overlap": 0,  # 0.0-1.0: fraction of comm hidden by compute
@@ -189,6 +219,14 @@ tracelens = {
     "eval_overhead_pct": 0,     # fraction of wall time spent in eval phases
     "stall_pct": 0,             # fraction of GPU time in stalls/sync
 }
+
+if os.path.exists(manifest_path):
+    manifest = json.load(open(manifest_path))
+    gpu_util = manifest.get("gpu_utilization", {})
+    tracelens["mfma_utilization"] = gpu_util.get("computation_time_percent", 0) / 100
+    tracelens["mem_bw_utilization"] = gpu_util.get("exposed_memcpy_time_percent", 0) / 100
+    tracelens["comm_compute_overlap"] = 1.0 - (gpu_util.get("exposed_comm_time_percent", 0) / 100)
+    tracelens["stall_pct"] = gpu_util.get("idle_time_percent", 0)
 ```
 
 ### Step 9: Identify GEAK candidates
@@ -279,4 +317,97 @@ state["tracelens_latest_output"] = state["tracelens_baseline_output"]
 - Profiling crashes: lower `profile_step_end`, fewer iters.
 - Trace too large: `scripts/run_profile.sh` size-check / re-filter.
 - RPD conversion fails: `sqlite3 <file>.rpd ".tables"`; install `rocmProfileData` for `rpd2tracing`.
-- TraceLens MCP down: warn; continue with Step 5 only; `state["tracelens_baseline_output"] = None`; run `parse_trace.py --compute-heuristics` without `--tracelens` for category-only rules.
+- TraceLens CLI not installed: `cp -r /hyperloom/TraceLens-internal /tmp/TraceLens-internal && pip install -e /tmp/TraceLens-internal`
+- TraceLens CLI fails: fall back to Step 5 (`parse_trace.py`) only; `state["tracelens_baseline_output"] = None`; run `parse_trace.py --compute-heuristics` without `--tracelens` for category-only rules.
+- Re-profile failure → warn, skip re-profile, continue with prior kernel candidates.
+- Re-profile category deltas all < 1% → log `stable`, no prior adjustments.
+
+## Re-Profile Trigger {#re-profile-trigger}
+
+After major optimizations GPU time shifts — formerly minor kernels can dominate and
+new GEAK candidates may appear. Re-profiling reruns the pipeline above against the
+current optimized configuration so downstream DFS steps target the refreshed
+bottleneck mix.
+
+Re-profile is not scored as an independent DFS action; the orchestrator pushes it
+onto the stack when Score Update Rules fire.
+
+**When triggered (Score Update Rules):**
+- Any kept action with gain > `REPROFILE_TRIGGER_PCT` (2.0%) (Rule #7).
+- All fusion flags tested (Rule #4).
+- A kernel-opt candidate was kept (Rule #5).
+
+**Score:** `max(remaining_scores) × 0.8` (derived, never scored on its own).
+**Budget:** max 3 re-profiles per run.
+
+### Procedure
+
+Re-run Steps 1 through 10 above, substituting every `"profile"` / `"baseline"`
+label for `"reprofile_${N}"`, where `N = state["reprofile_count"] + 1`. All file
+paths follow the same substitution, so the pipeline becomes:
+
+- Raw log: `$RESULT_DIR/attempt_reprofile_${N}_raw.log`
+- Trace copy/decompress destination: `$RESULT_DIR/reprofile_${N}_trace.json`
+- Filtered trace: `$RESULT_DIR/reprofile_${N}_filtered.json` (+ `gzip -kf` for
+  TraceLens consumption)
+- `discover_trace` marker: `${TRIAL_START_MARKER:-$RESULT_DIR/_trial_start_reprofile_${N}}`
+- TraceLens output directory: `$RESULT_DIR/tracelens_output/reprofile_${N}`
+- `parse_trace.py --result-dir`: `$RESULT_DIR/reprofile_${N}`
+
+`run_mlperf_trial "reprofile_${N}" 1 10` creates the marker automatically, so
+`discover_trace()` uses the correct `-newer` reference even if the raw log
+finishes writing after the trace file. Enable profiling in the YAML exactly as in
+Step 1, run the trial, then restore profiling off for normal runs.
+
+### Compare categories vs previous profile
+
+```python
+import json
+new = json.load(open(f"$RESULT_DIR/reprofile_${N}/categories.json"))
+old = json.load(open("$RESULT_DIR/categories.json"))
+for cat in new:
+    delta = new[cat] - old.get(cat, 0)
+    if abs(delta) > 1.0:
+        print(f"{cat}: {old.get(cat,0):.1f}% -> {new[cat]:.1f}% (delta={delta:+.1f}%)")
+```
+
+If TraceLens ran, compare overlap / MFMA / bound mix against the previous run in
+`state["tracelens_latest_output"]`.
+
+### Update action stack and kernel candidates
+
+```python
+import json, os
+
+rd = f"{RESULT_DIR}/reprofile_{N}"
+new_cands = json.load(open(f"{rd}/geak_candidates.json"))
+existing = {c["name"] for c in state["kernel_candidates"]}
+for c in new_cands:
+    if c["name"] not in existing:
+        state["kernel_candidates"].append({**c, "source": "re-profile"})
+state["tracelens_latest_output"] = f"{RESULT_DIR}/tracelens_output/reprofile_{N}"
+if new_cands:
+    priors["kernel-opt"] *= 1.3
+
+manifest_path = os.path.join(state["tracelens_latest_output"],
+                             "category_data", "category_manifest.json")
+if os.path.exists(manifest_path):
+    manifest = json.load(open(manifest_path))
+    gpu_util = manifest.get("gpu_utilization", {})
+    new_overlap = 1.0 - (gpu_util.get("exposed_comm_time_percent", 0) / 100)
+    new_mfma = gpu_util.get("computation_time_percent", 0) / 100
+    if new_overlap < state["comm_compute_overlap"]:
+        priors["comm-overlap"] *= 1.2
+    state["comm_compute_overlap"] = new_overlap
+    state["mfma_utilization"] = new_mfma
+```
+
+Promote `reprofile_${N}/categories.json` to `$RESULT_DIR/categories.json` as the
+new baseline when appropriate (e.g., the orchestrator has committed the kept
+optimization set).
+
+### Re-Profile outputs
+
+New trace + `reprofile_${N}/{profiler_summary,categories,geak_candidates,kernel_breakdown}.json`;
+optional `tracelens_output/reprofile_${N}/`; updated `kernel_candidates`, priors,
+and TraceLens state; category deltas from the compare step.

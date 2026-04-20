@@ -2,7 +2,7 @@
 
 ## Overview
 
-This action produces the final MLPerf optimization report by running a **complete Tier 3 trial** (full convergence) and treating **time-to-train (TTT)** as the primary value metric. Training runs until validation reaches target eval loss 3.34 (`run_stop status=success`) or iterations are exhausted (`status=aborted`). After that run, a short profiling pass plus TraceLens comparative analysis capture the before/after kernel bottleneck picture against the baseline trace.
+This action produces the final MLPerf optimization report by running a **complete Tier 4 trial** (full convergence) and treating **time-to-train (TTT)** as the primary value metric. Training runs until validation reaches target eval loss 3.34 (`run_stop status=success`) or iterations are exhausted (`status=aborted`). After that run, a short profiling pass plus TraceLens CLI analysis captures the before/after kernel bottleneck picture against the baseline trace.
 
 ## Inputs
 
@@ -10,16 +10,16 @@ This action produces the final MLPerf optimization report by running a **complet
 
 ## Procedure
 
-### Step 1: Run final optimized config (Tier 3 — full run to convergence)
+### Step 1: Run final optimized config (Tier 4 — full run to convergence)
 
 Before launching, confirm kept optimizations and YAML/env overrides are consistent, prior Tier 1/2 trials show the expected cumulative gain, and there are no stale `.bak` files or leftover env overrides from earlier trials.
 
 ```bash
 source "$SKILL_ROOT/scripts/common.sh"
-run_mlperf_trial "final" 3
+run_mlperf_trial "final" 4
 ```
 
-Tier 3 uses the config’s full `PRIMUS_TRAIN_ITERS`, normal `PRIMUS_EVAL_INTERVAL`, `MLLOG_TRAIN_LOSS_LOG_FREQ=32`, full YAML verbosity (no quiet config), and no timeout—the process exits when `run_stop` fires (`success` if target loss is reached, `aborted` if iterations run out). Wait for the process to fully exit before proceeding.
+Tier 4 uses the config’s full `PRIMUS_TRAIN_ITERS`, normal `PRIMUS_EVAL_INTERVAL`, `MLLOG_TRAIN_LOSS_LOG_FREQ=32`, full YAML verbosity (no quiet config), and no timeout—the process exits when `run_stop` fires (`success` if target loss is reached, `aborted` if iterations run out). Wait for the process to fully exit before proceeding.
 
 ### Step 2: Extract final metrics from raw log
 
@@ -109,75 +109,72 @@ with open(config_path, "w") as f:
     yaml.dump(config, f, default_flow_style=False)
 ```
 
-Locate, copy, and filter the trace. Detect the actual tensorboard path from the training log (the framework ignores `tensorboard_dir` YAML and logs the real path), then search detected dir, configured `tb_traces`, and finally `discover_trace()`:
+Locate, copy, and filter the trace following the canonical procedure from
+[`actions/profile.md`](profile.md) Step 4, with these substitutions for the final-profile run:
 
+- `RAW_LOG="$RESULT_DIR/attempt_final_profile_raw.log"`
+- Copy/decompress destination: `$RESULT_DIR/final_trace.json`
+- Filter destination: `$RESULT_DIR/final_filtered_trace.json`
+- Marker file: `${TRIAL_START_MARKER:-$RESULT_DIR/_trial_start_final_profile}`
+
+Run the same detect → search (`$ACTUAL_TB_DIR`, then `$TB_TRACE_DIR`) → `discover_trace()`
+fallback → `filter_trace` pipeline from profile.md with these variable values. Skip
+gzip/validation steps that are specific to the baseline run; Step 5 below re-gzips and
+validates the final trace on demand.
+
+### Step 5: TraceLens CLI Comparative Analysis
+
+If both baseline and final traces exist, run TraceLens CLI on the final trace and compare against the baseline analysis; otherwise skip and note unavailability in the report.
+
+**Ensure TraceLens CLI is installed:**
 ```bash
-source "$SKILL_ROOT/scripts/common.sh"
-TB_TRACE_DIR="$RESULT_DIR/tb_traces"
-TRACE_FOUND=""
-RAW_LOG="$RESULT_DIR/attempt_final_profile_raw.log"
-
-# Detect actual tensorboard path from training log
-ACTUAL_TB_DIR=""
-if [ -f "$RAW_LOG" ]; then
-    ACTUAL_TB_DIR=$(grep -oP 'the tensorboard path is: \K\S+' "$RAW_LOG" | tail -1)
-fi
-
-# Search: actual framework dir → configured TB_TRACE_DIR
-for SEARCH_DIR in "$ACTUAL_TB_DIR" "$TB_TRACE_DIR"; do
-    [ -z "$SEARCH_DIR" ] && continue
-    [ -d "$SEARCH_DIR" ] || continue
-    FOUND_GZ=$(find "$SEARCH_DIR" -name "*.pt.trace.json.gz" -type f 2>/dev/null \
-        | xargs ls -t 2>/dev/null | head -1)
-    FOUND_JSON=$(find "$SEARCH_DIR" -name "*.pt.trace.json" -type f 2>/dev/null \
-        | xargs ls -t 2>/dev/null | head -1)
-    if [ -n "$FOUND_GZ" ]; then
-        python3 -c "
-import gzip, json
-with gzip.open('$FOUND_GZ', 'rt') as f:
-    trace = json.load(f)
-with open('$RESULT_DIR/final_trace.json', 'w') as f:
-    json.dump(trace, f)
-"
-        TRACE_FOUND="pytorch_json_gz"
-        break
-    elif [ -n "$FOUND_JSON" ]; then
-        cp "$FOUND_JSON" "$RESULT_DIR/final_trace.json"
-        TRACE_FOUND="pytorch_json"
-        break
-    fi
-done
-
-# Fallback: discover_trace() with marker file and hint dir
-if [ -z "$TRACE_FOUND" ]; then
-    MARKER="${TRIAL_START_MARKER:-$RAW_LOG}"
-    HINT_DIR="${ACTUAL_TB_DIR:-$TB_TRACE_DIR}"
-    TRACE_INFO=$(discover_trace "$MARKER" \
-        "$RESULT_DIR/final_trace.json" "$HINT_DIR" 2>&1)
-    TRACE_FOUND=$(echo "$TRACE_INFO" | grep "^TRACE_FORMAT=" | cut -d= -f2)
-fi
-
-if [ -n "$TRACE_FOUND" ]; then
-    filter_trace "$RESULT_DIR/final_trace.json" "$RESULT_DIR/final_filtered_trace.json"
-fi
+TraceLens_generate_perf_report_pytorch --help >/dev/null 2>&1 || \
+  (cp -r /hyperloom/TraceLens-internal /tmp/TraceLens-internal && pip install -e /tmp/TraceLens-internal)
 ```
 
-### Step 5: TraceLens Comparative Analysis
+**Run TraceLens CLI on final trace:**
+```bash
+gzip -kf "$RESULT_DIR/final_filtered_trace.json" 2>/dev/null || true
 
-If both baseline and final traces exist, run TraceLens comparative analysis; otherwise skip and note unavailability in the report.
+mkdir -p "$RESULT_DIR/tracelens_output/final/perf_report_csvs"
+TraceLens_generate_perf_report_pytorch \
+  --profile_json_path "$RESULT_DIR/final_filtered_trace.json.gz" \
+  --output_csvs_dir "$RESULT_DIR/tracelens_output/final/perf_report_csvs" \
+  --gpu_arch_json_path /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/utils/arch/MI355X.json \
+  --enable_pseudo_ops
 
+PYTHONPATH="/hyperloom/TraceLens-internal:$PYTHONPATH" \
+python3 /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/orchestrator_prepare.py \
+  --trace-path "$RESULT_DIR/final_filtered_trace.json.gz" \
+  --platform MI355X \
+  --output-dir "$RESULT_DIR/tracelens_output/final"
+```
+
+**Compare baseline vs final:**
 ```python
-CallMcpTool(
-    server="oci-traceLens-agent",
-    toolName="run_comparative_analysis",
-    arguments={
-        "gpu1_kineto": f"{RESULT_DIR}/baseline_trace.json",
-        "gpu2_kineto": f"{RESULT_DIR}/final_trace.json",
-        "gpu1_name": "baseline",
-        "gpu2_name": "optimized",
-        "cleanup": False,
-    }
-)
+import json, csv, os
+
+def load_gpu_timeline(tl_dir):
+    path = os.path.join(tl_dir, "perf_report_csvs", "gpu_timeline.csv")
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        return {row["type"]: float(row["percent"]) for row in csv.DictReader(f)}
+
+def load_category_summary(tl_dir):
+    path = os.path.join(tl_dir, "perf_report_csvs", "ops_summary_by_category.csv")
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        return {row["op category"]: float(row["Percentage (%)"]) for row in csv.DictReader(f)}
+
+baseline_dir = f"{RESULT_DIR}/tracelens_output/baseline"
+final_dir = f"{RESULT_DIR}/tracelens_output/final"
+
+baseline_timeline = load_gpu_timeline(baseline_dir)
+final_timeline = load_gpu_timeline(final_dir)
+baseline_cats = load_category_summary(baseline_dir)
+final_cats = load_category_summary(final_dir)
 ```
 
 ### Step 6: Write optimization report
@@ -265,22 +262,13 @@ Write to `$RESULT_DIR/optimization_report.md`:
 
 ## Reproducibility
 
-**Baseline command:**
-```bash
-cd /root/Hyperloom-plus-mlperf/training_optimization/mlperf
-source config_MI355X_1x8x1_fp8.sh
-bash setup_container_symlinks.sh
-source config_MI355X_1x8x1_fp8.sh && bash run_and_time.sh
-```
+Baseline command pattern: see [`REFERENCE.md`](../REFERENCE.md) § MLPerf Run Commands →
+"Local Run".
 
-**Optimized command:**
-```bash
-cd /root/Hyperloom-plus-mlperf/training_optimization/mlperf
-source config_MI355X_1x8x1_fp8.sh
-<env var overrides>
-bash setup_container_symlinks.sh
-source config_MI355X_1x8x1_fp8.sh && bash run_and_time.sh
-```
+**Optimized command:** identical to the baseline command with the kept `export <VAR>=<value>`
+overrides inserted between `source config_MI355X_1x8x1_fp8.sh` and the second
+`source ... && bash run_and_time.sh`. List the actual applied env vars here (GBS, LR,
+fusion flags, FP8 recipe, NCCL buffers, etc.) so the run can be replayed verbatim.
 ```
 
 ### Step 7: Ingest key findings into KB
@@ -289,7 +277,7 @@ source config_MI355X_1x8x1_fp8.sh && bash run_and_time.sh
 python3 $SKILL_ROOT/kb/kb_ingest.py \
     --category "final_result" \
     --model "GPT-OSS-20B" \
-    --action "Full Tier 3 convergence run with all optimizations" \
+    --action "Full Tier 4 convergence run with all optimizations" \
     --lesson "TTT=${TTT_SECONDS}s, status=${TTT_STATUS}, final_eval_loss=${FINAL_EVAL_LOSS}, ms_per_iter=${FINAL_MS}" \
     --tags "mlperf,training,MI355X,gpt-oss-20b,tier3,convergence" \
     --gain "$CUMULATIVE_GAIN_PCT" \
@@ -298,7 +286,7 @@ python3 $SKILL_ROOT/kb/kb_ingest.py \
 
 ## Outputs
 
-- `$RESULT_DIR/optimization_report.md` (TTT and narrative); `attempt_final_raw.log` / `attempt_final.log` (Tier 3); `final_trace.json`; TraceLens comparative output when run; KB ingest entries.
+- `$RESULT_DIR/optimization_report.md` (TTT and narrative); `attempt_final_raw.log` / `attempt_final.log` (Tier 4); `final_trace.json`; TraceLens CLI output in `tracelens_output/final/` when run; KB ingest entries.
 
 ## Heuristic Update
 
@@ -310,4 +298,4 @@ N/A — terminal action.
 - **Crash:** report best-so-far config and crash analysis.
 - **Hang (>30 min no progress):** inspect GPU utilization; do not kill—wait for recovery or natural failure.
 - **Profiling (Step 4) fails:** ship report without trace comparison; state unavailable.
-- **TraceLens fails:** omit TraceLens section; state unavailable.
+- **TraceLens CLI not installed or fails:** omit TraceLens section; note unavailability in report.

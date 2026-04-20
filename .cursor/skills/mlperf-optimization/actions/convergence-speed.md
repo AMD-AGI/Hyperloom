@@ -2,13 +2,13 @@
 
 ## Overview
 
-MLPerf time-to-train is `ms/iter × iterations_to_converge + eval_overhead`; this action reduces the second and third terms by shaping the path to `eval_loss = 3.34` and cutting eval wall time, including secondary hyperparameter fine-tuning (warmup, eval interval, weight decay) within the already-chosen GBS/LR/parallelism configuration. It is **convergence-affecting**: Layer 2 uses `loss_efficiency` (Tier 2) to filter candidates; Layer 3 uses `projected_ttt` (Tier 2.5) for keep/discard. Run it after config selection (Step 9) and before the sweep (Step 10).
+MLPerf time-to-train is `ms/iter × iterations_to_converge + eval_overhead`; this action reduces the second and third terms by shaping the path to `eval_loss = 3.34` and cutting eval wall time, including secondary hyperparameter fine-tuning (warmup, eval interval, weight decay) within the already-chosen GBS/LR/parallelism configuration. It is **convergence-affecting**: Layer 2 uses `loss_efficiency` (Tier 2) to filter candidates; Layer 3 uses `projected_ttt` (Tier 3) for keep/discard. Run it after config selection (Step 9) and before the sweep (Step 10).
 
 ## Inputs
 
 - Winning config from config-selection (GBS, LR, EP, TP)
 - Baseline TTT and ms/iter
-- Baseline loss-vs-samples curve (from Tier 2L or Tier 3)
+- Baseline loss-vs-samples curve (from Tier 3 or Tier 4)
 - Current `eval_interval`, `warmup`, `weight_decay`, and LR schedule settings
 
 ## KB Query
@@ -40,11 +40,11 @@ eval_overhead=$(compute_eval_overhead "$RESULT_DIR/attempt_baseline_raw.log")
 
 #### Trial verification
 
-If eval interval changes are significant, verify with Tier 2L:
+If eval interval changes are significant, verify with Tier 3:
 
 ```bash
 source "$SKILL_ROOT/scripts/common.sh"
-run_mlperf_trial "eval_interval_32768" 2L "" \
+run_mlperf_trial "eval_interval_32768" 3 "" \
     "EVAL_SAMPLES_INTERVAL=32768"
 ```
 
@@ -75,16 +75,16 @@ done
 
 Discard any candidate where `loss_efficiency < baseline_eff × 0.85`.
 
-**Stage 2: Tier 2.5 projected TTT for survivors (1500 iters)**
+**Stage 2: Tier 3 projected TTT for survivors (2500 iters)**
 
 ```bash
-run_mlperf_trial "warmup_<best>_proj" 2.5 "" "PRIMUS_LR_WARMUP_ITERS=<best>"
+run_mlperf_trial "warmup_<best>_proj" 3 "" "PRIMUS_LR_WARMUP_ITERS=<best>"
 projected=$(project_ttt "$RESULT_DIR/attempt_warmup_<best>_proj_raw.log" "$GBS")
 ttt_gain=$(compute_ttt_gain_pct "$BASELINE_PROJECTED_TTT" "$(echo $projected | cut -f1)")
 echo "Warmup <best>: projected_ttt gain = ${ttt_gain}%"
 ```
 
-**Decision metric:** `projected_ttt` from Tier 2.5, not `eval_loss` at iteration 500. KEEP only if `ttt_gain_pct > 0%`.
+**Decision metric:** `projected_ttt` from Tier 3, not `eval_loss` at iteration 500. KEEP only if `ttt_gain_pct > 0%`.
 
 **NaN gate:** If warmup < 128 causes NaN in the first 100 iterations (`TRIAL_STATUS`), discard immediately.
 
@@ -107,10 +107,10 @@ done
 
 Discard if `loss_efficiency < baseline × 0.85`.
 
-**Stage 2: Tier 2.5 projected TTT for survivors**
+**Stage 2: Tier 3 projected TTT for survivors**
 
 ```bash
-run_mlperf_trial "wd_<best>_proj" 2.5 "" "PRIMUS_WEIGHT_DECAY=<best>"
+run_mlperf_trial "wd_<best>_proj" 3 "" "PRIMUS_WEIGHT_DECAY=<best>"
 projected=$(project_ttt "$RESULT_DIR/attempt_wd_<best>_proj_raw.log" "$GBS")
 ttt_gain=$(compute_ttt_gain_pct "$BASELINE_PROJECTED_TTT" "$(echo $projected | cut -f1)")
 ```
@@ -126,7 +126,7 @@ run_mlperf_trial "clip_05" 2 500 "PRIMUS_CLIP_GRAD=0.5"
 run_mlperf_trial "clip_15" 2 500 "PRIMUS_CLIP_GRAD=1.5"
 ```
 
-Only test if baseline Tier 2L runs showed loss spikes.
+Only test if baseline Tier 3 runs showed loss spikes.
 
 ### Dimension 5: LR schedule (decay window, floor, peak)
 
@@ -152,17 +152,17 @@ The optimal range is **2–5×** projected convergence iters. This provides mean
 source "$SKILL_ROOT/scripts/common.sh"
 converge_est=$((state_baseline_projected_iters))  # e.g. 7200
 
-run_mlperf_trial "decay_2x" 2L "" \
+run_mlperf_trial "decay_2x" 3 "" \
     "PRIMUS_LR_DECAY_ITERS=$((converge_est * 2))"
 
-run_mlperf_trial "decay_3x" 2L "" \
+run_mlperf_trial "decay_3x" 3 "" \
     "PRIMUS_LR_DECAY_ITERS=$((converge_est * 3))"
 
-run_mlperf_trial "decay_5x" 2L "" \
+run_mlperf_trial "decay_5x" 3 "" \
     "PRIMUS_LR_DECAY_ITERS=$((converge_est * 5))"
 ```
 
-**IMPORTANT:** This change **requires** Tier 2L (2500+ iters). Tier 2 (500 iters) is not informative — all decay windows look the same in warmup/early training. Compare `projected_ttt` from Tier 2L.
+**IMPORTANT:** This change **requires** Tier 3 (2500+ iters). Tier 2 (500 iters) is not informative — all decay windows look the same in warmup/early training. Compare `projected_ttt` from Tier 3.
 
 #### 5B: MIN_LR floor (`min_lr`)
 
@@ -177,13 +177,13 @@ After the decay window is set, `min_lr` determines the LR floor at the end of th
 | 2.0e-4 | 50% | High floor — minimal effective LR range, use with tight (2×) decay window |
 
 ```bash
-run_mlperf_trial "min_lr_1e5" 2L "" \
+run_mlperf_trial "min_lr_1e5" 3 "" \
     "PRIMUS_LR_DECAY_ITERS=<best_from_5A> PRIMUS_MIN_LR=1.0e-5"
-run_mlperf_trial "min_lr_2e5" 2L "" \
+run_mlperf_trial "min_lr_2e5" 3 "" \
     "PRIMUS_LR_DECAY_ITERS=<best_from_5A> PRIMUS_MIN_LR=2.0e-5"
-run_mlperf_trial "min_lr_12e5" 2L "" \
+run_mlperf_trial "min_lr_12e5" 3 "" \
     "PRIMUS_LR_DECAY_ITERS=<best_from_5A> PRIMUS_MIN_LR=1.2e-4"
-run_mlperf_trial "min_lr_2e4" 2L "" \
+run_mlperf_trial "min_lr_2e4" 3 "" \
     "PRIMUS_LR_DECAY_ITERS=<best_from_5A> PRIMUS_MIN_LR=2.0e-4"
 ```
 
@@ -194,22 +194,22 @@ If 5A chose a tight window (2×), prioritize the higher-floor trials (1.2e-4, 2.
 With a meaningful annealing schedule, the model may tolerate a higher peak LR. Test after 5A and 5B.
 
 ```bash
-run_mlperf_trial "lr_5e4" 2L "" \
+run_mlperf_trial "lr_5e4" 3 "" \
     "PRIMUS_LR=5.0e-4 PRIMUS_MIN_LR=<best> PRIMUS_LR_DECAY_ITERS=<best>"
-run_mlperf_trial "lr_6e4" 2L "" \
+run_mlperf_trial "lr_6e4" 3 "" \
     "PRIMUS_LR=6.0e-4 PRIMUS_MIN_LR=<best> PRIMUS_LR_DECAY_ITERS=<best>"
 ```
 
 **NaN gate:** Higher LR with FP8 increases NaN risk. If NaN occurs in the first 200 iters, discard and keep the current LR.
 
-**Decision:** Across 5A→5B→5C survivors, keep the combination with lowest `projected_ttt` from Tier 2L.
+**Decision:** Across 5A→5B→5C survivors, keep the combination with lowest `projected_ttt` from Tier 3.
 
 ### Combined validation
 
 Apply all winning convergence tweaks together:
 
 ```bash
-run_mlperf_trial "convergence_combined" 2L "" \
+run_mlperf_trial "convergence_combined" 3 "" \
     "PRIMUS_LR=<best> PRIMUS_MIN_LR=<best> \
      PRIMUS_LR_DECAY_ITERS=<best> PRIMUS_LR_WARMUP_ITERS=<best> \
      PRIMUS_WEIGHT_DECAY=<best> EVAL_SAMPLES_INTERVAL=<best>"
