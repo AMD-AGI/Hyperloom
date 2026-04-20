@@ -1,16 +1,28 @@
 {
   "mcpServers": {
-    "oci-oob-agent": {
-      "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-sandbox/agent-mcp-server-zr29p/",
+    "oci-geak-agent": {
       "headers": {
-        "Authorization": "Bearer ${AK_YOUR_API_KEY}"
-      }
+        "Authorization": "Bearer ak-aCJ0oIdv1Jyp4z-fesCMCUJx0yq6AyUyMmU2bhLC7bk"
+      },
+      "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/geak-agent-wvsbv/mcp/sse"
     },
-    "geak-agent": {
-      "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/geak-agent-wvsbv/mcp/sse",
+    "oci-oob-agent": {
       "headers": {
-        "Authorization": "Bearer ${AK_YOUR_API_KEY}"
-      }
+        "Authorization": "Bearer ak-aCJ0oIdv1Jyp4z-fesCMCUJx0yq6AyUyMmU2bhLC7bk"
+      },
+      "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-sandbox/agent-mcp-server-zr29p/sse"
+    },
+    "oci-primus-safe": {
+      "headers": {
+        "Authorization": "Bearer ak-aCJ0oIdv1Jyp4z-fesCMCUJx0yq6AyUyMmU2bhLC7bk"
+      },
+      "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/safe-mcp-zm7cc/sse"
+    },
+    "oob-optimizer-dev": {
+      "headers": {
+        "Authorization": "Bearer ak-3J1mCTngpDHUsJ1KrMmjntxdTys9xRkiaLHgTEbkBu4"
+      },
+      "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/agent-mcp-server-gpu-62tcr/sse"
     }
   }
 }
