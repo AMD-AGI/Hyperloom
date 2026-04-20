@@ -424,10 +424,11 @@ def clone_fork(fork_url: str, target_dir: str, branch: str = "main"):
 
 def sync_fork_from_upstream(repo_dir: str, upstream_url: str,
                             branch: str, token: str | None) -> None:
-    """Fast-forward fork's branch from upstream and push back.
+    """Align fork's branch with upstream by rebasing fork-only commits on top.
 
-    Fail-fast: any non-ff state means fork was hand-modified; abort PR flow.
-    Requires the clone to have full history (no --depth=1).
+    Conflicts (upstream and fork both touched the same file) raise and abort
+    the PR flow, since fork is intended as a passive mirror plus minimal infra.
+    Requires full history (no --depth=1) for rebase to work.
     """
     _run_git(["remote", "add", "upstream", upstream_url], repo_dir, check=False)
     _run_git(["fetch", "upstream", branch], repo_dir)
@@ -440,9 +441,8 @@ def sync_fork_from_upstream(repo_dir: str, upstream_url: str,
         log.info("Fork %s is already up-to-date with upstream", branch)
         return
 
-    log.info("Fork %s is %s commit(s) behind upstream, fast-forwarding",
-             branch, behind)
-    _run_git(["merge", "--ff-only", f"upstream/{branch}"], repo_dir)
+    log.info("Fork %s is %s commit(s) behind upstream, rebasing", branch, behind)
+    _run_git(["rebase", f"upstream/{branch}"], repo_dir)
 
     push_url = None
     if token:
@@ -454,11 +454,11 @@ def sync_fork_from_upstream(repo_dir: str, upstream_url: str,
             repo_path = url.replace("git@github.com:", "")
             push_url = f"https://x-access-token:{token}@github.com/{repo_path}"
 
-    if push_url:
-        _run_git(["push", push_url, branch], repo_dir)
-    else:
-        _run_git(["push", "origin", branch], repo_dir)
-    log.info("Synced fork %s with upstream and pushed", branch)
+    push_args = ["push", "--force-with-lease"]
+    push_args.append(push_url if push_url else "origin")
+    push_args.append(branch)
+    _run_git(push_args, repo_dir)
+    log.info("Synced fork %s with upstream (rebase + force-with-lease)", branch)
 
 
 def create_pr_branch(repo_dir: str, branch_name: str):
