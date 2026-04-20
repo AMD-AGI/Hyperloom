@@ -1,12 +1,24 @@
 name: "Bug Report"
 description: "Report a bug, failed run, hang, performance regression, or system issue"
-labels: ["type:bug", "needs-triage"]
+labels: ["type:bug"]
 body:
   - type: markdown
     attributes:
       value: |
         Thanks for reporting this issue. Please check [existing issues](../../issues) first to avoid duplicates.
         For usage questions or support, use our Teams channel instead.
+
+  - type: dropdown
+    id: target_release
+    attributes:
+      label: Target release
+      options:
+        - v0.2
+        - v0.3
+        - v0.4
+        - Unsure
+    validations:
+      required: true
 
   - type: dropdown
     id: entry_point
