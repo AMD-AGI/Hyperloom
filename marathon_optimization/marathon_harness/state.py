@@ -185,11 +185,14 @@ class MarathonState:
     kernel_manager_merges_completed: int = 0
     kernel_manager_merges_kept: int = 0
     # Heartbeat liveness signal for the kernel-mgr pane.  The
-    # orchestrator updates `km_last_observed_activity_ts` whenever it
-    # sees fresh writes to results.jsonl / event_log.jsonl, then sets
-    # `km_requested_restart=True` once activity is silent for longer
-    # than KM_HEARTBEAT_RESTART_MIN.  run.sh's monitor reads the flag
-    # and touches STOP_PANE_kernel-mgr to force a `--continue` restart.
+    # orchestrator probes KM-exclusive mtimes (logs/kernel-mgr.log and
+    # kernel_manager/results.jsonl) and sets `km_requested_restart=True`
+    # once activity is silent for longer than KM_HEARTBEAT_RESTART_MIN
+    # *while pending work exists in the work queue*.  run.sh's monitor
+    # reads the flag and SIGTERMs the pane's current `claude --print`
+    # PID; the pane's outer while-loop relaunches with `--continue`.
+    # The flag auto-clears when activity resumes (silence drops back
+    # below KM_HEARTBEAT_STALE_MIN).
     km_last_observed_activity_ts: float = 0.0
     km_requested_restart: bool = False
     km_restart_count: int = 0
