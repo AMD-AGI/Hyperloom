@@ -56,6 +56,98 @@ fi
 
 log() { echo "[run.sh $(date +%H:%M:%S)] $*"; }
 
+# ============================================================
+# preflight_deps() — fail-fast dependency check + auto-install
+# ============================================================
+# Why this runs FIRST (before STRICT / defaults / mode detection):
+#   Previously dep-install was buried in "STEP 2" (~line 285), AFTER ~150
+#   lines of env/mode/preflight checks. When the sandbox image was wrong
+#   (or local host was bare), a missing `jq` surfaced 90s+ into the run as
+#   `jq: command not found` deep inside an mcp.json print — by which time
+#   the agent had already backgrounded run.sh, polled a zombie PID twice,
+#   and humans had to re-derive what was missing. Moving install to T+0
+#   means the agent's first poll sees either a clean version banner or a
+#   single FATAL line naming the exact missing tool + install attempt.
+#
+# Behaviour: idempotent. If a tool is on PATH, skip; otherwise install via
+# apt-get (tmux/jq/curl) or npm (claude CLI, with Node 20 bootstrap if
+# npm itself is too old / missing). NO sandbox-vs-local branching here:
+# install whatever's missing, regardless of mode. If install fails the
+# script exits with a numbered code that names the missing tool.
+
+ensure_node() {
+    if command -v node >/dev/null 2>&1; then
+        local ver
+        ver="$(node --version 2>/dev/null | sed 's/v\([0-9]*\).*/\1/')"
+        if [[ -n "$ver" && "$ver" -ge 18 ]]; then
+            log "  node: $(node --version) (>=18, OK)"
+            return 0
+        fi
+        log "  node $(node --version) is <18, installing Node 20 binary"
+    else
+        log "  node not on PATH, installing Node 20 binary"
+    fi
+    local NODE_VER=v20.18.0 arch
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64)  arch=x64 ;;
+        aarch64) arch=arm64 ;;
+        *) echo "ERROR: unsupported arch '$arch' for Node binary install" >&2; return 1 ;;
+    esac
+    local url="https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-linux-$arch.tar.xz"
+    log "  fetching $url"
+    curl -fsSL "$url" \
+      | tar -xJ -C /usr/local --strip-components=1 --exclude='*.md' --exclude='LICENSE' \
+      || { echo "ERROR: failed to download/extract Node $NODE_VER" >&2; return 1; }
+    hash -r
+    log "  installed: node $(node --version)  npm $(npm --version)"
+}
+
+preflight_deps() {
+    log "preflight_deps: checking required CLIs (tmux jq curl claude)"
+    log "  hostname=$(hostname)  arch=$(uname -m)"
+
+    local need_apt=()
+    for tool in tmux jq curl; do
+        command -v "$tool" >/dev/null 2>&1 || need_apt+=("$tool")
+    done
+
+    if [[ ${#need_apt[@]} -gt 0 ]]; then
+        log "  missing apt pkgs: ${need_apt[*]} — installing"
+        if ! command -v apt-get >/dev/null 2>&1; then
+            echo "ERROR: need ${need_apt[*]} but apt-get unavailable; install manually then re-run" >&2
+            exit 10
+        fi
+        apt-get update -qq 2>&1 | tail -2
+        apt-get install -y -qq "${need_apt[@]}" 2>&1 | tail -2
+        for t in "${need_apt[@]}"; do
+            command -v "$t" >/dev/null 2>&1 \
+                || { echo "ERROR: $t still missing after apt-get install — check apt sources / network" >&2; exit 11; }
+        done
+    fi
+
+    if ! command -v claude >/dev/null 2>&1 && [[ "${STAGE_ONLY:-0}" != "1" ]]; then
+        log "  claude CLI missing — installing via npm"
+        if ! command -v npm >/dev/null 2>&1; then
+            ensure_node || { echo "ERROR: Node.js install failed (prereq for claude CLI)" >&2; exit 12; }
+        fi
+        npm install -g @anthropic-ai/claude-code 2>&1 | tail -3
+        command -v claude >/dev/null 2>&1 \
+            || { echo "ERROR: claude CLI unavailable after 'npm install -g @anthropic-ai/claude-code'" >&2; exit 13; }
+    fi
+
+    log "preflight_deps OK:"
+    # `cmd && log` would propagate cmd's non-zero exit and trip `set -e` when
+    # the tool is legitimately absent (e.g. STAGE_ONLY=1 skips claude install).
+    # Use if/fi so each version-echo is purely advisory.
+    if command -v tmux   >/dev/null 2>&1; then log "  tmux:   $(tmux -V 2>&1)"; fi
+    if command -v jq     >/dev/null 2>&1; then log "  jq:     $(jq --version 2>&1)"; fi
+    if command -v curl   >/dev/null 2>&1; then log "  curl:   $(curl --version 2>&1 | head -1)"; fi
+    if command -v claude >/dev/null 2>&1; then log "  claude: $(command -v claude) ($(claude --version 2>&1 | head -1))"; fi
+}
+
+preflight_deps
+
 # ---------- STRICT mode (MUST run BEFORE defaults) ----------
 # When STRICT=1, every parameter that has a default must ALSO be explicitly passed
 # by the caller. Catches: "agent only exported MODEL_NAME/BASE_DIR and silently
@@ -281,67 +373,18 @@ if [[ "$DRY_RUN" == "1" ]]; then
     exit 0
 fi
 
-# ========== STEP 2 — INSTALL DEPS (local mode only) ==========
-# Ubuntu apt nodejs is too old (v12) to run claude CLI (needs >=18). Pull the
-# Node 20 binary tarball from nodejs.org when npm is missing or node is too old.
-ensure_node() {
-    if command -v node >/dev/null 2>&1; then
-        local ver
-        ver="$(node --version 2>/dev/null | sed 's/v\([0-9]*\).*/\1/')"
-        if [[ -n "$ver" && "$ver" -ge 18 ]]; then
-            log "  node: $(node --version) (>=18, OK)"
-            return 0
-        fi
-        log "  node $(node --version) is <18, installing Node 20 binary"
-    else
-        log "  node not on PATH, installing Node 20 binary"
-    fi
-    local NODE_VER=v20.18.0 arch
-    arch="$(uname -m)"
-    case "$arch" in
-        x86_64)  arch=x64 ;;
-        aarch64) arch=arm64 ;;
-        *) echo "ERROR: unsupported arch '$arch' for Node binary install" >&2; return 1 ;;
-    esac
-    local url="https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-linux-$arch.tar.xz"
-    log "  fetching $url"
-    curl -fsSL "$url" \
-      | tar -xJ -C /usr/local --strip-components=1 --exclude='*.md' --exclude='LICENSE' \
-      || { echo "ERROR: failed to download/extract Node $NODE_VER" >&2; return 1; }
-    hash -r
-    log "  installed: node $(node --version)  npm $(npm --version)"
-}
-
-if [[ "$MODE" == "local" ]]; then
-    need=()
-    command -v tmux >/dev/null 2>&1 || need+=(tmux)
-    command -v jq   >/dev/null 2>&1 || need+=(jq)
-    command -v curl >/dev/null 2>&1 || need+=(curl)
-    if [[ ${#need[@]} -gt 0 ]]; then
-        log "Installing: ${need[*]}"
-        if command -v apt-get >/dev/null 2>&1; then
-            apt-get update -qq 2>&1 | tail -2
-            apt-get install -y -qq "${need[@]}" 2>&1 | tail -2
-        else
-            echo "ERROR: need ${need[*]} but apt-get not available" >&2; exit 10
-        fi
-    fi
-    if ! command -v claude >/dev/null 2>&1 && [[ "${STAGE_ONLY:-0}" != "1" ]]; then
-        log "claude CLI not on PATH — installing via npm"
-        if ! command -v npm >/dev/null 2>&1; then
-            ensure_node || { echo "ERROR: failed to install Node.js (prerequisite for claude CLI)" >&2; exit 12; }
-        fi
-        npm install -g @anthropic-ai/claude-code 2>&1 | tail -3
-    fi
-    if [[ "${STAGE_ONLY:-0}" != "1" ]]; then
-        command -v claude >/dev/null 2>&1 || { echo "ERROR: claude CLI unavailable after install" >&2; exit 13; }
-    fi
+# ========== STEP 2 — DEP VERIFY (install was done up-front in preflight_deps) ==========
+# Sanity re-check after STEP 1.5's auto-script-bootstrap, so any post-preflight
+# breakage (e.g. a script in BASE_DIR/scripts mutating PATH) is caught loudly
+# instead of producing a confusing failure deeper in tmux pane launch.
+for t in tmux jq; do
+    command -v "$t" >/dev/null 2>&1 \
+        || { echo "ERROR: '$t' disappeared after preflight_deps — PATH was mutated" >&2; exit 16; }
+done
+if [[ "${STAGE_ONLY:-0}" != "1" ]]; then
+    command -v claude >/dev/null 2>&1 \
+        || { echo "ERROR: 'claude' disappeared after preflight_deps — PATH was mutated" >&2; exit 16; }
 fi
-
-if command -v claude >/dev/null 2>&1; then
-    log "  claude: $(command -v claude) ($(claude --version 2>&1 | head -1))"
-fi
-command -v tmux >/dev/null 2>&1 && log "  tmux: $(tmux -V 2>&1)" || log "  tmux: (not installed; STAGE_ONLY)"
 
 # ========== STEP 3 — BOOTSTRAP (session dir + mcp.json + env file + pane scripts) ==========
 mkdir -p "$SESSION_DIR/logs" \
