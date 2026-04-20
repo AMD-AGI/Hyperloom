@@ -37,7 +37,19 @@ CORRECTNESS_ATOL = 1e-2
 CORRECTNESS_RTOL = 1e-2
 MAX_CONCURRENT_BACKENDS = 4
 EVENT_SNIPPET_CHARS = 2000
-OOB_ROUND_TIMEOUT_S = 3600
+
+# Wall-clock hard cap per OOB round.  Aligned with OOB MCP's default
+# task timeout (1800s = 30 min); the previous 3600s let a single dead
+# call burn a full hour before the outer layer noticed.
+OOB_ROUND_TIMEOUT_S = 1800
+
+# Cumulative wall-clock budget across ALL rounds of a single target.
+# Without this, a target that keeps almost-succeeding could eat
+# MAX_OOB_ROUNDS * OOB_ROUND_TIMEOUT_S = 5 * 30min = 2.5h of a 24h
+# marathon before being abandoned.  Pick 30 min: if we can't optimise a
+# kernel within one round's worth of OOB time total, move on and let
+# the orchestrator queue a differently-scoped sub-target.
+OOB_TARGET_BUDGET_S = 1800
 
 # Risk defaults by patch_type
 RISK_DEFAULTS: dict[str, tuple[float, float]] = {
@@ -254,7 +266,37 @@ class KernelManager:
         loop_t0 = time.monotonic()
 
         for round_num in range(1, MAX_OOB_ROUNDS + 1):
-            log.info("OOB round %d/%d for %s", round_num, MAX_OOB_ROUNDS, target.get("kernel_name"))
+            elapsed = time.monotonic() - loop_t0
+            if elapsed >= OOB_TARGET_BUDGET_S:
+                log.warning(
+                    "OOB target budget exhausted for %s: %.0fs >= %ds "
+                    "(round %d/%d not started)",
+                    target.get("kernel_name"), elapsed,
+                    OOB_TARGET_BUDGET_S, round_num, MAX_OOB_ROUNDS,
+                )
+                session_history.append({
+                    "round": round_num, "backend": "none",
+                    "outcome": "BUDGET_EXCEEDED",
+                    "error_analysis": (
+                        f"oob-budget-exceeded: {elapsed:.0f}s >= "
+                        f"{OOB_TARGET_BUDGET_S}s across {round_num - 1} rounds"
+                    ),
+                })
+                return self._build_result(
+                    "failed", target,
+                    error=(
+                        f"oob-budget-exceeded: {elapsed:.0f}s >= "
+                        f"{OOB_TARGET_BUDGET_S}s after {round_num - 1}/{MAX_OOB_ROUNDS} rounds"
+                    ),
+                    metadata={"session_history": session_history,
+                              "abort_reason": "oob-budget-exceeded"},
+                )
+
+            log.info(
+                "OOB round %d/%d for %s (elapsed %.0fs / %ds budget)",
+                round_num, MAX_OOB_ROUNDS, target.get("kernel_name"),
+                elapsed, OOB_TARGET_BUDGET_S,
+            )
 
             # Snapshot source file before this round so we can detect changes
             # even when the LLM edits files via tool calls instead of returning code

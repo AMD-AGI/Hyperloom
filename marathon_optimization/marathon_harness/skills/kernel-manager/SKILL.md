@@ -496,6 +496,13 @@ Append to `results.jsonl` with status `merge-ready`, `failed`, or `no-improvemen
 | `GEAK_STEP_LIMIT` | 100 | GEAK agent iteration budget |
 | `OOB_POLL_INTERVAL_S` | 15 | Seconds between OOB task status checks |
 | `OOB_POLL_TIMEOUT_MIN` | 30 | Max minutes to wait for any single backend |
+| `OOB_TASK_TOTAL_BUDGET_MIN` | 30 | Per-target cumulative wall-clock across ALL rounds & backends; abort target on exceed (aligns with OOB MCP's own 1800s timeout) |
+| `OOB_PER_TARGET_BACKEND_FAIL_CAP` | 3 | Consecutive non-OK returns from the same `(target, backend)` → skip that backend for the rest of the target's rounds |
+| `OOB_PER_SESSION_BACKEND_FAIL_CAP` | 8 | Cumulative failures of a backend across the session → deprioritise it globally |
+| `OOB_UNKNOWN_STATUS_STRIKES` | 5 | Consecutive unknown (neither terminal nor active) statuses → cancel task + treat as failed |
+| `OOB_PROMPT_MAX_BYTES` | 8192 | Hard cap on prompt size sent to OOB; oversize → prompt-pollution |
+| `OOB_TERMINAL_OK` | `{completed, succeeded, success, done, finished}` | Statuses that mean "fetch outputs" |
+| `OOB_TERMINAL_FAIL` | `{failed, cancelled, canceled, error, errored, terminated, crashed, timeout, timed_out, exhausted, aborted, hw_error, oom, killed}` | Statuses that mean "stop polling immediately, do not retry this round" |
 | `EVENT_SNIPPET_CHARS` | 2000 | Max chars of crash log in event details |
 
 ## Iron Rules
@@ -533,6 +540,36 @@ exhausted target. Include the full session_history so the Watchdog has context.
 **IR-11:** Include session_history in every OOB prompt from round 2 onward.
 The accumulated context of what was tried and why it failed is the most
 valuable input to the next attempt.
+
+**IR-12 (polling template):** When polling OOB/GEAK task status, use the
+**mandatory defensive template** from `actions/dispatch.md` §"Polling and
+Collection". A status in `OOB_TERMINAL_FAIL` MUST cause immediate exit
+(no sleep, no retry inside the round). Unknown statuses MUST strike up
+to `OOB_UNKNOWN_STATUS_STRIKES` and then cancel. Never simplify to a
+single `if status == "completed"` branch — that is the bug that made a
+dead task chew through `MAX_OOB_ROUNDS × OOB_POLL_TIMEOUT_MIN` of
+wall-clock for nothing. On every non-success exit, write an event
+(`oob-failed` / `oob-timeout` / `oob-unknown-status-stuck` /
+`oob-empty-output` / `oob-output-fetch-fail` / `oob-transport-fail`) to
+`event_log.jsonl` so the Watchdog can learn.
+
+**IR-13 (prompt hygiene):** Before calling `agent_create_task` /
+`geak_create_task`, run the prompt through the guard in `actions/dispatch.md`
+§"Prompt Hygiene Guard". If the guard matches any `POLLUTION_PATTERNS`
+(inference-server launch, multi-GPU / distributed, end-to-end serving
+benchmarks, full-model weight loading) OR the prompt exceeds
+`OOB_PROMPT_MAX_BYTES`, DO NOT submit. Write a `prompt-pollution` event
+and let the deep-guidance loop reshape the prompt on the next round (or
+exhaust). OOB is a single-kernel optimiser on 1 GPU with no weights; any
+task outside that envelope will stall the pod until the 30-min MCP
+timeout fires.
+
+**IR-14 (per-target budget):** Track `OOB_TASK_TOTAL_BUDGET_MIN` across
+all rounds and backends for the same target. On overrun, abort the
+target with `failed / reason=oob-budget-exceeded`, write an `exhausted`
+event, and move on. Also honour `OOB_PER_TARGET_BACKEND_FAIL_CAP` and
+`OOB_PER_SESSION_BACKEND_FAIL_CAP` to stop throwing good time at a
+backend that keeps returning failure for this target or this session.
 
 ## Autonomy
 
