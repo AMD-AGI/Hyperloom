@@ -26,7 +26,7 @@ export CONT=tasimage/primus:gpt_oss_20b_training_5.1
 export MODELDIR=/shared_nfs/huangwei/gpt_oss_20b/model
 export LOGDIR=/root/mlperf_primus/logs
 export CLEAR_CACHES=0
-export HF_TOKEN="hf_REDACTED"
+export HF_TOKEN="your_api_key"
 export WANDB_API_KEY="your_api_key"
 #export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=TRITON
 
