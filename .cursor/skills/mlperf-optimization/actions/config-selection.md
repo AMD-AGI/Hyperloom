@@ -18,11 +18,30 @@ python3 $SKILL_ROOT/kb/kb_query.py "GPT-OSS-20B GBS LR parallelism config" --top
 
 ## Procedure
 
-The matrix is intentionally small (6 configs). LR is coupled to GBS via sqrt scaling — it is not swept independently.
+The matrix is intentionally small (6 configs). LR is coupled to GBS via sqrt scaling — it
+is not swept independently.
 
-`LR = 4.0e-4 × sqrt(GBS / 32)` · `MIN_LR = LR / 10` · `WARMUP_ITERS = 128 × (32 / GBS)` · `GA_STEPS = GBS / (MBS × DP)` with MBS=2.
+**MLPerf IR-9 constraints (NOT heuristics — hard rules):**
 
-EP: set `expert_model_parallel_size`, `moe_enable_deepep: true`, `use_turbo_deepep: true`, `turbo_deepep_num_cu: 64`. TP: set `tensor_model_parallel_size`, then `DP = GPUS / (TP × PP)` and `GA = GBS / (MBS × DP)` for the target GBS.
+- `MIN_LR = LR × 0.1` (derived from `opt_end_learning_rate = opt_base_learning_rate × 0.1`).
+  Every candidate below must set `PRIMUS_MIN_LR` to exactly `PRIMUS_LR × 0.1`.
+- `PRIMUS_LR_DECAY_ITERS = PRIMUS_TRAIN_ITERS − PRIMUS_LR_WARMUP_ITERS` (derived from
+  `opt_learning_rate_decay_steps = 1_200_000 − warmup_steps`).
+- GBS, `PRIMUS_LR`, and `PRIMUS_LR_WARMUP_ITERS` are **unconstrained** and tunable.
+- `PRIMUS_WEIGHT_DECAY`, `PRIMUS_CLIP_GRAD`, AdamW betas/epsilon, dropout, `sequence_length`,
+  and `PRIMUS_TRAIN_ITERS` are fixed — NEVER included in any candidate override here.
+
+Scaling formulas (all IR-9 compliant):
+
+- `LR = 4.0e-4 × sqrt(GBS / 32)` (unconstrained scaling rule)
+- `MIN_LR = LR / 10` (IR-9 derived)
+- `WARMUP_ITERS = 128 × (32 / GBS)` (unconstrained; tune further in convergence-speed)
+- `DECAY_ITERS = PRIMUS_TRAIN_ITERS − WARMUP_ITERS` (IR-9 derived; overrides must set it)
+- `GA_STEPS = GBS / (MBS × DP)` with MBS=2
+
+EP: set `expert_model_parallel_size`, `moe_enable_deepep: true`, `use_turbo_deepep: true`,
+`turbo_deepep_num_cu: 64`. TP: set `tensor_model_parallel_size`, then
+`DP = GPUS / (TP × PP)` and `GA = GBS / (MBS × DP)` for the target GBS.
 
 ### Candidate Matrix
 
@@ -50,25 +69,26 @@ source "$SKILL_ROOT/scripts/common.sh"
 
 # Candidate A (baseline — already measured, reuse existing result)
 
+# Shared IR-9 pairing for WARMUP=256 ⇒ DECAY_ITERS = 1200000 − 256 = 1199744
+GBS16_OVERRIDES="PRIMUS_GLOBAL_BATCH_SIZE=16 PRIMUS_LR=2.0e-4 PRIMUS_MIN_LR=2.0e-5 \
+    PRIMUS_LR_WARMUP_ITERS=256 PRIMUS_LR_DECAY_ITERS=1199744"
+
 # Candidate B: GBS=16
-run_mlperf_trial "cfg_B_gbs16" 1 "" \
-    "PRIMUS_GLOBAL_BATCH_SIZE=16 PRIMUS_LR=2.0e-4 PRIMUS_MIN_LR=2.0e-5 PRIMUS_LR_WARMUP_ITERS=256"
+run_mlperf_trial "cfg_B_gbs16" 1 "" "$GBS16_OVERRIDES"
 
 # Candidate C: EP=8, GBS=32
 # (first modify YAML for EP=8, then run)
 run_mlperf_trial "cfg_C_ep8_gbs32" 1
 
 # Candidate D: EP=8, GBS=16
-run_mlperf_trial "cfg_D_ep8_gbs16" 1 "" \
-    "PRIMUS_GLOBAL_BATCH_SIZE=16 PRIMUS_LR=2.0e-4 PRIMUS_MIN_LR=2.0e-5 PRIMUS_LR_WARMUP_ITERS=256"
+run_mlperf_trial "cfg_D_ep8_gbs16" 1 "" "$GBS16_OVERRIDES"
 
 # Candidate E: TP=2, EP=4, GBS=32
 # (first modify YAML for TP=2/EP=4, then run)
 run_mlperf_trial "cfg_E_tp2ep4_gbs32" 1
 
 # Candidate F: TP=2, EP=4, GBS=16
-run_mlperf_trial "cfg_F_tp2ep4_gbs16" 1 "" \
-    "PRIMUS_GLOBAL_BATCH_SIZE=16 PRIMUS_LR=2.0e-4 PRIMUS_MIN_LR=2.0e-5 PRIMUS_LR_WARMUP_ITERS=256"
+run_mlperf_trial "cfg_F_tp2ep4_gbs16" 1 "" "$GBS16_OVERRIDES"
 ```
 
 Discard candidates with nan/no_data/crash. Revert YAML between candidates.
@@ -104,9 +124,8 @@ iters) produces loss-vs-samples curves for direct comparison.
 # 2. Run Tier 3 trial with GBS/LR overrides
 
 run_mlperf_trial "cfg_A_t3" 3
-run_mlperf_trial "cfg_B_t3" 3 "" \
-    "PRIMUS_GLOBAL_BATCH_SIZE=16 PRIMUS_LR=2.0e-4 PRIMUS_MIN_LR=2.0e-5 PRIMUS_LR_WARMUP_ITERS=256"
-# ... etc for each survivor
+run_mlperf_trial "cfg_B_t3" 3 "" "$GBS16_OVERRIDES"
+# ... etc for each survivor (each must keep its IR-9 MIN_LR / DECAY_ITERS pairing)
 ```
 
 **After each Tier 3 trial completes, extract:**
