@@ -141,8 +141,8 @@ else
     echo "Check: profile=true set in YAML? rpdTracerControl loaded in logs?"
 fi
 
-# --- Size check: re-filter if too large for TraceLens ---
-echo "[5/7] Validating trace for TraceLens..."
+# --- Size check: re-filter if too large for TraceLens CLI ---
+echo "[5/7] Validating trace for TraceLens CLI..."
 
 MAX_TRACE_MB=50
 TRACELENS_TRACE_GZ=""
@@ -215,7 +215,7 @@ echo ""
 echo "============================================================"
 echo "Profile complete. Results: $RESULT_DIR"
 if [ -n "${TRACELENS_TRACE_GZ:-}" ]; then
-    echo "TraceLens trace: $TRACELENS_TRACE_GZ"
+    echo "TraceLens CLI trace: $TRACELENS_TRACE_GZ"
 fi
 if [ -f "$RESULT_DIR/categories.json" ]; then
     echo "Categories: $(cat "$RESULT_DIR/categories.json")"

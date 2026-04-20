@@ -9,7 +9,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 # GBS/LR/parallelism config to find the optimal per-iteration cost.
 #
 # NOTE: For GBS/LR/TP/EP/DP config selection, use actions/config-selection.md
-# (three-stage workflow with Tier 1 → 2L → 3).
+# (three-stage workflow with Tier 1 → 3 → 4).
 #
 # Required env vars: MLPERF_DIR, CONFIG_SH, RESULT_DIR
 # Optional: SWEEP_ITERS (default 500), WINNING_GBS (default from config)
