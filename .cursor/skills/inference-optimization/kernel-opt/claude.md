@@ -37,17 +37,39 @@ may be intermittent. **Fallback to `codex` if `claude` is unavailable.**
 | **Multi-turn** | Yes (up to 30 turns) | Yes (typically 1) | Yes (up to 100 steps) | No |
 | **Best for** | Multi-step: analyze, write, verify compilation | Fast single-pass rewrites | Complex HIP, hardware-verified | Quick iteration |
 
+## Tracing Setup
+
+At the **start** of OOB Claude usage (before the first `agent_create_task`), record
+the start timestamp for message-level cost correlation:
+
+```bash
+python3 $SCRIPTS_DIR/setup_oob_tracing.py --agent claude
+```
+
+After ALL OOB Claude tasks complete (all iterations done), record the end:
+
+```bash
+python3 $SCRIPTS_DIR/setup_oob_tracing.py --record-end
+```
+
+**NOTE:** LLM header injection (`x-litellm-tags`, `x-litellm-spend-logs-metadata`)
+is handled automatically by `auth_proxy.py` inside the OOB workload pod — no manual
+header configuration needed (unlike GEAK). The timestamps allow correlating OOB's
+LLM spend to specific messages by querying `LiteLLM_SpendLogs` with time ranges.
+
 ## Tool Sequence
 
 Identical to Codex — same MCP, different `agent` parameter.
 
 | Step | Tool | Purpose |
 |------|------|---------|
+| 0 | `bash: setup_oob_tracing.py --agent claude` | Record start timestamp (once) |
 | 1 | `agent_create_task` | Create task with kernel source + prompt |
 | 2 | `agent_submit_task` | Start execution |
 | 3 | `agent_get_task` | Poll status (every `CLAUDE_POLL_INTERVAL_S`) |
 | 4 | `agent_get_outputs` | List output files |
 | 5 | `agent_download_file` | Download optimized kernel |
+| 6 | `bash: setup_oob_tracing.py --record-end` | Record end timestamp (once, after all iterations) |
 | - | `agent_cancel_task` | Cancel if stuck past `CLAUDE_POLL_TIMEOUT_MIN` |
 
 ## agent_create_task — Critical Details

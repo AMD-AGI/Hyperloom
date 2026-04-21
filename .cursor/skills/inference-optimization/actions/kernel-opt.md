@@ -23,14 +23,21 @@ python3 $SKILL_ROOT/kb/kb_query.py --category kernel_optimization --compact
 
 **FLOW GUARD:** Do NOT skip this action if candidates exist. Running sweep with unoptimized kernels wastes compute.
 
-### Step 0: Tracing setup (once)
+### Step 0: Tracing setup (once per backend)
 
-If `geak` is in `KERNEL_OPT_BACKENDS`, inject LLM cost attribution headers:
+**GEAK** — if `geak` is in `KERNEL_OPT_BACKENDS`:
 1. Run `python3 $SCRIPTS_DIR/setup_geak_tracing.py` (records start timestamp, outputs config)
 2. Call `geak_get_model_config` → `geak_set_model_config` with `extra_headers` from script output
 3. After ALL GEAK tasks complete: `python3 $SCRIPTS_DIR/setup_geak_tracing.py --record-end`
 
 See [`../kernel-opt/geak.md`](../kernel-opt/geak.md) "Tracing Setup" for details.
+
+**OOB (Codex/Claude)** — if `codex` or `claude` is in `KERNEL_OPT_BACKENDS`:
+1. Run `python3 $SCRIPTS_DIR/setup_oob_tracing.py --agent <codex|claude>` before first task
+2. After ALL OOB iterations complete: `python3 $SCRIPTS_DIR/setup_oob_tracing.py --record-end`
+
+OOB header injection is automatic (via `auth_proxy.py` in the workload pod).
+See [`../kernel-opt/codex.md`](../kernel-opt/codex.md) "Tracing Setup" for details.
 
 ### Step 1: Locate kernel source
 
