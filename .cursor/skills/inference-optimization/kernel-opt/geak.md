@@ -52,10 +52,55 @@ ls "$AITER_PATH/ops/"    # Python dispatch wrappers
 configuration files, server settings, workspace configs, test data, or results files.
 Modifying GEAK config is an Iron Rule violation and invalidates the entire run.
 
-**CRITICAL: Do NOT call `geak_set_model_config`.** The GEAK LLM model configuration
-is pre-set by the administrator. The skill MUST use whatever model is already
-configured. Calling `geak_set_model_config` to change the LLM backend violates IR-7
-and risks setting a non-existent model (e.g., `claude-haiku-4-5-20251001` on VertexAI).
+**Do NOT call `geak_set_model_config` to change the model backend.** The GEAK LLM
+model configuration is pre-set by the administrator. Calling it to change
+`model_class`, `model_name`, or `api_base` violates IR-7.
+
+**Exception — Tracing headers:** You MUST call `geak_set_model_config` once to
+inject observability headers. See "Tracing Setup" section below.
+
+## Tracing Setup
+
+At the **start** of the kernel-opt action (before any `geak_create_task`), perform
+these steps in order:
+
+### Step A: Record start timestamp + generate tracing config
+
+```bash
+python3 $SCRIPTS_DIR/setup_geak_tracing.py
+```
+
+The script outputs `extra_headers` JSON and writes to `/workspace/.geak_tracing.json`.
+
+### Step B: Inject tracing headers via MCP
+
+1. Call `geak_get_model_config` to read current config.
+2. Call `geak_set_model_config` with:
+   - Keep ALL existing fields (`model_class`, `model_name`, `api_base`, `api_key`, etc.)
+   - `model_name` MUST have `openai/` prefix (e.g. `openai/claude-opus-4-6`).
+     Without it, litellm uses Anthropic `/v1/messages` route and tags are NOT parsed.
+   - Add `extra_headers` to `model_kwargs` using the values from the script output:
+     ```json
+     "extra_headers": {
+       "x-litellm-tags": "product:primus-claw,component:geak",
+       "x-litellm-spend-logs-metadata": "{\"session_id\":\"<SESSION_ID>\",\"component\":\"geak\"}"
+     }
+     ```
+
+### Step C: Record end timestamp (after all tasks)
+
+After the last `geak_get_task` returns completed:
+```bash
+python3 $SCRIPTS_DIR/setup_geak_tracing.py --record-end
+```
+
+The start/end timestamps in `/workspace/.geak_tracing.json` allow correlating GEAK's
+LLM spend to specific messages by querying `LiteLLM_SpendLogs` with time ranges.
+
+**Rules:**
+- Run tracing setup exactly ONCE per kernel-opt action (not per task).
+- Do NOT change `model_class`, `api_base`, or `api_key`.
+- If `geak_get_model_config` returns empty/error, skip tracing (do not block).
 
 ## GEAK MCP Tool Reference
 
@@ -69,15 +114,15 @@ Requires two keys:
 
 | Step | Tool | Purpose |
 |------|------|---------|
-| 1 | `geak_get_model_config` | **Read-only**: verify LLM backend is configured |
-| 2 | `geak_create_task` | Create task with source + instructions |
-| 3 | `geak_submit_task` | Start optimization |
-| 4 | `geak_get_task` | Poll status (every 30s) |
-| 5 | `geak_get_outputs` | List output files |
-| 6 | `geak_download_file` | Download optimized code |
+| 0a | `bash: setup_geak_tracing.py` | Record start timestamp + generate config |
+| 0b | `geak_get_model_config` → `geak_set_model_config` | Inject tracing headers (once) |
+| 1 | `geak_create_task` | Create task with source + instructions |
+| 2 | `geak_submit_task` | Start optimization |
+| 3 | `geak_get_task` | Poll status (every 30s) |
+| 4 | `geak_get_outputs` | List output files |
+| 5 | `geak_download_file` | Download optimized code |
+| 6 | `bash: setup_geak_tracing.py --record-end` | Record end timestamp |
 | - | `geak_list_tasks` | Debug: list all tasks |
-
-**FORBIDDEN:** `geak_set_model_config` — NEVER call this tool. Use existing config.
 
 ### geak_create_task — critical details
 
