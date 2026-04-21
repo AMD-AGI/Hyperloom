@@ -1,5 +1,5 @@
 ---
-name: inference-optimization-magpie
+name: inference-optimization-cli-b
 description: |
   Autonomous DFS-guided inference optimization for LLM serving on AMD MI355X GPUs.
   Uses heuristic-scored depth-first search to systematically explore optimization actions
