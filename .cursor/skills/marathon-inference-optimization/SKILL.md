@@ -59,6 +59,10 @@ responsibility, defined here once so the prompt can stay short.
    (or, if absent, the `=== NO SESSION_REPORT.md — final state.json ===`
    block) to the user.
 
+5. **Claw-mode outcome self-check** (last thing you do — see "Claw Mode:
+   Session Outcome Self-Check (RCA)" near the bottom of this file). It is a
+   no-op on LOCAL hosts and adds negligible cost on Claw, so always include it.
+
 ### Hard rules
 
 - **No cron, no &-loops, no scheduled tasks.** Use multi-turn shell tool
@@ -267,3 +271,75 @@ pane IS on the GPU host natively.
 - `$SPEC_ROOT/actions/*.md` — per-action execution details (deep-kernel-analysis,
   operator-tuning, framework-rebuild, comm-optimization, compiler-tuning, dream,
   checkpoint, re-explore, recover, sweep, report)
+
+## Claw Mode: Session Outcome Self-Check (RCA)
+
+Claw's v1 RCA pipeline consumes an optional outcome file written at end-of-turn.
+Run this **after step 4** (after you've forwarded `SESSION_REPORT.md` back to
+the user). It is a no-op on LOCAL hosts.
+
+### Rules
+
+- The launcher is running inside the Claw sandbox iff `/workspace/.claw_message_id`
+  exists. If it does not, exit this step silently.
+- The marathon deliverable is `$SESSION_DIR/SESSION_REPORT.md` — emit a failure
+  outcome only when it is missing or clearly broken.
+- On success, write **nothing**; backend treats absence as success.
+- Never emit a `task_outcome` value other than the three allowed ones.
+
+### Allowed outcome values
+
+| `task_outcome` | Meaning |
+|----------------|---------|
+| `completed_no_report` | `SESSION_REPORT.md` was not produced (orchestrator never saw STOP) |
+| `completed_broken_report` | `SESSION_REPORT.md` exists but is truncated / missing structure |
+| `completed_invalid_report` | Report looks complete but key content is invalid |
+
+### Script
+
+```bash
+# $SESSION_DIR is the marathon run directory — same one you've been polling.
+REPORT="${SESSION_DIR:?SESSION_DIR not set}/SESSION_REPORT.md"
+
+MSG_ID_FILE="/workspace/.claw_message_id"
+if [ -r "$MSG_ID_FILE" ]; then
+  MID="$(tr -d '[:space:]' < "$MSG_ID_FILE")"
+  if [ -n "$MID" ]; then
+    OUT_DIR="/workspace/.claw_outcomes"
+    mkdir -p "$OUT_DIR"
+
+    outcome=""
+    reason=""
+    if [ ! -f "$REPORT" ]; then
+      outcome="completed_no_report"
+      reason="SESSION_REPORT.md was not produced"
+    elif [ "$(wc -c < "$REPORT")" -lt 800 ]; then
+      outcome="completed_broken_report"
+      reason="SESSION_REPORT too small (<800 bytes)"
+    elif [ "$(grep -c '^## ' "$REPORT")" -lt 2 ]; then
+      outcome="completed_broken_report"
+      reason="fewer than 2 H2 sections in SESSION_REPORT"
+    elif ! grep -q '^| ' "$REPORT"; then
+      outcome="completed_invalid_report"
+      reason="no result tables in SESSION_REPORT"
+    fi
+
+    if [ -n "$outcome" ]; then
+      python3 - "$OUT_DIR/$MID.json" "$outcome" "$reason" <<'PY'
+import json, sys
+path, outcome, reason = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path, "w") as f:
+    json.dump({"task_outcome": outcome, "reason": reason}, f)
+PY
+    fi
+  fi
+fi
+```
+
+Outcome file schema (forwarded by `executor-ts` to backend as `task_outcome` /
+`outcome_reason` on the `executor-complete` callback):
+
+```json
+{"task_outcome": "completed_no_report",
+ "reason": "SESSION_REPORT.md was not produced"}
+```
