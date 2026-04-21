@@ -1,6 +1,6 @@
 # Action: Profile & Analyze
 
-Combines profiling (Phase 3), TraceLens analysis (Phase 4), and candidate identification (Phase 5).
+Combines profiling (Phase 3), **standalone TraceLens CLI + orchestrator** (Phase 4), and candidate identification (Phase 5). Phase 3 (Magpie) only **collects** traces; Phase 4 is Step 2 below — do not conflate them.
 
 ## Inputs
 - Running server from `baseline.md`
@@ -42,9 +42,11 @@ elif [[ "$FRAMEWORK" == "vllm" ]]; then
 fi
 ```
 
-### Step 1: Profile with Magpie (torch.profiler + TraceLens + Gap Analysis in one shot)
+### Step 1: Profile with Magpie (torch.profiler + TraceLens-ready capture + Magpie gap hints)
 
-Magpie handles the full profiling pipeline: server launch → profiling → trace collection → TraceLens analysis → gap analysis → cleanup. No manual profiler HTTP endpoints needed.
+Magpie runs the **profiling benchmark**: server launch → torch profiler → writing **runtime trace + `capture_traces/`** → optional in-run **Magpie `gap_analysis` / YAML `tracelens` hooks** (pipeline summaries — **not** the standalone TraceLens product) → cleanup. No manual profiler HTTP endpoints needed.
+
+**This is not Step 2.** Step 2 (`TraceLens_*` CLI, `orchestrator_prepare.py`, `standalone-analysis-orchestrator.md`) is **mandatory** after Step 1 and produces `standalone_analysis.md`. Do not treat Magpie as having finished “TraceLens analysis” in the Phase 4 / deliverable sense.
 
 #### Step 1a: Compute steady-state profiling window
 
@@ -204,7 +206,7 @@ steady-state windowing (`DELAY_ITERS`/`MAX_ITERS`) to capture a representative s
 without oversized traces. Throughput numbers include profiling overhead — use clean
 baseline numbers from `baseline.md` for performance tracking.
 
-**Key profiler settings enabled for TraceLens:**
+**Key profiler settings for traces that downstream TraceLens CLI can consume:**
 - **Shape & callstack profiling** (SGLang): `SGLANG_PROFILE_WITH_STACK`, `SGLANG_PROFILE_RECORD_SHAPE`
 - **Graph capture tracing**: SGLang `--enable-profile-cuda-graph`, vLLM `--profiler-config.capture_torch_profiler_dir`
 - **Detailed annotations**: SGLang `extra_body.roofline_annotations`, vLLM `--profiler-config.detailed_trace_annotation`
@@ -212,7 +214,9 @@ baseline numbers from `baseline.md` for performance tracking.
 
 **ALWAYS `unset PROFILE SGLANG_TORCH_PROFILER_DIR` after profiling** — leaked env vars cause 30x slowdown.
 
-### Step 2: TraceLens analysis (CLI)
+### Step 2: TraceLens analysis (CLI) — **REQUIRED after Step 1**
+
+Step 1 only supplies files on disk. **You MUST run this step** unless the run is aborted for infrastructure reasons (and that must be stated explicitly in the report).
 
 **CRITICAL — pick the right CLI.** TraceLens ships multiple `TraceLens_*` entry
 points. Only one of them can stitch the runtime trace with the per-BS capture
@@ -339,7 +343,7 @@ The final standalone analysis report will be at `$TRACE_DIR/tracelens_output/sta
 
 ### Step 3: Identify GEAK candidates
 
-**From TraceLens output or direct trace parsing:**
+**Prefer `standalone_analysis.md` and Step 2 outputs.** Use direct trace parsing below only when Step 2 could not be completed after repair attempts (see Failure Handling) — and note the degraded path in your run log.
 
 ```python
 import gzip, json, time, os
@@ -381,7 +385,7 @@ for name, v in sorted(kernels.items(), key=lambda x: -x[1]['total_us']):
 | `topkGatingSoftmax` | **Yes** | MoE routing kernel |
 | Custom scheduling/routing | **Yes** | Token dispatch, KV cache ops |
 
-**Architecture-based fallback** (when profiling/TraceLens fails):
+**Architecture-based fallback** (last resort — no reliable trace or Step 2 unavailable):
 ```python
 import json
 config = json.load(open(f'{MODEL}/config.json'))
@@ -427,5 +431,5 @@ If >50% GPU time in vendor kernels: boost backend exploration scores significant
 - **Runtime trace has 0 `sglang_profiler::*` annotations:** `extra_body.roofline_annotations=true` wasn't honored by the `/start_profile` endpoint. Check `SGLANG_PROFILE_RECORD_SHAPE` / `SGLANG_PROFILE_WITH_STACK` are exported, and that `scheduler_profiler_mixin.patch` was applied.
 - **Step 2 sanity check fails (`other` > 80%, GEMM < 20%):** You're running the wrong TraceLens CLI, or the capture folder wasn't linked. Confirm `TraceLens_generate_perf_report_pytorch_inference` (not the non-inference variant) and `--capture_folder` points to a non-empty directory.
 - **TraceLens CLI not installed:** `pip install -e $(ls -d /shared_nfs/*/TraceLens-internal | head -1)` (copy to `/tmp` first if source is read-only).
-- **TraceLens CLI fails with trace parse errors:** fall back to direct trace parsing in Step 3.
+- **TraceLens CLI fails (parse errors, OOM, etc.):** do **not** skip Step 2 by default. Reduce trace size (`MAX_ITERS` / `PROFILE_NUM_PROMPTS`, Step 1a), re-run Step 1 if needed, fix CLI/install paths, and **re-run** the Step 2 commands until they succeed. **Only** if the CLI remains unusable after documented repair attempts may you use Step 3’s direct trace parsing **solely** to list GEAK-oriented kernel hints — you must still record that **full TraceLens deliverables (`standalone_analysis.md`, category findings) were not produced** and treat the run as degraded.
 - **Trace too large (>1GB):** reduce `MAX_ITERS` (Step 1a) or `PROFILE_NUM_PROMPTS`.

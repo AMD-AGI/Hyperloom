@@ -183,4 +183,4 @@ if categories["elementwise"] > 5:
 - If no trace produced: check profile=true was set, check output directory
 - If trace too large: filter using `scripts/common.sh:filter_trace()`
 - TraceLens CLI not installed: copy to `/tmp` and install (`cp -r /hyperloom/TraceLens-internal /tmp/ && pip install -e /tmp/TraceLens-internal`)
-- TraceLens CLI fails: fall back to manual kernel analysis (Step 3)
+- TraceLens CLI fails: shrink/filter trace, fix install, and **re-run** Step 5 CLI + orchestrator. Do **not** skip Step 5 by default. Only after documented failed repair attempts may you use Step 3 parsing for minimal kernel hints; note in outputs that full TraceLens deliverables (`standalone_analysis.md`) were not produced.

@@ -169,8 +169,14 @@ See `actions/profile.md` for the full profiling procedure.
 ## Magpie Integration
 
 All throughput benchmarks, profiling, and parameter sweeps use **Magpie** (`magpie benchmark`
-CLI) as the sole execution engine. Magpie wraps InferenceX with structured results, built-in
-TraceLens trace analysis, and gap analysis.
+CLI) as the sole execution engine. Magpie wraps InferenceX with structured `benchmark_report.json`,
+optional in-run **gap_analysis** hints, and YAML **`tracelens`** hooks — these help during the
+benchmark but are **not** the standalone TraceLens CLI workflow.
+
+**Mandatory distinction:** full TraceLens (**`actions/profile.md` Step 2**: `TraceLens_generate_perf_report_*`,
+`orchestrator_prepare.py`, `standalone-analysis-orchestrator.md`, `standalone_analysis.md`) runs **after**
+the Magpie profile step. Finishing a Magpie profile run does **not** satisfy Phase 4; the agent must
+execute Step 2 unless the run is explicitly aborted and documented.
 
 **Prerequisites — Install Magpie:**
 
