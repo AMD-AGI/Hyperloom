@@ -41,13 +41,13 @@ At the **start** of OOB Codex usage (before the first `agent_create_task`), reco
 the start timestamp for message-level cost correlation:
 
 ```bash
-python3 $SCRIPTS_DIR/setup_oob_tracing.py --agent codex
+python3 $SCRIPTS_DIR/trace_action.py --component oob --action start --agent codex
 ```
 
 After ALL OOB Codex tasks complete (all iterations done), record the end:
 
 ```bash
-python3 $SCRIPTS_DIR/setup_oob_tracing.py --record-end
+python3 $SCRIPTS_DIR/trace_action.py --component oob --action end
 ```
 
 **NOTE:** LLM header injection (`x-litellm-tags`, `x-litellm-spend-logs-metadata`)
@@ -59,13 +59,13 @@ LLM spend to specific messages by querying `LiteLLM_SpendLogs` with time ranges.
 
 | Step | Tool | Purpose |
 |------|------|---------|
-| 0 | `bash: setup_oob_tracing.py --agent codex` | Record start timestamp (once) |
+| 0 | `bash: trace_action.py --component oob --action start --agent codex` | Record start timestamp (once) |
 | 1 | `agent_create_task` | Create task with kernel source + prompt |
 | 2 | `agent_submit_task` | Start execution |
 | 3 | `agent_get_task` | Poll status (every `CODEX_POLL_INTERVAL_S`) |
 | 4 | `agent_get_outputs` | List output files |
 | 5 | `agent_download_file` | Download optimized kernel |
-| 6 | `bash: setup_oob_tracing.py --record-end` | Record end timestamp (once, after all iterations) |
+| 6 | `bash: trace_action.py --component oob --action end` | Record end timestamp (once, after all iterations) |
 | - | `agent_cancel_task` | Cancel if stuck past `CODEX_POLL_TIMEOUT_MIN` |
 
 ## agent_create_task — Critical Details

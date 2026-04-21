@@ -25,19 +25,23 @@ python3 $SKILL_ROOT/kb/kb_query.py --category kernel_optimization --compact
 
 ### Step 0: Tracing setup (once per backend)
 
-**GEAK** — if `geak` is in `KERNEL_OPT_BACKENDS`:
-1. Run `python3 $SCRIPTS_DIR/setup_geak_tracing.py` (records start timestamp, outputs config)
-2. Call `geak_get_model_config` → `geak_set_model_config` with `extra_headers` from script output
-3. After ALL GEAK tasks complete: `python3 $SCRIPTS_DIR/setup_geak_tracing.py --record-end`
+Use `trace_action.py` to record start/end for each external component:
 
-See [`../kernel-opt/geak.md`](../kernel-opt/geak.md) "Tracing Setup" for details.
+**GEAK** — if `geak` is in `KERNEL_OPT_BACKENDS`:
+1. `python3 $SCRIPTS_DIR/trace_action.py --component geak --action start`
+2. Call `geak_get_model_config` → `geak_set_model_config` with `extra_headers` from script output
+3. After ALL GEAK tasks: `python3 $SCRIPTS_DIR/trace_action.py --component geak --action end`
 
 **OOB (Codex/Claude)** — if `codex` or `claude` is in `KERNEL_OPT_BACKENDS`:
-1. Run `python3 $SCRIPTS_DIR/setup_oob_tracing.py --agent <codex|claude>` before first task
-2. After ALL OOB iterations complete: `python3 $SCRIPTS_DIR/setup_oob_tracing.py --record-end`
+1. `python3 $SCRIPTS_DIR/trace_action.py --component oob --action start --agent <codex|claude>`
+2. After ALL OOB iterations: `python3 $SCRIPTS_DIR/trace_action.py --component oob --action end`
 
-OOB header injection is automatic (via `auth_proxy.py` in the workload pod).
-See [`../kernel-opt/codex.md`](../kernel-opt/codex.md) "Tracing Setup" for details.
+**LLM Proxy** — if direct LLM API calls are made:
+1. `python3 $SCRIPTS_DIR/trace_action.py --component llm --action start`
+2. After all LLM calls: `python3 $SCRIPTS_DIR/trace_action.py --component llm --action end`
+
+See each backend's skill doc for details. OOB header injection is automatic
+(via `auth_proxy.py`). GEAK headers require `geak_set_model_config`.
 
 ### Step 1: Locate kernel source
 
