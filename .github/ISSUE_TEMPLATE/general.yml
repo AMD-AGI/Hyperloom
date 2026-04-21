@@ -1,0 +1,54 @@
+name: "General Issue"
+description: "General feedback, suggestion, question, or task"
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for suggestions, questions, or anything that doesn't fit Bug Report or Feature Request.
+
+  - type: dropdown
+    id: target_release
+    attributes:
+      label: Target release
+      options:
+        - v0.2
+        - v0.3
+        - v0.4
+        - Unsure
+    validations:
+      required: false
+
+  - type: dropdown
+    id: issue_kind
+    attributes:
+      label: What kind of issue is this?
+      options:
+        - Suggestion / Feature idea
+        - Question
+        - Task / Chore
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: domain
+    attributes:
+      label: Related area
+      options:
+        - Inference
+        - Training
+        - MCP tools
+        - UI / PrimusClaw
+        - General / Not sure
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe your issue, suggestion, or question
+    validations:
+      required: true

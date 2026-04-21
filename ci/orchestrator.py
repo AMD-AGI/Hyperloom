@@ -222,6 +222,7 @@ def main():
     parser.add_argument("--config", default=None, help="Path to ci-config.yaml")
     parser.add_argument("--models", default=None, help="Comma-separated model subset (inferenceX_key)")
     parser.add_argument("--trigger", default="manual", help="Trigger type: scheduled/manual/inferenceX")
+    parser.add_argument("--tools", default=None, help="Comma-separated Claw tool IDs (overrides ci-config)")
     parser.add_argument("--dry-run", action="store_true", help="Print prompts without executing")
     parser.add_argument("--output-dir", default="ci-output", help="Output directory for reports")
     args = parser.parse_args()
@@ -315,6 +316,11 @@ def main():
             print(prompt)
         sys.exit(0)
 
+    # Override tools if provided via CLI
+    if args.tools:
+        claw_cfg["tools"] = [int(t.strip()) for t in args.tools.split(",")]
+        log.info("Overriding Claw tools from CLI: %s", claw_cfg["tools"])
+
     # Execute
     claw = ClawClient.from_config(claw_cfg)
     nfs_base = results_cfg.get("nfs_base", "/hyperloom/results/ci")
@@ -328,56 +334,86 @@ def main():
                  result["model"], result["status"],
                  f"{result['gain_pct']}%" if result.get("gain_pct") is not None else "N/A")
 
-    # Generate reports
+    # Generate reports — wrap in try/except so report-generation bugs never
+    # discard the expensive LLM results that already completed successfully.
     ci_run_id = f"ci-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}"
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    md_report = generate_markdown_report(results, args.trigger, ifx_commit, ci_run_id)
-    json_summary = generate_json_summary(results, args.trigger, ifx_commit, ci_run_id)
+    json_summary = None
+    try:
+        md_report = generate_markdown_report(results, args.trigger, ifx_commit, ci_run_id)
+        (out_dir / "ci_report.md").write_text(md_report)
+    except Exception:
+        log.exception("generate_markdown_report failed — writing raw results as fallback")
+        (out_dir / "ci_report_raw.json").write_text(
+            json.dumps(results, indent=2, default=str))
 
-    (out_dir / "ci_report.md").write_text(md_report)
-    (out_dir / "ci_summary.json").write_text(json.dumps(json_summary, indent=2))
+    try:
+        json_summary = generate_json_summary(results, args.trigger, ifx_commit, ci_run_id)
+        (out_dir / "ci_summary.json").write_text(json.dumps(json_summary, indent=2))
+    except Exception:
+        log.exception("generate_json_summary failed — writing raw results as fallback")
+        (out_dir / "ci_summary_raw.json").write_text(
+            json.dumps(results, indent=2, default=str))
 
     # Per-model report files (for individual artifact downloads)
     for r in results:
-        model_dir = out_dir / r["model"]
-        model_dir.mkdir(parents=True, exist_ok=True)
-        report_content = r.get("report_content") or r.get("optimization_report")
-        if report_content:
-            (model_dir / "optimization_report.md").write_text(report_content)
+        try:
+            model_dir = out_dir / r["model"]
+            model_dir.mkdir(parents=True, exist_ok=True)
+            report_content = r.get("report_content") or r.get("optimization_report")
+            if report_content:
+                (model_dir / "optimization_report.md").write_text(report_content)
+        except Exception:
+            log.exception("Failed to write per-model report for %s", r.get("model"))
 
     # GitHub Actions Job Summary
-    github_summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
-    gh_summary = generate_github_summary(results, args.trigger, ifx_commit)
-    if github_summary_file:
-        with open(github_summary_file, "a") as f:
-            f.write(gh_summary)
-        log.info("GitHub Summary written to $GITHUB_STEP_SUMMARY")
-    else:
-        (out_dir / "github_summary.md").write_text(gh_summary)
-        log.info("GitHub Summary written to %s/github_summary.md (not in CI)", out_dir)
+    try:
+        github_summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+        gh_summary = generate_github_summary(results, args.trigger, ifx_commit)
+        if github_summary_file:
+            with open(github_summary_file, "a") as f:
+                f.write(gh_summary)
+            log.info("GitHub Summary written to $GITHUB_STEP_SUMMARY")
+        else:
+            (out_dir / "github_summary.md").write_text(gh_summary)
+            log.info("GitHub Summary written to %s/github_summary.md (not in CI)", out_dir)
+    except Exception:
+        log.exception("GitHub summary generation failed")
 
     log.info("Reports written to %s", out_dir)
-    log.info("Summary: %d models, %d completed, %d failed",
-             json_summary["stats"]["total"],
-             json_summary["stats"]["completed"],
-             json_summary["stats"]["failed"])
 
-    if json_summary["stats"]["avg_gain_pct"] is not None:
-        log.info("Average gain: %.1f%%", json_summary["stats"]["avg_gain_pct"])
+    if json_summary:
+        log.info("Summary: %d models, %d completed, %d failed",
+                 json_summary["stats"]["total"],
+                 json_summary["stats"]["completed"],
+                 json_summary["stats"]["failed"])
+
+        if json_summary["stats"]["avg_gain_pct"] is not None:
+            log.info("Average gain: %.1f%%", json_summary["stats"]["avg_gain_pct"])
+    else:
+        completed = sum(1 for r in results if r.get("status") == "completed")
+        failed = sum(1 for r in results if r.get("status") == "failed")
+        log.info("Summary (fallback): %d models, %d completed, %d failed",
+                 len(results), completed, failed)
 
     # Webhook notification (Slack / Teams / custom)
-    webhook_env = config.get("notification", {}).get("webhook_env")
-    if webhook_env:
-        webhook = os.environ.get(webhook_env)
-        if webhook:
-            _send_webhook(webhook, json_summary)
+    try:
+        webhook_env = config.get("notification", {}).get("webhook_env")
+        if webhook_env:
+            webhook = os.environ.get(webhook_env)
+            if webhook and json_summary:
+                _send_webhook(webhook, json_summary)
+    except Exception:
+        log.exception("Webhook notification failed")
 
-    # Exit non-zero if no models completed (failed + timeout = all bad)
-    if json_summary["stats"]["completed"] == 0:
-        timeout_count = json_summary["stats"].get("timeout", 0)
-        failed_count = json_summary["stats"].get("failed", 0)
+    # Exit non-zero only if ALL models failed (never discard partial success)
+    completed_count = (json_summary["stats"]["completed"] if json_summary
+                       else sum(1 for r in results if r.get("status") == "completed"))
+    if completed_count == 0:
+        timeout_count = sum(1 for r in results if r.get("status") == "timeout")
+        failed_count = sum(1 for r in results if r.get("status") == "failed")
         log.error("All models failed! (failed=%d, timeout=%d)", failed_count, timeout_count)
         sys.exit(1)
 
