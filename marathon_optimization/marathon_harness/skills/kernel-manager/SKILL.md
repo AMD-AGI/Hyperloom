@@ -43,16 +43,82 @@ LOOP forever:
      c. If oob-rewrite:
         i.   GIT ARCHAEOLOGY — check history before writing new code
         ii.  CHECK findings for prior guidance on this kernel
-        iii. DEEP OOB LOOP (up to 5 rounds):
-             - BUILD prompt with accumulated session_history
-             - DISPATCH to backends with engineered prompts
-             - COLLECT results (poll + download)
-             - LOCAL TEST — compile, correctness, micro-benchmark
-             - DEEP ANALYZE — not just pass/fail, but WHY it failed
-             - If crash/segfault: WRITE event to event_log.jsonl
-             - CHECK findings.jsonl for new Watchdog guidance
-             - BUILD next round with accumulated context
-        iv.  If all rounds exhausted: WRITE "exhausted" event
+        iii. ★ MANDATORY MULTI-ROUND PROTOCOL (up to 5 rounds) ★
+             You MUST follow this rigid step-by-step protocol for EVERY
+             oob-rewrite target. Do NOT freelance or shortcut.
+
+             FOR round_num = 1 to MAX_OOB_ROUNDS (5):
+
+               STEP A — SELECT backends for this round:
+                 - Round 1: dispatch to ALL available backends in parallel
+                 - Round 2+: prefer backends that produced the best result
+                   in prior rounds; also try any backend not yet tried
+                 - If OOB backends unavailable: write locally (you have
+                   full source access and a GPU)
+
+               STEP B — BUILD prompt with:
+                 - Full source file content (read from disk, not cached)
+                 - Model architecture: head_dim=64, hidden_size=2880,
+                   intermediate_size=2880, sliding_window=128, mxfp4 quant,
+                   128 experts top-4 MoE
+                 - Hardware constraints: gfx950 (MI355X), 304 CUs,
+                   VGPR limit=64 for 4-wave occupancy, fp8=e4m3fnuz
+                 - Trace shapes from the work queue entry
+                 - Watchdog findings for this kernel (from findings.jsonl)
+                 - ★ ALL session_history from prior rounds (MANDATORY from
+                   round 2+, see IR-18) — what was tried, what failed, WHY,
+                   and what constraints were discovered
+
+               STEP C — DISPATCH to selected backends:
+                 - If multiple OOB backends available: dispatch to ALL in
+                   parallel (do not sequential-try one at a time)
+                 - If writing locally: produce the kernel code yourself
+                 - Poll for results (OOB_POLL_INTERVAL_S=15, timeout=30min)
+
+               STEP D — COLLECT the best result:
+                 - Compare all backend responses
+                 - Prefer the one with actual compilable code (longest)
+                 - If multiple pass compile: keep all for testing
+
+               STEP E — RUN 4-step local test (IR-17):
+                 compile → correctness → micro-bench → adversarial
+                 Use find_free_gpu() / get_test_device() for GPU access
+
+               STEP F — IF ALL TESTS PASS:
+                 → Generate merge-ready patch
+                 → Write to results.jsonl with full micro_benchmark data
+                 → STOP (success — no need for more rounds)
+
+               STEP G — IF ANY TEST FAILS: DEEP ANALYZE the failure:
+                 DO NOT just record "failed". Analyze the failure mode:
+                 - COMPILE_FAIL: extract exact compiler error line, identify
+                   the constraint violated (e.g., unsupported intrinsic,
+                   max_vgprs exceeded, type mismatch)
+                 - CORRECTNESS_FAIL: identify WHICH output elements diverge,
+                   at what tolerance, for which shapes. Is it a precision
+                   issue or a logic bug?
+                 - REGRESSION: identify which shapes regressed and by how
+                   much. Is it occupancy-dependent? Does it regress only at
+                   large batch sizes?
+                 - SEGFAULT: capture crash log (first 2000 chars), write
+                   event to event_log.jsonl for Watchdog
+
+               STEP H — RECORD in session_history:
+                 {round_num, backend, outcome, error_analysis,
+                  constraints_used, micro_speedup (if any)}
+
+               STEP I — CHECK findings.jsonl for new Watchdog guidance
+                 that may have arrived during this round
+
+               STEP J — Feed failure analysis + discovered constraints
+                 into the NEXT round's prompt (Step B)
+
+             END FOR
+
+        iv.  If all 5 rounds exhausted without a PASS:
+             → WRITE "exhausted" event to event_log.jsonl with FULL
+               session_history so Watchdog + orch can see all attempts
+             → Write result with status: "failed" and session_history
      d. GENERATE merge-ready patch directory
      e. WRITE result to results.jsonl
   4. SLEEP 30s if no new work
@@ -482,6 +548,76 @@ Append to `results.jsonl` with status `merge-ready`, `failed`, or `no-improvemen
 
 ---
 
+## Backend-Specific Prompt Guidance
+
+Each OOB backend has different strengths. Tailor your prompt content
+and emphasis to the backend you're dispatching to.
+
+### GEAK (GPU Execution Agent — has a GPU)
+
+GEAK can compile, run, and benchmark kernels. Emphasize:
+- Provide the FULL source file to modify
+- Include exact `hipcc` / Triton compile commands
+- Include a benchmark harness snippet that GEAK can run directly
+- Include expected input/output shapes and dtypes
+- Ask GEAK to return both the kernel code AND benchmark numbers
+- Constraint emphasis: occupancy (VGPR budget), wavefront scheduling,
+  LDS usage, memory coalescing for gfx950
+
+### Codex (Code generation — no GPU)
+
+Codex excels at register-pressure-aware rewrites. Emphasize:
+- Focus prompt on register pressure and VGPR budget constraints
+- Specify exact target: `max_vgprs=64` for 4-wave occupancy on gfx950
+- Include ISA-level hints: `v_mfma_f32_*` instructions, `ds_read_b128`
+- Ask for LDS usage optimization and bank conflict avoidance
+- Codex CANNOT run the kernel — you MUST test locally after collecting
+
+### Claude OOB (Deep reasoning — no GPU)
+
+Claude is best for multi-file changes and deep algorithmic reasoning:
+- Use multi-turn conversation style (provide full context up front)
+- Include architectural reasoning: why this kernel matters, what the
+  dispatch chain looks like, what other components are affected
+- For framework-scheduling changes: include ALL affected files
+- For kernel fusion: describe the full dataflow graph
+- Claude will reason about trade-offs but CANNOT test — test locally
+
+### LLM Proxy (Generic model dispatch)
+
+Fallback for when other backends are unavailable:
+- Provide the most complete prompt possible (full source + constraints)
+- Simpler optimization targets work better (config changes, Triton)
+- Complex HIP kernels may need post-processing of the output
+
+---
+
+## Parallel Backend Dispatch
+
+When multiple OOB backends are available, dispatch to ALL of them in
+parallel for the same target. Do NOT sequential-try one backend at a time.
+
+```
+Round 1 dispatch strategy:
+  1. DISPATCH the same optimized prompt to GEAK, Codex, Claude, LLM in parallel
+  2. POLL all backends concurrently (OOB_POLL_INTERVAL_S=15)
+  3. COLLECT results as they arrive
+  4. Pick the BEST result (criteria: compiles > doesn't, passes correctness
+     > doesn't, highest micro-benchmark speedup)
+  5. If multiple candidates pass: test all locally, keep the fastest
+
+Round 2+ dispatch strategy:
+  1. Prefer backends that produced the closest-to-passing result in prior round
+  2. Also try any backend that hasn't been tried yet
+  3. Include session_history showing what other backends tried and failed
+  4. Feed the BEST prior result (even if failed) as a starting point
+```
+
+This maximizes the probability of finding a working optimization per round
+and minimizes wall-clock time (parallel vs sequential).
+
+---
+
 ## Constants
 
 | Constant | Value | Description |
@@ -520,9 +656,111 @@ orchestrator runs E2E after applying the merge-op.
 **IR-7:** Write results atomically. Always append full JSON lines; never leave
 partial writes in results.jsonl.
 
-**IR-8:** If the GPU is busy (server is running), skip micro-benchmark and mark
-result as `micro_benchmark: "deferred"`. The orchestrator will verify during
-integration after stopping the server.
+**IR-8:** If **all** GPUs are busy, try requesting temporary access before
+deferring (see IR-25 below). When `TP < GPU_COUNT`, use a free GPU directly
+(see `actions/local-test.md` `find_free_gpu()`). The server uses GPUs
+`0..TP-1`; remaining GPUs are available for micro-benchmarks. Read
+`/tmp/.marathon_gpu_lock.json` (if present) for the authoritative list of
+locked GPUs. Never default to device 0 without checking.
+
+**IR-25 (GPU time-share request):** When `find_free_gpu()` returns None (all
+GPUs locked by the inference server), request temporary exclusive GPU access
+from the orchestrator instead of immediately deferring. The orchestrator will
+kill the server during its next DFS poll to grant access.
+
+**Protocol:**
+1. Write `$SESSION_DIR/kernel_manager/gpu_request.json` with `status: "pending"`
+2. Poll every 30s for up to 30 minutes waiting for `status: "granted"`
+3. If granted: acquire the GPU lock (`holder: "kernel-manager"`), run
+   micro-benchmarks, then release the lock and set `status: "released"`
+4. The micro-benchmark MUST run — do NOT defer on timeout. If the
+   orchestrator has not granted after 30min, log a warning and retry
+   the request once. Only defer as a last resort after 60min total.
+
+**GPU request helpers (KM side):**
+```python
+import json, os, time, datetime
+
+GPU_LOCK_PATH = "/tmp/.marathon_gpu_lock.json"
+GPU_REQUEST_PATH = os.path.join(os.environ.get("SESSION_DIR", ""),
+                                "kernel_manager/gpu_request.json")
+
+def request_gpu_access(kernel_name, estimated_duration_s=300):
+    """Request exclusive GPU access from the orchestrator.
+    Writes a pending request, polls for grant, returns (device, reason)."""
+    req = {"status": "pending", "requester": "kernel-manager",
+           "kernel": kernel_name,
+           "since": datetime.datetime.utcnow().isoformat() + "Z",
+           "estimated_duration_s": estimated_duration_s}
+    os.makedirs(os.path.dirname(GPU_REQUEST_PATH), exist_ok=True)
+    with open(GPU_REQUEST_PATH, "w") as f:
+        json.dump(req, f)
+
+    # Try twice: 30min initial + 30min retry = 60min max
+    for attempt in range(2):
+        if attempt > 0:
+            # Re-write pending request for retry
+            req["since"] = datetime.datetime.utcnow().isoformat() + "Z"
+            req["attempt"] = attempt + 1
+            with open(GPU_REQUEST_PATH, "w") as f:
+                json.dump(req, f)
+        for _ in range(60):  # 60 * 30s = 30min per attempt
+            time.sleep(30)
+            try:
+                with open(GPU_REQUEST_PATH) as f:
+                    r = json.load(f)
+                if r.get("status") == "granted":
+                    write_gpu_lock([0], os.getpid())
+                    os.environ["HIP_VISIBLE_DEVICES"] = "0"
+                    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+                    return "cuda:0", "GPU_GRANTED by orchestrator"
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+    # 60min total with no grant — last resort defer
+    try: os.remove(GPU_REQUEST_PATH)
+    except FileNotFoundError: pass
+    return None, "GPU_REQUEST_TIMEOUT — orchestrator did not grant in 60min"
+
+def write_gpu_lock(gpus, pid):
+    lock = {"holder": "kernel-manager", "gpus": list(gpus), "pid": pid,
+            "since": datetime.datetime.utcnow().isoformat() + "Z",
+            "purpose": "micro-benchmark"}
+    with open(GPU_LOCK_PATH, "w") as f:
+        json.dump(lock, f)
+
+def release_gpu_lock():
+    try: os.remove(GPU_LOCK_PATH)
+    except FileNotFoundError: pass
+
+def release_gpu_after_benchmark():
+    """Release GPU lock and signal orchestrator to restart server."""
+    release_gpu_lock()
+    try:
+        with open(GPU_REQUEST_PATH) as f:
+            r = json.load(f)
+        r["status"] = "released"
+        r["released_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+        with open(GPU_REQUEST_PATH, "w") as f:
+            json.dump(r, f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+```
+
+**Usage in the local-test flow:**
+```
+dev, reason = find_free_gpu()
+if dev is None:
+    # No free GPU — request temporary access
+    dev, reason = request_gpu_access(kernel_name)
+    if dev is None:
+        # Timeout — defer
+        result["micro_benchmark"] = "deferred"
+        result["micro_benchmark_reason"] = reason
+    else:
+        # Got access — run benchmarks, then release
+        run_micro_benchmarks(dev, ...)
+        release_gpu_after_benchmark()
+```
 
 **IR-9:** Write an event to `event_log.jsonl` for every crash, segfault, and
 exhausted target. Include the full session_history so the Watchdog has context.
@@ -534,6 +772,94 @@ exhausted target. Include the full session_history so the Watchdog has context.
 The accumulated context of what was tried and why it failed is the most
 valuable input to the next attempt.
 
+**IR-15 (GPU lock):** Before running micro-benchmarks, read the GPU lock file
+at `/tmp/.marathon_gpu_lock.json`. The orchestrator writes this file before
+starting the inference server. Schema:
+```json
+{
+  "holder": "orchestrator",
+  "gpus": [0, 1],
+  "pid": 12345,
+  "since": "2026-04-21T18:00:00Z",
+  "purpose": "inference-server"
+}
+```
+Use `find_free_gpu()` from `actions/local-test.md` which reads this lock.
+When running a micro-benchmark, set `HIP_VISIBLE_DEVICES` /
+`CUDA_VISIBLE_DEVICES` to the free device so torch targets the correct GPU.
+
+**IR-16 (merge-ready status):** When writing to `results.jsonl`, use
+`status: "merge-ready"` for any patch that has a complete
+`merge_ready/<id>/` directory with `metadata.json` — regardless of whether
+the kernel was generated by OOB backends or locally. The `generation_method`
+field (`oob-rewrite` vs `local_kernel_write`) distinguishes provenance.
+Use `status: "failed"` only when no usable patch was produced. The
+orchestrator's MERGE-OP POLL filters on `status == "merge-ready"` — any
+other status (e.g. `patch_generated_locally`) will be silently ignored.
+
+**IR-18 (session_history mandatory in every prompt from round 2+):**
+From round 2 onward, EVERY prompt to an OOB backend or local write MUST
+include the accumulated session_history showing:
+  - What was tried in prior rounds
+  - Which backend was used
+  - The exact outcome (COMPILE_FAIL, CORRECTNESS_FAIL, REGRESSION, etc.)
+  - The error analysis (WHY it failed, not just THAT it failed)
+  - What constraints were discovered (e.g., max_vgprs=64 violated)
+  - What micro-benchmark speedup was achieved (if any)
+Use `format_session_history(task_id)` to generate the history block.
+This is the SINGLE MOST VALUABLE input to the next attempt — without it,
+the model repeats the same mistakes. Omitting session_history in round 2+
+is a protocol violation. If you have nothing to include (round 1), say
+"This is the first optimization attempt for this kernel."
+
+**IR-17 (MANDATORY 4-step local test gate — NO EXCEPTIONS):**
+A kernel may ONLY be written to results.jsonl with `status: "merge-ready"`
+if it has passed ALL 4 steps of the local test pipeline from
+`actions/local-test.md`. A "gpu_smoke_pass" or "compiles OK" is NOT
+sufficient. The 4 steps are:
+
+  **Step 1 — COMPILE:** The kernel must compile without errors.
+    - Triton: `exec(compile(source, filename, "exec"), ns)` in isolated ns
+    - HIP/C++: `hipcc -O3 --amdgpu-target=gfx950` exits 0
+    - Fail → `status: "failed"`, feed error to next OOB round
+
+  **Step 2 — CORRECTNESS:** Run the kernel on a FREE GPU (use
+  `get_test_device()` from `actions/local-test.md`) and compare output
+  against the ORIGINAL kernel or a PyTorch reference.
+    - Use `torch.allclose(out, ref, atol=1e-2, rtol=1e-2)`
+    - Test with at least 3 different input shapes/sizes
+    - If GPU busy and ALL GPUs locked: defer (PASS-DEFERRED), do NOT skip
+    - Fail → `status: "failed"`, feed error to next OOB round
+
+  **Step 3 — MICRO-BENCHMARK:** Time the optimized kernel vs the original
+  or a baseline on the same free GPU. Test at MULTIPLE batch sizes
+  (e.g. B=1,4,16,64) to catch occupancy-dependent regressions.
+    - Use `torch.cuda.Event(enable_timing=True)` with warmup (20 iters)
+      and measurement (200 iters)
+    - Compute per-shape speedup; require avg_speedup > 1.05x AND no
+      single shape regresses below 0.95x
+    - Record `micro_benchmark: {avg_speedup, per_shape: [...], latency_us}`
+      in the result
+    - If GPU busy: defer (PASS-DEFERRED), but the result MUST say
+      `micro_benchmark: "deferred"` — never omit the field
+    - Fail (< 1.05x or regression) → `status: "failed"`, include perf data
+
+  **Step 4 — ADVERSARIAL (optional but recommended):** Test edge cases:
+  zero-length inputs, maximum shapes, NaN/Inf inputs. Skip only if the
+  kernel type doesn't support it (e.g. config-only patches).
+
+  **Only when ALL required steps PASS** may you write `status: "merge-ready"`.
+  The result entry MUST include:
+    - `micro_benchmark: {avg_speedup: X.XX, per_shape: [...]}` (real data)
+    - `correctness: "passed"` (not "gpu_smoke_pass")
+    - `patch_type`, `target_file`, `rollback_command`, `apply_instructions`
+
+  A result with `status: "merge-ready"` but missing `micro_benchmark` data
+  will be DISCARDED by the orchestrator. This wastes everyone's time.
+  If you cannot run the benchmark (GPU busy), use `status: "merge-ready"`
+  with `micro_benchmark: "deferred"` — this is acceptable. But NEVER
+  write `merge-ready` with no micro_benchmark field at all.
+
 ## Autonomy
 
 Execute autonomously. No human confirmation needed for:
@@ -541,7 +867,7 @@ Execute autonomously. No human confirmation needed for:
 - Dispatching to OOB backends (GEAK, Codex, Claude, LLM Proxy)
 - Running git commands (read-only: log, show, diff)
 - Local compilation testing (Triton, hipcc)
-- Micro-benchmarking (when GPU is available)
+- Micro-benchmarking on free GPUs (check lock, set HIP_VISIBLE_DEVICES)
 - Editing source files to prepare patches
 - Writing events to event_log.jsonl (for Watchdog consumption)
 - Reading findings from findings.jsonl (from Watchdog)
