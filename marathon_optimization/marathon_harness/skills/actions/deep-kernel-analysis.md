@@ -9,12 +9,65 @@ transforms opaque kernel names from profiler output into actionable optimization
 - List of top-N kernels by GPU time % (from `state.kernel_candidates`)
 - `state.kernel_dispatch_map` (initially empty — this action populates it)
 
+## Mandatory Scope (CRITICAL)
+
+You MUST analyze at least the **top 10 kernels by GPU%** from the profile.
+MIN_GPU_PCT = 2.0% — every kernel above this threshold gets full Steps 1-5.
+Do NOT stop after finding the first opportunity. The goal is a COMPREHENSIVE
+action stack, not a single fix.
+
+After analyzing individual kernels, you MUST also run Step 0 (Env Var Scan)
+to find framework-level dispatch flags that control entire kernel families.
+
 ## Procedure
 
-For **each** kernel consuming >MIN_GPU_PCT of GPU time, run Steps 1-5 below.
+### Step 0: Environment Variable Dispatch Scan (MANDATORY)
+
+Before individual kernel analysis, scan for framework env vars that control
+major kernel dispatch paths. These are the highest-impact, lowest-effort
+optimizations and are often missed by per-kernel analysis.
+
+```bash
+# a) Find ALL env vars that control kernel dispatch in the framework
+grep -rn "os.environ.get\|os.getenv\|envs\." \
+    $FRAMEWORK_ROOT/model_executor/layers/ \
+    $FRAMEWORK_ROOT/worker/ \
+    $FRAMEWORK_ROOT/compilation/ \
+    2>/dev/null | grep -i "rocm\|aiter\|triton\|gemm\|attn\|mfma\|fp4\|fp8\|buffer\|rope"
+
+# b) For EACH env var found, check:
+#    - Is it currently SET in the serve script?
+#    - What is its DEFAULT value?
+#    - What kernel path does it enable/disable?
+#    - What is the expected performance impact?
+
+# c) Common high-impact ROCm/vLLM env vars to check:
+#    VLLM_ROCM_USE_AITER_FP4_ASM_GEMM   — enables ASM FP4 GEMM (replaces Triton)
+#    VLLM_ROCM_FP8_MFMA_PAGE_ATTN       — enables MFMA page attention
+#    AMDGCN_USE_BUFFER_OPS              — enables buffer load/store ops
+#    AITER_CONFIG_FMOE                  — path to tuned MoE GEMM CSV
+#    AITER_CONFIG_GEMM_BF16             — path to tuned BF16 GEMM CSV
+#    VLLM_ROCM_USE_AITER_TRITON_ROPE    — Triton vs CK rope kernel
+#    CU_NUM                             — forces CU count for config lookup
+```
+
+For each unset or suboptimal env var, create a candidate action:
+```python
+{
+    "name": f"Enable {env_var}={recommended_value}",
+    "type": "env-var-dispatch",
+    "classification": "self-fix",
+    "score": gpu_pct_affected * 10,  # high score — low effort, high impact
+    "description": f"Set {env_var} in serve script to activate {path_description}",
+}
+```
+
+### Steps 1-5: Per-Kernel Analysis
+
+For **each** kernel consuming >MIN_GPU_PCT (2.0%) of GPU time, run Steps 1-5 below.
 This is the most detailed analysis in the Marathon — invest time here.
 
-### Step 1: Dispatch Path Trace
+### Step 1: Dispatch Path Trace (per kernel)
 
 Trace the full call chain from Python API to GPU kernel launch:
 
@@ -356,15 +409,23 @@ def _select_backends(analysis):
 ```
 
 ## Outputs
-- `state.kernel_dispatch_map` — fully populated for all top-N kernels
-- `state.action_stack` — enriched with:
+- `state.kernel_dispatch_map` — fully populated for all top-N kernels (at least 10)
+- `state.action_stack` — enriched with AT LEAST 5-10 candidates:
+  - **Env-var-dispatch** actions from Step 0 (highest priority — low effort, high impact)
   - **Self-fix** dispatch-fix actions (high priority, orchestrator handles directly)
+  - **Config-only** actions (tuned CSV loading, shape-specific configs)
   - **Kernel-manager-poll** placeholders (low priority, remind orchestrator to check results)
 - `state.dispatch_bugs_found` — list of dispatch routing issues found
 - `state.untuned_shapes` — list of kernel shapes using generic configs
 - `$RESULT_DIR/kernel_manager/work_queue.jsonl` — kernel targets for the Kernel Manager
 - `state.kernel_manager_targets_pushed` — count of targets pushed to work queue
 - Per-kernel analysis logged to `$RESULT_DIR/kernel_analysis/`
+
+## Validation Gate
+If action_stack has fewer than 5 candidates after deep analysis, the analysis
+is INCOMPLETE. Go back and analyze more kernels, check more env vars, look at
+the serve script for missing optimization flags. The profiler data should
+yield at least 5-10 actionable items for any non-trivially-optimized model.
 
 ## Heuristic Update
 
