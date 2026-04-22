@@ -32,9 +32,23 @@ The detector classifies into one of:
 ### Step 2: Locate kernel sources
 ```bash
 KERNEL_LANGS=""
-[ -n "$(find "$REPO_ROOT" -name '*.hip' -o -name '*.cuh' -o -name '*.cu' 2>/dev/null | head -1)" ] && KERNEL_LANGS="$KERNEL_LANGS hip"
-grep -r -l --include='*.py' '@triton.jit' "$REPO_ROOT" 2>/dev/null | head -1 >/dev/null && KERNEL_LANGS="$KERNEL_LANGS triton"
-grep -r -l --include='*.py' 'torch.compile\|torch.compile(' "$REPO_ROOT" 2>/dev/null | head -1 >/dev/null && KERNEL_LANGS="$KERNEL_LANGS torch-compile"
+# Exclude vendored / build / venv trees so we don't mis-classify.
+# Use a function rather than `eval` to avoid shell glob-expansion of -path patterns.
+_find_src() {
+    find "$REPO_ROOT" \
+        -path '*/thirdparty/*'    -prune -o \
+        -path '*/third_party/*'   -prune -o \
+        -path '*/build*/*'        -prune -o \
+        -path '*/cmake-build-*/*' -prune -o \
+        -path '*/_deps/*'         -prune -o \
+        -path '*/.venv/*'         -prune -o \
+        -path '*/site-packages/*' -prune -o \
+        "$@" -print 2>/dev/null
+}
+
+[ -n "$(_find_src \( -name '*.hip' -o -name '*.cuh' -o -name '*.cu' \) | head -1)" ] && KERNEL_LANGS="$KERNEL_LANGS hip"
+[ -n "$(_find_src -name '*.py' | xargs grep -l '@triton.jit' 2>/dev/null | head -1)" ] && KERNEL_LANGS="$KERNEL_LANGS triton"
+[ -n "$(_find_src -name '*.py' | xargs grep -l 'torch\.compile' 2>/dev/null | head -1)" ] && KERNEL_LANGS="$KERNEL_LANGS torch-compile"
 echo "KERNEL_LANGS=\"$(echo $KERNEL_LANGS | xargs)\"" >> "$RESULT_DIR/detected.env"
 ```
 

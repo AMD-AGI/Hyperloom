@@ -39,6 +39,9 @@ mkdir -p "$TARGET/.cursor/skills"
 if [ -d "$DST_SKILL" ] && [ "$FORCE" != "--force" ]; then
     echo "[skip] $DST_SKILL already exists (use --force to overwrite)"
 else
+    # Must rm -rf first: `cp -r src dst` with dst existing produces dst/src/,
+    # which would silently leave stale files in the outer dir on re-bootstrap.
+    rm -rf "$DST_SKILL"
     cp -r "$SRC_SKILL" "$DST_SKILL"
     echo "[ok]   copied skill to $DST_SKILL"
 fi

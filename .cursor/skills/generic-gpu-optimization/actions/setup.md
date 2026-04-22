@@ -18,7 +18,7 @@
 GPU_NAME=$(rocm-smi --showproductname 2>/dev/null | grep -oE "MI[0-9]+[A-Z]*" | head -1)
 GPU_ARCH=$(rocminfo 2>/dev/null | grep -m1 -oE "gfx[0-9]+[a-z]*")
 ROCM_VERSION=$(cat /opt/rocm/.info/version 2>/dev/null || hipconfig --version 2>/dev/null)
-GPU_COUNT=$(rocm-smi -i 2>/dev/null | grep -c "GPU\[")
+GPU_COUNT=$(rocm-smi --showid 2>/dev/null | grep -oE "GPU\[[0-9]+\]" | sort -u | wc -l)
 
 export GPU="${GPU:-$GPU_NAME}"
 export GPU_ARCH GPU_COUNT ROCM_VERSION

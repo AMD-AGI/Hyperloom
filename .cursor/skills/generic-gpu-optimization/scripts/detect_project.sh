@@ -43,8 +43,20 @@ HAS_BENCH_DIR=$( [ -d bench ] || [ -d benchmarks ] || [ -d cpp/bench ] && echo 1
 HAS_PY_BENCH=$( find . -maxdepth 3 -name 'bench*.py' -o -name 'benchmark*.py' 2>/dev/null | head -1 | wc -l )
 
 # --- 4. Test harness signals ---------------------------------------------
-HAS_CTEST=$( find . -name 'CTestTestfile.cmake' -o -name 'tests' -type d 2>/dev/null | head -1 | wc -l )
+# Locate the actual CTestTestfile.cmake (its dir is where ctest must be invoked)
+CTEST_FILE=$(find build* cpp/build* -maxdepth 2 -name 'CTestTestfile.cmake' 2>/dev/null | head -1 || true)
+HAS_CTEST=$([ -n "$CTEST_FILE" ] && echo 1 || echo 0)
+CTEST_DIR=$([ -n "$CTEST_FILE" ] && dirname "$CTEST_FILE" || echo "")
 HAS_PYTEST=$( ([ -d tests ] || [ -d test ] || grep -q '^pytest' pyproject.toml 2>/dev/null) && echo 1 || echo 0 )
+
+# Determine the cmake source root (./ vs cpp/) so build/test commands point at the right place
+if [ -f cpp/CMakeLists.txt ]; then
+    CMAKE_SRC="cpp"
+    DEFAULT_BUILD_DIR="cpp/build"
+else
+    CMAKE_SRC="."
+    DEFAULT_BUILD_DIR="build"
+fi
 
 # --- 5. Classify ---------------------------------------------------------
 PROJECT_CLASS="unknown"
@@ -65,33 +77,30 @@ if [ "$HAS_CMAKE" = 1 ] && [ "$HAS_HIP" -gt 0 ] && { [ "$HAS_GBENCH" -gt 0 ] || 
     if [ "$HAS_BUILD_SH" = 1 ]; then
         BUILD_COMMAND="bash $REPO_ROOT/build.sh"
     else
-        # Find the right CMakeLists root (some projects have it under cpp/)
-        if [ -f cpp/CMakeLists.txt ]; then
-            BUILD_COMMAND="cmake -S cpp -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j\$(nproc)"
-        else
-            BUILD_COMMAND="cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j\$(nproc)"
-        fi
+        BUILD_COMMAND="cmake -S $CMAKE_SRC -B $DEFAULT_BUILD_DIR -DCMAKE_BUILD_TYPE=Release && cmake --build $DEFAULT_BUILD_DIR -j\$(nproc)"
     fi
 
     # Find the first bench binary; user can override via BENCH_COMMAND
-    BENCH_BIN=$(find build* cpp/build* -maxdepth 6 -type f -executable 2>/dev/null | grep -iE 'bench|benchmark' | head -1 || true)
+    BENCH_BIN=$(find $DEFAULT_BUILD_DIR -maxdepth 6 -type f -executable 2>/dev/null | grep -iE 'bench|benchmark' | head -1 || true)
     if [ -n "$BENCH_BIN" ]; then
         BENCH_COMMAND="$BENCH_BIN --benchmark_format=json --benchmark_min_time=2s --benchmark_repetitions=3"
         # Google Benchmark prints "real_time" in JSON; the regex picks the mean
         BENCH_METRIC="real_time_ns"
         BENCH_METRIC_REGEX='"real_time"\s*:\s*([0-9.]+)'
     else
-        # No built binary yet — emit a hint with a likely path and Google Benchmark args
+        # No built binary yet — leave BENCH_COMMAND empty; emit a separate hint
+        # variable so sourcing detected.env doesn't fail under `set -u`.
         BENCH_DIR=$(find . cpp -maxdepth 3 -type d \( -name bench -o -name benchmarks \) 2>/dev/null | head -1 || true)
         if [ -n "$BENCH_DIR" ]; then
-            BENCH_COMMAND="<rerun detect after build; expected: \$BUILD_DIR/${BENCH_DIR#./}/<BIN> --benchmark_format=json --benchmark_min_time=2s>"
+            BENCH_HINT="rerun detect after build; expected bench dir: ${BENCH_DIR#./}"
             BENCH_METRIC="real_time_ns"
             BENCH_METRIC_REGEX='"real_time"\s*:\s*([0-9.]+)'
         fi
     fi
 
     if [ "$HAS_CTEST" = 1 ]; then
-        TEST_COMMAND="cd build && ctest --output-on-failure -j\$(nproc)"
+        # ctest must run from the dir containing CTestTestfile.cmake
+        TEST_COMMAND="cd $CTEST_DIR && ctest --output-on-failure -j\$(nproc)"
         CORRECTNESS_MODE="tests"
     else
         CORRECTNESS_MODE="golden-output"
@@ -136,11 +145,15 @@ elif [ "$HAS_MAKEFILE" = 1 ] && [ "$HAS_HIP" -gt 0 ]; then
 fi
 
 # --- 6. Emit -------------------------------------------------------------
+# All values are quoted; the file must be sourceable under `set -euo pipefail`
+# (no unescaped $VAR references in the values).
+BENCH_HINT="${BENCH_HINT:-}"
 cat <<OUT
 PROJECT_CLASS=$PROJECT_CLASS
 BUILD_SYSTEM=$BUILD_SYSTEM
 BUILD_COMMAND="$BUILD_COMMAND"
 BENCH_COMMAND="$BENCH_COMMAND"
+BENCH_HINT="$BENCH_HINT"
 BENCH_METRIC=$BENCH_METRIC
 BENCH_METRIC_REGEX='$BENCH_METRIC_REGEX'
 METRIC_LOWER_IS_BETTER=$METRIC_LOWER_IS_BETTER
