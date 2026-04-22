@@ -119,21 +119,31 @@ print("Trace integrity: OK")
 ' 2>&1 || return 1
 }
 
-# Require sufficient free GPU memory on device 0, retrying with kill_server between attempts.
-# Uses globals: FRAMEWORK, GPU_FREE_THRESHOLD (default 0.85), GPU_CHECK_RETRIES (default 2).
+# Require sufficient free GPU memory on devices 0..TP-1 (the server's GPUs),
+# retrying with kill_server between attempts.
+# Uses globals: FRAMEWORK, TP, GPU_FREE_THRESHOLD (default 0.85), GPU_CHECK_RETRIES (default 2).
 check_gpu_memory() {
     local thresh="${GPU_FREE_THRESHOLD:-0.85}"
     local retries="${GPU_CHECK_RETRIES:-2}"
+    local tp="${TP:-1}"
     local try
     for try in $(seq 1 "$retries"); do
-        if GPU_FREE_THRESHOLD="$thresh" python3 -c "
-import torch
-import os
+        if GPU_FREE_THRESHOLD="$thresh" TP_CHECK="$tp" python3 -c "
+import torch, os
 thresh = float(os.environ.get('GPU_FREE_THRESHOLD', '0.85'))
-f, t = torch.cuda.mem_get_info(0)
-ratio = f / t
-print(f'GPU memory: {f/1024**3:.1f}GB free / {t/1024**3:.1f}GB total ({ratio*100:.1f}% free)')
-assert ratio > thresh, f'GPU not free enough: {ratio*100:.1f}% <= {thresh*100:.1f}% required'
+tp = int(os.environ.get('TP_CHECK', '1'))
+total_gpus = torch.cuda.device_count()
+check_devs = list(range(min(tp, total_gpus)))
+all_ok = True
+for dev in check_devs:
+    f, t = torch.cuda.mem_get_info(dev)
+    ratio = f / t
+    status = 'OK' if ratio > thresh else 'BUSY'
+    print(f'GPU {dev}: {f/1024**3:.1f}GB free / {t/1024**3:.1f}GB total ({ratio*100:.1f}% free) [{status}]')
+    if ratio <= thresh:
+        all_ok = False
+assert all_ok, f'Not all server GPUs (0..{tp-1}) are free (threshold {thresh*100:.0f}%)'
+print(f'All {len(check_devs)} server GPUs free.')
 " 2>&1; then
             return 0
         fi
