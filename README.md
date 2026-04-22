@@ -17,6 +17,7 @@ Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintai
 | | |
 |---|---|
 | **[How the Optimization Loop Works](docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md)** | Scoring heuristics, stack mechanics, dynamic branching, and the self-evolving knowledge base |
+| **[Generic GPU Optimization](docs/GENERIC_GPU_OPTIMIZATION.md)** | Point Hyperloom at any GPU repo (HIP / Triton / PyTorch); auto-detects build, bench, and tests |
 | **[GLM-5 — Discovering Optimizations Hard to Spot Manually](docs/CASE_STUDY_GLM5.md)** | Hidden GEMM configs, cross-repo kernel patches, +193% throughput |
 | **[DeepSeek-R1 — Fast Scale-Up on a New Workload](docs/CASE_STUDY_DEEPSEEK_R1.md)** | 7 configs to optimal in one session, MTP scheduling fix, +97% over B200 |
 
@@ -135,6 +136,35 @@ The agent takes it from there — baseline, profile, loop, report.
 
 ---
 
+## Quickstart — Any GPU Repo (Generic Mode)
+
+If your project isn't an SGLang/vLLM inference server or a Primus/Megatron training stack — for example a C++/HIP library with Google Benchmark, a standalone Triton kernel collection, or a research PyTorch script — use the **`generic-gpu-optimization`** skill. It auto-detects your build system, benchmark, and tests, then runs the same Hyperloom DFS loop against them.
+
+```bash
+# from the Hyperloom checkout
+./scripts/optimize_repo.sh /path/to/your/gpu/repo
+```
+
+This bootstraps the skill, `mcp.json`, and `.env.template` into your repo, then prints what was auto-detected. Then in Cursor (with the GEAK + OOB MCPs enabled):
+
+```
+@.cursor/skills/generic-gpu-optimization/SKILL.md
+Optimize this repo for MI355X.
+```
+
+The agent runs **setup → detect → build → baseline → correctness → profile → DFS loop (env-vars / compile-flags / GEAK kernel-opt) → report**. Every change is gated against the project's existing test suite (`ctest` / `pytest`); changes that pass tests and improve the metric are kept, everything else is reverted.
+
+Override anything the detector got wrong by passing it in the prompt:
+```
+BENCH_COMMAND: ./build/bench/MATRIX_BENCH --benchmark_filter=select_k --benchmark_format=json
+TEST_COMMAND:  ctest -R MATRIX_TEST --output-on-failure
+TIME_BUDGET_MIN: 60
+```
+
+Full design and the auto-detection rules: **[docs/GENERIC_GPU_OPTIMIZATION.md](docs/GENERIC_GPU_OPTIMIZATION.md)** | Skill README: **[.cursor/skills/generic-gpu-optimization/README.md](.cursor/skills/generic-gpu-optimization/README.md)**
+
+---
+
 ## Quickstart — Fully Local Mode (Docker / K8s)
 
 Run Hyperloom on your own GPU infrastructure — a single container bundles all MCP services (TraceLens, GEAK, OOB Agent), InferenceX, and Skills. No manual MCP or environment setup required.
@@ -194,6 +224,7 @@ Each domain has a comprehensive skill file with the full optimization protocol, 
 | **Training** | [SKILL.md](.cursor/skills/training-optimization/SKILL.md) | [README](.cursor/skills/training-optimization/README.md) |
 | **Inference** | [SKILL.md](.cursor/skills/inference-optimization/SKILL.md) | [README](.cursor/skills/inference-optimization/README.md) |
 | **MLPerf Training** | [SKILL.md](.cursor/skills/mlperf-optimization/SKILL.md) | [Readme](.cursor/skills/mlperf-optimization/Readme.MD) |
+| **Generic GPU Repo** | [SKILL.md](.cursor/skills/generic-gpu-optimization/SKILL.md) | [README](.cursor/skills/generic-gpu-optimization/README.md) |
 
 The skill files are the agent's instructions. They encode the full optimization methodology — setup, profiling protocol, what to try, how to measure, when to stop, and how to report. The knowledge base sections are updated live during runs with new pitfalls and validated results.
 
@@ -208,7 +239,8 @@ Hyperloom/
 │   └── skills/
 │       ├── training-optimization/        # Training optimization skill + knowledge base
 │       ├── inference-optimization/       # Inference optimization skill + scripts
-│       └── mlperf-optimization/          # MLPerf training optimization skill
+│       ├── mlperf-optimization/          # MLPerf training optimization skill
+│       └── generic-gpu-optimization/     # Auto-detect + optimize ANY GPU repo (HIP/Triton/PyTorch)
 ├── inference_optimization/
 │   └── InferenceX/                       # Inference benchmarking framework
 ├── training_optimization/
