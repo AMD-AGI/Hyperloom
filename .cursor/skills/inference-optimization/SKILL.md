@@ -27,13 +27,17 @@ gap acts as an urgency multiplier on all action scores.
 
 ## Execution Mode
 
-This skill supports two execution modes. **Read the mode-specific document for your mode
+This skill supports three execution modes. **Read the mode-specific document for your mode
 before starting:**
 
-- **Local mode** (Cursor IDE, direct shell): see [`modes/LOCAL.md`](modes/LOCAL.md)
+- **Fully-local mode** (Hyperloom container, Ray-scheduled GEAK CLI): see [`modes/FULLY_LOCAL.md`](modes/FULLY_LOCAL.md)
+- **Local mode** (Cursor IDE, GEAK MCP, direct shell): see [`modes/LOCAL.md`](modes/LOCAL.md)
 - **Claw mode** (SaFE RayJob, `exec_on_gpu`): see [`modes/CLAW.md`](modes/CLAW.md)
 
-**Auto-detection:** `GEAK_LOCAL=true` → local mode (default). Claw client context → claw mode.
+**Auto-detection:**
+- `MODE=local` + `/opt/entrypoint.sh` exists → fully-local mode (Hyperloom container)
+- `GEAK_LOCAL=true` (no container) → local mode
+- Claw client context → claw mode
 
 ## Iron Rules (non-negotiable)
 
@@ -96,7 +100,7 @@ administrator. Changing it risks setting a non-existent model and breaking all t
 
 Violation = immediate run invalidation.
 
-**Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11) and [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12).**
+**Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11), [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12), and [`modes/FULLY_LOCAL.md`](modes/FULLY_LOCAL.md) (IR-12 through IR-14).**
 
 ## Kernel Optimization & Tooling Constants
 
@@ -136,7 +140,7 @@ kernel-opt/                    — Per-backend kernel optimization references
   llm.md                       — LLM Proxy (direct API)
 kb/                            — RAG knowledge base (JSONL + query/ingest scripts)
 scripts/                       — Baseline/profiling/accuracy shell scripts
-modes/                         — Mode-specific execution details (LOCAL.md, CLAW.md)
+modes/                         — Mode-specific execution details (FULLY_LOCAL.md, LOCAL.md, CLAW.md)
 KNOWLEDGE-BASE.md              — Legacy KB (archived, seeded into kb/entries.jsonl)
 ```
 

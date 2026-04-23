@@ -1,12 +1,12 @@
 # Hyperloom Fully Local Mode — SGLang base image
-# Bundles: TraceLens MCP + GEAK MCP + OOB Agent MCP + InferenceX + Skills + SSH
+# Bundles: TraceLens CLI + GEAK CLI (geak via Ray) + OOB CLI (oob run) + InferenceX + Skills + SSH
 #
 # No local build context needed — all repo artifacts come from hyperloom-src.
 #   Prereq: docker pull docker.io/primussafe/hyperloom-src:<tag>
 #   docker build -f deploy/fully-local/Dockerfile.sglang -t hyperloom-local:sglang-latest .
 
 # Stage 0: repo source bundle (OOB, TraceLens, InferenceX, skills, deploy scripts)
-FROM primussafe/hyperloom-src:v1.0.3 AS hyperloom-src
+FROM primussafe/hyperloom-src-423:v1.0.4 AS hyperloom-src
 
 FROM lmsysorg/sglang:v0.5.9-rocm700-mi35x
 
@@ -29,21 +29,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Pin IntelliKit to a known-good SHA for reproducible builds (issue #62).
 # Keep aligned with GEAK/pyproject.toml; bump both together.
 ARG INTELLIKIT_SHA=bcbfa0252df9d55f3aab68c95dd3ce45ccbe5b46
-RUN git clone --branch feature/xiaofei/claw --depth 1 \
+RUN git clone --depth 1 \
         https://github.com/AMD-AGI/GEAK.git /opt/geak \
     && git clone https://github.com/AMDResearch/intellikit.git /opt/intellikit \
     && git -C /opt/intellikit checkout ${INTELLIKIT_SHA} \
     && cd /opt/geak && pip install --no-cache-dir -e . \
-    && pip install --no-cache-dir -r server/requirements.txt \
-    && pip install --no-cache-dir -e /opt/intellikit/metrix/
+    && pip install --no-cache-dir -e /opt/intellikit/metrix/ \
+    && pip install --no-cache-dir ray "click<8.3"
 
 # --- Layer 3: TraceLens (changes moderately) ---
 COPY --from=hyperloom-src /TraceLens /opt/TraceLens
-RUN cd /opt/TraceLens && pip install --no-cache-dir -e . \
-    && pip install --no-cache-dir -r TraceLens/AgenticMode/MCPServer/requirements.txt
+RUN cd /opt/TraceLens && pip install --no-cache-dir -e .
 
-# --- Layer 3.5: OOB Agent MCP deps (Node CLIs + Python SDK) ---
-COPY --from=hyperloom-src /oob-mcp/agent_mcp_server/requirements.txt /tmp/oob-requirements.txt
+# --- Layer 3.5: OOB Agent deps (Node CLIs + Python SDK) ---
+COPY --from=hyperloom-src /OOB/oob_cli/requirements.txt /tmp/oob-requirements.txt
 RUN pip install --no-cache-dir -r /tmp/oob-requirements.txt \
     && CERTIFI_BUNDLE=$(python3 -c "import certifi; print(certifi.where())" 2>/dev/null) \
     && if [ -n "$CERTIFI_BUNDLE" ]; then \
@@ -56,25 +55,33 @@ RUN pip install --no-cache-dir -r /tmp/oob-requirements.txt \
 COPY --from=hyperloom-src /InferenceX /opt/hyperloom/InferenceX
 COPY --from=hyperloom-src /skills/inference-optimization \
      /opt/hyperloom/.cursor/skills/inference-optimization
-COPY --from=hyperloom-src /oob-mcp /opt/oob-mcp
-COPY --from=hyperloom-src /deploy/mcp.json /opt/hyperloom/.cursor/mcp.json
+COPY --from=hyperloom-src /OOB /opt/OOB
 COPY --from=hyperloom-src /deploy/entrypoint.sh /opt/entrypoint.sh
 COPY --from=hyperloom-src /deploy/hyperloom-autostart.sh /etc/profile.d/hyperloom.sh
-RUN chmod +x /opt/entrypoint.sh /etc/profile.d/hyperloom.sh
-ENV MODE=local \
+COPY --from=hyperloom-src /deploy/geak-litellm.yaml /opt/hyperloom/geak-config/template.yaml
+# Install OOB as an editable package so the `oob` console script (defined in
+# pyproject.toml [project.scripts]) lands on PATH for `oob run ...` invocations.
+RUN pip install --no-cache-dir -e /opt/OOB/oob_cli \
+    && chmod +x /opt/entrypoint.sh /etc/profile.d/hyperloom.sh \
+    && git config --global user.email "hyperloom@local" \
+    && git config --global user.name  "Hyperloom Local" \
+    && git config --global init.defaultBranch main
+ENV PATH="/opt/venv/bin:${PATH}" \
+    MODE=local \
+    GEAK_MODEL_NAME=claude-opus-4-7 \
+    GEAK_CONFIG=/opt/hyperloom/geak-config/local.yaml \
     GEAK_LOCAL=true \
     OOB_LOCAL=true \
+    OOB_CLI=oob \
     KERNEL_OPT_BACKENDS=geak \
     NFS_BASE_PATH=/tmp/geak-data \
-    DATABASE_PATH=/tmp/geak-data/geak.db \
     INFERENCEX_PATH=/opt/hyperloom/InferenceX \
     FRAMEWORK=sglang \
-    OOB_MCP_PORT=8003 \
     AGENT_WORKSPACE_ROOT=/tmp/agent-workspaces \
-    PYTHONPATH=/opt/oob-mcp \
+    PYTHONPATH=/opt/OOB \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
-EXPOSE 22 8001 8002 8003
+EXPOSE 22 6379 8265
 ENTRYPOINT ["/opt/entrypoint.sh"]
 CMD []

@@ -57,15 +57,33 @@ is pre-set by the administrator. The skill MUST use whatever model is already
 configured. Calling `geak_set_model_config` to change the LLM backend violates IR-7
 and risks setting a non-existent model (e.g., `claude-haiku-4-5-20251001` on VertexAI).
 
-## GEAK MCP Tool Reference
+## GEAK Tool Reference
 
-### Authentication
+GEAK invocation differs by mode. **Check your mode before proceeding.**
 
-Requires two keys:
-- `GEAK_AUTH_KEY` — Bearer token for GEAK endpoint (set in `.env`)
-- `LITELLM_API_KEY` — Used internally by GEAK to call its LLM backend
+### Fully-Local Mode (Ray-scheduled CLI)
 
-### Tool sequence
+No MCP tools, no REST API. GEAK runs as the `geak` CLI, scheduled by Ray.
+
+| Step | Command | Purpose |
+|------|---------|---------|
+| 1 | `$GEAK_CLI status` | Verify Ray cluster has GPUs available |
+| 2 | `$GEAK_CLI run -t task.md --yolo` | Single task (blocking) |
+| 2b | `$GEAK_CLI batch -t a.md -t b.md ... --yolo` | Batch: all candidates in parallel (IR-1) |
+| 3 | *(automatic)* | Ray assigns GPU per task, `geak` runs with `--gpu-ids` |
+| 4 | *(automatic)* | Blocks until done, prints OK/FAIL + output path |
+
+Where `$GEAK_CLI="python3 $SKILL_ROOT/scripts/geak_ray_submit.py"`.
+
+**Authentication & model config:** `entrypoint.sh` renders `$GEAK_CONFIG`
+(`/opt/hyperloom/geak-config/local.yaml`) from a LiteLLM template at container start
+using `GEAK_MODEL_NAME` (default `claude-opus-4-7`), `GEAK_API_KEY`/`LLM_API_KEY`,
+and `GEAK_BASE_URL`/`LLM_API_BASE`. `geak_ray_submit.py` auto-injects `--config $GEAK_CONFIG`,
+so users do not need to pass it manually.
+
+### MCP Mode (Local / Claw)
+
+Requires GEAK MCP server running. Uses MCP tools:
 
 | Step | Tool | Purpose |
 |------|------|---------|
@@ -77,9 +95,13 @@ Requires two keys:
 | 6 | `geak_download_file` | Download optimized code |
 | - | `geak_list_tasks` | Debug: list all tasks |
 
+**Authentication (MCP mode):**
+- `GEAK_AUTH_KEY` — Bearer token for GEAK endpoint (set in `.env`)
+- `LITELLM_API_KEY` — Used internally by GEAK to call its LLM backend
+
 **FORBIDDEN:** `geak_set_model_config` — NEVER call this tool. Use existing config.
 
-### geak_create_task — critical details
+### geak_create_task — critical details (MCP mode only; fully-local uses task .md files)
 
 - `input_type` is **required** — use `"file"`
 - The instruction field is `prompt`, NOT `instructions`
