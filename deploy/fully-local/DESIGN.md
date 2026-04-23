@@ -32,7 +32,7 @@ Fully Local mode lets users run the full Hyperloom inference optimization loop o
 │   ────────────────       │    ──────────────────           │
 │   Web UI job submission  │    Cursor SSH into container    │
 │   AMD cloud sandboxes    │    User-owned GPU nodes         │
-│   Remote MCP connections │    MCP on localhost in-container │
+│   Remote MCP connections │    CLI-only in-container        │
 │   Minio + Langfuse       │    Local logs + filesystem      │
 │   RayJob distributed     │    Docker / K8s Pod             │
 └─────────────────────────┴────────────────────────────────┘
@@ -141,7 +141,7 @@ The same `hyperloom-src` artifacts feed into two inference framework base images
 
 ### 4.1 In-Container Processes
 
-Persistent processes (managed by `entrypoint.sh` supervisor):
+Persistent processes (Docker: `entrypoint.sh`; K8s: `/etc/profile.d/hyperloom.sh` on SSH login):
 
 | Process | Port | Role |
 |---------|------|------|
@@ -161,7 +161,7 @@ CLI tools (no port, invoked per task by the skill):
 
 **Docker mode**: `entrypoint.sh` runs as PID 1 — provisions agent CLI auth files, starts sshd / Ray / (optional) auth-proxy → waits for ports to be ready (30s timeout) → enters a supervisor loop (5s interval, restarts crashed Ray or auth-proxy). On SIGTERM/SIGINT, gracefully kills all child processes.
 
-**K8s mode**: When the Pod CMD is overridden, the same background processes are instead started by `/etc/profile.d/hyperloom.sh` on first SSH login (idempotent — uses `ray status` and config-file probes to avoid duplicate work).
+**K8s mode**: When the Pod CMD is overridden, `/etc/profile.d/hyperloom.sh` runs on SSH login instead of PID 1. It renders the GEAK LiteLLM config, starts Ray if needed, and when `OOB_BASE_URL` is set, starts the local OOB auth-proxy and rewrites `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` to `http://127.0.0.1:4002/...`. The script avoids duplicate background services by checking `ray status` and whether `:4002` is already listening.
 
 ---
 
@@ -203,7 +203,7 @@ No MCP/REST services run; tooling is CLI-only.
 - **Data stays in user's network**: Model files are volume-mounted; benchmark data and optimization results are stored on the container's local filesystem
 - **Only outbound traffic**: LLM API calls (GEAK kernel optimization, OOB `claude`/`codex` subprocesses) — can be restricted via network policies
 - **No exposed RPC surface**: No MCP/REST tooling servers exist; only sshd is reachable from outside, Ray and the optional auth-proxy bind to localhost
-- **API Key consolidation**: Unified entry points (`LLM_API_KEY` / `OOB_API_KEY`), entrypoint auto-maps to provider-specific variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `AMD_LLM_API_KEY`)
+- **API Key consolidation**: Unified entry points (`LLM_API_KEY` / `OOB_API_KEY`), startup scripts auto-map to provider-specific variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `AMD_LLM_API_KEY`) and route OOB traffic through the local `:4002` proxy when configured
 
 ---
 
@@ -211,11 +211,14 @@ No MCP/REST services run; tooling is CLI-only.
 
 ```
 deploy/fully-local/
+├── OOB/                        # Fully-local OOB CLI package sources
 ├── DESIGN.md                  # This design document
 ├── README.md                  # User-facing quick start guide
 ├── Dockerfile.hyperloom-src   # Stage 0: repo artifact bundle image
 ├── Dockerfile.sglang          # SGLang base image build
 ├── Dockerfile.vllm            # vLLM base image build
+├── geak-litellm.yaml          # GEAK LiteLLM template rendered at startup
 ├── entrypoint.sh              # Container entrypoint: service startup + supervisor + health checks
-└── hyperloom-autostart.sh     # K8s SSH login auto-start script
+├── hyperloom-autostart.sh     # K8s SSH login auto-start script
+└── test_hyperloom_autostart.py # Regression test for K8s autostart proxy rewrite
 ```

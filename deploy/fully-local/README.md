@@ -18,18 +18,21 @@ docker run -d --shm-size=16g \
   --device=/dev/kfd --device=/dev/dri \
   -v /path/to/models:/models \
   -p 20022:22 \
-  -e LLM_API_KEY=<your-api-key> \
-  -e LLM_API_BASE=https://api.openai.com/v1 \
-  hyperloom-local:sglang-latest
+  -e LLM_API_KEY=<your-geak-api-key> \
+  -e LLM_API_BASE=https://<your-openai-compatible-endpoint>/v1 \
+  -e GEAK_MODEL_NAME=<model-supported-by-that-endpoint> \
+  primussafe/hyperloom-fully-local:sglang-423-4
 ```
+> vllm images: docker.io/primussafe/hyperloom-fully-local:vllm-423-1
 
-> `LLM_API_KEY` and `LLM_API_BASE` are only used by the `geak` kernel optimization backend. If you use OOB `codex` / `claude` backends, configure `OOB_API_KEY` and `OOB_BASE_URL`.
+> `LLM_API_KEY` and `LLM_API_BASE` are only used by the `geak` kernel optimization backend. Set `GEAK_MODEL_NAME` to a model that your endpoint actually serves; if omitted, the default is `claude-opus-4-7`. If you use OOB `codex` / `claude` backends, configure `OOB_API_KEY` and `OOB_BASE_URL`.
 
 **Optional env vars** (add as needed):
 
 | Env var | Purpose |
 |---------|---------|
 | `HIP_VISIBLE_DEVICES=0,1` | Limit to specific GPUs |
+| `GEAK_MODEL_NAME=<model>` | Override the GEAK model rendered into the local LiteLLM config |
 | `OOB_API_KEY=<key>` | Unified OOB API key (used by both Claude/Codex) |
 | `OOB_BASE_URL=<url>` | Unified OOB API endpoint (recommended) |
 
@@ -81,7 +84,7 @@ Save results to /opt/hyperloom/results/
 
 | Backend | Description | Duration | Dependency |
 |---------|-------------|----------|------------|
-| `geak` | Local subprocess with GPU access and hardware validation | 2-3 hours | `LLM_API_KEY` |
+| `geak` | Local subprocess with GPU access and hardware validation | 2-3 hours | `LLM_API_KEY` + matching `GEAK_MODEL_NAME` / `LLM_API_BASE` |
 | `codex` | Codex code generation + local benchmark | ~1 hour | `OOB_API_KEY` + `OOB_BASE_URL` |
 | `claude` | Claude Code generation + local benchmark | ~1 hour | `OOB_API_KEY` + `OOB_BASE_URL` |
 
@@ -99,7 +102,7 @@ Use only claude as the kernel optimization backend.
 
 ## Kubernetes Deployment
 
-The same container image can be used as a K8s Pod base image. When K8s overrides the container CMD, background services (like Ray and auth-proxy) start automatically on first login via `/etc/profile.d/hyperloom.sh`.
+The same container image can be used as a K8s Pod base image. When K8s overrides the container CMD, `/etc/profile.d/hyperloom.sh` renders the GEAK config, starts Ray on first SSH login, and when `OOB_BASE_URL` is set, starts the local auth-proxy and rewrites `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` to `http://127.0.0.1:4002/...`.
 
 Example Pod spec:
 
@@ -124,7 +127,9 @@ spec:
           name: hyperloom-secrets
           key: llm-api-key
     - name: LLM_API_BASE
-      value: "https://api.deepseek.com/v1"
+      value: "https://<your-openai-compatible-endpoint>/v1"
+    - name: GEAK_MODEL_NAME
+      value: "<model-supported-by-that-endpoint>"
     - name: OOB_API_KEY
       valueFrom:
         secretKeyRef:
@@ -132,7 +137,7 @@ spec:
           key: oob-api-key
           optional: true
     - name: OOB_BASE_URL
-      value: "https://api.openai.com/v1"
+      value: "https://<your-oob-endpoint>/v1"
     resources:
       limits:
         amd.com/gpu: 1
@@ -178,6 +183,9 @@ Connect via Cursor Remote SSH → `<node-ip>:30022`, open `/opt/hyperloom`.
 |----------|---------|-------------|
 | `LLM_API_KEY` | — | LLM API key for GEAK kernel optimization |
 | `LLM_API_BASE` | — | LLM API endpoint URL |
+| `GEAK_MODEL_NAME` | `claude-opus-4-7` | GEAK model name rendered into the generated LiteLLM config |
+| `GEAK_API_KEY` | falls back to `LLM_API_KEY` | Optional GEAK-only API key override |
+| `GEAK_BASE_URL` | falls back to `LLM_API_BASE` | Optional GEAK-only endpoint override |
 | `FRAMEWORK` | `sglang` | Inference framework (`sglang` or `vllm`) |
 | `OOB_API_KEY` | — | Unified OOB API key (used by both Claude/Codex `oob run` invocations) |
 | `OOB_BASE_URL` | — | Unified OOB API endpoint (when set, an in-container auth-proxy on `:4002` rewrites Bearer auth) |
@@ -195,8 +203,7 @@ tail -f /var/log/hyperloom/ray-head.log         # Ray (GEAK GPU scheduler)
 tail -f /var/log/hyperloom/oob-auth-proxy.log   # OOB auth proxy (only if OOB_BASE_URL is set)
 ```
 
-> Per-task CLI logs (`oob run`, `geak`, TraceLens) are written under each task's
-> workspace, not into `/var/log/hyperloom`. For `oob run`, see `${OOB_HOME:-~/.oob}/<task_id>/execution.log`.
+> Per-task CLI logs are not written to `/var/log/hyperloom`. `oob run` stores files under `${OOB_HOME:-~/.oob}/tasks/cli/<task_id>/workspace/` (for example `execution.log`), while `geak` writes results under its own output directory.
 
 ## Security
 
@@ -216,7 +223,7 @@ docker run ... -v ~/.ssh/id_rsa.pub:/root/.ssh/authorized_keys:ro ...
 
 **Background services not running (K8s Pod)**
 
-Ray + auth-proxy start on first SSH login. If they didn't, run manually:
+Ray + the optional OOB auth-proxy are initialized on first SSH login. The same startup script also renders `GEAK_CONFIG` and rewrites OOB base URLs to the local `:4002` proxy when `OOB_BASE_URL` is set. If they didn't, run manually:
 
 ```bash
 source /etc/profile.d/hyperloom.sh
@@ -230,6 +237,7 @@ ss -tlnp | grep -E ':6379|:8265|:4002' || true       # Listening ports
 command -v oob && oob --help | head -5               # OOB CLI installed
 command -v geak                                      # GEAK CLI installed
 python3 -c "import TraceLens" && echo "TraceLens OK" # TraceLens importable
+printf 'OPENAI_BASE_URL=%s\nANTHROPIC_BASE_URL=%s\n' "$OPENAI_BASE_URL" "$ANTHROPIC_BASE_URL"
 ```
 
 **GPU count shows wrong number**
