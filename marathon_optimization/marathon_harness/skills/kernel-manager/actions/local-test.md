@@ -131,24 +131,182 @@ def clear_aiter_jit_cache(kernel_name):
 
 ## Step 2: Correctness Check
 
-**Requires GPU access.** If the inference server is running on the GPU, skip this step
-and mark as `correctness: "deferred"`.
+**Requires GPU access.** If the inference server is running on **all** GPUs, skip
+this step and mark as `correctness: "deferred"`. When `TP < GPU_COUNT`, use a free
+GPU via `get_test_device()` — do NOT default to device 0 (the server's GPU).
 
 ### GPU Availability Check
 
+The inference server uses GPUs `0..TP-1`. When `TP < GPU_COUNT`, the remaining
+GPUs are free for micro-benchmarks. Always check **all** devices — not just
+device 0 — and use the GPU lock file if present.
+
 ```python
-import torch
+import torch, os, json
+
+GPU_LOCK_PATH = "/tmp/.marathon_gpu_lock.json"
+
+def _read_gpu_lock():
+    """Read the GPU lock file to find which GPUs the orchestrator is using."""
+    try:
+        with open(GPU_LOCK_PATH) as f:
+            lock = json.load(f)
+        if lock.get("holder") and lock.get("gpus"):
+            return set(lock["gpus"])
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+def find_free_gpu():
+    """Find a GPU not used by the inference server.
+
+    Returns (device_id, reason) — device_id is an int if a free GPU exists,
+    or None if all GPUs are busy.
+
+    Resolution order:
+      1. Read /tmp/.marathon_gpu_lock.json (authoritative, written by orch)
+      2. Fall back to TP env var (server uses devices 0..TP-1)
+      3. Fall back to per-device memory probe
+    """
+    total_gpus = torch.cuda.device_count()
+    if total_gpus == 0:
+        return None, "NO_GPU — torch sees 0 devices"
+
+    locked = _read_gpu_lock()
+    if locked is not None:
+        for dev in range(total_gpus):
+            if dev in locked:
+                continue
+            mem_free, mem_total = torch.cuda.mem_get_info(dev)
+            if (mem_total - mem_free) / mem_total < 0.20:
+                return dev, f"OK — GPU {dev} free (lock says {sorted(locked)} busy)"
+        return None, f"ALL_LOCKED — lock={sorted(locked)}, all others >20% used"
+
+    server_tp = int(os.environ.get("TP", str(total_gpus)))
+    server_gpus = set(range(min(server_tp, total_gpus)))
+
+    for dev in range(total_gpus):
+        if dev in server_gpus:
+            continue
+        mem_free, mem_total = torch.cuda.mem_get_info(dev)
+        if (mem_total - mem_free) / mem_total < 0.20:
+            return dev, f"OK — GPU {dev} free (TP={server_tp}, devices {sorted(server_gpus)} assumed busy)"
+
+    for dev in range(total_gpus):
+        mem_free, mem_total = torch.cuda.mem_get_info(dev)
+        if (mem_total - mem_free) / mem_total < 0.20:
+            return dev, f"OK — GPU {dev} free (all-scan, server may be down)"
+
+    return None, f"GPU_BUSY — all {total_gpus} devices >20% VRAM used"
 
 def gpu_available():
-    """Check if the GPU is free for testing."""
+    """Legacy compat wrapper. Returns True if any GPU is free."""
+    dev, _ = find_free_gpu()
+    return dev is not None
+
+def get_test_device(kernel_name=None):
+    """Return the device string for torch tensors during testing.
+
+    Sets HIP_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES so torch operations
+    target the free GPU, not the server's GPU.
+
+    Resolution order:
+      1. Try find_free_gpu() for an immediately available GPU
+      2. If none free, request temporary access from orchestrator (IR-25)
+      3. If request times out after 60min total (2 attempts), return None
+    """
+    dev, reason = find_free_gpu()
+    if dev is not None:
+        os.environ["HIP_VISIBLE_DEVICES"] = str(dev)
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(dev)
+        return "cuda:0", reason
+
+    # No free GPU — request temporary access from orchestrator
+    dev, reason = request_gpu_access(kernel_name or "unknown")
+    if dev is not None:
+        return dev, reason  # request_gpu_access already set env vars
+    return None, reason
+
+import time, datetime
+
+GPU_REQUEST_PATH = os.path.join(os.environ.get("SESSION_DIR", ""),
+                                "kernel_manager/gpu_request.json")
+
+def request_gpu_access(kernel_name, estimated_duration_s=300):
+    """Request exclusive GPU access from the orchestrator (IR-25).
+
+    Writes a pending request, polls for the orchestrator to grant it
+    (by killing the inference server), then returns a device.
+
+    Returns (device_str, reason) — device_str is "cuda:0" if granted,
+    or None if the request timed out.
+    """
+    if not GPU_REQUEST_PATH or GPU_REQUEST_PATH.startswith("/kernel_manager"):
+        return None, "GPU_REQUEST_SKIP — SESSION_DIR not set"
+
+    req = {"status": "pending", "requester": "kernel-manager",
+           "kernel": kernel_name,
+           "since": datetime.datetime.utcnow().isoformat() + "Z",
+           "estimated_duration_s": estimated_duration_s}
+    os.makedirs(os.path.dirname(GPU_REQUEST_PATH), exist_ok=True)
+    with open(GPU_REQUEST_PATH, "w") as f:
+        json.dump(req, f)
+
+    # Try twice: 30min initial + 30min retry = 60min max.
+    # The micro-benchmark MUST run — do not give up easily.
+    for attempt in range(2):
+        if attempt > 0:
+            req["since"] = datetime.datetime.utcnow().isoformat() + "Z"
+            req["attempt"] = attempt + 1
+            with open(GPU_REQUEST_PATH, "w") as f:
+                json.dump(req, f)
+        for _ in range(60):  # 60 * 30s = 30min per attempt
+            time.sleep(30)
+            try:
+                with open(GPU_REQUEST_PATH) as f:
+                    r = json.load(f)
+                if r.get("status") == "granted":
+                    _write_gpu_lock_km([0], os.getpid())
+                    os.environ["HIP_VISIBLE_DEVICES"] = "0"
+                    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+                    return "cuda:0", "GPU_GRANTED by orchestrator"
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+    # 60min total — last resort
+    try: os.remove(GPU_REQUEST_PATH)
+    except FileNotFoundError: pass
+    return None, "GPU_REQUEST_TIMEOUT — orchestrator did not grant in 60min"
+
+def _write_gpu_lock_km(gpus, pid):
+    """Write GPU lock as kernel-manager (temporary holder during benchmarks)."""
+    lock = {"holder": "kernel-manager", "gpus": list(gpus), "pid": pid,
+            "since": datetime.datetime.utcnow().isoformat() + "Z",
+            "purpose": "micro-benchmark"}
+    with open(GPU_LOCK_PATH, "w") as f:
+        json.dump(lock, f)
+
+def _release_gpu_lock_km():
+    """Release GPU lock held by kernel-manager."""
+    try: os.remove(GPU_LOCK_PATH)
+    except FileNotFoundError: pass
+
+def release_gpu_after_benchmark():
+    """Release GPU lock and signal orchestrator to restart its server.
+
+    Call this after ALL micro-benchmarks are done for the current kernel.
+    The orchestrator polls gpu_request.json and will restart the inference
+    server when it sees status: 'released'.
+    """
+    _release_gpu_lock_km()
     try:
-        mem_free, mem_total = torch.cuda.mem_get_info()
-        usage_pct = (mem_total - mem_free) / mem_total * 100
-        if usage_pct > 20:
-            return False  # server likely running
-        return True
-    except RuntimeError:
-        return False
+        with open(GPU_REQUEST_PATH) as f:
+            r = json.load(f)
+        r["status"] = "released"
+        r["released_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+        with open(GPU_REQUEST_PATH, "w") as f:
+            json.dump(r, f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
 ```
 
 ### Correctness Verification
@@ -224,7 +382,10 @@ def verify_correctness(original_source, optimized_source, test_shapes, dtype=tor
 
 ## Step 3: Micro-Benchmark
 
-**Requires GPU access.** If GPU is busy, mark as `micro_benchmark: "deferred"`.
+**Requires GPU access.** The micro-benchmark MUST run.
+When `TP < GPU_COUNT`, use a free GPU via `get_test_device()`.
+When `TP == GPU_COUNT`, request temporary GPU access from the orchestrator (IR-25),
+which will wait up to 60min total (2 × 30min attempts). Only defer as a last resort.
 
 ### Multi-Shape Benchmark
 
@@ -443,7 +604,17 @@ Putting it all together — the complete test pipeline for a single kernel resul
 
 ```python
 def run_full_test(original_source, optimized_source, test_shapes, kernel_type, kernel_name=None):
-    """Run the complete test pipeline. Returns a test report dict."""
+    """Run the complete test pipeline. Returns a test report dict.
+
+    GPU access strategy (IR-25):
+      1. Try find_free_gpu() for an immediately available GPU
+      2. If none free, request_gpu_access() asks the orchestrator to
+         temporarily kill the server and grant GPU time
+      3. Waits up to 60min (2 × 30min attempts) — micro-benchmark must run
+      4. If GPUs were borrowed, release_gpu_after_benchmark() signals
+         the orchestrator to restart its server
+      5. Only defer as absolute last resort (60min timeout with no grant)
+    """
     report = {
         "compilation": None,
         "correctness": None,
@@ -451,13 +622,14 @@ def run_full_test(original_source, optimized_source, test_shapes, kernel_type, k
         "verdict": None,
         "feedback": None,
         "caches_cleared": [],
+        "gpu_borrowed": False,
     }
     
-    # Step 1: Compilation
+    # Step 1: Compilation (no GPU needed)
     if kernel_type in ("triton", "inductor-triton", "triton-source"):
         comp_ok, comp_msg = check_triton_compilation(optimized_source)
     elif kernel_type in ("cpp-hip", "hip-kernel"):
-        comp_ok, comp_msg = check_hip_compilation(optimized_source)  # source is a file path
+        comp_ok, comp_msg = check_hip_compilation(optimized_source)
     else:
         comp_ok, comp_msg = True, "OK — Python source (no compilation needed)"
     
@@ -467,19 +639,27 @@ def run_full_test(original_source, optimized_source, test_shapes, kernel_type, k
         report["feedback"] = build_feedback(report["compilation"], None, None)
         return report
     
-    # Step 2: Correctness (if GPU available)
-    if gpu_available():
+    # Acquire GPU for steps 2-3 (uses IR-25 request if no free GPU)
+    device, gpu_reason = get_test_device(kernel_name)
+    gpu_ok = device is not None
+    borrowed = "GPU_GRANTED" in gpu_reason if gpu_ok else False
+    report["gpu_borrowed"] = borrowed
+    
+    # Step 2: Correctness (requires GPU)
+    if gpu_ok:
         corr_ok, corr_msg = verify_correctness(original_source, optimized_source, test_shapes)
         report["correctness"] = (corr_ok, corr_msg)
         if not corr_ok:
             report["verdict"] = "FAIL-CORRECTNESS"
             report["feedback"] = build_feedback(report["compilation"], report["correctness"], None)
+            if borrowed:
+                release_gpu_after_benchmark()
             return report
     else:
-        report["correctness"] = (None, "DEFERRED — GPU busy")
+        report["correctness"] = (None, f"DEFERRED — {gpu_reason}")
     
-    # Step 3: Micro-benchmark (if GPU available)
-    if gpu_available():
+    # Step 3: Micro-benchmark (requires GPU)
+    if gpu_ok:
         speedup, details = micro_benchmark(original_source, optimized_source, test_shapes)
         report["micro_benchmark"] = (speedup, details)
         if speedup is None:
@@ -490,18 +670,26 @@ def run_full_test(original_source, optimized_source, test_shapes, kernel_type, k
                 report["feedback"] = build_feedback(
                     report["compilation"], report["correctness"], report["micro_benchmark"]
                 )
+                if borrowed:
+                    release_gpu_after_benchmark()
                 return report
         elif speedup < 1.05:
             report["verdict"] = "FAIL-PERF"
             report["feedback"] = build_feedback(
                 report["compilation"], report["correctness"], report["micro_benchmark"]
             )
+            if borrowed:
+                release_gpu_after_benchmark()
             return report
         else:
             report["verdict"] = "PASS"
     else:
-        report["micro_benchmark"] = (None, "DEFERRED — GPU busy")
+        report["micro_benchmark"] = (None, f"DEFERRED — {gpu_reason}")
         report["verdict"] = "PASS-DEFERRED"
+    
+    # Release borrowed GPU back to orchestrator (triggers server restart)
+    if borrowed:
+        release_gpu_after_benchmark()
     
     # Step 4: Clear caches for the patch type
     patch_type_map = {
