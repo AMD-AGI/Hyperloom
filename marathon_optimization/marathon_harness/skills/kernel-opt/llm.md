@@ -38,7 +38,7 @@ This document provides detailed reference material for LLM-based kernel optimiza
 
 ## Available Models (validated 2026-03-28)
 
-Gateway: `https://oci-slc.example-internal-host.invalid/api/v1/llm-proxy/v1`
+Gateway: `https://core42.example-internal-host.invalid/api/v1/llm-proxy/v1`
 
 | Model | Provider | Status | Latency | Recommendation |
 |---|---|---|---|---|
@@ -180,7 +180,7 @@ import httpx
 http_client = httpx.Client(verify=False, timeout=180)
 
 client = OpenAI(
-    base_url="https://oci-slc.example-internal-host.invalid/api/v1/llm-proxy/v1",
+    base_url="https://core42.example-internal-host.invalid/api/v1/llm-proxy/v1",
     api_key=os.environ["LLM_PROXY_API_KEY"],
     http_client=http_client,
 )
@@ -345,7 +345,7 @@ If one backend produces no valid result, the other wins by default. If neither p
 ### Gateway Configuration (validated 2026-03-28)
 
 ```
-Base URL: https://oci-slc.example-internal-host.invalid/api/v1/llm-proxy/v1
+Base URL: https://core42.example-internal-host.invalid/api/v1/llm-proxy/v1
 Key format: ak-... (PRISM SAFE API key, set as LLM_PROXY_API_KEY in .env)
 SSL: Must use httpx.Client(verify=False)
 ```
