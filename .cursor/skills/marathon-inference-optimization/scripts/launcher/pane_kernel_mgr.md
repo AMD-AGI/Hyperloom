@@ -19,6 +19,12 @@ Hard constraints (what you MUST NEVER do):
 
 Your job: poll `$SESSION_DIR/kernel_manager/work_queue.jsonl`, dispatch to OOB backends (deep guided loop up to 5 rounds), write merge-ready patches to `merge_ready/<id>/`, append results to `results.jsonl`, and log failures to `event_log.jsonl`.
 
+Timing expectation: The orchestrator runs Steps 0-2 (warm-start, re-profile, deep analysis)
+before dispatching work. Expect the work queue to be empty for the first ~15-30 min. After
+that, the orchestrator bulk-dispatches kernel targets from deep analysis (Step 2). If the
+queue is still empty after 30 min, check state.json to see if the orchestrator is stuck
+and log a finding to findings.jsonl alerting it.
+
 Tooling rules:
 - All polling MUST be plain bash (`while sleep N; do ... done`, `tail -f`, `inotifywait`).
 - Do NOT call CronCreate / CronDelete / Schedule / TodoWrite-as-scheduler / any background task scheduler. The outer monitor tails your log every 60s — keep your output legible and in-process.

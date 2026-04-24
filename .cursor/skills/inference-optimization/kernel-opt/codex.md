@@ -35,15 +35,37 @@ good for Triton structural rewrites (dual-loop to single-pass, block-size tuning
 | **Tool use** | File I/O, shell | Bash, profiling, submit | File I/O, shell | None |
 | **Best for** | Fast Triton rewrites | Complex HIP, final polish | Multi-step autonomous | Quick iteration |
 
+## Tracing Setup
+
+At the **start** of OOB Codex usage (before the first `agent_create_task`), record
+the start timestamp for message-level cost correlation:
+
+```bash
+python3 $SCRIPTS_DIR/trace_action.py --component oob --action start --agent codex
+```
+
+After ALL OOB Codex tasks complete (all iterations done), record the end:
+
+```bash
+python3 $SCRIPTS_DIR/trace_action.py --component oob --action end
+```
+
+**NOTE:** LLM header injection (`x-litellm-tags`, `x-litellm-spend-logs-metadata`)
+is handled automatically by `auth_proxy.py` inside the OOB workload pod — no manual
+header configuration needed (unlike GEAK). The timestamps allow correlating OOB's
+LLM spend to specific messages by querying `LiteLLM_SpendLogs` with time ranges.
+
 ## Tool Sequence
 
 | Step | Tool | Purpose |
 |------|------|---------|
+| 0 | `bash: trace_action.py --component oob --action start --agent codex` | Record start timestamp (once) |
 | 1 | `agent_create_task` | Create task with kernel source + prompt |
 | 2 | `agent_submit_task` | Start execution |
 | 3 | `agent_get_task` | Poll status (every `CODEX_POLL_INTERVAL_S`) |
 | 4 | `agent_get_outputs` | List output files |
 | 5 | `agent_download_file` | Download optimized kernel |
+| 6 | `bash: trace_action.py --component oob --action end` | Record end timestamp (once, after all iterations) |
 | - | `agent_cancel_task` | Cancel if stuck past `CODEX_POLL_TIMEOUT_MIN` |
 
 ## agent_create_task — Critical Details
