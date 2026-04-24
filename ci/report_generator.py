@@ -11,7 +11,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-LLM_ENDPOINT = "https://oci-slc.primus-safe.amd.com/api/v1/llm-proxy/v1/chat/completions"
+LLM_ENDPOINT = "https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1/chat/completions"
 
 
 def _extract_metrics_via_llm(report_content: str) -> dict:
