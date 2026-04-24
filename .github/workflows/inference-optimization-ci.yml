@@ -43,7 +43,7 @@ jobs:
   optimize:
     name: "${{ matrix.key }}"
     needs: prepare
-    runs-on: hyperloom-qn7cd
+    runs-on: hyperloom-mh826
     timeout-minutes: 510
     strategy:
       fail-fast: false
