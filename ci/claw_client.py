@@ -89,7 +89,7 @@ class ClawClient:
             "taskMode": task_mode,
             "attachments": [],
             "tools": tools if tools is not None else self.default_tools,
-            "workspaceId": self.sandbox_workspace or "control-plane-sandbox",
+            "workspaceId": self.sandbox_workspace or "core42-sandbox",
         }
         resp = self._session.post(
             self._url(f"/sessions/{session_id}/messages"),

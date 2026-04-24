@@ -93,7 +93,7 @@ Ray 2.44.1 fix). The same image is used for both the RayJob and kernel-opt backe
 The custom SGLang image is based on upstream SGLang with Ray compatibility fixes:
 
 ```dockerfile
-FROM harbor.oci-slc.primus-safe.amd.com/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x
+FROM harbor.core42.primus-safe.amd.com/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x
 RUN python -m pip install ray[default]==2.44.1 click==8.1.7
 ```
 
