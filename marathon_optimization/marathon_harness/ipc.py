@@ -77,6 +77,11 @@ def _km_dir(session_dir: str | Path) -> Path:
     return Path(session_dir) / "kernel_manager"
 
 
+def _safe_path_id(event_id: str) -> str:
+    """Replace characters illegal on Windows (: and others) so event IDs are safe as directory names."""
+    return event_id.replace(":", "-")
+
+
 # -----------------------------------------------------------------------
 # work_queue.jsonl  (W: orchestrator  |  R: kernel-manager, watchdog)
 # -----------------------------------------------------------------------

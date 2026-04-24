@@ -343,7 +343,7 @@ class LLMClient:
     def __init__(
         self,
         model: str = "claude-sonnet-4-20250514",
-        cwd: str = "/sgl-workspace",
+        cwd: str = "/tmp",
         add_dirs: list[str] | None = None,
         env: dict[str, str] | None = None,
         system_prompt: str = "",
@@ -511,12 +511,17 @@ class LLMClient:
             effective_system_prompt = _BASH_BLOCKLIST_PREAMBLE
         prompt = _BASH_BLOCKLIST_PREAMBLE + "\n" + prompt
 
+        sdk_env = dict(os.environ)
+        sdk_env.update(self.env)
         opts = ClaudeCodeOptions(
             model=model or self.model,
             max_turns=max_turns,
             cwd=cwd or self.cwd,
             system_prompt=effective_system_prompt,
             permission_mode="acceptEdits",
+            env=sdk_env,
+            extra_args={"bare": None},
+            add_dirs=[d for d in self.add_dirs if Path(d).is_dir()],
         )
         if allowed_tools:
             opts.allowed_tools = allowed_tools
@@ -527,12 +532,19 @@ class LLMClient:
             log.info("LLM/SDK call attempt %d/%d (max_turns=%d)", attempt, self.MAX_RETRIES, max_turns)
             try:
                 messages: list[Any] = []
-                async for msg in query(prompt=prompt, options=opts):
-                    if msg is not None:
-                        if not messages:
-                            log.info("LLM stream: first message received (type=%s)",
-                                     type(msg).__name__)
-                        messages.append(msg)
+                try:
+                    async for msg in query(prompt=prompt, options=opts):
+                        if msg is not None:
+                            if not messages:
+                                log.info("LLM stream: first message received (type=%s)",
+                                         type(msg).__name__)
+                            messages.append(msg)
+                except Exception as stream_exc:
+                    if messages:
+                        log.warning("SDK stream ended with error after %d messages: %s",
+                                    len(messages), stream_exc)
+                    else:
+                        raise
 
                 if not messages:
                     raise RuntimeError("No messages received from SDK")
