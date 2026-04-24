@@ -189,7 +189,7 @@ jobs:
 
           def fetch_tool_configs(tool_ids_str):
               api_key = os.environ.get("CLAW_API_KEY", "")
-              api_url = "https://oci-slc.primus-safe.amd.com/api/tools/api/v1/tools?offset=0&limit=100&order=desc"
+              api_url = "https://core42.primus-safe.amd.com/api/tools/api/v1/tools?offset=0&limit=100&order=desc"
               ctx = ssl.create_default_context()
               ctx.check_hostname = False
               ctx.verify_mode = ssl.CERT_NONE
