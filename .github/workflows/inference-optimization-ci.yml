@@ -56,14 +56,13 @@ jobs:
       - name: Update InferenceX images to latest stable
         continue-on-error: true
         run: |
+          SCRIPT="$GITHUB_WORKSPACE/inference_optimization/InferenceX/utils/check_image_versions.py"
           for INFERENCEX_CONFIG in \
             /wekafs/InferenceX/.github/configs/amd-master.yaml \
             /hyperloom/InferenceX/.github/configs/amd-master.yaml; do
             if [ -f "$INFERENCEX_CONFIG" ]; then
               pip install requests packaging pyyaml --quiet
-              python3 "$(dirname "$INFERENCEX_CONFIG")/../../utils/check_image_versions.py" \
-                --config-files "$INFERENCEX_CONFIG" \
-                --update
+              python3 "$SCRIPT" --config-files "$INFERENCEX_CONFIG" --update
               break
             fi
           done
