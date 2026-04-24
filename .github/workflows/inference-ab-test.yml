@@ -62,7 +62,7 @@ jobs:
     name: "A: ${{ matrix.key }}"
     needs: prepare
     if: github.event.inputs.mode != 'single'
-    runs-on: hyperloom-qn7cd
+    runs-on: hyperloom-mh826
     timeout-minutes: 510
     strategy:
       fail-fast: false
@@ -96,7 +96,7 @@ jobs:
   group-b:
     name: "B: ${{ matrix.key }}"
     needs: prepare
-    runs-on: hyperloom-qn7cd
+    runs-on: hyperloom-mh826
     timeout-minutes: 510
     strategy:
       fail-fast: false
@@ -131,7 +131,7 @@ jobs:
     name: "Compare A vs B"
     needs: [group-a, group-b]
     if: always()
-    runs-on: hyperloom-qn7cd
+    runs-on: hyperloom-mh826
     steps:
       - uses: actions/download-artifact@v4
         with:
