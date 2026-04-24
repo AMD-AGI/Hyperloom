@@ -95,10 +95,17 @@ The ONLY interaction allowed is through these GEAK MCP tool calls:
 `geak_get_model_config` (read-only), `geak_create_task`, `geak_submit_task`,
 `geak_get_task`, `geak_get_outputs`, `geak_download_file`, `geak_list_tasks`.
 
-**NEVER call `geak_set_model_config`** — the LLM backend is pre-configured by the
-administrator. Changing it risks setting a non-existent model and breaking all tasks.
+**NEVER call `geak_set_model_config` to change the model** — the LLM backend is
+pre-configured by the administrator. Changing `model_class`, `model_name`, or
+`api_base` risks setting a non-existent model and breaking all tasks.
 
-Violation = immediate run invalidation.
+**Exception — tracing headers:** At the start of the kernel-opt action, you MUST
+call `geak_set_model_config` exactly once to inject observability headers. Run
+`trace_action.py --component geak --action start` first to record timing and
+generate the config, then apply the `extra_headers` via MCP (see kernel-opt/geak.md
+"Tracing Setup"). Do NOT modify `model_class`, `model_name`, `api_base`, or `api_key`.
+
+Violation (changing model/backend) = immediate run invalidation.
 
 **Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11), [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12), and [`modes/FULLY_LOCAL.md`](modes/FULLY_LOCAL.md) (IR-12 through IR-14).**
 
@@ -164,7 +171,15 @@ These are recurring errors observed in production CI runs. **Read before executi
    server startup, health wait, benchmark, and profiling in a tested sequence. Manual
    launch skips health checks and often hits Exit code 144 (SIGTERM from stale processes).
 
-5. **Never call `geak_set_model_config`.** See IR-7. GEAK LLM backend is pre-configured.
+5. **Never call `geak_set_model_config` to change the model.** See IR-7. Only exception: tracing headers.
+
+6. **Record start/end timestamps for ALL external calls** (IR-13). Before invoking
+   any external component (GEAK, OOB, LLM proxy, TraceLens, or future backends),
+   run `python3 $SCRIPTS_DIR/trace_action.py --component <name> --action start`.
+   After the component finishes, run `--action end`. This enables per-message cost
+   attribution. If the specific backend skill already includes tracing steps, follow
+   those. If not, apply this rule as a fallback. Failure to trace does NOT block
+   execution — skip if the script is unavailable.
 
 ## DFS Search Tree
 

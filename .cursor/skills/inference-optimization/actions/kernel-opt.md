@@ -23,6 +23,26 @@ python3 $SKILL_ROOT/kb/kb_query.py --category kernel_optimization --compact
 
 **FLOW GUARD:** Do NOT skip this action if candidates exist. Running sweep with unoptimized kernels wastes compute.
 
+### Step 0: Tracing setup (once per backend)
+
+Use `trace_action.py` to record start/end for each external component:
+
+**GEAK** — if `geak` is in `KERNEL_OPT_BACKENDS`:
+1. `python3 $SCRIPTS_DIR/trace_action.py --component geak --action start`
+2. Call `geak_get_model_config` → `geak_set_model_config` with `extra_headers` from script output
+3. After ALL GEAK tasks: `python3 $SCRIPTS_DIR/trace_action.py --component geak --action end`
+
+**OOB (Codex/Claude)** — if `codex` or `claude` is in `KERNEL_OPT_BACKENDS`:
+1. `python3 $SCRIPTS_DIR/trace_action.py --component oob --action start --agent <codex|claude>`
+2. After ALL OOB iterations: `python3 $SCRIPTS_DIR/trace_action.py --component oob --action end`
+
+**LLM Proxy** — if direct LLM API calls are made:
+1. `python3 $SCRIPTS_DIR/trace_action.py --component llm --action start`
+2. After all LLM calls: `python3 $SCRIPTS_DIR/trace_action.py --component llm --action end`
+
+See each backend's skill doc for details. OOB header injection is automatic
+(via `auth_proxy.py`). GEAK headers require `geak_set_model_config`.
+
 ### Step 1: Locate kernel source
 
 **Strategy A (torch.compile mode):** Extract from STANDALONE kernel files in Inductor cache.
