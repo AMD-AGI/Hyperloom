@@ -108,9 +108,13 @@ python3 $SCRIPTS_DIR/trace_action.py --component tracelens --action end
 ```
 **TraceLens `other` category trap:** Triton kernels launched via `hipModuleLaunchKernel` appear in the `other` category, NOT in `triton`. Check `other_metrics.json` for individual `hipModuleLaunchKernel::*` entries — these may be significant GEAK candidates hidden under a misleading category name. Always drill into `other` before dismissing it.
 
-### Step 3: Identify GEAK candidates
+### Step 3: Identify kernel optimization candidates
 
-**From TraceLens output or direct trace parsing:**
+These candidates will be submitted to ALL active backends in `KERNEL_OPT_BACKENDS`
+(default `geak,codex`) simultaneously. GEAK, Codex, Claude, and LLM all race as
+equals — the best verified result wins regardless of which backend produced it.
+
+**From the trace kernel breakdown:**
 
 ```python
 import gzip, json, time, os
@@ -128,27 +132,59 @@ for e in trace.get('traceEvents', []):
         kernels[name]['total_us'] += e.get('dur', 0)
 
 total = sum(v['total_us'] for v in kernels.values())
+
+# 5-tier kernel classification (replaces binary is_vendor filter)
+def classify_kernel(name):
+    """Classify kernel into optimization tier. ALL tiers are actionable."""
+    if any(x in name for x in ['triton_', '_permute_kernel', 'triton_poi_', 'triton_red_', 'triton_tem_']):
+        return 'T1_TRITON'
+    if any(x in name for x in ['aiter::', 'fmha_v3', 'mha_fwd', 'fused_moe', 'moe_ck',
+                                 'topkGating', '_gemm_a8w8', '_fused_rms']):
+        return 'T2_AITER_CK'
+    if any(x in name for x in ['launch_server', 'schedule', 'batch', 'token_dispatch',
+                                 'kv_cache', 'radix', 'prefix_match']):
+        return 'T3_FRAMEWORK'
+    if any(x in name for x in ['nccl', 'rccl', 'allreduce', 'AllReduce', 'broadcast',
+                                 'all_gather', 'reduce_scatter']):
+        return 'T4_COMM'
+    if any(x in name for x in ['Cijk_', 'hipModule', 'ck::kernel']):
+        return 'T5_COMPILED'
+    if 'vectorized_elementwise_kernel' in name:
+        return 'T2_AITER_CK'  # C++ dispatch — Strategy C can convert to T1
+    return 'T2_AITER_CK'  # default to aiter/CK tier for unknown GPU kernels
+
 candidates = []
 for name, v in sorted(kernels.items(), key=lambda x: -x[1]['total_us']):
     pct = v['total_us'] / total * 100
-    if pct < 3: break
-    is_vendor = any(x in name for x in ['Cijk_', 'aiter::', 'hipModule', 'ck::kernel'])
-    if not is_vendor:
-        candidates.append((name, pct, v['count']))
-        print(f"GEAK candidate: {name} ({pct:.1f}%)")
+    if pct < 1: break  # lowered from 3% to 1% — deep optimization needs wider net
+    tier = classify_kernel(name)
+    candidates.append((name, pct, v['count'], tier))
+    print(f"[{tier}] {name} ({pct:.1f}%, {v['count']}x)")
 ```
 
-**Decision table for candidate types:**
+**5-Tier Classification — Decision Table:**
 
-| Kernel pattern | GEAK? | Why |
-|----------------|-------|-----|
-| `Cijk_*` (hipBLASLt GEMM) | No | Vendor BLAS |
-| `aiter::fmha_v3_*` | No | Vendor attention |
-| `triton_*` / `_permute_kernel` | **Yes** | Triton with Python source |
-| `topkGatingSoftmax` | **Yes** | MoE routing kernel |
-| Custom scheduling/routing | **Yes** | Token dispatch, KV cache ops |
+ALL tiers are optimization targets. The optimization *method* varies by tier, not whether
+it's attempted. GEAK can rewrite **Triton and HIP** kernels. When the user provides
+source paths for aiter/CK kernels (e.g., `/opt/aiter/csrc/`), those HIP kernels become
+first-class GEAK targets — do NOT skip them as "vendor."
 
-**Architecture-based fallback** (when profiling/TraceLens fails):
+| Tier | Kernel pattern | Optimization method | Backend |
+|------|----------------|--------------------:|---------|
+| **T1: Triton/Inductor** | `triton_*`, `_permute_kernel`, Inductor cache | Direct source rewrite, block tuning | Any (GEAK, Codex, Claude, LLM) |
+| **T2: aiter/CK dispatch** | `aiter::*`, `topkGating*`, `_gemm_a8w8*`, `vectorized_elementwise*` | HIP source rewrite (if source provided), Python dispatch rewrite, config tuning, Strategy C selective compile, env flags | GEAK for HIP (when source provided), OOB (Claude/Codex) |
+| **T3: Framework scheduling** | Token dispatch, KV cache ops, batch scheduler, prefill/decode overlap | Source edits in SGLang/vLLM scheduling code, `pip install -e .` | OOB (Claude/Codex) |
+| **T4: Communication** | NCCL/RCCL, AllReduce, custom allreduce | Topology tuning, quantized collectives, overlap scheduling, NCCL env vars | OOB (Claude/Codex) |
+| **T5: Compiled binaries** | `Cijk_*` (hipBLASLt), `ck::kernel` | GEMM CSV tuning, shape-specific config, NOT source rewrite | vendor-kernel-config action |
+
+**T2 sub-strategies (aiter/CK kernels are NOT "unoptimizable"):**
+- **HIP source rewrite (GEAK)**: When user provides source paths (e.g., `/opt/aiter/csrc/`), map trace kernel names back to `.cu`/`.hip` files using `rg` in the provided repo, then submit full source to GEAK. GEAK can rewrite HIP kernels.
+- **Dispatch rewrite**: aiter Python wrappers (`aiter/ops/`) choose kernel variants at runtime. Rewriting dispatch logic for model-specific shapes can select faster paths.
+- **Config tuning**: GEMM CSV files, fused MoE configs, FP8 bypass removal (see GLM-5-FP8 case).
+- **Strategy C**: Selective `torch.compile` on norm/activation submodules → converts `vectorized_elementwise_kernel` to Inductor Triton → T1 optimization applies.
+- **Env flags**: `SGLANG_ROCM_FUSED_DECODE_MLA`, `ROCM_QUICK_REDUCE_QUANTIZATION`, `AITER_ENABLE_VSKIP`.
+
+**Architecture-based fallback** (when profiling fails or trace is unavailable):
 ```python
 import json
 config = json.load(open(f'{MODEL}/config.json'))
@@ -157,36 +193,50 @@ has_moe = text_cfg.get('n_routed_experts', 0) > 0
 has_mla = text_cfg.get('kv_lora_rank', 0) > 0
 
 if has_moe:
-    print("Estimated: MoE GEMM ~50-60%, Attention ~10-15%, Elementwise ~10-20%, Comm ~10-15%")
+    print("Estimated: T5 vendor GEMM ~30-40%, T2 aiter/CK ~20-30%, T4 comm ~10-20%, T1 Triton ~5-15%, T3 scheduling ~5-10%")
 else:
-    print("Estimated: GEMM ~60-70%, Attention ~10-15%, RMSNorm/Act ~5-10%, Comm ~5-10%")
+    print("Estimated: T5 vendor GEMM ~40-50%, T1 Triton ~15-25%, T4 comm ~5-10%, T3 scheduling ~5-10%")
 ```
 
 **Exhaustive search checklist before declaring "no candidates":**
-- [ ] Checked TraceLens categories for non-vendor kernels
+- [ ] Classified ALL kernels >1% GPU time into tiers T1-T5
 - [ ] Searched Inductor cache: `find /tmp/torchinductor_root -name "*.py" | xargs grep -l "@triton"`
 - [ ] Searched framework source: `find /opt/venv -path "*/sglang/*" -name "*.py" -exec grep -l "@triton.jit" {} \;`
 - [ ] Searched aiter source: `find /sgl-workspace/aiter -name "*.py" -exec grep -l "@triton.jit" {} \;`
-- [ ] Verified ALL kernels >3% GPU time are vendor C++
+- [ ] Searched aiter dispatch wrappers: `find /sgl-workspace/aiter/aiter/ops -name "*.py"`
+- [ ] Searched framework scheduling code: `find /opt/venv -path "*/sglang/srt/managers/*" -name "*.py"`
+- [ ] Checked for NCCL/RCCL communication hotspots in T4
 - [ ] Searched for FUSED kernels that could replace multi-step pipelines
+- [ ] If `vectorized_elementwise_kernel` >5%: tried Strategy C selective compile
+- [ ] If T2 aiter kernels >30%: checked dispatch logic for model-specific tuning
+- [ ] If T4 comm >15%: checked collective config, overlap opportunities
+- [ ] If user provided kernel source paths: verified those kernels are included as candidates regardless of name
 
 ## Accuracy Validation
 N/A — profiling is read-only, no changes to validate.
 
 ## Outputs
 - `gpu_utilization_pct`: computation vs idle vs communication
-- `kernel_breakdown`: list of (kernel_name, gpu_pct, is_vendor, is_geak_candidate)
-- `geak_candidates`: ranked list of candidates with gpu_pct and source location
+- `kernel_breakdown`: list of (kernel_name, gpu_pct, tier, optimization_method)
+- `tier_summary`: dict of tier → total gpu_pct (T1 through T5)
+- `kernel_opt_candidates`: ranked list of ALL candidates >1% gpu_pct with tier and source location
 - `trace_path`: path to filtered trace for comparative analysis later
 
 ## Heuristic Update
-For each GEAK candidate found:
-- Score = `gpu_pct * expected_speedup_for_type / cost_minutes * (1 - accuracy_risk)`
-- Reduction kernels (RMSNorm): expected_speedup=0.5, cost=15min, accuracy_risk=0.15
-- Pointwise kernels: expected_speedup=0.3, cost=15min, accuracy_risk=0.1
-- Template/GEMM kernels: expected_speedup=0.1, cost=15min, accuracy_risk=0.05, crash_risk=0.5
+For each candidate found, score by tier:
 
-If >50% GPU time in vendor kernels: boost backend exploration scores significantly.
+| Tier | expected_speedup | cost_minutes | accuracy_risk | crash_risk |
+|------|:----------------:|:------------:|:-------------:|:----------:|
+| T1: Triton/Inductor | 0.5 | 15 | 0.15 | 0.1 |
+| T2: aiter/CK dispatch | 0.2 | 30 | 0.10 | 0.2 |
+| T3: Framework scheduling | 0.15 | 45 | 0.05 | 0.3 |
+| T4: Communication | 0.10 | 30 | 0.0 | 0.1 |
+| T5: Compiled binaries | 0.05 | 20 | 0.05 | 0.1 |
+
+- Score = `gpu_pct * expected_speedup / cost_minutes * (1 - accuracy_risk) * (1 - crash_risk)`
+- If T2+T5 >60% GPU time: boost `call-stack-opt` and `vendor-kernel-config` scores
+- If T4 >15% GPU time: boost communication tuning scores
+- If T3 scheduling idle >20%: boost framework scheduling optimization scores
 
 ## Failure Handling
 - TraceLens CLI not installed: copy to `/tmp` and install (`cp -r /hyperloom/TraceLens-internal /tmp/ && pip install -e /tmp/TraceLens-internal`)
