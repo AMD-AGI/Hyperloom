@@ -17,7 +17,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("test")
 
-ENDPOINT = "https://oci-slc.primus-safe.amd.com/claw-api/v1"
+ENDPOINT = "https://core42.primus-safe.amd.com/claw-api/v1"
 TEST_PROMPT = "Reply with exactly: HELLO_FROM_CI_TEST. Do not run any tools or commands. Just reply with that text."
 TIMEOUT = 120
 
