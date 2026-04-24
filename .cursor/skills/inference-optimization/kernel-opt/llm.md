@@ -59,6 +59,24 @@ Gateway: `https://oci-slc.primus-safe.amd.com/api/v1/llm-proxy/v1`
 | `vectorized_elementwise_kernel` | PyTorch | No (C++) | Maybe — try torch.compile first |
 | Custom HIP `__global__` | User code | Yes | **Yes** |
 
+## Tracing Setup
+
+Before the first LLM API call, record the start timestamp:
+
+```bash
+python3 $SCRIPTS_DIR/trace_action.py --component llm --action start
+```
+
+After all LLM calls and reflection rounds complete, record the end:
+
+```bash
+python3 $SCRIPTS_DIR/trace_action.py --component llm --action end
+```
+
+Additionally, inject tracing headers into the `OpenAI` client so LLM spend is
+attributed to the correct session. See Step 3 below for the `default_headers`
+parameter in the client constructor.
+
 ## LLM Optimization Flow
 
 ### Step 1: Extract kernel source (same as GEAK)
@@ -166,15 +184,28 @@ Return the COMPLETE optimized file."""
 ### Step 3: Call the LLM
 
 ```python
+import json
+import os
 from openai import OpenAI
 import httpx
 
 http_client = httpx.Client(verify=False, timeout=180)
 
+session_id = os.environ.get("SESSION_ID", "")
+tracing_headers = {
+    "x-litellm-tags": "product:primus-claw,component:llm",
+}
+if session_id:
+    tracing_headers["x-litellm-spend-logs-metadata"] = json.dumps({
+        "session_id": session_id,
+        "component": "llm",
+    })
+
 client = OpenAI(
     base_url="https://oci-slc.primus-safe.amd.com/api/v1/llm-proxy/v1",
     api_key=os.environ["LLM_PROXY_API_KEY"],
     http_client=http_client,
+    default_headers=tracing_headers,
 )
 
 response = client.chat.completions.create(
