@@ -173,7 +173,7 @@ ls /tmp/torchinductor_*/*/triton/*.py | head -20
 ```bash
 source .env  # loads LITELLM_API_KEY and GEAK_AUTH_KEY
 
-GEAK_URL="https://oci-slc.example-internal-host.invalid/control-plane/control-plane-dev/geak-agent-wvsbv/mcp/sse"
+GEAK_URL="https://core42.example-internal-host.invalid/core42/core42-hyperloom/geak-agent-8rmr6/mcp/sse"
 GEAK_AUTH="Authorization: Bearer $GEAK_AUTH_KEY"
 ```
 
@@ -576,15 +576,15 @@ For most distributed training workloads, you'll use manual extraction (Phase 2) 
 - `LITELLM_API_KEY` is used internally by GEAK to call its LLM backend
 - Both must be set in `.env` before submitting tasks
 
-### GEAK Pod Scheduling — Use `control-plane-dev` Space
-GEAK MCP submits workloads to `control-plane-anthropic` by default, which is often resource-constrained. To avoid long queue times, launch workloads directly via the Primus-SaFE API targeting `control-plane-dev`:
+### GEAK Pod Scheduling — Use `core42-sandbox` Space
+GEAK MCP submits workloads to `control-plane-anthropic` by default, which is often resource-constrained. To avoid long queue times, launch workloads directly via the Primus-SaFE API targeting `core42-sandbox`:
 ```bash
 curl -sk -X POST "$PRIMUS_SAFE_API_URL/api/v1/workloads" \
   -H "Authorization: Bearer $GEAK_AUTH_KEY" \
   -H "Content-Type: application/json" \
   -d @payload.json
 ```
-Include `"workspaceId": "control-plane-dev"` in the payload. You must replicate the GEAK entrypoint script (clone GEAK repo, install mini-swe-agent, run `mini` command). See the existing GEAK task entrypoints for reference.
+Include `"workspaceId": "core42-sandbox"` in the payload. You must replicate the GEAK entrypoint script (clone GEAK repo, install mini-swe-agent, run `mini` command). See the existing GEAK task entrypoints for reference.
 
 **Critical entrypoint fixes (learned from testing):**
 1. Must set `export MSWEA_CONFIGURED="true"` before running `mini` — otherwise it enters interactive setup mode

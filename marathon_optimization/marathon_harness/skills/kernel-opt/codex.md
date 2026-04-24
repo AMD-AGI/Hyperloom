@@ -5,7 +5,7 @@ description: Codex backend for kernel optimization via OOB Agent MCP. Code gener
 
 # Codex — Kernel Optimization Backend
 
-Codex backend for kernel optimization via the OOB Agent MCP (`oci-oob-agent`).
+Codex backend for kernel optimization via the OOB Agent MCP (`oob`).
 Generates optimized kernel code without GPU access. The calling skill is responsible
 for compilation checking, correctness verification, and micro-benchmarking.
 
