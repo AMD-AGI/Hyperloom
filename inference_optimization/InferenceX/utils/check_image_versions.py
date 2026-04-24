@@ -264,6 +264,42 @@ def _status_line(result: CheckResult) -> str:
     return "\n".join(lines)
 
 
+def update_config_file(config_file: str, results: list[CheckResult]) -> int:
+    """
+    Update image tags in-place for outdated images.
+    Returns number of images updated.
+    """
+    try:
+        with open(config_file) as f:
+            content = f.read()
+    except Exception as e:
+        print(f"[check_image_versions] WARNING: could not read {config_file} for update: {e}",
+              file=sys.stderr)
+        return 0
+
+    updated = 0
+    for result in results:
+        if not result.is_outdated or not result.latest_stable:
+            continue
+        old_tag = f"{result.image.repo}:{result.image.tag}"
+        new_tag = f"{result.image.repo}:{result.latest_stable}"
+        if old_tag in content:
+            content = content.replace(old_tag, new_tag)
+            updated += 1
+            print(f"[check_image_versions] Updated: {old_tag} → {new_tag}")
+
+    if updated:
+        try:
+            with open(config_file, "w") as f:
+                f.write(content)
+        except Exception as e:
+            print(f"[check_image_versions] WARNING: could not write {config_file}: {e}",
+                  file=sys.stderr)
+            return 0
+
+    return updated
+
+
 def print_report(results: list[CheckResult]) -> None:
     border = "=" * 54
     print(f"\n+{border}+")
@@ -335,6 +371,12 @@ def main() -> None:
         default=DEFAULT_TIMEOUT,
         help=f"HTTP timeout per request in seconds (default: {DEFAULT_TIMEOUT})",
     )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        default=False,
+        help="Update image tags in-place to latest stable versions",
+    )
     args = parser.parse_args()
 
     images = load_images_from_configs(args.config_files)
@@ -362,6 +404,15 @@ def main() -> None:
                 result.has_rc_available = True
 
         results.append(result)
+
+    if args.update:
+        total_updated = 0
+        for config_file in args.config_files:
+            total_updated += update_config_file(config_file, results)
+        if total_updated:
+            print(f"\n[check_image_versions] Auto-updated {total_updated} image(s) to latest stable.")
+        else:
+            print("\n[check_image_versions] All images already up to date, no updates needed.")
 
     print_report(results)
     sys.exit(0)  # always exit 0 — informational only
