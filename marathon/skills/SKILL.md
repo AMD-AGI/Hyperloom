@@ -278,12 +278,13 @@ WHILE NOT stopping_criteria_met():
   h. Measure: new_tput_per_gpu (MANDATORY — this is the bench result)
   i. Update state: current_tput_per_gpu, cumulative_gain_pct, best_tput_per_gpu
   j. RE-SCORE all remaining actions on the stack
-  k. DYNAMIC SUB-ACTION GENERATION (see "Dynamic Idea Generation" below)
-     After EVERY action (success, failure, or crash), generate sub-actions:
-     → On SUCCESS: generate follow-on actions (variations, adjacent targets)
-     → On FAILURE: generate retry with alternate strategy
-     → On CRASH: escalate to KM + generate defensive retry
-     Push all generated sub-actions onto the stack with inherited/boosted scores.
+  k. DYNAMIC IDEA GENERATION (IR-26 — see "Dynamic Idea Generation" section below)
+     After EVERY action execution, you MUST generate sub-actions:
+     → On SUCCESS: follow-on actions (apply same pattern elsewhere, deeper variant)
+     → On FAILURE: retry with alternate strategy (see ALT_STRATEGY_MAP)
+     → On CRASH: escalate to KM + push defensive-retry with constraints
+     Push all generated sub-actions with inherited/boosted scores.
+     This is how the marathon stays productive for 24h — ideas beget ideas.
   l. Log to completed_actions with FULL schema (IR-18: tput_before, tput_after,
      gain_pct, timestamp — never omit)
   m. If KEEP: sync $BASE_DIR/state.json (IR-19)
@@ -359,6 +360,142 @@ WHILE NOT stopping_criteria_met():
 
 **Dream is mandatory every 3-4 hours.** Not just at tier boundaries. Every dream
 contributes to KB so future runs (on this model or others) benefit.
+
+### Dynamic Idea Generation (IR-26 — MANDATORY after every action)
+
+The marathon's longevity depends on ideas generating MORE ideas. A static stack
+runs dry in 2-3 hours. Dynamic generation keeps the marathon productive for 24h+.
+
+**After EVERY DFS action execution (step k), you MUST walk through the five
+generation stages below and push any new actions onto the stack.** This is not
+optional. An action that completes without generating at least one follow-up
+idea is a wasted opportunity.
+
+#### 1. Sub-Actions — spawn from what you discovered during execution
+
+While executing any action you will notice related work that needs doing.
+Capture every such observation as a new action on the stack immediately.
+
+**Common patterns — always check for these:**
+
+- **Sibling files:** You patched one file (e.g. `fused_moe.py`). Check whether
+  a parallel file exists (`fused_moe_triton.py`, `fused_moe_bf16.py`) that
+  needs the same change. Push a sub-action for each untouched sibling.
+- **Sibling kernels:** You fixed a dispatch bug in kernel X. Scan for other
+  kernels using the same dispatch mechanism — they likely have the same bug.
+- **Sibling shapes:** You tuned GEMM shapes for attention. Check whether MLP,
+  gate, or projection layers use the same default shapes. Push tuning actions.
+- **Cascade effects:** You rebuilt a framework library. Push a "clear Triton
+  cache + re-profile" action, because compiled caches are now stale.
+- **Env var neighbors:** An env var toggle helped. Search for related env vars
+  that control sibling kernels or adjacent behavior. Push test actions for each.
+- **New kernels discovered:** During profiling or tracing, you noticed a kernel
+  you hadn't seen before. Push a deep-kernel-analysis action for it.
+
+**Score inheritance:** Give each sub-action a score of at least 60% of the
+parent action's score. This prevents important follow-up work from sinking
+below stale low-priority items on the stack.
+
+#### 2. Follow-On Actions — spawn from SUCCESS (KEEP) outcomes
+
+When an action succeeds, its success opens new doors. Ask yourself these
+five questions and push an action for each "yes":
+
+- **GENERALIZE:** Can this same optimization apply to other kernels of the
+  same type? For each similar kernel that hasn't been optimized yet, push an
+  action to apply the same approach. Score it at ~70% of the gain you just got.
+
+- **DEEPEN:** Can this kernel be optimized further along a different axis?
+  If the gain came from a dispatch fix, push operator-tuning for the same
+  kernel. If from tuning, push a kernel-rewrite. If from an env var, push
+  testing of combinations with other env vars. Score at ~50% of the gain.
+
+- **RE-PROFILE:** After any KEEP with gain >2%, push a re-profile action
+  with score 8. The bottleneck landscape has shifted — new targets may have
+  appeared that weren't visible before.
+
+- **UNBLOCK:** Check the stack for actions that depend on this one (e.g. a
+  kernel-rewrite that needed a framework-rebuild first). Boost their scores 2x.
+
+- **COMPOUND:** If you have 2+ recent KEEPs, push an action that combines
+  both approaches (e.g. apply both patches simultaneously to test for
+  superlinear compound gains).
+
+#### 3. Retry-with-Alternate-Strategy — spawn from FAILURE outcomes
+
+When an action fails (DISCARD, error, crash), do NOT just drop it. Look up
+the alternate strategies below and push a retry for each untried alternative.
+Only skip alternatives that have already been attempted on this same kernel.
+
+**Alternate strategy map:**
+
+| Failed strategy | Alternatives to try |
+|---|---|
+| oob-rewrite | triton-rewrite, hip-kernel, register-constrained-rewrite (add explicit VGPR limit from failure analysis) |
+| dispatch-fix | framework-rebuild (dispatch may be compiled-in), env-var-override (bypass dispatch entirely) |
+| operator-tuning | manual-shape-config (write the config directly), different tuning tool (rocblas-bench vs hipblaslt-bench) |
+| framework-rebuild | patch-only (surgical patch instead of full rebuild), different compiler flags, different library version (check git log for recent fixes) |
+| env-var-toggle | try integer values (not just on/off), combine with related env vars |
+| comm-optimization | different algorithm, different topology, diagnose first with NCCL_DEBUG=INFO |
+| compiler-tuning | clear cache and retry (may be cache corruption), different tiling config, pin to a specific Triton version |
+
+Score each retry at 70% of the original action's score, with a floor of 3.
+If the failure was a crash, also escalate to the KM with the crash context
+so it can attempt a constrained approach.
+
+#### 4. Synthetic Fallback Actions — inject when the stack runs low
+
+When the action stack drops below 3 entries and stopping criteria haven't
+been met, mine the history for new work:
+
+- **Retry failed kernels:** Go through completed_actions. For every DISCARD
+  or crashed kernel, check the alternate strategy map above. Push retries
+  for any alternative not yet attempted.
+
+- **Fill strategy gaps:** Compare the set of strategies you have actually
+  tested against the full list: triton-rewrite, hip-kernel,
+  register-constrained-rewrite, oob-rewrite, framework-rebuild,
+  operator-tuning, dispatch-fix, env-var-sweep, comm-topology,
+  compiler-cache-tune, kernel-fusion, selective-compile, memory-layout-opt,
+  mixed-precision-expand, kv-cache-layout, prefetch-opt. For each untested
+  strategy, push an exploratory action with score 4.
+
+- **Untried kernels from profile:** Check the kernel_dispatch_map for any
+  kernel with >=1% GPU time that hasn't been touched by any completed action.
+  Push a deep-kernel-analysis action for each, scored proportional to GPU%.
+
+- **Cross-layer compounds:** If you have 2+ successful KEEPs, push an action
+  to combine the two highest-gain optimizations and test them together.
+
+#### 5. Self-Reflection — brainstorm novel ideas as a last resort
+
+If stages 1-4 together produced fewer than 2 new actions, step back and
+think creatively. Consider dimensions that may not have been explored:
+
+- Memory alignment — are tensors padded for hardware-optimal access patterns?
+- Kernel launch overhead — can graph capture or persistent kernels help?
+- Mixed precision — can more operations run in fp8 or fp4?
+- KV cache layout — are paged attention variants optimal for this model?
+- Prefetch/async copy overlap — can data movement hide behind compute?
+- Hardware-specific features — are all gfx950/MI300X capabilities enabled?
+- Custom fused operators — can adjacent ops (attention+norm, gate+up) be fused?
+
+Push 1-3 novel actions with score 5 each.
+
+#### Execution Order Summary
+
+After every action, walk through these stages in order:
+
+1. Push sub-actions from what you discovered during execution
+2. If the action was a KEEP, push follow-on actions
+3. If the action failed, push retries with alternate strategies
+4. If the stack has fewer than 3 items, inject synthetic fallbacks
+5. If stages 1-4 produced fewer than 2 new actions, self-reflect for novel ideas
+6. Re-sort the stack by score (highest first)
+7. Log how many actions each stage produced
+
+If zero new actions were generated after all five stages, log a WARNING —
+the idea pipeline is broken and needs investigation.
 
 ### Dispatch Fix Fast Path
 
@@ -961,6 +1098,14 @@ def release_gpu_lock():
 ```
 Call `write_gpu_lock(list(range(TP)), pid)` after server start.
 Call `release_gpu_lock()` after `kill_server()`.
+
+**IR-26 (dynamic idea generation):** After EVERY DFS action (step k), run
+the full idea generation pipeline: sub-actions → follow-ons (on success) →
+retry-with-alternate-strategy (on failure) → synthetic fallbacks (when stack
+is low) → LLM self-reflection (last resort). A DFS iteration that generates
+zero new ideas is a bug — log a WARNING and investigate. The marathon's
+24h longevity depends on ideas begetting more ideas. See "Dynamic Idea
+Generation" section for full implementation.
 
 **IR-25 (GPU time-share):** When `TP == GPU_COUNT` (all GPUs run the server),
 the Kernel Manager has no free GPUs for micro-benchmarks. The KM can request
