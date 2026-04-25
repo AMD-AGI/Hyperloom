@@ -1,41 +1,34 @@
 ---
-
-## name: geak-inference-kernel-reference
+name: geak-inference-kernel-reference
 description: Deep reference for GEAK kernel optimization in inference serving. Covers MCP tool details, kernel extraction methods, integration paths, edge cases, and troubleshooting. Referenced by SKILL.md Phase 5 (identify candidates), Phase 7 (GEAK optimization loop), and Phase 8 (integrate + benchmark).
+---
 
 # GEAK Inference Kernel Optimization — Deep Reference
 
 This document provides detailed reference material for GEAK kernel optimization in the inference optimization loop defined in `SKILL.md`. The main skill covers the workflow; this file covers the details.
 
-## Inference Kernel Categories
+## GEAK-Specific Kernel Categories
 
-### Kernel identification from TraceLens
+GEAK requires either Triton Python source or HIP/C++ source with GPU compilation.
+For broader call-stack optimization (aiter dispatch, framework scheduling, comm tuning),
+see OOB backends: [`codex.md`](codex.md), [`claude.md`](claude.md), [`llm.md`](llm.md).
 
+### Kernel identification from profile
 
-| Kernel pattern                  | Framework     | Source available?    | GEAK target?                    |
-| ------------------------------- | ------------- | -------------------- | ------------------------------- |
-| `Cijk_Ailk_Bljk_*`              | hipBLASLt     | No (compiled)        | No — vendor BLAS                |
-| `aiter::fmha_v3_fwd`            | aiter         | No (.so) by default  | No by default — **Yes if user provides `.cu`/`.hip` source** |
-| `aiter::mha_fwd`                | aiter         | No (.so) by default  | No by default — **Yes if user provides source** |
-| `moe_ck2stages_gemm*`           | aiter         | No (.so) by default  | No by default — **Yes if user provides source** |
-| `aiter::fmoe_*`, `moe_sorting_*` | aiter       | No (.so) by default  | No by default — **Yes if user provides `.cu`/`.hip` source** |
-| `triton_*` from SGLang          | SGLang        | Yes (Python)         | **Yes**                         |
-| `triton_poi_`*, `triton_red_*`  | torch.compile | Yes (Inductor cache) | **Yes**                         |
-| `vectorized_elementwise_kernel` | PyTorch       | No (C++)             | Maybe — try torch.compile first |
-| Custom HIP `__global__`         | User code     | Yes                  | **Yes**                         |
-
-**User-provided source override:** When the user specifies kernel source paths (e.g.,
-`/opt/aiter/csrc/`, `/opt/sglang/`), kernels found at those paths are GEAK targets
-regardless of the default classification above. Map trace kernel names (e.g.,
-`aiter::fmoe_bf16_pertokenFp8`) back to source files using `rg` in the provided repo.
-Include full `.cu`/`.hip`/`.py` source in `files[].content` — GEAK can rewrite both
-Triton and HIP kernels.
-
+| Kernel pattern | Framework | Source available? | GEAK optimizable? | Best backend |
+|----------------|-----------|-------------------|:---:|---|
+| `triton_*` from SGLang | SGLang | Yes (Python) | **Yes** | Any (all backends race) |
+| `triton_poi_*`, `triton_red_*` | torch.compile | Yes (Inductor cache) | **Yes** | Any (all backends race) |
+| Custom HIP `__global__` | User code | Yes | **Yes** | GEAK (needs GPU to compile HIP) |
+| `topkGatingSoftmax` | aiter | Yes (HIP/C++) | **Yes** | GEAK (HIP compilation) |
+| `vectorized_elementwise_kernel` | PyTorch | No (C++) | Strategy C first | Strategy C → then any |
+| `Cijk_Ailk_Bljk_*` | hipBLASLt | No (compiled) | No — use CSV tuning | vendor-kernel-config |
+| `aiter::fmha_v3_fwd` | aiter | No (.so) | No — use dispatch rewrite | OOB (Claude/Codex) |
+| `moe_ck2stages_gemm*` | aiter | No (.so) | No — use config tuning | OOB (Claude/Codex) |
 
 ### Where to find kernel source
 
 **SGLang Triton kernels:**
-
 ```bash
 SGLANG_PATH=$(python3 -c "import sglang; import os; print(os.path.dirname(sglang.__file__))")
 rg "@triton.jit" "$SGLANG_PATH" --files-with-matches
@@ -46,101 +39,37 @@ rg "@triton.jit" "$SGLANG_PATH" --files-with-matches
 ```
 
 **torch.compile Inductor kernels:**
-
 ```bash
 ls /tmp/torchinductor_*/*/triton/*.py | head -20
 ```
 
-**aiter kernels (NOT GEAK targets by default — GEAK targets if user provides `.cu`/`.hip` source):**
-
+**aiter kernels (NOT GEAK targets — reference only):**
 ```bash
 AITER_PATH=$(python3 -c "import aiter; import os; print(os.path.dirname(aiter.__file__))")
 ls "$AITER_PATH/jit/"    # Compiled .so files
 ls "$AITER_PATH/ops/"    # Python dispatch wrappers
 ```
 
-## GEAK Configuration — DO NOT MODIFY (IR-7)
-
-**GEAK is external read-only infrastructure.** The skill MUST NOT modify any GEAK
-configuration files, server settings, workspace configs, test data, or results files.
-Modifying GEAK config is an Iron Rule violation and invalidates the entire run.
-
-**Do NOT call `geak_set_model_config` to change the model backend.** The GEAK LLM
-model configuration is pre-set by the administrator. Calling it to change
-`model_class`, `model_name`, or `api_base` violates IR-7.
-
-**Exception — Tracing headers:** You MUST call `geak_set_model_config` once to
-inject observability headers. See "Tracing Setup" section below.
-
-## Tracing Setup
-
-At the **start** of the kernel-opt action (before any `geak_create_task`), perform
-these steps in order:
-
-### Step A: Record start timestamp + generate tracing config
-
-```bash
-python3 $SCRIPTS_DIR/trace_action.py --component geak --action start
-```
-
-The script outputs `extra_headers` JSON and writes state to `/workspace/.trace_action_geak.json`.
-
-### Step B: Inject tracing headers via MCP
-
-1. Call `geak_get_model_config` to read current config.
-2. Call `geak_set_model_config` with:
-  - Keep ALL existing fields (`model_class`, `model_name`, `api_base`, `api_key`, etc.)
-  - `model_name` MUST have `openai/` prefix (e.g. `openai/claude-opus-4-6`).
-  Without it, litellm uses Anthropic `/v1/messages` route and tags are NOT parsed.
-  - Add `extra_headers` to `model_kwargs` using the values from the script output:
-    ```json
-    "extra_headers": {
-      "x-litellm-tags": "product:primus-claw,component:geak",
-      "x-litellm-spend-logs-metadata": "{\"session_id\":\"<SESSION_ID>\",\"component\":\"geak\"}"
-    }
-    ```
-
-### Step C: Record end timestamp (after all tasks)
-
-After the last `geak_get_task` returns completed:
-
-```bash
-python3 $SCRIPTS_DIR/trace_action.py --component geak --action end
-```
-
-The start/end timestamps allow correlating GEAK's LLM spend to specific messages
-by querying `LiteLLM_SpendLogs` with time ranges.
-
-**Rules:**
-
-- Run tracing setup exactly ONCE per kernel-opt action (not per task).
-- Do NOT change `model_class`, `api_base`, or `api_key`.
-- If `geak_get_model_config` returns empty/error, skip tracing (do not block).
-
 ## GEAK MCP Tool Reference
 
 ### Authentication
 
 Requires two keys:
-
 - `GEAK_AUTH_KEY` — Bearer token for GEAK endpoint (set in `.env`)
 - `LITELLM_API_KEY` — Used internally by GEAK to call its LLM backend
 
 ### Tool sequence
 
-
-| Step | Tool                                                    | Purpose                                  |
-| ---- | ------------------------------------------------------- | ---------------------------------------- |
-| 0a   | `bash: trace_action.py --component geak --action start` | Record start timestamp + generate config |
-| 0b   | `geak_get_model_config` → `geak_set_model_config`       | Inject tracing headers (once)            |
-| 1    | `geak_create_task`                                      | Create task with source + instructions   |
-| 2    | `geak_submit_task`                                      | Start optimization                       |
-| 3    | `geak_get_task`                                         | Poll status (every 30s)                  |
-| 4    | `geak_get_outputs`                                      | List output files                        |
-| 5    | `geak_download_file`                                    | Download optimized code                  |
-| 6    | `bash: trace_action.py --component geak --action end`   | Record end timestamp                     |
-| -    | `geak_list_tasks`                                       | Debug: list all tasks                    |
-
+| Step | Tool | Purpose |
+|------|------|---------|
+| 1 | `geak_set_model_config` | Configure LLM backend (once per session) |
+| 2 | `geak_create_task` | Create task with source + instructions |
+| 3 | `geak_submit_task` | Start optimization |
+| 4 | `geak_get_task` | Poll status (every 30s) |
+| 5 | `geak_get_outputs` | List output files |
+| 6 | `geak_download_file` | Download optimized code |
+| - | `geak_list_tasks` | Debug: list all tasks |
+| - | `geak_get_model_config` | Debug: check LLM config |
 
 ### geak_create_task — critical details
 
@@ -148,7 +77,7 @@ Requires two keys:
 - The instruction field is `prompt`, NOT `instructions`
 - `step_limit` controls agent iterations (**use 100** for kernel optimization — GEAK needs room to analyze, write, compile, fix errors, benchmark, and iterate. 20 is often not enough for a verified result; 5 is completely insufficient)
 - `gpu_count` defaults to 1
-- `**workspace_id`**: Always specify `KERNEL_OPT_WORKSPACE` (constant from `SKILL.md`; default `"control-plane-moe"`) for reliable scheduling. Default workspace is often resource-constrained.
+- **`workspace_id`**: Always specify `GEAK_WORKSPACE` (constant from `SKILL.md`; default `"control-plane-moe"`) for reliable scheduling. Default workspace is often resource-constrained.
 - Include ALL dependent files in the `files` array (GEAK needs self-contained code)
 
 ### Prompt template for inference kernels
@@ -158,7 +87,7 @@ Optimize this Triton kernel for AMD MI355X (gfx950, CDNA4).
 
 Hardware: 304 CUs, 256 VGPR/CU, HBM3e ~8 TB/s, MFMA instructions.
 Context: LLM inference serving (decode path).
-Input shapes: [exact shapes from TraceLens profile]
+Input shapes: [exact shapes from kernel profile]
 Data types: bf16 activations, fp8_e4m3 weights/KV cache.
 Currently: {kernel_time_ms}ms per call, {gpu_pct}% of total GPU time.
 Called {count} times per batch of {batch_size} requests.
@@ -183,33 +112,37 @@ Write the COMPLETE file (imports, decorator, function) to the output directory.
 **GEAK prompt rules — apply to ALL kernel types (MANDATORY for every geak_create_task):**
 
 1. **Kernel path — conditional on image availability:**
-  - If the kernel source file **exists in the Docker image** (e.g., `/sgl-workspace/aiter/...`, `/opt/venv/...`), **MUST include** the kernel's absolute file path and repo path in the prompt. Example: `"The kernel source file is at /sgl-workspace/aiter/jit/core/compile.py"`, `"The kernel repo is at /sgl-workspace/aiter/"`.
-  - If the kernel source is **runtime-generated** and only exists at runtime (e.g., `/tmp/torchinductor_root/...` from `torch.compile` Inductor cache), **DO NOT include** `kernel_url` or `kernel_repo` in the prompt. These files do not exist in the GEAK pod's image. Instead, copy the kernel files to a shared NFS path and reference the NFS path, OR omit these paths entirely and rely solely on `files[].content`.
-  - **How to tell:** paths under `/tmp/`, `/root/.cache/`, or any `torchinductor_*` directory are runtime-generated. Paths under `/sgl-workspace/`, `/opt/`, `/usr/` are part of the image.
+   - If the kernel source file **exists in the Docker image** (e.g., `/sgl-workspace/aiter/...`, `/opt/venv/...`), **MUST include** the kernel's absolute file path and repo path in the prompt. Example: `"The kernel source file is at /sgl-workspace/aiter/jit/core/compile.py"`, `"The kernel repo is at /sgl-workspace/aiter/"`.
+   - If the kernel source is **runtime-generated** and only exists at runtime (e.g., `/tmp/torchinductor_root/...` from `torch.compile` Inductor cache), **DO NOT include** `kernel_url` or `kernel_repo` in the prompt. These files do not exist in the GEAK pod's image. Instead, copy the kernel files to a shared NFS path and reference the NFS path, OR omit these paths entirely and rely solely on `files[].content`.
+   - **How to tell:** paths under `/tmp/`, `/root/.cache/`, or any `torchinductor_*` directory are runtime-generated. Paths under `/sgl-workspace/`, `/opt/`, `/usr/` are part of the image.
 2. **MUST specify homogeneous mode and max_rounds** — Always include: `"Use homogeneous mode. Set max_rounds to 1."` in the prompt.
 3. **MUST specify 1.5x minimum speedup target** — Always include: `"The kernel MUST be optimized to at least 1.5x speedup."` in the prompt.
 
 Additional rules:
 4. **Always say "Do NOT search the filesystem with find / or grep -r /"** — GEAK agents default to broad filesystem searches which hang 30+ min on NFS.
-5. **Always pass framework image** — Use `KERNEL_OPT_IMAGE` (provided by CI or user prompt). This single image is shared across all kernel-opt backends (GEAK + OOB).
+5. **Always pass framework image** — In claw mode, use `GEAK_IMAGE_SGLANG_RAY` (for SGLang) or `GEAK_IMAGE_VLLM` (for vLLM). In local mode, use `GEAK_IMAGE_SGLANG` or `GEAK_IMAGE_VLLM`.
 6. **Always embed full source in `files[].content`** — GEAK always receives the kernel source via `files[].content`. If the path also exists in the image, include it in the prompt for GEAK's preprocessor. If the path is runtime-generated, the `files[].content` is the sole source of truth.
 
-### Image and Workspace
+### GEAK Image Selection
 
-Use `KERNEL_OPT_IMAGE` (provided by CI or user prompt) for all `geak_create_task` calls. This is the same framework image used by all kernel-opt backends.
+| Condition | Local Mode | Claw Mode |
+|-----------|-----------|-----------|
+| User specified a custom image | Use user-specified | Use user-specified |
+| `FRAMEWORK=sglang` (default) | `GEAK_IMAGE_SGLANG` | `GEAK_IMAGE_SGLANG_RAY` |
+| `FRAMEWORK=vllm` | `GEAK_IMAGE_VLLM` | `GEAK_IMAGE_VLLM` |
 
-**Always pass `workspace_id: KERNEL_OPT_WORKSPACE` (default `"control-plane-moe"`) in `geak_create_task`.** User can override.
+**Claw mode MUST use `GEAK_IMAGE_SGLANG_RAY`** (not `GEAK_IMAGE_SGLANG`) for SGLang.
+
+**Always pass `workspace_id: GEAK_WORKSPACE` (default `"control-plane-moe"`) in `geak_create_task`.** User can override.
 
 ### GEAK latency breakdown
 
-
-| Phase             | Duration      | Notes                                     |
-| ----------------- | ------------- | ----------------------------------------- |
-| Pod scheduling    | 2-15 min      | Depends on cluster load, GPU availability |
-| Docker image pull | 1-5 min       | ROCm image is ~15GB                       |
-| Agent execution   | 3-10 min      | Depends on step_limit                     |
-| **Total**         | **10-30 min** | Poll every 30s                            |
-
+| Phase | Duration | Notes |
+|-------|----------|-------|
+| Pod scheduling | 2-15 min | Depends on cluster load, GPU availability |
+| Docker image pull | 1-5 min | ROCm image is ~15GB |
+| Agent execution | 3-10 min | Depends on step_limit |
+| **Total** | **10-30 min** | Poll every 30s |
 
 The `updated_at` timestamp stays frozen until the pod starts. Once it changes, the agent has started. If stuck >30 min with no update, the cluster may be overloaded — cancel and retry.
 
@@ -242,7 +175,6 @@ if __name__ == "__main__":
 ```
 
 Launch with patch:
-
 ```bash
 python3 -c "import patch_kernel; patch_kernel.apply_patches(); import sglang; ..." # won't work for server
 
@@ -285,7 +217,6 @@ shutil.rmtree(os.path.expanduser("~/.triton/cache"), ignore_errors=True)
 ```
 
 **Caveats for Path C:**
-
 - Must use `torch.compile(mode='default')`, NOT `mode='reduce-overhead'`
 - GEAK must preserve the exact function signature (args + constexprs)
 - Clear `.json` metadata files to force Inductor to reload source
@@ -331,70 +262,82 @@ else:
     print(f"Correct: max diff = {max_diff}")
 ```
 
-## Micro-Benchmark (Optional)
+## Micro-Benchmark (Optional — for local pre-screening)
 
-Before full server restart, quickly test kernel speed in isolation:
+Before full server restart, quickly test kernel speed in isolation. **Test inputs MUST
+come from the test harness generated in `kernel-opt.md` Step 1b** — never fabricate
+shapes. Use `generate_inductor_test_harness()` for Strategy A/C kernels or
+`generate_framework_test_harness()` for Strategy B kernels.
 
 ```python
-import torch, time
+import torch
 
-x = torch.randn(SHAPE, device="cuda", dtype=torch.bfloat16)
+harness = generate_inductor_test_harness(standalone_file)
 
-for _ in range(50): original_kernel(x); geak_kernel(x)
+# Build argument lists from harness
+orig_args = list(harness["in_ptrs"].values()) + list(harness["out_ptrs_orig"].values())
+opt_args = list(harness["in_ptrs"].values()) + list(harness["out_ptrs_opt"].values())
+for k, v in harness["constexprs"].items():
+    orig_args.append(v)
+    opt_args.append(v)
+
+# Warmup
+for _ in range(50):
+    original_kernel(*orig_args)
+    geak_kernel(*opt_args)
 torch.cuda.synchronize()
 
 start = torch.cuda.Event(enable_timing=True)
 end = torch.cuda.Event(enable_timing=True)
 
 start.record()
-for _ in range(200): original_kernel(x)
+for _ in range(200): original_kernel(*orig_args)
 end.record(); torch.cuda.synchronize()
 orig_ms = start.elapsed_time(end) / 200
 
 start.record()
-for _ in range(200): geak_kernel(x)
+for _ in range(200): geak_kernel(*opt_args)
 end.record(); torch.cuda.synchronize()
 geak_ms = start.elapsed_time(end) / 200
 
 print(f"Original: {orig_ms:.3f} ms | GEAK: {geak_ms:.3f} ms | Speedup: {(orig_ms-geak_ms)/orig_ms*100:.1f}%")
 ```
 
-If micro-benchmark shows regression, skip full integration.
+**Multi-shape testing:** Also run at xnumel ×{1, 4, 16, 64} to catch occupancy-dependent
+regressions. See `kernel-opt.md` Step 1b `multi_shape_benchmark()`. DeepSeek-R1 showed
++44% micro-benchmark at one shape but -19.9% E2E due to register pressure at scale.
+
+If micro-benchmark shows regression at ANY shape, skip full integration.
 
 ## GEAK Output Validation Checklist
 
 Before patching any GEAK output into the serving environment:
 
-- Function name matches original exactly (not renamed)
-- Function signature (parameters, constexprs) matches original
-- Decorators preserved (`@triton_heuristics`, `@triton.jit`, etc.)
-- No new imports that don't exist in the target environment
-- Block sizes within IR-8 constraints (not exceeding 2x original)
-- Source code is actual code, not comments or path references
-- `files[].content` contains the full source (not truncated)
-- `.best_config` values identified from GEAK output (XBLOCK, R0_BLOCK, BLOCK_N, BLOCK_K, num_warps, num_stages) and passed via `--best-config`
+- [ ] Function name matches original exactly (not renamed)
+- [ ] Function signature (parameters, constexprs) matches original
+- [ ] Decorators preserved (`@triton_heuristics`, `@triton.jit`, etc.)
+- [ ] No new imports that don't exist in the target environment
+- [ ] Block sizes within IR-8 constraints (not exceeding 2x original)
+- [ ] Source code is actual code, not comments or path references
+- [ ] `files[].content` contains the full source (not truncated)
+- [ ] `.best_config` values identified from GEAK output (XBLOCK, R0_BLOCK, BLOCK_N, BLOCK_K, num_warps, num_stages) and passed via `--best-config`
 
 ## Troubleshooting
 
 ### GEAK output doesn't compile
-
 - Fix obvious issues (missing imports, wrong types)
 - If unfixable, log as `crash` and move to next candidate
 
 ### GEAK output is slower
-
 - Common with Triton on AMD CDNA4 — GEAK may suggest block sizes that cause register pressure
 - Log as `discard` and revert
 - Try providing more specific hardware constraints in the prompt
 
 ### Server won't start after kernel patch
-
 - Revert to backup: `cp "$WORK_DIR/kernels/xxx.bak" "$SGLANG_PATH/..."`
 - Clear Python cache: `find "$SGLANG_PATH" -name "__pycache__" -exec rm -rf {} +`
 
 ### GEAK task stuck in pending
-
 - Pod scheduling can take 15+ min if cluster is loaded
 - Check with `geak_get_task` — if `updated_at` hasn't changed in 30 min, cancel and retry
-- Always use `workspace_id: KERNEL_OPT_WORKSPACE` for reliable scheduling (default `"control-plane-moe"` from `SKILL.md`; default workspace is resource-constrained)
-
+- Always use `workspace_id: GEAK_WORKSPACE` for reliable scheduling (default `"control-plane-moe"` from `SKILL.md`; default workspace is resource-constrained)

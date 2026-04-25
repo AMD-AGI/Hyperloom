@@ -125,10 +125,15 @@ def _read_server_pid() -> int | None:
     """Read the PID of the server that the orchestrator launched."""
     try:
         data = json.loads(_SERVER_PID_FILE.read_text())
-        pid = int(data.get("pid", 0))
+        if isinstance(data, int):
+            pid = data
+        elif isinstance(data, dict):
+            pid = int(data.get("pid", 0))
+        else:
+            pid = int(data)
         if pid > 0 and Path(f"/proc/{pid}").exists():
             return pid
-    except (OSError, json.JSONDecodeError, ValueError):
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
         pass
     return None
 
@@ -163,7 +168,7 @@ async def kill_rogue_servers(port: int = 8888) -> int:
     authorized_pid = _read_server_pid()
 
     proc = await asyncio.create_subprocess_shell(
-        "ps -eo pid,args | grep -E 'vllm serve|vllm.entrypoints|sglang.srt|sglang.launch_server' | grep -v grep",
+        "ps -eo pid,args | grep -E 'vllm serve|vllm.entrypoints|sglang.srt|sglang.launch_server' | grep -v grep | grep -v claude",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
     )
     stdout, _ = await proc.communicate()
