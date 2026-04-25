@@ -1,6 +1,9 @@
 ---
 name: inference-optimization-knowledge-base
-description: Model-specific configurations, validated results, and lessons learned from inference optimization runs. Referenced by SKILL.md for model-specific guidance.
+description: |
+  Shared knowledge base for Sprint and Marathon inference optimization skills.
+  This KB is shared between sprint-inference-optimization and marathon-inference-optimization.
+  Changes made here should be synced to the counterpart using sync_kb.sh.
 ---
 
 # Inference Optimization Knowledge Base
@@ -21,11 +24,11 @@ description: Model-specific configurations, validated results, and lessons learn
 **Key takeaways:**
 
 1. **Full multi-round loop is mandatory** — Qwen3-30B-A3B: RMSNorm-only ~+15% vs full loop **+27.6% (TP=1, through `mm_0`)** / **+27.8% (TP=8, incl. HIP)**. Extra gain came from `triton_tem_fused_mm_0` (~22% GPU) that was previously skipped. **Always run the full loop; do not stop after the first kernel.**
-2. **torch.compile is a prerequisite for large GEAK wins** — with torch.compile, GEAK reached up to +27.6%; without torch.compile, GEAK gains were ≤ 1.76%.
+2. **Full torch.compile enables the largest GEAK wins** — with full compile, GEAK reached up to +27.6%; without full compile, GEAK on vendor kernels yields ≤ 1.76%. **Selective submodule compilation (Strategy C) is an untested middle ground** on most MoE+MLA models — it can generate Inductor Triton targets for norm/activation ops even when full torch.compile is incompatible.
 3. **GEAK end-to-end gain depends on concurrency (CONC)** — sweet spot around CONC=4; at high concurrency, gains are diluted by the pipeline.
 4. **Server parameter tuning is often more effective than GEAK** — e.g. Kimi vLLM +84%, DSR1 +13.9%.
 5. **Already highly tuned models (gpt-oss) had little headroom** — GPU utilization ~94.7%, 95%+ vendor kernels.
-6. **GEAK supports HIP kernels (including aiter when source is provided)** — needs full `.cu`/`.hip` source in `files[].content` (not path-only). When the user provides source paths (e.g., `/opt/aiter/csrc/`), these kernels MUST NOT be skipped as "vendor" — map trace kernel names back to source files using `rg` in the provided repo. `topkGatingSoftmax`: use SGLang image + explicit source dir in prompt; test harness creation can fail with minimal input.
+6. **GEAK supports HIP kernels** — needs full `.cu` source in task input (not path-only). `topkGatingSoftmax`: use SGLang image + explicit source dir in prompt; test harness creation can fail with minimal input.
 7. **Framework choice dominates for some stacks** — Kimi-K2.5: SGLang ~324 vs vLLM ~141 tok/s (~2.3× gap).
 8. **Backend switches + scheduling modes outperform parameter sweeps** — GLM-5-FP8: backend switches gave +16.2% combined vs <1% from any single parameter change. **Always explore backends before sweeping parameters.**
 9. **Combination synergies can be super-linear** — GLM-5-FP8: two +3% backend switches combined for +16.2%. Always test winners together.
@@ -86,6 +89,28 @@ description: Model-specific configurations, validated results, and lessons learn
 | `ROCM_QUICK_REDUCE_QUANTIZATION=INT4` | Recommended | Faster collectives |
 | `SGLANG_TORCH_PROFILER_DIR=<path>` | For profiling only | Must set BEFORE server launch |
 
+### CRITICAL: Server Launch Rules
+
+**NEVER launch a server manually by constructing `python3 -m sglang.launch_server ...` or
+`vllm serve ...` commands.**  The Sprint repo's launch script (in `scripts/`) is the single
+source of truth for all optimization flags, environment variables, and model-specific
+configuration.  Missing a single flag (e.g. `--enable-aiter-allreduce-fusion` or
+`--kv-cache-dtype fp8_e4m3`) can cause 20-30% throughput regression that passes health
+checks but silently degrades benchmark results.
+
+**Always use the Sprint repo's launch script:**
+```bash
+# Find the launch script (detected by content, not name)
+LAUNCH=$(ls scripts/*.sh | head -1)  # or whichever the marathon detected
+bash "$LAUNCH" --background
+```
+
+Similarly, always run the patch/apply script BEFORE launching the server — the launch
+script assumes patches are already applied.
+
+If you need to modify server flags, edit the launch script and relaunch via it — never
+construct commands ad-hoc.
+
 ### Server Parameter Tuning Results
 
 **Validated 2026-03-22:**
@@ -112,10 +137,16 @@ description: Model-specific configurations, validated results, and lessons learn
 - FP8 weights (block-scaled per_128x128), hidden_size=7168, 61 layers
 - **torch.compile INCOMPATIBLE**: `--enable-torch-compile` causes CUDA graph capture failure: `get_heuristic_kernel_mla: cannot get heuristic kernel! q_type:fp8 kv_type:byte`. MLA + FP8 is not supported in torch.compile mode. Must run without torch.compile.
 - **GPU breakdown (without torch.compile)**: 57.4% vendor CK/aiter C++, 42.6% aiter Triton kernels. GPU utilization only 73.2% (26.4% idle — scheduling overhead).
-- **GEAK result: 0% (both reverted/discarded)**: `_gemm_a8w8_blockscale_kernel` (10.6% GPU): micro-benchmark +44%~+127%, but E2E **-19.9%** due to register pressure → REVERT. `_fused_rms_fp8_group_quant_kernel` (3.6% GPU): micro-benchmark 0% → DISCARD. These aiter kernels are already highly optimized by AMD engineers.
+- **Kernel optimization — OPEN OPPORTUNITY (13% GPU time in aiter Triton)**:
+  - `_gemm_a8w8_blockscale_kernel` (10.6% GPU): GEAK Strategy B micro-benchmark showed **+44%~+127%**, but E2E **-19.9%** due to register pressure (excessive register usage reduced occupancy) → REVERTED. The micro-benchmark gain proves the kernel IS suboptimal. The revert was caused by a specific, fixable problem (register pressure), NOT because the kernel is "already optimal."
+  - `_fused_rms_fp8_group_quant_kernel` (3.6% GPU): GEAK Strategy B micro-benchmark 0% → DISCARDED.
+  - **What was NOT tried**: (1) Register-constrained optimization (passing `num_warps`/`waves_per_eu` limits to prevent spilling), (2) OOB agents (Claude/Codex) with register-pressure awareness, (3) Strategy C selective compile, (4) aiter GEMM shape-level tuning via `gemm_a8w8_blockscale_tune.py`, (5) Verifying whether all DSR1 GEMM shapes (N,K with hidden_size=7168) have specialized gfx950 configs or fall back to generic defaults.
+  - **Shape tuning gap**: The generic config (`gfx950-GEMM-A8W8_BLOCKSCALE.json`) has a single `"any"` entry (128×128×128 blocks). Specialized N-K configs exist for some shapes but NOT verified for all DSR1 projection shapes. Shapes without specialized configs use the generic default — almost certainly suboptimal.
+  - **Tags**: `kernel-opt-open`, `register-pressure-fixable`, `shape-tuning-untested`, `strategy-c-untested`, `oob-untested`
 - **Strategy B patching pitfall**: aiter source files have module-level variable definitions (`make_kernel_repr(...)`) between kernel functions. Naive function-end detection (by indentation) deletes these definitions, causing `NameError` at import. **MUST use Python AST** (`ast.parse` + `node.end_lineno`) for precise function boundary detection.
 - **Server parameter tuning**: Controlled pair test (param_grid, same session, cuda-graph-max-bs=64): decode-steps 4→8 produced **+13.9%** (2229→2539 tok/s). The baseline 1813 tok/s was from an earlier session; comparing 1813→2537 cross-session overstates the isolated decode-steps effect.
-- **Lesson**: For models where vendor kernels dominate and torch.compile is unavailable, GEAK has very limited impact. The 25.3% idle time suggests the bottleneck is CPU-side kernel launch overhead / TP communication, not individual kernel speed. Focus on server parameter tuning first.
+- **Lesson**: GEAK Strategy B alone (unconstrained register optimization of vendor Triton) is insufficient for these kernels. The +44-127% micro-benchmark proves optimization potential EXISTS — the integration failed due to register pressure, not lack of headroom. **Next steps**: (1) OOB agents with register-constraint instructions, (2) aiter shape-level GEMM tuning for DSR1 shapes, (3) Strategy C selective compile. Do NOT treat this as "kernel-opt exhausted."
+- **Strategy C (selective compile) NOT TESTED**: The results above only cover Strategy B (vendor Triton, unconstrained GEAK). Selective submodule compilation — compiling RMSNorm/SiLU/GELU individually via `torch.compile(module, fullgraph=False)` — was never attempted. OOB agents (Claude/Codex) were also never tried on these kernels. Both remain open optimization paths.
 - SGLang is 9-10x faster than vLLM for this model on MI355X
 - Recommended params: `--attention-backend aiter --chunked-prefill-size 196608 --max-prefill-tokens 196608 --kv-cache-dtype fp8_e4m3 --num-continuous-decode-steps 4`
 - Baseline: 1813.09 tok/s at TP=8, CONC=64, ISL=1024, OSL=256
@@ -362,12 +393,76 @@ source /tmp/baseline_config.sh
 | **GEAK output path confusion** | GEAK agent wrote output to input file path instead of output dir | Always check `geak_get_outputs` and download from the correct path |
 | **benchmark_serving.py args** | Used `--output-file` (wrong) instead of `--save-result --result-dir --result-filename` | Check InferenceX script's `--help` first |
 | **InferenceX path wrong** | Used `/shared_nfs/limou/InferenceX/` instead of user's path | Always use `$INFERENCEX_PATH` from Phase 1 setup |
-| **Trace file too large** | Raw trace 349MB, 97% python_function events | Always filter before TraceLens (see Trace Size and Filtering in SKILL.md) |
-| **TraceLens not called** | Said "called TraceLens" but didn't actually run analysis | Must run `TraceLens_generate_perf_report_pytorch` CLI + `orchestrator_prepare.py` (see `actions/profile.md`) |
+| **Trace file too large** | Raw trace 349MB, 97% python_function events | Always filter before analysis (see Trace Size and Filtering in SKILL.md) |
+| **Kernel analysis skipped** | Said "analyzed trace" but didn't actually parse kernel events | Must parse filtered trace JSON and build kernel breakdown table |
 | **GEAK input: comments not code** | Submitted `.cu` with only comments/path references, GEAK had no source to optimize | Always embed full source in `files[].content` |
-| **GEAK: wrong image** | Default ROCm image lacks framework code and headers; paths in GEAK prompt don't exist | Pass framework image (`KERNEL_OPT_IMAGE`) for all kernel types |
+| **GEAK: wrong image** | Default ROCm image lacks framework code and headers; paths in GEAK prompt don't exist | Pass framework image (`GEAK_IMAGE_SGLANG` or `GEAK_IMAGE_VLLM`) for all kernel types |
 | **GEAK HIP: `find /` on NFS** | GEAK agent ran `find \| grep` to locate source, hung ~35 min on NFS | Prompt must specify exact source dir and say "Do NOT search filesystem with find / or grep -r /" |
 | **Skipped full loop** | Only optimized RMSNorm from prior experience, missed `mm_0` (~22% GPU) | **IRON RULE:** run full multi-round loop on all top-5 non-vendor candidates |
+| **"GEAK 0%" treated as "kernel-opt exhausted"** | KB said "GEAK 0%" on DSR1 Triton GEMMs → agent skipped 13% GPU time as "already tuned". GEAK actually showed +44-127% micro but -19.9% E2E (register pressure). OOB agents were never tried. | **NEVER** equate one backend's failure with kernel-opt exhaustion. Check tags: `oob-untested`, `register-pressure-fixable`. Submit to OOB agents with failure diagnosis. |
+| **"Already tuned" assumption without verification** | Agent read KB "already highly optimized by AMD engineers" and skipped GEMM shape tuning. Never verified whether DSR1's specific shapes had specialized gfx950 configs or fell back to generic defaults. | Always verify shape-level tuning: check `aiter/ops/triton/configs/gemm/` for model-specific N-K configs. Run `gemm_a8w8_blockscale_tune.py` for untuned shapes. |
+
+### Kernel-Opt Strategy Guide
+
+**CRITICAL: A GEAK failure ≠ "kernel-opt exhausted."** GEAK is ONE backend using ONE
+strategy. OOB agents (Claude, Codex) are **equal or better** than GEAK for kernel
+optimization, especially when: (a) register pressure caused GEAK's E2E regression (OOB
+agents can be instructed to constrain registers), (b) multi-file analysis is needed
+(Strategy D/E), (c) Triton kernel fusion is needed (Strategy F). A GEAK failure is
+information about GEAK's approach, not about the kernel's optimization potential.
+
+When KB entries report prior kernel-opt results, verify WHICH strategy AND backend were tested:
+
+| Strategy | Target | Best backend | Typical yield | Status |
+|----------|--------|:------------:|:-------------:|--------|
+| **A** (full torch.compile) | Inductor Triton kernels | GEAK, OOB, LLM | +14-27% | Validated on dense models |
+| **B** (no compile, unconstrained) | Framework/vendor Triton | GEAK, OOB, LLM | ≤1.76% on vendor (GEAK); **OOB untested** | GEAK validated; OOB gap |
+| **B'** (no compile, register-constrained) | Same as B + explicit register/occupancy limits | **OOB preferred** | Est. +2-10% | NEW — addresses DSR1 register-pressure failure |
+| **C** (selective compile) | Norm/activation → Inductor | GEAK, OOB | Untested on most MoE | Gap: `strategy-c-untested` tag |
+| **D** (call stack patching) | aiter dispatch, FP8 bypass | **OOB Claude/Codex** | +1-5% est. | Validated on GLM-5 (FP8 bypass) |
+| **E** (framework scheduling) | Batch scheduler, overlap | **OOB Claude** | +5-16% est. | Validated on GLM-5 (mixed-chunk) |
+| **F** (kernel fusion) | Multi-kernel sequences | GEAK + OOB | +2-5% est. | Identified on gpt-oss-120b |
+| **G** (GEMM shape tuning) | aiter Triton GEMM configs | aiter tuning tool | +1-5% est. | Validated on GLM-5; untested on DSR1 |
+
+**When prior kernel-opt result was "0%" or "reverted":**
+1. Check if the failure was **strategy-specific** (e.g., register pressure) — try with constraints
+2. Check if **OOB agents were tried** — if not, they are an independent opportunity
+3. Check if **shape-level GEMM tuning** was run — untuned shapes use generic configs
+4. Look for tags: `kernel-opt-open`, `oob-untested`, `shape-tuning-untested`, `register-pressure-fixable`
+5. Do NOT zero kernel-opt scores until ALL applicable strategies AND backends have been tested
+
+### Call Stack Optimization Targets
+
+Known optimization surfaces in the call stack above vendor kernels:
+
+**aiter dispatch layer** (`/sgl-workspace/aiter/aiter/ops/`):
+- `fused_moe.py` — kernel variant selection, FP8 bypass logic, config lookup
+- `gemm.py` — GEMM dispatch, CSV config lookup, shape-specific routing
+- Python wrappers that translate framework calls → CK/hipBLAS invocations
+
+**Framework scheduling layer** (SGLang `srt/managers/`):
+- `schedule_batch.py` — batch formation, prefill/decode mixing
+- `tp_worker.py` — tensor-parallel worker, forward pass orchestration
+- `tp_worker_overlap_thread.py` — compute/communication overlap
+- Key flags: `--enable-mixed-chunk`, `--num-continuous-decode-steps`
+
+**Communication layer** (NCCL/RCCL + custom):
+- AiterCustomAllreduce — shared-memory fast path, INT4 quantization
+- NCCL channel tuning — `NCCL_MIN_NCHANNELS`, topology awareness
+- Piecewise CUDA graphs — currently disabled on ROCm (`disable_piecewise_cuda_graph = True`)
+
+**Per-model call stack breakdown (from profiling):**
+
+| Model | T1 Triton | T2 aiter/CK | T3 Scheduling | T4 Comm | T5 Compiled |
+|-------|:---------:|:-----------:|:-------------:|:-------:|:-----------:|
+| Qwen3-30B (compile) | 35% | 5% | 5% | 5% | 50% |
+| DSR1-0528 (no compile) | 3% | 70% | 5% | 15% | 7% |
+| gpt-oss-120b | 7% | 30% | 5% | 5% | 53% |
+| GLM-5-FP8 | ~3% | ~25% | 5% | 45% | ~22% |
+| Kimi-K2.5 | ~5% | ~55% | 5% | 15% | ~20% |
+
+These breakdowns show that T2+T3+T4 represent 30-85% of GPU time on non-compile
+models — a massive optimization surface that was previously ignored.
 
 ## Per-Layer Kernel Sequence Analysis
 
@@ -419,7 +514,7 @@ for i, (ts, dur, name) in enumerate(kernels_timeline[len(kernels_timeline)//2:][
 
 *(Validated 2026-03-22 on gpt-oss-120b.)*
 
-When GEAK structural optimization fails (vendor kernels already optimized), **Triton launch parameter tuning** can still help:
+When GEAK structural rewrite is not applicable (e.g., vendor binary kernels), **Triton launch parameter tuning** can still help:
 
 | Parameter | Original | Tuned | Effect |
 |-----------|----------|-------|--------|
@@ -538,3 +633,64 @@ export SAFETENSORS_FAST_GPU=1
 | Projected DP=2/TP=4 (opt) | ~3,244 | ~406 | ~73 ms | ~+131% |
 
 Artifacts: `inference_optimization/results/glm5_optimization/`
+
+---
+
+## Dream System — Cross-Run Learning
+
+The dream system consolidates learnings across optimization runs to build institutional
+knowledge that improves future runs. Inspired by Claude Code's Auto Dream protocol.
+
+### How It Works
+
+```
+Run N completes → Dream consolidation → KB updated → Run N+1 starts with richer KB
+                                                       ↓
+                                                   KB warm-up injects model playbook
+                                                       ↓
+                                                   Agent starts with prior knowledge
+```
+
+### Components
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| Dream protocol | `actions/dream.md` | 4-phase consolidation (Orient, Gather, Consolidate, Prune) |
+| Consolidation engine | `scripts/dream.py` | Programmatic: group entries, detect contradictions, merge duplicates |
+| Playbook generator | `scripts/kb_summary.py` | Model-specific playbook for prompt injection at KB warm-up |
+| Checkpoint | `scripts/checkpoint.py` | State save/load with atomic writes for crash recovery |
+
+### Cross-Model Patterns Discovered
+
+These patterns emerged from consolidating KB entries across multiple model runs:
+
+1. **Backend switches outperform parameter sweeps** — validated on GLM-5-FP8 (+16.2%
+   backends vs <1% params), Kimi-K2.5 (SGLang 2.3x faster than vLLM). Always explore
+   backends first.
+
+2. **Combination synergies can be super-linear** — GLM-5-FP8: two +3% backends → +16.2%
+   combined. Always test winners together.
+
+3. **torch.compile viability determines optimization strategy** — Compile-compatible
+   models get Strategy A (Inductor Triton → GEAK, +14-27%). Non-compile models need
+   Strategies B-F (call stack optimization, framework tuning, fusion).
+
+4. **Vendor kernels have deep Python call stacks** — even when CK/aiter compiled
+   kernels dominate GPU time (60-70%), the Python dispatch logic above them is
+   optimizable. Strategy D (dispatch patching) and Strategy E (scheduling) target this.
+
+5. **CUDA graph coverage is the most impactful single parameter** — gpt-oss-120b:
+   cuda-graph-max-bs change → +35% at CONC=4. Always match to actual decode batch size.
+
+### Model Playbooks
+
+Generated automatically by `scripts/kb_summary.py` and stored in `kb/playbooks/`.
+The agent injects the relevant playbook at KB warm-up (Step 4) for immediate context.
+
+```bash
+# Generate playbook for a model
+python3 $SKILL_ROOT/scripts/kb_summary.py \
+    --model "DeepSeek-R1-0528" \
+    --kb-path "$SKILL_ROOT/kb/entries.jsonl" \
+    --output "$SKILL_ROOT/kb/playbooks/deepseek_r1_0528.md"
+```
