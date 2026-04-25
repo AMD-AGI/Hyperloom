@@ -33,7 +33,7 @@ This document provides detailed reference material for LLM-based kernel optimiza
 
 - `pip install openai httpx` (likely already installed)
 - `LLM_PROXY_API_KEY` set in `.env` (starts with `ak-`)
-- A profiling trace analyzed (TraceLens or manual kernel breakdown from SKILL.md Phase 3-5)
+- A profiling trace analyzed (kernel breakdown from SKILL.md Phase 3-5)
 - Kernel source code extracted (from Inductor cache or framework source)
 
 ## Available Models (validated 2026-03-28)
@@ -47,41 +47,25 @@ Gateway: `https://oci-slc.primus-safe.amd.com/api/v1/llm-proxy/v1`
 | `gpt-4.1` | OpenAI | **Working** | ~2s | Fast but may use invalid Triton APIs. Always verify. |
 | `gpt-5.2` | OpenAI | **Broken** | — | 400 BadRequest. Do not use. |
 
-## Inference Kernel Categories (Same as GEAK)
+## Full Call-Stack Optimization Capabilities
 
-| Kernel pattern | Framework | Source available? | LLM target? |
-|----------------|-----------|-------------------|-------------|
-| `Cijk_Ailk_Bljk_*` | hipBLASLt | No (compiled) | No — vendor BLAS |
-| `aiter::fmha_v3_fwd` | aiter | No (.so) by default | No by default — **Yes if user provides source** |
-| `moe_ck2stages_gemm*` | aiter | No (.so) by default | No by default — **Yes if user provides source** |
-| `aiter::fmoe_*`, `moe_sorting_*` | aiter | No (.so) by default | No by default — **Yes if user provides source** |
-| `triton_*` from SGLang | SGLang | Yes (Python) | **Yes** |
-| `triton_poi_*`, `triton_red_*` | torch.compile | Yes (Inductor cache) | **Yes** — primary target |
-| `vectorized_elementwise_kernel` | PyTorch | No (C++) | Maybe — try torch.compile first |
-| Custom HIP `__global__` | User code | Yes | **Yes** |
+LLM Proxy is the fastest backend (1-30s per call). Best for quick iteration on T1
+kernels and T2 config suggestions. Limited by single-turn, no tool use.
 
-**User-provided source override:** When the user specifies kernel source paths (e.g.,
-`/opt/aiter/csrc/`, `/opt/sglang/`), kernels found at those paths are LLM targets
-regardless of the default classification above. Map trace kernel names back to source
-files using `rg` in the provided repo. Include full source in the prompt.
+| Tier | Target | LLM capability | Example |
+|------|--------|:--------------:|---------|
+| **T1: Triton/Inductor** | Triton kernel source | **Full rewrite** | Fast structural rewrites, block tuning, multi-model diversity |
+| **T2: aiter/CK dispatch** | Python dispatch wrappers | **Suggest changes** | Analyze dispatch code, suggest model-specific paths (agent applies) |
+| **T2: aiter/CK config** | GEMM CSVs, env flags | **Generate configs** | Generate shape-specific GEMM CSV entries |
+| **T3: Framework scheduling** | SGLang/vLLM scheduler | **Limited** | Can analyze and suggest, but single-turn limits multi-file changes |
+| **T4: Communication** | NCCL/RCCL | **Suggest params** | Recommend NCCL env vars, collective strategies |
+| **T5: Compiled binaries** | Vendor BLAS/CK | No | Cannot modify compiled code |
 
-## Tracing Setup
+**Key advantage:** Speed. 1-30s per call enables 20+ iterations while GEAK does 1.
+Multi-model diversity (Claude + GPT in parallel) maximizes chance of creative solutions.
 
-Before the first LLM API call, record the start timestamp:
-
-```bash
-python3 $SCRIPTS_DIR/trace_action.py --component llm --action start
-```
-
-After all LLM calls and reflection rounds complete, record the end:
-
-```bash
-python3 $SCRIPTS_DIR/trace_action.py --component llm --action end
-```
-
-Additionally, inject tracing headers into the `OpenAI` client so LLM spend is
-attributed to the correct session. See Step 3 below for the `default_headers`
-parameter in the client constructor.
+**Limitation:** Single-turn, no tool use. The calling agent must apply LLM suggestions
+to T2-T4 targets manually. Best paired with OOB backends for complex changes.
 
 ## LLM Optimization Flow
 
@@ -190,28 +174,15 @@ Return the COMPLETE optimized file."""
 ### Step 3: Call the LLM
 
 ```python
-import json
-import os
 from openai import OpenAI
 import httpx
 
 http_client = httpx.Client(verify=False, timeout=180)
 
-session_id = os.environ.get("SESSION_ID", "")
-tracing_headers = {
-    "x-litellm-tags": "product:primus-claw,component:llm",
-}
-if session_id:
-    tracing_headers["x-litellm-spend-logs-metadata"] = json.dumps({
-        "session_id": session_id,
-        "component": "llm",
-    })
-
 client = OpenAI(
     base_url="https://oci-slc.primus-safe.amd.com/api/v1/llm-proxy/v1",
     api_key=os.environ["LLM_PROXY_API_KEY"],
     http_client=http_client,
-    default_headers=tracing_headers,
 )
 
 response = client.chat.completions.create(
@@ -238,15 +209,26 @@ if code_match:
         f.write(code_match.group(1))
 ```
 
-### Step 5: Verify compilation
+### Step 5: Verify compilation + correctness + micro-benchmark
+
+**Test inputs come from the test harness generated in `kernel-opt.md` Step 1b.**
+Never fabricate shapes — extract from standalone files or traces.
 
 ```python
+# Compilation
 try:
     exec(open("solution.py").read())
     print("Compilation: PASS")
 except Exception as e:
     print(f"Compilation: FAIL — {e}")
     # Feed error back for reflection (see below)
+
+# Correctness + micro-benchmark (using trace-derived harness)
+harness = generate_inductor_test_harness(standalone_file)
+# Run original + optimized with harness inputs
+# torch.allclose(orig_out, opt_out, atol=1e-2, rtol=1e-2)
+# multi_shape_benchmark() — reject if ANY shape regresses >5%
+# See kernel-opt.md Step 1b for full implementation
 ```
 
 ### Step 6: Parallel multi-model optimization (optional)
@@ -385,8 +367,7 @@ SSL: Must use httpx.Client(verify=False)
 
 ### When LLM Kernel Optimization Is Not Worth It
 
-Same criteria as GEAK (see [`geak.md`](geak.md)):
-- Kernel is <3% of total GPU time
-- Kernel is from vendor library (aiter, hipBLASLt, CK)
-- All compute is in vendor C++/ASM (>50% GPU time)
-- Model is GEMM-dominated with vendor BLAS
+- Kernel is <1% of total GPU time (below optimization threshold)
+- T5 compiled binary with no source — LLM cannot rewrite compiled code
+- For T2-T4 targets: LLM can SUGGEST changes, but OOB backends (Claude/Codex) are
+  better at implementing them (tool use, multi-file edits)
