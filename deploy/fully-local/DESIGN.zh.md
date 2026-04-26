@@ -96,10 +96,11 @@
 - SSH 是 Cursor Remote 的原生协议 — 零额外适配
 - 容器内 `/opt/hyperloom` 作为完整的 Cursor 工作区
 
-**纯 CLI 工具，通过 Ray 调度**：TraceLens、GEAK 和 OOB 均由 Skill 以容器内 CLI 方式调用。
-- Skill 直接执行 shell 命令：`tracelens-*`、`geak`（通过 `geak_ray_submit.py`）、`oob`（通过 `oob_ray_submit.py run`）
-- GEAK 和 OOB 均使用本地 Ray 集群进行 GPU 分配（每 GPU 一个任务）
-- OOB 的 `oob_ray_submit.py run` 将 `claude` / `codex` CLI 作为 Ray worker 子进程调度并阻塞至完成
+**纯 CLI 工具，按需经 Ray 调度**：TraceLens、GEAK 和 OOB 均由 Skill 以容器内 CLI 方式调用，但调度路径不同。
+- TraceLens：直接子进程执行 `tracelens-*`，**离线 trace 分析，不经过 Ray**
+- GEAK：通过 `geak_ray_submit.py` 提交到本地 Ray 集群，每任务 1 GPU，并行优化多个 kernel
+- OOB：通过 `oob_ray_submit.py run` 提交到 Ray，`claude` / `codex` CLI 作为 Ray worker 子进程调度并阻塞至完成
+- **OOB 经 Ray 的原因**：`claude` / `codex` 任务会驱动 GPU 上的 kernel benchmark / tuning，并发任务需要 Ray 通过 `CUDA_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES` 做 GPU 隔离，避免多任务在同一 GPU 上争抢
 
 ### 2.3 BYOI（方式 B）架构
 
@@ -127,7 +128,7 @@
 **关键原则**：
 - **bootstrap 完成后，两种方式行为完全一致** — Skill 层无需区分方式 A/B
 - **幂等**：`bootstrap.sh` 可重复执行，已安装的组件自动跳过
-- **持久化**：所有组件安装到 `/opt/hyperloom`，容器重启不丢失（需配合卷挂载或持久化层）
+- **持久化**：所有组件安装到 `/opt/hyperloom`；同一容器 `restart` 不丢，但 Pod 重建 / 重新 `docker run` 会丢失，需将 `/opt/hyperloom` 挂载到 WekaFS 或本地持久卷
 
 ---
 
@@ -179,7 +180,7 @@
 
 ### 4.1 容器内进程
 
-持久进程（Docker：`entrypoint.sh`；K8s：SSH 登录时 `/etc/profile.d/hyperloom.sh`）：
+持久进程（Docker：`entrypoint.sh`；K8s：SSH 登录时 `/etc/profile.d/hyperloom-autostart.sh`）：
 
 | 进程 | 端口 | 角色 |
 |------|------|------|
@@ -199,7 +200,7 @@ CLI 工具（无端口，由 Skill 按任务调用）：
 
 **Docker 模式**：`entrypoint.sh` 作为 PID 1 运行 — 配置 agent CLI 认证文件，启动 sshd / Ray /（可选）auth-proxy → 等待端口就绪（30 秒超时） → 进入 supervisor 循环（5 秒间隔，重启崩溃的 Ray 或 auth-proxy）。收到 SIGTERM/SIGINT 时，优雅地终止所有子进程。
 
-**K8s 模式**：当 Pod CMD 被覆盖时，`/etc/profile.d/hyperloom.sh` 在 SSH 登录时运行（而非 PID 1）。它渲染 GEAK LiteLLM 配置，按需启动 Ray，当设置 `OOB_BASE_URL` 时启动本地 OOB auth-proxy 并将 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` 重写为 `http://127.0.0.1:4002/...`。脚本通过检查 `ray status` 和 `:4002` 是否已在监听来避免重复启动后台服务。
+**K8s 模式**：当 Pod CMD 被覆盖时，`hyperloom-autostart.sh`（部署时被 symlink 到 `/etc/profile.d/`）在 SSH 登录时运行（而非 PID 1）。它渲染 GEAK LiteLLM 配置，按需启动 Ray，当设置 `OOB_BASE_URL` 时启动本地 OOB auth-proxy 并将 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` 重写为 `http://127.0.0.1:4002/...`。脚本通过检查 `ray status` 和 `:4002` 是否已在监听来避免重复启动后台服务。
 
 ---
 
@@ -210,10 +211,25 @@ CLI 工具（无端口，由 Skill 按任务调用）：
 | 维度 | Docker | Kubernetes |
 |------|--------|------------|
 | GPU 分配 | `--device=/dev/kfd --device=/dev/dri` | `amd.com/gpu` 设备插件 |
-| 后台进程启动 | entrypoint.sh 直接管理 | autostart.sh 首次 SSH 登录时幂等启动 |
+| 后台进程启动 | entrypoint.sh 直接管理 | hyperloom-autostart.sh 首次 SSH 登录时幂等启动（位于 `/etc/profile.d/`） |
 | 密钥管理 | `docker run -e` | K8s Secret |
 | 网络暴露 | `-p 20022:22` 端口映射 | Service NodePort（仅端口 22） |
-| 适用场景 | 单节点、快速验证 | 多用户、生产环境 |
+| 适用场景 | 单节点、快速验证 | 集中部署、生产环境 |
+
+### 5.2 部署方式 × 编排平台组合矩阵
+
+方式 A/B 与 Docker/K8s 是两个正交维度，4 种组合均支持：
+
+| | Docker | Kubernetes |
+|--|--|--|
+| **方式 A（预构建镜像）** | `entrypoint.sh` 作为 PID 1 启动所有服务；用户 `docker run hyperloom-sglang` 即可 | Pod 默认 CMD 即 `entrypoint.sh`；行为同 Docker |
+| **方式 B（BYOI）** | 用户 entrypoint 启动 sshd；Cursor 首次 SSH 连入触发 `bootstrap.sh` | Pod 用用户镜像 + 用户 CMD（需自带 sshd）；Cursor 首次 SSH 连入触发 `bootstrap.sh` |
+
+**BYOI + K8s 的额外要求**：
+- Pod spec 需暴露 SSH 端口（NodePort 或 Ingress）
+- 用户镜像必须以 sshd 为前台进程（或同时跑 sshd + 用户主进程）
+- WekaFS bundle 通过 PVC 挂载到 Pod 内的 `$HYPERLOOM_BUNDLE`
+- `/opt/hyperloom` 建议挂载 emptyDir 或 PVC，使 bootstrap 产物在 Pod 重建后可复用
 
 参见 [README.md](README.md) 了解部署示例和完整参数参考。
 
@@ -283,12 +299,21 @@ CLI 工具（无端口，由 Skill 按任务调用）：
 所有 GPU 节点共享）：
 
 ```
-$HYPERLOOM_BUNDLE/                # 默认 /wekafs/hyperloom-bundle/
-├── OOB/                          # 完整 OOB 源码（含 oob_cli/ 子目录）
+$HYPERLOOM_BUNDLE/                # 默认 /wekafs/fully-local/
+├── OOB/                          # OOB 源码（内容平铺：cli.py / auth_proxy.py / pyproject.toml 在根）
 ├── TraceLens-internal/           # TraceLens 源码
-├── InferenceX/                   # InferenceX 数据 + 脚本
-└── geak-litellm.yaml             # GEAK LiteLLM 模板
+└── inference_optimization/
+    └── InferenceX/               # InferenceX 数据 + 脚本
 ```
+
+> **GEAK LiteLLM 模板**不放 WekaFS — 由 `bootstrap.sh` Step 5 内嵌 heredoc
+> 写入 `$HYPERLOOM_ROOT/geak-config/template.yaml`，与方式 A 镜像内的
+> `geak-litellm.yaml` 内容完全一致。
+>
+> **OOB 目录结构注意**：WekaFS 上 `OOB/` 是平铺的（不含 `oob_cli/` 子目录）。
+> bootstrap 复制时会包一层目录变成 `$HYPERLOOM_ROOT/OOB/oob_cli/`，使其与
+> 方式 A 镜像内 `/opt/OOB/oob_cli/` 路径完全一致 — `auth_proxy.py` 路径、
+> `pip install -e` 目标都不需要分支判断。
 
 ```
 bootstrap.sh 执行流程
@@ -296,10 +321,10 @@ bootstrap.sh 执行流程
 
 Step 1: 探测硬性依赖（缺失则报错退出，不尝试自动安装）
   ├── Python ≥ 3.10?
-  ├── GPU? (rocm-smi)
-  ├── 推理框架? (import sglang / vllm)
+  ├── GPU? (rocm-smi 或 amd-smi)
+  ├── 推理框架? (import $FRAMEWORK，sglang 或 vllm)
   └── WekaFS bundle 可访问? ($HYPERLOOM_BUNDLE/{OOB,TraceLens-internal,
-                              InferenceX,geak-litellm.yaml} 全部存在)
+                              inference_optimization/InferenceX} 全部存在)
 
 Step 2: 软性系统依赖（缺什么装什么）
   ├── apt: pip, git, curl, gnupg, ca-certificates
@@ -318,31 +343,36 @@ Step 4: 从 WekaFS 复制并安装 Hyperloom 组件
   WekaFS 通常为只读共享盘，复制到 /opt/hyperloom 后再 pip install -e：
   ├── cp -r $HYPERLOOM_BUNDLE/TraceLens-internal → /opt/hyperloom/TraceLens
   │   └── pip install -e /opt/hyperloom/TraceLens
-  ├── cp -r $HYPERLOOM_BUNDLE/OOB → /opt/hyperloom/OOB
+  ├── cp -r $HYPERLOOM_BUNDLE/OOB → /opt/hyperloom/OOB/oob_cli  ← 包一层使路径与方式 A 一致
   │   ├── pip install -r /opt/hyperloom/OOB/oob_cli/requirements.txt
   │   └── pip install -e /opt/hyperloom/OOB/oob_cli
   ├── certifi CA 证书注入（如安装了 AMD CA）
   └── npm install -g @anthropic-ai/claude-code @openai/codex@0.100.0
 
 Step 5: 渲染配置 + Agent CLI 认证文件
-  ├── 读取 $HYPERLOOM_BUNDLE/geak-litellm.yaml
+  ├── 写入 /opt/hyperloom/geak-config/template.yaml (内嵌 heredoc，不依赖 WekaFS)
   │   渲染到 /opt/hyperloom/geak-config/local.yaml (注入 model/key/url)
   ├── 写入 /root/.claude/config.json (如设置 OOB_API_KEY)
   └── 写入 /root/.codex/auth.json    (如设置 OOB_API_KEY)
 
-Step 6: 启动后台服务 + 导出环境变量
+Step 6: 启动后台服务 + 导出环境变量 + 写入完成标记
   ├── ray start --head --num-gpus=$GPU_COUNT (如未运行)
-  ├── OOB auth-proxy on :4002 (如设置 OOB_BASE_URL，复用 auth_proxy.py)
+  ├── OOB auth-proxy on :4002 (如设置 OOB_BASE_URL，复用 /opt/hyperloom/OOB/oob_cli/auth_proxy.py)
   ├── 写入 /etc/profile.d/hyperloom-env.sh
-  │   ├── MODE=fully-local, FRAMEWORK=sglang/vllm
+  │   ├── MODE=fully-local
+  │   ├── FRAMEWORK=sglang/vllm
   │   ├── GEAK_CONFIG=/opt/hyperloom/geak-config/local.yaml
-  │   ├── INFERENCEX_PATH=$HYPERLOOM_BUNDLE/InferenceX  ← 直接指向 WekaFS
+  │   ├── INFERENCEX_PATH=$HYPERLOOM_BUNDLE/inference_optimization/InferenceX  ← 直接指向 WekaFS
   │   ├── SKILL_ROOT=/opt/hyperloom/.cursor/skills/inference-optimization
   │   ├── LLM_API_KEY → AMD_LLM_API_KEY 映射
   │   └── OOB_API_KEY → ANTHROPIC_API_KEY / OPENAI_API_KEY
+  ├── touch /opt/hyperloom/.bootstrap_done  ← 幂等标记，下次 SSH 跳过 bootstrap
   └── source 该文件以使当前 shell 立即生效
 ──────────────────────────────────────────────────────────
 完成 → 工具链与方式 A 等价（geak/oob/tracelens 均可用，Ray 已就绪）
+
+> **MODE 值约定**：方式 A 与方式 B 都直接 export `MODE=fully-local`。
+> 普通 `MODE=local` 仅表示非 fully-local 的本地模式。
 ```
 
 **与方式 A 的关键区别**：
@@ -354,7 +384,7 @@ Step 6: 启动后台服务 + 导出环境变量
 | `COPY --from=hyperloom-src /TraceLens`（构建时） | 改为运行时从 WekaFS `cp` | 同上 |
 | `COPY --from=hyperloom-src /InferenceX`（构建时） | 通过 `INFERENCEX_PATH` 直接指向 WekaFS | 数据量大，无需复制 |
 | `COPY --from=hyperloom-src /skills/...`（构建时） | 不做 | Skills 已在 Cursor 工作区中 |
-| `COPY` entrypoint.sh / autostart.sh | 不做 | 方式 B 没有 PID 1 守护进程 |
+| `COPY` entrypoint.sh / hyperloom-autostart.sh | 不做 | 方式 B 没有 PID 1 守护进程 |
 | supervisor loop（5 秒重启崩溃服务） | 不做 | 服务崩溃由用户处理或重新跑 bootstrap |
 
 ### 7.3 幂等性设计
@@ -363,7 +393,7 @@ Step 6: 启动后台服务 + 导出环境变量
 
 | 步骤 | 跳过条件 |
 |------|---------|
-| Step 1: WekaFS bundle | `$HYPERLOOM_BUNDLE/{OOB,TraceLens-internal,InferenceX,geak-litellm.yaml}` 全部存在 |
+| Step 1: WekaFS bundle | `$HYPERLOOM_BUNDLE/{OOB,TraceLens-internal,inference_optimization/InferenceX}` 全部存在 |
 | Step 2: pip / git / curl | `command -v` 全部成功 |
 | Step 2: Node.js 20 | `command -v node` 且版本 ≥ 20 |
 | Step 2: AMD CA 证书 | `/usr/local/share/ca-certificates/amd-root-ca.crt` 存在 |
@@ -386,19 +416,26 @@ Step 6: 启动后台服务 + 导出环境变量
 
 ### 7.4 模式检测
 
-Agent 在 Setup 阶段通过以下逻辑判断当前部署方式：
+Agent 在 Setup 阶段通过以下逻辑判断当前 fully-local 部署方式：
 
 ```bash
-if [ -f /opt/entrypoint.sh ] && [ "${MODE:-}" = "local" ]; then
+if [ -f /opt/entrypoint.sh ]; then
     # 方式 A：预构建镜像，entrypoint.sh 已完成所有初始化
     DEPLOY_METHOD="prebuilt"
+elif [ -f /opt/hyperloom/.bootstrap_done ]; then
+    # 方式 B：BYOI，bootstrap 已完成（标记位存在），无需重跑
+    DEPLOY_METHOD="byoi"
 else
-    # 方式 B：BYOI，需要执行 bootstrap
+    # 方式 B：BYOI 首次进入，触发 bootstrap（幂等，重复执行也安全）
     DEPLOY_METHOD="byoi"
     bash /opt/hyperloom/.cursor/skills/inference-optimization/scripts/bootstrap.sh
 fi
-# bootstrap 完成后，两种方式统一为 MODE=fully-local
+export MODE="${MODE:-fully-local}"
 ```
+
+> 标记位 `/opt/hyperloom/.bootstrap_done` 由 bootstrap Step 6 末尾写入，
+> 用于在容器/Pod 长期运行时避免每次 SSH 登录都触发幂等扫描；若想强制
+> 重跑，删除该文件即可。
 
 ### 7.5 方式 A vs 方式 B 对比
 
@@ -418,10 +455,11 @@ fi
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `HYPERLOOM_BUNDLE` | `/wekafs/hyperloom-bundle` | **必需** — WekaFS 上的 Hyperloom 资源根目录（含 OOB/TraceLens-internal/InferenceX/geak-litellm.yaml） |
+| `HYPERLOOM_BUNDLE` | `/wekafs/fully-local` | **必需** — WekaFS 上的 Hyperloom 资源根目录（含 OOB/TraceLens-internal/InferenceX/geak-litellm.yaml） |
 | `HYPERLOOM_ROOT` | `/opt/hyperloom` | 容器内 Hyperloom 组件安装根目录（OOB/TraceLens cp 目标） |
 | `GEAK_REPO` | `https://github.com/AMD-AGI/GEAK.git` | GEAK 仓库地址 |
-| `GEAK_BRANCH` | `main` | GEAK 仓库分支 |
+| `GEAK_BRANCH` | `main` | GEAK 仓库分支（仅当 `GEAK_SHA` 为空时使用） |
+| `GEAK_SHA` | *(空)* | GEAK 锁定的 commit SHA；非空时优先于 `GEAK_BRANCH`，用于复现性场景 |
 | `INTELLIKIT_SHA` | `bcbfa0252df...` | intellikit 锁定的 commit SHA |
 | `SKIP_BOOTSTRAP` | — | 设为 `1` 跳过 bootstrap（用户已手动安装） |
 

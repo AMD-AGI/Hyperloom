@@ -67,7 +67,7 @@ RUN pip install --no-cache-dir -e /opt/OOB/oob_cli \
     && git config --global user.name  "Hyperloom Local" \
     && git config --global init.defaultBranch main
 ENV PATH="/opt/venv/bin:${PATH}" \
-    MODE=local \
+    MODE=fully-local \
     GEAK_MODEL_NAME=claude-opus-4-7 \
     GEAK_CONFIG=/opt/hyperloom/geak-config/local.yaml \
     GEAK_LOCAL=true \

@@ -74,7 +74,7 @@ The agent auto-detects mode, framework, GPU count, and InferenceX path from the 
 
 TP=8, CONC=64, ISL=1024, OSL=1024
 Precision: FP8
-GPU type: MI355X
+GPU type: MI300X
 Must optimize at least 5 kernels.
 Execute the full skill pipeline (Phase 0-10), including parameter sweep.
 Save results to /opt/hyperloom/results/

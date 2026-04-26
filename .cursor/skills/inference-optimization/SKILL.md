@@ -35,8 +35,8 @@ before starting:**
 - **Claw mode** (SaFE RayJob, `exec_on_gpu`): see [`modes/CLAW.md`](modes/CLAW.md)
 
 **Auto-detection:**
-- `MODE=local` + `/opt/entrypoint.sh` exists → fully-local mode (Hyperloom container)
-- `GEAK_LOCAL=true` (no container) → local mode
+- `MODE=fully-local` → fully-local mode
+- `GEAK_LOCAL=true` (outside fully-local container) → local mode
 - Claw client context → claw mode
 
 ## Iron Rules (non-negotiable)

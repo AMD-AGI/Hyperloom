@@ -20,11 +20,10 @@ architecture, and per-action execution overrides.
 
 ## Mode Detection
 
-Auto-detected when `MODE=local` and running inside Hyperloom container:
+Selected explicitly by `MODE=fully-local`:
 
 ```bash
-if [ "${MODE:-}" = "local" ] && [ -f /opt/entrypoint.sh ]; then
-    MODE="fully-local"
+if [ "${MODE:-}" = "fully-local" ]; then
     WORKSPACE_ROOT="${WORKSPACE_ROOT:-/opt/hyperloom}"
     GEAK_CLI="python3 $SKILL_ROOT/scripts/geak_ray_submit.py"
     OOB_CLI="${OOB_CLI:-oob}"

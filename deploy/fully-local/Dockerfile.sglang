@@ -8,7 +8,7 @@
 # Stage 0: repo source bundle (OOB, TraceLens, InferenceX, skills, deploy scripts)
 FROM primussafe/hyperloom-src-423:v1.0.4 AS hyperloom-src
 
-FROM lmsysorg/sglang:v0.5.9-rocm700-mi35x
+FROM lmsysorg/sglang:v0.5.9-rocm700-mi30x
 
 # --- Layer 1: system deps + Node.js 20 (rarely changes, best cache hit) ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -67,7 +67,7 @@ RUN pip install --no-cache-dir -e /opt/OOB/oob_cli \
     && git config --global user.name  "Hyperloom Local" \
     && git config --global init.defaultBranch main
 ENV PATH="/opt/venv/bin:${PATH}" \
-    MODE=local \
+    MODE=fully-local \
     GEAK_MODEL_NAME=claude-opus-4-7 \
     GEAK_CONFIG=/opt/hyperloom/geak-config/local.yaml \
     GEAK_LOCAL=true \

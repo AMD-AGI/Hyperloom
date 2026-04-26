@@ -1,7 +1,9 @@
 # Hyperloom CLI auto-start script
 # Sourced by /etc/profile.d/hyperloom.sh on first login
 
-if [ -z "$HYPERLOOM_STARTED" ] && [ "${MODE:-}" = "local" ]; then
+export MODE="${MODE:-fully-local}"
+
+if [ -z "$HYPERLOOM_STARTED" ] && [ "${MODE:-}" = "fully-local" ]; then
     export HYPERLOOM_STARTED=1
     mkdir -p /var/log/hyperloom "${NFS_BASE_PATH:-/tmp/geak-data}"
     

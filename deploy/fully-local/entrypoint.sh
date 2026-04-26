@@ -38,6 +38,8 @@ fi
 
 AUTH_PROXY_PID=0
 
+export MODE="${MODE:-fully-local}"
+
 # OOB runs as a per-task CLI in fully-local mode (`oob run ...`); no persistent service.
 export OOB_CLI="${OOB_CLI:-oob}"
 
