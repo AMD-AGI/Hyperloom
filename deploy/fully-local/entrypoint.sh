@@ -12,8 +12,10 @@ mkdir -p "$LOG_DIR" "${NFS_BASE_PATH:-/tmp/geak-data}"
 # --- Graceful shutdown ---
 cleanup() {
     echo "[entrypoint] Shutting down..."
-    kill "$TRACELENS_PID" "$GEAK_API_PID" "$GEAK_MCP_PID" \
-         "$OOB_MCP_PID" "$AUTH_PROXY_PID" 2>/dev/null || true
+    if [ -n "${AUTH_PROXY_PID:-}" ] && [ "$AUTH_PROXY_PID" -gt 0 ] 2>/dev/null; then
+        kill "$AUTH_PROXY_PID" 2>/dev/null || true
+    fi
+    ray stop --force 2>/dev/null || true
     wait
     exit 0
 }
@@ -34,30 +36,28 @@ else
     GPU_COUNT=0
 fi
 
-TRACELENS_PORT=${TRACELENS_PORT:-8001}
-GEAK_MCP_PORT=${GEAK_MCP_PORT:-8002}
-OOB_MCP_PORT=${OOB_MCP_PORT:-8003}
-OOB_MCP_PID=0
 AUTH_PROXY_PID=0
+
+export MODE="${MODE:-fully-local}"
+
+# OOB runs as a per-task CLI in fully-local mode (`oob run ...`); no persistent service.
+export OOB_CLI="${OOB_CLI:-oob}"
 
 echo "============================================"
 echo "  Hyperloom — Local Mode (containerized)"
 echo "============================================"
 echo "  GPU:          ${GPU_COUNT} detected"
 echo "  Framework:    ${FRAMEWORK:-sglang}"
+echo "  GEAK:         CLI (geak) via Ray scheduler"
+echo "  GEAK model:   ${GEAK_MODEL_NAME:-claude-opus-4-7}"
+echo "  GEAK config:  ${GEAK_CONFIG:-/opt/hyperloom/geak-config/local.yaml}"
 echo "  GEAK data:    ${NFS_BASE_PATH:-/tmp/geak-data}"
-echo "  TraceLens:    :${TRACELENS_PORT}"
-echo "  GEAK MCP:     :${GEAK_MCP_PORT}"
-echo "  OOB Agent:    :${OOB_MCP_PORT}"
+echo "  Ray head:     :6379 (dashboard :8265)"
+echo "  OOB:          CLI (${OOB_CLI})"
+echo "  TraceLens:    CLI (pip-installed)"
 echo "  SSH:          :22"
 echo "  Logs:         ${LOG_DIR}/"
 echo "============================================"
-
-# --- Map LLM_API_KEY to all aliases GEAK might look for ---
-if [ -n "${LLM_API_KEY:-}" ]; then
-    export AMD_LLM_API_KEY="${AMD_LLM_API_KEY:-$LLM_API_KEY}"
-    export LLM_GATEWAY_KEY="${LLM_GATEWAY_KEY:-$LLM_API_KEY}"
-fi
 
 # --- Map OOB vars to provider-specific runtime vars ---
 export ANTHROPIC_API_KEY="${OOB_API_KEY:-}"
@@ -65,12 +65,42 @@ export OPENAI_API_KEY="${OOB_API_KEY:-}"
 export ANTHROPIC_BASE_URL="${OOB_BASE_URL:-}"
 export OPENAI_BASE_URL="${OOB_BASE_URL:-}"
 
+# Alias LLM_API_KEY -> AMD_LLM_API_KEY for GEAK CLI (geak reads AMD_LLM_API_KEY)
+export AMD_LLM_API_KEY="${AMD_LLM_API_KEY:-${LLM_API_KEY:-${LLM_GATEWAY_KEY:-}}}"
+
+# Render GEAK LiteLLM config from template (model/key/base resolved from env)
+GEAK_TEMPLATE=/opt/hyperloom/geak-config/template.yaml
+GEAK_CONFIG="${GEAK_CONFIG:-/opt/hyperloom/geak-config/local.yaml}"
+
+# Fallback for dev mode where /opt/hyperloom is bind-mounted from host repo
+if [ ! -f "$GEAK_TEMPLATE" ] && [ -f "/opt/hyperloom/deploy/fully-local/geak-litellm.yaml" ]; then
+    GEAK_TEMPLATE="/opt/hyperloom/deploy/fully-local/geak-litellm.yaml"
+fi
+
+if [ -f "$GEAK_TEMPLATE" ]; then
+    mkdir -p "$(dirname "$GEAK_CONFIG")"
+    _model="${GEAK_MODEL_NAME:-claude-opus-4-7}"
+    _key="${GEAK_API_KEY:-${LLM_API_KEY:-${AMD_LLM_API_KEY:-}}}"
+    _url="${GEAK_BASE_URL:-${LLM_API_BASE:-}}"
+    sed -e "s|__GEAK_MODEL_NAME__|${_model}|g" \
+        -e "s|__GEAK_API_KEY__|${_key}|g" \
+        -e "s|__GEAK_BASE_URL__|${_url}|g" \
+        "$GEAK_TEMPLATE" > "$GEAK_CONFIG"
+    chmod 600 "$GEAK_CONFIG"
+else
+    echo "[WARN] GEAK template not found at $GEAK_TEMPLATE"
+fi
+export GEAK_CONFIG
+
 # --- Export env vars for SSH sessions (docker run -e vars are invisible to sshd) ---
 {
-    for var in MODE FRAMEWORK GEAK_LOCAL KERNEL_OPT_BACKENDS NFS_BASE_PATH DATABASE_PATH \
+    echo 'export PATH="/opt/venv/bin:$PATH"'
+    for var in MODE FRAMEWORK GEAK_LOCAL KERNEL_OPT_BACKENDS NFS_BASE_PATH \
                INFERENCEX_PATH LLM_API_KEY LLM_API_BASE AMD_LLM_API_KEY LLM_GATEWAY_KEY \
-               TRACELENS_PORT GEAK_MCP_PORT OOB_MCP_PORT AGENT_WORKSPACE_ROOT \
+               GEAK_CONFIG GEAK_MODEL_NAME GEAK_API_KEY GEAK_BASE_URL \
+               AGENT_WORKSPACE_ROOT OOB_CLI OOB_HOME \
                OOB_API_KEY OOB_BASE_URL OOB_LOCAL \
+               ANTHROPIC_API_KEY ANTHROPIC_BASE_URL OPENAI_API_KEY OPENAI_BASE_URL \
                HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES GPUS_PER_NODE; do
         [ -n "${!var:-}" ] && echo "export ${var}='${!var}'"
     done
@@ -79,35 +109,22 @@ export OPENAI_BASE_URL="${OOB_BASE_URL:-}"
 # --- SSH server ---
 /usr/sbin/sshd
 
-# --- TraceLens MCP ---
-TRACELENS_PORT=$TRACELENS_PORT \
-TRACELENS_HOST=0.0.0.0 \
-  python -m TraceLens.AgenticMode.MCPServer \
-  > "$LOG_DIR/tracelens.log" 2>&1 &
-TRACELENS_PID=$!
+# --- Local Ray head (GPU task scheduler for GEAK) ---
+RAY_GPU_OPT=""
+if [ "${GPU_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+    RAY_GPU_OPT="--num-gpus=${GPU_COUNT}"
+fi
+ray start --head \
+    --port=6379 \
+    --dashboard-host=0.0.0.0 \
+    --dashboard-port=8265 \
+    ${RAY_GPU_OPT} \
+    > "$LOG_DIR/ray-head.log" 2>&1 || true
 
-# --- GEAK REST API (backend for MCP tools) ---
-cd /opt/geak
-GEAK_LOCAL=true \
-HOST=0.0.0.0 \
-NFS_BASE_PATH="${NFS_BASE_PATH:-/tmp/geak-data}" \
-DATABASE_PATH="${DATABASE_PATH:-/tmp/geak-data/geak.db}" \
-  python -m server.main \
-  > "$LOG_DIR/geak-api.log" 2>&1 &
-GEAK_API_PID=$!
-
-# --- GEAK MCP ---
-GEAK_LOCAL=true \
-HOST=0.0.0.0 \
-MCP_PORT=$GEAK_MCP_PORT \
-NFS_BASE_PATH="${NFS_BASE_PATH:-/tmp/geak-data}" \
-DATABASE_PATH="${DATABASE_PATH:-/tmp/geak-data/geak.db}" \
-  python -m server.mcp.http_server \
-  > "$LOG_DIR/geak-mcp.log" 2>&1 &
-GEAK_MCP_PID=$!
-
-# --- OOB Agent MCP (Claude Code + Codex backends) ---
-if [ -d /opt/oob-mcp/agent_mcp_server ]; then
+# --- OOB CLI prep (Claude Code + Codex backends; invoked per-task by `oob run`) ---
+# Provision agent CLI auth files and an optional auth proxy. The MCP/REST service
+# is no longer started — the skill calls `oob run ...` directly per task.
+if [ -d /opt/OOB/oob_cli ]; then
     mkdir -p "${AGENT_WORKSPACE_ROOT:-/tmp/agent-workspaces}"
 
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
@@ -133,6 +150,8 @@ CODEX_EOF
         chmod 600 /root/.codex/auth.json
     fi
 
+    # Bearer-auth rewrite for AMD LLM gateway: claude/codex CLIs only know
+    # x-api-key, so route them through a localhost proxy that injects Bearer.
     if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
         export LLM_PROXY_SCHEME=$(echo "$ANTHROPIC_BASE_URL" | grep -oP '^https?' || true)
         export LLM_PROXY_HOST=$(echo "$ANTHROPIC_BASE_URL" | grep -oP '(?<=://)[^:/]+' || true)
@@ -147,25 +166,16 @@ CODEX_EOF
         LLM_PATH=$(echo "$ANTHROPIC_BASE_URL" | grep -oP '(?<=://)[^/]+(/.+)' | grep -oP '/.*' || true)
         export AUTH_PROXY_PORT=4002
         export PROXY_AUTH_TOKEN="${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}"
-        python /opt/oob-mcp/agent_mcp_server/auth_proxy.py \
+        python /opt/OOB/oob_cli/auth_proxy.py \
           > "$LOG_DIR/oob-auth-proxy.log" 2>&1 &
         AUTH_PROXY_PID=$!
         sleep 1
         ANTHROPIC_PATH=$(echo "$LLM_PATH" | sed 's|/v1$||')
         export ANTHROPIC_BASE_URL="http://127.0.0.1:${AUTH_PROXY_PORT}${ANTHROPIC_PATH}"
+        # Codex musl-rustls may not honor corporate CAs;
+        # route through the same proxy (HTTP -> HTTPS upstream).
+        export OPENAI_BASE_URL="http://127.0.0.1:${AUTH_PROXY_PORT}${LLM_PATH}"
     fi
-
-    PYTHONPATH=/opt/oob-mcp \
-    MCP_PORT=$OOB_MCP_PORT \
-    OOB_LOCAL="${OOB_LOCAL:-true}" \
-    AGENT_WORKSPACE_ROOT="${AGENT_WORKSPACE_ROOT:-/tmp/agent-workspaces}" \
-    ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
-    ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-}" \
-    OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
-    OPENAI_BASE_URL="${OPENAI_BASE_URL:-}" \
-      python -m agent_mcp_server.server \
-      > "$LOG_DIR/oob-mcp.log" 2>&1 &
-    OOB_MCP_PID=$!
 fi
 
 # --- Health check: wait for ports (timeout 30s) ---
@@ -184,69 +194,29 @@ wait_for_port() {
 
 echo ""
 echo "Waiting for services..."
-wait_for_port "$TRACELENS_PORT" "TraceLens"
-wait_for_port 8000 "GEAK API"
-wait_for_port "$GEAK_MCP_PORT" "GEAK MCP"
-[ "$OOB_MCP_PID" -gt 0 ] && wait_for_port "$OOB_MCP_PORT" "OOB Agent"
-
-# --- Auto-configure GEAK LLM from env vars ---
-if [ -n "${LLM_API_KEY:-}" ] && [ -n "${LLM_API_BASE:-}" ]; then
-    echo "Configuring GEAK LLM backend..."
-    curl -s -X PUT http://localhost:8000/api/v1/config/model \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer local-mcp" \
-      -d "{\"model_class\":\"litellm\",\"model_name\":\"openai/claude-opus-4-6\",\"model_kwargs\":{\"api_base\":\"${LLM_API_BASE}\",\"api_key\":\"${LLM_API_KEY}\"}}" \
-      > /dev/null 2>&1 && echo "  [OK]   GEAK LLM configured" || echo "  [WARN] GEAK LLM config failed"
-fi
+wait_for_port 6379 "Ray head"
+wait_for_port 8265 "Ray dashboard"
+[ "$AUTH_PROXY_PID" -gt 0 ] && wait_for_port "${AUTH_PROXY_PORT:-4002}" "OOB auth-proxy"
 
 echo ""
 echo "${GPU_COUNT} GPU(s) available. Framework '${FRAMEWORK:-sglang}' ready."
+echo "GEAK tasks are scheduled via Ray (dashboard: http://localhost:8265)"
 echo "Connect: Cursor Remote SSH → localhost:<mapped-ssh-port> → open /opt/hyperloom"
 echo ""
 
 # --- Keep alive: restart crashed services ---
 while true; do
-    if ! kill -0 "$TRACELENS_PID" 2>/dev/null; then
-        echo "[$(date)] TraceLens crashed, restarting..."
-        cd /opt/TraceLens
-        TRACELENS_PORT=$TRACELENS_PORT TRACELENS_HOST=0.0.0.0 \
-          python -m TraceLens.AgenticMode.MCPServer \
-          >> "$LOG_DIR/tracelens.log" 2>&1 &
-        TRACELENS_PID=$!
+    if ! ray status > /dev/null 2>&1; then
+        echo "[$(date)] Ray head down, restarting..."
+        ray start --head --port=6379 --dashboard-host=0.0.0.0 --dashboard-port=8265 \
+            ${RAY_GPU_OPT} \
+            >> "$LOG_DIR/ray-head.log" 2>&1 || true
     fi
-    if ! kill -0 "$GEAK_API_PID" 2>/dev/null; then
-        echo "[$(date)] GEAK API crashed, restarting..."
-        cd /opt/geak
-        GEAK_LOCAL=true HOST=0.0.0.0 \
-        NFS_BASE_PATH="${NFS_BASE_PATH:-/tmp/geak-data}" \
-        DATABASE_PATH="${DATABASE_PATH:-/tmp/geak-data/geak.db}" \
-          python -m server.main \
-          >> "$LOG_DIR/geak-api.log" 2>&1 &
-        GEAK_API_PID=$!
-    fi
-    if ! kill -0 "$GEAK_MCP_PID" 2>/dev/null; then
-        echo "[$(date)] GEAK MCP crashed, restarting..."
-        cd /opt/geak
-        GEAK_LOCAL=true HOST=0.0.0.0 MCP_PORT=$GEAK_MCP_PORT \
-        NFS_BASE_PATH="${NFS_BASE_PATH:-/tmp/geak-data}" \
-        DATABASE_PATH="${DATABASE_PATH:-/tmp/geak-data/geak.db}" \
-          python -m server.mcp.http_server \
-          >> "$LOG_DIR/geak-mcp.log" 2>&1 &
-        GEAK_MCP_PID=$!
-    fi
-    if [ "$OOB_MCP_PID" -gt 0 ] && ! kill -0 "$OOB_MCP_PID" 2>/dev/null; then
-        echo "[$(date)] OOB Agent MCP crashed, restarting..."
-        PYTHONPATH=/opt/oob-mcp \
-        MCP_PORT=$OOB_MCP_PORT \
-        OOB_LOCAL="${OOB_LOCAL:-true}" \
-        AGENT_WORKSPACE_ROOT="${AGENT_WORKSPACE_ROOT:-/tmp/agent-workspaces}" \
-        ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
-        ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-}" \
-        OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
-        OPENAI_BASE_URL="${OPENAI_BASE_URL:-}" \
-          python -m agent_mcp_server.server \
-          >> "$LOG_DIR/oob-mcp.log" 2>&1 &
-        OOB_MCP_PID=$!
+    if [ "$AUTH_PROXY_PID" -gt 0 ] && ! kill -0 "$AUTH_PROXY_PID" 2>/dev/null; then
+        echo "[$(date)] OOB auth-proxy crashed, restarting..."
+        python /opt/OOB/oob_cli/auth_proxy.py \
+          >> "$LOG_DIR/oob-auth-proxy.log" 2>&1 &
+        AUTH_PROXY_PID=$!
     fi
     sleep 5
 done
