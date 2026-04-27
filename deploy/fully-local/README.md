@@ -65,12 +65,14 @@ Type in Cursor chat:
 
 ```
 @inference-optimization Optimize /models/Qwen3-30B-A3B
+mode: fully-local
 ```
 
 The agent auto-detects mode, framework, GPU count, and InferenceX path from the container environment. Specify extra details only when needed:
 
 ```
 @inference-optimization Optimize /models/Qwen3-30B-A3B
+mode: fully-local
 
 TP=8, CONC=64, ISL=1024, OSL=1024
 Precision: FP8
