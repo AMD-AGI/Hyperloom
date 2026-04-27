@@ -94,6 +94,7 @@ Specify backend in prompt (default `geak`, can also be changed by `KERNEL_OPT_BA
 
 ```
 @inference-optimization Optimize /models/Qwen3-30B-A3B
+mode: fully-local
 
 # Use Codex backend (requires OOB_API_KEY + OOB_BASE_URL)
 Use only codex as the kernel optimization backend.
