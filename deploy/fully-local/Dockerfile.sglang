@@ -6,7 +6,7 @@
 #   docker build -f deploy/fully-local/Dockerfile.sglang -t hyperloom-local:sglang-latest .
 
 # Stage 0: repo source bundle (OOB, TraceLens, InferenceX, skills, deploy scripts)
-FROM primussafe/hyperloom-src-423:v1.0.4 AS hyperloom-src
+FROM primussafe/hyperloom-src-427:v1.0.0 AS hyperloom-src
 
 FROM lmsysorg/sglang:v0.5.9-rocm700-mi30x
 
