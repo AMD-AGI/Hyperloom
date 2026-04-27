@@ -21,7 +21,6 @@ Extra args after known flags are forwarded to the `geak` CLI.
 """
 
 import argparse
-import json
 import os
 import subprocess
 import sys
