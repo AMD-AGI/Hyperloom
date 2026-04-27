@@ -1,11 +1,17 @@
 ---
 name: claude-inference-kernel-reference
-description: Claude Code backend for kernel optimization via OOB GPU Optimizer MCP. Multi-turn agent with tool-use capability. Verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
+description: Claude Code backend for kernel optimization. In local/claw modes uses the OOB GPU Optimizer MCP; in fully-local mode uses `oob_ray_submit.py run` (Ray-scheduled CLI). Multi-turn agent with tool-use capability. Verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
 ---
 
 # Claude Code — Kernel Optimization Backend
 
-Claude Code backend for kernel optimization via the OOB GPU Optimizer MCP (`oob-gpu-optimizer`).
+Claude Code backend for kernel optimization. Two transport modes:
+
+| Mode | How Claude is invoked |
+|------|-----------------------|
+| `local` / `claw` | OOB GPU Optimizer MCP (`agent_create_task(agent="claude")` etc.) |
+| `fully-local` | `oob_ray_submit.py run -a claude ...` CLI (single blocking subprocess per iteration) |
+
 Multi-turn agent with tool-use capability (file I/O, shell commands).
 The calling skill is responsible for compilation checking, correctness verification,
 and micro-benchmarking.
@@ -117,20 +123,67 @@ Same core prompt as Codex (see [`codex.md`](codex.md) Prompt Template section). 
 prompt rules from `actions/kernel-opt.md` apply. No GEAK-specific directives (no `mode`,
 no `max_rounds`). Image is passed as MCP parameter, not in prompt text.
 
-Claude benefits from more detailed reasoning prompts. Consider adding:
+### MANDATORY CONSTRAINTS (must appear verbatim in every Claude prompt)
+
+Claude is multi-turn with `Bash` access; without explicit constraints it will explore the
+filesystem and try to run benchmarks itself, burning turns and producing no `optimized_kernel.py`.
+Always include the following block at the top of the prompt (in addition to the shared
+constraints from `codex.md`):
+
+```
+MANDATORY CONSTRAINTS (violation = rejected):
+1. The output function name MUST be EXACTLY: {original_function_name}. Do NOT rename it.
+2. The function signature (parameter names, order, types) MUST be IDENTICAL to the original.
+3. Block size limits: BLOCK_M <= 16, BLOCK_N <= 128, BLOCK_K <= 256.
+4. Do NOT increase any block dimension beyond 2x its original value.
+5. Do NOT add @triton.autotune or change @triton_heuristics decorators.
+6. Do NOT search the filesystem with `find /` or `grep -r /`. The kernel source
+   is the file passed via `-f` (or `files[].content`) — work only from that.
+7. Write the COMPLETE optimized file to `optimized_kernel.py` in the current
+   working directory. Do NOT write anywhere else.
+```
+
+Claude also benefits from a brief reasoning scaffold appended after the constraints:
 
 ```
 Think step by step:
 1. Analyze the original kernel structure — identify redundant memory loads and loop patterns.
 2. Determine if a single-pass merge is safe (check R0_BLOCK vs r0_numel).
 3. Write the optimized kernel preserving the exact function signature.
-4. Verify the optimized kernel handles edge cases (mask boundaries, data types).
-Write the COMPLETE optimized file to optimized_kernel.py.
+4. Verify edge cases hold (mask boundaries, dtypes).
+Then write the COMPLETE optimized file to optimized_kernel.py and exit.
 ```
 
 ## Output Convention
 
-Same as Codex: optimized kernel written to `optimized_kernel.py`.
+Same as Codex: optimized kernel written to `optimized_kernel.py` in the task workspace.
+
+- **MCP modes:** Use `agent_get_outputs` to list, then `agent_download_file`.
+- **Fully-local mode:** The `oob_ray_submit.py run --json` result's `.workspace` field points at the
+  task workspace. Read `$WORKSPACE/optimized_kernel.py` directly. There is no
+  `output/` subdir.
+
+## Fully-Local Execution
+
+Identical to Codex's "Fully-Local Execution" section in [`codex.md`](codex.md);
+swap `-a codex` → `-a claude` and use Claude-specific constants:
+
+```bash
+# $OOB_RAY_CLI = "python3 $SKILL_ROOT/scripts/oob_ray_submit.py" (set by setup.md)
+OUT_DIR="$WORK_DIR/oob_claude_${KERNEL_NAME}_iter${ITER}"
+
+RESULT_JSON=$($OOB_RAY_CLI run \
+    -a claude \
+    -p "$PROMPT" \
+    -f "$WORK_DIR/kernel.py" \
+    -o "$OUT_DIR" \
+    --max-turns 30 \
+    --timeout $((CLAUDE_POLL_TIMEOUT_MIN * 60)) \
+    --no-live --json)
+```
+
+The same CLI ↔ MCP mapping table from [`codex.md`](codex.md) applies; Claude's
+longer per-iteration latency just means a larger `--timeout` budget.
 
 ## Iterative Refinement Loop
 
@@ -138,8 +191,9 @@ Claude uses the **same iterative refinement loop** as Codex. See [`codex.md`](co
 "Iterative Refinement Loop" section for the full flow, pseudocode, feedback context
 format, and key rules.
 
-The only difference: use `agent="claude"` and Claude-specific constants
-(`CLAUDE_MAX_TURNS`, `CLAUDE_POLL_INTERVAL_S`, `CLAUDE_POLL_TIMEOUT_MIN`).
+The only difference: use `agent="claude"` (or `oob_ray_submit.py run -a claude` in fully-local) and
+Claude-specific constants (`CLAUDE_MAX_TURNS`, `CLAUDE_POLL_INTERVAL_S`,
+`CLAUDE_POLL_TIMEOUT_MIN`).
 
 Claude's multi-turn capability means it may produce higher quality output per
 iteration (at the cost of higher latency). With feedback from prior iterations,
