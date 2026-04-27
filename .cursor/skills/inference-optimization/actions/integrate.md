@@ -78,7 +78,7 @@ def patch_standalone_kernels(kernel_name, geak_source_path, target_signature_pat
     return patched, skipped
 ```
 
-**Alternative: Use `patch_inductor.py` (recommended, IR-8):**
+**Alternative: Use `patch_inductor.py` (recommended, IR-6):**
 
 ```bash
 # Patch a single standalone kernel file (kernel source only)
