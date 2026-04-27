@@ -1,4 +1,4 @@
-# GEAK config template for Hyperloom fully-local mode.
+# GEAK config template for Hyperloom local mode.
 # Rendered by entrypoint.sh at container start; do not edit the rendered copy.
 # Placeholders below are replaced with values from container env vars:
 #   __GEAK_MODEL_NAME__  <- $GEAK_MODEL_NAME (default: claude-opus-4-7)

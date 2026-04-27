@@ -135,9 +135,9 @@ The agent takes it from there — baseline, profile, loop, report.
 
 ---
 
-## Quickstart — Fully Local Mode (Docker / K8s)
+## Quickstart — Local Mode (Docker / K8s)
 
-Run Hyperloom on your own GPU infrastructure — a single container bundles all MCP services (TraceLens, GEAK, OOB Agent), InferenceX, and Skills. No manual MCP or environment setup required.
+Run Hyperloom on your own GPU infrastructure — a single container bundles all tooling (GEAK CLI via Ray, OOB CLI via Ray, TraceLens CLI), InferenceX, and Skills. No MCP servers needed; all tools run as in-container CLIs scheduled by a local Ray cluster.
 
 ```bash
 docker run -d --shm-size=16g \
@@ -155,7 +155,7 @@ Connect via Cursor Remote SSH → `localhost:20022` → open `/opt/hyperloom`, t
 @inference-optimization Optimize /models/Qwen3-30B-A3B
 ```
 
-Full setup guide: **[deploy/fully-local/README.md](deploy/fully-local/README.md)** | Design doc: **[deploy/fully-local/DESIGN.md](deploy/fully-local/DESIGN.md)**
+Full setup guide: **[deploy/local/README.md](deploy/local/README.md)** | Design doc: **[deploy/local/DESIGN.md](deploy/local/DESIGN.md)**
 
 ---
 
@@ -215,7 +215,7 @@ Hyperloom/
 │   ├── turboquant/                       # Quantization evaluation library
 │   └── mlperf/                           # MLPerf GPT-OSS-20B benchmark code
 ├── deploy/
-│   └── fully-local/                      # Fully Local mode: containerized deployment for user-owned infra
+│   └── local/                            # Local mode: containerized deployment for user-owned infra
 ├── dashboards/                            # Interactive optimization dashboard (HTML)
 ├── slides/                               # Architecture diagrams
 ├── .env.template                         # Environment variables

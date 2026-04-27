@@ -1,9 +1,9 @@
-# Hyperloom Fully Local Mode — vLLM base image
+# Hyperloom Local Mode — vLLM base image
 # Bundles: TraceLens CLI + GEAK CLI (geak via Ray) + OOB CLI (oob run) + InferenceX + Skills + SSH
 #
 # No local build context needed — all repo artifacts come from hyperloom-src.
 #   Prereq: docker pull docker.io/primussafe/hyperloom-src:<tag>
-#   docker build -f deploy/fully-local/Dockerfile.vllm -t hyperloom-local:vllm-latest .
+#   docker build -f deploy/local/Dockerfile.vllm -t hyperloom-local:vllm-latest .
 
 # Stage 0: repo source bundle (OOB, TraceLens, InferenceX, skills, deploy scripts)
 FROM primussafe/hyperloom-src-427:v1.0.0 AS hyperloom-src
@@ -67,7 +67,7 @@ RUN pip install --no-cache-dir -e /opt/OOB/oob_cli \
     && git config --global user.name  "Hyperloom Local" \
     && git config --global init.defaultBranch main
 ENV PATH="/opt/venv/bin:${PATH}" \
-    MODE=fully-local \
+    MODE=local \
     GEAK_MODEL_NAME=claude-opus-4-7 \
     GEAK_CONFIG=/opt/hyperloom/geak-config/local.yaml \
     GEAK_LOCAL=true \

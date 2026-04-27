@@ -1,4 +1,4 @@
-# Hyperloom Fully Local Mode
+# Hyperloom Local Mode
 
 > **Local node support for user-owned infrastructure** — run the full Hyperloom inference optimization loop entirely on your own GPU nodes (Docker or K8s), without depending on AMD-hosted PrimusClaw sandboxes or Primus-SaFE authoring pods. See [DESIGN.md](DESIGN.md) for architecture details.
 
@@ -21,9 +21,9 @@ docker run -d --shm-size=16g \
   -e LLM_API_KEY=<your-geak-api-key> \
   -e LLM_API_BASE=https://<your-openai-compatible-endpoint>/v1 \
   -e GEAK_MODEL_NAME=<model-supported-by-that-endpoint> \
-  primussafe/hyperloom-fully-local:sglang-mi300x-427-1
+  primussafe/hyperloom-local:sglang-mi300x-427-1
 ```
-> vllm images: `primussafe/hyperloom-fully-local:vllm-427-1`
+> vllm images: `primussafe/hyperloom-local:vllm-427-1`
 
 > `LLM_API_KEY` and `LLM_API_BASE` are only used by the `geak` kernel optimization backend. Set `GEAK_MODEL_NAME` to a model that your endpoint actually serves; if omitted, the default is `claude-opus-4-7`. If you use OOB `codex` / `claude` backends, configure `OOB_API_KEY` and `OOB_BASE_URL`.
 
@@ -57,7 +57,7 @@ Host hyperloom
 2. Open folder: `/opt/hyperloom`
 3. Skills load automatically
 
-> Fully-local mode runs **no persistent MCP services** — TraceLens, GEAK, and OOB are all invoked as in-container CLIs (`tracelens-*`, `geak` via `geak_ray_submit.py` through Ray, OOB via `oob_ray_submit.py` through Ray). No MCP toggles need to be enabled.
+> Local mode runs **no persistent MCP services** — TraceLens, GEAK, and OOB are all invoked as in-container CLIs (`tracelens-*`, `geak` via `geak_ray_submit.py` through Ray, OOB via `oob_ray_submit.py` through Ray). No MCP toggles need to be enabled.
 
 ### 4. Run optimization
 
@@ -65,14 +65,14 @@ Type in Cursor chat:
 
 ```
 @inference-optimization Optimize /models/Qwen3-30B-A3B
-mode: fully-local
+mode: local
 ```
 
 The agent auto-detects mode, framework, GPU count, and InferenceX path from the container environment. Specify extra details only when needed:
 
 ```
 @inference-optimization Optimize /models/Qwen3-30B-A3B
-mode: fully-local
+mode: local
 
 TP=8, CONC=64, ISL=1024, OSL=1024
 Precision: FP8
@@ -94,7 +94,7 @@ Specify backend in prompt (default `geak`, can also be changed by `KERNEL_OPT_BA
 
 ```
 @inference-optimization Optimize /models/Qwen3-30B-A3B
-mode: fully-local
+mode: local
 
 # Use Codex backend (requires OOB_API_KEY + OOB_BASE_URL)
 Use only codex as the kernel optimization backend.
