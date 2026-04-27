@@ -27,13 +27,17 @@ gap acts as an urgency multiplier on all action scores.
 
 ## Execution Mode
 
-This skill supports two execution modes. **Read the mode-specific document for your mode
+This skill supports three execution modes. **Read the mode-specific document for your mode
 before starting:**
 
-- **Local mode** (Cursor IDE, direct shell): see [`modes/LOCAL.md`](modes/LOCAL.md)
+- **Fully-local mode** (Hyperloom container, Ray-scheduled GEAK CLI): see [`modes/FULLY_LOCAL.md`](modes/FULLY_LOCAL.md)
+- **Local mode** (Cursor IDE, GEAK MCP, direct shell): see [`modes/LOCAL.md`](modes/LOCAL.md)
 - **Claw mode** (SaFE RayJob, `exec_on_gpu`): see [`modes/CLAW.md`](modes/CLAW.md)
 
-**Auto-detection:** `GEAK_LOCAL=true` → local mode (default). Claw client context → claw mode.
+**Auto-detection:**
+- `MODE=fully-local` → fully-local mode
+- `GEAK_LOCAL=true` (outside fully-local container) → local mode
+- Claw client context → claw mode
 
 ## Iron Rules (non-negotiable)
 
@@ -103,7 +107,21 @@ generate the config, then apply the `extra_headers` via MCP (see kernel-opt/geak
 
 Violation (changing model/backend) = immediate run invalidation.
 
-**Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11) and [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12).**
+### IR-7b: Orchestrator MUST NOT write kernel optimization code itself
+
+All kernel optimization MUST go through the configured `KERNEL_OPT_BACKENDS`
+(`geak`, `codex`, `claude`, `llm`). The orchestrator Agent's role is to **prepare
+prompts, submit tasks to backends, verify results, and integrate** — NEVER to
+directly author optimized Triton/HIP/CUDA kernels.
+
+Even if the orchestrator is the same LLM model as a backend (e.g., Claude
+orchestrating via OOB Claude), it MUST still use the backend toolchain. Backends
+provide isolated workspaces, GPU-side validation, reproducible trajectories, and
+Ray-managed GPU scheduling that direct in-chat generation lacks.
+
+Violation = immediate run invalidation.
+
+**Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11), [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12), and [`modes/FULLY_LOCAL.md`](modes/FULLY_LOCAL.md) (IR-12 through IR-16).**
 
 ## Kernel Optimization & Tooling Constants
 
@@ -143,7 +161,7 @@ kernel-opt/                    — Per-backend kernel optimization references
   llm.md                       — LLM Proxy (direct API)
 kb/                            — RAG knowledge base (JSONL + query/ingest scripts)
 scripts/                       — Baseline/profiling/accuracy shell scripts
-modes/                         — Mode-specific execution details (LOCAL.md, CLAW.md)
+modes/                         — Mode-specific execution details (FULLY_LOCAL.md, LOCAL.md, CLAW.md)
 KNOWLEDGE-BASE.md              — Legacy KB (archived, seeded into kb/entries.jsonl)
 ```
 
@@ -169,7 +187,7 @@ These are recurring errors observed in production CI runs. **Read before executi
 
 5. **Never call `geak_set_model_config` to change the model.** See IR-7. Only exception: tracing headers.
 
-6. **Record start/end timestamps for ALL external calls** (IR-13). Before invoking
+6. **Record start/end timestamps for ALL external calls.** Before invoking
    any external component (GEAK, OOB, LLM proxy, TraceLens, or future backends),
    run `python3 $SCRIPTS_DIR/trace_action.py --component <name> --action start`.
    After the component finishes, run `--action end`. This enables per-message cost

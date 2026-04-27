@@ -117,17 +117,40 @@ by querying `LiteLLM_SpendLogs` with time ranges.
 - Do NOT change `model_class`, `api_base`, or `api_key`.
 - If `geak_get_model_config` returns empty/error, skip tracing (do not block).
 
-## GEAK MCP Tool Reference
+## GEAK Tool Reference
 
-### Authentication
+GEAK invocation differs by mode. **Check your mode before proceeding.**
 
-Requires two keys:
+### Fully-Local Mode (Ray-scheduled CLI)
 
+No MCP tools, no REST API. GEAK runs as the `geak` CLI, scheduled by Ray.
+
+| Step | Command | Purpose |
+|------|---------|---------|
+| 1 | `$GEAK_CLI status` | Verify Ray cluster has GPUs available |
+| 2 | `$GEAK_CLI run -t task.md --yolo` | Single task (blocking) |
+| 2b | `$GEAK_CLI batch -t a.md -t b.md ... --yolo` | Batch: all candidates in parallel (IR-1) |
+| 3 | *(automatic)* | Ray assigns GPU per task, `geak` runs with `--gpu-ids` |
+| 4 | *(automatic)* | Blocks until done, prints OK/FAIL + output path |
+
+Where `$GEAK_CLI="python3 $SKILL_ROOT/scripts/geak_ray_submit.py"`.
+
+**Authentication & model config:** `entrypoint.sh` renders `$GEAK_CONFIG`
+(`/opt/hyperloom/geak-config/local.yaml`) from a LiteLLM template at container start
+using `GEAK_MODEL_NAME` (default `claude-opus-4-7`), `GEAK_API_KEY`/`LLM_API_KEY`,
+and `GEAK_BASE_URL`/`LLM_API_BASE`. `geak_ray_submit.py` auto-injects `--config $GEAK_CONFIG`,
+so users do not need to pass it manually.
+
+### MCP Mode (Local / Claw)
+
+Requires GEAK MCP server running. Uses MCP tools:
+
+
+**Authentication (MCP mode):**
 - `GEAK_AUTH_KEY` — Bearer token for GEAK endpoint (set in `.env`)
 - `LITELLM_API_KEY` — Used internally by GEAK to call its LLM backend
 
-### Tool sequence
-
+**FORBIDDEN:** `geak_set_model_config` — NEVER call this tool. Use existing config.
 
 | Step | Tool                                                    | Purpose                                  |
 | ---- | ------------------------------------------------------- | ---------------------------------------- |
@@ -141,8 +164,7 @@ Requires two keys:
 | 6    | `bash: trace_action.py --component geak --action end`   | Record end timestamp                     |
 | -    | `geak_list_tasks`                                       | Debug: list all tasks                    |
 
-
-### geak_create_task — critical details
+### geak_create_task — critical details (MCP mode only; fully-local uses task .md files)
 
 - `input_type` is **required** — use `"file"`
 - The instruction field is `prompt`, NOT `instructions`
@@ -290,7 +312,7 @@ shutil.rmtree(os.path.expanduser("~/.triton/cache"), ignore_errors=True)
 - GEAK must preserve the exact function signature (args + constexprs)
 - Clear `.json` metadata files to force Inductor to reload source
 
-**Recommended: Use `patch_inductor.py` (IR-8):**
+**Recommended: Use `patch_inductor.py` (IR-6):**
 
 ```bash
 # Patch kernel source + update .best_config tiling parameters
@@ -369,7 +391,7 @@ Before patching any GEAK output into the serving environment:
 - Function signature (parameters, constexprs) matches original
 - Decorators preserved (`@triton_heuristics`, `@triton.jit`, etc.)
 - No new imports that don't exist in the target environment
-- Block sizes within IR-8 constraints (not exceeding 2x original)
+- Block sizes within IR-6 constraints (not exceeding 2x original)
 - Source code is actual code, not comments or path references
 - `files[].content` contains the full source (not truncated)
 - `.best_config` values identified from GEAK output (XBLOCK, R0_BLOCK, BLOCK_N, BLOCK_K, num_warps, num_stages) and passed via `--best-config`
