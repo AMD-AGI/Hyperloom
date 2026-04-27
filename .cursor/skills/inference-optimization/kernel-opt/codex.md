@@ -1,6 +1,6 @@
 ---
 name: codex-inference-kernel-reference
-description: Codex backend for kernel optimization. In local/claw modes uses the OOB GPU Optimizer MCP; in fully-local mode uses the `oob run` CLI. Code generation with optional GPU — verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
+description: Codex backend for kernel optimization. In local/claw modes uses the OOB GPU Optimizer MCP; in fully-local mode uses `oob_ray_submit.py run` (Ray-scheduled CLI). Code generation with optional GPU — verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
 ---
 
 # Codex — Kernel Optimization Backend
@@ -187,18 +187,18 @@ Return the COMPLETE optimized file — do not return partial snippets.
 
 ## Fully-Local Execution
 
-In fully-local mode the 5-step MCP flow above collapses to a **single blocking
-`oob_ray_submit.py run` invocation** per iteration. The CLI provisions a workspace, copies
-input files, spawns the `codex` subprocess with the right env vars, polls the
-internal TaskManager until terminal status, and exits.
+In fully-local mode each iteration is a **single blocking `oob_ray_submit.py run`
+invocation**. Ray assigns a GPU, provisions a workspace, copies input files, spawns
+the `codex` subprocess with the right env vars, and blocks until the task reaches
+a terminal status.
 
 ### Single iteration
 
 ```bash
-OOB_CLI="${OOB_CLI:-oob}"
+# $OOB_RAY_CLI = "python3 $SKILL_ROOT/scripts/oob_ray_submit.py" (set by setup.md)
 OUT_DIR="$WORK_DIR/oob_codex_${KERNEL_NAME}_iter${ITER}"
 
-RESULT_JSON=$($OOB_CLI run \
+RESULT_JSON=$($OOB_RAY_CLI run \
     -a codex \
     -p "$PROMPT" \
     -f "$WORK_DIR/kernel.py" \
@@ -224,7 +224,7 @@ fi
 | `agent_create_task(agent="codex", prompt, files, max_turns, ...)` | `oob_ray_submit.py run -a codex -p ... -f ... --max-turns ...` (single call) |
 | `agent_submit_task` | (folded into `oob_ray_submit.py run`) |
 | `agent_get_task` (poll) | (folded into `oob_ray_submit.py run`, polls internally) |
-| `agent_get_outputs` | `ls <workspace>/` (the `oob run --json` result's `.workspace` field already points at the live dir) |
+| `agent_get_outputs` | `ls <workspace>/` (the `oob_ray_submit.py run --json` result's `.workspace` field already points at the live dir) |
 | `agent_download_file` | `cp <workspace>/<file>` (file is already on local disk) |
 | `agent_cancel_task` | `kill -INT <oob-pid>` (graceful) |
 
@@ -380,7 +380,7 @@ This gives the agent visibility into what worked and what failed, enabling it to
 
 ### Task completes but no optimized_kernel.py in outputs
 - **MCP modes:** Check `agent_get_outputs` — file may have a different name
-- **Fully-local:** `ls <workspace>/` (the `oob run --json` result's `.workspace`) to see what Codex actually wrote
+- **Fully-local:** `ls <workspace>/` (the `oob_ray_submit.py run --json` result's `.workspace`) to see what Codex actually wrote
 - Next iteration prompt will include this failure, prompting explicit file output
 
 ### Task fails immediately

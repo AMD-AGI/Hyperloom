@@ -7,7 +7,7 @@
 - Docker with AMD ROCm support, or K8s cluster with AMD GPU nodes
 - Cursor IDE with Remote SSH extension
 - LLM API key for GEAK kernel optimization
-- OOB API key and base URL for the `oob` CLI (Claude Code / Codex backends)
+- OOB API key and base URL for OOB (Claude Code / Codex backends, scheduled via `oob_ray_submit.py` through Ray)
 
 ## Quick Start (Docker)
 
@@ -57,7 +57,7 @@ Host hyperloom
 2. Open folder: `/opt/hyperloom`
 3. Skills load automatically
 
-> Fully-local mode runs **no persistent MCP services** — TraceLens, GEAK, and OOB are all invoked as in-container CLIs (`tracelens-*`, `geak` via Ray, `oob run`). No MCP toggles need to be enabled.
+> Fully-local mode runs **no persistent MCP services** — TraceLens, GEAK, and OOB are all invoked as in-container CLIs (`tracelens-*`, `geak` via `geak_ray_submit.py` through Ray, OOB via `oob_ray_submit.py` through Ray). No MCP toggles need to be enabled.
 
 ### 4. Run optimization
 
@@ -84,9 +84,9 @@ Save results to /opt/hyperloom/results/
 
 | Backend | Description | Duration | Dependency |
 |---------|-------------|----------|------------|
-| `geak` | Local subprocess with GPU access and hardware validation | 2-3 hours | `LLM_API_KEY` + matching `GEAK_MODEL_NAME` / `LLM_API_BASE` |
-| `codex` | Codex code generation + local benchmark | ~1 hour | `OOB_API_KEY` + `OOB_BASE_URL` |
-| `claude` | Claude Code generation + local benchmark | ~1 hour | `OOB_API_KEY` + `OOB_BASE_URL` |
+| `geak` | `geak_ray_submit.py` through Ray, GPU isolation, hardware validation | 2-3 hours | `LLM_API_KEY` + matching `GEAK_MODEL_NAME` / `LLM_API_BASE` |
+| `codex` | `oob_ray_submit.py` through Ray schedules Codex subprocess + local benchmark | ~1 hour | `OOB_API_KEY` + `OOB_BASE_URL` |
+| `claude` | `oob_ray_submit.py` through Ray schedules Claude subprocess + local benchmark | ~1 hour | `OOB_API_KEY` + `OOB_BASE_URL` |
 
 Specify backend in prompt (default `geak`, can also be changed by `KERNEL_OPT_BACKENDS`):
 
@@ -166,6 +166,42 @@ spec:
 
 Connect via Cursor Remote SSH → `<node-ip>:30022`, open `/opt/hyperloom`.
 
+## BYOI (Bring Your Own Image)
+
+If you already have a custom image with your inference stack (specific driver builds, internal registries, etc.), you do not need the Hyperloom prebuilt image — you can run Hyperloom on top of yours.
+
+### Minimal requirements
+
+- Python ≥ 3.10 and ROCm GPU drivers (`/dev/kfd` + `/dev/dri`)
+- sglang or vllm installed
+- Hyperloom resource bundle mounted in the container (OOB / TraceLens / InferenceX; can live on any shared storage)
+
+### How to launch
+
+```bash
+docker run -d --shm-size=16g \
+  --device=/dev/kfd --device=/dev/dri \
+  -v /path/to/models:/models \
+  -v /path/to/hyperloom-bundle:/hyperloom-bundle:ro \
+  -v hyperloom-data:/opt/hyperloom \
+  -p 20022:22 \
+  -e LLM_API_KEY=<your-geak-api-key> \
+  -e LLM_API_BASE=https://<your-openai-compatible-endpoint>/v1 \
+  -e HYPERLOOM_BUNDLE=/hyperloom-bundle \
+  your-custom-image:latest
+```
+
+> The image must ship with sshd. `HYPERLOOM_BUNDLE` is the in-container path to the mounted bundle (default in some setups is `/wekafs/fully-local`; set it to your real mount). Prefer a persistent volume at `/opt/hyperloom` so bootstrap state survives container recreation.
+
+### Workflow
+
+1. Connect with Cursor Remote SSH and open `/opt/hyperloom`
+2. On first skill execution the agent detects BYOI and runs `bootstrap.sh`
+3. Bootstrap installs GEAK, Ray, TraceLens, OOB, and related deps (~3–5 minutes)
+4. After that, behavior matches the prebuilt image
+
+> Bootstrap is idempotent — already-installed components are skipped, and later starts finish in seconds. For the full design, see [section 7 of DESIGN.md](DESIGN.md#7-byoi-design-method-b).
+
 ## Container Ports
 
 | Internal Port | Service |
@@ -175,7 +211,7 @@ Connect via Cursor Remote SSH → `<node-ip>:30022`, open `/opt/hyperloom`.
 | 8265 | Ray dashboard (internal) |
 | 4002 | OOB auth-proxy — only present when `OOB_BASE_URL` is set (internal) |
 
-> TraceLens, GEAK, and OOB do **not** listen on any port — they are invoked as CLIs (`tracelens-*`, `geak` via Ray, `oob run`).
+> TraceLens, GEAK, and OOB do **not** listen on any port — they are invoked as CLIs (`tracelens-*`, `geak` via `geak_ray_submit.py` through Ray, OOB via `oob_ray_submit.py` through Ray).
 
 ## Environment Variables
 
@@ -187,10 +223,9 @@ Connect via Cursor Remote SSH → `<node-ip>:30022`, open `/opt/hyperloom`.
 | `GEAK_API_KEY` | falls back to `LLM_API_KEY` | Optional GEAK-only API key override |
 | `GEAK_BASE_URL` | falls back to `LLM_API_BASE` | Optional GEAK-only endpoint override |
 | `FRAMEWORK` | `sglang` | Inference framework (`sglang` or `vllm`) |
-| `OOB_API_KEY` | — | Unified OOB API key (used by both Claude/Codex `oob run` invocations) |
+| `OOB_API_KEY` | — | Unified OOB API key (shared by Claude/Codex `oob_ray_submit.py run` invocations) |
 | `OOB_BASE_URL` | — | Unified OOB API endpoint (when set, an in-container auth-proxy on `:4002` rewrites Bearer auth) |
-| `OOB_CLI` | `oob` | OOB CLI executable name; override only if you `pip install` it elsewhere |
-| `OOB_HOME` | `~/.oob` | Base dir where `oob run` stores task workspaces and SQLite db |
+| `OOB_HOME` | `~/.oob` | Root dir where `oob` stores task workspaces and the SQLite database |
 | `HIP_VISIBLE_DEVICES` | — | Comma-separated GPU indices (e.g. `0,1,2`) |
 | `GPUS_PER_NODE` | — | Override GPU count for entrypoint display |
 
@@ -203,7 +238,7 @@ tail -f /var/log/hyperloom/ray-head.log         # Ray (GEAK GPU scheduler)
 tail -f /var/log/hyperloom/oob-auth-proxy.log   # OOB auth proxy (only if OOB_BASE_URL is set)
 ```
 
-> Per-task CLI logs are not written to `/var/log/hyperloom`. `oob run` stores files under `${OOB_HOME:-~/.oob}/tasks/cli/<task_id>/workspace/` (for example `execution.log`), while `geak` writes results under its own output directory.
+> Per-task CLI logs are not written to `/var/log/hyperloom`. `oob_ray_submit.py run` stores files under `${OOB_HOME:-~/.oob}/tasks/cli/<task_id>/workspace/` (for example `execution.log`), while `geak` writes results under its own output directory.
 
 ## Security
 
@@ -234,7 +269,7 @@ Check status:
 ```bash
 ray status                                           # Ray head
 ss -tlnp | grep -E ':6379|:8265|:4002' || true       # Listening ports
-command -v oob && oob --help | head -5               # OOB CLI installed
+command -v oob && oob --help | head -5               # OOB CLI present (dependency of oob_ray_submit.py)
 command -v geak                                      # GEAK CLI installed
 python3 -c "import TraceLens" && echo "TraceLens OK" # TraceLens importable
 printf 'OPENAI_BASE_URL=%s\nANTHROPIC_BASE_URL=%s\n' "$OPENAI_BASE_URL" "$ANTHROPIC_BASE_URL"

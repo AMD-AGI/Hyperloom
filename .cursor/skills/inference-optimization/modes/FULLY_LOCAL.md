@@ -4,7 +4,7 @@ This document contains ALL fully-local-mode-specific instructions. Read this **b
 when running on a single machine with GPU access inside the Hyperloom Docker container.
 
 **Agent:** Read `SKILL.md` for the orchestrator loop and shared Iron Rules (IR-1 through
-IR-7). This file defines fully-local-specific Iron Rules (IR-12 through IR-14), constants,
+IR-7b). This file defines fully-local-specific Iron Rules (IR-12 through IR-16), constants,
 architecture, and per-action execution overrides.
 
 ## Environment
@@ -12,11 +12,11 @@ architecture, and per-action execution overrides.
 - **Client**: Cursor IDE (remote SSH into container)
 - **Runtime**: Local GPU machine (single node, Docker container)
 - **GEAK**: CLI (`geak` command) scheduled via Ray (`geak_ray_submit.py`)
-- **OOB**: CLI (`oob_ray_submit.py run`) — installed by `pip install -e /opt/oob-mcp/agent_mcp_server`
+- **OOB**: CLI (`oob_ray_submit.py run`) — installed by `pip install -e /opt/OOB/oob_cli`
 - **TraceLens**: Local CLI (`pip install -e /opt/TraceLens`)
 - **Storage**: Local disk within container (`/tmp/geak-data`, `/opt/hyperloom`, `${OOB_HOME:-~/.oob}`)
 - **Ray**: Local head node for GPU task scheduling (`:6379`, dashboard `:8265`)
-- **MCP**: NONE — bundled `mcp.json` is intentionally empty; all tooling is invoked as in-container CLIs
+- **MCP**: NONE — no `mcp.json` is shipped; all tooling is invoked as in-container CLIs
 
 ## Mode Detection
 
@@ -26,7 +26,8 @@ Selected explicitly by `MODE=fully-local`:
 if [ "${MODE:-}" = "fully-local" ]; then
     WORKSPACE_ROOT="${WORKSPACE_ROOT:-/opt/hyperloom}"
     GEAK_CLI="python3 $SKILL_ROOT/scripts/geak_ray_submit.py"
-    OOB_CLI="${OOB_CLI:-oob}"
+    OOB_RAY_CLI="python3 $SKILL_ROOT/scripts/oob_ray_submit.py"
+    OOB_CLI="${OOB_CLI:-oob}"  #底层 binary，由 oob_ray_submit.py 内部调用
 fi
 ```
 
@@ -64,9 +65,21 @@ The OOB MCP server and `oob_client.py` REST flow are GONE in fully-local mode.
 **Do NOT use `oob_client.py`** or `curl http://localhost:8003/...`.
 
 All Codex / Claude kernel-optimization tasks go through a single blocking
-`oob_ray_submit.py run -a <agent> ...` invocation (see "OOB in Fully-Local Mode" below).
-The 5-step REST flow (create → submit → poll → list outputs → download)
-collapses into one CLI call that writes results to the local task workspace.
+`oob_ray_submit.py run -a <agent> ...` invocation that writes results to the
+local task workspace (see "OOB in Fully-Local Mode" below).
+
+### IR-16: Orchestrator MUST NOT bypass backends by writing kernels directly
+
+In fully-local mode the orchestrator Agent and the OOB `claude` / `codex` backend
+may be the **same underlying LLM**. This does NOT mean the orchestrator can skip
+`oob_ray_submit.py` and write optimized kernels itself. The orchestrator MUST
+delegate kernel optimization to `KERNEL_OPT_BACKENDS` — see shared IR-7b.
+
+OOB via Ray provides: isolated workspace, GPU scheduling via `HIP_VISIBLE_DEVICES`,
+reproducible tool-call trajectory logs, and timeout / cancellation handling.
+Direct in-chat kernel generation has none of these.
+
+Violation = immediate run invalidation.
 
 ---
 
@@ -80,9 +93,9 @@ Cursor IDE (SSH) --> Skill (SKILL.md)
                       |     \-> Results returned when all tasks complete
                       |
                       |-> oob_ray_submit.py run -a {claude,codex} -p "..." -f kernel.py -o <work_dir>
-                      |     |-> Spawns the claude/codex CLI as a subprocess
-                      |     |-> Blocks until the agent task finishes (single call)
-                      |     \-> Optimized files land in <work_dir>/<task_id>/output/
+                      |     |-> Ray head schedules task with GPU isolation
+                      |     |-> Worker spawns claude/codex CLI as subprocess, blocks until done
+                      |     \-> Optimized files land in <work_dir>/<task_id>/workspace/
                       |
                       |-> TraceLens CLI (local, pip install -e)
                       |     \-> Offline trace analysis, no persistent service
@@ -102,8 +115,8 @@ Cursor IDE (SSH) --> Skill (SKILL.md)
 | GEAK invocation | `geak_ray_submit.py` (Ray + geak CLI) | GEAK MCP tools | `geak_client.py` (REST API) |
 | GEAK service | None (CLI per-task) | MCP server (persistent) | Remote REST API |
 | GPU scheduling | Ray local cluster | GEAK MCP handles it | SaFE cluster scheduler |
-| OOB | `oob_ray_submit.py run` CLI (per-task subprocess) | OOB MCP tools | `oob_client.py` (REST) |
-| OOB service | None (CLI per-task) | MCP server (persistent) | Remote REST API |
+| OOB | `oob_ray_submit.py run` (Ray-scheduled, GPU-isolated) | OOB MCP tools | `oob_client.py` (REST) |
+| OOB service | None (Ray task per invocation) | MCP server (persistent) | Remote REST API |
 | TraceLens | CLI (offline) | CLI + MCP server | CLI (offline) |
 | Shell commands | Direct | Direct | `exec_on_gpu` wrapper |
 | RayJob | None | None | SaFE-managed |
@@ -192,16 +205,17 @@ Parse the stdout for the output directory path.
 
 ## OOB in Fully-Local Mode
 
-OOB has **no persistent service**. The skill calls the `oob` CLI directly per task —
-one blocking command replaces the previous create→submit→poll→list→download flow.
+OOB has **no persistent service**. The skill calls `oob_ray_submit.py run` per task —
+Ray schedules each `claude` / `codex` subprocess with GPU isolation (via
+`HIP_VISIBLE_DEVICES`), one blocking call that writes results to local disk.
 
 ### Single-shot invocation
 
 ```bash
-OOB_CLI="${OOB_CLI:-oob}"  # entrypoint exports this; default is `oob`
+# $OOB_RAY_CLI = "python3 $SKILL_ROOT/scripts/oob_ray_submit.py"
 
 # Codex (one round)
-$OOB_CLI run \
+$OOB_RAY_CLI run \
   -a codex \
   -p "Optimize this Triton kernel ... (see prompt template in kernel-opt/codex.md)" \
   -f $WORK_DIR/kernel.py \
@@ -211,7 +225,7 @@ $OOB_CLI run \
   --no-live --json
 
 # Claude (one round)
-$OOB_CLI run \
+$OOB_RAY_CLI run \
   -a claude \
   -p "Optimize this Triton kernel ... (see prompt template in kernel-opt/claude.md)" \
   -f $WORK_DIR/kernel.py \
@@ -221,9 +235,11 @@ $OOB_CLI run \
   --no-live --json
 ```
 
-`oob_ray_submit.py run` blocks until the agent task reaches a terminal status, prints the final
-result JSON to stdout (with `--json`), and exits 0 on `completed`, 1 on `failed`,
-130 on Ctrl-C. Output files land at:
+`oob_ray_submit.py run` submits the task to the local Ray cluster, which assigns a GPU
+and spawns the `oob` CLI (`oob run ...`) as a Ray worker subprocess. It blocks until
+the agent task reaches a terminal status, prints the final result JSON to stdout
+(with `--json`), and exits 0 on `completed`, 1 on `failed`, 130 on Ctrl-C.
+Output files land at:
 
 ```
 <output-dir>/tasks/<user>/<task_id>/workspace/optimized_kernel.py    # main result
@@ -237,7 +253,7 @@ result JSON to stdout (with `--json`), and exits 0 on `completed`, 1 on `failed`
 Parse the `--json` payload to get `task_id`, `status`, `workspace`, and `error_message`:
 
 ```bash
-RESULT_JSON=$($OOB_CLI run -a codex -p "$PROMPT" -f kernel.py -o $WORK_DIR/codex --json --no-live)
+RESULT_JSON=$($OOB_RAY_CLI run -a codex -p "$PROMPT" -f kernel.py -o $WORK_DIR/codex --json --no-live)
 TASK_ID=$(echo "$RESULT_JSON" | jq -r .task_id)
 STATUS=$(echo "$RESULT_JSON"  | jq -r .status)
 WORKSPACE=$(echo "$RESULT_JSON" | jq -r .workspace)
@@ -247,10 +263,10 @@ WORKSPACE=$(echo "$RESULT_JSON" | jq -r .workspace)
 ### Iterative refinement loop (codex / claude only)
 
 `OOB_ROUND_ITERATIONS` (default 3) iterations per round, each one is a separate
-`oob_ray_submit.py run` invocation. The skill is responsible for stitching them: append the
-previous iteration's verified speedup / compile error into the next prompt.
-The original kernel source is always passed via `-f kernel.py`; **never** pass
-a previous iteration's output as the input.
+`oob_ray_submit.py run` invocation (each Ray-scheduled with GPU). The skill is
+responsible for stitching them: append the previous iteration's verified speedup /
+compile error into the next prompt. The original kernel source is always passed via
+`-f kernel.py`; **never** pass a previous iteration's output as the input.
 
 See [`../kernel-opt/codex.md`](../kernel-opt/codex.md) and
 [`../kernel-opt/claude.md`](../kernel-opt/claude.md) "Fully-Local Execution"
@@ -258,8 +274,8 @@ sections for the full pseudocode.
 
 ### Cancellation
 
-Send `SIGINT` / `SIGTERM` to the `oob` process — it will request graceful
-cancellation of the underlying agent task and return rc=130.
+Send `SIGINT` / `SIGTERM` to the `oob_ray_submit.py` process — it will request graceful
+cancellation of the underlying Ray task and agent subprocess, and return rc=130.
 
 ---
 
@@ -291,6 +307,7 @@ export INFERENCEX_PATH=${INFERENCEX_PATH:-/opt/hyperloom/InferenceX}
 export SKILL_ROOT=/opt/hyperloom/.cursor/skills/inference-optimization
 export SCRIPTS_DIR="$SKILL_ROOT/scripts"
 export GEAK_CLI="python3 $SCRIPTS_DIR/geak_ray_submit.py"
+export OOB_RAY_CLI="python3 $SCRIPTS_DIR/oob_ray_submit.py"
 export OOB_CLI="${OOB_CLI:-oob}"
 
 TIMESTAMP=$(date +%Y-%m-%d-%H-%M)

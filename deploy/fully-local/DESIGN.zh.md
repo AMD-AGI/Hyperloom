@@ -63,7 +63,7 @@
 │  + Agent         │                    │  容器内 CLI（无服务进程）：          │
 │  + Skills        │                    │   • tracelens-* (离线分析)          │
 │                  │                    │   • geak         (Ray 调度)         │
-└──────────────────┘                    │   • oob run      (单任务子进程)     │
+└──────────────────┘                    │   • oob          (Ray 调度)         │
                                         │                                    │
                                         │  后台进程：                         │
                                         │   • sshd                    :22    │
@@ -194,13 +194,15 @@ CLI 工具（无端口，由 Skill 按任务调用）：
 |------|---------|
 | TraceLens | `tracelens-*` console scripts（离线 trace 分析） |
 | GEAK | `geak` CLI 通过 `geak_ray_submit.py` → Ray 调度 |
-| OOB | `oob_ray_submit.py run -a {claude,codex} -p ... -f ...` — 通过 Ray 调度，生成 `claude` / `codex` 子进程并阻塞 |
+| OOB | `oob_ray_submit.py run -a {claude,codex} -p ... -f ...` — Ray 调度 GPU 隔离，`oob` CLI 作为 worker 子进程阻塞至完成 |
 
 ### 4.2 生命周期
 
 **Docker 模式**：`entrypoint.sh` 作为 PID 1 运行 — 配置 agent CLI 认证文件，启动 sshd / Ray /（可选）auth-proxy → 等待端口就绪（30 秒超时） → 进入 supervisor 循环（5 秒间隔，重启崩溃的 Ray 或 auth-proxy）。收到 SIGTERM/SIGINT 时，优雅地终止所有子进程。
 
 **K8s 模式**：当 Pod CMD 被覆盖时，`hyperloom-autostart.sh`（部署时被 symlink 到 `/etc/profile.d/`）在 SSH 登录时运行（而非 PID 1）。它渲染 GEAK LiteLLM 配置，按需启动 Ray，当设置 `OOB_BASE_URL` 时启动本地 OOB auth-proxy 并将 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` 重写为 `http://127.0.0.1:4002/...`。脚本通过检查 `ray status` 和 `:4002` 是否已在监听来避免重复启动后台服务。
+
+**GEAK 模板 fallback**：`hyperloom-autostart.sh` 渲染 GEAK config 时，优先使用 `/opt/hyperloom/geak-config/template.yaml`（方式 A 镜像内由 `Dockerfile` COPY 放入）。在开发模式（`/opt/hyperloom` 是从宿主机 bind-mount 的仓库目录）下该路径可能不存在，脚本会自动 fallback 到 `/opt/hyperloom/deploy/fully-local/geak-litellm.yaml`（即仓库中的模板源文件），确保无论哪种挂载方式 GEAK config 都能正确渲染。
 
 ---
 
@@ -455,7 +457,7 @@ export MODE="${MODE:-fully-local}"
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `HYPERLOOM_BUNDLE` | `/wekafs/fully-local` | **必需** — WekaFS 上的 Hyperloom 资源根目录（含 OOB/TraceLens-internal/InferenceX/geak-litellm.yaml） |
+| `HYPERLOOM_BUNDLE` | `/wekafs/fully-local` | **必需** — 共享存储上的 Hyperloom 资源根目录（含 OOB/TraceLens-internal/InferenceX） |
 | `HYPERLOOM_ROOT` | `/opt/hyperloom` | 容器内 Hyperloom 组件安装根目录（OOB/TraceLens cp 目标） |
 | `GEAK_REPO` | `https://github.com/AMD-AGI/GEAK.git` | GEAK 仓库地址 |
 | `GEAK_BRANCH` | `main` | GEAK 仓库分支（仅当 `GEAK_SHA` 为空时使用） |

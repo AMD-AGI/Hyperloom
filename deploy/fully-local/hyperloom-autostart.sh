@@ -89,7 +89,9 @@ if [ -z "$HYPERLOOM_STARTED" ] && [ "${MODE:-}" = "fully-local" ]; then
 
         if ! ss -tlnp 2>/dev/null | grep -q ":4002 "; then
             echo "Starting OOB auth proxy..."
-            python3 /opt/OOB/oob_cli/auth_proxy.py > /var/log/hyperloom/oob-auth-proxy.log 2>&1 &
+            PROXY_PY="/opt/OOB/oob_cli/auth_proxy.py"
+            [ ! -f "$PROXY_PY" ] && PROXY_PY="/opt/hyperloom/OOB/oob_cli/auth_proxy.py"
+            python3 "$PROXY_PY" > /var/log/hyperloom/oob-auth-proxy.log 2>&1 &
         fi
 
         export ANTHROPIC_BASE_URL="http://127.0.0.1:${AUTH_PROXY_PORT}${ANTHROPIC_PATH}"

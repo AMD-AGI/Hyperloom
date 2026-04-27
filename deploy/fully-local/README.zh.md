@@ -7,7 +7,7 @@
 - 支持 AMD ROCm 的 Docker，或具备 AMD GPU 节点的 K8s 集群
 - 带有 Remote SSH 扩展的 Cursor IDE
 - 用于 GEAK 内核优化的 LLM API 密钥
-- 用于 `oob` CLI（Claude Code / Codex 后端）的 OOB API 密钥和 base URL
+- 用于 OOB（Claude Code / Codex 后端，通过 `oob_ray_submit.py` 经 Ray 调度）的 OOB API 密钥和 base URL
 
 ## 快速开始（Docker）
 
@@ -57,7 +57,7 @@ Host hyperloom
 2. 打开文件夹：`/opt/hyperloom`
 3. Skills 自动加载
 
-> 全本地模式**不运行持久化 MCP 服务** — TraceLens、GEAK 和 OOB 均以容器内 CLI 方式调用（`tracelens-*`、`geak` 通过 Ray、`oob run`）。无需启用任何 MCP 开关。
+> 全本地模式**不运行持久化 MCP 服务** — TraceLens、GEAK 和 OOB 均以容器内 CLI 方式调用（`tracelens-*`、`geak` 通过 `geak_ray_submit.py` 经 Ray 调度、OOB 通过 `oob_ray_submit.py` 经 Ray 调度）。无需启用任何 MCP 开关。
 
 ### 4. 运行优化
 
@@ -65,12 +65,14 @@ Host hyperloom
 
 ```
 @inference-optimization Optimize /models/Qwen3-30B-A3B
+mode: fully-local
 ```
 
 Agent 会自动检测模式、框架、GPU 数量和 InferenceX 路径。仅在需要时指定额外参数：
 
 ```
 @inference-optimization Optimize /models/Qwen3-30B-A3B
+mode: fully-local
 
 TP=8, CONC=64, ISL=1024, OSL=1024
 Precision: FP8
@@ -84,9 +86,9 @@ Save results to /opt/hyperloom/results/
 
 | 后端 | 说明 | 耗时 | 依赖 |
 |------|------|------|------|
-| `geak` | 本地子进程，具有 GPU 访问和硬件验证能力 | 2-3 小时 | `LLM_API_KEY` + 匹配的 `GEAK_MODEL_NAME` / `LLM_API_BASE` |
-| `codex` | Codex 代码生成 + 本地基准测试 | ~1 小时 | `OOB_API_KEY` + `OOB_BASE_URL` |
-| `claude` | Claude Code 生成 + 本地基准测试 | ~1 小时 | `OOB_API_KEY` + `OOB_BASE_URL` |
+| `geak` | `geak_ray_submit.py` 经 Ray 调度，GPU 隔离，硬件验证 | 2-3 小时 | `LLM_API_KEY` + 匹配的 `GEAK_MODEL_NAME` / `LLM_API_BASE` |
+| `codex` | `oob_ray_submit.py` 经 Ray 调度 Codex 子进程 + 本地基准测试 | ~1 小时 | `OOB_API_KEY` + `OOB_BASE_URL` |
+| `claude` | `oob_ray_submit.py` 经 Ray 调度 Claude 子进程 + 本地基准测试 | ~1 小时 | `OOB_API_KEY` + `OOB_BASE_URL` |
 
 在提示词中指定后端（默认 `geak`，也可通过 `KERNEL_OPT_BACKENDS` 修改）：
 
@@ -166,6 +168,42 @@ spec:
 
 通过 Cursor Remote SSH 连接 → `<node-ip>:30022`，打开 `/opt/hyperloom`。
 
+## BYOI（Bring Your Own Image）
+
+如果你已有包含推理框架的自定义镜像（特殊驱动版本、内部镜像仓库等），无需使用 Hyperloom 预构建镜像，可以直接在你的镜像上运行 Hyperloom。
+
+### 最小依赖
+
+- Python ≥ 3.10 + ROCm GPU 驱动（`/dev/kfd` + `/dev/dri`）
+- sglang 或 vllm 已安装
+- Hyperloom 资源 bundle 已挂载到容器内（含 OOB / TraceLens / InferenceX，可放在任意共享存储上）
+
+### 启动方式
+
+```bash
+docker run -d --shm-size=16g \
+  --device=/dev/kfd --device=/dev/dri \
+  -v /path/to/models:/models \
+  -v /path/to/hyperloom-bundle:/hyperloom-bundle:ro \
+  -v hyperloom-data:/opt/hyperloom \
+  -p 20022:22 \
+  -e LLM_API_KEY=<your-geak-api-key> \
+  -e LLM_API_BASE=https://<your-openai-compatible-endpoint>/v1 \
+  -e HYPERLOOM_BUNDLE=/hyperloom-bundle \
+  your-custom-image:latest
+```
+
+> 容器需自带 sshd。`HYPERLOOM_BUNDLE` 指向容器内 bundle 挂载路径（默认 `/wekafs/fully-local`，按实际挂载点设置）。`/opt/hyperloom` 建议挂载持久卷，避免每次重建容器都重新 bootstrap。
+
+### 工作流程
+
+1. 用 Cursor Remote SSH 连入容器，打开 `/opt/hyperloom`
+2. Agent 首次执行 Skill 时自动检测到 BYOI 环境，运行 `bootstrap.sh`
+3. bootstrap 自动安装 GEAK、Ray、TraceLens、OOB 等依赖（约 3-5 分钟）
+4. 完成后与预构建镜像行为完全一致
+
+> bootstrap 是幂等的 — 已安装的组件自动跳过，后续启动秒级完成。详细设计参见 [DESIGN.zh.md 第 7 节](DESIGN.zh.md#7-byoi-模式设计方式-b)。
+
 ## 容器端口
 
 | 内部端口 | 服务 |
@@ -175,7 +213,7 @@ spec:
 | 8265 | Ray dashboard（内部） |
 | 4002 | OOB auth-proxy — 仅当设置 `OOB_BASE_URL` 时存在（内部） |
 
-> TraceLens、GEAK 和 OOB **不监听任何端口** — 它们以 CLI 方式调用（`tracelens-*`、`geak` 通过 Ray、`oob run`）。
+> TraceLens、GEAK 和 OOB **不监听任何端口** — 它们以 CLI 方式调用（`tracelens-*`、`geak` 通过 `geak_ray_submit.py` 经 Ray 调度、OOB 通过 `oob_ray_submit.py` 经 Ray 调度）。
 
 ## 环境变量
 
@@ -187,10 +225,9 @@ spec:
 | `GEAK_API_KEY` | 回退到 `LLM_API_KEY` | 可选的 GEAK 专用 API 密钥覆盖 |
 | `GEAK_BASE_URL` | 回退到 `LLM_API_BASE` | 可选的 GEAK 专用端点覆盖 |
 | `FRAMEWORK` | `sglang` | 推理框架（`sglang` 或 `vllm`） |
-| `OOB_API_KEY` | — | 统一 OOB API 密钥（Claude/Codex 的 `oob run` 调用共用） |
+| `OOB_API_KEY` | — | 统一 OOB API 密钥（Claude/Codex 的 `oob_ray_submit.py run` 调用共用） |
 | `OOB_BASE_URL` | — | 统一 OOB API 端点（设置后，容器内 `:4002` auth-proxy 重写 Bearer 认证） |
-| `OOB_CLI` | `oob` | OOB CLI 可执行文件名；仅在 `pip install` 到其他位置时覆盖 |
-| `OOB_HOME` | `~/.oob` | `oob run` 存储任务工作区和 SQLite 数据库的根目录 |
+| `OOB_HOME` | `~/.oob` | `oob` 存储任务工作区和 SQLite 数据库的根目录 |
 | `HIP_VISIBLE_DEVICES` | — | 逗号分隔的 GPU 索引（如 `0,1,2`） |
 | `GPUS_PER_NODE` | — | 覆盖 entrypoint 显示的 GPU 数量 |
 
@@ -203,7 +240,7 @@ tail -f /var/log/hyperloom/ray-head.log         # Ray（GEAK GPU 调度器）
 tail -f /var/log/hyperloom/oob-auth-proxy.log   # OOB auth proxy（仅当设置 OOB_BASE_URL 时）
 ```
 
-> 每个任务的 CLI 日志不写入 `/var/log/hyperloom`。`oob run` 将文件存储在 `${OOB_HOME:-~/.oob}/tasks/cli/<task_id>/workspace/` 下（如 `execution.log`），而 `geak` 将结果写入其自身的输出目录。
+> 每个任务的 CLI 日志不写入 `/var/log/hyperloom`。`oob_ray_submit.py run` 的任务文件存储在 `${OOB_HOME:-~/.oob}/tasks/cli/<task_id>/workspace/` 下（如 `execution.log`），而 `geak` 将结果写入其自身的输出目录。
 
 ## 安全
 
@@ -234,7 +271,7 @@ source /etc/profile.d/hyperloom.sh
 ```bash
 ray status                                           # Ray head
 ss -tlnp | grep -E ':6379|:8265|:4002' || true       # 监听端口
-command -v oob && oob --help | head -5               # OOB CLI 已安装
+command -v oob && oob --help | head -5               # OOB CLI 已安装（oob_ray_submit.py 的底层依赖）
 command -v geak                                      # GEAK CLI 已安装
 python3 -c "import TraceLens" && echo "TraceLens OK" # TraceLens 可导入
 printf 'OPENAI_BASE_URL=%s\nANTHROPIC_BASE_URL=%s\n' "$OPENAI_BASE_URL" "$ANTHROPIC_BASE_URL"

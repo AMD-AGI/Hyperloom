@@ -1,6 +1,6 @@
 ---
 name: claude-inference-kernel-reference
-description: Claude Code backend for kernel optimization. In local/claw modes uses the OOB GPU Optimizer MCP; in fully-local mode uses the `oob run` CLI. Multi-turn agent with tool-use capability. Verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
+description: Claude Code backend for kernel optimization. In local/claw modes uses the OOB GPU Optimizer MCP; in fully-local mode uses `oob_ray_submit.py run` (Ray-scheduled CLI). Multi-turn agent with tool-use capability. Verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
 ---
 
 # Claude Code — Kernel Optimization Backend
@@ -169,10 +169,10 @@ Identical to Codex's "Fully-Local Execution" section in [`codex.md`](codex.md);
 swap `-a codex` → `-a claude` and use Claude-specific constants:
 
 ```bash
-OOB_CLI="${OOB_CLI:-oob}"
+# $OOB_RAY_CLI = "python3 $SKILL_ROOT/scripts/oob_ray_submit.py" (set by setup.md)
 OUT_DIR="$WORK_DIR/oob_claude_${KERNEL_NAME}_iter${ITER}"
 
-RESULT_JSON=$($OOB_CLI run \
+RESULT_JSON=$($OOB_RAY_CLI run \
     -a claude \
     -p "$PROMPT" \
     -f "$WORK_DIR/kernel.py" \

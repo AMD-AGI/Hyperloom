@@ -69,6 +69,7 @@ if [ "${MODE:-}" = "fully-local" ]; then
     MODE="fully-local"
     WORKSPACE_ROOT="${WORKSPACE_ROOT:-/opt/hyperloom}"
     GEAK_CLI="python3 $SCRIPTS_DIR/geak_ray_submit.py"
+    OOB_RAY_CLI="python3 $SCRIPTS_DIR/oob_ray_submit.py"
     OOB_CLI="${OOB_CLI:-oob}"
 elif [ "${MODE:-}" = "claw" ]; then
     MODE="claw"
@@ -100,6 +101,7 @@ export OSL="${OSL:-256}"
 export FRAMEWORK="${FRAMEWORK:-sglang}"
 export INFERENCEX_PATH="$INFERENCEX_PATH"
 [ -n "${GEAK_CLI:-}" ] && export GEAK_CLI
+[ -n "${OOB_RAY_CLI:-}" ] && export OOB_RAY_CLI
 [ -n "${OOB_CLI:-}" ] && export OOB_CLI
 ```
 

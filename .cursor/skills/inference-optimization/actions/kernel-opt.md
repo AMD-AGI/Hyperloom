@@ -29,7 +29,7 @@ Use `trace_action.py` to record start/end for each external component:
 
 **GEAK** — if `geak` is in `KERNEL_OPT_BACKENDS`:
 1. `python3 $SCRIPTS_DIR/trace_action.py --component geak --action start`
-2. Call `geak_get_model_config` → `geak_set_model_config` with `extra_headers` from script output
+2. **local/claw only:** Call `geak_get_model_config` → `geak_set_model_config` with `extra_headers` from script output. **Fully-local:** skip MCP header injection (GEAK config is pre-rendered; `geak_ray_submit.py` handles invocation).
 3. After ALL GEAK tasks: `python3 $SCRIPTS_DIR/trace_action.py --component geak --action end`
 
 **OOB (Codex/Claude)** — if `codex` or `claude` is in `KERNEL_OPT_BACKENDS`:
@@ -41,7 +41,7 @@ Use `trace_action.py` to record start/end for each external component:
 2. After all LLM calls: `python3 $SCRIPTS_DIR/trace_action.py --component llm --action end`
 
 See each backend's skill doc for details. OOB header injection is automatic
-(via `auth_proxy.py`). GEAK headers require `geak_set_model_config`.
+(via `auth_proxy.py` in local/claw, or the local `:4002` proxy in fully-local).
 
 ### Step 1: Locate kernel source
 

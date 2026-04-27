@@ -304,7 +304,7 @@ shutil.rmtree(os.path.expanduser("~/.triton/cache"), ignore_errors=True)
 - GEAK must preserve the exact function signature (args + constexprs)
 - Clear `.json` metadata files to force Inductor to reload source
 
-**Recommended: Use `patch_inductor.py` (IR-8):**
+**Recommended: Use `patch_inductor.py` (IR-6):**
 
 ```bash
 # Patch kernel source + update .best_config tiling parameters
@@ -383,7 +383,7 @@ Before patching any GEAK output into the serving environment:
 - Function signature (parameters, constexprs) matches original
 - Decorators preserved (`@triton_heuristics`, `@triton.jit`, etc.)
 - No new imports that don't exist in the target environment
-- Block sizes within IR-8 constraints (not exceeding 2x original)
+- Block sizes within IR-6 constraints (not exceeding 2x original)
 - Source code is actual code, not comments or path references
 - `files[].content` contains the full source (not truncated)
 - `.best_config` values identified from GEAK output (XBLOCK, R0_BLOCK, BLOCK_N, BLOCK_K, num_warps, num_stages) and passed via `--best-config`
