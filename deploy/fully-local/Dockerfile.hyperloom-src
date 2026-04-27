@@ -8,10 +8,10 @@
 #   docker push docker.io/primussafe/hyperloom-src:latest
 
 FROM scratch
-COPY deploy/fully-local/OOB_mcp_server /oob-mcp/agent_mcp_server
+COPY deploy/fully-local/OOB /OOB/oob_cli
 COPY TraceLens-internal /TraceLens
 COPY inference_optimization/InferenceX /InferenceX
 COPY .cursor/skills/inference-optimization /skills/inference-optimization
-COPY deploy/fully-local/mcp.json /deploy/mcp.json
 COPY deploy/fully-local/entrypoint.sh /deploy/entrypoint.sh
 COPY deploy/fully-local/hyperloom-autostart.sh /deploy/hyperloom-autostart.sh
+COPY deploy/fully-local/geak-litellm.yaml /deploy/geak-litellm.yaml
