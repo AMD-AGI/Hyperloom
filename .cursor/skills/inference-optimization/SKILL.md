@@ -30,10 +30,12 @@ gap acts as an urgency multiplier on all action scores.
 This skill supports two execution modes. **Read the mode-specific document for your mode
 before starting:**
 
-- **Local mode** (Cursor IDE, direct shell): see [`modes/LOCAL.md`](modes/LOCAL.md)
+- **Local mode** (Hyperloom container, Ray-scheduled GEAK CLI): see [`modes/LOCAL.md`](modes/LOCAL.md)
 - **Claw mode** (SaFE RayJob, `exec_on_gpu`): see [`modes/CLAW.md`](modes/CLAW.md)
 
-**Auto-detection:** `GEAK_LOCAL=true` → local mode (default). Claw client context → claw mode.
+**Auto-detection:**
+- `MODE=local` → local mode
+- Claw client context → claw mode
 
 ## Iron Rules (non-negotiable)
 
@@ -75,7 +77,10 @@ Always use `scripts/patch_inductor.py` with `--target-file`. The `--cache-dir` o
 
 ### IR-7: NEVER modify GEAK configuration
 
-GEAK is an external service — treat it as **read-only infrastructure**. The skill MUST NOT
+**Local mode:** GEAK is CLI-only via Ray (`geak_ray_submit.py`); do not use GEAK MCP or
+`geak_client.py`. See [`modes/LOCAL.md`](modes/LOCAL.md) IR-13 and IR-14.
+
+**Claw mode:** GEAK is an external service — treat it as **read-only infrastructure**. The skill MUST NOT
 modify any GEAK configuration files, settings, or parameters beyond what is passed as
 arguments to `geak_create_task`. Specifically:
 
@@ -87,16 +92,37 @@ arguments to `geak_create_task`. Specifically:
 - **Do NOT** modify any test data, results, or configuration files belonging to GEAK
   (e.g., `tests/test_data/`, `server/config.py`, `server/templates/`)
 
-The ONLY interaction allowed is through these GEAK MCP tool calls:
+In claw mode, the ONLY interaction allowed is through these GEAK MCP tool calls:
 `geak_get_model_config` (read-only), `geak_create_task`, `geak_submit_task`,
 `geak_get_task`, `geak_get_outputs`, `geak_download_file`, `geak_list_tasks`.
 
-**NEVER call `geak_set_model_config`** — the LLM backend is pre-configured by the
-administrator. Changing it risks setting a non-existent model and breaking all tasks.
+**NEVER call `geak_set_model_config` to change the model** — the LLM backend is
+pre-configured by the administrator. Changing `model_class`, `model_name`, or
+`api_base` risks setting a non-existent model and breaking all tasks.
+
+**Exception — tracing headers (claw / MCP path):** At the start of the kernel-opt action, you MUST
+call `geak_set_model_config` exactly once to inject observability headers. Run
+`trace_action.py --component geak --action start` first to record timing and
+generate the config, then apply the `extra_headers` via MCP (see kernel-opt/geak.md
+"Tracing Setup"). Do NOT modify `model_class`, `model_name`, `api_base`, or `api_key`.
+
+Violation (changing model/backend) = immediate run invalidation.
+
+### IR-7b: Orchestrator MUST NOT write kernel optimization code itself
+
+All kernel optimization MUST go through the configured `KERNEL_OPT_BACKENDS`
+(`geak`, `codex`, `claude`, `llm`). The orchestrator Agent's role is to **prepare
+prompts, submit tasks to backends, verify results, and integrate** — NEVER to
+directly author optimized Triton/HIP/CUDA kernels.
+
+Even if the orchestrator is the same LLM model as a backend (e.g., Claude
+orchestrating via OOB Claude), it MUST still use the backend toolchain. Backends
+provide isolated workspaces, GPU-side validation, reproducible trajectories, and
+Ray-managed GPU scheduling that direct in-chat generation lacks.
 
 Violation = immediate run invalidation.
 
-**Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11) and [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12).**
+**Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11) and [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12 through IR-16).**
 
 ## Kernel Optimization & Tooling Constants
 
@@ -160,7 +186,15 @@ These are recurring errors observed in production CI runs. **Read before executi
    server startup, health wait, benchmark, and profiling in a tested sequence. Manual
    launch skips health checks and often hits Exit code 144 (SIGTERM from stale processes).
 
-5. **Never call `geak_set_model_config`.** See IR-7. GEAK LLM backend is pre-configured.
+5. **Never call `geak_set_model_config` to change the model.** See IR-7. Only exception: tracing headers.
+
+6. **Record start/end timestamps for ALL external calls.** Before invoking
+   any external component (GEAK, OOB, LLM proxy, TraceLens, or future backends),
+   run `python3 $SCRIPTS_DIR/trace_action.py --component <name> --action start`.
+   After the component finishes, run `--action end`. This enables per-message cost
+   attribution. If the specific backend skill already includes tracing steps, follow
+   those. If not, apply this rule as a fallback. Failure to trace does NOT block
+   execution — skip if the script is unavailable.
 
 ## DFS Search Tree
 
