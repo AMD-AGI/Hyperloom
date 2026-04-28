@@ -61,6 +61,25 @@ log() { echo "[run.sh $(date +%H:%M:%S)] $*"; }
 # ============================================================
 # Run before STRICT/defaults/mode detection so missing CLI dependencies show up
 # as the first visible failure, not deep inside a backgrounded tmux launch.
+run_preflight_step() {
+    local label=$1
+    shift
+    local timeout_s="${PREFLIGHT_STEP_TIMEOUT_S:-300}"
+    log "  ${label} (timeout=${timeout_s}s)"
+    set +e
+    timeout --signal=TERM --kill-after=30s "$timeout_s" "$@"
+    local rc=$?
+    set -e
+    if [[ $rc -eq 124 || $rc -eq 137 || $rc -eq 143 ]]; then
+        echo "ERROR: preflight step '$label' timed out after ${timeout_s}s" >&2
+        exit 14
+    fi
+    if [[ $rc -ne 0 ]]; then
+        echo "ERROR: preflight step '$label' failed with exit $rc" >&2
+        exit 14
+    fi
+}
+
 ensure_node() {
     if command -v node >/dev/null 2>&1; then
         local ver
@@ -81,10 +100,8 @@ ensure_node() {
         *) echo "ERROR: unsupported arch '$arch' for Node binary install" >&2; return 1 ;;
     esac
     local url="https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-linux-$arch.tar.xz"
-    log "  fetching $url"
-    curl -fsSL "$url" \
-      | tar -xJ -C /usr/local --strip-components=1 --exclude='*.md' --exclude='LICENSE' \
-      || { echo "ERROR: failed to download/extract Node $NODE_VER" >&2; return 1; }
+    run_preflight_step "install Node $NODE_VER" \
+        bash -o pipefail -c 'curl -fsSL "$1" | tar -xJ -C /usr/local --strip-components=1 --exclude="*.md" --exclude="LICENSE"' _ "$url"
     hash -r
     log "  installed: node $(node --version)  npm $(npm --version)"
 }
@@ -92,6 +109,9 @@ ensure_node() {
 preflight_deps() {
     log "preflight_deps: checking required CLIs (tmux jq curl claude)"
     log "  hostname=$(hostname)  arch=$(uname -m)"
+
+    command -v timeout >/dev/null 2>&1 \
+        || { echo "ERROR: required CLI 'timeout' is missing (coreutils); cannot enforce preflight timeouts" >&2; exit 9; }
 
     local need_apt=()
     for tool in tmux jq curl; do
@@ -104,8 +124,10 @@ preflight_deps() {
             echo "ERROR: need ${need_apt[*]} but apt-get unavailable; install manually then re-run" >&2
             exit 10
         fi
-        apt-get update -qq 2>&1 | tail -2
-        apt-get install -y -qq "${need_apt[@]}" 2>&1 | tail -2
+        run_preflight_step "apt-get update" \
+            bash -o pipefail -c 'apt-get update -qq 2>&1 | tail -2'
+        run_preflight_step "apt-get install ${need_apt[*]}" \
+            bash -o pipefail -c 'apt-get install -y -qq "$@" 2>&1 | tail -2' _ "${need_apt[@]}"
         for t in "${need_apt[@]}"; do
             command -v "$t" >/dev/null 2>&1 \
                 || { echo "ERROR: $t still missing after apt-get install — check apt sources / network" >&2; exit 11; }
@@ -117,7 +139,8 @@ preflight_deps() {
         if ! command -v npm >/dev/null 2>&1; then
             ensure_node || { echo "ERROR: Node.js install failed (prereq for claude CLI)" >&2; exit 12; }
         fi
-        npm install -g @anthropic-ai/claude-code 2>&1 | tail -3
+        run_preflight_step "npm install @anthropic-ai/claude-code" \
+            bash -o pipefail -c 'npm install -g @anthropic-ai/claude-code 2>&1 | tail -3'
         command -v claude >/dev/null 2>&1 \
             || { echo "ERROR: claude CLI unavailable after 'npm install -g @anthropic-ai/claude-code'" >&2; exit 13; }
     fi
