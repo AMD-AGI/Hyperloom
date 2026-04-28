@@ -34,6 +34,63 @@ Tooling rules:
 - Do NOT call CronCreate / CronDelete / Schedule / TodoWrite-as-scheduler / any background task scheduler. The outer monitor tails your log every 60s — keep your output legible and in-process.
 - Do NOT spawn detached `&` background daemons. The pane is restarted by the launcher's `--continue` loop; rogue background jobs survive restarts and corrupt state.
 
+Stage Gate Enforcement (CRITICAL — IR-20):
+- The protocol has 8 stages (0-7). You MUST execute them IN ORDER.
+- After completing each stage, call complete_stage() to record it in state.json.
+- Before starting any stage N, verify ALL stages 0..N-1 are in protocol_stages_completed.
+- DO NOT pre-populate the action stack from prior session knowledge during warm-start.
+  The action stack comes from PROFILING (Step 1) + DEEP ANALYSIS (Step 2), not memory.
+- DO NOT enter the DFS loop (Step 4) until Steps 0, 1, 2, 3 are ALL completed.
+- The Kernel Manager work queue MUST have entries before Step 3 completes (from Step 2 bulk dispatch).
+
+Action Tracking (CRITICAL — IR-21):
+- EVERY optimization MUST be recorded in state.json completed_actions[] with:
+  {id, action, name, status, description, tput_before, tput_after, gain_pct, timestamp}
+- tput_before = MEASURED throughput BEFORE the change.
+- tput_after = MEASURED throughput AFTER the change.
+- This builds the throughput-vs-time plot. Untracked gains are invisible.
+- Update state.json baseline_tput_per_gpu, current_tput_per_gpu, best_tput_per_gpu after EVERY bench.
+
+Warm-Start Rule (CRITICAL — IR-22):
+- Warm-start (Step 0) does ONE thing: launch the server AS-IS (no patches, no hotfixes),
+  run a baseline benchmark, and record the measured throughput. That's it.
+- DO NOT apply any hotfixes, patches, or optimizations during warm-start.
+- Known hotfixes from prior sessions (block_m fix, TRITON_ROPE toggle, CK alignment,
+  BF16 GEMM tuning, etc.) go into the ACTION STACK during Step 3 (Build Stack).
+- The DFS loop (Step 4) then applies them one-by-one with proper before/after benchmarks.
+- This ensures every single gain shows up on the timeline plot.
+
+Read-Only Analysis Rule (CRITICAL — IR-23):
+- Steps 1 (Profile) and 2 (Deep Analysis) are READ-ONLY. No code changes, no patches,
+  no file writes to system packages, no env var changes, no server restarts.
+- These steps ONLY produce: findings, kernel breakdowns, and candidate actions.
+- All candidate actions go into the action_stack (Step 3) for DFS execution (Step 4).
+- The ONLY place code changes happen is the DFS loop (Step 4).
+
+Stack Empty Rule (CRITICAL — IR-24):
+- If the action_stack is empty during DFS, do NOT exit the loop or wait for dream.
+- IMMEDIATELY re-profile + re-run deep analysis (with env var scan + top 10 kernels).
+- The deep analysis MUST produce at least 5-10 candidates. If fewer, go deeper.
+- The marathon has 24h — empty stack after 1h means analysis was incomplete.
+
+Deep Analysis Scope (CRITICAL):
+- Step 2 MUST analyze AT LEAST the top 10 kernels by GPU% (threshold: 2.0%).
+- Step 2 MUST start with an env var scan (check serve script for missing flags like
+  FP4_ASM_GEMM, FP8_MFMA_PAGE_ATTN, AMDGCN_USE_BUFFER_OPS, AITER_CONFIG_FMOE, etc.)
+- Each unset high-impact env var becomes a candidate action (score = gpu_pct * 10).
+- The action stack after deep analysis should have AT LEAST 5-10 items.
+
+Stage checklist — execute in this exact order, no exceptions:
+  Step 0: WARM-START → launch server AS-IS with NO patches, run baseline benchmark, record tput
+  Step 1: RE-PROFILE → READ-ONLY profiling on running server, get kernel GPU% breakdown
+  Step 2: DEEP ANALYSIS → READ-ONLY env var scan + top-10 kernel analysis, min 5-10 candidates
+  Step 3: BUILD STACK → score actions from profile+analysis, verify KM queue has work
+  Step 4: DFS LOOP → pop/execute/measure/re-score. If stack empty → re-profile + re-analyze (IR-24)
+  Step 5+: SWEEP, REPORT, DREAM
+
+On --continue restart: Read state.json, check protocol_stages_completed, resume from
+the NEXT incomplete stage. Do NOT restart from Step 0 if it's already completed.
+
 Autonomy:
 - Work autonomously; never ask for human confirmation between DFS actions.
-- Begin the Marathon protocol from Step 0 WARM-START now.
+- Begin the Marathon protocol now. Read state.json first to determine which stage to start from.
