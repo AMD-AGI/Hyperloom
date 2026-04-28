@@ -60,17 +60,57 @@ a re-profile to understand the baseline before going deep.
 
 ## The Protocol
 
-**Execute these steps in order.**
+**Execute these steps in STRICT ORDER. No skipping. No reordering.**
+
+Each step has a GATE — you MUST record completion in `state.json` before
+proceeding to the next step. Check `state.json["protocol_stages_completed"]`
+at the start of each step; if the previous stage is missing, you are out
+of order — STOP and go back.
 
 ```
-0. WARM-START     → actions/setup.md       — ingest Sprint handoff or pre-optimized baseline
-1. RE-PROFILE     → actions/profile.md     — fresh trace on the optimized baseline
-2. DEEP ANALYSIS  → actions/deep-kernel-analysis.md — per-kernel dispatch tracing + variant discovery
-3. BUILD STACK    → score Marathon-specific actions, push highest-first
+0. WARM-START     → actions/setup.md       — ingest baseline + BENCHMARK to measure actual tput
+1. RE-PROFILE     → actions/profile.md     — fresh trace on the baseline server
+2. DEEP ANALYSIS  → actions/deep-kernel-analysis.md + BULK KM DISPATCH
+3. BUILD STACK    → score Marathon-specific actions from profile + analysis results
 4. DFS LOOP       → pop → execute → measure → re-score → dream every 3-4h → repeat
 5. SWEEP          → actions/sweep.md       — extended sweep on deeply-optimized config
 6. REPORT         → actions/report.md      — final report + KB contribution
 7. DREAM          → final consolidation, cross-run KB contribution
+```
+
+### Stage Gate Protocol (MANDATORY — IR-20)
+
+After completing each stage, record it in state.json:
+
+```python
+import json, datetime
+def complete_stage(state_path, stage_num, stage_name, result_summary):
+    with open(state_path) as f:
+        state = json.load(f)
+    entry = {
+        "stage": stage_num,
+        "name": stage_name,
+        "completed_at": datetime.datetime.now(datetime.UTC).isoformat(),
+        "result": result_summary
+    }
+    if "protocol_stages_completed" not in state:
+        state["protocol_stages_completed"] = []
+    state["protocol_stages_completed"].append(entry)
+    state["protocol_stage"] = stage_num + 1
+    state["phase"] = stage_name
+    with open(state_path, "w") as f:
+        json.dump(state, f, indent=2)
+```
+
+**GATE CHECK** — run this before starting any stage N:
+```python
+def gate_check(state, required_stage):
+    completed = [s["stage"] for s in state.get("protocol_stages_completed", [])]
+    for s in range(required_stage):
+        if s not in completed:
+            raise RuntimeError(f"STAGE GATE VIOLATION: stage {s} not completed, "
+                               f"cannot start stage {required_stage}. "
+                               f"Completed: {completed}")
 ```
 
 ### Step 0: Warm-Start
@@ -81,52 +121,188 @@ Two modes (see `actions/setup.md`):
   load `handoff/opportunities.json` as pre-scored Marathon action candidates.
 - **Mode B: Pre-optimized directory** — parse launch script, extract config, set as baseline.
 
-Both modes skip basic setup and go directly to re-profile.
+**Step 0 MUST end with a MEASURED baseline benchmark.** The `baseline_tput_per_gpu`
+in state.json MUST be an actual benchmark result, never an assumed or inherited
+value. Run the benchmark, record the result, then call `complete_stage(0, "warmstart", ...)`.
 
-### Step 2: Deep Analysis
+Both modes then proceed to Step 1 RE-PROFILE (no skipping).
 
-For every kernel consuming >MIN_GPU_PCT of GPU time, run `actions/deep-kernel-analysis.md`:
+### Step 1: Re-Profile (MANDATORY — do NOT skip)
 
+**GATE:** Step 0 must be in `protocol_stages_completed` before starting Step 1.
+
+After measuring the baseline in Step 0, profile the RUNNING server to get
+a kernel-level GPU% breakdown. This drives everything that follows.
+
+1. Run `actions/profile.md` on the baseline server (already running from Step 0)
+2. Record the top-N kernels by GPU% in `state.json["kernel_dispatch_map"]`
+3. Identify which kernels are >1% GPU time — these are your optimization targets
+4. Record the profile result path in state.json
+5. Call `complete_stage(1, "re-profile", {"top_kernels": [...], "profile_path": "..."})`
+
+**DO NOT build the action stack or start DFS without a fresh profile.**
+Prior session knowledge is useful context but NOT a substitute for profiling
+the current running server — library versions change, optimizations get
+reverted, dispatch paths shift.
+
+### Step 2: Deep Analysis + BULK KM DISPATCH
+
+**GATE:** Step 1 must be in `protocol_stages_completed` before starting Step 2.
+
+Run `actions/deep-kernel-analysis.md` on AT LEAST the **top 10 kernels** by GPU%
+(minimum threshold: 2.0% GPU time). Do NOT stop after finding one opportunity.
+
+**MANDATORY analysis steps for EACH of the top 10 kernels:**
+
+0. **Env var scan** — FIRST, scan ALL framework env vars that control dispatch
+   (FP4_ASM, MFMA_PAGE_ATTN, BUFFER_OPS, CONFIG_FMOE, CONFIG_GEMM_BF16, etc.)
+   Check which are set vs unset in the serve script. Each unset high-impact flag
+   is a candidate action.
 1. **Dispatch path trace** — Python call chain → compiled extension → GPU kernel
 2. **Variant discovery** — search for alternative implementations, check platform branching
 3. **Config verification** — check shape-specific tuning configs vs generic defaults
 4. **Build system trace** — how is the kernel compiled? Patch vs rebuild required?
 5. **Opportunity report** — classifies each kernel as `self-fix` or `oob-rewrite`:
-   - **Self-fix** (dispatch bugs, one-line routing changes): orchestrator applies directly
-   - **OOB-rewrite** (kernel rewrites, multi-file changes): written to the Kernel Manager's
-     work queue at `$RESULT_DIR/kernel_manager/work_queue.jsonl`
+   - **Self-fix** (dispatch bugs, env var flags, config changes): → action_stack
+   - **OOB-rewrite** (kernel rewrites, multi-file changes): → KM work queue
+
+The action_stack after Step 2 should have AT LEAST 5-10 candidate actions.
+If you have fewer than 5, you haven't analyzed deeply enough — go back and
+check more kernels and env var flags.
+
+**BULK KM DISPATCH (MANDATORY after deep analysis):**
+
+After completing deep analysis, IMMEDIATELY write work_queue entries for ALL
+OOB-rewrite targets in bulk. Do NOT trickle them one-at-a-time as you pop DFS
+actions. The KM runs asynchronously — feeding it all targets up front maximizes
+parallelism and ensures kernel optimizations are in-flight while you do other DFS work.
+
+For EACH kernel with GPU% >= 1 that needs OOB optimization:
+```python
+entry = {
+    "id": f"km-{kernel_name_slug}",
+    "kernel_name": kernel_name,
+    "source_file": source_file,
+    "source_type": source_type,  # "triton" | "cpp_hip" | "python"
+    "strategy": strategy,        # "oob-rewrite" | "triton-rewrite" | "hip-kernel" | etc.
+    "priority": int(gpu_pct * 10),
+    "gpu_pct": gpu_pct,
+    "dispatch_analysis": {
+        "active_path": current_dispatch_path,
+        "optimal_path": best_known_path,
+        "dispatch_bug": bool,
+    },
+    "trace_shapes": [...],       # actual GEMM/op shapes from profiler
+    "constraints": {
+        "head_dim": 64,          # from model config
+        "hidden_size": 2880,
+        "target_vgprs": 64,     # for 4-wave occupancy on gfx950
+        "fp8_type": "e4m3fnuz", # MI355X native type
+    },
+    "status": "pending",
+    "timestamp": now_utc_iso,
+}
+# Append to $RESULT_DIR/kernel_manager/work_queue.jsonl
+```
+
+Target: up to 25 entries per analysis cycle (`KERNEL_OPT_MAX_SUBMISSIONS = 25`).
+The KM will process them in priority order (highest gpu_pct first).
+
+### Step 3: Build Stack
+
+**GATE:** Step 2 must be in `protocol_stages_completed` before starting Step 3.
+
+Score Marathon-specific actions based on the profile and deep analysis results.
+The action stack MUST be derived from actual profiling data — not from prior
+session knowledge alone. Prior sessions provide context for scoring, but the
+actions themselves come from the current profile + deep analysis.
+
+1. For each kernel from the profile: score based on GPU%, dispatch analysis,
+   and prior session outcomes (what worked/failed before)
+2. Push all scored actions onto `action_stack`, highest score first
+3. Verify the KM work queue has entries (from Step 2 bulk dispatch)
+4. Call `complete_stage(3, "build-stack", {"stack_size": N, "km_queue_size": M})`
 
 ### Step 4: The DFS Loop (Marathon Core)
 
-```
-WHILE action_stack is not empty AND NOT stopping_criteria_met():
+**GATE:** Step 3 must be in `protocol_stages_completed` before entering the DFS loop.
 
-  a. Pop highest-scored action from action_stack
-  b. IF action is a self-fix dispatch bug:
+```
+WHILE NOT stopping_criteria_met():
+
+  ** STACK EMPTY → IMMEDIATE RE-ANALYSIS (IR-24): **
+     If action_stack is empty, do NOT exit the DFS loop. Instead:
+       1. Re-profile the server (actions/profile.md)
+       2. Run FULL deep analysis (actions/deep-kernel-analysis.md) with
+          the updated rules: top 10 kernels, env var scan, min 5 candidates
+       3. Bulk-dispatch new KM targets
+       4. Build fresh action stack from analysis results
+       5. If the new stack is STILL empty after thorough analysis, THEN
+          enter dream.md and try re-exploration strategies
+       6. Only exit the DFS loop if stopping_criteria_met() (time budget
+          exhausted or shutdown signal)
+     The marathon has 24h — an empty stack after 1h means analysis was
+     incomplete, NOT that optimization is done.
+
+  a. Check shutdown signal: [ -f "$SESSION_DIR/STOP_PANE_orchestrator" ]
+
+  ★★★ STEP b: MERGE-OP POLL — ALWAYS FIRST, BEFORE POPPING ANY ACTION ★★★
+     KM merges ALWAYS take priority over DFS exploration. The Kernel Manager
+     runs validated 4-step tests (IR-17: compile → correctness → multi-shape
+     micro-benchmark → adversarial). Its merge-ready patches represent
+     already-proven kernel improvements — they must be integrated immediately and test e2e.
+
+     BEFORE popping any action, call poll_kernel_results(). For each
+     merge-ready result with micro_benchmark data:
+     → Push a `merge-op` action with score 10 (HIGHEST PRIORITY)
+     → merge-ops auto-sort to the top of the stack
+     → Next pop (step c) will pick them up
+
+     ALSO poll every 10 minutes WITHIN long-running actions (benchmark
+     waits, server startup, compilation) and after every server restart.
+
+     DO NOT SKIP. DO NOT DEFER. If merge-ready patches exist, they are
+     your next action — period. No DFS exploration until all merge-ops
+     are processed.
+
+  c. Pop highest-scored action from action_stack (merge-ops will be on top)
+  d. IF action is a self-fix dispatch bug:
        → Apply fix directly (git archaeology + patch + test)
        → No Kernel Manager involvement needed
-  c. IF action is a deep-kernel-opt target:
+  e. IF action is a deep-kernel-opt target:
        → Write to $RESULT_DIR/kernel_manager/work_queue.jsonl
        → The Kernel Manager (tmux pane 2) processes it asynchronously
        → Continue DFS loop with other actions
-  d. Execute the action (dispatch to actions/*.md)
-  e. ACCURACY GATE: if accuracy_risk > 0 → run eval, revert if drop > threshold
-  f. Measure: new_tput_per_gpu
-  g. Update state: current_tput_per_gpu, cumulative_gain_pct
-  h. RE-SCORE all remaining actions on the stack
-  i. Push new sub-actions discovered during execution
-  j. Log to completed_actions
-  k. KB ingest
+  f. Execute the action (dispatch to actions/*.md)
+  g. ACCURACY GATE: if accuracy_risk > 0 → run eval, revert if drop > threshold
+  h. Measure: new_tput_per_gpu (MANDATORY — this is the bench result)
+  i. Update state: current_tput_per_gpu, cumulative_gain_pct, best_tput_per_gpu
+  j. RE-SCORE all remaining actions on the stack
+  k. DYNAMIC SUB-ACTION GENERATION (see "Dynamic Idea Generation" below)
+     After EVERY action (success, failure, or crash), generate sub-actions:
+     → On SUCCESS: generate follow-on actions (variations, adjacent targets)
+     → On FAILURE: generate retry with alternate strategy
+     → On CRASH: escalate to KM + generate defensive retry
+     Push all generated sub-actions onto the stack with inherited/boosted scores.
+  l. Log to completed_actions with FULL schema (IR-18: tput_before, tput_after,
+     gain_pct, timestamp — never omit)
+  m. If KEEP: sync $BASE_DIR/state.json (IR-19)
+  n. KB ingest
 
-  ** MERGE-OP POLL: ** Between DFS actions, check results.jsonl for completed
-     kernel optimizations from the Kernel Manager. For each merge-ready result:
-     → Push a `merge-op` action onto the stack with score 9 (high priority)
-     → merge-op: kill server → apply patch → rebuild if needed → restart →
-       E2E benchmark → KEEP/REVERT
-     → On REVERT or crash during merge-op:
-       write event to event_log.jsonl (Watchdog will investigate)
+  ** GPU REQUEST POLL (IR-25): ** Check for pending KM GPU requests.
+     When TP == GPU_COUNT, the KM cannot micro-benchmark without borrowing GPUs.
+     Check $SESSION_DIR/kernel_manager/gpu_request.json for status: "pending".
+     If found:
+     → Kill inference server + release_gpu_lock()
+     → Set gpu_request.json status to "granted" (grant_gpu_request())
+     → Wait for KM to finish: poll for status "released" (15s intervals, 30min max)
+     → Once released: restart server + write_gpu_lock()
+     → Delete gpu_request.json (cleanup_gpu_request())
+     The KM micro-benchmark is critical — it feeds merge-ops (score 10 priority).
+     Wait up to 30min for KM to finish. One server restart cycle is a small cost
+     compared to losing validated benchmark data.
 
-  ** FINDINGS POLL: ** Between DFS actions, check findings.jsonl for Watchdog
+  ** FINDINGS POLL: ** After merge-op poll and between DFS actions, check findings.jsonl for Watchdog
      guidance. Findings may influence scoring:
      - If Watchdog says "hw-blocked" for a kernel: remove its actions from stack
      - If Watchdog provides constraints: update pending kernel targets
@@ -148,6 +324,37 @@ WHILE action_stack is not empty AND NOT stopping_criteria_met():
 
   ** CHECKPOINT: ** After every KEEP decision and every 30 min:
      → actions/checkpoint.md (persist state for recovery)
+
+  ** RE-PROFILE CADENCE (every 3 hours): **
+     Every 3 hours of wall clock, re-profile the running server to discover
+     NEW kernel bottlenecks that emerged after prior optimizations. Prior
+     KEEPs may have shifted the bottleneck from one kernel to another.
+       1. Run actions/profile.md to get fresh kernel breakdown
+       2. Compare with previous profile — find kernels whose GPU% increased
+       3. Run deep analysis on the top 10 NEW or CHANGED candidates
+       4. Bulk-dispatch new targets to KM work queue (up to 25 total)
+       5. Push new DFS actions from the analysis onto the stack
+     This ensures the KM always has fresh work and the orch doesn't run
+     out of ideas mid-marathon.
+
+  ** ESCALATION (failed DFS action → KM): **
+     When a DFS action fails and the failure is kernel-level (not config/infra):
+       → Write a work_queue entry to KM with the failure context:
+         {id, kernel_name, source_file, strategy: "escalated-from-orch",
+          failure_reason, prior_attempts: [...], constraints_discovered}
+       → The KM may find a different approach (different backend, different
+         optimization strategy) that the orch couldn't execute directly
+       → Do NOT just discard kernel failures — always escalate to KM first
+
+  ** CIRCUIT BREAKER (5 consecutive failures → re-analyze): **
+     After 5 consecutive DFS action failures (DISCARD or error):
+       1. STOP popping actions — the current stack is stale
+       2. Re-profile the server (even if <3h since last profile)
+       3. Run fresh deep analysis on the new profile
+       4. Bulk-dispatch new KM targets from the analysis
+       5. Replace the stale action stack with fresh actions
+       6. Reset consecutive failure counter
+     This prevents the orch from grinding through a stale stack of bad ideas.
 ```
 
 **Dream is mandatory every 3-4 hours.** Not just at tier boundaries. Every dream
@@ -187,8 +394,20 @@ def push_kernel_target(target, result_dir):
 **Polling results** (orchestrator reads manager output):
 
 ```python
+MERGE_READY_STATUSES = {"merge-ready", "patch_generated_locally"}
+
 def poll_kernel_results(result_dir, last_seen_id=None):
-    """Check for new merge-ready results from the Kernel Manager."""
+    """Check for new merge-ready results from the Kernel Manager.
+
+    Matches both 'merge-ready' (OOB-tested) and 'patch_generated_locally'
+    (locally written when OOB was unavailable). Both indicate a complete
+    patch directory exists under merge_ready/<task_id>/.
+
+    QUALITY GATE: Reject results that lack micro_benchmark data or
+    correctness evidence. A merge-ready result without benchmark data
+    means the KM skipped the 4-step test pipeline — these are unreliable
+    and should be discarded with a log message, not merged.
+    """
     results_path = os.path.join(result_dir, "kernel_manager", "results.jsonl")
     if not os.path.exists(results_path):
         return []
@@ -199,8 +418,16 @@ def poll_kernel_results(result_dir, last_seen_id=None):
             if not line:
                 continue
             result = json.loads(line)
-            if result["status"] == "merge-ready":
-                if last_seen_id is None or result["id"] > last_seen_id:
+            if result.get("status") in MERGE_READY_STATUSES:
+                rid = result.get("id") or result.get("task_id")
+                if last_seen_id is None or (rid and rid > last_seen_id):
+                    # Quality gate: require micro_benchmark data or explicit "deferred"
+                    mb = result.get("micro_benchmark") or result.get("micro_speedup")
+                    corr = result.get("correctness") or result.get("correctness_status")
+                    if mb is None and corr not in ("passed", "gpu_smoke_pass"):
+                        print(f"[MERGE-OP POLL] SKIPPING {rid}: no micro_benchmark "
+                              f"and no correctness evidence — KM must run 4-step test")
+                        continue
                     new_results.append(result)
     return new_results
 ```
@@ -437,6 +664,7 @@ read event_log.jsonl  write events ←──────────────
 - `$RESULT_DIR/kernel_manager/event_log.jsonl` — orchestrator + manager write, watchdog reads
 - `$RESULT_DIR/kernel_manager/findings.jsonl` — watchdog writes, orchestrator + manager read
 - `$RESULT_DIR/kernel_manager/rca_reports/<id>/` — watchdog writes detailed reports
+- `$RESULT_DIR/kernel_manager/gpu_request.json` — KM writes request, orchestrator grants/cleans up
 
 ## Time Tiers
 
@@ -523,7 +751,7 @@ state = {
 
     # DFS state
     "action_stack": [],
-    "completed_actions": [],
+    "completed_actions": [],       # REQUIRED per-entry schema — see below
     "kernel_candidates": [],
 
     # Async kernel optimization (legacy — direct OOB dispatch)
@@ -560,6 +788,88 @@ state = {
     "backend_wins": {},
     "frameworks_rebuilt": [],       # list of libraries rebuilt during this run
 }
+```
+
+## `completed_actions` Entry Schema (MANDATORY — IR-18)
+
+Every entry appended to `completed_actions` MUST include ALL of these fields.
+Sessions that omit `tput_before` / `tput_after` make gains invisible in
+timeline plots and break session-to-session handoff (the 5119→10551 gap bug).
+
+```python
+{
+    "id": "action_xxx",                     # unique action id
+    "action": "operator-tuning",            # action type from actions/*.md
+    "name": "Human-readable action name",   # short description
+    "status": "KEEP",                       # KEEP | DISCARD | REVERT | INFO | DONE
+    "description": "What was done",         # 1-2 sentences
+
+    # --- THESE FOUR FIELDS ARE MANDATORY (never omit, never null) ---
+    "tput_before": 10551.33,               # tok/s/GPU BEFORE this action
+    "tput_after": 10551.33,                # tok/s/GPU AFTER this action (= bench result)
+    "gain_pct": 0.0,                       # (tput_after - tput_before) / tput_before * 100
+    "timestamp": "2026-04-21T22:01:54Z",   # ISO 8601
+
+    # Optional but encouraged
+    "bench_id": "bench_marathon_xxx",       # benchmark result directory name
+    "accuracy_before": None,                # if accuracy gate was run
+    "accuracy_after": None,
+}
+```
+
+**IR-21 (action tracking):** Every optimization MUST be recorded in
+`completed_actions` with `tput_before`, `tput_after`, `gain_pct`, and
+`timestamp`. This builds the throughput-vs-time timeline.
+
+**IR-22 (no warm-start hotfixes):** Warm-start (Step 0) MUST NOT apply any
+patches, hotfixes, or optimizations. It launches the server AS-IS, runs a
+baseline benchmark, and records the measured throughput. That's it.
+Known hotfixes from prior sessions (block_m fix, TRITON_ROPE toggle, CK
+alignment fix, BF16 GEMM tuning, etc.) are added to the action_stack during
+Step 3 (Build Stack) and executed one-by-one in the DFS loop (Step 4) with
+proper before/after benchmarks. This ensures every gain appears on the
+throughput-vs-time plot.
+
+**IR-23 (read-only analysis):** Steps 1 (Re-Profile) and 2 (Deep Analysis)
+are strictly READ-ONLY. No code changes, no patches, no file writes to
+system packages, no env var changes, no server restarts. These steps ONLY
+produce findings, kernel breakdowns, and candidate actions. All candidates
+go into the action_stack (Step 3). Code changes ONLY happen in the DFS
+loop (Step 4), one action at a time with before/after benchmarks.
+
+## `BASE_DIR/state.json` Sync (MANDATORY — IR-19)
+
+After every KEEP decision and at session shutdown, the orchestrator MUST
+update `$BASE_DIR/state.json` with the session's best results:
+
+```python
+import json
+def sync_base_dir_state(base_dir, session_state):
+    base_state_path = f"{base_dir}/state.json"
+    base_state = {}
+    try:
+        with open(base_state_path) as f:
+            base_state = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    best = session_state.get("best_tput_per_gpu", 0)
+    prev_best = base_state.get("current_tput_per_gpu", 0)
+    if best > prev_best:
+        base_state.update({
+            "current_tput_per_gpu": best,
+            "sprint_baseline_tput_per_gpu": base_state.get(
+                "sprint_baseline_tput_per_gpu",
+                session_state.get("sprint_tput_per_gpu", 0)),
+            "tp": session_state.get("tp"),
+            "framework": session_state.get("framework"),
+            "model": session_state.get("model_name"),
+            "last_session_id": session_state.get("session_id"),
+            "last_session_best_tput": best,
+            "last_updated": session_state.get("last_updated",
+                __import__("datetime").datetime.utcnow().isoformat()),
+        })
+        with open(base_state_path, "w") as f:
+            json.dump(base_state, f, indent=2)
 ```
 
 ## Accuracy Gate
@@ -603,6 +913,137 @@ via the fast path — do NOT send them to the Kernel Manager (wastes round-trip 
 
 **IR-11:** Always check `git log -S` before writing new code. The correct code may have
 existed and been removed by a later commit (the RoPE lesson).
+
+**IR-12 (KM merges always first):** At the TOP of every DFS iteration,
+BEFORE popping any action, poll `results.jsonl` for merge-ready KM patches.
+If any exist, push them as `merge-op` with score 10 (highest). KM merges
+always take priority over DFS exploration — no exceptions. The Kernel
+Manager has already validated these patches through the 4-step IR-17
+pipeline (compile → correctness → multi-shape benchmark → adversarial).
+Deferring them wastes the KM's work and delays throughput gains.
+
+**IR-18 (completed_actions tracking):** Every entry in `completed_actions`
+MUST include `tput_before`, `tput_after`, `gain_pct`, and `timestamp`.
+Never omit these — timeline plots and session handoff depend on them.
+See "completed_actions Entry Schema" above.
+
+**IR-19 (BASE_DIR state sync):** After every KEEP decision and at session
+shutdown, sync `best_tput_per_gpu` to `$BASE_DIR/state.json`. This is the
+cross-session handoff contract. Without it, the next session starts from a
+stale sprint baseline and the throughput timeline has invisible gaps.
+
+**IR-13 (GPU lock):** Before starting the inference server, write
+`/tmp/.marathon_gpu_lock.json` with the GPUs being used. Remove it when the
+server is killed. The Kernel Manager reads this lock to find free GPUs for
+micro-benchmarks without contention. Schema:
+```json
+{
+  "holder": "orchestrator",
+  "gpus": [0],
+  "pid": 12345,
+  "since": "2026-04-21T18:00:00Z",
+  "purpose": "inference-server"
+}
+```
+Write helper (call after every server launch):
+```python
+import json, os, datetime
+def write_gpu_lock(gpus, server_pid):
+    lock = {"holder": "orchestrator", "gpus": list(gpus), "pid": server_pid,
+            "since": datetime.datetime.utcnow().isoformat() + "Z",
+            "purpose": "inference-server"}
+    with open("/tmp/.marathon_gpu_lock.json", "w") as f:
+        json.dump(lock, f)
+
+def release_gpu_lock():
+    try: os.remove("/tmp/.marathon_gpu_lock.json")
+    except FileNotFoundError: pass
+```
+Call `write_gpu_lock(list(range(TP)), pid)` after server start.
+Call `release_gpu_lock()` after `kill_server()`.
+
+**IR-25 (GPU time-share):** When `TP == GPU_COUNT` (all GPUs run the server),
+the Kernel Manager has no free GPUs for micro-benchmarks. The KM can request
+temporary exclusive GPU access by writing a `gpu_request.json` file. The
+orchestrator checks for this request during its DFS poll loop and, if found,
+temporarily kills the server to grant GPU access.
+
+**Protocol:**
+1. KM writes `$SESSION_DIR/kernel_manager/gpu_request.json` with `status: "pending"`
+2. Orchestrator sees it during GPU REQUEST POLL (DFS loop), kills the server,
+   calls `release_gpu_lock()`, sets request `status: "granted"`
+3. KM reads "granted", acquires lock (`holder: "kernel-manager"`), runs micro-benchmarks
+4. KM releases lock, sets request `status: "released"`
+5. Orchestrator reads "released", restarts the server, calls `write_gpu_lock()`,
+   deletes the request file
+
+**GPU request helpers (orchestrator side):**
+```python
+import json, os, time
+
+GPU_REQUEST_PATH = os.path.join(os.environ.get("SESSION_DIR", ""),
+                                "kernel_manager/gpu_request.json")
+
+def check_gpu_request():
+    """Check if KM has a pending GPU request. Returns the request dict or None."""
+    try:
+        with open(GPU_REQUEST_PATH) as f:
+            req = json.load(f)
+        if req.get("status") == "pending":
+            return req
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return None
+
+def grant_gpu_request():
+    """Grant the pending GPU request (call after killing server + releasing lock)."""
+    try:
+        with open(GPU_REQUEST_PATH) as f:
+            req = json.load(f)
+        req["status"] = "granted"
+        req["granted_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+        with open(GPU_REQUEST_PATH, "w") as f:
+            json.dump(req, f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+def wait_for_gpu_release(timeout_s=1800, poll_interval_s=15):
+    """Wait for KM to finish and set status to 'released'. Returns True if released.
+    Default timeout is 30min — the micro-benchmark MUST run, so we wait."""
+    elapsed = 0
+    while elapsed < timeout_s:
+        try:
+            with open(GPU_REQUEST_PATH) as f:
+                req = json.load(f)
+            if req.get("status") == "released":
+                return True
+        except (FileNotFoundError, json.JSONDecodeError):
+            return True  # file gone = KM done
+        time.sleep(poll_interval_s)
+        elapsed += poll_interval_s
+    return False  # timeout
+
+def cleanup_gpu_request():
+    """Remove the request file after server restart."""
+    try: os.remove(GPU_REQUEST_PATH)
+    except FileNotFoundError: pass
+```
+
+**GPU REQUEST POLL sequence (in DFS loop):**
+```
+req = check_gpu_request()
+if req:
+    log("GPU REQUEST: KM needs GPUs for kernel: " + req.get("kernel", "?"))
+    kill_server()
+    release_gpu_lock()
+    grant_gpu_request()
+    released = wait_for_gpu_release()  # 30min default — micro-benchmark must run
+    if not released:
+        log("WARNING: GPU request timed out after 30min, restarting server anyway")
+    cleanup_gpu_request()
+    start_server()  # normal server launch (calls write_gpu_lock internally)
+    # Next DFS iteration will re-benchmark if needed
+```
 
 ## Agent Creativity
 
