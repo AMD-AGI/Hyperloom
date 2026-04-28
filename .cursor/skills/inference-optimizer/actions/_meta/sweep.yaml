@@ -1,0 +1,29 @@
+name: sweep
+family: shallow
+cost_minutes_p50: 8.0
+cost_minutes_p75: 20.0
+expected_gain_pct: [1.0, 5.0]
+accuracy_risk: 0.0
+crash_risk: 0.04
+prerequisites:
+  - baseline
+requires_lanes:
+  - server_lifecycle
+  - benchmark_lane
+allowed_tools:
+  - emit_intent
+  - Read
+  - Bash
+side_effects:
+  - launches_server
+  - writes_results
+allowed_modes:
+  - quick_param_sweep
+  - guided_kernel_opt
+  - marathon_multi_agent
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 18
+lease_ttl_sec: 1500
+applicable_when:
+  - "scheduler.all_scores < 1.0"

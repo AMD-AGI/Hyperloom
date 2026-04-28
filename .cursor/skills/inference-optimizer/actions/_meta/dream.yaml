@@ -1,0 +1,23 @@
+name: dream
+family: creative
+cost_minutes_p50: 8.0
+cost_minutes_p75: 15.0
+expected_gain_pct: [0.0, 0.0]
+accuracy_risk: 0.0
+crash_risk: 0.0
+prerequisites: []
+requires_lanes: []
+allowed_tools:
+  - emit_intent
+  - Read
+side_effects:
+  - writes_findings
+allowed_modes:
+  - marathon_multi_agent
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 30
+lease_ttl_sec: 1200
+applicable_when:
+  - "marathon_only"
+  - "every_3h_or_4h"

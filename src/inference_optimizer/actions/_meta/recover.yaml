@@ -1,0 +1,17 @@
+name: recover
+family: resilience
+cost_minutes_p50: 10
+cost_minutes_p75: 20
+expected_gain_pct: [0, 0]
+accuracy_risk: 0.0
+crash_risk: 0.05
+prerequisites: []
+requires_lanes: [server_lifecycle, workspace_mutation]
+allowed_tools: [Read, Bash, Edit]
+side_effects: [workspace_write, server_restart]
+allowed_modes: [marathon_multi_agent]
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 12
+lease_ttl_sec: 1800
+applicable_when: [emergency_state]

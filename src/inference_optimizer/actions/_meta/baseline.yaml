@@ -1,0 +1,17 @@
+name: baseline
+family: prep
+cost_minutes_p50: 8
+cost_minutes_p75: 15
+expected_gain_pct: [0, 0]
+accuracy_risk: 0.0
+crash_risk: 0.10
+prerequisites: [setup, classify]
+requires_lanes: [server_lifecycle, benchmark_lane]
+allowed_tools: [Read, Bash]
+side_effects: [server_restart, results_write]
+allowed_modes: [quick_param_sweep, guided_kernel_opt, marathon_multi_agent]
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 8
+lease_ttl_sec: 1800
+applicable_when: [classify_completed]

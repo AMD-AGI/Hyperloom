@@ -1,0 +1,17 @@
+name: deep-kernel-analysis
+family: deep_kernel
+cost_minutes_p50: 45
+cost_minutes_p75: 90
+expected_gain_pct: [0, 0]
+accuracy_risk: 0.0
+crash_risk: 0.05
+prerequisites: [profile]
+requires_lanes: [profile_lane]
+allowed_tools: [Read, Bash]
+side_effects: [findings_write]
+allowed_modes: [marathon_multi_agent]
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 30
+lease_ttl_sec: 6000
+applicable_when: [marathon_phase_started]

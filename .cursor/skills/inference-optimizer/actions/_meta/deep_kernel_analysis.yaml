@@ -1,0 +1,25 @@
+name: deep_kernel_analysis
+family: deep_kernel
+cost_minutes_p50: 30.0
+cost_minutes_p75: 60.0
+expected_gain_pct: [0.0, 0.0]
+accuracy_risk: 0.0
+crash_risk: 0.05
+prerequisites:
+  - profile
+requires_lanes: []
+allowed_tools:
+  - emit_intent
+  - Read
+side_effects:
+  - reads_trace
+  - writes_findings
+allowed_modes:
+  - marathon_multi_agent
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 60
+lease_ttl_sec: 3600
+applicable_when:
+  - "kernel_dispatch_shows_aiter_dominance"
+  - "marathon_only"

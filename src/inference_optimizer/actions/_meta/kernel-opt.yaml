@@ -1,0 +1,17 @@
+name: kernel-opt
+family: deep_kernel
+cost_minutes_p50: 30
+cost_minutes_p75: 60
+expected_gain_pct: [3, 15]
+accuracy_risk: 0.10
+crash_risk: 0.20
+prerequisites: [profile]
+requires_lanes: [workspace_mutation, server_lifecycle, benchmark_lane]
+allowed_tools: [Read, Bash, Edit]
+side_effects: [workspace_write, server_restart]
+allowed_modes: [guided_kernel_opt, marathon_multi_agent]
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 30
+lease_ttl_sec: 5400
+applicable_when: [profile_completed, kernel_dispatch_indicates_optimisable]

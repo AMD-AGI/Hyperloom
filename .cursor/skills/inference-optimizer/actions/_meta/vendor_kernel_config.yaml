@@ -1,0 +1,26 @@
+name: vendor_kernel_config
+family: deep_kernel
+cost_minutes_p50: 15.0
+cost_minutes_p75: 30.0
+expected_gain_pct: [1.0, 5.0]
+accuracy_risk: 0.10
+crash_risk: 0.10
+prerequisites:
+  - profile
+requires_lanes:
+  - workspace_mutation
+allowed_tools:
+  - emit_intent
+  - Read
+  - Edit
+side_effects:
+  - patches_workspace
+allowed_modes:
+  - guided_kernel_opt
+  - marathon_multi_agent
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 25
+lease_ttl_sec: 1800
+applicable_when:
+  - "vendor_kernel_path_in_use"

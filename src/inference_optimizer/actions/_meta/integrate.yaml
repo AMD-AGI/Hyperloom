@@ -1,0 +1,17 @@
+name: integrate
+family: deep_kernel
+cost_minutes_p50: 20
+cost_minutes_p75: 45
+expected_gain_pct: [3, 12]
+accuracy_risk: 0.15
+crash_risk: 0.25
+prerequisites: [kernel-opt]
+requires_lanes: [server_lifecycle, workspace_mutation, benchmark_lane]
+allowed_tools: [Read, Bash, Edit]
+side_effects: [workspace_write, server_restart, results_write]
+allowed_modes: [guided_kernel_opt, marathon_multi_agent]
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 24
+lease_ttl_sec: 4500
+applicable_when: [kernel_opt_kept]

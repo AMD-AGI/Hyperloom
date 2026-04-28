@@ -1,0 +1,17 @@
+# Inference Optimizer — runtime dependencies
+#
+# pip install -r requirements.txt
+#
+# Note: the bootstrap module installs Node.js >=18 and the @anthropic-ai/claude-code
+# CLI itself; those are NOT pip packages.
+
+# Core: needed by ClaudeBackend (Phase 6).
+# Pin >=0.2.111 because Opus 4.7 ("claude-opus-4-7") requires that minimum.
+claude-agent-sdk>=0.2.111
+
+# Action metadata loader (Phase 4 / F3) — reads actions/_meta/*.yaml.
+PyYAML>=6.0
+
+# Test runner — only needed for `pytest`. Listed for convenience.
+pytest>=8.0
+pytest-asyncio>=1.0

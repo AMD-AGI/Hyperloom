@@ -1,0 +1,18 @@
+name: params
+family: shallow
+cost_minutes_p50: 15
+cost_minutes_p75: 30
+expected_gain_pct: [0, 25]
+accuracy_risk: 0.0
+crash_risk: 0.20
+prerequisites: [baseline]
+requires_lanes: [server_lifecycle, benchmark_lane]
+allowed_tools: [Read, Bash]
+side_effects: [server_restart, results_write]
+allowed_modes: [quick_param_sweep, guided_kernel_opt, marathon_multi_agent]
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 16
+lease_ttl_sec: 2700
+applicable_when: [baseline_completed]
+# NOTE: when sub-flag is fp8/quant the runner must promote accuracy_risk to 0.30

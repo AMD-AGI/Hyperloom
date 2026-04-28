@@ -1,0 +1,17 @@
+name: report
+family: shallow
+cost_minutes_p50: 5
+cost_minutes_p75: 10
+expected_gain_pct: [0, 0]
+accuracy_risk: 0.0
+crash_risk: 0.0
+prerequisites: []
+requires_lanes: []
+allowed_tools: [Read, Edit]
+side_effects: [results_write]
+allowed_modes: [quick_param_sweep, guided_kernel_opt, marathon_multi_agent]
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 6
+lease_ttl_sec: 600
+applicable_when: [stopping_announced]

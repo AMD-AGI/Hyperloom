@@ -1,0 +1,30 @@
+name: comm_optimization
+family: long
+cost_minutes_p50: 30.0
+cost_minutes_p75: 60.0
+expected_gain_pct: [1.0, 6.0]
+accuracy_risk: 0.05
+crash_risk: 0.15
+prerequisites:
+  - profile
+requires_lanes:
+  - server_lifecycle
+  - benchmark_lane
+allowed_tools:
+  - emit_intent
+  - Read
+  - Bash
+  - Edit
+side_effects:
+  - patches_workspace
+  - launches_server
+  - writes_results
+allowed_modes:
+  - marathon_multi_agent
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 50
+lease_ttl_sec: 3600
+applicable_when:
+  - "tp_size > 1"
+  - "marathon_only"

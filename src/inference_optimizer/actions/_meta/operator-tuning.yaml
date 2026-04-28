@@ -1,0 +1,17 @@
+name: operator-tuning
+family: deep_kernel
+cost_minutes_p50: 45
+cost_minutes_p75: 90
+expected_gain_pct: [2, 12]
+accuracy_risk: 0.10
+crash_risk: 0.20
+prerequisites: [deep-kernel-analysis]
+requires_lanes: [server_lifecycle, workspace_mutation, benchmark_lane]
+allowed_tools: [Read, Bash, Edit]
+side_effects: [workspace_write, server_restart]
+allowed_modes: [marathon_multi_agent]
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 30
+lease_ttl_sec: 6000
+applicable_when: [deep_kernel_targets_found]
