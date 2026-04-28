@@ -16,10 +16,8 @@
 MODE="${MODE:-local}"
 if [ "$MODE" = "claw" ]; then
     WORKSPACE_ROOT="${WORKSPACE_ROOT:-/shared_nfs/inference-optimization}"
-elif [ "$MODE" = "fully-local" ]; then
-    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/opt/hyperloom}"
 else
-    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace/inference-optimization}"
+    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/opt/hyperloom}"
 fi
 
 # Constants
