@@ -69,6 +69,92 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Per-topic prompt-render table (consumed by ``Conductor._render_msg_body``).
+#
+# Keys mirror the dispatcher publish sites in ``_handle_*`` below — when a
+# new ``_handle_<intent>`` lands, add the matching entry here so the inbox
+# view shows the meaningful field instead of an empty body. The fallback
+# branch in ``_render_msg_body`` keeps unknown shapes from rendering as
+# ``""`` (which is what triggered Critic / Watchdog "empty body" alerts in
+# v0.7).
+# ---------------------------------------------------------------------------
+def _render_proposal(p: dict) -> str:
+    if p.get("kind") == "delegate_queued":
+        return (
+            f"delegate_queued action={p.get('action_name', '?')} "
+            f"task={str(p.get('task_id', '?'))[:8]} "
+            f"params={p.get('params', {})}"
+        )
+    return (
+        f"action={p.get('action_name', '?')} "
+        f"predicted_gain={p.get('predicted_gain_pct', '?')}% "
+        f"params={p.get('params', {})}"
+    )
+
+
+def _render_decision(p: dict) -> str:
+    head = p.get("kind") or "decision"
+    rationale = p.get("rationale", "")
+    s = f"{head} changes={p.get('changes', {})}"
+    if rationale:
+        s += f" rationale={rationale}"
+    return s
+
+
+def _render_alert(p: dict) -> str:
+    sev = p.get("severity", "?")
+    summary = p.get("summary", "")
+    detail = p.get("detail", "")
+    out = f"[{sev}] {summary}"
+    if detail:
+        out += f" — {detail}"
+    return out
+
+
+def _render_question(p: dict) -> str:
+    q_topic = p.get("topic", "")
+    q = p.get("question", "")
+    return f"[topic={q_topic}] {q}" if q_topic else q
+
+
+def _render_answer(p: dict) -> str:
+    q_topic = p.get("topic", "")
+    a = p.get("answer", "")
+    return f"[topic={q_topic}] {a}" if q_topic else a
+
+
+def _render_objection(p: dict) -> str:
+    target = str(p.get("target_msg_id", ""))[:8]
+    text = p.get("objection") or p.get("body_md") or ""
+    return f"target={target} {text}" if target else text
+
+
+def _render_vote(p: dict) -> str:
+    target = str(p.get("target_msg_id", ""))[:8]
+    return f"target={target} vote={p.get('vote', '?')}"
+
+
+def _render_reflection_tick(p: dict) -> str:
+    elapsed = p.get("elapsed_minutes")
+    left = p.get("time_left_minutes")
+    if isinstance(elapsed, (int, float)) and isinstance(left, (int, float)):
+        return f"elapsed={elapsed:.2f}m time_left={left:.2f}m"
+    return ""
+
+
+_TOPIC_RENDERERS = {
+    "proposal": _render_proposal,
+    "decision": _render_decision,
+    "alert": _render_alert,
+    "question": _render_question,
+    "answer": _render_answer,
+    "objection": _render_objection,
+    "vote": _render_vote,
+    "reflection_tick": _render_reflection_tick,
+}
+
+
+# ---------------------------------------------------------------------------
 class StopReason:
     TARGET_REACHED = "target_reached"
     TIME_EXHAUSTED = "time_exhausted"
@@ -207,6 +293,14 @@ class Conductor:
                 tasks=tasks,
                 workspace=self.session_dir,
                 agent_name="executor",
+                env=self.env,
+                # Route executor-emitted intents through the same
+                # PolicyGate + handle_intent pipeline as LLM-emitted
+                # intents. This is what makes ``baseline`` /
+                # ``bench_runner`` updates land on the events bus +
+                # SharedState exactly like a Claude reactor would have
+                # done if it had perfect tool use.
+                intent_sink=self._executor_intent_sink,
             )
 
         # Persona index — populate from existing files; reactor prompt
@@ -634,11 +728,20 @@ class Conductor:
         PolicyGate has already verified the agent can write these fields, so
         we apply the changes directly. SharedState.apply_validated_transition
         silently ignores non-allowlisted keys (defence-in-depth).
+
+        After the transition lands, we re-derive ``cumulative_gain`` from
+        the resulting (baseline_tput, current_tput) pair so the objective
+        + early-stop signals see the up-to-date number on the next tick
+        (DESIGN §6.3 / §8 / §7.1 #1).
         """
         assert self.ctx is not None
         ctx = self.ctx
         changes = dict(payload.get("changes", {}) or {})
         ctx.state.apply_validated_transition(from_agent, changes)
+        # Auto-derive cumulative_gain so executors / LLM only need to
+        # report tput numbers; the Conductor owns the gain math (which
+        # also keeps it on the CORE_STATE_FIELDS PolicyGate allowlist).
+        self._maybe_recompute_gain(from_agent)
         await ctx.bus.append_and_seq(
             Message.new(
                 from_agent=from_agent,
@@ -648,6 +751,9 @@ class Conductor:
                     "kind": "state_updated",
                     "changes": changes,
                     "rationale": payload.get("rationale", ""),
+                    "derived": {
+                        "cumulative_gain": ctx.state.cumulative_gain,
+                    },
                 },
                 priority=1,
             )
@@ -687,6 +793,62 @@ class Conductor:
             )
         )
 
+    def _maybe_recompute_gain(self, from_agent: str) -> None:
+        """Derive ``cumulative_gain`` from the current
+        (baseline_tput, current_tput) pair.
+
+        Convention: gain is the percentage *throughput improvement* over
+        the baseline measured on the same model + framework. We accept
+        any value on the real line (executors can write a regression
+        and the early-stop / objective layers still work). Skips when
+        baseline is missing or zero (would divide-by-zero).
+        """
+        if self.ctx is None:
+            return
+        state = self.ctx.state
+        try:
+            base = float(state.baseline_tput or 0)
+            cur = float(state.current_tput or 0)
+        except (TypeError, ValueError):
+            return
+        if base <= 0:
+            # Initial baseline call also writes ``current_tput=baseline``;
+            # gain is exactly 0 in that case (handled below).
+            if cur > 0 and base == 0:
+                state.cumulative_gain = 0.0
+            return
+        new_gain = (cur - base) / base * 100.0
+        # Apply via the same transition path so a derived field never
+        # sneaks past the allowed-list (cumulative_gain *is* on it).
+        state.apply_validated_transition(
+            "conductor", {"cumulative_gain": new_gain},
+        )
+
+    async def _executor_intent_sink(
+        self, from_agent: str, intent: Intent
+    ) -> None:
+        """Receive an intent emitted by an :class:`ActionExecutor` and
+        push it through the same handler pipeline as LLM intents — but
+        **bypassing PolicyGate**.
+
+        Rationale: Python ``ActionExecutor`` instances are trusted code
+        (their inputs come from `subprocess` invocations of the bundled
+        scripts, not from a free-text LLM). Their intents represent
+        measurement facts (``baseline_tput``, ``current_tput``,
+        ``cumulative_gain``) that PolicyGate's CORE_STATE_FIELDS guard
+        was designed to block *agent reactors* (LLMs) from setting
+        directly. Re-using the same channel for trusted code requires
+        the bypass — otherwise legitimate baseline measurements get
+        denied.
+
+        We re-attribute the from_agent to ``"conductor"`` on the bus so
+        downstream consumers can distinguish trusted measurement
+        events from LLM proposals. The handler still records the full
+        ``rationale`` so audit logs trace back to the originating
+        executor.
+        """
+        await self._handle_intent("conductor", intent)
+
     async def _handle_simple_topic(
         self,
         from_agent: str,
@@ -713,6 +875,84 @@ class Conductor:
                 in_reply_to=payload.get("in_reply_to"),
             )
         )
+
+    # ------------------------------------------------------------------
+    # Prompt rendering helpers
+    # ------------------------------------------------------------------
+    # Per-message body cap when the body is *synthesised* from structured
+    # payload fields (proposal/decision/observation/...). Free-text
+    # ``body_md`` from heartbeats / send_message is left intact because it
+    # is the agent's own composed content.
+    _MSG_BODY_RENDER_CAP = 360
+
+    @staticmethod
+    def _render_msg_body(topic: str, payload: Any) -> str:
+        """Render a single bus event into one line for the inbox view.
+
+        DESIGN §10.5.6 — every published payload shape varies per topic
+        (``send_message`` carries ``body_md``; ``propose_action`` carries
+        ``action_name``/``predicted_gain_pct``/``params``; ``observation``
+        carries ``kind``/``reason``; ``reflection_tick`` carries
+        ``elapsed_minutes``; etc.). The pre-fix renderer only looked at
+        ``body_md`` and ``kind`` keys, so most non-text events showed up
+        as empty bodies in the prompt — and Critic/Watchdog correctly
+        flagged this as "I cannot evaluate" alerts (see findings/alerts).
+
+        Contract:
+
+        - When ``payload['body_md']`` is non-empty text, return it verbatim
+          (no truncation — agent-authored content is intentional).
+        - Otherwise, dispatch on ``topic`` to a known shape renderer.
+        - Fall back to a compact ``kind=... key=val ...`` summary, then a
+          ``repr(payload)`` truncated to :attr:`_MSG_BODY_RENDER_CAP`.
+
+        ``payload`` is duck-typed; non-dict shapes are coerced via ``str``
+        (defensive — should never happen since the bus enforces dicts).
+        """
+        if not isinstance(payload, dict):
+            return str(payload or "")
+
+        body_md = payload.get("body_md")
+        if isinstance(body_md, str) and body_md.strip():
+            return body_md
+
+        renderer = _TOPIC_RENDERERS.get(topic)
+        if renderer is not None:
+            rendered = renderer(payload)
+            if rendered:
+                return Conductor._truncate(rendered, Conductor._MSG_BODY_RENDER_CAP)
+
+        # Generic fallback: prefer ``kind`` if present, then a compact
+        # ``key=val`` summary of the remaining keys.
+        kind = payload.get("kind")
+        rest = {k: v for k, v in payload.items() if k != "kind"}
+        if isinstance(kind, str) and kind:
+            summary = (
+                f"{kind} {Conductor._kvs(rest)}"
+                if rest
+                else kind
+            )
+        else:
+            summary = Conductor._kvs(payload) or repr(payload)
+        return Conductor._truncate(summary, Conductor._MSG_BODY_RENDER_CAP)
+
+    @staticmethod
+    def _kvs(d: dict[str, Any]) -> str:
+        """Compact ``k=v`` formatter — preserves field meaning without
+        spending characters on JSON quoting."""
+        parts = []
+        for k, v in d.items():
+            if isinstance(v, str):
+                parts.append(f"{k}={v}")
+            elif isinstance(v, (int, float, bool)) or v is None:
+                parts.append(f"{k}={v}")
+            else:
+                parts.append(f"{k}={v!r}")
+        return " ".join(parts)
+
+    @staticmethod
+    def _truncate(s: str, cap: int) -> str:
+        return s if len(s) <= cap else s[: cap - 3] + "..."
 
     # ------------------------------------------------------------------
     # Misc helpers
@@ -862,6 +1102,66 @@ class Conductor:
     # ------------------------------------------------------------------
     # Prompt composition
     # ------------------------------------------------------------------
+    def _render_action_catalogue(self, mode: ExecutionMode) -> str:
+        """Render the per-mode action catalogue as a markdown table.
+
+        Injected into every reactor prompt so the LLM knows the exact
+        action names + cost / risk envelopes it can ``propose_action``
+        / ``delegate``. Without this the LLM tends to invent
+        plausible-but-wrong action names that PolicyGate then rejects.
+        """
+        if self.ctx is None or self.ctx.actions is None:
+            return ""
+        actions = self.ctx.actions.allowed_for_mode(mode)
+        if not actions:
+            return ""
+        lines = [
+            "## Available actions for this mode",
+            "",
+            "| name | family | lanes | cost_p75 | acc_risk |",
+            "|---|---|---|---:|---:|",
+        ]
+        for a in sorted(actions, key=lambda x: (x.family, x.name)):
+            lanes = ", ".join(a.requires_lanes) or "—"
+            lines.append(
+                f"| `{a.name}` | {a.family} | {lanes} | "
+                f"{a.cost_minutes_p75:.0f}m | {a.accuracy_risk:.2f} |"
+            )
+        lines.append("")
+        lines.append(
+            "Use these exact names in `propose_action` / `delegate` "
+            "intents. Unknown names are rejected by PolicyGate."
+        )
+        return "\n".join(lines) + "\n\n"
+
+    def _render_first_action_hint(self, agent_name: str) -> str:
+        """Tiny first-action nudge so the executor reactor doesn't sit on
+        heartbeats from cold start. Only fired when:
+
+        * the agent is the executor (other roles don't propose actions),
+        * baseline_tput is still 0 (no measurement has landed yet), and
+        * no proposal/delegate event already exists in the events log.
+        """
+        if self.ctx is None or agent_name != "executor":
+            return ""
+        state = self.ctx.state
+        try:
+            base = float(state.baseline_tput or 0)
+        except (TypeError, ValueError):
+            base = 0.0
+        if base > 0:
+            return ""
+        return (
+            "## First action hint (live)\n"
+            "No baseline measurement exists yet (baseline_tput=0). "
+            "The natural first step is to delegate the `baseline` action "
+            "(no params required — it reads MODEL/TP/CONC/ISL/OSL/"
+            "INFERENCEX_PATH from the run env). "
+            "Emit `delegate` with `action_name: baseline` and a brief "
+            "`reason`. After the executor returns, follow up with "
+            "`bench_runner` to get `cumulative_gain`.\n\n"
+        )
+
     def _compose_prompt(
         self,
         agent_name: str,
@@ -874,9 +1174,7 @@ class Conductor:
         role = ctx.role_registry.get(agent_name)
         msg_lines = []
         for m in msgs[-10:]:
-            body = ""
-            if isinstance(m.payload, dict):
-                body = str(m.payload.get("body_md") or m.payload.get("kind") or "")
+            body = self._render_msg_body(m.topic, m.payload)
             msg_lines.append(
                 f"  - seq={m.seq} from={m.from_agent} topic={m.topic} :: {body}"
             )
@@ -906,12 +1204,17 @@ class Conductor:
             if sage_hint and sage_hint.strip()
             else ""
         )
+        # Action catalogue + first-action hint (executor only).
+        catalogue_block = self._render_action_catalogue(ctx.state.execution_mode)
+        first_hint_block = self._render_first_action_hint(agent_name)
         return (
             f"{role_header}"
             f"{long_persona_block}"
             f"{iron}\n"
             f"{ctx.state.summary()}\n"
             f"## Objective\n{ctx.objective.describe()}\n\n"
+            f"{catalogue_block}"
+            f"{first_hint_block}"
             f"{sage_block}"
             f"## Recent inbox (latest first)\n{msgs_block}\n\n"
             f"## Mode flags\n{ctx.flags!r}\n"

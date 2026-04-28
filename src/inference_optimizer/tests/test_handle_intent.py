@@ -349,7 +349,11 @@ async def test_objection_writes_objection_event(session_dir):
     )
 
     bus = MessageBus(db)
-    events = await bus.tail(n=1000)
+    # Filter by topic in SQL so the rare ``objection`` event isn't drowned
+    # out by the high-frequency heartbeats both reactors emit during the
+    # 1s test window. (Without ``topic=...`` we'd need n ≫ 1000 to surface
+    # the seq=4 event in guided mode.)
+    events = await bus.tail(n=200, topic="objection")
     objs = _topic_payloads(events, "objection")
     assert any(
         p.get("reason") == "predicted gain is unrealistic" for p in objs
@@ -387,7 +391,8 @@ async def test_vote_writes_vote_event(session_dir):
     )
 
     bus = MessageBus(db)
-    events = await bus.tail(n=1000)
+    # Same topic-overflow guard as the objection test above.
+    events = await bus.tail(n=200, topic="vote")
     votes = _topic_payloads(events, "vote")
     assert any(p.get("vote") == "approve" for p in votes)
     db.close()

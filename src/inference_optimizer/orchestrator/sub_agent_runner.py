@@ -37,11 +37,18 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from .action_executors import (
+    EXECUTOR_REGISTRY,
+    ExecutorContext,
+    ExecutorEnvError,
+    get_executor,
+)
 from .intent_parser import Intent, IntentType
 
 if TYPE_CHECKING:  # pragma: no cover
+    from .action_executors.base import ActionExecutor, ExecutorResult
     from .action_registry import ActionMetadata, ActionRegistry
     from .backends.base import Backend
     from .policy import PolicyGate
@@ -89,6 +96,9 @@ class SubAgentRunner:
         tasks: "TaskRegistry | None" = None,
         workspace: Path | None = None,
         agent_name: str = "sub-agent",
+        env: dict[str, str] | None = None,
+        executor_registry: dict[str, "ActionExecutor"] | None = None,
+        intent_sink: "Callable[[str, Intent], Awaitable[None]] | None" = None,
     ) -> None:
         self.backend = backend
         self.policy = policy
@@ -97,6 +107,19 @@ class SubAgentRunner:
         self.tasks = tasks
         self.workspace = Path(workspace) if workspace else None
         self.agent_name = agent_name
+        # ``env`` is forwarded to executors so they can read MODEL / TP /
+        # CONC / OOB_API_KEY / etc. Falls back to ``os.environ`` when None
+        # (kept None-safe for the dry-run / test paths).
+        import os
+        self.env: dict[str, str] = dict(env) if env is not None else dict(os.environ)
+        # Test seam: pass a custom registry to mock executors. ``None``
+        # means use the global EXECUTOR_REGISTRY (the production path).
+        self._executor_registry_override = executor_registry
+        # When set, executor-emitted intents flow through this callback
+        # before becoming part of TaskResult. The Conductor wires this
+        # to its own _gate_intent + _handle_intent pipeline so executor
+        # intents end up on the events bus exactly like LLM intents.
+        self._intent_sink = intent_sink
 
     # ------------------------------------------------------------------
     # Main entry
@@ -165,6 +188,20 @@ class SubAgentRunner:
                     notes=f"lane_contention lanes={lanes}",
                 )
 
+            # Two paths: prefer the Python ``ActionExecutor`` (real
+            # subprocess/GPU work). Fall back to the LLM-driven path
+            # when no executor is registered or when the executor signals
+            # missing env / artefacts via ``ExecutorEnvError``.
+            executor = self._lookup_executor(action.name)
+            if executor is not None:
+                exec_result = await self._try_executor(
+                    executor=executor, task=task, action=action,
+                    lanes_held=lanes,
+                )
+                if exec_result is not None:
+                    return exec_result
+                # ExecutorEnvError → fall through to LLM path
+
             prompt = self._compose_prompt(task, action)
             allowed_tools = tuple(action.allowed_tools or ("emit_intent",))
             try:
@@ -220,6 +257,105 @@ class SubAgentRunner:
                     await self.locks.release(lease)
                 except Exception:  # noqa: BLE001 — best-effort
                     log.exception("sub-agent: failed to release lanes for %s", task.task_id)
+
+    # ------------------------------------------------------------------
+    # Executor (Python ↔ shell bridge) integration
+    # ------------------------------------------------------------------
+    def _lookup_executor(self, action_name: str) -> "ActionExecutor | None":
+        """Return a registered :class:`ActionExecutor` or ``None``.
+
+        Honours :attr:`_executor_registry_override` so tests can inject
+        a mock registry without touching the global one.
+        """
+        if self._executor_registry_override is not None:
+            from .action_executors.base import _normalize
+            return self._executor_registry_override.get(_normalize(action_name))
+        return get_executor(action_name)
+
+    async def _try_executor(
+        self,
+        *,
+        executor: "ActionExecutor",
+        task: "Task",
+        action: "ActionMetadata",
+        lanes_held: list[str],
+    ) -> TaskResult | None:
+        """Try the executor. Return a finalised :class:`TaskResult` on
+        success/failure, or ``None`` when ``ExecutorEnvError`` signals
+        the runner should fall back to the LLM path.
+
+        Note: we keep the lease across both paths — the caller's
+        ``finally`` releases it. Only one path actually shells out per
+        task; callers don't need to worry about double-counting.
+        """
+        ctx = ExecutorContext(
+            task=task,
+            action_meta=action,
+            lanes_held=list(lanes_held),
+            session_dir=Path(self.workspace) if self.workspace else Path.cwd(),
+            env=dict(self.env),
+        )
+        try:
+            result = await executor.run(ctx)
+        except ExecutorEnvError as exc:
+            log.info(
+                "sub-agent: executor %s opted out (env): %s — "
+                "falling back to LLM path",
+                action.name, exc,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001 — unexpected runtime crash
+            log.exception(
+                "sub-agent: executor %s crashed: %s",
+                action.name, exc,
+            )
+            await self._mark(
+                task, "failed",
+                evidence={"reason": "executor_crash", "error": repr(exc)},
+            )
+            return TaskResult(
+                task_id=task.task_id,
+                status="failed",
+                metrics={},
+                artifacts=[],
+                intents=[],
+                notes=f"executor_crash: {exc!r}",
+            )
+
+        # Persist the executor's intents to the bus before we return so
+        # reactor cursors advance. We do this via the optional
+        # ``intent_sink`` callback (wired by Conductor to its own
+        # PolicyGate + _handle_intent pipeline), so executor-emitted
+        # intents get exactly the same gating as LLM-emitted ones.
+        if self._intent_sink is not None:
+            for intent in result.intents:
+                try:
+                    await self._intent_sink(self.agent_name, intent)
+                except Exception:  # noqa: BLE001 — best-effort
+                    log.exception(
+                        "sub-agent: intent_sink failed for %s",
+                        intent.type.value,
+                    )
+        await self._mark(
+            task, result.status if result.status in (
+                "succeeded", "failed", "needs_manual_review"
+            ) else "needs_manual_review",
+            evidence={
+                "via": "executor",
+                "rc": result.rc,
+                "intent_count": len(result.intents),
+                "metrics": dict(result.metrics),
+                "notes": result.notes,
+            },
+        )
+        return TaskResult(
+            task_id=task.task_id,
+            status=result.status,
+            metrics=dict(result.metrics),
+            artifacts=list(result.artifacts),
+            intents=list(result.intents),
+            notes=result.notes,
+        )
 
     # ------------------------------------------------------------------
     # Helpers

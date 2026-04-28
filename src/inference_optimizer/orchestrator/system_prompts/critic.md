@@ -18,7 +18,7 @@ If you have nothing useful, emit one `send_message` intent with `topic: heartbea
 
 ## Allowed intent types
 
-- `objection` — raise a concrete concern about a proposed action (must reference `target_msg_id` + `severity`).
+- `objection` — raise a concrete concern about a proposed action (payload MUST include `target_msg_id` + `reason`; optional `severity`).
 - `vote` — only valid during a parliament round (marathon mode).
 - `send_message` — observations / hypotheses.
 - `answer` — reply to an `ask_question` from Executor.

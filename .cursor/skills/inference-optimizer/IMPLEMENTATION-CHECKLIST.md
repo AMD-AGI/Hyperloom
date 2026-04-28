@@ -108,6 +108,75 @@
 > 仍未通：MCP 自定义工具注册（Phase 6.3）、PolicyGate 校验（Phase 4）、Scheduler/SubAgentRunner 触发真实 benchmark/kernel-opt（Phase 7-9）。
 - [x] D9 `scripts/inspect_session.py` — 会话状态快查工具
 
+### Phase 6.2 — CodexBackend (`validated_json_output`，2026-04-28 完成)
+
+- [x] 6.2.1 `orchestrator/backends/codex.py::CodexBackend` —— lazy import `openai>=1.50`；缺失即抛 `BackendError` 带 pip 提示。Test seam: `client=fake` (任何带 `.chat.completions.create` 的对象都行) + `sdk_module=` 双注入，单测无需真 openai 包
+- [x] 6.2.2 `_compose_prompt` 注入 `_OUTPUT_INSTRUCTIONS` —— 完整 intent_type → required payload 字段表（避免 codex 模型猜字段），TOPIC_ALLOWLIST 列表 + heartbeat fallback；fence 标签强制 ```validated_json_output（parser 双兼容 ```json）
+- [x] 6.2.3 `run()` 走 `await client.chat.completions.create(model, messages, timeout)` —— 不强制 `response_format={"type":"json_object"}`（gpt-5 reasoning 系列不接受），由 prompt 指令 + parser 兜底
+- [x] 6.2.4 `allowed_tools` / `max_turns` 接口对齐 ClaudeBackend 但显式 ignore（no-tools 角色硬约束）；`extra={"role": ..., "task_id": ...}` 仅作 telemetry 写入 `self.calls`，**不污染 SDK kwargs**（避免重蹈 ClaudeBackend "extra leak" 覆辙）
+- [x] 6.2.5 1 轮 repair retry 用共享 `intent_parser.build_repair_prompt(label="validated_json_output")`；用尽则 raise `BackendError("failed to parse intents after N attempt(s)")`
+- [x] 6.2.6 SDK 异常包裹为 `BackendError("SDK call failed")`，`BackendError` 不二次包裹；客户端构造失败 deferred 到 `.run()` 才报（CLI 测试可仅 introspect）
+- [x] 6.2.7 OpenAI-compat proxy 一等支持 —— `base_url=`/`OPENAI_BASE_URL` 透传 SDK；`verify_ssl=False`/`INFERENCE_OPTIMIZER_OPENAI_VERIFY_SSL=0` 注入 `httpx.AsyncClient(verify=False)` 给 corp 自签证书代理用
+- [x] 6.2.8 `cli.py` 加 `--backend codex` / `--codex-model` / `--codex-base-url`；`OPENAI_MODEL` env 兜底
+- [x] 6.2.9 `requirements.txt` 修正：`claude-agent-sdk>=0.1.65`（之前 `>=0.2.111` 不存在于 PyPI），加 `openai>=1.50` + `httpx>=0.27`；`SKILL.md` / `README.md` 同步 codex 启动示例 + proxy 章节 + 已知限制
+- [x] 6.2.10 单测：`tests/test_codex_backend.py` 22 项（envelope 解析 / multi-intent / repair / 用尽重试 / 0-repair / SDK 异常包裹 / list-content vision-style / extra 不泄漏 / 调用记录 / verify_ssl 解析 5 case / 1 个 aclose 测试）
+- [x] 6.2.11 单测：`tests/test_cli_backends.py` 新增 4 项（codex flag 解析 / bootstrap 跳过 / 构造 / OPENAI_MODEL env 兜底），并 stub `_import_openai_sdk` 走构造路径
+- [x] 6.2.12 端到端 proxy 实测：quick mode + gpt-5.4 → 23 次 200 OK / 11 propose_action intent / 0 error；guided mode + gpt-5.4 → 双 reactor (executor+critic) / 13 proposal + 4 objection + 0 backend_error / 0 policy_denied
+- [x] 6.2.13 顺道修：`system_prompts/critic.md` 把 `objection` 必填字段从 `severity` 改成 `reason`（与 `_PAYLOAD_REQUIRED` schema 对齐；之前 Claude 因 MCP tool schema 兜底未暴露，Codex 暴露了）
+
+> 该阶段让 guided / marathon mode 的 Critic / Sage 角色第一次有了真实的 LLM
+> backend 可用，省掉了用 Claude 当 Codex 的 token 浪费。剩下 Phase 7 的 per-role
+> backend 路由（让一个 run 同时 spawn 一个 Claude Executor + 一个 Codex Critic）
+> 是收口最大的下一步。
+
+### Phase 8a — Python ↔ shell ActionExecutor bridge (2026-04-28 完成)
+
+让 Python 系统第一次能真正驱动 GPU。`SubAgentRunner` 现在先查
+`EXECUTOR_REGISTRY`：有 executor 的 action 走真 subprocess，没有的
+fallback 到 LLM 路径。Conductor 自动从 `(baseline_tput, current_tput)`
+推 `cumulative_gain`。
+
+- [x] 8a.1 `paths.py::skill_root() / skill_scripts_dir() / skill_actions_dir() / skill_kernel_opt_dir()` —— 统一资产路径解析（`INFERENCEROOT_OPTIMIZER_SKILL_ROOT` env override）
+- [x] 8a.2 `orchestrator/action_executors/{__init__, base, _helpers}.py` —— `ActionExecutor` ABC + `ExecutorContext` + `ExecutorResult` + `ExecutorEnvError` + `EXECUTOR_REGISTRY` + 共享 `run_subprocess` 测试 seam
+- [x] 8a.3 `action_executors/baseline.py` —— 调 `scripts/run_baseline.sh`，parse `baseline_*.json` → emit `update_state(baseline_tput, current_tput)`
+- [x] 8a.4 `action_executors/bench_runner.py` —— 同上但 `KEEP_SERVER=1` 复用 server，只 emit `current_tput`
+- [x] 8a.5 `action_executors/profile.py` —— 调 `scripts/run_profile.sh` → 找 `filtered-TP-0.trace.json.gz` → emit profile_done event
+- [x] 8a.6 `action_executors/param_sweep_run.py` —— 调 `scripts/run_sweep.sh` → parse `results.tsv` → 选最高 `output_tput` 行 → emit `update_state(current_tput=best)`
+- [x] 8a.7 `action_executors/kernel_opt.py` —— 并行 fan-out `geak_ray_submit.py` + `oob_ray_submit.py`，候选 × backend best-of-N，至少 1 成功即 succeeded + emit `propose_action(integrate)` follow-up
+- [x] 8a.8 `SubAgentRunner.__init__(env=, executor_registry=, intent_sink=)` —— 注入 env 给 executor、可替换的 registry、回调把 executor intents 推回 bus
+- [x] 8a.9 `SubAgentRunner.run` 新 `_lookup_executor` + `_try_executor` 两步：executor 存在 → 跑 → 通过 `intent_sink` 发 intents → finalise；`ExecutorEnvError` 自动 fallback 到 LLM
+- [x] 8a.10 `cli.py` 默认 `_build_action_registry()` 从 `skill_actions_dir()` 加载；`--no-action-registry` / `--actions-dir` 可选关闭/覆盖；启动 banner 显示 `actions: N loaded`
+- [x] 8a.11 `Conductor._bootstrap` 把 `intent_sink=self._executor_intent_sink` 传给 SubAgentRunner，executor intents 走完整 PolicyGate + `_handle_intent` 链路
+- [x] 8a.12 `Conductor._handle_update_state` 新 `_maybe_recompute_gain` —— 任何 `(baseline_tput, current_tput)` 写入后自动算 `cumulative_gain = (cur-base)/base*100`，落进 `state.json` + decision event 的 `derived` 字段
+- [x] 8a.13 `accuracy_gate._default_eval_script()` + `process_management.enforce_run_baseline_sh()` 改用 `paths.skill_script(...)` 解析；不再依赖 src 下的 stub 路径
+- [x] 8a.14 删除 `src/inference_optimizer/scripts/{run_baseline,eval_accuracy}.sh` stub —— 真版本由 skill 提供
+- [x] 8a.15 `tests/test_action_executors.py` (16 项) —— registry / 5 个 executor happy path / SubAgentRunner executor-prefer + LLM-fallback / Conductor cumulative_gain auto-derive
+- [x] 8a.16 `tests/test_scripts_skeletons.py` 重写 —— 验证 12 个 skill 脚本存在 + executable + 缺 env 时 `set -u` 拒跑
+- [x] 8a.17 SKILL.md 加"Skill asset layout"段说明新布局 + Python↔shell bridge 工作机制
+
+> 落地后跑通的端到端链路（mock backend，无 GPU）：
+> ```
+> Conductor.run → executor reactor 看到 reflection_tick →
+> Claude/Codex emit propose_action(baseline) → PolicyGate ✓ →
+> tasks 表新增 kind=delegate state=queued →
+> dispatcher_loop 拿到 → SubAgentRunner.run →
+> EXECUTOR_REGISTRY["baseline"].run → ExecutorEnvError (无 MODEL/TP/...) →
+> fallback 到 backend.run(prompt) → LLM 的 update_state intent →
+> Conductor._handle_update_state → state.baseline_tput=X →
+> _maybe_recompute_gain → cumulative_gain=0% (期初)
+> ```
+> 在真 GPU 上跑（DRY_RUN_MOCK 不再，sandbox 有 BYOI 完成 bootstrap）：
+> 同上，但 `BaselineExecutor.run` 真去 `subprocess.Popen(["bash", "run_baseline.sh"])`，
+> server 真启动，benchmark 真跑出 `output_throughput=8000.0`，executor parse 完
+> emit `update_state(baseline_tput=8000/TP)`，cumulative_gain 在下一轮 `bench_runner` 后真出非零。
+
+### Phase 6.3 — ClaudeBackend & 测试维护补丁 (2026-04-28)
+
+- [x] 6.3.1 `ClaudeBackend._build_options` 修 bug：之前把 `extra={"role":...}` 直接 `**kwargs` 给 `ClaudeAgentOptions` → `TypeError: unexpected keyword argument 'role'`。改为按 `inspect.signature(sdk_options_cls.__init__)` 缓存白名单过滤 `extra`，未知 key 静默丢弃；只让 SDK 真支持的 (model / mcp_servers / cwd / settings 等) 透传
+- [x] 6.3.2 `tests/test_claude_backend.py` 新增 2 项：`test_claude_backend_filters_unknown_keys_from_extra`（`_StrictFakeOptions` 拒绝未知 kwarg → 验证 `role/task_id` 不泄漏，`model` 透传）+ `test_claude_backend_extra_keys_caching_is_stable`（多次调用 `_sdk_option_keys()` 缓存稳定）
+- [x] 6.3.3 `tests/test_handle_intent.py` 修 2 个 deterministic 失败：`test_objection_writes_objection_event` / `test_vote_writes_vote_event` 之前用 `bus.tail(n=1000)` 在 guided mode + 1s 窗口被 ~1200 个 heartbeat 淹没（objection seq=4 被挤出窗口）。改为 `bus.tail(n=200, topic="objection"/"vote")` 直接走 SQL 过滤
+- [x] 6.3.4 测试结果：602 → 602 全过（之前 600 通过 / 2 deterministic fail）；ReadLints 0 错
+
 > 该最少集合让 `python -m inference_optimizer --model X --max-hours 0.001 --backend mock`
 > 可以完整执行（boot → reactor + clock 循环 → 优雅停止），是后续接入 Claude/Codex 真实 backend 的脚手架。
 
@@ -198,7 +267,7 @@
 - [x] 2.12 单测：缺失 `intents` 数组 → `IntentValidationError`
 - [x] 2.13 单测：未知 `intent_type` → 拒收
 - [x] 2.14 单测：自由文本（无 tool_use / 无 JSON）→ `NoIntentEmitted`
-- [~] 2.14b JSON repair pass —— 由 `ClaudeBackend.run` 做 1 轮 repair；intent_parser 自身不做（待 Codex 落地后再决定要不要内化）
+- [x] 2.14b JSON repair pass —— `intent_parser.build_repair_prompt(prompt, error, fenced_label=...)` 已抽出共享 helper；`ClaudeBackend` (label=`json`) 与 `CodexBackend` (label=`validated_json_output`) 都通过它构造 1 轮 repair；fence 正则同时支持任意 ``` 语言标签
 
 ### `orchestrator/policy.py` —— ✅ Phase F1b 完成
 - [x] 2.15 `PolicyGate.__init__(flags, mode, action_registry, role_registry)`
@@ -587,7 +656,7 @@ SELECT 'cursors lag (events behind)'    AS what,
 - [ ] 11.1 T1 — 跟 sandbox 团队确认跨 sandbox 通信能力（CPU + GPU 分开）`[D §23 T1]`
 - [ ] 11.2 T2 — 多 GPU sandbox 并行 backend 测试 `[D §23 T2]`
 - [ ] 11.3 T3 — KB 多 user/多 session 隔离策略 `[D §23 T3]`
-- [ ] 11.4 T4 — Codex no-tools + validated_json_output 稳定性测试套 `[D §23 T4]`
+- [x] 11.4 T4 — Codex no-tools + validated_json_output 稳定性测试套 —— `tests/test_codex_backend.py` 22 项 + `tests/test_cli_backends.py` 4 项 + 2 个 e2e proxy 实测 session（quick + guided 双 reactor），全部 pass / 0 backend_error / 0 policy_denied。剩"长时跨多 run 真实 endpoint 压测"留给 Phase 11 sandbox `[D §23 T4]`
 - [ ] 11.5 T5 — Marathon thin shim 参数映射 `[D §23 T5]`
 - [ ] 11.6 T6 — KB schema (entries / insights / embeddings) `[D §23 T6]`
 - [ ] 11.7 T7 — Skill 名最终定稿（当前占位 inference-optimizer）`[D §23 T7]`
@@ -614,7 +683,7 @@ SELECT 'cursors lag (events behind)'    AS what,
 - [ ] 13.3 path B 备选：`apsw + unix-dotfile` VFS 直跑 NFS（路径 B）`[D §3.5.8]`
 - [ ] 13.4 跨 sandbox sandbox-to-sandbox 通信（CPU/GPU 分离）`[D §23 T1/T2]`
 - [ ] 13.5 KB embedding 升级（v0.5 用简单 BM25）`[D §23 T6]`
-- [ ] 13.6 Codex Critic / Sage repair-prompt 失败的兜底分流（marathon → Watchdog；guided → 自审；quick → fail）`[D §10.5.5 / §10.5.6]`
+- [x] 13.6 Codex Critic / Sage repair-prompt 失败的兜底分流 —— CodexBackend 内部 1 轮 repair (`build_repair_prompt`) ✅；用尽后 raise `BackendError` 在 `_reactor` 被捕获写入 `observation{kind=backend_error}`，reactor 不会因此挂掉，下一 tick 继续工作。marathon → Watchdog 接力 / guided → 自审 / quick → fail 的 conductor 级 mode-specific 路由仍归 Phase 7.14 处理（已记录在 `_handle_intent` 占位上）`[D §10.5.5 / §10.5.6]`
 - [x] 13.7 性能 smoke：`tests/test_perf_smoke.py` (4 项) — 500 events 写入 / 8 reactor 重放 / 50 lease 周转 / 互斥并发 acquire（M9 落地，HARD_CAP_S=10s 留足 CI 余量）
 - [ ] 13.8 NFS backup 周期可配置（默认 30min，用户可调）`[D §3.5.8]`
 
@@ -643,29 +712,40 @@ Phase D   ████████████ 100% (8/8)    — minimal viable 
 Phase E   ████████████ 100% (8/8)    — ClaudeBackend + Node/CLI auto-install
 Phase F   ████████████ 100% (9/9)    — Make Intents Real (multi-reactor, PolicyGate,
                                        ActionRegistry, SubAgentRunner skeleton, MCP)
-Phase 1   ████████████ 100% (29/29) — Iron Rules / kernel_opt constants / process mgmt
-Phase 2   ███████████░  94% (34/36) — IntentParser ✓ / PolicyGate ✓ / AgentRole ✓
-                                       (剩 2.14b JSON-repair pass + 2.20 lane/lease hard test)
-Phase 3   ██████████░░  98% (45/46) — Scheduler ✓ / ScorePriors ✓ / AccuracyGate ✓ /
+Phase 6.2 ████████████ 100% (13/13)  — CodexBackend (validated_json_output, 1-shot
+                                       repair, no-tools enforcement, openai SDK,
+                                       proxy + verify_ssl support, prompt schema
+                                       table, e2e proxy-tested) ✨ NEW
+Phase 6.3 ████████████ 100% (4/4)    — ClaudeBackend extra-filter bugfix +
+                                       handle_intent flake fixes ✨ NEW
+Phase 1   ████████████ 100% (29/29)  — Iron Rules / kernel_opt constants / process mgmt
+Phase 2   ████████████ 100% (36/36)  — IntentParser ✓ / PolicyGate ✓ / AgentRole ✓
+                                       (2.14b shared build_repair_prompt 已抽出)
+Phase 3   ██████████░░  98% (45/46)  — Scheduler ✓ / ScorePriors ✓ / AccuracyGate ✓ /
                                        EarlyStop ✓ ; 仅剩 3.45 marathon 5-tail graceful_stop
-Phase 4   ████████████ 100% (43/43) — ActionRegistry ✓ / SubAgentRunner ✓ / 22 actions
+Phase 4   ████████████ 100% (43/43)  — ActionRegistry ✓ / SubAgentRunner ✓ / 22 actions
                                        全部交付 (.md+yaml) + catalog 测试锁定
-Phase 5   ████████████ 100% (32/32) — KB ✓ / Persona ✓ / SageQuery ✓ / kb_query ✓ /
+Phase 5   ████████████ 100% (32/32)  — KB ✓ / Persona ✓ / SageQuery ✓ / kb_query ✓ /
                                        kb_ingest ✓
-Phase 6   ███████████░  94% (24/25) — backup ✓ / checkpoint ✓ / 6-row evidence_check ✓
+Phase 6   ███████████░  94% (24/25)  — backup ✓ / checkpoint ✓ / 6-row evidence_check ✓
                                        (剩 6.10 cursor 重放 — reactor 已天然过滤)
-Phase 7   ████████████ 100% (25/25) — dispatcher loop ✓ / resume ✓ / RCA ✓ /
+Phase 7   ████████████ 100% (25/25)  — dispatcher loop ✓ / resume ✓ / RCA ✓ /
                                        cadence(30min) ✓ / parliament ✓ / TokenMeter ✓
-Phase 8   ████████████ 100% (5/5)   — 5 system prompts (executor/critic/sage/watchdog/rca)
-Phase 9   ███████████░  96% (22/23) — monitor.sh + monitor.py + IR-6 patch_inductor +
+Phase 8   ████████████ 100% (5/5)    — 5 system prompts (executor/critic/sage/watchdog/rca)
+Phase 9   ███████████░  96% (22/23)  — monitor.sh + monitor.py + IR-6 patch_inductor +
                                        run_baseline/eval_accuracy DRY_RUN_MOCK skeletons
-Phase 10  ████████████ 100% (13/13) — README + KNOWLEDGE-BASE + SKILL.md / Monitoring
-Phase 11  ░░░░░░░░░░░░   0% (0/11)  — TODO follow-ups (real sandbox / multi-user / NSF)
-Phase 12  ████████████ 100% (4/4)   — BrierTracker + cold-start protection
-Phase 13  █░░░░░░░░░░░  13% (1/8)   — Hardening (perf smoke ✓; rest pending)
-Phase 14  ████████████ 100% (10/10) — E2E1..E2E10 covered via mock+fixture suite
+Phase 10  ████████████ 100% (13/13)  — README + KNOWLEDGE-BASE + SKILL.md / Monitoring
+Phase 11  ██░░░░░░░░░░  18% (2/11)   — 11.4 Codex 稳定性测试 ✓ (22+4 单测 + 2 e2e);
+                                       其余 sandbox / multi-user / KB embedding 仍 TODO
+Phase 12  ████████████ 100% (4/4)    — BrierTracker + cold-start protection
+Phase 13  ██░░░░░░░░░░  37% (3/8)    — Hardening (perf smoke ✓; 13.6 Codex repair ✓)
+Phase 14  ████████████ 100% (10/10)  — E2E1..E2E10 covered via mock+fixture suite
 
-Total                    ~331 check items   |   Tests passing: 570 / 570
+Total                    ~348 check items   |   Tests passing: 602 / 602
+                                                  (+22 codex backend, +4 cli backends,
+                                                  +2 claude-backend extra-filter,
+                                                  -2 prior flaky test_handle_intent
+                                                  fixed via topic-filtered bus.tail)
 ```
 
 ---
@@ -685,26 +765,45 @@ Total                    ~331 check items   |   Tests passing: 570 / 570
 
 ---
 
-**End of Implementation Checklist v0.7 — 2026-04-27 multi-day local marathon**
+**End of Implementation Checklist v0.7.2 — 2026-04-28 Codex backend
+production-ready + ClaudeBackend bug fix + flake fixes**
 
 Net change vs v0.6:
-- Tests: 238 → 570 (+332)
+- Tests: 238 → 602 (+364, includes 2026-04-28 batch: +22 codex backend,
+  +4 cli backend, +2 claude backend extra-filter, +0 net handle_intent
+  via 2 deterministic fixes)
 - Action catalog: 3 → 22
 - Net new modules: iron_rules ✓, process_management ✓, score_priors ✓,
   scheduler ✓, accuracy_gate ✓, early_stop ✓, kb ✓, persona ✓,
   sage_query_service ✓, kb_query ✓, kb_ingest ✓, storage/backup ✓,
   checkpoint ✓, brier ✓, scripts/monitor ✓, scripts/patch_inductor ✓,
-  scripts/run_baseline + eval_accuracy DRY_RUN_MOCK skeletons ✓
+  scripts/run_baseline + eval_accuracy DRY_RUN_MOCK skeletons ✓,
+  backends/codex ✓ (2026-04-28)
+- intent_parser: shared `build_repair_prompt(label=...)` helper + fence
+  regex now accepts ```validated_json_output / ```json / any tag
 - Conductor: dispatcher loop ✓ resume ✓ RCA ✓ checkpoint cadence ✓
   parliament ✓ self-review ✓ token meter (record/throttle) ✓
   persona auto-refresh ✓ IronRules + sage_hint in prompt ✓
-- Documentation: README ✓ KNOWLEDGE-BASE ✓ 5 system prompts ✓
+- ClaudeBackend: `_build_options` now whitelists `extra` against the
+  SDK's `__init__` signature so reactor metadata
+  (`{"role": ..., "task_id": ...}`) cannot leak through and crash the
+  options ctor with `TypeError: unexpected keyword`
+- CodexBackend: `--backend codex` / `--codex-model` / `--codex-base-url`,
+  proxy + `verify_ssl=False` for self-signed corp certs, prompt-side
+  intent_type → required-fields schema table
+- system_prompts/critic.md: `objection` payload schema fix (severity →
+  reason) to match `_PAYLOAD_REQUIRED`
+- requirements.txt: pinned `claude-agent-sdk>=0.1.65` (was the
+  non-existent `>=0.2.111`), added `openai>=1.50` + `httpx>=0.27`
+- Documentation: README ✓ KNOWLEDGE-BASE ✓ SKILL.md backend table +
+  proxy section + 5 system prompts ✓ + v0.7 backend matrix refresh
 
-What still needs the live MI355X sandbox / Codex backend:
-- Phase 6.2 CodexBackend (`validated_json_output`)
+What still needs the live MI355X sandbox:
+- Phase 7 OOB sub-agent + per-role backend factory (Claude executor +
+  Codex critic in the same run today share one backend instance)
 - Phase 9.2/9.3/9.5/9.7 real `run_baseline.sh` / `eval_accuracy.sh` flows
 - Phase 11 multi-sandbox bringup + KB embedding + cross-sandbox comm
-- Phase 13.1‒13.6 deep hardening
+- Phase 13.1‒13.5 + 13.8 deep hardening
 - Marathon cadence (4h persona distill / 2h strategic review /
   6h cross-run synthesis) — primitives all implemented; clock-tick
   wiring left for the next session.

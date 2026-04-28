@@ -234,8 +234,12 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
 # ---------------------------------------------------------------------------
 # JSON object extraction helpers
 # ---------------------------------------------------------------------------
+# Accept any language tag after ``` (or no tag). Codex roles emit
+# ```validated_json_output blocks (DESIGN §10.5.5), Claude tends to
+# emit ```json. Trailing whitespace before the closing fence is allowed.
 _JSON_FENCE_RE = re.compile(
-    r"```(?:json)?\s*\n(?P<body>\{.*?\})\s*\n```", re.DOTALL | re.IGNORECASE,
+    r"```[a-zA-Z0-9_+-]*\s*\n(?P<body>\{.*?\})\s*\n?```",
+    re.DOTALL | re.IGNORECASE,
 )
 
 
@@ -299,8 +303,29 @@ def parse_codex_validated_json(text: str) -> list[Intent]:
     return validate_envelope(envelope)
 
 
+def _is_emit_intent_name(name: Any) -> bool:
+    """True iff *name* refers to the ``emit_intent`` tool, qualified or not.
+
+    The Claude SDK rewrites in-process MCP tools as
+    ``mcp__<server_name>__<tool_name>`` before exposing them to the model
+    (see :mod:`backends.mcp_emit_intent`), so the tool_use blocks we get
+    back carry the qualified name (e.g.
+    ``mcp__inference_optimizer__emit_intent``). We accept both the bare
+    name (used in unit tests, JSONL replay, and any future non-MCP
+    transport) and any ``mcp__<server>__emit_intent`` variant so the
+    parser stays stable when the server name changes.
+    """
+    if not isinstance(name, str):
+        return False
+    if name == "emit_intent":
+        return True
+    return name.startswith("mcp__") and name.endswith("__emit_intent")
+
+
 def _walk_tool_use_blocks(messages: Iterable[Any]) -> Iterable[dict[str, Any]]:
-    """Yield ``input`` dicts from every ``ToolUseBlock`` named ``emit_intent``.
+    """Yield ``input`` dicts from every ``ToolUseBlock`` whose name resolves
+    to ``emit_intent`` (qualified or unqualified — see
+    :func:`_is_emit_intent_name`).
 
     The shape we accept is duck-typed because the SDK objects evolve; we
     only ever read ``.name`` and ``.input``. If a message has ``.content``
@@ -312,21 +337,20 @@ def _walk_tool_use_blocks(messages: Iterable[Any]) -> Iterable[dict[str, Any]]:
         content = getattr(msg, "content", None)
         if content is not None:
             for block in content:
-                name = getattr(block, "name", None)
-                if name == "emit_intent":
+                if _is_emit_intent_name(getattr(block, "name", None)):
                     yield dict(getattr(block, "input", {}) or {})
             continue
 
         # Plain dict (tests / replay)
         if isinstance(msg, dict):
-            if msg.get("type") == "tool_use" and msg.get("name") == "emit_intent":
+            if msg.get("type") == "tool_use" and _is_emit_intent_name(msg.get("name")):
                 yield dict(msg.get("input", {}) or {})
             elif "content" in msg and isinstance(msg["content"], list):
                 for block in msg["content"]:
                     if (
                         isinstance(block, dict)
                         and block.get("type") == "tool_use"
-                        and block.get("name") == "emit_intent"
+                        and _is_emit_intent_name(block.get("name"))
                     ):
                         yield dict(block.get("input", {}) or {})
 
@@ -342,9 +366,15 @@ def parse_claude_trajectory(
     in its ``input``. We aggregate them into one envelope and reuse the
     same :func:`validate_envelope` that Codex flows through.
 
-    If there are no tool_use blocks but ``fallback_text`` is provided, we
-    fall back to JSON-in-text mode (used by ClaudeBackend in v0.5 before
-    MCP custom tools land).
+    The block name may be the bare ``"emit_intent"`` (legacy /
+    JSON-in-text fallback / unit tests) or the SDK-qualified
+    ``"mcp__<server>__emit_intent"`` shape produced by the in-process MCP
+    server (DESIGN §10.5.4). Both forms are accepted — see
+    :func:`_is_emit_intent_name`.
+
+    If there are no matching tool_use blocks but ``fallback_text`` is
+    provided, we fall back to JSON-in-text mode (used by ClaudeBackend in
+    v0.5 before MCP custom tools land).
     """
     items = []
     for input_obj in _walk_tool_use_blocks(trajectory):
@@ -364,6 +394,34 @@ def parse_claude_trajectory(
     raise NoIntentEmitted("no emit_intent tool_use blocks and no fallback text")
 
 
+# ---------------------------------------------------------------------------
+# Repair-prompt helper (DESIGN §10.5.5, IMPL-CHECKLIST §2.14b)
+# ---------------------------------------------------------------------------
+def build_repair_prompt(
+    original_prompt: str,
+    error: Exception | None,
+    *,
+    fenced_label: str = "json",
+) -> str:
+    """Compose a follow-up prompt that asks the model to retry, citing the
+    exact validation error.
+
+    Used by both ``ClaudeBackend`` and ``CodexBackend`` for their single
+    repair attempt. Codex roles want ``validated_json_output`` for the
+    fence label; Claude is happy with ``json``. The error string is
+    truncated to keep the repaired prompt short.
+    """
+    reason = str(error) if error else "unknown parse failure"
+    if len(reason) > 500:
+        reason = reason[:497] + "..."
+    return (
+        f"{original_prompt.rstrip()}\n\n"
+        f"Your previous reply did not validate ({reason}). "
+        f"Please retry — return ONLY the JSON envelope inside a "
+        f"```{fenced_label} fenced block. Do not add commentary."
+    )
+
+
 __all__ = [
     "EMIT_INTENT_TOOL_SCHEMA",
     "INTENT_ENVELOPE_SCHEMA",
@@ -372,6 +430,7 @@ __all__ = [
     "IntentValidationError",
     "NoIntentEmitted",
     "ProtocolError",
+    "build_repair_prompt",
     "parse_claude_trajectory",
     "parse_codex_validated_json",
     "validate_envelope",

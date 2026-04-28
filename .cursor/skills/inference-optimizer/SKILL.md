@@ -1,15 +1,23 @@
-# Inference Optimizer (v0.6 — multi-reactor + emit_intent MCP tool)
+# Inference Optimizer (v0.8 — Python ↔ shell ActionExecutor bridge)
 
-> **STATUS**: ``MockBackend`` (dry-run) and ``ClaudeBackend`` (real Claude
-> via ``claude-agent-sdk``) both work. The Conductor now spawns one
-> reactor per role (executor + critic + sage + watchdog) according to
-> ``ExecutionMode``, every intent flows through ``PolicyGate``, and
-> ``emit_intent`` is wired as a real MCP tool inside ``ClaudeBackend``
-> (with JSON-in-text envelope as automatic fallback). The
-> ``ActionRegistry`` loads action specs from ``actions/_meta/*.yaml`` and
-> the ``SubAgentRunner`` skeleton drains queued ``delegate`` tasks. Real
-> OOB sub-agent processes + benchmark/kernel-opt actions land in later
-> phases. See ``IMPLEMENTATION-CHECKLIST.md``.
+> **STATUS**: ``MockBackend`` (dry-run), ``ClaudeBackend`` (real Claude
+> via ``claude-agent-sdk``), and ``CodexBackend`` (real Codex / GPT via
+> the ``openai`` SDK with ``validated_json_output``) all work. The
+> Conductor spawns one reactor per role (executor + critic + sage +
+> watchdog) according to ``ExecutionMode``, every intent flows through
+> ``PolicyGate``, and ``emit_intent`` is wired as a real MCP tool inside
+> ``ClaudeBackend`` (JSON-in-text fallback). Codex roles post a single
+> ``validated_json_output`` envelope per turn (parser accepts ``json`` /
+> ``validated_json_output`` fences). The ``ActionRegistry`` loads 22
+> actions from ``actions/_meta/*.yaml``; the ``SubAgentRunner`` first
+> tries the matching ``ActionExecutor`` (Python wrapper around the
+> bundled ``scripts/*.sh``), falling back to the LLM path when env vars
+> are missing. Five executors live today: ``baseline``, ``bench_runner``,
+> ``profile``, ``param_sweep_run``, ``kernel_opt`` — they shell out to
+> ``run_baseline.sh`` / ``run_profile.sh`` / ``run_sweep.sh`` /
+> ``geak_ray_submit.py`` / ``oob_ray_submit.py``. The Conductor
+> auto-derives ``cumulative_gain`` from any ``baseline_tput`` /
+> ``current_tput`` update. See ``IMPLEMENTATION-CHECKLIST.md``.
 >
 > **Auto-bootstrap**: When ``--backend claude`` is selected, the CLI
 > probes for Node.js (>=18) and the ``claude`` CLI binary on PATH. With
@@ -54,6 +62,13 @@ based on `MAX_HOURS`:
 | `INFERENCE_OPTIMIZER_VENV_BIN`         | default `/opt/venv/bin`                                  |
 | `INFERENCE_OPTIMIZER_AUTO_INSTALL`     | `1`/`true`/`yes` → bootstrap installs Node + claude CLI  |
 | `ANTHROPIC_API_KEY`                    | required for `--backend claude` (or use Bedrock/Vertex)  |
+| `ANTHROPIC_AUTH_TOKEN`                 | Bearer-auth alternative to `ANTHROPIC_API_KEY`; required when proxy expects `Authorization: Bearer ...` instead of `x-api-key` |
+| `ANTHROPIC_BASE_URL`                   | OpenAI-compat / Anthropic-compat proxy root (e.g. corp gateway). Claude SDK appends `/v1/messages`. |
+| `OPENAI_API_KEY`                       | required for `--backend codex` (or use Azure / proxy)    |
+| `OPENAI_BASE_URL`                      | OpenAI-compatible proxy root (Azure / Foundry / corp). The SDK appends `/v1/chat/completions`. CLI flag `--codex-base-url` overrides. |
+| `OPENAI_MODEL`                         | default model id for `--backend codex` (overridden by `--codex-model`) |
+| `INFERENCE_OPTIMIZER_OPENAI_VERIFY_SSL`| `0`/`false`/`no`/`off` → skip TLS verification on the OpenAI proxy (self-signed corp certs). Default verify on. |
+| `NODE_TLS_REJECT_UNAUTHORIZED`         | claude CLI / Node child-proc equivalent of the above; set `0` to skip TLS verify when `ANTHROPIC_BASE_URL` points at a self-signed proxy |
 
 ---
 
@@ -84,7 +99,9 @@ python -m inference_optimizer \
     [--target-gain-pct "$TARGET_GAIN_PCT" |
      --target-tput-per-gpu "$TARGET_TPUT_PER_GPU" |
      --target-dir "$TARGET_DIR"] \
-    [--backend mock|claude] \
+    [--backend mock|claude|codex] \
+    [--codex-model gpt-5.4] \
+    [--codex-base-url https://api.example.com/v1] \
     [--auto-install] \
     [--session-id <id-to-resume>]
 ```
@@ -103,13 +120,92 @@ python -m inference_optimizer `
 5. **Print the session_dir** the CLI emits on stderr. The user needs it
    to inspect state and the SQLite DB.
 
-### v0.6 backends
+## Run on local GPU (minimum)
+
+For a real run that boots sglang/vllm and produces an actual
+`cumulative_gain` number, the CLI exposes the GPU/framework knobs that
+the bundled `scripts/*.sh` shell scripts need. Auto-probe fills in the
+defaults the operator didn't specify (GPU count via `rocm-smi` /
+`amd-smi` / `nvidia-smi`, framework via Python import).
+
+### Pre-flight requirements
+
+| Requirement | Check |
+|---|---|
+| sglang or vllm in current Python env | `python -c "import sglang"` or `import vllm` |
+| ROCm or NVIDIA SMI on PATH | `rocm-smi -h` or `nvidia-smi -h` |
+| InferenceX checkout | `ls $INFERENCEX_PATH/benchmarks/benchmark_lib.sh` |
+| OPENAI_API_KEY (codex) or ANTHROPIC_API_KEY (claude) | `env \| grep -E 'OPENAI\|ANTHROPIC'_API_KEY` |
+
+### Run
+
+```bash
+export INFERENCEX_PATH=/opt/InferenceX
+export OPENAI_API_KEY=sk-...                   # or ANTHROPIC_API_KEY
+export INFERENCE_OPTIMIZER_SESSION_ROOT=/tmp/io-local
+
+cd src
+python -m inference_optimizer \
+    --model Qwen/Qwen3-8B \
+    --max-hours 1 \
+    --target-gain-pct 10 \
+    --inferencex-path "$INFERENCEX_PATH" \
+    --backend codex --codex-model gpt-5.4 \
+    --reactor-tick-s 5.0 --clock-tick-s 10.0 \
+    --log-level INFO
+```
+
+Optional pinned overrides (auto-probe fills these otherwise):
+
+```bash
+    --tp 4 --conc 32 --isl 1024 --osl 256 \
+    --port 8888 --framework sglang
+```
+
+The CLI banner now prints what it picked up:
+
+```
+[inference-optimizer] starting
+  ...
+  actions     : 22 loaded
+  gpu         : count=4 type=gfx950
+  framework   : sglang (version=0.5.10rc0...)
+  config      : tp=4 conc=32 isl=1024 osl=256 port=8888
+  inferencex  : /opt/InferenceX
+```
+
+### What happens after launch
+
+1. The executor reactor wakes up, sees the `Available actions`
+   catalogue + a `First action hint (live)` block (because
+   `baseline_tput=0`).
+2. It emits `delegate(action_name="baseline")`.
+3. The dispatcher loop picks the queued task; `BaselineExecutor` shells
+   out to `scripts/run_baseline.sh` which launches sglang, runs the
+   benchmark, and writes `results/<task_id>/baseline_*.json`.
+4. The executor parses the JSON, emits
+   `update_state(baseline_tput=X)`, the Conductor records it, and
+   `cumulative_gain` is auto-derived.
+5. Subsequent rounds (`bench_runner`, `param_sweep_run`, optionally
+   `kernel_opt`) push `current_tput` up; once `cumulative_gain ≥
+   target_gain_pct`, the early-stop signal `target_reached` fires and
+   the run ends gracefully.
+
+### Monitor
+
+```bash
+bash src/inference_optimizer/scripts/monitor.sh --watch 5
+# or:
+python -m inference_optimizer.scripts.monitor --watch 5 --per-agent
+```
+
+### v0.7 backends
 
 | backend         | what it does                                                                                    | status |
 | --------------- | ----------------------------------------------------------------------------------------------- | ------ |
 | `mock`          | scripted heartbeats, no LLM calls, runs locally                                                 | OK     |
 | `claude`        | real Claude via `claude-agent-sdk`; in-process MCP server exposes `emit_intent` as a real tool, JSON-in-text envelope is the automatic fallback | OK |
-| `codex`         | real Codex SDK, `validated_json_output`                                                         | TODO (Phase 6.x) |
+| `codex`         | real Codex/GPT via the `openai` SDK; no-tools roles (Critic/Sage) post one `validated_json_output` envelope per turn, with a 1-shot repair pass on parse failure | OK |
 
 All backends route through the same `Conductor`, but the Conductor now
 spawns one reactor per role returned by `roles_for_mode(execution_mode)`,
@@ -170,6 +266,42 @@ python -m inference_optimizer --model fake/model --max-hours 0.001 `
 
 `max-hours 0.001` ≈ 3.6 s of wall time. The run will end with
 `reason=time_exhausted`.
+
+### `--backend codex` (OpenAI-compatible)
+
+`CodexBackend` talks to anything OpenAI-compatible — direct
+`api.openai.com`, Azure OpenAI, AMD primus-safe LLM proxy, Foundry, etc.
+No bootstrap step is needed (it's pure-pip via `openai>=1.50`).
+
+Pick the endpoint via env or CLI:
+
+```bash
+export OPENAI_API_KEY=ak-...
+export OPENAI_BASE_URL=https://your.proxy.example.com/api/v1/llm-proxy/v1
+# Skip TLS verify when the proxy uses a self-signed cert:
+export INFERENCE_OPTIMIZER_OPENAI_VERIFY_SSL=0
+
+python -m inference_optimizer \
+    --model /hyperloom/models/Qwen3-30B-A3B \
+    --max-hours 0.05 \
+    --backend codex \
+    --codex-model gpt-5.4
+```
+
+For an Anthropic-compat proxy used with `--backend claude` that needs
+`Authorization: Bearer` (instead of `x-api-key`):
+
+```bash
+export ANTHROPIC_AUTH_TOKEN=ak-...                                        # Bearer
+export ANTHROPIC_API_KEY=$ANTHROPIC_AUTH_TOKEN                            # silence ClaudeBackend warn
+export ANTHROPIC_BASE_URL=https://your.proxy.example.com/api/v1/llm-proxy
+export NODE_TLS_REJECT_UNAUTHORIZED=0                                     # claude CLI runs under Node
+python -m inference_optimizer --model X --max-hours 0.05 \
+    --backend claude --claude-model claude-opus-4-7
+```
+
+The Codex endpoint is auto-derived: `${OPENAI_BASE_URL}/chat/completions`
+(the SDK adds the `/v1` only if missing). Don't double-append `/v1`.
 
 ---
 
@@ -278,6 +410,49 @@ TARGET_TPUT_PER_GPU=6000
 the async main loop. The Conductor wires every subsystem, replays SQLite
 state on resume, and orchestrates reactors.
 
+## Skill asset layout (all under `.cursor/skills/inference-optimizer/`)
+
+```
+SKILL.md                    ← this file (entrypoint Cursor reads)
+README.md                   ← architecture overview
+KNOWLEDGE-BASE.md           ← cross-run lessons schema
+IMPLEMENTATION-CHECKLIST.md ← per-phase progress tracker
+
+actions/                    ← active catalogue (22 actions)
+  <name>.md                 ← prompt body for the LLM sub-agent
+  _meta/<name>.yaml         ← machine-readable metadata
+                              (cost, lanes, allowed_modes, side_effects)
+actions_old/                ← legacy single-skill descriptions, kept for
+                              cross-referencing while we drain TODOs
+kernel-opt/                 ← per-backend prompt templates
+  geak.md / claude.md / codex.md / llm.md
+scripts/                    ← real shell + Python tools (GPU-side)
+  run_baseline.sh           ← launch sglang/vllm + benchmark + profile
+  run_profile.sh            ← profile-only against running server
+  run_sweep.sh              ← CONC × ISL/OSL grid sweep
+  eval_accuracy.sh          ← lm-evaluation-harness GSM8K
+  bootstrap.sh              ← BYOI: GEAK / intellikit / Ray / OOB / npm
+  common.sh                 ← kill_server / wait_for_health / filter_trace
+  executor.sh               ← local / claw / fully-local dispatch
+  geak_ray_submit.py        ← Ray-scheduled GEAK CLI
+  oob_ray_submit.py         ← Ray-scheduled OOB (Claude/Codex) CLI
+  ray_submit.py             ← generic Ray claw submit
+  patch_inductor.py         ← apply GEAK output to Inductor cache
+  trace_action.py           ← per-component start/end timestamps
+system_prompts/             ← per-agent role markdown bodies
+```
+
+**Python ↔ shell bridge** (Phase 8a, see ``IMPLEMENTATION-CHECKLIST.md``):
+the `SubAgentRunner` first looks up an `ActionExecutor` in
+`src/inference_optimizer/orchestrator/action_executors/` for the
+queued delegate task. If found, the executor shells out to the
+matching `scripts/*.sh` and parses the result file (`metrics.json` /
+`results.tsv` / `eval_summary_*.json`). It then emits `update_state`
+intents that flow through the same `PolicyGate` as LLM intents.
+When required env vars are missing the executor raises
+`ExecutorEnvError` and the runner falls back to the LLM-driven path
+(useful for dev boxes without GPU + InferenceX).
+
 ## Where to read more
 
 - [`inference-optimizer-DESIGN-modified.md`](./inference-optimizer-DESIGN-modified.md) — full v0.5 design
@@ -288,15 +463,28 @@ state on resume, and orchestrates reactors.
 ## TODO (next phases)
 
 - [x] Phase 6.1 ClaudeBackend + bootstrap (Node + claude CLI auto-install)
+- [x] Phase 6.2 CodexBackend (`validated_json_output` parser + 22 tests +
+      shared `build_repair_prompt` helper, OpenAI-compat proxy support)
 - [x] Phase 4 PolicyGate wiring (intent permissions + quick allowlist)
 - [x] F1 multi-reactor Conductor (one reactor per role, role-aware prompts)
 - [x] F2 full intent dispatcher (10 intent types, idempotent task queueing)
 - [x] F3a `ActionRegistry` (load `actions/_meta/*.yaml` + system prompts)
 - [x] F3b `SubAgentRunner` skeleton (lane acquire → backend → metrics)
 - [x] F4 MCP custom-tool ``emit_intent`` registered inside `ClaudeBackend`
-- [ ] Phase 6.2 CodexBackend (`validated_json_output` parser + tests)
-- [ ] Phase 7 OOB sub-agent dispatch (separate process, per-task backend)
-- [ ] Phase 8 real benchmark / kernel-opt actions wired to MI355X sandboxes
-- [ ] Phase 9 BudgetAwareScheduler + accuracy gate
+- [x] 11.4 Codex no-tools + `validated_json_output` stability suite
+      (22 unit tests + 2 e2e proxy sessions)
+- [x] 13.6 Codex Critic / Sage repair-prompt fallback (1-shot retry via
+      `build_repair_prompt`)
+- [x] Phase 8a Python ↔ shell `ActionExecutor` bridge (5 executors:
+      `baseline` / `bench_runner` / `profile` / `param_sweep_run` /
+      `kernel_opt`). They shell out to `scripts/run_baseline.sh` /
+      `run_profile.sh` / `run_sweep.sh` / `geak_ray_submit.py` /
+      `oob_ray_submit.py` and emit `update_state` intents through the
+      same PolicyGate as LLM-emitted ones. Conductor auto-derives
+      `cumulative_gain` from any `(baseline_tput, current_tput)` pair.
+      CLI loads `ActionRegistry` by default → dispatcher loop runs.
+- [ ] Phase 7 OOB sub-agent dispatch (per-task per-role backend factory)
+- [ ] Phase 8b real GPU integration (sandbox bootstrap.sh + InferenceX)
+- [ ] Phase 9 BudgetAwareScheduler wired to Conductor prompt
 - [ ] Marathon cadences (persona distill, KB synthesis)
 - [ ] Cursor skill manifest entry + demo recordings

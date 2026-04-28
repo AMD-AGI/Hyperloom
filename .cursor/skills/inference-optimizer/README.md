@@ -73,12 +73,29 @@ $env:MAX_HOURS  = "1.0"
 python -m inference_optimizer --backend mock --auto-install --log-level INFO
 ```
 
-Bash:
+Bash + Claude (auto-install Node + claude CLI on first use):
 
 ```bash
 MODEL_PATH=openai/gpt-oss-20b MAX_HOURS=1.0 \
   python -m inference_optimizer --backend claude --auto-install
 ```
+
+Bash + Codex (no Node bootstrap needed; pure-pip via `openai>=1.50`):
+
+```bash
+export OPENAI_API_KEY=...
+export OPENAI_BASE_URL=https://api.openai.com/v1   # or your proxy / Azure / Foundry
+# self-signed cert proxy? add: export INFERENCE_OPTIMIZER_OPENAI_VERIFY_SSL=0
+
+MODEL_PATH=openai/gpt-oss-20b MAX_HOURS=1.0 \
+  python -m inference_optimizer --backend codex --codex-model gpt-5.4
+```
+
+For an Anthropic-compat proxy that wants `Authorization: Bearer ...`
+(instead of the standard `x-api-key`), set both `ANTHROPIC_AUTH_TOKEN`
+and `ANTHROPIC_BASE_URL`; if the cert is self-signed also set
+`NODE_TLS_REJECT_UNAUTHORIZED=0` so the bundled claude CLI's Node
+process accepts it.
 
 ## Monitoring
 
@@ -104,7 +121,10 @@ Exits 0 when `cursors lag ≤ 10` and no zombie tasks; non-zero otherwise
 
 ## Status / Known limitations
 
-- Codex backend is still TODO (Phase 6.2 in `IMPLEMENTATION-CHECKLIST.md`).
+- All three backends (`mock`, `claude`, `codex`) are wired and tested;
+  the Conductor still uses a single backend instance for every reactor,
+  so per-role backend mixing (e.g. Claude Executor + Codex Critic in
+  the same run) is the next step (Phase 7 — per-task backend factory).
 - `dispatch_pending_delegates` runs in-process for v0.7; OOB process
   isolation lands with Phase 7.
 - Real `run_baseline.sh` / `eval_accuracy.sh` need the sprint sandbox;

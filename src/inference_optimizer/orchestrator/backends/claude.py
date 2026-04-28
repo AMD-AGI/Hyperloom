@@ -34,9 +34,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
+
+log = logging.getLogger(__name__)
 
 from ..intent_parser import (
     EMIT_INTENT_TOOL_SCHEMA,
@@ -272,20 +275,60 @@ class ClaudeBackend(Backend):
                 full_prompt if attempt == 0 else self._repair_prompt(full_prompt, last_error),
                 options=options,
             )
+            tool_names = list(self._iter_tool_use_names(trajectory))
             self.calls.append(
                 {
                     "agent": agent_name,
                     "attempt": attempt,
                     "text_chars": len(text),
-                    "tool_blocks": sum(
-                        1 for _ in self._iter_tool_use_names(trajectory)
-                    ),
+                    "tool_blocks": len(tool_names),
                 }
             )
+            if log.isEnabledFor(logging.DEBUG):
+                log.debug(
+                    "claude[%s] attempt=%d msgs=%d text_chars=%d tool_blocks=%d tool_names=%s",
+                    agent_name, attempt, len(trajectory), len(text),
+                    len(tool_names), tool_names,
+                )
+                log.debug(
+                    "claude[%s] attempt=%d trajectory_types=%s",
+                    agent_name, attempt,
+                    [type(m).__name__ for m in trajectory],
+                )
+                for i, msg in enumerate(trajectory):
+                    blocks = getattr(msg, "content", None)
+                    if blocks is not None:
+                        block_repr = []
+                        for b in blocks:
+                            bname = type(b).__name__
+                            tname = getattr(b, "name", None)
+                            tinput = getattr(b, "input", None)
+                            t = getattr(b, "text", None)
+                            if t is not None:
+                                snippet = (t[:200] + "...") if len(t) > 200 else t
+                                block_repr.append(f"{bname}(text={snippet!r})")
+                            elif tname is not None:
+                                block_repr.append(f"{bname}(name={tname!r}, input={tinput!r})")
+                            else:
+                                block_repr.append(bname)
+                        log.debug("claude[%s] msg[%d]=%s blocks=%s",
+                                  agent_name, i, type(msg).__name__, block_repr)
+                    else:
+                        result = getattr(msg, "result", None)
+                        log.debug("claude[%s] msg[%d]=%s result=%r",
+                                  agent_name, i, type(msg).__name__, result)
+                log.debug(
+                    "claude[%s] attempt=%d raw_text=%r",
+                    agent_name, attempt, text,
+                )
             try:
                 return parse_claude_trajectory(trajectory, fallback_text=text)
             except (IntentValidationError, NoIntentEmitted) as exc:
                 last_error = exc
+                log.debug(
+                    "claude[%s] parse failed attempt=%d err=%s text_preview=%r",
+                    agent_name, attempt, exc, text[:500],
+                )
                 if attempt == self.repair_attempts:
                     raise BackendError(
                         f"ClaudeBackend: failed to parse intents after "
@@ -316,7 +359,14 @@ class ClaudeBackend(Backend):
     def _build_options(
         self, allowed_tools: Sequence[str], max_turns: int, extra: dict
     ) -> Any:
-        kwargs = dict(extra)
+        # ``extra`` is the per-call metadata channel from the Conductor /
+        # SubAgentRunner (e.g. ``{"role": "executor", "task_id": ...}``). The
+        # SDK options class only accepts a fixed set of fields, so we filter
+        # ``extra`` against the constructor signature and drop the rest.
+        allowed_kwargs = self._sdk_option_keys()
+        kwargs: dict[str, Any] = {
+            k: v for k, v in extra.items() if k in allowed_kwargs
+        }
         merged_tools = list(allowed_tools)
         if self.has_emit_intent_tool and self.mcp_tool_name not in merged_tools:
             # ``allowed_tools`` here is the caller-supplied list; we always
@@ -332,6 +382,23 @@ class ClaudeBackend(Backend):
         if self.model:
             kwargs.setdefault("model", self.model)
         return self.sdk_options_cls(**kwargs)  # type: ignore[misc]
+
+    def _sdk_option_keys(self) -> frozenset[str]:
+        """Cached set of constructor kwargs the SDK options class accepts."""
+        cached = getattr(self, "_sdk_option_keys_cache", None)
+        if cached is not None:
+            return cached
+        keys: frozenset[str]
+        try:
+            import inspect
+            sig = inspect.signature(self.sdk_options_cls.__init__)  # type: ignore[misc]
+            keys = frozenset(
+                name for name in sig.parameters if name != "self"
+            )
+        except (TypeError, ValueError):
+            keys = frozenset()
+        self._sdk_option_keys_cache = keys  # type: ignore[attr-defined]
+        return keys
 
     async def _invoke_sdk(
         self, prompt: str, *, options: Any

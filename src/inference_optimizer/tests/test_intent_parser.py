@@ -250,3 +250,116 @@ def test_claude_ignores_non_emit_intent_tool_uses():
     intents = parse_claude_trajectory(trajectory)
     assert len(intents) == 1
     assert intents[0].type == IntentType.ALERT
+
+
+# ---------------------------------------------------------------------------
+# Qualified-name parsing — the Claude SDK rewrites in-process MCP tool names
+# as ``mcp__<server>__<tool>`` before exposing them to the model, so the
+# trajectory we get back carries that qualified shape. The parser must accept
+# both forms (regression for the v0.7 silent-no-intents bug).
+# ---------------------------------------------------------------------------
+def test_claude_parses_mcp_qualified_tool_name():
+    """Object-shape blocks with the ``mcp__<server>__emit_intent`` name."""
+    trajectory = [
+        _AssistantMessage(content=[
+            _ToolUseBlock(
+                name="mcp__inference_optimizer__emit_intent",
+                input={"intent_type": "send_message", "payload": {"topic": "ack"}},
+            ),
+            _ToolUseBlock(
+                name="mcp__inference_optimizer__emit_intent",
+                input={
+                    "intent_type": "propose_action",
+                    "payload": {"action_name": "run_baseline", "predicted_gain_pct": 0},
+                },
+            ),
+        ]),
+    ]
+    intents = parse_claude_trajectory(trajectory)
+    assert {i.type for i in intents} == {
+        IntentType.SEND_MESSAGE, IntentType.PROPOSE_ACTION,
+    }
+
+
+def test_claude_parses_mcp_qualified_tool_name_dict_shape():
+    """Dict-shape replay of qualified MCP tool calls."""
+    trajectory = [
+        {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "mcp__inference_optimizer__emit_intent",
+                    "input": {
+                        "intent_type": "alert",
+                        "payload": {"severity": "warn", "summary": "x"},
+                    },
+                }
+            ]
+        }
+    ]
+    intents = parse_claude_trajectory(trajectory)
+    assert len(intents) == 1
+    assert intents[0].type == IntentType.ALERT
+
+
+def test_claude_parses_mcp_qualified_tool_name_top_level_dict():
+    """Top-level dict with ``type=tool_use`` (no nested content)."""
+    trajectory = [
+        {
+            "type": "tool_use",
+            "name": "mcp__inference_optimizer__emit_intent",
+            "input": {"intent_type": "send_message", "payload": {"topic": "hi"}},
+        }
+    ]
+    intents = parse_claude_trajectory(trajectory)
+    assert len(intents) == 1
+    assert intents[0].type == IntentType.SEND_MESSAGE
+
+
+def test_claude_qualified_name_independent_of_server_name():
+    """Any ``mcp__<server>__emit_intent`` is accepted — defends against future
+    server-name renames (the parser must not hard-code the server name)."""
+    trajectory = [
+        _AssistantMessage(content=[
+            _ToolUseBlock(
+                name="mcp__some_other_server__emit_intent",
+                input={"intent_type": "send_message", "payload": {"topic": "hi"}},
+            ),
+        ]),
+    ]
+    intents = parse_claude_trajectory(trajectory)
+    assert len(intents) == 1
+    assert intents[0].type == IntentType.SEND_MESSAGE
+
+
+def test_claude_rejects_lookalike_qualified_names():
+    """Names that merely *contain* ``emit_intent`` substring must NOT match —
+    only the bare name and the ``mcp__<server>__emit_intent`` shape do."""
+    trajectory = [
+        _AssistantMessage(content=[
+            _ToolUseBlock(name="my_emit_intent", input={}),
+            _ToolUseBlock(name="emit_intent_v2", input={}),
+            _ToolUseBlock(name="mcp__server__other_tool", input={}),
+        ]),
+    ]
+    with pytest.raises(NoIntentEmitted):
+        parse_claude_trajectory(trajectory)
+
+
+def test_claude_mixed_qualified_and_bare_names_in_one_trajectory():
+    """Real-world case: SDK upgrade lands mid-session and the trajectory
+    contains both shapes. Both should be picked up."""
+    trajectory = [
+        _AssistantMessage(content=[
+            _ToolUseBlock(
+                name="emit_intent",
+                input={"intent_type": "send_message", "payload": {"topic": "a"}},
+            ),
+            _ToolUseBlock(
+                name="mcp__inference_optimizer__emit_intent",
+                input={"intent_type": "alert", "payload": {"severity": "info", "summary": "b"}},
+            ),
+        ]),
+    ]
+    intents = parse_claude_trajectory(trajectory)
+    assert {i.type for i in intents} == {IntentType.SEND_MESSAGE, IntentType.ALERT}

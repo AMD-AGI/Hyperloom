@@ -116,6 +116,250 @@ async def test_compose_prompt_sage_hint_block(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# Inbox-body rendering — every published payload shape from the dispatcher
+# (_handle_*) must produce a non-empty, informative body line. Regression
+# guard for v0.7 bug: ``proposal`` / ``question`` / ``alert`` /
+# ``reflection_tick`` etc. used to render as empty strings, which made
+# Critic and Watchdog raise "I cannot evaluate" alerts.
+# ---------------------------------------------------------------------------
+class TestRenderMsgBody:
+    def test_body_md_passthrough(self):
+        out = Conductor._render_msg_body(
+            "heartbeat", {"body_md": "Critic online, standing by."}
+        )
+        assert out == "Critic online, standing by."
+
+    def test_body_md_long_text_not_truncated(self):
+        long_text = "X" * 5000  # agent-authored content kept intact
+        out = Conductor._render_msg_body("heartbeat", {"body_md": long_text})
+        assert out == long_text
+
+    def test_proposal_renders_action_and_gain(self):
+        out = Conductor._render_msg_body(
+            "proposal",
+            {
+                "task_id": "abc123def456",
+                "action_name": "run_baseline",
+                "predicted_gain_pct": 5,
+                "params": {"backend": "sglang"},
+            },
+        )
+        assert "action=run_baseline" in out
+        assert "predicted_gain=5%" in out
+        assert "backend" in out
+
+    def test_proposal_delegate_kind_renders_distinctly(self):
+        out = Conductor._render_msg_body(
+            "proposal",
+            {
+                "kind": "delegate_queued",
+                "task_id": "abc123def456789",
+                "action_name": "kernel_opt",
+                "params": {"file": "x.cu"},
+            },
+        )
+        assert "delegate_queued" in out
+        assert "action=kernel_opt" in out
+        assert "task=abc123de" in out  # truncated to 8 chars
+
+    def test_decision_renders_kind_changes_and_rationale(self):
+        out = Conductor._render_msg_body(
+            "decision",
+            {
+                "kind": "state_updated",
+                "changes": {"current_action": "run_baseline"},
+                "rationale": "establish baseline",
+            },
+        )
+        assert "state_updated" in out
+        assert "current_action" in out
+        assert "rationale=establish baseline" in out
+
+    def test_alert_renders_severity_summary_detail(self):
+        out = Conductor._render_msg_body(
+            "alert",
+            {"severity": "high", "summary": "OOM on GPU 0", "detail": "VRAM=80GB"},
+        )
+        assert "[high]" in out
+        assert "OOM on GPU 0" in out
+        assert "VRAM=80GB" in out
+
+    def test_alert_without_detail_renders_summary_only(self):
+        out = Conductor._render_msg_body(
+            "alert",
+            {"severity": "low", "summary": "no actionable content", "detail": ""},
+        )
+        assert out.startswith("[low] no actionable content")
+        assert "—" not in out  # no separator when detail is empty
+
+    def test_question_renders_topic_and_question(self):
+        out = Conductor._render_msg_body(
+            "question",
+            {"topic": "model_kb_recall", "question": "Best backend for Qwen3?"},
+        )
+        assert "[topic=model_kb_recall]" in out
+        assert "Best backend for Qwen3?" in out
+
+    def test_answer_renders_topic_and_answer(self):
+        out = Conductor._render_msg_body(
+            "answer",
+            {"topic": "model_kb_recall", "answer": "no_prior_data"},
+        )
+        assert "[topic=model_kb_recall]" in out
+        assert "no_prior_data" in out
+
+    def test_objection_renders_target_and_text(self):
+        out = Conductor._render_msg_body(
+            "objection",
+            {
+                "target_msg_id": "deadbeef0123cafe",
+                "objection": "predicted_gain=20% lacks evidence",
+            },
+        )
+        assert "target=deadbeef" in out
+        assert "predicted_gain=20% lacks evidence" in out
+
+    def test_vote_renders_target_and_choice(self):
+        out = Conductor._render_msg_body(
+            "vote",
+            {"target_msg_id": "abcd1234efgh5678", "vote": "no"},
+        )
+        assert "target=abcd1234" in out
+        assert "vote=no" in out
+
+    def test_reflection_tick_renders_elapsed_and_left(self):
+        out = Conductor._render_msg_body(
+            "reflection_tick",
+            {"elapsed_minutes": 1.25, "time_left_minutes": 418.75},
+        )
+        assert "elapsed=1.25m" in out
+        assert "time_left=418.75m" in out
+
+    def test_observation_uses_kind_fallback(self):
+        # _record_observation publishes {kind, agent, intent_type, rule, reason}
+        out = Conductor._render_msg_body(
+            "observation",
+            {
+                "kind": "policy_denied",
+                "agent": "executor",
+                "intent_type": "send_message",
+                "rule": "topic",
+                "reason": "topic='session_start' not in TOPIC_ALLOWLIST",
+            },
+        )
+        assert "policy_denied" in out
+        assert "agent=executor" in out
+        assert "rule=topic" in out
+        assert "TOPIC_ALLOWLIST" in out
+
+    def test_event_persona_update_uses_kind_fallback(self):
+        out = Conductor._render_msg_body(
+            "event",
+            {"kind": "persona_update", "agent": "executor", "chars": 240},
+        )
+        assert "persona_update" in out
+        assert "agent=executor" in out
+        assert "chars=240" in out
+
+    def test_unknown_topic_with_kind_falls_back(self):
+        out = Conductor._render_msg_body(
+            "future_topic_xyz", {"kind": "newshape", "k1": "v1", "k2": 42}
+        )
+        assert "newshape" in out
+        assert "k1=v1" in out
+        assert "k2=42" in out
+
+    def test_unknown_topic_without_kind_uses_kvs(self):
+        out = Conductor._render_msg_body(
+            "future_topic_xyz", {"a": 1, "b": "two"}
+        )
+        assert "a=1" in out
+        assert "b=two" in out
+
+    def test_synthesised_body_truncated_at_cap(self):
+        long_params = {"x" * 50: "y" * 500}
+        out = Conductor._render_msg_body(
+            "proposal",
+            {"action_name": "noop", "predicted_gain_pct": 0, "params": long_params},
+        )
+        assert len(out) <= Conductor._MSG_BODY_RENDER_CAP
+        assert out.endswith("...")
+
+    def test_non_dict_payload_coerced_to_string(self):
+        assert Conductor._render_msg_body("heartbeat", None) == ""
+        assert Conductor._render_msg_body("heartbeat", "raw text") == "raw text"
+
+    def test_empty_body_md_falls_through_to_renderer(self):
+        # body_md='' should NOT shadow the per-topic renderer (regression
+        # for the case where send_message publishes ``body_md=""`` after
+        # filtering).
+        out = Conductor._render_msg_body(
+            "alert", {"body_md": "", "severity": "info", "summary": "x"}
+        )
+        assert "[info]" in out
+        assert "x" in out
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_renders_inbox_bodies_for_all_topics(tmp_path: Path):
+    """End-to-end: a heterogeneous inbox of every published topic must
+    show non-empty bodies in the rendered prompt."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class _Msg:
+        seq: int
+        from_agent: str
+        topic: str
+        payload: dict
+
+    db = SqliteConnection(tmp_path / "storage" / "conductor.db")
+    conductor = Conductor(
+        tmp_path,
+        backend=MockBackend(),
+        env={"MODEL_PATH": "fake", "MAX_HOURS": "0.001"},
+        db=db,
+        enable_dispatcher=False,
+    )
+    await conductor._bootstrap()
+
+    msgs: list[Any] = [
+        _Msg(27, "executor", "question",
+             {"topic": "model_kb_recall", "question": "Best backend?"}),
+        _Msg(28, "executor", "proposal",
+             {"task_id": "abc12345", "action_name": "run_baseline",
+              "predicted_gain_pct": 0, "params": {}}),
+        _Msg(29, "clock", "reflection_tick",
+             {"elapsed_minutes": 1.25, "time_left_minutes": 418.75}),
+        _Msg(30, "critic", "alert",
+             {"severity": "low", "summary": "empty body", "detail": ""}),
+        _Msg(31, "executor", "decision",
+             {"kind": "state_updated", "changes": {"current_action": "run_baseline"},
+              "rationale": "cold start"}),
+        _Msg(32, "conductor", "observation",
+             {"kind": "policy_denied", "agent": "executor",
+              "intent_type": "send_message", "rule": "topic",
+              "reason": "topic='X' not in TOPIC_ALLOWLIST"}),
+    ]
+    prompt = conductor._compose_prompt("critic", msgs=msgs)
+
+    assert "seq=27 from=executor topic=question :: [topic=model_kb_recall] Best backend?" in prompt
+    assert "seq=28 from=executor topic=proposal :: action=run_baseline predicted_gain=0%" in prompt
+    assert "seq=29 from=clock topic=reflection_tick :: elapsed=1.25m time_left=418.75m" in prompt
+    assert "seq=30 from=critic topic=alert :: [low] empty body" in prompt
+    assert "seq=31 from=executor topic=decision :: state_updated" in prompt
+    assert "seq=32 from=conductor topic=observation :: policy_denied" in prompt
+
+    # Crucially: no line should end with the empty-body separator
+    # ``"topic=X :: "`` followed by a newline (which is what triggered
+    # the original Critic/Watchdog "empty body" alerts).
+    for line in prompt.splitlines():
+        line = line.rstrip()
+        assert not line.endswith("::"), f"empty body line: {line!r}"
+    db.close()
+
+
+# ---------------------------------------------------------------------------
 # Persona index refresh after update_persona intent
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
@@ -456,4 +700,84 @@ async def test_init_session_resume_loads_existing_state(tmp_path: Path):
     state = await conductor._init_session_resume()
     assert state is not None
     assert state.cursors.get("executor") == 99
+    db.close()
+
+
+# ---------------------------------------------------------------------------
+# Action catalogue + first-action hint injected into prompt (L3)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_compose_prompt_injects_action_catalogue(
+    tmp_path: Path,
+):
+    """The prompt must list the available actions so the LLM can name
+    them in `propose_action` / `delegate` intents."""
+    db = SqliteConnection(tmp_path / "storage" / "conductor.db")
+    registry = ActionRegistry(SKILL_ACTIONS_DIR).load()
+    conductor = Conductor(
+        tmp_path,
+        backend=MockBackend(),
+        env={"MODEL_PATH": "fake", "MAX_HOURS": "1"},
+        db=db,
+        action_registry=registry,
+        enable_dispatcher=False,
+    )
+    await conductor._bootstrap()
+    prompt = conductor._compose_prompt("executor", [])
+    # Locate the catalogue section so we can assert on it without
+    # fighting the role's static system prompt (executor.md mentions
+    # kernel_opt in its mode table for context, which is fine). The
+    # catalogue runs from its H2 header to the next H2 header.
+    header = "## Available actions for this mode"
+    assert header in prompt
+    cat_start = prompt.index(header)
+    next_h2 = prompt.find("\n## ", cat_start + len(header))
+    cat_end = next_h2 if next_h2 != -1 else len(prompt)
+    catalogue = prompt[cat_start:cat_end]
+    # Quick mode (MAX_HOURS=1 → quick_param_sweep) → baseline, sweep,
+    # params, classify, target_analysis, report should be present; the
+    # deep_kernel family (kernel_opt, deep_kernel_analysis, ...) must
+    # be excluded from the catalogue.
+    assert "`baseline`" in catalogue
+    assert "`sweep`" in catalogue
+    assert "`kernel_opt`" not in catalogue
+    assert "`deep_kernel_analysis`" not in catalogue
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_first_action_hint_only_for_executor_at_t0(
+    tmp_path: Path,
+):
+    """First-action hint should fire for the executor when baseline_tput=0,
+    and disappear once baseline lands."""
+    db = SqliteConnection(tmp_path / "storage" / "conductor.db")
+    registry = ActionRegistry(SKILL_ACTIONS_DIR).load()
+    conductor = Conductor(
+        tmp_path,
+        backend=MockBackend(),
+        env={"MODEL_PATH": "fake", "MAX_HOURS": "1"},
+        db=db,
+        action_registry=registry,
+        enable_dispatcher=False,
+    )
+    await conductor._bootstrap()
+    # The dynamic hint marker — distinct from the static mention in
+    # executor.md which says "First action hint" (without "(live)")
+    # to keep these two coupled but unambiguously separable.
+    HINT_MARKER = "## First action hint (live)"
+
+    # Cold-start: hint visible, baseline_tput=0
+    prompt = conductor._compose_prompt("executor", [])
+    assert HINT_MARKER in prompt
+
+    # Critic / sage / watchdog should never see the hint even at t=0
+    for other_role in ("critic", "watchdog", "sage"):
+        prompt_other = conductor._compose_prompt(other_role, [])
+        assert HINT_MARKER not in prompt_other
+
+    # After baseline has been measured, hint disappears.
+    conductor.ctx.state.baseline_tput = 5000.0
+    prompt = conductor._compose_prompt("executor", [])
+    assert HINT_MARKER not in prompt
     db.close()

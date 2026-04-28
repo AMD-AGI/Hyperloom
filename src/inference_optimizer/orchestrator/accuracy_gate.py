@@ -107,8 +107,25 @@ class AccuracyGateError(RuntimeError):
     """Raised when the gate cannot make a meaningful decision."""
 
 
-_EVAL_SCRIPT_REL = Path("scripts") / "eval_accuracy.sh"
+_EVAL_SCRIPT_NAME = "eval_accuracy.sh"
 _DEFAULT_TIMEOUT_S = 30 * 60  # 30 min hard cap
+
+
+def _default_eval_script() -> Path:
+    """Resolve the bundled ``eval_accuracy.sh`` lazily so import succeeds
+    even when the skill root cannot be located (e.g. during unit tests
+    that monkeypatch :func:`_run_eval`).
+
+    Falls back to the bare relative path so callers can still see *some*
+    diagnostic when the skill is missing — they get
+    ``ProcessManagementError`` / ``AccuracyGateError`` from the next
+    layer rather than an ImportError.
+    """
+    try:
+        from ..paths import skill_script
+        return skill_script(_EVAL_SCRIPT_NAME)
+    except Exception:  # noqa: BLE001 — best-effort resolution
+        return Path("scripts") / _EVAL_SCRIPT_NAME
 
 
 def _run_eval(
@@ -158,7 +175,7 @@ def run_gsm8k(
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     if script_path is None:
-        script_path = _EVAL_SCRIPT_REL
+        script_path = _default_eval_script()
     rc = _run_eval(
         script_path=Path(script_path),
         server_port=int(server_port),

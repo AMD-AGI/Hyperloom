@@ -168,3 +168,69 @@ def test_cli_build_backend_claude_constructs_with_model(monkeypatch):
     # Fake SDK has no `tool` / `create_sdk_mcp_server`; the backend should
     # silently degrade to JSON-in-text mode rather than raising.
     assert backend.has_emit_intent_tool is False
+
+
+def test_cli_parses_backend_codex_flag():
+    parser = cli_mod._build_argparser()
+    args = parser.parse_args([
+        "--model", "x", "--max-hours", "0.001",
+        "--backend", "codex",
+        "--codex-model", "gpt-5.4",
+        "--codex-base-url", "https://example.invalid/v1",
+    ])
+    assert args.backend == "codex"
+    assert args.codex_model == "gpt-5.4"
+    assert args.codex_base_url == "https://example.invalid/v1"
+
+
+def test_cli_bootstrap_skipped_for_codex_backend(monkeypatch):
+    """``--backend codex`` doesn't need Node / claude CLI."""
+    parser = cli_mod._build_argparser()
+    args = parser.parse_args([
+        "--model", "x", "--max-hours", "0.001", "--backend", "codex",
+    ])
+    called: list[bool] = []
+    monkeypatch.setattr(cli_mod, "ensure_claude_cli",
+                        lambda **_kw: called.append(True))
+    import logging
+    out = cli_mod._bootstrap_for_backend(args, logging.getLogger("t"))
+    assert out is None
+    assert called == []
+
+
+def test_cli_build_backend_codex_constructs_with_model(monkeypatch):
+    parser = cli_mod._build_argparser()
+    args = parser.parse_args([
+        "--model", "x", "--max-hours", "0.001",
+        "--backend", "codex",
+        "--codex-model", "gpt-5.4",
+    ])
+
+    # Stub the SDK import so CodexBackend construction succeeds without
+    # the openai package being importable.
+    from inference_optimizer.orchestrator.backends import codex as codex_mod
+
+    class _FakeSdk:
+        AsyncOpenAI = object  # never invoked because tests inject sdk_call
+
+    monkeypatch.setattr(codex_mod, "_import_openai_sdk", lambda: _FakeSdk)
+    backend = cli_mod._build_backend(args)
+    from inference_optimizer.orchestrator.backends.codex import CodexBackend
+    assert isinstance(backend, CodexBackend)
+    assert backend.model == "gpt-5.4"
+    assert backend.base_url is None
+
+
+def test_cli_build_backend_codex_uses_env_model_when_flag_missing(
+    monkeypatch,
+):
+    parser = cli_mod._build_argparser()
+    args = parser.parse_args([
+        "--model", "x", "--max-hours", "0.001", "--backend", "codex",
+    ])
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4-mini")
+    from inference_optimizer.orchestrator.backends import codex as codex_mod
+    monkeypatch.setattr(codex_mod, "_import_openai_sdk",
+                        lambda: type("S", (), {"AsyncOpenAI": object}))
+    backend = cli_mod._build_backend(args)
+    assert backend.model == "gpt-5.4-mini"

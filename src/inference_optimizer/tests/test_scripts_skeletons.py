@@ -1,33 +1,37 @@
-"""Tests that the bash skeleton scripts exist + DRY_RUN_MOCK works."""
+"""Smoke tests for the skill-bundled shell scripts.
+
+The scripts now live under
+``.cursor/skills/inference-optimizer/scripts/`` (resolved via
+:func:`paths.skill_scripts_dir`) and are the *real* sprint scripts that
+launch sglang/vllm + run benchmarks + evaluate accuracy. We can only
+verify two cheap things in a sandbox without GPU + WekaFS bundle:
+
+1. The expected files exist and are executable.
+2. Invoked without their required env vars they refuse to do anything
+   (exit non-zero, do not leak files into the cwd).
+
+The full DRY_RUN_MOCK fixture path was specific to the now-removed
+``src/inference_optimizer/scripts/{run_baseline,eval_accuracy}.sh``
+stubs; the new skill scripts assume real GPU + InferenceX bundle.
+"""
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import sys
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
-
-SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+from inference_optimizer.paths import skill_scripts_dir
 
 
 def _scripts_runnable() -> bool:
-    """Bash + the script must actually run.
-
-    On Windows the resolver picks up ``wsl.exe`` which fails when no WSL
-    distribution is installed; we probe with ``bash -c true`` to confirm
-    the resolved interpreter actually executes shell commands.
-    """
     if shutil.which("bash") is None:
         return False
     try:
         rc = subprocess.call(
             ["bash", "-c", "true"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -36,66 +40,68 @@ def _scripts_runnable() -> bool:
 
 
 # ---------------------------------------------------------------------------
-def test_run_baseline_script_exists():
-    assert (SCRIPTS_DIR / "run_baseline.sh").is_file()
+# Existence
+# ---------------------------------------------------------------------------
+def test_skill_scripts_dir_exists():
+    assert skill_scripts_dir().is_dir()
 
 
-def test_eval_accuracy_script_exists():
-    assert (SCRIPTS_DIR / "eval_accuracy.sh").is_file()
+@pytest.mark.parametrize(
+    "name",
+    [
+        "run_baseline.sh",
+        "run_profile.sh",
+        "run_sweep.sh",
+        "eval_accuracy.sh",
+        "common.sh",
+        "executor.sh",
+        "bootstrap.sh",
+        "geak_ray_submit.py",
+        "oob_ray_submit.py",
+        "ray_submit.py",
+        "patch_inductor.py",
+        "trace_action.py",
+    ],
+)
+def test_skill_script_exists(name):
+    p = skill_scripts_dir() / name
+    assert p.is_file(), f"skill script missing: {p}"
 
 
-def test_monitor_script_exists():
-    assert (SCRIPTS_DIR / "monitor.sh").is_file()
+def test_run_baseline_executable_bit():
+    """The shell scripts should be marked executable so subprocess.run
+    can invoke them directly without a ``bash`` prefix."""
+    p = skill_scripts_dir() / "run_baseline.sh"
+    assert p.stat().st_mode & 0o111, f"{p} is not executable"
+
+
+# ---------------------------------------------------------------------------
+# Behaviour without env vars — must refuse, must not silently succeed
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(not _scripts_runnable(), reason="bash unavailable")
+def test_run_baseline_refuses_without_required_env(tmp_path: Path):
+    """``MODEL`` / ``TP`` / ``CONC`` / ``ISL`` / ``OSL`` / ``INFERENCEX_PATH``
+    are mandatory. Calling the script with none of these set must exit
+    non-zero (set -u) before touching the GPU."""
+    env = {"PATH": "/usr/bin:/bin"}  # minimal env, no fixtures
+    rc = subprocess.call(
+        ["bash", str(skill_scripts_dir() / "run_baseline.sh")],
+        env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        cwd=str(tmp_path),
+        timeout=10,
+    )
+    assert rc != 0
 
 
 @pytest.mark.skipif(not _scripts_runnable(), reason="bash unavailable")
-def test_run_baseline_dry_run_writes_metrics(tmp_path: Path):
-    out_dir = tmp_path / "out"
-    env = os.environ.copy()
-    env.update(
-        MODEL="fake/model", TP="2", PORT="9000",
-        OUT_DIR=str(out_dir), DRY_RUN_MOCK="1",
-    )
+def test_eval_accuracy_refuses_without_required_env(tmp_path: Path):
+    env = {"PATH": "/usr/bin:/bin"}
     rc = subprocess.call(
-        ["bash", str(SCRIPTS_DIR / "run_baseline.sh")],
+        ["bash", str(skill_scripts_dir() / "eval_accuracy.sh")],
         env=env,
-    )
-    assert rc == 0
-    metrics = (out_dir / "metrics.json")
-    assert metrics.is_file()
-    data = json.loads(metrics.read_text(encoding="utf-8"))
-    assert data["mocked"] is True
-    assert data["tput_per_gpu"] == 5000.0
-
-
-@pytest.mark.skipif(not _scripts_runnable(), reason="bash unavailable")
-def test_eval_accuracy_dry_run_writes_summary(tmp_path: Path):
-    res = tmp_path / "res"
-    env = os.environ.copy()
-    env.update(
-        MODEL="fake/model", PORT="9000",
-        RESULTS_DIR=str(res), DRY_RUN_MOCK="1",
-        EVAL_TASK="gsm8k",
-    )
-    rc = subprocess.call(
-        ["bash", str(SCRIPTS_DIR / "eval_accuracy.sh")],
-        env=env,
-    )
-    assert rc == 0
-    summary = res / "eval_summary_gsm8k.json"
-    assert summary.is_file()
-    data = json.loads(summary.read_text(encoding="utf-8"))
-    assert data["score"] == 0.71
-
-
-@pytest.mark.skipif(not _scripts_runnable(), reason="bash unavailable")
-def test_run_baseline_real_path_returns_nonzero(tmp_path: Path):
-    out_dir = tmp_path / "out"
-    env = os.environ.copy()
-    env.update(MODEL="x", TP="1", PORT="1", OUT_DIR=str(out_dir))
-    env.pop("DRY_RUN_MOCK", None)
-    rc = subprocess.call(
-        ["bash", str(SCRIPTS_DIR / "run_baseline.sh")],
-        env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        cwd=str(tmp_path),
+        timeout=10,
     )
     assert rc != 0

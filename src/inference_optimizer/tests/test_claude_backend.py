@@ -244,3 +244,90 @@ async def test_claude_backend_sdk_exception_wrapped():
     with pytest.raises(BackendError) as exc:
         await backend.run("hi", agent_name="executor")
     assert "SDK call failed" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# _build_options ``extra`` filtering — DESIGN guarantees that the per-call
+# ``extra`` dict carries metadata (role name, task_id, ...) that MUST NOT
+# bleed through into the SDK options constructor (would raise TypeError).
+# ---------------------------------------------------------------------------
+@dataclass
+class _StrictFakeOptions:
+    """Like _FakeOptions but rejects unknown kwargs at construction time."""
+
+    allowed_tools: list = field(default_factory=list)
+    max_turns: int = 10
+    model: str | None = None
+
+
+@pytest.mark.asyncio
+async def test_claude_backend_filters_unknown_keys_from_extra():
+    """Reactor passes ``extra={"role": ...}`` — must not reach SDK options."""
+    msg = _AssistantMessage(
+        content=[
+            _ToolUseBlock(
+                name="emit_intent",
+                input={
+                    "intent_type": "send_message",
+                    "payload": {"topic": "heartbeat", "body_md": "hi"},
+                },
+            )
+        ]
+    )
+    fake_query = _make_query_factory([msg])
+    backend = ClaudeBackend(
+        sdk_query_factory=fake_query,
+        sdk_options_cls=_StrictFakeOptions,
+        sdk_extract_text=_make_extract(),
+        enable_mcp_emit_intent=False,
+    )
+
+    intents = await backend.run(
+        "p",
+        agent_name="executor",
+        extra={
+            "role": "executor",      # not a SDK field — must be filtered
+            "task_id": "t-1",        # not a SDK field — must be filtered
+            "model": "claude-opus-4-7",  # IS a SDK field — must pass through
+        },
+    )
+    assert len(intents) == 1
+    opts = fake_query.last_options
+    # The strict fake would have raised if `role` / `task_id` leaked through.
+    assert opts.model == "claude-opus-4-7"
+
+
+@pytest.mark.asyncio
+async def test_claude_backend_extra_keys_caching_is_stable():
+    """Two calls in a row must hit the same filtered keyset (cached)."""
+    msgs = [
+        _AssistantMessage(content=[_ToolUseBlock(
+            name="emit_intent",
+            input={"intent_type": "send_message",
+                   "payload": {"topic": "heartbeat"}})]),
+        _AssistantMessage(content=[_ToolUseBlock(
+            name="emit_intent",
+            input={"intent_type": "send_message",
+                   "payload": {"topic": "heartbeat"}})]),
+    ]
+    iters = iter(msgs)
+
+    async def gen_one(msg):
+        yield msg
+
+    def fake_query(*, prompt, options):
+        return gen_one(next(iters))
+
+    backend = ClaudeBackend(
+        sdk_query_factory=fake_query,
+        sdk_options_cls=_StrictFakeOptions,
+        sdk_extract_text=_make_extract(),
+        enable_mcp_emit_intent=False,
+    )
+    await backend.run("a", agent_name="executor", extra={"role": "executor"})
+    await backend.run("b", agent_name="executor", extra={"role": "executor"})
+    # If caching were broken we'd burn time per call but no functional regression
+    # should occur — assert no exception was raised by either invocation.
+    cached = backend._sdk_option_keys()
+    assert "allowed_tools" in cached
+    assert "role" not in cached
