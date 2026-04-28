@@ -3,11 +3,11 @@
 # executor.sh — Execution backend abstraction layer
 #
 # Dispatches GPU-side commands to the correct backend:
-#   - local mode:  execute directly (eval)
-#   - claw mode:   submit to Ray cluster via ray_submit.py
+#   - local: execute directly (eval)
+#   - claw:  submit to Ray cluster via ray_submit.py
 #
 # Required env:
-#   MODE           — "local" or "claw"
+#   MODE             — "local" or "claw"
 #   RAY_HEAD_ADDRESS — Ray client address (claw mode only), e.g. ray://<head>:10001
 #
 # Usage:
