@@ -27,16 +27,14 @@ gap acts as an urgency multiplier on all action scores.
 
 ## Execution Mode
 
-This skill supports three execution modes. **Read the mode-specific document for your mode
+This skill supports two execution modes. **Read the mode-specific document for your mode
 before starting:**
 
-- **Fully-local mode** (Hyperloom container, Ray-scheduled GEAK CLI): see [`modes/FULLY_LOCAL.md`](modes/FULLY_LOCAL.md)
-- **Local mode** (Cursor IDE, GEAK MCP, direct shell): see [`modes/LOCAL.md`](modes/LOCAL.md)
+- **Local mode** (Hyperloom container, Ray-scheduled GEAK CLI): see [`modes/LOCAL.md`](modes/LOCAL.md)
 - **Claw mode** (SaFE RayJob, `exec_on_gpu`): see [`modes/CLAW.md`](modes/CLAW.md)
 
 **Auto-detection:**
-- `MODE=fully-local` → fully-local mode
-- `GEAK_LOCAL=true` (outside fully-local container) → local mode
+- `MODE=local` → local mode
 - Claw client context → claw mode
 
 ## Iron Rules (non-negotiable)
@@ -79,7 +77,10 @@ Always use `scripts/patch_inductor.py` with `--target-file`. The `--cache-dir` o
 
 ### IR-7: NEVER modify GEAK configuration
 
-GEAK is an external service — treat it as **read-only infrastructure**. The skill MUST NOT
+**Local mode:** GEAK is CLI-only via Ray (`geak_ray_submit.py`); do not use GEAK MCP or
+`geak_client.py`. See [`modes/LOCAL.md`](modes/LOCAL.md) IR-13 and IR-14.
+
+**Claw mode:** GEAK is an external service — treat it as **read-only infrastructure**. The skill MUST NOT
 modify any GEAK configuration files, settings, or parameters beyond what is passed as
 arguments to `geak_create_task`. Specifically:
 
@@ -91,7 +92,7 @@ arguments to `geak_create_task`. Specifically:
 - **Do NOT** modify any test data, results, or configuration files belonging to GEAK
   (e.g., `tests/test_data/`, `server/config.py`, `server/templates/`)
 
-The ONLY interaction allowed is through these GEAK MCP tool calls:
+In claw mode, the ONLY interaction allowed is through these GEAK MCP tool calls:
 `geak_get_model_config` (read-only), `geak_create_task`, `geak_submit_task`,
 `geak_get_task`, `geak_get_outputs`, `geak_download_file`, `geak_list_tasks`.
 
@@ -99,7 +100,7 @@ The ONLY interaction allowed is through these GEAK MCP tool calls:
 pre-configured by the administrator. Changing `model_class`, `model_name`, or
 `api_base` risks setting a non-existent model and breaking all tasks.
 
-**Exception — tracing headers:** At the start of the kernel-opt action, you MUST
+**Exception — tracing headers (claw / MCP path):** At the start of the kernel-opt action, you MUST
 call `geak_set_model_config` exactly once to inject observability headers. Run
 `trace_action.py --component geak --action start` first to record timing and
 generate the config, then apply the `extra_headers` via MCP (see kernel-opt/geak.md
@@ -121,7 +122,7 @@ Ray-managed GPU scheduling that direct in-chat generation lacks.
 
 Violation = immediate run invalidation.
 
-**Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11), [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12), and [`modes/FULLY_LOCAL.md`](modes/FULLY_LOCAL.md) (IR-12 through IR-16).**
+**Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11) and [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12 through IR-16).**
 
 ## Kernel Optimization & Tooling Constants
 
@@ -161,7 +162,7 @@ kernel-opt/                    — Per-backend kernel optimization references
   llm.md                       — LLM Proxy (direct API)
 kb/                            — RAG knowledge base (JSONL + query/ingest scripts)
 scripts/                       — Baseline/profiling/accuracy shell scripts
-modes/                         — Mode-specific execution details (FULLY_LOCAL.md, LOCAL.md, CLAW.md)
+modes/                         — Mode-specific execution details (LOCAL.md, CLAW.md)
 KNOWLEDGE-BASE.md              — Legacy KB (archived, seeded into kb/entries.jsonl)
 ```
 

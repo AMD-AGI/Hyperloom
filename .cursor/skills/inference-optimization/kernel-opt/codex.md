@@ -1,6 +1,6 @@
 ---
 name: codex-inference-kernel-reference
-description: Codex backend for kernel optimization. In local/claw modes uses the OOB GPU Optimizer MCP; in fully-local mode uses `oob_ray_submit.py run` (Ray-scheduled CLI). Code generation with optional GPU — verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
+description: Codex backend for kernel optimization. In claw mode uses the OOB GPU Optimizer MCP; in local mode uses `oob_ray_submit.py run` (Ray-scheduled CLI). Code generation with optional GPU — verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
 ---
 
 # Codex — Kernel Optimization Backend
@@ -9,8 +9,8 @@ Codex backend for kernel optimization. Two transport modes:
 
 | Mode | How Codex is invoked |
 |------|----------------------|
-| `local` / `claw` | OOB GPU Optimizer MCP (`agent_create_task` etc.) |
-| `fully-local` | `oob_ray_submit.py run -a codex ...` CLI (single blocking subprocess per iteration) |
+| `claw` | OOB GPU Optimizer MCP (`agent_create_task` etc.) |
+| `local` | `oob_ray_submit.py run -a codex ...` CLI (single blocking subprocess per iteration) |
 
 Tool surface and prompt template are identical across modes; only the call
 mechanism differs. Generates optimized kernel code. The calling skill is
@@ -62,7 +62,10 @@ is handled automatically by `auth_proxy.py` inside the OOB workload pod — no m
 header configuration needed (unlike GEAK). The timestamps allow correlating OOB's
 LLM spend to specific messages by querying `LiteLLM_SpendLogs` with time ranges.
 
-## Tool Sequence
+## Tool Sequence (claw MCP only)
+
+> **Local mode:** Skip this MCP sequence entirely. Use `oob_ray_submit.py run`
+> instead — see "Local Execution" section below.
 
 | Step | Tool | Purpose |
 |------|------|---------|
@@ -75,7 +78,10 @@ LLM spend to specific messages by querying `LiteLLM_SpendLogs` with time ranges.
 | 6 | `bash: trace_action.py --component oob --action end` | Record end timestamp (once, after all iterations) |
 | - | `agent_cancel_task` | Cancel if stuck past `CODEX_POLL_TIMEOUT_MIN` |
 
-## agent_create_task — Critical Details
+## agent_create_task — Critical Details (claw MCP only)
+
+> **Claw mode only.** In local mode, these MCP tools are not available.
+> Use `oob_ray_submit.py run` CLI instead (see "Local Execution" below).
 
 - `agent`: `"codex"` (required)
 - `prompt`: kernel optimization instructions (see Prompt Template below)
@@ -182,12 +188,12 @@ Return the COMPLETE optimized file — do not return partial snippets.
 
 - Codex writes the optimized kernel to `optimized_kernel.py` in its workspace
 - The prompt MUST instruct Codex to use this filename
-- **MCP modes:** Use `agent_get_outputs` to list files, then `agent_download_file` to retrieve
-- **Fully-local mode:** Read directly from `<output-dir>/tasks/<user>/<task_id>/workspace/optimized_kernel.py`. The `oob_ray_submit.py run --json` result already exposes this via `.workspace`; use `$WORKSPACE/optimized_kernel.py` directly. There is **no** `output/` subdir.
+- **MCP (claw):** Use `agent_get_outputs` to list files, then `agent_download_file` to retrieve
+- **Local mode:** Read directly from `<output-dir>/tasks/<user>/<task_id>/workspace/optimized_kernel.py`. The `oob_ray_submit.py run --json` result already exposes this via `.workspace`; use `$WORKSPACE/optimized_kernel.py` directly. There is **no** `output/` subdir.
 
-## Fully-Local Execution
+## Local Execution
 
-In fully-local mode each iteration is a **single blocking `oob_ray_submit.py run`
+In local mode each iteration is a **single blocking `oob_ray_submit.py run`
 invocation**. Ray assigns a GPU, provisions a workspace, copies input files, spawns
 the `codex` subprocess with the right env vars, and blocks until the task reaches
 a terminal status.
@@ -228,12 +234,12 @@ fi
 | `agent_download_file` | `cp <workspace>/<file>` (file is already on local disk) |
 | `agent_cancel_task` | `kill -INT <oob-pid>` (graceful) |
 
-### Things that do NOT apply to fully-local
+### Things that do NOT apply to local mode
 
 - `image` and `workspace_id` — no SaFE workload is created; the agent CLI runs in-container.
   These args (and the `KERNEL_OPT_IMAGE` / `KERNEL_OPT_WORKSPACE` env vars) are silently ignored.
 - `gpu_count`, `cpu`, `memory`, `ephemeral_storage`, `replicas`, `rdma` — these are
-  K8s-workload knobs; in fully-local mode the subprocess uses whatever the container has.
+  K8s-workload knobs; in local mode the subprocess uses whatever the container has.
 - `agent_cancel_task` MCP tool — use process signals instead.
 
 ## Iterative Refinement Loop
@@ -258,8 +264,8 @@ After all iterations: pick the result with the best verified speedup.
 ### Iteration Flow (pseudocode)
 
 The same outer loop runs in all modes; only `submit_and_wait()` differs.
-For fully-local, `submit_and_wait()` is a single `oob_ray_submit.py run` subprocess.
-For MCP modes, it is the `agent_create_task` + `agent_submit_task` + poll sequence.
+For local mode, `submit_and_wait()` is a single `oob_ray_submit.py run` subprocess.
+For claw (MCP), it is the `agent_create_task` + `agent_submit_task` + poll sequence.
 
 ```python
 best_result = None
@@ -273,7 +279,7 @@ for i in range(OOB_ROUND_ITERATIONS):
         prompt += "\nUse these results to improve your optimization. Avoid repeating failed approaches."
 
     # 2. Submit + wait (mode-specific)
-    if MODE == "fully-local":
+    if MODE == "local":
         # Single blocking CLI call writes results to <workspace> (== task workspace dir)
         result = oob_run_blocking(
             agent="codex",  # or "claude"
@@ -299,8 +305,8 @@ for i in range(OOB_ROUND_ITERATIONS):
         feedback_context += f"\nIteration {i+1}: FAILED — task error: {result.get('error')}"
         continue
 
-    # 3. Read optimized kernel (already on local disk in fully-local;
-    #    requires agent_download_file in MCP modes)
+    # 3. Read optimized kernel (already on local disk in local mode;
+    #    requires agent_download_file in claw MCP modes)
     optimized_code = read_optimized_kernel(result)
     if not optimized_code:
         feedback_context += f"\nIteration {i+1}: FAILED — no output file produced"
@@ -347,13 +353,13 @@ This gives the agent visibility into what worked and what failed, enabling it to
 ### Key Rules
 
 1. **Always use the ORIGINAL kernel source** in `files[].content` (or `-f` in
-   fully-local) — never pass a previous iteration's output as the source. The
+   local mode) — never pass a previous iteration's output as the source. The
    agent should generate each attempt from scratch based on the original + feedback.
 2. **Each iteration is a NEW task** — `agent_create_task` + `agent_submit_task` in
-   MCP modes, a fresh `oob_ray_submit.py run` invocation in fully-local. Do not try to resume
+   claw (MCP) modes, a fresh `oob_ray_submit.py run` invocation in local mode. Do not try to resume
    or modify a previous task.
 3. **Verification runs locally** (on the machine with GPU access — the inference
-   server in local / fully-local mode, or the RayJob in claw mode).
+   server in local mode, or the RayJob in claw mode).
 4. **Stop early** if `speedup >= 2.0x` — no need to exhaust all iterations.
 5. **Stop early** if all iterations produce compilation errors — likely
    a fundamental issue with the kernel type for this backend.
@@ -379,13 +385,13 @@ This gives the agent visibility into what worked and what failed, enabling it to
 ## Troubleshooting
 
 ### Task completes but no optimized_kernel.py in outputs
-- **MCP modes:** Check `agent_get_outputs` — file may have a different name
-- **Fully-local:** `ls <workspace>/` (the `oob_ray_submit.py run --json` result's `.workspace`) to see what Codex actually wrote
+- **MCP (claw):** Check `agent_get_outputs` — file may have a different name
+- **Local:** `ls <workspace>/` (the `oob_ray_submit.py run --json` result's `.workspace`) to see what Codex actually wrote
 - Next iteration prompt will include this failure, prompting explicit file output
 
 ### Task fails immediately
-- **MCP modes:** Check `agent_get_task` `error` field
-- **Fully-local:** Inspect `<output-dir>/<task_id>/execution.log` and the JSON `error_message`
+- **MCP (claw):** Check `agent_get_task` `error` field
+- **Local:** Inspect `<output-dir>/<task_id>/execution.log` and the JSON `error_message`
 - Verify prompt is not empty and the input file (`-f`) is non-empty / readable
 
 ### All iterations produce compilation errors
