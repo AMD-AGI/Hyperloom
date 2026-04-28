@@ -38,6 +38,22 @@ log = logging.getLogger("ci-orchestrator")
 CI_DIR = Path(__file__).resolve().parent
 PROMPT_TEMPLATE = (CI_DIR / "prompt_template.md").read_text()
 
+# Load skill files from repo — embedded in prompt to bypass tool-mounting failures
+_SKILL_ROOT = CI_DIR.parent / ".cursor" / "skills" / "inference-optimization"
+
+
+def _read_skill_file(*parts: str) -> str:
+    p = _SKILL_ROOT.joinpath(*parts)
+    return p.read_text() if p.exists() else ""
+
+
+SKILL_MD = _read_skill_file("SKILL.md")
+CLAW_MD = _read_skill_file("modes", "CLAW.md")
+RUN_BASELINE_SH = _read_skill_file("scripts", "run_baseline.sh")
+RUN_SWEEP_SH = _read_skill_file("scripts", "run_sweep.sh")
+EXECUTOR_SH = _read_skill_file("scripts", "executor.sh")
+COMMON_SH = _read_skill_file("scripts", "common.sh")
+
 
 def load_config(config_path: str | None = None) -> dict:
     path = Path(config_path) if config_path else CI_DIR / "ci-config.yaml"
@@ -55,22 +71,43 @@ def render_prompt(merged: dict) -> str:
         conc=merged.get("conc"),
     )
     script = merged.get("benchmark_script")
-    if script:
+    script_content = merged.get("benchmark_script_content", "")
+    if script and script_content:
         bss = (
-            f"MANDATORY: Read the InferenceX benchmark script and replicate its server config:\n"
-            f"  {merged['inferencex_path']}/{script}\n"
+            f"MANDATORY: Replicate the server config from this InferenceX benchmark script "
+            f"({script}).\n"
             f"Key env vars for this run: MODEL={merged['model_path']} TP={merged['tp']} "
             f"EP_SIZE={merged['ep']} CONC={merged['conc']} ISL={isl} OSL={osl} "
             f"MAX_MODEL_LEN=4096 RANDOM_RANGE_RATIO=0.8 "
             f"NUM_PROMPTS_MULTIPLIER=10 RESULT_FILENAME=baseline\n"
-            f"Also export: RANDOM_RANGE_RATIO=0.8 NUM_PROMPTS_MULTIPLIER=10 "
-            f"before running skill scripts (run_baseline.sh / run_sweep.sh).\n"
-            f"DO NOT run the script directly (it depends on benchmark_lib.sh and hf download).\n"
-            f"Instead: read the script, extract the server launch command, env vars, and "
-            f"server flags, then use them to launch the server and run the benchmark yourself."
+            f"DO NOT run the script directly. Extract server launch command and env vars, "
+            f"then reproduce them yourself.\n\n"
+            f"<benchmark_script>\n{script_content}\n</benchmark_script>"
+        )
+    elif script:
+        bss = (
+            f"MANDATORY: Read the InferenceX benchmark script and replicate its server config:\n"
+            f"  {merged['inferencex_path']}/{script}\n"
+            f"Key env vars: MODEL={merged['model_path']} TP={merged['tp']} "
+            f"CONC={merged['conc']} ISL={isl} OSL={osl}"
         )
     else:
         bss = "No InferenceX benchmark script found. Construct server launch manually."
+
+    # Embed skill files so agent doesn't depend on tool mounting
+    skill_section = ""
+    if SKILL_MD:
+        skill_section += f"\n<skill_md>\n{SKILL_MD}\n</skill_md>\n"
+    if CLAW_MD:
+        skill_section += f"\n<claw_md>\n{CLAW_MD}\n</claw_md>\n"
+    if RUN_BASELINE_SH:
+        skill_section += f"\n<run_baseline_sh>\n{RUN_BASELINE_SH}\n</run_baseline_sh>\n"
+    if RUN_SWEEP_SH:
+        skill_section += f"\n<run_sweep_sh>\n{RUN_SWEEP_SH}\n</run_sweep_sh>\n"
+    if EXECUTOR_SH:
+        skill_section += f"\n<executor_sh>\n{EXECUTOR_SH}\n</executor_sh>\n"
+    if COMMON_SH:
+        skill_section += f"\n<common_sh>\n{COMMON_SH}\n</common_sh>\n"
 
     return PROMPT_TEMPLATE.format(
         model_hf=merged["model_hf"],
@@ -96,6 +133,7 @@ def render_prompt(merged: dict) -> str:
         inferenceX_data=ifx_text,
         runner=merged["runner"],
         benchmark_script_section=bss,
+        skill_section=skill_section,
     )
 
 
@@ -270,14 +308,18 @@ def main():
             amd_master = yaml.safe_load(f)
         log.info("InferenceX commit: %s", ifx_commit[:7])
 
+        ifx_script_contents: dict[str, str] = {}
         for model_cfg in model_list:
             ifx_key = model_cfg["inferenceX_key"]
             script = find_benchmark_script(_tmpdir, ifx_key, scripts_path)
             ifx_scripts[ifx_key] = script
             if script:
                 log.info("Found benchmark script for %s: %s", ifx_key, script)
+                script_path = Path(_tmpdir) / script
+                ifx_script_contents[ifx_key] = script_path.read_text() if script_path.exists() else ""
             else:
                 log.warning("No benchmark script found for %s", ifx_key)
+                ifx_script_contents[ifx_key] = ""
 
     # Merge configs and fetch API data
     merged_models = []
@@ -300,6 +342,7 @@ def main():
         merged = merge_model_config(
             model_cfg, amd_master[ifx_key], defaults, harbor_prefix, ifx_benchmarks)
         merged["benchmark_script"] = ifx_scripts.get(ifx_key)
+        merged["benchmark_script_content"] = ifx_script_contents.get(ifx_key, "")
         merged_models.append(merged)
 
     if not merged_models:
