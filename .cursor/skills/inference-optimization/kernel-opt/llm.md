@@ -52,12 +52,36 @@ Gateway: `https://oci-slc.example-internal-host.invalid/api/v1/llm-proxy/v1`
 | Kernel pattern | Framework | Source available? | LLM target? |
 |----------------|-----------|-------------------|-------------|
 | `Cijk_Ailk_Bljk_*` | hipBLASLt | No (compiled) | No — vendor BLAS |
-| `aiter::fmha_v3_fwd` | aiter | No (.so) | No — vendor attention |
-| `moe_ck2stages_gemm*` | aiter | No (.so) | No — vendor fused MoE |
+| `aiter::fmha_v3_fwd` | aiter | No (.so) by default | No by default — **Yes if user provides source** |
+| `moe_ck2stages_gemm*` | aiter | No (.so) by default | No by default — **Yes if user provides source** |
+| `aiter::fmoe_*`, `moe_sorting_*` | aiter | No (.so) by default | No by default — **Yes if user provides source** |
 | `triton_*` from SGLang | SGLang | Yes (Python) | **Yes** |
 | `triton_poi_*`, `triton_red_*` | torch.compile | Yes (Inductor cache) | **Yes** — primary target |
 | `vectorized_elementwise_kernel` | PyTorch | No (C++) | Maybe — try torch.compile first |
 | Custom HIP `__global__` | User code | Yes | **Yes** |
+
+**User-provided source override:** When the user specifies kernel source paths (e.g.,
+`/opt/aiter/csrc/`, `/opt/sglang/`), kernels found at those paths are LLM targets
+regardless of the default classification above. Map trace kernel names back to source
+files using `rg` in the provided repo. Include full source in the prompt.
+
+## Tracing Setup
+
+Before the first LLM API call, record the start timestamp:
+
+```bash
+python3 $SCRIPTS_DIR/trace_action.py --component llm --action start
+```
+
+After all LLM calls and reflection rounds complete, record the end:
+
+```bash
+python3 $SCRIPTS_DIR/trace_action.py --component llm --action end
+```
+
+Additionally, inject tracing headers into the `OpenAI` client so LLM spend is
+attributed to the correct session. See Step 3 below for the `default_headers`
+parameter in the client constructor.
 
 ## LLM Optimization Flow
 
@@ -166,15 +190,28 @@ Return the COMPLETE optimized file."""
 ### Step 3: Call the LLM
 
 ```python
+import json
+import os
 from openai import OpenAI
 import httpx
 
 http_client = httpx.Client(verify=False, timeout=180)
 
+session_id = os.environ.get("SESSION_ID", "")
+tracing_headers = {
+    "x-litellm-tags": "product:primus-claw,component:llm",
+}
+if session_id:
+    tracing_headers["x-litellm-spend-logs-metadata"] = json.dumps({
+        "session_id": session_id,
+        "component": "llm",
+    })
+
 client = OpenAI(
     base_url="https://oci-slc.example-internal-host.invalid/api/v1/llm-proxy/v1",
     api_key=os.environ["LLM_PROXY_API_KEY"],
     http_client=http_client,
+    default_headers=tracing_headers,
 )
 
 response = client.chat.completions.create(
