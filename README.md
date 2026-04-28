@@ -48,7 +48,7 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 
 ---
 
-## Quickstart — Local Optimization (Cursor / Claude / VS Code)
+## Quickstart — Remote Mode (Cursor / Claude / VS Code)
 
 ### 1. Configure MCP Servers & TraceLens CLI
 
@@ -137,7 +137,7 @@ The agent takes it from there — baseline, profile, loop, report.
 
 ## Quickstart — Local Mode (Docker / K8s)
 
-Run Hyperloom on your own GPU infrastructure — a single container bundles all tooling (GEAK CLI via Ray, OOB CLI via Ray, TraceLens CLI), InferenceX, and Skills. No MCP servers needed; all tools run as in-container CLIs scheduled by a local Ray cluster.
+Run Hyperloom on your own GPU infrastructure — a single container bundles all tooling (GEAK CLI via Ray, OOB CLI via Ray, TraceLens CLI), InferenceX, and Skills. All tools run as in-container CLIs scheduled by a local Ray cluster.
 
 ```bash
 docker run -d --shm-size=16g \
