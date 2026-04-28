@@ -18,7 +18,6 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -38,23 +37,23 @@ configuration changes that improved performance.
 Compare the BASELINE server launch command with the OPTIMIZED server launch command.
 Return ONLY a JSON object with these fields:
 
-{
+{{
   "flag_changes": [
-    {"flag": "--flag-name", "old_value": "4", "new_value": "8", "action": "modify"},
-    {"flag": "--new-flag", "value": "some_val", "action": "add"},
-    {"flag": "--removed-flag", "action": "remove"}
+    {{"flag": "--flag-name", "old_value": "4", "new_value": "8", "action": "modify"}},
+    {{"flag": "--new-flag", "value": "some_val", "action": "add"}},
+    {{"flag": "--removed-flag", "action": "remove"}}
   ],
   "env_var_changes": [
-    {"var": "VAR_NAME", "value": "1", "action": "add"}
+    {{"var": "VAR_NAME", "value": "1", "action": "add"}}
   ],
   "gain_pct": 6.27,
   "description": "one-line summary of what changed"
-}
+}}
 
 Rules:
 - Only include changes that IMPROVED performance (positive gain)
 - Ignore kernel optimization results (those are runtime, not config changes)
-- If no server config changes were found, return {"flag_changes": [], "env_var_changes": [], "gain_pct": 0, "description": "no config changes"}
+- If no server config changes were found, return {{"flag_changes": [], "env_var_changes": [], "gain_pct": 0, "description": "no config changes"}}
 - Return ONLY valid JSON, no markdown fences, no explanation
 
 Report:
@@ -682,7 +681,6 @@ def submit_pr(
 
     token = os.environ.get(pr_cfg.get("token_env", "INFERENCEX_FORK_TOKEN"))
 
-    ci_run_id = ci_summary.get("ci_run_id", "unknown")
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
     branch_name = f"hyperloom/ci-{ts}"
 
