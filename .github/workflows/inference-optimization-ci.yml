@@ -74,6 +74,53 @@ jobs:
             ci-output/*/optimization_report.md
           retention-days: 90
 
+  submit-inferenceX-pr:
+    name: Submit InferenceX PR
+    needs: optimize
+    runs-on: ubuntu-latest
+    if: always() && contains(needs.optimize.result, 'success')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all model reports
+        uses: actions/download-artifact@v4
+        with:
+          path: ci-output
+          pattern: report-*
+          merge-multiple: true
+
+      - name: Install dependencies
+        working-directory: ci
+        run: pip3 install -q -r requirements.txt
+
+      - name: Merge per-model summaries
+        working-directory: ci
+        run: |
+          python3 -c "
+          import json, glob, sys
+          summaries = glob.glob('${{ github.workspace }}/ci-output/ci_summary.json')
+          if not summaries:
+              print('No ci_summary.json found'); sys.exit(0)
+          merged = json.loads(open(summaries[0]).read())
+          for s in summaries[1:]:
+              data = json.loads(open(s).read())
+              merged['models'].extend(data.get('models', []))
+          merged['stats']['total'] = len(merged['models'])
+          merged['stats']['completed'] = sum(1 for m in merged['models'] if m.get('status')=='completed')
+          open('${{ github.workspace }}/ci-output/ci_summary_merged.json','w').write(json.dumps(merged, indent=2))
+          print(f'Merged {len(merged[\"models\"])} models')
+          "
+
+      - name: Submit PR to InferenceX
+        working-directory: ci
+        env:
+          INFERENCEX_FORK_TOKEN: ${{ secrets.INFERENCEX_FORK_TOKEN }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          python3 pr_submitter.py \
+            --summary "${{ github.workspace }}/ci-output/ci_summary_merged.json" \
+            --reports-dir "${{ github.workspace }}/ci-output"
+
   detect-inferenceX:
     name: Check InferenceX Updates
     runs-on: ubuntu-latest
