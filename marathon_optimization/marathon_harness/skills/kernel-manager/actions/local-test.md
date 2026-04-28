@@ -314,28 +314,28 @@ def release_gpu_after_benchmark():
 ```python
 def verify_correctness(original_source, optimized_source, test_shapes, dtype=torch.bfloat16):
     """Compare outputs of original vs optimized kernel.
-    
+
     Args:
         original_source: str, the original kernel source code
         optimized_source: str, the optimized kernel source code  
         test_shapes: dict with keys like "xnumel", "r0_numel", "M", "N", "K"
         dtype: torch dtype for test tensors
-    
+
     Returns: (passed: bool, details: str)
     """
     ATOL = 1e-2
     RTOL = 1e-2
-    
+
     orig_ns, opt_ns = {}, {}
     exec(compile(original_source, "original.py", "exec"), orig_ns)
     exec(compile(optimized_source, "optimized.py", "exec"), opt_ns)
-    
+
     kernel_name = None
     for name in opt_ns:
         if hasattr(opt_ns[name], 'run') or (callable(opt_ns.get(name)) and name.startswith(('triton_', '_'))):
             kernel_name = name
             break
-    
+
     if kernel_name not in orig_ns:
         return False, f"NAME_MISMATCH — '{kernel_name}' not found in original"
     
@@ -644,7 +644,7 @@ def run_full_test(original_source, optimized_source, test_shapes, kernel_type, k
     gpu_ok = device is not None
     borrowed = "GPU_GRANTED" in gpu_reason if gpu_ok else False
     report["gpu_borrowed"] = borrowed
-    
+
     # Step 2: Correctness (requires GPU)
     if gpu_ok:
         corr_ok, corr_msg = verify_correctness(original_source, optimized_source, test_shapes)
@@ -690,7 +690,7 @@ def run_full_test(original_source, optimized_source, test_shapes, kernel_type, k
     # Release borrowed GPU back to orchestrator (triggers server restart)
     if borrowed:
         release_gpu_after_benchmark()
-    
+
     # Step 4: Clear caches for the patch type
     patch_type_map = {
         "triton": "triton-source",
