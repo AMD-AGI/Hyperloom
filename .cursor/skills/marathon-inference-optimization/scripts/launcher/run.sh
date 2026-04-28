@@ -59,22 +59,8 @@ log() { echo "[run.sh $(date +%H:%M:%S)] $*"; }
 # ============================================================
 # preflight_deps() — fail-fast dependency check + auto-install
 # ============================================================
-# Why this runs FIRST (before STRICT / defaults / mode detection):
-#   Previously dep-install was buried in "STEP 2" (~line 285), AFTER ~150
-#   lines of env/mode/preflight checks. When the sandbox image was wrong
-#   (or local host was bare), a missing `jq` surfaced 90s+ into the run as
-#   `jq: command not found` deep inside an mcp.json print — by which time
-#   the agent had already backgrounded run.sh, polled a zombie PID twice,
-#   and humans had to re-derive what was missing. Moving install to T+0
-#   means the agent's first poll sees either a clean version banner or a
-#   single FATAL line naming the exact missing tool + install attempt.
-#
-# Behaviour: idempotent. If a tool is on PATH, skip; otherwise install via
-# apt-get (tmux/jq/curl) or npm (claude CLI, with Node 20 bootstrap if
-# npm itself is too old / missing). NO sandbox-vs-local branching here:
-# install whatever's missing, regardless of mode. If install fails the
-# script exits with a numbered code that names the missing tool.
-
+# Run before STRICT/defaults/mode detection so missing CLI dependencies show up
+# as the first visible failure, not deep inside a backgrounded tmux launch.
 ensure_node() {
     if command -v node >/dev/null 2>&1; then
         local ver
@@ -137,9 +123,6 @@ preflight_deps() {
     fi
 
     log "preflight_deps OK:"
-    # `cmd && log` would propagate cmd's non-zero exit and trip `set -e` when
-    # the tool is legitimately absent (e.g. STAGE_ONLY=1 skips claude install).
-    # Use if/fi so each version-echo is purely advisory.
     if command -v tmux   >/dev/null 2>&1; then log "  tmux:   $(tmux -V 2>&1)"; fi
     if command -v jq     >/dev/null 2>&1; then log "  jq:     $(jq --version 2>&1)"; fi
     if command -v curl   >/dev/null 2>&1; then log "  curl:   $(curl --version 2>&1 | head -1)"; fi
@@ -374,9 +357,6 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 # ========== STEP 2 — DEP VERIFY (install was done up-front in preflight_deps) ==========
-# Sanity re-check after STEP 1.5's auto-script-bootstrap, so any post-preflight
-# breakage (e.g. a script in BASE_DIR/scripts mutating PATH) is caught loudly
-# instead of producing a confusing failure deeper in tmux pane launch.
 for t in tmux jq; do
     command -v "$t" >/dev/null 2>&1 \
         || { echo "ERROR: '$t' disappeared after preflight_deps — PATH was mutated" >&2; exit 16; }
@@ -451,6 +431,9 @@ KERNEL_OPT_WORKSPACE=$KERNEL_OPT_WORKSPACE
 KERNEL_OPT_BACKENDS=$KERNEL_OPT_BACKENDS
 INFERENCEX_PATH=$INFERENCEX_PATH
 MAX_HOURS=$MAX_HOURS
+PANE_CLAUDE_TIMEOUT_S=${PANE_CLAUDE_TIMEOUT_S:-1800}
+PANE_MAX_RESTARTS=${PANE_MAX_RESTARTS:-200}
+PANE_CLAUDE_DEBUG=${PANE_CLAUDE_DEBUG:-0}
 ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
 ANTHROPIC_BASE_URL=$ANTHROPIC_BASE_URL
 ENVEOF
@@ -482,30 +465,12 @@ B64
 
 LOG="$log_file"
 STOP_FILE="$SESSION_DIR/STOP_PANE_${name}"
-# PID file for the currently-running \`claude --print\` invocation.
-# Used by run.sh's monitor to forcibly kill a wedged inner claude when
-# orchestrator sets state.json:km_requested_restart=true after detecting
-# pane silence > KM_HEARTBEAT_RESTART_MIN.  The outer while loop here
-# survives the kill and re-launches with \`--continue\`.
+# PID file for the currently-running \`claude --print\` invocation. run.sh's
+# monitor uses this to soft-restart a wedged kernel-mgr pane when the
+# orchestrator sets state.json:km_requested_restart=true.
 PID_FILE="$SESSION_DIR/.pane_${name}.pid"
-# Bumped from 50 → 200 because each \`claude --print\` is now wallclock-bounded
-# (default 30min via timeout below). 18h × 2 restarts/h = 36; 24h = 48; with
-# headroom for retries-after-API-errors, 200 leaves plenty of slack. The real
-# stop conditions are STOP_FILE (graceful) and MAX_HOURS (run.sh wall budget).
 MAX_RESTARTS=\${PANE_MAX_RESTARTS:-200}
-# Wallclock cap on each \`claude --print\` call. CRITICAL for survival of long
-# runs: without it, a single hung SSE / MCP / API stream pins the inner
-# claude process forever, the outer while-loop never re-checks STOP_FILE,
-# never sends \`--continue\`, and the pane is dead until run.sh kills it
-# at MAX_HOURS — the entire marathon produces nothing past that point.
-# Default 1800s (30min): matches OK 6h-session's empirically observed
-# ~1-2h natural exit cadence with extra margin so transient API hangs are
-# bounded. Adjustable via PANE_CLAUDE_TIMEOUT_S env var.
 CLAUDE_TIMEOUT_S=\${PANE_CLAUDE_TIMEOUT_S:-1800}
-# Optional: enable Anthropic SDK debug logging (HTTP request/response, SSE
-# stream events) so the next time a hang happens we can pinpoint whether
-# it's API-server-side stream death, NAT/proxy idle drop, or claude CLI
-# state-machine deadlock. Off by default — adds ~MB/min to log size.
 CLAUDE_DEBUG=\${PANE_CLAUDE_DEBUG:-0}
 DIAG_DIR="\$SESSION_DIR/diagnostics/${name}"
 mkdir -p "\$DIAG_DIR" 2>/dev/null || true
@@ -518,15 +483,10 @@ while [ ! -f "\$STOP_FILE" ] && [ \$ATTEMPT -lt \$MAX_RESTARTS ]; do
     ATTEMPT=\$((ATTEMPT + 1))
     echo "[\$(date -Iseconds)] [pane:${name}] attempt=\$ATTEMPT continue=\$CONTINUE_FLAG" >> "\$LOG"
     CLAUDE_START=\$(date +%s)
-    # \`timeout --signal=TERM\` lets claude shut down cleanly on the wallclock cap;
-    # \`--kill-after=30s\` escalates to SIGKILL if it ignores TERM. Exit code 124 = timed out.
-    # \`env -S\` here lets us conditionally inject ANTHROPIC_LOG=debug without polluting the parent shell.
     DEBUG_ENV=""
     if [ "\$CLAUDE_DEBUG" = "1" ]; then
         DEBUG_ENV="ANTHROPIC_LOG=debug"
     fi
-    # Run inner claude in the background so we can publish its PID for
-    # external soft-kill (orchestrator-driven pane restart on KM hang).
     env \$DEBUG_ENV timeout --signal=TERM --kill-after=30s "\$CLAUDE_TIMEOUT_S" claude --print \\
         --output-format stream-json --verbose \\
         \$CONTINUE_FLAG \\
@@ -549,10 +509,7 @@ while [ ! -f "\$STOP_FILE" ] && [ \$ATTEMPT -lt \$MAX_RESTARTS ]; do
     rm -f "\$PID_FILE" 2>/dev/null || true
     CLAUDE_DURATION=\$(( \$(date +%s) - CLAUDE_START ))
     if [ "\$EXIT" = "124" ] || [ "\$EXIT" = "137" ]; then
-        echo "[\$(date -Iseconds)] [pane:${name}] WARN: claude --print exceeded \${CLAUDE_TIMEOUT_S}s wallclock (exit=\$EXIT, ran for \${CLAUDE_DURATION}s) — likely a hung SSE/MCP/API stream; restarting with --continue" >> "\$LOG"
-        # Post-mortem snapshot: capture process tree + open TCP sockets + last
-        # log mtime so we can later diagnose where the hang lived (Anthropic
-        # API, MCP, or middlebox). Best-effort, never fail the loop.
+        echo "[\$(date -Iseconds)] [pane:${name}] WARN: claude --print exceeded \${CLAUDE_TIMEOUT_S}s wallclock (exit=\$EXIT, ran for \${CLAUDE_DURATION}s); restarting with --continue" >> "\$LOG"
         DIAG_FILE="\$DIAG_DIR/hang_attempt\${ATTEMPT}_\$(date +%Y%m%dT%H%M%S).txt"
         {
             echo "=== Hang post-mortem for [pane:${name}] attempt=\$ATTEMPT ==="
@@ -561,21 +518,21 @@ while [ ! -f "\$STOP_FILE" ] && [ \$ATTEMPT -lt \$MAX_RESTARTS ]; do
             echo "timeout_setting: \$CLAUDE_TIMEOUT_S"
             echo "exit_code: \$EXIT"
             echo
-            echo "--- claude/node processes (post-SIGTERM, may already be reaped) ---"
+            echo "--- claude/node processes (post-timeout, may already be reaped) ---"
             ps -eo pid,ppid,etime,stat,cmd 2>/dev/null | grep -E '\\b(claude|node)\\b' | grep -v grep | head -20 || echo "(none)"
             echo
             echo "--- ESTABLISHED TCP to candidate hang targets ---"
             (ss -tnp 2>/dev/null || netstat -tnp 2>/dev/null) | grep -E 'ESTAB|ESTABLISHED' | grep -E 'anthropic|claude|amd\\.com|primus|oci-' | head -20 || echo "(none)"
             echo
-            echo "--- log mtime (gap from now = idle window) ---"
+            echo "--- log mtime ---"
             stat -c '%y %n' "\$LOG" 2>/dev/null || echo "(stat failed)"
-            echo "now:    \$(date -Iseconds)"
+            echo "now: \$(date -Iseconds)"
             echo
             echo "--- last 20 lines of pane log ---"
             tail -20 "\$LOG" 2>/dev/null
             echo "=== end ==="
         } > "\$DIAG_FILE" 2>&1
-        echo "[\$(date -Iseconds)] [pane:${name}] hang diagnostic snapshot → \$DIAG_FILE" >> "\$LOG"
+        echo "[\$(date -Iseconds)] [pane:${name}] hang diagnostic snapshot -> \$DIAG_FILE" >> "\$LOG"
     else
         echo "[\$(date -Iseconds)] [pane:${name}] claude exit=\$EXIT (ran for \${CLAUDE_DURATION}s)" >> "\$LOG"
     fi
@@ -679,13 +636,8 @@ cleanup() {
     for name in watchdog orchestrator kernel-mgr; do
         touch "$SESSION_DIR/STOP_PANE_$name" 2>/dev/null || true
     done
-    # NOTE: SESSION_REPORT.md is now written in the FINALIZE step (before
-    # `[run.sh] Done`) rather than here. cleanup() runs from the EXIT trap,
-    # which on sandbox runs races against container teardown — the snapshot
-    # daemon starts copying the moment the polling agent sees `Done` and
-    # returns. Doing the 60s grace + fallback writer in FINALIZE guarantees
-    # SESSION_REPORT.md exists in $SESSION_DIR before the snapshot fires.
-    # If a fallback was needed, this trap is now best-effort progress only.
+    # SESSION_REPORT.md is produced in FINALIZE before `[run.sh] Done`; the
+    # EXIT trap may race sandbox teardown, so only attempt a last-ditch fallback here.
     if [[ ! -f "$SESSION_DIR/SESSION_REPORT.md" ]]; then
         log "  cleanup: SESSION_REPORT.md still missing — last-ditch fallback attempt"
         generate_fallback_report
@@ -734,14 +686,9 @@ KM_LAST_RESTART=0
 while tmux has-session -t marathon 2>/dev/null; do
     NOW=$(date +%s); ELAPSED=$(( NOW - START ))
 
-    # ----- kernel-mgr soft-restart on heartbeat-stale -----
-    # Orchestrator's _check_km_heartbeat() sets state.json:km_requested_restart=true
-    # after KM_HEARTBEAT_RESTART_MIN of silence on KM-exclusive sources
-    # (logs/kernel-mgr.log, kernel_manager/results.jsonl) WHILE pending work still
-    # exists in the work queue.  We respond by SIGTERMing the pane's current
-    # `claude --print` PID; the pane's outer while-loop will sleep 15s and re-launch
-    # with --continue.  Throttled to at most one restart per 5 min so a flapping
-    # orchestrator can't loop-kill.
+    # Orchestrator sets state.json:km_requested_restart=true after kernel-mgr
+    # silence while pending work exists. Soft-kill the current inner claude;
+    # the pane launcher will relaunch with --continue.
     if [[ -f "$SESSION_DIR/state.json" ]] \
         && [[ $(( NOW - KM_LAST_RESTART )) -ge 300 ]] \
         && jq -e '.km_requested_restart == true' "$SESSION_DIR/state.json" >/dev/null 2>&1; then
@@ -749,29 +696,22 @@ while tmux has-session -t marathon 2>/dev/null; do
         if [[ -f "$KM_PID_FILE" ]]; then
             KM_PID=$(cat "$KM_PID_FILE" 2>/dev/null || true)
             if [[ -n "$KM_PID" ]] && kill -0 "$KM_PID" 2>/dev/null; then
-                log "monitor: km_requested_restart=true → SIGTERM inner claude pid=$KM_PID (pane outer loop will --continue)"
-                # Only SIGTERM: the pane already wraps claude in `timeout --signal=TERM
-                # --kill-after=30s`, so the TERM we send propagates to claude; if claude
-                # ignores it, timeout's own --kill-after=30s escalates to SIGKILL without
-                # us needing to reach in and risk orphaning claude by killing the timeout
-                # wrapper directly. Allow 60s for that full chain (TERM → 30s grace →
-                # timeout-driven KILL → process exit).
+                log "monitor: km_requested_restart=true -> SIGTERM inner claude pid=$KM_PID"
                 kill -TERM "$KM_PID" 2>/dev/null || true
                 for _ in $(seq 1 12); do
                     kill -0 "$KM_PID" 2>/dev/null || break
                     sleep 5
                 done
                 if kill -0 "$KM_PID" 2>/dev/null; then
-                    log "monitor: km pid=$KM_PID still alive after 60s SIGTERM grace — escalating to SIGKILL (claude may be orphaned until reaped by init)"
+                    log "monitor: km pid=$KM_PID still alive after 60s SIGTERM grace; escalating to SIGKILL"
                     kill -KILL "$KM_PID" 2>/dev/null || true
                 fi
                 KM_LAST_RESTART=$NOW
             else
-                # PID file exists but no live process; clean it up so we don't loop.
                 rm -f "$KM_PID_FILE" 2>/dev/null || true
             fi
         else
-            log "monitor: km_requested_restart=true but no PID file at $KM_PID_FILE; skipping (orchestrator will clear flag if KM revives)"
+            log "monitor: km_requested_restart=true but no PID file at $KM_PID_FILE; skipping"
             KM_LAST_RESTART=$NOW
         fi
     fi
@@ -831,21 +771,9 @@ done
 # ========== STEP 6 — FINALIZE ==========
 log "marathon complete"
 
-# CRITICAL ORDERING: SESSION_REPORT.md must exist BEFORE we print `[run.sh] Done`.
-#
-# Why this happens here (not in cleanup()): the polling agent that drives this
-# marathon is contractually required by the skill's SKILL.md to stop polling
-# the moment it sees `[run.sh] Done` in /tmp/marathon.log. On the Claw sandbox,
-# the agent finishing its turn triggers an immediate executor snapshot+teardown
-# of the container — typically within 5s of the final assistant message. The
-# EXIT-trap `cleanup()` in this script never gets the wall-clock budget it
-# needs (180s grace + jq-driven fallback writer) before the container dies and
-# the unsynced state of $SESSION_DIR is what S3 captures. Result: 18h runs
-# kept ending with zero SESSION_REPORT.md on S3 even though state.json was fine.
-#
-# Doing the grace-window + fallback writer here, synchronously inside the main
-# script body, guarantees SESSION_REPORT.md is on disk (and flushed) BEFORE the
-# `Done` line is printed.
+# SESSION_REPORT.md must exist before `[run.sh] Done`. In the Claw sandbox the
+# polling agent stops as soon as it sees Done, often triggering container
+# snapshot/teardown before the EXIT trap has time to write the fallback report.
 if [[ ! -f "$SESSION_DIR/SESSION_REPORT.md" ]]; then
     log "finalize: 60s grace window for orchestrator pane to produce SESSION_REPORT.md"
     waited=0
@@ -858,9 +786,6 @@ if [[ ! -f "$SESSION_DIR/SESSION_REPORT.md" ]]; then
     log "finalize: pane never produced SESSION_REPORT.md within grace; invoking fallback writer"
     generate_fallback_report
 fi
-# Best-effort flush so the sandbox S3-sync daemon picks up the new file BEFORE
-# container teardown. `sync` flushes filesystem buffers; the short sleep gives
-# the periodic S3 syncer a window to upload SESSION_REPORT.md.
 sync 2>/dev/null || true
 sleep 5
 

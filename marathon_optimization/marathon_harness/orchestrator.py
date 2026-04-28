@@ -38,35 +38,17 @@ RESCORE_INTERVAL = 3
 PERIODIC_BENCH_INTERVAL = 3      # force E2E benchmark every N completed actions
 PLATEAU_THRESHOLD = 6            # consecutive no-gain actions → re-explore
 LOOP_DETECT_WINDOW = 8
-CIRCUIT_BREAKER = 5              # consecutive failures (crashes) → re-analyze
-# Independent from CIRCUIT_BREAKER above: CIRCUIT_BREAKER counts CRASHES,
-# this counts actions that completed cleanly but LOST throughput (and were
-# reverted by the zero-tolerance gate at line ~1022).  Without an
-# independent counter, a hypothesis that produces 5 in-a-row regressions
-# but never crashes will keep generating near-relatives of itself via
-# _analyze_regression(); the marathon then burns hours on a doomed
-# branch.  Hitting the cap forces a re-explore (jump to a fresh
-# hypothesis tree) and emits a `branch-exhausted` event.
-CONSECUTIVE_REGRESSION_CAP = 3
+CIRCUIT_BREAKER = 5              # consecutive failures → re-analyze
+CONSECUTIVE_REGRESSION_CAP = 3   # clean-but-losing actions → re-explore
 MAX_WALL_HOURS = 24
 MAX_CONSECUTIVE_RE_EXPLORES = 3
 RE_PROFILE_CADENCE_MIN = 180     # re-profile every 3h for new targets
 MAX_CRASH_COUNT = 10
 MAX_SELF_RETRY = 3               # Orchestrator self-diagnosis retry cap per action
 
-# kernel-mgr liveness probe.  Inner-claude pane wallclock timeout
-# (PANE_CLAUDE_TIMEOUT_S=1800s in run.sh) only bounds a SINGLE
-# `claude --print` call; it does not detect "the work-loop hasn't
-# produced anything for hours".  Watch the kernel_manager/{results,
-# event_log,work_queue}.jsonl mtimes and request a pane restart when
-# they go silent for too long.  The restart is performed by run.sh's
-# monitor loop (touches STOP_PANE_kernel-mgr; the pane's outer
-# while-loop then re-launches `claude --print --continue` with fresh
-# context).  This is a soft restart — it preserves the pane's
-# accumulated history.
-KM_HEARTBEAT_CHECK_INTERVAL_S = 300   # don't stat files every cycle
-KM_HEARTBEAT_STALE_MIN = 60           # warn (event_log only)
-KM_HEARTBEAT_RESTART_MIN = 120        # request pane restart
+KM_HEARTBEAT_CHECK_INTERVAL_S = 300
+KM_HEARTBEAT_STALE_MIN = 60
+KM_HEARTBEAT_RESTART_MIN = 120
 
 _NUMERIC_RESULT_KEYS = frozenset({
     "accuracy_risk", "crash_risk", "gain_pct", "micro_speedup",
@@ -176,7 +158,15 @@ class Orchestrator:
         try:
             # Step 0: WARM-START
             self.state.phase = "warm_start"
+            if self._workload is not None:
+                self._workload.snapshot_system_files()
             await self._warm_start()
+            if self._workload is not None:
+                changed = self._workload.system_files_changed()
+                if changed:
+                    log.warning("Warm-start modified %d system file(s): %s — rolling back",
+                                len(changed), changed)
+                    self._workload.rollback_system_files()
 
             # Step 1: RE-PROFILE
             self.state.phase = "profile"
@@ -1063,11 +1053,13 @@ class Orchestrator:
                     )
                     verify_bench = await self._run_benchmark()
                     if verify_bench:
-                        new_tput = verify_bench.get("tput_per_gpu", prev_tput)
-                        log.info("Post-revert verification: %.1f tok/s/GPU", new_tput)
-                    self.state.current_tput_per_gpu = max(new_tput, prev_tput)
-                    if self.state.current_tput_per_gpu > (self.state.best_tput_per_gpu or 0):
-                        self.state.best_tput_per_gpu = self.state.current_tput_per_gpu
+                        verify_tput = verify_bench.get("tput_per_gpu", 0)
+                        log.info("Post-revert verification: %.1f tok/s/GPU (health-check only, "
+                                 "not updating current which stays at %.1f)",
+                                 verify_tput, prev_tput)
+                        if verify_tput <= 0:
+                            log.error("Post-revert server unhealthy (0 tput)")
+                    self.state.current_tput_per_gpu = prev_tput
 
                     if not action.get("needs_benchmark_only"):
                         retry = await self._analyze_regression(action, result, prev_tput, bench)
@@ -1088,9 +1080,6 @@ class Orchestrator:
                         result["gain_pct"] = gain
                         log.info("Action %s improved throughput: %.1f → %.1f (+%.1f%%)",
                                  action.get("id"), prev_tput, new_tput, gain)
-                        # Real throughput gain proves the current branch is
-                        # alive — clear the regression streak so the
-                        # circuit-breaker only fires on uninterrupted losses.
                         self.state.consecutive_regressions = 0
 
                         self._snapshot_diffs(action, prev_tput, new_tput)
@@ -1308,11 +1297,9 @@ class Orchestrator:
         if self.state.actions_since_gain >= PLATEAU_THRESHOLD:
             await self._re_explore()
 
-        # Regression circuit breaker: branch is exhausted if we got
-        # CONSECUTIVE_REGRESSION_CAP clean-but-losing actions in a row.
-        # Force a re-explore to jump out of the dead hypothesis tree;
-        # write a branch-exhausted event so the watchdog can surface a
-        # systemic finding (e.g. "stop trying X-class actions on Y").
+        # Regression circuit breaker: branch is exhausted if we got several
+        # clean-but-losing actions in a row. This is independent from
+        # CIRCUIT_BREAKER, which counts crashes.
         cr = getattr(self.state, "consecutive_regressions", 0)
         if cr >= CONSECUTIVE_REGRESSION_CAP:
             log.warning(
@@ -3042,30 +3029,11 @@ READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
     # ------------------------------------------------------------------
 
     def _check_km_heartbeat(self) -> None:
-        """Watch KM-owned mtimes and request a pane restart when activity
-        goes silent for too long.
+        """Request a kernel-mgr pane restart when pending work goes silent.
 
-        Why this exists: PANE_CLAUDE_TIMEOUT_S=1800 in run.sh only bounds
-        a single `claude --print` invocation — it does NOT detect a
-        work-loop that's still making periodic `claude --print` calls but
-        whose calls aren't producing useful work (inner claude in a
-        tight no-op turn loop, MCP wedged on a state machine bug, etc.).
-        Two-stage response: WARN at KM_HEARTBEAT_STALE_MIN, REQUEST
-        RESTART at KM_HEARTBEAT_RESTART_MIN.  The actual pane restart is
-        performed by run.sh's monitor (it sees `km_requested_restart=true`
-        in state.json, SIGTERMs the pane's current `claude --print` PID,
-        and the pane's outer while-loop re-launches with `--continue`).
-
-        Heartbeat sources — CRITICALLY must be files that ONLY the KM
-        pane writes.  `event_log.jsonl` and `work_queue.jsonl` are
-        shared with the orchestrator (we ourselves write branch-exhausted,
-        km-stale, accuracy-fail events; we push targets to work_queue).
-        Using those as "liveness" would self-cancel: the moment we wrote
-        a km-stale event, the file mtime would refresh and the next
-        check would consider KM alive again.  The only reliable sources:
-          * logs/kernel-mgr.log — pane stream-json stdout (inner claude
-            writes it directly; goes silent the instant the pane dies)
-          * kernel_manager/results.jsonl — written ONLY by KM
+        The heartbeat must look only at KM-owned files. `event_log.jsonl` and
+        `work_queue.jsonl` are shared with the orchestrator, so using their
+        mtimes would let our own writes make a dead KM look alive.
         """
         now = time.monotonic()
         last_check = getattr(self, "_km_heartbeat_last_check_mono", 0.0)
@@ -3073,17 +3041,9 @@ READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
             return
         self._km_heartbeat_last_check_mono = now
 
-        # KM hasn't been used yet — nothing to monitor.
         if self.state.kernel_manager_targets_pushed <= 0:
             return
 
-        # Idle-vs-hung gate: silence on a KM with NO pending work is normal
-        # (we pushed targets, it finished them, queue is empty).  Treating
-        # that as a hang would restart a healthy idle pane every
-        # RESTART_MIN — visible as runaway km_restart_count on long runs.
-        # Only arm stale/restart checks when there IS pending work, OR when
-        # a restart is already in flight and we still need the auto-clear
-        # path below to run.
         pending_km_targets = 0
         try:
             wq = ipc.read_work_queue_all(self.session_dir)
@@ -3093,13 +3053,14 @@ READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
         for t in wq:
             if t.get("status") == "pending" and t.get("id") not in processed:
                 pending_km_targets += 1
+
+        # A silent KM with no pending work is idle, not hung.
         if pending_km_targets <= 0 and not getattr(
             self.state, "km_requested_restart", False
         ):
             return
 
         session_path = Path(self.session_dir)
-        # Probe KM-exclusive files only (see docstring above).
         heartbeat_sources = [
             session_path / "logs" / "kernel-mgr.log",
             session_path / "kernel_manager" / "results.jsonl",
@@ -3114,12 +3075,10 @@ READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
                 continue
 
         if latest_mtime <= 0:
-            return  # Pane log not yet created — too early to call stale.
+            return
 
         silence_min = (time.time() - latest_mtime) / 60
 
-        # Auto-clear the restart flag if KM has come back to life
-        # (pane restart succeeded and produced fresh output).
         if (getattr(self.state, "km_requested_restart", False)
                 and silence_min < KM_HEARTBEAT_STALE_MIN):
             log.info(
@@ -3131,7 +3090,6 @@ READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
             self.state.save()
             return
 
-        # Already requested restart — wait for run.sh to act and KM to revive.
         if getattr(self.state, "km_requested_restart", False):
             return
 
@@ -3162,16 +3120,12 @@ READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
             except Exception as exc:
                 log.warning("Failed to write km-restart-requested event: %s", exc)
             try:
-                # Persist immediately so run.sh's monitor sees the flag
-                # on its next 10s poll, not whenever the orchestrator
-                # next decides to checkpoint.
                 self.state.save()
             except Exception as exc:
                 log.warning("Failed to save state after km-restart request: %s", exc)
             return
 
         if silence_min >= KM_HEARTBEAT_STALE_MIN:
-            # Throttle warn events: at most one per 30 min of continuing silence.
             last_warn = getattr(self, "_km_stale_last_warn_min", 0.0)
             if silence_min - last_warn >= 30:
                 log.warning(
