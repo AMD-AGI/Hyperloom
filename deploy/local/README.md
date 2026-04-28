@@ -21,9 +21,9 @@ docker run -d --shm-size=16g \
   -e LLM_API_KEY=<your-geak-api-key> \
   -e LLM_API_BASE=https://<your-openai-compatible-endpoint>/v1 \
   -e GEAK_MODEL_NAME=<model-supported-by-that-endpoint> \
-  primussafe/hyperloom-local:sglang-mi300x-427-1
+  primussafe/hyperloom-local:sglang-mi30x-428-1
 ```
-> vllm images: `primussafe/hyperloom-local:vllm-427-1`
+> vllm images: `primussafe/hyperloom-local:vllm-428-1`
 
 > `LLM_API_KEY` and `LLM_API_BASE` are only used by the `geak` kernel optimization backend. Set `GEAK_MODEL_NAME` to a model that your endpoint actually serves; if omitted, the default is `claude-opus-4-7`. If you use OOB `codex` / `claude` backends, configure `OOB_API_KEY` and `OOB_BASE_URL`.
 
