@@ -3,12 +3,16 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 # =============================================================================
-# MLPerf Optimization — GBS × LR Sweep
+# MLPerf Optimization — MBS / Eval Interval Sweep
 #
-# Runs Tier 2 trials with different GBS/LR/MBS combinations to find the
-# optimal operating point for time-to-target.
+# Runs Tier 2 trials with different MBS/GA combinations within the winning
+# GBS/LR/parallelism config to find the optimal per-iteration cost.
+#
+# NOTE: For GBS/LR/TP/EP/DP config selection, use actions/config-selection.md
+# (three-stage workflow with Tier 1 → 3 → 4).
 #
 # Required env vars: MLPERF_DIR, CONFIG_SH, RESULT_DIR
+# Optional: SWEEP_ITERS (default 500), WINNING_GBS (default from config)
 # =============================================================================
 
 : "${MLPERF_DIR:?MLPERF_DIR env var required}"
@@ -17,33 +21,41 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 SWEEP_ITERS="${SWEEP_ITERS:-500}"
 
+source "$CONFIG_SH"
+WINNING_GBS="${WINNING_GBS:-$PRIMUS_GLOBAL_BATCH_SIZE}"
+WINNING_LR="${WINNING_LR:-$PRIMUS_LR}"
+DP="${DP:-8}"
+
 echo "============================================================"
-echo "MLPerf Optimization — GBS × LR Sweep (Tier 2)"
+echo "MLPerf Optimization — MBS Sweep (Tier 2)"
+echo "Winning config: GBS=$WINNING_GBS LR=$WINNING_LR DP=$DP"
 echo "Iters per trial: $SWEEP_ITERS"
 echo "Results: $RESULT_DIR"
 echo "============================================================"
 
 cat > "$RESULT_DIR/sweep_results.tsv" <<EOF
-gbs	lr	mbs	ga_steps	ms_per_iter	loss_at_end	status
+mbs	ga_steps	ms_per_iter	loss_at_end	status
 EOF
 
-sweep_configs=(
-    "16:2.0e-4:2:1"
-    "32:4.0e-4:2:2"
-    "32:4.0e-4:4:1"
-    "64:5.6e-4:2:4"
-    "64:5.6e-4:4:2"
-)
+for mbs in 1 2 4; do
+    ga=$((WINNING_GBS / (mbs * DP)))
+    if [ "$ga" -lt 1 ]; then
+        echo "--- Skipping MBS=$mbs: GA would be $ga (< 1) ---"
+        continue
+    fi
+    check=$((ga * mbs * DP))
+    if [ "$check" -ne "$WINNING_GBS" ]; then
+        echo "--- Skipping MBS=$mbs: GBS mismatch ($check != $WINNING_GBS) ---"
+        continue
+    fi
 
-for config_str in "${sweep_configs[@]}"; do
-    IFS=: read -r gbs lr mbs ga <<< "$config_str"
-    label="gbs${gbs}_lr${lr}_mbs${mbs}"
+    label="mbs${mbs}_ga${ga}"
 
     echo ""
-    echo "--- Sweep: GBS=$gbs LR=$lr MBS=$mbs GA=$ga ---"
+    echo "--- Sweep: MBS=$mbs GA=$ga (GBS=$WINNING_GBS) ---"
 
     run_mlperf_trial "sweep_${label}" 2 "$SWEEP_ITERS" \
-        "PRIMUS_GLOBAL_BATCH_SIZE=$gbs PRIMUS_LR=$lr PRIMUS_MICRO_BATCH_SIZE=$mbs PRIMUS_MIN_LR=$(python3 -c "print(f'{float(\"$lr\") * 0.1:.1e}')")"
+        "PRIMUS_MICRO_BATCH_SIZE=$mbs"
 
     RESULT_LINE=$(grep "^TRIAL_RESULT" "$RESULT_DIR/attempt_sweep_${label}.log" 2>/dev/null || echo "")
 
@@ -58,7 +70,7 @@ for config_str in "${sweep_configs[@]}"; do
         status="error"
     fi
 
-    echo -e "${gbs}\t${lr}\t${mbs}\t${ga}\t${ms_per_iter}\t${last_loss}\t${status}" >> "$RESULT_DIR/sweep_results.tsv"
+    echo -e "${mbs}\t${ga}\t${ms_per_iter}\t${last_loss}\t${status}" >> "$RESULT_DIR/sweep_results.tsv"
     echo "  Result: ${ms_per_iter} ms/iter, last_loss=${last_loss}, status=${status}"
 done
 
