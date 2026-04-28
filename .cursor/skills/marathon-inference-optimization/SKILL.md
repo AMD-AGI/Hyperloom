@@ -41,9 +41,8 @@ responsibility, defined here once so the prompt can stay short.
    hands control back immediately so you can poll.
 
 3. **Poll every 60s** with a SEPARATE shell tool call. Always pair the tail
-   with a liveness check on the marathon PID — without it, an early death of
-   `run.sh` will be invisible (the tail just keeps showing the same stale
-   bytes for hours):
+   with a liveness check on the marathon PID; otherwise an early `run.sh`
+   death can look like a quiet long-running marathon for hours:
    ```bash
    sleep 60 && (kill -0 $marathon_pid 2>/dev/null || echo MARATHON_DEAD) && tail -200 /tmp/marathon.log
    ```
@@ -52,20 +51,14 @@ responsibility, defined here once so the prompt can stay short.
    `crash`, `dream`, `km`) **plus the last 3 activity lines from EACH of
    the three pane logs** (`orchestrator` / `kernel-mgr` / `watchdog` —
    `assistant text`, `tool: <name> <cmd>`, `result: ...`). 200 lines covers
-   ~10 progress blocks of history, enough buffer for autocompact gaps. Do
-   NOT separately tail the three per-pane logs on every poll — that
-   duplicates output. Only do a one-off `tail -200 $SESSION_DIR/logs/<pane>.log`
-   when you need deeper detail on a specific pane.
-
-   **After every poll, you MUST emit assistant TEXT** in the structured
-   `Poll N (elapsed ~Xmin) / TAIL: <verbatim> / Brief: phase=… last_pane_restart=…`
-   format from the prompt template. Turns that end with only `tool_use`+
-   `tool_result` are protocol violations — no human can follow a 24h run
-   if every turn is silent.
+   several progress blocks, enough buffer for autocompact gaps. Do NOT
+   separately tail the three per-pane logs on every poll — that duplicates
+   output. Only do a one-off `tail -200 $SESSION_DIR/logs/<pane>.log` when
+   you need deeper detail on a specific pane.
 
    If the liveness check prints `MARATHON_DEAD` before `[run.sh] Done`,
    immediately classify as "MARATHON DIED EARLY", forward the last 200
-   lines + a `ps -ef | grep -E 'run.sh|claude'` snapshot, and stop polling.
+   lines plus a `ps -ef | grep -E 'run.sh|claude'` snapshot, and stop polling.
 
 4. **Stop polling** when `/tmp/marathon.log` contains the line `[run.sh] Done`.
    That line is the authoritative finish signal. When you see it, forward the
@@ -141,9 +134,9 @@ user must export them before invoking the skill.
 | `KERNEL_OPT_BACKENDS` | `geak,claude,codex` | OOB allowlist |
 | `DRY_RUN` | 0 | `1` = preflight only, no tmux |
 | `REPORT_INTERVAL_S` | 60 | monitor cadence |
-| `PANE_CLAUDE_TIMEOUT_S` | `1800` (30 min) | per-`claude --print` wallclock cap. On expiry the pane launcher SIGTERMs (then SIGKILLs after 30s) and restarts with `--continue`, recovering the prior conversation. Set lower to react faster to hangs; set higher only if a single tool call legitimately needs >30 min (rare). |
-| `PANE_MAX_RESTARTS` | `200` | restart-loop cap per pane (was hardcoded 50; bumped because the new wallclock timeout makes restarts more frequent). |
-| `PANE_CLAUDE_DEBUG` | `0` | set `1` to inject `ANTHROPIC_LOG=debug` into the inner `claude --print`, capturing full HTTP request/response and SSE stream events in the pane log (~MB/min extra). Recommended for the FIRST run after upgrading run.sh, so any new hang produces a fully diagnosable trace. |
+| `PANE_CLAUDE_TIMEOUT_S` | `1800` (30 min) | per-`claude --print` wallclock cap; on expiry the pane launcher restarts with `--continue` |
+| `PANE_MAX_RESTARTS` | `200` | restart-loop cap per pane |
+| `PANE_CLAUDE_DEBUG` | `0` | `1` injects `ANTHROPIC_LOG=debug` into inner `claude --print` calls for hang diagnosis |
 
 ## How `run.sh` self-adapts
 
@@ -156,20 +149,17 @@ The script does the choosing for you:
 | `claude` CLI missing | `command -v claude` | local mode: `npm install -g @anthropic-ai/claude-code`; sandbox always has it |
 | `STRICT=1` | env flag | `run.sh` exits 20 if any required var (MAX_HOURS / FRAMEWORK / MODEL_CLASS / GPU_COUNT / GPU_TYPE / TP / EP / PRECISION / CONC / ISL / OSL) is unset — catches "agent only exported MODEL_NAME and silently fell back to defaults" |
 
-## Prompt template — params + a small Rules block the agent must echo
+## Prompt template — just the params, Rules live here in SKILL.md
 
-The "Your role" section above is the full operating contract. The Rules
-block below is what every prompt must repeat verbatim — it pins down the
-poll cadence, the assistant-text-every-turn requirement, and the
-unexpected-death / fallback-report fallbacks that we've been bitten by.
-DO NOT trim it; it overrides any conflicting reading of SKILL.md.
+The "Your role" section above is the full operating contract for the agent.
+The user's prompt therefore only needs to supply the env vars (what changes
+per run) and a trigger pointing at this skill. No Rules to repeat.
 
 ### Cursor / local GPU host
 
-````
+```
 @marathon-inference-optimization
 
-```bash
 PANE_CLAUDE_DEBUG=1 \
 STRICT=1 MODEL_NAME=deepseek-ai/DeepSeek-R1-0528 \
 BASE_DIR=/shared_nfs/xiaofei/marathon-runs/dsr1-$(date +%m%d-%H%M) \
@@ -184,76 +174,24 @@ bash $SKILL_ROOT/scripts/launcher/run.sh > /tmp/marathon.log 2>&1 &
 echo "marathon_pid=$!"
 ```
 
-Rules (strict — override SKILL.md on any conflict):
-1) Launch in BACKGROUND exactly once with the command above. Capture `$marathon_pid`.
-2) Poll every 60s using one Bash call:
-   `sleep 60 && (kill -0 $marathon_pid 2>/dev/null || echo MARATHON_DEAD) && tail -200 /tmp/marathon.log`
-3) After EACH poll, immediately output assistant TEXT in this exact format:
-   Poll N (elapsed ~Xmin)
-   TAIL:
-   <paste tail output verbatim>
-   Brief: phase=<X> tput=<Y> gain=<Z>% completed=<N> crash=<C> dream=<D> km=<KS> last_pane_restart=<Mmin_ago|none> done=<no|yes>
-4) Every turn MUST end with assistant TEXT in the format above.
-   VALID:   [Bash tool_use] → [tool_result] → [assistant TEXT "Poll N ... Brief: ..."]
-   INVALID: [Bash tool_use] → [tool_result] → <turn ends with no assistant text>
-5) NO cron, NO scheduled tasks, NO background loops/scripts. Multi-turn polling only.
-6) If `MARATHON_DEAD` appears before `[run.sh] Done`, immediately output the last
-   200 lines of /tmp/marathon.log + `ps -ef | grep -E 'run.sh|claude' | head -20`,
-   classify as "MARATHON DIED EARLY", and stop polling.
-7) Stop when `[run.sh] Done` appears. Then output:
-   === SESSION_REPORT.md === ... === END SESSION_REPORT ===
-   If `[run.sh] Done` printed `=== NO SESSION_REPORT.md ===` instead, forward
-   THAT block verbatim plus the last 100 lines of any non-empty pane log, and
-   report as "fallback writer failure".
-8) Do NOT interrupt the marathon before MAX_HOURS expires.
-9) If user requests early stop:
-   `touch $SESSION_DIR/STOP_PANE_{watchdog,orchestrator,kernel-mgr}` then
-   continue polling until `[run.sh] Done`.
-10) Auth vars (ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / SAFE_API_KEY) are
-    auto-injected by the sandbox; do NOT re-export.
-````
-
 ### Claw sandbox
 
-Same body, plus one sandbox header. Note the literal `/hyperloom/Hyperloom/...`
-path because Cursor's `@marathon-inference-optimization` reference doesn't
-resolve inside the Claw agent — point at the file directly.
+Same body, plus one sandbox header:
 
-````
-@/hyperloom/Hyperloom/.cursor/skills/marathon-inference-optimization
+```
+@marathon-inference-optimization
+
 SandboxImage: harbor.oci-slc.example-internal-host.invalid/custom/lmsysorg/sglang:202603270958
 
-```bash
-PANE_CLAUDE_DEBUG=1 \
-STRICT=1 MODEL_NAME=... \
-BASE_DIR=/workspace/hyperloom/... MODEL_PATH=/hyperloom/models/... \
-MAX_HOURS=... FRAMEWORK=... MODEL_CLASS=... \
-GPU_COUNT=8 GPU_TYPE=MI355X TP=8 EP=1 PRECISION=fp8 \
-CONC=64 ISL=1024 OSL=1024 \
-IMAGE=... KERNEL_OPT_WORKSPACE=control-plane-sandbox KERNEL_OPT_BACKENDS=claude \
-INFERENCEX_PATH=/hyperloom/InferenceX \
-bash /hyperloom/Hyperloom/.cursor/skills/marathon-inference-optimization/scripts/launcher/run.sh > /tmp/marathon.log 2>&1 &
-echo "marathon_pid=$!"
+STRICT=1 MODEL_NAME=... BASE_DIR=/workspace/hyperloom/... MODEL_PATH=... \
+MAX_HOURS=... (...same as above...)
 ```
-
-(...same Rules 1-10 as above...)
-````
-
-### Why these Rules exist (pitfalls already burned us)
-
-| Rule | Pitfall it prevents |
-|------|---------------------|
-| 2 (`kill -0` in poll) | An 18h marathon where `run.sh` died at hour 1 but the polling agent kept reporting "no `[run.sh] Done` yet" for 17h because nothing in the tail surfaced the death. |
-| 3 (structured Brief with `last_pane_restart`) | Forces the agent to surface pane restart frequency; high frequency = the new wallclock timeout is firing, which means a hang is recurring (look at `$SESSION_DIR/diagnostics/`). |
-| 4 (assistant TEXT every turn) | Earlier prompts produced turns of pure `tool_use`+`tool_result` with no readable summary; humans tailing along had nothing to read. |
-| 6 (`MARATHON_DEAD` fast-path) | Without this the agent will happily poll a corpse for the full `MAX_HOURS`. |
-| 7 (fallback-of-fallback for SESSION_REPORT) | The pane's report writer + run.sh's fallback writer can BOTH fail; the agent must still surface *something* useful. |
-| `PANE_CLAUDE_DEBUG=1` (in env) | Without `ANTHROPIC_LOG=debug`, a recurring hang is only diagnosable by the post-mortem snapshot in `diagnostics/`; with it, you see the exact HTTP/SSE state at the moment of stall. |
 
 The agent reads this SKILL.md when `@marathon-inference-optimization` is
 triggered (or when the glob `**/marathon*` matches), follows the "Your role"
-section + Rules block, polls `tail -200 /tmp/marathon.log`, and forwards the
-final SESSION_REPORT when `[run.sh] Done` appears.
+section, constructs the `bash $SKILL_ROOT/scripts/launcher/run.sh > /tmp/marathon.log 2>&1 &`
+invocation from the env vars, polls with the `kill -0` + `tail -200` command above, and forwards
+the final SESSION_REPORT when `[run.sh] Done` appears.
 
 ### Sandbox vs local — what differs
 
