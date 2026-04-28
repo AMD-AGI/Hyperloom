@@ -38,9 +38,9 @@ fi
 
 AUTH_PROXY_PID=0
 
-export MODE="${MODE:-fully-local}"
+export MODE="${MODE:-local}"
 
-# OOB runs as a per-task CLI in fully-local mode (`oob run ...`); no persistent service.
+# OOB runs as a per-task CLI in local mode (`oob run ...`); no persistent service.
 export OOB_CLI="${OOB_CLI:-oob}"
 
 echo "============================================"
@@ -73,8 +73,8 @@ GEAK_TEMPLATE=/opt/hyperloom/geak-config/template.yaml
 GEAK_CONFIG="${GEAK_CONFIG:-/opt/hyperloom/geak-config/local.yaml}"
 
 # Fallback for dev mode where /opt/hyperloom is bind-mounted from host repo
-if [ ! -f "$GEAK_TEMPLATE" ] && [ -f "/opt/hyperloom/deploy/fully-local/geak-litellm.yaml" ]; then
-    GEAK_TEMPLATE="/opt/hyperloom/deploy/fully-local/geak-litellm.yaml"
+if [ ! -f "$GEAK_TEMPLATE" ] && [ -f "/opt/hyperloom/deploy/local/geak-litellm.yaml" ]; then
+    GEAK_TEMPLATE="/opt/hyperloom/deploy/local/geak-litellm.yaml"
 fi
 
 if [ -f "$GEAK_TEMPLATE" ]; then
