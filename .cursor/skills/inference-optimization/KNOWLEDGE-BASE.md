@@ -25,7 +25,7 @@ description: Model-specific configurations, validated results, and lessons learn
 3. **GEAK end-to-end gain depends on concurrency (CONC)** — sweet spot around CONC=4; at high concurrency, gains are diluted by the pipeline.
 4. **Server parameter tuning is often more effective than GEAK** — e.g. Kimi vLLM +84%, DSR1 +13.9%.
 5. **Already highly tuned models (gpt-oss) had little headroom** — GPU utilization ~94.7%, 95%+ vendor kernels.
-6. **GEAK supports HIP kernels** — needs full `.cu` source in task input (not path-only). `topkGatingSoftmax`: use SGLang image + explicit source dir in prompt; test harness creation can fail with minimal input.
+6. **GEAK supports HIP kernels (including aiter when source is provided)** — needs full `.cu`/`.hip` source in `files[].content` (not path-only). When the user provides source paths (e.g., `/opt/aiter/csrc/`), these kernels MUST NOT be skipped as "vendor" — map trace kernel names back to source files using `rg` in the provided repo. `topkGatingSoftmax`: use SGLang image + explicit source dir in prompt; test harness creation can fail with minimal input.
 7. **Framework choice dominates for some stacks** — Kimi-K2.5: SGLang ~324 vs vLLM ~141 tok/s (~2.3× gap).
 8. **Backend switches + scheduling modes outperform parameter sweeps** — GLM-5-FP8: backend switches gave +16.2% combined vs <1% from any single parameter change. **Always explore backends before sweeping parameters.**
 9. **Combination synergies can be super-linear** — GLM-5-FP8: two +3% backend switches combined for +16.2%. Always test winners together.
@@ -363,7 +363,7 @@ source /tmp/baseline_config.sh
 | **benchmark_serving.py args** | Used `--output-file` (wrong) instead of `--save-result --result-dir --result-filename` | Check InferenceX script's `--help` first |
 | **InferenceX path wrong** | Used `/shared_nfs/limou/InferenceX/` instead of user's path | Always use `$INFERENCEX_PATH` from Phase 1 setup |
 | **Trace file too large** | Raw trace 349MB, 97% python_function events | Always filter before TraceLens (see Trace Size and Filtering in SKILL.md) |
-| **TraceLens not called** | Said "called TraceLens" but didn't actually invoke MCP tools | Must use `check_trace_file` + `run_full_standalone_analysis` MCP tools |
+| **TraceLens not called** | Said "called TraceLens" but didn't actually run analysis | Must run `TraceLens_generate_perf_report_pytorch` CLI + `orchestrator_prepare.py` (see `actions/profile.md`) |
 | **GEAK input: comments not code** | Submitted `.cu` with only comments/path references, GEAK had no source to optimize | Always embed full source in `files[].content` |
 | **GEAK: wrong image** | Default ROCm image lacks framework code and headers; paths in GEAK prompt don't exist | Pass framework image (`KERNEL_OPT_IMAGE`) for all kernel types |
 | **GEAK HIP: `find /` on NFS** | GEAK agent ran `find \| grep` to locate source, hung ~35 min on NFS | Prompt must specify exact source dir and say "Do NOT search filesystem with find / or grep -r /" |

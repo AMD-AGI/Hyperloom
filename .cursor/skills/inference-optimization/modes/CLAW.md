@@ -4,14 +4,15 @@ This document contains ALL claw-mode-specific instructions. Read this **before s
 when using Claw client with SaFE cluster.
 
 **Agent:** Read `SKILL.md` for the orchestrator loop and shared Iron Rules (IR-1 through
-IR-7). This file defines claw-specific Iron Rules (IR-8 through IR-11), constants,
+IR-7b). This file defines claw-specific Iron Rules (IR-8 through IR-11), constants,
 architecture, and per-action execution overrides.
 
 ## Environment
 
 - **Client**: Claw (internal platform, Claude Code-like)
 - **Runtime**: SaFE cluster with multi-node GPU
-- **MCP Servers**: SaFE MCP + GEAK MCP + OOB GPU Optimizer MCP + TraceLens MCP (all remote HTTP)
+- **MCP Servers**: SaFE MCP + GEAK MCP + OOB GPU Optimizer MCP
+- **TraceLens**: Local CLI (`pip install -e /hyperloom/TraceLens-internal`)
 - **Storage**: Shared NFS (`/shared_nfs/` inside Pod, maps to NFS root)
 
 ## Mode Detection
@@ -117,7 +118,7 @@ Claw Client --> Skill (SKILL.md)
                  |-> GEAK MCP (remote, unchanged)
                  |     \-> SaFE API -> PyTorchJob -> kernel optimization
                  |
-                 |-> TraceLens MCP (remote, unchanged)
+                 |-> TraceLens CLI (local, pip install -e)
                  |     \-> Reads traces from shared NFS
                  |
                  \-> Benchmark results on shared NFS
@@ -281,7 +282,7 @@ After profiling, unset profiler env vars inside the Ray cluster:
 exec_on_gpu "unset PROFILE SGLANG_TORCH_PROFILER_DIR VLLM_TORCH_PROFILER_DIR"
 ```
 
-Trace files on shared NFS — accessible from both Claw client and TraceLens MCP.
+Trace files on shared NFS — accessible from both Claw client and TraceLens CLI.
 
 Filesystem searches for kernel source must also go through `exec_on_gpu`:
 
