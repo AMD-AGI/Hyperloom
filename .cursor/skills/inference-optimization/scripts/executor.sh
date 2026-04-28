@@ -3,11 +3,11 @@
 # executor.sh — Execution backend abstraction layer
 #
 # Dispatches GPU-side commands to the correct backend:
-#   - local / fully-local: execute directly (eval)
-#   - claw:                submit to Ray cluster via ray_submit.py
+#   - local: execute directly (eval)
+#   - claw:  submit to Ray cluster via ray_submit.py
 #
 # Required env:
-#   MODE             — "local", "fully-local", or "claw"
+#   MODE             — "local" or "claw"
 #   RAY_HEAD_ADDRESS — Ray client address (claw mode only), e.g. ray://<head>:10001
 #
 # Usage:
@@ -22,7 +22,7 @@ exec_on_gpu() {
     local cmd="$1"
     local timeout="${2:-3600}"
 
-    if [ "$MODE" = "local" ] || [ "$MODE" = "fully-local" ]; then
+    if [ "$MODE" = "local" ]; then
         eval "$cmd"
     elif [ "$MODE" = "claw" ]; then
         if [ -z "$RAY_HEAD_ADDRESS" ]; then
@@ -34,7 +34,7 @@ exec_on_gpu() {
             --command "$cmd" \
             --timeout "$timeout"
     else
-        echo "ERROR: Unknown MODE='$MODE'. Expected 'local', 'fully-local', or 'claw'." >&2
+        echo "ERROR: Unknown MODE='$MODE'. Expected 'local' or 'claw'." >&2
         return 1
     fi
 }
@@ -42,7 +42,7 @@ exec_on_gpu() {
 exec_on_gpu_bg() {
     local cmd="$1"
 
-    if [ "$MODE" = "local" ] || [ "$MODE" = "fully-local" ]; then
+    if [ "$MODE" = "local" ]; then
         eval "$cmd" &
         echo $!
     elif [ "$MODE" = "claw" ]; then
@@ -55,7 +55,7 @@ exec_on_gpu_bg() {
             --command "nohup $cmd > /dev/null 2>&1 & echo \$!" \
             --timeout 30
     else
-        echo "ERROR: Unknown MODE='$MODE'. Expected 'local', 'fully-local', or 'claw'." >&2
+        echo "ERROR: Unknown MODE='$MODE'. Expected 'local' or 'claw'." >&2
         return 1
     fi
 }
