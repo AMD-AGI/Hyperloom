@@ -1,6 +1,9 @@
 Use the inference-optimization skill to optimize {model_hf} inference performance.
 mode: {mode}
 
+NOTE: The skill files are embedded below in XML tags — use them directly instead of searching the filesystem.
+{skill_section}
+
 Configuration:
 Model path: {model_path}
 Framework: {framework}
