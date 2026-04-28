@@ -2,7 +2,7 @@
 """OOB Ray Submit — schedule oob CLI tasks via local Ray cluster.
 
 Provides GPU isolation for concurrent OOB (Claude Code / Codex) tasks
-in fully-local mode. Each task gets an isolated GPU allocated by Ray.
+in local mode. Each task gets an isolated GPU allocated by Ray.
 
 Usage:
     # Single task (blocking, prints result when done)

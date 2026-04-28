@@ -1,9 +1,9 @@
 # Hyperloom CLI auto-start script
 # Sourced by /etc/profile.d/hyperloom.sh on first login
 
-export MODE="${MODE:-fully-local}"
+export MODE="${MODE:-local}"
 
-if [ -z "$HYPERLOOM_STARTED" ] && [ "${MODE:-}" = "fully-local" ]; then
+if [ -z "$HYPERLOOM_STARTED" ] && [ "${MODE:-}" = "local" ]; then
     export HYPERLOOM_STARTED=1
     mkdir -p /var/log/hyperloom "${NFS_BASE_PATH:-/tmp/geak-data}"
     
@@ -21,8 +21,8 @@ if [ -z "$HYPERLOOM_STARTED" ] && [ "${MODE:-}" = "fully-local" ]; then
     GEAK_CONFIG="${GEAK_CONFIG:-/opt/hyperloom/geak-config/local.yaml}"
 
     # Fallback for dev mode where /opt/hyperloom is bind-mounted from host repo
-    if [ ! -f "$GEAK_TEMPLATE" ] && [ -f "/opt/hyperloom/deploy/fully-local/geak-litellm.yaml" ]; then
-        GEAK_TEMPLATE="/opt/hyperloom/deploy/fully-local/geak-litellm.yaml"
+    if [ ! -f "$GEAK_TEMPLATE" ] && [ -f "/opt/hyperloom/deploy/local/geak-litellm.yaml" ]; then
+        GEAK_TEMPLATE="/opt/hyperloom/deploy/local/geak-litellm.yaml"
     fi
 
     if [ -f "$GEAK_TEMPLATE" ]; then

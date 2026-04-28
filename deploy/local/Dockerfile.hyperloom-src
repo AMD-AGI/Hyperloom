@@ -1,17 +1,17 @@
-# Hyperloom source bundle — all components for fully local mode
+# Hyperloom source bundle — all components for local mode
 # Packages repo artifacts into a minimal image for multi-stage consumption,
 # so downstream Dockerfiles need no local build context.
 #
 # Build context: repo root (/shared_nfs/lss/Hyperloom/)
 #   Requires: cp -r /hyperloom/TraceLens-internal TraceLens-internal
-#   docker build -f deploy/fully-local/Dockerfile.hyperloom-src -t docker.io/primussafe/hyperloom-src:latest .
+#   docker build -f deploy/local/Dockerfile.hyperloom-src -t docker.io/primussafe/hyperloom-src:latest .
 #   docker push docker.io/primussafe/hyperloom-src:latest
 
 FROM scratch
-COPY deploy/fully-local/OOB /OOB/oob_cli
+COPY deploy/local/OOB /OOB/oob_cli
 COPY TraceLens-internal /TraceLens
 COPY inference_optimization/InferenceX /InferenceX
 COPY .cursor/skills/inference-optimization /skills/inference-optimization
-COPY deploy/fully-local/entrypoint.sh /deploy/entrypoint.sh
-COPY deploy/fully-local/hyperloom-autostart.sh /deploy/hyperloom-autostart.sh
-COPY deploy/fully-local/geak-litellm.yaml /deploy/geak-litellm.yaml
+COPY deploy/local/entrypoint.sh /deploy/entrypoint.sh
+COPY deploy/local/hyperloom-autostart.sh /deploy/hyperloom-autostart.sh
+COPY deploy/local/geak-litellm.yaml /deploy/geak-litellm.yaml
