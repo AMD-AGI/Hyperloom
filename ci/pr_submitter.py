@@ -763,10 +763,6 @@ def submit_pr(
         append_perf_changelog(changelog_path, config_keys, descriptions)
         any_changed = True
 
-        if not any_changed:
-            log.info("No files changed, skipping PR")
-            return
-
         commit_msg = f"[Hyperloom CI] {pr_title}\n\n" + "\n".join(f"- {d}" for d in descriptions)
         if not commit_and_push(tmpdir, branch_name, commit_msg, token):
             log.info("Nothing to push")
