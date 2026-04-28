@@ -59,6 +59,10 @@ responsibility, defined here once so the prompt can stay short.
    If the liveness check prints `MARATHON_DEAD` before `[run.sh] Done`,
    immediately classify as "MARATHON DIED EARLY", forward the last 200
    lines plus a `ps -ef | grep -E 'run.sh|claude'` snapshot, and stop polling.
+   If `/tmp/marathon.log` stays on the same `preflight_deps` /
+   `missing apt pkgs: ... installing` line for 10 consecutive polls, classify
+   as `PREFLIGHT_STALLED`, forward the last 200 lines plus the same process
+   snapshot, and stop polling instead of burning the full `MAX_HOURS`.
 
 4. **Stop polling** when `/tmp/marathon.log` contains the line `[run.sh] Done`.
    That line is the authoritative finish signal. When you see it, forward the
@@ -134,6 +138,7 @@ user must export them before invoking the skill.
 | `KERNEL_OPT_BACKENDS` | `geak,claude,codex` | OOB allowlist |
 | `DRY_RUN` | 0 | `1` = preflight only, no tmux |
 | `REPORT_INTERVAL_S` | 60 | monitor cadence |
+| `PREFLIGHT_STEP_TIMEOUT_S` | `300` | wallclock cap for each preflight install/download step |
 | `PANE_CLAUDE_TIMEOUT_S` | `1800` (30 min) | per-`claude --print` wallclock cap; on expiry the pane launcher restarts with `--continue` |
 | `PANE_MAX_RESTARTS` | `200` | restart-loop cap per pane |
 | `PANE_CLAUDE_DEBUG` | `0` | `1` injects `ANTHROPIC_LOG=debug` into inner `claude --print` calls for hang diagnosis |
