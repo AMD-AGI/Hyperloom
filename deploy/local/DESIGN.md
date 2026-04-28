@@ -1,16 +1,16 @@
-# Hyperloom Fully Local Mode Design Document
+# Hyperloom Local Mode Design Document
 
 > Local node support for user-owned infrastructure.
 
 ## 1. Overview & Motivation
 
-### 1.1 What is Fully Local Mode
+### 1.1 What is Local Mode
 
-Fully Local mode lets users run the full Hyperloom inference optimization loop on their **own GPU infrastructure**, without depending on AMD-hosted PrimusClaw sandboxes or Primus-SaFE Authoring Pods.
+Local mode lets users run the full Hyperloom inference optimization loop on their **own GPU infrastructure**, without depending on AMD-hosted PrimusClaw sandboxes or Primus-SaFE Authoring Pods.
 
-"Fully Local" means **local Agent + local GPU** — the Agent (Cursor IDE) runs locally, benchmarks execute on local GPUs, and **all optimization tooling is invoked as in-container CLIs** (TraceLens; GEAK via `geak_ray_submit.py` through Ray; OOB via `oob_ray_submit.py run` through Ray). No persistent MCP/REST services are exposed.
+"Local" means **local Agent + local GPU** — the Agent (Cursor IDE) runs locally, benchmarks execute on local GPUs, and **all optimization tooling is invoked as in-container CLIs** (TraceLens; GEAK via `geak_ray_submit.py` through Ray; OOB via `oob_ray_submit.py run` through Ray). No persistent MCP/REST services are exposed.
 
-Fully Local supports **two deployment methods**:
+Local mode supports **two deployment methods**:
 
 | | Method A: Prebuilt image | Method B: BYOI (Bring Your Own Image) |
 |--|--|--|
@@ -19,9 +19,9 @@ Fully Local supports **two deployment methods**:
 | Best for | Standard rollout, quick start | Existing images, special drivers, internal registries |
 | Entrypoint | Hyperloom `entrypoint.sh` (starts all services) | User-defined (Agent runs bootstrap) |
 
-### 1.2 Why Fully Local
+### 1.2 Why Local
 
-| Scenario | PrimusClaw (cloud-hosted) | Fully Local (user-owned infra) |
+| Scenario | PrimusClaw (cloud-hosted) | Local (user-owned infra) |
 |----------|--------------------------|-------------------------------|
 | User has own GPU cluster | Data uploaded to AMD cloud | Data stays in user's network |
 | Air-gapped / private network | Requires public internet | Only LLM API outbound needed |
@@ -37,7 +37,7 @@ Fully Local supports **two deployment methods**:
 │                  Hyperloom Optimization Engine             │
 │           (Skills + Optimization Loop + Knowledge Base)    │
 ├─────────────────────────┬────────────────────────────────┤
-│   PrimusClaw Mode        │      Fully Local Mode            │
+│   PrimusClaw Mode        │      Local Mode                  │
 │   ────────────────       │    ──────────────────           │
 │   Web UI job submission  │    Cursor SSH into container    │
 │   AMD cloud sandboxes    │    User-owned GPU nodes         │
@@ -205,7 +205,7 @@ CLI tools (no port, invoked per task by the skill):
 
 **K8s mode**: When the Pod CMD is overridden, `/etc/profile.d/hyperloom.sh` (from `hyperloom-autostart.sh`) runs on SSH login instead of PID 1. It renders the GEAK LiteLLM config, starts Ray if needed, and when `OOB_BASE_URL` is set, starts the local OOB auth-proxy and rewrites `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` to `http://127.0.0.1:4002/...`. The script avoids duplicate background services by checking `ray status` and whether `:4002` is already listening.
 
-**GEAK template fallback**: When rendering GEAK config, `hyperloom-autostart.sh` prefers `/opt/hyperloom/geak-config/template.yaml` (copied into Method A images by the Dockerfile). In dev mode, where `/opt/hyperloom` is a host bind-mount of the repo, that path may be missing; the script then falls back to `/opt/hyperloom/deploy/fully-local/geak-litellm.yaml` (the template in-repo) so GEAK config always renders regardless of mount layout.
+**GEAK template fallback**: When rendering GEAK config, `hyperloom-autostart.sh` prefers `/opt/hyperloom/geak-config/template.yaml` (copied into Method A images by the Dockerfile). In dev mode, where `/opt/hyperloom` is a host bind-mount of the repo, that path may be missing; the script then falls back to `/opt/hyperloom/deploy/local/geak-litellm.yaml` (the template in-repo) so GEAK config always renders regardless of mount layout.
 
 ---
 
@@ -357,7 +357,7 @@ Step 6: Start background services, export env, completion marker
   ├── ray start --head --num-gpus=$GPU_COUNT if not already running
   ├── OOB auth-proxy on :4002 if OOB_BASE_URL is set (reuse /opt/hyperloom/OOB/oob_cli/auth_proxy.py)
   ├── write /etc/profile.d/hyperloom-env.sh
-  │   ├── MODE=fully-local
+  │   ├── MODE=local
   │   ├── FRAMEWORK=sglang|vllm
   │   ├── GEAK_CONFIG=/opt/hyperloom/geak-config/local.yaml
   │   ├── INFERENCEX_PATH=$HYPERLOOM_BUNDLE/inference_optimization/InferenceX  ← points at WekaFS
@@ -370,7 +370,7 @@ Step 6: Start background services, export env, completion marker
 Done → toolchain matches Method A (geak / oob / tracelens usable, Ray up)
 ```
 
-> **MODE convention**: Both Method A and B export `MODE=fully-local`. Plain `MODE=local` means non-fully-local local mode only.
+> **MODE convention**: Both Method A and B export `MODE=local` for this containerized deployment.
 
 **Method A vs Method B responsibilities**:
 
@@ -424,7 +424,7 @@ else
     DEPLOY_METHOD="byoi"
     bash /opt/hyperloom/.cursor/skills/inference-optimization/scripts/bootstrap.sh
 fi
-export MODE="${MODE:-fully-local}"
+export MODE="${MODE:-local}"
 ```
 
 > `/opt/hyperloom/.bootstrap_done` is written at the end of bootstrap Step 6 so long-lived containers do not re-scan on every SSH login. Delete the file to force a full re-run.
@@ -460,7 +460,7 @@ In addition to Method A variables, BYOI supports:
 ## Appendix: File Inventory
 
 ```
-deploy/fully-local/
+deploy/local/
 ├── DESIGN.md                  # This design document
 ├── README.md                  # User-facing quick start guide
 ├── Dockerfile.hyperloom-src   # Stage 0: repo artifact bundle image (Method A)

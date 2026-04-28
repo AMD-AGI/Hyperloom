@@ -74,10 +74,9 @@ inject observability headers. See "Tracing Setup" section below.
 
 ## Tracing Setup
 
-At the **start** of the kernel-opt action (before any `geak_create_task`), perform
-these steps in order:
+At the **start** of the kernel-opt action, record timestamps for cost correlation.
 
-### Step A: Record start timestamp + generate tracing config
+### Step A: Record start timestamp
 
 ```bash
 python3 $SCRIPTS_DIR/trace_action.py --component geak --action start
@@ -85,7 +84,11 @@ python3 $SCRIPTS_DIR/trace_action.py --component geak --action start
 
 The script outputs `extra_headers` JSON and writes state to `/workspace/.trace_action_geak.json`.
 
-### Step B: Inject tracing headers via MCP
+### Step B: Inject tracing headers (claw only)
+
+> **This step applies to claw mode ONLY.** In local mode, GEAK runs as a CLI
+> tool with config rendered by `entrypoint.sh` — there is no MCP server and no
+> `geak_get_model_config` / `geak_set_model_config` tools available. Skip this step.
 
 1. Call `geak_get_model_config` to read current config.
 2. Call `geak_set_model_config` with:
@@ -102,7 +105,7 @@ The script outputs `extra_headers` JSON and writes state to `/workspace/.trace_a
 
 ### Step C: Record end timestamp (after all tasks)
 
-After the last `geak_get_task` returns completed:
+After the last GEAK task completes:
 
 ```bash
 python3 $SCRIPTS_DIR/trace_action.py --component geak --action end
@@ -121,7 +124,7 @@ by querying `LiteLLM_SpendLogs` with time ranges.
 
 GEAK invocation differs by mode. **Check your mode before proceeding.**
 
-### Fully-Local Mode (Ray-scheduled CLI)
+### Local Mode (Ray-scheduled CLI)
 
 No MCP tools, no REST API. GEAK runs as the `geak` CLI, scheduled by Ray.
 
@@ -141,7 +144,7 @@ using `GEAK_MODEL_NAME` (default `claude-opus-4-7`), `GEAK_API_KEY`/`LLM_API_KEY
 and `GEAK_BASE_URL`/`LLM_API_BASE`. `geak_ray_submit.py` auto-injects `--config $GEAK_CONFIG`,
 so users do not need to pass it manually.
 
-### MCP Mode (Local / Claw)
+### MCP Mode (claw)
 
 Requires GEAK MCP server running. Uses MCP tools:
 
@@ -164,7 +167,11 @@ Requires GEAK MCP server running. Uses MCP tools:
 | 6    | `bash: trace_action.py --component geak --action end`   | Record end timestamp                     |
 | -    | `geak_list_tasks`                                       | Debug: list all tasks                    |
 
-### geak_create_task — critical details (MCP mode only; fully-local uses task .md files)
+### geak_create_task — critical details (claw MCP only)
+
+> **Claw mode only.** In local mode, GEAK is invoked via `$GEAK_CLI run -t task.md`
+> (see "Local Mode" table above). The parameters below map to fields in the task
+> `.md` file instead of MCP arguments.
 
 - `input_type` is **required** — use `"file"`
 - The instruction field is `prompt`, NOT `instructions`
@@ -224,6 +231,10 @@ Use `KERNEL_OPT_IMAGE` (provided by CI or user prompt) for all `geak_create_task
 
 ### GEAK latency breakdown
 
+**Local mode:** GEAK runs in-container via Ray — no pod scheduling or image pull.
+Typical latency: 3–10 min per task (agent execution only).
+
+**Claw mode (SaFE pods):**
 
 | Phase             | Duration      | Notes                                     |
 | ----------------- | ------------- | ----------------------------------------- |
@@ -231,7 +242,6 @@ Use `KERNEL_OPT_IMAGE` (provided by CI or user prompt) for all `geak_create_task
 | Docker image pull | 1-5 min       | ROCm image is ~15GB                       |
 | Agent execution   | 3-10 min      | Depends on step_limit                     |
 | **Total**         | **10-30 min** | Poll every 30s                            |
-
 
 The `updated_at` timestamp stays frozen until the pod starts. Once it changes, the agent has started. If stuck >30 min with no update, the cluster may be overloaded — cancel and retry.
 
@@ -414,9 +424,10 @@ Before patching any GEAK output into the serving environment:
 - Revert to backup: `cp "$WORK_DIR/kernels/xxx.bak" "$SGLANG_PATH/..."`
 - Clear Python cache: `find "$SGLANG_PATH" -name "__pycache__" -exec rm -rf {} +`
 
-### GEAK task stuck in pending
+### GEAK task stuck in pending (claw only)
 
 - Pod scheduling can take 15+ min if cluster is loaded
 - Check with `geak_get_task` — if `updated_at` hasn't changed in 30 min, cancel and retry
 - Always use `workspace_id: KERNEL_OPT_WORKSPACE` for reliable scheduling (default `"control-plane-moe"` from `SKILL.md`; default workspace is resource-constrained)
+- In local mode, tasks run in-container via Ray — no pod scheduling. If a task hangs, check `$GEAK_CLI status` for Ray cluster health.
 
