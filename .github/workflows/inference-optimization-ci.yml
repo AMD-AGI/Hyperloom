@@ -53,7 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Update InferenceX images to latest stable
+      - name: Report latest InferenceX image versions
         continue-on-error: true
         run: |
           SCRIPT="$GITHUB_WORKSPACE/inference_optimization/InferenceX/utils/check_image_versions.py"
@@ -62,12 +62,12 @@ jobs:
             /hyperloom/InferenceX/.github/configs/amd-master.yaml; do
             if [ -f "$INFERENCEX_CONFIG" ]; then
               pip install requests packaging pyyaml --quiet
-              python3 "$SCRIPT" --config-files "$INFERENCEX_CONFIG" --update
+              python3 "$SCRIPT" --config-files "$INFERENCEX_CONFIG"
               break
             fi
           done
           if [ ! -f "$INFERENCEX_CONFIG" ]; then
-            echo "amd-master.yaml not found, skipping image update"
+            echo "amd-master.yaml not found, skipping image version report"
           fi
 
       - name: Run optimization

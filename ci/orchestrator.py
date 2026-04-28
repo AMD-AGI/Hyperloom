@@ -304,6 +304,25 @@ def main():
             check=True, capture_output=True, text=True,
         )
         yaml_path = Path(_tmpdir) / ifx_cfg["config_path"]
+
+        # Update images in the cloned amd-master.yaml to latest stable before reading
+        check_script = CI_DIR.parent / "inference_optimization" / "InferenceX" / "utils" / "check_image_versions.py"
+        if check_script.exists():
+            try:
+                result = subprocess.run(
+                    [sys.executable, str(check_script),
+                     "--config-files", str(yaml_path), "--update"],
+                    capture_output=True, text=True, timeout=120,
+                )
+                if result.stdout:
+                    log.info("Image version check:\n%s", result.stdout.strip())
+                if result.returncode != 0 and result.stderr:
+                    log.warning("Image version check stderr: %s", result.stderr.strip())
+            except Exception as e:
+                log.warning("Image version check failed (non-fatal): %s", e)
+        else:
+            log.warning("check_image_versions.py not found at %s, skipping image update", check_script)
+
         with open(yaml_path) as f:
             amd_master = yaml.safe_load(f)
         log.info("InferenceX commit: %s", ifx_commit[:7])
