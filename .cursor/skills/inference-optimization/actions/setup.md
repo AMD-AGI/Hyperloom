@@ -5,7 +5,7 @@
 
 ## Procedure
 
-### Step 0 (CRITICAL): Set PATH for venv
+### Step 0 (CRITICAL): Set PATH and bootstrap BYOI
 
 **ALWAYS prepend `/opt/venv/bin` to PATH before any python3 command.** The system
 `/usr/bin/python3` does NOT have sglang/vllm/numpy installed. Every bash command
@@ -13,6 +13,20 @@ in this skill MUST start with:
 
 ```bash
 export PATH="/opt/venv/bin:$PATH"
+
+SKILL_ROOT="${SKILL_ROOT:-.cursor/skills/inference-optimization}"
+BOOTSTRAP_SCRIPT="$SKILL_ROOT/scripts/bootstrap.sh"
+HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
+
+if [ "$MODE" = "local" ] \
+   && [ ! -f /opt/entrypoint.sh ] \
+   && [ ! -f /opt/hyperloom/.bootstrap_done ] \
+   && [ -d "$HYPERLOOM_BUNDLE" ]; then
+    bash "$BOOTSTRAP_SCRIPT"
+    . /etc/profile.d/hyperloom-env.sh
+elif [ -f /opt/hyperloom/.bootstrap_done ] && [ -f /etc/profile.d/hyperloom-env.sh ]; then
+    . /etc/profile.d/hyperloom-env.sh
+fi
 ```
 
 ### Step 1: Auto-detect environment
@@ -20,10 +34,13 @@ export PATH="/opt/venv/bin:$PATH"
 ```bash
 export PATH="/opt/venv/bin:$PATH"
 
-MODEL=$(ls -d /shared_nfs/*/models/*/ 2>/dev/null | head -1)
-GPU_COUNT=$(amd-smi list 2>/dev/null | grep "^GPU:" | wc -l)
-GPU_TYPE=$(rocm-smi --showproductname 2>/dev/null | grep "GFX Version" | head -1 | grep -o "gfx[0-9]*")
-INFERENCEX_PATH=$(ls -d /shared_nfs/*/InferenceX 2>/dev/null | head -1)
+MODEL="${MODEL:-$(ls -d /shared_nfs/*/models/*/ 2>/dev/null | head -1)}"
+GPU_COUNT="${GPU_COUNT:-$(amd-smi list 2>/dev/null | grep "^GPU:" | wc -l)}"
+GPU_TYPE="${GPU_TYPE:-$(rocm-smi --showproductname 2>/dev/null | grep "GFX Version" | head -1 | grep -o "gfx[0-9]*")}"
+INFERENCEX_PATH="${INFERENCEX_PATH:-$(ls -d /shared_nfs/*/InferenceX 2>/dev/null | head -1)}"
+if [ "$MODE" = "local" ]; then
+    INFERENCEX_PATH="${INFERENCEX_PATH:-/opt/hyperloom/InferenceX}"
+fi
 
 FRAMEWORK="${FRAMEWORK:-sglang}"
 if [ "$FRAMEWORK" = "vllm" ]; then
@@ -32,8 +49,10 @@ else
     FRAMEWORK_VERSION=$(python3 -c "import sglang; print(sglang.__version__)" 2>/dev/null)
 fi
 
-TP=$GPU_COUNT
-if [ "$TP" -le 1 ]; then CONC=4; elif [ "$TP" -le 4 ]; then CONC=32; else CONC=64; fi
+TP="${TP:-$GPU_COUNT}"
+if [ -z "${CONC:-}" ]; then
+    if [ "$TP" -le 1 ]; then CONC=4; elif [ "$TP" -le 4 ]; then CONC=32; else CONC=64; fi
+fi
 ```
 
 User-specified values override auto-detected ones. **NEVER override user-specified TP**
@@ -45,18 +64,29 @@ User-specified values override auto-detected ones. **NEVER override user-specifi
 SKILL_ROOT="${SKILL_ROOT:-.cursor/skills/inference-optimization}"
 SCRIPTS_DIR="$SKILL_ROOT/scripts"
 
-# Mode detection
-if [ "${GEAK_LOCAL:-true}" = "true" ]; then
-    MODE="local"
-    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace/inference-optimization}"
-else
+# Mode detection (local = Hyperloom container, Ray CLIs; claw = SaFE + exec_on_gpu)
+if [ "${MODE:-}" = "claw" ]; then
     MODE="claw"
     WORKSPACE_ROOT="${WORKSPACE_ROOT:-/shared_nfs/inference-optimization}"
+else
+    MODE="local"
+    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/opt/hyperloom}"
+    GEAK_CLI="python3 $SCRIPTS_DIR/geak_ray_submit.py"
+    OOB_RAY_CLI="python3 $SCRIPTS_DIR/oob_ray_submit.py"
+    OOB_CLI="${OOB_CLI:-oob}"
 fi
 
-# Source executor backend (enables exec_on_gpu for local/claw dispatch)
-source "$SCRIPTS_DIR/executor.sh"
+# Source mode-specific helpers
+if [ "$MODE" = "local" ]; then
+    source "$SCRIPTS_DIR/common.sh"
+    WORKSPACE_ROOT="/opt/hyperloom"
+else
+    # Enables exec_on_gpu for claw dispatch.
+    source "$SCRIPTS_DIR/executor.sh"
+fi
 
+export MODE="$MODE"
+export WORKSPACE_ROOT="$WORKSPACE_ROOT"
 export MODEL="$MODEL"
 export TP="$TP"
 export CONC="$CONC"
@@ -64,6 +94,9 @@ export ISL="${ISL:-1024}"
 export OSL="${OSL:-256}"
 export FRAMEWORK="${FRAMEWORK:-sglang}"
 export INFERENCEX_PATH="$INFERENCEX_PATH"
+[ -n "${GEAK_CLI:-}" ] && export GEAK_CLI
+[ -n "${OOB_RAY_CLI:-}" ] && export OOB_RAY_CLI
+[ -n "${OOB_CLI:-}" ] && export OOB_CLI
 ```
 
 `run_baseline.sh` writes `run_context.env` into `$RESULT_DIR`. Reuse it for subsequent steps.
