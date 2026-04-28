@@ -3,15 +3,20 @@
 # mlperf-optimization/scripts/common.sh
 #
 # Shared helpers for MLPerf training optimization:
-#   - Trial tier management (quick / convergence / full)
+#   - Trial tier management (quick / convergence / long convergence / full)
 #   - Log filtering via trial_monitor.py
 #   - YAML quiet config via apply_quiet_config.sh
 #   - Metric extraction from MLLOG
 #   - Process management
+#
+# Metric/trace helpers are thin wrappers over `mlperf_utils.py <subcommand>`.
+# Keep bash function names and stdout contracts unchanged — callers parse with
+# cut/grep/eval, so any drift here will silently break trial parsing.
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+MLPERF_UTILS="$SCRIPT_DIR/mlperf_utils.py"
 
 : "${MLPERF_DIR:=/root/Hyperloom-plus-mlperf/training_optimization/mlperf}"
 : "${CONFIG_SH:=$MLPERF_DIR/config_MI355X_1x8x1_fp8.sh}"
@@ -42,7 +47,7 @@ kill_training() {
 # Trial tier defaults
 # ---------------------------------------------------------------------------
 trial_tier_defaults() {
-    local tier="${1:?tier required (1, 2, or 3)}"
+    local tier="${1:?tier required (1, 2, 3, or 4)}"
     case "$tier" in
         1)
             echo "train_iters=100 eval_interval=10000 log_freq=1 timeout_s=3600 quiet=1"
@@ -51,6 +56,9 @@ trial_tier_defaults() {
             echo "train_iters=500 eval_interval=50 log_freq=1 timeout_s=7200 quiet=1"
             ;;
         3)
+            echo "train_iters=2500 eval_interval=50 log_freq=1 timeout_s=14400 quiet=1"
+            ;;
+        4)
             echo "train_iters= eval_interval= log_freq=32 timeout_s=0 quiet=0"
             ;;
         *)
@@ -66,9 +74,10 @@ trial_tier_defaults() {
 # Usage:
 #   run_mlperf_trial <label> [tier] [train_iters] [extra_env]
 #
-# Tier 1 (quick):       100 iters, no eval, MLLOG_TRAIN_LOSS_LOG_FREQ=1, 60min timeout
-# Tier 2 (convergence): 500 iters, eval enabled, MLLOG_TRAIN_LOSS_LOG_FREQ=1, 120min timeout
-# Tier 3 (full):        original config, MLLOG_TRAIN_LOSS_LOG_FREQ=32, no timeout
+# Tier 1 (quick):            100 iters, no eval, MLLOG_TRAIN_LOSS_LOG_FREQ=1, 60min timeout
+# Tier 2 (convergence):      500 iters, eval enabled, MLLOG_TRAIN_LOSS_LOG_FREQ=1, 120min timeout
+# Tier 3 (long convergence): 2500 iters, eval enabled, MLLOG_TRAIN_LOSS_LOG_FREQ=1, 4hr timeout
+# Tier 4 (full):             original config, MLLOG_TRAIN_LOSS_LOG_FREQ=32, no timeout
 #
 # Prints a TRIAL_RESULT line on stdout for structured parsing.
 # Raw log is always preserved at $RESULT_DIR/attempt_<label>_raw.log
@@ -80,13 +89,11 @@ run_mlperf_trial() {
     local train_iters_override="${3:-}"
     local extra_env="${4:-}"
 
-    # Resolve tier defaults
     local defaults
     defaults=$(trial_tier_defaults "$tier") || return 1
     local train_iters eval_interval log_freq timeout_s quiet
     eval "$defaults"
 
-    # Override train_iters if caller specified
     if [ -n "$train_iters_override" ]; then
         train_iters="$train_iters_override"
     fi
@@ -99,7 +106,11 @@ run_mlperf_trial() {
 
     kill_training
 
-    # Apply quiet YAML for tier 1 & 2
+    # Timestamp marker for discover_trace(): created BEFORE training starts so
+    # any trace file written during the run will have mtime > marker mtime.
+    export TRIAL_START_MARKER="${RESULT_DIR:-.}/_trial_start_${label}"
+    touch "$TRIAL_START_MARKER"
+
     if [ "$quiet" = "1" ] && [ -n "$EXP" ] && [ -f "$EXP" ]; then
         quiet_yaml "$EXP"
     fi
@@ -107,7 +118,6 @@ run_mlperf_trial() {
     cd "$MLPERF_DIR"
     source "$CONFIG_SH"
 
-    # Tier-specific overrides
     if [ -n "$train_iters" ]; then
         export PRIMUS_TRAIN_ITERS="$train_iters"
     fi
@@ -120,14 +130,12 @@ run_mlperf_trial() {
     export PYTHONWARNINGS=ignore
     export MASTER_PORT=$(next_port)
 
-    # Apply caller's extra env vars
     if [ -n "$extra_env" ]; then
         for kv in $extra_env; do
             export "$kv"
         done
     fi
 
-    # Recompute derived values after overrides
     if [ -n "$PRIMUS_GLOBAL_BATCH_SIZE" ] && [ -n "$EVAL_SAMPLES_INTERVAL" ]; then
         export PRIMUS_EVAL_INTERVAL=$((EVAL_SAMPLES_INTERVAL / PRIMUS_GLOBAL_BATCH_SIZE))
         if [ -n "$eval_interval" ] && [ "$eval_interval" != "10000" ]; then
@@ -137,7 +145,6 @@ run_mlperf_trial() {
 
     bash setup_container_symlinks.sh 2>/dev/null
 
-    # Re-source config to pick up derived values, then re-apply our overrides
     source "$CONFIG_SH"
     if [ -n "$train_iters" ]; then
         export PRIMUS_TRAIN_ITERS="$train_iters"
@@ -173,12 +180,10 @@ run_mlperf_trial() {
         exit_code=${PIPESTATUS[0]}
     fi
 
-    # Restore YAML
     if [ "$quiet" = "1" ] && [ -n "$EXP" ]; then
         restore_yaml "$EXP"
     fi
 
-    # Handle timeout exit code (124)
     if [ "$exit_code" -eq 124 ]; then
         echo "WARNING: Trial [$label] timed out after ${timeout_s}s" >&2
     fi
@@ -187,221 +192,224 @@ run_mlperf_trial() {
 }
 
 # ---------------------------------------------------------------------------
-# Metric extraction — operate on raw log files
+# Metric extraction wrappers — delegate to mlperf_utils.py subcommands.
+# Stdout format of each wrapper matches the pre-refactor heredoc exactly.
 # ---------------------------------------------------------------------------
 
 extract_ms_per_iter() {
-    local log_file="${1:?log file required}"
-    local warmup="${2:-5}"
-    local measure="${3:-5}"
-
-    python3 -c "
-import json, sys
-
-with open('$log_file') as f:
-    lines = f.readlines()
-
-mllog_lines = [l for l in lines if l.startswith(':::MLLOG')]
-train_loss_events = []
-for line in mllog_lines:
-    data = json.loads(line.replace(':::MLLOG ', ''))
-    if data['key'] == 'train_loss':
-        train_loss_events.append(data)
-
-iter_times_ms = []
-for i in range(1, len(train_loss_events)):
-    delta = train_loss_events[i]['time_ms'] - train_loss_events[i-1]['time_ms']
-    iter_times_ms.append(delta)
-
-if not iter_times_ms:
-    print('ERROR: no iteration times found', file=sys.stderr)
-    sys.exit(1)
-
-warmup = $warmup
-measure = $measure
-if len(iter_times_ms) >= warmup + measure:
-    measured = iter_times_ms[warmup:warmup + measure]
-elif len(iter_times_ms) > warmup:
-    measured = iter_times_ms[warmup:]
-else:
-    measured = iter_times_ms
-
-avg = sum(measured) / len(measured)
-print(f'{avg:.1f}')
-"
+    python3 "$MLPERF_UTILS" extract-ms-per-iter \
+        "${1:?log file required}" --warmup "${2:-5}" --measure "${3:-5}"
 }
 
 extract_mllog_field() {
-    local log_file="${1:?log file required}"
-    local field="${2:?field name required}"
-
-    python3 -c "
-import json
-with open('$log_file') as f:
-    for line in f:
-        if not line.startswith(':::MLLOG'):
-            continue
-        data = json.loads(line.replace(':::MLLOG ', ''))
-        if data['key'] == '$field':
-            print(data['value'])
-            break
-"
+    python3 "$MLPERF_UTILS" extract-mllog-field \
+        "${1:?log file required}" "${2:?field name required}"
 }
 
 verify_gbs() {
-    local log_file="${1:?log file required}"
-    local expected="${2:?expected GBS required}"
-
-    python3 -c "
-import json, sys
-
-gbs = None
-with open('$log_file') as f:
-    for line in f:
-        if not line.startswith(':::MLLOG'):
-            continue
-        data = json.loads(line.replace(':::MLLOG ', ''))
-        if data['key'] == 'global_batch_size':
-            gbs = data['value']
-            break
-
-if gbs is None:
-    print('WARNING: could not find GBS in MLLOG', file=sys.stderr)
-    sys.exit(0)
-
-if gbs != $expected:
-    print(f'ERROR: GBS mismatch: found {gbs}, expected $expected', file=sys.stderr)
-    sys.exit(1)
-
-print(f'GBS verified: {gbs}')
-"
+    python3 "$MLPERF_UTILS" verify-gbs \
+        "${1:?log file required}" "${2:?expected GBS required}"
 }
 
 extract_losses() {
-    local log_file="${1:?log file required}"
-
-    python3 -c "
-import json
-
-with open('$log_file') as f:
-    for line in f:
-        if not line.startswith(':::MLLOG'):
-            continue
-        data = json.loads(line.replace(':::MLLOG ', ''))
-        if data['key'] == 'train_loss':
-            sc = data['metadata'].get('samples_count', '?')
-            lr = data['metadata'].get('lr', '?')
-            print(f'samples={sc}\tloss={data[\"value\"]:.6f}\tlr={lr}')
-"
+    python3 "$MLPERF_UTILS" extract-losses "${1:?log file required}"
 }
 
 extract_time_to_train() {
-    local log_file="${1:?log file required}"
-
-    python3 -c "
-import json
-
-events = []
-with open('$log_file') as f:
-    for line in f:
-        if not line.startswith(':::MLLOG'):
-            continue
-        events.append(json.loads(line.replace(':::MLLOG ', '')))
-
-run_start = next((e['time_ms'] for e in events if e['key'] == 'run_start'), None)
-run_stop = next((e for e in events if e['key'] == 'run_stop'), None)
-
-if run_start and run_stop:
-    seconds = (run_stop['time_ms'] - run_start) / 1000
-    status = run_stop['metadata'].get('status', 'unknown')
-    print(f'{seconds:.1f}\t{status}')
-else:
-    print('ERROR: run_start/run_stop not found')
-"
+    python3 "$MLPERF_UTILS" extract-ttt "${1:?log file required}"
 }
 
-# ---------------------------------------------------------------------------
-# Helper: parse a TRIAL_RESULT line into shell variables
-# Usage: eval "$(parse_trial_result "$line")"
-# ---------------------------------------------------------------------------
+# project_ttt: power-law extrapolation of TTT.
+# Output: "<projected_ttt_seconds>\t<projected_samples>\t<samples_per_sec>\t<r_squared>"
+project_ttt() {
+    python3 "$MLPERF_UTILS" project-ttt \
+        "${1:?raw log file required}" "${2:?GBS required}"
+}
+
+# parse_trial_result: emits shell assignments for eval "$(parse_trial_result "$line")".
 parse_trial_result() {
-    local line="${1:?TRIAL_RESULT line required}"
-    python3 -c "
-line = '''$line'''
-if not line.startswith('TRIAL_RESULT'):
-    print('# not a TRIAL_RESULT line')
-    exit(0)
-parts = line.split()
-for part in parts[1:]:
-    key, _, val = part.partition('=')
-    print(f'TRIAL_{key.upper()}=\"{val}\"')
-"
+    python3 "$MLPERF_UTILS" parse-trial-result "${1:?TRIAL_RESULT line required}"
 }
 
-# ---------------------------------------------------------------------------
-# Helper: compute gain percentage
-# ---------------------------------------------------------------------------
 compute_gain_pct() {
-    local baseline="${1:?baseline value required}"
-    local current="${2:?current value required}"
-    python3 -c "
-b = float('$baseline')
-c = float('$current')
-if b > 0:
-    print(f'{(b - c) / b * 100:.2f}')
-else:
-    print('0.00')
-"
+    python3 "$MLPERF_UTILS" compute-gain-pct \
+        "${1:?baseline value required}" "${2:?current value required}"
+}
+
+# Loss efficiency — Layer 2 quick filter.
+compute_loss_efficiency() {
+    python3 "$MLPERF_UTILS" compute-loss-efficiency "${1:?log file required}"
+}
+
+# TTT gain — Layer 3 final decision.
+compute_ttt_gain_pct() {
+    python3 "$MLPERF_UTILS" compute-ttt-gain-pct \
+        "${1:?baseline projected TTT required}" "${2:?candidate projected TTT required}"
 }
 
 # ---------------------------------------------------------------------------
-# Helper: detect NaN/Inf in a log file
+# Action classification: throughput-only vs convergence-affecting
+# Determines which evaluation layers apply in the DFS loop.
 # ---------------------------------------------------------------------------
+classify_action() {
+    local action="${1:?action name required}"
+    case "$action" in
+        config-selection|convergence-speed|fp8-recipe-tuning|hyperparams)
+            echo "convergence-affecting"
+            ;;
+        *)
+            echo "throughput-only"
+            ;;
+    esac
+}
+
 detect_nan_in_log() {
-    local log_file="${1:?log file required}"
-    python3 -c "
-import json, math
-with open('$log_file') as f:
-    for line in f:
-        if not line.startswith(':::MLLOG'):
-            continue
-        data = json.loads(line.replace(':::MLLOG ', ''))
-        if data['key'] == 'train_loss':
-            v = data.get('value')
-            if v is not None and (math.isnan(float(v)) or math.isinf(float(v))):
-                print('NaN_DETECTED')
-                exit(0)
-print('OK')
-"
+    python3 "$MLPERF_UTILS" detect-nan "${1:?log file required}"
+}
+
+extract_eval_trajectory() {
+    python3 "$MLPERF_UTILS" extract-eval-trajectory "${1:?log file required}"
+}
+
+compute_eval_overhead() {
+    python3 "$MLPERF_UTILS" compute-eval-overhead "${1:?log file required}"
 }
 
 # ---------------------------------------------------------------------------
-# Chrome trace filtering (for profiling action)
+# Trace discovery (ROCm RPD + standard PyTorch JSON)
+#
+# Search priority:
+#   0) Known tensorboard_dir (tb_trace_dir arg) — no -newer, most reliable
+#   1) -newer search for *.pt.trace.json(.gz)
+#   2) -newer search for *trace*.json / *chrome*.json / *profiler*.json
+#   3) -newer search for *.rpd (+ convert)
+#   4) -newer search for *_results.json (rocprofv3)
+#   5) Relaxed fallback: most recent *.pt.trace.json(.gz) within last 30 min
+# ---------------------------------------------------------------------------
+discover_trace() {
+    local after_file="${1:?reference file for -newer required}"
+    local output_json="${2:?output JSON path required}"
+    local tb_trace_dir="${3:-}"
+
+    local found
+
+    _find_newest() {
+        find "$@" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-
+    }
+
+    # 0) Priority: search known tensorboard_dir without -newer
+    if [ -n "$tb_trace_dir" ] && [ -d "$tb_trace_dir" ]; then
+        found=$(_find_newest "$tb_trace_dir" -name "*.pt.trace.json.gz" -type f)
+        if [ -n "$found" ]; then
+            python3 "$MLPERF_UTILS" decompress-gz-trace "$found" "$output_json"
+            echo "TRACE_FORMAT=pytorch_json_gz"
+            echo "TRACE_SOURCE=$found"
+            return 0
+        fi
+
+        found=$(_find_newest "$tb_trace_dir" -name "*.pt.trace.json" -type f)
+        if [ -n "$found" ]; then
+            cp "$found" "$output_json"
+            echo "TRACE_FORMAT=pytorch_json"
+            echo "TRACE_SOURCE=$found"
+            return 0
+        fi
+    fi
+
+    # 1a) -newer search for gzipped PyTorch Chrome trace
+    found=$(_find_newest /workspace /tmp /root -name "*.pt.trace.json.gz" \
+        -newer "$after_file" -type f)
+    if [ -n "$found" ]; then
+        echo "Found gzipped trace (newer): $found" >&2
+        python3 "$MLPERF_UTILS" decompress-gz-trace "$found" "$output_json"
+        echo "TRACE_FORMAT=pytorch_json_gz"
+        echo "TRACE_SOURCE=$found"
+        return 0
+    fi
+
+    # 1b) -newer search for standard PyTorch Chrome trace JSON
+    found=$(_find_newest /workspace /tmp /root -name "*.pt.trace.json" \
+        -newer "$after_file" -type f)
+    if [ -n "$found" ]; then
+        cp "$found" "$output_json"
+        echo "TRACE_FORMAT=pytorch_json"
+        echo "TRACE_SOURCE=$found"
+        return 0
+    fi
+
+    # 2) -newer search for any Chrome-format JSON
+    found=$(_find_newest /workspace /tmp /root \
+        \( -name "*trace*.json" -o -name "*chrome*.json" -o -name "*profiler*.json" \) \
+        -newer "$after_file" -size +10k -type f)
+    if [ -n "$found" ]; then
+        cp "$found" "$output_json"
+        echo "TRACE_FORMAT=chrome_json"
+        echo "TRACE_SOURCE=$found"
+        return 0
+    fi
+
+    # 3) -newer search for RPD files (.rpd = SQLite3 from ROCm RPD backend)
+    found=$(_find_newest /workspace /tmp /root -name "*.rpd" \
+        -newer "$after_file" -type f)
+    if [ -n "$found" ]; then
+        echo "Found RPD trace: $found — converting to Chrome JSON..." >&2
+        convert_rpd_to_json "$found" "$output_json"
+        if [ $? -eq 0 ] && [ -s "$output_json" ]; then
+            echo "TRACE_FORMAT=rpd_converted"
+            echo "TRACE_SOURCE=$found"
+            return 0
+        fi
+        echo "WARNING: RPD conversion failed" >&2
+    fi
+
+    # 4) -newer search for rocprofv3 results JSON
+    found=$(_find_newest /workspace /tmp /root -name "*_results.json" \
+        -newer "$after_file" -type f)
+    if [ -n "$found" ]; then
+        cp "$found" "$output_json"
+        echo "TRACE_FORMAT=rocprofv3"
+        echo "TRACE_SOURCE=$found"
+        return 0
+    fi
+
+    # 5a) Relaxed fallback: most recent *.pt.trace.json.gz from the last 30 min
+    found=$(_find_newest /workspace /tmp /root -name "*.pt.trace.json.gz" \
+        -mmin -30 -type f)
+    if [ -n "$found" ]; then
+        echo "Relaxed fallback: found recent gzipped trace $found" >&2
+        python3 "$MLPERF_UTILS" decompress-gz-trace "$found" "$output_json"
+        echo "TRACE_FORMAT=pytorch_json_gz_relaxed"
+        echo "TRACE_SOURCE=$found"
+        return 0
+    fi
+
+    # 5b) Relaxed fallback: most recent *.pt.trace.json from the last 30 min
+    found=$(_find_newest /workspace /tmp /root -name "*.pt.trace.json" \
+        -mmin -30 -type f)
+    if [ -n "$found" ]; then
+        echo "Relaxed fallback: found recent trace $found" >&2
+        cp "$found" "$output_json"
+        echo "TRACE_FORMAT=pytorch_json_relaxed"
+        echo "TRACE_SOURCE=$found"
+        return 0
+    fi
+
+    echo "WARNING: No trace file found in any format" >&2
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# RPD → Chrome JSON conversion (thin wrapper).
+# ---------------------------------------------------------------------------
+convert_rpd_to_json() {
+    python3 "$MLPERF_UTILS" rpd-to-chrome \
+        "${1:?rpd file path required}" "${2:?output json path required}"
+}
+
+# ---------------------------------------------------------------------------
+# Chrome trace filtering (for profiling action).
 # ---------------------------------------------------------------------------
 filter_trace() {
-    local src="${1:?source trace path required}"
-    local dst="${2:?destination trace path required}"
-    python3 -c "
-import json, os, gzip
-
-src = '$src'
-dst = '$dst'
-
-opener = gzip.open if src.endswith('.gz') else open
-with opener(src, 'rt') as f:
-    trace = json.load(f)
-
-keep = {'kernel', 'gpu_memcpy', 'gpu_memset', 'cpu_op', 'cuda_runtime',
-        'ac2g', 'user_annotation', 'gpu_user_annotation'}
-orig = len(trace['traceEvents'])
-trace['traceEvents'] = [e for e in trace['traceEvents'] if e.get('cat', '') in keep]
-filt = len(trace['traceEvents'])
-
-writer = gzip.open if dst.endswith('.gz') else open
-with writer(dst, 'wt') as f:
-    json.dump(trace, f)
-
-size_mb = os.path.getsize(dst) / 1024 / 1024
-print(f'Filtered: {orig} -> {filt} events ({size_mb:.1f}MB)')
-" 2>&1 || return 1
+    python3 "$MLPERF_UTILS" filter-trace \
+        "${1:?source trace path required}" "${2:?destination trace path required}" || return 1
 }

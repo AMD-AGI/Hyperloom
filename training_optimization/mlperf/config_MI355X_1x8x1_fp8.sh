@@ -74,7 +74,7 @@ export MLLOG_SUBMISSION_PLATFORM=MI355X
 # -----------------------------------------------------------------------------
 export NVTE_ROCM_ENABLE_MXFP8=0
 # FP8 has a lot of small kernels where the _cast_tranpose_triton can be a bottleneck. Enable the optimized version which merges the cast and transpose into one kernel and is further optimized for AMD GPUs
-export NVTE_USE_CAST_TRANSPOSE_TRITON=0
+export NVTE_USE_CAST_TRANSPOSE_TRITON=1
 export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=1
 export NVTE_CK_IS_V3_ATOMIC_FP32=0
 export NVTE_CK_USES_FWD_V3=1
