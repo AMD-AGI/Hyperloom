@@ -1,0 +1,301 @@
+[
+  {
+    "id": "approve_controlled_kernel_patch",
+    "description": "Approve a scoped kernel patch with controlled E2E evidence, passing accuracy, active-path proof, and rollback.",
+    "skill_entrypoint": "../SKILL.md",
+    "input_packet": {
+      "request_type": "patch_vote",
+      "optimization_goal": "Improve tok/s/GPU by replacing the active fused attention kernel for Qwen3-14B on MI355X.",
+      "affected_layer": "kernel/operator",
+      "patch": {
+        "files": [
+          "python/sglang/srt/layers/attention/flashinfer_backend.py",
+          "sgl-kernel/src/attention/fused_attention_gfx950.cu",
+          "sgl-kernel/configs/qwen3_14b_mi355x.best_config"
+        ],
+        "summary": "Route Qwen3-14B attention to a gfx950-specialized fused kernel and update shape-specific tuning config.",
+        "unrelated_changes": false
+      },
+      "benchmark": {
+        "baseline": {
+          "tput_per_gpu": 1200.0,
+          "model": "Qwen3-14B",
+          "gpu": "MI355X",
+          "gpu_count": 8,
+          "framework": "SGLang",
+          "framework_commit": "abc1234",
+          "rocm": "6.4.1",
+          "tp": 8,
+          "pp": 1,
+          "max_concurrency": 128,
+          "isl": 2048,
+          "osl": 512,
+          "warmup": 3,
+          "sample_count": 200,
+          "duration_s": 600
+        },
+        "after": {
+          "tput_per_gpu": 1250.4,
+          "gain_pct": 4.2,
+          "model": "Qwen3-14B",
+          "gpu": "MI355X",
+          "gpu_count": 8,
+          "framework": "SGLang",
+          "framework_commit": "abc1234",
+          "rocm": "6.4.1",
+          "tp": 8,
+          "pp": 1,
+          "max_concurrency": 128,
+          "isl": 2048,
+          "osl": 512,
+          "warmup": 3,
+          "sample_count": 200,
+          "duration_s": 600
+        },
+        "methodology": "Controlled same-session A/B with matched launch parameters."
+      },
+      "accuracy_gate": {
+        "status": "pass",
+        "suite": "gsm8k",
+        "baseline_score": 0.742,
+        "after_score": 0.743,
+        "tolerance": 0.005
+      },
+      "dispatch_evidence": {
+        "active_path_proven": true,
+        "profile_kernel_name": "fused_attention_gfx950_qwen3",
+        "gpu_pct_before": 18.4,
+        "gpu_pct_after": 16.9
+      },
+      "build_and_cache": {
+        "rebuilt": true,
+        "server_restarted": true,
+        "compiled_cache_cleared": true
+      },
+      "rollback": {
+        "available": true,
+        "plan": "Revert the three touched files and restart the server."
+      },
+      "triage_findings": []
+    },
+    "expected": {
+      "kind": "patch_vote",
+      "approval": true,
+      "objection_types": [],
+      "required_evidence_absent": true,
+      "confidence_any_of": [
+        "high",
+        "medium"
+      ]
+    }
+  },
+  {
+    "id": "reject_mismatched_benchmark",
+    "description": "Reject when the after benchmark changes concurrency and is not comparable with baseline.",
+    "skill_entrypoint": "../SKILL.md",
+    "input_packet": {
+      "request_type": "patch_vote",
+      "optimization_goal": "Improve serving throughput by changing scheduler limits.",
+      "affected_layer": "serving/runtime",
+      "patch": {
+        "files": [
+          "python/sglang/srt/server_args.py"
+        ],
+        "summary": "Raise max concurrency and adjust scheduler queue depth.",
+        "unrelated_changes": false
+      },
+      "benchmark": {
+        "baseline": {
+          "tput_per_gpu": 1200.0,
+          "max_concurrency": 128,
+          "isl": 2048,
+          "osl": 512,
+          "sample_count": 200
+        },
+        "after": {
+          "tput_per_gpu": 1290.0,
+          "gain_pct": 7.5,
+          "max_concurrency": 256,
+          "isl": 2048,
+          "osl": 512,
+          "sample_count": 200
+        }
+      },
+      "accuracy_gate": {
+        "status": "pass"
+      },
+      "rollback": {
+        "available": true
+      }
+    },
+    "expected": {
+      "kind": "patch_vote",
+      "approval": false,
+      "objection_types_any_of": [
+        "benchmark_invalid"
+      ],
+      "required_evidence_includes": [
+        "matched_benchmark"
+      ],
+      "min_blocker_count": 1
+    }
+  },
+  {
+    "id": "reject_missing_accuracy_gate",
+    "description": "Reject a performance win that has comparable benchmark data but no accuracy gate or waiver.",
+    "skill_entrypoint": "../SKILL.md",
+    "input_packet": {
+      "request_type": "patch_vote",
+      "optimization_goal": "Enable a compiler flag that improves decode throughput.",
+      "affected_layer": "compiler",
+      "patch": {
+        "files": [
+          "launch/serve_qwen3_mi355x.sh"
+        ],
+        "summary": "Enable an Inductor fusion flag.",
+        "unrelated_changes": false
+      },
+      "benchmark": {
+        "baseline": {
+          "tput_per_gpu": 1200.0,
+          "max_concurrency": 128,
+          "isl": 2048,
+          "osl": 512,
+          "sample_count": 200
+        },
+        "after": {
+          "tput_per_gpu": 1236.0,
+          "gain_pct": 3.0,
+          "max_concurrency": 128,
+          "isl": 2048,
+          "osl": 512,
+          "sample_count": 200
+        }
+      },
+      "accuracy_gate": null,
+      "build_and_cache": {
+        "server_restarted": true,
+        "compiled_cache_cleared": true
+      },
+      "rollback": {
+        "available": true
+      }
+    },
+    "expected": {
+      "kind": "patch_vote",
+      "approval": false,
+      "objection_types_any_of": [
+        "accuracy_missing"
+      ],
+      "required_evidence_includes": [
+        "accuracy_gate"
+      ],
+      "min_blocker_count": 1
+    }
+  },
+  {
+    "id": "reject_micro_only_active_path_unproven",
+    "description": "Reject when only micro-benchmark speedup exists and the active dispatch path is not proven.",
+    "skill_entrypoint": "../SKILL.md",
+    "input_packet": {
+      "request_type": "patch_vote",
+      "optimization_goal": "Use an OOB generated MoE kernel for Qwen3-14B.",
+      "affected_layer": "kernel/operator",
+      "patch": {
+        "files": [
+          "sgl-kernel/src/moe/moe_gfx950.cu"
+        ],
+        "summary": "Add a new MoE kernel implementation.",
+        "unrelated_changes": false
+      },
+      "micro_benchmark": {
+        "speedup": 1.31,
+        "shapes": [
+          "m=4096,n=2880,k=2880"
+        ],
+        "correctness": "pass"
+      },
+      "benchmark": null,
+      "accuracy_gate": {
+        "status": "pass"
+      },
+      "dispatch_evidence": {
+        "active_path_proven": false
+      },
+      "rollback": {
+        "available": true
+      }
+    },
+    "expected": {
+      "kind": "patch_vote",
+      "approval": false,
+      "objection_types_any_of": [
+        "micro_only_evidence",
+        "active_path_unproven",
+        "benchmark_missing"
+      ],
+      "required_evidence_includes_any_of": [
+        "matched_benchmark",
+        "active_path_evidence"
+      ],
+      "min_blocker_count": 1
+    }
+  },
+  {
+    "id": "reject_triage_conflict",
+    "description": "Reject when Triage reports a related accuracy failure not addressed by the patch packet.",
+    "skill_entrypoint": "../SKILL.md",
+    "input_packet": {
+      "request_type": "patch_vote",
+      "optimization_goal": "Keep a communication topology change after a throughput gain.",
+      "affected_layer": "communication",
+      "patch": {
+        "files": [
+          "launch/rccl_topology.env"
+        ],
+        "summary": "Switch RCCL algorithm for target topology.",
+        "unrelated_changes": false
+      },
+      "benchmark": {
+        "baseline": {
+          "tput_per_gpu": 1200.0,
+          "tp": 8,
+          "max_concurrency": 128,
+          "sample_count": 200
+        },
+        "after": {
+          "tput_per_gpu": 1260.0,
+          "gain_pct": 5.0,
+          "tp": 8,
+          "max_concurrency": 128,
+          "sample_count": 200
+        }
+      },
+      "accuracy_gate": {
+        "status": "pass"
+      },
+      "rollback": {
+        "available": true
+      },
+      "triage_findings": [
+        {
+          "event_id": "evt_comm_accuracy_017",
+          "classification": "software",
+          "root_cause": "The same RCCL algorithm intermittently returns stale data under TP=8.",
+          "confidence": "high",
+          "systemic": true,
+          "addressed_by_packet": false
+        }
+      ]
+    },
+    "expected": {
+      "kind": "patch_vote",
+      "approval": false,
+      "objection_types_any_of": [
+        "triage_conflict",
+        "cross_layer_conflict"
+      ],
+      "min_blocker_count": 1
+    }
+  }
+]
