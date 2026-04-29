@@ -1,17 +1,25 @@
 name: classify
 family: prep
-cost_minutes_p50: 1
-cost_minutes_p75: 3
-expected_gain_pct: [0, 0]
+cost_minutes_p50: 1.0
+cost_minutes_p75: 2.0
+expected_gain_pct: [0.0, 0.0]
 accuracy_risk: 0.0
-crash_risk: 0.0
-prerequisites: [setup]
+crash_risk: 0.01
+prerequisites:
+  - setup
 requires_lanes: []
-allowed_tools: [Read, Glob]
-side_effects: []
-allowed_modes: [quick_param_sweep, guided_kernel_opt, marathon_multi_agent]
+allowed_tools:
+  - emit_intent
+  - Read
+side_effects:
+  - reads_model_metadata
+allowed_modes:
+  - quick_param_sweep
+  - guided_kernel_opt
+  - marathon_multi_agent
 preferred_backend: claude
 preferred_model: claude-opus-4-7
-max_turns: 4
-lease_ttl_sec: 300
-applicable_when: [setup_completed]
+max_turns: 6
+lease_ttl_sec: 180
+applicable_when:
+  - "model_class is unknown"

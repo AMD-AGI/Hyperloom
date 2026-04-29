@@ -98,11 +98,14 @@ QUICK_BASH_DENYLIST: tuple[str, ...] = (
 # ``allowed_modes`` field takes precedence.
 DEFAULT_QUICK_ACTION_ALLOWLIST: frozenset[str] = frozenset(
     {
+        "baseline",                # MUST be first in every mode (executor.md)
         "server_lifecycle_restart",
         "param_sweep_run",
         "bench_runner",
+        "profile",                 # cheap, soft-skip when no trace
         "diagnostic_probe",
         "kb_query",
+        "report",                  # quick mode terminates with report
     }
 )
 
@@ -296,17 +299,42 @@ class PolicyGate:
             )
 
     def _validate_send_message_topic(self, payload: dict[str, Any]) -> None:
-        """``send_message.topic`` must be in the bus topic allow-list."""
+        """``send_message.topic`` validation.
+
+        DESIGN refinement (post-v0.8): Critic / Sage / Watchdog naturally
+        invent topic names like ``rca_finding`` / ``kb_status`` /
+        ``executor_status`` / ``critic_review_post_baseline`` that aren't
+        in :data:`TOPIC_ALLOWLIST`. Hard-denying them flooded the run with
+        ``policy_denied`` observations and cost ~80% of LLM tokens for no
+        signal.
+
+        Policy now:
+
+            * empty topic           -> deny (still a real bug)
+            * topic in allowlist    -> pass
+            * topic not in allowlist
+                -> mutate ``payload['topic']='observation'`` and stash the
+                   original under ``payload['original_topic']`` so the bus
+                   receives a valid record AND we don't lose the LLM's
+                   intent. The conductor's ``_handle_send_message`` already
+                   does this downgrade for non-agent send paths; we extend
+                   it to the agent path here.
+
+        This keeps the bus schema strict (only allow-listed topics live in
+        the events table) while letting agents talk freely. Unknown topics
+        become ``observation`` with the original name preserved for
+        debuggability.
+        """
         topic = str(payload.get("topic", "")).strip()
         if not topic:
             raise PolicyDenied(
                 "send_message missing topic", rule="payload",
             )
-        if topic not in TOPIC_ALLOWLIST:
-            raise PolicyDenied(
-                f"send_message topic={topic!r} not in TOPIC_ALLOWLIST",
-                rule="topic",
-            )
+        if topic in TOPIC_ALLOWLIST:
+            return
+        # Soft downgrade: stash original, normalize to ``observation``.
+        payload["original_topic"] = topic
+        payload["topic"] = "observation"
 
     # ------------------------------------------------------------------
     # Per-aspect helpers (re-used by SubAgentRunner)

@@ -12,22 +12,22 @@ Two distinct path concepts live here:
 
    Local dev / test override: ``INFERENCE_OPTIMIZER_SESSION_ROOT``.
 
-2. **Skill asset paths** — read-only files shipped with the skill itself
-   (shell scripts that touch the GPU, kernel-opt prompt templates,
+2. **Runtime asset paths** — read-only files shipped with the Python package
+   itself (shell scripts that touch the GPU, kernel-opt prompt templates,
    action metadata). Layout::
 
-        <repo>/.cursor/skills/inference-optimizer/
+        src/inference_optimizer/
             scripts/         ← run_baseline.sh, eval_accuracy.sh, geak_ray_submit.py, ...
-            kernel-opt/      ← geak.md / claude.md / codex.md / llm.md prompts
+            kernel_opt/      ← geak.md / claude.md / codex.md / llm.md prompts
             actions/         ← <name>.md + _meta/<name>.yaml (active catalogue)
-            actions_old/     ← legacy reference (kept until full deprecation)
-            system_prompts/  ← per-role markdown bodies
+            orchestrator/system_prompts/
 
    The Python orchestrator never *modifies* these files — it only reads
    them and shells out to the scripts via :class:`ActionExecutor`.
 
-   Override: ``INFERENCE_OPTIMIZER_SKILL_ROOT`` for tests / vendored
-   deploys where the skill lives outside ``.cursor/``.
+   Override: ``INFERENCE_OPTIMIZER_ASSET_ROOT`` for tests / vendored
+   deploys. ``INFERENCE_OPTIMIZER_SKILL_ROOT`` is still accepted as a
+   legacy alias while older launch scripts are drained.
 """
 
 from __future__ import annotations
@@ -81,113 +81,125 @@ def db_path_for(session_dir: Path) -> Path:
 
 
 # --------------------------------------------------------------------------
-# Skill asset root (read-only shipped files)
+# Runtime asset root (read-only shipped files)
 # --------------------------------------------------------------------------
+ENV_OVERRIDE_ASSET_ROOT = "INFERENCE_OPTIMIZER_ASSET_ROOT"
 ENV_OVERRIDE_SKILL_ROOT = "INFERENCE_OPTIMIZER_SKILL_ROOT"
+PACKAGE_ROOT = Path(__file__).resolve().parent
 SKILL_REL_PATH = Path(".cursor") / "skills" / "inference-optimizer"
-_SKILL_SENTINEL = "SKILL.md"
 
 
 class SkillRootNotFound(RuntimeError):
-    """Raised when ``skill_root()`` cannot locate the skill directory.
+    """Raised when an explicit runtime asset override is invalid.
 
-    Either set ``INFERENCE_OPTIMIZER_SKILL_ROOT`` or run from inside a
-    repository checkout that contains
-    ``.cursor/skills/inference-optimizer/SKILL.md``.
+    Kept for backward compatibility with callers that already catch this
+    exception around action-registry setup.
     """
 
 
-def _find_repo_root(start: Path) -> Path | None:
-    """Walk up from ``start`` looking for a checkout that contains the skill.
-
-    The sentinel is the SKILL.md file itself rather than ``.git`` so this
-    works in vendored / sub-tree layouts where there is no top-level
-    Git directory.
-    """
-    cur = Path(start).resolve()
-    candidates: list[Path] = []
-    if cur.is_file():
-        candidates.append(cur.parent)
-    else:
-        candidates.append(cur)
-    candidates.extend(cur.parents)
-    for parent in candidates:
-        if (parent / SKILL_REL_PATH / _SKILL_SENTINEL).exists():
-            return parent
+def _override_root() -> Path | None:
+    """Return the explicit runtime-asset root, if one was configured."""
+    for env_name in (ENV_OVERRIDE_ASSET_ROOT, ENV_OVERRIDE_SKILL_ROOT):
+        override = os.environ.get(env_name)
+        if not override:
+            continue
+        root = Path(override).expanduser()
+        if not root.exists():
+            raise SkillRootNotFound(
+                f"{env_name} points at a missing runtime asset root: {root}"
+            )
+        return root
     return None
 
 
-def skill_root() -> Path:
-    """Return absolute path to ``.cursor/skills/inference-optimizer/``.
+def asset_root() -> Path:
+    """Return the package runtime-asset root.
 
-    Resolution order (cheapest → fallback):
-
-        1. ``INFERENCE_OPTIMIZER_SKILL_ROOT`` env override (must point
-           directly at the skill directory).
-        2. Walk up from this module's location looking for
-           ``.cursor/skills/inference-optimizer/SKILL.md``.
-        3. Walk up from the current working directory.
-        4. Raise :class:`SkillRootNotFound`.
+    The default is the installed ``inference_optimizer`` package directory,
+    so the optimizer can run outside Cursor and outside a Git checkout.
     """
-    override = os.environ.get(ENV_OVERRIDE_SKILL_ROOT)
-    if override:
-        return Path(override)
-    repo = _find_repo_root(Path(__file__))
-    if repo is None:
-        repo = _find_repo_root(Path.cwd())
-    if repo is None:
-        raise SkillRootNotFound(
-            "could not locate .cursor/skills/inference-optimizer/SKILL.md "
-            "from this module or cwd; set "
-            f"{ENV_OVERRIDE_SKILL_ROOT}=<path-to-skill-dir> to override."
-        )
-    return repo / SKILL_REL_PATH
+    return _override_root() or PACKAGE_ROOT
+
+
+def skill_root() -> Path:
+    """Backward-compatible alias for :func:`asset_root`."""
+    return asset_root()
+
+
+def asset_scripts_dir() -> Path:
+    """Shell + Python tools shipped with the package."""
+    return asset_root() / "scripts"
+
+
+def asset_kernel_opt_dir() -> Path:
+    """Per-backend prompt templates (geak.md / claude.md / codex.md / llm.md)."""
+    return asset_root() / "kernel_opt"
+
+
+def asset_actions_dir() -> Path:
+    """Active action catalogue: ``<name>.md`` + ``_meta/<name>.yaml``."""
+    return asset_root() / "actions"
+
+
+def asset_system_prompts_dir() -> Path:
+    """Markdown system prompts loaded by :class:`AgentRole`."""
+    return asset_root() / "orchestrator" / "system_prompts"
+
+
+def asset_script(name: str) -> Path:
+    """Resolve a specific shell / Python script under ``asset_scripts_dir``."""
+    return asset_scripts_dir() / name
 
 
 def skill_scripts_dir() -> Path:
-    """Shell + Python tools under the skill (run_baseline.sh, eval_accuracy.sh,
-    geak_ray_submit.py, ...). All ``ActionExecutor`` shells out here."""
-    return skill_root() / "scripts"
+    """Backward-compatible alias for :func:`asset_scripts_dir`."""
+    return asset_scripts_dir()
 
 
 def skill_kernel_opt_dir() -> Path:
-    """Per-backend prompt templates (geak.md / claude.md / codex.md / llm.md)."""
-    return skill_root() / "kernel-opt"
+    """Backward-compatible alias for :func:`asset_kernel_opt_dir`."""
+    return asset_kernel_opt_dir()
 
 
 def skill_actions_dir() -> Path:
-    """Active action catalogue: ``<name>.md`` + ``_meta/<name>.yaml``."""
-    return skill_root() / "actions"
+    """Backward-compatible alias for :func:`asset_actions_dir`."""
+    return asset_actions_dir()
 
 
 def skill_actions_old_dir() -> Path:
-    """Legacy single-skill action descriptions; kept for cross-referencing
-    until the full sister-skill deprecation lands."""
-    return skill_root() / "actions_old"
+    """Legacy alias kept for callers that still probe the old directory."""
+    return asset_root() / "actions_old"
 
 
 def skill_system_prompts_dir() -> Path:
-    """Markdown system prompts loaded by :class:`AgentRole`."""
-    return skill_root() / "system_prompts"
+    """Backward-compatible alias for :func:`asset_system_prompts_dir`."""
+    return asset_system_prompts_dir()
 
 
 def skill_script(name: str) -> Path:
-    """Resolve a specific shell / Python script under ``skill_scripts_dir``.
+    """Backward-compatible wrapper around :func:`asset_script`.
 
-    Convenience wrapper used by ``ActionExecutor`` subclasses so the call
-    site reads ``skill_script("run_baseline.sh")`` instead of nesting
-    path joins.
+    Existing executor call sites can keep using ``skill_script("...")``
+    while runtime assets live in the package directory.
     """
-    return skill_scripts_dir() / name
+    return asset_script(name)
 
 
 __all__ = [
     "DEFAULT_PROD_ROOT",
+    "ENV_OVERRIDE_ASSET_ROOT",
     "ENV_OVERRIDE_DB_PATH",
     "ENV_OVERRIDE_ROOT",
     "ENV_OVERRIDE_SKILL_ROOT",
+    "PACKAGE_ROOT",
     "SKILL_REL_PATH",
     "SkillRootNotFound",
+    "asset_actions_dir",
+    "asset_kernel_opt_dir",
+    "asset_root",
+    "asset_script",
+    "asset_scripts_dir",
+    "asset_system_prompts_dir",
     "db_path_for",
     "make_session_dir",
     "session_root",

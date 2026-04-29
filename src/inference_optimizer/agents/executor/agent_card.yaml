@@ -1,0 +1,30 @@
+# Executor — multi-CLI agent card.
+#
+# Sole proposer + delegator. Active in every execution mode.
+# Backend: Claude (tool-using) so it can compose `emit_intent` calls.
+name: executor
+role: executor
+backend: claude
+enabled: true
+capabilities:
+  - propose_action
+  - delegate
+  - update_state
+  - send_message
+  - ask_question
+allowed_modes:
+  - quick_param_sweep
+  - guided_kernel_opt
+  - marathon_multi_agent
+system_prompt: system_prompt.md
+inbox_filename: inbox.jsonl
+outbox_filename: outbox.jsonl
+restart_policy:
+  max_restarts: 50
+  backoff_seconds: 15
+  continue_flag: true
+extra:
+  notes: |
+    The Executor is the only agent that may emit `delegate` and
+    `propose_action` intents. PolicyGate enforces this regardless of
+    transport (in-process reactor or multi-CLI).

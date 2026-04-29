@@ -44,6 +44,8 @@ def test_cli_parses_auto_install_flag():
 
 
 def test_cli_resolve_auto_install_from_env(monkeypatch):
+    """Post-v0.8: default flipped from False to True. Env var still wins
+    over the default but loses to an explicit CLI flag."""
     args = _mk_args()
     monkeypatch.setenv("INFERENCE_OPTIMIZER_AUTO_INSTALL", "1")
     assert cli_mod._resolve_auto_install(args) is True
@@ -54,7 +56,21 @@ def test_cli_resolve_auto_install_from_env(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_AUTO_INSTALL", "false")
     assert cli_mod._resolve_auto_install(args) is False
 
+    # Default with no env / no flag is now True (not False).
     monkeypatch.delenv("INFERENCE_OPTIMIZER_AUTO_INSTALL", raising=False)
+    assert cli_mod._resolve_auto_install(args) is True
+
+
+def test_cli_resolve_auto_install_no_install_flag_wins(monkeypatch):
+    """``--no-auto-install`` must override both the True default and a
+    truthy env value."""
+    parser = cli_mod._build_argparser()
+    args = parser.parse_args([
+        "--model", "x", "--max-hours", "0.001",
+        "--backend", "claude", "--no-auto-install",
+    ])
+    assert args.auto_install is False
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AUTO_INSTALL", "1")
     assert cli_mod._resolve_auto_install(args) is False
 
 
@@ -110,9 +126,16 @@ def test_cli_bootstrap_for_backend_calls_ensure(monkeypatch):
 
 
 def test_cli_bootstrap_surfaces_missing_dependency(monkeypatch, capsys):
-    """When deps missing and not auto-installing, print clean instructions
-    and exit with code 2."""
-    args = _mk_args()  # auto_install stays None → False
+    """When deps can't be installed (auto_install effective + bootstrap
+    still fails — e.g. offline), print clean instructions and exit 2."""
+    parser = cli_mod._build_argparser()
+    # Explicit --no-auto-install so the bootstrap path raises immediately
+    # rather than trying to download (the test's fake_ensure raises
+    # regardless, but this keeps the intent obvious).
+    args = parser.parse_args([
+        "--model", "Qwen3-8B", "--max-hours", "0.001",
+        "--backend", "claude", "--no-auto-install",
+    ])
 
     def fake_ensure(**kwargs):
         raise MissingDependency(

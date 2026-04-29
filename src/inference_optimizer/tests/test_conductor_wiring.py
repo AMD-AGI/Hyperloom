@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from inference_optimizer.paths import asset_actions_dir
 from inference_optimizer.orchestrator.action_registry import ActionRegistry
 from inference_optimizer.orchestrator.backends import MockBackend
 from inference_optimizer.orchestrator.backends.mock import ScriptStep
@@ -33,10 +34,7 @@ from inference_optimizer.orchestrator.message_bus import MessageBus
 from inference_optimizer.storage.connection import SqliteConnection
 
 
-SKILL_ACTIONS_DIR = (
-    Path(__file__).resolve().parents[3]
-    / ".cursor" / "skills" / "inference-optimizer" / "actions"
-)
+PACKAGE_ACTIONS_DIR = asset_actions_dir()
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +386,7 @@ async def test_update_persona_refreshes_in_memory_index(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_dispatcher_loop_drains_queued_delegates(tmp_path: Path):
     db = SqliteConnection(tmp_path / "storage" / "conductor.db")
-    registry = ActionRegistry(SKILL_ACTIONS_DIR).load()
+    registry = ActionRegistry(PACKAGE_ACTIONS_DIR).load()
 
     # Backend that emits one update_state intent — SubAgentRunner will
     # treat that as success metric extraction.
@@ -713,7 +711,7 @@ async def test_compose_prompt_injects_action_catalogue(
     """The prompt must list the available actions so the LLM can name
     them in `propose_action` / `delegate` intents."""
     db = SqliteConnection(tmp_path / "storage" / "conductor.db")
-    registry = ActionRegistry(SKILL_ACTIONS_DIR).load()
+    registry = ActionRegistry(PACKAGE_ACTIONS_DIR).load()
     conductor = Conductor(
         tmp_path,
         backend=MockBackend(),
@@ -752,7 +750,7 @@ async def test_compose_prompt_first_action_hint_only_for_executor_at_t0(
     """First-action hint should fire for the executor when baseline_tput=0,
     and disappear once baseline lands."""
     db = SqliteConnection(tmp_path / "storage" / "conductor.db")
-    registry = ActionRegistry(SKILL_ACTIONS_DIR).load()
+    registry = ActionRegistry(PACKAGE_ACTIONS_DIR).load()
     conductor = Conductor(
         tmp_path,
         backend=MockBackend(),

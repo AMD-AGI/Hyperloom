@@ -1,25 +1,19 @@
-# Action: `backends` (STUB)
+# backends — try sglang vs vllm
 
-> Family: **shallow** · All modes · accuracy_risk=0.10.
+**Family**: `shallow` · **Cost**: ~15‑30 min · **Risk**: 10% accuracy drift
 
-Try alternative serving backends (sglang vs vllm), each through
-`scripts/run_baseline.sh`, and pick the winner by `tok/s/GPU` *and*
-accuracy gate (because backend swap can change numerics).
+Run the baseline workload under each candidate backend (sglang, vllm,
+optionally TRT‑LLM) and compare `tok/s/GPU`. Per IR‑4 every backend
+switch begins with `kill_server` + `check_gpu_memory`.
 
-## Output schema
+Constraints:
 
-```json
-{
-  "candidates": [
-    {"backend": "sglang", "tok_per_s_per_gpu": 4123, "verdict": "keep"},
-    {"backend": "vllm",  "tok_per_s_per_gpu": 4520, "verdict": "keep"}
-  ],
-  "winner": "vllm",
-  "delta_pct": 9.6
-}
-```
+- Use `vllm_flag_translator` from `process_management` when invoking vllm
+  with sglang‑style flags.
+- Accuracy‑gate (gsm8k) must pass with ≤1% drop or the result is
+  REVERTed (DESIGN §7.5).
 
-## TODO (IMPL-CHECKLIST §4.27)
+Outputs:
 
-- [ ] vllm flag translator (`process_management.vllm_flag_translator`)
-- [ ] Call `accuracy_gate.run_gsm8k` after every candidate KEEP
+- `update_state` `current_tput=...` only after gate passes
+- `propose_action` topic=`proposal` if a clear winner emerges (delta > 3%)

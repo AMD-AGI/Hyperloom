@@ -1,0 +1,32 @@
+# Critic — multi-CLI agent card.
+#
+# Reviews proposals + post-mortems. Active in guided + marathon.
+# Backend: Codex (no tools, validated_json_output).
+name: critic
+role: critic
+backend: codex
+enabled: true
+capabilities:
+  - objection
+  - vote
+  - send_message
+  - answer
+allowed_modes:
+  - guided_kernel_opt
+  - marathon_multi_agent
+system_prompt: system_prompt.md
+inbox_filename: inbox.jsonl
+outbox_filename: outbox.jsonl
+restart_policy:
+  max_restarts: 50
+  backoff_seconds: 15
+  # Codex CLI has no `--continue` flag. Continuity is supplied via the
+  # explicit conversation.jsonl that the launcher prepends to each
+  # restart's prompt — see Phase 3 (codex_continuity).
+  continue_flag: false
+extra:
+  notes: |
+    Codex roles never delegate side-effecting actions. PolicyGate will
+    reject `delegate`, `propose_action`, `update_state` intents from
+    this agent.
+  conversation_log: conversation.jsonl

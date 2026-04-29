@@ -33,7 +33,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable
 
 from ..storage.connection import SqliteConnection
 from .agent_role import AgentRole, default_role_registry, roles_for_mode
@@ -51,6 +51,11 @@ from .feature_flags import FeatureFlags, build_feature_flags
 from .intent_parser import Intent, IntentType
 from .iron_rules import render_for_prompt as render_iron_rules
 from .message_bus import Message, MessageBus, TOPIC_ALLOWLIST
+from .multi_cli import (
+    AgentCard,
+    MultiCLIRouter,
+    discover_agent_cards,
+)
 from .objective import Objective, build_objective
 from .policy import PolicyDenied, PolicyGate
 from .resource_lock import ResourceLockManager, SqliteLeaseBackend
@@ -163,6 +168,34 @@ class StopReason:
     EMERGENCY = "emergency"
 
 
+# ---------------------------------------------------------------------------
+# Transport / process model for agents
+# ---------------------------------------------------------------------------
+class TransportMode:
+    """How agent reactors are physically realised.
+
+    SINGLE_PROC
+        Every active role gets an in-process asyncio task driving
+        ``backend.run`` per tick. The legacy v0.x model.
+
+    MULTI_CLI
+        Every active role runs as an independent CLI subprocess (claude
+        --print --continue or codex with explicit conversation log),
+        spawned by :class:`MultiCLILauncher`. The Conductor keeps only
+        the Router + dispatcher in-process. See plan
+        ``.cursor/plans/multi-cli-agents-a2a_*.plan.md``.
+
+    HYBRID
+        Selected roles run as CLIs (named via ``cli_agents``); the rest
+        keep the in-process reactor. Useful as the Phase 2 migration
+        rung where executor is the only CLI.
+    """
+
+    SINGLE_PROC = "single-proc"
+    MULTI_CLI = "multi-cli"
+    HYBRID = "hybrid"
+
+
 @dataclass
 class ConductorContext:
     """Bundle of components passed to reactors and helpers."""
@@ -184,6 +217,9 @@ class ConductorContext:
     kb: "KnowledgeBase | None" = None
     sage: "SageQueryService | None" = None
     persona_index: dict[str, str] = field(default_factory=dict)
+    multi_cli_router: MultiCLIRouter | None = None
+    cli_agents: tuple[str, ...] = ()
+    in_proc_roles: list[AgentRole] = field(default_factory=list)
     extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -196,6 +232,22 @@ class Conductor:
 
     The ``backend`` injection is what makes dry-runs (MockBackend) and real
     runs (ClaudeBackend / CodexBackend) interchangeable.
+
+    Transport modes (``transport_mode`` constructor arg):
+
+    * ``single-proc`` — every active role runs as an in-process asyncio
+      reactor task. **Constructor default** for backward compatibility
+      with library/test callers that instantiate :class:`Conductor`
+      directly. Cheap to start, easy to debug, but bounded by the shared
+      Python process's lifetime/context.
+    * ``multi-cli`` — every active role becomes its own
+      ``claude --print --continue`` (or ``codex`` with explicit
+      conversation log) restart-loop CLI under tmux. **CLI default**
+      since v0.9 (see ``cli.py``). Required for marathon >6h runs to
+      avoid context-window exhaustion + give per-agent fault isolation.
+    * ``hybrid`` — only the role names listed in ``cli_agents`` go to
+      CLIs; the rest stay as in-process reactors. Useful as a
+      transitional rung when migrating one role at a time.
     """
 
     DEFAULT_REACTOR_TICK_S = 2.0
@@ -216,6 +268,10 @@ class Conductor:
         clock_tick_s: float | None = None,
         enable_dispatcher: bool = True,
         enable_checkpointing: bool = False,
+        transport_mode: str = TransportMode.SINGLE_PROC,
+        cli_agents: Iterable[str] = (),
+        agents_root: Path | None = None,
+        router_tick_s: float | None = None,
     ) -> None:
         self.session_dir = Path(session_dir)
         self.env = dict(env) if env is not None else dict(os.environ)
@@ -234,6 +290,11 @@ class Conductor:
         self._enable_checkpointing = enable_checkpointing
         self._dispatcher_stop = asyncio.Event()
         self._last_checkpoint_ts: float = 0.0
+        # Multi-CLI transport (plan: multi-cli-agents-a2a)
+        self._transport_mode = transport_mode
+        self._cli_agents: tuple[str, ...] = tuple(cli_agents)
+        self._agents_root = agents_root
+        self._router_tick_s = router_tick_s
 
     # ------------------------------------------------------------------
     # Bootstrap
@@ -307,6 +368,26 @@ class Conductor:
         # composition reads this map.
         persona_index = self._load_persona_index()
 
+        # ----- Multi-CLI plumbing -----
+        # Decide which roles run as out-of-process CLIs (= MultiCLIRouter
+        # owns their inbox/outbox) vs in-process reactors (= legacy
+        # asyncio reactor task). The split is driven by transport_mode:
+        #
+        #   single-proc  -> all reactors in-process (legacy)
+        #   multi-cli    -> every active role gets a CLI; in-proc list empty
+        #   hybrid       -> roles named in self._cli_agents get a CLI;
+        #                   the rest stay in-process.
+        cli_agent_names: tuple[str, ...] = self._resolve_cli_agent_names(roles)
+        in_proc_roles: list[AgentRole] = [
+            r for r in roles if r.name not in set(cli_agent_names)
+        ]
+        multi_cli_router: MultiCLIRouter | None = None
+        if cli_agent_names:
+            multi_cli_router = self._build_router(
+                bus=bus, policy=policy,
+                cli_agent_names=cli_agent_names,
+            )
+
         ctx = ConductorContext(
             state=state,
             objective=objective,
@@ -324,6 +405,9 @@ class Conductor:
             kb=self._kb_override,
             sage=self._sage_override,
             persona_index=persona_index,
+            multi_cli_router=multi_cli_router,
+            cli_agents=cli_agent_names,
+            in_proc_roles=in_proc_roles,
         )
         self.ctx = ctx
 
@@ -340,14 +424,19 @@ class Conductor:
                     "max_minutes": max_minutes,
                     "model_path": model_path,
                     "roles": [r.name for r in roles],
+                    "transport": self._transport_mode,
+                    "cli_agents": list(cli_agent_names),
                 },
                 priority=0,
             )
         )
         state.write_snapshot(self.session_dir)
         log.info(
-            "conductor: bootstrapped session=%s mode=%s roles=%s max_minutes=%.1f",
+            "conductor: bootstrapped session=%s mode=%s roles=%s max_minutes=%.1f "
+            "transport=%s cli_agents=%s in_proc=%s",
             state.session_id, mode.value, [r.name for r in roles], max_minutes,
+            self._transport_mode, list(cli_agent_names),
+            [r.name for r in in_proc_roles],
         )
         return ctx
 
@@ -357,10 +446,17 @@ class Conductor:
     async def run(self) -> ConductorContext:
         """Main entry. Returns the populated context after a graceful stop.
 
-        Reactors spawned: one per role from :func:`roles_for_mode` plus the
-        clock, the stopping-watcher and (if action_registry was provided) a
-        long-running ``dispatch_pending_delegates`` loop that drains the
-        queued ``delegate`` tasks via :class:`SubAgentRunner`.
+        Reactor topology depends on ``transport_mode``:
+
+        * ``single-proc``: one in-process asyncio reactor per role
+          (legacy behaviour).
+        * ``multi-cli`` / ``hybrid``: roles listed in ``cli_agents`` are
+          driven by an external CLI — the Router pumps their JSONL
+          inbox/outbox files. The remaining roles still get in-process
+          reactors.
+
+        The clock, stopping-watcher and (when wired) delegate-dispatcher
+        always run in-process because they don't need backend turns.
         """
         ctx = await self._bootstrap()
         try:
@@ -368,7 +464,7 @@ class Conductor:
                 asyncio.create_task(
                     self._reactor(role.name), name=f"reactor-{role.name}"
                 )
-                for role in ctx.roles
+                for role in ctx.in_proc_roles
             ]
             tasks: list[asyncio.Task] = [
                 *reactor_tasks,
@@ -377,6 +473,12 @@ class Conductor:
                     self._stopping_watcher(), name="stopping-watcher"
                 ),
             ]
+            if ctx.multi_cli_router is not None:
+                tasks.append(
+                    asyncio.create_task(
+                        ctx.multi_cli_router.run(), name="multi-cli-router",
+                    )
+                )
             if (
                 self._enable_dispatcher
                 and ctx.sub_agent_runner is not None
@@ -389,6 +491,8 @@ class Conductor:
                 )
             await self._stop_event.wait()
             self._dispatcher_stop.set()
+            if ctx.multi_cli_router is not None:
+                ctx.multi_cli_router.request_stop()
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -397,6 +501,143 @@ class Conductor:
             if self._owns_db and self._db is not None:
                 self._db.close()
         return ctx
+
+    # ------------------------------------------------------------------
+    # Multi-CLI bootstrap helpers
+    # ------------------------------------------------------------------
+    def _resolve_cli_agent_names(
+        self, roles: list[AgentRole]
+    ) -> tuple[str, ...]:
+        """Return the subset of ``roles`` that should run as CLI processes.
+
+        Resolution order:
+
+        1. ``transport_mode == single-proc`` -> ``()`` (no CLIs).
+        2. ``transport_mode == multi-cli`` -> every active role.
+        3. ``transport_mode == hybrid`` -> intersect ``self._cli_agents``
+           with the active role names.
+
+        Unknown role names in ``self._cli_agents`` are silently dropped
+        and logged at INFO level — this keeps a stale ``--cli-agents``
+        flag from breaking a single-proc fallback.
+        """
+        if self._transport_mode == TransportMode.SINGLE_PROC:
+            return ()
+        active = tuple(r.name for r in roles)
+        if self._transport_mode == TransportMode.MULTI_CLI:
+            return active
+        # hybrid
+        requested = set(self._cli_agents)
+        keep = tuple(name for name in active if name in requested)
+        dropped = sorted(requested - set(active))
+        if dropped:
+            log.info(
+                "transport=hybrid: ignoring cli_agents=%s "
+                "(not in active roster %s)", dropped, list(active),
+            )
+        return keep
+
+    def _build_router(
+        self,
+        *,
+        bus: MessageBus,
+        policy: PolicyGate,
+        cli_agent_names: tuple[str, ...],
+    ) -> MultiCLIRouter:
+        """Construct + register :class:`MultiCLIRouter` for the named agents.
+
+        Cards are discovered under ``self._agents_root`` (default:
+        ``src/inference_optimizer/agents/``). Names not represented by a
+        card produce a stub :class:`AgentCard` so the Router still has a
+        path namespace; this lets early phases run before every role has
+        an authored card.
+        """
+        # Late-bind the agents root so tests can inject a tmp tree via
+        # the AGENTS_ROOT env var. Default = the package path.
+        if self._agents_root is not None:
+            root = Path(self._agents_root)
+        else:
+            from ..agents import agents_root as _default_root
+            root = _default_root()
+        cards_by_name = discover_agent_cards(root) if root.is_dir() else {}
+        agents: list[AgentCard] = []
+        for name in cli_agent_names:
+            card = cards_by_name.get(name)
+            if card is None:
+                log.warning(
+                    "multi-cli: no agent_card for %r under %s; using stub",
+                    name, root,
+                )
+                card = self._stub_agent_card(name)
+            agents.append(card)
+
+        router = MultiCLIRouter(
+            session_dir=self.session_dir,
+            bus=bus,
+            policy=None,  # PolicyGate is enforced inside _gate_intent
+            agents=agents,
+            intent_handler=self._router_intent_handler,
+            deny_recorder=self._router_deny_recorder,
+            tick_s=self._router_tick_s,
+        )
+        return router
+
+    @staticmethod
+    def _stub_agent_card(name: str) -> AgentCard:
+        """Return a placeholder :class:`AgentCard` when no YAML is on disk.
+
+        Used so the Router still has correct inbox/outbox paths even
+        when an operator stands up a brand-new role before authoring
+        its card. The launcher refuses to spawn stubs.
+        """
+        # Local import to avoid pulling agents/ module at module import.
+        from .multi_cli.agent_card import RestartPolicy
+        return AgentCard(
+            name=name,
+            role="executor",  # benign default; PolicyGate uses role_registry
+            backend="mock",
+            card_path=Path("/dev/null"),
+            card_dir=Path("/dev/null"),
+            enabled=True,
+            restart_policy=RestartPolicy(),
+        )
+
+    async def _router_intent_handler(
+        self, agent_name: str, intent: Intent
+    ) -> None:
+        """Bridge for outbox intents → Conductor's normal intent pipeline.
+
+        Reuses :meth:`_gate_intent` so every cross-process intent goes
+        through the *same* PolicyGate as in-process reactors. Denied
+        intents are short-circuited inside ``_gate_intent``; accepted
+        intents flow through ``_handle_intent`` exactly like reactor
+        emissions.
+        """
+        if not await self._gate_intent(agent_name, intent):
+            return
+        await self._handle_intent(agent_name, intent)
+
+    async def _router_deny_recorder(
+        self, agent_name: str, intent: Intent, rule: str, reason: str
+    ) -> None:
+        """Persist a malformed-envelope deny as a ``policy_denied`` observation.
+
+        ``_gate_intent`` already records its own deny observation, so
+        this helper only fires for upstream Envelope-level errors
+        (unknown intent_type, missing fields). It mirrors the same
+        observation shape so the monitor view stays uniform.
+        """
+        await self._record_observation(
+            from_agent="conductor",
+            kind="policy_denied",
+            detail={
+                "agent": agent_name,
+                "intent_type": intent.type.value,
+                "rule": rule,
+                "reason": reason,
+                "via": "multi_cli_router",
+            },
+        )
 
     # ------------------------------------------------------------------
     # Per-agent reactor
@@ -705,6 +946,38 @@ class Conductor:
             side_effects=side_effects,
             lease_ttl_sec=lease_ttl_sec,
         )
+        # Detect idempotency-hit: if the returned task is already in a
+        # terminal state (succeeded / failed / safely_failed), the LLM is
+        # re-delegating something that won't get re-run by the dispatcher.
+        # Emit an extra ``event`` so the executor reactor sees the dead
+        # end and pivots to a different action_name on the next turn,
+        # instead of looping (the v0.8 marathon-mode failure where
+        # ``profile`` was re-delegated 10+ times after a single failure).
+        terminal_states = {"succeeded", "failed", "safely_failed",
+                           "needs_manual_review"}
+        if task.state in terminal_states:
+            await ctx.bus.append_and_seq(
+                Message.new(
+                    from_agent="conductor",
+                    to_agent=from_agent,
+                    topic="event",
+                    payload={
+                        "kind": "delegate_dedup_to_terminal",
+                        "task_id": task.task_id,
+                        "action_name": action_name,
+                        "task_state": task.state,
+                        "hint": (
+                            f"action {action_name!r} already ran and ended "
+                            f"in state={task.state!r}; the dispatcher will "
+                            f"NOT re-run it. Pick a different action_name "
+                            f"from the catalogue (e.g. bench_runner, "
+                            f"param_sweep_run, kernel_opt) or change "
+                            f"params to break idempotency."
+                        ),
+                    },
+                    priority=0,
+                )
+            )
         await ctx.bus.append_and_seq(
             Message.new(
                 from_agent=from_agent,
@@ -715,6 +988,7 @@ class Conductor:
                     "task_id": task.task_id,
                     "action_name": action_name,
                     "params": params,
+                    "task_state": task.state,
                 },
                 priority=1,
             )

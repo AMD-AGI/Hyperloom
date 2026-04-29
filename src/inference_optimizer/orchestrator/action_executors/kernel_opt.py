@@ -33,7 +33,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ...paths import skill_script
+from ...paths import asset_script
 from ..intent_parser import Intent, IntentType
 from ._helpers import merged_env, send_message_intent
 from .base import (
@@ -66,7 +66,7 @@ async def _submit_geak(
     timeout_s: float,
 ) -> tuple[int, dict[str, Any]]:
     """Submit one GEAK task. Returns (rc, telemetry)."""
-    script = skill_script("geak_ray_submit.py")
+    script = asset_script("geak_ray_submit.py")
     cmd = [
         "python3", str(script),
         "run", "-t", str(candidate), "--yolo",
@@ -84,7 +84,7 @@ async def _submit_oob(
     max_turns: int,
 ) -> tuple[int, dict[str, Any]]:
     """Submit one OOB (codex/claude) round."""
-    script = skill_script("oob_ray_submit.py")
+    script = asset_script("oob_ray_submit.py")
     cmd = [
         "python3", str(script), "run",
         "-a", agent,

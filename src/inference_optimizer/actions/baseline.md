@@ -1,25 +1,20 @@
-# Action: `baseline` (STUB)
+# baseline — first-light tok/s/GPU measurement
 
-> Family: **prep** · All modes · accuracy_risk=0.0.
+**Family**: `prep` · **Cost**: ~5‑10 min · **Risk**: low
 
-Run the canonical benchmark via `scripts/run_baseline.sh` to fix
-`baseline_tput` (and `baseline_accuracy` if `accuracy_gate.requires_gate`
-is in scope for any future action).
+Run `scripts/run_baseline.sh` (IR-3) to obtain the canonical
+`tok/s/GPU` for the model‑class default backend and parameter set. Result
+is written to `<session_dir>/results/baseline/metrics.json`.
 
-## Output schema
+Preflight (IR-4):
 
-```json
-{
-  "tok_per_s_per_gpu": 4123.0,
-  "p50_latency_ms": 91.2,
-  "p95_latency_ms": 145.0,
-  "results_dir": "results/baseline_<ts>",
-  "baseline_accuracy_gsm8k": 0.812
-}
-```
+1. `kill_server sglang` then `kill_server vllm`
+2. `check_gpu_memory` — fail if any GPU is using > MIN_GPU_PCT (=3%)
+3. unset `PROFILE` / `SGLANG_TORCH_PROFILER_DIR`
+4. launch via `scripts/run_baseline.sh`
 
-## TODO (IMPL-CHECKLIST §4.25)
+Outputs:
 
-- [ ] Wire `process_management.enforce_run_baseline_sh("baseline")`
-- [ ] Capture artefacts under `results/baseline_<ts>/`
-- [ ] Optionally trigger an accuracy_gate baseline (depending on flags)
+- `update_state` `baseline_tput=...`, `current_tput=baseline_tput`
+- `send_message` topic=`decision` "baseline locked in"
+- file artifact `results/baseline/metrics.json`

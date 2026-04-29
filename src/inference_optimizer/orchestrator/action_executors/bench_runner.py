@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from ...paths import skill_script
+from ...paths import asset_script
 from ._helpers import (
     find_first,
     merged_env,
@@ -68,7 +68,7 @@ class BenchRunnerExecutor(ActionExecutor):
             },
         )
 
-        script = skill_script("run_baseline.sh")
+        script = asset_script("run_baseline.sh")
         log_path = results_dir / "bench_runner.log"
 
         rc = await run_subprocess(

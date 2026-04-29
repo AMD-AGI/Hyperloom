@@ -1,13 +1,13 @@
-# Action: `recover` (STUB)
+# recover — resume from latest checkpoint
 
-> Family: **resilience** · marathon-only · accuracy_risk=0.0.
+**Family**: `resilience` · **Cost**: ~5‑15 min · **Risk**: low
 
-Crash-recovery action. Reverts workspace to the latest checkpoint
-backup, kills servers, restarts from the last KEEP-snapshot, and emits a
-`recover_succeeded` event.
+Restore from `<session_dir>/checkpoints/<latest>/conductor.db.bak` via
+`storage.backup.restore_from_backup`, replay events past the recorded
+cursors, and run `evidence_check_matrix` on every in‑flight task.
 
-## TODO (IMPL-CHECKLIST §4.41)
+Verdicts:
 
-- [ ] Read latest checkpoint via `Checkpoint.load_latest`
-- [ ] `storage.backup.restore_from_backup` if local DB corrupt
-- [ ] Hard requirement: `process_management.safe_kill_server` for both frameworks
+- `succeeded` — task evidence intact, mark task `succeeded`
+- `safely_failed` — evidence partially intact but result not usable
+- `evidence_insufficient` → `needs_manual_review`

@@ -89,8 +89,21 @@ def test_critic_can_objection_and_vote():
 # ---------------------------------------------------------------------------
 # Delegate gate
 # ---------------------------------------------------------------------------
-def test_delegate_blocked_in_quick_mode_via_feature_flag():
-    gate = make_gate(ExecutionMode.QUICK_PARAM_SWEEP)
+def test_delegate_blocked_when_feature_flag_disabled():
+    """Post-Phase 8a: quick mode now ALLOWS delegate (the action_executor
+    bridge is the canonical way to run actions). To verify the
+    flag-driven denial path still works, construct a PolicyGate with
+    ``enable_subagent_delegate=False`` explicitly. This guards against
+    accidentally re-enabling delegate in a future minimal mode."""
+    from dataclasses import replace
+    from inference_optimizer.orchestrator.feature_flags import build_feature_flags
+    base_flags = build_feature_flags(ExecutionMode.QUICK_PARAM_SWEEP)
+    flags = replace(base_flags, enable_subagent_delegate=False)
+    gate = PolicyGate(
+        flags=flags,
+        mode=ExecutionMode.QUICK_PARAM_SWEEP,
+        role_registry=default_role_registry(),
+    )
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             "executor",
@@ -98,6 +111,18 @@ def test_delegate_blocked_in_quick_mode_via_feature_flag():
         )
     assert exc.value.rule == "mode"
     assert "delegation disabled" in str(exc.value)
+
+
+def test_delegate_allowed_in_quick_mode_post_phase_8a():
+    """The default quick-mode gate now permits delegate; the action_executor
+    bridge needs queued delegate tasks to run shell scripts."""
+    # Bare gate (no action_registry) — falls back to QUICK_ACTION_ALLOWLIST.
+    # ``baseline`` is on it (see DEFAULT_QUICK_ACTION_ALLOWLIST).
+    gate = make_gate(ExecutionMode.QUICK_PARAM_SWEEP)
+    gate.validate_intent(
+        "executor",
+        intent(IntentType.DELEGATE, action_name="baseline"),
+    )
 
 
 def test_delegate_codex_role_blocked_by_role():
@@ -281,22 +306,40 @@ def test_update_state_codex_role_denied_by_role_rule():
 # ---------------------------------------------------------------------------
 # send_message topic gate
 # ---------------------------------------------------------------------------
-def test_send_message_rejects_topic_outside_allowlist():
+def test_send_message_downgrades_unknown_topic_to_observation():
+    """Post-v0.8: PolicyGate no longer denies unknown topics. Instead it
+    mutates ``payload.topic`` to ``observation`` and stashes the original
+    name under ``original_topic``. Rationale: see SKILL.md L6 (the v0.8
+    marathon run wasted ~80% of LLM tokens on policy_denied chatter for
+    invented topic names like ``rca_finding`` / ``kb_status``)."""
+    gate = make_gate()
+    payload = {"topic": "not-on-bus", "body_md": "x"}
+    msg_intent = intent(IntentType.SEND_MESSAGE, **payload)
+    gate.validate_intent("executor", msg_intent)
+    # The intent's payload should be mutated in place.
+    assert msg_intent.payload["topic"] == "observation"
+    assert msg_intent.payload["original_topic"] == "not-on-bus"
+
+
+def test_send_message_still_rejects_empty_topic():
+    """Empty topic is a real bug (caller forgot to set it) — PolicyGate
+    should still catch this."""
     gate = make_gate()
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             "executor",
-            intent(IntentType.SEND_MESSAGE, topic="not-on-bus", body_md="x"),
+            intent(IntentType.SEND_MESSAGE, topic="", body_md="x"),
         )
-    assert exc.value.rule == "topic"
+    assert exc.value.rule == "payload"
 
 
 def test_send_message_accepts_known_topic():
     gate = make_gate()
-    gate.validate_intent(
-        "executor",
-        intent(IntentType.SEND_MESSAGE, topic="event", body_md="hello"),
-    )
+    msg_intent = intent(IntentType.SEND_MESSAGE, topic="event", body_md="hello")
+    gate.validate_intent("executor", msg_intent)
+    # Allowlisted topic must NOT be downgraded.
+    assert msg_intent.payload["topic"] == "event"
+    assert "original_topic" not in msg_intent.payload
 
 
 # ---------------------------------------------------------------------------

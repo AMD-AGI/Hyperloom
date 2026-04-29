@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from inference_optimizer.paths import asset_actions_dir
 from inference_optimizer.orchestrator.action_registry import (
     ActionMetadata,
     ActionRegistry,
@@ -15,16 +16,10 @@ from inference_optimizer.orchestrator.execution_mode import ExecutionMode
 
 
 # ---------------------------------------------------------------------------
-# Skill-bundled actions (the ones we authored in F3a)
+# Package-bundled actions (the runtime catalogue)
 # ---------------------------------------------------------------------------
-SKILL_ACTIONS_DIR = (
-    Path(__file__).resolve().parents[3]
-    / ".cursor" / "skills" / "inference-optimizer" / "actions"
-)
-
-
 def _make_registry() -> ActionRegistry:
-    return ActionRegistry(SKILL_ACTIONS_DIR).load()
+    return ActionRegistry(asset_actions_dir()).load()
 
 
 def test_loads_all_three_bundled_actions():

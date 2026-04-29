@@ -1,14 +1,8 @@
-# Action: `dream` (STUB)
+# dream — KB-driven exploration brainstorm
 
-> Family: **creative** · marathon-only · accuracy_risk=0.0 · NO side effects.
+**Family**: `creative` · **Cost**: ~8‑15 min · **Risk**: zero (read‑only)
 
-A reflective interlude (DESIGN §12.3). Spawned every 3-4h in marathon mode.
-The Executor reads recent KEEP/REVERT history + Sage cross-run insights and
-emits ONE `update_persona` intent + ONE `send_message(topic: kb_synthesis)`.
-
-No GPU, no benchmark, no workspace touch. Pure cognitive consolidation.
-
-## TODO (IMPL-CHECKLIST §4.39)
-
-- [ ] Cap turn budget tightly (max_turns=6)
-- [ ] Output strictly bound: 1 persona note + 1 synthesis message
+Marathon‑only. Triggered on the 3‑4h cadence (DESIGN §14). Sage / Critic
+read recent KB entries + persona files and propose 2‑3 unconventional
+actions for the Executor to consider. Outputs are pure
+`propose_action` intents; no side effects.

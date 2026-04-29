@@ -1,0 +1,32 @@
+# Sage — multi-CLI agent card.
+#
+# KB recall + devil's advocate + cross-run synthesis. Marathon-only as a
+# resident reactor; quick/guided invoke Sage as a synchronous KB query
+# service from the Conductor (no CLI required).
+# Backend: Codex (no tools).
+name: sage
+role: sage
+backend: codex
+enabled: true
+capabilities:
+  - answer
+  - objection
+  - send_message
+  - update_persona
+allowed_modes:
+  - marathon_multi_agent
+system_prompt: system_prompt.md
+inbox_filename: inbox.jsonl
+outbox_filename: outbox.jsonl
+restart_policy:
+  max_restarts: 50
+  backoff_seconds: 30
+  # Codex CLI lacks `--continue`; the launcher injects conversation.jsonl
+  # on every restart instead.
+  continue_flag: false
+extra:
+  notes: |
+    Sage's KB queries fire on the synchronous SageQueryService path in
+    quick/guided modes; the marathon CLI form (this card) handles
+    devil's-advocate objections + 6h cross-run synthesis only.
+  conversation_log: conversation.jsonl

@@ -1,8 +1,7 @@
-"""Smoke tests for the skill-bundled shell scripts.
+"""Smoke tests for the package-bundled shell scripts.
 
-The scripts now live under
-``.cursor/skills/inference-optimizer/scripts/`` (resolved via
-:func:`paths.skill_scripts_dir`) and are the *real* sprint scripts that
+The scripts live under ``src/inference_optimizer/scripts/`` (resolved via
+:func:`paths.asset_scripts_dir`) and are the *real* sprint scripts that
 launch sglang/vllm + run benchmarks + evaluate accuracy. We can only
 verify two cheap things in a sandbox without GPU + WekaFS bundle:
 
@@ -10,9 +9,8 @@ verify two cheap things in a sandbox without GPU + WekaFS bundle:
 2. Invoked without their required env vars they refuse to do anything
    (exit non-zero, do not leak files into the cwd).
 
-The full DRY_RUN_MOCK fixture path was specific to the now-removed
-``src/inference_optimizer/scripts/{run_baseline,eval_accuracy}.sh``
-stubs; the new skill scripts assume real GPU + InferenceX bundle.
+The scripts assume a real GPU + InferenceX bundle, so sandbox tests only
+exercise refusal paths.
 """
 from __future__ import annotations
 
@@ -22,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.paths import skill_scripts_dir
+from inference_optimizer.paths import asset_scripts_dir
 
 
 def _scripts_runnable() -> bool:
@@ -42,8 +40,8 @@ def _scripts_runnable() -> bool:
 # ---------------------------------------------------------------------------
 # Existence
 # ---------------------------------------------------------------------------
-def test_skill_scripts_dir_exists():
-    assert skill_scripts_dir().is_dir()
+def test_asset_scripts_dir_exists():
+    assert asset_scripts_dir().is_dir()
 
 
 @pytest.mark.parametrize(
@@ -64,14 +62,14 @@ def test_skill_scripts_dir_exists():
     ],
 )
 def test_skill_script_exists(name):
-    p = skill_scripts_dir() / name
-    assert p.is_file(), f"skill script missing: {p}"
+    p = asset_scripts_dir() / name
+    assert p.is_file(), f"package script missing: {p}"
 
 
 def test_run_baseline_executable_bit():
     """The shell scripts should be marked executable so subprocess.run
     can invoke them directly without a ``bash`` prefix."""
-    p = skill_scripts_dir() / "run_baseline.sh"
+    p = asset_scripts_dir() / "run_baseline.sh"
     assert p.stat().st_mode & 0o111, f"{p} is not executable"
 
 
@@ -85,7 +83,7 @@ def test_run_baseline_refuses_without_required_env(tmp_path: Path):
     non-zero (set -u) before touching the GPU."""
     env = {"PATH": "/usr/bin:/bin"}  # minimal env, no fixtures
     rc = subprocess.call(
-        ["bash", str(skill_scripts_dir() / "run_baseline.sh")],
+        ["bash", str(asset_scripts_dir() / "run_baseline.sh")],
         env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         cwd=str(tmp_path),
@@ -98,7 +96,7 @@ def test_run_baseline_refuses_without_required_env(tmp_path: Path):
 def test_eval_accuracy_refuses_without_required_env(tmp_path: Path):
     env = {"PATH": "/usr/bin:/bin"}
     rc = subprocess.call(
-        ["bash", str(skill_scripts_dir() / "eval_accuracy.sh")],
+        ["bash", str(asset_scripts_dir() / "eval_accuracy.sh")],
         env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         cwd=str(tmp_path),

@@ -132,13 +132,32 @@ def merged_env(
     parent: dict[str, str] | None,
     *overrides: dict[str, Any],
 ) -> dict[str, str]:
-    """Return ``parent`` merged with each override dict, stringifying
-    values. Used to build the env passed to subprocess.
+    """Return an env dict for subprocess execution.
 
-    Parent ``None`` → start from os.environ (best-effort cross-platform).
+    Build order (lowest → highest priority):
+
+        1. ``os.environ`` — always inherited so child processes see
+           ``PATH`` / ``PYTHONPATH`` / ``LD_LIBRARY_PATH`` / ``VIRTUAL_ENV``
+           etc. and can find the right ``python3`` + native libs (torch,
+           ROCm, CUDA, NCCL, RCCL).
+        2. ``parent`` — Conductor-supplied env (CLI args: ``MODEL`` /
+           ``TP`` / ``CONC`` / ``ISL`` / ``OSL`` / ``PORT`` /
+           ``FRAMEWORK`` / ``INFERENCEX_PATH`` plus probe results).
+        3. ``*overrides`` — per-call additions (``RESULT_DIR``,
+           ``TRACE_DIR``, etc.). Stringified.
+
+    Inheriting ``os.environ`` is required for the bundled
+    ``scripts/run_baseline.sh`` etc. which shell out to ``python3 -c
+    "import torch"`` — without ``PATH`` / ``LD_LIBRARY_PATH`` the system
+    ``/usr/bin/python3`` (no torch) is selected and the script aborts.
     """
     import os
-    out = dict(parent if parent is not None else os.environ)
+    out = dict(os.environ)
+    if parent:
+        for k, v in parent.items():
+            if v is None:
+                continue
+            out[str(k)] = str(v)
     for o in overrides:
         if not o:
             continue

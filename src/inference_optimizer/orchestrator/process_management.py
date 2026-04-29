@@ -240,15 +240,15 @@ def enforce_run_baseline_sh(
 
     Verifies the script exists; raises :class:`ProcessManagementError` if
     the action is in the required set but the script is missing. The
-    default location is the skill-bundled
-    ``.cursor/skills/inference-optimizer/scripts/run_baseline.sh``.
+    default location is the package-bundled
+    ``src/inference_optimizer/scripts/run_baseline.sh``.
     """
     if action_name not in _RUN_BASELINE_REQUIRED_ACTIONS:
         return
     if script_path is None:
         try:
-            from ..paths import skill_script
-            candidate = skill_script("run_baseline.sh")
+            from ..paths import asset_script
+            candidate = asset_script("run_baseline.sh")
         except Exception:  # noqa: BLE001 — fall back to relative for diagnostics
             candidate = Path("scripts/run_baseline.sh")
     else:

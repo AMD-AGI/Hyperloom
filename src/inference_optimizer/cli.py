@@ -48,10 +48,10 @@ from .orchestrator.conductor import Conductor
 from .orchestrator.env_probe import fill_default_env, probe_environment
 from .paths import (
     SkillRootNotFound,
+    asset_actions_dir,
     db_path_for,
     make_session_dir,
     session_root,
-    skill_actions_dir,
 )
 
 
@@ -99,10 +99,15 @@ def _build_argparser() -> argparse.ArgumentParser:
                    help="optional OpenAI-compatible endpoint "
                         "(Azure / proxy / Foundry)")
 
-    # bootstrap
+    # bootstrap — auto-install is ON by default (post-v0.8 UX change). The
+    # claude CLI install is per-user (~/.cache/inference-optimizer/), no
+    # sudo, ~30s, and skipped silently when the CLI is already present.
+    # Pass --no-auto-install to opt out. The CLI namespace default stays
+    # None so env-var precedence still works in _resolve_auto_install.
     p.add_argument("--auto-install", action="store_true",
                    help="if Node.js or the claude CLI is missing, install "
-                        "them into ~/.cache/inference-optimizer (no sudo)")
+                        "them into ~/.cache/inference-optimizer (no sudo). "
+                        "[ON by default]")
     p.add_argument("--no-auto-install", dest="auto_install",
                    action="store_false",
                    help="explicitly disable bootstrap auto-install")
@@ -117,13 +122,58 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--clock-tick-s", type=float, default=None,
                    help="clock + heartbeat interval (default 5.0s)")
 
+    # transport mode (multi-cli is the production default; single-proc is
+    # kept for tests / dev / quick smoke runs where the launcher overhead
+    # isn't worth it).
+    p.add_argument(
+        "--transport", "--transport-mode",
+        dest="transport",
+        choices=("single-proc", "multi-cli", "hybrid"),
+        default="multi-cli",
+        help=(
+            "agent transport (default: multi-cli): "
+            "multi-cli (RECOMMENDED — every agent is its own "
+            "claude/codex CLI restart-loop, no shared context window, "
+            "fault-isolated; required for marathon >6h runs), "
+            "single-proc (DEV/CI ONLY — legacy asyncio reactors in one "
+            "Python process; cheaper for quick<2h smoke + unit tests), "
+            "hybrid (transitional — CLIs only for the names in "
+            "--cli-agents, the rest stay in-process)"
+        ),
+    )
+    p.add_argument(
+        "--cli-agents",
+        type=str,
+        default="",
+        help=(
+            "comma-separated agent names to run as CLIs in --transport=hybrid "
+            "(e.g. 'executor' to migrate one role at a time). Ignored in "
+            "multi-cli (every active role becomes a CLI) and single-proc."
+        ),
+    )
+    p.add_argument(
+        "--router-tick-s",
+        type=float,
+        default=None,
+        help="MultiCLIRouter polling interval (default 0.5s)",
+    )
+    p.add_argument(
+        "--agents-root",
+        type=str,
+        default=None,
+        help=(
+            "override agent_card.yaml discovery root "
+            "(default: src/inference_optimizer/agents/ in the package)"
+        ),
+    )
+
     # action registry / executor wiring
     p.add_argument("--no-action-registry", action="store_true",
                    help="skip loading the action catalogue (no dispatcher, "
                         "no executors). Useful for the very first dry-run.")
     p.add_argument("--actions-dir", type=str, default=None,
                    help="override path to the action metadata directory "
-                        "(default: <skill>/actions/)")
+                        "(default: package assets actions/)")
 
     # GPU / framework env (passed through to ActionExecutor scripts)
     p.add_argument("--tp", type=int, default=None,
@@ -182,6 +232,15 @@ def _build_env(args: argparse.Namespace) -> dict[str, str]:
         raise SystemExit(
             f"At most one target may be set; got {[k for k, _ in set_targets]!r}"
         )
+    if not set_targets:
+        # Post-v0.8 default: when the operator (or the agent invoking the
+        # skill) didn't explicitly set any target, aim for 100% gain over
+        # baseline. The early-stop signal effectively becomes "stop only
+        # when we've doubled tok/s/GPU" — in practice we run until time
+        # exhausted on real GPU runs, but this gives the conductor a real
+        # objective instead of TimeOnlyObjective (which has no early-stop
+        # at all and tends to encourage excessive exploration).
+        env["TARGET_GAIN_PCT"] = "100"
     for k, v in set_targets:
         env[k] = str(v)
 
@@ -225,15 +284,29 @@ def _build_backend(args: argparse.Namespace) -> Backend:
 def _resolve_auto_install(args: argparse.Namespace) -> bool:
     """Resolve --auto-install / --no-auto-install / env var precedence.
 
-    Order:
-        1. CLI flag, if explicitly given.
-        2. ``INFERENCE_OPTIMIZER_AUTO_INSTALL`` env (``1`` / ``true`` / ``yes``).
-        3. Default ``False``.
+    Order (post-v0.8 — default flipped from False to True):
+
+        1. CLI flag, if explicitly given (``--auto-install`` /
+           ``--no-auto-install``).                                  -> use it
+        2. ``INFERENCE_OPTIMIZER_AUTO_INSTALL`` env truthy
+           (``1`` / ``true`` / ``yes`` / ``on``)                    -> True
+        3. ``INFERENCE_OPTIMIZER_AUTO_INSTALL`` env falsey
+           (``0`` / ``false`` / ``no`` / ``off``)                   -> False
+        4. Default (no flag, no env)                                -> **True**
+
+    The default flip means agents do NOT need to pass ``--auto-install``
+    on every invocation; the bundled claude CLI install is per-user,
+    sudo-free, and a no-op once cached. To opt out, pass
+    ``--no-auto-install`` or set ``INFERENCE_OPTIMIZER_AUTO_INSTALL=0``.
     """
     if args.auto_install is not None:
         return bool(args.auto_install)
     raw = os.environ.get("INFERENCE_OPTIMIZER_AUTO_INSTALL", "").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True  # default ON
 
 
 def _bootstrap_for_backend(args: argparse.Namespace, log: logging.Logger) -> InstallReport | None:
@@ -279,10 +352,10 @@ def _build_action_registry(
         actions_dir = (
             Path(args.actions_dir).expanduser()
             if args.actions_dir
-            else skill_actions_dir()
+            else asset_actions_dir()
         )
     except SkillRootNotFound as exc:
-        log.warning("action registry: cannot locate skill root: %s", exc)
+        log.warning("action registry: cannot locate runtime assets: %s", exc)
         return None
     if not actions_dir.is_dir():
         log.warning("action registry: actions dir not found: %s", actions_dir)
@@ -338,13 +411,36 @@ async def _run(args: argparse.Namespace) -> int:
         )
         env = fill_default_env(env, probe)
 
+    target_str = (
+        f"gain_pct={env['TARGET_GAIN_PCT']}%" if "TARGET_GAIN_PCT" in env else
+        f"tput_per_gpu={env['TARGET_TPUT_PER_GPU']}" if "TARGET_TPUT_PER_GPU" in env else
+        f"baseline_dir={env['TARGET_DIR']}" if "TARGET_DIR" in env else
+        "time_only"
+    )
+    target_default_marker = (
+        " [default — pass --target-gain-pct N to override]"
+        if "TARGET_GAIN_PCT" in env
+        and not any(v not in (None, "") for v in (
+            args.target_gain_pct, args.target_tput_per_gpu, args.target_dir,
+        ))
+        else ""
+    )
+    transport_label = args.transport
+    if args.transport == "hybrid" and cli_agents_list:
+        transport_label = f"hybrid (cli_agents={','.join(cli_agents_list)})"
+    elif args.transport == "hybrid":
+        # No agents named -> hybrid degenerates to single-proc.
+        transport_label = "hybrid (empty cli_agents -> behaves like single-proc)"
+
     print(
         "[inference-optimizer] starting\n"
         f"  session_dir : {session_dir}\n"
         f"  db          : {db_path_for(session_dir)}\n"
         f"  model       : {env['MODEL_PATH']}\n"
         f"  max_hours   : {env['MAX_HOURS']}\n"
+        f"  target      : {target_str}{target_default_marker}\n"
         f"  backend     : {args.backend}\n"
+        f"  transport   : {transport_label}\n"
         f"  actions     : "
         + (f"{len(action_registry)} loaded\n" if action_registry else "(none — dispatcher disabled)\n")
         + f"  gpu         : count={env.get('GPU_COUNT', '?')} "
@@ -367,6 +463,13 @@ async def _run(args: argparse.Namespace) -> int:
         flush=True,
     )
 
+    cli_agents_list = [
+        s.strip() for s in (args.cli_agents or "").split(",") if s.strip()
+    ]
+    agents_root_path = (
+        Path(args.agents_root).expanduser() if args.agents_root else None
+    )
+
     conductor = Conductor(
         session_dir,
         backend=backend,
@@ -374,6 +477,10 @@ async def _run(args: argparse.Namespace) -> int:
         action_registry=action_registry,
         reactor_tick_s=args.reactor_tick_s,
         clock_tick_s=args.clock_tick_s,
+        transport_mode=args.transport,
+        cli_agents=cli_agents_list,
+        agents_root=agents_root_path,
+        router_tick_s=args.router_tick_s,
     )
 
     loop = asyncio.get_running_loop()

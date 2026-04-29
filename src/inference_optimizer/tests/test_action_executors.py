@@ -285,7 +285,12 @@ async def test_profile_finds_filtered_trace(monkeypatch, session_dir):
 
 
 @pytest.mark.asyncio
-async def test_profile_no_trace_means_failed(monkeypatch, session_dir):
+async def test_profile_no_trace_means_soft_skip(monkeypatch, session_dir):
+    """Updated for the post-v0.8 contract: rc=0 + no trace is a soft skip
+    (succeeded with ``trace_skipped=1`` and a ``profile_skipped`` event)
+    instead of a hard failure. The previous "failed" semantic caused a
+    pathological loop where the marathon executor kept re-delegating
+    profile after a single skip — see SKILL.md L5."""
     ex = get_executor("profile")
     ctx = _make_ctx(
         name="profile", session_dir=session_dir,
@@ -299,8 +304,17 @@ async def test_profile_no_trace_means_failed(monkeypatch, session_dir):
 
     _patch_run_subprocess(monkeypatch, fake_run)
     result = await ex.run(ctx)
-    assert result.status == "failed"
-    assert "filtered TP-0" in result.notes
+    assert result.status == "succeeded"
+    assert result.metrics.get("trace_skipped") == 1
+    assert result.metrics.get("trace_size_bytes") == 0
+    # Must emit at least one event so the executor reactor sees the skip
+    # signal and pivots to bench_runner / param_sweep_run / kernel_opt.
+    skip_events = [
+        i for i in result.intents
+        if i.payload.get("kind") == "profile_skipped"
+    ]
+    assert len(skip_events) == 1
+    assert "next_actions_hint" in skip_events[0].payload
 
 
 # ---------------------------------------------------------------------------

@@ -1,23 +1,16 @@
-# Action: `profile` (STUB)
+# profile — torch profiler trace
 
-> Family: **analysis** · All modes · accuracy_risk=0.0.
+**Family**: `analysis` · **Cost**: ~8‑15 min · **Risk**: low
 
-Capture a torch / sglang trace, write the canonical
-`filtered-TP-0.trace.json.gz`, and return analysis pointers.
+Re‑launch the server with `PROFILE=1` and `SGLANG_TORCH_PROFILER_DIR=...`
+exported, run a short workload, then locate `filtered-TP-0.trace.json.gz`
+via `process_management.pick_filtered_trace`.
 
-## Output schema
+Critical: when `profile` finishes, the **next** action MUST run
+`unset_profile_envs` (handled by `process_management.unset_profile_envs`)
+to ensure the bench numbers are not biased by tracing overhead.
 
-```json
-{
-  "trace_path": "results/profile_<ts>/filtered-TP-0.trace.json.gz",
-  "top_kernels": [{"name": "...", "pct": 0.34}, ...],
-  "kernel_dispatch": "aiter_dominated|triton_dominated|mixed",
-  "decode_stage_pct": 0.71
-}
-```
+Outputs:
 
-## TODO (IMPL-CHECKLIST §4.26)
-
-- [ ] Set `PROFILE=1` and `SGLANG_TORCH_PROFILER_DIR` then unset on completion
-- [ ] Use `process_management.pick_filtered_trace`
-- [ ] Optional CSV summary for quick-mode reports
+- artifact: `results/profile/<ts>/filtered-TP-0.trace.json.gz`
+- `send_message` topic=`event` "profile captured"

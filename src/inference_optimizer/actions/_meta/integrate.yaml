@@ -1,17 +1,31 @@
 name: integrate
 family: deep_kernel
-cost_minutes_p50: 20
-cost_minutes_p75: 45
-expected_gain_pct: [3, 12]
+cost_minutes_p50: 12.0
+cost_minutes_p75: 25.0
+expected_gain_pct: [0.0, 0.0]
 accuracy_risk: 0.15
-crash_risk: 0.25
-prerequisites: [kernel-opt]
-requires_lanes: [server_lifecycle, workspace_mutation, benchmark_lane]
-allowed_tools: [Read, Bash, Edit]
-side_effects: [workspace_write, server_restart, results_write]
-allowed_modes: [guided_kernel_opt, marathon_multi_agent]
+crash_risk: 0.15
+prerequisites:
+  - kernel_opt
+requires_lanes:
+  - server_lifecycle
+  - workspace_mutation
+  - benchmark_lane
+allowed_tools:
+  - emit_intent
+  - Read
+  - Bash
+  - Edit
+side_effects:
+  - patches_workspace
+  - launches_server
+  - writes_results
+allowed_modes:
+  - guided_kernel_opt
+  - marathon_multi_agent
 preferred_backend: claude
 preferred_model: claude-opus-4-7
-max_turns: 24
-lease_ttl_sec: 4500
-applicable_when: [kernel_opt_kept]
+max_turns: 35
+lease_ttl_sec: 2700
+applicable_when:
+  - "kernel_opt.last_status == succeeded"

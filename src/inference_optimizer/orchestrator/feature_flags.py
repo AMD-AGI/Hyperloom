@@ -36,7 +36,14 @@ def build_feature_flags(mode: ExecutionMode) -> FeatureFlags:
             enable_watchdog_reactor=False,
             enable_sage_reactor=False,
             enable_sage_query_service=True,
-            enable_subagent_delegate=False,
+            # Post-Phase 8a (action_executor bridge): quick mode now NEEDS
+            # ``delegate`` enabled. The bridge dispatches queued delegate
+            # tasks to bundled ``scripts/*.sh`` shell wrappers — this is
+            # the ONLY way a quick run can actually produce a baseline
+            # number. Keeping it False forced the executor to shell out
+            # via raw Bash, which is slower and fragile. Critic/sage/
+            # watchdog stay off (still single-role).
+            enable_subagent_delegate=True,
             enable_persona_distill=False,
             enable_kb_read=True,
             enable_kb_write=True,

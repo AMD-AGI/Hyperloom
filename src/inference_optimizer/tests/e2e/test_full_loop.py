@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from inference_optimizer.paths import asset_actions_dir
 from inference_optimizer.orchestrator.action_registry import ActionRegistry
 from inference_optimizer.orchestrator.backends import MockBackend
 from inference_optimizer.orchestrator.backends.mock import ScriptStep
@@ -33,10 +34,7 @@ from inference_optimizer.orchestrator.task_registry import TaskRegistry
 from inference_optimizer.storage.connection import SqliteConnection
 
 
-SKILL_ACTIONS_DIR = (
-    Path(__file__).resolve().parents[4]
-    / ".cursor" / "skills" / "inference-optimizer" / "actions"
-)
+PACKAGE_ACTIONS_DIR = asset_actions_dir()
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +43,7 @@ SKILL_ACTIONS_DIR = (
 @pytest.mark.asyncio
 async def test_delegate_dispatch_loop_succeeds(tmp_path: Path):
     db = SqliteConnection(tmp_path / "storage" / "conductor.db")
-    registry = ActionRegistry(SKILL_ACTIONS_DIR).load()
+    registry = ActionRegistry(PACKAGE_ACTIONS_DIR).load()
 
     succ_intent = Intent(
         type=IntentType.UPDATE_STATE,

@@ -1,7 +1,7 @@
 """``baseline`` executor — first-light measurement of the unmodified server.
 
 Wraps the bundled ``run_baseline.sh`` (under
-``.cursor/skills/inference-optimizer/scripts/``). It launches the
+``src/inference_optimizer/scripts/``). It launches the
 target framework (sglang / vllm), waits for ``/health``, runs a
 benchmark, then activates profiling via ``/start_profile`` and emits
 filtered traces — all in a single process so the framework stays warm.
@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 
-from ...paths import skill_script
+from ...paths import asset_script
 from ._helpers import (
     find_first,
     merged_env,
@@ -76,7 +76,7 @@ class BaselineExecutor(ActionExecutor):
             },
         )
 
-        script = skill_script("run_baseline.sh")
+        script = asset_script("run_baseline.sh")
         log_path = results_dir / "run_baseline.log"
 
         rc = await run_subprocess(

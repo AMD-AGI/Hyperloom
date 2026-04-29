@@ -111,3 +111,37 @@ runs `scripts/run_baseline.sh`, and on the next turn you'll see
   votes (marathon mode).
 * Never assume an action succeeded — wait for the `event` topic
   message from the executor with `kind=*_done` and read the metrics.
+
+## Failure handling — DO NOT LOOP
+
+Tasks are deduplicated by ``(action_name, params)``. If you re-emit
+``delegate(action_name=X, params={})`` after task X has reached a
+terminal state, **the dispatcher will NOT re-run it** — you will just
+get the same failed task back, every time, forever. The conductor
+flags this with a synthetic event:
+
+```
+topic=event  kind=delegate_dedup_to_terminal  action_name=X
+hint=action X already ran and ended in state=failed/succeeded/...;
+     pick a different action_name or change params.
+```
+
+When you see this event:
+
+1. **Pick a different `action_name`** from the live catalogue. Good
+   recovery choices when ``profile`` keeps getting skipped:
+   ``bench_runner`` (re-measures against the running server),
+   ``param_sweep_run`` (CONC × ISL/OSL grid), or ``kernel_opt`` (if
+   ``baseline_tput`` is already non-zero).
+2. Or **change the params** (e.g. different `CONC`, `ISL`, `OSL`) so
+   the idempotency key differs — you'll get a fresh task.
+3. Never re-delegate the **exact same** ``(action_name, params)`` pair
+   that's already terminal. Two consecutive failed attempts with the
+   same key is a hard stop signal.
+
+A ``profile`` action that returns ``kind=profile_skipped`` is a
+**soft success** — the script ran fine but no new trace was written
+this round (the live sglang server keeps writing to its launch-time
+``SGLANG_TORCH_PROFILER_DIR``, usually the baseline task's dir). Do
+NOT re-delegate ``profile``; move on to ``bench_runner`` /
+``param_sweep_run`` / ``kernel_opt``.

@@ -162,31 +162,32 @@ class SubAgentRunner:
 
         lease: "Lease | None" = None
         try:
-            try:
-                lease = await self.locks.acquire(
-                    lanes,
-                    holder_id=f"{self.agent_name}-{uuid.uuid4().hex[:8]}",
-                    task_id=task.task_id,
-                    action=action.name,
-                    ttl_sec=ttl_sec,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.info(
-                    "sub-agent: lane contention for %s lanes=%s: %s",
-                    action.name, lanes, exc,
-                )
-                await self._mark(
-                    task, "failed",
-                    evidence={"reason": "lane_contention", "error": repr(exc)},
-                )
-                return TaskResult(
-                    task_id=task.task_id,
-                    status="failed",
-                    metrics={},
-                    artifacts=[],
-                    intents=[],
-                    notes=f"lane_contention lanes={lanes}",
-                )
+            if lanes:
+                try:
+                    lease = await self.locks.acquire(
+                        lanes,
+                        holder_id=f"{self.agent_name}-{uuid.uuid4().hex[:8]}",
+                        task_id=task.task_id,
+                        action=action.name,
+                        ttl_sec=ttl_sec,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.info(
+                        "sub-agent: lane contention for %s lanes=%s: %s",
+                        action.name, lanes, exc,
+                    )
+                    await self._mark(
+                        task, "failed",
+                        evidence={"reason": "lane_contention", "error": repr(exc)},
+                    )
+                    return TaskResult(
+                        task_id=task.task_id,
+                        status="failed",
+                        metrics={},
+                        artifacts=[],
+                        intents=[],
+                        notes=f"lane_contention lanes={lanes}",
+                    )
 
             # Two paths: prefer the Python ``ActionExecutor`` (real
             # subprocess/GPU work). Fall back to the LLM-driven path

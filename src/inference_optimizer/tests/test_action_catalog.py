@@ -1,24 +1,20 @@
 """Catalog-level tests — IMPL-CHECKLIST §4.22‒§4.43.
 
-Locks in the *names* of every action that ships with the skill, plus the
+Locks in the *names* of every action that ships with the package, plus the
 mode-distribution invariants documented in DESIGN §12. Adding or removing
 a yaml without updating this file is intentional friction.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
+from inference_optimizer.paths import asset_actions_dir
 from inference_optimizer.orchestrator.action_registry import ActionRegistry
 from inference_optimizer.orchestrator.execution_mode import ExecutionMode
 from inference_optimizer.orchestrator.resource_lock import KNOWN_LANES
 
 
-SKILL_ACTIONS_DIR = (
-    Path(__file__).resolve().parents[3]
-    / ".cursor" / "skills" / "inference-optimizer" / "actions"
-)
+PACKAGE_ACTIONS_DIR = asset_actions_dir()
 
 
 _PREP = {"setup", "classify", "target_analysis", "baseline", "bench_runner"}
@@ -43,7 +39,7 @@ ALL_EXPECTED = (
 
 @pytest.fixture(scope="module")
 def registry() -> ActionRegistry:
-    return ActionRegistry(SKILL_ACTIONS_DIR).load()
+    return ActionRegistry(PACKAGE_ACTIONS_DIR).load()
 
 
 def test_full_catalog_present(registry: ActionRegistry):

@@ -1,25 +1,14 @@
-# Action: `report` (STUB)
+# report — final write-up
 
-> Family: **shallow** · All modes · accuracy_risk=0.0.
+**Family**: `shallow` · **Cost**: ~2‑5 min · **Risk**: zero
 
-Final summary report. Aggregates baseline → final, lists kept actions,
-produces a markdown writeup under `results/report_<ts>.md` and a small
-machine-readable summary at `results/report_<ts>.json`.
+Compose a markdown summary at `<session_dir>/report.md` plus a structured
+`report.json` with: baseline_tput, best_tput, cumulative_gain, all KEEP
+decisions, accuracy_gate verdicts, and a chronological action history.
 
-## Output schema
+Always runs at end of session via `_graceful_stop` (DESIGN §7.2).
 
-```json
-{
-  "report_md": "results/report_<ts>.md",
-  "report_json": "results/report_<ts>.json",
-  "final_tput": 5230.0,
-  "cumulative_gain_pct": 26.9,
-  "stop_reason": "target_reached"
-}
-```
+Outputs:
 
-## TODO (IMPL-CHECKLIST §4.30)
-
-- [ ] Pull KEEP / REVERT decisions from SharedState.last_decisions
-- [ ] Pull token-budget figures from TokenBudgetMeter
-- [ ] Optionally seed `kb.ingest` lessons from this run
+- artifacts: `report.md`, `report.json`
+- `send_message` topic=`event` "session report ready"

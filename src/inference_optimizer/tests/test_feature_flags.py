@@ -12,7 +12,10 @@ def test_quick_flag_set():
     assert flags.enable_watchdog_reactor is False
     assert flags.enable_sage_reactor is False
     assert flags.enable_sage_query_service is True
-    assert flags.enable_subagent_delegate is False
+    # Post-Phase 8a: action_executor bridge requires delegate to be on
+    # in EVERY mode; quick mode now has the executor + dispatcher only,
+    # without the auxiliary roles.
+    assert flags.enable_subagent_delegate is True
     assert flags.enable_kb_read is True
     assert flags.enable_kb_write is True
     assert flags.enable_strategic_review is False

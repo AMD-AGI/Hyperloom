@@ -1,17 +1,25 @@
 name: report
 family: shallow
-cost_minutes_p50: 5
-cost_minutes_p75: 10
-expected_gain_pct: [0, 0]
+cost_minutes_p50: 2.0
+cost_minutes_p75: 5.0
+expected_gain_pct: [0.0, 0.0]
 accuracy_risk: 0.0
 crash_risk: 0.0
 prerequisites: []
 requires_lanes: []
-allowed_tools: [Read, Edit]
-side_effects: [results_write]
-allowed_modes: [quick_param_sweep, guided_kernel_opt, marathon_multi_agent]
+allowed_tools:
+  - emit_intent
+  - Read
+  - Write
+side_effects:
+  - writes_findings
+allowed_modes:
+  - quick_param_sweep
+  - guided_kernel_opt
+  - marathon_multi_agent
 preferred_backend: claude
 preferred_model: claude-opus-4-7
-max_turns: 6
+max_turns: 12
 lease_ttl_sec: 600
-applicable_when: [stopping_announced]
+applicable_when:
+  - "stop_reason in (target_reached, time_exhausted, no_more_leverage)"

@@ -113,7 +113,7 @@ _DEFAULT_TIMEOUT_S = 30 * 60  # 30 min hard cap
 
 def _default_eval_script() -> Path:
     """Resolve the bundled ``eval_accuracy.sh`` lazily so import succeeds
-    even when the skill root cannot be located (e.g. during unit tests
+    even when an asset override cannot be located (e.g. during unit tests
     that monkeypatch :func:`_run_eval`).
 
     Falls back to the bare relative path so callers can still see *some*
@@ -122,8 +122,8 @@ def _default_eval_script() -> Path:
     layer rather than an ImportError.
     """
     try:
-        from ..paths import skill_script
-        return skill_script(_EVAL_SCRIPT_NAME)
+        from ..paths import asset_script
+        return asset_script(_EVAL_SCRIPT_NAME)
     except Exception:  # noqa: BLE001 — best-effort resolution
         return Path("scripts") / _EVAL_SCRIPT_NAME
 

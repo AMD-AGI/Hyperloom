@@ -37,7 +37,7 @@ from inference_optimizer.orchestrator.action_registry import ActionRegistry
 from inference_optimizer.orchestrator.backends import MockBackend
 from inference_optimizer.orchestrator.conductor import Conductor
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
-from inference_optimizer.paths import skill_actions_dir
+from inference_optimizer.paths import asset_actions_dir
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ async def test_local_gpu_smoke_baseline_then_bench_yields_positive_gain(
         "GPU_COUNT": str(tp),
     }
 
-    registry = ActionRegistry(skill_actions_dir()).load()
+    registry = ActionRegistry(asset_actions_dir()).load()
     backend = MockBackend()  # never invoked — we drive tasks manually
 
     conductor = Conductor(

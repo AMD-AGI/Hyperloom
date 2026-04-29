@@ -27,21 +27,21 @@ lease_ttl_sec:     <int>
 applicable_when:   [<predicate_id>, ...]   # consulted by Scheduler
 ```
 
-## Action list (20 — see DESIGN §12.1)
+## Action list (22 — see DESIGN §12.1)
 
 | family       | quick | guided | marathon | actions |
 | -----------  | :---: | :---:  | :---:    | ------------------------------------------------ |
-| prep         |  ✓    |  ✓     |  ✓       | setup, classify, target-analysis, baseline      |
+| prep         |  ✓    |  ✓     |  ✓       | setup, classify, target_analysis, baseline, bench_runner |
 | analysis     |  ✓    |  ✓     |  ✓       | profile                                         |
-| shallow      |  ✓    |  ✓     |  ✓       | backends, params, sweep, report                 |
-| deep_kernel  |  ✗    |  ✓     |  ✓       | kernel-opt, integrate                           |
-| deep_kernel  |  ✗    |  ✗     |  ✓       | deep-kernel-analysis, operator-tuning, vendor-kernel-config |
-| long         |  ✗    |  ✗     |  ✓       | framework-rebuild, comm-optimization, compiler-tuning |
-| creative     |  ✗    |  ✗     |  ✓       | dream, re-explore                               |
+| shallow      |  ✓    |  ✓     |  ✓       | backends, params, sweep, param_sweep_run, report |
+| deep_kernel  |  ✗    |  ✓     |  ✓       | kernel_opt, integrate                           |
+| deep_kernel  |  ✗    |  ✗     |  ✓       | deep_kernel_analysis, operator_tuning, vendor_kernel_config |
+| long         |  ✗    |  ✗     |  ✓       | framework_rebuild, comm_optimization, compiler_tuning |
+| creative     |  ✗    |  ✗     |  ✓       | dream, re_explore                               |
 | resilience   |  ✗    |  ✗     |  ✓       | recover                                         |
 
 ## TODO (IMPL-CHECKLIST Phase 4 §4.22‒4.43)
 
-- [ ] Migrate sprint action.md content into each markdown
+- [x] Runtime action content lives in this package directory
 - [ ] Calibrate `expected_gain_pct` p50 from sprint+marathon historical data
 - [ ] Fill in `applicable_when` predicates referenced by Scheduler

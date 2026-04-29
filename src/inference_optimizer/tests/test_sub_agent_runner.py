@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from inference_optimizer.paths import asset_actions_dir
 from inference_optimizer.orchestrator.action_registry import ActionRegistry
 from inference_optimizer.orchestrator.agent_role import default_role_registry
 from inference_optimizer.orchestrator.backends import MockBackend, ScriptStep
@@ -28,10 +29,7 @@ from inference_optimizer.orchestrator.task_registry import TaskRegistry
 from inference_optimizer.storage.connection import SqliteConnection
 
 
-SKILL_ACTIONS_DIR = (
-    Path(__file__).resolve().parents[3]
-    / ".cursor" / "skills" / "inference-optimizer" / "actions"
-)
+PACKAGE_ACTIONS_DIR = asset_actions_dir()
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +39,7 @@ async def runner_setup(session_dir):
     db = SqliteConnection(session_dir / "storage" / "conductor.db")
     tasks = TaskRegistry(db)
     locks = ResourceLockManager(SqliteLeaseBackend(db))
-    actions = ActionRegistry(SKILL_ACTIONS_DIR).load()
+    actions = ActionRegistry(PACKAGE_ACTIONS_DIR).load()
     policy = PolicyGate(
         flags=build_feature_flags(ExecutionMode.GUIDED_KERNEL_OPT),
         mode=ExecutionMode.GUIDED_KERNEL_OPT,
@@ -176,7 +174,7 @@ async def test_run_marks_failed_on_backend_error(session_dir):
     db = SqliteConnection(session_dir / "storage" / "conductor.db")
     tasks = TaskRegistry(db)
     locks = ResourceLockManager(SqliteLeaseBackend(db))
-    actions = ActionRegistry(SKILL_ACTIONS_DIR).load()
+    actions = ActionRegistry(PACKAGE_ACTIONS_DIR).load()
     policy = PolicyGate(
         flags=build_feature_flags(ExecutionMode.GUIDED_KERNEL_OPT),
         mode=ExecutionMode.GUIDED_KERNEL_OPT,

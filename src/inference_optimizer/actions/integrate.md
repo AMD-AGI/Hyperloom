@@ -1,25 +1,21 @@
-# Action: `integrate` (STUB)
+# integrate — adopt GEAK candidate kernels
 
-> Family: **deep_kernel** · guided + marathon · accuracy_risk=0.15.
+**Family**: `deep_kernel` · **Cost**: ~12‑25 min · **Risk**: 15% accuracy
 
-After kernel-opt KEEP, integrate the winning kernel into the framework
-workspace, run `scripts/run_baseline.sh` to validate, and if accuracy
-passes, KEEP and snapshot.
+Mandatory follow-up to a successful `kernel_opt` (IR-3). Patches the
+workspace with the winning kernel(s), rebuilds the extension, and
+re‑runs `scripts/run_baseline.sh` to confirm the gain.
 
-## Output schema
+Lane discipline (acquires three):
 
-```json
-{
-  "integrated_kernel_id": "...",
-  "post_integrate_tput": 5430.0,
-  "delta_vs_pre_integrate_pct": 4.1,
-  "accuracy_verdict": "keep|revert",
-  "patch_files": ["..."]
-}
-```
+1. `workspace_mutation` — rebuild
+2. `server_lifecycle` — kill+launch
+3. `benchmark_lane` — measure
 
-## TODO (IMPL-CHECKLIST §4.32 / IR-3 / IR-6)
+Outputs:
 
-- [ ] Enforce `process_management.enforce_run_baseline_sh("integrate")`
-- [ ] `patch_inductor.py --target-file <f>` ; for tile changes also pass `--best-config`
-- [ ] On revert: rollback patches, write event `integrate_reverted`
+- `update_state` `current_tput=...` if accuracy_gate KEEPs
+- artifact `results/integrate/<ts>/metrics.json`
+
+If `accuracy_gate.compare_to_baseline → REVERT`, this action MUST roll
+the workspace back to the prior commit before exiting.

@@ -17,7 +17,7 @@ import csv
 import logging
 from pathlib import Path
 
-from ...paths import skill_script
+from ...paths import asset_script
 from ._helpers import merged_env, send_message_intent, update_state_intent
 from .base import (
     ActionExecutor,
@@ -84,7 +84,7 @@ class ParamSweepRunExecutor(ActionExecutor):
             },
         )
 
-        script = skill_script("run_sweep.sh")
+        script = asset_script("run_sweep.sh")
         log_path = results_dir / "run_sweep.log"
 
         rc = await run_subprocess(

@@ -1,22 +1,17 @@
-# Action: `params` (STUB)
+# params — server-flag tuning
 
-> Family: **shallow** · All modes · accuracy_risk=0.0 (default) / 0.30 (fp8 kv-cache, quantization, etc.).
+**Family**: `shallow` · **Cost**: ~10‑25 min · **Risk**: 0% baseline,
++0.30 if quantization (kv‑cache fp8) is among the params being swept.
 
-Sweep server-side parameters: `--max-running-requests`, attention backend,
-chunked prefill, kv-cache dtype, etc. Some sub-flags are quantization-style
-and trigger the high-risk accuracy gate variant.
+Tunes safe runtime params: `--max-running-requests`, `--mem-fraction-static`,
+`--enable-torch-compile`, `--chunked-prefill-size` etc.
 
-## Output schema
+When tuning ventures into `--kv-cache-dtype fp8` / `--quantization fp8`
+override `accuracy_risk` to `0.30` for that specific candidate (the gate
+will trigger).
 
-```json
-{
-  "winning_params": {"--attention-backend": "fa3", "--enable-mla": true},
-  "delta_pct": 6.4,
-  "high_risk_flags_used": ["--kv-cache-fp8"]
-}
-```
+Outputs:
 
-## TODO (IMPL-CHECKLIST §4.28)
-
-- [ ] Sub-flag risk classifier; switch `accuracy_risk` to 0.30 when fp8 / quant detected
-- [ ] Avoid clobbering user-supplied TP value (`assert_user_tp_respected`)
+- `propose_action` topic=`proposal` for each tested param combo
+- after `update_after_action` records result, scheduler may follow up
+  with `report` once `cumulative_gain_plateau` triggers.

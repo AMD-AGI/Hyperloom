@@ -42,6 +42,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
+from ..paths import asset_system_prompts_dir
 from .execution_mode import ExecutionMode
 from .intent_parser import IntentType
 
@@ -298,7 +299,7 @@ def roles_for_mode(
 # --------------------------------------------------------------------------
 def system_prompts_dir() -> Path:
     """Return absolute path to ``orchestrator/system_prompts/``."""
-    return Path(__file__).resolve().parent / "system_prompts"
+    return asset_system_prompts_dir()
 
 
 _DEFAULT_PROMPT_TEMPLATE = (

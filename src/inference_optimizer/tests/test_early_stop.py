@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import pytest
 
+from inference_optimizer.paths import asset_actions_dir
 from inference_optimizer.orchestrator.action_registry import ActionRegistry
 from inference_optimizer.orchestrator.early_stop import (
     BRIER_PLATEAU_THRESHOLD,
@@ -26,10 +26,7 @@ from inference_optimizer.orchestrator.scheduler import BudgetAwareScheduler
 from inference_optimizer.orchestrator.shared_state import SharedState
 
 
-SKILL_ACTIONS_DIR = (
-    Path(__file__).resolve().parents[3]
-    / ".cursor" / "skills" / "inference-optimizer" / "actions"
-)
+PACKAGE_ACTIONS_DIR = asset_actions_dir()
 
 
 @dataclass
@@ -52,7 +49,7 @@ class _FakeFlags:
 
 @pytest.fixture(scope="module")
 def registry() -> ActionRegistry:
-    return ActionRegistry(SKILL_ACTIONS_DIR).load()
+    return ActionRegistry(PACKAGE_ACTIONS_DIR).load()
 
 
 @pytest.fixture

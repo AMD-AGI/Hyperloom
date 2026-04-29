@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 
-from ...paths import skill_script
+from ...paths import asset_script
 from ._helpers import find_first, merged_env, send_message_intent
 from .base import (
     ActionExecutor,
@@ -58,7 +58,7 @@ class ProfileExecutor(ActionExecutor):
             },
         )
 
-        script = skill_script("run_profile.sh")
+        script = asset_script("run_profile.sh")
         log_path = results_dir / "run_profile.log"
 
         rc = await run_subprocess(
@@ -73,12 +73,52 @@ class ProfileExecutor(ActionExecutor):
                 notes=f"run_profile.sh exited rc={rc}; see {log_path}",
             )
 
-        # Locate the filtered trace.
+        # Locate a filtered trace. Order of preference:
+        #   1. filtered TP-0 in this task's traces dir
+        #   2. filtered TP-0 anywhere under <session>/results/**/traces/
+        #      (the live sglang server keeps writing to wherever
+        #      ``SGLANG_TORCH_PROFILER_DIR`` was set at server-launch
+        #      time — usually the baseline task's dir)
         filtered = find_first(traces_dir, "filtered-TP-0.trace.json.gz")
         if filtered is None:
+            session_results = ctx.session_dir / "results"
+            filtered = find_first(session_results, "filtered-TP-0.trace.json.gz")
+
+        if filtered is None:
+            # rc=0 means the script ran cleanly; no trace artefact this round
+            # is treated as a soft skip (NOT a failure). This avoids the
+            # pathological loop where the LLM keeps re-delegating profile
+            # because the executor flags it failed despite a clean exit.
+            # The executor reactor sees ``kind=profile_skipped`` and is
+            # nudged toward param_sweep / kernel_opt / bench_runner.
             return ExecutorResult(
-                status="failed", rc=rc,
-                notes=f"no filtered TP-0 trace produced under {traces_dir}",
+                status="succeeded", rc=rc,
+                metrics={"trace_size_bytes": 0, "trace_skipped": 1},
+                artifacts=[str(log_path)],
+                intents=[
+                    send_message_intent(
+                        topic="event",
+                        body_md=(
+                            f"profile completed (rc=0) but no new trace was "
+                            f"written this round; the running server still "
+                            f"writes to its launch-time SGLANG_TORCH_PROFILER_DIR. "
+                            f"Move on to bench_runner / param_sweep_run / "
+                            f"kernel_opt — do NOT re-delegate profile."
+                        ),
+                        extras={
+                            "kind": "profile_skipped",
+                            "reason": "no_new_trace",
+                            "results_dir": str(results_dir),
+                            "next_actions_hint": [
+                                "bench_runner", "param_sweep_run", "kernel_opt",
+                            ],
+                        },
+                    ),
+                ],
+                notes=(
+                    f"no filtered TP-0 trace under {traces_dir} or any "
+                    f"sibling task dir; flagged as soft-skip (rc=0)"
+                ),
             )
 
         intents = [
@@ -103,7 +143,7 @@ class ProfileExecutor(ActionExecutor):
             },
             artifacts=[str(filtered), str(log_path)],
             intents=intents,
-            notes=f"profile written to {filtered}",
+            notes=f"profile resolved trace at {filtered}",
         )
 
 

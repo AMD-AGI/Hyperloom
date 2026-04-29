@@ -8,7 +8,7 @@ and is responsible for:
 1. Validating its required env vars are present (raise
    :class:`ExecutorEnvError` early if not — the runner will fall back to
    the LLM-driven path).
-2. Shelling out to the bundled skill scripts (resolved via
+2. Shelling out to the bundled package scripts (resolved via
    :func:`paths.skill_script`).
 3. Parsing the script's outputs (``metrics.json`` / ``results.tsv`` /
    ``eval_summary_<task>.json``) into structured fields on
@@ -164,9 +164,10 @@ async def run_subprocess(
         assert proc.stdout is not None  # nosec - PIPE is set
         if timeout_s is not None:
             try:
-                async with asyncio.timeout(timeout_s):
-                    rc = await _drain(proc, log_fh)
-            except TimeoutError:
+                rc = await asyncio.wait_for(
+                    _drain(proc, log_fh), timeout=timeout_s
+                )
+            except (asyncio.TimeoutError, TimeoutError):
                 proc.kill()
                 await proc.wait()
                 raise

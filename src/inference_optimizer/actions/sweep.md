@@ -1,22 +1,12 @@
-# Action: `sweep` (STUB)
+# sweep — quasi-random scheduling sweep
 
-> Family: **shallow** · All modes · accuracy_risk=0.0.
+**Family**: `shallow` · **Cost**: ~8‑20 min · **Risk**: zero accuracy
 
-Combine top-N param settings with top-N backend candidates and re-bench.
-Used in quick mode to extract the last few percent before `report`.
+Last‑ditch shallow exploration when no other action's score exceeds 1.0
+(DESIGN §9.3 update rule #7). Picks 3‑5 random parameter combos within
+the policy‑allowed safe set and bench‑runs each.
 
-## Output schema
+Outputs:
 
-```json
-{
-  "best_combination": {
-    "backend": "vllm",
-    "params": {"--attention-backend": "fa3", "--max-running-requests": 256}
-  },
-  "delta_vs_baseline_pct": 14.2
-}
-```
-
-## TODO (IMPL-CHECKLIST §4.29)
-
-- [ ] Cap combinations: top-3 backend × top-3 params = 9 runs maximum
+- `report` follows once sweep completes — exit through `report` even if
+  no winner (so the user gets a final summary).
