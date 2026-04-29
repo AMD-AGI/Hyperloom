@@ -1,0 +1,194 @@
+{
+  "approve_controlled_kernel_patch": {
+    "kind": "patch_vote",
+    "approval": true,
+    "confidence": "high",
+    "summary": "Approved: the patch is scoped to the claimed kernel path, benchmark parameters are matched, accuracy passes, active dispatch is proven, and rollback is clear.",
+    "objections": [],
+    "required_evidence": [],
+    "warnings": [],
+    "notes": [
+      "Controlled same-session A/B shows a 4.2% tok/s/GPU gain."
+    ]
+  },
+  "reject_mismatched_benchmark": {
+    "kind": "patch_vote",
+    "approval": false,
+    "confidence": "high",
+    "summary": "Rejected: the after benchmark changed max_concurrency, so the reported throughput gain is not comparable with the baseline.",
+    "objections": [
+      {
+        "type": "benchmark_invalid",
+        "severity": "blocker",
+        "reason": "Baseline used max_concurrency=128 while the after run used max_concurrency=256.",
+        "required_fix": "Rerun before and after benchmarks with matched concurrency, ISL/OSL, sample count, and launch parameters.",
+        "evidence_ref": "benchmark.after.max_concurrency"
+      }
+    ],
+    "required_evidence": [
+      "matched_benchmark"
+    ],
+    "warnings": [],
+    "notes": []
+  },
+  "reject_missing_accuracy_gate": {
+    "kind": "patch_vote",
+    "approval": false,
+    "confidence": "high",
+    "summary": "Rejected: the packet reports a compiler-flag throughput gain but does not include an accuracy gate result or waiver.",
+    "objections": [
+      {
+        "type": "accuracy_missing",
+        "severity": "blocker",
+        "reason": "Accuracy evidence is required for a claimed performance win.",
+        "required_fix": "Run the configured accuracy gate or provide an explicit orchestrator waiver.",
+        "evidence_ref": "accuracy_gate"
+      }
+    ],
+    "required_evidence": [
+      "accuracy_gate"
+    ],
+    "warnings": [],
+    "notes": []
+  },
+  "reject_micro_only_active_path_unproven": {
+    "kind": "patch_vote",
+    "approval": false,
+    "confidence": "high",
+    "summary": "Rejected: the packet only proves a micro-benchmark win and does not prove E2E throughput or active dispatch.",
+    "objections": [
+      {
+        "type": "micro_only_evidence",
+        "severity": "blocker",
+        "reason": "Micro-benchmark speedup is not enough to approve an E2E optimization patch.",
+        "required_fix": "Provide controlled before/after E2E benchmark evidence for the final server configuration.",
+        "evidence_ref": "micro_benchmark"
+      },
+      {
+        "type": "active_path_unproven",
+        "severity": "blocker",
+        "reason": "The packet says the active dispatch path is not proven.",
+        "required_fix": "Provide profile or runtime dispatch evidence showing the new MoE kernel is selected.",
+        "evidence_ref": "dispatch_evidence.active_path_proven"
+      }
+    ],
+    "required_evidence": [
+      "matched_benchmark",
+      "active_path_evidence"
+    ],
+    "warnings": [],
+    "notes": []
+  },
+  "reject_triage_conflict": {
+    "kind": "patch_vote",
+    "approval": false,
+    "confidence": "high",
+    "summary": "Rejected: a high-confidence Triage finding reports a related systemic accuracy risk that the packet does not address.",
+    "objections": [
+      {
+        "type": "triage_conflict",
+        "severity": "blocker",
+        "reason": "Triage reports that the same RCCL algorithm can return stale data under TP=8.",
+        "required_fix": "Resolve or explicitly mitigate the Triage finding before keeping this communication change.",
+        "evidence_ref": "triage_findings[0]"
+      }
+    ],
+    "required_evidence": [
+      "triage_resolution"
+    ],
+    "warnings": [],
+    "notes": []
+  },
+  "draft_valid_kernel_optimization_entry": {
+    "kind": "kb_draft",
+    "kb_drafts": [
+      {
+        "category": "kernel_optimization",
+        "action": "Route Qwen3-14B attention to fused_attention_gfx950 and update the shape-specific best_config.",
+        "lesson": "The attention kernel rewrite produced E2E gain only when dispatch and shape-specific tuning config were updated together.",
+        "model": "Qwen3-14B",
+        "gpu": "MI355X",
+        "framework": "SGLang",
+        "tags": [
+          "attention",
+          "dispatch",
+          "best_config",
+          "gfx950"
+        ],
+        "result": {
+          "status": "KEEP",
+          "gain_pct": 4.2,
+          "baseline_tput_per_gpu": 1200.0,
+          "final_tput_per_gpu": 1250.4,
+          "accuracy": "pass"
+        },
+        "confidence": 0.9,
+        "source": "final_report",
+        "context": "Controlled same-session A/B with matched launch parameters and passing accuracy gate.",
+        "supersedes": null,
+        "validated_date": "2026-04-29",
+        "strategy_tested": [
+          "kernel_rewrite",
+          "dispatch_update",
+          "shape_config_update"
+        ]
+      }
+    ],
+    "rejected_candidates": [],
+    "notes": []
+  },
+  "draft_benchmark_methodology_pitfall": {
+    "kind": "kb_draft",
+    "kb_drafts": [
+      {
+        "category": "benchmark_methodology",
+        "action": "Compared scheduler throughput with different max_concurrency values between baseline and after runs.",
+        "lesson": "Changing max_concurrency between baseline and after runs can create a false throughput win.",
+        "model": "Qwen3-14B",
+        "gpu": "MI355X",
+        "framework": "SGLang",
+        "tags": [
+          "benchmark",
+          "concurrency",
+          "pitfall"
+        ],
+        "result": {
+          "status": "REVERT",
+          "failure_type": "benchmark_invalid"
+        },
+        "confidence": 0.85,
+        "source": "final_report",
+        "context": "The scheduler patch was reverted after Critic found max_concurrency mismatch.",
+        "supersedes": null,
+        "validated_date": "2026-04-29",
+        "strategy_tested": [
+          "scheduler_queue_depth"
+        ]
+      }
+    ],
+    "rejected_candidates": [],
+    "notes": []
+  },
+  "reject_speculative_report_candidate": {
+    "kind": "kb_draft",
+    "kb_drafts": [],
+    "rejected_candidates": [
+      {
+        "source_section": "Future work",
+        "reason": "The candidate is speculative and not tested; no controlled benchmark or accuracy evidence was provided."
+      }
+    ],
+    "notes": []
+  },
+  "reject_duplicate_existing_kb": {
+    "kind": "kb_draft",
+    "kb_drafts": [],
+    "rejected_candidates": [
+      {
+        "source_section": "kept_patches[0]",
+        "reason": "Duplicate of existing KB entry kb-existing-attn-gfx950 without new scope, evidence, or supersession."
+      }
+    ],
+    "notes": []
+  }
+}
