@@ -40,6 +40,9 @@ KB_CATEGORIES = {
     "dream_consolidation",
 }
 
+PATCH_CONFIDENCE = {"high", "medium", "low"}
+SEVERITIES = {"blocker", "major", "minor"}
+
 
 def fail(message: str) -> None:
     raise AssertionError(message)
@@ -140,8 +143,28 @@ def validate_outputs(cases: list[dict[str, Any]], outputs_path: Path) -> None:
 def assert_patch_output(case_id: str, expected: dict[str, Any], output: dict[str, Any]) -> None:
     if output.get("kind") != "patch_vote":
         fail(f"{case_id}: output.kind must be patch_vote")
+    require_type(case_id, output, "approval", bool)
+    require_type(case_id, output, "confidence", str)
+    require_type(case_id, output, "summary", str)
+    require_type(case_id, output, "objections", list)
+    require_type(case_id, output, "required_evidence", list)
+    require_type(case_id, output, "warnings", list)
+    require_type(case_id, output, "notes", list)
+    if output["confidence"] not in PATCH_CONFIDENCE:
+        fail(f"{case_id}: invalid confidence {output['confidence']}")
     if output.get("approval") is not expected["approval"]:
         fail(f"{case_id}: approval mismatch")
+
+    for evidence in output["required_evidence"]:
+        if not isinstance(evidence, str) or not evidence:
+            fail(f"{case_id}: required_evidence items must be non-empty strings")
+    for note in output["notes"]:
+        if not isinstance(note, str):
+            fail(f"{case_id}: notes items must be strings")
+    for objection in output["objections"]:
+        validate_objection(case_id, objection, require_known_type=True)
+    for warning in output["warnings"]:
+        validate_objection(case_id, warning, require_known_type=False)
 
     objection_types = [obj.get("type") for obj in as_list(output.get("objections"))]
     if "objection_types" in expected and objection_types != expected["objection_types"]:
@@ -179,9 +202,19 @@ def assert_patch_output(case_id: str, expected: dict[str, Any], output: dict[str
 def assert_kb_output(case_id: str, expected: dict[str, Any], output: dict[str, Any]) -> None:
     if output.get("kind") != "kb_draft":
         fail(f"{case_id}: output.kind must be kb_draft")
+    require_type(case_id, output, "kb_drafts", list)
+    require_type(case_id, output, "rejected_candidates", list)
+    require_type(case_id, output, "notes", list)
 
     drafts = as_list(output.get("kb_drafts"))
     rejected = as_list(output.get("rejected_candidates"))
+    for draft in drafts:
+        validate_kb_draft(case_id, draft)
+    for rejected_candidate in rejected:
+        validate_rejected_candidate(case_id, rejected_candidate)
+    for note in output["notes"]:
+        if not isinstance(note, str):
+            fail(f"{case_id}: notes items must be strings")
 
     if len(drafts) < int(expected.get("min_kb_drafts", 0)):
         fail(f"{case_id}: too few KB drafts")
@@ -230,6 +263,61 @@ def assert_kb_output(case_id: str, expected: dict[str, Any], output: dict[str, A
             fail(f"{case_id}: duplicate must be rejected or explicitly supersede existing KB")
 
 
+def require_type(case_id: str, data: dict[str, Any], key: str, expected_type: type) -> None:
+    if key not in data:
+        fail(f"{case_id}: output missing required key {key}")
+    if not isinstance(data[key], expected_type):
+        fail(f"{case_id}: output.{key} must be {expected_type.__name__}")
+
+
+def validate_objection(
+    case_id: str,
+    objection: Any,
+    require_known_type: bool,
+) -> None:
+    if not isinstance(objection, dict):
+        fail(f"{case_id}: objection/warning entries must be objects")
+    for key in ("type", "severity", "reason", "required_fix", "evidence_ref"):
+        require_type(case_id, objection, key, str)
+        if not objection[key]:
+            fail(f"{case_id}: objection/warning field {key} must be non-empty")
+    if objection["severity"] not in SEVERITIES:
+        fail(f"{case_id}: invalid severity {objection['severity']}")
+    if require_known_type and objection["type"] not in PATCH_OBJECTION_TYPES:
+        fail(f"{case_id}: unknown objection type {objection['type']}")
+
+
+def validate_kb_draft(case_id: str, draft: Any) -> None:
+    if not isinstance(draft, dict):
+        fail(f"{case_id}: kb_drafts entries must be objects")
+    for key in ("category", "action", "lesson"):
+        require_type(case_id, draft, key, str)
+        if not draft[key]:
+            fail(f"{case_id}: KB draft field {key} must be non-empty")
+    if draft["category"] not in KB_CATEGORIES:
+        fail(f"{case_id}: unknown KB category {draft['category']}")
+    if "tags" in draft and not isinstance(draft["tags"], list):
+        fail(f"{case_id}: KB draft tags must be a list")
+    if "result" in draft and not isinstance(draft["result"], dict):
+        fail(f"{case_id}: KB draft result must be an object")
+    if "confidence" in draft:
+        confidence = float(draft["confidence"])
+        if not 0.0 <= confidence <= 1.0:
+            fail(f"{case_id}: KB draft confidence must be in [0, 1]")
+
+
+def validate_rejected_candidate(case_id: str, rejected_candidate: Any) -> None:
+    if not isinstance(rejected_candidate, dict):
+        fail(f"{case_id}: rejected_candidates entries must be objects")
+    require_type(case_id, rejected_candidate, "reason", str)
+    if not rejected_candidate["reason"]:
+        fail(f"{case_id}: rejected candidate reason must be non-empty")
+    if "source_section" in rejected_candidate and not isinstance(
+        rejected_candidate["source_section"], str
+    ):
+        fail(f"{case_id}: rejected candidate source_section must be a string")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -241,7 +329,7 @@ def main() -> None:
     parser.add_argument(
         "--outputs",
         type=Path,
-        help="Optional output JSON keyed by case id for assertion checks.",
+        help="Output JSON keyed by case id for assertion checks. Defaults to expected_outputs.json if present.",
     )
     args = parser.parse_args()
 
@@ -253,8 +341,12 @@ def main() -> None:
             case_path = base_dir / case_path
         cases.extend(validate_case_file(case_path))
 
-    if args.outputs:
-        validate_outputs(cases, args.outputs)
+    outputs_path = args.outputs
+    default_outputs = base_dir / "expected_outputs.json"
+    if outputs_path is None and default_outputs.exists():
+        outputs_path = default_outputs
+    if outputs_path:
+        validate_outputs(cases, outputs_path)
 
     print(f"OK: validated {len(cases)} Critic test cases")
 
