@@ -179,7 +179,13 @@ These are recurring errors observed in production CI runs. **Read before executi
    reconnect cycle that wastes hours. Use a polling loop with `sleep 60` + status check
    between each iteration. See IR-13 in `modes/CLAW.md`.
 
-8. **Record start/end timestamps for ALL external calls** (IR-13). Before invoking
+8. **Skill scripts live in the sandbox, NOT on NFS.** When creating RayJob/PyTorchJob
+   entrypoints, do NOT reference sandbox paths like `/hyperloom/...` or
+   `/workspace/.skills/...` — these paths don't exist inside the GPU workload container.
+   Use `exec_on_gpu` to run scripts on an existing RayJob, or inline the script content
+   directly in the entrypoint. Failure mode: exit 127 / "file not found" at 0s.
+
+9. **Record start/end timestamps for ALL external calls** (IR-13). Before invoking
    any external component (GEAK, OOB, LLM proxy, TraceLens, or future backends),
    run `python3 $SCRIPTS_DIR/trace_action.py --component <name> --action start`.
    After the component finishes, run `--action end`. This enables per-message cost
