@@ -174,7 +174,12 @@ These are recurring errors observed in production CI runs. **Read before executi
    `EVAL_ONLY=${EVAL_ONLY:-false}`. Failure mode: `unbound variable` → exit 1 → job
    fails after minutes of GPU startup, wasting the entire compilation/warmup time.
 
-7. **Record start/end timestamps for ALL external calls** (IR-13). Before invoking
+7. **NEVER use `sleep` longer than 60 seconds.** The MCP bash connection has an idle
+   timeout. `sleep 900` or `sleep 1800` will trigger MCP error `-32001`, forcing a
+   reconnect cycle that wastes hours. Use a polling loop with `sleep 60` + status check
+   between each iteration. See IR-13 in `modes/CLAW.md`.
+
+8. **Record start/end timestamps for ALL external calls** (IR-13). Before invoking
    any external component (GEAK, OOB, LLM proxy, TraceLens, or future backends),
    run `python3 $SCRIPTS_DIR/trace_action.py --component <name> --action start`.
    After the component finishes, run `--action end`. This enables per-message cost
