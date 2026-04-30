@@ -208,18 +208,19 @@ def run_model(
                      session_id, sandbox_timeout)
     log.info("Session %s finished with status: %s", session_id, status)
 
-    # Step 3: Download optimization report from Claw
-    # Wait for report upload to finalize before querying files
+    # Step 3: Download optimization report from Claw, with NFS fallback
     wait_secs = 300
     log.info("Waiting %ds for report upload to finalize...", wait_secs)
     time.sleep(wait_secs)
 
     report_content = None
+    os.makedirs(result_dir, exist_ok=True)
+    download_suffixes = ("optimization_report.md", "ci_metrics.json")
+
+    # 3a. Try Claw file API (sandbox /workspace)
     try:
         files = claw.list_files(session_id)
         log.info("Session %s has %d files", session_id, len(files))
-        os.makedirs(result_dir, exist_ok=True)
-        download_suffixes = ("optimization_report.md", "ci_metrics.json")
         for f in files:
             fpath = f["path"]
             if not any(fpath.endswith(s) for s in download_suffixes):
@@ -233,6 +234,43 @@ def run_model(
                 log.warning("Failed to download %s: %s", fpath, e)
     except Exception as e:
         log.warning("Failed to list/download files for %s: %s", session_id, e)
+
+    # 3b. NFS fallback: scan /wekafs/hyperloom-results/ for results
+    #     Agent may write to NFS via PyTorchJob/RayJob instead of sandbox.
+    if not report_content:
+        nfs_scan_dirs = [
+            "/wekafs/hyperloom-results",
+            "/wekafs/results/ci",
+            "/wekafs/inference-optimization/results",
+        ]
+        model_short = model_name.lower().replace("-", "").replace("_", "")
+        for scan_dir in nfs_scan_dirs:
+            if not os.path.isdir(scan_dir):
+                continue
+            for entry in sorted(os.listdir(scan_dir), reverse=True):
+                entry_clean = entry.lower().replace("-", "").replace("_", "")
+                if model_short not in entry_clean:
+                    continue
+                candidate = os.path.join(scan_dir, entry)
+                if not os.path.isdir(candidate):
+                    continue
+                for suffix in download_suffixes:
+                    for root, _, fnames in os.walk(candidate):
+                        for fn in fnames:
+                            if fn.endswith(suffix.split("/")[-1]):
+                                src = os.path.join(root, fn)
+                                dst = os.path.join(result_dir, fn)
+                                if not os.path.exists(dst):
+                                    import shutil
+                                    shutil.copy2(src, dst)
+                                    log.info("NFS fallback: copied %s → %s", src, dst)
+                                    if fn == "optimization_report.md":
+                                        report_content = Path(dst).read_text()
+                if report_content:
+                    log.info("NFS fallback found results in %s", candidate)
+                    break
+            if report_content:
+                break
 
     # Step 4: Build result
     ifx_ref = None
