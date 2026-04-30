@@ -187,78 +187,27 @@ class ClawClient:
         reconnect_retries: int = 3,
         reconnect_wait_s: int = 180,
     ) -> str:
-        """Monitor a session until completion using SSE + polling fallback.
+        """Monitor a session until completion by polling the session status API.
 
-        Strategy: try SSE first for real-time logs. When SSE disconnects
-        (CLAW closes the stream between LLM turns), fall back to polling
-        the session status API every 30s. This avoids the SSE replay loop
-        that caused CI logs to freeze.
+        CLAW's SSE stream closes between LLM turns and replays from the start
+        on reconnect, making it unsuitable for long-running monitoring. This
+        method polls ``GET /sessions/{id}`` every 30s instead.
 
         Returns final status: 'completed', 'failed', 'timeout'.
         """
         effective_timeout = timeout or self.timeout
         start = time.time()
         last_heartbeat = start
-        status = "running"
-        got_agent_response = False
         poll_interval = 30
-        sse_failed = False
 
-        # Phase 1: Try SSE for initial events (tool loading, first agent response)
-        try:
-            for event_data in self.subscribe_sse(session_id, min(120, effective_timeout)):
-                elapsed = time.time() - start
-                try:
-                    event_type = event_data.get("type", "") if isinstance(event_data, dict) else ""
-                except Exception:
-                    continue
+        log.info("Session %s monitoring via polling (interval=%ds, timeout=%ds)",
+                 session_id, poll_interval, effective_timeout)
 
-                if on_event:
-                    try:
-                        on_event(event_data)
-                    except Exception:
-                        pass
-
-                try:
-                    log.info("Session %s [%.0fs] SSE %s: %s",
-                             session_id, elapsed, event_type,
-                             json.dumps(event_data, default=str))
-                except Exception:
-                    log.info("Session %s [%.0fs] SSE %s: (unserializable)",
-                             session_id, elapsed, event_type)
-
-                if event_type == "chatDelta":
-                    got_agent_response = True
-                elif event_type == "statusUpdate":
-                    agent_status = event_data.get("agentStatus", "")
-                    if agent_status == "stopped":
-                        brief = event_data.get("brief", "")
-                        status = "failed" if "failed" in brief.lower() else "completed"
-                        log.info(">>> SESSION %s <<< after %.0fs (%s)",
-                                 status.upper(), elapsed, brief)
-                        return status
-                elif event_type == "error":
-                    log.error(">>> ERROR <<< session=%s: %s", session_id,
-                              json.dumps(event_data, default=str)[:500])
-                    return "failed"
-
-        except Exception as e:
-            log.warning("Session %s SSE ended after %.0fs: %s — switching to polling",
-                        session_id, time.time() - start, e)
-            sse_failed = True
-
-        if not sse_failed:
-            log.info("Session %s SSE stream closed after %.0fs — switching to polling mode",
-                     session_id, time.time() - start)
-
-        # Phase 2: Poll session status API until completion or timeout
-        log.info("Session %s entering polling mode (interval=%ds)", session_id, poll_interval)
         while True:
             elapsed = time.time() - start
             if elapsed >= effective_timeout:
-                status = "timeout"
                 log.warning("Session %s global timeout reached (%.0fs)", session_id, elapsed)
-                break
+                return "timeout"
 
             try:
                 sess = self.get_session(session_id)
@@ -266,22 +215,20 @@ class ClawClient:
                 agent_status = sess.get("agent_status", "running")
 
                 if agent_status == "stopped" or sess_status in ("completed", "stopped"):
-                    status = "completed"
                     log.info(">>> SESSION COMPLETED <<< %s after %.0fs (status=%s, agent=%s)",
                              session_id, elapsed, sess_status, agent_status)
-                    break
+                    return "completed"
                 elif sess_status == "failed":
-                    status = "failed"
                     log.error(">>> SESSION FAILED <<< %s after %.0fs", session_id, elapsed)
-                    break
+                    return "failed"
 
             except Exception as e:
                 log.warning("Session %s poll error: %s", session_id, e)
 
             if time.time() - last_heartbeat > heartbeat_interval:
-                log.info("Session %s still running... (%.0f min, polling)", session_id, elapsed / 60)
+                log.info("Session %s still running... (%.0f min)", session_id, elapsed / 60)
                 last_heartbeat = time.time()
 
             time.sleep(poll_interval)
 
-        return status
+        return "timeout"
