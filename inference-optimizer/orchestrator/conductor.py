@@ -267,9 +267,12 @@ class Conductor:
         prompt = await self._compose_prompt(agent_name)
         sys_prompt = await self._load_system_prompt(agent_name)
         tools = self.policy.allowed_tools_for_agent(agent_name)
+        # max_turns=0 → backend uses its own default. ClaudeBackend needs
+        # ≥ 2 to accommodate the tool_use → tool_result → final-text turn
+        # sequence; mock backends ignore max_turns.
         try:
             result: BackendTurnResult = await backend.run(
-                prompt=prompt, system_prompt=sys_prompt, tools=tools, max_turns=1,
+                prompt=prompt, system_prompt=sys_prompt, tools=tools, max_turns=0,
             )
         except BackendError as exc:
             await self._record_observation(
