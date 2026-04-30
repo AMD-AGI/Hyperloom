@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hyperloom-inference-optimizer"
+version = "0.6.0"
+description = "Inference Optimizer v0.6 — single-mode 4-agent (Orchestration/Kernel/Critic/Robustness) autonomous LLM inference optimization runtime for AMD GPU platforms."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "claude-agent-sdk>=0.1.65",
+    "openai>=1.50",
+    "httpx>=0.27",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=1.0",
+]
+
+# v0.6 follows the Hyperloom "top-level skill directory" convention
+# (alongside `marathon/` and `kernel-agent/`). The skill directory uses a
+# hyphen (`inference-optimizer/`) to match those siblings; setuptools maps
+# it to the Python module name `inference_optimizer` (underscore) so that
+# code can `import inference_optimizer.orchestrator` etc.
+#
+# Because the hyphen ↔ underscore mapping doesn't compose with
+# `[tool.setuptools.packages.find]`, packages + package_dir are computed
+# dynamically in `setup.py` (which simply walks the skill dir).
+[tool.setuptools.dynamic]
+# packages + package-dir provided by setup.py
+
+[tool.setuptools.package-data]
+inference_optimizer = [
+    "SKILL.md",
+    "README.md",
+    "actions/*.md",
+    "actions/_meta/*.yaml",
+    "agents/*/agent_card.yaml",
+    "agents/*/system_prompt.md",
+    "agents/*/SKILL.md",
+    "agents/*/scripts/*",
+    "kernel_opt/*.md",
+    "orchestrator/system_prompts/*.md",
+    "scripts/*",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["inference-optimizer/tests"]
+pythonpath = ["."]
