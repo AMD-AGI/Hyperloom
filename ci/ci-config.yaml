@@ -63,6 +63,14 @@ models:
     kernel_opt_backends: claude
     target_gpu: mi300x
 
+  # ── GLM 5 (FP8, TP=8) — uses mi355x config, runs on mi300x ──
+  - inferenceX_key: glm5-fp8-mi355x-sglang
+    inferenceX_api_name: GLM-5
+    model_path_override: /wekafs/models/zai-org-GLM-5
+    optimization_depth: full
+    kernel_opt_backends: claude
+    target_gpu: mi300x
+
   # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
   - inferenceX_key: qwen3.5-bf16-mi300x-sglang
     inferenceX_api_name: Qwen-3.5-397B-A17B
