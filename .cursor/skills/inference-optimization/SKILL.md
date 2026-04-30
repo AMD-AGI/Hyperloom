@@ -169,7 +169,12 @@ These are recurring errors observed in production CI runs. **Read before executi
 
 5. **Never call `geak_set_model_config` to change the model.** See IR-7. Only exception: tracing headers.
 
-6. **Record start/end timestamps for ALL external calls** (IR-13). Before invoking
+6. **When writing entrypoint scripts, declare ALL referenced variables with defaults.**
+   If using `set -u` (or `set -uo pipefail`), every variable MUST have a default:
+   `EVAL_ONLY=${EVAL_ONLY:-false}`. Failure mode: `unbound variable` → exit 1 → job
+   fails after minutes of GPU startup, wasting the entire compilation/warmup time.
+
+7. **Record start/end timestamps for ALL external calls** (IR-13). Before invoking
    any external component (GEAK, OOB, LLM proxy, TraceLens, or future backends),
    run `python3 $SCRIPTS_DIR/trace_action.py --component <name> --action start`.
    After the component finishes, run `--action end`. This enables per-message cost
