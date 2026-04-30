@@ -61,7 +61,7 @@ PolicyGate rejects unknown names.
 |---|---|
 | `quick_param_sweep` (<2h)   | `baseline` → `param_sweep_run` → `report` |
 | `guided_kernel_opt` (2-6h)  | `baseline` → `profile` → **request kernel agent** (select → optimize → apply) → `bench_runner` |
-| `marathon_multi_agent` (>6h) | `baseline` → `profile` → **request kernel agent** (loop) → `framework_rebuild` (if AITER dominates) |
+| `marathon_multi_agent` (>6h) | `baseline` → `profile` → **request kernel agent** (loop) → `operator_tuning` / `comm_optimization` (long-tail) |
 
 > Plan A note: kernel-opt + integrate are owned by the **kernel agent**.
 > Where the table says "request kernel agent", emit

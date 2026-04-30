@@ -37,7 +37,7 @@ def test_requires_gate_returns_false_for_unknown_action():
 
 
 def test_risk_table_contains_known_actions():
-    for n in ("backends", "kernel-opt", "integrate", "framework-rebuild"):
+    for n in ("backends", "kernel-opt", "integrate", "comm-optimization"):
         assert n in ACCURACY_RISK_TABLE
 
 

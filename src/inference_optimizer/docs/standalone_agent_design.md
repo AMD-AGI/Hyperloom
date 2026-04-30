@@ -278,7 +278,7 @@ critic ──── vote(reject) ─────>  │
                                   └── 返回 "approved" / "rejected" / "abstained"
 ```
 
-**适用**: marathon 高风险决策（KEEP/REVERT, framework_rebuild）。
+**适用**: marathon 高风险决策（KEEP/REVERT, comm_optimization, compiler_tuning）。
 **当前限制**: Brier 加权 (§9.4) 还没接通到投票计数；目前是简单多数。
 
 ### 8.3 问答模式（任意 agent → sage）

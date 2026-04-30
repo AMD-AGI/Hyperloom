@@ -108,10 +108,19 @@ _CRITIC_INTENTS: frozenset[IntentType] = _BASE_INTENTS
 # privileged intent it carries is KILL_TASK (PolicyGate enforces source
 # allowlist). It never delegates / proposes / requests; its job is
 # observation + alert + kill.
+#
+# Phase G expansion — triage is also the only role that may emit the
+# scheduling-police intents (FORCE_DISPATCH / PRUNE_BRANCH /
+# ESCALATE_STRATEGY_CHANGE). PolicyGate's TRIAGE_ONLY_INTENTS frozenset
+# enforces the source allowlist on top of the role gate; both layers
+# agree.
 _TRIAGE_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
         IntentType.UPDATE_STATE,
         IntentType.KILL_TASK,
+        IntentType.FORCE_DISPATCH,
+        IntentType.PRUNE_BRANCH,
+        IntentType.ESCALATE_STRATEGY_CHANGE,
     }
 )
 

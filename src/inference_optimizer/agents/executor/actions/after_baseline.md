@@ -50,9 +50,10 @@ re-delegate `profile`** with the same params; you'll hit
 ### `marathon_multi_agent` (`MAX_HOURS > 6`)
 
 Same first move as guided (`profile`), but you have the full long-running
-toolkit available downstream: `framework_rebuild`, `comm_optimization`,
-`compiler_tuning`, `dream`, `re_explore`. Don't reach for those until
-you've at least tried one kernel-opt loop via the kernel agent.
+toolkit available downstream: `comm_optimization`, `compiler_tuning`,
+`operator_tuning`, `vendor_kernel_config`, `dream`, `re_explore`. Don't
+reach for those until you've at least tried one kernel-opt loop via the
+kernel agent.
 
 In marathon mode you also have **Critic + Watchdog + Sage + Kernel** as
 co-reactors. Use `propose_action` (not `delegate` and not `request`) for

@@ -134,7 +134,16 @@ class BudgetAwareScheduler:
         pres = self.pressure(state)
         prior = prior_for(self.model_class, action.name)
         adj = self._adjustments.get(action.name, 1.0)
-        total = base * pres * mode_gate * depth_gate * dim * lane * prior * adj
+        # Family-level dead-end pruning (scheduling problem #6): once a
+        # family has accumulated FAMILY_FAILURE_PRUNE_THRESHOLD consecutive
+        # failures the conductor adds it to ``state.pruned_families``. A
+        # zero gate keeps the score multiplicative so other factors still
+        # show in the breakdown for diagnostics.
+        family_gate = 0.0 if state.is_family_pruned(action.family) else 1.0
+        total = (
+            base * pres * mode_gate * depth_gate
+            * dim * lane * prior * adj * family_gate
+        )
         return ActionScore(
             name=action.name,
             score=total,
@@ -147,6 +156,7 @@ class BudgetAwareScheduler:
                 "lane_available": lane,
                 "prior": prior,
                 "adjustment": adj,
+                "family_gate": family_gate,
             },
         )
 
@@ -168,6 +178,8 @@ class BudgetAwareScheduler:
             if self._mode_gate(a, self.mode) <= 0.0:
                 continue
             if self._depth_gate(a, state) <= 0.0:
+                continue
+            if state.is_family_pruned(a.family):
                 continue
             return a
 

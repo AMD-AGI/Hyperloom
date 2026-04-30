@@ -878,19 +878,23 @@ class Conductor:
         try:
             ctx.policy.validate_intent(from_agent, intent, ctx.state)
         except PolicyDenied as exc:
+            detail: dict[str, Any] = {
+                "agent": from_agent,
+                "intent_type": intent.type.value,
+                "rule": exc.rule or "unknown",
+                "reason": str(exc),
+            }
+            if getattr(exc, "hint", None):
+                detail["hint"] = exc.hint
             await self._record_observation(
                 from_agent="conductor",
                 kind="policy_denied",
-                detail={
-                    "agent": from_agent,
-                    "intent_type": intent.type.value,
-                    "rule": exc.rule or "unknown",
-                    "reason": str(exc),
-                },
+                detail=detail,
             )
             log.info(
-                "policy denied: agent=%s intent=%s rule=%s reason=%s",
+                "policy denied: agent=%s intent=%s rule=%s reason=%s hint=%s",
                 from_agent, intent.type.value, exc.rule, exc,
+                getattr(exc, "hint", None),
             )
             return False
         return True
@@ -947,6 +951,12 @@ class Conductor:
             await self._handle_response(from_agent, payload)
         elif intent.type == IntentType.KILL_TASK:
             await self._handle_kill_task(from_agent, payload)
+        elif intent.type == IntentType.FORCE_DISPATCH:
+            await self._handle_force_dispatch(from_agent, payload)
+        elif intent.type == IntentType.PRUNE_BRANCH:
+            await self._handle_prune_branch(from_agent, payload)
+        elif intent.type == IntentType.ESCALATE_STRATEGY_CHANGE:
+            await self._handle_escalate_strategy_change(from_agent, payload)
         else:  # pragma: no cover — defensive
             await self._record_observation(
                 from_agent=from_agent,
@@ -981,6 +991,32 @@ class Conductor:
                 priority=priority,
             )
         )
+        # Phase C — bench_done event fallback. The BenchRunnerExecutor
+        # emits an explicit ``update_state`` and a parallel
+        # ``send_message{topic=event, kind=bench_done, tput_per_gpu=...}``.
+        # If anything (PolicyGate hiccup, agent retry that swallowed the
+        # update_state) caused current_tput to lag the bus, mirror the
+        # bench result into SharedState here so state.json never stays
+        # out of date when a real measurement was taken.
+        if (
+            topic == "event"
+            and isinstance(extras, dict)
+            and extras.get("kind") == "bench_done"
+            and "tput_per_gpu" in extras
+        ):
+            try:
+                tput = float(extras["tput_per_gpu"])
+            except (TypeError, ValueError):
+                tput = None
+            if tput is not None and tput > 0 and tput != ctx.state.current_tput:
+                ctx.state.apply_validated_transition(
+                    "conductor",
+                    {
+                        "current_tput": tput,
+                        "current_action": "bench_done",
+                    },
+                )
+                self._maybe_recompute_gain("conductor")
 
     async def _handle_alert(
         self, from_agent: str, payload: dict[str, Any]
@@ -1107,6 +1143,140 @@ class Conductor:
             )
         except OSError:  # pragma: no cover — best-effort
             log.exception("failed to mirror kill to findings/kills.jsonl")
+
+    # ------------------------------------------------------------------
+    # Phase G — triage scheduling-police handlers.
+    # ------------------------------------------------------------------
+    async def _handle_force_dispatch(
+        self, from_agent: str, payload: dict[str, Any]
+    ) -> None:
+        """force_dispatch -> bump a queued task to the head of the
+        dispatcher queue by rewriting its ``created_at`` timestamp.
+
+        The dispatcher orders by ``created_at`` (see
+        ``dispatch_pending_delegates``). We set it to the unix epoch
+        (1970-01-01) so the affected row sorts before all natural
+        rows. The change is also broadcast on the bus so other agents
+        see the priority bump.
+        """
+        from .task_registry import TaskNotFound
+
+        assert self.ctx is not None
+        ctx = self.ctx
+        task_id = str(payload.get("task_id", "")).strip()
+        reason = str(payload.get("reason", "")).strip()
+        status = "ok"
+        detail = ""
+        try:
+            task_before = await ctx.tasks.get(task_id)
+            if task_before.state != "queued":
+                status = "noop_not_queued"
+                detail = f"task is in state={task_before.state!r}"
+            else:
+                async with ctx.db.transaction() as cur:
+                    cur.execute(
+                        "UPDATE tasks SET created_at=? WHERE task_id=?",
+                        ("1970-01-01T00:00:00+00:00", task_id),
+                    )
+        except TaskNotFound:
+            status = "not_found"
+            detail = f"no task with task_id={task_id!r}"
+        await ctx.bus.append_and_seq(
+            Message.new(
+                from_agent=from_agent,
+                to_agent="*",
+                topic="event",
+                payload={
+                    "kind": "force_dispatch",
+                    "task_id": task_id,
+                    "reason": reason,
+                    "status": status,
+                    "detail": detail,
+                },
+                priority=0,
+            )
+        )
+
+    async def _handle_prune_branch(
+        self, from_agent: str, payload: dict[str, Any]
+    ) -> None:
+        """prune_branch -> add the family to ``state.pruned_families`` AND
+        cancel every currently-queued task whose action belongs to
+        that family. In-flight tasks are left running (cooperative
+        cancellation, same as kill_task)."""
+        from .task_registry import IllegalTransition
+
+        assert self.ctx is not None
+        ctx = self.ctx
+        family = str(payload.get("family", "")).strip()
+        reason = str(payload.get("reason", "")).strip()
+        ctx.state.pruned_families.add(family)
+        cancelled: list[str] = []
+        if ctx.actions is not None:
+            queued = await ctx.tasks.list_by_state("queued")
+            for t in queued:
+                action_name = (t.params or {}).get("action_name")
+                if not action_name:
+                    continue
+                meta = ctx.actions.get(action_name)
+                if meta is None or meta.family != family:
+                    continue
+                try:
+                    await ctx.tasks.transition(
+                        t.task_id, "cancelled",
+                        evidence={
+                            "kill_by": from_agent,
+                            "reason": f"prune_branch family={family} :: {reason}",
+                            "scope": "task",
+                            "via": "prune_branch",
+                        },
+                    )
+                    cancelled.append(t.task_id)
+                except IllegalTransition:
+                    log.warning(
+                        "prune_branch: illegal transition for %s", t.task_id,
+                    )
+        await ctx.bus.append_and_seq(
+            Message.new(
+                from_agent=from_agent,
+                to_agent="*",
+                topic="event",
+                payload={
+                    "kind": "branch_pruned",
+                    "family": family,
+                    "reason": reason,
+                    "cancelled_task_ids": cancelled,
+                },
+                priority=0,
+            )
+        )
+
+    async def _handle_escalate_strategy_change(
+        self, from_agent: str, payload: dict[str, Any]
+    ) -> None:
+        """escalate_strategy_change -> priority-0 ``alert`` event so
+        executor's next inbox tick reads it before normal traffic. The
+        executor is expected to act on ``next_action_hint`` rather than
+        continue its current planning."""
+        assert self.ctx is not None
+        ctx = self.ctx
+        reason = str(payload.get("reason", "")).strip()
+        hint = str(payload.get("next_action_hint", "")).strip()
+        severity = str(payload.get("severity") or "high").strip()
+        await ctx.bus.append_and_seq(
+            Message.new(
+                from_agent=from_agent,
+                to_agent="executor",
+                topic="alert",
+                payload={
+                    "kind": "strategy_change",
+                    "severity": severity,
+                    "reason": reason,
+                    "next_action_hint": hint,
+                },
+                priority=0,
+            )
+        )
 
     async def _handle_propose_action(
         self, from_agent: str, payload: dict[str, Any]
@@ -1888,10 +2058,134 @@ class Conductor:
                 db=ctx.db,
                 poll_interval_s=max(0.1, self._reactor_tick_s),
                 stop=self._dispatcher_stop,
+                on_task_done=self._on_task_finished,
             )
         except asyncio.CancelledError:
             log.debug("dispatcher cancelled")
             raise
+
+    async def _on_task_finished(self, task, result) -> None:
+        """Hook invoked by the dispatcher after every delegate task ends.
+
+        Maintains:
+          * ``SharedState.family_failure_streak`` / ``pruned_families``
+            (Phase F — dead-end detection)
+          * ``BudgetAwareScheduler.update_after_action`` (DESIGN §9.3
+            follow-ups; previously implemented but never wired)
+        """
+        if self.ctx is None:
+            return
+        action_meta = None
+        if self._action_registry is not None:
+            try:
+                params = task.params or {}
+                action_name = params.get("action_name") if isinstance(params, dict) else None
+                if action_name:
+                    action_meta = self._action_registry.get(action_name)
+            except Exception:  # noqa: BLE001
+                action_meta = None
+        family = getattr(action_meta, "family", None) if action_meta else None
+        succeeded = (result.status == "succeeded")
+        try:
+            self.ctx.state.record_action_outcome(family, succeeded=succeeded)
+        except Exception:  # noqa: BLE001
+            log.exception("record_action_outcome failed")
+        if self.ctx.scheduler is not None and action_meta is not None:
+            try:
+                metrics = dict(result.metrics or {})
+                gain_pct = float(metrics.get("gain_pct", 0.0))
+                status = "succeeded" if succeeded else (
+                    "reverted" if result.status == "reverted" else "failed"
+                )
+                self.ctx.scheduler.update_after_action(
+                    action_meta, gain_pct, status,
+                    history=self.ctx.state.last_decisions(20),
+                )
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "scheduler.update_after_action failed for %s", action_meta.name,
+                )
+        # Phase C — mandatory bench cadence after workspace mutation.
+        if (
+            succeeded
+            and action_meta is not None
+            and action_meta.name != "bench_runner"
+            and "workspace_mutation" in (action_meta.requires_lanes or ())
+        ):
+            try:
+                await self._auto_enqueue_bench_runner(
+                    triggering_action=action_meta.name,
+                    triggering_task_id=task.task_id,
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("auto_enqueue_bench_runner failed")
+
+    async def _auto_enqueue_bench_runner(
+        self, *, triggering_action: str, triggering_task_id: str,
+    ) -> None:
+        """Auto-enqueue a ``bench_runner`` after a workspace_mutation
+        action. Skips when one is already queued/running so we never
+        duplicate work and never recurse on bench_runner itself.
+
+        Idempotency key includes ``triggering_task_id`` so successive
+        mutations get distinct bench validations (post-modification we
+        WANT a fresh measurement) instead of being collapsed by the
+        registry's id-key dedup.
+        """
+        assert self.ctx is not None
+        ctx = self.ctx
+        if ctx.actions is None:
+            return
+        bench_meta = ctx.actions.get("bench_runner")
+        if bench_meta is None:
+            return
+        rows = await ctx.db.fetchall(
+            "SELECT task_id FROM tasks WHERE state IN (?, ?) "
+            "AND params LIKE '%\"action_name\": \"bench_runner\"%' LIMIT 1",
+            ("queued", "running"),
+        )
+        if rows:
+            log.info(
+                "auto-bench: skipping; bench_runner already in flight "
+                "(triggered by %s)", triggering_action,
+            )
+            return
+        params = {
+            "action_name": "bench_runner",
+            "params": {"auto_after": triggering_action,
+                       "trigger_task_id": triggering_task_id},
+            "requested_by": "conductor",
+            "auto_after": triggering_action,
+        }
+        idem = self._task_idempotency_key(
+            kind="delegate",
+            from_agent="conductor",
+            action_name="bench_runner",
+            params={"auto_after": triggering_action,
+                    "trigger_task_id": triggering_task_id},
+        )
+        task = await ctx.tasks.create(
+            kind="delegate",
+            params=params,
+            idempotency_key=idem,
+            requires_lanes=list(bench_meta.requires_lanes or ()),
+            allowed_tools=list(bench_meta.allowed_tools or ()),
+            side_effects=list(bench_meta.side_effects or ()),
+            lease_ttl_sec=int(bench_meta.lease_ttl_sec or 0),
+        )
+        await ctx.bus.append_and_seq(
+            Message.new(
+                from_agent="conductor",
+                to_agent="*",
+                topic="event",
+                payload={
+                    "kind": "auto_bench_enqueued",
+                    "task_id": task.task_id,
+                    "after": triggering_action,
+                    "trigger_task_id": triggering_task_id,
+                },
+            )
+        )
 
     def _load_persona_index(self) -> dict[str, str]:
         """Read ``personas/<agent>.md`` files into an in-memory map."""

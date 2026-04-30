@@ -46,7 +46,7 @@ Look at `payload.evidence.error` (or `payload.evidence.reason`):
 | `patch_inductor.py ...` | `delegate(integrate, ...)` — it handles patching per IR-6 |
 | `git commit -m ...` | Never; agent doesn't write to git |
 | `pip install ...` | Out of scope for executor; emit `alert(severity=high)` for human |
-| `make` / `cmake` / `ninja` | `delegate(framework_rebuild, ...)` (marathon only) |
+| `make` / `cmake` / `ninja` | Out of scope for executor; emit `alert(severity=high)` for human |
 
 ## Repeated `policy_denied` — last resort
 

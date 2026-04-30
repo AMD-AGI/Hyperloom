@@ -448,13 +448,20 @@ async def dispatch_pending_delegates(
     db,
     poll_interval_s: float = 0.5,
     stop: asyncio.Event | None = None,
+    on_task_done: "Callable[[Task, TaskResult], Awaitable[None] | None] | None" = None,
 ) -> int:
     """Background pump: drain queued delegate tasks via ``runner.run``.
 
     Returns the number of tasks dispatched (useful for tests). The dispatcher
     runs until ``stop`` is set OR no more queued delegates are visible *and*
     ``stop`` is None (one-shot mode used by tests).
+
+    If ``on_task_done`` is provided it is invoked after each ``runner.run``
+    completes (success or failure) with ``(task, task_result)``. This is the
+    Conductor's hook for SharedState updates and follow-up scheduling.
     """
+    import inspect
+
     dispatched = 0
     while True:
         rows = await db.fetchall(
@@ -473,7 +480,14 @@ async def dispatch_pending_delegates(
 
         for row in rows:
             task = Task.from_row(row)
-            await runner.run(task)
+            result = await runner.run(task)
+            if on_task_done is not None:
+                try:
+                    out = on_task_done(task, result)
+                    if inspect.isawaitable(out):
+                        await out
+                except Exception:  # noqa: BLE001 — never let the hook break dispatch
+                    log.exception("on_task_done hook failed for %s", task.task_id)
             dispatched += 1
         if stop is not None and stop.is_set():
             return dispatched

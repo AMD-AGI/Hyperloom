@@ -49,6 +49,9 @@ class SharedState:
     decisions: list[dict[str, Any]] = field(default_factory=list)
     rca_findings: list[dict[str, Any]] = field(default_factory=list)
 
+    family_failure_streak: dict[str, int] = field(default_factory=dict)
+    pruned_families: set[str] = field(default_factory=set)
+
     # ----------------------------------------------------------------------
     # derived properties
     # ----------------------------------------------------------------------
@@ -67,6 +70,37 @@ class SharedState:
         """Append an RCA finding. Full integration with PolicyGate landing
         with IMPL-CHECKLIST §3.4 — for the dry-run this just records."""
         self.rca_findings.append(dict(finding))
+
+    # ----------------------------------------------------------------------
+    # family-level dead-end pruning (DESIGN follow-up: scheduling problem #6)
+    # ----------------------------------------------------------------------
+    FAMILY_FAILURE_PRUNE_THRESHOLD: int = 3
+
+    def record_action_outcome(self, family: str | None, succeeded: bool) -> None:
+        """Track per-family failure streaks. After
+        ``FAMILY_FAILURE_PRUNE_THRESHOLD`` consecutive failures the family
+        is added to ``pruned_families`` so the scheduler can skip it.
+        A success resets the streak and lifts any prune for that family.
+        """
+        if not family:
+            return
+        if succeeded:
+            self.family_failure_streak[family] = 0
+            self.pruned_families.discard(family)
+            return
+        cur = self.family_failure_streak.get(family, 0) + 1
+        self.family_failure_streak[family] = cur
+        if cur >= self.FAMILY_FAILURE_PRUNE_THRESHOLD:
+            self.pruned_families.add(family)
+
+    def is_family_pruned(self, family: str | None) -> bool:
+        return bool(family) and family in self.pruned_families
+
+    def unprune_family(self, family: str) -> None:
+        """Manual override (used by triage's ``prune_branch`` un-prune
+        flow if it ever needs to revive a family)."""
+        self.pruned_families.discard(family)
+        self.family_failure_streak.pop(family, None)
 
     def last_decisions(self, n: int = 5) -> list[dict[str, Any]]:
         return list(self.decisions[-n:])
@@ -127,6 +161,8 @@ class SharedState:
             "stop_reason": self.stop_reason,
             "decisions_tail": self.last_decisions(20),
             "rca_findings_tail": list(self.rca_findings[-20:]),
+            "family_failure_streak": dict(self.family_failure_streak),
+            "pruned_families": sorted(self.pruned_families),
         }
 
     def write_snapshot(self, session_dir: Path) -> None:

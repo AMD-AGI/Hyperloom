@@ -32,8 +32,8 @@ Risky but possible. Two options:
   its expected gain is smaller. Examples:
   - Instead of `kernel_opt` (cost_p75 ≈ 60min), try `param_sweep_run`
     (cost_p75 ≈ 8min) or `backends` (cost_p75 ≈ 12min).
-  - Instead of `framework_rebuild` (cost_p75 ≈ 90min), try
-    `compiler_tuning` (cost_p75 ≈ 25min).
+  - Instead of `comm_optimization` (cost_p75 ≈ 30min), try
+    `compiler_tuning` (cost_p75 ≈ 25min) or `params` (cost_p75 ≈ 8min).
 
 ### Time left < cost_p75 × 0.8
 

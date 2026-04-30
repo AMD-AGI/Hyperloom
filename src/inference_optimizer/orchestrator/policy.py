@@ -44,11 +44,19 @@ class PolicyDenied(RuntimeError):
         rule:    short identifier of the rule that fired
                  (``role``, ``mode``, ``state_field``, ``bash``, ...) so
                  reactors can log structured reasons.
+        hint:    optional one-line, agent-actionable suggestion describing
+                 the canonical fix (e.g. "add a 'topic' key to the
+                 send_message payload"). Surfaced in the
+                 ``policy_denied`` observation so the next reactor turn
+                 can self-correct without re-reading the failure
+                 codebook.
     """
 
-    def __init__(self, reason: str, *, rule: str | None = None):
+    def __init__(self, reason: str, *, rule: str | None = None,
+                 hint: str | None = None):
         super().__init__(reason)
         self.rule = rule
+        self.hint = hint
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +90,7 @@ QUICK_BASH_DENYLIST: tuple[str, ...] = (
     "patch ",                  # IR-6: only via integrate action
     "patch_inductor.py",
     "geak",                    # marathon only
-    "make ",                   # framework rebuild
+    "make ",                   # build systems out of executor scope
     "cmake ",
     "ninja",
     "rm -rf",                  # safety belt
@@ -145,6 +153,33 @@ REQUEST_ROUTING: dict[str, frozenset[str]] = {
 # ---------------------------------------------------------------------------
 KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"triage"})
 KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
+
+
+# ---------------------------------------------------------------------------
+# Phase G — triage-only "scheduling police" intents.
+#
+# These are emitted by triage to override executor stalls / dead-end loops:
+#
+#  * force_dispatch       — bump a queued task to the head of the queue
+#  * prune_branch         — cancel queued tasks of a family + add it to
+#                            ``state.pruned_families`` so the scheduler
+#                            stops scoring it
+#  * escalate_strategy_change — broadcast a high-priority strategy hint
+#                                that executor's next tick must read
+#
+# PolicyGate enforces the source allowlist (only triage may emit any of
+# these) on top of the per-role ``allowed_intents`` gate. Both layers
+# agree; the dual check is intentional belt-and-braces because the
+# scheduling-police intents bypass executor's normal authority.
+# ---------------------------------------------------------------------------
+TRIAGE_ONLY_INTENTS: frozenset[IntentType] = frozenset(
+    {
+        IntentType.FORCE_DISPATCH,
+        IntentType.PRUNE_BRANCH,
+        IntentType.ESCALATE_STRATEGY_CHANGE,
+    }
+)
+TRIAGE_ONLY_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"triage"})
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +271,8 @@ class PolicyGate:
             self._validate_response(role, payload)
         elif intent.type == IntentType.KILL_TASK:
             self._validate_kill_task(role, payload)
+        elif intent.type in TRIAGE_ONLY_INTENTS:
+            self._validate_triage_only(role, intent.type, payload)
         # ANSWER / ASK_QUESTION / UPDATE_PERSONA / ALERT carry no
         # policy-relevant side-effects beyond the role gate.
 
@@ -450,6 +487,10 @@ class PolicyGate:
             raise PolicyDenied(
                 "update_state.payload.changes must be a non-empty dict",
                 rule="payload",
+                hint=(
+                    "include at least one allowed field, e.g. "
+                    "{'changes': {'current_action': '<action_name>'}}"
+                ),
             )
         if role.can_mutate_core_state:
             return
@@ -458,6 +499,11 @@ class PolicyGate:
             raise PolicyDenied(
                 f"role={role.name!r} cannot mutate core state fields: {violating!r}",
                 rule="state_field",
+                hint=(
+                    "core fields are conductor-derived; remove "
+                    f"{violating!r} from changes and only set role-allowed "
+                    "fields like current_action / current_tput / crash_count"
+                ),
             )
 
     def _validate_send_message_topic(self, payload: dict[str, Any]) -> None:
@@ -491,6 +537,10 @@ class PolicyGate:
         if not topic:
             raise PolicyDenied(
                 "send_message missing topic", rule="payload",
+                hint=(
+                    "add a 'topic' key, e.g. 'heartbeat' / 'observation' / "
+                    "'alert' / 'request' / 'response' / 'decision' / 'event'"
+                ),
             )
         if topic in TOPIC_ALLOWLIST:
             return
@@ -511,14 +561,35 @@ class PolicyGate:
         if self.action_registry is not None:
             action = self.action_registry.get(action_name)
             if action is None:
+                # Surface up to 8 candidate names to help the agent recover
+                # from typos / hallucinated action ids.
+                try:
+                    candidates = sorted(self.action_registry.names())[:8]
+                except Exception:  # noqa: BLE001
+                    candidates = []
+                hint = (
+                    f"action {action_name!r} not in catalogue; "
+                    f"valid examples: {candidates!r}"
+                ) if candidates else None
                 raise PolicyDenied(
                     f"unknown action {action_name!r}", rule="mode",
+                    hint=hint,
                 )
             modes = getattr(action, "allowed_modes", None)
             if modes is not None and self.mode not in modes:
+                try:
+                    allowed_here = sorted(
+                        a.name for a in self.action_registry.allowed_for_mode(self.mode)
+                    )
+                except Exception:  # noqa: BLE001
+                    allowed_here = []
                 raise PolicyDenied(
                     f"action={action_name!r} not allowed in mode={self.mode.value!r}",
                     rule="mode",
+                    hint=(
+                        f"actions allowed in {self.mode.value}: {allowed_here!r}"
+                        if allowed_here else None
+                    ),
                 )
             return
         # No registry — fall back to mode-specific allow-list.
@@ -527,8 +598,66 @@ class PolicyGate:
                 raise PolicyDenied(
                     f"action={action_name!r} not in quick allowlist",
                     rule="mode",
+                    hint=(
+                        "quick mode action allowlist: "
+                        f"{sorted(self.quick_action_allowlist)!r}"
+                    ),
                 )
         # In guided/marathon, w/o a registry, accept (Phase 4 tightens this).
+
+    def _validate_triage_only(
+        self, role: "AgentRole", intent_type: IntentType,
+        payload: dict[str, Any],
+    ) -> None:
+        """Source-allowlist + payload-shape gate for the Phase G
+        scheduling-police intents (FORCE_DISPATCH / PRUNE_BRANCH /
+        ESCALATE_STRATEGY_CHANGE). The role gate already filters by
+        ``allowed_intents`` (only triage carries them), but we belt-
+        and-brace the source check so a future role mis-assignment
+        cannot quietly grant scheduler-override rights."""
+        if role.name not in TRIAGE_ONLY_SOURCE_ALLOWLIST:
+            raise PolicyDenied(
+                f"intent_type={intent_type.value!r} restricted to "
+                f"{sorted(TRIAGE_ONLY_SOURCE_ALLOWLIST)!r}; "
+                f"role={role.name!r} cannot emit it",
+                rule="triage_only",
+                hint=(
+                    "scheduling-police intents (force_dispatch, "
+                    "prune_branch, escalate_strategy_change) are reserved "
+                    "for the triage agent. Use alert / send_message instead."
+                ),
+            )
+        if intent_type is IntentType.FORCE_DISPATCH:
+            if not str(payload.get("task_id", "")).strip():
+                raise PolicyDenied(
+                    "force_dispatch.payload.task_id must be a non-empty string",
+                    rule="payload",
+                    hint=(
+                        "include the queued task's task_id; check "
+                        "$SESSION_DIR/storage/conductor.db tasks table"
+                    ),
+                )
+        elif intent_type is IntentType.PRUNE_BRANCH:
+            if not str(payload.get("family", "")).strip():
+                raise PolicyDenied(
+                    "prune_branch.payload.family must be a non-empty string",
+                    rule="payload",
+                    hint=(
+                        "family is the action.family value, e.g. 'long' / "
+                        "'deep_kernel' / 'shallow' / 'creative'"
+                    ),
+                )
+        elif intent_type is IntentType.ESCALATE_STRATEGY_CHANGE:
+            if not str(payload.get("next_action_hint", "")).strip():
+                raise PolicyDenied(
+                    "escalate_strategy_change.payload.next_action_hint "
+                    "must be a non-empty string",
+                    rule="payload",
+                    hint=(
+                        "describe the suggested next action / family in "
+                        "1–2 sentences so executor can act on it next tick"
+                    ),
+                )
 
     def validate_quick_bash(self, command: str) -> None:
         """Public helper for SubAgentRunner — validate a single Bash command

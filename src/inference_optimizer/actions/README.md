@@ -27,7 +27,7 @@ lease_ttl_sec:     <int>
 applicable_when:   [<predicate_id>, ...]   # consulted by Scheduler
 ```
 
-## Action list (22 — see DESIGN §12.1)
+## Action list (21 — see DESIGN §12.1)
 
 | family       | quick | guided | marathon | actions |
 | -----------  | :---: | :---:  | :---:    | ------------------------------------------------ |
@@ -36,7 +36,7 @@ applicable_when:   [<predicate_id>, ...]   # consulted by Scheduler
 | shallow      |  ✓    |  ✓     |  ✓       | backends, params, sweep, param_sweep_run, report |
 | deep_kernel  |  ✗    |  ✓     |  ✓       | kernel_opt, integrate                           |
 | deep_kernel  |  ✗    |  ✗     |  ✓       | deep_kernel_analysis, operator_tuning, vendor_kernel_config |
-| long         |  ✗    |  ✗     |  ✓       | framework_rebuild, comm_optimization, compiler_tuning |
+| long         |  ✗    |  ✗     |  ✓       | comm_optimization, compiler_tuning              |
 | creative     |  ✗    |  ✗     |  ✓       | dream, re_explore                               |
 | resilience   |  ✗    |  ✗     |  ✓       | recover                                         |
 

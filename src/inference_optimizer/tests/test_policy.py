@@ -659,3 +659,117 @@ def test_kill_task_scope_server_denied():
 def test_kill_task_constants():
     assert KILL_TASK_SOURCE_ALLOWLIST == frozenset({"triage"})
     assert KILL_TASK_ALLOWED_SCOPES == frozenset({"task"})
+
+
+# ---------------------------------------------------------------------------
+# PolicyDenied hint surface (Phase D — agent self-correction signal)
+# ---------------------------------------------------------------------------
+def test_update_state_empty_changes_carries_hint():
+    gate = make_gate()
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "executor", intent(IntentType.UPDATE_STATE, changes={})
+        )
+    assert exc.value.rule == "payload"
+    assert exc.value.hint
+    assert "current_action" in exc.value.hint
+
+
+def test_update_state_core_field_violation_carries_hint():
+    gate = make_gate()
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "executor",
+            intent(IntentType.UPDATE_STATE,
+                   changes={"cumulative_gain": 5.0}),
+        )
+    assert exc.value.rule == "state_field"
+    assert exc.value.hint and "cumulative_gain" in exc.value.hint
+
+
+def test_send_message_empty_topic_carries_hint():
+    gate = make_gate()
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "executor",
+            intent(IntentType.SEND_MESSAGE, topic="", body_md="x"),
+        )
+    assert exc.value.hint and "heartbeat" in exc.value.hint
+
+
+def test_triage_can_emit_force_dispatch():
+    gate = make_gate()
+    gate.validate_intent(
+        "triage",
+        intent(IntentType.FORCE_DISPATCH,
+               task_id="abcd1234", reason="bump validation bench"),
+    )
+
+
+def test_executor_cannot_emit_force_dispatch_role_gate():
+    gate = make_gate()
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "executor",
+            intent(IntentType.FORCE_DISPATCH,
+                   task_id="abcd1234", reason="bump"),
+        )
+    assert exc.value.rule == "role"
+
+
+def test_triage_can_emit_prune_branch():
+    gate = make_gate()
+    gate.validate_intent(
+        "triage",
+        intent(IntentType.PRUNE_BRANCH,
+               family="long", reason="3 consecutive failures"),
+    )
+
+
+def test_prune_branch_requires_family():
+    gate = make_gate()
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "triage",
+            intent(IntentType.PRUNE_BRANCH, family="", reason="x"),
+        )
+    assert exc.value.rule == "payload"
+    assert exc.value.hint and "family" in exc.value.hint
+
+
+def test_triage_can_emit_escalate_strategy_change():
+    gate = make_gate()
+    gate.validate_intent(
+        "triage",
+        intent(IntentType.ESCALATE_STRATEGY_CHANGE,
+               reason="GPU 0% for 12min",
+               next_action_hint="switch to triton prefill"),
+    )
+
+
+def test_escalate_requires_next_action_hint():
+    gate = make_gate()
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "triage",
+            intent(IntentType.ESCALATE_STRATEGY_CHANGE,
+                   reason="stuck", next_action_hint=""),
+        )
+    assert exc.value.rule == "payload"
+
+
+def test_unknown_action_hint_lists_candidates():
+    """When an ActionRegistry is wired, an unknown action name should
+    surface up to 8 valid candidates so the agent can recover."""
+    from inference_optimizer.paths import asset_actions_dir
+    from inference_optimizer.orchestrator.action_registry import ActionRegistry
+
+    registry = ActionRegistry(asset_actions_dir()).load()
+    gate = make_gate(action_registry=registry)
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "executor",
+            intent(IntentType.DELEGATE, action_name="totally_not_an_action"),
+        )
+    assert exc.value.rule == "mode"
+    assert exc.value.hint and "valid examples" in exc.value.hint

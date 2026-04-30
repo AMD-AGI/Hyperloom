@@ -50,6 +50,13 @@ class IntentType(str, Enum):
     # forces payload.scope to "task" (process / server kills are NOT in
     # MVP — IR-5 still owns server lifecycle).
     KILL_TASK = "kill_task"
+    # Phase G — triage-only "scheduling police" operations. They let the
+    # always-on health watcher steer the dispatcher when the executor is
+    # stuck or going down a dead path. PolicyGate restricts the source
+    # to {"triage"} (TRIAGE_ONLY_INTENTS); see standalone_agent_design.
+    FORCE_DISPATCH = "force_dispatch"            # bump a queued task to head of queue
+    PRUNE_BRANCH = "prune_branch"                 # cancel queued tasks of a family
+    ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"  # high-prio strategy hint
 
 
 @dataclass
@@ -115,6 +122,10 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     # `force: bool` (metadata only in MVP) and `scope: "task"`
     # (PolicyGate rejects scope=process/server). See standalone_agent_design §13.3.
     IntentType.KILL_TASK:       ("task_id", "reason"),
+    # Phase G — triage scheduling-police intents.
+    IntentType.FORCE_DISPATCH:           ("task_id", "reason"),
+    IntentType.PRUNE_BRANCH:             ("family", "reason"),
+    IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
 }
 
 
@@ -148,7 +159,15 @@ EMIT_INTENT_TOOL_SCHEMA: dict[str, Any] = {
                     "request: {target_agent, kind, params?, reason?}; "
                     "response: {in_reply_to, kind, status?, result?}; "
                     "kill_task: {task_id, reason, force?, scope?='task'} "
-                    "(triage only — see PolicyGate.KILL_TASK_SOURCE_ALLOWLIST)."
+                    "(triage only — see PolicyGate.KILL_TASK_SOURCE_ALLOWLIST); "
+                    "force_dispatch: {task_id, reason} (triage only — bumps "
+                    "a queued task to the head of the dispatcher queue); "
+                    "prune_branch: {family, reason} (triage only — cancels "
+                    "queued tasks in that family and adds it to "
+                    "state.pruned_families); "
+                    "escalate_strategy_change: {reason, next_action_hint, "
+                    "severity?='high'} (triage only — emits a priority-0 "
+                    "strategy hint event so executor's next tick reads it)."
                 ),
             },
         },

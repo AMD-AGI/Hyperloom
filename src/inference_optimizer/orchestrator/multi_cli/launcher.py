@@ -154,6 +154,18 @@ class MultiCLILauncher:
         """Return the per-session agent dir (inbox/outbox + cursor live here)."""
         return Path(self.session_dir) / "agents" / card.name
 
+    # Per-pane working directory + Claude SDK config directory.
+    # See standalone_agent_design §13.9.x — pre-fix every Claude pane
+    # shared `$SESSION_DIR/.multicli` as cwd, which made ``claude
+    # --print --continue`` resume the wrong agent's session (the SDK
+    # buckets sessions per cwd hash). With per-pane cwd + per-pane
+    # ``CLAUDE_CONFIG_DIR`` each agent has its own conversation slot.
+    def pane_dir(self, card: AgentCard) -> Path:
+        return self.work_dir / card.name
+
+    def claude_config_dir(self, card: AgentCard) -> Path:
+        return self.pane_dir(card) / ".claude"
+
     # ------------------------------------------------------------------
     # Stage — write all scripts to disk; do NOT spawn anything
     # ------------------------------------------------------------------
@@ -176,6 +188,11 @@ class MultiCLILauncher:
             outbox = agent_dir / card.outbox_filename
             inbox.touch(exist_ok=True)
             outbox.touch(exist_ok=True)
+
+            # Per-pane cwd + Claude config dir (see comment above).
+            pane = self.pane_dir(card)
+            pane.mkdir(parents=True, exist_ok=True)
+            self.claude_config_dir(card).mkdir(parents=True, exist_ok=True)
 
             script_path = self._write_pane_script(card)
             staged[name] = StagedAgent(
@@ -214,17 +231,19 @@ class MultiCLILauncher:
             )
         first = True
         for name, agent in staged.items():
+            card = self.cards[name]
+            pane_cwd = str(self.pane_dir(card))
             if first:
                 subprocess.run(
                     ["tmux", "new-session", "-d", "-s", self.tmux_session,
-                     "-n", name, "-c", str(self.work_dir)],
+                     "-n", name, "-c", pane_cwd],
                     check=True,
                 )
                 first = False
             else:
                 subprocess.run(
                     ["tmux", "new-window", "-t", self.tmux_session,
-                     "-n", name, "-c", str(self.work_dir)],
+                     "-n", name, "-c", pane_cwd],
                     check=True,
                 )
             subprocess.run(
@@ -257,6 +276,7 @@ class MultiCLILauncher:
         """
         staged = self.stage()
         for name, agent in staged.items():
+            card = self.cards[name]
             log_handle = agent.log_file.open("a", encoding="utf-8")
             try:
                 proc = subprocess.Popen(
@@ -265,7 +285,7 @@ class MultiCLILauncher:
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL,
                     start_new_session=True,
-                    cwd=str(self.work_dir),
+                    cwd=str(self.pane_dir(card)),
                 )
             except OSError:
                 log_handle.close()
@@ -449,18 +469,26 @@ class MultiCLILauncher:
         claude = self.claude_bin
         allowed_tools = self.allowed_tools
 
+        pane_dir = self.pane_dir(card)
+        claude_cfg_dir = self.claude_config_dir(card)
         return f"""#!/usr/bin/env bash
 # Auto-generated pane launcher for agent '{card.name}' (backend=claude).
 #
 # Restart-loop strategy mirrors marathon/launcher/run.sh lines 419-472:
 # the inner `claude --print` is one-shot; the outer `while` adds
 # `--continue` from the second iteration onwards to resume the prior
-# conversation history (Anthropic SDK tracks it per working directory).
+# conversation history.
+#
+# Phase B isolation: each agent pane has its own cwd + CLAUDE_CONFIG_DIR
+# so the SDK's per-cwd session bucket cannot leak across agents (the
+# v0.9 marathon kernel-agent bug). See standalone_agent_design §13.9.x.
 set -a
 [ -f "{env_file}" ] && source "{env_file}"
 set +a
 
-cd "{self.work_dir}"
+mkdir -p "{pane_dir}" "{claude_cfg_dir}"
+cd "{pane_dir}"
+export CLAUDE_CONFIG_DIR="{claude_cfg_dir}"
 
 SYSTEM_PROMPT=$(base64 -d <<'B64'
 {sp_b64}
@@ -476,11 +504,15 @@ CONTINUE_FLAG=""
 USER_MSG={initial_msg}
 
 mkdir -p "$(dirname "$LOG")"
-echo "[$(date -Iseconds)] [agent:{card.name}] launcher starting" >> "$LOG"
+echo "[$(date -Iseconds)] [agent:{card.name}] launcher starting (cwd={pane_dir}, claude_cfg={claude_cfg_dir})" >> "$LOG"
 
+OUTBOX="$AGENT_DIR/outbox.jsonl"
+mkdir -p "$AGENT_DIR"
+touch "$OUTBOX"
 while [ ! -f "$STOP_FILE" ] && [ $ATTEMPT -lt $MAX_RESTARTS ]; do
     ATTEMPT=$((ATTEMPT + 1))
     echo "[$(date -Iseconds)] [agent:{card.name}] attempt=$ATTEMPT continue=$CONTINUE_FLAG" >> "$LOG"
+    OUTBOX_LINES_BEFORE=$(wc -l < "$OUTBOX" 2>/dev/null || echo 0)
     {claude} --print \\
         --output-format stream-json --verbose \\
         $CONTINUE_FLAG \\
@@ -492,6 +524,18 @@ while [ ! -f "$STOP_FILE" ] && [ $ATTEMPT -lt $MAX_RESTARTS ]; do
         >> "$LOG" 2>&1 < /dev/null
     EXIT=$?
     echo "[$(date -Iseconds)] [agent:{card.name}] claude exit=$EXIT" >> "$LOG"
+    OUTBOX_LINES_AFTER=$(wc -l < "$OUTBOX" 2>/dev/null || echo 0)
+    if [ "$OUTBOX_LINES_AFTER" = "$OUTBOX_LINES_BEFORE" ] && [ ! -f "$STOP_FILE" ]; then
+        # Turn-end fallback heartbeat (Phase E — analysis-paralysis guard).
+        # The agent's claude session ended without emitting any envelope,
+        # so we surface a single send_message(topic=heartbeat) so the bus
+        # immediately reflects the stall and triage can react.
+        FB_TS=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
+        FB_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-' || python3 -c "import uuid;print(uuid.uuid4().hex)")
+        FB_SEQ=$((OUTBOX_LINES_AFTER + 1))
+        printf '%s\\n' "{{\\"kind\\":\\"intent\\",\\"msg_id\\":\\"$FB_ID\\",\\"seq\\":$FB_SEQ,\\"ts\\":\\"$FB_TS\\",\\"from_agent\\":\\"{card.name}\\",\\"to_agent\\":\\"*\\",\\"intent_type\\":\\"send_message\\",\\"payload\\":{{\\"topic\\":\\"heartbeat\\",\\"body_md\\":\\"no_intent_emitted_this_turn (auto_fallback attempt=$ATTEMPT exit=$EXIT)\\"}}}}" >> "$OUTBOX"
+        echo "[$(date -Iseconds)] [agent:{card.name}] auto-heartbeat appended (no intent this turn)" >> "$LOG"
+    fi
     [ -f "$STOP_FILE" ] && break
     sleep {backoff}
     CONTINUE_FLAG={shlex.quote(continue_flag)}
@@ -522,16 +566,21 @@ echo "[$(date -Iseconds)] [agent:{card.name}] launcher exiting" >> "$LOG"
         codex = self.codex_bin
         conv_log_name = (card.extra or {}).get("conversation_log", "conversation.jsonl")
 
+        pane_dir = self.pane_dir(card)
         return f"""#!/usr/bin/env bash
 # Auto-generated pane launcher for agent '{card.name}' (backend=codex).
 #
 # Codex CLI has no `--continue`. We approximate persistence by re-reading
 # ``conversation.jsonl`` on every restart and prepending it to the prompt.
+#
+# Phase B isolation: each agent pane has its own cwd so any per-cwd
+# tooling state is segregated from sibling agents.
 set -a
 [ -f "{env_file}" ] && source "{env_file}"
 set +a
 
-cd "{self.work_dir}"
+mkdir -p "{pane_dir}"
+cd "{pane_dir}"
 
 SYSTEM_PROMPT=$(base64 -d <<'B64'
 {sp_b64}

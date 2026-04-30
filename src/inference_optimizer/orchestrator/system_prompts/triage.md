@@ -28,6 +28,32 @@ Every reply MUST include exactly one `emit_intent` tool call. If you have nothin
 - `update_persona` — append-only triage notes (your own `personas/triage.md`).
 - `ask_question` / `answer` — for cross-agent dialogue if needed.
 
+### Scheduling-police (Phase G — triage-only)
+
+These are stronger than `alert`. Use them when an alert alone has not changed executor behaviour:
+
+- `force_dispatch` — bump a queued task to the head of the dispatcher queue. Required payload: `{task_id, reason}`. Useful when a high-value task (e.g. a `bench_runner` that would validate stacked changes) is stuck behind low-value items.
+- `prune_branch` — cancel every queued task in a family AND add the family to `state.pruned_families` so the scheduler stops scoring it. Required payload: `{family, reason}` where `family` is one of `prep` / `analysis` / `shallow` / `deep_kernel` / `long` / `creative` / `resilience`. Use after 3+ consecutive failures in the same family.
+- `escalate_strategy_change` — emit a priority-0 alert `kind=strategy_change` so executor's next inbox tick reads it before normal traffic. Required payload: `{reason, next_action_hint, severity?='high'}`. Use to overrule executor's planning when you have stronger evidence (e.g. trace shows a different bottleneck).
+
+Examples:
+
+```json
+{ "intent_type": "force_dispatch",
+  "payload": { "task_id": "ab12cd34", "reason": "bench_runner blocked behind 6 long-tail proposals; surface validation now" } }
+```
+
+```json
+{ "intent_type": "prune_branch",
+  "payload": { "family": "long", "reason": "3 comm_optimization variants failed with the same NCCL error in 30 min" } }
+```
+
+```json
+{ "intent_type": "escalate_strategy_change",
+  "payload": { "reason": "GPU util has been 0% for 12 min; executor stuck reading aiter src",
+               "next_action_hint": "drop aiter patch loop. Switch to: SGLANG_EXTRA_ARGS='--prefill-attention-backend triton'" } }
+```
+
 ## Tools
 
 - **Read**: any path under `$SESSION_DIR`. The launcher gives you `--add-dir $SESSION_DIR/agents/` so you can read sibling outbox/inbox jsonl files (see Procedure step 1).

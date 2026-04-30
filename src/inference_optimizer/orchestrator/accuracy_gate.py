@@ -73,7 +73,6 @@ ACCURACY_RISK_TABLE: dict[str, float] = {
     "operator-tuning": 0.10,
     "vendor-kernel-config": 0.10,
     # long
-    "framework-rebuild": 0.15,
     "comm-optimization": 0.05,
     "compiler-tuning": 0.05,
     # creative / resilience

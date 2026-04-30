@@ -239,7 +239,7 @@ def choose_execution_mode(env) -> ExecutionMode:
 | F14 | 浅层 9 action：setup / classify / target-analysis / baseline / profile / backends / params / sweep / report | ✓ | ✓ | ✓ |
 | F15 | kernel-opt + integrate（GEAK 调用 + Inductor patch） | ✗ | ✓ | ✓ |
 | F16 | 深层 3 action：deep-kernel-analysis / operator-tuning / vendor-kernel-config | ✗ | ✗ | ✓ |
-| F17 | 长跑 6 action：framework-rebuild / comm-optimization / compiler-tuning / dream / re-explore / recover | ✗ | ✗ | ✓ |
+| F17 | 长跑 5 action：comm-optimization / compiler-tuning / dream / re-explore / recover | ✗ | ✗ | ✓ |
 
 ##### 协作模式（A2A）
 
@@ -1522,7 +1522,6 @@ class SubAgentRunner:
 | **deep-kernel-analysis** | deep_kernel | marathon | ✗ | ✗ | ✓ | 0.0 |
 | **operator-tuning** | deep_kernel | marathon | ✗ | ✗ | ✓ | 0.10 |
 | **vendor-kernel-config** | deep_kernel | sprint | ✗ | ✗ | ✓ | 0.10 |
-| **framework-rebuild** | long | marathon | ✗ | ✗ | ✓ | 0.15 |
 | **comm-optimization** | long | marathon | ✗ | ✗ | ✓ | 0.05 |
 | **compiler-tuning** | long | marathon | ✗ | ✗ | ✓ | 0.05 |
 | **dream** | creative | marathon | ✗ | ✗ | ✓ | 0.0 (生成假设) |
@@ -1535,14 +1534,14 @@ class SubAgentRunner:
 
 ```yaml
 ---
-name: framework-rebuild
+name: comm-optimization
 family: long
-cost_minutes_p50: 60
-cost_minutes_p75: 90
-expected_gain_pct: 5-15
-accuracy_risk: 0.15
-crash_risk: 0.30
-prerequisites: [profile, deep-kernel-analysis]
+cost_minutes_p50: 40
+cost_minutes_p75: 60
+expected_gain_pct: 3-10
+accuracy_risk: 0.05
+crash_risk: 0.10
+prerequisites: [profile]
 requires_lanes: [server_lifecycle, workspace_mutation]
 allowed_tools: [Read, Bash, Edit]
 side_effects: [workspace_write, server_restart]
@@ -2118,7 +2117,7 @@ src/inference_optimizer/              # 实现独立目录（统一代码库）
 │   ├── backends.md / params.md / sweep.md / report.md
 │   ├── kernel-opt.md / integrate.md
 │   ├── deep-kernel-analysis.md / operator-tuning.md / vendor-kernel-config.md
-│   ├── framework-rebuild.md / comm-optimization.md / compiler-tuning.md
+│   ├── comm-optimization.md / compiler-tuning.md
 │   ├── dream.md / re-explore.md / recover.md
 │   └── _meta/                         # 每个 action 的 yaml metadata
 ├── kb/

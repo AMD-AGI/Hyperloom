@@ -18,6 +18,10 @@ capabilities:
   - update_persona
   - ask_question
   - answer
+  # Phase G — scheduling-police intents (PolicyGate restricts source to triage).
+  - force_dispatch
+  - prune_branch
+  - escalate_strategy_change
 allowed_modes:
   - quick_param_sweep
   - guided_kernel_opt
@@ -39,3 +43,8 @@ extra:
 
     kill_task scope is restricted to "task" — server / process kills are
     out of MVP scope per IR-5.
+
+    Phase G expansion — triage is also the sole source for
+    `force_dispatch` / `prune_branch` / `escalate_strategy_change`
+    (PolicyGate.TRIAGE_ONLY_SOURCE_ALLOWLIST). Use these when the
+    executor is stuck or repeating dead paths instead of just alerting.

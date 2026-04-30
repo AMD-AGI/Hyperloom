@@ -378,6 +378,226 @@ async def test_update_persona_refreshes_in_memory_index(tmp_path: Path):
 # Dispatcher loop drains queued delegate tasks
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
+async def test_auto_bench_enqueued_after_workspace_mutation(tmp_path: Path):
+    """Phase C — ``_on_task_finished`` must auto-enqueue a bench_runner
+    task whenever a workspace_mutation action succeeds and no bench_runner
+    is already in-flight."""
+    db = SqliteConnection(tmp_path / "storage" / "conductor.db")
+    registry = ActionRegistry(PACKAGE_ACTIONS_DIR).load()
+    conductor = Conductor(
+        tmp_path,
+        backend=MockBackend(),
+        env={"MODEL_PATH": "fake", "MAX_HOURS": "0.05"},
+        db=db,
+        action_registry=registry,
+        enable_dispatcher=False,
+    )
+    await conductor._bootstrap()
+    # Pick any workspace_mutation action that exists.
+    mutation_meta = next(
+        a for a in registry.all()
+        if "workspace_mutation" in (a.requires_lanes or ())
+    )
+
+    class _StubResult:
+        status = "succeeded"
+        metrics: dict = {}
+
+    class _StubTask:
+        task_id = "abcdef123456"
+        params = {"action_name": mutation_meta.name}
+
+    await conductor._on_task_finished(_StubTask(), _StubResult())
+    queued = await conductor.ctx.tasks.list_by_state("queued")
+    bench_tasks = [
+        t for t in queued
+        if (t.params or {}).get("action_name") == "bench_runner"
+    ]
+    assert bench_tasks, (
+        f"expected an auto-enqueued bench_runner after {mutation_meta.name}, "
+        f"got queued={[t.params for t in queued]}"
+    )
+    assert bench_tasks[0].params["auto_after"] == mutation_meta.name
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_bench_skipped_when_bench_already_running(tmp_path: Path):
+    db = SqliteConnection(tmp_path / "storage" / "conductor.db")
+    registry = ActionRegistry(PACKAGE_ACTIONS_DIR).load()
+    conductor = Conductor(
+        tmp_path,
+        backend=MockBackend(),
+        env={"MODEL_PATH": "fake", "MAX_HOURS": "0.05"},
+        db=db,
+        action_registry=registry,
+        enable_dispatcher=False,
+    )
+    await conductor._bootstrap()
+    # Pre-stage a bench_runner in queued state.
+    await conductor.ctx.tasks.create(
+        kind="delegate",
+        params={"action_name": "bench_runner", "params": {},
+                "requested_by": "executor"},
+        idempotency_key="manual-bench-1",
+    )
+    mutation_meta = next(
+        a for a in registry.all()
+        if "workspace_mutation" in (a.requires_lanes or ())
+    )
+
+    class _R:
+        status = "succeeded"
+        metrics: dict = {}
+
+    class _T:
+        task_id = "abcdef987654"
+        params = {"action_name": mutation_meta.name}
+
+    await conductor._on_task_finished(_T(), _R())
+    bench_tasks = [
+        t for t in await conductor.ctx.tasks.list_by_state("queued")
+        if (t.params or {}).get("action_name") == "bench_runner"
+    ]
+    assert len(bench_tasks) == 1, (
+        "auto-bench should skip when one is already in flight"
+    )
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_bench_done_event_falls_back_into_state_tput(tmp_path: Path):
+    """Phase C — when a ``send_message{topic=event,kind=bench_done}``
+    arrives the conductor mirrors the per-GPU throughput into
+    SharedState even if no ``update_state`` reaches it (e.g. agent
+    silently dropped that intent)."""
+    db = SqliteConnection(tmp_path / "storage" / "conductor.db")
+    conductor = Conductor(
+        tmp_path,
+        backend=MockBackend(),
+        env={"MODEL_PATH": "fake", "MAX_HOURS": "0.001"},
+        db=db,
+        enable_dispatcher=False,
+    )
+    await conductor._bootstrap()
+    conductor.ctx.state.baseline_tput = 1000.0
+    conductor.ctx.state.current_tput = 1000.0
+    await conductor._handle_send_message(
+        "executor",
+        {
+            "topic": "event",
+            "body_md": "bench complete",
+            "kind": "bench_done",
+            "tput_per_gpu": 1500.0,
+            "tput_total": 6000.0,
+        },
+    )
+    assert conductor.ctx.state.current_tput == pytest.approx(1500.0)
+    # Cumulative gain should also be recomputed: (1500/1000 - 1)*100 = 50%.
+    assert conductor.ctx.state.cumulative_gain == pytest.approx(50.0)
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_force_dispatch_promotes_queued_task_to_head(tmp_path: Path):
+    db = SqliteConnection(tmp_path / "storage" / "conductor.db")
+    conductor = Conductor(
+        tmp_path,
+        backend=MockBackend(),
+        env={"MODEL_PATH": "fake", "MAX_HOURS": "0.05"},
+        db=db,
+        enable_dispatcher=False,
+    )
+    await conductor._bootstrap()
+    # Two queued tasks; second one is the one we want force-dispatched.
+    a = await conductor.ctx.tasks.create(
+        kind="delegate",
+        params={"action_name": "bench_runner", "params": {},
+                "requested_by": "executor"},
+        idempotency_key="t1",
+    )
+    b = await conductor.ctx.tasks.create(
+        kind="delegate",
+        params={"action_name": "bench_runner", "params": {"x": 1},
+                "requested_by": "executor"},
+        idempotency_key="t2",
+    )
+    await conductor._handle_force_dispatch(
+        "triage", {"task_id": b.task_id, "reason": "test"},
+    )
+    rows = await db.fetchall(
+        "SELECT task_id, created_at FROM tasks "
+        "WHERE kind='delegate' AND state='queued' ORDER BY created_at"
+    )
+    assert rows[0]["task_id"] == b.task_id
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_prune_branch_cancels_family_and_marks_state(tmp_path: Path):
+    db = SqliteConnection(tmp_path / "storage" / "conductor.db")
+    registry = ActionRegistry(PACKAGE_ACTIONS_DIR).load()
+    conductor = Conductor(
+        tmp_path,
+        backend=MockBackend(),
+        env={"MODEL_PATH": "fake", "MAX_HOURS": "0.05"},
+        db=db,
+        action_registry=registry,
+        enable_dispatcher=False,
+    )
+    await conductor._bootstrap()
+    # Pick a long-family action and queue one.
+    long_action = next(a for a in registry.all() if a.family == "long")
+    await conductor.ctx.tasks.create(
+        kind="delegate",
+        params={"action_name": long_action.name, "params": {},
+                "requested_by": "executor"},
+        idempotency_key="prune-test-1",
+    )
+    await conductor._handle_prune_branch(
+        "triage", {"family": "long", "reason": "3 consecutive failures"},
+    )
+    assert "long" in conductor.ctx.state.pruned_families
+    cancelled = await conductor.ctx.tasks.list_by_state("cancelled")
+    assert any(
+        (t.params or {}).get("action_name") == long_action.name for t in cancelled
+    )
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_escalate_strategy_change_emits_priority0_alert(tmp_path: Path):
+    db = SqliteConnection(tmp_path / "storage" / "conductor.db")
+    conductor = Conductor(
+        tmp_path,
+        backend=MockBackend(),
+        env={"MODEL_PATH": "fake", "MAX_HOURS": "0.05"},
+        db=db,
+        enable_dispatcher=False,
+    )
+    await conductor._bootstrap()
+    await conductor._handle_escalate_strategy_change(
+        "triage",
+        {
+            "reason": "GPU idle 12min",
+            "next_action_hint": "switch to triton prefill",
+            "severity": "high",
+        },
+    )
+    bus = MessageBus(db)
+    msgs = await bus.tail(n=20)
+    strat = [
+        m for m in msgs
+        if m.topic == "alert"
+        and (m.payload or {}).get("kind") == "strategy_change"
+    ]
+    assert strat, f"expected strategy_change alert, got {msgs}"
+    assert strat[0].priority == 0
+    assert strat[0].to_agent == "executor"
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_dispatcher_loop_drains_queued_delegates(tmp_path: Path):
     db = SqliteConnection(tmp_path / "storage" / "conductor.db")
     registry = ActionRegistry(PACKAGE_ACTIONS_DIR).load()

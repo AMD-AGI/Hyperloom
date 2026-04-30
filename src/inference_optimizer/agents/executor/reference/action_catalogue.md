@@ -4,7 +4,7 @@
 this mode" table into your prompt every turn. That table reflects live
 metadata + lane availability — trust it over this static snapshot.
 
-This file is for orientation: **which 22 actions exist, by family**.
+This file is for orientation: **which 21 actions exist, by family**.
 
 > Authoritative metadata: `src/inference_optimizer/actions/_meta/<name>.yaml`
 > Markdown bodies (the per-action prompts SubAgentRunner injects):
@@ -18,11 +18,11 @@ This file is for orientation: **which 22 actions exist, by family**.
 | `analysis` | Profile / collect evidence | ✓ | ✓ | ✓ |
 | `shallow` | Backends / params / sweep / report | ✓ | ✓ | ✓ |
 | `deep_kernel` | Kernel-opt / integrate / operator tuning | ✗ | partial | ✓ |
-| `long` | Framework rebuild / comm / compiler | ✗ | ✗ | ✓ |
+| `long` | Comm / compiler tuning | ✗ | ✗ | ✓ |
 | `creative` | Dream / re-explore | ✗ | ✗ | ✓ |
 | `resilience` | Recover from checkpoint | ✗ | ✗ | ✓ |
 
-## All 22 actions (by family, alphabetical within family)
+## All 21 actions (by family, alphabetical within family)
 
 ### prep
 
@@ -66,7 +66,6 @@ This file is for orientation: **which 22 actions exist, by family**.
 |---|:-:|:-:|:-:|---|
 | `comm_optimization` | ✗ | ✗ | ✓ | NCCL / RCCL / SHMEM tuning |
 | `compiler_tuning` | ✗ | ✗ | ✓ | torch.compile / triton.autotune envelope |
-| `framework_rebuild` | ✗ | ✗ | ✓ | Rebuild sglang/vllm/aiter (cost_p75 ≈ 90min) |
 
 ### creative
 
@@ -91,7 +90,7 @@ back to `DEFAULT_QUICK_ACTION_ALLOWLIST`:
  bench_runner, profile, diagnostic_probe, kb_query, report}
 ```
 
-`kernel_opt` / `integrate` / `framework_rebuild` etc. are NOT on this
+`kernel_opt` / `integrate` etc. are NOT on this
 list and will be rejected even before `mode_gate=0` fires.
 
 ## Lane requirements (concurrency)

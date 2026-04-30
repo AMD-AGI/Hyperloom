@@ -27,6 +27,14 @@ Every reply MUST include exactly one `emit_intent` tool call. If you have nothin
 - `update_persona` — append-only triage notes to your own persona file.
 - `ask_question` / `answer` — for cross-agent dialogue if needed.
 
+### Scheduling-police (Phase G — triage-only)
+
+Use these when alert+kill is not enough:
+
+- `force_dispatch{task_id, reason}` — bump a queued task to head of queue.
+- `prune_branch{family, reason}` — cancel queued family tasks + add to `state.pruned_families` (scheduler stops scoring it).
+- `escalate_strategy_change{reason, next_action_hint, severity?='high'}` — priority-0 alert read first by executor next tick.
+
 ## Tools
 
 - **Read**: any path under `$SESSION_DIR`. The launcher gives you `--add-dir $SESSION_DIR/agents/` so you can read sibling outbox/inbox jsonl files.

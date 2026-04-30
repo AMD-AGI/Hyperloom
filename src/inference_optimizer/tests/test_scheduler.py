@@ -100,11 +100,11 @@ def test_mode_gate_allows_quick_action(registry, state: SharedState):
 
 
 def test_depth_gate_blocks_too_long_action(registry, state: SharedState):
-    """``framework_rebuild`` (~75 min p75) should be killed when only 30 min remain."""
+    """``compiler_tuning`` (~75 min p75) should be killed when only 30 min remain."""
     sch = _scheduler(registry, mode=ExecutionMode.MARATHON_MULTI_AGENT)
     state.max_minutes = 60.0
     state.elapsed_minutes = 30.0
-    a = registry.get("framework_rebuild")
+    a = registry.get("compiler_tuning")
     s = sch.score(a, state)
     assert s.breakdown["depth_gate"] == 0.0
 
@@ -263,5 +263,55 @@ def test_score_breakdown_keys_present(registry, state: SharedState):
     expected_keys = {
         "base", "pressure", "mode_gate", "depth_gate",
         "diminishing", "lane_available", "prior", "adjustment",
+        "family_gate",
     }
     assert expected_keys <= set(s.breakdown)
+
+
+# ---------------------------------------------------------------------------
+# family-level dead-end pruning (scheduling problem #6)
+# ---------------------------------------------------------------------------
+def test_family_pruning_zeros_score(registry, state: SharedState):
+    """Once a family is in ``state.pruned_families`` every action in
+    that family must score 0.0 via the new ``family_gate`` factor."""
+    sch = _scheduler(registry, mode=ExecutionMode.MARATHON_MULTI_AGENT)
+    a = registry.get("comm_optimization")
+    assert a is not None
+    state.pruned_families.add(a.family)
+    s = sch.score(a, state)
+    assert s.breakdown["family_gate"] == 0.0
+    assert s.score == 0.0
+
+
+def test_family_pruning_does_not_affect_other_families(
+    registry, state: SharedState
+):
+    sch = _scheduler(registry, mode=ExecutionMode.MARATHON_MULTI_AGENT)
+    state.pruned_families.add("long")
+    bench = registry.get("bench_runner")
+    s = sch.score(bench, state)
+    assert s.breakdown["family_gate"] == 1.0
+
+
+def test_record_action_outcome_streak_then_prune(state: SharedState):
+    fam = "long"
+    for _ in range(state.FAMILY_FAILURE_PRUNE_THRESHOLD - 1):
+        state.record_action_outcome(fam, succeeded=False)
+    assert fam not in state.pruned_families
+    state.record_action_outcome(fam, succeeded=False)
+    assert fam in state.pruned_families
+    # A success resets the streak and lifts the prune.
+    state.record_action_outcome(fam, succeeded=True)
+    assert fam not in state.pruned_families
+    assert state.family_failure_streak[fam] == 0
+
+
+def test_pick_next_skips_pruned_family(registry, state: SharedState):
+    sch = _scheduler(registry, mode=ExecutionMode.MARATHON_MULTI_AGENT)
+    # Prune everything except prep & analysis to force the picker into
+    # those small families.
+    for fam in ("long", "deep_kernel", "shallow", "creative", "resilience"):
+        state.pruned_families.add(fam)
+    pick = sch.pick_next(state)
+    if pick is not None:
+        assert pick.family not in state.pruned_families

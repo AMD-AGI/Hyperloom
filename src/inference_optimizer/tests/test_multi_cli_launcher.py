@@ -132,6 +132,55 @@ def test_claude_pane_emits_restart_loop(tmp_path: Path):
     assert "base64 -d" in body
 
 
+def test_pane_isolation_per_agent_cwd_and_claude_config(tmp_path: Path):
+    """Phase B — every staged agent must get its own per-pane cwd
+    (``$WORK/<name>/``) and per-pane Claude config dir
+    (``$WORK/<name>/.claude``). The pane script must ``cd`` there and
+    export ``CLAUDE_CONFIG_DIR`` before invoking ``claude --print``."""
+    session = tmp_path / "session"
+    session.mkdir()
+    cards = {
+        "executor": _stub_card(tmp_path, "executor", backend="claude"),
+        "critic": _stub_card(tmp_path, "critic", backend="claude"),
+    }
+    launcher = MultiCLILauncher(session_dir=session, cards=cards)
+    staged = launcher.stage()
+
+    exec_pane = session / WORK_SUBDIR / "executor"
+    crit_pane = session / WORK_SUBDIR / "critic"
+    assert exec_pane.is_dir() and (exec_pane / ".claude").is_dir()
+    assert crit_pane.is_dir() and (crit_pane / ".claude").is_dir()
+    assert exec_pane != crit_pane
+
+    exec_body = staged["executor"].pane_script.read_text()
+    crit_body = staged["critic"].pane_script.read_text()
+    assert f'cd "{exec_pane}"' in exec_body
+    assert f'cd "{crit_pane}"' in crit_body
+    assert f'export CLAUDE_CONFIG_DIR="{exec_pane / ".claude"}"' in exec_body
+    assert f'export CLAUDE_CONFIG_DIR="{crit_pane / ".claude"}"' in crit_body
+
+
+def test_claude_pane_emits_turn_end_heartbeat_fallback(tmp_path: Path):
+    """Phase E: when claude exits without writing any envelope to its
+    outbox, the pane script must append a single send_message
+    (topic=heartbeat) so the bus reflects the stall and triage can
+    react. See standalone_agent_design §13.9.x — analysis-paralysis
+    guard."""
+    session = tmp_path / "session"
+    session.mkdir()
+    cards = {"executor": _stub_card(tmp_path, "executor", backend="claude")}
+    launcher = MultiCLILauncher(session_dir=session, cards=cards)
+    staged = launcher.stage()
+    body = staged["executor"].pane_script.read_text()
+    # We capture line counts before/after the claude call.
+    assert "OUTBOX_LINES_BEFORE=" in body
+    assert "OUTBOX_LINES_AFTER=" in body
+    # When unchanged the script appends a structured send_message envelope.
+    assert "no_intent_emitted_this_turn" in body
+    assert '\\"intent_type\\":\\"send_message\\"' in body
+    assert '\\"topic\\":\\"heartbeat\\"' in body
+
+
 def test_claude_pane_omits_continue_when_disabled(tmp_path: Path):
     session = tmp_path / "session"
     session.mkdir()

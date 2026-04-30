@@ -29,7 +29,7 @@ _DEEP_KERNEL = {
     "operator_tuning",
     "vendor_kernel_config",
 }
-_LONG = {"framework_rebuild", "comm_optimization", "compiler_tuning"}
+_LONG = {"comm_optimization", "compiler_tuning"}
 _CREATIVE = {"dream", "re_explore"}
 _RESILIENCE = {"recover"}
 
@@ -68,8 +68,7 @@ def test_deep_kernel_actions_excluded_from_quick(registry: ActionRegistry, name:
 
 @pytest.mark.parametrize(
     "name", sorted({"deep_kernel_analysis", "operator_tuning",
-                    "framework_rebuild", "comm_optimization",
-                    "compiler_tuning", "dream"})
+                    "comm_optimization", "compiler_tuning", "dream"})
 )
 def test_marathon_only_actions(registry: ActionRegistry, name: str):
     a = registry.get(name)
