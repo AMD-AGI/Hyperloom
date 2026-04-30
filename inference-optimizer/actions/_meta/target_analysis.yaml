@@ -1,0 +1,23 @@
+name: target_analysis
+family: prep
+cost_minutes_p50: 2.0
+cost_minutes_p75: 4.0
+expected_gain_pct: [0.0, 0.0]
+accuracy_risk: 0.0
+crash_risk: 0.0
+prerequisites:
+  - classify
+requires_lanes: []
+allowed_tools:
+  - emit_intent
+  - Read
+side_effects:
+  - reads_model_files
+  - writes_state
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 10
+lease_ttl_sec: 300
+applicable_when:
+  - "model_class != ''"
+  - "target_summary == ''"
