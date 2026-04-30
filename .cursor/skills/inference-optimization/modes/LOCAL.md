@@ -27,7 +27,7 @@ if [ "${MODE:-}" = "local" ]; then
     WORKSPACE_ROOT="${WORKSPACE_ROOT:-/opt/hyperloom}"
     GEAK_CLI="python3 $SKILL_ROOT/scripts/geak_ray_submit.py"
     OOB_RAY_CLI="python3 $SKILL_ROOT/scripts/oob_ray_submit.py"
-    OOB_CLI="${OOB_CLI:-oob}"  #底层 binary，由 oob_ray_submit.py 内部调用
+    OOB_CLI="${OOB_CLI:-oob}"
 fi
 ```
 
