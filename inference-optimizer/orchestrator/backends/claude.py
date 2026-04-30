@@ -109,7 +109,10 @@ class ClaudeBackend:
 
     model: str | None = None
     api_key_env: str = "ANTHROPIC_API_KEY"
-    max_turns_default: int = 5
+    # Default of 4 covers the typical reactor-tick sequence:
+    # tool_use → tool_result → final assistant text (3 messages).
+    # Larger = more retries on validation failure but more tokens.
+    max_turns_default: int = 4
     enable_mcp_emit_intent: bool = True
 
     # Test seams — set these to bypass SDK import / network calls.
@@ -215,14 +218,27 @@ class ClaudeBackend:
         if system_prompt:
             kwargs["system_prompt"] = system_prompt
         # Allowed tools = caller-provided + our MCP-qualified emit_intent.
-        allowed = list(tools)
+        # Drop the unqualified short name "emit_intent" — Claude CLI rejects
+        # bare tool names that don't match a real registered tool. The MCP
+        # qualified form "mcp__inference_optimizer__emit_intent" is what
+        # actually wires into the SDK tool registry.
+        allowed = [t for t in tools if t != EMIT_INTENT_TOOL_NAME]
         if self.mcp_tool_name and self.mcp_tool_name not in allowed:
             allowed.append(self.mcp_tool_name)
         if allowed:
             kwargs["allowed_tools"] = allowed
         if self.mcp_server_config is not None:
             kwargs["mcp_servers"] = {MCP_SERVER_NAME: self.mcp_server_config}
+        # Capture CLI stderr so failures are diagnosable instead of opaque
+        # "Command failed with exit code 1".
+        kwargs["stderr"] = self._stderr_sink
         return self.sdk_options_cls(**kwargs)
+
+    def _stderr_sink(self, line: str) -> None:
+        """Default stderr handler — append to ``self.calls`` for postmortems."""
+        text = line.strip()
+        if text:
+            self.calls.append({"stderr": text})
 
     async def _invoke_and_collect(
         self, prompt: str, options: Any
