@@ -62,6 +62,7 @@ curl -sk "$SAFE_API_BASE/api/v1/workloads/$WORKLOAD_ID" \
 ```
 
 Do NOT waste turns exploring the environment for API keys. Use the key above directly.
+Do NOT call exit_plan_mode or enter_plan_mode — these tools don't exist. Just execute directly.
 
 InferenceX Baseline:
 Target GPU: {target_gpu}
