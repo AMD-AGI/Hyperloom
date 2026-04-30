@@ -196,7 +196,7 @@ class PolicyGate:
 
         Codex roles → ``[]`` (no-tools). Claude roles → ``["emit_intent"]``
         in v0.6; per-action Read/Bash/Edit injection happens in
-        SubAgentRunner (P0-3).
+        SubAgentRunner (P0-3) and via :meth:`allowed_tools_for_action`.
         """
         role = self.role_registry.get(agent_name)
         if role is None:
@@ -204,6 +204,20 @@ class PolicyGate:
         if role.no_tools:
             return []
         return ["emit_intent"]
+
+    def allowed_tools_for_action(self, action_name: str) -> list[str]:
+        """Per-action tool intersection used by SubAgentRunner.
+
+        Returns the action's declared ``allowed_tools`` from metadata, or
+        the conservative default ``["emit_intent"]`` when no
+        ActionRegistry is wired or the action is unknown.
+        """
+        if self.action_registry is None:
+            return ["emit_intent"]
+        meta = self.action_registry.get(action_name)
+        if meta is None:
+            return ["emit_intent"]
+        return list(meta.allowed_tools)
 
     # ------------------------------------------------------------------
     # Per-intent validators
@@ -225,11 +239,32 @@ class PolicyGate:
                 f"of delegate(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
             )
+        # If an ActionRegistry is wired, refuse delegate for unknown action names.
+        # No registry → fall through (P0 / dev-mode where registry isn't loaded).
+        if self.action_registry is not None and self.action_registry.get(action_name) is None:
+            raise PolicyDenied(
+                f"unknown action_name={action_name!r} (not in ActionRegistry)",
+                rule="unknown_action",
+                hint="register a yaml under inference-optimizer/actions/_meta/<name>.yaml",
+            )
 
     def _validate_propose_action(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
+        # Soft check — propose is advisory; only reject if registry is wired
+        # AND the name is unknown AND it's not a kernel-owned action (which
+        # are listed in metadata under their canonical names).
+        if (
+            self.action_registry is not None
+            and action_name not in KERNEL_OWNED_ACTIONS
+            and self.action_registry.get(action_name) is None
+        ):
+            raise PolicyDenied(
+                f"propose_action: unknown action_name={action_name!r} "
+                f"(not in ActionRegistry)",
+                rule="unknown_action",
+            )
 
     def _validate_state_transition(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         changes = payload.get("changes")
