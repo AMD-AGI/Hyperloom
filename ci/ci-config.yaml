@@ -4,7 +4,7 @@ claw:
   sandbox_workspace_env: SANDBOX_WORKSPACE
   sandbox_timeout: 28800
   agent_id: agent_default
-  tools: [66]  # 66=ci-mix300 v1.1.0(skill). SaFE API key passed via prompt.
+  tools: [67]  # 67=ci-mix300 v1.2.0(skill) with submit_workload.mjs + check_workload.mjs
 
 inferenceX:
   repo: https://github.com/SemiAnalysisAI/InferenceX.git
