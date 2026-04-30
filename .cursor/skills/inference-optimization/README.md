@@ -19,7 +19,7 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 ### Output directories (on shared NFS)
 
 ```
-/shared_nfs/inference-optimization/
+/wekafs/inference-optimization/
 ├── results/<timestamp>/     # Benchmark JSON results + server logs
 ├── traces/<timestamp>/      # Profiler traces (directly on NFS for TraceLens)
 ```
@@ -41,8 +41,8 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 
 - **GPU**: AMD Instinct MI355X / MI325X / MI300X (ROCm 7.0+)
 - **Framework**: SGLang v0.5.9+ installed
-- **InferenceX**: Cloned (e.g. `/shared_nfs/InferenceX`)
-- **Model**: Downloaded locally (e.g. `/shared_nfs/models/DeepSeek-R1-0528`)
+- **InferenceX**: Cloned (e.g. `/wekafs/InferenceX`)
+- **Model**: Downloaded locally (e.g. `/wekafs/models/DeepSeek-R1-0528`)
 - **MCP servers**:
   - TraceLens — kernel profiling analysis
   - GEAK — kernel optimization (remote GPU pod)
@@ -54,8 +54,8 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 
 ```
 @inference-optimization Optimize Qwen3-30B-A3B inference on MI355X.
-Model: /shared_nfs/models/Qwen3-30B-A3B
-InferenceX: /shared_nfs/InferenceX
+Model: /wekafs/models/Qwen3-30B-A3B
+InferenceX: /wekafs/InferenceX
 
 Run the full torch.compile + GEAK pipeline:
 1. Baseline (no torch.compile)
@@ -74,7 +74,7 @@ This follows the **verified best path**: torch.compile generates Triton kernels 
 
 ```
 @inference-optimization Profile DeepSeek-R1 inference bottlenecks.
-Model: /shared_nfs/models/DeepSeek-R1-0528
+Model: /wekafs/models/DeepSeek-R1-0528
 Just run baseline + TraceLens analysis. Show kernel breakdown.
 No GEAK optimization or parameter sweep needed.
 ```
@@ -83,7 +83,7 @@ No GEAK optimization or parameter sweep needed.
 
 ```
 @inference-optimization Sweep DeepSeek-R1 inference across CONC=4,8,16,32,64.
-Model: /shared_nfs/models/DeepSeek-R1-0528
+Model: /wekafs/models/DeepSeek-R1-0528
 ISL/OSL: 1k/1k and 8k/1k. Skip TraceLens/GEAK, just benchmark.
 ```
 

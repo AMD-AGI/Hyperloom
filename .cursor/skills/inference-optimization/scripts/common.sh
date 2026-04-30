@@ -15,7 +15,7 @@
 # Mode detection
 MODE="${MODE:-local}"
 if [ "$MODE" = "claw" ]; then
-    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/shared_nfs/inference-optimization}"
+    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/wekafs/inference-optimization}"
 else
     WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace/inference-optimization}"
 fi
