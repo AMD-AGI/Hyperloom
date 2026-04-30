@@ -364,7 +364,8 @@ async def test_conductor_prune_branch_cancels_family_and_future_proposals(sessio
         b_after = await c.tasks.get(b.task_id)
         assert a_after.state == "cancelled"
         assert b_after.state == "cancelled"
-        assert "deep_kernel_analysis" in c.state.pruned_families
+        # P1-3: pruned_families now lives in persistent SharedState
+        assert "deep_kernel_analysis" in c.shared_state.pruned_families
 
         # Future proposal of same family is soft-rejected
         await c._handle_intent("orchestration", Intent(
