@@ -47,21 +47,30 @@ Use this API key for ALL SaFE platform operations (workload create/get/stop):
   SAFE_API_KEY={safe_api_key}
   SAFE_API_BASE=https://core42.primus-safe.amd.com
 
-Example — create a PyTorchJob:
+IMPORTANT — Workload Submission:
+Your skill has ready-to-use scripts at `$SKILL_ROOT/scripts/`:
+1. Write your entrypoint bash script to `/workspace/hyperloom/entrypoint.sh`
+2. Submit: `node $SKILL_ROOT/scripts/submit_workload.mjs --api-key "$SAFE_API_KEY" --workspace core42-hyperloom --name my-job --image "vllm/vllm-openai-rocm:v0.17.0" --script /workspace/hyperloom/entrypoint.sh`
+3. Check: `node $SKILL_ROOT/scripts/check_workload.mjs --api-key "$SAFE_API_KEY" --id WORKLOAD_ID --wait --logs`
+
+Where $SKILL_ROOT is at: /workspace/users/*/sessions/*/.skills/ci-mix300
+Find it with: `ls /workspace/users/*/sessions/*/.skills/ci-mix300/scripts/submit_workload.mjs`
+
+If those scripts don't exist, use this curl format instead:
+
+IMPORTANT: The correct SaFE workload create format (DO NOT deviate — use this EXACTLY):
 ```bash
-curl -sk -X POST "$SAFE_API_BASE/api/v1/workloads" \
-  -H "Authorization: Bearer $SAFE_API_KEY" \
+curl -sk -X POST "https://core42.primus-safe.amd.com/api/v1/workloads" \
+  -H "Authorization: Bearer {safe_api_key}" \
   -H "Content-Type: application/json" \
-  -d '{{"displayName":"my-job","workspaceId":"{sandbox_workspace}","kind":"PyTorchJob",...}}'
+  -d '{{"displayName":"JOBNAME","workspaceId":"{sandbox_workspace}","kind":"PyTorchJob","images":["vllm/vllm-openai-rocm:v0.17.0"],"resources":[{{"replica":1,"cpu":"96","gpu":"8","memory":"1024Gi"}}],"entryPoints":["echo HELLO"],"isTolerateAll":true,"ttlSecondsAfterFinished":600}}'
 ```
+- `entryPoints` must be an array of strings: `["bash /path/to/script.sh"]`
+- `images` must be an array: `["image:tag"]`
+- To poll status: `curl -sk "https://core42.primus-safe.amd.com/api/v1/workloads/$WID" -H "Authorization: Bearer {safe_api_key}"`
+- To get logs: `curl -sk "https://core42.primus-safe.amd.com/api/v1/workloads/$WID/pods/$PID/logs" -H "Authorization: Bearer {safe_api_key}"`
 
-Example — check workload status:
-```bash
-curl -sk "$SAFE_API_BASE/api/v1/workloads/$WORKLOAD_ID" \
-  -H "Authorization: Bearer $SAFE_API_KEY"
-```
-
-Do NOT waste turns exploring the environment for API keys. Use the key above directly.
+Do NOT waste turns exploring the SaFE API format. Use the exact format above.
 Do NOT call exit_plan_mode or enter_plan_mode — these tools don't exist. Just execute directly.
 
 InferenceX Baseline:
