@@ -20,10 +20,10 @@ export PATH="/opt/venv/bin:$PATH"
 ```bash
 export PATH="/opt/venv/bin:$PATH"
 
-MODEL=$(ls -d /shared_nfs/*/models/*/ 2>/dev/null | head -1)
+MODEL=$(ls -d /wekafs/*/models/*/ 2>/dev/null | head -1)
 GPU_COUNT=$(amd-smi list 2>/dev/null | grep "^GPU:" | wc -l)
 GPU_TYPE=$(rocm-smi --showproductname 2>/dev/null | grep "GFX Version" | head -1 | grep -o "gfx[0-9]*")
-INFERENCEX_PATH=$(ls -d /shared_nfs/*/InferenceX 2>/dev/null | head -1)
+INFERENCEX_PATH=$(ls -d /wekafs/*/InferenceX 2>/dev/null | head -1)
 
 FRAMEWORK="${FRAMEWORK:-sglang}"
 if [ "$FRAMEWORK" = "vllm" ]; then
@@ -51,7 +51,7 @@ if [ "${GEAK_LOCAL:-true}" = "true" ]; then
     WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace/inference-optimization}"
 else
     MODE="claw"
-    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/shared_nfs/inference-optimization}"
+    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/wekafs/inference-optimization}"
 fi
 
 # Source executor backend (enables exec_on_gpu for local/claw dispatch)
@@ -80,4 +80,4 @@ payloads, wait logic, and claw execution environment setup.
 ## Failure Handling
 - If no model found: ask user for MODEL path
 - If no GPUs detected: check `amd-smi` / `rocm-smi` installation
-- If InferenceX not found: check `/shared_nfs/*/InferenceX/`
+- If InferenceX not found: check `/wekafs/*/InferenceX/`
