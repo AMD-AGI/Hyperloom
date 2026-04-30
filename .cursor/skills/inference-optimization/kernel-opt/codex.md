@@ -302,15 +302,29 @@ for i in range(OOB_ROUND_ITERATIONS):
         result = poll_until_complete(task["task_id"])
 
     if result["status"] == "failed":
-        feedback_context += f"\nIteration {i+1}: FAILED — task error: {result.get('error')}"
-        continue
-
-    # 3. Read optimized kernel (already on local disk in local mode;
-    #    requires agent_download_file in claw MCP modes)
-    optimized_code = read_optimized_kernel(result)
-    if not optimized_code:
-        feedback_context += f"\nIteration {i+1}: FAILED — no output file produced"
-        continue
+        # When the user passes --timeout to `oob run`, the agent subprocess is
+        # killed after the deadline — but it may have already written output files.
+        # OOB CLI (--json) returns "partial_outputs" listing workspace files.
+        workspace = result.get("workspace")
+        partial = result.get("partial_outputs", [])
+        if "optimized_kernel.py" in partial and workspace:
+            optimized_code = read_file(f"{workspace}/optimized_kernel.py")
+            if optimized_code:
+                # Fall through to verification below (compile → correctness → bench)
+                pass
+            else:
+                feedback_context += f"\nIteration {i+1}: FAILED (timeout, output unreadable)"
+                continue
+        else:
+            feedback_context += f"\nIteration {i+1}: FAILED — task error: {result.get('error')}"
+            continue
+    else:
+        # 3. Read optimized kernel (already on local disk in local mode;
+        #    requires agent_download_file in claw MCP modes)
+        optimized_code = read_optimized_kernel(result)
+        if not optimized_code:
+            feedback_context += f"\nIteration {i+1}: FAILED — no output file produced"
+            continue
 
     # 4. LOCAL verification (on the inference server or RayJob)
     compile_ok, compile_err = check_compilation(optimized_code)
