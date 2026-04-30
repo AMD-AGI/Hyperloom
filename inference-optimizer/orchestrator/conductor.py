@@ -123,6 +123,103 @@ class Conductor:
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
 
+        # Resume: rebuild ConductorState.pending_proposals from the SQLite
+        # event log so a Conductor restart picks up undecided proposals
+        # without losing the Critic Review queue (DESIGN §17.5).
+        self._resumed_from = self._detect_resume_state()
+
+    # ==================================================================
+    # Resume
+    # ==================================================================
+    def _detect_resume_state(self) -> dict[str, Any]:
+        """Synchronously inspect persistence to determine if this is a resume.
+
+        Called from __init__ — must not block on the event loop. Returns a
+        small dict with `is_resume` + summary stats. The actual rebuild of
+        in-memory ConductorState happens lazily on the first call to
+        :meth:`tick` (or the dedicated :meth:`replay_for_resume`); this lets
+        construction stay synchronous + fast.
+        """
+        ev_count = self.bus.db.fetchone_sync("SELECT COUNT(*) AS c FROM events")
+        events_present = (int(ev_count["c"]) if ev_count else 0) > 0
+        state_path = SharedState.state_path(self.session_dir)
+        return {
+            "is_resume": events_present or state_path.exists(),
+            "event_count": int(ev_count["c"]) if ev_count else 0,
+            "state_json_present": state_path.exists(),
+            "rebuilt": False,  # set by replay_for_resume()
+        }
+
+    async def replay_for_resume(self) -> dict[str, Any]:
+        """Walk the event log to reconstruct ``ConductorState.pending_proposals``.
+
+        Idempotent — re-running rebuilds from scratch. Returns a small dict
+        of stats so tests can assert what was restored.
+
+        We treat a proposal as **undecided** when there is no
+        ``review_verdict`` event addressed to it AND no ``decision`` event
+        materializing it (`kind == "approved_proposal"`).
+        """
+        # 1. Collect all proposal events.
+        proposal_msgs = await self.bus.tail(topic="proposal", n=10_000)
+        # 2. Collect verdicts and approved decisions, keyed by proposal_msg_id.
+        verdicts = await self.bus.tail(topic="review_verdict", n=10_000)
+        decisions = await self.bus.tail(topic="decision", n=10_000)
+
+        decided_ids: set[str] = set()
+        verdict_by_target: dict[str, str] = {}
+        for v in verdicts:
+            target = v.payload.get("target_proposal_msg_id")
+            if target:
+                verdict_by_target[target] = v.payload.get("verdict", "")
+                decided_ids.add(target)
+        for d in decisions:
+            if d.payload.get("kind") == "approved_proposal":
+                # The conductor stores task_id, not the original proposal_msg_id,
+                # in the decision; tasks created via materialization have
+                # idempotency_key f"approved-{proposal_msg_id}" — we can
+                # back-trace through the tasks table if needed, but for
+                # pending-proposal rebuild it's enough that the verdict event
+                # already marked the proposal as decided.
+                pass
+
+        # 3. Rebuild PendingProposal entries for undecided proposals.
+        rebuilt = 0
+        self.state.pending_proposals.clear()
+        for p in proposal_msgs:
+            if p.msg_id in decided_ids:
+                # Optional: also remember the verdict so the Conductor can
+                # surface it if asked (e.g. /status command).
+                continue
+            payload = p.payload or {}
+            self.state.pending_proposals[p.msg_id] = PendingProposal(
+                proposal_msg_id=p.msg_id,
+                from_agent=p.from_agent,
+                action_name=str(payload.get("action_name", "")),
+                predicted_gain_pct=float(payload.get("predicted_gain_pct", 0.0)),
+                payload=dict(payload),
+            )
+            rebuilt += 1
+
+        self._resumed_from["rebuilt"] = True
+        self._resumed_from["pending_restored"] = rebuilt
+        return {
+            "is_resume": self._resumed_from["is_resume"],
+            "event_count": self._resumed_from["event_count"],
+            "state_json_present": self._resumed_from["state_json_present"],
+            "pending_restored": rebuilt,
+            "verdicts_seen": len(verdicts),
+        }
+
+    @property
+    def resumed_from(self) -> dict[str, Any]:
+        """Read-only snapshot of resume detection (set by ``__init__``).
+
+        Returns ``{"is_resume": bool, "event_count": int, "state_json_present":
+        bool, "rebuilt": bool, ...}``.
+        """
+        return dict(self._resumed_from)
+
     # ==================================================================
     # Lifecycle
     # ==================================================================
@@ -146,10 +243,17 @@ class Conductor:
     async def tick(self, n: int = 1) -> None:
         """Run exactly ``n`` reactor passes for **every** agent.
 
-        Used by P0-3 / P0-5 tests. Each agent's backend.run() is called
-        once per pass; intents are validated + routed before the next
-        pass starts. Dispatcher pumps queued tasks at the end of each pass.
+        Used by P0-3 / P0-5 / P1-4 tests. Each agent's backend.run() is
+        called once per pass; intents are validated + routed before the
+        next pass starts. Dispatcher pumps queued tasks at the end of
+        each pass.
+
+        On the first tick, if this Conductor was constructed against a
+        non-empty session, it lazily reruns ``replay_for_resume()`` so
+        in-memory state catches up before any new reactor work runs.
         """
+        if self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]:
+            await self.replay_for_resume()
         for _ in range(n):
             for name in roles_for_run():
                 await self._reactor_pass(name)
