@@ -47,22 +47,32 @@ class Violation:
 # ---------------------------------------------------------------------------
 # Rule registry — IR-1..IR-7
 # ---------------------------------------------------------------------------
+# Plan A — IR severity policy
+#
+# IR-3 / IR-4 / IR-5 stay BLOCK because they protect the conductor itself
+# (process safety, IR-3 ensures gain validation closes the loop). The four
+# kernel-opt-flavoured rules (IR-1/2/6/7) are softened to WARN: violating
+# them downgrades correctness guarantees but should not abort the run —
+# kernel agent (Plan A owner) is expected to read IR-prompted warnings and
+# self-correct on the next turn.
 IRON_RULES: tuple[IronRule, ...] = (
     IronRule(
         id="IR-1",
         description=(
-            "Always submit kernel candidates IN PARALLEL via GEAK MCP "
-            "(no sequential single-candidate submissions)."
+            "Should submit kernel candidates IN PARALLEL via GEAK MCP "
+            "(sequential / single-candidate submissions hurt throughput)."
         ),
         applies_to_modes=("guided", "marathon"),
+        severity=Severity.WARN,
     ),
     IronRule(
         id="IR-2",
         description=(
-            "Never modify kernel source files before GEAK auto-tunes them; "
-            "kernel-opt action MUST be the first writer."
+            "Recommended: do not modify kernel source files before GEAK "
+            "auto-tunes them; kernel-opt action should be the first writer."
         ),
         applies_to_modes=("guided", "marathon"),
+        severity=Severity.WARN,
     ),
     IronRule(
         id="IR-3",
@@ -91,20 +101,33 @@ IRON_RULES: tuple[IronRule, ...] = (
     IronRule(
         id="IR-6",
         description=(
-            "patch_inductor.py MUST receive --target-file and (when changing "
-            "block_size or num_warps) --best-config. --cache-dir is removed."
+            "Recommended: patch_inductor.py should receive --target-file and "
+            "(when changing block_size or num_warps) --best-config. "
+            "--cache-dir is deprecated."
         ),
         applies_to_modes=("guided", "marathon"),
+        severity=Severity.WARN,
     ),
     IronRule(
         id="IR-7",
         description=(
-            "Never modify GEAK MCP config (except for tracing headers per "
-            "exception list)."
+            "Recommended: do not modify GEAK MCP config (except for tracing "
+            "headers per exception list)."
         ),
         applies_to_modes=("guided", "marathon"),
+        severity=Severity.WARN,
     ),
 )
+
+
+def _severity_for(rule_id: str) -> Severity:
+    """Lookup the configured severity for a rule (used by predicates so a
+    Violation inherits the rule's declared severity rather than the
+    Violation default)."""
+    for rule in IRON_RULES:
+        if rule.id == rule_id:
+            return rule.severity
+    return Severity.BLOCK
 
 
 def all_rules() -> tuple[IronRule, ...]:
@@ -159,9 +182,10 @@ def _ir1_parallel_kernel_submission(meta: dict[str, Any]) -> Violation | None:
     return Violation(
         rule_id="IR-1",
         reason=(
-            "kernel-opt action must declare parallel GEAK submission "
-            "(execution_flags must include 'parallel_geak_submission')"
+            "kernel-opt action should declare parallel GEAK submission "
+            "(execution_flags should include 'parallel_geak_submission')"
         ),
+        severity=_severity_for("IR-1"),
     )
 
 
@@ -183,8 +207,10 @@ def _ir2_no_kernel_source_modification_before_geak(
         rule_id="IR-2",
         reason=(
             f"action {name!r} declares 'patches_kernel_source' before "
-            "GEAK has run; only kernel-opt or integrate may do that"
+            "GEAK has run; recommended: only kernel-opt or integrate "
+            "should be the first writer"
         ),
+        severity=_severity_for("IR-2"),
     )
 
 
@@ -202,6 +228,7 @@ def _ir3_integrate_after_kernel_opt(meta: dict[str, Any]) -> Violation | None:
             "kernel-opt must declare 'integrate' in required_follow_ups "
             "and validate via scripts/run_baseline.sh"
         ),
+        severity=_severity_for("IR-3"),
     )
 
 
@@ -220,6 +247,7 @@ def _ir4_kill_then_check_gpu(meta: dict[str, Any]) -> Violation | None:
             "actions touching server_lifecycle must declare a preflight "
             "ordering containing kill_server + check_gpu_memory"
         ),
+        severity=_severity_for("IR-4"),
     )
 
 
@@ -240,6 +268,7 @@ def _ir5_no_pkill_f_sglang(meta: dict[str, Any]) -> Violation | None:
                         f"forbidden pattern {n!r} found in action "
                         f"definition (would kill the conductor itself)"
                     ),
+                    severity=_severity_for("IR-5"),
                 )
     return None
 
@@ -260,11 +289,13 @@ def _ir6_patch_inductor_args(meta: dict[str, Any]) -> Violation | None:
             return Violation(
                 rule_id="IR-6",
                 reason="patch_inductor invocation missing --target-file",
+                severity=_severity_for("IR-6"),
             )
         if "--cache-dir" in joined:
             return Violation(
                 rule_id="IR-6",
-                reason="patch_inductor invocation must not pass --cache-dir",
+                reason="patch_inductor invocation should not pass --cache-dir (deprecated)",
+                severity=_severity_for("IR-6"),
             )
         tuning_keys = set(inv.get("tuning_keys", []) or [])
         if {"block_size", "num_warps"} & tuning_keys and "--best-config" not in joined:
@@ -274,6 +305,7 @@ def _ir6_patch_inductor_args(meta: dict[str, Any]) -> Violation | None:
                     "patch_inductor invocation tunes block_size/num_warps "
                     "but does not pass --best-config"
                 ),
+                severity=_severity_for("IR-6"),
             )
     return None
 
@@ -292,6 +324,7 @@ def _ir7_no_geak_config_mutation(meta: dict[str, Any]) -> Violation | None:
             "action declares 'modifies_geak_config' without listing only "
             "the allowed 'tracing_headers' exception"
         ),
+        severity=_severity_for("IR-7"),
     )
 
 
@@ -333,13 +366,19 @@ def validate_action(
 
 
 def render_for_prompt(mode: "ExecutionMode | str") -> str:
-    """Markdown bullet block for the per-role system prompt (DESIGN §6.3)."""
+    """Markdown bullet block for the per-role system prompt (DESIGN §6.3).
+
+    Plan A: BLOCK rules use "MUST" framing; WARN rules use "should" framing.
+    The label after the rule id surfaces the severity so the LLM can
+    prioritise hard guarantees over soft recommendations.
+    """
     rules = rules_for_mode(mode)
     if not rules:
         return "## Iron Rules\n  (none for this mode)\n"
-    lines = ["## Iron Rules (NEVER violate)"]
+    lines = ["## Iron Rules"]
     for r in rules:
-        lines.append(f"- **{r.id}** ({r.severity.value}): {r.description}")
+        label = "MUST" if r.severity is Severity.BLOCK else "should"
+        lines.append(f"- **{r.id}** ({r.severity.value} — {label}): {r.description}")
     return "\n".join(lines) + "\n"
 
 

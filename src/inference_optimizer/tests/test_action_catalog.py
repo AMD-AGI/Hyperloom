@@ -20,9 +20,11 @@ PACKAGE_ACTIONS_DIR = asset_actions_dir()
 _PREP = {"setup", "classify", "target_analysis", "baseline", "bench_runner"}
 _ANALYSIS = {"profile"}
 _SHALLOW = {"backends", "params", "sweep", "param_sweep_run", "report"}
+# Plan A: kernel_opt + integrate moved out of the action registry — they
+# are owned by the kernel agent and triggered via REQUEST/RESPONSE, not
+# delegate(). The remaining deep_kernel actions (analysis / autotune /
+# vendor config) stay since they're marathon-only and not yet migrated.
 _DEEP_KERNEL = {
-    "kernel_opt",
-    "integrate",
     "deep_kernel_analysis",
     "operator_tuning",
     "vendor_kernel_config",
@@ -103,11 +105,13 @@ def test_every_action_has_markdown_body(registry: ActionRegistry):
     assert not missing, f"actions missing .md body: {missing}"
 
 
-def test_integrate_requires_three_lanes(registry: ActionRegistry):
-    a = registry.get("integrate")
-    assert a is not None
-    needed = {"workspace_mutation", "server_lifecycle", "benchmark_lane"}
-    assert needed <= set(a.requires_lanes)
+def test_integrate_action_removed_for_plan_a(registry: ActionRegistry):
+    """Plan A: integrate moved to the kernel agent's apply_patch subskill.
+    The action registry should no longer carry it, so executors that try
+    to delegate('integrate') are caught by both PolicyGate and the
+    catalogue lookup."""
+    assert registry.get("integrate") is None
+    assert registry.get("kernel_opt") is None
 
 
 def test_recover_requires_server_and_workspace(registry: ActionRegistry):

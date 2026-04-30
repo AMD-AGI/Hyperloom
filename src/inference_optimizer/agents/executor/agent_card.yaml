@@ -1,7 +1,13 @@
-# Executor — multi-CLI agent card.
+# Executor — multi-CLI agent card (skill-style v0.2).
 #
 # Sole proposer + delegator. Active in every execution mode.
 # Backend: Claude (tool-using) so it can compose `emit_intent` calls.
+#
+# Skill layout (see SKILL.md for the index):
+#   SKILL.md                 — short entrypoint, base64-injected as --system-prompt
+#   actions/                 — subskills, agent reads via Read tool on demand
+#   reference/               — long-tail reference (IR rules, catalogue, codebook)
+#   scripts/                 — bash helpers (inbox_tail.sh, state_check.sh)
 name: executor
 role: executor
 backend: claude
@@ -16,7 +22,11 @@ allowed_modes:
   - quick_param_sweep
   - guided_kernel_opt
   - marathon_multi_agent
-system_prompt: system_prompt.md
+# v0.2: switched from system_prompt.md to SKILL.md (Cursor-skill style).
+# The launcher loads <card_dir>/SKILL.md and base64-injects it as the
+# Claude CLI's --system-prompt. SKILL.md indexes the actions/ and
+# reference/ subdirectories which the agent Reads on demand.
+system_prompt: SKILL.md
 inbox_filename: inbox.jsonl
 outbox_filename: outbox.jsonl
 restart_policy:
@@ -28,3 +38,15 @@ extra:
     The Executor is the only agent that may emit `delegate` and
     `propose_action` intents. PolicyGate enforces this regardless of
     transport (in-process reactor or multi-CLI).
+
+    Skill structure:
+      - SKILL.md indexes everything; agent reads it once on every restart
+        as the system prompt (always in context).
+      - actions/<name>.md are read on demand via the Read tool when a
+        specific trigger fires (see SKILL.md "Subskill index" table).
+      - reference/<name>.md hold long-tail static knowledge.
+      - scripts/<name>.sh are pre-approved Bash helpers; the agent invokes
+        them via the Bash tool. Both scripts are read-only.
+
+    The launcher's --add-dir already covers `<card_dir>` so all subdirs
+    here are visible to the Claude CLI without further config.

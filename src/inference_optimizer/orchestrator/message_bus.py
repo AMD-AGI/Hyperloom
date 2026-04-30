@@ -22,15 +22,25 @@ from ..storage.connection import SqliteConnection
 
 # ---------------------------------------------------------------------------
 TOPIC_ALLOWLIST = frozenset({
-    "proposal", "objection", "question", "answer",
-    "observation", "event", "decision", "vote",
-    "vote_request", "parliament_open", "alert",
+    "proposal", "question", "answer",
+    "observation", "event", "decision",
+    "alert",
     "historical_warning", "reflection_tick",
     "do_postmortem", "do_strategic_review", "do_emergency_rca",
     "synthesize_for_kb", "graceful_stop", "heartbeat",
     "delegated_result", "intent_emitted", "rca_done",
     # Storage-layer events
     "lease_expired", "lease_acquire_failed",
+    # Agent-to-agent RPC topics carrying REQUEST / RESPONSE intents
+    # (kernel agent contract). Conductor.handle_request mirrors the
+    # request payload onto this topic so the target agent's inbox
+    # picks it up; Conductor.handle_response writes onto "response".
+    "request", "response",
+    # v0.4 MVP — triage emits kill_task; Conductor mirrors to topic="kill"
+    # for audit trail (see standalone_agent_design §13.3).
+    "kill",
+    # NOTE: "objection" / "vote" / "vote_request" / "parliament_open"
+    # removed in v0.4 — parliament mode is gone.
 })
 
 

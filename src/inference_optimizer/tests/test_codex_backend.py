@@ -103,9 +103,10 @@ async def test_codex_backend_parses_validated_json_block():
 
 @pytest.mark.asyncio
 async def test_codex_backend_supports_multiple_intents_in_envelope():
+    """v0.4 — uses ALERT (was OBJECTION which was deleted with parliament)."""
     text = _envelope([
-        {"intent_type": "objection",
-         "payload": {"target_msg_id": "m1", "reason": "stale evidence"}},
+        {"intent_type": "alert",
+         "payload": {"severity": "medium", "summary": "stale evidence"}},
         {"intent_type": "send_message",
          "payload": {"topic": "observation", "body_md": "watch out"}},
     ])
@@ -114,7 +115,7 @@ async def test_codex_backend_supports_multiple_intents_in_envelope():
     intents = await backend.run("hi", agent_name="critic")
 
     assert len(intents) == 2
-    assert intents[0].type == IntentType.OBJECTION
+    assert intents[0].type == IntentType.ALERT
     assert intents[1].type == IntentType.SEND_MESSAGE
 
 

@@ -240,10 +240,15 @@ class BudgetAwareScheduler:
             tested.add(action.name)  # placeholder
             if len(tested) >= 3:
                 self._enqueue_followup("profile")
-        # Rule 5 — kernel KEPT → re-profile + next-kernel.
+        # Rule 5 — kernel KEPT → re-profile (so executor can request another
+        # kernel-opt round through the kernel agent).
+        # Plan A: the literal "kernel_opt" followup hint was removed because
+        # PolicyGate now denies executor.delegate(kernel_opt); the executor
+        # uses request{target=kernel} instead, and that request is driven by
+        # the agents/executor/actions/request_kernel_optimization.md
+        # subskill rather than by the scheduler followup queue.
         if action.family == "deep_kernel" and status == "succeeded":
             self._enqueue_followup("profile")
-            self._enqueue_followup("kernel_opt")
         # Rule 6 — kernel DISCARDED (i.e. integrate ran then was reverted)
         # → reduce remaining deep_kernel candidates by 0.7×. Rule 6 is
         # *only* for the "reverted" path; outright failures are handled by

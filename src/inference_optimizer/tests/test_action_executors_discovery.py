@@ -17,13 +17,17 @@ from inference_optimizer.orchestrator.action_executors import (
 
 
 def test_bundled_executors_all_discovered():
-    """The five bundled executors must self-register without a manual list."""
+    """Plan A: KernelOptExecutor was removed (kernel agent owns kernel-opt).
+    The four remaining bundled executors must self-register."""
     discovered = discovered_executor_modules()
     short = {m.rsplit(".", 1)[-1] for m in discovered}
-    expected = {"baseline", "bench_runner", "profile",
-                "param_sweep_run", "kernel_opt"}
+    expected = {"baseline", "bench_runner", "profile", "param_sweep_run"}
     assert expected.issubset(short), (
         f"missing expected executors: discovered={short}"
+    )
+    assert "kernel_opt" not in short, (
+        f"kernel_opt should be removed from executor discovery (Plan A): "
+        f"discovered={short}"
     )
 
 
@@ -39,9 +43,11 @@ def test_no_discovery_failures_in_bundled_set():
 
 
 def test_registry_keys_are_normalised():
-    # ``kernel-opt`` must resolve identically to ``kernel_opt``.
-    a = get_executor("kernel-opt")
-    b = get_executor("kernel_opt")
+    # ``bench-runner`` must resolve identically to ``bench_runner``.
+    # (Plan A: kernel-opt removed; param_sweep_run is a representative
+    # multi-word action whose dash form should normalise.)
+    a = get_executor("param-sweep-run")
+    b = get_executor("param_sweep_run")
     assert a is not None
     assert a is b
 

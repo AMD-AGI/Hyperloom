@@ -88,8 +88,8 @@ async def test_multi_cli_lifts_every_role_to_cli(session_dir, quick_env, tmp_pat
             agents_root=tmp_path / "no-such-dir",  # forces stub cards
         )
         ctx = await conductor._bootstrap()
-        # Quick mode roster = [executor]
-        assert ctx.cli_agents == ("executor",)
+        # v0.4 — quick mode roster = [executor, triage] (triage always-on)
+        assert ctx.cli_agents == ("executor", "triage")
         assert ctx.in_proc_roles == []
         assert ctx.multi_cli_router is not None
     finally:
@@ -111,7 +111,9 @@ async def test_hybrid_filters_to_named_agents(session_dir, quick_env, tmp_path):
         )
         ctx = await conductor._bootstrap()
         assert ctx.cli_agents == ("executor",)  # ghost dropped
-        assert ctx.in_proc_roles == []  # only executor in quick mode
+        # v0.4 — quick mode also has triage active; in hybrid w/ only
+        # executor in cli_agents, triage stays in-process.
+        assert [r.name for r in ctx.in_proc_roles] == ["triage"]
         assert ctx.multi_cli_router is not None
     finally:
         db.close()

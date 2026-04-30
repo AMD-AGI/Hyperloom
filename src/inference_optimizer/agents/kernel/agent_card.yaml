@@ -1,0 +1,51 @@
+# Kernel — multi-CLI agent card (Plan A — kernel agent).
+#
+# Persistent reactor that owns kernel-opt + integrate. Active in
+# guided + marathon modes (quick_param_sweep does not allow kernel-opt).
+# Backend: Claude (needs Bash/Read/Edit to drive geak_ray_submit.py /
+# oob_ray_submit.py / patch_inductor.py).
+#
+# Skill layout:
+#   SKILL.md                 — short entrypoint, base64-injected as --system-prompt
+#   actions/                 — subskills the agent reads on demand
+#   reference/               — long-tail reference (GEAK, OOB, IR-soft, troubleshooting)
+#   scripts/                 — bash helpers (trace_summary, run_geak, run_oob, apply_patch)
+name: kernel
+role: kernel
+backend: claude
+enabled: true
+capabilities:
+  - response
+  - send_message
+  - alert
+  - update_persona
+  - ask_question
+  - answer
+allowed_modes:
+  - guided_kernel_opt
+  - marathon_multi_agent
+system_prompt: SKILL.md
+inbox_filename: inbox.jsonl
+outbox_filename: outbox.jsonl
+restart_policy:
+  # GEAK / OOB Ray jobs can take 30+ minutes; bump max_restarts so the
+  # kernel agent survives Claude SDK turn timeouts and resumes the
+  # polling loop on next restart.
+  max_restarts: 50
+  backoff_seconds: 30
+  continue_flag: true
+extra:
+  notes: |
+    Kernel agent is a "responder" — it never emits REQUEST or DELEGATE.
+    The only workflow is: receive REQUEST(kind=...) from executor, do the
+    work via Bash, emit RESPONSE(in_reply_to=...).
+
+    PolicyGate enforces:
+      - Only executor may REQUEST(target_agent=kernel).
+      - Only kernel may emit RESPONSE.
+      - Executor cannot delegate(kernel_opt) / delegate(integrate).
+
+    Lane management is soft (Plan A defaults). The agent should respect
+    `state.json::current_action` from other agents — if executor's
+    current_action is `bench_*`, kernel agent should not start a server
+    restart concurrently.

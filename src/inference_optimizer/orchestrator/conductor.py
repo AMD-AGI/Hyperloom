@@ -1,29 +1,30 @@
-"""Conductor — DESIGN §15.
+"""Conductor — DESIGN §15 / standalone_agent_design §13 (v0.4 MVP).
 
 Single owner of the run. Wires every subsystem (storage, locks, bus,
-cursors, kb, scheduler, policy, sub_agent_runner, ...) and runs the asyncio
+cursors, scheduler, policy, sub_agent_runner, ...) and runs the asyncio
 gather of reactors + clock + stopping_watcher.
 
-STATUS (v0.6 — PolicyGate + multi-reactor):
-    - ``_bootstrap`` wires storage / bus / cursors / tasks / locks + objective +
-      shared state + role-registry + PolicyGate. SubAgentRunner / ActionRegistry
-      / Scheduler are still ``None`` in dry-run.
-    - One reactor task is spawned per role returned by ``roles_for_mode``:
-        quick     -> [executor]
-        guided    -> [executor, critic]
-        marathon  -> [executor, critic, watchdog, sage]
-    - Every parsed intent runs through :meth:`PolicyGate.validate_intent`
-      before ``_handle_intent``. Denied intents are logged on the bus as a
-      ``policy_denied`` observation; the reactor keeps going.
-    - The clock fires elapsed-time updates and reflection ticks. Once
-      ``elapsed_minutes >= max_minutes`` it triggers a graceful
-      ``time_exhausted`` stop.
+v0.4 MVP roster (per ``roles_for_mode``):
+    quick     -> [executor, triage]
+    guided    -> [executor, critic, kernel, triage]
+    marathon  -> [executor, critic, kernel, triage]
 
-What is intentionally **NOT** here yet (see IMPLEMENTATION-CHECKLIST):
-    - Action proposal + sub-agent dispatch (Phase 7.10 / F3)
-    - Accuracy gate / scheduler updates (Phase 5 / 9)
-    - Marathon cadences: persona distill, strategic review, KB synthesis
-    - Resume from checkpoint
+Triage is always-on (active in every mode) with its own slow tick
+(``triage_tick_s = 60.0``) so it can scan sibling agents' outbox/inbox
+files for crash/stall signals. It is the only role allowed to emit
+:attr:`IntentType.KILL_TASK` (PolicyGate enforces).
+
+Removed in v0.4 (vs v0.3):
+    * sage role + ``SageQueryService`` (no KB in MVP)
+    * watchdog role (renamed to triage with broader powers)
+    * parliament mode + OBJECTION/VOTE intents + ``_open_parliament``
+    * ``ephemeral_rca_via_critic`` (triage covers RCA always-on)
+    * legacy session resume — ``resume_from_session_dir`` rejects any
+      session_dir whose state references the old roster
+
+Every parsed intent runs through :meth:`PolicyGate.validate_intent`
+before ``_handle_intent``. Denied intents are logged on the bus as a
+``policy_denied`` observation; the reactor keeps going.
 """
 from __future__ import annotations
 
@@ -53,7 +54,9 @@ from .iron_rules import render_for_prompt as render_iron_rules
 from .message_bus import Message, MessageBus, TOPIC_ALLOWLIST
 from .multi_cli import (
     AgentCard,
+    MultiCLILauncher,
     MultiCLIRouter,
+    StagedAgent,
     discover_agent_cards,
 )
 from .objective import Objective, build_objective
@@ -66,7 +69,6 @@ from .task_registry import TaskRegistry
 if TYPE_CHECKING:  # pragma: no cover - type-only
     from .action_registry import ActionRegistry
     from .kb import KnowledgeBase
-    from .sage_query_service import SageQueryService
     from .scheduler import BudgetAwareScheduler
 
 
@@ -128,15 +130,10 @@ def _render_answer(p: dict) -> str:
     return f"[topic={q_topic}] {a}" if q_topic else a
 
 
-def _render_objection(p: dict) -> str:
-    target = str(p.get("target_msg_id", ""))[:8]
-    text = p.get("objection") or p.get("body_md") or ""
-    return f"target={target} {text}" if target else text
-
-
-def _render_vote(p: dict) -> str:
-    target = str(p.get("target_msg_id", ""))[:8]
-    return f"target={target} vote={p.get('vote', '?')}"
+def _render_kill(p: dict) -> str:
+    task = str(p.get("task_id", ""))[:8]
+    reason = p.get("reason", "")
+    return f"task={task} reason={reason}"
 
 
 def _render_reflection_tick(p: dict) -> str:
@@ -147,15 +144,39 @@ def _render_reflection_tick(p: dict) -> str:
     return ""
 
 
+def _render_request(p: dict) -> str:
+    target = p.get("target_agent", "?")
+    kind = p.get("kind", "?")
+    src_msg = str(p.get("source_msg_id", ""))[:8]
+    extras = ""
+    params = p.get("params") or {}
+    if isinstance(params, dict) and params:
+        # Compact preview of the first 2 param keys; full payload still on disk.
+        preview = ", ".join(f"{k}={v!r}" for k, v in list(params.items())[:2])
+        if len(params) > 2:
+            preview += f", +{len(params) - 2} more"
+        extras = f" params={{{preview}}}"
+    suffix = f" src={src_msg}" if src_msg else ""
+    return f"target={target} kind={kind}{suffix}{extras}"
+
+
+def _render_response(p: dict) -> str:
+    in_reply = str(p.get("in_reply_to", ""))[:8]
+    kind = p.get("kind", "?")
+    status = p.get("status", "?")
+    return f"in_reply_to={in_reply} kind={kind} status={status}"
+
+
 _TOPIC_RENDERERS = {
     "proposal": _render_proposal,
     "decision": _render_decision,
     "alert": _render_alert,
     "question": _render_question,
     "answer": _render_answer,
-    "objection": _render_objection,
-    "vote": _render_vote,
+    "kill": _render_kill,
     "reflection_tick": _render_reflection_tick,
+    "request": _render_request,
+    "response": _render_response,
 }
 
 
@@ -215,7 +236,6 @@ class ConductorContext:
     scheduler: "BudgetAwareScheduler | None" = None
     sub_agent_runner: SubAgentRunner | None = None
     kb: "KnowledgeBase | None" = None
-    sage: "SageQueryService | None" = None
     persona_index: dict[str, str] = field(default_factory=dict)
     multi_cli_router: MultiCLIRouter | None = None
     cli_agents: tuple[str, ...] = ()
@@ -252,6 +272,10 @@ class Conductor:
 
     DEFAULT_REACTOR_TICK_S = 2.0
     DEFAULT_CLOCK_TICK_S = 5.0
+    # v0.4 MVP — triage runs slower than other reactors. Per
+    # standalone_agent_design §13.9.3: 60s tick is enough for crash/stall
+    # detection without burning Claude tokens.
+    DEFAULT_TRIAGE_TICK_S = 60.0
 
     def __init__(
         self,
@@ -263,15 +287,20 @@ class Conductor:
         role_registry: dict[str, AgentRole] | None = None,
         action_registry: "ActionRegistry | None" = None,
         kb: "KnowledgeBase | None" = None,
-        sage: "SageQueryService | None" = None,
         reactor_tick_s: float | None = None,
         clock_tick_s: float | None = None,
+        triage_tick_s: float | None = None,
         enable_dispatcher: bool = True,
         enable_checkpointing: bool = False,
         transport_mode: str = TransportMode.SINGLE_PROC,
         cli_agents: Iterable[str] = (),
         agents_root: Path | None = None,
         router_tick_s: float | None = None,
+        launch_cli_agents: str = "off",
+        cli_shutdown_grace_s: float = 30.0,
+        launcher_env: dict[str, str] | None = None,
+        launcher_extra_dirs: Iterable[Path] = (),
+        launcher_overrides: dict[str, AgentCard] | None = None,
     ) -> None:
         self.session_dir = Path(session_dir)
         self.env = dict(env) if env is not None else dict(os.environ)
@@ -283,9 +312,9 @@ class Conductor:
         self._role_registry_override = role_registry
         self._action_registry = action_registry
         self._kb_override = kb
-        self._sage_override = sage
         self._reactor_tick_s = reactor_tick_s or self.DEFAULT_REACTOR_TICK_S
         self._clock_tick_s = clock_tick_s or self.DEFAULT_CLOCK_TICK_S
+        self._triage_tick_s = triage_tick_s or self.DEFAULT_TRIAGE_TICK_S
         self._enable_dispatcher = enable_dispatcher
         self._enable_checkpointing = enable_checkpointing
         self._dispatcher_stop = asyncio.Event()
@@ -295,6 +324,28 @@ class Conductor:
         self._cli_agents: tuple[str, ...] = tuple(cli_agents)
         self._agents_root = agents_root
         self._router_tick_s = router_tick_s
+        # Auto-launch of agent CLI subprocesses (Phase A — patch plan).
+        # ``off``       -> Conductor only runs Router; operator spawns
+        #                  CLIs externally. Default; backward-compatible.
+        # ``subprocess`` -> Conductor calls launcher.launch_subprocess()
+        #                  during _bootstrap and waits for children on
+        #                  graceful shutdown. No tmux dep.
+        # ``tmux``      -> Conductor calls launcher.launch() (tmux-based)
+        #                  during _bootstrap. Requires tmux on PATH.
+        if launch_cli_agents not in ("off", "subprocess", "tmux"):
+            raise ValueError(
+                f"launch_cli_agents must be 'off' / 'subprocess' / 'tmux', "
+                f"got {launch_cli_agents!r}"
+            )
+        self._launch_cli_agents: str = launch_cli_agents
+        self._cli_shutdown_grace_s: float = float(cli_shutdown_grace_s)
+        self._launcher_env: dict[str, str] = dict(launcher_env or {})
+        self._launcher_extra_dirs: tuple[Path, ...] = tuple(launcher_extra_dirs)
+        # Test seam: tests inject custom AgentCard overrides (e.g. backend=mock-cli)
+        # so the e2e harness can drive real subprocesses without claude/codex.
+        self._launcher_overrides: dict[str, AgentCard] = dict(launcher_overrides or {})
+        self._launcher: MultiCLILauncher | None = None
+        self._staged_cli_agents: dict[str, StagedAgent] = {}
 
     # ------------------------------------------------------------------
     # Bootstrap
@@ -387,6 +438,16 @@ class Conductor:
                 bus=bus, policy=policy,
                 cli_agent_names=cli_agent_names,
             )
+            # Auto-launch the CLI subprocesses if the operator opted in.
+            # We do this at bootstrap (vs in run()) so the agents are up
+            # by the time the very first bus event lands; otherwise the
+            # ``run_started`` event would be mirrored into an inbox no
+            # one is yet listening to.
+            if self._launch_cli_agents != "off":
+                self._launcher, self._staged_cli_agents = self._launch_cli_agent_processes(
+                    cli_agent_names=cli_agent_names,
+                    router=multi_cli_router,
+                )
 
         ctx = ConductorContext(
             state=state,
@@ -403,7 +464,6 @@ class Conductor:
             actions=self._action_registry,
             sub_agent_runner=sub_agent_runner,
             kb=self._kb_override,
-            sage=self._sage_override,
             persona_index=persona_index,
             multi_cli_router=multi_cli_router,
             cli_agents=cli_agent_names,
@@ -493,6 +553,11 @@ class Conductor:
             self._dispatcher_stop.set()
             if ctx.multi_cli_router is not None:
                 ctx.multi_cli_router.request_stop()
+            # Tell every spawned CLI agent to stop BEFORE we cancel our
+            # asyncio tasks — that way the Router gets one more drain
+            # tick to pick up any final intents the CLIs flushed before
+            # exiting.
+            await self._shutdown_cli_agent_processes()
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -602,6 +667,93 @@ class Conductor:
             restart_policy=RestartPolicy(),
         )
 
+    def _launch_cli_agent_processes(
+        self,
+        *,
+        cli_agent_names: tuple[str, ...],
+        router: MultiCLIRouter,
+    ) -> tuple[MultiCLILauncher, dict[str, StagedAgent]]:
+        """Spawn one CLI process per name in ``cli_agent_names``.
+
+        Card resolution order:
+            1. ``self._launcher_overrides[name]`` (test seam — e.g.
+               wires a ``backend=mock-cli`` card that drives the in-tree
+               mock_agent module).
+            2. The card the Router picked up from agents_root (the
+               authored ``agent_card.yaml``).
+            3. Skip with a warning if neither is available — without a
+               real card we can't pick a backend template.
+        """
+        cards_for_launch: dict[str, AgentCard] = {}
+        for name in cli_agent_names:
+            card = self._launcher_overrides.get(name) or router.agents.get(name)
+            if card is None:
+                log.warning(
+                    "auto-launch: no card for %r; skipping process spawn",
+                    name,
+                )
+                continue
+            if not card.enabled:
+                log.info("auto-launch: card for %r disabled; skipping spawn", name)
+                continue
+            cards_for_launch[name] = card
+
+        if not cards_for_launch:
+            log.warning("auto-launch: no cards to spawn; running router-only")
+            return MultiCLILauncher(
+                session_dir=self.session_dir, cards={}
+            ), {}
+
+        # Pull through every env var the agent CLIs are likely to need
+        # for action executors (MODEL_PATH, MAX_HOURS, INFERENCEX_PATH...).
+        merged_env: dict[str, str] = dict(self.env)
+        merged_env.update(self._launcher_env)
+
+        launcher = MultiCLILauncher(
+            session_dir=self.session_dir,
+            cards=cards_for_launch,
+            env=merged_env,
+            extra_dirs=tuple(self._launcher_extra_dirs),
+            agent_root=self._agents_root,
+        )
+        if self._launch_cli_agents == "tmux":
+            staged = launcher.launch()
+        else:
+            staged = launcher.launch_subprocess()
+        log.info(
+            "auto-launch: started %d CLI agent(s) via %s: %s",
+            len(staged), self._launch_cli_agents, sorted(staged.keys()),
+        )
+        return launcher, staged
+
+    async def _shutdown_cli_agent_processes(self) -> None:
+        """Drop STOP sentinels + wait for every spawned subprocess to exit.
+
+        Called by :meth:`run` after the asyncio tasks are cancelled.
+        Tmux panes own their own process tree so we only signal them
+        via the STOP file; the subprocess path uses :meth:`wait_for_exit`
+        with a SIGKILL fallback to keep the Conductor process from
+        deadlocking on a wedged child.
+        """
+        if self._launcher is None or not self._staged_cli_agents:
+            return
+        try:
+            self._launcher.request_stop_all(self._staged_cli_agents)
+        except Exception:  # noqa: BLE001
+            log.exception("auto-launch: failed to request stop on CLI agents")
+        if self._launch_cli_agents == "subprocess":
+            # ``wait_for_exit`` is blocking; offload to a thread so the
+            # asyncio event loop stays responsive (unit-test gracefully).
+            try:
+                rcs = await asyncio.to_thread(
+                    self._launcher.wait_for_exit,
+                    self._staged_cli_agents,
+                    timeout_s=self._cli_shutdown_grace_s,
+                )
+                log.info("auto-launch: CLI agents exited with rcs=%s", rcs)
+            except Exception:  # noqa: BLE001
+                log.exception("auto-launch: error while waiting for CLI exit")
+
     async def _router_intent_handler(
         self, agent_name: str, intent: Intent
     ) -> None:
@@ -651,8 +803,22 @@ class Conductor:
             if ctx.policy is not None
             else ("emit_intent",)
         )
+        # v0.4 — triage runs at a slower tick than other reactors. For the
+        # triage reactor, ``tick_s`` is the **minimum interval between
+        # turns** (enforced even when the bus has new events), so a 60s
+        # tick truly throttles it. For other reactors we keep the legacy
+        # behaviour: tick_s only governs the idle wait. See
+        # standalone_agent_design §13.9.3.
+        is_triage = agent_name == "triage"
+        tick_s = self._triage_tick_s if is_triage else self._reactor_tick_s
         try:
             while not ctx.state.should_stop():
+                if is_triage:
+                    # Throttle triage between turns regardless of inbox
+                    # depth so its slow tick is honoured even under load.
+                    await asyncio.sleep(tick_s)
+                    if ctx.state.should_stop():
+                        break
                 cursor = await ctx.cursors.load(agent_name)
                 msgs = await ctx.bus.replay_for(
                     agent_name, after_seq=cursor.last_processed_seq
@@ -661,7 +827,7 @@ class Conductor:
                 # reactor would otherwise consume its own output).
                 to_process = [m for m in msgs if m.from_agent != agent_name]
                 if not msgs:
-                    await asyncio.sleep(self._reactor_tick_s)
+                    await asyncio.sleep(tick_s)
                     continue
 
                 if to_process:
@@ -732,7 +898,7 @@ class Conductor:
     async def _handle_intent(self, from_agent: str, intent: Intent) -> None:
         """Dispatch on ``intent.type`` and apply the side-effect.
 
-        Dispatch table (DESIGN §10.5.6 + §15):
+        Dispatch table (DESIGN §10.5.6 + §15 + standalone §13.3):
 
             send_message    -> bus.append(topic from payload)
             alert           -> bus.append(topic="alert") + findings/alerts.jsonl
@@ -743,8 +909,10 @@ class Conductor:
             update_persona  -> personas/<agent>.md append + topic="event"
             ask_question    -> bus.append(topic="question")
             answer          -> bus.append(topic="answer")
-            objection       -> bus.append(topic="objection")
-            vote            -> bus.append(topic="vote")
+            request         -> mirror to target agent's inbox (RPC)
+            response        -> reverse-route to original requester (RPC)
+            kill_task       -> tasks.transition(cancelled) + bus(topic="kill")
+                               + findings/kills.jsonl (triage only — v0.4)
 
         Every branch is idempotent at the SQLite layer (events are append-only,
         tasks use ``idempotency_key``).
@@ -773,14 +941,12 @@ class Conductor:
             await self._handle_simple_topic(
                 from_agent, payload, topic="answer",
             )
-        elif intent.type == IntentType.OBJECTION:
-            await self._handle_simple_topic(
-                from_agent, payload, topic="objection",
-            )
-        elif intent.type == IntentType.VOTE:
-            await self._handle_simple_topic(
-                from_agent, payload, topic="vote",
-            )
+        elif intent.type == IntentType.REQUEST:
+            await self._handle_request(from_agent, payload)
+        elif intent.type == IntentType.RESPONSE:
+            await self._handle_response(from_agent, payload)
+        elif intent.type == IntentType.KILL_TASK:
+            await self._handle_kill_task(from_agent, payload)
         else:  # pragma: no cover — defensive
             await self._record_observation(
                 from_agent=from_agent,
@@ -856,6 +1022,91 @@ class Conductor:
             )
         except OSError:  # pragma: no cover — best-effort
             log.exception("failed to mirror alert to findings/alerts.jsonl")
+
+    async def _handle_kill_task(
+        self, from_agent: str, payload: dict[str, Any]
+    ) -> None:
+        """kill_task -> tasks.transition(cancelled) + bus(topic="kill") +
+        findings/kills.jsonl mirror.
+
+        v0.4 MVP — triage-only (PolicyGate enforces the source allowlist).
+        Cancel is "simplest cooperative": the tasks row is marked cancelled
+        so the dispatcher won't schedule new attempts; any in-flight
+        ActionExecutor finishes its current run naturally. We do NOT
+        forcibly cancel asyncio tasks or kill subprocesses — see
+        standalone_agent_design §13.9.2.
+        """
+        from .task_registry import IllegalTransition, TaskNotFound
+
+        assert self.ctx is not None
+        ctx = self.ctx
+        task_id = str(payload.get("task_id", "")).strip()
+        reason = str(payload.get("reason", "")).strip()
+        force = bool(payload.get("force", False))
+        scope = str(payload.get("scope") or "task").strip()
+
+        cancel_status = "ok"
+        cancel_detail = ""
+        try:
+            task_before = await ctx.tasks.get(task_id)
+            if task_before.state in {"succeeded", "cancelled", "needs_manual_review"}:
+                cancel_status = "noop_terminal"
+                cancel_detail = f"task already in {task_before.state}"
+            else:
+                await ctx.tasks.transition(
+                    task_id,
+                    "cancelled",
+                    evidence={
+                        "kill_by": from_agent,
+                        "reason": reason,
+                        "force": force,
+                        "scope": scope,
+                    },
+                )
+        except TaskNotFound:
+            cancel_status = "not_found"
+            cancel_detail = f"no task with task_id={task_id!r}"
+            log.warning(
+                "kill_task: task_id=%s not found (from=%s)", task_id, from_agent,
+            )
+        except IllegalTransition as exc:
+            cancel_status = "illegal_transition"
+            cancel_detail = str(exc)
+            log.warning("kill_task: illegal transition for %s: %s", task_id, exc)
+
+        await ctx.bus.append_and_seq(
+            Message.new(
+                from_agent=from_agent,
+                to_agent="*",
+                topic="kill",
+                payload={
+                    "task_id": task_id,
+                    "reason": reason,
+                    "force": force,
+                    "scope": scope,
+                    "status": cancel_status,
+                    "detail": cancel_detail,
+                },
+                priority=0,
+            )
+        )
+        try:
+            self._append_finding(
+                "kills.jsonl",
+                {
+                    "from": from_agent,
+                    "task_id": task_id,
+                    "reason": reason,
+                    "force": force,
+                    "scope": scope,
+                    "status": cancel_status,
+                    "detail": cancel_detail,
+                    "ts": time.time(),
+                    "session_id": ctx.state.session_id,
+                },
+            )
+        except OSError:  # pragma: no cover — best-effort
+            log.exception("failed to mirror kill to findings/kills.jsonl")
 
     async def _handle_propose_action(
         self, from_agent: str, payload: dict[str, Any]
@@ -1149,6 +1400,132 @@ class Conductor:
                 in_reply_to=payload.get("in_reply_to"),
             )
         )
+
+    # ------------------------------------------------------------------
+    # REQUEST / RESPONSE — agent-to-agent RPC (Plan A: kernel agent)
+    # ------------------------------------------------------------------
+    async def _handle_request(
+        self, from_agent: str, payload: dict[str, Any]
+    ) -> None:
+        """REQUEST → ``topic="request"`` event addressed to ``target_agent``.
+
+        Routing relies on the existing bus + Router/MultiCLI mirror path:
+        when ``to_agent`` matches an active agent's name, the message is
+        replayed into that agent's inbox via ``bus.replay_for`` (single-
+        proc reactor) or ``MultiCLIRouter.mirror_bus_tick`` (multi-cli).
+
+        We do NOT validate ``target_agent`` here — :class:`PolicyGate` did
+        that already. Priority is bumped to 2 so the target agent's
+        reactor processes the request promptly without waiting for the
+        next batch flush.
+        """
+        assert self.ctx is not None
+        ctx = self.ctx
+        target = str(payload.get("target_agent", "")).strip()
+        if not target:  # pragma: no cover — PolicyGate would reject first
+            await self._record_observation(
+                from_agent="conductor",
+                kind="request_missing_target",
+                detail={"from": from_agent, "payload": payload},
+            )
+            return
+        kind = str(payload.get("kind", "")).strip() or "?"
+        # Allocate the request its own envelope on the bus; the msg_id we
+        # get back is what the target uses as ``in_reply_to`` later.
+        msg = Message.new(
+            from_agent=from_agent,
+            to_agent=target,
+            topic="request",
+            payload={
+                "kind": kind,
+                "target_agent": target,
+                "params": payload.get("params") or {},
+                "reason": payload.get("reason", ""),
+                # Echo any extra free-form keys verbatim so the target
+                # doesn't lose context (e.g. correlation_id).
+                **{
+                    k: v for k, v in payload.items()
+                    if k not in {
+                        "kind", "target_agent", "params", "reason",
+                        "to", "topic", "priority", "in_reply_to",
+                    }
+                },
+            },
+            priority=int(payload.get("priority", 2)),
+        )
+        await ctx.bus.append_and_seq(msg)
+
+    async def _handle_response(
+        self, from_agent: str, payload: dict[str, Any]
+    ) -> None:
+        """RESPONSE → ``topic="response"`` event reverse-routed to the
+        request's original sender.
+
+        We use ``payload['in_reply_to']`` to look up the original request
+        envelope on the bus (best-effort; falls back to broadcast
+        ``to_agent="*"`` if the request can't be found, e.g. very old
+        request that aged out of the events window).
+        """
+        assert self.ctx is not None
+        ctx = self.ctx
+        in_reply_to = str(payload.get("in_reply_to", "")).strip()
+        if not in_reply_to:  # pragma: no cover — PolicyGate would reject first
+            await self._record_observation(
+                from_agent="conductor",
+                kind="response_missing_in_reply_to",
+                detail={"from": from_agent, "payload": payload},
+            )
+            return
+
+        # Look up the original request to find who to send back to.
+        original_sender = await self._lookup_original_request_sender(in_reply_to)
+        if original_sender is None:
+            log.warning(
+                "response: could not find original request msg_id=%s; "
+                "broadcasting to=*", in_reply_to,
+            )
+            original_sender = "*"
+        kind = str(payload.get("kind", "")).strip() or "?"
+        msg = Message.new(
+            from_agent=from_agent,
+            to_agent=original_sender,
+            topic="response",
+            payload={
+                "kind": kind,
+                "status": payload.get("status", "succeeded"),
+                "result": payload.get("result"),
+                **{
+                    k: v for k, v in payload.items()
+                    if k not in {
+                        "kind", "status", "result",
+                        "to", "topic", "priority", "in_reply_to",
+                    }
+                },
+            },
+            priority=int(payload.get("priority", 2)),
+            in_reply_to=in_reply_to,
+        )
+        await ctx.bus.append_and_seq(msg)
+
+    async def _lookup_original_request_sender(
+        self, request_msg_id: str
+    ) -> str | None:
+        """Reverse-lookup: find the ``from_agent`` of the request envelope
+        carrying ``msg_id == request_msg_id``.
+
+        Uses :meth:`MessageBus.lookup_by_id` (indexed by msg_id) so this
+        stays O(1) regardless of bus size. Returns ``None`` if not found
+        — caller falls back to broadcast.
+        """
+        assert self.ctx is not None
+        try:
+            msg = await self.ctx.bus.lookup_by_id(request_msg_id)
+        except Exception:  # noqa: BLE001 — best-effort
+            log.exception("response: bus.lookup_by_id failed for reverse-route")
+            return None
+        if msg is None or msg.topic != "request":
+            return None
+        return msg.from_agent
 
     # ------------------------------------------------------------------
     # Prompt rendering helpers
@@ -1558,82 +1935,8 @@ class Conductor:
             return None
 
     # ------------------------------------------------------------------
-    # Emergency / parliament
+    # Self-review (replaces parliament since v0.4 — see §13.1)
     # ------------------------------------------------------------------
-    async def ephemeral_rca_via_critic(self) -> dict[str, Any] | None:
-        """One-shot Critic invocation that produces an RCA finding.
-
-        Used by the guided emergency branch (DESIGN §5.1.3 / §7.2). Returns
-        the parsed RCA finding dict on success, or ``None`` on failure.
-        """
-        assert self.ctx is not None
-        ctx = self.ctx
-        prompt = (
-            "# RCA Critic — emergency post-mortem\n"
-            f"{ctx.state.summary()}\n\n"
-            "## Recent events\n"
-            + "\n".join(
-                f"  - {e.seq} {e.from_agent}->{e.to_agent} {e.topic}"
-                for e in await ctx.bus.tail(n=200)
-            )
-            + "\n\n## Task: produce ONE rca_finding intent.\n"
-        )
-        try:
-            intents = await self.backend.run(
-                prompt,
-                agent_name="critic",
-                allowed_tools=("emit_intent",),
-                extra={"rca_mode": True},
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("ephemeral_rca_via_critic: backend.run failed")
-            return None
-        for intent in intents or []:
-            if intent.type != IntentType.SEND_MESSAGE:
-                continue
-            payload = dict(intent.payload or {})
-            if str(payload.get("topic")) == "rca_finding":
-                return payload
-        return None
-
-    async def _open_parliament(self, proposal: dict[str, Any]) -> str:
-        """Marathon-only — broadcast a proposal and collect votes.
-
-        Returns ``"approved"`` / ``"rejected"`` / ``"abstained"`` based on
-        the simple majority rule. The actual vote tally is recorded on the
-        ``vote`` topic; consumers can replay them for audit.
-        """
-        assert self.ctx is not None
-        ctx = self.ctx
-        if ctx.state.execution_mode is not ExecutionMode.MARATHON_MULTI_AGENT:
-            return "abstained"
-        await ctx.bus.append_and_seq(
-            Message.new(
-                from_agent="conductor",
-                to_agent="*",
-                topic="proposal",
-                payload={"kind": "parliament_open", **proposal},
-                priority=0,
-            )
-        )
-        # Collect every ``vote`` event posted in the next half-tick window.
-        # In production we wait for explicit ``end-of-vote`` markers; v0.7
-        # uses a fixed 2 s window which is fine for unit tests using mock
-        # backends that respond instantly.
-        await asyncio.sleep(min(2.0, self._reactor_tick_s * 4))
-        events = await ctx.bus.tail(n=200)
-        votes = [
-            e.payload for e in events
-            if e.topic == "vote" and isinstance(e.payload, dict)
-        ]
-        approve = sum(1 for v in votes if str(v.get("verdict")) == "approve")
-        reject = sum(1 for v in votes if str(v.get("verdict")) == "reject")
-        if approve > reject:
-            return "approved"
-        if reject > approve:
-            return "rejected"
-        return "abstained"
-
     async def _record_proposal_for_self_review(
         self, proposal: dict[str, Any]
     ) -> None:

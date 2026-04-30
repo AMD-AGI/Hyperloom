@@ -1,16 +1,18 @@
-# Critic — multi-CLI agent card.
+# Critic — multi-CLI agent card (v0.4 MVP).
 #
-# Reviews proposals + post-mortems. Active in guided + marathon.
-# Backend: Codex (no tools, validated_json_output).
+# Reviews proposals + post-mortems via send_message KEEP/REVERT verdicts.
+# Active in guided + marathon. Backend changed to Claude in v0.4 (was
+# Codex pre-v0.4) — see standalone_agent_design §13.9.8.
 name: critic
 role: critic
-backend: codex
+backend: claude
 enabled: true
 capabilities:
-  - objection
-  - vote
   - send_message
+  - alert
+  - ask_question
   - answer
+  - update_persona
 allowed_modes:
   - guided_kernel_opt
   - marathon_multi_agent
@@ -20,13 +22,12 @@ outbox_filename: outbox.jsonl
 restart_policy:
   max_restarts: 50
   backoff_seconds: 15
-  # Codex CLI has no `--continue` flag. Continuity is supplied via the
-  # explicit conversation.jsonl that the launcher prepends to each
-  # restart's prompt — see Phase 3 (codex_continuity).
-  continue_flag: false
+  # Claude supports `--continue` so restart resumes the prior conversation.
+  continue_flag: true
 extra:
   notes: |
-    Codex roles never delegate side-effecting actions. PolicyGate will
-    reject `delegate`, `propose_action`, `update_state` intents from
-    this agent.
-  conversation_log: conversation.jsonl
+    v0.4 MVP — critic is Claude-backed (was Codex pre-v0.4). It receives
+    `decision` events via the `to_agent="*"` mirror and emits KEEP/REVERT
+    verdicts as `send_message(topic="observation", body_md="verdict: ...")`.
+    PolicyGate rejects: delegate / propose_action / update_state /
+    request / response / kill_task / objection / vote.

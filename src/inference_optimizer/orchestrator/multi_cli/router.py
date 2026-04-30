@@ -96,8 +96,14 @@ def _outbox_cursor_path(outbox: Path) -> Path:
 
 
 def _inbox_seq_cursor_path(inbox: Path) -> Path:
-    """Co-located ``<file>.seq`` last-mirrored bus seq."""
-    return inbox.with_suffix(inbox.suffix + ".seq")
+    """Router-private cursor: last bus seq we mirrored into ``inbox``.
+
+    NOTE: this is intentionally distinct from the agent-side cursor
+    (``inbox.jsonl.seq`` — written by the agent itself to track which
+    envelopes it has processed). The Router writes ``inbox.jsonl.mirrored``
+    so the two cursors do not trample each other.
+    """
+    return inbox.with_suffix(inbox.suffix + ".mirrored")
 
 
 # ---------------------------------------------------------------------------

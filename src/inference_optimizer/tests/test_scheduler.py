@@ -82,8 +82,11 @@ def test_pressure_floors_at_zero_when_no_max(registry, state: SharedState):
 # mode_gate / depth_gate / diminishing / lane_available
 # ---------------------------------------------------------------------------
 def test_mode_gate_zeroes_disallowed_action(registry, state: SharedState):
+    """Plan A: kernel_opt removed; deep_kernel_analysis stands in as a
+    representative action that's not allowed in quick mode."""
     sch = _scheduler(registry, mode=ExecutionMode.QUICK_PARAM_SWEEP)
-    a = registry.get("kernel_opt")
+    a = registry.get("deep_kernel_analysis")
+    assert a is not None
     s = sch.score(a, state)
     assert s.breakdown["mode_gate"] == 0.0
     assert s.score == 0.0
@@ -190,8 +193,11 @@ def test_rule1_succeeded_boosts_family(registry, state: SharedState):
 
 
 def test_rule2_failed_halves_family(registry, state: SharedState):
+    """Plan A: kernel_opt removed; deep_kernel_analysis stands in as the
+    trigger action whose family-mates should be halved by Rule 2."""
     sch = _scheduler(registry)
-    a = registry.get("kernel_opt")
+    a = registry.get("deep_kernel_analysis")
+    assert a is not None
     sch.update_after_action(a, gain_pct=0.0, status="failed")
     halved = [v for v in sch.adjustments.values() if v == 0.5]
     assert halved, "expected at least one deep_kernel-family halving"
@@ -204,25 +210,32 @@ def test_rule3_combined_backends_pushed(registry, state: SharedState):
     assert "combined_backends_test" in sch.followups
 
 
-def test_rule5_kernel_keep_pushes_profile_and_next_kernel(
+def test_rule5_kernel_keep_pushes_profile(
     registry, state: SharedState
 ):
+    """Plan A: Rule 5 enqueues 'profile' only — the kernel_opt followup
+    was removed because executor cannot delegate(kernel_opt); the kernel
+    agent path is driven by the request_kernel_optimization subskill."""
     sch = _scheduler(registry)
-    a = registry.get("kernel_opt")
+    a = registry.get("deep_kernel_analysis")  # stand-in deep_kernel action
+    assert a is not None
     sch.update_after_action(a, gain_pct=10.0, status="succeeded")
     assert "profile" in sch.followups
-    assert "kernel_opt" in sch.followups
+    # kernel_opt is no longer enqueued (no such registered action).
+    assert "kernel_opt" not in sch.followups
 
 
 def test_rule6_kernel_discard_reduces_remaining(
     registry, state: SharedState
 ):
     sch = _scheduler(registry)
-    a = registry.get("kernel_opt")
+    a = registry.get("deep_kernel_analysis")
+    assert a is not None
     sch.update_after_action(a, gain_pct=0.0, status="reverted")
     # any other deep_kernel-family entry should now have a < 1.0 adjustment
     any_dim = [
-        v for k, v in sch.adjustments.items() if v < 1.0 and k != "kernel_opt"
+        v for k, v in sch.adjustments.items()
+        if v < 1.0 and k != "deep_kernel_analysis"
     ]
     assert any_dim
 

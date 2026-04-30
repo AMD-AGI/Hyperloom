@@ -297,5 +297,38 @@ def test_validate_collects_multiple_violations():
     vs = validate_action(meta, "marathon")
     rule_ids = {v.rule_id for v in vs}
     assert {"IR-1", "IR-3", "IR-4", "IR-5", "IR-7"} <= rule_ids
-    # All violations default to BLOCK severity
-    assert all(v.severity == Severity.BLOCK for v in vs)
+    # Plan A — IR-3/4/5 stay BLOCK (process safety / gain validation);
+    # IR-1/2/6/7 are now WARN. Each violation inherits the rule's
+    # configured severity, not a hard-coded default.
+    by_id = {v.rule_id: v.severity for v in vs}
+    assert by_id["IR-3"] == Severity.BLOCK
+    assert by_id["IR-4"] == Severity.BLOCK
+    assert by_id["IR-5"] == Severity.BLOCK
+    assert by_id["IR-1"] == Severity.WARN
+    assert by_id["IR-7"] == Severity.WARN
+
+
+# ---------------------------------------------------------------------------
+# Plan A — IR severity policy
+# ---------------------------------------------------------------------------
+def test_ir_severity_policy_plan_a():
+    """IR-3/IR-4/IR-5 BLOCK, IR-1/IR-2/IR-6/IR-7 WARN per Plan A."""
+    from inference_optimizer.orchestrator.iron_rules import IRON_RULES
+    by_id = {r.id: r.severity for r in IRON_RULES}
+    assert by_id["IR-1"] == Severity.WARN
+    assert by_id["IR-2"] == Severity.WARN
+    assert by_id["IR-3"] == Severity.BLOCK
+    assert by_id["IR-4"] == Severity.BLOCK
+    assert by_id["IR-5"] == Severity.BLOCK
+    assert by_id["IR-6"] == Severity.WARN
+    assert by_id["IR-7"] == Severity.WARN
+
+
+def test_render_for_prompt_uses_must_for_block_should_for_warn():
+    """Prompt rendering surfaces severity as MUST/should so the LLM can
+    weight hard guarantees against soft recommendations."""
+    md = render_for_prompt("marathon")
+    # IR-3 is BLOCK -> "MUST"
+    assert "**IR-3**" in md and "MUST" in md
+    # IR-1 is WARN -> "should"
+    assert "**IR-1**" in md and "should" in md

@@ -108,6 +108,12 @@ if [ "$FRAMEWORK" = "vllm" ]; then
     wait_for_health "$PORT" "$RESULT_DIR/server.log" "$SERVER_PID"
 else
     export SGLANG_USE_AITER=1 RCCL_MSCCL_ENABLE=0 ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+    # RCCL tuning for TP=4 on XGMI (gfx950/MI355X):
+    # cpu_group now uses RCCL (not gloo), so tune Ring algorithm + 4 channels
+    # to match TP size and eliminate hipEventSynchronize stalls on barriers.
+    export NCCL_ALGO=Ring
+    export NCCL_NCHANNELS=4
+    export NCCL_MIN_NRINGS=4
     export SGLANG_TORCH_PROFILER_DIR="$TRACE_DIR"
     SGLANG_EXTRA_ARGS="${SGLANG_EXTRA_ARGS:-}"
     write_run_context

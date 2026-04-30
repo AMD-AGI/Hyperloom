@@ -1,4 +1,4 @@
-"""Tests for Conductor._handle_intent — F2 (10 intent type branches).
+"""Tests for Conductor._handle_intent — v0.4 MVP intent branches.
 
 Each test scripts a single intent through MockBackend, runs the dry-run loop
 briefly, then verifies the documented side-effect:
@@ -11,8 +11,10 @@ briefly, then verifies the documented side-effect:
     update_persona   -> personas/<agent>.md grew + bus(event:persona_update)
     ask_question     -> bus(question)
     answer           -> bus(answer)
-    objection        -> bus(objection)
-    vote             -> bus(vote)
+    kill_task        -> tasks.transition(cancelled) + bus(kill)
+                        + findings/kills.jsonl  (triage only)
+
+OBJECTION / VOTE branches were removed in v0.4 (parliament gone).
 """
 from __future__ import annotations
 
@@ -34,7 +36,13 @@ TINY_QUICK_HOURS = "0.0005"
 
 # ---------------------------------------------------------------------------
 async def _run_with_intent(session_dir, intent: Intent, *, agent="executor"):
-    """Boot conductor with one scripted intent for the given agent."""
+    """Boot conductor with one scripted intent for the given agent.
+
+    v0.4 — triage is always-on in quick mode but emits its own heartbeats
+    that would drown the test's target event in a 1000-event tail. We
+    pin ``triage_tick_s`` very high (effectively disabling triage during
+    the sub-2s test window) so the executor's intent stays observable.
+    """
     db = SqliteConnection(session_dir / "storage" / "conductor.db")
     backend = MockBackend(
         script=[ScriptStep(intents=[intent], only_if_agent=agent)]
@@ -46,6 +54,7 @@ async def _run_with_intent(session_dir, intent: Intent, *, agent="executor"):
         db=db,
         reactor_tick_s=0.1,
         clock_tick_s=0.2,
+        triage_tick_s=99999.0,   # disable triage flood in unit test
     )
     await asyncio.wait_for(conductor.run(), timeout=10.0)
     return db
@@ -316,26 +325,43 @@ async def test_answer_writes_answer_event(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_objection_writes_objection_event(session_dir):
+async def test_kill_task_writes_kill_event_and_finding(session_dir):
+    """v0.4 — triage emits kill_task, conductor cancels the task and mirrors
+    the kill onto bus(topic="kill") + findings/kills.jsonl.
+    """
+    import json
+    from inference_optimizer.orchestrator.task_registry import TaskRegistry
+
+    db = SqliteConnection(session_dir / "storage" / "conductor.db")
+    # Pre-seed a queued task so kill has something to cancel.
+    tasks = TaskRegistry(db)
+    seeded_task = await tasks.create(
+        kind="delegate",
+        params={"action_name": "baseline", "requested_by": "executor"},
+        idempotency_key="seed-baseline-key",
+        requires_lanes=["server"],
+        lease_ttl_sec=60,
+    )
+
     intent = Intent(
-        type=IntentType.OBJECTION,
+        type=IntentType.KILL_TASK,
         payload={
-            "target_msg_id": "abc-123",
-            "reason": "predicted gain is unrealistic",
+            "task_id": seeded_task.task_id,
+            "reason": "stuck in queued >2x lease_ttl in test fixture",
+            "scope": "task",
         },
     )
-    db = SqliteConnection(session_dir / "storage" / "conductor.db")
-    # Critic role required for OBJECTION (executor cannot emit it per policy).
     backend = MockBackend(
-        script=[ScriptStep(intents=[intent], only_if_agent="critic")]
+        script=[ScriptStep(intents=[intent], only_if_agent="triage")]
     )
     conductor = Conductor(
         session_dir,
         backend=backend,
-        env={"MODEL_PATH": "fake/model", "MAX_HOURS": "3"},  # guided -> +critic
+        env={"MODEL_PATH": "fake/model", "MAX_HOURS": "0.0005"},  # quick
         db=db,
         reactor_tick_s=0.1,
         clock_tick_s=0.2,
+        triage_tick_s=0.1,   # speed triage up for the test
     )
 
     async def kick():
@@ -349,52 +375,57 @@ async def test_objection_writes_objection_event(session_dir):
     )
 
     bus = MessageBus(db)
-    # Filter by topic in SQL so the rare ``objection`` event isn't drowned
-    # out by the high-frequency heartbeats both reactors emit during the
-    # 1s test window. (Without ``topic=...`` we'd need n ≫ 1000 to surface
-    # the seq=4 event in guided mode.)
-    events = await bus.tail(n=200, topic="objection")
-    objs = _topic_payloads(events, "objection")
+    events = await bus.tail(n=200, topic="kill")
+    kills = _topic_payloads(events, "kill")
     assert any(
-        p.get("reason") == "predicted gain is unrealistic" for p in objs
+        p.get("task_id") == seeded_task.task_id
+        and p.get("status") == "ok"
+        for p in kills
     )
+    # Task should now be cancelled.
+    cancelled = await TaskRegistry(db).get(seeded_task.task_id)
+    assert cancelled.state == "cancelled"
+    # findings/kills.jsonl mirror.
+    kills_file = session_dir / "findings" / "kills.jsonl"
+    assert kills_file.is_file()
+    rows = [
+        json.loads(line) for line in kills_file.read_text().splitlines() if line.strip()
+    ]
+    assert any(r.get("task_id") == seeded_task.task_id for r in rows)
     db.close()
 
 
 @pytest.mark.asyncio
-async def test_vote_writes_vote_event(session_dir):
-    intent = Intent(
-        type=IntentType.VOTE,
-        payload={"target_msg_id": "abc-123", "vote": "approve"},
-    )
+async def test_kill_task_from_executor_is_policy_denied(session_dir):
+    """v0.4 — only triage may kill_task; executor's attempt is rejected."""
     db = SqliteConnection(session_dir / "storage" / "conductor.db")
+    intent = Intent(
+        type=IntentType.KILL_TASK,
+        payload={"task_id": "fake", "reason": "x", "scope": "task"},
+    )
     backend = MockBackend(
-        script=[ScriptStep(intents=[intent], only_if_agent="critic")]
+        script=[ScriptStep(intents=[intent], only_if_agent="executor")]
     )
     conductor = Conductor(
         session_dir,
         backend=backend,
-        env={"MODEL_PATH": "fake/model", "MAX_HOURS": "3"},
+        env={"MODEL_PATH": "fake/model", "MAX_HOURS": "0.0005"},
         db=db,
         reactor_tick_s=0.1,
         clock_tick_s=0.2,
     )
+    await asyncio.wait_for(conductor.run(), timeout=10.0)
 
-    async def kick():
-        await asyncio.sleep(1.0)
-        if conductor.ctx is not None:
-            from inference_optimizer.orchestrator.conductor import StopReason
-            conductor.ctx.state.set_stopping(StopReason.EMERGENCY)
-
-    await asyncio.wait_for(
-        asyncio.gather(conductor.run(), kick()), timeout=15.0
-    )
-
+    # No kill events on the bus.
     bus = MessageBus(db)
-    # Same topic-overflow guard as the objection test above.
-    events = await bus.tail(n=200, topic="vote")
-    votes = _topic_payloads(events, "vote")
-    assert any(p.get("vote") == "approve" for p in votes)
+    events = await bus.tail(n=200, topic="kill")
+    assert events == []
+    # PolicyGate should have written a policy_denied observation.
+    obs = await bus.tail(n=1000, topic="observation")
+    denied_kinds = [
+        e.payload.get("kind") for e in obs if isinstance(e.payload, dict)
+    ]
+    assert "policy_denied" in denied_kinds
     db.close()
 
 
@@ -422,3 +453,135 @@ def test_task_idempotency_key_is_deterministic():
         params={"foo": 1, "bar": 99},
     )
     assert a != c
+
+
+# ---------------------------------------------------------------------------
+# Plan A — REQUEST / RESPONSE routing
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_request_writes_request_event_addressed_to_target(session_dir):
+    """REQUEST intent → ``topic="request"`` event with to_agent=<target>."""
+    intent = Intent(
+        type=IntentType.REQUEST,
+        payload={
+            "target_agent": "kernel",
+            "kind": "select_kernels",
+            "params": {"trace_path": "/tmp/x.json.gz"},
+            "reason": "smoke",
+        },
+    )
+    db = await _run_with_intent(session_dir, intent)
+    bus = MessageBus(db)
+    events = await bus.tail(n=200, topic="request")
+    assert events, "no request events written"
+    first = events[0]
+    assert first.from_agent == "executor"
+    assert first.to_agent == "kernel"
+    assert first.payload["kind"] == "select_kernels"
+    assert first.payload["target_agent"] == "kernel"
+    assert first.payload["params"]["trace_path"] == "/tmp/x.json.gz"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_response_reverse_routes_to_request_sender(session_dir):
+    """RESPONSE looks up the original request and addresses to_agent
+    back to the request's from_agent (here: executor)."""
+    db = SqliteConnection(session_dir / "storage" / "conductor.db")
+    # Pre-seed: directly insert a request envelope so we have a known msg_id
+    # to reply to. SqliteConnection ctor already ran ensure_schema.
+    bus = MessageBus(db)
+    from inference_optimizer.orchestrator.message_bus import Message
+    request_msg = Message.new(
+        from_agent="executor",
+        to_agent="kernel",
+        topic="request",
+        payload={"kind": "select_kernels", "target_agent": "kernel"},
+    )
+    await bus.append_and_seq(request_msg)
+
+    # Now script kernel to reply.
+    response_intent = Intent(
+        type=IntentType.RESPONSE,
+        payload={
+            "in_reply_to": request_msg.msg_id,
+            "kind": "select_kernels_done",
+            "status": "succeeded",
+            "result": {"candidates": ["a.py", "b.py"]},
+        },
+    )
+    backend = MockBackend(
+        script=[ScriptStep(intents=[response_intent], only_if_agent="kernel")]
+    )
+    conductor = Conductor(
+        session_dir,
+        backend=backend,
+        env={"MODEL_PATH": "fake/model", "MAX_HOURS": "3"},  # guided -> +kernel
+        db=db,
+        reactor_tick_s=0.1,
+        clock_tick_s=0.2,
+    )
+
+    async def kick():
+        await asyncio.sleep(1.0)
+        if conductor.ctx is not None:
+            from inference_optimizer.orchestrator.conductor import StopReason
+            conductor.ctx.state.set_stopping(StopReason.EMERGENCY)
+
+    await asyncio.wait_for(
+        asyncio.gather(conductor.run(), kick()), timeout=15.0
+    )
+
+    events = await bus.tail(n=200, topic="response")
+    assert events, "no response events written"
+    matching = [e for e in events if e.in_reply_to == request_msg.msg_id]
+    assert matching, f"no response with in_reply_to={request_msg.msg_id!r}"
+    resp = matching[0]
+    # Reverse-routed back to the request's original sender (executor).
+    assert resp.to_agent == "executor"
+    assert resp.from_agent == "kernel"
+    assert resp.payload["kind"] == "select_kernels_done"
+    assert resp.payload["status"] == "succeeded"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_response_unknown_in_reply_to_falls_back_to_broadcast(session_dir):
+    """If the original request can't be found, response is broadcast."""
+    response_intent = Intent(
+        type=IntentType.RESPONSE,
+        payload={
+            "in_reply_to": "nonexistent-msg-id-xxxxx",
+            "kind": "ack",
+            "status": "succeeded",
+        },
+    )
+    db = SqliteConnection(session_dir / "storage" / "conductor.db")
+    backend = MockBackend(
+        script=[ScriptStep(intents=[response_intent], only_if_agent="kernel")]
+    )
+    conductor = Conductor(
+        session_dir,
+        backend=backend,
+        env={"MODEL_PATH": "fake/model", "MAX_HOURS": "3"},
+        db=db,
+        reactor_tick_s=0.1,
+        clock_tick_s=0.2,
+    )
+
+    async def kick():
+        await asyncio.sleep(1.0)
+        if conductor.ctx is not None:
+            from inference_optimizer.orchestrator.conductor import StopReason
+            conductor.ctx.state.set_stopping(StopReason.EMERGENCY)
+
+    await asyncio.wait_for(
+        asyncio.gather(conductor.run(), kick()), timeout=15.0
+    )
+
+    bus = MessageBus(db)
+    events = await bus.tail(n=200, topic="response")
+    assert events
+    resp = events[0]
+    assert resp.to_agent == "*"  # broadcast fallback
+    db.close()

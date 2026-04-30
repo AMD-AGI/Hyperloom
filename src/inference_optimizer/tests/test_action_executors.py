@@ -42,14 +42,12 @@ from inference_optimizer.orchestrator.action_executors import (
     bench_runner as bench_runner_mod,
 )
 from inference_optimizer.orchestrator.action_executors import (
-    kernel_opt as kernel_opt_mod,
-)
-from inference_optimizer.orchestrator.action_executors import (
     param_sweep_run as param_sweep_mod,
 )
 from inference_optimizer.orchestrator.action_executors import (
     profile as profile_mod,
 )
+# Plan A: KernelOptExecutor removed (kernel agent owns kernel-opt now).
 from inference_optimizer.orchestrator.intent_parser import IntentType
 from inference_optimizer.orchestrator.action_registry import ActionMetadata
 from inference_optimizer.orchestrator.execution_mode import ExecutionMode
@@ -125,21 +123,32 @@ def _patch_run_subprocess(monkeypatch, side_effect):
     monkeypatch.setattr(bench_runner_mod, "run_subprocess", side_effect)
     monkeypatch.setattr(profile_mod, "run_subprocess", side_effect)
     monkeypatch.setattr(param_sweep_mod, "run_subprocess", side_effect)
-    monkeypatch.setattr(kernel_opt_mod, "run_subprocess", side_effect)
 
 
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
-def test_registry_has_five_executors():
-    expected = {"baseline", "bench_runner", "profile",
-                "param_sweep_run", "kernel_opt"}
+def test_registry_has_four_executors():
+    """Plan A: KernelOptExecutor removed (kernel agent owns it now)."""
+    expected = {"baseline", "bench_runner", "profile", "param_sweep_run"}
     assert expected.issubset(set(EXECUTOR_REGISTRY))
+    # And kernel_opt MUST NOT be in the registry.
+    assert "kernel_opt" not in EXECUTOR_REGISTRY
 
 
 def test_get_executor_normalizes_dashes():
-    assert get_executor("kernel-opt") is get_executor("kernel_opt")
     assert get_executor("bench-runner") is get_executor("bench_runner")
+    assert get_executor("param-sweep-run") is get_executor("param_sweep_run")
+
+
+def test_get_executor_kernel_opt_returns_none():
+    """Plan A: kernel_opt action no longer has an executor — kernel agent
+    owns the work via its own Bash tool. Lookup must return None so the
+    SubAgentRunner falls through to LLM (which itself shouldn't fire
+    because PolicyGate denies executor.delegate(kernel_opt) up-front)."""
+    assert get_executor("kernel_opt") is None
+    assert get_executor("kernel-opt") is None
+    assert get_executor("integrate") is None
 
 
 def test_get_executor_returns_none_for_unknown():
@@ -354,80 +363,18 @@ async def test_param_sweep_picks_best_row(monkeypatch, session_dir):
 
 
 # ---------------------------------------------------------------------------
-# KernelOptExecutor
+# KernelOptExecutor — REMOVED in Plan A
 # ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_kernel_opt_requires_kernel_candidates(session_dir):
-    ex = get_executor("kernel_opt")
-    ctx = _make_ctx(
-        name="kernel_opt", session_dir=session_dir,
-        env=dict(INFERENCEX_PATH="/x", KERNEL_OPT_BACKENDS="geak"),
-        params={},  # missing kernel_candidates
-    )
-    with pytest.raises(ExecutorEnvError) as exc:
-        await ex.run(ctx)
-    assert "kernel_candidates" in str(exc.value)
-
-
-@pytest.mark.asyncio
-async def test_kernel_opt_geak_only_succeeds(monkeypatch, session_dir, tmp_path):
-    ex = get_executor("kernel_opt")
-    candidate = tmp_path / "kernel_a.py"
-    candidate.write_text("# fake kernel")
-    ctx = _make_ctx(
-        name="kernel_opt", session_dir=session_dir,
-        env=dict(INFERENCEX_PATH="/x", KERNEL_OPT_BACKENDS="geak"),
-        params={"kernel_candidates": [str(candidate)]},
-    )
-
-    seen_cmds: list[list[str]] = []
-
-    # Note: kernel_opt's _submit_geak / _submit_oob don't pass cwd, so
-    # accept it as optional to mirror the real run_subprocess signature.
-    async def fake_run(cmd, *, env, log_path, timeout_s=None, cwd=None):
-        seen_cmds.append(list(cmd))
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text("geak ok\n")
-        return 0
-
-    _patch_run_subprocess(monkeypatch, fake_run)
-    result = await ex.run(ctx)
-    assert result.status == "succeeded", f"unexpected: {result.notes}"
-    assert result.metrics["n_succeeded"] == 1
-    assert result.metrics["n_failed"] == 0
-    # GEAK invocation includes the candidate path + --yolo.
-    assert any("geak_ray_submit.py" in c for cmd in seen_cmds for c in cmd)
-    assert any(str(candidate) in c for cmd in seen_cmds for c in cmd)
-    # Should also propose a follow-up integrate.
-    propose = next(i for i in result.intents if i.type == IntentType.PROPOSE_ACTION)
-    assert propose.payload["action_name"] == "integrate"
-
-
-@pytest.mark.asyncio
-async def test_kernel_opt_partial_failure_returns_succeeded(
-    monkeypatch, session_dir, tmp_path,
-):
-    """If at least one backend succeeds, status is succeeded (best-of-N)."""
-    ex = get_executor("kernel_opt")
-    cand = tmp_path / "k.py"
-    cand.write_text("# x")
-    ctx = _make_ctx(
-        name="kernel_opt", session_dir=session_dir,
-        env=dict(INFERENCEX_PATH="/x", KERNEL_OPT_BACKENDS="geak"),
-        params={"kernel_candidates": [str(cand)]},
-    )
-    state = {"calls": 0}
-
-    async def flaky(cmd, *, env, log_path, timeout_s=None, cwd=None):
-        state["calls"] += 1
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text("x\n")
-        return 0  # the only call succeeds
-
-    _patch_run_subprocess(monkeypatch, flaky)
-    result = await ex.run(ctx)
-    assert result.status == "succeeded"
-    assert state["calls"] == 1
+# The KernelOptExecutor was deleted as part of Plan A. The kernel agent
+# (a persistent reactor) now owns kernel-opt + integrate end-to-end and
+# invokes geak_ray_submit.py / oob_ray_submit.py / patch_inductor.py
+# directly via its Bash tool. See:
+#   - agents/kernel/SKILL.md
+#   - agents/kernel/actions/{select_kernels,run_optimization,apply_patch}.md
+#   - tests covering the new path: test_policy.py (REQUEST/RESPONSE
+#     gating + executor.delegate(kernel_opt) denial), test_handle_intent.py
+#     (request/response routing), test_multi_cli_all_agents.py (kernel
+#     CLI discovery + happy-path heartbeat).
 
 
 # ---------------------------------------------------------------------------

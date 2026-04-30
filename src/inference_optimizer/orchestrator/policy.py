@@ -111,6 +111,43 @@ DEFAULT_QUICK_ACTION_ALLOWLIST: frozenset[str] = frozenset(
 
 
 # ---------------------------------------------------------------------------
+# Plan A — kernel-owned actions
+#
+# These actions are owned end-to-end by the kernel agent. The executor
+# (and any other role) MUST NOT delegate them directly; the only valid
+# path is REQUEST(target_agent="kernel", kind="...") + RESPONSE.
+# PolicyGate hard-rejects executor.delegate(kernel_opt|integrate) so the
+# capability boundary is unambiguous.
+# ---------------------------------------------------------------------------
+KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({"kernel_opt", "integrate"})
+
+
+# ---------------------------------------------------------------------------
+# Request / Response routing matrix (DESIGN §5 / standalone_agent_design §3.2)
+#
+# Maps source role -> set of allowed target_agent names. A REQUEST whose
+# (from_agent, target_agent) pair is not on this map is rejected. Today
+# only executor->kernel is allowed; expanding here is how new agent-to-
+# agent RPC paths are sanctioned.
+# ---------------------------------------------------------------------------
+REQUEST_ROUTING: dict[str, frozenset[str]] = {
+    "executor": frozenset({"kernel"}),
+}
+
+
+# ---------------------------------------------------------------------------
+# kill_task source allowlist — v0.4 MVP (standalone_agent_design §13.3)
+#
+# Only the triage role may emit kill_task intents. Any other role attempting
+# kill_task is hard-rejected at PolicyGate. payload.scope is also restricted
+# to "task" (process / server kills are NOT in MVP — IR-5 still owns server
+# lifecycle; see KILL_TASK_ALLOWED_SCOPES).
+# ---------------------------------------------------------------------------
+KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"triage"})
+KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
+
+
+# ---------------------------------------------------------------------------
 # Core SharedState fields that only the Conductor may mutate
 # ---------------------------------------------------------------------------
 CORE_STATE_FIELDS: frozenset[str] = frozenset(
@@ -193,8 +230,14 @@ class PolicyGate:
             self._validate_state_transition(role, payload)
         elif intent.type == IntentType.SEND_MESSAGE:
             self._validate_send_message_topic(payload)
-        # OBJECTION / VOTE / ANSWER / ASK_QUESTION / UPDATE_PERSONA / ALERT
-        # carry no policy-relevant side-effects beyond the role gate.
+        elif intent.type == IntentType.REQUEST:
+            self._validate_request(role, payload)
+        elif intent.type == IntentType.RESPONSE:
+            self._validate_response(role, payload)
+        elif intent.type == IntentType.KILL_TASK:
+            self._validate_kill_task(role, payload)
+        # ANSWER / ASK_QUESTION / UPDATE_PERSONA / ALERT carry no
+        # policy-relevant side-effects beyond the role gate.
 
     # ------------------------------------------------------------------
     def allowed_tools_for_agent(
@@ -238,6 +281,9 @@ class PolicyGate:
             * role.can_delegate_side_effects = True
             * mode allows sub-agent delegation (FeatureFlags)
             * action_name in mode allowlist (or ActionRegistry approval)
+            * action_name NOT in :data:`KERNEL_OWNED_ACTIONS` (Plan A —
+              kernel agent owns kernel_opt + integrate end-to-end; the
+              executor must use REQUEST(target=kernel) instead)
         """
         if not role.can_delegate_side_effects:
             raise PolicyDenied(
@@ -254,7 +300,123 @@ class PolicyGate:
             raise PolicyDenied(
                 "delegate intent missing action_name", rule="payload",
             )
+        # Plan A — kernel-owned actions are not directly delegatable by any
+        # role. Executor must REQUEST the kernel agent instead.
+        if action_name in KERNEL_OWNED_ACTIONS:
+            raise PolicyDenied(
+                f"action={action_name!r} is owned by the kernel agent; "
+                f"emit REQUEST(target_agent='kernel', kind='...') instead "
+                f"of delegate(action_name={action_name!r})",
+                rule="kernel_owned_by_kernel_agent",
+            )
         self._validate_mode_allowed(action_name)
+
+    # ------------------------------------------------------------------
+    def _validate_request(
+        self, role: "AgentRole", payload: dict[str, Any]
+    ) -> None:
+        """``request`` (agent-to-agent RPC) requires:
+
+            * source role's name is on :data:`REQUEST_ROUTING` (i.e. has at
+              least one valid target it can request).
+            * ``payload['target_agent']`` is in the source role's allowed
+              targets set.
+            * ``payload['kind']`` is a non-empty string.
+
+        Kind-level validation (e.g. "executor can only request
+        select_kernels / run_optimization / apply_patch from kernel") is
+        intentionally left to the kernel agent's own LLM-side discipline
+        for v1 simplicity — wire it here later when the kind catalogue
+        stabilises.
+        """
+        targets = REQUEST_ROUTING.get(role.name)
+        if not targets:
+            raise PolicyDenied(
+                f"role={role.name!r} cannot emit REQUEST",
+                rule="role",
+            )
+        target = str(payload.get("target_agent", "")).strip()
+        if not target:
+            raise PolicyDenied(
+                "request missing target_agent", rule="payload",
+            )
+        if target not in targets:
+            raise PolicyDenied(
+                f"role={role.name!r} cannot request target_agent={target!r} "
+                f"(allowed: {sorted(targets)!r})",
+                rule="request_target",
+            )
+        kind = str(payload.get("kind", "")).strip()
+        if not kind:
+            raise PolicyDenied(
+                "request missing kind", rule="payload",
+            )
+
+    def _validate_response(
+        self, role: "AgentRole", payload: dict[str, Any]
+    ) -> None:
+        """``response`` validation.
+
+        The source role must have RESPONSE on its allowed_intents (already
+        gated by the role check above). We additionally require:
+
+            * ``payload['in_reply_to']`` is a non-empty string (so the
+              Conductor can reverse-route to the original requester).
+            * ``payload['kind']`` is a non-empty string.
+        """
+        in_reply_to = str(payload.get("in_reply_to", "")).strip()
+        if not in_reply_to:
+            raise PolicyDenied(
+                "response missing in_reply_to", rule="payload",
+            )
+        kind = str(payload.get("kind", "")).strip()
+        if not kind:
+            raise PolicyDenied(
+                "response missing kind", rule="payload",
+            )
+
+    def _validate_kill_task(
+        self, role: "AgentRole", payload: dict[str, Any]
+    ) -> None:
+        """``kill_task`` validation — v0.4 MVP (standalone_agent_design §13.3).
+
+        Constraints:
+            * source role must be in :data:`KILL_TASK_SOURCE_ALLOWLIST`
+              (only ``triage`` today)
+            * ``payload['task_id']`` is a non-empty string
+            * ``payload['reason']`` is a non-empty string
+            * ``payload['scope']`` defaults to ``"task"`` and MUST be in
+              :data:`KILL_TASK_ALLOWED_SCOPES`. Explicit ``"process"`` /
+              ``"server"`` are rejected — IR-5 still owns server lifecycle
+              and OS-level pid kills are not in MVP scope.
+
+        ``force`` (optional bool) is metadata only in MVP — it does not
+        change behaviour, only gets recorded into ``findings/kills.jsonl``.
+        """
+        if role.name not in KILL_TASK_SOURCE_ALLOWLIST:
+            raise PolicyDenied(
+                f"role={role.name!r} cannot emit kill_task "
+                f"(allowed: {sorted(KILL_TASK_SOURCE_ALLOWLIST)!r})",
+                rule="kill_task_source",
+            )
+        task_id = str(payload.get("task_id", "")).strip()
+        if not task_id:
+            raise PolicyDenied(
+                "kill_task missing task_id", rule="payload",
+            )
+        reason = str(payload.get("reason", "")).strip()
+        if not reason:
+            raise PolicyDenied(
+                "kill_task missing reason", rule="payload",
+            )
+        scope = str(payload.get("scope") or "task").strip()
+        if scope not in KILL_TASK_ALLOWED_SCOPES:
+            raise PolicyDenied(
+                f"kill_task scope={scope!r} not allowed "
+                f"(allowed: {sorted(KILL_TASK_ALLOWED_SCOPES)!r}; "
+                f"v0.4 MVP keeps server/process kills out per IR-5)",
+                rule="kill_scope",
+            )
 
     def _validate_propose_action(
         self, role: "AgentRole", payload: dict[str, Any]
@@ -414,8 +576,12 @@ def _matches_any(command: str, patterns: Iterable[str]) -> bool:
 __all__ = [
     "CORE_STATE_FIELDS",
     "DEFAULT_QUICK_ACTION_ALLOWLIST",
+    "KERNEL_OWNED_ACTIONS",
+    "KILL_TASK_ALLOWED_SCOPES",
+    "KILL_TASK_SOURCE_ALLOWLIST",
     "PolicyDenied",
     "PolicyGate",
     "QUICK_BASH_ALLOWLIST",
+    "REQUEST_ROUTING",
     "QUICK_BASH_DENYLIST",
 ]

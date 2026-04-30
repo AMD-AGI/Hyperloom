@@ -85,10 +85,11 @@ async def test_compose_prompt_iron_rules_block_present(tmp_path: Path):
     prompt = conductor._compose_prompt("executor", msgs=[])
     assert "IR-4" in prompt
     assert "IR-5" in prompt
-    # The dynamic render uses an explicit "(block)" tag on each rule —
-    # the executor.md static persona doesn't, so this lets us tell them
-    # apart.
-    assert "(block)" in prompt
+    # Plan A — render_for_prompt now tags each rule with its severity so
+    # the LLM can prioritise. IR-4/IR-5 stay BLOCK so look for the
+    # severity surface ("block" lower-case + "MUST" tone).
+    assert "(block" in prompt  # accept "(block" or "(block — MUST)"
+    assert "MUST" in prompt
     db.close()
 
 
@@ -206,24 +207,17 @@ class TestRenderMsgBody:
         assert "[topic=model_kb_recall]" in out
         assert "no_prior_data" in out
 
-    def test_objection_renders_target_and_text(self):
+    def test_kill_renders_task_and_reason(self):
+        """v0.4 — replaces the deleted objection/vote topic renderers."""
         out = Conductor._render_msg_body(
-            "objection",
+            "kill",
             {
-                "target_msg_id": "deadbeef0123cafe",
-                "objection": "predicted_gain=20% lacks evidence",
+                "task_id": "deadbeef0123cafe",
+                "reason": "stuck for 4x lease_ttl",
             },
         )
-        assert "target=deadbeef" in out
-        assert "predicted_gain=20% lacks evidence" in out
-
-    def test_vote_renders_target_and_choice(self):
-        out = Conductor._render_msg_body(
-            "vote",
-            {"target_msg_id": "abcd1234efgh5678", "vote": "no"},
-        )
-        assert "target=abcd1234" in out
-        assert "vote=no" in out
+        assert "task=deadbeef" in out
+        assert "reason=stuck for 4x lease_ttl" in out
 
     def test_reflection_tick_renders_elapsed_and_left(self):
         out = Conductor._render_msg_body(
@@ -444,69 +438,7 @@ async def test_dispatcher_loop_drains_queued_delegates(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Ephemeral RCA via critic
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_ephemeral_rca_returns_finding(tmp_path: Path):
-    db = SqliteConnection(tmp_path / "storage" / "conductor.db")
-    rca_intent = Intent(
-        type=IntentType.SEND_MESSAGE,
-        payload={
-            "topic": "rca_finding",
-            "body_md": "kernel rebuild OOMed",
-            "rca": {
-                "root_cause": "OOM during rebuild",
-                "evidence_event_seqs": [10, 11],
-                "recommended_action": "abort",
-            },
-        },
-    )
-    backend = MockBackend(script=[ScriptStep(intents=[rca_intent])])
-    conductor = Conductor(
-        tmp_path,
-        backend=backend,
-        env={"MODEL_PATH": "fake", "MAX_HOURS": "0.001"},
-        db=db,
-        enable_dispatcher=False,
-    )
-    await conductor._bootstrap()
-    finding = await conductor.ephemeral_rca_via_critic()
-    assert finding is not None
-    assert finding["rca"]["recommended_action"] == "abort"
-    db.close()
-
-
-@pytest.mark.asyncio
-async def test_ephemeral_rca_returns_none_when_no_finding(tmp_path: Path):
-    db = SqliteConnection(tmp_path / "storage" / "conductor.db")
-    # Backend emits an unrelated send_message
-    backend = MockBackend(
-        script=[
-            ScriptStep(
-                intents=[
-                    Intent(
-                        type=IntentType.SEND_MESSAGE,
-                        payload={"topic": "event", "body_md": "noop"},
-                    )
-                ]
-            )
-        ]
-    )
-    conductor = Conductor(
-        tmp_path,
-        backend=backend,
-        env={"MODEL_PATH": "fake", "MAX_HOURS": "0.001"},
-        db=db,
-        enable_dispatcher=False,
-    )
-    await conductor._bootstrap()
-    finding = await conductor.ephemeral_rca_via_critic()
-    assert finding is None
-    db.close()
-
-
-# ---------------------------------------------------------------------------
-# _open_parliament + _record_proposal_for_self_review
+# v0.4 — Self-review (parliament removed entirely; ephemeral RCA gone too)
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_record_proposal_for_self_review_writes_event(tmp_path: Path):
@@ -534,55 +466,14 @@ async def test_record_proposal_for_self_review_writes_event(tmp_path: Path):
     db.close()
 
 
-@pytest.mark.asyncio
-async def test_open_parliament_quick_mode_abstains(tmp_path: Path):
-    db = SqliteConnection(tmp_path / "storage" / "conductor.db")
-    conductor = Conductor(
-        tmp_path,
-        backend=MockBackend(),
-        env={"MODEL_PATH": "fake", "MAX_HOURS": "0.001"},
-        db=db,
-        enable_dispatcher=False,
-        reactor_tick_s=0.05,
+def test_v04_removed_parliament_and_ephemeral_rca():
+    """v0.4 — confirm the deleted methods/symbols are actually gone."""
+    assert not hasattr(Conductor, "_open_parliament"), (
+        "v0.4 removed parliament — _open_parliament should not exist"
     )
-    await conductor._bootstrap()
-    verdict = await conductor._open_parliament({"action_name": "x"})
-    assert verdict == "abstained"
-    db.close()
-
-
-@pytest.mark.asyncio
-async def test_open_parliament_marathon_counts_votes(tmp_path: Path):
-    db = SqliteConnection(tmp_path / "storage" / "conductor.db")
-    conductor = Conductor(
-        tmp_path,
-        backend=MockBackend(),
-        env={"MODEL_PATH": "fake", "MAX_HOURS": "12"},
-        db=db,
-        enable_dispatcher=False,
-        reactor_tick_s=0.05,
+    assert not hasattr(Conductor, "ephemeral_rca_via_critic"), (
+        "v0.4 removed ephemeral RCA — method should not exist"
     )
-    await conductor._bootstrap()
-
-    async def cast_votes():
-        await asyncio.sleep(0.05)
-        ctx = conductor.ctx
-        from inference_optimizer.orchestrator.message_bus import Message
-        for v in ("approve", "approve", "reject"):
-            await ctx.bus.append_and_seq(
-                Message.new(
-                    from_agent="critic",
-                    to_agent="*",
-                    topic="vote",
-                    payload={"verdict": v},
-                )
-            )
-
-    voter = asyncio.create_task(cast_votes())
-    verdict = await conductor._open_parliament({"action_name": "x"})
-    await voter
-    assert verdict == "approved"
-    db.close()
 
 
 # ---------------------------------------------------------------------------

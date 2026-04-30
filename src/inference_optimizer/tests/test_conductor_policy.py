@@ -86,7 +86,8 @@ class _RecordingBackend(Backend):
 # Multi-reactor spawn count
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_quick_mode_spawns_only_executor_reactor(session_dir):
+async def test_quick_mode_spawns_executor_and_triage(session_dir):
+    """v0.4 — quick mode roster: executor + triage (always-on)."""
     db = SqliteConnection(session_dir / "storage" / "conductor.db")
     backend = _RecordingBackend()
     conductor = Conductor(
@@ -96,11 +97,13 @@ async def test_quick_mode_spawns_only_executor_reactor(session_dir):
         db=db,
         reactor_tick_s=0.1,
         clock_tick_s=0.2,
+        triage_tick_s=0.5,   # let triage fire at least once during the test
     )
     await asyncio.wait_for(conductor.run(), timeout=10.0)
 
     agents_called = {c["agent"] for c in backend.calls}
-    assert agents_called == {"executor"}
+    assert "executor" in agents_called
+    assert "triage" in agents_called
     db.close()
 
 
@@ -134,6 +137,7 @@ async def test_guided_mode_spawns_executor_and_critic(session_dir):
 
 @pytest.mark.asyncio
 async def test_marathon_mode_spawns_full_roster(session_dir):
+    """v0.4 — guided/marathon roster: executor + critic + kernel + triage."""
     db = SqliteConnection(session_dir / "storage" / "conductor.db")
     backend = _RecordingBackend()
     conductor = Conductor(
@@ -143,10 +147,11 @@ async def test_marathon_mode_spawns_full_roster(session_dir):
         db=db,
         reactor_tick_s=0.1,
         clock_tick_s=0.2,
+        triage_tick_s=0.5,   # let triage fire at least once during the test
     )
 
     async def kick():
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(2.0)
         if conductor.ctx is not None:
             conductor.ctx.state.set_stopping(StopReason.EMERGENCY)
 
@@ -155,11 +160,11 @@ async def test_marathon_mode_spawns_full_roster(session_dir):
     )
 
     agents_called = {c["agent"] for c in backend.calls}
-    # All four resident roles were given a chance to react.
+    # v0.4 — executor + critic + kernel + triage are the roster.
     assert "executor" in agents_called
     assert "critic" in agents_called
-    assert "watchdog" in agents_called
-    assert "sage" in agents_called
+    assert "kernel" in agents_called
+    assert "triage" in agents_called
     db.close()
 
 
@@ -189,12 +194,12 @@ async def test_codex_role_receives_no_tools(session_dir):
     )
 
     by_agent = {c["agent"]: c for c in backend.calls}
-    if "critic" in by_agent:
-        assert by_agent["critic"]["allowed_tools"] == ()
-    if "sage" in by_agent:
-        assert by_agent["sage"]["allowed_tools"] == ()
-    if "executor" in by_agent:
-        assert "emit_intent" in by_agent["executor"]["allowed_tools"]
+    # v0.4 — all 4 roles are Claude-backed; each gets emit_intent.
+    for name in ("executor", "critic", "triage", "kernel"):
+        if name in by_agent:
+            assert "emit_intent" in by_agent[name]["allowed_tools"], (
+                f"{name} should receive emit_intent tool in v0.4"
+            )
     db.close()
 
 
@@ -296,5 +301,6 @@ async def test_run_started_event_lists_roles(session_dir):
     ]
     assert started
     payload = started[0].payload
-    assert payload.get("roles") == ["executor"]
+    # v0.4 — quick mode roster is [executor, triage].
+    assert payload.get("roles") == ["executor", "triage"]
     db.close()

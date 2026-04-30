@@ -32,13 +32,24 @@ class IntentType(str, Enum):
     SEND_MESSAGE = "send_message"
     DELEGATE = "delegate"
     PROPOSE_ACTION = "propose_action"
-    OBJECTION = "objection"
-    VOTE = "vote"
     UPDATE_STATE = "update_state"
     UPDATE_PERSONA = "update_persona"
     ASK_QUESTION = "ask_question"
     ANSWER = "answer"
     ALERT = "alert"
+    # Bidirectional agent-to-agent RPC (DESIGN §5 / standalone_agent_design §3.2).
+    # `request` is the typed RPC ask (target_agent + kind + params); `response`
+    # carries `in_reply_to` + `kind` + `status` + `result`. Used today for
+    # executor <-> kernel agent kernel-opt protocol; PolicyGate restricts the
+    # (source, target) pairs that may emit each.
+    REQUEST = "request"
+    RESPONSE = "response"
+    # v0.4 MVP — triage-only kill operation (standalone_agent_design §13.3).
+    # Cancels a queued/running task in the registry. PolicyGate restricts
+    # the source role to {"triage"} via KILL_TASK_SOURCE_ALLOWLIST and
+    # forces payload.scope to "task" (process / server kills are NOT in
+    # MVP — IR-5 still owns server lifecycle).
+    KILL_TASK = "kill_task"
 
 
 @dataclass
@@ -91,13 +102,19 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.SEND_MESSAGE:    ("topic",),
     IntentType.DELEGATE:        ("action_name",),
     IntentType.PROPOSE_ACTION:  ("action_name", "predicted_gain_pct"),
-    IntentType.OBJECTION:       ("target_msg_id", "reason"),
-    IntentType.VOTE:             ("target_msg_id", "vote"),
     IntentType.UPDATE_STATE:    ("changes",),
     IntentType.UPDATE_PERSONA:  ("body_md",),
     IntentType.ASK_QUESTION:    ("topic", "question"),
     IntentType.ANSWER:           ("in_reply_to", "answer"),
     IntentType.ALERT:           ("severity", "summary"),
+    # Agent-to-agent RPC. PolicyGate further restricts the allowed (source,
+    # target_agent) pairs and the allowed `kind` values per pair.
+    IntentType.REQUEST:         ("target_agent", "kind"),
+    IntentType.RESPONSE:        ("in_reply_to", "kind"),
+    # v0.4 MVP — triage-only task cancellation. Optional payload extras:
+    # `force: bool` (metadata only in MVP) and `scope: "task"`
+    # (PolicyGate rejects scope=process/server). See standalone_agent_design §13.3.
+    IntentType.KILL_TASK:       ("task_id", "reason"),
 }
 
 
@@ -124,11 +141,14 @@ EMIT_INTENT_TOOL_SCHEMA: dict[str, Any] = {
                     "Per-intent payload. send_message: {topic, body_md, "
                     "to?}; propose_action: {action_name, predicted_gain_pct, "
                     "reason?}; delegate: {action_name, params?, "
-                    "idempotency_key?}; vote: {target_msg_id, vote}; "
-                    "objection: {target_msg_id, reason}; alert: {severity, "
+                    "idempotency_key?}; alert: {severity, "
                     "summary, detail?}; update_state: {changes}; "
                     "update_persona: {body_md}; ask_question: {topic, "
-                    "question}; answer: {in_reply_to, answer}."
+                    "question}; answer: {in_reply_to, answer}; "
+                    "request: {target_agent, kind, params?, reason?}; "
+                    "response: {in_reply_to, kind, status?, result?}; "
+                    "kill_task: {task_id, reason, force?, scope?='task'} "
+                    "(triage only — see PolicyGate.KILL_TASK_SOURCE_ALLOWLIST)."
                 ),
             },
         },

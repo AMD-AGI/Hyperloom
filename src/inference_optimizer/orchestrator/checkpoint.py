@@ -43,6 +43,7 @@ __all__ = [
     "ResumeState",
     "Verdict",
     "Checkpoint",
+    "LegacySessionRejected",
     "resume_from_session_dir",
     "evidence_check_matrix",
 ]
@@ -197,6 +198,48 @@ class Checkpoint:
 
 
 # ---------------------------------------------------------------------------
+class LegacySessionRejected(RuntimeError):
+    """v0.4 — refuses to resume a session created by an older roster.
+
+    Triggered when ``state.json`` references the removed ``sage`` /
+    ``watchdog`` roles or any topic from the deleted parliament path
+    (``parliament_open`` / ``vote`` / ``vote_request`` / ``objection``).
+
+    See ``standalone_agent_design §13.9.6`` for the rationale (no schema
+    migration in MVP).
+    """
+
+
+# v0.4 — strings whose presence in state.json indicates a legacy session.
+_LEGACY_ROSTER_TOKENS: tuple[str, ...] = (
+    "\"sage\"",
+    "\"watchdog\"",
+    "parliament_open",
+    "\"vote\"",
+    "vote_request",
+    "\"objection\"",
+)
+
+
+def _reject_if_legacy_session(session_dir: Path) -> None:
+    """Raise :class:`LegacySessionRejected` if state.json shows old roster."""
+    state_file = session_dir / "state.json"
+    if not state_file.is_file():
+        return
+    try:
+        text = state_file.read_text(encoding="utf-8")
+    except OSError:
+        return
+    hits = [t for t in _LEGACY_ROSTER_TOKENS if t in text]
+    if hits:
+        raise LegacySessionRejected(
+            f"session_dir={session_dir} appears to be a pre-v0.4 session "
+            f"(found tokens: {hits!r}). v0.4 removed the sage/watchdog "
+            f"roles and the parliament path; please start a new "
+            f"session_dir instead. See standalone_agent_design §13.9.6."
+        )
+
+
 async def resume_from_session_dir(
     session_dir: Path,
     db: "SqliteConnection",
@@ -208,6 +251,8 @@ async def resume_from_session_dir(
 
     Steps:
 
+        0. (v0.4) raise :class:`LegacySessionRejected` if state.json
+           references the old sage/watchdog roster or parliament topics
         1. load all per-agent cursors via ``CursorStore.all``
         2. survey in-flight tasks (state IN ``queued`` / ``running``)
         3. reap expired leases via ``locks.backend.reap_expired``
@@ -217,6 +262,7 @@ async def resume_from_session_dir(
     from .task_registry import TaskRegistry
 
     session_dir = Path(session_dir)
+    _reject_if_legacy_session(session_dir)
 
     cursor_store = CursorStore(db)
     cursors_map = await cursor_store.all()

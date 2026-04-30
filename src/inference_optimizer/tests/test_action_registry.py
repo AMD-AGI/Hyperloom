@@ -22,10 +22,14 @@ def _make_registry() -> ActionRegistry:
     return ActionRegistry(asset_actions_dir()).load()
 
 
-def test_loads_all_three_bundled_actions():
+def test_loads_bundled_actions():
+    """Plan A: kernel_opt + integrate moved to kernel agent — registry no
+    longer ships them. Other foundational actions remain."""
     reg = _make_registry()
     names = set(reg.names())
-    assert {"bench_runner", "param_sweep_run", "kernel_opt"}.issubset(names)
+    assert {"bench_runner", "param_sweep_run", "baseline", "profile"}.issubset(names)
+    assert "kernel_opt" not in names
+    assert "integrate" not in names
 
 
 def test_get_returns_action_metadata_or_none():
@@ -44,11 +48,15 @@ def test_bench_runner_allowed_in_all_modes():
     assert ExecutionMode.MARATHON_MULTI_AGENT in a.allowed_modes
 
 
-def test_kernel_opt_blocked_in_quick_mode():
+def test_deep_kernel_action_blocked_in_quick_mode():
+    """deep_kernel_analysis stands in for the kernel-opt-flavoured
+    actions that must stay out of quick mode (kernel_opt itself was
+    removed in Plan A, so we test on a sibling)."""
     reg = _make_registry()
-    a = reg.get("kernel_opt")
+    a = reg.get("deep_kernel_analysis")
+    assert a is not None
     assert ExecutionMode.QUICK_PARAM_SWEEP not in a.allowed_modes
-    assert ExecutionMode.GUIDED_KERNEL_OPT in a.allowed_modes
+    assert ExecutionMode.MARATHON_MULTI_AGENT in a.allowed_modes
 
 
 def test_allowed_for_mode_filters_correctly():
@@ -56,12 +64,15 @@ def test_allowed_for_mode_filters_correctly():
     quick = {a.name for a in reg.allowed_for_mode(ExecutionMode.QUICK_PARAM_SWEEP)}
     assert "bench_runner" in quick
     assert "param_sweep_run" in quick
+    # Plan A — kernel_opt registry entry removed; nothing to gate here.
     assert "kernel_opt" not in quick
 
     marathon = {
         a.name for a in reg.allowed_for_mode(ExecutionMode.MARATHON_MULTI_AGENT)
     }
-    assert "kernel_opt" in marathon
+    # Marathon-only deep_kernel actions still listed.
+    assert "deep_kernel_analysis" in marathon
+    assert "operator_tuning" in marathon
 
 
 def test_allowed_for_mode_accepts_string():
@@ -76,15 +87,13 @@ def test_allowed_for_mode_rejects_unknown_string():
         reg.allowed_for_mode("not-a-mode")
 
 
-def test_kernel_opt_has_kernel_lane():
+def test_kernel_opt_no_longer_in_registry():
+    """Plan A: kernel agent owns kernel_opt + integrate; both removed from
+    the action registry to guarantee executor cannot delegate them."""
     reg = _make_registry()
-    a = reg.get("kernel_opt")
-    # Kernel optimization needs to mutate the workspace (rebuild kernels) on top
-    # of the usual server + benchmark lanes, all of which must be defined in
-    # ``ResourceLockManager.KNOWN_LANES``.
-    assert "workspace_mutation" in a.requires_lanes
-    assert "server_lifecycle" in a.requires_lanes
-    assert "benchmark_lane" in a.requires_lanes
+    assert reg.get("kernel_opt") is None
+    assert reg.get("integrate") is None
+    assert reg.get("kernel-opt") is None  # hyphen variant also gone
 
 
 def test_system_prompt_for_known_action():

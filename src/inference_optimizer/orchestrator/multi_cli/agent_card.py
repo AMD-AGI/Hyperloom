@@ -16,7 +16,7 @@ Schema (subset enforced in v0)
 ------------------------------
 
     name:               str             # must equal the directory name
-    role:               str             # one of {executor, critic, watchdog, sage}
+    role:               str             # one of {executor, critic, triage, kernel}
                                         # (used for AgentRole lookup + PolicyGate)
     backend:            "claude" | "codex" | "mock"
     capabilities:       list[str]       # informational; for plug-and-play discovery
@@ -49,9 +49,11 @@ class AgentCardError(RuntimeError):
 
 
 _VALID_ROLES: frozenset[str] = frozenset(
-    {"executor", "critic", "watchdog", "sage"}
+    # v0.4 MVP roster (standalone_agent_design §13.1):
+    # executor / critic / triage / kernel — all Claude-backed.
+    {"executor", "critic", "triage", "kernel"}
 )
-_VALID_BACKENDS: frozenset[str] = frozenset({"claude", "codex", "mock"})
+_VALID_BACKENDS: frozenset[str] = frozenset({"claude", "codex", "mock", "mock-cli"})
 
 DEFAULT_INBOX = "inbox.jsonl"
 DEFAULT_OUTBOX = "outbox.jsonl"

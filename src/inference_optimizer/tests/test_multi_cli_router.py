@@ -170,7 +170,9 @@ async def test_mirror_persists_seq_cursor(db, session_dir, card_executor):
     await router.mirror_bus_tick()
     # Cursor file should exist with the last seq.
     inbox = agent_inbox_path(session_dir, "executor")
-    cursor = inbox.with_suffix(inbox.suffix + ".seq")
+    # Router uses ``.mirrored`` (its own bookkeeping) NOT ``.seq``
+    # (which is reserved for the agent-side consumed cursor).
+    cursor = inbox.with_suffix(inbox.suffix + ".mirrored")
     assert cursor.is_file()
     assert int(cursor.read_text()) == 1
 

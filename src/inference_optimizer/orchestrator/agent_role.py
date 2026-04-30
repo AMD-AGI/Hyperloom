@@ -1,4 +1,4 @@
-"""Agent role definitions — DESIGN §5.1.
+"""Agent role definitions — DESIGN §5.1 / standalone_agent_design §13 (v0.4 MVP).
 
 Each ``AgentRole`` binds:
 
@@ -9,20 +9,26 @@ Each ``AgentRole`` binds:
     * whether the role may *delegate* side-effecting actions or *mutate* core
       shared-state fields (consumed by :class:`PolicyGate`)
 
-The design (§5.1) specifies exactly four reactor-capable personas:
+v0.4 MVP roster (4 Claude-backed reactors — see standalone_agent_design §13.1):
 
-    ┌──────────┬──────────┬──────────────┬──────────┐
-    │ name     │ backend  │ enabled in   │ tools?   │
-    ├──────────┼──────────┼──────────────┼──────────┤
-    │ executor │ Claude   │ all modes    │ yes      │
-    │ critic   │ Codex    │ guided +     │ no-tools │
-    │          │          │ marathon     │          │
-    │ watchdog │ Claude   │ marathon     │ yes      │
-    │ sage     │ Codex    │ marathon     │ no-tools │
-    │          │          │ (resident)   │          │
-    │ sage     │ Codex    │ quick+guided │ no-tools │
-    │          │          │ (KB query)   │          │
-    └──────────┴──────────┴──────────────┴──────────┘
+    ┌──────────┬──────────┬──────────────────────────────┬──────────────────┐
+    │ name     │ backend  │ enabled in                   │ allowed intents  │
+    ├──────────┼──────────┼──────────────────────────────┼──────────────────┤
+    │ executor │ Claude   │ quick + guided + marathon    │ propose/delegate │
+    │          │          │                              │ /update_state/   │
+    │          │          │                              │ /request         │
+    │ critic   │ Claude   │ guided + marathon            │ KEEP/REVERT obs  │
+    │          │          │ (was Codex pre-v0.4)         │ via send_message │
+    │ triage   │ Claude   │ all modes (always-on,        │ alert/update_st/ │
+    │          │          │ tick=60s)                    │ /kill_task (only)│
+    │ kernel   │ Claude   │ guided + marathon            │ response only    │
+    │          │          │ (Plan A — kernel-opt)        │ (executor RPC)   │
+    └──────────┴──────────┴──────────────────────────────┴──────────────────┘
+
+Removed in v0.4 (vs v0.3 Plan A):
+    * sage role (KB merged later; no KB in MVP)
+    * watchdog role (renamed to triage with broader powers)
+    * OBJECTION / VOTE intents (parliament removed entirely)
 
 The Conductor itself is *not* a role here — it is the host process that owns
 PolicyGate and rejects/accepts intents on behalf of the policy.
@@ -30,9 +36,8 @@ PolicyGate and rejects/accepts intents on behalf of the policy.
 References:
 
     - DESIGN §5.1 Agent roster & responsibilities
+    - standalone_agent_design §13 (v0.4 MVP)
     - DESIGN §10.5.4 emit_intent tool schema (Claude side)
-    - DESIGN §10.5.5 validated_json_output (Codex side)
-    - IMPLEMENTATION-CHECKLIST.md Phase 2 §2.31 — §2.35
 """
 from __future__ import annotations
 
@@ -65,12 +70,10 @@ DEFAULT_CODEX_API_KEY_ENV = "OPENAI_API_KEY"
 
 
 # --------------------------------------------------------------------------
-# Role permission catalogue (DESIGN §5.1.1 + §10.5.7)
+# Role permission catalogue (DESIGN §5.1.1 + §10.5.7 + standalone §13.4)
 # --------------------------------------------------------------------------
-# Codex roles never use tools and are not allowed to *trigger* workspace
-# side-effects (DESIGN §5.1.1 — "需要工具或 workspace 副作用的动作统一走
-# Claude-based Executor / Watchdog / ephemeral sub-agent"). Claude roles may
-# delegate but Conductor still has the final say via PolicyGate.
+# v0.4 MVP — all 4 reactor roles use Claude. Codex factory is retained for
+# v0.5+ but no role is bound to it today.
 
 _BASE_INTENTS: frozenset[IntentType] = frozenset(
     {
@@ -87,34 +90,40 @@ _EXECUTOR_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
         IntentType.PROPOSE_ACTION,
         IntentType.DELEGATE,
         IntentType.UPDATE_STATE,
+        # Executor is the only role that may emit REQUEST today (kernel agent
+        # is the sole valid target). PolicyGate enforces both the source
+        # role and the target_agent payload value (DESIGN §5 / standalone
+        # _agent_design §3).
+        IntentType.REQUEST,
     }
 )
 
-_WATCHDOG_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
+# Critic in v0.4 MVP has no OBJECTION/VOTE — parliament is removed entirely.
+# Its only output is plain `send_message` carrying KEEP/REVERT verdicts after
+# decision events arrive in its inbox (the standard `to_agent="*"` mirror
+# already covers this — see standalone §13.9.4).
+_CRITIC_INTENTS: frozenset[IntentType] = _BASE_INTENTS
+
+# Triage in v0.4 MVP — always-on cross-layer health watcher. The only
+# privileged intent it carries is KILL_TASK (PolicyGate enforces source
+# allowlist). It never delegates / proposes / requests; its job is
+# observation + alert + kill.
+_TRIAGE_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
-        IntentType.PROPOSE_ACTION,
-        # Watchdog can suggest a postmortem/strategic review via DELEGATE in
-        # marathon mode (DESIGN §5.1 row "Watchdog"). It still passes through
-        # PolicyGate which only allows action_names tagged for watchdogs.
-        IntentType.DELEGATE,
         IntentType.UPDATE_STATE,
+        IntentType.KILL_TASK,
     }
 )
 
-_CRITIC_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
+# Kernel agent is a "responder" persona — it never initiates RPCs (no
+# REQUEST), never delegates side-effecting actions, and never proposes the
+# next inference-optimization action. Its sole new privilege is RESPONSE,
+# which it emits in reply to executor REQUESTs. send_message + alert +
+# update_persona + ask_question + answer are inherited from _BASE_INTENTS so
+# the kernel agent can post observations / heartbeats during long GEAK runs.
+_KERNEL_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
-        IntentType.OBJECTION,
-        IntentType.VOTE,
-    }
-)
-
-_SAGE_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
-    {
-        IntentType.OBJECTION,
-        IntentType.VOTE,
-        # DESIGN §5.1.2 marathon Sage: "可发 objection 触发议会" plus may
-        # propose strategic review actions.
-        IntentType.PROPOSE_ACTION,
+        IntentType.RESPONSE,
     }
 )
 
@@ -231,36 +240,58 @@ ROLE_EXECUTOR: AgentRole = claude_role(
     can_mutate_core_state=False,
 )
 
-ROLE_WATCHDOG: AgentRole = claude_role(
-    "watchdog",
-    description="event_log RCA, crash analysis, health monitoring (marathon-only).",
-    allowed_intents=_WATCHDOG_INTENTS,
-    # Watchdog may set crash_count / current_action via update_state but never
-    # current_best / stop_reason — that remains Conductor-owned.
-    can_delegate_side_effects=True,
+# Critic in v0.4 — Claude-backed (was Codex pre-v0.4). KEEP/REVERT review +
+# Brier prediction via plain `send_message`. No OBJECTION / VOTE because
+# parliament is removed in MVP.
+ROLE_CRITIC: AgentRole = claude_role(
+    "critic",
+    description="Reviews decisions; emits KEEP/REVERT verdicts via send_message; never delegates.",
+    allowed_intents=_CRITIC_INTENTS,
+    can_delegate_side_effects=False,
     can_mutate_core_state=False,
 )
 
-ROLE_CRITIC: AgentRole = codex_role(
-    "critic",
-    description="Reviews proposals, independent predictions, post-mortem; ephemeral RCA in guided emergency.",
-    allowed_intents=_CRITIC_INTENTS,
+# Triage in v0.4 — always-on Claude reactor (replaces watchdog + sage as
+# cross-layer health watcher). Reads sibling agent outbox/inbox via the
+# launcher's expanded --add-dir; emits kill_task to cancel stuck tasks.
+ROLE_TRIAGE: AgentRole = claude_role(
+    "triage",
+    description=(
+        "Always-on cross-layer health watcher. Scans event_log + sibling"
+        " agent jsonl. The ONLY role allowed to emit kill_task."
+    ),
+    allowed_intents=_TRIAGE_INTENTS,
+    # Triage never delegates side-effecting actions — its workspace footprint
+    # is read-only Bash (tail/head/cat/ls/pgrep). kill_task is a separate
+    # intent and is gated by KILL_TASK_SOURCE_ALLOWLIST in policy.py.
+    can_delegate_side_effects=False,
+    can_mutate_core_state=False,
 )
 
-ROLE_SAGE: AgentRole = codex_role(
-    "sage",
-    description="KB curation, cross-run synthesis, devil's advocate (marathon resident).",
-    allowed_intents=_SAGE_INTENTS,
+# Kernel agent: persistent reactor that owns kernel-opt / integrate work.
+# Backed by Claude (needs Bash/Read/Edit to drive geak_ray_submit.py /
+# oob_ray_submit.py / patch_inductor.py). Intent set is intentionally narrow
+# — it only RESPONSE-s to executor REQUESTs, never initiates work itself.
+ROLE_KERNEL: AgentRole = claude_role(
+    "kernel",
+    description=(
+        "Kernel-opt + integrate specialist. Responds to executor REQUEST"
+        " RPCs (select_kernels / run_optimization / apply_patch); never"
+        " delegates or proposes."
+    ),
+    allowed_intents=_KERNEL_INTENTS,
+    can_delegate_side_effects=False,
+    can_mutate_core_state=False,
 )
 
 
 def default_role_registry() -> dict[str, AgentRole]:
-    """Return a fresh dict of the four built-in roles keyed by name."""
+    """Return a fresh dict of the four built-in v0.4 roles keyed by name."""
     return {
         ROLE_EXECUTOR.name: ROLE_EXECUTOR,
-        ROLE_WATCHDOG.name: ROLE_WATCHDOG,
         ROLE_CRITIC.name: ROLE_CRITIC,
-        ROLE_SAGE.name: ROLE_SAGE,
+        ROLE_TRIAGE.name: ROLE_TRIAGE,
+        ROLE_KERNEL.name: ROLE_KERNEL,
     }
 
 
@@ -273,22 +304,26 @@ def roles_for_mode(
 ) -> list[AgentRole]:
     """Return the *resident reactor* roles for a given execution mode.
 
-    The mapping follows DESIGN §5.1:
+    v0.4 MVP mapping (standalone_agent_design §13.2):
 
-        quick      -> [executor]
-        guided     -> [executor, critic]
-        marathon   -> [executor, critic, watchdog, sage]
+        quick      -> [executor, triage]
+        guided     -> [executor, critic, kernel, triage]
+        marathon   -> [executor, critic, kernel, triage]
 
-    Note: Sage in quick/guided is the "KB query service" form (DESIGN §5.1.2),
-    not a reactor — it is *not* returned here.
+    triage is always-on (active in every mode) — it is the only cross-mode
+    reactor. critic + kernel activate from guided onwards. quick forbids
+    kernel-opt actions so kernel agent stays absent there.
+
+    guided / marathon roster is intentionally identical — the difference
+    collapses to prompt length + checkpoint cadence, simplifying tests.
     """
     reg = registry if registry is not None else default_role_registry()
     if mode == ExecutionMode.QUICK_PARAM_SWEEP:
-        names = ("executor",)
+        names = ("executor", "triage")
     elif mode == ExecutionMode.GUIDED_KERNEL_OPT:
-        names = ("executor", "critic")
+        names = ("executor", "critic", "kernel", "triage")
     elif mode == ExecutionMode.MARATHON_MULTI_AGENT:
-        names = ("executor", "critic", "watchdog", "sage")
+        names = ("executor", "critic", "kernel", "triage")
     else:  # pragma: no cover - defensive
         raise ValueError(f"unknown execution mode: {mode!r}")
     return [reg[n] for n in names if n in reg]
@@ -342,8 +377,8 @@ __all__ = [
     "DEFAULT_CODEX_API_KEY_ENV",
     "ROLE_CRITIC",
     "ROLE_EXECUTOR",
-    "ROLE_SAGE",
-    "ROLE_WATCHDOG",
+    "ROLE_KERNEL",
+    "ROLE_TRIAGE",
     "claude_role",
     "codex_role",
     "default_role_registry",

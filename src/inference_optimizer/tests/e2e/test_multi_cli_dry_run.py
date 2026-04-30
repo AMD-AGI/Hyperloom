@@ -89,7 +89,8 @@ async def test_multi_cli_quick_mode_completes(session_dir):
     await emit_task
 
     assert ctx.state.stop_reason == StopReason.TIME_EXHAUSTED
-    assert ctx.cli_agents == ("executor",)  # quick mode roster
+    # v0.4 — quick mode roster: executor + triage (always-on)
+    assert ctx.cli_agents == ("executor", "triage")
     assert ctx.in_proc_roles == []
     assert ctx.multi_cli_router is not None
 
@@ -107,7 +108,8 @@ async def test_multi_cli_quick_mode_completes(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_multi_cli_marathon_lifts_all_four_agents(session_dir):
+async def test_multi_cli_marathon_lifts_all_four_v04_agents(session_dir):
+    """v0.4 — marathon roster: executor + critic + kernel + triage."""
     db = SqliteConnection(session_dir / "storage" / "conductor.db")
     conductor = Conductor(
         session_dir,
@@ -124,7 +126,9 @@ async def test_multi_cli_marathon_lifts_all_four_agents(session_dir):
         transport_mode=TransportMode.MULTI_CLI,
     )
     ctx = await conductor._bootstrap()
-    assert set(ctx.cli_agents) == {"executor", "critic", "watchdog", "sage"}
+    assert set(ctx.cli_agents) == {
+        "executor", "critic", "kernel", "triage",
+    }
     assert ctx.multi_cli_router is not None
     # Don't run() — that would actually spend 10h. Just confirm the
     # bootstrap produces the expected topology.
@@ -142,7 +146,8 @@ async def test_hybrid_mode_keeps_other_roles_in_process(session_dir):
         backend=MockBackend(),
         env={
             "MODEL_PATH": "fake/model",
-            "MAX_HOURS": "5",  # guided mode (executor + critic active)
+            # v0.4 — guided spawns executor + critic + kernel + triage.
+            "MAX_HOURS": "5",
             "TARGET_GAIN_PCT": "100",
         },
         db=db,
@@ -154,7 +159,8 @@ async def test_hybrid_mode_keeps_other_roles_in_process(session_dir):
     )
     ctx = await conductor._bootstrap()
     assert ctx.cli_agents == ("executor",)
-    assert {r.name for r in ctx.in_proc_roles} == {"critic"}
+    # v0.4 — critic + kernel + triage stay in-process under hybrid.
+    assert {r.name for r in ctx.in_proc_roles} == {"critic", "kernel", "triage"}
     assert ctx.multi_cli_router is not None
     db.close()
 

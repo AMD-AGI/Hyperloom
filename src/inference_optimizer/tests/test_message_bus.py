@@ -74,7 +74,7 @@ async def test_tail_filter_by_topic(db):
         Message.new("e", "c", "proposal", {"k": "p"})
     )
     await bus.append_and_seq(
-        Message.new("e", "c", "objection", {"k": "o"})
+        Message.new("triage", "*", "kill", {"task_id": "t1", "reason": "x"})
     )
     await bus.append_and_seq(
         Message.new("e", "c", "proposal", {"k": "p2"})
@@ -82,6 +82,22 @@ async def test_tail_filter_by_topic(db):
     proposals = await bus.tail(topic="proposal")
     assert len(proposals) == 2
     assert all(m.topic == "proposal" for m in proposals)
+
+
+@pytest.mark.asyncio
+async def test_topic_allowlist_v04(db):
+    """v0.4 — `kill` is on the allowlist; the parliament topics are gone."""
+    from inference_optimizer.orchestrator.message_bus import TOPIC_ALLOWLIST
+    assert "kill" in TOPIC_ALLOWLIST
+    assert "objection" not in TOPIC_ALLOWLIST
+    assert "vote" not in TOPIC_ALLOWLIST
+    assert "vote_request" not in TOPIC_ALLOWLIST
+    assert "parliament_open" not in TOPIC_ALLOWLIST
+    bus = MessageBus(db)
+    with pytest.raises(ValueError, match="topic"):
+        await bus.append_and_seq(
+            Message.new("e", "c", "objection", {"k": "removed"})
+        )
 
 
 @pytest.mark.asyncio

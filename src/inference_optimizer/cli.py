@@ -166,6 +166,28 @@ def _build_argparser() -> argparse.ArgumentParser:
             "(default: src/inference_optimizer/agents/ in the package)"
         ),
     )
+    p.add_argument(
+        "--launch-cli-agents",
+        choices=("off", "subprocess", "tmux"),
+        default="off",
+        help=(
+            "auto-spawn the agent CLI subprocesses when --transport "
+            "multi-cli/hybrid is set. 'off' (default) leaves spawning to "
+            "the operator (compat with marathon's bash run.sh model). "
+            "'subprocess' uses subprocess.Popen, no tmux dep. 'tmux' "
+            "uses the tmux-based launcher for interactive monitoring."
+        ),
+    )
+    p.add_argument(
+        "--cli-shutdown-grace-s",
+        type=float,
+        default=30.0,
+        help=(
+            "seconds to wait for CLI agents to exit cleanly after STOP "
+            "sentinels are dropped, before SIGKILL fallback (subprocess "
+            "path only)"
+        ),
+    )
 
     # action registry / executor wiring
     p.add_argument("--no-action-registry", action="store_true",
@@ -431,6 +453,8 @@ async def _run(args: argparse.Namespace) -> int:
     elif args.transport == "hybrid":
         # No agents named -> hybrid degenerates to single-proc.
         transport_label = "hybrid (empty cli_agents -> behaves like single-proc)"
+    if args.transport != "single-proc":
+        transport_label += f" / launch={args.launch_cli_agents}"
 
     print(
         "[inference-optimizer] starting\n"
@@ -481,6 +505,8 @@ async def _run(args: argparse.Namespace) -> int:
         cli_agents=cli_agents_list,
         agents_root=agents_root_path,
         router_tick_s=args.router_tick_s,
+        launch_cli_agents=args.launch_cli_agents,
+        cli_shutdown_grace_s=args.cli_shutdown_grace_s,
     )
 
     loop = asyncio.get_running_loop()

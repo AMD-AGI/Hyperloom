@@ -10,8 +10,8 @@ import pytest
 from inference_optimizer.orchestrator.agent_role import (
     ROLE_CRITIC,
     ROLE_EXECUTOR,
-    ROLE_SAGE,
-    ROLE_WATCHDOG,
+    ROLE_KERNEL,
+    ROLE_TRIAGE,
     default_role_registry,
 )
 from inference_optimizer.orchestrator.execution_mode import ExecutionMode
@@ -75,14 +75,14 @@ def test_executor_can_send_message():
     )  # no exception
 
 
-def test_critic_can_objection_and_vote():
+def test_critic_can_send_message_verdict():
+    """v0.4 — critic emits KEEP/REVERT verdicts via send_message
+    (OBJECTION/VOTE removed with parliament)."""
     gate = make_gate()
     gate.validate_intent(
         "critic",
-        intent(IntentType.OBJECTION, target_msg_id="abc", reason="risky"),
-    )
-    gate.validate_intent(
-        "critic", intent(IntentType.VOTE, target_msg_id="abc", vote="reject")
+        intent(IntentType.SEND_MESSAGE, topic="observation",
+               body_md="verdict: keep\ntarget_decision_seq: 5\nreason: ok"),
     )
 
 
@@ -125,12 +125,22 @@ def test_delegate_allowed_in_quick_mode_post_phase_8a():
     )
 
 
-def test_delegate_codex_role_blocked_by_role():
+def test_delegate_critic_role_blocked_by_role():
+    """Critic doesn't have DELEGATE in allowed_intents -> role rule fires."""
     gate = make_gate(ExecutionMode.MARATHON_MULTI_AGENT)
-    # Sage doesn't have DELEGATE in allowed_intents anyway -> role rule fires.
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
-            "sage", intent(IntentType.DELEGATE, action_name="kernel_opt"),
+            "critic", intent(IntentType.DELEGATE, action_name="kernel_opt"),
+        )
+    assert exc.value.rule == "role"
+
+
+def test_delegate_triage_role_blocked_by_role():
+    """v0.4 — triage cannot delegate; role rule rejects."""
+    gate = make_gate(ExecutionMode.MARATHON_MULTI_AGENT)
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "triage", intent(IntentType.DELEGATE, action_name="bench_runner"),
         )
     assert exc.value.rule == "role"
 
@@ -262,11 +272,12 @@ def test_update_state_blocks_core_field_for_executor():
     assert "current_best" in str(exc.value)
 
 
-def test_update_state_blocks_core_field_for_watchdog():
+def test_update_state_blocks_core_field_for_triage():
+    """v0.4 — triage may emit update_state but not for CORE_STATE_FIELDS."""
     gate = make_gate(ExecutionMode.MARATHON_MULTI_AGENT)
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
-            "watchdog",
+            "triage",
             intent(IntentType.UPDATE_STATE, changes={"stop_reason": "x"}),
         )
     assert exc.value.rule == "state_field"
@@ -370,15 +381,13 @@ def test_quick_bash_outside_quick_is_noop_for_allowlist():
 # ---------------------------------------------------------------------------
 # allowed_tools_for_agent
 # ---------------------------------------------------------------------------
-def test_allowed_tools_for_codex_role_is_empty():
-    gate = make_gate()
-    assert gate.allowed_tools_for_agent("critic") == []
-    assert gate.allowed_tools_for_agent("sage") == []
-
-
 def test_allowed_tools_for_claude_role_has_emit_intent():
+    """v0.4 — all 4 roles are Claude-backed; each gets emit_intent."""
     gate = make_gate()
-    assert "emit_intent" in gate.allowed_tools_for_agent("executor")
+    for agent in ("executor", "critic", "triage", "kernel"):
+        assert "emit_intent" in gate.allowed_tools_for_agent(agent), (
+            f"{agent} should have emit_intent"
+        )
 
 
 def test_allowed_tools_for_unknown_agent_empty():
@@ -396,3 +405,257 @@ def test_core_state_fields_includes_current_best_and_stop_reason():
 
 def test_default_quick_allowlist_non_empty():
     assert "bench_runner" in DEFAULT_QUICK_ACTION_ALLOWLIST
+
+
+# ---------------------------------------------------------------------------
+# Plan A — REQUEST / RESPONSE gating + kernel-owned action denial
+# ---------------------------------------------------------------------------
+from inference_optimizer.orchestrator.policy import (  # noqa: E402
+    KERNEL_OWNED_ACTIONS,
+    REQUEST_ROUTING,
+)
+
+
+def test_executor_request_to_kernel_passes():
+    gate = make_gate(ExecutionMode.GUIDED_KERNEL_OPT)
+    intent = Intent(
+        type=IntentType.REQUEST,
+        payload={
+            "target_agent": "kernel",
+            "kind": "select_kernels",
+            "params": {"trace_path": "/tmp/x.json.gz"},
+        },
+    )
+    gate.validate_intent("executor", intent, state=None)
+
+
+def test_critic_cannot_request():
+    """Only executor may emit REQUEST today (REQUEST_ROUTING)."""
+    gate = make_gate(ExecutionMode.GUIDED_KERNEL_OPT)
+    intent = Intent(
+        type=IntentType.REQUEST,
+        payload={"target_agent": "kernel", "kind": "select_kernels"},
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("critic", intent, state=None)
+    # Critic's role allow-list should reject REQUEST entirely.
+    assert exc.value.rule == "role"
+
+
+def test_executor_request_to_unknown_target_rejected():
+    gate = make_gate(ExecutionMode.GUIDED_KERNEL_OPT)
+    intent = Intent(
+        type=IntentType.REQUEST,
+        payload={"target_agent": "watchdog", "kind": "rca"},
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("executor", intent, state=None)
+    assert exc.value.rule == "request_target"
+
+
+def test_executor_request_missing_target_rejected():
+    gate = make_gate()
+    intent = Intent(type=IntentType.REQUEST, payload={"kind": "select_kernels"})
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("executor", intent, state=None)
+    assert exc.value.rule == "payload"
+
+
+def test_executor_request_missing_kind_rejected():
+    gate = make_gate()
+    intent = Intent(type=IntentType.REQUEST, payload={"target_agent": "kernel"})
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("executor", intent, state=None)
+    assert exc.value.rule == "payload"
+
+
+def test_kernel_response_passes():
+    gate = make_gate(ExecutionMode.GUIDED_KERNEL_OPT)
+    intent = Intent(
+        type=IntentType.RESPONSE,
+        payload={
+            "in_reply_to": "abc123",
+            "kind": "select_kernels_done",
+            "status": "succeeded",
+            "result": {"candidates": ["a.py"]},
+        },
+    )
+    gate.validate_intent("kernel", intent, state=None)
+
+
+def test_executor_cannot_emit_response():
+    """RESPONSE is reserved for kernel agent; role gate rejects."""
+    gate = make_gate(ExecutionMode.GUIDED_KERNEL_OPT)
+    intent = Intent(
+        type=IntentType.RESPONSE,
+        payload={"in_reply_to": "x", "kind": "ack"},
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("executor", intent, state=None)
+    assert exc.value.rule == "role"
+
+
+def test_kernel_response_missing_in_reply_to_rejected():
+    gate = make_gate(ExecutionMode.GUIDED_KERNEL_OPT)
+    intent = Intent(
+        type=IntentType.RESPONSE,
+        payload={"kind": "select_kernels_done"},
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("kernel", intent, state=None)
+    assert exc.value.rule == "payload"
+
+
+def test_executor_delegate_kernel_opt_denied():
+    """Plan A — kernel_opt is owned by kernel agent; executor must REQUEST."""
+    gate = make_gate(ExecutionMode.GUIDED_KERNEL_OPT)
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"action_name": "kernel_opt", "params": {}},
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("executor", intent, state=None)
+    assert exc.value.rule == "kernel_owned_by_kernel_agent"
+
+
+def test_executor_delegate_integrate_denied():
+    gate = make_gate(ExecutionMode.GUIDED_KERNEL_OPT)
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"action_name": "integrate", "params": {}},
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("executor", intent, state=None)
+    assert exc.value.rule == "kernel_owned_by_kernel_agent"
+
+
+def test_executor_delegate_baseline_still_works():
+    """Sanity: only kernel-owned actions are blocked, not all actions."""
+    gate = make_gate(ExecutionMode.GUIDED_KERNEL_OPT)
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"action_name": "baseline", "params": {}},
+    )
+    # No exception expected.
+    gate.validate_intent("executor", intent, state=None)
+
+
+def test_kernel_owned_actions_constants():
+    assert KERNEL_OWNED_ACTIONS == frozenset({"kernel_opt", "integrate"})
+    assert "kernel" in REQUEST_ROUTING["executor"]
+
+
+# ---------------------------------------------------------------------------
+# v0.4 MVP — KILL_TASK gate (triage-only, scope-restricted)
+# ---------------------------------------------------------------------------
+from inference_optimizer.orchestrator.policy import (  # noqa: E402
+    KILL_TASK_ALLOWED_SCOPES,
+    KILL_TASK_SOURCE_ALLOWLIST,
+)
+
+
+def test_triage_can_kill_task():
+    gate = make_gate(ExecutionMode.GUIDED_KERNEL_OPT)
+    intent_obj = Intent(
+        type=IntentType.KILL_TASK,
+        payload={
+            "task_id": "abc12345",
+            "reason": "stuck for 4x lease_ttl",
+            "scope": "task",
+        },
+    )
+    gate.validate_intent("triage", intent_obj, state=None)
+
+
+def test_triage_can_kill_task_default_scope():
+    """scope defaults to 'task' when omitted."""
+    gate = make_gate(ExecutionMode.GUIDED_KERNEL_OPT)
+    intent_obj = Intent(
+        type=IntentType.KILL_TASK,
+        payload={"task_id": "abc12345", "reason": "stuck"},
+    )
+    gate.validate_intent("triage", intent_obj, state=None)
+
+
+def test_executor_cannot_kill_task_role_gate():
+    """Executor's allowed_intents doesn't include KILL_TASK -> role rule."""
+    gate = make_gate(ExecutionMode.GUIDED_KERNEL_OPT)
+    intent_obj = Intent(
+        type=IntentType.KILL_TASK,
+        payload={"task_id": "abc12345", "reason": "stuck"},
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("executor", intent_obj, state=None)
+    assert exc.value.rule == "role"
+
+
+def test_critic_cannot_kill_task_role_gate():
+    gate = make_gate(ExecutionMode.GUIDED_KERNEL_OPT)
+    intent_obj = Intent(
+        type=IntentType.KILL_TASK,
+        payload={"task_id": "abc12345", "reason": "stuck"},
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("critic", intent_obj, state=None)
+    assert exc.value.rule == "role"
+
+
+def test_kernel_cannot_kill_task_role_gate():
+    gate = make_gate(ExecutionMode.GUIDED_KERNEL_OPT)
+    intent_obj = Intent(
+        type=IntentType.KILL_TASK,
+        payload={"task_id": "abc12345", "reason": "stuck"},
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("kernel", intent_obj, state=None)
+    assert exc.value.rule == "role"
+
+
+def test_kill_task_missing_task_id_rejected():
+    gate = make_gate()
+    intent_obj = Intent(
+        type=IntentType.KILL_TASK,
+        payload={"reason": "stuck"},
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("triage", intent_obj, state=None)
+    assert exc.value.rule == "payload"
+
+
+def test_kill_task_missing_reason_rejected():
+    gate = make_gate()
+    intent_obj = Intent(
+        type=IntentType.KILL_TASK,
+        payload={"task_id": "abc12345"},
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("triage", intent_obj, state=None)
+    assert exc.value.rule == "payload"
+
+
+def test_kill_task_scope_process_denied():
+    """v0.4 MVP — only scope='task' is allowed (IR-5 owns server lifecycle)."""
+    gate = make_gate()
+    intent_obj = Intent(
+        type=IntentType.KILL_TASK,
+        payload={"task_id": "x", "reason": "stuck", "scope": "process"},
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("triage", intent_obj, state=None)
+    assert exc.value.rule == "kill_scope"
+
+
+def test_kill_task_scope_server_denied():
+    gate = make_gate()
+    intent_obj = Intent(
+        type=IntentType.KILL_TASK,
+        payload={"task_id": "x", "reason": "stuck", "scope": "server"},
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("triage", intent_obj, state=None)
+    assert exc.value.rule == "kill_scope"
+
+
+def test_kill_task_constants():
+    assert KILL_TASK_SOURCE_ALLOWLIST == frozenset({"triage"})
+    assert KILL_TASK_ALLOWED_SCOPES == frozenset({"task"})

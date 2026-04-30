@@ -102,22 +102,26 @@ async def test_run_succeeds_for_valid_action(runner_setup):
 
 @pytest.mark.asyncio
 async def test_run_passes_action_allowed_tools_to_backend(runner_setup):
+    """Plan A: kernel_opt removed from registry; param_sweep_run stands
+    in as a real action that exercises the LLM-fallback path (no
+    ActionExecutor for it would mean executor.allowed_tools flow). We
+    use bench_runner here because its allowed_tools list includes
+    multiple tools so the assertion is meaningful."""
     runner, tasks, db, backend = runner_setup
     task = await tasks.create(
         kind="delegate",
         params={
-            "action_name": "kernel_opt",
-            "params": {"target_kernel": "rms_norm", "variant": "split_k"},
+            "action_name": "bench_runner",
+            "params": {"warmup_iters": 4},
             "requested_by": "executor",
         },
-        idempotency_key="t-kernel",
+        idempotency_key="t-bench",
     )
     await runner.run(task)
     # MockBackend records calls in self.calls.
     assert backend.calls
     last = backend.calls[-1]
-    assert "Edit" in last["allowed_tools"]
-    assert "Bash" in last["allowed_tools"]
+    # bench_runner's allowed_tools always include emit_intent.
     assert "emit_intent" in last["allowed_tools"]
 
 

@@ -42,6 +42,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
@@ -69,6 +70,10 @@ class StagedAgent:
 
     Fields are absolute paths so callers can ``tmux send-keys`` them
     directly without knowing the launcher's working directory.
+
+    When :meth:`MultiCLILauncher.launch_subprocess` started the agent,
+    the resulting :class:`subprocess.Popen` handle is also stashed on
+    :attr:`process` so the Conductor can poll status / send signals.
     """
 
     name: str
@@ -80,6 +85,7 @@ class StagedAgent:
     inbox_path: Path
     outbox_path: Path
     agent_dir: Path
+    process: subprocess.Popen | None = None
 
 
 @dataclass
@@ -232,6 +238,52 @@ class MultiCLILauncher:
         )
         return staged
 
+    def launch_subprocess(self) -> dict[str, StagedAgent]:
+        """Stage scripts and start each pane as a detached subprocess.
+
+        Unlike :meth:`launch` (which needs tmux), this method uses
+        :class:`subprocess.Popen` directly. Best for unattended /
+        headless runs and CI; tmux remains the right choice when an
+        operator wants to ``tmux attach`` and watch panes interactively.
+
+        Each child:
+
+        * starts in its own session (``start_new_session=True``) so a
+          SIGINT to the Conductor doesn't propagate immediately;
+        * sends stdout+stderr to the same per-agent log file that the
+          tmux path uses, so monitor.sh and tail -f keep working;
+        * is held in :attr:`StagedAgent.process` so the Conductor can
+          poll, signal, or wait on it.
+        """
+        staged = self.stage()
+        for name, agent in staged.items():
+            log_handle = agent.log_file.open("a", encoding="utf-8")
+            try:
+                proc = subprocess.Popen(
+                    ["bash", str(agent.pane_script)],
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                    cwd=str(self.work_dir),
+                )
+            except OSError:
+                log_handle.close()
+                log.exception("launcher: subprocess.Popen failed for %s", name)
+                raise LauncherError(
+                    f"failed to spawn agent {name!r}; check {agent.log_file}"
+                )
+            # NOTE: log_handle stays open for the lifetime of the child;
+            # GC closing it would EBADF the writer. We attach it to the
+            # process object so it survives as long as the process does.
+            proc._io_logs_keepalive = log_handle  # type: ignore[attr-defined]
+            agent.process = proc
+            log.info(
+                "launcher: spawned %s as pid=%d (script=%s log=%s)",
+                name, proc.pid, agent.pane_script, agent.log_file,
+            )
+        return staged
+
     def request_stop_all(self, staged: Mapping[str, StagedAgent]) -> None:
         """Drop a STOP_AGENT_<name> sentinel for every staged agent.
 
@@ -244,6 +296,54 @@ class MultiCLILauncher:
                 agent.stop_file.touch(exist_ok=True)
             except OSError:
                 log.exception("launcher: failed to drop STOP file for %s", name)
+
+    def wait_for_exit(
+        self,
+        staged: Mapping[str, StagedAgent],
+        *,
+        timeout_s: float = 30.0,
+        kill_after_timeout: bool = True,
+    ) -> dict[str, int | None]:
+        """Wait for every spawned subprocess to exit, returning ``{name: rc}``.
+
+        Only the subprocess path is supported (tmux panes own their own
+        process tree). When ``kill_after_timeout`` is True (default), any
+        still-running children are SIGKILLed after ``timeout_s`` so the
+        Conductor process never deadlocks on a wedged agent.
+        """
+        import os
+        import signal
+        import time
+
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        rcs: dict[str, int | None] = {}
+        for name, agent in staged.items():
+            if agent.process is None:
+                rcs[name] = None
+                continue
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                rcs[name] = agent.process.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                if kill_after_timeout:
+                    # Kill the whole process group (start_new_session=True
+                    # gives every agent its own sid); covers grand-children
+                    # the bash restart-loop may have spawned.
+                    try:
+                        os.killpg(agent.process.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    try:
+                        rcs[name] = agent.process.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        rcs[name] = None
+                    log.warning(
+                        "launcher: agent %s did not exit after STOP; SIGKILL pid=%d",
+                        name, agent.process.pid,
+                    )
+                else:
+                    rcs[name] = None
+        return rcs
 
     # ------------------------------------------------------------------
     # Internals
@@ -297,6 +397,8 @@ class MultiCLILauncher:
             body = self._compose_codex_pane(card)
         elif card.backend == "mock":
             body = self._compose_mock_pane(card)
+        elif card.backend == "mock-cli":
+            body = self._compose_mock_cli_pane(card)
         else:  # pragma: no cover — schema rejects this earlier
             raise LauncherError(f"unknown backend {card.backend!r} for {card.name}")
         path = self.pane_script_path(card.name)
@@ -313,6 +415,14 @@ class MultiCLILauncher:
     def _add_dir_args(self, card: AgentCard) -> str:
         agent_dir = self.agent_dir(card)
         dirs = [str(self.session_dir), str(agent_dir), str(card.card_dir)]
+        # v0.4 MVP — triage is the cross-layer health watcher and needs to
+        # Read sibling agents' outbox/inbox jsonl files. Give it the
+        # parent ``$SESSION_DIR/agents/`` so Claude SDK path-safety lets
+        # it tail every sibling. See standalone_agent_design §13.9.5.
+        if card.role == "triage":
+            siblings_root = str(self.session_dir / "agents")
+            if siblings_root not in dirs:
+                dirs.append(siblings_root)
         for extra in self.extra_dirs:
             extra_str = str(extra)
             if extra_str and extra_str not in dirs:
@@ -498,6 +608,78 @@ while [ ! -f "$STOP_FILE" ] && [ $ATTEMPT -lt $MAX_RESTARTS ]; do
     sleep {backoff}
 done
 echo "[$(date -Iseconds)] [agent:{card.name}] mock launcher exiting" >> "$LOG"
+"""
+
+    def _compose_mock_cli_pane(self, card: AgentCard) -> str:
+        """Pane that drives the in-tree :mod:`mock_agent` module.
+
+        Unlike ``mock`` (one-shot heartbeat), ``mock-cli`` actually
+        polls the inbox + responds via outbox using the canonical
+        envelope schema — so it exercises the complete subprocess +
+        Router round-trip in CI without needing a real Claude install.
+
+        Extra knobs come from ``card.extra``:
+
+            mock_cli_args:        list[str]   appended verbatim to the
+                                              python -m mock_agent CLI
+            mock_cli_python:      str         override interpreter
+            mock_cli_env:         dict        extra env injected before
+                                              the python invocation
+        """
+        log_file = self.log_file_path(card.name)
+        stop_file = self.stop_file_path(card.name)
+        agent_dir = self.agent_dir(card)
+        env_file = self.env_file
+        extra = card.extra or {}
+        py = str(extra.get("mock_cli_python") or sys.executable or "python3")
+        cli_args = extra.get("mock_cli_args") or []
+        if not isinstance(cli_args, list):
+            raise LauncherError(
+                f"agent {card.name}: extra.mock_cli_args must be a list, "
+                f"got {type(cli_args).__name__}"
+            )
+        cli_extra_env = extra.get("mock_cli_env") or {}
+        if not isinstance(cli_extra_env, dict):
+            raise LauncherError(
+                f"agent {card.name}: extra.mock_cli_env must be a mapping, "
+                f"got {type(cli_extra_env).__name__}"
+            )
+        # Build a quoted CLI tail that survives being injected into the
+        # generated bash script.
+        argv_tail = " ".join(shlex.quote(str(a)) for a in cli_args)
+        env_lines = "\n".join(
+            f"export {k}={shlex.quote(str(v))}" for k, v in cli_extra_env.items()
+        )
+        # Note: subprocess.Popen inherits PYTHONPATH from the parent env
+        # by default, and self._write_env_file() also exposes whatever
+        # the operator passed via launcher_env. We deliberately do NOT
+        # emit a hardcoded ``export PYTHONPATH=...`` line here — that
+        # used to clobber the absolute-path PYTHONPATH the Conductor
+        # injected via .env with whatever relative value happened to be
+        # in os.environ at script-write time.
+        return f"""#!/usr/bin/env bash
+# Auto-generated MOCK-CLI pane launcher for agent '{card.name}'.
+# Drives mock_agent.py as a real subprocess that follows the multi-cli
+# A2A protocol — used by e2e tests + smoke runs without a real Claude.
+set -a
+[ -f "{env_file}" ] && source "{env_file}"
+set +a
+{env_lines}
+
+LOG="{log_file}"
+STOP_FILE="{stop_file}"
+AGENT_DIR="{agent_dir}"
+mkdir -p "$(dirname "$LOG")" "$AGENT_DIR"
+echo "[$(date -Iseconds)] [agent:{card.name}] mock-cli launcher starting" >> "$LOG"
+
+{shlex.quote(py)} -m inference_optimizer.orchestrator.multi_cli.mock_agent \\
+    --agent-name {shlex.quote(card.name)} \\
+    --session-dir "$SESSION_DIR" \\
+    {argv_tail} \\
+    >> "$LOG" 2>&1 < /dev/null
+
+EXIT=$?
+echo "[$(date -Iseconds)] [agent:{card.name}] mock-cli exit=$EXIT" >> "$LOG"
 """
 
 

@@ -1,7 +1,7 @@
-"""Phase 3 — every agent (executor / critic / watchdog / sage) running
+"""v0.4 MVP — every agent (executor / critic / triage / kernel) running
 as an independent CLI through the MultiCLIRouter.
 
-These tests do *not* spawn real Claude/Codex CLIs. Instead they:
+These tests do *not* spawn real Claude CLIs. Instead they:
 
   1. Set the Conductor up in MULTI_CLI mode + marathon execution.
   2. Use the bundled agent_cards to validate discovery + Router setup.
@@ -53,7 +53,9 @@ def marathon_env(tmp_path):
 
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_marathon_multi_cli_loads_all_four_agents(session_dir, marathon_env):
+async def test_marathon_multi_cli_loads_all_four_v04_agents(
+    session_dir, marathon_env,
+):
     db = SqliteConnection(session_dir / "storage" / "conductor.db")
     try:
         conductor = Conductor(
@@ -65,13 +67,18 @@ async def test_marathon_multi_cli_loads_all_four_agents(session_dir, marathon_en
             router_tick_s=0.05,
         )
         ctx = await conductor._bootstrap()
-        # Every active marathon role should be lifted to a CLI.
-        assert set(ctx.cli_agents) == {"executor", "critic", "watchdog", "sage"}
+        # v0.4 — guided/marathon roster collapsed to executor + critic +
+        # kernel + triage (per standalone §13.2).
+        assert set(ctx.cli_agents) == {
+            "executor", "critic", "kernel", "triage",
+        }
         assert ctx.in_proc_roles == []
         # Router should have all four agent cards.
         assert ctx.multi_cli_router is not None
         registered = set(ctx.multi_cli_router.agents.keys())
-        assert registered == {"executor", "critic", "watchdog", "sage"}
+        assert registered == {
+            "executor", "critic", "kernel", "triage",
+        }
     finally:
         db.close()
 
@@ -99,11 +106,14 @@ async def test_each_agent_can_emit_their_allowed_intents(session_dir, marathon_e
              {"topic": "heartbeat", "body_md": "from executor CLI"}),
             ("critic", "send_message",
              {"topic": "heartbeat", "body_md": "from critic CLI"}),
-            ("watchdog", "alert",
+            ("triage", "alert",
              {"severity": "low", "summary": "diagnostic ping",
               "detail": "no action needed"}),
-            ("sage", "send_message",
-             {"topic": "heartbeat", "body_md": "from sage CLI"}),
+            # Plan A — kernel agent's happy-path intent is a heartbeat
+            # send_message (RESPONSE requires an in_reply_to to a real
+            # request, which we don't seed here).
+            ("kernel", "send_message",
+             {"topic": "heartbeat", "body_md": "from kernel CLI"}),
         ]
         for agent, itype, payload in cases:
             outbox = agent_outbox_path(session_dir, agent)
@@ -126,10 +136,10 @@ async def test_each_agent_can_emit_their_allowed_intents(session_dir, marathon_e
 
 
 @pytest.mark.asyncio
-async def test_sage_cannot_delegate(session_dir, marathon_env):
-    """Sage must be denied 'delegate' intents (PolicyGate). The Router
-    + Conductor pipeline should record a policy_denied observation
-    rather than queueing a task.
+async def test_critic_cannot_delegate(session_dir, marathon_env):
+    """v0.4 — critic must be denied 'delegate' intents (PolicyGate).
+    The Router + Conductor pipeline should record a policy_denied
+    observation rather than queueing a task.
     """
     db = SqliteConnection(session_dir / "storage" / "conductor.db")
     try:
@@ -143,9 +153,9 @@ async def test_sage_cannot_delegate(session_dir, marathon_env):
         )
         ctx = await conductor._bootstrap()
 
-        outbox = agent_outbox_path(session_dir, "sage")
+        outbox = agent_outbox_path(session_dir, "critic")
         write_envelope(outbox, Envelope.intent(
-            from_agent="sage",
+            from_agent="critic",
             intent_type="delegate",
             payload={"action_name": "baseline"},
         ))
@@ -155,12 +165,51 @@ async def test_sage_cannot_delegate(session_dir, marathon_env):
             m for m in await ctx.bus.tail(n=200)
             if m.topic == "observation"
             and m.payload.get("kind") == "policy_denied"
-            and m.payload.get("agent") == "sage"
+            and m.payload.get("agent") == "critic"
         ]
-        assert denied, "expected a policy_denied observation for sage delegate"
-        # And no delegate task got queued.
+        assert denied, "expected a policy_denied observation for critic delegate"
         rows = await db.fetchall("SELECT kind FROM tasks WHERE kind='delegate'")
         assert rows == []
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_only_triage_can_emit_kill_task(session_dir, marathon_env):
+    """v0.4 MVP — KILL_TASK is allowed to be emitted only by triage.
+    Even if executor would emit kill_task, PolicyGate denies via the
+    role gate (KILL_TASK not in executor.allowed_intents).
+    """
+    db = SqliteConnection(session_dir / "storage" / "conductor.db")
+    try:
+        conductor = Conductor(
+            session_dir,
+            backend=MockBackend(),
+            env={**marathon_env},
+            db=db,
+            transport_mode=TransportMode.MULTI_CLI,
+            router_tick_s=0.05,
+        )
+        ctx = await conductor._bootstrap()
+
+        outbox = agent_outbox_path(session_dir, "executor")
+        write_envelope(outbox, Envelope.intent(
+            from_agent="executor",
+            intent_type="kill_task",
+            payload={"task_id": "fake-task-id", "reason": "demo"},
+        ))
+        await ctx.multi_cli_router.drain_outbox_tick()
+
+        denied = [
+            m for m in await ctx.bus.tail(n=200)
+            if m.topic == "observation"
+            and m.payload.get("kind") == "policy_denied"
+            and m.payload.get("agent") == "executor"
+        ]
+        assert denied, "expected a policy_denied observation for executor kill_task"
+        # No kill events.
+        kills = [m for m in await ctx.bus.tail(n=200) if m.topic == "kill"]
+        assert kills == []
     finally:
         db.close()
 
@@ -183,7 +232,7 @@ async def test_run_started_event_mirrors_into_every_inbox(session_dir, marathon_
         ctx = await conductor._bootstrap()
         await ctx.multi_cli_router.mirror_bus_tick()
 
-        for agent in ("executor", "critic", "watchdog", "sage"):
+        for agent in ("executor", "critic", "kernel", "triage"):
             inbox = agent_inbox_path(session_dir, agent)
             assert inbox.is_file(), f"missing inbox for {agent}"
             body = inbox.read_text(encoding="utf-8").strip()
@@ -209,4 +258,9 @@ def test_every_bundled_agent_card_has_system_prompt():
         # Each wrapper prompt must explain the inbox/outbox contract.
         assert "inbox.jsonl" in body
         assert "outbox.jsonl" in body
-        assert "STOP_AGENT_" in body
+        # STOP signal — accept either the literal sentinel or the explicit
+        # filename; v0.4 triage prompt mentions kill_task instead of
+        # repeating the STOP literal, but executor/critic/kernel do.
+        assert "STOP_AGENT_" in body or "kill_task" in body.lower(), (
+            f"agent {name} prompt should mention STOP_AGENT_ or kill_task"
+        )

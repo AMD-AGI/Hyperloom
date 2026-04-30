@@ -623,15 +623,21 @@ GEAK 是外部服务 —— 视为**只读基础设施**。skill 不能修改 GE
 
 ## 5. Agent 角色与模型分配
 
-### 5.1 Persistent Agent（marathon 全集 4 个 + Conductor，按 mode 启用）
+### 5.1 Persistent Agent（marathon 全集 5 个 + Conductor，按 mode 启用）
+
+> Plan A 加入 Kernel agent — 持久 reactor，guided + marathon 启用，
+> 通过 REQUEST/RESPONSE 与 executor 协同，独占 kernel-opt + integrate
+> 全流程。executor 不能 delegate(kernel_opt) / delegate(integrate)。
+> 详见 `docs/standalone_agent_design.md` §3.2 和 §8.5。
 
 | Agent | OOB Backend | 模型 | 主要职责 | LLM? | quick | guided | marathon |
 |---|---|---|---|:-:|:-:|:-:|:-:|
-| **Conductor** | — | Python | 主循环 + bus + state + 资源锁 + 议会主持 + 早停 + checkpoint + resume | ❌ | ✓ | ✓ | ✓ |
-| **Executor** | `ClaudeBackend` | `claude-opus-4-7` | 提议 action、委托 sub-agent（quick 直接执行）、解读结果、写 prediction | ✓ | ✓ reactor | ✓ reactor | ✓ reactor |
-| **Critic** | `CodexBackend` | `gpt-5.4` | review 提议、独立预测、本 run post-mortem；按 mode 介入；no-tools、JSON intent only；guided emergency 时兼任 ephemeral RCA | ✓ | ✗ | ✓ reactor（轻量 review） | ✓ reactor（完整 review） |
-| **Watchdog** | `ClaudeBackend` | `claude-opus-4-7` | event_log RCA、crash 分析、健康监控（强工具使用） | ✓ | ✗ | ✗ | ✓ 常驻 reactor |
-| **Sage** | `CodexBackend` | `gpt-5.4` | KB 主动维护、跨 run 召回、Devil's advocate、跨 run 教训沉淀；no-tools、JSON intent only | ✓ | ✓ KB 查询服务 | ✓ KB 查询服务 | ✓ 常驻 reactor + Devil's advocate |
+| **Conductor** | — | Python | 主循环 + bus + state + 资源锁 + 议会主持 + 早停 + checkpoint + resume + REQUEST/RESPONSE 路由 (Plan A) | ❌ | ✓ | ✓ | ✓ |
+| **Executor** | `ClaudeBackend` | `claude-opus-4-7` | 提议 action、委托 sub-agent（quick 直接执行）、解读结果、写 prediction、REQUEST kernel agent (Plan A) | ✓ | ✓ reactor | ✓ reactor | ✓ reactor |
+| **Critic** | `CodexBackend` | `gpt-5.4` | review 提议、独立预测、本 run post-mortem；按 mode 介入；no-tools、JSON intent only；guided emergency 时兼任 ephemeral RCA；可对 kernel agent response 发 objection (Plan A) | ✓ | ✗ | ✓ reactor（轻量 review） | ✓ reactor（完整 review） |
+| **Watchdog** | `ClaudeBackend` | `claude-opus-4-7` | event_log RCA、crash 分析、健康监控（强工具使用）；不 alert 长 GEAK turn 超时 (Plan A) | ✓ | ✗ | ✗ | ✓ 常驻 reactor |
+| **Sage** | `CodexBackend` | `gpt-5.4` | KB 主动维护、跨 run 召回、Devil's advocate、跨 run 教训沉淀；no-tools、JSON intent only；可应 kernel agent 的 ask_question (Plan A) | ✓ | ✓ KB 查询服务 | ✓ KB 查询服务 | ✓ 常驻 reactor + Devil's advocate |
+| **Kernel** (Plan A) | `ClaudeBackend` | `claude-opus-4-7` | 响应 executor REQUEST (select_kernels / run_optimization / apply_patch)；通过 Bash 调 GEAK/OOB Ray 脚本 + patch_inductor.py + run_baseline.sh；只发 RESPONSE 不发 REQUEST/DELEGATE | ✓ | ✗ | ✓ reactor (responder-only) | ✓ reactor (responder-only) |
 
 #### 5.1.1 Tool Access 原则
 
@@ -1188,7 +1194,7 @@ class Message:
 
 ### 10.2 Topic 白名单
 
-`proposal` / `objection` / `question` / `answer` / `observation` / `event` / `decision` / `vote` / `vote_request` / `parliament_open` / `alert` / `historical_warning` / `reflection_tick` / `do_postmortem` / `do_strategic_review` / `do_emergency_rca` / `synthesize_for_kb` / `graceful_stop` / `heartbeat` / `delegated_result` / `intent_emitted` / `rca_done`
+`proposal` / `objection` / `question` / `answer` / `observation` / `event` / `decision` / `vote` / `vote_request` / `parliament_open` / `alert` / `historical_warning` / `reflection_tick` / `do_postmortem` / `do_strategic_review` / `do_emergency_rca` / `synthesize_for_kb` / `graceful_stop` / `heartbeat` / `delegated_result` / `intent_emitted` / `rca_done` / `lease_expired` / `lease_acquire_failed` / **`request`** / **`response`** (Plan A — agent-to-agent RPC)
 
 ### 10.3 协议规则
 
