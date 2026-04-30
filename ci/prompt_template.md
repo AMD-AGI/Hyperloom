@@ -42,6 +42,20 @@ Rules:
 
 SAFETY: Do NOT run broad kill commands like `kill -9 $(ps aux | grep "vllm|ray")`. This will kill the sandbox executor. Use the skill's kill_server function or kill specific PIDs only.
 
+CRITICAL — MCP Tools Available:
+You have MCP tools loaded from hyperloom-public-mcp. These are DIRECT tool calls, NOT bash commands.
+Do NOT try to curl the SaFE API. Do NOT look for API keys. Use these MCP tools directly:
+
+- `workload_create` — Create a RayJob/PyTorchJob on SaFE (pass kind, images, resources, env, etc.)
+- `workload_get` — Check workload status by ID
+- `workload_list` — List workloads in a workspace
+- `workload_stop` — Stop a workload
+- `geak_create_task` — Submit kernel optimization task to GEAK
+- `geak_get_task` — Check GEAK task status
+- `geak_get_outputs` — Get GEAK optimization results
+
+These are your tools — call them like any other tool (bash, read, write). See modes/CLAW.md for exact parameters.
+
 InferenceX Baseline:
 Target GPU: {target_gpu}
 Raw performance values:
