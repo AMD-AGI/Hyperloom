@@ -201,6 +201,14 @@ The only difference: use `agent="claude"` (or `oob_ray_submit.py run -a claude` 
 Claude-specific constants (`CLAUDE_MAX_TURNS`, `CLAUDE_POLL_INTERVAL_S`,
 `CLAUDE_POLL_TIMEOUT_MIN`).
 
+**Timeout recovery:** When the user passes `--timeout` to `oob run` and the agent
+exceeds that deadline, OOB kills the subprocess and marks the task as `failed` — but
+the agent may have already written output files. The OOB JSON result includes a
+`partial_outputs` field listing workspace files; check it before discarding the
+iteration. Claude's multi-turn nature makes timeout more likely, but it often writes
+intermediate files before the deadline. See `codex.md` pseudocode for the exact
+salvage logic.
+
 Claude's multi-turn capability means it may produce higher quality output per
 iteration (at the cost of higher latency). With feedback from prior iterations,
 Claude is particularly effective at fixing compilation errors and avoiding
