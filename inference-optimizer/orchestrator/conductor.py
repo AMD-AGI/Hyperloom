@@ -44,6 +44,7 @@ from .policy import (
     ROBUSTNESS_ONLY_SOURCE_ALLOWLIST,
 )
 from .resource_lock import ResourceLockManager, SqliteLeaseBackend
+from .shared_state import SharedState
 from .sub_agent_runner import SubAgentRunner
 from .task_registry import Task, TaskRegistry
 
@@ -66,10 +67,14 @@ class PendingProposal:
 
 @dataclass
 class ConductorState:
-    """In-memory mirror of session state used by reactor + dispatcher."""
+    """In-memory ephemeral state for the reactor + dispatcher.
+
+    The persistent counterpart lives in :class:`SharedState` (state.json).
+    pruned_families and similar long-lived flags now go through SharedState;
+    in-flight reactor data (pending_proposals) stays here.
+    """
 
     pending_proposals: dict[str, PendingProposal] = field(default_factory=dict)
-    pruned_families: set[str] = field(default_factory=set)
 
 
 class Conductor:
@@ -111,6 +116,9 @@ class Conductor:
         self.policy = PolicyGate(role_registry=self.role_registry)
         self.sub = sub_agent_runner or SubAgentRunner(self.locks, self.tasks)
 
+        # Persistent session state (state.json) — load existing for resume;
+        # save() is called whenever the Conductor mutates a persistent field.
+        self.shared_state = SharedState.load_or_init(self.session_dir)
         self.state = ConductorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
@@ -246,8 +254,9 @@ class Conductor:
     # ------------------------------------------------------------------
     async def _handle_propose_action(self, source: str, intent: Intent) -> None:
         action_name = intent.payload["action_name"]
-        if action_name in self.state.pruned_families:
-            # Soft-reject pruned families (Robustness already pruned this)
+        # Pruned-family check reads from persistent SharedState so resume
+        # after crash still respects the prune.
+        if self.shared_state.is_pruned(action_name):
             await self._record_observation(
                 "conductor", "observation",
                 {"kind": "proposal_pruned", "from": source, "action": action_name},
@@ -366,7 +375,8 @@ class Conductor:
 
     async def _handle_prune_branch(self, source: str, intent: Intent) -> None:
         family = intent.payload["family"]
-        self.state.pruned_families.add(family)
+        if self.shared_state.add_pruned_family(family):
+            self.shared_state.save(self.session_dir)
         cancelled = await self.tasks.cancel_family([family])
         await self.bus.append_and_seq(Message.new(
             source, "*", "event",
@@ -412,10 +422,17 @@ class Conductor:
         ))
 
     async def _handle_update_state(self, source: str, intent: Intent) -> None:
-        # Persist as observation; full SharedState lands in P0-5.
+        # Apply to persistent SharedState (PolicyGate already enforced that
+        # the source role can't write CORE_STATE_FIELDS unless allowed).
+        applied = self.shared_state.apply_changes(
+            intent.payload["changes"], allow_core=False,
+        )
+        if applied:
+            self.shared_state.save(self.session_dir)
         await self.bus.append_and_seq(Message.new(
             source, "*", "observation",
-            {"kind": "update_state", "changes": intent.payload["changes"]},
+            {"kind": "update_state", "changes": applied,
+             "rejected": sorted(set(intent.payload["changes"]) - set(applied))},
         ))
 
     # ------------------------------------------------------------------
@@ -464,4 +481,4 @@ class Conductor:
             ))
 
 
-__all__ = ["Conductor", "ConductorState", "PendingProposal"]
+__all__ = ["Conductor", "ConductorState", "PendingProposal", "SharedState"]
