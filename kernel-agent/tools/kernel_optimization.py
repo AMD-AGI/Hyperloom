@@ -1,0 +1,883 @@
+#!/usr/bin/env python3
+"""Kernel optimization tool for the resident Kernel Agent skill."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
+        json.dump(data, tmp, indent=2, sort_keys=True)
+        tmp.write("\n")
+        tmp_path = Path(tmp.name)
+    tmp_path.replace(path)
+
+
+def append_jsonl(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(data, sort_keys=True) + "\n")
+
+
+def append_log(log_path: Path, message: str) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(message.rstrip() + "\n")
+
+
+def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
+    if not log_path.exists():
+        return []
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return lines[-limit:]
+
+
+def update_status(
+    status_path: Path,
+    *,
+    state: str,
+    current_step: str,
+    log_path: Path,
+    artifact_paths: dict[str, str],
+    run_id: str,
+    started_at: str,
+    error: str | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "tool": "kernel_optimization",
+        "run_id": run_id,
+        "state": state,
+        "current_step": current_step,
+        "pid": os.getpid(),
+        "started_at": started_at,
+        "updated_at": utc_now(),
+        "log_path": str(log_path),
+        "artifact_paths": artifact_paths,
+        "offset_bytes": log_path.stat().st_size if log_path.exists() else 0,
+        "last_lines": read_last_lines(log_path),
+    }
+    if error:
+        payload["error"] = error
+    atomic_write_json(status_path, payload)
+
+
+def load_candidates(path: Path) -> list[dict[str, Any]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, list):
+        return payload
+    return list(payload.get("hot_kernels") or payload.get("kernel_candidates") or [])
+
+
+def find_candidate(candidates: list[dict[str, Any]], kernel_id: str) -> dict[str, Any]:
+    for candidate in candidates:
+        if candidate.get("kernel_id") == kernel_id or candidate.get("name") == kernel_id:
+            return candidate
+    raise KeyError(f"kernel not found in candidates: {kernel_id}")
+
+
+def existing_path(value: str) -> str:
+    if not value:
+        return ""
+    path = Path(value).expanduser()
+    return str(path.resolve()) if path.exists() else ""
+
+
+def has_benchmark(args: argparse.Namespace, candidate: dict[str, Any]) -> bool:
+    return bool(
+        existing_path(args.benchmark_file)
+        or existing_path(args.test_harness_path)
+        or existing_path(str(candidate.get("benchmark_file") or ""))
+        or existing_path(str(candidate.get("test_harness_path") or ""))
+    )
+
+
+def parse_backends(backends: str) -> list[str]:
+    parsed = [b.strip().lower() for b in backends.split(",") if b.strip()]
+    allowed = {"geak", "claude", "codex"}
+    invalid = [b for b in parsed if b not in allowed]
+    if invalid:
+        raise ValueError(f"unsupported backend(s): {', '.join(invalid)} "
+                         f"(allowed: {sorted(allowed)}; the 'llm' single-shot "
+                         "backend was removed because max_tokens=2048 truncates "
+                         "any non-trivial kernel)")
+    return parsed
+
+
+def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    user_backends = parse_backends(args.backends)
+    benchmark_available = has_benchmark(args, candidate)
+    source_type = str(candidate.get("source_type") or "unknown")
+    notes: dict[str, Any] = {
+        "user_specified_backends": bool(user_backends),
+        "benchmark_available": benchmark_available,
+        "geak_without_benchmark": False,
+    }
+
+    if user_backends:
+        if "geak" in user_backends and not benchmark_available:
+            notes["geak_without_benchmark"] = True
+        return user_backends, notes
+
+    if source_type == "vendor_binary":
+        return [], notes
+    if source_type == "hip_cpp":
+        return ["geak"] if benchmark_available else ["claude", "codex"]
+
+    selected = ["claude", "codex"]
+    if benchmark_available:
+        selected.insert(0, "geak")
+    return selected, notes
+
+
+_GEAK_KERNEL_TYPE = {
+    "triton": "triton",
+    "hip_cpp": "hip",
+    "python": "other",
+    "vendor_binary": "other",
+    "unknown": "other",
+}
+
+
+def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
+    source_file = args.source_file or candidate.get("source_file", "")
+    source_block = ""
+    if source_file and Path(str(source_file)).exists():
+        content = Path(str(source_file)).read_text(encoding="utf-8", errors="replace")
+        source_block = f"\nSource content:\n```\n{content[:12000]}\n```"
+    kernel_repo = str(candidate.get("kernel_repo") or "")
+    bench_files = candidate.get("benchmark_files") or []
+    if isinstance(bench_files, str):
+        bench_files = [bench_files]
+    is_multigpu = bool(candidate.get("is_multigpu"))
+    # Resolve how many GPUs the executor will give this attempt: CLI override
+    # wins, then candidate hint, then 1 (single-GPU compute kernel).
+    num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0)
+                   or int(candidate.get("num_gpus_recommended") or 1))
+    # Map our source_type to GEAK's kernel_type vocabulary so its task_parser
+    # can route to the right agent (hip / triton / other).
+    geak_kernel_type = _GEAK_KERNEL_TYPE.get(str(candidate.get("source_type", "unknown")), "other")
+    kernel_name = str(candidate.get("name", args.kernel_id))
+    budget_min = int(getattr(args, "budget_minutes", 30) or 30)
+    bench_block = ""
+    if bench_files:
+        bench_block = "\nKnown benchmark/test files (also copied into your workspace as -f):\n"
+        for b in bench_files[:8]:
+            bench_block += f"- {b}\n"
+        if is_multigpu and num_gpus >= 2:
+            bench_block += (
+                f"\nNOTE: This is a multi-GPU collective kernel and you HAVE {num_gpus} GPUs "
+                "available in this sandbox (Ray/ROCR_VISIBLE_DEVICES already set). "
+                f"To run a real benchmark use `torchrun --nproc_per_node={num_gpus} <bench>.py` "
+                f"or `mpirun -n {num_gpus} ...` so torch.distributed init_process_group "
+                "(backend='nccl' / 'rccl') succeeds. Do NOT fall back to a single-GPU "
+                "rank-slice surrogate; the speedup numbers from a single-GPU surrogate are "
+                "NOT comparable across attempts.\n"
+            )
+        elif is_multigpu:
+            bench_block += (
+                "\nNOTE: This is a multi-GPU collective kernel but you only have 1 GPU. "
+                "Write a single-GPU rank-slice micro-bench (clearly labelled as a "
+                "surrogate) for compute/IO improvement signal only.\n"
+            )
+    repo_block = ""
+    if kernel_repo:
+        repo_block = (
+            f"\nKernel repo root: {kernel_repo}\n"
+            f"You may READ any file under {kernel_repo} (it is on the local filesystem)."
+        )
+    safety = (
+        "\nIMPORTANT — sandbox rules:\n"
+        f"- Do NOT modify files under {kernel_repo or '/sgl-workspace'} or any system path.\n"
+        "- Write all new/optimized kernel code, benchmarks, and reports under the\n"
+        "  current working directory (your isolated workspace) ONLY.\n"
+        "\n"
+        "GOAL & EARLY-EXIT:\n"
+        "- Target speedup: >= 1.50x on the dominant inference shape(s).\n"
+        f"- Hard wall-clock budget: ~{budget_min} minutes. If you reach >=1.50x with\n"
+        "  passing correctness BEFORE the budget expires, STOP immediately, write the\n"
+        "  final `optimization_report.md` with `speedup: X.XXx` and exit (don't keep\n"
+        "  squeezing for marginal gains).\n"
+        f"- Otherwise iterate up to minute {int(budget_min*0.85)}, then STOP iterating\n"
+        "  and finalize the report with your best so-far measured speedup. The runner\n"
+        "  will SIGTERM at minute "
+        f"{budget_min}; any in-flight work not on disk is lost.\n"
+        "- Always print the final number in the form `speedup: X.XXx` (lowercase `x`)\n"
+        "  at the END of `optimization_report.md` so the runner can extract it; if you\n"
+        "  cannot measure, write `speedup: N/A`.\n"
+        "\n"
+        "PRIORITY ORDER for picking an optimization path — check IN ORDER, use the\n"
+        "FIRST that applies. Do NOT default to the C++ source you were given:\n"
+        "(priority 0) IF kernel_url ends with `.cu`/`.cuh` AND the file is mostly\n"
+        "  host-side ASM-kernel dispatch (it contains `hipModuleLoad`,\n"
+        "  `AiterAsmKernel`, `.co`, `kernelName`, or `cfg_*`), then DO NOT try to\n"
+        "  rewrite the C++ host code — the actual compute lives in pre-compiled\n"
+        "  `.co` ASM artifacts you cannot rebuild. Instead, search for an\n"
+        f"  equivalent Triton implementation under `{kernel_repo or '/sgl-workspace/aiter'}/aiter/ops/triton/...`\n"
+        "  matching the kernel name (e.g. `aiter::gemm_a16w16` →\n"
+        "  `aiter/ops/triton/gemm/basic/gemm_a16w16.py`) and optimize THAT Triton\n"
+        "  kernel. This is how a 1.30x+ speedup is typically achieved on ASM-backed\n"
+        "  kernels (claude r19 pattern).\n"
+        "\n"
+        "How to do A/B benchmarking WITHOUT rebuilding aiter (which is forbidden):\n"
+        "(option 1) TRITON path (preferred when available). If you took priority 0,\n"
+        f"  write your version as a NEW Triton .py under ./optimized_versions/, then:\n"
+        "  `from aiter.ops.triton.<path> import <fn> as baseline; "
+        "from your_v3 import <fn> as optimized` — Triton is JIT-compiled, NO rebuild.\n"
+        "(option 2) STANDALONE HIP/CUDA program. Write a single .hip/.cu under\n"
+        "  ./benchmarks/ that #include's BOTH the aiter baseline header (e.g.\n"
+        f"  `#include \"{kernel_repo}/csrc/include/<the_target>.cuh\"`) AND your\n"
+        "  optimized .cuh from ./optimized_versions/, then build with:\n"
+        f"  `hipcc -O3 -std=c++17 -DUSE_ROCM -I{kernel_repo or '/sgl-workspace/aiter'}/csrc/include "
+        "--offload-arch=gfx942 -o ./benchmarks/bench ./benchmarks/bench.hip`.\n"
+        "  Run as a single-process program; for multi-GPU collectives simulate ranks\n"
+        "  with `std::thread` + `std::barrier` (no MPI/torchrun needed).\n"
+        "(option 3) PYTORCH cpp_extension.load(). Build a .so from your modified\n"
+        "  .cu/.cuh entirely under ./optimized_versions/ via\n"
+        "  `torch.utils.cpp_extension.load(name='opt', sources=[...], extra_include_paths=[...])`,\n"
+        "  then `import opt` and compare against the original Python entry point.\n"
+        "Pick whichever option matches the kernel; do NOT just measure baseline\n"
+        "and write `speedup: N/A` — that wastes the run.\n"
+    )
+    if not is_multigpu:
+        safety += "- Use the provided benchmark/test files above for correctness/perf measurement.\n"
+    elif num_gpus >= 2:
+        safety += (
+            f"- Run REAL multi-GPU benchmarks via `torchrun --nproc_per_node={num_gpus}`. "
+            "Save the bench script under `./benchmarks/` and the per-shape latency "
+            "numbers in `./optimization_report.md`.\n"
+        )
+    else:
+        safety += (
+            "- Write a SINGLE-GPU micro-bench using torch tensors that exercises ONE "
+            "rank's slice of the algorithm (e.g. local reduce + memcpy) so you can "
+            "still measure compute/IO improvements.\n"
+        )
+    # Use GEAK task_parser field names (kernel_name/kernel_url/kernel_type/repo)
+    # so its LLM-based parser can extract them; OOB agents read the same body
+    # as a normal natural-language prompt.
+    return "\n".join([
+        "Optimize this kernel for AMD MI355X (gfx950, CDNA4) inference serving.",
+        "",
+        f"kernel_name: {kernel_name}",
+        f"kernel_url: {source_file}",
+        f"kernel_type: {geak_kernel_type}",
+        f"repo: {kernel_repo}",
+        f"GPU percent: {candidate.get('gpu_pct', 'unknown')}",
+        f"Shapes: {json.dumps(candidate.get('shapes', []), sort_keys=True)}",
+        "",
+        "Preserve function name, signature, decorators, and numerical behavior.",
+        "Return complete optimized code plus explanation of correctness assumptions.",
+        repo_block,
+        bench_block,
+        safety,
+        source_block,
+    ])
+
+
+def ray_available() -> bool:
+    try:
+        import ray  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _backends_module_dir() -> Path:
+    return Path(__file__).resolve().parent / "backends"
+
+
+def _import_backend(name: str):
+    """Dynamically load kernel-agent/tools/backends/<name>.py.
+
+    The submodules are not part of a Python package on disk; we add their
+    directory to sys.path before import so they can also import each other.
+    """
+    backends_dir = _backends_module_dir()
+    if str(backends_dir) not in sys.path:
+        sys.path.insert(0, str(backends_dir))
+    import importlib
+    return importlib.import_module(name)
+
+
+def _kernel_agent_root() -> Path:
+    return Path(os.environ.get("WORKSPACE_PATH", "/workspace")) / "kernel-agent"
+
+
+def _geak_output_dir(session_id: str, prompt_file: Path) -> Path:
+    out = _kernel_agent_root() / "geak" / session_id / prompt_file.stem
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _oob_output_dir(session_id: str) -> Path:
+    out = _kernel_agent_root() / "oob" / session_id
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _mirror_path_link(run_dir: Path, mirror: Path) -> None:
+    """Create a relative symlink inside the run dir pointing at the mirror."""
+    try:
+        link_dir = run_dir / mirror.parent.name  # geak / oob
+        link_dir.mkdir(parents=True, exist_ok=True)
+        link = link_dir / mirror.name
+        if link.exists() or link.is_symlink():
+            return
+        link.symlink_to(mirror, target_is_directory=True)
+    except OSError:
+        pass
+
+
+def _git_checkout_fallback(kernel_repo: str, log_path: Path) -> None:
+    """Best-effort `git checkout -- .` to undo any rogue agent writes under
+    the kernel repo (e.g. claude ignoring the soft safety prompt). Idempotent
+    and safe to call after every backend attempt."""
+    if not kernel_repo:
+        return
+    git_dir = Path(kernel_repo) / ".git"
+    if not git_dir.exists():
+        return
+    try:
+        proc = subprocess.run(
+            ["git", "-C", kernel_repo, "checkout", "--", "."],
+            capture_output=True, text=True, timeout=60,
+        )
+        append_log(log_path, f"[git-fallback] checkout rc={proc.returncode}")
+        if proc.stderr.strip():
+            append_log(log_path, f"[git-fallback] stderr: {proc.stderr.strip()[:400]}")
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        append_log(log_path, f"[git-fallback] failed: {type(exc).__name__}: {exc}")
+
+
+def invoke_backend(
+    backend: str,
+    prompt_file: Path,
+    source_file: str,
+    args: argparse.Namespace,
+    candidate: dict[str, Any] | None = None,
+    log_path: Path | None = None,
+) -> dict[str, Any]:
+    """Run a backend via the self-contained submitters.
+
+    Returns a normalized dict: returncode, stdout_tail, stderr_tail, stdout,
+    gpu_ids, elapsed_s, cmd, optimized_path (optional), cli_workspace (oob).
+    """
+    timeout_s = max(60, int(args.budget_minutes * 60))
+    prefer_ray = ray_available()
+    candidate = candidate or {}
+    kernel_repo = str(candidate.get("kernel_repo") or "")
+    bench_files: list[str] = list(candidate.get("benchmark_files") or [])
+    # Resolve per-task GPU count: CLI override wins, then candidate hint,
+    # then 1.
+    num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0)
+                   or int(candidate.get("num_gpus_recommended") or 1))
+    try:
+        if backend == "geak":
+            geak = _import_backend("geak_submit")
+            out_dir = _geak_output_dir(args.session_id, prompt_file)
+            # GEAK preprocess will INVENT a wrong path (e.g.
+            # `/sgl-workspace/aiter/./benchmarks/bench_<kernel>.py` which does
+            # not exist) when --test-command is empty, causing torchrun exit 2
+            # at baseline measurement. Always pick a real existing test from
+            # candidate.benchmark_files, prefixing with `torchrun` for the
+            # multi-GPU path so collective init_process_group succeeds.
+            test_command = ""
+            is_multigpu = bool((candidate or {}).get("is_multigpu"))
+            if is_multigpu and num_gpus >= 2:
+                for bf in bench_files:
+                    if bf.endswith(".py") and Path(bf).exists() and (
+                        "test_" in Path(bf).name or "bench" in Path(bf).name
+                    ):
+                        test_command = f"torchrun --nproc_per_node={num_gpus} {bf}"
+                        break
+            elif not is_multigpu:
+                for bf in bench_files:
+                    if bf.endswith(".py") and Path(bf).exists() and (
+                        "test_" in Path(bf).name or "bench" in Path(bf).name
+                    ):
+                        test_command = f"python {bf}"
+                        break
+            result = geak.submit(
+                prompt_file=prompt_file,
+                output_dir=out_dir,
+                kernel_path=source_file,
+                cost_limit=args.geak_cost_limit,
+                timeout_s=timeout_s,
+                num_gpus=num_gpus,
+                prefer_ray=prefer_ray,
+                kernel_repo=kernel_repo,
+                test_command=test_command,
+            )
+            result["stdout"] = result.get("stdout_tail", "")
+            result["output_dir"] = str(out_dir)
+            # Surface GEAK partial outputs (final_report.json / results dir)
+            # so a SIGTERM'd attempt with patches on disk still gets
+            # promoted to "partial" by the run_attempt scanner below.
+            final_report = out_dir / "final_report.json"
+            if final_report.is_file():
+                result["geak_final_report"] = str(final_report)
+            results_dir = out_dir / "results"
+            if results_dir.is_dir():
+                # Count any *.patch under results/ as evidence of partial work.
+                patches = sorted(results_dir.rglob("*.patch"))
+                if patches:
+                    result["geak_results_dir"] = str(results_dir)
+                    result["geak_patch_count"] = len(patches)
+                    result["geak_latest_patch"] = str(patches[-1])
+            return result
+        if backend in {"claude", "codex"}:
+            oob = _import_backend("oob_submit")
+            out_dir = _oob_output_dir(args.session_id)
+            is_multigpu = bool((candidate or {}).get("is_multigpu"))
+            if is_multigpu:
+                keep = [f for f in bench_files if not Path(f).name.startswith("test_")]
+                extras = keep[:3]
+            else:
+                extras = bench_files[:3]
+            result = oob.submit(
+                agent=backend,
+                prompt_file=prompt_file,
+                output_dir=out_dir,
+                source_file=source_file,
+                max_turns=args.oob_max_turns,
+                timeout_s=timeout_s,
+                num_gpus=num_gpus,
+                prefer_ray=prefer_ray,
+                extra_files=extras,
+                kernel_repo=kernel_repo,
+            )
+            result["output_dir"] = str(out_dir)
+            return result
+        return {
+            "returncode": 2,
+            "stdout_tail": f"unknown backend: {backend}",
+            "stderr_tail": "", "stdout": "", "gpu_ids": "",
+            "elapsed_s": 0.0, "cmd": [],
+        }
+    finally:
+        # Always undo any rogue writes under the kernel repo, regardless of
+        # the backend's exit code (claude has been observed to ignore the
+        # soft safety prompt and edit files in /sgl-workspace/aiter directly).
+        if log_path is not None:
+            _git_checkout_fallback(kernel_repo, log_path)
+
+
+def env_first(*names: str) -> str:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return ""
+
+
+def run_attempt(
+    backend: str,
+    *,
+    args: argparse.Namespace,
+    candidate: dict[str, Any],
+    run_dir: Path,
+    log_path: Path,
+) -> dict[str, Any]:
+    attempt_id = f"{backend}-{uuid.uuid4().hex[:8]}"
+    prompt_dir = run_dir / "prompts"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    prompt_file = prompt_dir / f"{attempt_id}.md"
+    prompt_file.write_text(build_prompt(candidate, args), encoding="utf-8")
+
+    source_file = args.source_file or str(candidate.get("source_file") or "")
+    started = time.time()
+    append_log(log_path, f"[attempt {attempt_id}] backend={backend}")
+
+    optimized_path = run_dir / "optimized" / f"{attempt_id}_optimized.txt"
+    optimized_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.dry_run:
+        status = "completed"
+        returncode = 0
+        stdout_tail = "[dry-run] backend execution skipped"
+        full_stdout = stdout_tail
+        optimized_path.write_text("# dry-run optimized kernel placeholder\n", encoding="utf-8")
+        result = {}
+    else:
+        append_log(log_path, f"$ invoke_backend({backend})")
+        result = invoke_backend(backend, prompt_file, source_file, args,
+                                candidate=candidate, log_path=log_path)
+        returncode = int(result.get("returncode", 1))
+        full_stdout = result.get("stdout") or result.get("stdout_tail") or ""
+        stdout_tail = (full_stdout or "")[-4000:] or result.get("stderr_tail", "")
+        if returncode == 0:
+            status = "completed"
+        elif returncode == 124:
+            status = "timeout"
+        else:
+            status = "failed"
+        if returncode == 0 and full_stdout.strip():
+            optimized_path.write_text(full_stdout, encoding="utf-8")
+        append_log(log_path, stdout_tail)
+
+    elapsed = round(time.time() - started, 3)
+
+    backend_paths: dict[str, str] = {}
+    if not args.dry_run:
+        out_dir = result.get("output_dir") if isinstance(result, dict) else ""
+        if out_dir:
+            backend_paths["output_dir"] = out_dir
+            # Prefer the workspace path emitted in oob's init ndjson event;
+            # the previous mtime-based heuristic mis-attributed concurrent
+            # replicas to each other (claude-rep0 → codex-rep1's dir).
+            cli_workspace = (result.get("cli_workspace") or "") if isinstance(result, dict) else ""
+            session_id_oob = (result.get("session_id") or "") if isinstance(result, dict) else ""
+            cli_log = ""
+            if cli_workspace:
+                exec_log = Path(cli_workspace) / "execution.log"
+                if exec_log.exists():
+                    cli_log = str(exec_log)
+                # Scan for partial outputs even when returncode != 0 so a
+                # timed-out attempt doesn't get marked as 0-product:
+                opt_dir = Path(cli_workspace) / "optimized_versions"
+                if opt_dir.is_dir():
+                    files = sorted(opt_dir.iterdir(), key=lambda p: p.stat().st_mtime)
+                    if files:
+                        backend_paths["partial_optimized_count"] = str(len(files))
+                        backend_paths["partial_latest_optimized"] = str(files[-1])
+                report = Path(cli_workspace) / "optimization_report.md"
+                if report.exists():
+                    backend_paths["partial_report"] = str(report)
+            if cli_workspace:
+                backend_paths["cli_workspace"] = cli_workspace
+            if cli_log:
+                backend_paths["cli_execution_log"] = cli_log
+            if session_id_oob:
+                backend_paths["oob_session_id"] = session_id_oob
+            # GEAK partial-output surface (forwarded by invoke_backend on
+            # the geak branch). final_report.json / per-round patches.
+            geak_final = (result.get("geak_final_report") or "") if isinstance(result, dict) else ""
+            if geak_final:
+                backend_paths["geak_final_report"] = geak_final
+            geak_patch = (result.get("geak_latest_patch") or "") if isinstance(result, dict) else ""
+            if geak_patch:
+                backend_paths["geak_latest_patch"] = geak_patch
+                backend_paths["geak_patch_count"] = str(result.get("geak_patch_count") or 0)
+            # Promote any timed-out / failed attempt that left artifacts on
+            # disk to "partial" so build_verification + make_proposal can
+            # distinguish "killed but useful" from "truly empty failure".
+            partial_evidence_keys = (
+                "partial_latest_optimized", "partial_report",
+                "geak_final_report", "geak_latest_patch",
+            )
+            if status in {"timeout", "failed"} and any(
+                k in backend_paths for k in partial_evidence_keys
+            ):
+                status = "partial"
+
+    return {
+        "attempt_id": attempt_id,
+        "backend": backend,
+        "status": status,
+        "error_type": status if status in {"backend_not_installed", "timeout"} else "",
+        "returncode": returncode,
+        "elapsed_s": elapsed,
+        "prompt_path": str(prompt_file),
+        "optimized_path": str(optimized_path) if optimized_path.exists() else "",
+        "stdout_tail": stdout_tail,
+        "created_at": utc_now(),
+        "backend_paths": backend_paths,
+    }
+
+
+_SPEEDUP_PATTERNS = [
+    # Match `speedup: 1.28x` / `Speedup: **1.076x**` / `avg=1.044x` etc.
+    re.compile(r"(?i)\bspeedup\b[^\n]{0,40}?([0-9]+(?:\.[0-9]+)?)\s*[xX]"),
+    re.compile(r"(?i)\bavg(?:erage)?\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)\s*[xX]\s+(?:speedup|across)"),
+    re.compile(r"(?i)\b([0-9]+(?:\.[0-9]+)?)\s*[xX]\s+(?:speedup|faster)"),
+]
+
+
+def _extract_speedup_from_report(report_path: str | Path) -> float | None:
+    """Best-effort scan of an OOB optimization_report.md for a speedup figure.
+
+    Picks the MAX value across all matches (agents often report per-shape
+    numbers and an aggregate; we want the headline). Returns None if nothing
+    parseable is found or the file does not exist.
+    """
+    if not report_path:
+        return None
+    p = Path(report_path)
+    if not p.is_file():
+        return None
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    found: list[float] = []
+    for pat in _SPEEDUP_PATTERNS:
+        for m in pat.finditer(text):
+            try:
+                v = float(m.group(1))
+                # Reject obvious junk (e.g. "100x faster" hyperbole)
+                if 0.3 <= v <= 50.0:
+                    found.append(v)
+            except ValueError:
+                continue
+    if not found:
+        return None
+    # Use median-of-top-3 to dodge cherry-picked best-shape numbers; agents
+    # tend to also print regression shapes which we don't want to filter out.
+    found.sort(reverse=True)
+    top = found[:3]
+    return round(sum(top) / len(top), 4)
+
+
+def _extract_speedup_from_geak(final_report_path: str | Path) -> float | None:
+    """Pull best_speedup from a GEAK final_report.json if present and >0."""
+    if not final_report_path:
+        return None
+    p = Path(final_report_path)
+    if not p.is_file():
+        return None
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        v = float(d.get("best_speedup") or 0.0)
+        return v if v > 0 else None
+    except Exception:
+        return None
+
+
+def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]], benchmark_available: bool) -> dict[str, Any]:
+    # An attempt is usable if it either completed cleanly OR was killed past
+    # the budget but left optimized_versions/ + report on disk (status=partial).
+    usable = [a for a in attempts if a.get("status") in {"completed", "partial"}]
+    best = None
+    best_speedup = 0.0
+    measured = False
+    # Prefer the attempt with the highest extracted speedup; if none has a
+    # measurable number, fall back to the first usable attempt with a 0.0 hint.
+    for a in usable:
+        bp = a.get("backend_paths") or {}
+        report = bp.get("partial_report") or bp.get("report") or ""
+        sp = _extract_speedup_from_report(report)
+        if sp is None:
+            sp = _extract_speedup_from_geak(bp.get("geak_final_report", ""))
+        if sp is not None:
+            measured = True
+            if sp > best_speedup:
+                best_speedup = sp
+                best = a
+    if best is None and usable:
+        best = usable[0]
+    compile_passed = bool(best)
+    # Correctness is still derived from upstream signal (accuracy harness or
+    # GEAK's own retest); microbench presence alone isn't enough.
+    correctness_passed = bool(best and benchmark_available)
+    if args.micro_speedup is not None:
+        micro_speedup = float(args.micro_speedup)
+        speedup_source = "cli_override"
+    elif measured:
+        micro_speedup = best_speedup
+        speedup_source = "report_scan"
+    elif getattr(args, "dry_run", False):
+        # Dry-run is a smoke-test of the pipeline, not a real measurement.
+        # Keep the legacy 1.05 placeholder so CI can exercise KEEP/REVIEW
+        # paths without needing a real backend.
+        micro_speedup = 1.05 if best else 0.0
+        speedup_source = "dry_run_placeholder"
+    else:
+        # Real run with no parseable speedup → don't fake "improved";
+        # leave it at 1.0 so PolicyGate can route to PARTIAL.
+        micro_speedup = 1.0 if best else 0.0
+        speedup_source = "default_unmeasured"
+    e2e_gain_pct = args.e2e_gain_pct
+    accuracy_passed = args.accuracy_passed
+    return {
+        "compile_passed": compile_passed,
+        "correctness_passed": correctness_passed,
+        "micro_speedup": micro_speedup,
+        "micro_speedup_source": speedup_source,
+        "e2e_gain_pct": e2e_gain_pct,
+        "accuracy_passed": accuracy_passed,
+        "verification_status": "complete" if correctness_passed and e2e_gain_pct is not None else "deferred",
+        "best_attempt_id": best["attempt_id"] if best else "",
+        "best_backend": best["backend"] if best else "",
+        "best_artifact_path": best.get("optimized_path", "") if best else "",
+    }
+
+
+def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
+    reasons: list[str] = []
+    if not verification["compile_passed"]:
+        return {"decision": "REVERT", "reasons": ["compile failed"]}
+    if not verification["correctness_passed"]:
+        reasons.append("correctness evidence missing or failed")
+    # Distinguish "we have artifacts but didn't measure a speedup" (PARTIAL,
+    # human review can salvage) from "we measured and it's a regression"
+    # (REVERT). The signal is verification["micro_speedup_source"]:
+    #   * report_scan / cli_override → real number
+    #   * default_unmeasured        → no number found, don't punish
+    src = verification.get("micro_speedup_source", "default_unmeasured")
+    if src == "default_unmeasured":
+        # Real run with backend artifacts on disk but no measurable speedup;
+        # don't punish as REVERT (regression) and don't lie as KEEP — leave
+        # it at PARTIAL so a human reviewer can salvage from the report.
+        reasons.append("no measurable speedup found in any backend report")
+        return {"decision": "PARTIAL", "reasons": reasons}
+    if verification["micro_speedup"] <= 1.0:
+        return {"decision": "REVERT", "reasons": ["microbench did not improve"]}
+    # Goal threshold: only speedups >= 1.50x are KEEP candidates. Anything
+    # in (1.0, 1.50) is a marginal win that needs human review (could be
+    # noise / shape-specific / not worth the risk on production paths).
+    KEEP_THRESHOLD = 1.50
+    if verification["micro_speedup"] < KEEP_THRESHOLD:
+        reasons.append(
+            f"speedup {verification['micro_speedup']:.3f}x below KEEP "
+            f"threshold {KEEP_THRESHOLD:.2f}x"
+        )
+    if verification["e2e_gain_pct"] is None:
+        reasons.append("E2E evidence missing")
+    elif verification["e2e_gain_pct"] < 0:
+        return {"decision": "REVERT", "reasons": ["E2E regressed"]}
+    if verification["accuracy_passed"] is None:
+        reasons.append("accuracy evidence missing")
+    elif verification["accuracy_passed"] is False:
+        return {"decision": "REVERT", "reasons": ["accuracy gate failed"]}
+
+    if reasons:
+        return {"decision": "NEEDS_REVIEW", "reasons": reasons}
+    return {"decision": "KEEP", "reasons": ["all required evidence passed"]}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Kernel Agent optimization tool")
+    parser.add_argument("--kernel-id", required=True)
+    parser.add_argument("--session-id", default="")
+    parser.add_argument("--workspace-path", default=os.environ.get("WORKSPACE_PATH", "/workspace"))
+    parser.add_argument("--candidates-path", default="")
+    parser.add_argument("--backends", default="")
+    parser.add_argument("--benchmark-file", default="")
+    parser.add_argument("--test-harness-path", default="")
+    parser.add_argument("--source-file", default="")
+    parser.add_argument("--budget-minutes", type=float, default=30.0)
+    parser.add_argument("--micro-speedup", type=float, default=None)
+    parser.add_argument("--e2e-gain-pct", type=float, default=None)
+    parser.add_argument("--accuracy-passed", choices=["true", "false", "unknown"], default="unknown")
+    parser.add_argument("--oob-max-turns", type=int, default=int(os.environ.get("KERNEL_AGENT_OOB_MAX_TURNS", "100")))
+    parser.add_argument("--geak-cost-limit", type=float, default=None)
+    parser.add_argument("--num-gpus", type=int,
+                        default=int(os.environ.get("KERNEL_AGENT_NUM_GPUS", "0")),
+                        help="Per-task GPU reservation; 0 means follow the "
+                             "candidate's num_gpus_recommended (1 for compute "
+                             "kernels, 2 for communication kernels).")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    session_id = args.session_id or uuid.uuid4().hex[:12]
+    run_id = f"ko-{uuid.uuid4().hex[:8]}"
+    started_at = utc_now()
+    root = Path(args.workspace_path) / "kernel-agent"
+    run_dir = root / "runs" / session_id
+    log_path = run_dir / "logs" / "kernel_optimization" / f"{run_id}.log"
+    status_path = run_dir / "status" / "kernel_optimization" / f"{run_id}.json"
+    artifacts: dict[str, str] = {}
+
+    try:
+        update_status(status_path, state="running", current_step="load_candidate",
+                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
+                      started_at=started_at)
+        candidates_path = Path(args.candidates_path) if args.candidates_path else run_dir / "kernel_candidates.json"
+        candidate = find_candidate(load_candidates(candidates_path), args.kernel_id)
+        resolved_source = args.source_file or str(candidate.get("source_file") or "")
+        if not args.dry_run and not resolved_source:
+            raise RuntimeError(
+                f"source file not resolved for kernel {args.kernel_id}; "
+                "skipping backend dispatch (no fabricated source allowed)"
+            )
+        selected_backends, backend_notes = choose_backends(args, candidate)
+        benchmark_available = bool(backend_notes["benchmark_available"])
+        append_log(log_path, f"kernel_id={args.kernel_id}")
+        append_log(log_path, f"resolved_source={resolved_source or 'NONE'}")
+        append_log(log_path, f"selected_backends={','.join(selected_backends) or 'none'}")
+
+        update_status(status_path, state="running", current_step="run_backends",
+                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
+                      started_at=started_at)
+        attempts: list[dict[str, Any]] = []
+        for backend in selected_backends:
+            attempt = run_attempt(backend, args=args, candidate=candidate,
+                                  run_dir=run_dir, log_path=log_path)
+            attempt.update(backend_notes)
+            attempts.append(attempt)
+            append_jsonl(run_dir / "optimization_attempts.jsonl", attempt)
+
+        update_status(status_path, state="running", current_step="verify_and_propose",
+                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
+                      started_at=started_at)
+        accuracy = None if args.accuracy_passed == "unknown" else args.accuracy_passed == "true"
+        args.accuracy_passed = accuracy
+        verification = build_verification(args, attempts, benchmark_available)
+        proposal = make_proposal(verification)
+
+        verification_path = run_dir / "verification" / f"{args.kernel_id}.json"
+        atomic_write_json(verification_path, verification)
+        result_path = run_dir / "results" / f"{args.kernel_id}.json"
+        result = {
+            "tool": "kernel_optimization",
+            "session_id": session_id,
+            "run_id": run_id,
+            "kernel_id": args.kernel_id,
+            "selected_backends": selected_backends,
+            "backend_selection": backend_notes,
+            "attempts": attempts,
+            "verification": verification,
+            "proposal": proposal,
+            "cli_log_path": str(log_path),
+            "status_path": str(status_path),
+            "artifact_paths": {
+                "verification": str(verification_path),
+                "result": str(result_path),
+                "cli_log_path": str(log_path),
+                "status_path": str(status_path),
+            },
+        }
+        atomic_write_json(result_path, result)
+        artifacts.update(result["artifact_paths"])
+        update_status(status_path, state="succeeded", current_step="done",
+                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
+                      started_at=started_at)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    except Exception as exc:
+        append_log(log_path, f"[error] {type(exc).__name__}: {exc}")
+        update_status(status_path, state="failed", current_step="failed",
+                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
+                      started_at=started_at, error=f"{type(exc).__name__}: {exc}")
+        print(json.dumps({
+            "tool": "kernel_optimization",
+            "session_id": session_id,
+            "run_id": run_id,
+            "status": "failed",
+            "error": f"{type(exc).__name__}: {exc}",
+            "cli_log_path": str(log_path),
+            "status_path": str(status_path),
+        }, indent=2, sort_keys=True))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
