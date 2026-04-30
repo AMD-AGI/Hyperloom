@@ -13,8 +13,16 @@ Mock backends (P0):
 """
 
 from .base import Backend, BackendError, BackendTurnResult
+from .claude import ClaudeBackend
 from .critic_mock import MockCriticBackend
 from .kernel_mock import MockKernelBackend
+from .mcp_emit_intent import (
+    EMIT_INTENT_TOOL_NAME,
+    EMIT_INTENT_TOOL_QUALIFIED,
+    MCP_SERVER_NAME,
+    build_emit_intent_server,
+    validate_emit_intent_input,
+)
 from .mock_backend import MockBackend, MockTurn, ScriptedPlan
 from .robustness_mock import MockRobustnessBackend
 
@@ -22,10 +30,16 @@ __all__ = [
     "Backend",
     "BackendError",
     "BackendTurnResult",
+    "ClaudeBackend",
+    "EMIT_INTENT_TOOL_NAME",
+    "EMIT_INTENT_TOOL_QUALIFIED",
+    "MCP_SERVER_NAME",
     "MockBackend",
     "MockCriticBackend",
     "MockKernelBackend",
     "MockRobustnessBackend",
     "MockTurn",
     "ScriptedPlan",
+    "build_emit_intent_server",
+    "validate_emit_intent_input",
 ]
