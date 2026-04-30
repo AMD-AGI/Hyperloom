@@ -129,19 +129,25 @@ class ClawClient:
         self,
         session_id: str,
         timeout: int | None = None,
+        last_event_id: str | None = None,
     ) -> Generator[dict, None, None]:
         """Subscribe to SSE event stream for a session.
 
         Must be called BEFORE send_message to avoid missing events.
         Yields parsed event dicts until agent stops or timeout.
+        When ``last_event_id`` is provided, the server should resume from that
+        point instead of replaying from the beginning (standard SSE protocol).
         """
         effective_timeout = timeout or self.timeout
         url = self._url(f"/chat/sessions/{session_id}/messages")
+        headers = {"Accept": "text/event-stream"}
+        if last_event_id:
+            headers["Last-Event-ID"] = last_event_id
         resp = self._session.get(
             url,
-            headers={"Accept": "text/event-stream"},
+            headers=headers,
             stream=True,
-            timeout=(30, effective_timeout),
+            timeout=(30, min(effective_timeout, 600)),
         )
         resp.raise_for_status()
 
@@ -166,6 +172,10 @@ class ClawClient:
                 log.debug("Non-JSON SSE event: %s", event.data[:100])
                 continue
 
+            # Track last event ID for resume-on-reconnect
+            if event.id:
+                self._last_event_id = event.id
+
             yield data
 
     def monitor_session(
@@ -188,9 +198,12 @@ class ClawClient:
         effective_timeout = timeout or self.timeout
         start = time.time()
         last_heartbeat = start
+        last_event_time = start
         status = "running"
         got_agent_response = False
         retries_left = reconnect_retries
+        self._last_event_id = None
+        sse_idle_timeout = 600  # 10 min without any SSE event → force reconnect
 
         while True:
             try:
@@ -201,8 +214,10 @@ class ClawClient:
                                 session_id, time.time() - start)
                     break
 
-                for event_data in self.subscribe_sse(session_id, int(remaining)):
+                for event_data in self.subscribe_sse(session_id, int(remaining),
+                                                      last_event_id=self._last_event_id):
                     elapsed = time.time() - start
+                    last_event_time = time.time()
                     retries_left = reconnect_retries
 
                     try:
@@ -269,8 +284,13 @@ class ClawClient:
                                 session_id, elapsed)
                     break
 
+                idle_secs = time.time() - last_event_time
+                if idle_secs > sse_idle_timeout:
+                    log.warning("Session %s SSE idle for %.0fs (threshold %ds), forcing reconnect",
+                                session_id, idle_secs, sse_idle_timeout)
                 log.warning("Session %s SSE stream ended after %.0fs with status still 'running', "
-                            "will attempt reconnect", session_id, elapsed)
+                            "reconnecting (last_event_id=%s)",
+                            session_id, elapsed, self._last_event_id)
 
             except (requests.exceptions.ReadTimeout,
                     requests.exceptions.ConnectionError,
