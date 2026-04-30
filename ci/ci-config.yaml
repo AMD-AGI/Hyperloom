@@ -4,7 +4,7 @@ claw:
   sandbox_workspace_env: SANDBOX_WORKSPACE
   sandbox_timeout: 28800
   agent_id: agent_default
-  tools: [66, 3]  # 66=ci-mix300 v1.1.0(skill), 3=hyperloom-public-mcp(geak+oob+safe+traceLens)
+  tools: [66]  # 66=ci-mix300 v1.1.0(skill). SaFE API key passed via prompt.
 
 inferenceX:
   repo: https://github.com/SemiAnalysisAI/InferenceX.git
