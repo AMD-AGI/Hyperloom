@@ -105,6 +105,41 @@ When **polling** workload results, the agent MUST:
 
 Violation = wasted GPU hours from blind polling loops.
 
+### IR-13: NEVER `sleep` longer than 60 seconds in a single bash command
+
+**Problem:** The Hands sandbox has a bash idle timeout. When the agent runs
+`sleep 900` or `sleep 1800` to wait for compilation/warmup, the MCP connection
+drops with error `-32001` before the sleep finishes. The agent then reconnects,
+checks status, sleeps again — repeating this cycle for **3-4 hours** of wasted
+wall-clock time.
+
+**Rule:** ALL polling loops MUST use short sleep intervals (≤ 60s) with an
+explicit check between each iteration:
+
+```bash
+# CORRECT — short sleep + check each iteration
+for i in $(seq 1 60); do
+  if [ -f "$NFS_DIR/ci_metrics.json" ]; then echo "DONE"; break; fi
+  # or: check workload status via workload_get
+  sleep 60
+done
+
+# WRONG — long sleep triggers MCP timeout
+sleep 1800
+cat "$NFS_DIR/ci_metrics.json"
+```
+
+When waiting for a workload (RayJob / PyTorchJob) to complete:
+1. Use `workload_get` to poll status every 60s — NOT `sleep` + file check
+2. Once status is `Succeeded`, THEN read the NFS results
+3. If status is `Failed`, abort immediately — do NOT keep polling
+
+**Also applies to `exec_on_gpu`:** Any command that blocks for >60s (e.g.,
+`exec_on_gpu "sleep 300 && check_results"`) will trigger the same timeout.
+Break it into multiple short calls.
+
+Violation = hours of wasted sandbox time from MCP reconnect loops.
+
 ---
 
 ## Claw-Mode Constants
