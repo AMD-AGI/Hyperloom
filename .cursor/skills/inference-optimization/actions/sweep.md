@@ -16,7 +16,7 @@ Full ISL/OSL/CONC sweep with the optimized version to map the Pareto frontier.
 export MODEL="$MODEL_PATH" TP=$TP INFERENCEX_PATH="$INFERENCEX_PATH"
 export CONC_VALUES="4 16 64"
 export ISL_OSL_CONFIGS="1024:1024 8192:1024 1024:8192"
-export RESULT_DIR="/shared_nfs/inference-optimization/results/sweep_$(date +%Y-%m-%d-%H-%M)"
+export RESULT_DIR="/wekafs/inference-optimization/results/sweep_$(date +%Y-%m-%d-%H-%M)"
 
 bash "$SCRIPTS_DIR/run_sweep.sh"
 ```
