@@ -100,6 +100,9 @@ def _parse_version_from_tag(tag: str, repo: str) -> Optional[tuple]:
             return None
 
         # lmsysorg/sglang and vllm/*: strip leading 'v' and trailing suffixes
+        # Skip non-production tags like -base, -dev, -debug (bare images without framework)
+        if re.search(r'-(base|dev|debug|slim|minimal)$', tag, re.IGNORECASE):
+            return None
         v_match = re.match(r'v([\d.]+(?:\.post\d+)?(?:rc\d+)?)', tag)
         if v_match:
             return (Version(v_match.group(1)),)
