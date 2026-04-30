@@ -42,19 +42,26 @@ Rules:
 
 SAFETY: Do NOT run broad kill commands like `kill -9 $(ps aux | grep "vllm|ray")`. This will kill the sandbox executor. Use the skill's kill_server function or kill specific PIDs only.
 
-CRITICAL — MCP Tools Available:
-You have MCP tools loaded from hyperloom-public-mcp. These are DIRECT tool calls, NOT bash commands.
-Do NOT try to curl the SaFE API. Do NOT look for API keys. Use these MCP tools directly:
+CRITICAL — SaFE API Access:
+Use this API key for ALL SaFE platform operations (workload create/get/stop):
+  SAFE_API_KEY={safe_api_key}
+  SAFE_API_BASE=https://core42.example-internal-host.invalid
 
-- `workload_create` — Create a RayJob/PyTorchJob on SaFE (pass kind, images, resources, env, etc.)
-- `workload_get` — Check workload status by ID
-- `workload_list` — List workloads in a workspace
-- `workload_stop` — Stop a workload
-- `geak_create_task` — Submit kernel optimization task to GEAK
-- `geak_get_task` — Check GEAK task status
-- `geak_get_outputs` — Get GEAK optimization results
+Example — create a PyTorchJob:
+```bash
+curl -sk -X POST "$SAFE_API_BASE/api/v1/workloads" \
+  -H "Authorization: Bearer $SAFE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{{"displayName":"my-job","workspaceId":"{sandbox_workspace}","kind":"PyTorchJob",...}}'
+```
 
-These are your tools — call them like any other tool (bash, read, write). See modes/CLAW.md for exact parameters.
+Example — check workload status:
+```bash
+curl -sk "$SAFE_API_BASE/api/v1/workloads/$WORKLOAD_ID" \
+  -H "Authorization: Bearer $SAFE_API_KEY"
+```
+
+Do NOT waste turns exploring the environment for API keys. Use the key above directly.
 
 InferenceX Baseline:
 Target GPU: {target_gpu}
