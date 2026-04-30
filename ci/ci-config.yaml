@@ -22,7 +22,7 @@ notification:
   webhook_env: WEBHOOK_URL                # Slack / Teams Incoming Webhook 均可
 
 defaults:
-  mode: local
+  mode: claw
   geak_step_limit: 100
   kernel_opt_workspace: ${KERNEL_OPT_WORKSPACE}
   min_kernels: 5
@@ -37,7 +37,7 @@ models:
     model_path_override: /wekafs/models/DeepSeek-R1-0528
     optimization_depth: full
     kernel_opt_backends: claude
-    target_gpu: mi355x
+    target_gpu: mi300x
 
   # ── gpt-oss 120B (FP4, TP=8, vLLM) ──
   - inferenceX_key: gptoss-fp4-mi355x-vllm
@@ -45,7 +45,7 @@ models:
     model_path_override: /wekafs/models/gpt-oss-120b
     optimization_depth: full
     kernel_opt_backends: claude
-    target_gpu: mi355x
+    target_gpu: mi300x
 
   # ── Kimi K2.5 (INT4, TP=8, vLLM) ──
   - inferenceX_key: kimik2.5-int4-mi355x-vllm
@@ -53,7 +53,7 @@ models:
     model_path_override: /wekafs/models/Kimi-K2.5
     optimization_depth: full
     kernel_opt_backends: claude
-    target_gpu: mi355x
+    target_gpu: mi300x
 
   # ── MiniMax M2.5 (FP8, TP=8, vLLM) ──
   - inferenceX_key: minimaxm2.5-fp8-mi355x-vllm
@@ -61,7 +61,7 @@ models:
     model_path_override: /wekafs/models/MiniMaxAI-MiniMax-M2.5
     optimization_depth: full
     kernel_opt_backends: claude
-    target_gpu: mi355x
+    target_gpu: mi300x
 
   # ── GLM 5 (FP8, TP=8) ──
   - inferenceX_key: glm5-fp8-mi355x-sglang
@@ -69,7 +69,7 @@ models:
     model_path_override: /wekafs/models/zai-org-GLM-5
     optimization_depth: full
     kernel_opt_backends: claude
-    target_gpu: mi355x
+    target_gpu: mi300x
 
   # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
   - inferenceX_key: qwen3.5-bf16-mi355x-sglang
@@ -77,5 +77,5 @@ models:
     model_path_override: /wekafs/models/Qwen-Qwen3.5-397B-A17B
     optimization_depth: full
     kernel_opt_backends: claude
-    target_gpu: mi355x
+    target_gpu: mi300x
 
