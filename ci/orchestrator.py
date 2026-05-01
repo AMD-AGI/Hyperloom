@@ -9,6 +9,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -151,7 +152,8 @@ def run_model(
     """Execute the full optimization flow for a single model."""
     model_name = merged["model_hf"].split("/")[-1]
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
-    result_dir = f"{nfs_base}/{model_name}/{timestamp}"
+    # Use a local temp dir for downloading files — nfs_base may be read-only on the runner
+    result_dir = os.path.join(tempfile.gettempdir(), "hyperloom-ci", model_name, timestamp)
 
     log.info("═" * 60)
     log.info("Starting model: %s (%s)", model_name, merged["precision"])
@@ -214,10 +216,7 @@ def run_model(
     log.info("Session %s finished with status: %s", session_id, status)
 
     # Step 3: Download optimization report from Claw, with NFS fallback
-    wait_secs = 300
-    log.info("Waiting %ds for report upload to finalize...", wait_secs)
-    time.sleep(wait_secs)
-
+    # No sleep here — sandbox is already gone after session ends; download immediately.
     report_content = None
     os.makedirs(result_dir, exist_ok=True)
     download_suffixes = ("optimization_report.md", "ci_metrics.json")
@@ -354,7 +353,7 @@ def main():
             try:
                 result = subprocess.run(
                     [sys.executable, str(check_script),
-                     "--config-files", str(yaml_path), "--update"],
+                     "--config-files", str(yaml_path)],
                     capture_output=True, text=True, timeout=120,
                 )
                 if result.stdout:
@@ -364,7 +363,7 @@ def main():
             except Exception as e:
                 log.warning("Image version check failed (non-fatal): %s", e)
         else:
-            log.warning("check_image_versions.py not found at %s, skipping image update", check_script)
+            log.warning("check_image_versions.py not found at %s, skipping image version check", check_script)
 
         with open(yaml_path) as f:
             amd_master = yaml.safe_load(f)
