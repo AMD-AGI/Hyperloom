@@ -266,6 +266,7 @@ class ClawClient:
 
         # Main loop: poll session status API
         poll_count = 0
+        agent_ever_ran = False
         try:
             while True:
                 elapsed = time.time() - start
@@ -279,13 +280,22 @@ class ClawClient:
                     agent_status = sess.get("agent_status", "running")
                     poll_count += 1
 
+                    if agent_status == "running":
+                        agent_ever_ran = True
+
                     if poll_count <= 3 or poll_count % 10 == 0:
                         log.info("Session %s [%.0fs] poll #%d: status=%s agent=%s",
                                  session_id, elapsed, poll_count, sess_status, agent_status)
 
+                    # Agent is done when: explicitly stopped, session completed,
+                    # or agent returned to idle after having run (normal completion path)
                     if agent_status == "stopped" or sess_status in ("completed", "stopped"):
                         log.info(">>> SESSION COMPLETED <<< %s after %.0fs (status=%s, agent=%s)",
                                  session_id, elapsed, sess_status, agent_status)
+                        return "completed"
+                    elif agent_ever_ran and agent_status == "idle":
+                        log.info(">>> SESSION COMPLETED (agent idle) <<< %s after %.0fs",
+                                 session_id, elapsed)
                         return "completed"
                     elif sess_status == "failed":
                         log.error(">>> SESSION FAILED <<< %s after %.0fs", session_id, elapsed)
