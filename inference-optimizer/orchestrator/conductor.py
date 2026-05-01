@@ -24,9 +24,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from ..paths import db_path_for, make_session_dir
 from ..storage.connection import SqliteConnection
@@ -35,6 +37,7 @@ from .backends.base import Backend, BackendError, BackendTurnResult
 from .cursor_store import CursorStore
 from .intent_parser import Intent, IntentType
 from .message_bus import Message, MessageBus
+from .objective import Objective, TimeOnlyObjective
 from .policy import (
     KILL_TASK_SOURCE_ALLOWLIST,
     PolicyDenied,
@@ -258,6 +261,134 @@ class Conductor:
             for name in roles_for_run():
                 await self._reactor_pass(name)
             await self._pump_dispatcher_once()
+
+    # ==================================================================
+    # Long-run interface (DESIGN §9 + §21)
+    # ==================================================================
+    async def run(
+        self,
+        *,
+        objective: Objective | None = None,
+        max_minutes: float | None = None,
+        tick_interval_sec: float = 0.0,
+        max_ticks: int | None = None,
+        stop_when: Callable[["Conductor"], Awaitable[bool] | bool] | None = None,
+        install_signal_handlers: bool = False,
+    ) -> str:
+        """Run reactor + dispatcher in a long-running loop until a stop
+        condition fires.
+
+        Stop signals (in priority order, see DESIGN §9.1):
+
+        * ``self._stop`` set (from SIGINT/SIGTERM or ``stop()``)
+            → ``stop_reason="signal"``
+        * objective.reached(shared_state)  → ``"target_reached"``
+        * wall-clock budget exceeded        → ``"time_exhausted"``
+        * crash_count >= 3                  → ``"emergency"``
+        * custom ``stop_when`` callback returns True → ``"custom"``
+        * ``max_ticks`` reached (test guard) → ``"max_ticks"``
+
+        On stop, ``shared_state.stop_reason`` is set + saved + the final
+        value is returned.
+        """
+        objective = objective or TimeOnlyObjective()
+        deadline = (
+            time.monotonic() + max_minutes * 60.0 if max_minutes else None
+        )
+        max_minutes_value = max_minutes if max_minutes is not None else 0
+        # Persist budget so prompts and Resume can see it.
+        if max_minutes is not None:
+            self.shared_state.max_minutes = int(max_minutes)
+            self.shared_state.save(self.session_dir)
+
+        previous_handlers: dict[int, Any] = {}
+        if install_signal_handlers:
+            try:
+                loop = asyncio.get_running_loop()
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    loop.add_signal_handler(sig, self._stop.set)
+                    previous_handlers[sig] = True
+                log.info("Conductor.run: SIGINT/SIGTERM handlers installed")
+            except (NotImplementedError, RuntimeError) as exc:  # noqa: BLE001
+                # add_signal_handler is unavailable on Windows or when
+                # we're not on the main thread (pytest-asyncio worker).
+                log.info("Conductor.run: signal handlers not installed (%s)", exc)
+                previous_handlers = {}
+
+        if self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]:
+            await self.replay_for_resume()
+
+        tick_n = 0
+        stop_reason = ""
+        try:
+            while not stop_reason:
+                tick_n += 1
+                # Run one reactor + dispatcher pass.
+                for name in roles_for_run():
+                    if self._stop.is_set():
+                        break
+                    await self._reactor_pass(name)
+                if not self._stop.is_set():
+                    await self._pump_dispatcher_once()
+
+                # ---- check stop conditions ----
+                if self._stop.is_set():
+                    stop_reason = "signal"
+                    break
+                if objective.reached(self.shared_state):
+                    stop_reason = "target_reached"
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    stop_reason = "time_exhausted"
+                    break
+                if self.shared_state.crash_count >= 3:
+                    stop_reason = "emergency"
+                    break
+                if max_ticks is not None and tick_n >= max_ticks:
+                    stop_reason = "max_ticks"
+                    break
+                if stop_when is not None:
+                    triggered = stop_when(self)
+                    if asyncio.iscoroutine(triggered):
+                        triggered = await triggered
+                    if bool(triggered):
+                        stop_reason = "custom"
+                        break
+
+                # Brief wait between ticks to avoid 100% CPU spin in dev
+                # mode while still being responsive to signals. 0.0 keeps
+                # tests fast.
+                if tick_interval_sec > 0:
+                    try:
+                        await asyncio.wait_for(
+                            self._stop.wait(), timeout=tick_interval_sec
+                        )
+                        stop_reason = "signal"
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+        finally:
+            self.shared_state.stop_reason = stop_reason or "unknown"
+            self.shared_state.save(self.session_dir)
+            log.info(
+                "Conductor.run: stopped tick=%d reason=%s baseline_tput=%.1f "
+                "cumulative_gain=%.2f%% max_minutes=%.0f",
+                tick_n, stop_reason or "unknown",
+                self.shared_state.baseline_tput,
+                self.shared_state.cumulative_gain,
+                max_minutes_value,
+            )
+            # Best-effort cleanup of installed handlers; the asyncio loop
+            # cleans up automatically on shutdown but explicit removal is
+            # tidy and matches the install-step.
+            if previous_handlers:
+                try:
+                    loop = asyncio.get_running_loop()
+                    for sig in previous_handlers:
+                        loop.remove_signal_handler(sig)
+                except (NotImplementedError, RuntimeError):
+                    pass
+        return self.shared_state.stop_reason
 
     # ==================================================================
     # Reactor
