@@ -212,6 +212,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
               f"{(state.current_best or {}).get('tput')}")
         print(f"  prior stop_reason     : {state.stop_reason or '(none)'}")
     else:
+        if not args.model:
+            print("ERROR: --model is required for new runs (or use --resume "
+                  "<session_id>)", file=sys.stderr)
+            sys.exit(2)
         session_dir = make_session_dir(args.session_name) if args.session_name \
             else make_session_dir()
         print(f"Session dir: {session_dir}")
