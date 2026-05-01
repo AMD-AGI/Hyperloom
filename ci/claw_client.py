@@ -8,6 +8,7 @@ import os
 import threading
 import time
 from typing import Any, Generator
+from urllib.parse import quote
 
 import requests
 import sseclient
@@ -110,8 +111,10 @@ class ClawClient:
         ))["data"]
 
     def download_file(self, session_id: str, file_path: str) -> bytes:
+        # Strip leading slash to avoid double-slash in URL; percent-encode the path.
+        encoded = quote(file_path.lstrip("/"), safe="")
         resp = self._session.get(
-            self._url(f"/sessions/{session_id}/files/{file_path}/stream"),
+            self._url(f"/sessions/{session_id}/files/{encoded}/stream"),
         )
         resp.raise_for_status()
         return resp.content
