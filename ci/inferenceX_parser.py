@@ -263,7 +263,7 @@ def merge_model_config(
         "precision": parsed["precision"],
         "framework": parsed["framework"],
         "runner": parsed["runner"],
-        "tp": parsed["tp"],
+        "tp": model_cfg.get("tp", parsed["tp"]),
         "ep": model_cfg.get("ep", parsed["ep"]),
         "conc": parsed["conc_end"],
         "isl_osl_configs": parsed["isl_osl_configs"],
