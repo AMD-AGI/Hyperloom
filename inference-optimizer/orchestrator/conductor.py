@@ -36,6 +36,7 @@ from .agent_role import AgentRole, default_role_registry, roles_for_run
 from .backends.base import Backend, BackendError, BackendTurnResult
 from .cursor_store import CursorStore
 from .intent_parser import Intent, IntentType
+from .kernel_request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from .message_bus import Message, MessageBus
 from .objective import Objective, TimeOnlyObjective
 from .policy import (
@@ -594,9 +595,48 @@ class Conductor:
     async def _handle_request(self, source: str, intent: Intent) -> None:
         target_agent = intent.payload["target_agent"]
         kind = intent.payload["kind"]
-        msg = Message.new(source, target_agent, "request",
-                          dict(intent.payload), priority=1)
-        await self.bus.append_and_seq(msg)
+        # Always record the request on the bus so the kernel reactor
+        # (and tests / replay) can see it.
+        request_msg = Message.new(
+            source, target_agent, "request", dict(intent.payload), priority=1,
+        )
+        await self.bus.append_and_seq(request_msg)
+
+        # Programmatic shortcut: if the kernel agent has a registered
+        # handler for this `kind`, run it inline and emit RESPONSE on its
+        # behalf so we don't burn an extra LLM turn for a deterministic
+        # shell-tool invocation. See kernel_request_handlers.py for the
+        # rationale.
+        if target_agent == "kernel":
+            handler = get_handler(kind)
+            if handler is not None:
+                params = intent.payload.get("params") or {}
+                try:
+                    result = await handler(
+                        {**intent.payload, **params},
+                        session_dir=self.session_dir,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.exception(
+                        "kernel_request_handler[%s] crashed for source=%s",
+                        kind, source,
+                    )
+                    result = {
+                        "status": "failed",
+                        "error_class": "handler_exception",
+                        "error": repr(exc),
+                    }
+                await self.bus.append_and_seq(Message.new(
+                    "kernel", source, "response",
+                    {
+                        "in_reply_to": request_msg.msg_id,
+                        "kind": f"{kind}_done",
+                        "status": result.get("status", "ok"),
+                        "result": result,
+                        "source": "programmatic_handler",
+                    },
+                    in_reply_to=request_msg.msg_id, priority=1,
+                ))
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
         in_reply_to = intent.payload["in_reply_to"]
