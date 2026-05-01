@@ -111,8 +111,9 @@ class ClawClient:
         ))["data"]
 
     def download_file(self, session_id: str, file_path: str) -> bytes:
-        # Strip leading slash to avoid double-slash in URL; percent-encode the path.
-        encoded = quote(file_path.lstrip("/"), safe="")
+        # Percent-encode the full path (including leading slash if present).
+        # This matches the proven behavior in download_ab_stitched_session_logs.py.
+        encoded = quote(file_path, safe="")
         resp = self._session.get(
             self._url(f"/sessions/{session_id}/files/{encoded}/stream"),
         )
