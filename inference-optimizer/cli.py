@@ -56,24 +56,33 @@ log = logging.getLogger("inference_optimizer.cli")
 _DEFAULT_ORCH_PROMPT = (
     "You are the Orchestration agent for an inference-optimization run.\n"
     "Read the Shared session state below to see progress against the goal.\n\n"
-    "Decision rules:\n"
-    "1. If `baseline_tput == 0.0`, propose action `baseline` immediately.\n"
-    "   Prep actions (setup / classify / target_analysis) are stubbed for\n"
-    "   the smoke run — do NOT propose them.\n"
-    "2. After baseline succeeds, follow this DFS-style plan (per\n"
-    "   DESIGN §16): backends → params → kernel-opt → integrate. Each\n"
-    "   round, pick the action with the highest expected value given the\n"
-    "   current Shared state.\n"
-    "3. To dispatch a kernel-owned action (kernel_opt / integrate /\n"
-    "   deep_kernel_analysis / operator_tuning / vendor_kernel_config),\n"
-    "   you MUST emit `request{target_agent='kernel', kind=...}`. PolicyGate\n"
-    "   rejects direct delegate of these actions.\n"
-    "4. After every successful action, observe the new `baseline_tput` /\n"
-    "   `cumulative_gain` and decide whether to continue.\n"
-    "5. If the goal is reached (Shared state shows `stop_reason='target_reached'`),\n"
-    "   emit a single send_message{topic='heartbeat', body_md='goal-reached'}\n"
-    "   and stop.\n\n"
-    "OUTPUT: every turn MUST emit at least one `emit_intent` tool call. "
+    "DFS plan (DESIGN §16, marathon backends.md / params.md):\n"
+    "  1. baseline_tput == 0           → propose `baseline`\n"
+    "  2. baseline done, no trace_dir  → propose `profile`  (writes torch trace)\n"
+    "  3. profile done                 → propose `backends` (10-variant DFS)\n"
+    "  4. backends done                → propose `params`   (8-variant DFS)\n"
+    "  5. params done                  → REQUEST kernel select_kernels (see below)\n"
+    "  6. select_kernels response in   → REQUEST kernel run_optimization\n"
+    "  7. run_optimization response in → REQUEST kernel integrate\n"
+    "  8. integrate KEEP               → propose `report` and stop\n\n"
+    "PRECISE kernel REQUEST kinds (use EXACTLY these — `kernel_opt` has no\n"
+    "handler and the request will fall through to a hallucinating LLM):\n"
+    "  request{target_agent: 'kernel', kind: 'select_kernels',\n"
+    "          params: {trace_input: <main_trace_path from latest profile\n"
+    "                                  delegated_result>, top_k: 10}}\n"
+    "  request{target_agent: 'kernel', kind: 'run_optimization',\n"
+    "          params: {kernel_id: <hot kernel name from select_kernels\n"
+    "                              response.result.hot_kernels[0]>,\n"
+    "                   backends: 'codex,claude'}}\n"
+    "  request{target_agent: 'kernel', kind: 'integrate',\n"
+    "          params: {patch_path: <from run_optimization response>,\n"
+    "                   base_tput: <current_best.tput>,\n"
+    "                   config_path: '<absolute path to baseline yaml>'}}\n\n"
+    "After every successful action, observe the new `baseline_tput` /\n"
+    "`cumulative_gain` and decide whether to continue. If `stop_reason` is\n"
+    "set on Shared state, emit ONE send_message{topic='heartbeat',\n"
+    "body_md='goal-reached'} and stop.\n\n"
+    "OUTPUT: every turn MUST emit at least one `emit_intent` tool call.\n"
     "Free-text replies are dropped.\n"
 )
 
@@ -204,13 +213,23 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                   file=sys.stderr)
             sys.exit(2)
         state = SharedState.load_or_init(session_dir)
+        prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
         print(f"  prior baseline_tput   : {state.baseline_tput:.1f}")
         print(f"  prior cumul_gain      : {state.cumulative_gain:.2f}%")
         print(f"  prior current_best    : "
               f"{(state.current_best or {}).get('action')}/"
               f"{(state.current_best or {}).get('tput')}")
-        print(f"  prior stop_reason     : {state.stop_reason or '(none)'}")
+        print(f"  prior stop_reason     : {prior_stop or '(none)'}")
+        # CRITICAL: a leftover stop_reason from the prior run (most often
+        # "time_exhausted") fools Orchestration into thinking the work is
+        # already done — it just heartbeats forever. Clear it so the new
+        # run has a clean signal. The Conductor's run() always re-sets
+        # stop_reason at exit anyway.
+        if prior_stop:
+            state.stop_reason = ""
+            state.save(session_dir)
+            print(f"  → cleared stop_reason for fresh resume")
     else:
         if not args.model:
             print("ERROR: --model is required for new runs (or use --resume "
