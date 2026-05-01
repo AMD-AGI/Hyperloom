@@ -4,11 +4,11 @@ Each executor is an `async def fn(ExecutorContext) -> dict` that the
 SubAgentRunner dispatches when a queued task's ``kind`` matches its
 registered name.
 
-P1-6 ships:
+Executors shipped:
 
-* :func:`baseline_executor` — runs an end-to-end SGLang baseline benchmark
-  via Magpie CLI, parses ``benchmark_report.json``, and returns a stable
-  result schema (request_throughput / output_throughput / TTFT / E2EL / ...).
+* :func:`baseline_executor` — Magpie SGLang baseline benchmark.
+* :func:`profile_executor`  — Magpie SGLang baseline + torch profiler
+  (writes ``torch_trace/`` for the Kernel agent to analyze).
 """
 
 from .baseline import (
@@ -16,9 +16,17 @@ from .baseline import (
     BaselineExecutor,
     baseline_executor,
 )
+from .profile import (
+    PROFILE_DEFAULT_CONFIG,
+    ProfileExecutor,
+    profile_executor,
+)
 
 __all__ = [
     "BASELINE_DEFAULT_CONFIG",
     "BaselineExecutor",
+    "PROFILE_DEFAULT_CONFIG",
+    "ProfileExecutor",
     "baseline_executor",
+    "profile_executor",
 ]
