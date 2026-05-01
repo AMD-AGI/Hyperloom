@@ -36,6 +36,7 @@ from .orchestrator.action_executors import (
     baseline_executor,
     params_executor,
     profile_executor,
+    report_executor,
     sweep_executor,
 )
 from .orchestrator.backends import (
@@ -170,7 +171,8 @@ def _register_executors(conductor: Conductor) -> None:
     conductor.sub.register_executor("backends", backends_executor)
     conductor.sub.register_executor("params",   params_executor)
     conductor.sub.register_executor("sweep",    sweep_executor)
-    for kind in ("setup", "classify", "target_analysis", "report",
+    conductor.sub.register_executor("report",   report_executor)
+    for kind in ("setup", "classify", "target_analysis",
                   "kernel_opt", "integrate", "deep_kernel_analysis",
                   "operator_tuning", "vendor_kernel_config",
                   "dream", "re_explore", "recover",
