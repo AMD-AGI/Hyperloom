@@ -212,15 +212,24 @@ class ReportExecutor:
         """Best-effort session_dir resolution.
 
         Strategy (in order):
-        1. ``task.params['session_dir']``  — explicit wins
-        2. ``$INFERENCE_OPTIMIZER_SESSION_ROOT`` + cwd heuristic
-        3. None → executor returns failed status with an error
+        1. ``ctx.extra['session_dir']``     — Conductor injects this for in-process runs
+        2. ``task.params['session_dir']``   — explicit wins (e.g. tests)
+        3. ``$INFERENCE_OPTIMIZER_SESSION_DIR`` env var — the CLI sets this
+           on every ``optimize`` invocation so report tasks dispatched from
+           an LLM proposal find the right session even when params is empty.
+        4. ``$INFERENCE_OPTIMIZER_SESSION_ROOT`` + most-recent heuristic — last resort
+        5. None → executor returns failed status with an error
         """
+        extra = getattr(ctx, "extra", None) or {}
+        if extra.get("session_dir"):
+            return Path(extra["session_dir"])
         params = ctx.task.params or {}
         if params.get("session_dir"):
             return Path(params["session_dir"])
-        # Try the most-recent session under the env override.
         import os as _os
+        explicit = _os.environ.get("INFERENCE_OPTIMIZER_SESSION_DIR")
+        if explicit and Path(explicit).exists():
+            return Path(explicit)
         root = _os.environ.get("INFERENCE_OPTIMIZER_SESSION_ROOT")
         if root and Path(root).exists():
             sessions = sorted(Path(root).iterdir(), key=lambda p: p.stat().st_mtime,
