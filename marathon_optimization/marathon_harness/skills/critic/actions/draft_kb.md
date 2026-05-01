@@ -1,7 +1,7 @@
 # Draft KB
 
-Use this action when the Orchestration Core asks Critic to extract KB draft
-entries from a final optimization report or run summary.
+Use this action when Conductor asks Critic to extract KB entries from a completed
+action result, final optimization report, or run summary.
 
 ## Expected Input
 
@@ -12,9 +12,9 @@ The packet may contain:
 - Patch list and keep/revert decisions.
 - Accuracy gate result.
 - Sweep result.
-- Triage findings or RCA summaries.
+- Robustness findings or RCA summaries.
 - Existing KB snippets or conflict notes.
-- Model, GPU, framework, and environment metadata.
+- Model family, model name, GPU, framework, and environment metadata.
 
 Treat absent fields as unknown. Do not infer validation that the report does not
 state.
@@ -27,7 +27,7 @@ Create a KB draft only for lessons that are reusable across future runs:
 - A pitfall that caused a revert, crash, or misleading benchmark.
 - A benchmark methodology lesson.
 - A framework, kernel, communication, or architecture constraint.
-- A recovery pattern confirmed by Triage or RCA.
+- A recovery pattern confirmed by Robustness or RCA.
 - A target/framework comparison backed by measured evidence.
 
 Reject candidates that are:
@@ -59,13 +59,14 @@ Use only these categories:
 
 Every draft must include:
 
+- `model_family`: partition key for the central KB.
+- `model`: model name.
 - `category`: one of the allowed categories.
 - `action`: concise description of what was tried.
 - `lesson`: reusable conclusion.
 
 Include these when available:
 
-- `model`
 - `gpu`
 - `framework`
 - `tags`
@@ -114,3 +115,8 @@ For pitfalls or recovery entries, use the fields that best preserve the lesson:
 
 Return a JSON object matching `kb_draft_schema` in
 [references/verdict_schema.md](../references/verdict_schema.md).
+
+## Ownership Boundary
+
+Critic is the only KB read/write/synthesis entrypoint. Other agents should
+consume KB hints injected by Conductor, not read or write KB directly.
