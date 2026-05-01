@@ -57,7 +57,6 @@ jobs:
                   pip install requests packaging pyyaml --quiet
                   python3 ${GITHUB_WORKSPACE}/utils/check_image_versions.py \
                       --config-files ${GITHUB_WORKSPACE}/.github/configs/amd-master.yaml \
-                      --update \
                       | tee -a $GITHUB_STEP_SUMMARY
 
             - id: setup
