@@ -35,7 +35,7 @@ from ..storage.connection import SqliteConnection
 from .agent_role import AgentRole, default_role_registry, roles_for_run
 from .backends.base import Backend, BackendError, BackendTurnResult
 from .cursor_store import CursorStore
-from .intent_parser import Intent, IntentType
+from .intent_parser import Intent, IntentType, NoIntentEmitted
 from .kernel_request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from .message_bus import Message, MessageBus
 from .objective import Objective, TimeOnlyObjective
@@ -412,6 +412,31 @@ class Conductor:
                 {"kind": "backend_error", "agent": agent_name, "error": repr(exc)},
             )
             return
+        except NoIntentEmitted as exc:
+            # Reactor turn produced no parseable intents (LLM hiccup,
+            # malformed envelope, missing required payload field, ...).
+            # Surface as a structured observation so the next tick sees
+            # the failure and self-corrects, instead of killing the run.
+            await self._record_observation(
+                "conductor", "observation",
+                {"kind": "no_intent_emitted", "agent": agent_name,
+                 "error": str(exc)[:500]},
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            # Catch-all so one agent's bad turn never stops the long-run
+            # loop. Logged + recorded; the agent gets another shot next
+            # tick. (Repeated crashes still drive crash_count → emergency
+            # stop in `run()`.)
+            log.exception("reactor pass for %s raised", agent_name)
+            await self._record_observation(
+                "conductor", "observation",
+                {"kind": "reactor_exception", "agent": agent_name,
+                 "error": f"{type(exc).__name__}: {str(exc)[:500]}"},
+            )
+            self.shared_state.crash_count += 1
+            self.shared_state.save(self.session_dir)
+            return
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
 
@@ -560,10 +585,25 @@ class Conductor:
             await self._materialize_approved_proposal(pending)
 
     async def _materialize_approved_proposal(self, pending: PendingProposal) -> None:
-        """Promote an approved proposal into a TaskRegistry entry."""
+        """Promote an approved proposal into a TaskRegistry entry.
+
+        For grid-style executors (backends / params / sweep) we inject the
+        current best throughput as ``base_tput`` so they can compute
+        gain%; otherwise the executor's default of 0.0 makes
+        best_gain_pct uninformative (DESIGN §16 baseline_tput parameter).
+        """
+        params = dict(pending.payload.get("params") or {})
+        if pending.action_name in ("backends", "params", "sweep"):
+            cb = self.shared_state.current_best or {}
+            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
+                else self.shared_state.baseline_tput
+            params.setdefault("base_tput", float(base or 0.0))
+            cb_args = cb.get("extra_sglang_args") if isinstance(cb, dict) else None
+            params.setdefault("base_extra_args", str(cb_args or ""))
         task = await self.tasks.create(
             kind=pending.action_name,
-            params=pending.payload.get("params") or {},
+            params=params,
             idempotency_key=f"approved-{pending.proposal_msg_id}",
         )
         await self.bus.append_and_seq(Message.new(
@@ -811,6 +851,38 @@ class Conductor:
                 "workspace": result.get("workspace"),
             }
             changed = True
+        elif task_kind in ("backends", "params", "sweep"):
+            # Promote a grid-runner winner if it actually beat the
+            # current best by a meaningful margin (>= 1% per marathon
+            # backends.md / params.md "KEEP" threshold).
+            best_tput = result.get("output_throughput")
+            cb = self.shared_state.current_best or {}
+            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+            cur_best = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
+                else float(self.shared_state.baseline_tput or 0.0)
+            if (
+                isinstance(best_tput, (int, float))
+                and best_tput > 0
+                and cur_best > 0
+                and (best_tput - cur_best) / cur_best * 100.0 >= 1.0
+            ):
+                bv = result.get("best_variant") or {}
+                self.shared_state.current_best = {
+                    "action": task_kind,
+                    "tput": float(best_tput),
+                    "variant_name": bv.get("name") if isinstance(bv, dict) else None,
+                    "extra_sglang_args":
+                        (bv.get("extra_sglang_args") if isinstance(bv, dict) else "") or "",
+                    "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
+                    "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
+                    "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
+                }
+                if self.shared_state.baseline_tput > 0:
+                    self.shared_state.cumulative_gain = (
+                        (float(best_tput) - self.shared_state.baseline_tput)
+                        / self.shared_state.baseline_tput * 100.0
+                    )
+                changed = True
         if changed:
             self.shared_state.save(self.session_dir)
 
