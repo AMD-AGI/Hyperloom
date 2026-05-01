@@ -21,6 +21,9 @@ test = [
     "pytest-asyncio>=1.0",
 ]
 
+[project.scripts]
+inference-optimizer = "inference_optimizer.cli:main"
+
 # v0.6 follows the Hyperloom "top-level skill directory" convention
 # (alongside `marathon/` and `kernel-agent/`). The skill directory uses a
 # hyphen (`inference-optimizer/`) to match those siblings; setuptools maps
