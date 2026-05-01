@@ -33,6 +33,7 @@ from .profile import (
     ProfileExecutor,
     profile_executor,
 )
+from .report import ReportExecutor, report_executor
 from .sweep import (
     DEFAULT_CONC_VALUES,
     DEFAULT_ISL_OSL,
@@ -52,11 +53,13 @@ __all__ = [
     "PROFILE_DEFAULT_CONFIG",
     "ParamsExecutor",
     "ProfileExecutor",
+    "ReportExecutor",
     "SweepExecutor",
     "backends_executor",
     "baseline_executor",
     "discover_backend_flags",
     "params_executor",
     "profile_executor",
+    "report_executor",
     "sweep_executor",
 ]
