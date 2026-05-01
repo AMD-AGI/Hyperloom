@@ -498,6 +498,86 @@ def upgrade_pybind_shim_source(source_file: str, kernel_name: str,
     return source_file
 
 
+# ---------------------------------------------------------------------------
+# B path: prefer TraceLens-generated kernel_summary csv
+# ---------------------------------------------------------------------------
+# TraceLens already does the right thing — it uses the cuda graph parent +
+# hipGraphLaunch parent_cpu_op join to count REAL device time per kernel
+# launch (and skips the host-side `cuda::synchronize` python-frame events
+# that confused our raw parser). Reading TraceLens's own csv output is
+# both (a) more accurate and (b) auto-tracks future TraceLens improvements.
+# Schema (from `--enable_kernel_summary --output_csvs_dir <dir>`):
+#   columns: Parent op category | Parent cpu_op | Kernel name |
+#            Kernel stream | Kernel duration (µs)_sum |
+#            Kernel duration (µs)_count | Kernel duration (µs)_mean | ...
+# We pick top_k by sum-duration and aggregate variants whose names
+# differ only by template parameters (Cijk_*MT256x16x64 vs Cijk_*MT16x16x512
+# stay separate — they ARE different rocBLAS variants — but the same
+# bf16 add_rmsnorm_quant_kernel called from 2 stream_ids merges).
+
+_TRACELENS_REQUIRED_COLS = (
+    "Kernel name",
+    "Kernel duration (\u00b5s)_sum",
+    "Kernel duration (\u00b5s)_count",
+)
+
+
+def parse_tracelens_kernel_summary(
+    csv_path: Path, top_k: int,
+) -> list[dict[str, Any]] | None:
+    """Read TraceLens's ``kernel_summary.csv`` → wrapper schema (top_k).
+
+    Returns ``None`` if the csv doesn't exist, is missing required columns,
+    or contains zero kernel rows — the caller falls back to the raw parser.
+    """
+    import csv as _csv  # localised; we don't want a hard import at module load
+    if not csv_path.exists():
+        return None
+    try:
+        with csv_path.open(encoding="utf-8") as f:
+            rdr = _csv.DictReader(f)
+            field_lookup = {h.lower(): h for h in (rdr.fieldnames or [])}
+            for required in _TRACELENS_REQUIRED_COLS:
+                if required.lower() not in field_lookup:
+                    return None
+            name_col = field_lookup["kernel name"]
+            sum_col = field_lookup["kernel duration (\u00b5s)_sum"]
+            count_col = field_lookup["kernel duration (\u00b5s)_count"]
+            rows = []
+            for r in rdr:
+                name = (r.get(name_col) or "").strip()
+                if not name:
+                    continue
+                try:
+                    dur = float(r.get(sum_col) or 0)
+                except ValueError:
+                    continue
+                try:
+                    cnt = int(float(r.get(count_col) or 0))
+                except ValueError:
+                    cnt = 0
+                if dur <= 0:
+                    continue
+                rows.append({"name": name, "duration_us": dur, "call_count": cnt})
+    except Exception:
+        return None
+    if not rows:
+        return None
+    # Aggregate same-name rows (same kernel launched on multiple streams).
+    agg: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        bucket = agg.setdefault(
+            r["name"],
+            {"name": r["name"], "duration_us": 0.0, "call_count": 0,
+             "source_file": "", "source_type": "unknown", "shapes": []},
+        )
+        bucket["duration_us"] += r["duration_us"]
+        bucket["call_count"] += r["call_count"]
+    total_dur = sum(c["duration_us"] for c in agg.values())
+    top = sorted(agg.values(), key=lambda x: x["duration_us"], reverse=True)[:top_k]
+    return _finalize_candidates(top, total_dur=total_dur)
+
+
 def is_multigpu_kernel(name: str, source_file: str) -> bool:
     """Heuristic: kernel is a multi-GPU collective if name/source hints it."""
     blob = f"{name} {source_file}".lower()
@@ -556,10 +636,29 @@ def analyze_trace_files(trace_files: list[Path], top_k: int) -> list[dict[str, A
 
     candidates = sorted(aggregates.values(), key=lambda x: x["duration_us"], reverse=True)
     top = candidates[:top_k]
+    return _finalize_candidates(top, total_dur=total_dur)
+
+
+def _finalize_candidates(
+    top: list[dict[str, Any]], *, total_dur: float | None = None,
+) -> list[dict[str, Any]]:
+    """Apply source resolution / pybind upgrade / backend recommend / notes.
+
+    Shared post-processing for both the raw-trace parser
+    (``analyze_trace_files``) and the TraceLens csv parser
+    (``parse_tracelens_kernel_summary``). Mutates ``top`` in place.
+    """
+    sum_dur = total_dur if total_dur is not None else sum(it.get("duration_us", 0.0) for it in top)
+    sum_dur = sum_dur or 1.0
     for idx, item in enumerate(top, 1):
         item.pop("_extracted_source_checked", None)
+        item.setdefault("source_file", "")
+        item.setdefault("source_type", "unknown")
+        item.setdefault("shapes", [])
         item["kernel_id"] = f"k{idx:03d}"
-        item["gpu_pct"] = round((item["duration_us"] / total_dur * 100.0) if total_dur else 0.0, 3)
+        # Honour pre-computed gpu_pct (B path), else compute now.
+        if not item.get("gpu_pct"):
+            item["gpu_pct"] = round(item["duration_us"] / sum_dur * 100.0, 3)
         item["duration_us"] = round(item["duration_us"], 3)
         if not item.get("source_file"):
             item["source_file"] = locate_source_via_grep(item["name"])
@@ -775,7 +874,24 @@ def main() -> int:
         update_status(status_path, state="running", current_step="extract_hot_kernels",
                       log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                       started_at=started_at)
-        candidates = analyze_trace_files(trace_files, args.top_k)
+        # Prefer TraceLens's own kernel_summary.csv (B path) — it correctly
+        # filters cuda::synchronize and other host-side events that
+        # confused our raw parser. Fall back to the (now-fixed) raw
+        # trace parser when the csv is missing (TraceLens CLI crashed,
+        # or --dry-run skipped TraceLens entirely).
+        candidates = None
+        tl_csv_dir_local = artifacts.get("tracelens_csv_dir")
+        if tl_csv_dir_local:
+            tl_csv = Path(tl_csv_dir_local) / "kernel_summary.csv"
+            candidates = parse_tracelens_kernel_summary(tl_csv, args.top_k)
+            if candidates:
+                append_log(log_path,
+                           f"hot kernels from TraceLens csv "
+                           f"({len(candidates)}, src={tl_csv})")
+        if not candidates:
+            append_log(log_path,
+                       "fallback: raw trace parser (TraceLens csv unavailable)")
+            candidates = analyze_trace_files(trace_files, args.top_k)
         artifacts.update(write_reports(run_dir, trace_input_type=trace_input_type,
                                        trace_files=trace_files, candidates=candidates,
                                        args=args))
