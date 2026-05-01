@@ -3,60 +3,85 @@
 Critic returns structured JSON. Do not wrap the response in markdown unless the
 caller explicitly asks for markdown.
 
-## Patch Vote Schema
+## Review Verdict Schema
 
 ```json
 {
-  "kind": "patch_vote",
-  "approval": false,
+  "kind": "review_verdict",
+  "target_proposal_msg_id": "msg_123",
+  "verdict": "reject",
+  "source": "critic",
   "confidence": "high",
-  "summary": "The patch cannot be approved because benchmark parameters do not match the baseline.",
-  "objections": [
+  "reasoning": "The after-run changed max_concurrency, so the reported gain is not comparable with the baseline.",
+  "predicted_gain_pct": null,
+  "kb_evidence": [],
+  "packet_evidence": [
+    "benchmark.baseline.max_concurrency",
+    "benchmark.after.max_concurrency"
+  ],
+  "risks": [
     {
       "type": "benchmark_invalid",
       "severity": "blocker",
-      "reason": "After-change benchmark omitted max_concurrency, so it is not comparable with baseline.",
-      "required_fix": "Rerun before/after benchmarks with matched launch parameters, concurrency, ISL/OSL, warmup, and sample count.",
-      "evidence_ref": "benchmark.after"
+      "reason": "Baseline used max_concurrency=128 while the after run used max_concurrency=256.",
+      "required_fix": "Rerun before and after benchmarks with matched concurrency, ISL/OSL, sample count, and launch parameters.",
+      "evidence_ref": "benchmark.after.max_concurrency"
     }
   ],
   "required_evidence": [
-    "matched_benchmark",
-    "accuracy_gate"
+    "matched_benchmark"
   ],
-  "warnings": [],
+  "alternative_action": null,
+  "advice_text": "",
   "notes": []
 }
 ```
 
 Allowed values:
 
-- `kind`: `patch_vote`
-- `approval`: `true` or `false`
+- `kind`: `review_verdict`
+- `verdict`: `approve`, `reject`, `redirect`, `advise`, or `needs_review`
+- `source`: `critic`, `mock`, `timeout`, or `critic_unavailable`
 - `confidence`: `high`, `medium`, or `low`
-- `objections[].severity`: `blocker`, `major`, or `minor`
+- `risks[].severity`: `blocker`, `major`, or `minor`
 
-Approval example:
+Verdict rules:
+
+- `approve`: dispatch may proceed. Include `predicted_gain_pct` when the
+  proposal claims performance impact.
+- `reject`: dispatch must not proceed. Include `kb_evidence` for historical or
+  policy-backed rejection and `packet_evidence` for packet-local facts.
+- `redirect`: include `alternative_action` with a registered action owned by the
+  same agent family.
+- `advise`: dispatch may proceed. Include non-empty `advice_text`.
+- `needs_review`: dispatch must not proceed. Use for high-risk mock, timeout,
+  unavailable, or insufficient-evidence cases.
+
+Approve example:
 
 ```json
 {
-  "kind": "patch_vote",
-  "approval": true,
+  "kind": "review_verdict",
+  "target_proposal_msg_id": "msg_123",
+  "verdict": "approve",
+  "source": "critic",
   "confidence": "high",
-  "summary": "The patch is approved: controlled benchmark shows a 4.2% tok/s/GPU gain with passing accuracy and a clear rollback path.",
-  "objections": [],
-  "required_evidence": [],
-  "warnings": [
-    {
-      "type": "followup_sweep",
-      "severity": "minor",
-      "reason": "The final sweep covers the target concurrency but not the next lower operating point.",
-      "required_fix": "Optional: include the lower concurrency point in the next run.",
-      "evidence_ref": "sweep.summary"
-    }
+  "reasoning": "Controlled A/B evidence shows a 4.2% tok/s/GPU gain with passing accuracy and active-path proof.",
+  "predicted_gain_pct": 4.2,
+  "kb_evidence": [
+    "kb:qwen3/attn-dispatch-best-config"
   ],
+  "packet_evidence": [
+    "benchmark.after.gain_pct",
+    "accuracy_gate.status",
+    "dispatch_evidence.active_path_proven"
+  ],
+  "risks": [],
+  "required_evidence": [],
+  "alternative_action": null,
+  "advice_text": "",
   "notes": [
-    "Active dispatch path is proven by profile evidence."
+    "Rollback is clear."
   ]
 }
 ```
@@ -71,6 +96,7 @@ Approval example:
       "category": "kernel_optimization",
       "action": "Patched the active fused attention kernel for Qwen3-14B on MI355X.",
       "lesson": "The fused attention rewrite produced an E2E gain only when the dispatch path and shape-specific tuning config were updated together.",
+      "model_family": "qwen",
       "model": "Qwen3-14B",
       "gpu": "MI355X",
       "framework": "SGLang",
@@ -121,14 +147,20 @@ If the caller requests both outputs in one response, return:
 ```json
 {
   "kind": "critic_response",
-  "patch_vote": {
-    "kind": "patch_vote",
-    "approval": true,
+  "review_verdict": {
+    "kind": "review_verdict",
+    "target_proposal_msg_id": "msg_123",
+    "verdict": "approve",
+    "source": "critic",
     "confidence": "high",
-    "summary": "Approved.",
-    "objections": [],
+    "reasoning": "Approved.",
+    "predicted_gain_pct": 2.5,
+    "kb_evidence": [],
+    "packet_evidence": [],
+    "risks": [],
     "required_evidence": [],
-    "warnings": [],
+    "alternative_action": null,
+    "advice_text": "",
     "notes": []
   },
   "kb_draft": {
