@@ -6,6 +6,7 @@
     "input_packet": {
       "request_type": "kb_draft",
       "metadata": {
+        "model_family": "qwen",
         "model": "Qwen3-14B",
         "gpu": "MI355X",
         "framework": "SGLang",
@@ -44,6 +45,7 @@
         "category",
         "action",
         "lesson",
+        "model_family",
         "model",
         "gpu",
         "framework",
@@ -65,6 +67,7 @@
     "input_packet": {
       "request_type": "kb_draft",
       "metadata": {
+        "model_family": "qwen",
         "model": "Qwen3-14B",
         "gpu": "MI355X",
         "framework": "SGLang",
@@ -107,6 +110,7 @@
     "input_packet": {
       "request_type": "kb_draft",
       "metadata": {
+        "model_family": "qwen",
         "model": "Qwen3-14B",
         "gpu": "MI355X",
         "framework": "SGLang"
@@ -144,6 +148,7 @@
     "input_packet": {
       "request_type": "kb_draft",
       "metadata": {
+        "model_family": "qwen",
         "model": "Qwen3-14B",
         "gpu": "MI355X",
         "framework": "SGLang",

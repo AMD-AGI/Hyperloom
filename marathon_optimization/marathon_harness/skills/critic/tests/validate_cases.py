@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate Critic skill test fixtures and optional generated outputs."""
+"""Validate Critic skill fixtures and optional generated outputs."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-PATCH_OBJECTION_TYPES = {
+RISK_TYPES = {
     "benchmark_missing",
     "benchmark_invalid",
     "accuracy_missing",
@@ -19,7 +19,7 @@ PATCH_OBJECTION_TYPES = {
     "micro_only_evidence",
     "cache_or_rebuild_risk",
     "rollback_missing",
-    "triage_conflict",
+    "robustness_conflict",
     "cross_layer_conflict",
     "regression_risk",
     "insufficient_context",
@@ -40,7 +40,9 @@ KB_CATEGORIES = {
     "dream_consolidation",
 }
 
-PATCH_CONFIDENCE = {"high", "medium", "low"}
+VERDICTS = {"approve", "reject", "redirect", "advise", "needs_review"}
+SOURCES = {"critic", "mock", "timeout", "critic_unavailable"}
+CONFIDENCE = {"high", "medium", "low"}
 SEVERITIES = {"blocker", "major", "minor"}
 
 
@@ -55,6 +57,13 @@ def load_json(path: Path) -> Any:
 
 def as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def require_type(case_id: str, data: dict[str, Any], key: str, expected_type: type) -> None:
+    if key not in data:
+        fail(f"{case_id}: missing required key {key}")
+    if not isinstance(data[key], expected_type):
+        fail(f"{case_id}: {key} must be {expected_type.__name__}")
 
 
 def validate_case_file(path: Path) -> list[dict[str, Any]]:
@@ -74,19 +83,16 @@ def validate_case_file(path: Path) -> list[dict[str, Any]]:
             fail(f"{prefix}: duplicate id {case_id}")
         seen.add(case_id)
 
-        if not isinstance(case.get("description"), str) or not case["description"]:
-            fail(f"{case_id}: missing description")
-        if not isinstance(case.get("input_packet"), dict):
-            fail(f"{case_id}: missing input_packet")
-        if not isinstance(case.get("expected"), dict):
-            fail(f"{case_id}: missing expected")
+        require_type(case_id, case, "description", str)
+        require_type(case_id, case, "input_packet", dict)
+        require_type(case_id, case, "expected", dict)
 
         request_type = case["input_packet"].get("request_type")
         expected_kind = case["expected"].get("kind")
-        if request_type == "patch_vote":
-            if expected_kind != "patch_vote":
-                fail(f"{case_id}: expected.kind must be patch_vote")
-            validate_patch_expected(case_id, case["expected"])
+        if request_type == "review_verdict":
+            if expected_kind != "review_verdict":
+                fail(f"{case_id}: expected.kind must be review_verdict")
+            validate_review_expected(case_id, case["expected"])
         elif request_type == "kb_draft":
             if expected_kind != "kb_draft":
                 fail(f"{case_id}: expected.kind must be kb_draft")
@@ -97,16 +103,14 @@ def validate_case_file(path: Path) -> list[dict[str, Any]]:
     return data
 
 
-def validate_patch_expected(case_id: str, expected: dict[str, Any]) -> None:
-    if "approval" not in expected:
-        fail(f"{case_id}: patch expected must include approval")
-    if not isinstance(expected["approval"], bool):
-        fail(f"{case_id}: approval must be boolean")
-
-    for key in ("objection_types", "objection_types_any_of"):
-        for objection_type in as_list(expected.get(key)):
-            if objection_type not in PATCH_OBJECTION_TYPES:
-                fail(f"{case_id}: unknown objection type {objection_type}")
+def validate_review_expected(case_id: str, expected: dict[str, Any]) -> None:
+    require_type(case_id, expected, "verdict", str)
+    if expected["verdict"] not in VERDICTS:
+        fail(f"{case_id}: invalid verdict {expected['verdict']}")
+    for key in ("risk_types", "risk_types_any_of"):
+        for risk_type in as_list(expected.get(key)):
+            if risk_type not in RISK_TYPES:
+                fail(f"{case_id}: unknown risk type {risk_type}")
 
 
 def validate_kb_expected(case_id: str, expected: dict[str, Any]) -> None:
@@ -134,69 +138,108 @@ def validate_outputs(cases: list[dict[str, Any]], outputs_path: Path) -> None:
         output = outputs[case_id]
         if not isinstance(output, dict):
             fail(f"{case_id}: output must be an object")
-        if case["expected"]["kind"] == "patch_vote":
-            assert_patch_output(case_id, case["expected"], output)
+        if case["expected"]["kind"] == "review_verdict":
+            assert_review_output(case_id, case["expected"], output)
         else:
             assert_kb_output(case_id, case["expected"], output)
 
 
-def assert_patch_output(case_id: str, expected: dict[str, Any], output: dict[str, Any]) -> None:
-    if output.get("kind") != "patch_vote":
-        fail(f"{case_id}: output.kind must be patch_vote")
-    require_type(case_id, output, "approval", bool)
-    require_type(case_id, output, "confidence", str)
-    require_type(case_id, output, "summary", str)
-    require_type(case_id, output, "objections", list)
-    require_type(case_id, output, "required_evidence", list)
-    require_type(case_id, output, "warnings", list)
-    require_type(case_id, output, "notes", list)
-    if output["confidence"] not in PATCH_CONFIDENCE:
+def assert_review_output(case_id: str, expected: dict[str, Any], output: dict[str, Any]) -> None:
+    if output.get("kind") != "review_verdict":
+        fail(f"{case_id}: output.kind must be review_verdict")
+    for key, typ in (
+        ("target_proposal_msg_id", str),
+        ("verdict", str),
+        ("source", str),
+        ("confidence", str),
+        ("reasoning", str),
+        ("kb_evidence", list),
+        ("packet_evidence", list),
+        ("risks", list),
+        ("required_evidence", list),
+        ("notes", list),
+    ):
+        require_type(case_id, output, key, typ)
+
+    if output["verdict"] not in VERDICTS:
+        fail(f"{case_id}: invalid verdict {output['verdict']}")
+    if output["source"] not in SOURCES:
+        fail(f"{case_id}: invalid source {output['source']}")
+    if output["confidence"] not in CONFIDENCE:
         fail(f"{case_id}: invalid confidence {output['confidence']}")
-    if output.get("approval") is not expected["approval"]:
-        fail(f"{case_id}: approval mismatch")
+    if output["verdict"] != expected["verdict"]:
+        fail(f"{case_id}: verdict mismatch")
+    if expected.get("target_proposal_msg_id") and (
+        output["target_proposal_msg_id"] != expected["target_proposal_msg_id"]
+    ):
+        fail(f"{case_id}: target_proposal_msg_id mismatch")
+    if expected.get("source") and output["source"] != expected["source"]:
+        fail(f"{case_id}: source mismatch")
 
-    for evidence in output["required_evidence"]:
-        if not isinstance(evidence, str) or not evidence:
-            fail(f"{case_id}: required_evidence items must be non-empty strings")
-    for note in output["notes"]:
-        if not isinstance(note, str):
-            fail(f"{case_id}: notes items must be strings")
-    for objection in output["objections"]:
-        validate_objection(case_id, objection, require_known_type=True)
-    for warning in output["warnings"]:
-        validate_objection(case_id, warning, require_known_type=False)
+    if output.get("predicted_gain_pct") is not None:
+        if not isinstance(output["predicted_gain_pct"], (int, float)):
+            fail(f"{case_id}: predicted_gain_pct must be numeric or null")
+    if output["verdict"] in {"approve", "redirect"} and output.get("predicted_gain_pct") is None:
+        fail(f"{case_id}: approve/redirect must include predicted_gain_pct")
+    if output["verdict"] == "redirect" and not isinstance(output.get("alternative_action"), dict):
+        fail(f"{case_id}: redirect must include alternative_action")
+    if output["verdict"] == "advise" and not output.get("advice_text"):
+        fail(f"{case_id}: advise must include advice_text")
+    if output["verdict"] in {"reject", "redirect"} and not output["kb_evidence"]:
+        fail(f"{case_id}: reject/redirect must include kb_evidence")
 
-    objection_types = [obj.get("type") for obj in as_list(output.get("objections"))]
-    if "objection_types" in expected and objection_types != expected["objection_types"]:
-        fail(f"{case_id}: objection_types mismatch: {objection_types}")
+    for field in ("kb_evidence", "packet_evidence", "required_evidence", "notes"):
+        for item in output[field]:
+            if not isinstance(item, str):
+                fail(f"{case_id}: {field} items must be strings")
+    for risk in output["risks"]:
+        validate_risk(case_id, risk)
 
-    any_of = set(as_list(expected.get("objection_types_any_of")))
-    if any_of and not any_of.intersection(objection_types):
-        fail(f"{case_id}: expected one objection type from {sorted(any_of)}")
+    risk_types = [risk.get("type") for risk in output["risks"]]
+    if "risk_types" in expected and risk_types != expected["risk_types"]:
+        fail(f"{case_id}: risk_types mismatch: {risk_types}")
+    any_risk = set(as_list(expected.get("risk_types_any_of")))
+    if any_risk and not any_risk.intersection(risk_types):
+        fail(f"{case_id}: expected one risk type from {sorted(any_risk)}")
 
-    required = set(as_list(output.get("required_evidence")))
+    required = set(output["required_evidence"])
     for evidence in as_list(expected.get("required_evidence_includes")):
         if evidence not in required:
             fail(f"{case_id}: missing required evidence {evidence}")
-
-    any_required = set(as_list(expected.get("required_evidence_includes_any_of")))
-    if any_required and not any_required.intersection(required):
-        fail(f"{case_id}: expected one required evidence from {sorted(any_required)}")
-
     if expected.get("required_evidence_absent") and required:
         fail(f"{case_id}: required_evidence should be empty")
 
     confidence_any_of = set(as_list(expected.get("confidence_any_of")))
-    if confidence_any_of and output.get("confidence") not in confidence_any_of:
+    if confidence_any_of and output["confidence"] not in confidence_any_of:
         fail(f"{case_id}: confidence must be one of {sorted(confidence_any_of)}")
 
     min_blocker_count = int(expected.get("min_blocker_count", 0))
-    blocker_count = sum(
-        1 for objection in as_list(output.get("objections"))
-        if objection.get("severity") == "blocker"
-    )
+    blocker_count = sum(1 for risk in output["risks"] if risk.get("severity") == "blocker")
     if blocker_count < min_blocker_count:
-        fail(f"{case_id}: expected at least {min_blocker_count} blocker objections")
+        fail(f"{case_id}: expected at least {min_blocker_count} blocker risks")
+
+    if len(output["kb_evidence"]) < int(expected.get("min_kb_evidence", 0)):
+        fail(f"{case_id}: too little kb_evidence")
+    if expected.get("alternative_action_required") and not output.get("alternative_action"):
+        fail(f"{case_id}: missing alternative_action")
+    if expected.get("advice_text_required") and not output.get("advice_text"):
+        fail(f"{case_id}: missing advice_text")
+    if "min_predicted_gain_pct" in expected:
+        if float(output.get("predicted_gain_pct") or 0) < float(expected["min_predicted_gain_pct"]):
+            fail(f"{case_id}: predicted_gain_pct below minimum")
+
+
+def validate_risk(case_id: str, risk: Any) -> None:
+    if not isinstance(risk, dict):
+        fail(f"{case_id}: risks entries must be objects")
+    for key in ("type", "severity", "reason", "required_fix", "evidence_ref"):
+        require_type(case_id, risk, key, str)
+        if not risk[key]:
+            fail(f"{case_id}: risk field {key} must be non-empty")
+    if risk["type"] not in RISK_TYPES:
+        fail(f"{case_id}: unknown risk type {risk['type']}")
+    if risk["severity"] not in SEVERITIES:
+        fail(f"{case_id}: invalid severity {risk['severity']}")
 
 
 def assert_kb_output(case_id: str, expected: dict[str, Any], output: dict[str, Any]) -> None:
@@ -263,34 +306,10 @@ def assert_kb_output(case_id: str, expected: dict[str, Any], output: dict[str, A
             fail(f"{case_id}: duplicate must be rejected or explicitly supersede existing KB")
 
 
-def require_type(case_id: str, data: dict[str, Any], key: str, expected_type: type) -> None:
-    if key not in data:
-        fail(f"{case_id}: output missing required key {key}")
-    if not isinstance(data[key], expected_type):
-        fail(f"{case_id}: output.{key} must be {expected_type.__name__}")
-
-
-def validate_objection(
-    case_id: str,
-    objection: Any,
-    require_known_type: bool,
-) -> None:
-    if not isinstance(objection, dict):
-        fail(f"{case_id}: objection/warning entries must be objects")
-    for key in ("type", "severity", "reason", "required_fix", "evidence_ref"):
-        require_type(case_id, objection, key, str)
-        if not objection[key]:
-            fail(f"{case_id}: objection/warning field {key} must be non-empty")
-    if objection["severity"] not in SEVERITIES:
-        fail(f"{case_id}: invalid severity {objection['severity']}")
-    if require_known_type and objection["type"] not in PATCH_OBJECTION_TYPES:
-        fail(f"{case_id}: unknown objection type {objection['type']}")
-
-
 def validate_kb_draft(case_id: str, draft: Any) -> None:
     if not isinstance(draft, dict):
         fail(f"{case_id}: kb_drafts entries must be objects")
-    for key in ("category", "action", "lesson"):
+    for key in ("model_family", "model", "category", "action", "lesson"):
         require_type(case_id, draft, key, str)
         if not draft[key]:
             fail(f"{case_id}: KB draft field {key} must be non-empty")
@@ -323,7 +342,7 @@ def main() -> None:
     parser.add_argument(
         "--cases",
         nargs="+",
-        default=["patch_vote_cases.json", "kb_draft_cases.json"],
+        default=["review_verdict_cases.json", "kb_draft_cases.json"],
         help="Case files to validate.",
     )
     parser.add_argument(

@@ -1,22 +1,45 @@
 {
-  "approve_controlled_kernel_patch": {
-    "kind": "patch_vote",
-    "approval": true,
+  "approve_controlled_kernel_proposal": {
+    "kind": "review_verdict",
+    "target_proposal_msg_id": "msg_attn_keep_001",
+    "verdict": "approve",
+    "source": "critic",
     "confidence": "high",
-    "summary": "Approved: the patch is scoped to the claimed kernel path, benchmark parameters are matched, accuracy passes, active dispatch is proven, and rollback is clear.",
-    "objections": [],
+    "reasoning": "Controlled A/B evidence shows a 4.2% tok/s/GPU gain with passing accuracy, active-path proof, cache handling, and clear rollback.",
+    "predicted_gain_pct": 4.2,
+    "kb_evidence": [
+      "kb:qwen/qwen3-14b/attn-dispatch-best-config"
+    ],
+    "packet_evidence": [
+      "benchmark.after.gain_pct",
+      "accuracy_gate.status",
+      "dispatch_evidence.active_path_proven",
+      "rollback.available"
+    ],
+    "risks": [],
     "required_evidence": [],
-    "warnings": [],
+    "alternative_action": null,
+    "advice_text": "",
     "notes": [
-      "Controlled same-session A/B shows a 4.2% tok/s/GPU gain."
+      "Kernel response can be kept."
     ]
   },
   "reject_mismatched_benchmark": {
-    "kind": "patch_vote",
-    "approval": false,
+    "kind": "review_verdict",
+    "target_proposal_msg_id": "msg_sched_002",
+    "verdict": "reject",
+    "source": "critic",
     "confidence": "high",
-    "summary": "Rejected: the after benchmark changed max_concurrency, so the reported throughput gain is not comparable with the baseline.",
-    "objections": [
+    "reasoning": "The after benchmark changed max_concurrency, so the reported throughput gain is not comparable.",
+    "predicted_gain_pct": null,
+    "kb_evidence": [
+      "kb:policy/benchmark-methodology/matched-concurrency"
+    ],
+    "packet_evidence": [
+      "benchmark.baseline.max_concurrency",
+      "benchmark.after.max_concurrency"
+    ],
+    "risks": [
       {
         "type": "benchmark_invalid",
         "severity": "blocker",
@@ -28,81 +51,135 @@
     "required_evidence": [
       "matched_benchmark"
     ],
-    "warnings": [],
+    "alternative_action": null,
+    "advice_text": "",
     "notes": []
   },
-  "reject_missing_accuracy_gate": {
-    "kind": "patch_vote",
-    "approval": false,
+  "needs_review_missing_accuracy_gate": {
+    "kind": "review_verdict",
+    "target_proposal_msg_id": "msg_compile_flag_003",
+    "verdict": "needs_review",
+    "source": "critic",
     "confidence": "high",
-    "summary": "Rejected: the packet reports a compiler-flag throughput gain but does not include an accuracy gate result or waiver.",
-    "objections": [
+    "reasoning": "The proposal is high risk and has no accuracy gate result or waiver.",
+    "predicted_gain_pct": null,
+    "kb_evidence": [],
+    "packet_evidence": [
+      "accuracy_gate"
+    ],
+    "risks": [
       {
         "type": "accuracy_missing",
         "severity": "blocker",
-        "reason": "Accuracy evidence is required for a claimed performance win.",
-        "required_fix": "Run the configured accuracy gate or provide an explicit orchestrator waiver.",
+        "reason": "Accuracy evidence is required before a high-risk compiler change can dispatch.",
+        "required_fix": "Run the configured accuracy gate or provide an explicit Conductor waiver.",
         "evidence_ref": "accuracy_gate"
       }
     ],
     "required_evidence": [
       "accuracy_gate"
     ],
-    "warnings": [],
+    "alternative_action": null,
+    "advice_text": "",
     "notes": []
   },
-  "reject_micro_only_active_path_unproven": {
-    "kind": "patch_vote",
-    "approval": false,
+  "redirect_known_bad_backend": {
+    "kind": "review_verdict",
+    "target_proposal_msg_id": "msg_backend_004",
+    "verdict": "redirect",
+    "source": "critic",
     "confidence": "high",
-    "summary": "Rejected: the packet only proves a micro-benchmark win and does not prove E2E throughput or active dispatch.",
-    "objections": [
+    "reasoning": "KB evidence says flashinfer is known to OOM for this model and context, while a same-owner triton backend alternative is registered.",
+    "predicted_gain_pct": 1.5,
+    "kb_evidence": [
+      "kb:qwen/qwen3-14b/flashinfer-oom-long-context"
+    ],
+    "packet_evidence": [
+      "registered_alternatives[0]"
+    ],
+    "risks": [
       {
-        "type": "micro_only_evidence",
-        "severity": "blocker",
-        "reason": "Micro-benchmark speedup is not enough to approve an E2E optimization patch.",
-        "required_fix": "Provide controlled before/after E2E benchmark evidence for the final server configuration.",
-        "evidence_ref": "micro_benchmark"
-      },
+        "type": "regression_risk",
+        "severity": "major",
+        "reason": "The proposed backend is known-bad for this model family at long context.",
+        "required_fix": "Use the registered triton backend alternative instead.",
+        "evidence_ref": "kb_evidence[0]"
+      }
+    ],
+    "required_evidence": [],
+    "alternative_action": {
+      "name": "backend_exploration",
+      "owner": "orchestration",
+      "params": {
+        "attention_backend": "triton"
+      }
+    },
+    "advice_text": "",
+    "notes": []
+  },
+  "advise_low_risk_followup": {
+    "kind": "review_verdict",
+    "target_proposal_msg_id": "msg_params_005",
+    "verdict": "advise",
+    "source": "critic",
+    "confidence": "medium",
+    "reasoning": "The params proposal is low risk and can proceed, but prior KB says gains are often near noise.",
+    "predicted_gain_pct": null,
+    "kb_evidence": [
+      "kb:qwen/qwen3-14b/params-gain-noise"
+    ],
+    "packet_evidence": [
+      "action_metadata.accuracy_risk"
+    ],
+    "risks": [
       {
-        "type": "active_path_unproven",
+        "type": "regression_risk",
+        "severity": "minor",
+        "reason": "Prior runs show this parameter family often produces marginal gains.",
+        "required_fix": "If gain is below 3%, do not keep deepening this branch.",
+        "evidence_ref": "kb_evidence[0]"
+      }
+    ],
+    "required_evidence": [],
+    "alternative_action": null,
+    "advice_text": "Proceed, but require a matched benchmark and stop deepening this branch if gain is below 3%.",
+    "notes": []
+  },
+  "reject_robustness_conflict": {
+    "kind": "review_verdict",
+    "target_proposal_msg_id": "msg_comm_006",
+    "verdict": "reject",
+    "source": "critic",
+    "confidence": "high",
+    "reasoning": "A high-confidence Robustness finding reports a related systemic stale-data risk that the packet does not address.",
+    "predicted_gain_pct": null,
+    "kb_evidence": [
+      "kb:qwen/qwen3-14b/rccl-stale-data-tp8"
+    ],
+    "packet_evidence": [
+      "robustness_findings[0]"
+    ],
+    "risks": [
+      {
+        "type": "robustness_conflict",
         "severity": "blocker",
-        "reason": "The packet says the active dispatch path is not proven.",
-        "required_fix": "Provide profile or runtime dispatch evidence showing the new MoE kernel is selected.",
-        "evidence_ref": "dispatch_evidence.active_path_proven"
+        "reason": "Robustness reports that the same RCCL algorithm can return stale data under TP=8.",
+        "required_fix": "Resolve or explicitly mitigate the Robustness finding before dispatching this communication change.",
+        "evidence_ref": "robustness_findings[0]"
       }
     ],
     "required_evidence": [
-      "matched_benchmark",
-      "active_path_evidence"
+      "robustness_resolution"
     ],
-    "warnings": [],
-    "notes": []
-  },
-  "reject_triage_conflict": {
-    "kind": "patch_vote",
-    "approval": false,
-    "confidence": "high",
-    "summary": "Rejected: a high-confidence Triage finding reports a related systemic accuracy risk that the packet does not address.",
-    "objections": [
-      {
-        "type": "triage_conflict",
-        "severity": "blocker",
-        "reason": "Triage reports that the same RCCL algorithm can return stale data under TP=8.",
-        "required_fix": "Resolve or explicitly mitigate the Triage finding before keeping this communication change.",
-        "evidence_ref": "triage_findings[0]"
-      }
-    ],
-    "required_evidence": [
-      "triage_resolution"
-    ],
-    "warnings": [],
+    "alternative_action": null,
+    "advice_text": "",
     "notes": []
   },
   "draft_valid_kernel_optimization_entry": {
     "kind": "kb_draft",
     "kb_drafts": [
       {
+        "model_family": "qwen",
         "category": "kernel_optimization",
         "action": "Route Qwen3-14B attention to fused_attention_gfx950 and update the shape-specific best_config.",
         "lesson": "The attention kernel rewrite produced E2E gain only when dispatch and shape-specific tuning config were updated together.",
@@ -141,6 +218,7 @@
     "kind": "kb_draft",
     "kb_drafts": [
       {
+        "model_family": "qwen",
         "category": "benchmark_methodology",
         "action": "Compared scheduler throughput with different max_concurrency values between baseline and after runs.",
         "lesson": "Changing max_concurrency between baseline and after runs can create a false throughput win.",
