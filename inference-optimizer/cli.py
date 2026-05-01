@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .orchestrator.action_executors import baseline_executor
+from .orchestrator.action_executors import baseline_executor, profile_executor
 from .orchestrator.backends import (
     ClaudeBackend,
     CodexBackend,
@@ -160,6 +160,7 @@ def _register_executors(conductor: Conductor) -> None:
     fill in the real ones.
     """
     conductor.sub.register_executor("baseline", baseline_executor)
+    conductor.sub.register_executor("profile",  profile_executor)
     for kind in ("setup", "classify", "target_analysis", "report",
                   "backends", "params", "sweep",
                   "kernel_opt", "integrate", "deep_kernel_analysis",

@@ -1,0 +1,102 @@
+"""Real ``profile`` ActionExecutor — Magpie SGLang run with torch profiler on.
+
+DESIGN v0.6 §16 profile action.
+
+Reuses the BaselineExecutor shell-out machinery; the only meaningful
+difference is the YAML config — the profile config has
+``profiler.torch_profiler.enabled: true`` so Magpie writes a
+``torch_trace/`` directory inside the workspace.
+
+Result schema (delivered on the bus as ``delegated_result``)::
+
+    status:        "succeeded" | "failed"
+    framework:     "sglang"
+    model:         path
+    request/output/total_token_throughput, latency stats (same as baseline)
+    workspace:     absolute path of the Magpie workspace
+    trace_dir:     absolute path of the torch_trace dir (or None)
+    report_path:   absolute path of benchmark_report.json
+
+Downstream consumers (Kernel agent → tracelens_analysis.py) only need
+``trace_dir``; we surface the rest so the same SharedState promotion
+logic the baseline path uses (current_best, output_throughput, etc.)
+works unchanged.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any
+
+from ...paths import asset_root
+from .baseline import BaselineExecutor
+
+
+log = logging.getLogger(__name__)
+
+
+PROFILE_DEFAULT_CONFIG = (
+    asset_root() / "scripts" / "configs" / "profile_qwen3_8b_sglang.yaml"
+)
+PROFILE_DEFAULT_TIMEOUT_SEC = 1500     # Magpie + sglang profile is heavier
+
+
+class ProfileExecutor(BaselineExecutor):
+    """Subclass that swaps the default config + extracts trace_dir."""
+
+    def __init__(
+        self,
+        *,
+        magpie_python: str = "/opt/venv/bin/python",
+        default_config_path: Path | str = PROFILE_DEFAULT_CONFIG,
+        default_output_root: Path | str = "/workspace/hyperloom",
+        default_timeout_sec: int = PROFILE_DEFAULT_TIMEOUT_SEC,
+        cwd: Path | str = "/tmp",
+    ):
+        super().__init__(
+            magpie_python=magpie_python,
+            default_config_path=default_config_path,
+            default_output_root=default_output_root,
+            default_timeout_sec=default_timeout_sec,
+            cwd=cwd,
+        )
+
+    async def __call__(self, ctx) -> dict[str, Any]:
+        result = await super().__call__(ctx)
+        # Augment with trace_dir if the workspace produced one.
+        workspace_str = result.get("workspace")
+        if workspace_str:
+            trace_dir = Path(workspace_str) / "torch_trace"
+            if trace_dir.is_dir():
+                # Find the actual trace .json.gz files; pick the one most
+                # likely to be the main rank trace (first by name).
+                trace_files = sorted(trace_dir.glob("*.trace.json.gz"))
+                result["trace_dir"] = str(trace_dir)
+                result["trace_files"] = [str(p) for p in trace_files]
+                if trace_files:
+                    result["main_trace_path"] = str(trace_files[0])
+                else:
+                    log.warning(
+                        "profile_executor: torch_trace dir exists but no "
+                        ".trace.json.gz files in %s", trace_dir,
+                    )
+            else:
+                result["trace_dir"] = None
+                result["trace_files"] = []
+                log.warning(
+                    "profile_executor: workspace=%s has no torch_trace dir",
+                    workspace_str,
+                )
+        return result
+
+
+profile_executor = ProfileExecutor()
+
+
+__all__ = [
+    "PROFILE_DEFAULT_CONFIG",
+    "PROFILE_DEFAULT_TIMEOUT_SEC",
+    "ProfileExecutor",
+    "profile_executor",
+]
