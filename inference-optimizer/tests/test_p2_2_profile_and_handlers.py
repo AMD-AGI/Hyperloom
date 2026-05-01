@@ -179,9 +179,10 @@ async def test_run_optimization_handler_dry_run(session_dir):
 
 
 def test_handlers_dispatch_table():
+    """P2-2 only registered select_kernels + run_optimization. P2-4
+    added apply_patch + integrate (covered in test_p2_4_integrate_report)."""
     assert krh.has_handler("select_kernels")
     assert krh.has_handler("run_optimization")
-    assert not krh.has_handler("apply_patch")  # P2-4 work
     assert not krh.has_handler("totally_unknown_kind")
 
 
