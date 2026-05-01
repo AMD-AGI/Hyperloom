@@ -1,10 +1,11 @@
 # Risk Rules
 
-Use these rules when deciding whether a patch can be approved.
+Use these rules when deciding which review verdict to return.
 
 ## Blockers
 
-Object with `severity: "blocker"` when any of these are true:
+Return `reject` or `needs_review` with `severity: "blocker"` when any of these
+are true:
 
 - No after-change benchmark is provided for a claimed performance win.
 - Before/after benchmark parameters are not comparable.
@@ -14,15 +15,15 @@ Object with `severity: "blocker"` when any of these are true:
 - The patch requires rebuild, reinstall, server restart, or cache clearing but
   the packet does not show that it happened.
 - The change can only be rolled back manually through unclear steps.
-- Triage reports a related crash, hang, accuracy failure, or cache corruption
+- Robustness reports a related crash, hang, accuracy failure, or cache corruption
   that the packet does not address.
 - The patch contains unrelated broad refactors that make the optimization effect
   impossible to isolate.
 
 ## Major Risks
 
-Object with `severity: "major"` when the patch may be valid but needs more
-evidence before approval:
+Return `advise` or `needs_review` with `severity: "major"` when the patch may be
+valid but needs more evidence before dispatch:
 
 - Micro-benchmark improved but E2E throughput is missing or inconclusive.
 - Benchmark shows a small gain inside expected noise and no repeated run is
@@ -35,7 +36,7 @@ evidence before approval:
 
 ## Minor Warnings
 
-Use `warnings` when the issue should be tracked but does not block approval:
+Use `advise` when the issue should be tracked but does not block dispatch:
 
 - Follow-up sweep could cover more concurrency points.
 - Report omits a minor environment field while all core comparability fields are
@@ -75,7 +76,7 @@ Required evidence depends on patch scope:
 Reject a KB candidate when:
 
 - The lesson depends on unvalidated benchmark evidence.
-- The result is contradicted by Triage findings.
+- The result is contradicted by Robustness findings.
 - The action is too specific to a temporary file path or one-off debug state.
 - The entry repeats an existing lesson without new scope, evidence, or
   supersession.
