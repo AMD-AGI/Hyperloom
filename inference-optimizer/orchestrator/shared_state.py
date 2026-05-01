@@ -25,6 +25,9 @@ v0.6 fields:
     pruned_families     list[str]  — set by Robustness via PRUNE_BRANCH
     start_ts            str   — ISO timestamp
     max_minutes         int   — wall-clock budget (0 = unlimited)
+    last_profile_trace  str   — set by Conductor when `profile` returns a
+                                trace path; consumed by Orch to populate
+                                `select_kernels` REQUEST `trace_input` param
 """
 
 from __future__ import annotations
@@ -59,6 +62,7 @@ class SharedState:
     pruned_families: list[str] = field(default_factory=list)
     start_ts: str = field(default_factory=_now_iso)
     max_minutes: int = 0
+    last_profile_trace: str = ""
 
     # ------------------------------------------------------------------
     # Persistence
@@ -153,6 +157,7 @@ class SharedState:
             f"current_action={self.current_action or '(idle)'}",
             f"crash_count={self.crash_count}",
             f"pruned_families={self.pruned_families or '(none)'}",
+            f"last_profile_trace={self.last_profile_trace or '(none)'}",
             f"stop_reason={self.stop_reason or '(none)'}",
         ]
         return "\n".join(lines)
