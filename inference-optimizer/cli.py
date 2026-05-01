@@ -57,19 +57,23 @@ _DEFAULT_ORCH_PROMPT = (
     "You are the Orchestration agent for an inference-optimization run.\n"
     "Read the Shared session state below to see progress against the goal.\n\n"
     "DFS plan (DESIGN §16, marathon backends.md / params.md):\n"
-    "  1. baseline_tput == 0           → propose `baseline`\n"
-    "  2. baseline done, no trace_dir  → propose `profile`  (writes torch trace)\n"
-    "  3. profile done                 → propose `backends` (10-variant DFS)\n"
-    "  4. backends done                → propose `params`   (8-variant DFS)\n"
-    "  5. params done                  → REQUEST kernel select_kernels (see below)\n"
-    "  6. select_kernels response in   → REQUEST kernel run_optimization\n"
-    "  7. run_optimization response in → REQUEST kernel integrate\n"
-    "  8. integrate KEEP               → propose `report` and stop\n\n"
+    "  1. baseline_tput == 0                       → propose `baseline`\n"
+    "  2. baseline done, last_profile_trace empty  → propose `profile`\n"
+    "                                                 (writes torch trace,\n"
+    "                                                 path lands in SharedState\n"
+    "                                                 as last_profile_trace)\n"
+    "  3. profile done                             → propose `backends` (DFS)\n"
+    "  4. backends done                            → propose `params`   (DFS)\n"
+    "  5. params done                              → REQUEST kernel select_kernels\n"
+    "  6. select_kernels response in               → REQUEST kernel run_optimization\n"
+    "  7. run_optimization response in             → REQUEST kernel integrate\n"
+    "  8. integrate KEEP                           → propose `report` and stop\n\n"
     "PRECISE kernel REQUEST kinds (use EXACTLY these — `kernel_opt` has no\n"
     "handler and the request will fall through to a hallucinating LLM):\n"
     "  request{target_agent: 'kernel', kind: 'select_kernels',\n"
-    "          params: {trace_input: <main_trace_path from latest profile\n"
-    "                                  delegated_result>, top_k: 10}}\n"
+    "          params: {trace_input: <verbatim value of\n"
+    "                                  last_profile_trace from Shared state\n"
+    "                                  — never invent a path>, top_k: 10}}\n"
     "  request{target_agent: 'kernel', kind: 'run_optimization',\n"
     "          params: {kernel_id: <hot kernel name from select_kernels\n"
     "                              response.result.hot_kernels[0]>,\n"
@@ -252,6 +256,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         codex_model=args.codex_model,
         kernel_codex=args.kernel_codex,
     )
+    # Bug A fix: expose the active session_dir to in-process executors
+    # (e.g. ReportExecutor) that don't get session_dir threaded through
+    # task.params. This is read in report.py::_resolve_session_dir.
+    os.environ["INFERENCE_OPTIMIZER_SESSION_DIR"] = str(session_dir)
+
     conductor = Conductor(session_dir, backends=backends)
     conductor.system_prompt_overrides = {
         "orchestration": args.orch_prompt or _DEFAULT_ORCH_PROMPT,

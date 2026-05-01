@@ -677,6 +677,18 @@ class Conductor:
                     },
                     in_reply_to=request_msg.msg_id, priority=1,
                 ))
+                # Bug B fix: the request was just answered programmatically,
+                # so the LLM-backed kernel agent should NOT see the request
+                # in its inbox next tick (otherwise it duplicates the
+                # response with hallucinated content). Advance the kernel
+                # cursor past this request seq. cursor.advance is monotonic,
+                # so this is safe even if kernel had already processed
+                # earlier seqs in the same tick.
+                await self.cursors.advance(
+                    target_agent,
+                    seq=request_msg.seq,
+                    msg_id=request_msg.msg_id,
+                )
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
         in_reply_to = intent.payload["in_reply_to"]
@@ -851,6 +863,42 @@ class Conductor:
                 "workspace": result.get("workspace"),
             }
             changed = True
+        elif task_kind == "profile":
+            # Bug C fix: surface the trace path produced by ProfileExecutor
+            # to SharedState so Orch can pass a real path to the kernel
+            # `select_kernels` REQUEST instead of fabricating one.
+            trace_path = (
+                result.get("main_trace_path")
+                or (result.get("trace_files") or [None])[0]
+                or result.get("trace_dir")
+            )
+            if trace_path:
+                self.shared_state.last_profile_trace = str(trace_path)
+                changed = True
+            # profile result may also include a tput; promote into
+            # current_best on the same +1% rule the grid path uses below.
+            tput = result.get("output_throughput")
+            cb = self.shared_state.current_best or {}
+            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+            cur_best = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
+                else float(self.shared_state.baseline_tput or 0.0)
+            if (
+                isinstance(tput, (int, float)) and tput > 0 and cur_best > 0
+                and (tput - cur_best) / cur_best * 100.0 >= 1.0
+            ):
+                self.shared_state.current_best = {
+                    "action": "profile",
+                    "tput": float(tput),
+                    "ttft_mean_ms": result.get("ttft_mean_ms"),
+                    "e2el_mean_ms": result.get("e2el_mean_ms"),
+                    "workspace": result.get("workspace"),
+                }
+                if self.shared_state.baseline_tput > 0:
+                    self.shared_state.cumulative_gain = (
+                        (float(tput) - self.shared_state.baseline_tput)
+                        / self.shared_state.baseline_tput * 100.0
+                    )
+                changed = True
         elif task_kind in ("backends", "params", "sweep"):
             # Promote a grid-runner winner if it actually beat the
             # current best by a meaningful margin (>= 1% per marathon
