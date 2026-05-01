@@ -141,10 +141,18 @@ async def _async_value(v):
 
 @pytest.mark.asyncio
 async def test_e2e_request_response_round_trip(session_dir):
-    """Plan A: orchestration REQUEST → kernel mock RESPONSE → routed back."""
+    """Plan A: orchestration REQUEST → kernel mock RESPONSE → routed back.
+
+    Uses a kind (`explore_options`) that is NOT registered in
+    KERNEL_REQUEST_HANDLERS so the request flows through the LLM-backed
+    kernel agent instead of being intercepted by a programmatic handler.
+    Production kinds (select_kernels / run_optimization / integrate)
+    have dedicated handler tests in test_p3_bugfixes.py and the
+    integration suite.
+    """
     req = Intent(type=IntentType.REQUEST, payload={
         "target_agent": "kernel",
-        "kind": "select_kernels",
+        "kind": "explore_options",
         "params": {"top_k": 5},
     })
     backends = {
@@ -173,7 +181,7 @@ async def test_e2e_request_response_round_trip(session_dir):
         r = responses[0]
         assert r.from_agent == "kernel"
         assert r.payload["status"] == "ok"
-        assert r.payload["kind"] == "select_kernels_done"
+        assert r.payload["kind"] == "explore_options_done"
         assert r.payload["result"]["chosen"] == ["mock_kernel_1"]
     finally:
         await c.stop()
