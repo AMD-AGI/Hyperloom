@@ -1,13 +1,17 @@
-# Review Patch
+# Review Proposal
 
-Use this action when the Orchestration Core asks Critic to vote on an
-optimization patch, config change, generated kernel, dispatch fix, rebuild
-change, or keep/revert decision.
+Use this action when Conductor asks Critic to review an Orchestration proposal,
+Kernel response, generated patch, config change, dispatch fix, or
+`integrate keep_proposed` decision.
 
 ## Expected Input
 
 The packet may contain:
 
+- `target_proposal_msg_id`.
+- Proposal intent or Kernel response payload.
+- Action metadata, including `family`, `owner`, `accuracy_risk`, and allowed
+  side effects.
 - Patch or diff content.
 - Stated optimization goal and affected stack layer.
 - Baseline benchmark result.
@@ -16,11 +20,23 @@ The packet may contain:
 - Micro-benchmark data.
 - Profile or dispatch evidence.
 - Build, install, cache, and restart notes.
-- Triage findings or RCA summaries.
+- Robustness findings or RCA summaries.
+- KB evidence recalled by Critic or supplied by Conductor.
 - Rollback plan.
 - Prior attempts and session history.
 
 Treat absent fields as missing evidence, not as passing evidence.
+
+## Review Triggers
+
+Critic review is required for:
+
+- Orchestration `propose_action` where `accuracy_risk > 0`.
+- Orchestration `propose_action` where `family in {"deep_kernel", "long"}`.
+- Kernel `response` where `kind="integrate"` and `status="keep_proposed"`.
+
+Critic does not block Robustness emergency actions such as `kill_task`,
+`prune_branch`, or `force_dispatch`. Review those only after the fact as advice.
 
 ## Review Steps
 
@@ -40,7 +56,7 @@ Treat absent fields as missing evidence, not as passing evidence.
    - Before/after results must include absolute values and gain percentage.
 
 3. Check correctness evidence.
-   - Accuracy gate passed, or the orchestrator provided an explicit waiver.
+   - Accuracy gate passed, or Conductor provided an explicit waiver.
    - Numerical tolerance is appropriate for the modified layer.
    - Kernel or operator changes include correctness tests for the affected shapes.
    - Framework or dispatch changes prove the active path is the path measured.
@@ -57,18 +73,24 @@ Treat absent fields as missing evidence, not as passing evidence.
    - Framework dispatch changes do not bypass the optimized kernel.
    - Communication changes do not conflict with topology, TP/PP, or resource lane
      assumptions.
-   - Triage findings do not flag a known crash, regression, cache corruption, or
-     accuracy failure for this patch family.
+   - Robustness findings do not flag a known crash, regression, cache
+     corruption, or accuracy failure for this patch family.
 
-6. Decide the vote.
-   - `approval: true` only if there are no blocker objections.
-   - `approval: false` if benchmark, correctness, deployability, or rollback
-     evidence is missing or contradictory.
-   - Use `warnings` for non-blocking follow-up items.
+6. Decide the verdict.
+   - `approve`: no blocker risk; include `predicted_gain_pct` when performance is
+     relevant.
+   - `reject`: do not dispatch; use when packet evidence or KB evidence proves
+     the proposal is unsafe or invalid.
+   - `redirect`: replace with `alternative_action`; use only when the action is
+     registered and has the same owner.
+   - `advise`: dispatch may proceed, but advice should be injected into the next
+     Orchestration prompt.
+   - `needs_review`: high-risk proposal has insufficient evidence or Critic is
+     acting as mock/timeout/unavailable.
 
-## Objection Types
+## Risk Types
 
-Use one of these `type` values when possible:
+Use one of these `risk.type` values when possible:
 
 - `benchmark_missing`
 - `benchmark_invalid`
@@ -79,17 +101,16 @@ Use one of these `type` values when possible:
 - `micro_only_evidence`
 - `cache_or_rebuild_risk`
 - `rollback_missing`
-- `triage_conflict`
+- `robustness_conflict`
 - `cross_layer_conflict`
 - `regression_risk`
 - `insufficient_context`
 
 ## Severity
 
-- `blocker`: must be fixed before approval.
-- `major`: likely blocks approval unless the orchestrator explicitly accepts the
-  risk.
-- `minor`: does not block approval but should be tracked.
+- `blocker`: must be fixed before dispatch.
+- `major`: likely blocks dispatch unless Conductor explicitly accepts the risk.
+- `minor`: does not block dispatch but should be tracked.
 
 ## Confidence
 
@@ -99,5 +120,5 @@ Use one of these `type` values when possible:
 
 ## Output
 
-Return a JSON object matching `patch_vote_schema` in
+Return a JSON object matching `review_verdict_schema` in
 [references/verdict_schema.md](../references/verdict_schema.md).
