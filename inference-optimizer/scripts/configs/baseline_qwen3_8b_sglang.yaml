@@ -1,0 +1,46 @@
+# Magpie baseline benchmark config for Qwen3-8B on SGLang / MI300X.
+# Used by inference_optimizer.orchestrator.action_executors.baseline as the
+# default smoke-test config when MODEL is unset.
+#
+# Local mode (no Docker) — the orchestrator already runs inside the sglang
+# container; no need to nest one.
+
+benchmark:
+  framework: sglang
+  model: /wekafs/models/Qwen-Qwen3-8B
+  precision: bf16              # 8B fits comfortably on a single MI300X
+  run_mode: local
+
+  envs:
+    TP: 1                      # single GPU for the smoke run
+    CONC: 8                    # low concurrency to keep wall time short
+    ISL: 256
+    OSL: 256
+    RANDOM_RANGE_RATIO: 1
+    MAX_MODEL_LEN: 8192        # smaller context = faster warmup
+    # Bypass Magpie's auto-GPU-selection — KFD has zombie contexts from a
+    # dead Ray session that fool the "find_idle_gpus" check even though
+    # actual VRAM is 0. Pin to GPU 1 via ROCR_VISIBLE_DEVICES only.
+    # NOTE: do NOT set HIP_VISIBLE_DEVICES — on this stack HIP_VISIBLE
+    # makes torch.cuda.is_available() return False even when device_count=1.
+    ROCR_VISIBLE_DEVICES: "1"
+
+    # The benchmark script uses bare `python3`; without putting venv first
+    # the subprocess picks /usr/bin/python3 (no torch with ROCm) and sglang
+    # raises "No accelerator". Force PATH ahead of system.
+    PATH: "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+  gpu_selection:
+    auto: false                # we already pinned via HIP_VISIBLE_DEVICES
+
+  benchmark_script: sglang_mi300x.sh
+  timeout_seconds: 600         # 10 min hard cap
+
+  profiler:
+    torch_profiler:
+      enabled: false           # skip profiler for the smoke run; baseline
+                               # only needs throughput/latency numbers
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false
