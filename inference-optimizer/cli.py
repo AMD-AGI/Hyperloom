@@ -47,7 +47,7 @@ from .orchestrator.backends import (
 from .orchestrator.conductor import Conductor
 from .orchestrator.objective import build_objective
 from .orchestrator.shared_state import SharedState
-from .paths import make_session_dir
+from .paths import make_session_dir, session_root
 
 
 log = logging.getLogger("inference_optimizer.cli")
@@ -195,9 +195,27 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
 
 
 async def _run_optimize(args: argparse.Namespace) -> int:
-    session_dir = make_session_dir(args.session_name) if args.session_name \
-        else make_session_dir()
-    print(f"Session dir: {session_dir}")
+    if args.resume:
+        # Resume mode: skip the SharedState seed so Conductor.__init__
+        # picks up the existing state.json + SQLite event log unchanged.
+        session_dir = session_root() / args.resume
+        if not session_dir.exists():
+            print(f"ERROR: --resume session not found: {session_dir}",
+                  file=sys.stderr)
+            sys.exit(2)
+        state = SharedState.load_or_init(session_dir)
+        print(f"Resuming session: {session_dir}")
+        print(f"  prior baseline_tput   : {state.baseline_tput:.1f}")
+        print(f"  prior cumul_gain      : {state.cumulative_gain:.2f}%")
+        print(f"  prior current_best    : "
+              f"{(state.current_best or {}).get('action')}/"
+              f"{(state.current_best or {}).get('tput')}")
+        print(f"  prior stop_reason     : {state.stop_reason or '(none)'}")
+    else:
+        session_dir = make_session_dir(args.session_name) if args.session_name \
+            else make_session_dir()
+        print(f"Session dir: {session_dir}")
+        state = _seed_shared_state(session_dir, args)
 
     objective = build_objective({
         "MAX_HOURS": str(args.max_hours),
@@ -206,8 +224,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         "TARGET_DIR": args.target_baseline_dir or "",
     })
     print(f"Objective       : kind={objective.kind()} {objective.describe()}")
-
-    state = _seed_shared_state(session_dir, args)
     backends = _build_backends(
         claude_model=args.claude_model,
         codex_model=args.codex_model,
@@ -256,8 +272,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     opt = sub.add_parser("optimize",
                           help="Drive a multi-agent optimization run on a model")
-    opt.add_argument("--model", "-m", required=True, type=Path,
-                      help="Model path (HuggingFace dir or HF model id)")
+    opt.add_argument("--model", "-m", type=Path, default=None,
+                      help="Model path (required for new runs; ignored when "
+                           "--resume is set — model is read from state.json)")
     opt.add_argument("--max-hours", type=float, default=2.0,
                       help="Wall-clock budget in hours (default 2.0)")
     grp = opt.add_mutually_exclusive_group()
@@ -268,7 +285,12 @@ def _build_parser() -> argparse.ArgumentParser:
     grp.add_argument("--target-baseline-dir", type=str, default=None,
                       help="Stop when current best matches the baseline in DIR")
     opt.add_argument("--session-name", type=str, default=None,
-                      help="Override auto-generated session id")
+                      help="Override auto-generated session id (for new runs)")
+    opt.add_argument("--resume", type=str, default=None,
+                      help="Resume from an existing session id. Skips the "
+                           "SharedState seed and lets the Conductor replay "
+                           "the prior event log + state.json. Mutually "
+                           "exclusive with --session-name in practice.")
     opt.add_argument("--model-class", type=str, default=None,
                       help="Optional model class hint (dense_8B / moe_mla / ...)")
     opt.add_argument("--target-summary", type=str, default=None,
