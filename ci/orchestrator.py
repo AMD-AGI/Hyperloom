@@ -226,8 +226,8 @@ def run_model(
         files = claw.list_files(session_id)
         log.info("Session %s has %d files", session_id, len(files))
         for f in files:
-            fpath = f["path"]
-            if not any(fpath.endswith(s) for s in download_suffixes):
+            fpath = f.get("path") or f.get("Path") or ""
+            if not fpath or not any(fpath.endswith(s) for s in download_suffixes):
                 continue
             local = os.path.join(result_dir, os.path.basename(fpath))
             try:
