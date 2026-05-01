@@ -208,6 +208,12 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         f"- Do NOT modify files under {kernel_repo or '/sgl-workspace'} or any system path.\n"
         "- Write all new/optimized kernel code, benchmarks, and reports under the\n"
         "  current working directory (your isolated workspace) ONLY.\n"
+        "- DO NOT run `find /` or any unbounded filesystem scan. The host mounts\n"
+        "  WekaFS, so a single `find / ...` typically takes 30–60 minutes and\n"
+        "  burns the entire budget. The kernel source is at `kernel_url` above and\n"
+        "  the repo root is `repo` above — use those EXACT paths. If you need to\n"
+        "  search inside the repo, scope to the repo root: `find <repo> -name ...`\n"
+        "  or `rg ... <repo>`, NEVER `find /`.\n"
         "\n"
         "GOAL & EARLY-EXIT:\n"
         "- Target speedup: >= 1.50x on the dominant inference shape(s).\n"
@@ -274,7 +280,11 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     # so its LLM-based parser can extract them; OOB agents read the same body
     # as a normal natural-language prompt.
     return "\n".join([
-        "Optimize this kernel for AMD MI355X (gfx950, CDNA4) inference serving.",
+        f"# TASK: Optimize the `{kernel_name}` kernel",
+        "",
+        "Optimize this GPU kernel for **AMD Instinct MI300X (gfx942, CDNA3)** "
+        "inference serving. Produce an actual edited kernel file with measurable "
+        "speedup; do NOT just analyze and submit unchanged.",
         "",
         f"kernel_name: {kernel_name}",
         f"kernel_url: {source_file}",
@@ -282,6 +292,11 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         f"repo: {kernel_repo}",
         f"GPU percent: {candidate.get('gpu_pct', 'unknown')}",
         f"Shapes: {json.dumps(candidate.get('shapes', []), sort_keys=True)}",
+        "",
+        "Hardware notes (DO NOT use gfx950/MI355X-only features):",
+        "- 304 CUs, MFMA bf16 instructions, 256 VGPRs/CU",
+        "- HBM3 (~5.3 TB/s peak), 256 MB Infinity Cache",
+        "- Build flag: `--offload-arch=gfx942`",
         "",
         "Preserve function name, signature, decorators, and numerical behavior.",
         "Return complete optimized code plus explanation of correctness assumptions.",
@@ -442,6 +457,34 @@ def invoke_backend(
                     result["geak_results_dir"] = str(results_dir)
                     result["geak_patch_count"] = len(patches)
                     result["geak_latest_patch"] = str(patches[-1])
+                # Per-task best_results.json: GEAK's heterogeneous orchestrator
+                # writes one per sub-agent task with `best_patch_speedup` from
+                # an LLM-judged comparison of patches against the baseline.
+                # Aggregate them here so the driver can extract a real speedup
+                # even when the run is SIGTERM'd before the top-level
+                # final_report.json (select_patch round) finishes (observed in
+                # r38: 60min budget burned by 9 sub-agent tasks; select_patch
+                # never started). Take the max across tasks.
+                best_jsons = sorted(results_dir.rglob("best_results.json"))
+                if best_jsons:
+                    best_speedup = 0.0
+                    best_task = ""
+                    best_patch_path = ""
+                    for bj in best_jsons:
+                        try:
+                            d = json.loads(bj.read_text(encoding="utf-8"))
+                            sp = float(d.get("best_patch_speedup") or 0.0)
+                        except Exception:
+                            continue
+                        if sp > best_speedup:
+                            best_speedup = sp
+                            best_task = bj.parent.name
+                            best_patch_path = str(d.get("best_patch_file") or "")
+                    if best_speedup > 0:
+                        result["geak_per_task_best_speedup"] = best_speedup
+                        result["geak_per_task_best_task"] = best_task
+                        if best_patch_path:
+                            result["geak_per_task_best_patch"] = best_patch_path
             return result
         if backend in {"claude", "codex"}:
             oob = _import_backend("oob_submit")
@@ -576,6 +619,18 @@ def run_attempt(
             if geak_patch:
                 backend_paths["geak_latest_patch"] = geak_patch
                 backend_paths["geak_patch_count"] = str(result.get("geak_patch_count") or 0)
+            # Per-task best speedup salvage (when select_patch round didn't
+            # finish before SIGTERM). build_verification picks this up.
+            per_task_sp = (result.get("geak_per_task_best_speedup")
+                           if isinstance(result, dict) else None)
+            if per_task_sp:
+                backend_paths["geak_per_task_best_speedup"] = str(per_task_sp)
+                bt = result.get("geak_per_task_best_task")
+                if bt:
+                    backend_paths["geak_per_task_best_task"] = str(bt)
+                bp = result.get("geak_per_task_best_patch")
+                if bp:
+                    backend_paths["geak_per_task_best_patch"] = str(bp)
             # Promote any timed-out / failed attempt that left artifacts on
             # disk to "partial" so build_verification + make_proposal can
             # distinguish "killed but useful" from "truly empty failure".
@@ -676,6 +731,19 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
         sp = _extract_speedup_from_report(report)
         if sp is None:
             sp = _extract_speedup_from_geak(bp.get("geak_final_report", ""))
+        # Fallback: GEAK timed out before select_patch round wrote
+        # final_report.json, but per-task best_results.json files have
+        # speedups. Use the max across tasks (already aggregated by
+        # invoke_backend → backend_paths["geak_per_task_best_speedup"]).
+        if sp is None:
+            try:
+                per_task = bp.get("geak_per_task_best_speedup")
+                if per_task is not None:
+                    sp = float(per_task)
+                    if sp <= 0:
+                        sp = None
+            except (ValueError, TypeError):
+                sp = None
         if sp is not None:
             measured = True
             if sp > best_speedup:
