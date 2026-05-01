@@ -455,10 +455,14 @@ def main() -> int:
         # "HIP error: invalid device ordinal" (observed in r20/r22). Drop
         # GEAK from the backend list when per_task_gpus >= 2; let claude /
         # codex handle multi-GPU collectives via standalone HIP / torchrun.
+        # Set ALLOW_GEAK_MULTIGPU=1 to bypass this guard (e.g. when verifying
+        # whether an upstream GEAK fix has lifted the limitation).
         backends_dropped: list[str] = []
-        if per_task_gpus >= 2 and "geak" in backends:
+        if (per_task_gpus >= 2
+                and "geak" in backends
+                and os.environ.get("ALLOW_GEAK_MULTIGPU") != "1"):
             backends = [b for b in backends if b != "geak"]
-            backends_dropped.append("geak (multi-GPU collective unsupported by GEAK sub-agent ray nesting)")
+            backends_dropped.append("geak (multi-GPU collective unsupported by GEAK sub-agent ray nesting; set ALLOW_GEAK_MULTIGPU=1 to bypass)")
         max_concurrent = max(1, args.total_gpus // max(1, per_task_gpus))
         total_jobs = len(backends) * args.replicas_per_backend
         summary["gpu_plan"] = {

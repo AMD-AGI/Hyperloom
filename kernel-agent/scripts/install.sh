@@ -15,7 +15,16 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
 TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens-internal}"
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
-GEAK_BRANCH="${GEAK_BRANCH:-main}"
+# Default to the LitellmModel-fixed branch. Upstream main works ONLY when the
+# model is reached via amd_llm + AMD LLM Gateway (anthropic SDK direct). On
+# the AMD primus-safe OpenAI-compat proxy that we have here, main's litellm
+# path does not normalize tool-call args and returns Python repr (single
+# quotes) for `submit({summary: [...]}`), making _parse_llm_response crash
+# with "Expecting property name in double quotes char 2". The PR branch
+# `feature/xiaofei/claw` adds use_amd_openai_compatible_litellm_route /
+# litellm_model_name_for_completion / format_messages_openai_chat which
+# normalize the OpenAI-compat path. Verified end-to-end on r36.
+GEAK_BRANCH="${GEAK_BRANCH:-feature/xiaofei/claw}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_ROOT}/geak-config/local.yaml}"
 # litellm picks the protocol from the model_name prefix:
