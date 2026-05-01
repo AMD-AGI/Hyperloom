@@ -28,11 +28,16 @@ KERNEL_HINTS = (
 )
 RUNTIME_API_NAMES = {
     "hipeventsynchronize",
+    "hipdevicesynchronize",
+    "hipstreamsynchronize",
     "hipgraphlaunch",
     "hiplaunchkernel",
     "hipmodulelaunchkernel",
     "hipmemcpy",
     "hipmemset",
+    "cudaeventsynchronize",
+    "cudadevicesynchronize",
+    "cudastreamsynchronize",
 }
 
 
@@ -119,12 +124,25 @@ def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
 
 
 def is_kernel_event(event: dict[str, Any]) -> bool:
+    """Strict GPU-kernel filter for raw torch_profiler events.
+
+    PyTorch profiler tags real GPU kernel launches with ``cat == 'kernel'``.
+    Everything else (``python_function`` / ``cuda_runtime`` / ``cpu_op``)
+    is host-side activity even when the symbol name happens to contain
+    "cuda" / "hip" / "synchronize" — including these via fuzzy matching
+    causes ``torch/cuda/streams.py(222): synchronize`` (the CPU wait that
+    accumulates the ENTIRE GPU duration of the wrapped enqueue burst) to
+    eclipse all real kernels in the top-K hot list, which then makes
+    every downstream step (source resolver, GEAK / Codex / Claude
+    backend dispatch) operate on a phantom kernel.
+    """
+    cat = str(event.get("cat") or event.get("category") or "").lower()
+    if cat != "kernel":
+        return False
     name = str(event.get("name") or event.get("kernel_name") or "")
     if name.lower() in RUNTIME_API_NAMES:
         return False
-    cat = str(event.get("cat") or event.get("category") or "")
-    haystack = f"{name} {cat}".lower()
-    return any(hint in haystack for hint in KERNEL_HINTS)
+    return True
 
 
 def extract_shape(event: dict[str, Any]) -> dict[str, Any] | None:
