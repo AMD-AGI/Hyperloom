@@ -284,29 +284,49 @@ class Conductor:
             await self._handle_intent(agent_name, intent)
 
     async def _compose_prompt(self, agent_name: str) -> str:
-        """Minimal v0.6 prompt: pending messages tail + state summary.
+        """v0.6 §8.3 prompt: SharedState summary + inbox tail.
 
-        v0.6 §8.3 specifies a richer composition (KB hint / Critic verdict
-        / Robustness alert / persona). P0-3 ships the skeleton; the rich
-        composition lands in P0-5 before the e2e demo.
+        Layout::
+
+            === Shared session state ===
+            session_id=...   model=...   baseline_tput=...   ...
+            === Inbox for <agent> (newest last) ===
+            seq=... msg_id=... from=... topic=... payload=...
 
         We include the canonical ``msg_id`` for each inbox row so reactive
         mock backends (and future real LLMs) can address replies via
         ``in_reply_to`` / ``target_proposal_msg_id`` without extra lookups.
         """
+        sections: list[str] = []
+
+        # 1. Shared session state — gives the agent goal + progress context
+        # even on tick 1 when the inbox is empty.
+        sections.append("=== Shared session state ===")
+        sections.append(self.shared_state.to_prompt_summary())
+
+        # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
         msgs = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
-        if not msgs:
-            return f"(no new messages for {agent_name})"
-        lines = [f"Inbox for {agent_name} (newest last):"]
-        for m in msgs[-20:]:
-            lines.append(
-                f"  seq={m.seq} msg_id={m.msg_id} from={m.from_agent} "
-                f"topic={m.topic} payload={m.payload}"
-            )
-        return "\n".join(lines)
+        if msgs:
+            sections.append(f"=== Inbox for {agent_name} (newest last) ===")
+            for m in msgs[-20:]:
+                sections.append(
+                    f"  seq={m.seq} msg_id={m.msg_id} from={m.from_agent} "
+                    f"topic={m.topic} payload={m.payload}"
+                )
+        else:
+            sections.append(f"=== Inbox for {agent_name} ===")
+            sections.append("(no new messages)")
+
+        return "\n".join(sections)
 
     async def _load_system_prompt(self, agent_name: str) -> str:
+        # Demo / test override: callers may pre-stuff a system prompt by
+        # setting ``self.system_prompt_overrides[agent_name]``. Useful to
+        # short-circuit prereq exploration during smoke runs.
+        override = getattr(self, "system_prompt_overrides", {}).get(agent_name)
+        if override is not None:
+            return override
         role = self.role_registry[agent_name]
         try:
             return role.load_system_prompt()
@@ -586,6 +606,42 @@ class Conductor:
                  "state": result.state, "result": result.result,
                  "error": result.error},
             ))
+            # Auto-promote certain succeeded results into SharedState core
+            # fields (Conductor is the only writer of CORE_STATE_FIELDS;
+            # see DESIGN §14.5 / §17.2).
+            if result.state == "succeeded":
+                await self._promote_to_shared_state(task.kind, result.result)
+
+    async def _promote_to_shared_state(self, task_kind: str, result: dict) -> None:
+        """Lift specific action-result fields into the persistent SharedState.
+
+        Currently handled:
+
+        * ``baseline``  → baseline_tput (output_throughput) + baseline_accuracy
+                          (when present) + current_best snapshot
+        """
+        if not isinstance(result, dict):
+            return
+        changed = False
+        if task_kind == "baseline":
+            tput = result.get("output_throughput")
+            if isinstance(tput, (int, float)) and tput > 0:
+                self.shared_state.baseline_tput = float(tput)
+                changed = True
+            acc = result.get("accuracy")
+            if isinstance(acc, (int, float)):
+                self.shared_state.baseline_accuracy = float(acc)
+                changed = True
+            self.shared_state.current_best = {
+                "action": "baseline",
+                "tput": float(tput) if isinstance(tput, (int, float)) else None,
+                "ttft_mean_ms": result.get("ttft_mean_ms"),
+                "e2el_mean_ms": result.get("e2el_mean_ms"),
+                "workspace": result.get("workspace"),
+            }
+            changed = True
+        if changed:
+            self.shared_state.save(self.session_dir)
 
 
 __all__ = ["Conductor", "ConductorState", "PendingProposal", "SharedState"]
