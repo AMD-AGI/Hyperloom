@@ -256,9 +256,29 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "  Run as a single-process program; for multi-GPU collectives simulate ranks\n"
         "  with `std::thread` + `std::barrier` (no MPI/torchrun needed).\n"
         "(option 3) PYTORCH cpp_extension.load(). Build a .so from your modified\n"
-        "  .cu/.cuh entirely under ./optimized_versions/ via\n"
-        "  `torch.utils.cpp_extension.load(name='opt', sources=[...], extra_include_paths=[...])`,\n"
-        "  then `import opt` and compare against the original Python entry point.\n"
+        "  .cu/.cuh entirely under ./optimized_versions/, then `import` it and\n"
+        "  compare against the original Python entry point. Concrete template:\n"
+        "    ```python\n"
+        "    import os, torch\n"
+        "    from torch.utils.cpp_extension import load\n"
+        "    HERE = os.path.dirname(os.path.abspath(__file__))\n"
+        f"    AITER_INC = '{kernel_repo or '/sgl-workspace/aiter'}/csrc/include'\n"
+        "    opt = load(\n"
+        "        name='opt_kernel',\n"
+        "        sources=[os.path.join(HERE, 'v1_my_kernel.cu')],\n"
+        "        extra_include_paths=[AITER_INC],\n"
+        "        extra_cuda_cflags=['-O3', '-std=c++17', '-DUSE_ROCM',\n"
+        "                           '--offload-arch=gfx942'],\n"
+        "        verbose=False,\n"
+        "    )\n"
+        "    out_opt = opt.my_kernel(*args)            # YOUR optimized version\n"
+        "    out_ref = aiter.<original_entry>(*args)   # baseline (unmodified)\n"
+        "    torch.testing.assert_close(out_opt, out_ref)  # correctness\n"
+        "    # then time both with torch.cuda.Event for speedup\n"
+        "    ```\n"
+        "  This is the ONLY way to A/B an ASM-backed C++ kernel without\n"
+        "  rebuilding aiter (which is forbidden). Codex tends to skip this\n"
+        "  and write `speedup: N/A` — DO NOT do that.\n"
         "Pick whichever option matches the kernel; do NOT just measure baseline\n"
         "and write `speedup: N/A` — that wastes the run.\n"
     )
@@ -604,6 +624,31 @@ def run_attempt(
                 report = Path(cli_workspace) / "optimization_report.md"
                 if report.exists():
                     backend_paths["partial_report"] = str(report)
+            # /home/user/ rescue: claude occasionally ignores the absolute-
+            # path system_prompt and writes to ~/optimized_versions/ instead
+            # of the workspace cwd (observed pre-Fix-3 in r12-r17, recurs
+            # rarely after). When the cli_workspace's optimized_versions/ is
+            # empty but /home/user/optimized_versions/ has fresh files newer
+            # than this attempt's start time, surface them so the report
+            # is not silently lost.
+            home_opt = Path("/home/user/optimized_versions")
+            if (cli_workspace
+                    and (not (Path(cli_workspace) / "optimized_versions").is_dir()
+                         or not list((Path(cli_workspace) / "optimized_versions").iterdir()))
+                    and home_opt.is_dir()):
+                rescued = sorted(
+                    [p for p in home_opt.iterdir() if p.is_file() and p.stat().st_mtime >= started],
+                    key=lambda p: p.stat().st_mtime,
+                )
+                if rescued:
+                    backend_paths["partial_optimized_count"] = str(len(rescued))
+                    backend_paths["partial_latest_optimized"] = str(rescued[-1])
+                    backend_paths["partial_optimized_rescued_from"] = str(home_opt)
+                    home_report = Path("/home/user/optimization_report.md")
+                    if (home_report.is_file()
+                            and home_report.stat().st_mtime >= started
+                            and "partial_report" not in backend_paths):
+                        backend_paths["partial_report"] = str(home_report)
             if cli_workspace:
                 backend_paths["cli_workspace"] = cli_workspace
             if cli_log:
@@ -808,10 +853,12 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         return {"decision": "PARTIAL", "reasons": reasons}
     if verification["micro_speedup"] <= 1.0:
         return {"decision": "REVERT", "reasons": ["microbench did not improve"]}
-    # Goal threshold: only speedups >= 1.50x are KEEP candidates. Anything
-    # in (1.0, 1.50) is a marginal win that needs human review (could be
-    # noise / shape-specific / not worth the risk on production paths).
-    KEEP_THRESHOLD = 1.50
+    # Goal threshold: 1.20x lets shape-specific 5-30% wins (claude r19 GEMM
+    # 1.32x, GEAK r39 rms_norm 1.18x, codex r25 GEMM 1.66x) through to
+    # human KEEP review. Below 1.20x is treated as noise / not worth the
+    # production risk and routed to NEEDS_REVIEW with reason. Originally
+    # 1.50 (overly strict — too many real wins fell through to PARTIAL).
+    KEEP_THRESHOLD = 1.20
     if verification["micro_speedup"] < KEEP_THRESHOLD:
         reasons.append(
             f"speedup {verification['micro_speedup']:.3f}x below KEEP "
