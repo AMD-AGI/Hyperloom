@@ -677,6 +677,12 @@ class Conductor:
                     },
                     in_reply_to=request_msg.msg_id, priority=1,
                 ))
+                # Mirror kernel-opt outcomes into SharedState so Orch
+                # sees decision/speedup in its prompt next tick and
+                # doesn't re-dispatch the same kernel_id forever.
+                if kind == "run_optimization":
+                    self.shared_state.record_kernel_opt(result)
+                    self.shared_state.save(self.session_dir)
                 # Bug B fix: the request was just answered programmatically,
                 # so the LLM-backed kernel agent should NOT see the request
                 # in its inbox next tick (otherwise it duplicates the
@@ -835,6 +841,30 @@ class Conductor:
             if result.state == "succeeded":
                 await self._promote_to_shared_state(task.kind, result.result)
 
+    def _lift_to_current_best(
+        self, task_kind: str, best_tput: float, bv: dict[str, Any],
+    ) -> None:
+        """Update SharedState.current_best + recompute cumulative_gain.
+
+        Helper for both the 1-shot KEEP threshold path and the
+        cross-round consistent-winner path in _promote_to_shared_state.
+        """
+        self.shared_state.current_best = {
+            "action": task_kind,
+            "tput": float(best_tput),
+            "variant_name": bv.get("name") if isinstance(bv, dict) else None,
+            "extra_sglang_args":
+                (bv.get("extra_sglang_args") if isinstance(bv, dict) else "") or "",
+            "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
+            "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
+            "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
+        }
+        if self.shared_state.baseline_tput > 0:
+            self.shared_state.cumulative_gain = (
+                (float(best_tput) - self.shared_state.baseline_tput)
+                / self.shared_state.baseline_tput * 100.0
+            )
+
     async def _promote_to_shared_state(self, task_kind: str, result: dict) -> None:
         """Lift specific action-result fields into the persistent SharedState.
 
@@ -901,36 +931,79 @@ class Conductor:
                 changed = True
         elif task_kind in ("backends", "params", "sweep"):
             # Promote a grid-runner winner if it actually beat the
-            # current best by a meaningful margin (>= 1% per marathon
-            # backends.md / params.md "KEEP" threshold).
+            # current best by a meaningful margin. We use 0.5% as the
+            # 1-shot KEEP threshold (relaxed from marathon's original
+            # 1.0% per the resume5 9h finding: 35/38 winners landed in
+            # the 0.3–0.84% band but never promoted because each
+            # individual run sat under 1.0%) AND, as a separate path,
+            # promote ANY consistent winner that wins ≥ 2 of last 3
+            # rounds with average gain ≥ 0.3% — that's the cross-round
+            # signal-vs-noise check.
+            PROMOTE_THRESHOLD_PCT = 0.5
+            CROSS_ROUND_LOOKBACK = 3
+            CROSS_ROUND_MIN_APPEARANCES = 2
+            CROSS_ROUND_MIN_AVG_GAIN_PCT = 0.3
             best_tput = result.get("output_throughput")
+            bv = result.get("best_variant") or {}
+            best_gain = result.get("best_gain_pct")
             cb = self.shared_state.current_best or {}
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
             cur_best = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
                 else float(self.shared_state.baseline_tput or 0.0)
-            if (
-                isinstance(best_tput, (int, float))
-                and best_tput > 0
-                and cur_best > 0
-                and (best_tput - cur_best) / cur_best * 100.0 >= 1.0
-            ):
-                bv = result.get("best_variant") or {}
-                self.shared_state.current_best = {
-                    "action": task_kind,
-                    "tput": float(best_tput),
-                    "variant_name": bv.get("name") if isinstance(bv, dict) else None,
-                    "extra_sglang_args":
-                        (bv.get("extra_sglang_args") if isinstance(bv, dict) else "") or "",
-                    "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
-                    "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
-                    "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
-                }
-                if self.shared_state.baseline_tput > 0:
-                    self.shared_state.cumulative_gain = (
-                        (float(best_tput) - self.shared_state.baseline_tput)
-                        / self.shared_state.baseline_tput * 100.0
+            # Compute gain vs current_best (different from result.best_gain_pct
+            # which is gain vs base_tput injected at materialize time).
+            gain_vs_cb = (
+                (best_tput - cur_best) / cur_best * 100.0
+                if isinstance(best_tput, (int, float)) and best_tput > 0 and cur_best > 0
+                else None
+            )
+            # Always record this round to the rolling history regardless
+            # of whether it promotes — `consistent_winner` consults it.
+            if isinstance(bv, dict) and bv.get("name") and gain_vs_cb is not None:
+                self.shared_state.push_params_winner(
+                    action=task_kind,
+                    variant_name=bv.get("name"),
+                    tput=best_tput,
+                    gain_pct=gain_vs_cb,
+                )
+            promoted = False
+            if gain_vs_cb is not None and gain_vs_cb >= PROMOTE_THRESHOLD_PCT:
+                self._lift_to_current_best(task_kind, best_tput, bv)
+                promoted = True
+            else:
+                # Cross-round signal: same variant winning consistently
+                # at sub-threshold but real gains.
+                consistent = self.shared_state.consistent_winner(
+                    lookback=CROSS_ROUND_LOOKBACK,
+                    min_appearances=CROSS_ROUND_MIN_APPEARANCES,
+                    min_avg_gain_pct=CROSS_ROUND_MIN_AVG_GAIN_PCT,
+                )
+                if consistent and consistent.get("tput", 0) > cur_best:
+                    # Lift the consistent winner — synthesise a best_variant
+                    # from the history record (we don't have its full
+                    # extra_sglang_args here, so leave that blank; Orch
+                    # consults `params_winner_history` if it needs to know
+                    # which variant_name is the consistent one).
+                    self._lift_to_current_best(
+                        consistent["action"], consistent["tput"],
+                        {"name": consistent["variant_name"]},
                     )
+                    log.info(
+                        "promoted consistent winner: variant=%s avg_gain=%.2f%% (%d rounds)",
+                        consistent["variant_name"],
+                        consistent["gain_pct"],
+                        CROSS_ROUND_LOOKBACK,
+                    )
+                    promoted = True
+            if promoted:
+                self.shared_state.params_no_promote_streak = 0
                 changed = True
+            else:
+                # Plateau detection: count consecutive grid runs that
+                # didn't move current_best. Prompt summary surfaces this
+                # so Orch knows when to switch to kernel-opt.
+                self.shared_state.params_no_promote_streak += 1
+                changed = True  # streak counter changed → save state.json
         if changed:
             self.shared_state.save(self.session_dir)
 
