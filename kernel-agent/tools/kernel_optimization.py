@@ -773,6 +773,74 @@ def _extract_speedup_from_geak(final_report_path: str | Path) -> float | None:
         return None
 
 
+def _extract_correctness_from_report(report_path: str | Path) -> bool | None:
+    """Best-effort correctness signal from backend markdown/json reports."""
+    if not report_path:
+        return None
+    p = Path(report_path)
+    if not p.is_file():
+        return None
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    lower = text.lower()
+    fail_markers = (
+        "correctness failed", "incorrect", "mismatch", "assert_close failed",
+        "not close", "wrong output", "validation failed",
+    )
+    pass_markers = (
+        "correctness passed", "correctness: pass", "all tests passed",
+        "assert_close passed", "torch.testing.assert_close passed",
+        "validation passed",
+    )
+    if any(marker in lower for marker in fail_markers):
+        return False
+    if any(marker in lower for marker in pass_markers):
+        return True
+    return None
+
+
+def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None:
+    """Read correctness from GEAK-style JSON reports when present."""
+    if not final_report_path:
+        return None
+    p = Path(final_report_path)
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    found: list[bool] = []
+
+    def walk(obj: Any) -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                lk = str(k).lower()
+                if "correct" in lk or "valid" in lk:
+                    if isinstance(v, bool):
+                        found.append(v)
+                    elif isinstance(v, str):
+                        lv = v.lower()
+                        if lv in {"pass", "passed", "true", "ok", "success"}:
+                            found.append(True)
+                        elif lv in {"fail", "failed", "false", "error"}:
+                            found.append(False)
+                walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk(data)
+    if False in found:
+        return False
+    if True in found:
+        return True
+    return None
+
+
 def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]], benchmark_available: bool) -> dict[str, Any]:
     # An attempt is usable if it either completed cleanly OR was killed past
     # the budget but left optimized_versions/ + report on disk (status=partial).
@@ -809,9 +877,23 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
     if best is None and usable:
         best = usable[0]
     compile_passed = bool(best)
-    # Correctness is still derived from upstream signal (accuracy harness or
-    # GEAK's own retest); microbench presence alone isn't enough.
-    correctness_passed = bool(best and benchmark_available)
+    correctness_signal = getattr(args, "correctness_passed", None)
+    correctness_source = "cli_override" if correctness_signal is not None else "missing"
+    if correctness_signal is None and best is not None:
+        bp = best.get("backend_paths") or {}
+        correctness_signal = _extract_correctness_from_report(
+            bp.get("partial_report") or bp.get("report") or ""
+        )
+        if correctness_signal is not None:
+            correctness_source = "report_scan"
+    if correctness_signal is None and best is not None:
+        bp = best.get("backend_paths") or {}
+        correctness_signal = _extract_correctness_from_geak(
+            bp.get("geak_final_report", "")
+        )
+        if correctness_signal is not None:
+            correctness_source = "geak_report"
+    correctness_passed = bool(best and correctness_signal is True)
     if args.micro_speedup is not None:
         micro_speedup = float(args.micro_speedup)
         speedup_source = "cli_override"
@@ -834,6 +916,8 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
     return {
         "compile_passed": compile_passed,
         "correctness_passed": correctness_passed,
+        "correctness_source": correctness_source,
+        "benchmark_available": benchmark_available,
         "micro_speedup": micro_speedup,
         "micro_speedup_source": speedup_source,
         "e2e_gain_pct": e2e_gain_pct,
@@ -911,6 +995,7 @@ def main() -> int:
                              "SIGTERMs the select_patch round).")
     parser.add_argument("--micro-speedup", type=float, default=None)
     parser.add_argument("--e2e-gain-pct", type=float, default=None)
+    parser.add_argument("--correctness-passed", choices=["true", "false", "unknown"], default="unknown")
     parser.add_argument("--accuracy-passed", choices=["true", "false", "unknown"], default="unknown")
     parser.add_argument("--oob-max-turns", type=int, default=int(os.environ.get("KERNEL_AGENT_OOB_MAX_TURNS", "100")))
     parser.add_argument("--geak-cost-limit", type=float, default=None)
@@ -965,6 +1050,8 @@ def main() -> int:
                       started_at=started_at)
         accuracy = None if args.accuracy_passed == "unknown" else args.accuracy_passed == "true"
         args.accuracy_passed = accuracy
+        correctness = None if args.correctness_passed == "unknown" else args.correctness_passed == "true"
+        args.correctness_passed = correctness
         verification = build_verification(args, attempts, benchmark_available)
         proposal = make_proposal(verification)
 
