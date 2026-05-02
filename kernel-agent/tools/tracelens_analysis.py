@@ -178,6 +178,57 @@ def source_type_for(name: str, source_file: str) -> str:
     return "unknown"
 
 
+# Wrapper TUs that just dispatch to a precompiled .so / .co (no device body
+# we can rewrite) — agents waste their budget grepping but produce no real
+# patch. Detected by file size + content signature, similar to
+# `_is_pybind_shim` for pybind glue but broader: also catches Python
+# dispatch wrappers and the few "ctypes load + call" shims that aren't
+# strictly pybind. Kept conservative so we don't drop legitimate small
+# kernels.
+_VENDOR_DISPATCH_SIGS = (
+    "ctypes.CDLL",  # pure-Python wrapper around .so
+    "torch.ops.aiter.",  # registered aten op forwarding
+    "_C_aiter.",  # bound C extension forwarding
+    "module_name = ",  # aiter jit module loaders
+    "AITER_JIT_LOAD",  # aiter macro
+    "hipModuleLoad",  # raw .co loader
+    "AiterAsmKernel",  # ASM dispatch wrapper
+)
+_VENDOR_KEYWORD_NAMES = (
+    "hipblaslt", "rocblaslt", "miopen", "ck_kernels",
+)
+
+
+def is_vendor_dispatch_wrapper(name: str, source_file: str) -> bool:
+    """Heuristic: True when source_file is a thin dispatch wrapper around a
+    precompiled vendor binary (.so/.co), i.e. nothing for a kernel agent
+    to rewrite. Distinct from `_is_pybind_shim` (which catches PYBIND11
+    registration TUs); this catches Python wrappers + ctypes/jit-load
+    style C++ shims + vendor BLAS names.
+    """
+    nm = (name or "").lower()
+    if any(kw in nm for kw in _VENDOR_KEYWORD_NAMES):
+        return True
+    if not source_file:
+        return False
+    p = Path(source_file)
+    try:
+        if not p.is_file():
+            return False
+        # Heuristic threshold: real device kernels (Triton .py rms_norm
+        # ~38 KB, HIP `.cuh` custom_all_reduce ~110 KB, attention kernels
+        # ~30+ KB) are almost always > 16 KB; ASM dispatch wrappers like
+        # asm_gemm_a16w16.cu (~10 KB) and pybind shims (~250 B) sit
+        # well below. Anything > 16 KB is presumed real and never marked
+        # vendor by this check.
+        if p.stat().st_size > 16 * 1024:
+            return False
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    return any(sig in text for sig in _VENDOR_DISPATCH_SIGS)
+
+
 KNOWN_SEARCH_ROOTS = (
     "/sgl-workspace/aiter",
     "/sgl-workspace/sglang/sgl-kernel",
@@ -673,6 +724,15 @@ def _finalize_candidates(
         # (rare, but defensive).
         item["kernel_repo"] = find_repo_root(item.get("source_file", "")) or item["kernel_repo"]
         item["source_type"] = source_type_for(item["name"], item.get("source_file", ""))
+        # Re-classify thin vendor / dispatch wrappers (the .so/.co loader
+        # shims that have no rewritable kernel body). Even when the file
+        # extension is .cu/.py and source_type would otherwise be hip_cpp/
+        # python, downgrade to vendor_binary so recommend_backends() drops
+        # this candidate (or the runner skips it entirely).
+        if (item["source_type"] != "vendor_binary"
+                and is_vendor_dispatch_wrapper(item["name"], item.get("source_file", ""))):
+            item["source_type"] = "vendor_binary"
+            item["vendor_dispatch_wrapper"] = True
         item["benchmark_files"] = find_benchmark_files(
             item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
         )
