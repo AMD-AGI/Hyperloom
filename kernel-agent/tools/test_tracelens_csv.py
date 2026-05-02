@@ -176,3 +176,54 @@ def test_b_returns_none_when_csv_has_zero_kernels(tmp_path):
         encoding="utf-8",
     )
     assert tla.parse_tracelens_kernel_summary(empty, top_k=10) is None
+
+
+# ===========================================================================
+# Native-only kernel-opt targeting
+# ===========================================================================
+def test_compile_generated_kernel_is_not_reusable_native():
+    candidate = {
+        "name": "triton_poi_fused_add_mul_0",
+        "source_file": "/tmp/torchinductor_root/ab/cdef.py",
+        "source_type": tla.source_type_for(
+            "triton_poi_fused_add_mul_0",
+            "/tmp/torchinductor_root/ab/cdef.py",
+        ),
+    }
+    assert candidate["source_type"] == "runtime_generated"
+    assert tla.is_runtime_generated_kernel(
+        candidate["name"], candidate["source_file"],
+    ) is True
+    assert tla.is_reusable_native_kernel(candidate) is False
+    assert tla.recommend_backends(candidate) == []
+    assert "not reusable" in tla.build_notes(candidate)
+
+
+def test_stable_framework_triton_source_is_reusable_native():
+    candidate = {
+        "name": "triton_attention_decode_kernel",
+        "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/triton_ops.py",
+        "source_type": tla.source_type_for(
+            "triton_attention_decode_kernel",
+            "/sgl-workspace/sglang/python/sglang/srt/layers/attention/triton_ops.py",
+        ),
+    }
+    assert candidate["source_type"] == "triton"
+    assert tla.is_runtime_generated_kernel(
+        candidate["name"], candidate["source_file"],
+    ) is False
+    assert tla.is_reusable_native_kernel(candidate) is True
+    assert tla.recommend_backends(candidate) == ["geak", "claude", "codex"]
+
+
+def test_unknown_source_root_is_not_reusable_native():
+    candidate = {
+        "name": "my_custom_kernel",
+        "source_file": "/tmp/random/my_custom_kernel.cu",
+        "source_type": tla.source_type_for(
+            "my_custom_kernel", "/tmp/random/my_custom_kernel.cu",
+        ),
+    }
+    assert candidate["source_type"] == "hip_cpp"
+    assert tla.is_reusable_native_kernel(candidate) is False
+    assert tla.recommend_backends(candidate) == []
