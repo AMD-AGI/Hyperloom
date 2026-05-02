@@ -246,7 +246,11 @@ async def select_kernels_handler(
     timeout_sec = int(payload.get("budget_minutes", 5)) * 60
 
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
-    return _shape_tool_result(rc, stdout, stderr)
+    result = _shape_tool_result(rc, stdout, stderr)
+    artifacts = result.get("artifact_paths") if isinstance(result, dict) else None
+    if isinstance(artifacts, dict) and artifacts.get("kernel_candidates"):
+        result["candidates_path"] = artifacts["kernel_candidates"]
+    return result
 
 
 # ---------------------------------------------------------------------------

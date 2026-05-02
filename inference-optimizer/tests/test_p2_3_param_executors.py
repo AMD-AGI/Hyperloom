@@ -324,9 +324,12 @@ async def test_params_executor_with_default_grid(sub_agent_runner, tmp_path):
 
 def test_default_grids_are_non_empty():
     assert len(DEFAULT_BACKENDS_GRID) >= 5
-    assert len(DEFAULT_PARAMS_GRID)   >= 5
+    assert len(DEFAULT_PARAMS_GRID)   >= 12
     assert len(DEFAULT_NCCL_GRID)     >= 1
     assert all(isinstance(v, GridVariant) for v in DEFAULT_BACKENDS_GRID)
+    names = {v.name for v in DEFAULT_PARAMS_GRID}
+    assert {"cuda_graph_max_bs_64", "chunked_prefill_128k",
+            "max_prefill_tokens_64k"} <= names
 
 
 @pytest.mark.asyncio
