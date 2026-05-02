@@ -45,6 +45,7 @@ from .orchestrator.action_executors import (
 from .orchestrator.backends import (
     ClaudeBackend,
     CodexBackend,
+    MockCriticBackend,
     MockRobustnessBackend,
 )
 from .orchestrator.conductor import Conductor
@@ -178,11 +179,12 @@ async def _noop_prep(ctx) -> dict:
 
 
 def _build_backends(
-    *, claude_model: str, codex_model: str, kernel_codex: bool
+    *, claude_model: str, codex_model: str, kernel_codex: bool,
+    critic_mock: bool = False,
 ) -> dict[str, Any]:
     backends: dict[str, Any] = {
         "orchestration": ClaudeBackend(model=claude_model, max_turns_default=4),
-        "critic":        CodexBackend(model=codex_model),
+        "critic":        MockCriticBackend() if critic_mock else CodexBackend(model=codex_model),
         "robustness":    MockRobustnessBackend(),
     }
     if kernel_codex:
@@ -307,6 +309,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         claude_model=args.claude_model,
         codex_model=args.codex_model,
         kernel_codex=args.kernel_codex,
+        critic_mock=args.critic_mock,
     )
     # Bug A fix: expose the active session_dir to in-process executors
     # (e.g. ReportExecutor) that don't get session_dir threaded through
@@ -324,7 +327,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     print(f"Backends        : "
           f"orchestration=Claude({args.claude_model}), "
           f"kernel={'Codex' if args.kernel_codex else 'Claude'}, "
-          f"critic=Codex({args.codex_model}), robustness=mock")
+          f"critic={'mock' if args.critic_mock else f'Codex({args.codex_model})'}, "
+          f"robustness=mock")
     print(f"Max ticks       : {args.max_ticks or 'unlimited'} "
           f"(budget = {args.max_hours}h)")
     print(f"Tick interval   : {args.tick_interval_sec}s")
@@ -392,6 +396,9 @@ def _build_parser() -> argparse.ArgumentParser:
                            "Pass --kernel-claude to switch.")
     opt.add_argument("--kernel-claude", action="store_false", dest="kernel_codex",
                       help="Use Claude backend for Kernel agent")
+    opt.add_argument("--critic-mock", action="store_true", default=False,
+                      help="Use mock Critic auto-approval when Codex credentials "
+                           "are unavailable. Intended for validation runs.")
     opt.add_argument("--orch-prompt", type=str, default=None,
                       help="Override Orchestration system prompt (file path or inline)")
     opt.add_argument("--critic-prompt", type=str, default=None,
