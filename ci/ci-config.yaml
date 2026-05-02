@@ -63,14 +63,14 @@ models:
     kernel_opt_backends: claude
     target_gpu: mi300x
 
-  # ── GLM 5 (FP8, TP=16, 2-node) — mi355x config, runs on mi300x with TP=16 ──
-  - inferenceX_key: glm5-fp8-mi355x-sglang
-    inferenceX_api_name: GLM-5
-    model_path_override: /wekafs/models/zai-org-GLM-5
-    optimization_depth: full
-    kernel_opt_backends: claude
-    target_gpu: mi300x
-    tp: 16
+  # ── GLM 5 (FP8) — requires multi-node (TP=16), pending RayJob support ──
+  # - inferenceX_key: glm5-fp8-mi355x-sglang
+  #   inferenceX_api_name: GLM-5
+  #   model_path_override: /wekafs/models/zai-org-GLM-5
+  #   optimization_depth: full
+  #   kernel_opt_backends: claude
+  #   target_gpu: mi300x
+  #   tp: 16
 
   # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
   - inferenceX_key: qwen3.5-bf16-mi300x-sglang
