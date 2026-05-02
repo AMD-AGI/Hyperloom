@@ -182,6 +182,61 @@ async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypa
         await c.stop()
 
 
+@pytest.mark.asyncio
+async def test_select_kernels_caches_result_to_shared_state(session_dir, monkeypatch, tmp_path):
+    """Successful select_kernels writes a cache entry; the next identical
+    request short-circuits without invoking the handler."""
+    c = Conductor(session_dir, backends=_silent_backends())
+    try:
+        from inference_optimizer.orchestrator import kernel_request_handlers
+        candidates_path = tmp_path / "kernel_candidates.json"
+        candidates_path.write_text("{}", encoding="utf-8")
+        call_count = {"n": 0}
+
+        async def fake_handler(payload, *, session_dir):
+            call_count["n"] += 1
+            return {
+                "status": "ok",
+                "candidates_path": str(candidates_path),
+                "hot_kernels": [
+                    {"kernel_id": "k001", "name": "kA", "gpu_pct": 30.0,
+                     "source_file": "/sgl-workspace/aiter/csrc/x.cu",
+                     "reusable_native_kernel": True},
+                ],
+            }
+        monkeypatch.setitem(
+            kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
+            "select_kernels", fake_handler,
+        )
+
+        intent = Intent(
+            type=IntentType.REQUEST,
+            payload={"target_agent": "kernel", "kind": "select_kernels",
+                     "params": {"trace_input": "/tmp/trace-A.json.gz"}},
+        )
+        await c._handle_intent("orchestration", intent)
+        await c._handle_intent("orchestration", intent)
+
+        assert call_count["n"] == 1, "second identical request must hit the cache"
+        cached = c.shared_state.last_select_kernels
+        assert cached["trace_input"] == "/tmp/trace-A.json.gz"
+        assert cached["candidates_path"] == str(candidates_path)
+        assert cached["hot_kernels_top5"][0]["kernel_id"] == "k001"
+
+        # Different trace_input must NOT hit the cache.
+        await c._handle_intent("orchestration", Intent(
+            type=IntentType.REQUEST,
+            payload={"target_agent": "kernel", "kind": "select_kernels",
+                     "params": {"trace_input": "/tmp/trace-B.json.gz"}},
+        ))
+        assert call_count["n"] == 2
+
+        # to_prompt_summary surfaces the cached state for Orchestration.
+        assert "last_select_kernels=" in c.shared_state.to_prompt_summary()
+    finally:
+        await c.stop()
+
+
 # ===========================================================================
 # Bug C — profile result promotes main_trace_path to SharedState
 # ===========================================================================
