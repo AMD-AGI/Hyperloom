@@ -88,3 +88,12 @@ def test_cli_correctness_override(tmp_path):
     assert verification["correctness_passed"] is True
     assert verification["correctness_source"] == "cli_override"
     assert ko.make_proposal(verification)["decision"] == "KEEP"
+
+
+def test_benchmark_files_list_counts_as_benchmark(tmp_path):
+    bench = tmp_path / "bench.py"
+    bench.write_text("print('ok')\n", encoding="utf-8")
+    args = _args()
+    args.benchmark_file = ""
+    args.test_harness_path = ""
+    assert ko.has_benchmark(args, {"benchmark_files": [str(bench)]}) is True

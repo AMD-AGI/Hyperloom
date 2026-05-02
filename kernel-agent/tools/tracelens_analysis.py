@@ -472,12 +472,50 @@ def find_repo_root(source_file: str) -> str:
 _BENCHMARK_DIRS = ("op_tests", "tests", "benchmarks", "benchmark", "test", "perf")
 
 
+_KNOWN_HARNESS_HINTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        ("rmsnorm_quant", "add_rmsnorm_quant", "rmsnorm"),
+        (
+            "/sgl-workspace/aiter/op_tests/test_rmsnorm2dFusedAddQuant.py",
+            "/sgl-workspace/aiter/op_tests/test_rmsnorm2d.py",
+            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_rmsnorm.py",
+            "/sgl-workspace/sglang/sgl-kernel/benchmark/bench_rmsnorm.py",
+        ),
+    ),
+    (
+        ("activation", "act_and_mul", "silu"),
+        (
+            "/sgl-workspace/aiter/op_tests/test_activation.py",
+            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_ff_a16w16_fused.py",
+        ),
+    ),
+    (
+        ("paged_attention", "fmha", "attention"),
+        (
+            "/sgl-workspace/aiter/op_tests/test_pa.py",
+            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_pa_decode.py",
+            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_pa_prefill.py",
+        ),
+    ),
+)
+
+
+def _known_harness_files(name: str, source_file: str) -> list[Path]:
+    blob = f"{name} {source_file}".lower()
+    out: list[Path] = []
+    for markers, paths in _KNOWN_HARNESS_HINTS:
+        if any(marker in blob for marker in markers):
+            out.extend(Path(p) for p in paths if Path(p).exists())
+    return out
+
+
 def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> list[str]:
     """Look for Python/cpp test/benchmark files matching the kernel keywords
     inside well-known sub-directories of *repo_root*. Returns absolute paths.
     """
+    known = _known_harness_files(name, source_file)
     if not repo_root:
-        return []
+        return [str(p) for p in known[:10]]
     keywords = _candidate_keywords(name)
     # Source-file stem and a no-underscore variant catch repos that name tests
     # slightly differently from the kernel symbol (e.g. cross_device_reduce vs
@@ -492,7 +530,7 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
     if not keywords:
         return []
     root = Path(repo_root)
-    found: list[Path] = []
+    found: list[Path] = list(known)
     for sub in _BENCHMARK_DIRS:
         sub_root = root / sub
         if not sub_root.exists():
