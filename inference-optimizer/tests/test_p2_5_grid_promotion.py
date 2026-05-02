@@ -158,7 +158,8 @@ async def test_promote_backends_winner_updates_current_best_and_gain(session_dir
 
 @pytest.mark.asyncio
 async def test_promote_backends_does_not_overwrite_when_below_threshold(session_dir):
-    """Improvement < 1% is treated as noise; current_best stays."""
+    """Improvement < 0.5% (P5 relaxed threshold; marathon was 1.0%) and
+    not yet a consistent winner across rounds → current_best stays."""
     c = Conductor(session_dir, backends=_silent_backends())
     try:
         c.shared_state.baseline_tput = 800.0
@@ -166,15 +167,18 @@ async def test_promote_backends_does_not_overwrite_when_below_threshold(session_
         c.shared_state.cumulative_gain = 0.0
         c.shared_state.save(session_dir)
 
-        # +0.5% — below the 1% KEEP threshold from marathon backends.md
+        # +0.25% — below the 0.5% single-round KEEP bar (P5)
         result = {
             "status": "succeeded",
-            "output_throughput": 804.0,
+            "output_throughput": 802.0,
             "best_variant": {"name": "attn_aiter"},
         }
         await c._promote_to_shared_state("backends", result)
         assert c.shared_state.cumulative_gain == 0.0
         assert c.shared_state.current_best["action"] == "baseline"  # unchanged
+        # A single sub-threshold winner shouldn't trigger the cross-round
+        # promote either (needs ≥ 2 of 3 rounds for the same variant).
+        assert c.shared_state.params_no_promote_streak == 1
     finally:
         await c.stop()
 
