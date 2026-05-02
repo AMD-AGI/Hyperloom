@@ -284,10 +284,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # already done — it just heartbeats forever. Clear it so the new
         # run has a clean signal. The Conductor's run() always re-sets
         # stop_reason at exit anyway.
-        if prior_stop:
+        prior_crash = state.crash_count
+        if prior_stop or prior_crash >= 3:
             state.stop_reason = ""
+            # Reset persisted crash_count so a fresh resume isn't immediately
+            # tripped into "emergency" by accumulated failures from prior runs
+            # (e.g. authentication errors before .env was loaded).
+            state.crash_count = 0
             state.save(session_dir)
-            print(f"  → cleared stop_reason for fresh resume")
+            print(
+                f"  → cleared stop_reason and reset crash_count "
+                f"(was {prior_crash}) for fresh resume"
+            )
     else:
         if not args.model:
             print("ERROR: --model is required for new runs (or use --resume "
