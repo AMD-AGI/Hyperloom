@@ -265,8 +265,30 @@ async def test_run_stops_on_signal_via_stop_event(session_dir):
 async def test_run_stops_on_emergency_crash_count(session_dir):
     c = Conductor(session_dir, backends=_backends_silent())
     try:
-        c.shared_state.crash_count = 5
+        c.shared_state.crash_count = 30
         reason = await c.run(max_ticks=10)
+        assert reason == "emergency"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_emergency_below_default_threshold(session_dir):
+    c = Conductor(session_dir, backends=_backends_silent())
+    try:
+        c.shared_state.crash_count = 5
+        reason = await c.run(max_ticks=2)
+        assert reason == "max_ticks"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_emergency_threshold_can_be_lowered_per_call(session_dir):
+    c = Conductor(session_dir, backends=_backends_silent())
+    try:
+        c.shared_state.crash_count = 4
+        reason = await c.run(max_ticks=10, crash_emergency_threshold=3)
         assert reason == "emergency"
     finally:
         await c.stop()
