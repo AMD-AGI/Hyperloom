@@ -348,3 +348,53 @@ async def test_run_optimization_handler_uses_candidates_path_native_guard(
     assert result["status"] == "failed"
     assert result["error_class"] == "non_reusable_kernel"
     assert "runtime-generated" in result["reason"]
+
+
+@pytest.mark.asyncio
+async def test_run_optimization_handler_forwards_verification_evidence(
+    session_dir, tmp_path, monkeypatch,
+):
+    from inference_optimizer.orchestrator import kernel_request_handlers as krh
+
+    candidates = tmp_path / "kernel_candidates.json"
+    candidates.write_text(
+        """
+        {
+          "hot_kernels": [
+            {
+              "kernel_id": "k006",
+              "name": "aiter_native_kernel",
+              "source_file": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+              "reusable_native_kernel": true
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    seen = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        seen["cmd"] = cmd
+        return 0, '{"status":"ok"}', ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    await krh.run_optimization_handler(
+        {
+            "kernel_id": "k006",
+            "candidates_path": str(candidates),
+            "micro_speedup": 1.25,
+            "e2e_gain_pct": 0.7,
+            "correctness_passed": True,
+            "accuracy_passed": True,
+            "dry_run": True,
+        },
+        session_dir=session_dir,
+    )
+    cmd = seen["cmd"]
+    assert "--correctness-passed" in cmd
+    assert cmd[cmd.index("--correctness-passed") + 1] == "true"
+    assert "--accuracy-passed" in cmd
+    assert cmd[cmd.index("--accuracy-passed") + 1] == "true"
+    assert "--micro-speedup" in cmd
+    assert "--e2e-gain-pct" in cmd
