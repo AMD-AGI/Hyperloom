@@ -55,6 +55,10 @@ class SharedState:
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
+    # Full accepted configuration stack across action families. Each entry
+    # records the incremental candidate that was accepted; current_best keeps
+    # the materialized full args/env for execution.
+    optimization_stack: list[dict[str, Any]] = field(default_factory=list)
     cumulative_gain: float = 0.0
     stop_reason: str = ""
     current_action: str = ""
@@ -63,6 +67,9 @@ class SharedState:
     start_ts: str = field(default_factory=_now_iso)
     max_minutes: int = 0
     last_profile_trace: str = ""
+    # Most recent workload sweep; used to reason about gains beyond the
+    # smoke workload (CONC/ISL/OSL frontier).
+    last_sweep: dict[str, Any] = field(default_factory=dict)
     # Kernel-opt response tracking — Conductor records the most recent
     # `run_optimization_done` so Orch sees what's been tried and doesn't
     # re-dispatch the same kernel_id every tick.
@@ -195,6 +202,31 @@ class SharedState:
             "ts": _now_iso(),
         }
 
+    def record_sweep(self, result: dict[str, Any]) -> None:
+        if not isinstance(result, dict):
+            return
+        grid = result.get("sweep_grid") or []
+        best = None
+        if isinstance(grid, list):
+            best = max(
+                (
+                    e for e in grid
+                    if isinstance(e, dict)
+                    and e.get("status") == "succeeded"
+                    and isinstance(e.get("output_throughput"), (int, float))
+                ),
+                default=None,
+                key=lambda e: e.get("output_throughput") or 0.0,
+            )
+        self.last_sweep = {
+            "ts": _now_iso(),
+            "grid_size": result.get("grid_size", len(grid) if isinstance(grid, list) else 0),
+            "best_overall": best or {},
+            "best_for_each_conc": result.get("best_for_each_conc") or {},
+            "pareto_front": result.get("pareto_front") or [],
+            "workspace": result.get("workspace", ""),
+        }
+
     def push_params_winner(self, *, action: str, variant_name: str,
                            tput: float, gain_pct: float, max_history: int = 10) -> None:
         """Append one round's winner to the rolling history buffer."""
@@ -239,6 +271,24 @@ class SharedState:
             return
         self.params_search = dict(update)
 
+    def seed_stack_from_current_best(self) -> None:
+        """Backfill stack for old sessions that only had current_best."""
+        if self.optimization_stack or not isinstance(self.current_best, dict):
+            return
+        variant = self.current_best.get("variant_name")
+        extra_args = self.current_best.get("extra_sglang_args")
+        if not variant and not extra_args:
+            return
+        self.optimization_stack = [{
+            "action": self.current_best.get("action", "unknown"),
+            "variant_name": variant or "legacy_current_best",
+            "extra_sglang_args": extra_args or "",
+            "extra_envs": dict(self.current_best.get("extra_envs") or {}),
+            "tput": self.current_best.get("tput"),
+            "workspace": self.current_best.get("workspace"),
+            "source": "seeded_from_current_best",
+        }]
+
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection (DESIGN §8.3)."""
         lines = [
@@ -246,7 +296,9 @@ class SharedState:
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
             f"baseline_tput={self.baseline_tput}  baseline_acc={self.baseline_accuracy}",
             f"current_best={self.current_best or '(none)'}",
+            f"optimization_stack={self._format_optimization_stack()}",
             f"cumulative_gain={self.cumulative_gain}%",
+            f"last_sweep={self._format_last_sweep()}",
             f"current_action={self.current_action or '(idle)'}",
             f"crash_count={self.crash_count}",
             f"pruned_families={self.pruned_families or '(none)'}",
@@ -272,6 +324,31 @@ class SharedState:
         return (
             f"accepted={acc_names or []} rejected={len(rejected)} "
             f"tested={len(tested)} cursor={cursor}"
+        )
+
+    def _format_optimization_stack(self) -> str:
+        if not self.optimization_stack:
+            return "(none)"
+        parts = []
+        for entry in self.optimization_stack:
+            if not isinstance(entry, dict):
+                continue
+            parts.append(
+                f"{entry.get('action','?')}:{entry.get('variant_name','?')}"
+            )
+        return parts or "(none)"
+
+    def _format_last_sweep(self) -> str:
+        if not self.last_sweep:
+            return "(none)"
+        best = self.last_sweep.get("best_overall") or {}
+        if not best:
+            return f"grid_size={self.last_sweep.get('grid_size', 0)} best=(none)"
+        return (
+            f"grid_size={self.last_sweep.get('grid_size', 0)} "
+            f"best={best.get('name','?')} "
+            f"tput={best.get('output_throughput','?')} "
+            f"conc={best.get('conc','?')} isl={best.get('isl','?')} osl={best.get('osl','?')}"
         )
 
 

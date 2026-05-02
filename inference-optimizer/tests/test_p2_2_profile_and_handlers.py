@@ -153,6 +153,26 @@ async def test_select_kernels_handler_dry_run_returns_structured_result(session_
 
 
 @pytest.mark.asyncio
+async def test_select_kernels_handler_surfaces_candidates_path(session_dir, monkeypatch):
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "ok",
+            "hot_kernels": [],
+            "artifact_paths": {
+                "kernel_candidates": "/tmp/kernel_candidates.json",
+            },
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["candidates_path"] == "/tmp/kernel_candidates.json"
+
+
+@pytest.mark.asyncio
 async def test_select_kernels_handler_missing_trace_input(session_dir):
     res = await krh.select_kernels_handler({}, session_dir=session_dir)
     assert res["status"] == "failed"
