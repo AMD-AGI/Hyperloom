@@ -63,6 +63,23 @@ class SharedState:
     start_ts: str = field(default_factory=_now_iso)
     max_minutes: int = 0
     last_profile_trace: str = ""
+    # Kernel-opt response tracking — Conductor records the most recent
+    # `run_optimization_done` so Orch sees what's been tried and doesn't
+    # re-dispatch the same kernel_id every tick.
+    last_kernel_opt: dict[str, Any] = field(default_factory=dict)
+    # Cross-round params/backends/sweep aggregation. Each entry is
+    # {action, variant_name, tput, gain_pct, ts}; we cap the list at 10
+    # rows so the prompt summary stays bounded. Used by
+    # `_promote_to_shared_state` to detect a "consistent winner that's
+    # below the 1-shot threshold but consistent across rounds" pattern
+    # the resume5 9h run hit (best variant +0.5–0.8% across 38 rounds,
+    # but never promoted because each single run sat under the 1.0% bar).
+    params_winner_history: list[dict[str, Any]] = field(default_factory=list)
+    # How many CONSECUTIVE grid-runner (params/backends/sweep) tasks
+    # finished without producing a new current_best. Robustness uses
+    # this to nudge Orch off the params plateau. Reset to 0 whenever
+    # current_best advances.
+    params_no_promote_streak: int = 0
 
     # ------------------------------------------------------------------
     # Persistence
@@ -146,6 +163,73 @@ class SharedState:
             applied[key] = value
         return applied
 
+    def _format_last_kernel_opt(self) -> str:
+        """Single-line repr of last kernel-opt outcome for prompt injection."""
+        if not self.last_kernel_opt:
+            return "(none)"
+        ko = self.last_kernel_opt
+        return (
+            f"kernel_id={ko.get('kernel_id','?')} "
+            f"decision={ko.get('decision','?')} "
+            f"speedup={ko.get('micro_speedup','?')}"
+        )
+
+    def record_kernel_opt(self, result: dict[str, Any]) -> None:
+        """Capture the result returned by kernel_optimization_handler so the
+        next Orch turn knows what's already been tried (and the outcome)."""
+        if not isinstance(result, dict):
+            return
+        verification = result.get("verification") or {}
+        proposal = result.get("proposal") or {}
+        self.last_kernel_opt = {
+            "kernel_id": result.get("kernel_id", ""),
+            "decision": proposal.get("decision", ""),
+            "reasons": proposal.get("reasons", []),
+            "micro_speedup": verification.get("micro_speedup", 0.0),
+            "compile_passed": verification.get("compile_passed"),
+            "correctness_passed": verification.get("correctness_passed"),
+            "best_artifact_path": verification.get("best_artifact_path", ""),
+            "ts": _now_iso(),
+        }
+
+    def push_params_winner(self, *, action: str, variant_name: str,
+                           tput: float, gain_pct: float, max_history: int = 10) -> None:
+        """Append one round's winner to the rolling history buffer."""
+        self.params_winner_history.append({
+            "action": action,
+            "variant_name": variant_name,
+            "tput": float(tput) if tput is not None else 0.0,
+            "gain_pct": float(gain_pct) if gain_pct is not None else 0.0,
+            "ts": _now_iso(),
+        })
+        # Trim oldest entries if we're past max_history.
+        if len(self.params_winner_history) > max_history:
+            self.params_winner_history = self.params_winner_history[-max_history:]
+
+    def consistent_winner(self, *, lookback: int = 3,
+                          min_appearances: int = 2,
+                          min_avg_gain_pct: float = 0.3) -> dict[str, Any] | None:
+        """Detect a variant_name that consistently wins across recent rounds.
+
+        Returns the winning variant's most-recent record (so callers can
+        promote it) or ``None`` if no variant qualifies.
+        """
+        if len(self.params_winner_history) < min_appearances:
+            return None
+        recent = self.params_winner_history[-lookback:]
+        from collections import Counter
+        counts = Counter(w["variant_name"] for w in recent if w.get("variant_name"))
+        for name, n in counts.most_common():
+            if n < min_appearances:
+                continue
+            picks = [w for w in recent if w.get("variant_name") == name]
+            avg_gain = sum(w["gain_pct"] for w in picks) / len(picks)
+            if avg_gain >= min_avg_gain_pct:
+                # Return the most-recent record for this winner so caller
+                # can lift its tput / extra_sglang_args into current_best.
+                return picks[-1]
+        return None
+
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection (DESIGN §8.3)."""
         lines = [
@@ -158,6 +242,8 @@ class SharedState:
             f"crash_count={self.crash_count}",
             f"pruned_families={self.pruned_families or '(none)'}",
             f"last_profile_trace={self.last_profile_trace or '(none)'}",
+            f"params_no_promote_streak={self.params_no_promote_streak}",
+            f"last_kernel_opt={self._format_last_kernel_opt()}",
             f"stop_reason={self.stop_reason or '(none)'}",
         ]
         return "\n".join(lines)
