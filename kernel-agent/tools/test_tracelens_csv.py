@@ -227,3 +227,12 @@ def test_unknown_source_root_is_not_reusable_native():
     assert candidate["source_type"] == "hip_cpp"
     assert tla.is_reusable_native_kernel(candidate) is False
     assert tla.recommend_backends(candidate) == []
+
+
+def test_known_rmsnorm_harness_is_registered_without_repo_root():
+    files = tla.find_benchmark_files(
+        "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256EEEv",
+        "",
+        "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+    )
+    assert any("rmsnorm" in path.lower() for path in files)
