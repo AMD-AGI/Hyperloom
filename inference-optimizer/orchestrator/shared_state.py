@@ -208,7 +208,14 @@ class SharedState:
 
     def record_select_kernels(self, payload: dict[str, Any],
                               result: dict[str, Any]) -> None:
-        """Cache the latest select_kernels output keyed by trace_input."""
+        """Cache the latest select_kernels output keyed by trace_input.
+
+        We persist a wider window than the prompt-visible top5 so that when
+        the very top GPU consumers are vendor-binary kernels (Tensile / CK)
+        Orchestration still sees lower-ranked but **reusable native** entries
+        (e.g. AITER RMSNorm) and can dispatch ``run_optimization`` against
+        them instead of looping on rejected ones.
+        """
         if not isinstance(result, dict):
             return
         trace_input = (
@@ -222,21 +229,28 @@ class SharedState:
             if isinstance(artifacts, dict):
                 candidates_path = artifacts.get("kernel_candidates", "") or ""
         hot = result.get("hot_kernels") or []
-        summary = []
-        for entry in hot[:5] if isinstance(hot, list) else []:
+        summary: list[dict[str, Any]] = []
+        reusable_ids: list[str] = []
+        for entry in hot[:15] if isinstance(hot, list) else []:
             if not isinstance(entry, dict):
                 continue
+            kid = entry.get("kernel_id")
+            reusable = bool(entry.get("reusable_native_kernel"))
             summary.append({
-                "kernel_id": entry.get("kernel_id"),
+                "kernel_id": kid,
                 "name": entry.get("name"),
                 "gpu_pct": entry.get("gpu_pct"),
                 "source_file": entry.get("source_file"),
-                "reusable_native_kernel": entry.get("reusable_native_kernel"),
+                "reusable_native_kernel": reusable,
+                "recommended_backends": entry.get("recommended_backends") or [],
             })
+            if reusable and kid:
+                reusable_ids.append(str(kid))
         self.last_select_kernels = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
-            "hot_kernels_top5": summary,
+            "hot_kernels_top15": summary,
+            "reusable_native_kernel_ids": reusable_ids,
             "ts": _now_iso(),
         }
 
@@ -382,13 +396,16 @@ class SharedState:
             return "(none)"
         ids = [
             str(e.get("kernel_id"))
-            for e in self.last_select_kernels.get("hot_kernels_top5", [])
+            for e in self.last_select_kernels.get("hot_kernels_top15", [])
             if isinstance(e, dict) and e.get("kernel_id")
         ]
+        reusable = list(
+            self.last_select_kernels.get("reusable_native_kernel_ids", [])
+        )
         return (
             f"trace={self.last_select_kernels.get('trace_input','?')} "
             f"candidates_path={self.last_select_kernels.get('candidates_path','?')} "
-            f"top5={ids or []}"
+            f"top={ids or []} reusable_native={reusable or []}"
         )
 
     def _format_last_sweep(self) -> str:

@@ -221,7 +221,8 @@ async def test_select_kernels_caches_result_to_shared_state(session_dir, monkeyp
         cached = c.shared_state.last_select_kernels
         assert cached["trace_input"] == "/tmp/trace-A.json.gz"
         assert cached["candidates_path"] == str(candidates_path)
-        assert cached["hot_kernels_top5"][0]["kernel_id"] == "k001"
+        assert cached["hot_kernels_top15"][0]["kernel_id"] == "k001"
+        assert "k001" in cached["reusable_native_kernel_ids"]
 
         # Different trace_input must NOT hit the cache.
         await c._handle_intent("orchestration", Intent(

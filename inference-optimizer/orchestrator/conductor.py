@@ -277,6 +277,7 @@ class Conductor:
         max_ticks: int | None = None,
         stop_when: Callable[["Conductor"], Awaitable[bool] | bool] | None = None,
         install_signal_handlers: bool = False,
+        crash_emergency_threshold: int = 25,
     ) -> str:
         """Run reactor + dispatcher in a long-running loop until a stop
         condition fires.
@@ -287,7 +288,7 @@ class Conductor:
             → ``stop_reason="signal"``
         * objective.reached(shared_state)  → ``"target_reached"``
         * wall-clock budget exceeded        → ``"time_exhausted"``
-        * crash_count >= 3                  → ``"emergency"``
+        * crash_count >= ``crash_emergency_threshold`` → ``"emergency"``
         * custom ``stop_when`` callback returns True → ``"custom"``
         * ``max_ticks`` reached (test guard) → ``"max_ticks"``
 
@@ -344,7 +345,7 @@ class Conductor:
                 if deadline is not None and time.monotonic() >= deadline:
                     stop_reason = "time_exhausted"
                     break
-                if self.shared_state.crash_count >= 3:
+                if self.shared_state.crash_count >= crash_emergency_threshold:
                     stop_reason = "emergency"
                     break
                 if max_ticks is not None and tick_n >= max_ticks:
@@ -749,7 +750,10 @@ class Conductor:
         return {
             "status": "ok",
             "candidates_path": candidates_path,
-            "hot_kernels_top5": cached.get("hot_kernels_top5", []),
+            "hot_kernels_top15": cached.get("hot_kernels_top15", []),
+            "reusable_native_kernel_ids": cached.get(
+                "reusable_native_kernel_ids", []
+            ),
             "cached_at": cached.get("ts"),
             "note": "served from shared_state.last_select_kernels cache",
         }
