@@ -59,6 +59,118 @@ HYPERLOOM_KERNEL_AGENT_ROOT = Path(
 HandlerResult = dict[str, Any]
 HandlerFn = Callable[..., Awaitable[HandlerResult]]
 
+_RUNTIME_GENERATED_SOURCE_MARKERS = (
+    "/tmp/torchinductor",
+    "/torchinductor_",
+    "/.cache/torch/inductor",
+    "/.triton/cache",
+    "/triton/cache",
+)
+_COMPILE_GENERATED_NAME_MARKERS = (
+    "triton_poi_",
+    "triton_red_",
+    "triton_tem_",
+    "torchinductor",
+    "inductor",
+)
+_REUSABLE_SOURCE_ROOTS = (
+    "/sgl-workspace/aiter/",
+    "/sgl-workspace/sglang/",
+    "/sgl-workspace/vllm/",
+    "/opt/venv/lib/python3.10/site-packages/aiter/",
+    "/opt/venv/lib/python3.10/site-packages/sglang/",
+    "/opt/venv/lib/python3.10/site-packages/vllm/",
+)
+
+
+def _is_runtime_generated_kernel(name: str, source_file: str) -> bool:
+    lower_name = (name or "").lower()
+    lower_file = (source_file or "").lower()
+    if any(marker in lower_file for marker in _RUNTIME_GENERATED_SOURCE_MARKERS):
+        return True
+    if any(marker in lower_name for marker in _COMPILE_GENERATED_NAME_MARKERS):
+        return not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS)
+    return False
+
+
+def _load_candidate_metadata(payload: dict) -> dict[str, Any]:
+    """Find candidate metadata for the requested kernel_id if available."""
+    if isinstance(payload.get("candidate"), dict):
+        return payload["candidate"]
+    candidates_path = payload.get("candidates_path")
+    kernel_id = str(payload.get("kernel_id") or "")
+    if not candidates_path or not kernel_id:
+        return {}
+    try:
+        data = json.loads(Path(candidates_path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    kernels = data.get("hot_kernels") if isinstance(data, dict) else None
+    if not isinstance(kernels, list):
+        return {}
+    for item in kernels:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("kernel_id") or "") == kernel_id:
+            return item
+    return {}
+
+
+def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
+    """Reject compile-generated or otherwise non-reusable kernel targets."""
+    candidate = _load_candidate_metadata(payload)
+    kernel_id = str(payload.get("kernel_id") or "")
+    name = str(candidate.get("name") or payload.get("kernel_name") or kernel_id)
+    source_file = str(
+        payload.get("source_file")
+        or candidate.get("source_file")
+        or ""
+    )
+    reusable = candidate.get("reusable_native_kernel")
+    if reusable is False:
+        return {
+            "status": "failed",
+            "error_class": "non_reusable_kernel",
+            "error": "kernel-opt only accepts reusable native kernel sources",
+            "kernel_id": kernel_id,
+            "kernel_name": name,
+            "source_file": source_file,
+            "reason": candidate.get("optimization_notes")
+                      or "candidate marked reusable_native_kernel=false",
+        }
+    if not source_file:
+        return {
+            "status": "failed",
+            "error_class": "missing_native_source",
+            "error": "kernel-opt requires a resolved stable source_file",
+            "kernel_id": kernel_id,
+            "kernel_name": name,
+        }
+    if _is_runtime_generated_kernel(name, source_file):
+        return {
+            "status": "failed",
+            "error_class": "runtime_generated_kernel",
+            "error": (
+                "refusing to optimize torch.compile/Inductor runtime-generated "
+                "kernel; result would not be reusable"
+            ),
+            "kernel_id": kernel_id,
+            "kernel_name": name,
+            "source_file": source_file,
+        }
+    lower_file = source_file.lower()
+    if not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS):
+        return {
+            "status": "failed",
+            "error_class": "unstable_source_path",
+            "error": "source_file is not under a known reusable framework source root",
+            "kernel_id": kernel_id,
+            "kernel_name": name,
+            "source_file": source_file,
+        }
+    payload.setdefault("source_file", source_file)
+    return None
+
 
 # ---------------------------------------------------------------------------
 async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str, str]:
@@ -158,6 +270,9 @@ async def run_optimization_handler(
     kernel_id = payload.get("kernel_id")
     if not kernel_id:
         return {"status": "failed", "error": "missing 'kernel_id' in payload"}
+    guard = _validate_reusable_native_kernel(payload)
+    if guard is not None:
+        return guard
 
     workspace_path = (
         payload.get("workspace_path")

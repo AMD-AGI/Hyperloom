@@ -612,6 +612,10 @@ class Conductor:
             params.setdefault("base_tput", float(base or 0.0))
             cb_args = cb.get("extra_sglang_args") if isinstance(cb, dict) else None
             params.setdefault("base_extra_args", str(cb_args or ""))
+            if pending.action_name == "params":
+                params.setdefault("params_search", self.shared_state.params_search)
+                if isinstance(cb, dict) and cb.get("variant_name"):
+                    params.setdefault("base_variant_name", str(cb["variant_name"]))
         task = await self.tasks.create(
             kind=pending.action_name,
             params=params,
@@ -957,6 +961,11 @@ class Conductor:
             best_tput = result.get("output_throughput")
             bv = result.get("best_variant") or {}
             best_gain = result.get("best_gain_pct")
+            if task_kind == "params" and isinstance(result.get("params_search_update"), dict):
+                self.shared_state.apply_params_search_update(
+                    result["params_search_update"],
+                )
+                changed = True
             cb = self.shared_state.current_best or {}
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
             cur_best = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
