@@ -166,15 +166,24 @@ attempt but mark `geak_without_benchmark: true`.
   ambitious optimization, but the KEEP gate is 1.20x because real inference
   wins are often shape-specific 1.18-1.32x — see r19 GEMM 1.32x, r39 GEAK
   rms_norm 1.18x.)
-- **Default budget**: 60 minutes per backend attempt (`--backend-budget-min 60`).
+- **Default budget**:
+  - claude / codex: **60 minutes** per attempt (`--backend-budget-min 60`)
+  - GEAK: **90 minutes** per attempt (`--geak-budget-min 90`)
+  
   Agents are instructed to **early-exit** as soon as they hit `>=1.50x` with
   passing correctness; otherwise they iterate up to ~85% of the budget and the
   runner SIGTERMs at 100%. `parallel_e2e_runner` will still extract whatever
   `optimization_report.md` / `optimized_versions/*` were on disk at SIGTERM
   time and promote the attempt to `partial` (see Proposal Rules).
-- **GEAK note**: GEAK sub-agent typically needs >= 60 min for one round of
-  baseline + sub-agent patch generation + validation. Do not drop the budget
-  below 30 min for GEAK or it will return `partial` with an empty patch.
+- **Why GEAK budget is 90 min, not 60**: GEAK runs N sub-agent tasks serially
+  (each 5-10 min: baseline measurement + LLM patch generation + per-patch
+  benchmark) + a final `select_patch` round that LLM-judges all patches and
+  writes `final_report.json`. With a 60 min budget, the select_patch round
+  consistently gets SIGTERM'd before it finishes (observed r38/r39: driver
+  had to fall back to per-task `best_results.json` salvage). 90 min lets the
+  select_patch round run, producing `final_report.json` with the canonical
+  best_speedup. Do not drop GEAK budget below 60 min or it will return
+  `partial` with an empty patch.
 
 ## Artifacts
 

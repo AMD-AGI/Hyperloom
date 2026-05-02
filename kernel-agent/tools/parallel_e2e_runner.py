@@ -266,6 +266,7 @@ def run_one_attempt(
         "--session-id", args.session_id,
         "--backends", backend,
         "--budget-minutes", str(args.backend_budget_min),
+        "--geak-budget-min", str(args.geak_budget_min),
         "--oob-max-turns", str(args.oob_max_turns),
         "--num-gpus", str(num_gpus),
     ]
@@ -343,10 +344,17 @@ def main() -> int:
     parser.add_argument("--baseline-timeout-min", type=float, default=45)
     parser.add_argument("--backend-budget-min", type=float, default=60,
                         help="Wall-clock budget per backend attempt in minutes "
-                             "(default 60). Agents are told to early-exit as "
+                             "(default 60). Applies to claude/codex OOB "
+                             "backends. Agents are told to early-exit as "
                              "soon as they hit >=1.50x with passing correctness; "
                              "otherwise they iterate up to ~85%% of this budget "
                              "and SIGTERM at 100%%.")
+    parser.add_argument("--geak-budget-min", type=float, default=90,
+                        help="Per-attempt wall-clock budget for GEAK only "
+                             "(default 90 min). GEAK runs N sub-agent tasks "
+                             "serially + a select_patch round; 60 min "
+                             "consistently SIGTERMs the select_patch round "
+                             "(observed r38/r39).")
     parser.add_argument("--replicas-per-backend", type=int, default=2)
     parser.add_argument("--backends", default="geak,claude,codex",
                         help="Comma list of agentic backends. Note: 'llm' single-shot "
