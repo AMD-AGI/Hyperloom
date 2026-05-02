@@ -10,9 +10,12 @@ Mirrors marathon/skills/actions/params.md PARAM_GRID:
 
 Plus an optional NCCL_GRID via ``extra_envs`` (NCCL_MIN_NCHANNELS / NCCL_ALGO).
 
-Same flow as backends_executor: each variant is tested independently on
-top of the current ``base_extra_args``; winners are those that beat
-``base_tput`` by > +1%.
+The executor now follows a round-based incremental search:
+
+* test a bounded batch of single candidates against the same current base
+* combine the positive candidates and re-benchmark the combination
+* persist accepted/rejected/tested state so resume continues at the next
+  untested candidate instead of replaying old work
 """
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from ...paths import asset_root
-from ._grid_runner import GridVariant, VariantResult, pick_winners, run_grid
+from ._grid_runner import GridVariant, VariantResult, run_grid
 
 
 log = logging.getLogger(__name__)
@@ -65,6 +68,65 @@ DEFAULT_NCCL_GRID: list[GridVariant] = [
 
 
 # ---------------------------------------------------------------------------
+def _variant_to_dict(v: GridVariant) -> dict[str, Any]:
+    return {
+        "name": v.name,
+        "extra_sglang_args": v.extra_sglang_args,
+        "extra_envs": dict(v.extra_envs),
+        "note": v.note,
+    }
+
+
+def _dict_to_variant(v: dict[str, Any]) -> GridVariant:
+    return GridVariant(
+        name=str(v["name"]),
+        extra_sglang_args=str(v.get("extra_sglang_args", "") or ""),
+        extra_envs=dict(v.get("extra_envs", {}) or {}),
+        note=str(v.get("note", "") or ""),
+    )
+
+
+def _join_args(*parts: str) -> str:
+    return " ".join(p.strip() for p in parts if p and p.strip())
+
+
+def _merge_envs(variants: list[GridVariant]) -> dict[str, str]:
+    envs: dict[str, str] = {}
+    for v in variants:
+        envs.update({str(k): str(val) for k, val in v.extra_envs.items()})
+    return envs
+
+
+def _result_gain(tput: float | None, base_tput: float) -> float | None:
+    if not isinstance(tput, (int, float)) or tput <= 0 or base_tput <= 0:
+        return None
+    return (float(tput) - base_tput) / base_tput * 100.0
+
+
+def _result_with_effective_args(
+    result: VariantResult,
+    *,
+    base_extra_args: str,
+    variant_args: str,
+) -> dict[str, Any]:
+    d = result.to_dict()
+    d["extra_sglang_args"] = _join_args(base_extra_args, variant_args)
+    d["candidate_extra_sglang_args"] = variant_args
+    return d
+
+
+def _initial_search_state() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "accepted": [],
+        "rejected": [],
+        "tested": {},
+        "cursor": 0,
+        "last_round": {},
+    }
+
+
+# ---------------------------------------------------------------------------
 class ParamsExecutor:
     """ActionExecutor for the ``params`` action."""
 
@@ -77,6 +139,8 @@ class ParamsExecutor:
         default_output_root: Path | str = "/workspace/hyperloom",
         variant_timeout_sec: int = 900,
         include_nccl: bool = False,
+        default_max_candidates_per_round: int = 0,
+        keep_threshold_pct: float = 0.5,
     ):
         self.default_grid = list(default_grid or DEFAULT_PARAMS_GRID)
         self.default_nccl_grid = list(default_nccl_grid or DEFAULT_NCCL_GRID)
@@ -87,6 +151,8 @@ class ParamsExecutor:
         self.default_output_root = Path(default_output_root)
         self.variant_timeout_sec = variant_timeout_sec
         self.include_nccl = include_nccl
+        self.default_max_candidates_per_round = int(default_max_candidates_per_round)
+        self.keep_threshold_pct = float(keep_threshold_pct)
 
     async def __call__(self, ctx) -> dict[str, Any]:
         params = ctx.task.params or {}
@@ -105,6 +171,11 @@ class ParamsExecutor:
         base_tput = float(params.get("base_tput", 0.0))
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
+        keep_threshold_pct = float(params.get("keep_threshold_pct",
+                                              self.keep_threshold_pct))
+        max_candidates = int(params.get(
+            "max_candidates_per_round", self.default_max_candidates_per_round,
+        ))
 
         # Compose grid: flags first, then optional NCCL.
         grid_override = params.get("grid")
@@ -121,16 +192,113 @@ class ParamsExecutor:
             if self.include_nccl or params.get("include_nccl"):
                 grid += list(self.default_nccl_grid)
 
-        results = await run_grid(
+        search = dict(params.get("params_search") or _initial_search_state())
+        search.setdefault("schema_version", 1)
+        search.setdefault("accepted", [])
+        search.setdefault("rejected", [])
+        search.setdefault("tested", {})
+        search.setdefault("cursor", 0)
+        base_variant_name = str(params.get("base_variant_name") or "").strip()
+        if base_variant_name:
+            already_accepted = any(
+                isinstance(v, dict) and v.get("name") == base_variant_name
+                for v in search.get("accepted", [])
+            )
+            if not already_accepted:
+                base_variant = next(
+                    (v for v in grid if v.name == base_variant_name),
+                    None,
+                )
+                search["accepted"] = [
+                    (
+                        _variant_to_dict(base_variant)
+                        if base_variant is not None
+                        else {
+                            "name": base_variant_name,
+                            "extra_sglang_args": base_extra_args,
+                            "extra_envs": {},
+                            "note": "seeded_from_current_best",
+                        }
+                    ),
+                    *list(search.get("accepted") or []),
+                ]
+
+        accepted_names = {
+            str(v.get("name")) for v in search.get("accepted", [])
+            if isinstance(v, dict) and v.get("name")
+        }
+        rejected_names = {
+            str(v.get("name")) for v in search.get("rejected", [])
+            if isinstance(v, dict) and v.get("name")
+        }
+        tested_names = set((search.get("tested") or {}).keys())
+
+        candidates = [
+            v for v in grid
+            if v.name not in accepted_names
+            and v.name not in rejected_names
+            and v.name not in tested_names
+        ]
+        if max_candidates > 0:
+            candidates = candidates[:max_candidates]
+
+        if not candidates:
+            return {
+                "status": "succeeded",
+                "base_tput": base_tput,
+                "grid_size": 0,
+                "all_results": [],
+                "winners": [],
+                "best_variant": None,
+                "best_gain_pct": 0.0,
+                "output_throughput": None,
+                "workspace": output_root.as_posix(),
+                "params_search_update": search,
+                "params_search_exhausted": True,
+            }
+
+        single_results = await run_grid(
             base_yaml_path=config_path,
             base_extra_args=base_extra_args,
-            grid=grid,
+            grid=candidates,
             output_root=output_root,
             variant_timeout_sec=timeout_sec,
         )
-        winners = pick_winners(results, baseline_tput=base_tput)
+
+        candidate_by_name = {v.name: v for v in candidates}
+        threshold_tput = base_tput * (1.0 + keep_threshold_pct / 100.0)
+        round_winners = [
+            r for r in single_results
+            if r.status == "succeeded"
+            and isinstance(r.output_throughput, (int, float))
+            and r.output_throughput > threshold_tput
+        ]
+
+        combo_results: list[VariantResult] = []
+        if round_winners:
+            winner_variants = [candidate_by_name[r.name] for r in round_winners]
+            # If exactly one new winner is tested on an already accepted base,
+            # the single run is already "accepted + D"; no extra duplicate run.
+            if len(winner_variants) > 1:
+                combo = GridVariant(
+                    "combo_" + "_".join(v.name for v in winner_variants),
+                    extra_sglang_args=_join_args(
+                        *(v.extra_sglang_args for v in winner_variants),
+                    ),
+                    extra_envs=_merge_envs(winner_variants),
+                    note="combo_winners",
+                )
+                combo_results = await run_grid(
+                    base_yaml_path=config_path,
+                    base_extra_args=base_extra_args,
+                    grid=[combo],
+                    output_root=output_root / "combo",
+                    variant_timeout_sec=timeout_sec,
+                )
+
+        all_results = single_results + combo_results
         best = max(
-            (r for r in results
+            (r for r in all_results
              if r.status == "succeeded"
              and isinstance(r.output_throughput, (int, float))),
             default=None,
@@ -141,16 +309,89 @@ class ParamsExecutor:
             if best and base_tput > 0 else 0.0
         )
 
+        accepted = [
+            _dict_to_variant(v) for v in (search.get("accepted") or [])
+            if isinstance(v, dict) and v.get("name")
+        ]
+        accepted_next = list(accepted)
+        selected_new_names: list[str] = []
+        best_variant_dict: dict[str, Any] | None = None
+        if best:
+            if best.name.startswith("combo_"):
+                selected_new_names = [r.name for r in round_winners]
+                selected_args = str(best.extra_sglang_args or "")
+                best_variant_dict = _result_with_effective_args(
+                    best, base_extra_args=base_extra_args,
+                    variant_args=selected_args,
+                )
+            elif best.name in candidate_by_name and best_gain >= keep_threshold_pct:
+                selected_new_names = [best.name]
+                selected_args = candidate_by_name[best.name].extra_sglang_args
+                best_variant_dict = _result_with_effective_args(
+                    best, base_extra_args=base_extra_args,
+                    variant_args=selected_args,
+                )
+
+        for name in selected_new_names:
+            accepted_next.append(candidate_by_name[name])
+
+        tested = dict(search.get("tested") or {})
+        rejected = list(search.get("rejected") or [])
+        for r in single_results:
+            gain = _result_gain(r.output_throughput, base_tput)
+            tested[r.name] = {
+                "result": r.to_dict(),
+                "gain_pct": gain,
+                "base_tput": base_tput,
+            }
+            if r.name not in set(selected_new_names):
+                reason = "not_keep" if (gain is None or gain < keep_threshold_pct) \
+                    else "combo_conflict"
+                rejected.append({
+                    **_variant_to_dict(candidate_by_name[r.name]),
+                    "reason": reason,
+                    "gain_pct": gain,
+                    "tput": r.output_throughput,
+                })
+
+        accepted_dicts = [_variant_to_dict(v) for v in accepted_next]
+        # Deduplicate rejected by name while preserving latest reason.
+        rejected_by_name = {
+            str(v.get("name")): v for v in rejected
+            if isinstance(v, dict) and v.get("name")
+            and str(v.get("name")) not in {a["name"] for a in accepted_dicts}
+        }
+        search_update = {
+            "schema_version": 1,
+            "accepted": accepted_dicts,
+            "rejected": list(rejected_by_name.values()),
+            "tested": tested,
+            "cursor": len(tested),
+            "last_round": {
+                "base_tput": base_tput,
+                "base_extra_args": base_extra_args,
+                "tested": [r.name for r in single_results],
+                "round_winners": [r.name for r in round_winners],
+                "selected_new": list(selected_new_names),
+                "combo_tested": [r.name for r in combo_results],
+            },
+        }
+
         return {
-            "status": "succeeded" if results else "failed",
+            "status": "succeeded" if all_results else "failed",
             "base_tput": base_tput,
-            "grid_size": len(results),
-            "all_results": [r.to_dict() for r in results],
-            "winners": [w.to_dict() for w in winners],
-            "best_variant": best.to_dict() if best else None,
+            "grid_size": len(single_results),
+            "total_runs": len(all_results),
+            "single_results": [r.to_dict() for r in single_results],
+            "combo_results": [r.to_dict() for r in combo_results],
+            "all_results": [r.to_dict() for r in all_results],
+            "winners": [w.to_dict() for w in round_winners],
+            "best_variant": best_variant_dict,
             "best_gain_pct": best_gain,
             "output_throughput": best.output_throughput if best else None,
             "workspace": output_root.as_posix(),
+            "params_search_update": search_update,
+            "params_search_exhausted": len(search_update["tested"]) >= len(grid),
         }
 
 
