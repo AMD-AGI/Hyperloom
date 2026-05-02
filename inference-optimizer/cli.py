@@ -104,6 +104,7 @@ _DEFAULT_ORCH_PROMPT = (
     "  request{target_agent: 'kernel', kind: 'run_optimization',\n"
     "          params: {kernel_id: <picked kernel_id>,\n"
     "                   source_file: <from hot_kernels[i].source_file>,\n"
+    "                   candidates_path: <select_kernels_done.candidates_path>,\n"
     "                   backends: 'claude',\n"
     "                   budget_minutes: 25}}\n\n"
     "step K3: when `run_optimization_done` arrives, look at\n"
