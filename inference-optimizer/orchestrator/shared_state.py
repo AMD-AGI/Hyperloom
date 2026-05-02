@@ -67,6 +67,10 @@ class SharedState:
     start_ts: str = field(default_factory=_now_iso)
     max_minutes: int = 0
     last_profile_trace: str = ""
+    # Cached result of the most recent `select_kernels` request keyed by
+    # `trace_input`. Conductor short-circuits subsequent identical requests
+    # so Orchestration does not waste budget re-analysing the same trace.
+    last_select_kernels: dict[str, Any] = field(default_factory=dict)
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
@@ -202,6 +206,40 @@ class SharedState:
             "ts": _now_iso(),
         }
 
+    def record_select_kernels(self, payload: dict[str, Any],
+                              result: dict[str, Any]) -> None:
+        """Cache the latest select_kernels output keyed by trace_input."""
+        if not isinstance(result, dict):
+            return
+        trace_input = (
+            (payload or {}).get("trace_input")
+            or (payload or {}).get("trace_dir")
+            or ""
+        )
+        candidates_path = result.get("candidates_path") or ""
+        if not candidates_path:
+            artifacts = result.get("artifact_paths") or {}
+            if isinstance(artifacts, dict):
+                candidates_path = artifacts.get("kernel_candidates", "") or ""
+        hot = result.get("hot_kernels") or []
+        summary = []
+        for entry in hot[:5] if isinstance(hot, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            summary.append({
+                "kernel_id": entry.get("kernel_id"),
+                "name": entry.get("name"),
+                "gpu_pct": entry.get("gpu_pct"),
+                "source_file": entry.get("source_file"),
+                "reusable_native_kernel": entry.get("reusable_native_kernel"),
+            })
+        self.last_select_kernels = {
+            "trace_input": str(trace_input),
+            "candidates_path": str(candidates_path),
+            "hot_kernels_top5": summary,
+            "ts": _now_iso(),
+        }
+
     def record_sweep(self, result: dict[str, Any]) -> None:
         if not isinstance(result, dict):
             return
@@ -303,6 +341,7 @@ class SharedState:
             f"crash_count={self.crash_count}",
             f"pruned_families={self.pruned_families or '(none)'}",
             f"last_profile_trace={self.last_profile_trace or '(none)'}",
+            f"last_select_kernels={self._format_last_select_kernels()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"params_search={self._format_params_search()}",
             f"last_kernel_opt={self._format_last_kernel_opt()}",
@@ -337,6 +376,20 @@ class SharedState:
                 f"{entry.get('action','?')}:{entry.get('variant_name','?')}"
             )
         return parts or "(none)"
+
+    def _format_last_select_kernels(self) -> str:
+        if not self.last_select_kernels:
+            return "(none)"
+        ids = [
+            str(e.get("kernel_id"))
+            for e in self.last_select_kernels.get("hot_kernels_top5", [])
+            if isinstance(e, dict) and e.get("kernel_id")
+        ]
+        return (
+            f"trace={self.last_select_kernels.get('trace_input','?')} "
+            f"candidates_path={self.last_select_kernels.get('candidates_path','?')} "
+            f"top5={ids or []}"
+        )
 
     def _format_last_sweep(self) -> str:
         if not self.last_sweep:
