@@ -18,6 +18,9 @@ Env vars consumed (besides the standard backend creds):
   CLAUDE_MODEL                                 — default claude-opus-4-7
   CODEX_MODEL                                  — default gpt-5.4
   INFERENCE_OPTIMIZER_SESSION_ROOT             — overrides default session root
+  INFERENCE_OPTIMIZER_KB_ROOT                  — marathon KB dir (kb_query.py +
+                                                 entries.jsonl); default:
+                                                 Hyperloom/marathon/skills/kb
 """
 
 from __future__ import annotations
@@ -110,6 +113,13 @@ _DEFAULT_ORCH_PROMPT = (
     "    PARTIAL/REVERT → don't integrate; pick the NEXT hot kernel\n"
     "                     (skip kernels with kernel_id == last_kernel_opt.kernel_id)\n"
     "                     and re-issue step K2 with that one.\n\n"
+    "===== KERNEL TARGETING (native vs torch.compile) =====\n"
+    "Kernel-opt should rewrite **native** HIP/CUDA/AITER sources. Traces taken\n"
+    "with `--enable-torch-compile` skew toward Inductor/Triton and `/tmp/\n"
+    "torchinductor` artifacts — hard to optimize and patches may not apply to\n"
+    "the production server if it runs **without** compile. Prefer `profile`\n"
+    "and `last_profile_trace` from a **no-compile** server config when driving\n"
+    "select_kernels / run_optimization; see Knowledge base hints below.\n\n"
     "===== HARD RULES =====\n"
     "* `kind` MUST be EXACTLY one of: 'select_kernels' / 'run_optimization' /\n"
     "  'integrate' / 'apply_patch' (these have programmatic handlers).\n"
