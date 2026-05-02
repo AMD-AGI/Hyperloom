@@ -242,6 +242,43 @@ async def test_select_kernels_caches_result_to_shared_state(session_dir, monkeyp
 # Bug C — profile result promotes main_trace_path to SharedState
 # ===========================================================================
 @pytest.mark.asyncio
+async def test_profile_promotion_records_args_and_clears_select_cache(session_dir):
+    """A new profile invalidates any prior select_kernels cache and stamps
+    the server config that produced the trace into shared_state."""
+    c = Conductor(session_dir, backends=_silent_backends())
+    try:
+        from inference_optimizer.orchestrator.task_registry import Task
+        c.shared_state.last_select_kernels = {
+            "trace_input": "/old/trace.json.gz",
+            "candidates_path": "/old/k.json",
+            "hot_kernels_top15": [],
+            "reusable_native_kernel_ids": [],
+        }
+        task = Task(
+            task_id="t-profile-1",
+            kind="profile",
+            params={"base_extra_args": "--cuda-graph-max-bs 8"},
+            requires_lanes=(),
+            state="running",
+            idempotency_key="profile-test-1",
+        )
+        result = {
+            "status": "succeeded",
+            "main_trace_path": "/new/trace.json.gz",
+            "trace_files": ["/new/trace.json.gz"],
+            "trace_dir": "/new/torch_trace",
+        }
+        await c._promote_to_shared_state("profile", result, task=task)
+        assert c.shared_state.last_profile_trace == "/new/trace.json.gz"
+        assert c.shared_state.last_profile_args == "--cuda-graph-max-bs 8"
+        assert c.shared_state.last_select_kernels == {}
+        summary = c.shared_state.to_prompt_summary()
+        assert "last_profile_args='--cuda-graph-max-bs 8'" in summary
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_profile_promotion_writes_last_profile_trace(session_dir):
     c = Conductor(session_dir, backends=_silent_backends())
     try:
