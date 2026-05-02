@@ -606,14 +606,22 @@ class Conductor:
         best_gain_pct uninformative (DESIGN §16 baseline_tput parameter).
         """
         params = dict(pending.payload.get("params") or {})
+        cb = self.shared_state.current_best or {}
+        cb_args = (
+            str(cb.get("extra_sglang_args") or "")
+            if isinstance(cb, dict) else ""
+        )
+        if pending.action_name == "profile":
+            # Profile itself does not yet consume base_extra_args, but we
+            # stamp it onto the task so the post-task promotion records the
+            # server config that produced this trace.
+            params.setdefault("base_extra_args", cb_args)
         if pending.action_name in ("backends", "params", "sweep"):
-            cb = self.shared_state.current_best or {}
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
             base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
                 else self.shared_state.baseline_tput
             params.setdefault("base_tput", float(base or 0.0))
-            cb_args = cb.get("extra_sglang_args") if isinstance(cb, dict) else None
-            params.setdefault("base_extra_args", str(cb_args or ""))
+            params.setdefault("base_extra_args", cb_args)
             if pending.action_name == "params":
                 params.setdefault("params_search", self.shared_state.params_search)
                 # Long runs should advance the search incrementally so params
@@ -901,7 +909,9 @@ class Conductor:
             # fields (Conductor is the only writer of CORE_STATE_FIELDS;
             # see DESIGN §14.5 / §17.2).
             if result.state == "succeeded":
-                await self._promote_to_shared_state(task.kind, result.result)
+                await self._promote_to_shared_state(
+                    task.kind, result.result, task=task,
+                )
 
     def _lift_to_current_best(
         self, task_kind: str, best_tput: float, bv: dict[str, Any],
@@ -978,7 +988,13 @@ class Conductor:
                 / self.shared_state.baseline_tput * 100.0
             )
 
-    async def _promote_to_shared_state(self, task_kind: str, result: dict) -> None:
+    async def _promote_to_shared_state(
+        self,
+        task_kind: str,
+        result: dict,
+        *,
+        task: "Task | None" = None,
+    ) -> None:
         """Lift specific action-result fields into the persistent SharedState.
 
         Currently handled:
@@ -1017,6 +1033,16 @@ class Conductor:
             )
             if trace_path:
                 self.shared_state.last_profile_trace = str(trace_path)
+                # Record the server config in effect for this trace so
+                # Orchestration can decide whether to re-profile.
+                profile_args = ""
+                if task is not None:
+                    profile_args = str(
+                        (task.params or {}).get("base_extra_args") or ""
+                    )
+                self.shared_state.last_profile_args = profile_args
+                # Stale select_kernels cache no longer matches this trace.
+                self.shared_state.last_select_kernels = {}
                 changed = True
             # profile result may also include a tput; promote into
             # current_best on the same +1% rule the grid path uses below.
