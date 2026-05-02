@@ -27,6 +27,7 @@ import logging
 import signal
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -614,6 +615,10 @@ class Conductor:
             params.setdefault("base_extra_args", str(cb_args or ""))
             if pending.action_name == "params":
                 params.setdefault("params_search", self.shared_state.params_search)
+                # Long runs should advance the search incrementally so params
+                # does not monopolize the whole optimization budget. Direct
+                # executor calls/tests can still pass 0 to run the full grid.
+                params.setdefault("max_candidates_per_round", 3)
                 if isinstance(cb, dict) and cb.get("variant_name"):
                     params.setdefault("base_variant_name", str(cb["variant_name"]))
         task = await self.tasks.create(
@@ -864,12 +869,63 @@ class Conductor:
         Helper for both the 1-shot KEEP threshold path and the
         cross-round consistent-winner path in _promote_to_shared_state.
         """
+        previous = self.shared_state.current_best or {}
+        if not self.shared_state.optimization_stack:
+            self.shared_state.seed_stack_from_current_best()
+
+        base_args = ""
+        if isinstance(previous, dict):
+            base_args = str(previous.get("extra_sglang_args") or "").strip()
+        candidate_args = ""
+        if isinstance(bv, dict):
+            candidate_args = str(
+                bv.get("candidate_extra_sglang_args")
+                or bv.get("extra_sglang_args")
+                or ""
+            ).strip()
+        full_args = ""
+        if isinstance(bv, dict):
+            full_args = str(bv.get("extra_sglang_args") or "").strip()
+        if base_args and candidate_args and full_args == candidate_args:
+            full_args = " ".join((base_args, candidate_args))
+        elif not full_args:
+            full_args = " ".join(
+                part for part in (base_args, candidate_args) if part
+            )
+
+        variant_name = bv.get("name") if isinstance(bv, dict) else None
+        if candidate_args or variant_name:
+            existing = {
+                (str(e.get("action")), str(e.get("variant_name")))
+                for e in self.shared_state.optimization_stack
+                if isinstance(e, dict)
+            }
+            key = (task_kind, str(variant_name or ""))
+            if key not in existing:
+                self.shared_state.optimization_stack.append({
+                    "action": task_kind,
+                    "variant_name": variant_name,
+                    "candidate_extra_sglang_args": candidate_args,
+                    "extra_envs": (
+                        dict(bv.get("extra_envs") or {})
+                        if isinstance(bv, dict) else {}
+                    ),
+                    "tput": float(best_tput),
+                    "workspace": (
+                        bv.get("workspace") if isinstance(bv, dict) else None
+                    ),
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                })
+
         self.shared_state.current_best = {
             "action": task_kind,
             "tput": float(best_tput),
-            "variant_name": bv.get("name") if isinstance(bv, dict) else None,
-            "extra_sglang_args":
-                (bv.get("extra_sglang_args") if isinstance(bv, dict) else "") or "",
+            "variant_name": variant_name,
+            "extra_sglang_args": full_args,
+            "extra_envs": (
+                dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
+            ),
+            "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
             "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
             "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
@@ -945,6 +1001,14 @@ class Conductor:
                     )
                 changed = True
         elif task_kind in ("backends", "params", "sweep"):
+            if task_kind == "sweep":
+                self.shared_state.record_sweep(result)
+                changed = True
+                # Sweep maps the current stack across workloads; it is not
+                # itself a new serving config, so don't overwrite current_best.
+                self.shared_state.params_no_promote_streak += 1
+                self.shared_state.save(self.session_dir)
+                return
             # Promote a grid-runner winner if it actually beat the
             # current best by a meaningful margin. We use 0.5% as the
             # 1-shot KEEP threshold (relaxed from marathon's original

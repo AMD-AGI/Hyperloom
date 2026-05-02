@@ -35,6 +35,16 @@ log = logging.getLogger(__name__)
 DEFAULT_PARAMS_GRID: list[GridVariant] = [
     GridVariant("cuda_graph_max_bs_8",       "--cuda-graph-max-bs 8",
                  note="cuda_graph"),
+    # KB/marathon: cuda graph coverage is often the biggest server-param lever.
+    # Keep multiple powers-of-two-ish caps because the best value depends on
+    # target CONC and available HBM; repeated flags are okay because SGLang
+    # argparse uses the last value.
+    GridVariant("cuda_graph_max_bs_16",      "--cuda-graph-max-bs 16",
+                 note="cuda_graph"),
+    GridVariant("cuda_graph_max_bs_32",      "--cuda-graph-max-bs 32",
+                 note="cuda_graph"),
+    GridVariant("cuda_graph_max_bs_64",      "--cuda-graph-max-bs 64",
+                 note="cuda_graph"),
     GridVariant("decode_steps_8",             "--num-continuous-decode-steps 8",
                  note="decode_steps"),
     GridVariant("decode_steps_16",            "--num-continuous-decode-steps 16",
@@ -45,10 +55,29 @@ DEFAULT_PARAMS_GRID: list[GridVariant] = [
                  note="memory"),
     GridVariant("mem_fraction_0_90",          "--mem-fraction-static 0.90",
                  note="memory"),
+    GridVariant("mem_fraction_0_80",          "--mem-fraction-static 0.80",
+                 note="memory"),
     GridVariant("schedule_conservativeness_0_5",
                  "--schedule-conservativeness 0.5",
                  note="scheduling"),
+    GridVariant("schedule_conservativeness_0_3",
+                 "--schedule-conservativeness 0.3",
+                 note="scheduling"),
+    GridVariant("schedule_conservativeness_0_7",
+                 "--schedule-conservativeness 0.7",
+                 note="scheduling"),
+    GridVariant("schedule_conservativeness_1_0",
+                 "--schedule-conservativeness 1.0",
+                 note="scheduling"),
+    GridVariant("chunked_prefill_32k",        "--chunked-prefill-size 32768",
+                 note="prefill"),
     GridVariant("chunked_prefill_64k",        "--chunked-prefill-size 65536",
+                 note="prefill"),
+    GridVariant("chunked_prefill_128k",       "--chunked-prefill-size 131072",
+                 note="prefill"),
+    GridVariant("max_prefill_tokens_32k",     "--max-prefill-tokens 32768",
+                 note="prefill"),
+    GridVariant("max_prefill_tokens_64k",     "--max-prefill-tokens 65536",
                  note="prefill"),
 ]
 
