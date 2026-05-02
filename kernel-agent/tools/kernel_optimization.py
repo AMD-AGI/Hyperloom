@@ -415,7 +415,19 @@ def invoke_backend(
     Returns a normalized dict: returncode, stdout_tail, stderr_tail, stdout,
     gpu_ids, elapsed_s, cmd, optimized_path (optional), cli_workspace (oob).
     """
-    timeout_s = max(60, int(args.budget_minutes * 60))
+    # GEAK needs more wall-clock than claude/codex: a single sub-agent task
+    # already takes 5-10 min (baseline + LLM patch generation + per-patch
+    # benchmark), and the orchestrator typically dispatches 4-9 tasks per
+    # round + a select_patch round at the end. Empirically 60 min lets
+    # individual sub-agents finish but consistently SIGTERMs the
+    # select_patch round (r38, r39 both fell back to per-task best_results
+    # salvage). 90 min is the new default; override via --geak-budget-min.
+    if backend == "geak":
+        budget_min = float(getattr(args, "geak_budget_min", 0)
+                           or getattr(args, "budget_minutes", 30) or 30)
+    else:
+        budget_min = float(getattr(args, "budget_minutes", 30) or 30)
+    timeout_s = max(60, int(budget_min * 60))
     prefer_ray = ray_available()
     candidate = candidate or {}
     kernel_repo = str(candidate.get("kernel_repo") or "")
@@ -888,7 +900,15 @@ def main() -> int:
     parser.add_argument("--benchmark-file", default="")
     parser.add_argument("--test-harness-path", default="")
     parser.add_argument("--source-file", default="")
-    parser.add_argument("--budget-minutes", type=float, default=30.0)
+    parser.add_argument("--budget-minutes", type=float, default=30.0,
+                        help="Per-attempt wall-clock budget for claude/codex "
+                             "OOB backends. GEAK uses --geak-budget-min.")
+    parser.add_argument("--geak-budget-min", type=float, default=90.0,
+                        help="Per-attempt wall-clock budget for GEAK only "
+                             "(default 90 min; needed because GEAK runs "
+                             "per-task patch sub-agents serially + a final "
+                             "select_patch round, and 60 min consistently "
+                             "SIGTERMs the select_patch round).")
     parser.add_argument("--micro-speedup", type=float, default=None)
     parser.add_argument("--e2e-gain-pct", type=float, default=None)
     parser.add_argument("--accuracy-passed", choices=["true", "false", "unknown"], default="unknown")
