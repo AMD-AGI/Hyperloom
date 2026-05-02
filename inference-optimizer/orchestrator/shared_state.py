@@ -67,6 +67,10 @@ class SharedState:
     start_ts: str = field(default_factory=_now_iso)
     max_minutes: int = 0
     last_profile_trace: str = ""
+    # Server EXTRA_SGLANG_ARGS in effect when last_profile_trace was captured.
+    # Orchestration uses this to decide whether re-profiling would change the
+    # hot-kernel distribution; identical args means the same trace.
+    last_profile_args: str = ""
     # Cached result of the most recent `select_kernels` request keyed by
     # `trace_input`. Conductor short-circuits subsequent identical requests
     # so Orchestration does not waste budget re-analysing the same trace.
@@ -355,6 +359,7 @@ class SharedState:
             f"crash_count={self.crash_count}",
             f"pruned_families={self.pruned_families or '(none)'}",
             f"last_profile_trace={self.last_profile_trace or '(none)'}",
+            f"last_profile_args='{self.last_profile_args}'",
             f"last_select_kernels={self._format_last_select_kernels()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"params_search={self._format_params_search()}",
