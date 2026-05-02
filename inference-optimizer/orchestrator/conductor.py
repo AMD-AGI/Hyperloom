@@ -671,21 +671,28 @@ class Conductor:
             handler = get_handler(kind)
             if handler is not None:
                 params = intent.payload.get("params") or {}
-                try:
-                    result = await handler(
-                        {**intent.payload, **params},
-                        session_dir=self.session_dir,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    log.exception(
-                        "kernel_request_handler[%s] crashed for source=%s",
-                        kind, source,
-                    )
-                    result = {
-                        "status": "failed",
-                        "error_class": "handler_exception",
-                        "error": repr(exc),
-                    }
+                merged_payload = {**intent.payload, **params}
+                cache_hit_source = None
+                cached_result = self._cached_kernel_request(kind, merged_payload)
+                if cached_result is not None:
+                    result = cached_result
+                    cache_hit_source = "shared_state_cache"
+                else:
+                    try:
+                        result = await handler(
+                            merged_payload,
+                            session_dir=self.session_dir,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.exception(
+                            "kernel_request_handler[%s] crashed for source=%s",
+                            kind, source,
+                        )
+                        result = {
+                            "status": "failed",
+                            "error_class": "handler_exception",
+                            "error": repr(exc),
+                        }
                 await self.bus.append_and_seq(Message.new(
                     "kernel", source, "response",
                     {
@@ -693,10 +700,20 @@ class Conductor:
                         "kind": f"{kind}_done",
                         "status": result.get("status", "ok"),
                         "result": result,
-                        "source": "programmatic_handler",
+                        "source": cache_hit_source or "programmatic_handler",
                     },
                     in_reply_to=request_msg.msg_id, priority=1,
                 ))
+                # Cache select_kernels output so subsequent identical
+                # requests are short-circuited next tick. Only cache real
+                # successful runs, not failures, to avoid sticky errors.
+                if (
+                    kind == "select_kernels"
+                    and cache_hit_source is None
+                    and result.get("status") in ("ok", "succeeded")
+                ):
+                    self.shared_state.record_select_kernels(merged_payload, result)
+                    self.shared_state.save(self.session_dir)
                 # Mirror kernel-opt outcomes into SharedState so Orch
                 # sees decision/speedup in its prompt next tick and
                 # doesn't re-dispatch the same kernel_id forever.
@@ -715,6 +732,27 @@ class Conductor:
                     seq=request_msg.seq,
                     msg_id=request_msg.msg_id,
                 )
+
+    def _cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """Return a cached programmatic_handler result if applicable."""
+        if kind != "select_kernels":
+            return None
+        cached = self.shared_state.last_select_kernels or {}
+        if not isinstance(cached, dict) or not cached:
+            return None
+        trace_input = payload.get("trace_input") or payload.get("trace_dir")
+        if not trace_input or trace_input != cached.get("trace_input"):
+            return None
+        candidates_path = cached.get("candidates_path")
+        if not candidates_path or not Path(candidates_path).exists():
+            return None
+        return {
+            "status": "ok",
+            "candidates_path": candidates_path,
+            "hot_kernels_top5": cached.get("hot_kernels_top5", []),
+            "cached_at": cached.get("ts"),
+            "note": "served from shared_state.last_select_kernels cache",
+        }
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
         in_reply_to = intent.payload["in_reply_to"]
