@@ -167,6 +167,8 @@ def extract_source_file(event: dict[str, Any]) -> str:
 def source_type_for(name: str, source_file: str) -> str:
     lower_name = name.lower()
     lower_file = source_file.lower()
+    if is_runtime_generated_kernel(name, source_file):
+        return "runtime_generated"
     if source_file.endswith((".cu", ".cuh", ".hip", ".cpp", ".h", ".hpp")):
         return "hip_cpp"
     if "triton" in lower_name and source_file.endswith(".py"):
@@ -176,6 +178,64 @@ def source_type_for(name: str, source_file: str) -> str:
     if "hipblas" in lower_name or "rocblas" in lower_name:
         return "vendor_binary"
     return "unknown"
+
+
+_RUNTIME_GENERATED_SOURCE_MARKERS = (
+    "/tmp/torchinductor",
+    "/torchinductor_",
+    "/.cache/torch/inductor",
+    "/.triton/cache",
+    "/triton/cache",
+)
+_COMPILE_GENERATED_NAME_MARKERS = (
+    "triton_poi_",
+    "triton_red_",
+    "triton_tem_",
+    "torchinductor",
+    "inductor",
+)
+_REUSABLE_SOURCE_ROOTS = (
+    "/sgl-workspace/aiter/",
+    "/sgl-workspace/sglang/",
+    "/sgl-workspace/vllm/",
+    "/opt/venv/lib/python3.10/site-packages/aiter/",
+    "/opt/venv/lib/python3.10/site-packages/sglang/",
+    "/opt/venv/lib/python3.10/site-packages/vllm/",
+)
+
+
+def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
+    """Return True for torch.compile / Inductor / cache-generated kernels.
+
+    Kernel-opt must target reusable native sources. Runtime-generated files
+    under torchinductor or Triton caches are tied to a specific compile graph,
+    shape, and cache state; patching them is not portable across serving runs.
+    """
+    lower_name = (name or "").lower()
+    lower_file = (source_file or "").lower()
+    if any(marker in lower_file for marker in _RUNTIME_GENERATED_SOURCE_MARKERS):
+        return True
+    if any(marker in lower_name for marker in _COMPILE_GENERATED_NAME_MARKERS):
+        # A stable in-repo SGLang/vLLM Triton source can still be reusable.
+        return not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS)
+    return False
+
+
+def is_reusable_native_kernel(candidate: dict[str, Any]) -> bool:
+    """Whether a candidate is safe to send to kernel optimization backends."""
+    source_file = str(candidate.get("source_file") or "")
+    if not source_file:
+        return False
+    if candidate.get("source_type") == "vendor_binary":
+        return False
+    if candidate.get("vendor_dispatch_wrapper"):
+        return False
+    if is_runtime_generated_kernel(str(candidate.get("name") or ""), source_file):
+        return False
+    lower_file = source_file.lower()
+    if not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS):
+        return False
+    return candidate.get("source_type") in {"hip_cpp", "triton", "python"}
 
 
 # Wrapper TUs that just dispatch to a precompiled .so / .co (no device body
@@ -733,6 +793,10 @@ def _finalize_candidates(
                 and is_vendor_dispatch_wrapper(item["name"], item.get("source_file", ""))):
             item["source_type"] = "vendor_binary"
             item["vendor_dispatch_wrapper"] = True
+        item["runtime_generated_kernel"] = is_runtime_generated_kernel(
+            item["name"], item.get("source_file", "")
+        )
+        item["reusable_native_kernel"] = is_reusable_native_kernel(item)
         item["benchmark_files"] = find_benchmark_files(
             item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
         )
@@ -752,7 +816,11 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
     source_type = candidate.get("source_type")
     if not candidate.get("source_file"):
         return []
+    if not candidate.get("reusable_native_kernel", is_reusable_native_kernel(candidate)):
+        return []
     if source_type == "vendor_binary":
+        return []
+    if source_type == "runtime_generated":
         return []
     if source_type == "hip_cpp":
         return ["geak", "claude", "codex"]
@@ -766,6 +834,15 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
 def build_notes(candidate: dict[str, Any]) -> str:
     if not candidate.get("source_file"):
         return "source file not resolved; backend dispatch will be skipped"
+    if candidate.get("runtime_generated_kernel", is_runtime_generated_kernel(
+        str(candidate.get("name") or ""), str(candidate.get("source_file") or "")
+    )):
+        return (
+            "runtime-generated torch.compile/Inductor kernel; not reusable, "
+            "kernel-opt disabled"
+        )
+    if not candidate.get("reusable_native_kernel", is_reusable_native_kernel(candidate)):
+        return "not a reusable native source; kernel-opt disabled"
     return f"resolved source: {candidate['source_file']}"
 
 
