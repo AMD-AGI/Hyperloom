@@ -160,9 +160,12 @@ attempt but mark `geak_without_benchmark: true`.
 
 ## Optimization Goals & Time Budget
 
-- **Target speedup**: `>= 1.50x` on the dominant inference shape(s). Below this
+- **Target speedup**: `>= 1.20x` on the dominant inference shape(s). Below this
   threshold an attempt is `NEEDS_REVIEW` (marginal / shape-specific / risky),
-  not `KEEP`.
+  not `KEEP`. (Prompt still tells agents to aim for `>= 1.50x` to incentivise
+  ambitious optimization, but the KEEP gate is 1.20x because real inference
+  wins are often shape-specific 1.18-1.32x — see r19 GEMM 1.32x, r39 GEAK
+  rms_norm 1.18x.)
 - **Default budget**: 60 minutes per backend attempt (`--backend-budget-min 60`).
   Agents are instructed to **early-exit** as soon as they hit `>=1.50x` with
   passing correctness; otherwise they iterate up to ~85% of the budget and the
@@ -200,7 +203,7 @@ Return one of `KEEP`, `PARTIAL`, `NEEDS_REVIEW`, or `REVERT`.
 `KEEP` requires ALL evidence:
 - compile/import pass
 - correctness pass
-- microbench speedup `>= 1.50x` (the goal threshold) with `micro_speedup_source`
+- microbench speedup `>= 1.20x` (the gate threshold) with `micro_speedup_source`
   in `{"report_scan", "cli_override"}` (i.e. a real measurement, not a default)
 - E2E does not regress
 - accuracy gate passed or accuracy risk is explicitly zero
@@ -212,7 +215,7 @@ budget boundary, sandbox couldn't rebuild the .so for A/B, GEAK sub-agent
 out-of-time. A human reviewer can read the report and salvage.
 
 `NEEDS_REVIEW` is returned when the attempt completed and produced a measured
-speedup in `(1.0x, 1.50x)` — improvement exists but doesn't meet the goal,
+speedup in `(1.0x, 1.20x)` — improvement exists but doesn't meet the gate,
 needs human judgement on shape coverage / risk.
 
 `REVERT` is returned for `compile fail`, `microbench did not improve`
