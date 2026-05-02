@@ -36,6 +36,7 @@ from .agent_role import AgentRole, default_role_registry, roles_for_run
 from .backends.base import Backend, BackendError, BackendTurnResult
 from .cursor_store import CursorStore
 from .intent_parser import Intent, IntentType, NoIntentEmitted
+from .kb_digest import format_kb_digest_for_orchestration
 from .kernel_request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from .message_bus import Message, MessageBus
 from .objective import Objective, TimeOnlyObjective
@@ -460,6 +461,16 @@ class Conductor:
         # even on tick 1 when the inbox is empty.
         sections.append("=== Shared session state ===")
         sections.append(self.shared_state.to_prompt_summary())
+
+        # 1b. Marathon KB retrieval — curated lessons (validated stacks).
+        if agent_name == "orchestration":
+            kb_text = format_kb_digest_for_orchestration(
+                model_name=getattr(self.shared_state, "model_name", "") or "",
+                framework="sglang",
+            )
+            if kb_text.strip():
+                sections.append("=== Knowledge base hints ===")
+                sections.append(kb_text)
 
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
