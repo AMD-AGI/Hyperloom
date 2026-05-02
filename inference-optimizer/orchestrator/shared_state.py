@@ -80,6 +80,9 @@ class SharedState:
     # this to nudge Orch off the params plateau. Reset to 0 whenever
     # current_best advances.
     params_no_promote_streak: int = 0
+    # Persistent params DFS state. ParamsExecutor owns the search mechanics,
+    # Conductor is still the only writer to state.json.
+    params_search: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Persistence
@@ -230,6 +233,12 @@ class SharedState:
                 return picks[-1]
         return None
 
+    def apply_params_search_update(self, update: dict[str, Any]) -> None:
+        """Merge a ParamsExecutor search update into persistent state."""
+        if not isinstance(update, dict):
+            return
+        self.params_search = dict(update)
+
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection (DESIGN §8.3)."""
         lines = [
@@ -243,10 +252,27 @@ class SharedState:
             f"pruned_families={self.pruned_families or '(none)'}",
             f"last_profile_trace={self.last_profile_trace or '(none)'}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
+            f"params_search={self._format_params_search()}",
             f"last_kernel_opt={self._format_last_kernel_opt()}",
             f"stop_reason={self.stop_reason or '(none)'}",
         ]
         return "\n".join(lines)
+
+    def _format_params_search(self) -> str:
+        if not self.params_search:
+            return "(none)"
+        accepted = self.params_search.get("accepted") or []
+        rejected = self.params_search.get("rejected") or []
+        tested = self.params_search.get("tested") or {}
+        cursor = self.params_search.get("cursor", 0)
+        acc_names = [
+            str(v.get("name", "")) for v in accepted
+            if isinstance(v, dict) and v.get("name")
+        ]
+        return (
+            f"accepted={acc_names or []} rejected={len(rejected)} "
+            f"tested={len(tested)} cursor={cursor}"
+        )
 
 
 __all__ = ["SharedState"]
