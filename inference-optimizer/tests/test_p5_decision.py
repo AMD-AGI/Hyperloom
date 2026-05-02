@@ -273,3 +273,78 @@ async def test_select_kernels_does_not_record_kernel_opt(
         assert c.shared_state.last_kernel_opt == {}
     finally:
         await c.stop()
+
+
+# ===========================================================================
+# D — native-only guard for kernel optimization handler
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_run_optimization_handler_rejects_compile_generated_source(session_dir):
+    from inference_optimizer.orchestrator.kernel_request_handlers import (
+        run_optimization_handler,
+    )
+
+    result = await run_optimization_handler(
+        {
+            "kernel_id": "k_inductor",
+            "kernel_name": "triton_poi_fused_add_mul_0",
+            "source_file": "/tmp/torchinductor_root/ab/cdef.py",
+            "dry_run": True,
+        },
+        session_dir=session_dir,
+    )
+    assert result["status"] == "failed"
+    assert result["error_class"] == "runtime_generated_kernel"
+    assert "not be reusable" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_optimization_handler_rejects_missing_native_source(session_dir):
+    from inference_optimizer.orchestrator.kernel_request_handlers import (
+        run_optimization_handler,
+    )
+
+    result = await run_optimization_handler(
+        {"kernel_id": "k_unknown", "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert result["status"] == "failed"
+    assert result["error_class"] == "missing_native_source"
+
+
+@pytest.mark.asyncio
+async def test_run_optimization_handler_uses_candidates_path_native_guard(
+    session_dir, tmp_path,
+):
+    from inference_optimizer.orchestrator.kernel_request_handlers import (
+        run_optimization_handler,
+    )
+
+    candidates = tmp_path / "kernel_candidates.json"
+    candidates.write_text(
+        """
+        {
+          "hot_kernels": [
+            {
+              "kernel_id": "k001",
+              "name": "triton_red_fused_sum_0",
+              "source_file": "/tmp/torchinductor_root/xy/generated.py",
+              "reusable_native_kernel": false,
+              "optimization_notes": "runtime-generated compile kernel"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    result = await run_optimization_handler(
+        {
+            "kernel_id": "k001",
+            "candidates_path": str(candidates),
+            "dry_run": True,
+        },
+        session_dir=session_dir,
+    )
+    assert result["status"] == "failed"
+    assert result["error_class"] == "non_reusable_kernel"
+    assert "runtime-generated" in result["reason"]
