@@ -301,6 +301,20 @@ async def run_optimization_handler(
         cmd += ["--benchmark-file", str(payload["benchmark_file"])]
     if payload.get("test_harness_path"):
         cmd += ["--test-harness-path", str(payload["test_harness_path"])]
+    if payload.get("micro_speedup") is not None:
+        cmd += ["--micro-speedup", str(payload["micro_speedup"])]
+    if payload.get("e2e_gain_pct") is not None:
+        cmd += ["--e2e-gain-pct", str(payload["e2e_gain_pct"])]
+    if payload.get("correctness_passed") is not None:
+        cmd += [
+            "--correctness-passed",
+            "true" if bool(payload["correctness_passed"]) else "false",
+        ]
+    if payload.get("accuracy_passed") is not None:
+        cmd += [
+            "--accuracy-passed",
+            "true" if bool(payload["accuracy_passed"]) else "false",
+        ]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     timeout_sec = int(payload.get("budget_minutes", 30)) * 60
