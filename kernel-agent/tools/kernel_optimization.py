@@ -101,11 +101,13 @@ def existing_path(value: str) -> str:
 
 
 def has_benchmark(args: argparse.Namespace, candidate: dict[str, Any]) -> bool:
+    bench_files = candidate.get("benchmark_files") or []
     return bool(
         existing_path(args.benchmark_file)
         or existing_path(args.test_harness_path)
         or existing_path(str(candidate.get("benchmark_file") or ""))
         or existing_path(str(candidate.get("test_harness_path") or ""))
+        or any(existing_path(str(p)) for p in bench_files)
     )
 
 
