@@ -83,6 +83,8 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/vllm/",
 )
 _APPLY_TOOL_MODULE: Any | None = None
+_DEFAULT_KERNEL_BACKEND_ORDER = ("claude", "codex", "geak")
+_DEFAULT_KERNEL_BATCH_PARALLEL = 3
 
 
 def _is_runtime_generated_kernel(name: str, source_file: str) -> bool:
@@ -396,6 +398,160 @@ async def select_kernels_handler(
 
 # ---------------------------------------------------------------------------
 async def run_optimization_handler(
+    payload: dict, *, session_dir: Path,
+) -> HandlerResult:
+    """Run kernel optimization.
+
+    When candidate metadata is available, this handler upgrades legacy
+    single-kernel requests into a batch over all reusable native kernels. Each
+    kernel is optimized concurrently, while backends are tried sequentially per
+    kernel in the preferred order: Claude first, then Codex, then GEAK.
+    """
+    if payload.get("_single_kernel"):
+        return await _run_optimization_single(payload, session_dir=session_dir)
+    candidates = _batch_kernel_candidates(payload)
+    if len(candidates) <= 1:
+        single_payload = dict(payload)
+        if candidates and not single_payload.get("kernel_id"):
+            single_payload["kernel_id"] = candidates[0].get("kernel_id")
+        single_payload["_single_kernel"] = True
+        return await _run_optimization_single(single_payload, session_dir=session_dir)
+    return await _run_optimization_batch(payload, candidates, session_dir=session_dir)
+
+
+def _backend_order(payload: dict) -> list[str]:
+    raw = payload.get("backend_order") or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
+    if raw:
+        order = [item.strip() for item in str(raw).split(",") if item.strip()]
+    else:
+        # Ignore legacy payload["backends"] here. Older Orchestration prompts
+        # often send backends="claude"; batch scheduling must still exercise
+        # the full fallback ladder.
+        order = list(_DEFAULT_KERNEL_BACKEND_ORDER)
+    allowed = {"claude", "codex", "geak"}
+    return [backend for backend in order if backend in allowed]
+
+
+def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
+    candidates_path = payload.get("candidates_path")
+    if not candidates_path:
+        return []
+    try:
+        data = json.loads(Path(candidates_path).read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    kernels = data.get("hot_kernels") or data.get("hot_kernels_top15") or []
+    if not isinstance(kernels, list):
+        return []
+    reusable_ids = data.get("reusable_native_kernel_ids") or []
+    reusable_id_set = {str(item) for item in reusable_ids if item}
+    selected: list[dict[str, Any]] = []
+    for item in kernels:
+        if not isinstance(item, dict):
+            continue
+        kernel_id = str(item.get("kernel_id") or "")
+        if not kernel_id:
+            continue
+        if reusable_id_set and kernel_id not in reusable_id_set:
+            continue
+        if item.get("reusable_native_kernel") is not True:
+            continue
+        if not item.get("source_file"):
+            continue
+        selected.append(item)
+    return selected
+
+
+async def _run_kernel_backend_sequence(
+    base_payload: dict,
+    candidate: dict[str, Any],
+    *,
+    session_dir: Path,
+) -> HandlerResult:
+    kernel_id = str(candidate.get("kernel_id") or base_payload.get("kernel_id") or "")
+    attempts: list[dict[str, Any]] = []
+    best: HandlerResult | None = None
+    for backend in _backend_order(base_payload):
+        child = dict(base_payload)
+        child["_single_kernel"] = True
+        child["kernel_id"] = kernel_id
+        child["backends"] = backend
+        child["candidate"] = candidate
+        child.setdefault("source_file", candidate.get("source_file"))
+        result = await _run_optimization_single(child, session_dir=session_dir)
+        attempts.append({
+            "backend": backend,
+            "status": result.get("status"),
+            "kernel_id": result.get("kernel_id"),
+            "proposal": result.get("proposal"),
+            "verification": result.get("verification"),
+            "best_artifact_path": result.get("best_artifact_path"),
+            "error": result.get("error"),
+        })
+        verification = result.get("verification") or {}
+        proposal = result.get("proposal") or {}
+        if best is None or float(verification.get("micro_speedup") or 0.0) > float(
+            (best.get("verification") or {}).get("micro_speedup") or 0.0
+        ):
+            best = result
+        if result.get("status") == "ok" and proposal.get("decision") == "KEEP":
+            break
+    if best is None:
+        best = {
+            "status": "failed",
+            "kernel_id": kernel_id,
+            "error": "no backend attempts were run",
+        }
+    best = dict(best)
+    best["backend_fallback_attempts"] = attempts
+    best["batch_kernel_id"] = kernel_id
+    return best
+
+
+async def _run_optimization_batch(
+    payload: dict,
+    candidates: list[dict[str, Any]],
+    *,
+    session_dir: Path,
+) -> HandlerResult:
+    max_parallel = int(
+        payload.get("max_parallel")
+        or os.environ.get("KERNEL_OPT_MAX_PARALLEL", _DEFAULT_KERNEL_BATCH_PARALLEL)
+    )
+    max_parallel = max(1, max_parallel)
+    sem = asyncio.Semaphore(max_parallel)
+
+    async def _guarded(candidate: dict[str, Any]) -> HandlerResult:
+        async with sem:
+            return await _run_kernel_backend_sequence(
+                payload, candidate, session_dir=session_dir,
+            )
+
+    results = await asyncio.gather(*(_guarded(c) for c in candidates))
+    best = max(
+        results,
+        key=lambda r: (
+            1 if (r.get("proposal") or {}).get("decision") == "KEEP" else 0,
+            float((r.get("verification") or {}).get("micro_speedup") or 0.0),
+        ),
+        default=None,
+    )
+    if best is None:
+        return {
+            "status": "failed",
+            "error": "batch optimization produced no results",
+            "batch_results": [],
+        }
+    out = dict(best)
+    out["batch_mode"] = True
+    out["batch_kernel_ids"] = [str(c.get("kernel_id")) for c in candidates]
+    out["backend_order"] = _backend_order(payload)
+    out["max_parallel"] = max_parallel
+    out["batch_results"] = results
+    return out
+
+
+async def _run_optimization_single(
     payload: dict, *, session_dir: Path,
 ) -> HandlerResult:
     """Run Hyperloom/kernel-agent's kernel_optimization.py on one kernel.
