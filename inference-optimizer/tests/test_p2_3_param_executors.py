@@ -227,6 +227,41 @@ async def test_run_grid_keeps_going_on_subprocess_failure(tmp_path):
     assert results[1].output_throughput == 900.0
 
 
+@pytest.mark.asyncio
+async def test_run_grid_writes_variant_extra_envs(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_root = tmp_path / "out"
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=900.0)
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="ok", stderr="",
+        )
+
+    grid = [
+        GridVariant(
+            "sglang_multi_stream_overlap",
+            extra_envs={"SGLANG_OPT_USE_MULTI_STREAM_OVERLAP": "1"},
+        ),
+    ]
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+                side_effect=_fake_run):
+        results = await run_grid(
+            base_yaml_path=base, base_extra_args="",
+            grid=grid, output_root=output_root, variant_timeout_sec=10,
+        )
+
+    assert results[0].status == "succeeded"
+    cfg = yaml.safe_load(
+        (output_root / "variant_00_sglang_multi_stream_overlap" / "config.yaml")
+        .read_text()
+    )
+    assert cfg["benchmark"]["envs"]["SGLANG_OPT_USE_MULTI_STREAM_OVERLAP"] == "1"
+
+
 # ===========================================================================
 # BackendsExecutor / ParamsExecutor / SweepExecutor — end-to-end via SubAgentRunner
 # ===========================================================================
@@ -330,6 +365,26 @@ def test_default_grids_are_non_empty():
     names = {v.name for v in DEFAULT_PARAMS_GRID}
     assert {"cuda_graph_max_bs_64", "chunked_prefill_128k",
             "max_prefill_tokens_64k"} <= names
+
+
+def test_default_params_grid_includes_inferencex_sglang_candidates():
+    """Keep the SGLang default search aligned with high-signal InferenceX knobs."""
+    by_name = {v.name: v for v in DEFAULT_PARAMS_GRID}
+
+    assert by_name["disable_radix_cache"].extra_sglang_args == "--disable-radix-cache"
+    assert by_name["tokenizer_workers_16"].extra_sglang_args == "--tokenizer-worker-num 16"
+    assert by_name["stream_interval_50"].extra_sglang_args == "--stream-interval 50"
+    assert by_name["max_running_requests_256"].extra_sglang_args == "--max-running-requests 256"
+
+    assert by_name["sglang_multi_stream_overlap"].extra_envs == {
+        "SGLANG_OPT_USE_MULTI_STREAM_OVERLAP": "1",
+    }
+    assert by_name["sglang_flashmla_tilelang"].extra_envs == {
+        "SGLANG_HACK_FLASHMLA_BACKEND": "tilelang",
+    }
+    assert by_name["sglang_tilelang_indexer"].extra_envs == {
+        "SGLANG_OPT_USE_TILELANG_INDEXER": "true",
+    }
 
 
 @pytest.mark.asyncio
