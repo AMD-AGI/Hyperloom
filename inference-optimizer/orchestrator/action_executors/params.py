@@ -1,12 +1,14 @@
 """Real ``params`` ActionExecutor — DESIGN v0.6 §16 params action.
 
-Mirrors marathon/skills/actions/params.md PARAM_GRID:
+Mirrors marathon/skills/actions/params.md PARAM_GRID, with additional SGLang
+runtime toggles learned from InferenceX's validated launch recipes:
 
   * cuda-graph-max-bs $CONC
   * num-continuous-decode-steps {8,16,32}
   * mem-fraction-static 0.85 / 0.90
   * schedule-conservativeness 0.5
   * chunked-prefill-size 65536
+  * radix/cache, tokenizer, stream interval, and ROCm/TileLang env toggles
 
 Plus an optional NCCL_GRID via ``extra_envs`` (NCCL_MIN_NCHANNELS / NCCL_ALGO).
 
@@ -79,6 +81,33 @@ DEFAULT_PARAMS_GRID: list[GridVariant] = [
                  note="prefill"),
     GridVariant("max_prefill_tokens_64k",     "--max-prefill-tokens 65536",
                  note="prefill"),
+    # InferenceX SGLang recipes often disable radix cache for large MoE
+    # throughput runs; keep it as a candidate rather than a global default.
+    GridVariant("disable_radix_cache",         "--disable-radix-cache",
+                 note="cache"),
+    GridVariant("tokenizer_workers_8",         "--tokenizer-worker-num 8",
+                 note="tokenizer"),
+    GridVariant("tokenizer_workers_16",        "--tokenizer-worker-num 16",
+                 note="tokenizer"),
+    GridVariant("stream_interval_30",          "--stream-interval 30",
+                 note="streaming"),
+    GridVariant("stream_interval_50",          "--stream-interval 50",
+                 note="streaming"),
+    GridVariant("max_running_requests_128",    "--max-running-requests 128",
+                 note="scheduling"),
+    GridVariant("max_running_requests_256",    "--max-running-requests 256",
+                 note="scheduling"),
+    # Env toggles are injected through Magpie benchmark.envs. Unsupported
+    # SGLang versions should ignore them; the A/B run decides whether to keep.
+    GridVariant("sglang_multi_stream_overlap",
+                 extra_envs={"SGLANG_OPT_USE_MULTI_STREAM_OVERLAP": "1"},
+                 note="overlap"),
+    GridVariant("sglang_flashmla_tilelang",
+                 extra_envs={"SGLANG_HACK_FLASHMLA_BACKEND": "tilelang"},
+                 note="attention"),
+    GridVariant("sglang_tilelang_indexer",
+                 extra_envs={"SGLANG_OPT_USE_TILELANG_INDEXER": "true"},
+                 note="indexer"),
 ]
 
 
