@@ -36,6 +36,7 @@ can monkey-patch in tests.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -81,6 +82,7 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
 )
+_APPLY_TOOL_MODULE: Any | None = None
 
 
 def _is_runtime_generated_kernel(name: str, source_file: str) -> bool:
@@ -172,6 +174,145 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
     return None
 
 
+def _load_apply_tool() -> Any:
+    global _APPLY_TOOL_MODULE
+    if _APPLY_TOOL_MODULE is not None:
+        return _APPLY_TOOL_MODULE
+    path = HYPERLOOM_KERNEL_AGENT_ROOT / "tools" / "apply_kernel_patch.py"
+    spec = importlib.util.spec_from_file_location("hyperloom_apply_kernel_patch", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load apply_kernel_patch.py from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _APPLY_TOOL_MODULE = module
+    return module
+
+
+def _artifact_paths_from_payload(payload: dict) -> list[str]:
+    raw = payload.get("artifact_paths") or payload.get("compiled_artifact_paths") or []
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, list):
+        return [str(item) for item in raw if item]
+    return []
+
+
+def _maybe_apply_kernel_patch(
+    payload: dict,
+    *,
+    session_dir: Path,
+    kernel_id: str | None,
+) -> HandlerResult:
+    patch_path = str(payload.get("patch_path") or "").strip()
+    target_file = str(
+        payload.get("target_file")
+        or payload.get("source_file")
+        or ""
+    ).strip()
+    if not patch_path or not target_file:
+        return {
+            "status": "skipped",
+            "reason": "missing patch_path or target_file/source_file",
+        }
+    tool = _load_apply_tool()
+    return tool.apply_kernel_patch(
+        patch_path=patch_path,
+        target_file=target_file,
+        backup_root=payload.get("backup_root") or session_dir / "kernel_patch_backups",
+        kernel_id=str(kernel_id or payload.get("kernel_id") or ""),
+        artifact_paths=_artifact_paths_from_payload(payload),
+        rebuild_command=payload.get("rebuild_command"),
+        rebuild_timeout_sec=int(payload.get("rebuild_timeout_sec", 1800)),
+        skip_rebuild=bool(payload.get("skip_rebuild", False)),
+        allow_unknown_target=bool(payload.get("allow_unknown_target", False)),
+        dry_run=bool(payload.get("dry_run_patch", False)),
+    )
+
+
+def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
+    if apply_result.get("status") != "ok" or not apply_result.get("manifest_path"):
+        return {"status": "skipped", "reason": "no applied patch manifest"}
+    tool = _load_apply_tool()
+    return tool.revert_kernel_patch(apply_result["manifest_path"])
+
+
+def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
+    kernels = (
+        (state.last_select_kernels or {}).get("hot_kernels_top15")
+        or (state.last_select_kernels or {}).get("hot_kernels")
+        or []
+    )
+    for item in kernels:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("kernel_id") or "") == kernel_id:
+            return str(item.get("source_file") or "")
+    return ""
+
+
+def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dict, HandlerResult | None]:
+    """Fill integrate inputs from SharedState when Orchestration sends only kernel_id.
+
+    Orchestration often knows only ``kernel_id`` after a successful
+    ``run_optimization``. The concrete artifact path lives in
+    ``last_kernel_opt`` and the source target lives in ``last_select_kernels``.
+    Resolve them here so integrate applies the optimized source before
+    re-baselining; never silently run an E2E benchmark without applying a patch.
+    """
+    from .shared_state import SharedState
+
+    resolved = dict(payload)
+    kernel_id = str(resolved.get("kernel_id") or "")
+    state = SharedState.load_or_init(session_dir)
+    last_kernel = state.last_kernel_opt or {}
+
+    if kernel_id and str(last_kernel.get("kernel_id") or "") == kernel_id:
+        if not resolved.get("patch_path"):
+            artifact = (
+                last_kernel.get("best_artifact_path")
+                or last_kernel.get("patch_path")
+                or last_kernel.get("optimized_path")
+            )
+            if artifact:
+                resolved["patch_path"] = str(artifact)
+        if not resolved.get("source_file") and last_kernel.get("source_file"):
+            resolved["source_file"] = str(last_kernel["source_file"])
+
+    if kernel_id and not (resolved.get("target_file") or resolved.get("source_file")):
+        source = _find_selected_kernel_source(state, kernel_id)
+        if source:
+            resolved["source_file"] = source
+
+    patch_path = str(resolved.get("patch_path") or "").strip()
+    target_file = str(
+        resolved.get("target_file")
+        or resolved.get("source_file")
+        or ""
+    ).strip()
+    if not patch_path or not target_file:
+        missing = []
+        if not patch_path:
+            missing.append("patch_path")
+        if not target_file:
+            missing.append("target_file/source_file")
+        return resolved, {
+            "status": "failed",
+            "error_class": "missing_integration_inputs",
+            "error": "integrate requires an optimized artifact and target source before E2E",
+            "decision": "REVERT",
+            "kernel_id": kernel_id or None,
+            "patch_path": patch_path or None,
+            "target_file": target_file or None,
+            "missing": missing,
+            "last_kernel_opt": {
+                k: last_kernel.get(k)
+                for k in ("kernel_id", "best_artifact_path", "patch_path", "source_file")
+                if k in last_kernel
+            },
+        }
+    return resolved, None
+
+
 # ---------------------------------------------------------------------------
 async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str, str]:
     """asyncio-friendly wrapper around blocking subprocess.run.
@@ -205,7 +346,7 @@ async def select_kernels_handler(
         framework:       default 'sglang'
         target_platform: default 'MI300X'
         dry_run:         default False (testing)
-        budget_minutes:  default 5
+        budget_minutes:  default 60
 
     Returns::
 
@@ -243,7 +384,7 @@ async def select_kernels_handler(
         cmd += ["--target-platform", str(payload["target_platform"])]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
-    timeout_sec = int(payload.get("budget_minutes", 5)) * 60
+    timeout_sec = int(payload.get("budget_minutes", 60)) * 60
 
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
     result = _shape_tool_result(rc, stdout, stderr)
@@ -264,7 +405,7 @@ async def run_optimization_handler(
 
     Optional payload:
         backends:        comma-separated 'geak,claude,codex' (auto-pick if empty)
-        budget_minutes:  default 30
+        budget_minutes:  default 60
         source_file:     path to original kernel source (for context)
         candidates_path: path to JSON describing candidates (optional)
         dry_run:         default False (testing)
@@ -317,7 +458,11 @@ async def run_optimization_handler(
         ]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
-    timeout_sec = int(payload.get("budget_minutes", 30)) * 60
+    # Give kernel_optimization.py time to handle its own backend timeout and
+    # salvage partial artifacts. The backend receives budget_minutes as its
+    # hard wall-clock; killing this wrapper at the exact same second loses
+    # optimized_versions/ and report paths.
+    timeout_sec = int(payload.get("budget_minutes", 60)) * 60 + 180
 
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
     return _shape_tool_result(rc, stdout, stderr)
@@ -381,13 +526,11 @@ async def integrate_handler(
 ) -> HandlerResult:
     """Apply a kernel patch + re-baseline + KEEP/REVERT decision.
 
-    Mirrors DESIGN v0.6 §16 integrate action. The full real-world flow
-    is: ``patch_inductor.py --target-file <kernel.py> --patch <new.py>``
-    → restart sglang with the patched cache → baseline → compare. P2-4
-    keeps the **patch step as a stub** (we record patch metadata and
-    skip the apply) but does run a real re-baseline via
-    :class:`BaselineExecutor`, so the KEEP/REVERT signal is honest
-    against whatever the patch actually changed (or didn't, in stub mode).
+    Mirrors DESIGN v0.6 §16 integrate action: apply an optimized kernel
+    artifact, re-run the active Magpie baseline config, then KEEP only
+    if the measured E2E throughput clears the threshold. Compiled kernels
+    are backed up as source plus existing .so/.co/.hsaco artifacts before
+    rebuild so non-KEEP decisions can restore quickly without a rebuild.
 
     Required payload:
         base_tput:    float — what we're comparing against
@@ -426,16 +569,38 @@ async def integrate_handler(
             "error": "integrate_handler requires base_tput > 0 to compute KEEP/REVERT",
         }
 
-    # NOTE: real patch apply (patch_inductor.py + sglang restart) lives
-    # in P3+. Here we just log the apply intent so the bus has a paper
-    # trail, then run re-baseline.
+    payload, missing_inputs = _resolve_integrate_payload(
+        payload, session_dir=session_dir,
+    )
+    if missing_inputs is not None:
+        return missing_inputs
+
     patch_path = payload.get("patch_path")
     kernel_id = payload.get("kernel_id")
-    log.info(
-        "integrate_handler: stub-applying patch_path=%s kernel_id=%s "
-        "(real patch_inductor invocation deferred to P3)",
-        patch_path, kernel_id,
+    apply_result = _maybe_apply_kernel_patch(
+        payload, session_dir=session_dir, kernel_id=kernel_id,
     )
+    log.info("integrate_handler: apply_result=%s", apply_result)
+    if apply_result.get("status") == "failed":
+        return {
+            "status": "failed",
+            "error": "kernel patch apply failed",
+            "decision": "REVERT",
+            "apply_result": apply_result,
+            "kernel_id": kernel_id,
+            "patch_path": patch_path,
+        }
+    if apply_result.get("status") != "ok":
+        return {
+            "status": "failed",
+            "error_class": "patch_not_applied",
+            "error": "kernel patch was not applied; refusing to run E2E benchmark",
+            "decision": "REVERT",
+            "apply_result": apply_result,
+            "kernel_id": kernel_id,
+            "patch_path": patch_path,
+            "target_file": payload.get("target_file") or payload.get("source_file"),
+        }
 
     keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
     extra_args = str(payload.get("extra_sglang_args", "") or "").strip()
@@ -463,15 +628,19 @@ async def integrate_handler(
     try:
         bench_result = await BaselineExecutor()(ctx)
     except Exception as exc:  # noqa: BLE001
+        revert_result = _maybe_revert_kernel_patch(apply_result)
         return {
             "status": "failed",
             "error_class": "rebaseline_exception",
             "error": repr(exc),
             "kernel_id": kernel_id,
             "patch_path": patch_path,
+            "apply_result": apply_result,
+            "revert_result": revert_result,
         }
 
     if bench_result.get("status") != "succeeded":
+        revert_result = _maybe_revert_kernel_patch(apply_result)
         return {
             "status": "failed",
             "error": "re-baseline did not succeed",
@@ -479,6 +648,8 @@ async def integrate_handler(
             "rebaseline_detail": bench_result,
             "kernel_id": kernel_id,
             "patch_path": patch_path,
+            "apply_result": apply_result,
+            "revert_result": revert_result,
         }
 
     new_tput = float(bench_result.get("output_throughput") or 0.0)
@@ -488,16 +659,25 @@ async def integrate_handler(
         else ("REVERT" if gain_pct < -keep_threshold_pct
               else "NEEDS_REVIEW")
     )
+    revert_result = (
+        {"status": "skipped", "reason": "KEEP decision"}
+        if decision == "KEEP"
+        else _maybe_revert_kernel_patch(apply_result)
+    )
     return {
         "status":      "ok",
         "decision":    decision,
         "kernel_id":   kernel_id,
         "patch_path":  patch_path,
+        "target_file": payload.get("target_file") or payload.get("source_file"),
         "base_tput":   base_tput,
         "new_tput":    new_tput,
         "gain_pct":    gain_pct,
         "report_path": bench_result.get("report_path"),
         "workspace":   bench_result.get("workspace"),
+        "extra_sglang_args": extra_args,
+        "apply_result": apply_result,
+        "revert_result": revert_result,
     }
 
 
