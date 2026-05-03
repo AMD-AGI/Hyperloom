@@ -10,7 +10,7 @@ intent transport is JSON-in-text:
     envelope. CodexBackend extracts the envelope (handles fenced
     ``json`` blocks or bare JSON), validates with the same
     ``validate_envelope`` the Claude path uses, and returns the same
-    :class:`BackendTurnResult` shape. The Conductor never has to know
+    :class:`BackendTurnResult` shape. The Coordinator never has to know
     which backend produced the intents.
 
 Authentication:

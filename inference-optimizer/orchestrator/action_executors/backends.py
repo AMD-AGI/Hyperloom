@@ -1,4 +1,4 @@
-"""Real ``backends`` ActionExecutor — DESIGN v0.6 §16 backends action.
+"""Real ``backends`` ActionRunner — DESIGN v0.6 §16 backends action.
 
 Mirrors marathon/skills/actions/backends.md DFS protocol:
 
@@ -9,7 +9,7 @@ Mirrors marathon/skills/actions/backends.md DFS protocol:
      ``EXTRA_SGLANG_ARGS`` (or empty if no current best).
   3. Pick the winners (output_throughput > base_tput × 1.01).
   4. Optionally run the combined-winners run (deferred to integrate /
-     P2-4 — keeps this executor's wall time bounded).
+     P2-4 — keeps this runner's wall time bounded).
 
 Result schema returned to the bus::
 
@@ -106,7 +106,7 @@ def discover_backend_flags(
 
 # ---------------------------------------------------------------------------
 class BackendsExecutor:
-    """ActionExecutor for the ``backends`` action."""
+    """ActionRunner for the ``backends`` action."""
 
     def __init__(
         self,

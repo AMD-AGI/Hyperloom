@@ -1,6 +1,6 @@
-"""Conductor — DESIGN v0.6 §7.5 / §21 main loop.
+"""Coordinator — DESIGN v0.6 §7.5 / §21 main loop.
 
-The Conductor is the **protocol manager** (not a decision-maker). It owns:
+The Coordinator is the **protocol manager** (not a decision-maker). It owns:
 
 * MessageBus + ResourceLockManager + TaskRegistry + CursorStore
 * PolicyGate (intent validation choke-point)
@@ -72,7 +72,7 @@ class PendingProposal:
 
 
 @dataclass
-class ConductorState:
+class CoordinatorState:
     """In-memory ephemeral state for the reactor + dispatcher.
 
     The persistent counterpart lives in :class:`SharedState` (state.json).
@@ -83,8 +83,8 @@ class ConductorState:
     pending_proposals: dict[str, PendingProposal] = field(default_factory=dict)
 
 
-class Conductor:
-    """The single Conductor instance per session.
+class Coordinator:
+    """The single Coordinator instance per session.
 
     Construct, ``await ctor.start()``, optionally ``await ctor.tick(n)``
     for bounded test runs, then ``await ctor.stop()``.
@@ -107,7 +107,7 @@ class Conductor:
             if name not in backends:
                 raise ValueError(
                     f"missing backend for role {name!r} "
-                    f"(provide via Conductor(backends={{...}}))"
+                    f"(provide via Coordinator(backends={{...}}))"
                 )
         self.backends = dict(backends)
 
@@ -123,14 +123,14 @@ class Conductor:
         self.sub = sub_agent_runner or SubAgentRunner(self.locks, self.tasks)
 
         # Persistent session state (state.json) — load existing for resume;
-        # save() is called whenever the Conductor mutates a persistent field.
+        # save() is called whenever the Coordinator mutates a persistent field.
         self.shared_state = SharedState.load_or_init(self.session_dir)
-        self.state = ConductorState()
+        self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
 
-        # Resume: rebuild ConductorState.pending_proposals from the SQLite
-        # event log so a Conductor restart picks up undecided proposals
+        # Resume: rebuild CoordinatorState.pending_proposals from the SQLite
+        # event log so a Coordinator restart picks up undecided proposals
         # without losing the Critic Review queue (DESIGN §17.5).
         self._resumed_from = self._detect_resume_state()
 
@@ -142,7 +142,7 @@ class Conductor:
 
         Called from __init__ — must not block on the event loop. Returns a
         small dict with `is_resume` + summary stats. The actual rebuild of
-        in-memory ConductorState happens lazily on the first call to
+        in-memory CoordinatorState happens lazily on the first call to
         :meth:`tick` (or the dedicated :meth:`replay_for_resume`); this lets
         construction stay synchronous + fast.
         """
@@ -157,7 +157,7 @@ class Conductor:
         }
 
     async def replay_for_resume(self) -> dict[str, Any]:
-        """Walk the event log to reconstruct ``ConductorState.pending_proposals``.
+        """Walk the event log to reconstruct ``CoordinatorState.pending_proposals``.
 
         Idempotent — re-running rebuilds from scratch. Returns a small dict
         of stats so tests can assert what was restored.
@@ -181,7 +181,7 @@ class Conductor:
                 decided_ids.add(target)
         for d in decisions:
             if d.payload.get("kind") == "approved_proposal":
-                # The conductor stores task_id, not the original proposal_msg_id,
+                # The coordinator stores task_id, not the original proposal_msg_id,
                 # in the decision; tasks created via materialization have
                 # idempotency_key f"approved-{proposal_msg_id}" — we can
                 # back-trace through the tasks table if needed, but for
@@ -194,7 +194,7 @@ class Conductor:
         self.state.pending_proposals.clear()
         for p in proposal_msgs:
             if p.msg_id in decided_ids:
-                # Optional: also remember the verdict so the Conductor can
+                # Optional: also remember the verdict so the Coordinator can
                 # surface it if asked (e.g. /status command).
                 continue
             payload = p.payload or {}
@@ -254,7 +254,7 @@ class Conductor:
         next pass starts. Dispatcher pumps queued tasks at the end of
         each pass.
 
-        On the first tick, if this Conductor was constructed against a
+        On the first tick, if this Coordinator was constructed against a
         non-empty session, it lazily reruns ``replay_for_resume()`` so
         in-memory state catches up before any new reactor work runs.
         """
@@ -275,7 +275,7 @@ class Conductor:
         max_minutes: float | None = None,
         tick_interval_sec: float = 0.0,
         max_ticks: int | None = None,
-        stop_when: Callable[["Conductor"], Awaitable[bool] | bool] | None = None,
+        stop_when: Callable[["Coordinator"], Awaitable[bool] | bool] | None = None,
         install_signal_handlers: bool = False,
         crash_emergency_threshold: int = 25,
     ) -> str:
@@ -312,11 +312,11 @@ class Conductor:
                 for sig in (signal.SIGINT, signal.SIGTERM):
                     loop.add_signal_handler(sig, self._stop.set)
                     previous_handlers[sig] = True
-                log.info("Conductor.run: SIGINT/SIGTERM handlers installed")
+                log.info("Coordinator.run: SIGINT/SIGTERM handlers installed")
             except (NotImplementedError, RuntimeError) as exc:  # noqa: BLE001
                 # add_signal_handler is unavailable on Windows or when
                 # we're not on the main thread (pytest-asyncio worker).
-                log.info("Conductor.run: signal handlers not installed (%s)", exc)
+                log.info("Coordinator.run: signal handlers not installed (%s)", exc)
                 previous_handlers = {}
 
         if self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]:
@@ -375,7 +375,7 @@ class Conductor:
             self.shared_state.stop_reason = stop_reason or "unknown"
             self.shared_state.save(self.session_dir)
             log.info(
-                "Conductor.run: stopped tick=%d reason=%s baseline_tput=%.1f "
+                "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
                 "cumulative_gain=%.2f%% max_minutes=%.0f",
                 tick_n, stop_reason or "unknown",
                 self.shared_state.baseline_tput,
@@ -411,7 +411,7 @@ class Conductor:
             )
         except BackendError as exc:
             await self._record_observation(
-                "conductor", "observation",
+                "coordinator", "observation",
                 {"kind": "backend_error", "agent": agent_name, "error": repr(exc)},
             )
             return
@@ -421,7 +421,7 @@ class Conductor:
             # Surface as a structured observation so the next tick sees
             # the failure and self-corrects, instead of killing the run.
             await self._record_observation(
-                "conductor", "observation",
+                "coordinator", "observation",
                 {"kind": "no_intent_emitted", "agent": agent_name,
                  "error": str(exc)[:500]},
             )
@@ -433,7 +433,7 @@ class Conductor:
             # stop in `run()`.)
             log.exception("reactor pass for %s raised", agent_name)
             await self._record_observation(
-                "conductor", "observation",
+                "coordinator", "observation",
                 {"kind": "reactor_exception", "agent": agent_name,
                  "error": f"{type(exc).__name__}: {str(exc)[:500]}"},
             )
@@ -555,7 +555,7 @@ class Conductor:
         # after crash still respects the prune.
         if self.shared_state.is_pruned(action_name):
             await self._record_observation(
-                "conductor", "observation",
+                "coordinator", "observation",
                 {"kind": "proposal_pruned", "from": source, "action": action_name},
             )
             return
@@ -579,7 +579,7 @@ class Conductor:
         pending = self.state.pending_proposals.get(target)
         if pending is None:
             await self._record_observation(
-                "conductor", "observation",
+                "coordinator", "observation",
                 {"kind": "verdict_for_unknown_proposal", "target": target, "verdict": verdict},
             )
             return
@@ -602,7 +602,7 @@ class Conductor:
 
         For grid-style executors (backends / params / sweep) we inject the
         current best throughput as ``base_tput`` so they can compute
-        gain%; otherwise the executor's default of 0.0 makes
+        gain%; otherwise the runner's default of 0.0 makes
         best_gain_pct uninformative (DESIGN §16 baseline_tput parameter).
         """
         params = dict(pending.payload.get("params") or {})
@@ -626,7 +626,7 @@ class Conductor:
                 params.setdefault("params_search", self.shared_state.params_search)
                 # Long runs should advance the search incrementally so params
                 # does not monopolize the whole optimization budget. Direct
-                # executor calls/tests can still pass 0 to run the full grid.
+                # runner calls/tests can still pass 0 to run the full grid.
                 params.setdefault("max_candidates_per_round", 3)
                 if isinstance(cb, dict) and cb.get("variant_name"):
                     params.setdefault("base_variant_name", str(cb["variant_name"]))
@@ -636,7 +636,7 @@ class Conductor:
             idempotency_key=f"approved-{pending.proposal_msg_id}",
         )
         await self.bus.append_and_seq(Message.new(
-            "conductor", "*", "decision",
+            "coordinator", "*", "decision",
             {"kind": "approved_proposal", "task_id": task.task_id,
              "action_name": pending.action_name, "from_agent": pending.from_agent},
         ))
@@ -654,7 +654,7 @@ class Conductor:
             idempotency_key=idempotency_key,
         )
         await self.bus.append_and_seq(Message.new(
-            "conductor", "*", "event",
+            "coordinator", "*", "event",
             {"kind": "task_queued", "task_id": task.task_id, "source": source, "action": action_name},
         ))
 
@@ -729,6 +729,9 @@ class Conductor:
                 if kind == "run_optimization":
                     self.shared_state.record_kernel_opt(result)
                     self.shared_state.save(self.session_dir)
+                if kind == "integrate" and result.get("decision") == "KEEP":
+                    self._record_integrate_keep(result)
+                    self.shared_state.save(self.session_dir)
                 # Bug B fix: the request was just answered programmatically,
                 # so the LLM-backed kernel agent should NOT see the request
                 # in its inbox next tick (otherwise it duplicates the
@@ -785,7 +788,7 @@ class Conductor:
             task = await self.tasks.get(task_id)
         except Exception:  # noqa: BLE001 — TaskNotFound
             await self._record_observation(
-                "conductor", "observation",
+                "coordinator", "observation",
                 {"kind": "kill_task_unknown", "task_id": task_id, "source": source},
             )
             return
@@ -868,7 +871,7 @@ class Conductor:
         self, source: str, intent: Intent, denied: PolicyDenied
     ) -> None:
         await self.bus.append_and_seq(Message.new(
-            "conductor", source, "observation",
+            "coordinator", source, "observation",
             {
                 "kind": "policy_denied",
                 "intent_type": intent.type.value,
@@ -888,6 +891,59 @@ class Conductor:
             top = latest[0]
             await self.cursors.advance(agent_name, seq=top.seq, msg_id=top.msg_id)
 
+    def _record_integrate_keep(self, result: dict[str, Any]) -> None:
+        new_tput = result.get("new_tput")
+        if not isinstance(new_tput, (int, float)) or new_tput <= 0:
+            return
+        if not self.shared_state.optimization_stack:
+            self.shared_state.seed_stack_from_current_best()
+
+        cb = self.shared_state.current_best or {}
+        extra_args = str(
+            result.get("extra_sglang_args")
+            or (cb.get("extra_sglang_args") if isinstance(cb, dict) else "")
+            or ""
+        ).strip()
+        apply_result = result.get("apply_result") or {}
+        entry = {
+            "action": "integrate",
+            "kernel_id": result.get("kernel_id"),
+            "patch_path": result.get("patch_path"),
+            "target_file": result.get("target_file"),
+            "backup_manifest": (
+                apply_result.get("manifest_path")
+                if isinstance(apply_result, dict) else None
+            ),
+            "gain_pct": result.get("gain_pct"),
+            "tput": float(new_tput),
+            "workspace": result.get("workspace"),
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        key = (entry["kernel_id"], entry["patch_path"], entry["target_file"])
+        existing = {
+            (item.get("kernel_id"), item.get("patch_path"), item.get("target_file"))
+            for item in self.shared_state.optimization_stack
+            if isinstance(item, dict) and item.get("action") == "integrate"
+        }
+        if key not in existing:
+            self.shared_state.optimization_stack.append(entry)
+
+        self.shared_state.current_best = {
+            "action": "integrate",
+            "tput": float(new_tput),
+            "kernel_id": result.get("kernel_id"),
+            "extra_sglang_args": extra_args,
+            "optimization_stack": list(self.shared_state.optimization_stack),
+            "ttft_mean_ms": result.get("ttft_mean_ms"),
+            "e2el_mean_ms": result.get("e2el_mean_ms"),
+            "workspace": result.get("workspace"),
+        }
+        if self.shared_state.baseline_tput > 0:
+            self.shared_state.cumulative_gain = (
+                (float(new_tput) - self.shared_state.baseline_tput)
+                / self.shared_state.baseline_tput * 100.0
+            )
+
     # ==================================================================
     # Dispatcher (pulls queued tasks → SubAgentRunner)
     # ==================================================================
@@ -900,13 +956,13 @@ class Conductor:
                 log.exception("dispatcher: failed to run task %s", task.task_id)
                 continue
             await self.bus.append_and_seq(Message.new(
-                "conductor", "*", "delegated_result",
+                "coordinator", "*", "delegated_result",
                 {"task_id": task.task_id, "kind": task.kind,
                  "state": result.state, "result": result.result,
                  "error": result.error},
             ))
             # Auto-promote certain succeeded results into SharedState core
-            # fields (Conductor is the only writer of CORE_STATE_FIELDS;
+            # fields (Coordinator is the only writer of CORE_STATE_FIELDS;
             # see DESIGN §14.5 / §17.2).
             if result.state == "succeeded":
                 await self._promote_to_shared_state(
@@ -1160,4 +1216,4 @@ class Conductor:
             self.shared_state.save(self.session_dir)
 
 
-__all__ = ["Conductor", "ConductorState", "PendingProposal", "SharedState"]
+__all__ = ["Coordinator", "CoordinatorState", "PendingProposal", "SharedState"]

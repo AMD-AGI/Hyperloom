@@ -5,7 +5,7 @@ Roles (DESIGN v0.6 §7):
 * Orchestration — proposes actions, delegates sub-agents, REQUESTs Kernel
 * Kernel        — owns 5 deep-kernel actions, responder-only via REQUEST/RESPONSE
 * Critic        — reviews proposals (approve/reject/redirect/advise), owns KB
-* Robustness    — always-on Watchdog + RCA + Handle, scheduling police
+* Robustness    — always-on health monitoring, RCA, recovery, scheduling police
 
 See ``inference-optimizer-DESIGN-v2.md`` for the canonical specification.
 """

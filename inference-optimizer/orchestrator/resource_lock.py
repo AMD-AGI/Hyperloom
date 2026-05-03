@@ -245,7 +245,7 @@ class SqliteLeaseBackend:
 
 # ---------------------------------------------------------------------------
 class ResourceLockManager:
-    """Conductor-facing wrapper. Today it's a thin pass-through over the
+    """Coordinator-facing wrapper. Today it's a thin pass-through over the
     backend; future versions can attach scheduling hints / metrics here.
     """
 

@@ -2,7 +2,7 @@
 
 Loads action metadata from ``actions/_meta/<name>.yaml`` (one file per
 action). The corresponding markdown body at ``actions/<name>.md`` is
-the agent-facing playbook (loaded lazily by SubAgentRunner / Conductor
+the agent-facing playbook (loaded lazily by SubAgentRunner / Coordinator
 when composing a sub-agent prompt).
 
 Used by:

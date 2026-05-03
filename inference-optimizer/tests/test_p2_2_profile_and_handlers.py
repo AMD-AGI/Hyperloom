@@ -20,14 +20,14 @@ from inference_optimizer.orchestrator.backends import (
     ScriptedPlan,
     MockTurn,
 )
-from inference_optimizer.orchestrator.conductor import Conductor
+from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.task_registry import TaskRegistry
 from inference_optimizer.orchestrator.resource_lock import (
     ResourceLockManager, SqliteLeaseBackend,
 )
 from inference_optimizer.orchestrator.sub_agent_runner import (
-    ExecutorContext, SubAgentRunner,
+    RunnerContext, SubAgentRunner,
 )
 from inference_optimizer.paths import make_session_dir
 from inference_optimizer.storage import SqliteConnection
@@ -73,7 +73,7 @@ def test_profile_yaml_has_torch_profiler_enabled():
 @pytest.mark.asyncio
 async def test_profile_executor_extracts_trace_dir(tmp_path):
     """When the workspace contains torch_trace/*.trace.json.gz, the
-    executor surfaces them in the result so downstream consumers can
+    runner surfaces them in the result so downstream consumers can
     feed them into tracelens_analysis.py."""
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
@@ -207,14 +207,14 @@ def test_handlers_dispatch_table():
 
 
 # ===========================================================================
-# Conductor — REQUEST programmatic handler integration
+# Coordinator — REQUEST programmatic handler integration
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_conductor_request_select_kernels_uses_handler(session_dir):
-    """When Orchestration emits REQUEST{kind=select_kernels}, the Conductor
+async def test_coordinator_request_select_kernels_uses_handler(session_dir):
+    """When Orchestration emits REQUEST{kind=select_kernels}, the Coordinator
     should run the registered handler programmatically and emit RESPONSE
     on the bus *without* waiting for the Kernel LLM."""
-    c = Conductor(session_dir, backends=_backends_silent())
+    c = Coordinator(session_dir, backends=_backends_silent())
 
     captured: dict = {}
 
@@ -256,10 +256,10 @@ async def test_conductor_request_select_kernels_uses_handler(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_conductor_request_unknown_kind_routes_to_llm(session_dir):
+async def test_coordinator_request_unknown_kind_routes_to_llm(session_dir):
     """REQUEST whose kind has no handler is mirrored to kernel inbox
     (LLM responder path) — no auto-RESPONSE."""
-    c = Conductor(session_dir, backends=_backends_silent())
+    c = Coordinator(session_dir, backends=_backends_silent())
     try:
         await c._handle_intent("orchestration", Intent(
             type=IntentType.REQUEST,
@@ -278,9 +278,9 @@ async def test_conductor_request_unknown_kind_routes_to_llm(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_conductor_request_handler_exception_recorded(session_dir):
+async def test_coordinator_request_handler_exception_recorded(session_dir):
     """Handler crashes → RESPONSE.status='failed' + error_class set."""
-    c = Conductor(session_dir, backends=_backends_silent())
+    c = Coordinator(session_dir, backends=_backends_silent())
 
     async def bad_handler(payload, *, session_dir):
         raise RuntimeError("boom")
