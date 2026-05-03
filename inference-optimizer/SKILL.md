@@ -27,7 +27,9 @@ The CLI starts a Python Conductor that coordinates:
 - Critic: proposal review; can be real Codex or `--critic-mock` when Codex credentials are unavailable.
 - Robustness: mock watchdog in this branch.
 
-State lives in one session directory:
+State lives in one session directory. Production defaults to
+`/hyperloom/inference-optimizer-sessions`, but portable launches should set
+`INFERENCE_OPTIMIZER_SESSION_ROOT` to a writable run-local directory:
 
 ```bash
 /hyperloom/inference-optimizer-sessions/<session_id>/
@@ -39,62 +41,182 @@ State lives in one session directory:
 
 Always prefer `state.json` and `conductor.db` over guessing from terminal logs.
 
-## New Environment Setup
+## Portable Environment Setup
 
-Run these from the Hyperloom repo root:
+Start from the repository root, but do not assume a fixed checkout path. Resolve
+the root once and use variables for every path that follows:
 
 ```bash
-cd /wekafs/xiaofei/Hyperloom
+export REPO_ROOT="$(pwd)"
+export PYTHON="${PYTHON:-/opt/venv/bin/python}"
+test -x "$PYTHON" || export PYTHON="$(command -v python3)"
+export RUN_ROOT="$REPO_ROOT/optimizer_runs"
+export WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace}"
+mkdir -p "$RUN_ROOT" "$WORKSPACE_ROOT"
 ```
 
-Load credentials. The expected `.env` keys are `ANTHROPIC_BASE_URL` and
-`ANTHROPIC_AUTH_TOKEN`.
+Load LLM credentials without printing secrets. The canonical credentials are
+`OPENAI_BASE_URL` and `SAFE_API_KEY` for the user's LiteLLM-compatible endpoint.
+If they are not already exported, source `$REPO_ROOT/.env`. Export compatibility
+aliases for the Python optimizer, Claude/Codex OOB, GEAK, and any legacy code
+that still reads Anthropic/OpenAI-style env names.
 
 ```bash
-set -a
-. ./.env
-set +a
+if [ -f "$REPO_ROOT/.env" ]; then
+  set -a
+  . "$REPO_ROOT/.env"
+  set +a
+fi
+
+: "${OPENAI_BASE_URL:?OPENAI_BASE_URL must be set in env or .env}"
+: "${SAFE_API_KEY:?SAFE_API_KEY must be set in env or .env}"
+
+export OPENAI_API_KEY="${OPENAI_API_KEY:-$SAFE_API_KEY}"
+export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-$SAFE_API_KEY}"
+export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$SAFE_API_KEY}"
+export OOB_API_KEY="${OOB_API_KEY:-$SAFE_API_KEY}"
+export GEAK_API_KEY="${GEAK_API_KEY:-$SAFE_API_KEY}"
+export LLM_API_KEY="${LLM_API_KEY:-$SAFE_API_KEY}"
+export AMD_LLM_API_KEY="${AMD_LLM_API_KEY:-$SAFE_API_KEY}"
+
+export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-$OPENAI_BASE_URL}"
+export OOB_BASE_URL="${OOB_BASE_URL:-$OPENAI_BASE_URL}"
+export GEAK_BASE_URL="${GEAK_BASE_URL:-$OPENAI_BASE_URL}"
+export LLM_API_BASE="${LLM_API_BASE:-$OPENAI_BASE_URL}"
+
+"$PYTHON" - <<'PY'
+import os
+required = ["OPENAI_BASE_URL", "SAFE_API_KEY"]
+missing = [k for k in required if not os.environ.get(k)]
+print("env_required_present=", not missing)
+if missing:
+    print("missing=", ",".join(missing))
+print("compat_aliases_present=", all(bool(os.environ.get(k)) for k in [
+    "OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OOB_API_KEY", "GEAK_API_KEY"
+]))
+PY
 ```
 
-Install the optimizer package into the active Python environment:
+Install or validate the optimizer package in the same Python environment that
+will launch the long run:
 
 ```bash
-/opt/venv/bin/python -m pip install -e ".[test]"
-/opt/venv/bin/python -m inference_optimizer.cli --help
+"$PYTHON" -m pip install -e "$REPO_ROOT[test]"
+"$PYTHON" -m inference_optimizer.cli --help
 ```
 
-Magpie must be importable by the same Python that launches the optimizer:
+Kernel-agent is a reusable downstream skill. Before launching
+`inference_optimizer.cli`, read and follow `$REPO_ROOT/kernel-agent/SKILL.md`,
+especially `Installation`, `TraceLens Requirements`, and `Backend Selection`.
+This makes the same kernel-agent work both standalone and under
+inference-optimizer. The launcher should invoke kernel-agent's installer rather
+than duplicating backend setup logic:
 
 ```bash
-/opt/venv/bin/python -c "import Magpie; print('Magpie OK')"
+export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
+export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
+export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
+export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+export PATH="/opt/venv/bin:/usr/local/bin:$PATH"
+
+bash "$HYPERLOOM_KERNEL_AGENT_ROOT/scripts/install.sh" --with-oob
+. "$HYPERLOOM_KERNEL_AGENT_ROOT/env.sh"
 ```
 
-If Magpie is missing, install it in the environment before launching:
+Kernel backends submit Ray tasks with `num_gpus>=1`, so Ray must advertise all
+visible GPUs. Do not start Ray with `--num-gpus=0`; that leaves kernel
+optimization pending forever even when ROCm sees idle GPUs.
 
 ```bash
-git clone https://github.com/AMD-AGI/Magpie /workspace/Magpie
-/opt/venv/bin/python -m pip install -e /workspace/Magpie
+export RAY_NUM_GPUS="${RAY_NUM_GPUS:-$("$PYTHON" - <<'PY'
+try:
+    import torch
+    print(torch.cuda.device_count() or 1)
+except Exception:
+    print(1)
+PY
+)}"
+"$PYTHON" -m ray stop --force || true
+"$PYTHON" -m ray start --head --disable-usage-stats \
+  --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
+"$PYTHON" -m ray status
 ```
 
-TraceLens is used by `select_kernels`. Prefer the open-source repo unless the
-environment already provides an internal mount:
+Magpie must be importable by the launcher Python. If it is missing, install it
+before launching:
 
 ```bash
-git clone https://github.com/AMD-AGI/TraceLens /workspace/TraceLens
-export TRACELENS_ROOT=/workspace/TraceLens
+"$PYTHON" - <<'PY' || {
+import Magpie
+print("Magpie OK")
+PY
+  git clone https://github.com/AMD-AGI/Magpie "$WORKSPACE_ROOT/Magpie"
+  "$PYTHON" -m pip install -e "$WORKSPACE_ROOT/Magpie"
+}
 ```
 
-Kernel-agent is expected next to `inference-optimizer`:
+TraceLens is used by `select_kernels`. Prefer the internal mount because it
+contains the standalone TraceLens skills required by `kernel-agent`; clone the
+open-source repo only as a fallback when the internal mount is unavailable:
 
 ```bash
-export HYPERLOOM_KERNEL_AGENT_ROOT=/wekafs/xiaofei/Hyperloom/kernel-agent
+if [ -d "/wekafs/hyperloom/TraceLens-internal" ]; then
+  export TRACELENS_ROOT="/wekafs/hyperloom/TraceLens-internal"
+elif [ -d "$WORKSPACE_ROOT/TraceLens" ]; then
+  export TRACELENS_ROOT="$WORKSPACE_ROOT/TraceLens"
+else
+  git clone https://github.com/AMD-AGI/TraceLens "$WORKSPACE_ROOT/TraceLens"
+  export TRACELENS_ROOT="$WORKSPACE_ROOT/TraceLens"
+fi
+test -f "$TRACELENS_ROOT/TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
 ```
 
-Optional but recommended session root in a new sandbox:
+Kernel-agent is expected in the same repository. Resolve it relative to
+`REPO_ROOT` and treat its skill as the source of truth for TraceLens, Ray, GEAK,
+and OOB setup:
 
 ```bash
-export INFERENCE_OPTIMIZER_SESSION_ROOT=/hyperloom/inference-optimizer-sessions
+export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
+test -d "$HYPERLOOM_KERNEL_AGENT_ROOT"
+test -f "$HYPERLOOM_KERNEL_AGENT_ROOT/SKILL.md"
+```
+
+Use a repo-local session root by default so the skill works in sandboxes where
+`/hyperloom` is absent:
+
+```bash
+export INFERENCE_OPTIMIZER_SESSION_ROOT="$RUN_ROOT/inference-optimizer-sessions"
 mkdir -p "$INFERENCE_OPTIMIZER_SESSION_ROOT"
+```
+
+## Portable Preflight
+
+Before every new model run, verify the model path, GPU visibility, and duplicate
+processes. Never print tokens.
+
+```bash
+export MODEL_PATH=/path/to/model
+test -d "$MODEL_PATH"
+
+"$PYTHON" - <<'PY'
+import os
+try:
+    import torch
+    print("torch_cuda_available=", torch.cuda.is_available())
+    print("torch_cuda_device_count=", torch.cuda.device_count())
+except Exception as exc:
+    print("torch_check_error=", type(exc).__name__, str(exc)[:300])
+
+patterns = ("inference_optimizer.cli", "Magpie", "sglang.launch_server")
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        cmd = open(f"/proc/{pid}/cmdline", "rb").read()
+    except Exception:
+        continue
+    text = cmd.replace(b"\0", b" ").decode("utf-8", "ignore")
+    if text and any(p in text for p in patterns):
+        print(f"existing_process {pid}: {text[:300]}")
+PY
 ```
 
 ## Benchmark Config
@@ -119,23 +241,107 @@ Do not set `HIP_VISIBLE_DEVICES` on the known ROCm stack unless the user asks;
 it can make `torch.cuda.is_available()` return false. Use
 `ROCR_VISIBLE_DEVICES` for GPU pinning.
 
+Do not edit the default Qwen YAML for a new model. Materialize a run-specific
+asset root and override only the benchmark configs for that run:
+
+```bash
+export MODEL_NAME="$(basename "$MODEL_PATH")"
+export RUN_TS="$(date +%Y%m%d_%H%M%S)"
+export ASSET_ROOT="$RUN_ROOT/assets_${MODEL_NAME}_${RUN_TS}"
+export TP="${TP:-$( "$PYTHON" - <<'PY'
+try:
+    import torch
+    print(torch.cuda.device_count() or 1)
+except Exception:
+    print(1)
+PY
+)}"
+export ROCR_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES:-$(seq -s, 0 $((TP - 1)))}"
+
+"$PYTHON" - <<'PY'
+from pathlib import Path
+import os, yaml
+
+repo = Path(os.environ["REPO_ROOT"])
+asset = Path(os.environ["ASSET_ROOT"])
+src = repo / "inference-optimizer"
+(asset / "scripts" / "configs").mkdir(parents=True, exist_ok=True)
+
+for name in ["actions", "kernel_opt", "orchestrator"]:
+    target = asset / name
+    if not target.exists():
+        target.symlink_to(src / name, target_is_directory=True)
+for helper in ["ab_torch_compile_magpie.py", "ab_torch_compile_kernels.py"]:
+    target = asset / "scripts" / helper
+    if not target.exists():
+        target.symlink_to(src / "scripts" / helper)
+
+def write_config(src_name, dst_name, profile_enabled, timeout_seconds):
+    cfg = yaml.safe_load((src / "scripts" / "configs" / src_name).read_text())
+    bench = cfg.setdefault("benchmark", {})
+    bench["model"] = os.environ["MODEL_PATH"]
+    bench["precision"] = os.environ.get("PRECISION", "bf16")
+    bench["timeout_seconds"] = timeout_seconds
+    envs = bench.setdefault("envs", {})
+    envs.update({
+        "TP": int(os.environ["TP"]),
+        "CONC": int(os.environ.get("CONC", "8")),
+        "ISL": int(os.environ.get("ISL", "256")),
+        "OSL": int(os.environ.get("OSL", "256")),
+        "RANDOM_RANGE_RATIO": os.environ.get("RANDOM_RANGE_RATIO", "1"),
+        "MAX_MODEL_LEN": int(os.environ.get("MAX_MODEL_LEN", "8192")),
+        "ROCR_VISIBLE_DEVICES": os.environ["ROCR_VISIBLE_DEVICES"],
+        "PATH": "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    })
+    bench["gpu_selection"] = {"auto": False}
+    profiler = bench.setdefault("profiler", {})
+    profiler.setdefault("torch_profiler", {})["enabled"] = bool(profile_enabled)
+    profiler.setdefault("system_profiler", {})["enabled"] = False
+    profiler.setdefault("tracelens", {})["enabled"] = False
+    (asset / "scripts" / "configs" / dst_name).write_text(
+        yaml.safe_dump(cfg, sort_keys=False),
+        encoding="utf-8",
+    )
+
+write_config("baseline_qwen3_8b_sglang.yaml",
+             "baseline_qwen3_8b_sglang.yaml",
+             False, int(os.environ.get("BASELINE_TIMEOUT_SEC", "1800")))
+write_config("profile_qwen3_8b_sglang.yaml",
+             "profile_qwen3_8b_sglang.yaml",
+             True, int(os.environ.get("PROFILE_TIMEOUT_SEC", "2400")))
+print("asset_root=", asset)
+PY
+
+export INFERENCE_OPTIMIZER_ASSET_ROOT="$ASSET_ROOT"
+```
+
 ## Launch A New Optimization
 
 Use this for a fresh model/session:
 
 ```bash
-cd /wekafs/xiaofei/Hyperloom
-set -a; . ./.env; set +a
+cd "$REPO_ROOT"
+if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
+. "$HYPERLOOM_KERNEL_AGENT_ROOT/env.sh"
+export PATH="/opt/venv/bin:/usr/local/bin:$PATH"
 
-setsid nohup /opt/venv/bin/python -m inference_optimizer.cli --verbose optimize \
-  --model /path/to/model \
-  --target-gain 10 \
-  --max-hours 5 \
+export SESSION_NAME="${MODEL_NAME}-$(date +%Y%m%d_%H%M%S)"
+export RUN_LOG="$RUN_ROOT/run_${SESSION_NAME}.log"
+export PID_FILE="$RUN_ROOT/run_${SESSION_NAME}.pid"
+export TARGET_GAIN="${TARGET_GAIN:-10}"
+export MAX_HOURS="${MAX_HOURS:-5}"
+
+setsid nohup "$PYTHON" -m inference_optimizer.cli --verbose optimize \
+  --model "$MODEL_PATH" \
+  --session-name "$SESSION_NAME" \
+  --target-gain "$TARGET_GAIN" \
+  --max-hours "$MAX_HOURS" \
   --tick-interval-sec 30 \
   --kernel-claude \
   --critic-mock \
-  > /wekafs/xiaofei/Hyperloom/optimizer_runs/run_$(date +%Y%m%d_%H%M%S).log \
+  > "$RUN_LOG" \
   2>&1 < /dev/null &
+echo $! > "$PID_FILE"
 ```
 
 Use real Critic only when Codex/OpenAI credentials are available:
@@ -147,39 +353,148 @@ Use real Critic only when Codex/OpenAI credentials are available:
 `setsid nohup ... &` is required for long runs. Cursor background shell alone is
 not enough; it can die on SSH disconnect.
 
+After launching, perform a short health check. The run is healthy only when the
+optimizer process is alive, `state.json` exists, and the first benchmark process
+or SGLang server has started.
+
+```bash
+"$PYTHON" - <<'PY'
+import json, os, pathlib
+pid_file = pathlib.Path(os.environ["PID_FILE"])
+pid = pid_file.read_text().strip()
+print("optimizer_running=", pathlib.Path("/proc", pid).exists())
+session = pathlib.Path(os.environ["INFERENCE_OPTIMIZER_SESSION_ROOT"]) / os.environ["SESSION_NAME"]
+state_path = session / "state.json"
+print("state_exists=", state_path.exists())
+if state_path.exists():
+    state = json.loads(state_path.read_text())
+    print("stop_reason=", state.get("stop_reason"))
+    print("baseline_tput=", state.get("baseline_tput"))
+    print("cumulative_gain=", state.get("cumulative_gain"))
+patterns = ("Magpie", "sglang.launch_server")
+for proc in pathlib.Path("/proc").iterdir():
+    if not proc.name.isdigit():
+        continue
+    try:
+        text = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "ignore")
+    except Exception:
+        continue
+    if text and any(p in text for p in patterns):
+        print(f"child_process {proc.name}: {text[:300]}")
+PY
+```
+
 ## Resume Existing Session
 
 Use resume instead of starting over:
 
 ```bash
-cd /wekafs/xiaofei/Hyperloom
-set -a; . ./.env; set +a
+cd "$REPO_ROOT"
+set -a; . "$REPO_ROOT/.env"; set +a
 
-setsid nohup /opt/venv/bin/python -m inference_optimizer.cli --verbose optimize \
-  --resume <session_id> \
-  --target-gain 10 \
-  --max-hours 5 \
+export SESSION_NAME=<session_id>
+export RUN_LOG="$RUN_ROOT/resume_${SESSION_NAME}_$(date +%Y%m%d_%H%M%S).log"
+export PID_FILE="$RUN_ROOT/run_${SESSION_NAME}.pid"
+export TARGET_GAIN="${TARGET_GAIN:-10}"
+export MAX_HOURS="${MAX_HOURS:-5}"
+
+setsid nohup "$PYTHON" -m inference_optimizer.cli --verbose optimize \
+  --resume "$SESSION_NAME" \
+  --target-gain "$TARGET_GAIN" \
+  --max-hours "$MAX_HOURS" \
   --tick-interval-sec 30 \
   --kernel-claude \
   --critic-mock \
-  > /wekafs/xiaofei/Hyperloom/optimizer_runs/run_$(date +%Y%m%d_%H%M%S).log \
+  > "$RUN_LOG" \
   2>&1 < /dev/null &
+echo $! > "$PID_FILE"
 ```
 
 Resume preserves baseline, current best, params search state, event history, and
 kernel-agent artifacts. The CLI clears stale `stop_reason` and `crash_count`
 before retrying.
 
+## Watchdog For Long Runs
+
+For any run longer than 5 minutes, start a watchdog in its own `setsid nohup`
+process. It must poll no more often than every 5 minutes, stop when the session
+has a terminal `stop_reason`, and resume the same session if the optimizer exits
+unexpectedly.
+
+```bash
+export WATCHDOG_SCRIPT="$RUN_ROOT/watchdog_${SESSION_NAME}.sh"
+export WATCHDOG_LOG="$RUN_ROOT/watchdog_${SESSION_NAME}_$(date +%Y%m%d_%H%M%S).log"
+export WATCHDOG_PID_FILE="$RUN_ROOT/watchdog_${SESSION_NAME}.pid"
+
+cat > "$WATCHDOG_SCRIPT" <<'SH'
+#!/usr/bin/env bash
+set -u
+deadline="$("$PYTHON" - <<'PY'
+import os, time
+print(int(time.time() + (float(os.environ.get("MAX_HOURS", "5")) + 1.0) * 3600))
+PY
+)"
+read_stop_reason() {
+  "$PYTHON" - "$INFERENCE_OPTIMIZER_SESSION_ROOT/$SESSION_NAME/state.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+if not p.exists():
+    print("")
+else:
+    try:
+        print(str((json.loads(p.read_text()).get("stop_reason") or "")).strip())
+    except Exception:
+        print("")
+PY
+}
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  pid=""
+  [ -f "$PID_FILE" ] && read -r pid < "$PID_FILE" || true
+  stop_reason="$(read_stop_reason)"
+  case "$stop_reason" in
+    target_reached|time_exhausted|max_ticks)
+      echo "[watchdog] terminal stop_reason=$stop_reason $(date -Is)"
+      exit 0
+      ;;
+  esac
+  if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+    echo "[watchdog] alive pid=$pid stop_reason=${stop_reason:-none} $(date -Is)"
+    sleep 300
+    continue
+  fi
+  echo "[watchdog] optimizer stopped; resuming $SESSION_NAME $(date -Is)"
+  resume_log="$RUN_ROOT/resume_${SESSION_NAME}_$(date +%Y%m%d_%H%M%S).log"
+  set -a; . "$REPO_ROOT/.env"; set +a
+  setsid nohup "$PYTHON" -m inference_optimizer.cli --verbose optimize \
+    --resume "$SESSION_NAME" \
+    --target-gain "${TARGET_GAIN:-10}" \
+    --max-hours "${MAX_HOURS:-5}" \
+    --tick-interval-sec 30 \
+    --kernel-claude \
+    --critic-mock \
+    > "$resume_log" 2>&1 < /dev/null &
+  echo $! > "$PID_FILE"
+  sleep 300
+done
+echo "[watchdog] deadline reached $(date -Is)"
+SH
+
+chmod +x "$WATCHDOG_SCRIPT"
+setsid nohup bash "$WATCHDOG_SCRIPT" > "$WATCHDOG_LOG" 2>&1 < /dev/null &
+echo $! > "$WATCHDOG_PID_FILE"
+```
+
 ## Monitoring
 
 Poll at most every 5 minutes unless debugging a startup failure.
 
 ```bash
-export SESSION=/hyperloom/inference-optimizer-sessions/<session_id>
-python3 - <<'PY'
+export SESSION="$INFERENCE_OPTIMIZER_SESSION_ROOT/$SESSION_NAME"
+"$PYTHON" - <<'PY'
 import json, os, pathlib
 s = json.loads((pathlib.Path(os.environ["SESSION"]) / "state.json").read_text())
 print("stop_reason:", s.get("stop_reason"))
+print("baseline_tput:", s.get("baseline_tput"))
 print("cumulative_gain:", s.get("cumulative_gain"))
 print("current_best:", s.get("current_best"))
 print("params_search:", s.get("params_search", {}).get("last_round"))
@@ -192,10 +507,10 @@ PY
 Use SQLite for recent action counts:
 
 ```bash
-python3 - <<'PY'
-import sqlite3, json
+"$PYTHON" - <<'PY'
+import json, os, pathlib, sqlite3
 from collections import Counter
-db = "/hyperloom/inference-optimizer-sessions/<session_id>/storage/conductor.db"
+db = pathlib.Path(os.environ["SESSION"]) / "storage" / "conductor.db"
 con = sqlite3.connect(db)
 c = Counter()
 for fa, ta, topic, payload in con.execute(
@@ -223,17 +538,17 @@ The optimizer should:
 
 1. Establish or reuse `baseline_tput`.
 2. Run `profile` only when the active server args differ from
-   `last_profile_args`; otherwise reuse `last_profile_trace`.
+  `last_profile_args`; otherwise reuse `last_profile_trace`.
 3. Run `select_kernels` once per trace/config and cache the result in
-   `last_select_kernels`.
+  `last_select_kernels`.
 4. Pick only `reusable_native_kernel_ids` for `run_optimization`.
 5. Require compile + correctness + microbench/E2E evidence before KEEP.
 6. Use `params_search` to test parameters incrementally and remember rejected
-   candidates across resume.
+  candidates across resume.
 7. Use `optimization_stack` so backend + params + kernel changes do not
-   overwrite each other.
+  overwrite each other.
 8. Use `sweep` to understand workload-specific results beyond the smoke
-   workload.
+  workload.
 
 ## Kernel Apply Safety
 
@@ -243,8 +558,8 @@ or compiled artifacts. Before applying a patch:
 - Back up source files.
 - Back up compiled `.so` / `.co` artifacts when available.
 - On REVERT, restore compiled artifacts first, then source files, then restart
-  the server. Avoid a rebuild on revert when the original compiled artifact was
-  backed up.
+the server. Avoid a rebuild on revert when the original compiled artifact was
+backed up.
 - Only KEEP when correctness and E2E are acceptable.
 
 If the user has not explicitly approved environment mutation, stop before real
@@ -254,13 +569,13 @@ apply/rebuild and ask. Dry-run and analysis are safe.
 
 - `ANTHROPIC_AUTH_TOKEN not set`: source `.env`.
 - `Fatal error in message reader`: retry/resume; transient Claude CLI failures
-  are tolerated up to the Conductor emergency threshold.
+are tolerated up to the Conductor emergency threshold.
 - `No accelerator`: ensure Magpie subprocess PATH includes `/opt/venv/bin` and
-  use `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
+use `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
 - Repeated `select_kernels`: check `last_select_kernels`; if trace/config did
-  not change, this is a bug. Reuse cached candidates and run optimization.
+not change, this is a bug. Reuse cached candidates and run optimization.
 - `correctness_passed=false`: do not integrate. Inspect the kernel-agent report;
-  the report must contain explicit correctness evidence.
+the report must contain explicit correctness evidence.
 - `time_exhausted`: resume the same session id; do not start from scratch.
 
 ## Report Back To User
