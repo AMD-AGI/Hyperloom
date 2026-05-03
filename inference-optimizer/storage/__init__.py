@@ -1,6 +1,6 @@
 """SQLite WAL atomic storage backend (DESIGN v0.6 §3.5 / §13.1 / ADR-42).
 
-Single ``$SESSION_DIR/storage/conductor.db`` consolidates 4 tables:
+Single ``$SESSION_DIR/storage/coordinator.db`` consolidates 4 tables:
 
 * ``leases``  — resource lock state (one row per lane)
 * ``events``  — A2A message bus source-of-truth (AUTOINCREMENT seq)

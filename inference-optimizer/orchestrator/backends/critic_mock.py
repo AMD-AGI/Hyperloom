@@ -1,6 +1,6 @@
 """Mock Critic backend — auto-approves every proposal it sees.
 
-Used in P0 main-path tests so Conductor + Orchestration + Kernel can run
+Used in P0 main-path tests so Coordinator + Orchestration + Kernel can run
 end-to-end without a real Codex Critic. The full Critic Review Protocol
 (§18) — verdict ∈ {approve, reject, redirect, advise, needs_review},
 KB-evidence reasoning, brier calibration — is implemented later by the
@@ -26,7 +26,7 @@ from ..intent_parser import Intent, IntentType
 from .base import Backend, BackendTurnResult
 
 
-# DESIGN §13.1 inbox rendering format. Conductor._compose_prompt emits:
+# DESIGN §13.1 inbox rendering format. Coordinator._compose_prompt emits:
 #     seq=12 msg_id=<hex32> from=orchestration topic=proposal payload={...}
 _PROPOSAL_RE = re.compile(
     r"^\s*seq=(\d+)\s+msg_id=([a-f0-9]+)\s+from=(\w+)\s+topic=proposal\s+payload=(.*)$",

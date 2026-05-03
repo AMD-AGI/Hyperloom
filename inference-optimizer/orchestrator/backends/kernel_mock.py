@@ -1,6 +1,6 @@
 """Mock Kernel backend — auto-responds to every REQUEST it sees.
 
-Used in P0 main-path tests so Conductor + Orchestration can exercise the
+Used in P0 main-path tests so Coordinator + Orchestration can exercise the
 Plan A REQUEST/RESPONSE protocol without a real Claude Kernel agent.
 
 Behaviour:
@@ -21,7 +21,7 @@ from ..intent_parser import Intent, IntentType
 from .base import Backend, BackendTurnResult
 
 
-# Conductor renders inbox rows as:
+# Coordinator renders inbox rows as:
 #   seq=N msg_id=<hex32> from=orchestration topic=request payload={'target_agent': 'kernel', 'kind': 'select_kernels', ...}
 _REQUEST_RE = re.compile(
     r"^\s*seq=(\d+)\s+msg_id=([a-f0-9]+)\s+from=(\w+)\s+topic=request\s+payload=(.*)$",

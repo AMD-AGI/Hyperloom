@@ -4,7 +4,7 @@ Verifies:
 
 * Package importable + ``__version__`` set to v0.6.0
 * ``paths.make_session_dir`` creates all standard subdirs under env override
-* ``paths.db_path_for`` resolves to ``storage/conductor.db`` under session
+* ``paths.db_path_for`` resolves to ``storage/coordinator.db`` under session
 * ``storage.SqliteConnection`` opens DB with WAL pragmas + 4 tables created
 * Cross-table ``BEGIN IMMEDIATE`` transaction round-trips events + cursors
 """
@@ -49,7 +49,7 @@ def test_db_path_for_default_under_session(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_OVERRIDE_ROOT, str(tmp_path))
     monkeypatch.delenv(paths.ENV_OVERRIDE_DB_PATH, raising=False)
     sd = paths.make_session_dir("dbtest")
-    assert paths.db_path_for(sd) == sd / "storage" / "conductor.db"
+    assert paths.db_path_for(sd) == sd / "storage" / "coordinator.db"
 
 
 def test_db_path_for_env_override_wins(tmp_path, monkeypatch):

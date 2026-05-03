@@ -1,14 +1,14 @@
-"""P0-3 Conductor + MockBackend + SubAgentRunner tests.
+"""P0-3 Coordinator + MockBackend + SubAgentRunner tests.
 
 Covers:
 
 * MockBackend playback: scripted turns + exhaustion fallback heartbeat
-* SubAgentRunner: lease acquired → task run → released; missing executor
-  fails the task; exception in executor transitions to failed
-* Conductor.tick() exercises 4-agent reactor + dispatcher in single process
+* SubAgentRunner: lease acquired → task run → released; missing runner
+  fails the task; exception in runner transitions to failed
+* Coordinator.tick() exercises 4-agent reactor + dispatcher in single process
 * PROPOSE_ACTION → bus 'proposal' + pending_proposals tracked
 * REVIEW_VERDICT(approve) → task materialized; (reject) → no task
-* DELEGATE → task queued + dispatcher runs registered executor
+* DELEGATE → task queued + dispatcher runs registered runner
 * REQUEST(orchestration→kernel) → bus 'request' to_agent=kernel
 * RESPONSE → routed back to original requester
 * KILL_TASK by Robustness cancels queued task
@@ -29,10 +29,10 @@ from inference_optimizer.orchestrator.backends import (
     MockTurn,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.conductor import Conductor
+from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.sub_agent_runner import (
-    ExecutorContext,
+    RunnerContext,
     SubAgentResult,
     SubAgentRunner,
 )
@@ -51,7 +51,7 @@ from inference_optimizer.storage import SqliteConnection
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_ROOT", str(tmp_path))
-    return make_session_dir("conductor-test")
+    return make_session_dir("coordinator-test")
 
 
 def _heartbeat() -> Intent:
@@ -136,7 +136,7 @@ async def test_sub_agent_runner_no_executor_fails(tmp_path):
     task = await tr.create(kind="never_registered", params={}, idempotency_key="k-x")
     res = await sub.run_task(task)
     assert res.state == "failed"
-    assert "no executor" in res.error
+    assert "no runner" in res.error
     db.close()
 
 
@@ -166,12 +166,12 @@ async def test_sub_agent_runner_acquires_lane(tmp_path):
 
 
 # ===========================================================================
-# Conductor — bounded ticks
+# Coordinator — bounded ticks
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_conductor_starts_with_silent_backends(session_dir):
+async def test_coordinator_starts_with_silent_backends(session_dir):
     backends = _build_backends({})
-    c = Conductor(session_dir, backends=backends)
+    c = Coordinator(session_dir, backends=backends)
     try:
         await c.tick(2)
         # 4 agents × 2 ticks × 1 heartbeat each = 8 send_message events
@@ -182,12 +182,12 @@ async def test_conductor_starts_with_silent_backends(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_conductor_propose_action_creates_pending(session_dir):
+async def test_coordinator_propose_action_creates_pending(session_dir):
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "baseline", "predicted_gain_pct": 0.0,
     })
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
-    c = Conductor(session_dir, backends=_build_backends(plans))
+    c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
         await c.tick(1)
         assert len(c.state.pending_proposals) == 1
@@ -199,7 +199,7 @@ async def test_conductor_propose_action_creates_pending(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_conductor_review_verdict_approve_creates_task(session_dir):
+async def test_coordinator_review_verdict_approve_creates_task(session_dir):
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "baseline", "predicted_gain_pct": 0.0,
     })
@@ -207,7 +207,7 @@ async def test_conductor_review_verdict_approve_creates_task(session_dir):
         "orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])]),
         # Critic will see proposal next tick, then approve
     }
-    c = Conductor(session_dir, backends=_build_backends(plans))
+    c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
         await c.tick(1)
         proposal_id = next(iter(c.state.pending_proposals.keys()))
@@ -230,12 +230,12 @@ async def test_conductor_review_verdict_approve_creates_task(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_conductor_review_verdict_reject_no_task(session_dir):
+async def test_coordinator_review_verdict_reject_no_task(session_dir):
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "baseline", "predicted_gain_pct": 0.0,
     })
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
-    c = Conductor(session_dir, backends=_build_backends(plans))
+    c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
         await c.tick(1)
         proposal_id = next(iter(c.state.pending_proposals.keys()))
@@ -256,15 +256,15 @@ async def test_conductor_review_verdict_reject_no_task(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_conductor_delegate_task_run_via_dispatcher(session_dir):
+async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
     delegate = Intent(type=IntentType.DELEGATE, payload={
         "action_name": "baseline", "params": {"runs": 1},
         "idempotency_key": "k-deleg-1",
     })
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
 
-    c = Conductor(session_dir, backends=_build_backends(plans))
-    # Register on Conductor's built-in SubAgentRunner — sharing its db handle.
+    c = Coordinator(session_dir, backends=_build_backends(plans))
+    # Register on Coordinator's built-in SubAgentRunner — sharing its db handle.
     c.sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1840}))
     try:
         await c.tick(1)
@@ -276,13 +276,13 @@ async def test_conductor_delegate_task_run_via_dispatcher(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_conductor_request_routes_to_kernel(session_dir):
+async def test_coordinator_request_routes_to_kernel(session_dir):
     req = Intent(type=IntentType.REQUEST, payload={
         "target_agent": "kernel", "kind": "select_kernels",
         "params": {"top_k": 5},
     })
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
-    c = Conductor(session_dir, backends=_build_backends(plans))
+    c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
         await c.tick(1)
         kernel_inbox = await c.bus.tail(to_agent="kernel", topic="request")
@@ -292,15 +292,15 @@ async def test_conductor_request_routes_to_kernel(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_conductor_response_routes_back_to_requester(session_dir):
+async def test_coordinator_response_routes_back_to_requester(session_dir):
     req = Intent(type=IntentType.REQUEST, payload={
         "target_agent": "kernel", "kind": "select_kernels",
     })
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
-    c = Conductor(session_dir, backends=_build_backends(plans))
+    c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
         await c.tick(1)
-        # Find the request msg_id Conductor inserted
+        # Find the request msg_id Coordinator inserted
         kernel_inbox = await c.bus.tail(to_agent="kernel", topic="request")
         assert kernel_inbox, "no request mirrored to kernel"
         request_msg_id = kernel_inbox[0].msg_id
@@ -322,18 +322,18 @@ async def test_conductor_response_routes_back_to_requester(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_conductor_kill_task_by_robustness(session_dir):
+async def test_coordinator_kill_task_by_robustness(session_dir):
     delegate = Intent(type=IntentType.DELEGATE, payload={
         "action_name": "long_running", "params": {},
         "idempotency_key": "k-long-1",
     })
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
 
-    c = Conductor(session_dir, backends=_build_backends(plans))
+    c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
-        await c.tick(1)  # delegate enqueued; dispatcher fails (no executor)
+        await c.tick(1)  # delegate enqueued; dispatcher fails (no runner)
         all_tasks = await c.tasks.by_state("failed")
-        assert all_tasks  # no executor → failed
+        assert all_tasks  # no runner → failed
 
         # Re-create a queued one for kill test (use a different idem key)
         new_task = await c.tasks.create(
@@ -350,8 +350,8 @@ async def test_conductor_kill_task_by_robustness(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_conductor_prune_branch_cancels_family_and_future_proposals(session_dir):
-    c = Conductor(session_dir, backends=_build_backends({}))
+async def test_coordinator_prune_branch_cancels_family_and_future_proposals(session_dir):
+    c = Coordinator(session_dir, backends=_build_backends({}))
     try:
         a = await c.tasks.create(kind="deep_kernel_analysis", params={}, idempotency_key="ka")
         b = await c.tasks.create(kind="deep_kernel_analysis", params={}, idempotency_key="kb")
@@ -380,11 +380,11 @@ async def test_conductor_prune_branch_cancels_family_and_future_proposals(sessio
 
 
 @pytest.mark.asyncio
-async def test_conductor_policy_denied_surfaces_as_observation(session_dir):
+async def test_coordinator_policy_denied_surfaces_as_observation(session_dir):
     # Critic tries to delegate (forbidden by role).
     bad = Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline"})
     plans = {"critic": ScriptedPlan(turns=[MockTurn(intents=[bad])])}
-    c = Conductor(session_dir, backends=_build_backends(plans))
+    c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
         await c.tick(1)
         denied = await c.bus.tail(topic="observation")

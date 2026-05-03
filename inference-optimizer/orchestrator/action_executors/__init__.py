@@ -1,6 +1,6 @@
-"""Concrete ActionExecutor implementations (DESIGN v0.6 §15.2).
+"""Concrete ActionRunner implementations (DESIGN v0.6 §15.2).
 
-Each executor is an `async def fn(ExecutorContext) -> dict` that the
+Each runner is an `async def fn(RunnerContext) -> dict` that the
 SubAgentRunner dispatches when a queued task's ``kind`` matches its
 registered name.
 

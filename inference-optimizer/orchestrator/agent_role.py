@@ -26,7 +26,7 @@ v0.6 roster — 4 persistent reactors, no mode gating::
 
 Removed in v0.6:
     * sage role (KB merged into Critic — §7.3 / ADR-35)
-    * watchdog role (renamed to robustness — ADR-36)
+    * robustness role (health monitoring + RCA + recovery — ADR-36)
     * triage role (renamed to robustness — alignment with arch diagram)
     * OBJECTION / VOTE intents (parliament removed entirely — ADR-38)
 
@@ -104,7 +104,7 @@ _CRITIC_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
 })
 
 
-# Robustness — always-on Watchdog + RCA + Handle. Holds the entire
+# Robustness — always-on health monitoring + RCA + recovery. Holds the entire
 # scheduling-police intent set + KILL_TASK exclusively.
 _ROBUSTNESS_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
     IntentType.UPDATE_STATE,  # crash_count / current_action only

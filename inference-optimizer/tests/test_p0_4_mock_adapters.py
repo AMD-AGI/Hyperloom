@@ -8,7 +8,7 @@ Covers:
 * MockCriticBackend with no proposals → heartbeat only
 * MockRobustnessBackend always emits heartbeat
 * MockRobustnessBackend with alert_after_ticks emits alert on the Nth tick
-* End-to-end: Conductor with MockCriticBackend approves an Orchestration
+* End-to-end: Coordinator with MockCriticBackend approves an Orchestration
   proposal and the dispatcher materializes the resulting task — without
   any hand-injected critic verdict (real Critic loop closes itself).
 """
@@ -26,7 +26,7 @@ from inference_optimizer.orchestrator.backends import (
     MockTurn,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.conductor import Conductor
+from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.paths import make_session_dir
 
@@ -143,7 +143,7 @@ async def test_mock_robustness_alert_after_n_ticks():
 
 
 # ===========================================================================
-# E2E with Conductor — real Critic-loop closes itself (no manual verdict)
+# E2E with Coordinator — real Critic-loop closes itself (no manual verdict)
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_e2e_mock_critic_closes_proposal_loop(session_dir):
@@ -159,7 +159,7 @@ async def test_e2e_mock_critic_closes_proposal_loop(session_dir):
     }
     backends = _backends_with_mock_critic_and_robustness(plans)
 
-    c = Conductor(session_dir, backends=backends)
+    c = Coordinator(session_dir, backends=backends)
     try:
         # Tick 1: orchestration proposes; critic doesn't see it yet (composes
         # prompt before propose appears — depends on iteration order).
@@ -181,7 +181,7 @@ async def test_e2e_mock_critic_closes_proposal_loop(session_dir):
 @pytest.mark.asyncio
 async def test_e2e_mock_robustness_keeps_emitting_heartbeats(session_dir):
     backends = _backends_with_mock_critic_and_robustness({})
-    c = Conductor(session_dir, backends=backends)
+    c = Coordinator(session_dir, backends=backends)
     try:
         await c.tick(3)
         beats = await c.bus.tail(topic="heartbeat", to_agent="*")
