@@ -13,8 +13,8 @@ Usage::
 The script:
 
 * Verifies that ``ANTHROPIC_AUTH_TOKEN`` (or ``ANTHROPIC_API_KEY``) is set
-* Builds a Conductor with all 4 agents wired
-* Registers a one-line ``baseline`` executor (same as p0_main_loop)
+* Builds a Coordinator with all 4 agents wired
+* Registers a one-line ``baseline`` runner (same as p0_main_loop)
 * Runs ``CONDUCTOR_TICKS`` ticks (default 4) so Orchestration has room
   to propose → see verdict → request Kernel → see response
 * Prints highlight events + a per-tick event count so we can watch the
@@ -33,7 +33,7 @@ from ..orchestrator.backends import (
     MockKernelBackend,
     MockRobustnessBackend,
 )
-from ..orchestrator.conductor import Conductor
+from ..orchestrator.coordinator import Coordinator
 from ..paths import make_session_dir
 
 
@@ -76,14 +76,14 @@ async def _run(ticks: int, model: str | None) -> int:
         "robustness": MockRobustnessBackend(),
     }
 
-    conductor = Conductor(session_dir, backends=backends)
-    conductor.sub.register_executor("baseline", _baseline_executor)
+    coordinator = Coordinator(session_dir, backends=backends)
+    coordinator.sub.register_executor("baseline", _baseline_executor)
 
     print(f"Running {ticks} ticks across 4 agents (orchestration=Claude real)")
     try:
         for n in range(ticks):
             try:
-                await conductor.tick(1)
+                await coordinator.tick(1)
             except Exception as exc:  # noqa: BLE001
                 print(f"  [tick {n+1}] ERROR: {type(exc).__name__}: {exc}")
                 continue
@@ -91,7 +91,7 @@ async def _run(ticks: int, model: str | None) -> int:
             for topic in ("proposal", "review_verdict", "decision",
                            "delegated_result", "request", "response",
                            "heartbeat", "alert", "observation"):
-                msgs = await conductor.bus.tail(topic=topic, n=200)
+                msgs = await coordinator.bus.tail(topic=topic, n=200)
                 if msgs:
                     counts[topic] = len(msgs)
             print(f"  [tick {n+1}] events: {counts}")
@@ -100,7 +100,7 @@ async def _run(ticks: int, model: str | None) -> int:
         print("---- highlights ----")
         for topic in ("proposal", "review_verdict", "decision",
                        "delegated_result", "request", "response", "alert"):
-            msgs = await conductor.bus.tail(topic=topic, n=20)
+            msgs = await coordinator.bus.tail(topic=topic, n=20)
             for m in msgs:
                 summary = {k: v for k, v in m.payload.items()
                             if k in ("action_name", "verdict", "kind",
@@ -115,7 +115,7 @@ async def _run(ticks: int, model: str | None) -> int:
         for entry in ob.calls[-5:]:
             print(f"  {entry}")
     finally:
-        await conductor.stop()
+        await coordinator.stop()
 
     return 0
 

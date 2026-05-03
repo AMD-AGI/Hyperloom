@@ -1,4 +1,4 @@
-"""Real ``report`` ActionExecutor — DESIGN v0.6 §16 report action.
+"""Real ``report`` ActionRunner — DESIGN v0.6 §16 report action.
 
 Reads the session's SharedState + bus event log and produces:
 
@@ -133,7 +133,7 @@ def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
 
 # ---------------------------------------------------------------------------
 class ReportExecutor:
-    """ActionExecutor for the ``report`` action.
+    """ActionRunner for the ``report`` action.
 
     Honours ``ctx.task.params``:
         output_dir:        write final.{md,json} here (default
@@ -153,10 +153,10 @@ class ReportExecutor:
         self.max_highlights = int(max_highlights)
 
     async def __call__(self, ctx) -> dict[str, Any]:
-        # Resolve session dir from db path (executor doesn't get session_dir
+        # Resolve session dir from db path (runner doesn't get session_dir
         # directly — but the BaselineExecutor pattern means we infer from
         # task.params or parent process env). For the CLI flow, the
-        # session_dir is the parent of `storage/conductor.db`.
+        # session_dir is the parent of `storage/coordinator.db`.
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
             return {"status": "failed",
@@ -173,7 +173,7 @@ class ReportExecutor:
         state = SharedState.load_or_init(session_dir)
 
         # Pull bus stats. We open a fresh read-only-ish connection (the
-        # Conductor's connection is in the same process; SQLite WAL lets
+        # Coordinator's connection is in the same process; SQLite WAL lets
         # us share without contention).
         db = SqliteConnection(db_path_for(session_dir))
         try:
@@ -212,13 +212,13 @@ class ReportExecutor:
         """Best-effort session_dir resolution.
 
         Strategy (in order):
-        1. ``ctx.extra['session_dir']``     — Conductor injects this for in-process runs
+        1. ``ctx.extra['session_dir']``     — Coordinator injects this for in-process runs
         2. ``task.params['session_dir']``   — explicit wins (e.g. tests)
         3. ``$INFERENCE_OPTIMIZER_SESSION_DIR`` env var — the CLI sets this
            on every ``optimize`` invocation so report tasks dispatched from
            an LLM proposal find the right session even when params is empty.
         4. ``$INFERENCE_OPTIMIZER_SESSION_ROOT`` + most-recent heuristic — last resort
-        5. None → executor returns failed status with an error
+        5. None → runner returns failed status with an error
         """
         extra = getattr(ctx, "extra", None) or {}
         if extra.get("session_dir"):

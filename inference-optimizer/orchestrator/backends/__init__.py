@@ -1,6 +1,6 @@
 """LLM backend wrappers (DESIGN v0.6 §15).
 
-Each backend exposes a uniform :class:`Backend` protocol so the Conductor
+Each backend exposes a uniform :class:`Backend` protocol so the Coordinator
 can swap implementations (real Claude / Codex SDK, mock for tests, future
 multi-CLI bridge) without touching the reactor loop.
 

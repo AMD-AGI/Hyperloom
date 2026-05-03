@@ -4,20 +4,20 @@ Locks the three P3 fixes uncovered by the resume3 1h validation
 (see PR #130 description):
 
 * **Bug A** ``ReportExecutor`` failed with ``could not resolve session_dir``
-  because Conductor never threaded the active session_dir into the
-  executor context. Fix: cli.py exports ``$INFERENCE_OPTIMIZER_SESSION_DIR``
+  because Coordinator never threaded the active session_dir into the
+  runner context. Fix: cli.py exports ``$INFERENCE_OPTIMIZER_SESSION_DIR``
   and report.py picks it up before falling back to the most-recent-session
   heuristic.
 
 * **Bug B** Codex Kernel LLM emitted a duplicate (hallucinated) RESPONSE
   to the same REQUEST that the programmatic_handler had already answered.
-  Fix: Conductor advances the target_agent cursor past ``request_msg.seq``
+  Fix: Coordinator advances the target_agent cursor past ``request_msg.seq``
   immediately after the handler responds, so the next reactor pass for
   that agent doesn't see the request in its inbox.
 
 * **Bug C** Orchestration fabricated trace paths for ``select_kernels``
   REQUESTs because SharedState never exposed the trace path produced by
-  ``ProfileExecutor``. Fix: ``Conductor._promote_to_shared_state`` writes
+  ``ProfileExecutor``. Fix: ``Coordinator._promote_to_shared_state`` writes
   ``main_trace_path`` to ``shared_state.last_profile_trace`` on profile
   succeeded; ``to_prompt_summary`` shows it; cli.py's _DEFAULT_ORCH_PROMPT
   tells Orch to use it verbatim.
@@ -37,7 +37,7 @@ from inference_optimizer.orchestrator.backends import (
     MockBackend,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.conductor import Conductor
+from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.message_bus import Message
 from inference_optimizer.orchestrator.shared_state import SharedState
@@ -79,12 +79,12 @@ async def test_report_resolves_session_dir_from_env(tmp_path, monkeypatch):
     state = SharedState(session_id=sd.name, model_name="qwen3-8b",
                         baseline_tput=800.0, cumulative_gain=2.5)
     state.save(sd)
-    # Initialise the conductor.db with the schema (ensure_schema runs
+    # Initialise the coordinator.db with the schema (ensure_schema runs
     # automatically when SqliteConnection opens).
     from inference_optimizer.storage.connection import SqliteConnection
     storage_dir = sd / "storage"
     storage_dir.mkdir()
-    SqliteConnection(storage_dir / "conductor.db").close()
+    SqliteConnection(storage_dir / "coordinator.db").close()
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(sd))
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SESSION_ROOT", raising=False)
@@ -104,13 +104,13 @@ async def test_report_resolves_session_dir_from_env(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_report_prefers_ctx_extra_over_env(tmp_path, monkeypatch):
-    """ctx.extra['session_dir'] beats env var (in-process Conductor wins)."""
+    """ctx.extra['session_dir'] beats env var (in-process Coordinator wins)."""
     sd = tmp_path / "ctx-session"
     sd.mkdir()
     SharedState(session_id=sd.name, baseline_tput=600.0).save(sd)
     from inference_optimizer.storage.connection import SqliteConnection
     (sd / "storage").mkdir()
-    SqliteConnection(sd / "storage" / "conductor.db").close()
+    SqliteConnection(sd / "storage" / "coordinator.db").close()
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path / "wrong"))
 
@@ -133,10 +133,10 @@ async def test_report_prefers_ctx_extra_over_env(tmp_path, monkeypatch):
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypatch):
-    """After Conductor handles a 'select_kernels' request inline, the
+    """After Coordinator handles a 'select_kernels' request inline, the
     kernel agent's cursor should be past the request seq so its next
     compose_prompt won't include the already-handled request."""
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         # Stub the real handler so we don't shell out to kernel-agent.
         from inference_optimizer.orchestrator import kernel_request_handlers
@@ -186,7 +186,7 @@ async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypa
 async def test_select_kernels_caches_result_to_shared_state(session_dir, monkeypatch, tmp_path):
     """Successful select_kernels writes a cache entry; the next identical
     request short-circuits without invoking the handler."""
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from inference_optimizer.orchestrator import kernel_request_handlers
         candidates_path = tmp_path / "kernel_candidates.json"
@@ -245,7 +245,7 @@ async def test_select_kernels_caches_result_to_shared_state(session_dir, monkeyp
 async def test_profile_promotion_records_args_and_clears_select_cache(session_dir):
     """A new profile invalidates any prior select_kernels cache and stamps
     the server config that produced the trace into shared_state."""
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from inference_optimizer.orchestrator.task_registry import Task
         c.shared_state.last_select_kernels = {
@@ -280,7 +280,7 @@ async def test_profile_promotion_records_args_and_clears_select_cache(session_di
 
 @pytest.mark.asyncio
 async def test_profile_promotion_writes_last_profile_trace(session_dir):
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.baseline_tput = 800.0
         c.shared_state.save(session_dir)
@@ -310,7 +310,7 @@ async def test_profile_promotion_writes_last_profile_trace(session_dir):
 
 @pytest.mark.asyncio
 async def test_profile_trace_appears_in_prompt_summary(session_dir):
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.last_profile_trace = "/abs/path/to/trace.json.gz"
         summary = c.shared_state.to_prompt_summary()
@@ -323,7 +323,7 @@ async def test_profile_trace_appears_in_prompt_summary(session_dir):
 async def test_profile_trace_falls_back_to_trace_dir_when_no_main(session_dir):
     """If profile result only has trace_dir (no .json.gz files yet),
     SharedState should still get a usable hint instead of staying empty."""
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         result = {
             "status": "succeeded",

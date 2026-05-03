@@ -1,4 +1,4 @@
-"""Real ``params`` ActionExecutor — DESIGN v0.6 §16 params action.
+"""Real ``params`` ActionRunner — DESIGN v0.6 §16 params action.
 
 Mirrors marathon/skills/actions/params.md PARAM_GRID, with additional SGLang
 runtime toggles learned from InferenceX's validated launch recipes:
@@ -12,7 +12,7 @@ runtime toggles learned from InferenceX's validated launch recipes:
 
 Plus an optional NCCL_GRID via ``extra_envs`` (NCCL_MIN_NCHANNELS / NCCL_ALGO).
 
-The executor now follows a round-based incremental search:
+The runner now follows a round-based incremental search:
 
 * test a bounded batch of single candidates against the same current base
 * combine the positive candidates and re-benchmark the combination
@@ -226,7 +226,7 @@ def _initial_search_state() -> dict[str, Any]:
 
 # ---------------------------------------------------------------------------
 class ParamsExecutor:
-    """ActionExecutor for the ``params`` action."""
+    """ActionRunner for the ``params`` action."""
 
     def __init__(
         self,

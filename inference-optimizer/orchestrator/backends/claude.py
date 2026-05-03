@@ -15,7 +15,7 @@ P1-5 implementation:
 Out of scope for P1-5:
 
 * JSON-in-text fallback (silently degrades to NoIntentEmitted error)
-* Repair-prompt retry on parse failure (let the Conductor surface the
+* Repair-prompt retry on parse failure (let the Coordinator surface the
   policy_denied / observation event so the agent self-corrects)
 * Codex backend — ships in a follow-up commit; the Critic role still
   uses MockCriticBackend until then
@@ -49,7 +49,7 @@ log = logging.getLogger(__name__)
 
 
 # Prompt suffix injected into every Claude turn so the model knows the
-# tool contract. Conductor.compose_prompt() runs first; this is appended.
+# tool contract. Coordinator.compose_prompt() runs first; this is appended.
 _OUTPUT_INSTRUCTIONS = f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
 You MUST communicate with the system by calling the `{EMIT_INTENT_TOOL_NAME}`

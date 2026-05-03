@@ -5,13 +5,13 @@ materializes them into ``tasks`` rows, and dispatches the work.
 
 v0.6 §15.2 distinguishes two sub-agent forms:
 
-* **ActionExecutor** (Python class, no LLM) — fast, deterministic shell
+* **ActionRunner** (Python class, no LLM) — fast, deterministic shell
   wrappers (``BaselineExecutor`` / ``BenchRunnerExecutor`` / ...). Looked
   up via ``EXECUTOR_REGISTRY[task.kind]``.
 * **OOB sub-agent** (LLM) — fallback path: spawn a fresh ``backend.run()``.
 
 P0-3 ships only the routing skeleton: enqueue + run hook + a stub
-"echo" executor that tests can plug in. Real shell-out executors land
+"echo" runner that tests can plug in. Real shell-out executors land
 in P0-6+.
 """
 
@@ -26,14 +26,14 @@ from .task_registry import Task, TaskRegistry
 
 
 @dataclass
-class ExecutorContext:
+class RunnerContext:
     task: Task
     lease: Lease | None
     extra: dict = field(default_factory=dict)
 
 
-# Executor signature: async fn(ctx) -> result_payload (dict)
-ExecutorFn = Callable[[ExecutorContext], Awaitable[dict]]
+# Runner signature: async fn(ctx) -> result_payload (dict)
+ExecutorFn = Callable[[RunnerContext], Awaitable[dict]]
 
 
 @dataclass
@@ -45,7 +45,7 @@ class SubAgentResult:
 
 
 class SubAgentRunner:
-    """Routes ``delegate`` work to the matching ActionExecutor + holds leases.
+    """Routes ``delegate`` work to the matching ActionRunner + holds leases.
 
     ``executor_registry`` maps ``task.kind`` → :data:`ExecutorFn`. Tests
     register stubs here. Production registers shell-wrapping executors
@@ -71,21 +71,21 @@ class SubAgentRunner:
 
         Note: task state machine only allows ``queued → running`` then
         ``running → failed/succeeded/...``, so we always transition to
-        ``running`` first — even on the "no executor" failure path —
+        ``running`` first — even on the "no runner" failure path —
         otherwise IllegalTransition fires.
         """
         # queued → running first (state machine constraint)
         await self.tasks.transition(task.task_id, "running")
 
-        executor = self.executor_registry.get(task.kind)
-        if executor is None:
+        runner = self.executor_registry.get(task.kind)
+        if runner is None:
             await self.tasks.transition(
                 task.task_id, "failed",
                 evidence={"reason": "no_executor", "kind": task.kind},
             )
             return SubAgentResult(
                 task_id=task.task_id, state="failed",
-                result={}, error=f"no executor registered for kind={task.kind!r}",
+                result={}, error=f"no runner registered for kind={task.kind!r}",
             )
 
         lease: Lease | None = None
@@ -98,9 +98,9 @@ class SubAgentRunner:
                 ttl_sec=task.lease_ttl_sec or 60,
             )
         try:
-            ctx = ExecutorContext(task=task, lease=lease)
+            ctx = RunnerContext(task=task, lease=lease)
             try:
-                result_payload = await executor(ctx)
+                result_payload = await runner(ctx)
             except Exception as exc:  # noqa: BLE001 — surface to task.history
                 await self.tasks.transition(
                     task.task_id, "failed", evidence={"error": repr(exc)},
@@ -120,4 +120,4 @@ class SubAgentRunner:
                 await self.locks.release(lease)
 
 
-__all__ = ["ExecutorContext", "ExecutorFn", "SubAgentResult", "SubAgentRunner"]
+__all__ = ["RunnerContext", "ExecutorFn", "SubAgentResult", "SubAgentRunner"]
