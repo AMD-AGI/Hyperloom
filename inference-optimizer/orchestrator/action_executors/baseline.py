@@ -41,8 +41,11 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from ...paths import asset_root
 from ..sub_agent_runner import ExecutorContext
+from ._grid_runner import server_args_env_name
 
 
 log = logging.getLogger(__name__)
@@ -53,6 +56,31 @@ BASELINE_DEFAULT_CONFIG = (
     asset_root() / "scripts" / "configs" / "baseline_qwen3_8b_sglang.yaml"
 )
 BASELINE_DEFAULT_TIMEOUT_SEC = 1200
+
+
+def _materialize_config_with_envs(
+    config_path: Path,
+    output_dir: Path,
+    *,
+    extra_sglang_args: str = "",
+    extra_server_args: str = "",
+    extra_envs: dict[str, Any] | None = None,
+) -> Path:
+    server_args = (extra_server_args or extra_sglang_args).strip()
+    if not server_args and not extra_envs:
+        return config_path
+    with config_path.open(encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    bench = cfg.setdefault("benchmark", {})
+    envs = bench.setdefault("envs", {})
+    if server_args:
+        envs[server_args_env_name(bench.get("framework"))] = server_args
+    for key, value in (extra_envs or {}).items():
+        envs[str(key)] = str(value)
+    materialized = output_dir / "baseline_config.with_envs.yaml"
+    with materialized.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+    return materialized
 
 
 class BaselineExecutor:
@@ -86,6 +114,17 @@ class BaselineExecutor:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         timeout_sec = int(params.get("timeout_sec") or self.default_timeout_sec)
+        config_path = _materialize_config_with_envs(
+            config_path,
+            output_dir,
+            extra_sglang_args=str(params.get("extra_sglang_args") or ""),
+            extra_server_args=str(
+                params.get("extra_server_args")
+                or params.get("extra_vllm_args")
+                or ""
+            ),
+            extra_envs=dict(params.get("extra_envs") or {}),
+        )
 
         cmd = [
             self.magpie_python, "-m", "Magpie", "-v", "benchmark",
