@@ -1,0 +1,34 @@
+# Magpie baseline benchmark config for Qwen3-8B on vLLM / MI300X.
+# Use this as the single-node vLLM smoke config while the optimizer's vLLM
+# path is being validated. Profile and multi-node vLLM configs are separate
+# follow-up work.
+
+benchmark:
+  framework: vllm
+  model: /wekafs/models/Qwen-Qwen3-8B
+  precision: bf16
+  run_mode: local
+
+  envs:
+    TP: 1
+    CONC: 8
+    ISL: 256
+    OSL: 256
+    RANDOM_RANGE_RATIO: 1
+    MAX_MODEL_LEN: 8192
+    ROCR_VISIBLE_DEVICES: "1"
+    PATH: "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+  gpu_selection:
+    auto: false
+
+  benchmark_script: vllm_mi300x.sh
+  timeout_seconds: 600
+
+  profiler:
+    torch_profiler:
+      enabled: false
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false

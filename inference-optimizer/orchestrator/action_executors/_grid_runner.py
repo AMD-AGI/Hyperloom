@@ -75,6 +75,15 @@ class VariantResult:
 
 
 # ---------------------------------------------------------------------------
+def server_args_env_name(framework: str | None) -> str:
+    """Return the Magpie env var used to append backend server args."""
+    name = str(framework or "").strip().lower()
+    if "vllm" in name:
+        return "EXTRA_VLLM_ARGS"
+    return "EXTRA_SGLANG_ARGS"
+
+
+# ---------------------------------------------------------------------------
 def _build_variant_yaml(
     base_yaml_path: Path,
     base_extra_args: str,
@@ -92,11 +101,12 @@ def _build_variant_yaml(
         cfg = yaml.safe_load(f)
     bench = cfg.setdefault("benchmark", {})
     envs = bench.setdefault("envs", {})
+    extra_args_env = server_args_env_name(bench.get("framework"))
 
     combined = " ".join(part for part in (base_extra_args.strip(),
                                             variant.extra_sglang_args.strip()) if part)
     if combined:
-        envs["EXTRA_SGLANG_ARGS"] = combined
+        envs[extra_args_env] = combined
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
 
@@ -285,4 +295,5 @@ __all__ = [
     "VariantResult",
     "pick_winners",
     "run_grid",
+    "server_args_env_name",
 ]
