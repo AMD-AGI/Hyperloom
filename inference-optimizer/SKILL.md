@@ -241,6 +241,33 @@ Do not set `HIP_VISIBLE_DEVICES` on the known ROCm stack unless the user asks;
 it can make `torch.cuda.is_available()` return false. Use
 `ROCR_VISIBLE_DEVICES` for GPU pinning.
 
+## SGLang Parameter Search
+
+This project should first validate SGLang improvements, then add vLLM once the
+SGLang path is stable. `params` writes candidates through `EXTRA_SGLANG_ARGS`
+and `benchmark.envs`; do not hard-code a flag as default unless A/B results keep
+it across the target workload.
+
+The default SGLang search already covers cuda graph batch caps, continuous
+decode steps, memory fraction, scheduling conservativeness, chunked prefill, and
+max prefill tokens. It should also test the InferenceX-derived candidates:
+
+- Cache/scheduler: `--disable-radix-cache`, `--max-running-requests 128/256`.
+- Tokenization/streaming: `--tokenizer-worker-num 8/16`, `--stream-interval 30/50`.
+- ROCm/TileLang envs: `SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=1`,
+  `SGLANG_HACK_FLASHMLA_BACKEND=tilelang`,
+  `SGLANG_OPT_USE_TILELANG_INDEXER=true`.
+
+Treat speculative decoding as model-specific until validated. For MTP/EAGLE,
+use a custom grid with `SGLANG_ENABLE_SPEC_V2=1` and the appropriate
+`--speculative-*` flags only when the model has the required draft path or MTP
+support. Benchmark with chat-formatted prompts (`--dsv4` for DeepSeek-V4 style
+runs) because raw random prompts can make acceptance-rate results misleading.
+
+When judging a SGLang candidate, compare at least `1k/1k` and `8k/1k`, and
+include both low and high concurrency if the model fits. Keep parameters only
+when throughput improves without unacceptable TTFT/E2E or correctness regressions.
+
 Do not edit the default Qwen YAML for a new model. Materialize a run-specific
 asset root and override only the benchmark configs for that run:
 
