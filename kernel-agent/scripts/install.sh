@@ -36,12 +36,12 @@ case "${_GEAK_RAW_MODEL}" in
   openai/*|anthropic/*|bedrock/*|azure/*|vertex_ai/*) GEAK_MODEL_NAME_VAL="${_GEAK_RAW_MODEL}" ;;
   *) GEAK_MODEL_NAME_VAL="openai/${_GEAK_RAW_MODEL}" ;;
 esac
-# GEAK uses litellm; the AMD gateway accepts the same ANTHROPIC_AUTH_TOKEN as
-# OOB. Fall back across both env names so users only need .env to work.
-GEAK_API_KEY_VAL="${GEAK_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}"
-GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${ANTHROPIC_BASE_URL:-${OPENAI_BASE_URL:-${LLM_API_BASE:-}}}}"
-OOB_API_KEY_VAL="${OOB_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}}}"
-OOB_BASE_URL_VAL="${OOB_BASE_URL:-${ANTHROPIC_BASE_URL:-${OPENAI_BASE_URL:-}}}"
+# GEAK/OOB use the user's LiteLLM-compatible endpoint. The canonical env is
+# OPENAI_BASE_URL + SAFE_API_KEY; keep fallbacks for older launchers.
+GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}"
+GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-${LLM_API_BASE:-}}}}"
+OOB_API_KEY_VAL="${OOB_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}}}}"
+OOB_BASE_URL_VAL="${OOB_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}}"
 
 WITH_GEAK=0
 WITH_OOB=0
@@ -323,6 +323,7 @@ write_env_file() {
     [ -n "${PROXY_ANTHROPIC_BASE_URL:-}" ] && echo "export ANTHROPIC_BASE_URL='${PROXY_ANTHROPIC_BASE_URL}'"
     [ -n "${PROXY_OPENAI_BASE_URL:-}" ] && echo "export OPENAI_BASE_URL='${PROXY_OPENAI_BASE_URL}'"
     [ -n "${OOB_API_KEY_VAL}" ] && {
+      echo "export SAFE_API_KEY='${OOB_API_KEY_VAL}'"
       echo "export ANTHROPIC_API_KEY='${OOB_API_KEY_VAL}'"
       echo "export ANTHROPIC_AUTH_TOKEN='${OOB_API_KEY_VAL}'"
       echo "export OPENAI_API_KEY='${OOB_API_KEY_VAL}'"
