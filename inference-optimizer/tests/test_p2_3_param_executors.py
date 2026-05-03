@@ -27,6 +27,12 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
     pick_winners,
     run_grid,
 )
+from inference_optimizer.orchestrator.action_executors.baseline import (
+    _materialize_config_with_envs,
+)
+from inference_optimizer.orchestrator.action_executors.params import (
+    DEFAULT_VLLM_PARAMS_GRID,
+)
 from inference_optimizer.orchestrator.task_registry import TaskRegistry
 from inference_optimizer.orchestrator.resource_lock import (
     ResourceLockManager, SqliteLeaseBackend,
@@ -48,6 +54,28 @@ def _write_baseline_yaml(path: Path) -> None:
             "run_mode": "local",
             "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
             "benchmark_script": "sglang_mi300x.sh",
+            "timeout_seconds": 600,
+            "profiler": {
+                "torch_profiler": {"enabled": False},
+                "system_profiler": {"enabled": False},
+                "tracelens": {"enabled": False},
+            },
+            "gpu_selection": {"auto": False},
+        },
+    }
+    with path.open("w") as f:
+        yaml.safe_dump(cfg, f)
+
+
+def _write_vllm_yaml(path: Path) -> None:
+    cfg = {
+        "benchmark": {
+            "framework": "vllm",
+            "model": "/wekafs/models/Qwen-Qwen3-8B",
+            "precision": "bf16",
+            "run_mode": "local",
+            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
+            "benchmark_script": "vllm_mi300x.sh",
             "timeout_seconds": 600,
             "profiler": {
                 "torch_profiler": {"enabled": False},
@@ -262,6 +290,55 @@ async def test_run_grid_writes_variant_extra_envs(tmp_path):
     assert cfg["benchmark"]["envs"]["SGLANG_OPT_USE_MULTI_STREAM_OVERLAP"] == "1"
 
 
+@pytest.mark.asyncio
+async def test_run_grid_writes_vllm_extra_args_for_vllm_configs(tmp_path):
+    base = tmp_path / "vllm.yaml"
+    _write_vllm_yaml(base)
+    output_root = tmp_path / "out"
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=900.0)
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="ok", stderr="",
+        )
+
+    grid = [GridVariant("vllm_block_size_256", "--block-size 256")]
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+                side_effect=_fake_run):
+        results = await run_grid(
+            base_yaml_path=base, base_extra_args="--kv-cache-dtype fp8",
+            grid=grid, output_root=output_root, variant_timeout_sec=10,
+        )
+
+    assert results[0].status == "succeeded"
+    cfg = yaml.safe_load(
+        (output_root / "variant_00_vllm_block_size_256" / "config.yaml")
+        .read_text()
+    )
+    envs = cfg["benchmark"]["envs"]
+    assert envs["EXTRA_VLLM_ARGS"] == "--kv-cache-dtype fp8 --block-size 256"
+    assert "EXTRA_SGLANG_ARGS" not in envs
+
+
+def test_baseline_materialize_uses_vllm_extra_args_env(tmp_path):
+    base = tmp_path / "vllm.yaml"
+    _write_vllm_yaml(base)
+    out = tmp_path / "out"
+    out.mkdir()
+
+    materialized = _materialize_config_with_envs(
+        base,
+        out,
+        extra_server_args="--block-size 256",
+    )
+    cfg = yaml.safe_load(materialized.read_text())
+    envs = cfg["benchmark"]["envs"]
+    assert envs["EXTRA_VLLM_ARGS"] == "--block-size 256"
+    assert "EXTRA_SGLANG_ARGS" not in envs
+
+
 # ===========================================================================
 # BackendsExecutor / ParamsExecutor / SweepExecutor — end-to-end via SubAgentRunner
 # ===========================================================================
@@ -385,6 +462,61 @@ def test_default_params_grid_includes_inferencex_sglang_candidates():
     assert by_name["sglang_tilelang_indexer"].extra_envs == {
         "SGLANG_OPT_USE_TILELANG_INDEXER": "true",
     }
+
+
+def test_default_vllm_params_grid_includes_inferencex_candidates():
+    by_name = {v.name: v for v in DEFAULT_VLLM_PARAMS_GRID}
+
+    assert by_name["vllm_kv_cache_fp8"].extra_sglang_args == "--kv-cache-dtype fp8"
+    assert by_name["vllm_block_size_256"].extra_sglang_args == "--block-size 256"
+    assert by_name["vllm_no_prefix_cache"].extra_sglang_args == (
+        "--no-enable-prefix-caching"
+    )
+    assert by_name["vllm_fp4_indexer_cache"].extra_sglang_args == (
+        "--attention_config.use_fp4_indexer_cache=True"
+    )
+    assert (
+        "FULL_AND_PIECEWISE"
+        in by_name["vllm_full_piecewise_compile"].extra_sglang_args
+    )
+
+
+@pytest.mark.asyncio
+async def test_params_executor_uses_vllm_grid_for_vllm_config(sub_agent_runner, tmp_path):
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "vllm.yaml"
+    _write_vllm_yaml(base)
+    output_dir = tmp_path / "params-vllm-out"
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=900.0)
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="ok", stderr="",
+        )
+
+    task = await tr.create(
+        kind="params",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="pa-vllm-1",
+    )
+    sub.register_executor("params", ParamsExecutor())
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+                side_effect=_fake_run):
+        res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    assert res.result["grid_size"] == len(DEFAULT_VLLM_PARAMS_GRID)
+    cfg = yaml.safe_load(
+        (output_dir / "variant_00_vllm_kv_cache_fp8" / "config.yaml").read_text()
+    )
+    assert cfg["benchmark"]["envs"]["EXTRA_VLLM_ARGS"] == "--kv-cache-dtype fp8"
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from ...paths import asset_root
 from ._grid_runner import GridVariant, VariantResult, run_grid
 
@@ -111,6 +113,35 @@ DEFAULT_PARAMS_GRID: list[GridVariant] = [
 ]
 
 
+DEFAULT_VLLM_PARAMS_GRID: list[GridVariant] = [
+    GridVariant("vllm_kv_cache_fp8",           "--kv-cache-dtype fp8",
+                 note="kv_cache"),
+    GridVariant("vllm_block_size_256",         "--block-size 256",
+                 note="cache"),
+    GridVariant("vllm_no_prefix_cache",        "--no-enable-prefix-caching",
+                 note="cache"),
+    GridVariant("vllm_cudagraph_capture_512",
+                 "--max-cudagraph-capture-size 512",
+                 note="cuda_graph"),
+    GridVariant("vllm_cudagraph_capture_2048",
+                 "--max-cudagraph-capture-size 2048",
+                 note="cuda_graph"),
+    GridVariant(
+        "vllm_full_piecewise_compile",
+        "--compilation-config '{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\","
+        "\"custom_ops\":[\"all\"]}'",
+        note="compile",
+    ),
+    GridVariant("vllm_fp4_indexer_cache",
+                 "--attention_config.use_fp4_indexer_cache=True",
+                 note="indexer"),
+    GridVariant("vllm_gpu_mem_0_90",           "--gpu-memory-utilization 0.90",
+                 note="memory"),
+    GridVariant("vllm_gpu_mem_0_95",           "--gpu-memory-utilization 0.95",
+                 note="memory"),
+]
+
+
 # NCCL grid — applied via env vars rather than CLI flags.
 DEFAULT_NCCL_GRID: list[GridVariant] = [
     GridVariant("nccl_min_nchannels_32",
@@ -155,6 +186,15 @@ def _merge_envs(variants: list[GridVariant]) -> dict[str, str]:
     return envs
 
 
+def _config_framework(config_path: Path) -> str:
+    try:
+        with config_path.open(encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    except Exception:
+        return ""
+    return str((cfg.get("benchmark") or {}).get("framework") or "").lower()
+
+
 def _result_gain(tput: float | None, base_tput: float) -> float | None:
     if not isinstance(tput, (int, float)) or tput <= 0 or base_tput <= 0:
         return None
@@ -192,6 +232,7 @@ class ParamsExecutor:
         self,
         *,
         default_grid: list[GridVariant] | None = None,
+        default_vllm_grid: list[GridVariant] | None = None,
         default_nccl_grid: list[GridVariant] | None = None,
         default_config_path: Path | str | None = None,
         default_output_root: Path | str = "/workspace/hyperloom",
@@ -201,6 +242,7 @@ class ParamsExecutor:
         keep_threshold_pct: float = 0.5,
     ):
         self.default_grid = list(default_grid or DEFAULT_PARAMS_GRID)
+        self.default_vllm_grid = list(default_vllm_grid or DEFAULT_VLLM_PARAMS_GRID)
         self.default_nccl_grid = list(default_nccl_grid or DEFAULT_NCCL_GRID)
         self.default_config_path = (
             Path(default_config_path) if default_config_path
@@ -246,7 +288,12 @@ class ParamsExecutor:
                 for v in grid_override
             ]
         else:
-            grid = list(self.default_grid)
+            framework = _config_framework(config_path)
+            grid = (
+                list(self.default_vllm_grid)
+                if "vllm" in framework
+                else list(self.default_grid)
+            )
             if self.include_nccl or params.get("include_nccl"):
                 grid += list(self.default_nccl_grid)
 
@@ -459,6 +506,7 @@ params_executor = ParamsExecutor()
 __all__ = [
     "DEFAULT_NCCL_GRID",
     "DEFAULT_PARAMS_GRID",
+    "DEFAULT_VLLM_PARAMS_GRID",
     "ParamsExecutor",
     "params_executor",
 ]
