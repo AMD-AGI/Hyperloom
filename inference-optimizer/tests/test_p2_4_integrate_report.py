@@ -1,4 +1,4 @@
-"""P2-4 tests: integrate kernel-request handler + report executor + e2e."""
+"""P2-4 tests: integrate kernel-request handler + report runner + e2e."""
 
 from __future__ import annotations
 
@@ -21,12 +21,12 @@ from inference_optimizer.orchestrator.backends import (
     MockBackend,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.conductor import Conductor
+from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.task_registry import Task
 from inference_optimizer.orchestrator.sub_agent_runner import (
-    ExecutorContext, SubAgentRunner,
+    RunnerContext, SubAgentRunner,
 )
 from inference_optimizer.orchestrator.resource_lock import (
     ResourceLockManager, SqliteLeaseBackend,
@@ -429,11 +429,11 @@ def test_integrate_registered_under_two_aliases():
 
 
 # ===========================================================================
-# Conductor wiring of integrate request
+# Coordinator wiring of integrate request
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_conductor_integrate_request_emits_keep_response(session_dir, tmp_path):
-    """End-to-end conductor flow: REQUEST{kind=integrate} → handler runs →
+async def test_coordinator_integrate_request_emits_keep_response(session_dir, tmp_path):
+    """End-to-end coordinator flow: REQUEST{kind=integrate} → handler runs →
     RESPONSE on bus contains KEEP/REVERT decision."""
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
@@ -447,7 +447,7 @@ async def test_conductor_integrate_request_emits_keep_response(session_dir, tmp_
             args=cmd, returncode=0, stdout="ok", stderr="",
         )
 
-    c = Conductor(session_dir, backends=_backends_silent())
+    c = Coordinator(session_dir, backends=_backends_silent())
     try:
         with patch("subprocess.run", side_effect=_fake_run):
             await c._handle_intent("orchestration", Intent(
@@ -491,7 +491,7 @@ async def test_conductor_integrate_request_emits_keep_response(session_dir, tmp_
 @pytest.mark.asyncio
 async def test_report_executor_writes_md_and_json(session_dir):
     """Pre-load the session with realistic state + a few bus events,
-    then run the report executor and assert both files exist + parse."""
+    then run the report runner and assert both files exist + parse."""
     state = SharedState(
         session_id=session_dir.name,
         model_name="Qwen-Qwen3-8B",
@@ -506,8 +506,8 @@ async def test_report_executor_writes_md_and_json(session_dir):
     )
     state.save(session_dir)
 
-    # Make the conductor seed the bus with a few realistic events.
-    c = Conductor(session_dir, backends=_backends_silent())
+    # Make the coordinator seed the bus with a few realistic events.
+    c = Coordinator(session_dir, backends=_backends_silent())
     try:
         await c._handle_intent("orchestration", Intent(
             type=IntentType.PROPOSE_ACTION,
@@ -524,7 +524,7 @@ async def test_report_executor_writes_md_and_json(session_dir):
     finally:
         await c.stop()
 
-    # Build a Task ourselves and invoke the executor.
+    # Build a Task ourselves and invoke the runner.
     db = SqliteConnection(tmp_path_helper(session_dir))
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -561,15 +561,15 @@ async def test_report_executor_writes_md_and_json(session_dir):
 def tmp_path_helper(session_dir: Path) -> Path:
     """ReportExecutor needs its own SqliteConnection — point it at the
     session's DB."""
-    return session_dir / "storage" / "conductor.db"
+    return session_dir / "storage" / "coordinator.db"
 
 
 @pytest.mark.asyncio
 async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path,
                                                                       monkeypatch):
     """Without an explicit session_dir param + nothing under env override,
-    the executor reports a structured failure (not a crash). Note the
-    SubAgentRunner state stays "succeeded" because the executor returned
+    the runner reports a structured failure (not a crash). Note the
+    SubAgentRunner state stays "succeeded" because the runner returned
     a dict (didn't raise) — the failure signal is inside result['status']."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SESSION_ROOT", raising=False)
     db = SqliteConnection(tmp_path / "x.db")

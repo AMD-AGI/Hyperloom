@@ -1,4 +1,4 @@
-"""Real ``baseline`` ActionExecutor — runs Magpie SGLang benchmark.
+"""Real ``baseline`` ActionRunner — runs Magpie SGLang benchmark.
 
 DESIGN v0.6 §15.2 + §16.1 baseline action.
 
@@ -7,13 +7,13 @@ Wire-up:
     sub.register_executor("baseline", baseline_executor)
 
 Orchestration emits ``delegate{action_name="baseline", params={...}}``;
-SubAgentRunner pulls this executor, acquires the action's lanes
+SubAgentRunner pulls this runner, acquires the action's lanes
 (`benchmark_lane` + `server_lifecycle`), runs the Magpie CLI as a
 subprocess, parses ``benchmark_report.json``, and returns the result on
 the bus as a ``delegated_result`` event so Orchestration can read the
 real ``baseline_tput`` next tick.
 
-The executor honours the following ExecutorContext.task.params keys
+The runner honours the following RunnerContext.task.params keys
 (all optional — defaults below come from BASELINE_DEFAULT_CONFIG):
 
     config_path:  absolute path to a Magpie YAML config to use
@@ -27,7 +27,7 @@ Implementation notes:
   is the cleanest seam.
 * Parses ``benchmark_report.json`` rather than ``inferencex_result.json``
   because the former has the cleaner top-level schema.
-* Returns ``error_class`` on failure so the conductor can route to
+* Returns ``error_class`` on failure so the coordinator can route to
   Robustness RCA later (P1-7).
 """
 
@@ -44,7 +44,7 @@ from typing import Any
 import yaml
 
 from ...paths import asset_root
-from ..sub_agent_runner import ExecutorContext
+from ..sub_agent_runner import RunnerContext
 from ._grid_runner import server_args_env_name
 
 
@@ -101,7 +101,7 @@ class BaselineExecutor:
         self.default_timeout_sec = default_timeout_sec
         self.cwd = Path(cwd)
 
-    async def __call__(self, ctx: ExecutorContext) -> dict[str, Any]:
+    async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         params = ctx.task.params or {}
         config_path = Path(params.get("config_path") or self.default_config_path)
         if not config_path.exists():
@@ -142,7 +142,7 @@ class BaselineExecutor:
                  cmd, output_dir)
 
         # subprocess.run is sync — wrap in asyncio.to_thread so we don't
-        # block the Conductor reactor loop.
+        # block the Coordinator reactor loop.
         try:
             proc = await asyncio.to_thread(
                 subprocess.run, cmd,

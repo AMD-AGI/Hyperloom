@@ -6,7 +6,7 @@ trajectory becomes one validated :class:`Intent` downstream.
 
 Why in-process (not stdio/SSE):
 
-* **Zero extra processes** — Conductor + reactors + sub-agents already
+* **Zero extra processes** — Coordinator + reactors + sub-agents already
   use plenty of pids; an in-process MCP server keeps the topology trim.
 * **Synchronous lookup** — handler validates + returns an MCP envelope;
   intent capture is done by the trajectory parser (so the handler can

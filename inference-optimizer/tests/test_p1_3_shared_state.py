@@ -1,4 +1,4 @@
-"""P1-3 SharedState + Conductor integration tests.
+"""P1-3 SharedState + Coordinator integration tests.
 
 Covers:
 
@@ -8,11 +8,11 @@ Covers:
 * SharedState.apply_changes only writes known fields, drops unknown
 * SharedState.add_pruned_family is idempotent
 * SharedState.to_prompt_summary contains all major fields
-* Conductor loads existing state.json on construction (resume hook)
-* Conductor.PRUNE_BRANCH writes state.json (pruned_families persisted)
-* Conductor.PRUNE_BRANCH-cancelled families survive a Conductor restart
-* Conductor.UPDATE_STATE persists allowed fields to state.json
-* Conductor.UPDATE_STATE rejects unknown fields (logged in 'rejected')
+* Coordinator loads existing state.json on construction (resume hook)
+* Coordinator.PRUNE_BRANCH writes state.json (pruned_families persisted)
+* Coordinator.PRUNE_BRANCH-cancelled families survive a Coordinator restart
+* Coordinator.UPDATE_STATE persists allowed fields to state.json
+* Coordinator.UPDATE_STATE rejects unknown fields (logged in 'rejected')
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from inference_optimizer.orchestrator.backends import (
     MockTurn,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.conductor import Conductor
+from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
@@ -165,15 +165,15 @@ def test_to_prompt_summary_contains_key_fields():
 
 
 # ===========================================================================
-# Conductor × SharedState integration
+# Coordinator × SharedState integration
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_conductor_loads_existing_shared_state(session_dir):
-    """Conductor.__init__ must pick up an existing state.json (resume hook)."""
+async def test_coordinator_loads_existing_shared_state(session_dir):
+    """Coordinator.__init__ must pick up an existing state.json (resume hook)."""
     pre = SharedState(session_id="resumed", baseline_tput=2000.0,
                       pruned_families=["deep_kernel"])
     pre.save(session_dir)
-    c = Conductor(session_dir, backends=_backends_full())
+    c = Coordinator(session_dir, backends=_backends_full())
     try:
         assert c.shared_state.session_id == "resumed"
         assert c.shared_state.baseline_tput == 2000.0
@@ -183,8 +183,8 @@ async def test_conductor_loads_existing_shared_state(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_conductor_prune_branch_persists(session_dir):
-    c = Conductor(session_dir, backends=_backends_full())
+async def test_coordinator_prune_branch_persists(session_dir):
+    c = Coordinator(session_dir, backends=_backends_full())
     try:
         await c._handle_intent("robustness", Intent(
             type=IntentType.PRUNE_BRANCH,
@@ -200,8 +200,8 @@ async def test_conductor_prune_branch_persists(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_pruned_family_survives_conductor_restart(session_dir):
-    c1 = Conductor(session_dir, backends=_backends_full())
+async def test_pruned_family_survives_coordinator_restart(session_dir):
+    c1 = Coordinator(session_dir, backends=_backends_full())
     try:
         await c1._handle_intent("robustness", Intent(
             type=IntentType.PRUNE_BRANCH,
@@ -210,8 +210,8 @@ async def test_pruned_family_survives_conductor_restart(session_dir):
     finally:
         await c1.stop()
 
-    # Restart — fresh Conductor must observe the prune
-    c2 = Conductor(session_dir, backends=_backends_full())
+    # Restart — fresh Coordinator must observe the prune
+    c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         assert c2.shared_state.is_pruned("long")
         # And future proposals of that family are soft-rejected
@@ -225,11 +225,11 @@ async def test_pruned_family_survives_conductor_restart(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_conductor_update_state_persists_known_fields(session_dir):
+async def test_coordinator_update_state_persists_known_fields(session_dir):
     """Orchestration may write non-core fields (current_action / target_summary).
     Core fields (model_name / baseline_tput / current_best / ...) are gated
     by PolicyGate's CORE_STATE_FIELDS — see test_p0_2_roles_policy."""
-    c = Conductor(session_dir, backends=_backends_full())
+    c = Coordinator(session_dir, backends=_backends_full())
     try:
         await c._handle_intent("orchestration", Intent(
             type=IntentType.UPDATE_STATE,
@@ -246,8 +246,8 @@ async def test_conductor_update_state_persists_known_fields(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_conductor_update_state_drops_unknown_fields(session_dir):
-    c = Conductor(session_dir, backends=_backends_full())
+async def test_coordinator_update_state_drops_unknown_fields(session_dir):
+    c = Coordinator(session_dir, backends=_backends_full())
     try:
         await c._handle_intent("orchestration", Intent(
             type=IntentType.UPDATE_STATE,

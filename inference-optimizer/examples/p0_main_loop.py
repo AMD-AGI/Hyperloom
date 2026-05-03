@@ -1,16 +1,16 @@
 """P0 end-to-end main-loop demo.
 
-Wires up the Conductor with all four mock agents and walks through the
+Wires up the Coordinator with all four mock agents and walks through the
 single canonical flow that P0 must support:
 
     1. Orchestration proposes ``baseline``
     2. Critic (mock) auto-approves
-    3. Conductor materializes the approved proposal as a ``baseline`` task
-    4. Dispatcher runs the task via the registered ``baseline`` executor
+    3. Coordinator materializes the approved proposal as a ``baseline`` task
+    4. Dispatcher runs the task via the registered ``baseline`` runner
        (a one-line Python lambda for this demo)
     5. Orchestration emits REQUEST{target=kernel, kind=select_kernels}
     6. Kernel (mock) auto-responds with RESPONSE{kind=select_kernels_done}
-    7. Conductor routes the response back to Orchestration's inbox
+    7. Coordinator routes the response back to Orchestration's inbox
     8. Orchestration acknowledges via send_message
 
 Robustness ticks heartbeats throughout. No real LLMs, no real GPU work,
@@ -36,7 +36,7 @@ from ..orchestrator.backends import (
     MockTurn,
     ScriptedPlan,
 )
-from ..orchestrator.conductor import Conductor
+from ..orchestrator.coordinator import Coordinator
 from ..orchestrator.intent_parser import Intent, IntentType
 from ..paths import make_session_dir
 
@@ -84,36 +84,36 @@ async def _run_demo(ticks: int = 6) -> dict:
         "robustness":    MockRobustnessBackend(),
     }
 
-    conductor = Conductor(session_dir, backends=backends)
-    conductor.sub.register_executor("baseline", _baseline_executor)
+    coordinator = Coordinator(session_dir, backends=backends)
+    coordinator.sub.register_executor("baseline", _baseline_executor)
 
     print(f"Session dir: {session_dir}")
-    print(f"DB:          {conductor.db.db_path}")
+    print(f"DB:          {coordinator.db.db_path}")
     print(f"Running {ticks} ticks across 4 agents...")
     print()
 
     try:
         for tick_n in range(ticks):
-            await conductor.tick(1)
-            counts = await _summarize_bus(conductor)
+            await coordinator.tick(1)
+            counts = await _summarize_bus(coordinator)
             print(f"  [tick {tick_n + 1}] events: {counts}")
 
         # Pull a few highlight events
         print()
         print("---- highlights ----")
-        proposals = await conductor.bus.tail(topic="proposal")
+        proposals = await coordinator.bus.tail(topic="proposal")
         for p in proposals:
             print(f"  proposal from={p.from_agent} action={p.payload.get('action_name')}")
-        verdicts = await conductor.bus.tail(topic="review_verdict")
+        verdicts = await coordinator.bus.tail(topic="review_verdict")
         for v in verdicts:
             print(f"  verdict source={v.from_agent} -> {v.payload.get('verdict')}")
-        decisions = await conductor.bus.tail(topic="decision")
+        decisions = await coordinator.bus.tail(topic="decision")
         for d in decisions:
             print(f"  decision kind={d.payload.get('kind')} action={d.payload.get('action_name')}")
-        results = await conductor.bus.tail(topic="delegated_result")
+        results = await coordinator.bus.tail(topic="delegated_result")
         for r in results:
             print(f"  delegated_result task={r.payload.get('task_id')[:8]} state={r.payload.get('state')} result={r.payload.get('result')}")
-        responses = await conductor.bus.tail(topic="response")
+        responses = await coordinator.bus.tail(topic="response")
         for r in responses:
             print(f"  response from={r.from_agent} kind={r.payload.get('kind')} status={r.payload.get('status')}")
 
@@ -126,14 +126,14 @@ async def _run_demo(ticks: int = 6) -> dict:
             "responses_seen": len(responses),
         }
     finally:
-        await conductor.stop()
+        await coordinator.stop()
 
 
-async def _summarize_bus(conductor: Conductor) -> dict[str, int]:
+async def _summarize_bus(coordinator: Coordinator) -> dict[str, int]:
     out: dict[str, int] = {}
     for topic in ("proposal", "review_verdict", "decision", "delegated_result",
                    "request", "response", "heartbeat", "alert"):
-        msgs = await conductor.bus.tail(topic=topic, n=100)
+        msgs = await coordinator.bus.tail(topic=topic, n=100)
         if msgs:
             out[topic] = len(msgs)
     return out

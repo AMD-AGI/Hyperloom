@@ -1,7 +1,7 @@
 """PolicyGate — DESIGN v0.6 §14.5.
 
 Single chokepoint: every parsed Intent passes through ``validate_intent``
-before the Conductor commits side-effects. PolicyGate converges:
+before the Coordinator commits side-effects. PolicyGate converges:
 
     * Role permission   — does this agent's role allow this intent type?
     * Source allowlist  — REVIEW_VERDICT is critic-only;
@@ -10,11 +10,11 @@ before the Conductor commits side-effects. PolicyGate converges:
     * REQUEST routing   — only orchestration→kernel is allowed in v0.6
     * Kernel ownership  — 5 kernel-owned actions can NOT be `delegate`d;
                           orchestration must REQUEST(target_agent="kernel")
-    * Core state guard  — only the Conductor can mutate
+    * Core state guard  — only the Coordinator can mutate
                           CORE_STATE_FIELDS (current_best, etc.)
 
 PolicyGate stays *pure* — it does not touch the bus or the DB. The
-Conductor catches :class:`PolicyDenied` and emits a ``policy_denied``
+Coordinator catches :class:`PolicyDenied` and emits a ``policy_denied``
 observation event so the LLM can self-correct on its next replay turn.
 
 v0.6 changes vs v0.5:
@@ -111,7 +111,7 @@ ROBUSTNESS_ONLY_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
 
 
 # ---------------------------------------------------------------------------
-# Core SharedState fields that only the Conductor may mutate.
+# Core SharedState fields that only the Coordinator may mutate.
 # ---------------------------------------------------------------------------
 CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "current_best",
@@ -288,7 +288,7 @@ class PolicyGate:
         topic = str(payload.get("topic", "")).strip()
         if not topic:
             raise PolicyDenied("send_message missing topic", rule="payload")
-        # Unknown topics are soft-degraded by the Conductor to "observation"
+        # Unknown topics are soft-degraded by the Coordinator to "observation"
         # (DESIGN §13.2). PolicyGate doesn't reject them outright so agents
         # can still surface unstructured observations.
 

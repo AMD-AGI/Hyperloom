@@ -1,7 +1,7 @@
-"""SQLite schema for the unified Conductor state DB (DESIGN v0.6 §13.1 / ADR-42).
+"""SQLite schema for the unified Coordinator state DB (DESIGN v0.6 §13.1 / ADR-42).
 
 Four tables consolidated into a single WAL database
-``$SESSION_DIR/storage/conductor.db``:
+``$SESSION_DIR/storage/coordinator.db``:
 
 * ``leases``  — resource lock state (one row per lane, PK = lane name)
 * ``events``  — A2A message bus source-of-truth, AUTOINCREMENT seq
