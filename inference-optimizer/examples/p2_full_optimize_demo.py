@@ -12,10 +12,10 @@ What it exercises:
 
   For each action, Critic (real Codex gpt-5.4) reviews + approves.
   For the kernel-owned actions, Orchestration emits a REQUEST →
-  Conductor's `kernel_request_handlers` runs the Hyperloom kernel-agent
+  Coordinator's `kernel_request_handlers` runs the Hyperloom kernel-agent
   shell tools (or stub for integrate) and emits the RESPONSE.
 
-  After ``CONDUCTOR_TICKS`` (default 6), the report executor writes the
+  After ``CONDUCTOR_TICKS`` (default 6), the report runner writes the
   final.md / final.json under ``$SESSION_DIR/report/``.
 
 Usage::
@@ -54,7 +54,7 @@ from ..orchestrator.backends import (
     CodexBackend,
     MockRobustnessBackend,
 )
-from ..orchestrator.conductor import Conductor
+from ..orchestrator.coordinator import Coordinator
 from ..orchestrator.objective import TargetGainObjective
 from ..orchestrator.shared_state import SharedState
 from ..paths import make_session_dir
@@ -92,7 +92,7 @@ _CRITIC_PROMPT = (
 
 
 _KERNEL_PROMPT = (
-    "You are the Kernel agent. For requests not handled by Conductor's\n"
+    "You are the Kernel agent. For requests not handled by Coordinator's\n"
     "programmatic dispatch, emit RESPONSE{in_reply_to, kind='<kind>_done',\n"
     "status='ok', result={...}}. If your inbox has nothing, heartbeat."
 )
@@ -123,19 +123,19 @@ async def _run(ticks: int, target_gain: float) -> int:
         "critic":        CodexBackend(model="gpt-5.4"),
         "robustness":    MockRobustnessBackend(),
     }
-    conductor = Conductor(session_dir, backends=backends)
-    conductor.sub.register_executor("baseline", baseline_executor)
-    conductor.sub.register_executor("profile",  profile_executor)
-    conductor.sub.register_executor("backends", backends_executor)
-    conductor.sub.register_executor("params",   params_executor)
-    conductor.sub.register_executor("sweep",    sweep_executor)
-    conductor.sub.register_executor("report",   report_executor)
+    coordinator = Coordinator(session_dir, backends=backends)
+    coordinator.sub.register_executor("baseline", baseline_executor)
+    coordinator.sub.register_executor("profile",  profile_executor)
+    coordinator.sub.register_executor("backends", backends_executor)
+    coordinator.sub.register_executor("params",   params_executor)
+    coordinator.sub.register_executor("sweep",    sweep_executor)
+    coordinator.sub.register_executor("report",   report_executor)
     for kind in ("setup", "classify", "target_analysis",
                   "dream", "re_explore", "recover",
                   "comm_optimization", "compiler_tuning"):
-        conductor.sub.register_executor(kind, _noop_prep)
+        coordinator.sub.register_executor(kind, _noop_prep)
 
-    conductor.system_prompt_overrides = {
+    coordinator.system_prompt_overrides = {
         "orchestration": _ORCH_PROMPT,
         "critic":        _CRITIC_PROMPT,
         "kernel":        _KERNEL_PROMPT,
@@ -146,21 +146,21 @@ async def _run(ticks: int, target_gain: float) -> int:
 
     objective = TargetGainObjective(target_gain_pct=target_gain)
     try:
-        stop_reason = await conductor.run(
+        stop_reason = await coordinator.run(
             objective=objective,
             max_ticks=ticks,
             tick_interval_sec=0.0,
             install_signal_handlers=False,
         )
     finally:
-        await conductor.stop()
+        await coordinator.stop()
 
     print()
     print("================ Final summary ================")
     print(f"  stop_reason     : {stop_reason}")
-    print(f"  baseline_tput   : {conductor.shared_state.baseline_tput:.1f} tok/s/GPU")
-    print(f"  cumulative_gain : {conductor.shared_state.cumulative_gain:.2f}%")
-    print(f"  current_best    : {conductor.shared_state.current_best}")
+    print(f"  baseline_tput   : {coordinator.shared_state.baseline_tput:.1f} tok/s/GPU")
+    print(f"  cumulative_gain : {coordinator.shared_state.cumulative_gain:.2f}%")
+    print(f"  current_best    : {coordinator.shared_state.current_best}")
     report_md = session_dir / "report" / "final.md"
     if report_md.exists():
         print(f"  report          : {report_md}")

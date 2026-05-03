@@ -30,7 +30,7 @@ from inference_optimizer.orchestrator.backends import (
     MockBackend,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.conductor import Conductor
+from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
@@ -58,7 +58,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     return make_session_dir("p5-test")
 
 
-def _baseline_state(c: Conductor, base: float = 800.0, current: float = 833.6):
+def _baseline_state(c: Coordinator, base: float = 800.0, current: float = 833.6):
     c.shared_state.baseline_tput = base
     c.shared_state.current_best = {"action": "backends", "tput": current}
     c.shared_state.cumulative_gain = (current - base) / base * 100.0
@@ -71,7 +71,7 @@ def _baseline_state(c: Conductor, base: float = 800.0, current: float = 833.6):
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_promote_at_half_pct_threshold(session_dir):
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         _baseline_state(c, base=800.0, current=833.6)
         # +0.6% over current_best — would NOT have promoted at 1.0%, MUST at 0.5%.
@@ -98,7 +98,7 @@ async def test_promote_at_half_pct_threshold(session_dir):
 async def test_no_promote_below_half_pct(session_dir):
     """+0.3% over current_best is below 0.5% AND not yet a consistent
     winner (only 1 round) — must NOT promote."""
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         _baseline_state(c, base=800.0, current=833.6)
         result = {
@@ -124,7 +124,7 @@ async def test_no_promote_below_half_pct(session_dir):
 async def test_consistent_winner_promoted_below_threshold(session_dir):
     """Decode_steps_8 wins 2 of last 3 rounds with avg gain ~0.6% but
     no individual round crosses 0.5%. The cross-round path catches it."""
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         _baseline_state(c, base=800.0, current=833.6)
         # Round 1: decode_steps_8 +0.40% — sub-threshold, recorded
@@ -159,7 +159,7 @@ async def test_consistent_winner_promoted_below_threshold(session_dir):
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_plateau_counter_increments_on_no_promote(session_dir):
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         _baseline_state(c, base=800.0, current=833.6)
         for _ in range(7):
@@ -179,7 +179,7 @@ async def test_plateau_counter_increments_on_no_promote(session_dir):
 
 @pytest.mark.asyncio
 async def test_plateau_counter_resets_on_promote(session_dir):
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         _baseline_state(c, base=800.0, current=833.6)
         # 4 sub-threshold rounds → streak = 4
@@ -208,7 +208,7 @@ async def test_plateau_counter_resets_on_promote(session_dir):
 async def test_run_optimization_response_records_to_shared_state(
     session_dir, monkeypatch,
 ):
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         # Stub the handler so we don't shell out.
         from inference_optimizer.orchestrator import kernel_request_handlers
@@ -255,7 +255,7 @@ async def test_select_kernels_does_not_record_kernel_opt(
     session_dir, monkeypatch,
 ):
     """Only run_optimization (not select_kernels) writes to last_kernel_opt."""
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from inference_optimizer.orchestrator import kernel_request_handlers
         async def fake(payload, *, session_dir):

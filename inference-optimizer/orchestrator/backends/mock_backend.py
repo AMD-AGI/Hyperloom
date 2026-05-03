@@ -1,7 +1,7 @@
 """MockBackend — scripted-turn LLM stub for P0 / unit / e2e tests.
 
 Avoids burning tokens during dev, makes tests deterministic and offline.
-The Conductor / SubAgentRunner / Critic Review tests all use this.
+The Coordinator / SubAgentRunner / Critic Review tests all use this.
 
 Usage::
 

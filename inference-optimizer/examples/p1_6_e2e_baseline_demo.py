@@ -7,7 +7,7 @@ Wire-up:
 * **Kernel**         — MockKernelBackend (auto-respond to REQUEST)
 * **Robustness**     — MockRobustnessBackend (heartbeat-only)
 
-* `baseline` executor — :func:`baseline_executor` runs the Magpie SGLang
+* `baseline` runner — :func:`baseline_executor` runs the Magpie SGLang
   CLI subprocess against ``baseline_qwen3_8b_sglang.yaml``, parses
   ``benchmark_report.json``, returns real throughput / latency numbers.
 
@@ -25,7 +25,7 @@ Run::
 Expect:
 
   tick 1: Orchestration (Claude) reads SharedState, sees baseline_tput=0,
-          proposes `baseline`. Critic mock approves. Conductor
+          proposes `baseline`. Critic mock approves. Coordinator
           materializes a task. Dispatcher runs baseline_executor — this
           launches Magpie + sglang server (~2 min for Qwen3-8B), parses
           throughput, writes delegated_result to the bus.
@@ -46,7 +46,7 @@ from ..orchestrator.backends import (
     MockKernelBackend,
     MockRobustnessBackend,
 )
-from ..orchestrator.conductor import Conductor
+from ..orchestrator.coordinator import Coordinator
 from ..orchestrator.shared_state import SharedState
 from ..paths import make_session_dir
 
@@ -92,8 +92,8 @@ async def _run(ticks: int, model: str | None) -> int:
         "critic":        MockCriticBackend(),
         "robustness":    MockRobustnessBackend(),
     }
-    conductor = Conductor(session_dir, backends=backends)
-    conductor.sub.register_executor("baseline", baseline_executor)
+    coordinator = Coordinator(session_dir, backends=backends)
+    coordinator.sub.register_executor("baseline", baseline_executor)
     # Stub prep executors — DESIGN §16 puts setup / classify / target_analysis
     # before baseline, but for this smoke run we don't need real prep work
     # (model_class etc. are already in SharedState). Returning empty success
@@ -101,13 +101,13 @@ async def _run(ticks: int, model: str | None) -> int:
     async def _noop_prep(ctx) -> dict:
         return {"status": "succeeded", "kind": ctx.task.kind, "note": "no-op stub for smoke demo"}
     for kind in ("setup", "classify", "target_analysis", "report"):
-        conductor.sub.register_executor(kind, _noop_prep)
+        coordinator.sub.register_executor(kind, _noop_prep)
 
     # Override orchestration system prompt for the smoke demo: model_class +
     # session_id are already populated, so prereqs (setup / classify /
     # target_analysis) are effectively done. Tell the agent to propose
     # `baseline` directly — otherwise Claude burns ticks exploring prereqs.
-    conductor.system_prompt_overrides = {
+    coordinator.system_prompt_overrides = {
         "orchestration": (
             "You are the Orchestration agent for an inference-optimization run. "
             "Read the Shared session state below to see what's already done.\n\n"
@@ -129,7 +129,7 @@ async def _run(ticks: int, model: str | None) -> int:
         ),
     }
 
-    print("Registered baseline executor + 4 prep stub executors. SharedState seeded.")
+    print("Registered baseline runner + 4 prep stub executors. SharedState seeded.")
     print("Overrode orchestration system prompt to skip prep + go straight to baseline.")
     print(f"Running {ticks} ticks across 4 agents (orchestration=Claude real)")
     print()
@@ -137,7 +137,7 @@ async def _run(ticks: int, model: str | None) -> int:
     try:
         for n in range(ticks):
             try:
-                await conductor.tick(1)
+                await coordinator.tick(1)
             except Exception as exc:  # noqa: BLE001
                 print(f"  [tick {n+1}] ERROR: {type(exc).__name__}: {exc}")
                 continue
@@ -145,17 +145,17 @@ async def _run(ticks: int, model: str | None) -> int:
             for topic in ("proposal", "review_verdict", "decision",
                            "delegated_result", "request", "response",
                            "heartbeat", "alert", "observation"):
-                msgs = await conductor.bus.tail(topic=topic, n=200)
+                msgs = await coordinator.bus.tail(topic=topic, n=200)
                 if msgs:
                     counts[topic] = len(msgs)
-            tput = conductor.shared_state.baseline_tput
+            tput = coordinator.shared_state.baseline_tput
             print(f"  [tick {n+1}] events={counts} baseline_tput={tput:.1f}")
 
         print()
         print("---- highlights ----")
         for topic in ("proposal", "review_verdict", "decision",
                        "delegated_result", "alert"):
-            msgs = await conductor.bus.tail(topic=topic, n=20)
+            msgs = await coordinator.bus.tail(topic=topic, n=20)
             for m in msgs:
                 summary = {k: v for k, v in m.payload.items()
                             if k in ("action_name", "verdict", "kind",
@@ -173,9 +173,9 @@ async def _run(ticks: int, model: str | None) -> int:
 
         print()
         print("---- final SharedState ----")
-        print(conductor.shared_state.to_prompt_summary())
+        print(coordinator.shared_state.to_prompt_summary())
     finally:
-        await conductor.stop()
+        await coordinator.stop()
 
     return 0
 
