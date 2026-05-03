@@ -11,7 +11,55 @@ logs, and return structured results.
 
 All files live under `$WORKSPACE_PATH/kernel-agent`; default `WORKSPACE_PATH` is
 `/workspace`. Do not write outside that tree except reading user-provided trace
-or source paths and the TraceLens install at `/hyperloom/TraceLens-internal`.
+or source paths and the TraceLens install at
+`/wekafs/hyperloom/TraceLens-internal`.
+
+## LLM Environment
+
+The canonical LLM endpoint is LiteLLM-compatible and is configured by:
+
+- `OPENAI_BASE_URL`
+- `SAFE_API_KEY`
+
+If either variable is missing, load `.env` from the repository that launched the
+skill. Do not print the key. Before running installers or tools, export
+compatibility aliases used by OOB, GEAK, Claude/Codex CLIs, and older scripts:
+
+```bash
+if [ -n "${REPO_ROOT:-}" ] && [ -f "$REPO_ROOT/.env" ]; then
+  set -a
+  . "$REPO_ROOT/.env"
+  set +a
+elif [ -f .env ]; then
+  set -a
+  . ./.env
+  set +a
+fi
+
+: "${OPENAI_BASE_URL:?OPENAI_BASE_URL must be set in env or .env}"
+: "${SAFE_API_KEY:?SAFE_API_KEY must be set in env or .env}"
+
+export OPENAI_API_KEY="${OPENAI_API_KEY:-$SAFE_API_KEY}"
+export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-$SAFE_API_KEY}"
+export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$SAFE_API_KEY}"
+export OOB_API_KEY="${OOB_API_KEY:-$SAFE_API_KEY}"
+export GEAK_API_KEY="${GEAK_API_KEY:-$SAFE_API_KEY}"
+export LLM_API_KEY="${LLM_API_KEY:-$SAFE_API_KEY}"
+export AMD_LLM_API_KEY="${AMD_LLM_API_KEY:-$SAFE_API_KEY}"
+
+export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-$OPENAI_BASE_URL}"
+export OOB_BASE_URL="${OOB_BASE_URL:-$OPENAI_BASE_URL}"
+export GEAK_BASE_URL="${GEAK_BASE_URL:-$OPENAI_BASE_URL}"
+export LLM_API_BASE="${LLM_API_BASE:-$OPENAI_BASE_URL}"
+
+python3 - <<'PY'
+import os
+missing = [k for k in ("OPENAI_BASE_URL", "SAFE_API_KEY") if not os.environ.get(k)]
+print("llm_env_present=", not missing)
+if missing:
+    print("missing=", ",".join(missing))
+PY
+```
 
 ## Installation
 
@@ -23,9 +71,36 @@ bash $WORKSPACE_PATH/kernel-agent/scripts/install.sh
 
 Base install provides:
 - `ray==2.44.1`
-- `click<8.3`
-- TraceLens editable install from `/hyperloom/TraceLens-internal`
+- `click<8.3.0`
+- TraceLens editable install from `/wekafs/hyperloom/TraceLens-internal`
 - `TraceLens_generate_perf_report_pytorch --help` verification
+
+If a pod or venv was rebuilt, repair the Ray/Click pair before any kernel
+optimization request. `click>=8.3` is incompatible with the Ray 2.44 CLI in this
+environment and can make backend submission fail before any kernel code compiles:
+
+```bash
+pip install --quiet 'click<8.3.0' 'ray[default]==2.44.1'
+ray --version
+```
+
+Start Ray with every visible GPU before OOB/GEAK kernel optimization. OOB and
+GEAK submit Ray tasks with `num_gpus>=1`; if Ray is started with
+`--num-gpus=0`, tasks stay pending even when the node has idle GPUs.
+
+```bash
+RAY_NUM_GPUS="${RAY_NUM_GPUS:-$(python3 - <<'PY'
+try:
+    import torch
+    print(torch.cuda.device_count() or 1)
+except Exception:
+    print(1)
+PY
+)}"
+ray stop --force || true
+ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
+ray status
+```
 
 Backends are installed lazily. Install only the requested backend:
 
@@ -109,16 +184,19 @@ TraceLens runs through its CLI and its own skill.
 1. Install/check TraceLens before analysis:
 
 ```bash
-cd /hyperloom/TraceLens-internal
+export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+cd "$TRACELENS_ROOT"
 pip install -e .
 TraceLens_generate_perf_report_pytorch --help
 ```
 
-If the command is missing, stop and fix installation before analysis.
+If the command is missing, stop and fix installation before analysis. Do not
+fall back to the open-source TraceLens clone when the internal mount exists; the
+internal mount contains the standalone skills expected by this tool.
 
 2. Read this skill file and strictly follow its order:
 
-`/hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md`
+`/wekafs/hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md`
 
 3. Step 6 and Step 7 categories must run in independent Task subagents. Each
 subagent must write findings under `system_findings/` or `category_findings/`.
