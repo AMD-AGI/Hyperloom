@@ -398,3 +398,81 @@ async def test_run_optimization_handler_forwards_verification_evidence(
     assert cmd[cmd.index("--accuracy-passed") + 1] == "true"
     assert "--micro-speedup" in cmd
     assert "--e2e-gain-pct" in cmd
+
+
+@pytest.mark.asyncio
+async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fallback(
+    session_dir, tmp_path, monkeypatch,
+):
+    from inference_optimizer.orchestrator import kernel_request_handlers as krh
+
+    candidates = tmp_path / "kernel_candidates.json"
+    candidates.write_text(
+        """
+        {
+          "hot_kernels": [
+            {
+              "kernel_id": "k003",
+              "name": "native_moe_gemm",
+              "source_file": "/sgl-workspace/aiter/csrc/kernels/moe.cu",
+              "reusable_native_kernel": true
+            },
+            {
+              "kernel_id": "k006",
+              "name": "native_quant",
+              "source_file": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
+              "reusable_native_kernel": true
+            }
+          ],
+          "reusable_native_kernel_ids": ["k003", "k006"]
+        }
+        """,
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, str]] = []
+
+    async def fake_single(payload, *, session_dir):
+        kernel_id = payload["kernel_id"]
+        backend = payload["backends"]
+        calls.append((kernel_id, backend))
+        keep = kernel_id == "k006" and backend == "codex"
+        speedup = 1.31 if keep else 1.0
+        return {
+            "status": "ok",
+            "kernel_id": kernel_id,
+            "selected_backends": [backend],
+            "best_artifact_path": f"/tmp/{kernel_id}-{backend}.cu",
+            "verification": {
+                "compile_passed": keep,
+                "correctness_passed": keep,
+                "micro_speedup": speedup,
+                "best_artifact_path": f"/tmp/{kernel_id}-{backend}.cu",
+            },
+            "proposal": {
+                "decision": "KEEP" if keep else "PARTIAL",
+                "reasons": [],
+            },
+        }
+
+    monkeypatch.setattr(krh, "_run_optimization_single", fake_single)
+    result = await krh.run_optimization_handler(
+        {
+            "candidates_path": str(candidates),
+            "budget_minutes": 60,
+            "max_parallel": 2,
+        },
+        session_dir=session_dir,
+    )
+
+    assert result["batch_mode"] is True
+    assert result["batch_kernel_ids"] == ["k003", "k006"]
+    assert result["backend_order"] == ["claude", "codex", "geak"]
+    assert result["kernel_id"] == "k006"
+    assert result["proposal"]["decision"] == "KEEP"
+    assert result["verification"]["micro_speedup"] == pytest.approx(1.31)
+
+    by_kernel: dict[str, list[str]] = {}
+    for kernel_id, backend in calls:
+        by_kernel.setdefault(kernel_id, []).append(backend)
+    assert by_kernel["k003"] == ["claude", "codex", "geak"]
+    assert by_kernel["k006"] == ["claude", "codex"]
