@@ -1,4 +1,4 @@
-"""P2-1 Objective + Conductor.run() long-loop tests."""
+"""P2-1 Objective + Coordinator.run() long-loop tests."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from inference_optimizer.orchestrator.backends import (
     MockTurn,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.conductor import Conductor
+from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.objective import (
     Objective,
@@ -208,11 +208,11 @@ def test_build_objective_treats_empty_target_as_unset():
 
 
 # ===========================================================================
-# Conductor.run() long loop
+# Coordinator.run() long loop
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_run_stops_on_max_ticks(session_dir):
-    c = Conductor(session_dir, backends=_backends_silent())
+    c = Coordinator(session_dir, backends=_backends_silent())
     try:
         reason = await c.run(max_ticks=3)
         assert reason == "max_ticks"
@@ -223,7 +223,7 @@ async def test_run_stops_on_max_ticks(session_dir):
 
 @pytest.mark.asyncio
 async def test_run_stops_on_objective_reached(session_dir):
-    c = Conductor(session_dir, backends=_backends_silent())
+    c = Coordinator(session_dir, backends=_backends_silent())
     try:
         # Pre-load state so objective is already reached on tick 1.
         c.shared_state.baseline_tput = 1000.0
@@ -240,7 +240,7 @@ async def test_run_stops_on_objective_reached(session_dir):
 
 @pytest.mark.asyncio
 async def test_run_stops_on_time_exhausted(session_dir):
-    c = Conductor(session_dir, backends=_backends_silent())
+    c = Coordinator(session_dir, backends=_backends_silent())
     try:
         # max_minutes = 0.001 = 60ms; each tick is fast, but the budget is
         # enforced AFTER each tick so we always run >=1 tick.
@@ -252,7 +252,7 @@ async def test_run_stops_on_time_exhausted(session_dir):
 
 @pytest.mark.asyncio
 async def test_run_stops_on_signal_via_stop_event(session_dir):
-    c = Conductor(session_dir, backends=_backends_silent())
+    c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c._stop.set()  # simulate SIGINT
         reason = await c.run(max_ticks=10)
@@ -263,7 +263,7 @@ async def test_run_stops_on_signal_via_stop_event(session_dir):
 
 @pytest.mark.asyncio
 async def test_run_stops_on_emergency_crash_count(session_dir):
-    c = Conductor(session_dir, backends=_backends_silent())
+    c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.crash_count = 30
         reason = await c.run(max_ticks=10)
@@ -274,7 +274,7 @@ async def test_run_stops_on_emergency_crash_count(session_dir):
 
 @pytest.mark.asyncio
 async def test_run_does_not_emergency_below_default_threshold(session_dir):
-    c = Conductor(session_dir, backends=_backends_silent())
+    c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.crash_count = 5
         reason = await c.run(max_ticks=2)
@@ -285,7 +285,7 @@ async def test_run_does_not_emergency_below_default_threshold(session_dir):
 
 @pytest.mark.asyncio
 async def test_run_emergency_threshold_can_be_lowered_per_call(session_dir):
-    c = Conductor(session_dir, backends=_backends_silent())
+    c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.crash_count = 4
         reason = await c.run(max_ticks=10, crash_emergency_threshold=3)
@@ -296,7 +296,7 @@ async def test_run_emergency_threshold_can_be_lowered_per_call(session_dir):
 
 @pytest.mark.asyncio
 async def test_run_stops_on_custom_stop_when(session_dir):
-    c = Conductor(session_dir, backends=_backends_silent())
+    c = Coordinator(session_dir, backends=_backends_silent())
     try:
         ticks = {"n": 0}
 
@@ -313,7 +313,7 @@ async def test_run_stops_on_custom_stop_when(session_dir):
 
 @pytest.mark.asyncio
 async def test_run_persists_stop_reason_to_state_json(session_dir):
-    c = Conductor(session_dir, backends=_backends_silent())
+    c = Coordinator(session_dir, backends=_backends_silent())
     try:
         await c.run(max_ticks=2)
     finally:
@@ -324,7 +324,7 @@ async def test_run_persists_stop_reason_to_state_json(session_dir):
 
 @pytest.mark.asyncio
 async def test_run_persists_max_minutes_to_state(session_dir):
-    c = Conductor(session_dir, backends=_backends_silent())
+    c = Coordinator(session_dir, backends=_backends_silent())
     try:
         await c.run(max_ticks=1, max_minutes=42.0)
     finally:
@@ -335,7 +335,7 @@ async def test_run_persists_max_minutes_to_state(session_dir):
 @pytest.mark.asyncio
 async def test_run_async_stop_when_callback(session_dir):
     """stop_when can be an async function too."""
-    c = Conductor(session_dir, backends=_backends_silent())
+    c = Coordinator(session_dir, backends=_backends_silent())
     try:
         async def acb(_c):
             return True

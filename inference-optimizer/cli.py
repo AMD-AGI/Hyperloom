@@ -9,7 +9,7 @@ Usage::
 
 Single subcommand for now (``optimize``). Wires Claude+Codex backends,
 registers all available action_executors, builds the requested objective,
-and starts ``Conductor.run()`` until target / time / SIGTERM.
+and starts ``Coordinator.run()`` until target / time / SIGTERM.
 
 Env vars consumed (besides the standard backend creds):
 
@@ -48,7 +48,7 @@ from .orchestrator.backends import (
     MockCriticBackend,
     MockRobustnessBackend,
 )
-from .orchestrator.conductor import Conductor
+from .orchestrator.coordinator import Coordinator
 from .orchestrator.objective import build_objective
 from .orchestrator.shared_state import SharedState
 from .paths import make_session_dir, session_root
@@ -123,12 +123,15 @@ _DEFAULT_ORCH_PROMPT = (
     "                   source_file: <from hot_kernels[i].source_file>,\n"
     "                   candidates_path: <select_kernels_done.candidates_path>,\n"
     "                   backends: 'claude',\n"
-    "                   budget_minutes: 25}}\n\n"
+    "                   budget_minutes: 60}}\n\n"
     "step K3: when `run_optimization_done` arrives, look at\n"
     "  result.proposal.decision and result.verification:\n"
     "    KEEP        → emit request{kind: 'integrate', params:\n"
-    "                               {patch_path: <result.best_artifact_path>,\n"
+    "                               {kernel_id: <result.kernel_id>,\n"
+    "                                patch_path: <result.best_artifact_path OR result.verification.best_artifact_path>,\n"
+    "                                target_file: <result.source_file>,\n"
     "                                base_tput: <current_best.tput>,\n"
+    "                                extra_sglang_args: <current_best.extra_sglang_args>,\n"
     "                                config_path: <baseline yaml absolute path>}}\n"
     "    PARTIAL/REVERT → don't integrate; pick the NEXT hot kernel\n"
     "                     (skip kernels with kernel_id == last_kernel_opt.kernel_id)\n"
@@ -242,25 +245,25 @@ def _default_target_summary(args: argparse.Namespace) -> str:
     return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
 
 
-def _register_executors(conductor: Conductor) -> None:
+def _register_executors(coordinator: Coordinator) -> None:
     """Wire all currently-available action executors.
 
     P2-1 ships only `baseline` (real Magpie). Stubs for prep + kernel-owned
     actions keep the Orchestration loop from stalling while later phases
     fill in the real ones.
     """
-    conductor.sub.register_executor("baseline", baseline_executor)
-    conductor.sub.register_executor("profile",  profile_executor)
-    conductor.sub.register_executor("backends", backends_executor)
-    conductor.sub.register_executor("params",   params_executor)
-    conductor.sub.register_executor("sweep",    sweep_executor)
-    conductor.sub.register_executor("report",   report_executor)
+    coordinator.sub.register_executor("baseline", baseline_executor)
+    coordinator.sub.register_executor("profile",  profile_executor)
+    coordinator.sub.register_executor("backends", backends_executor)
+    coordinator.sub.register_executor("params",   params_executor)
+    coordinator.sub.register_executor("sweep",    sweep_executor)
+    coordinator.sub.register_executor("report",   report_executor)
     for kind in ("setup", "classify", "target_analysis",
                   "kernel_opt", "integrate", "deep_kernel_analysis",
                   "operator_tuning", "vendor_kernel_config",
                   "dream", "re_explore", "recover",
                   "comm_optimization", "compiler_tuning"):
-        conductor.sub.register_executor(kind, _noop_prep)
+        coordinator.sub.register_executor(kind, _noop_prep)
 
 
 def _print_final_summary(state: SharedState, stop_reason: str) -> None:
@@ -279,7 +282,7 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
 
 async def _run_optimize(args: argparse.Namespace) -> int:
     if args.resume:
-        # Resume mode: skip the SharedState seed so Conductor.__init__
+        # Resume mode: skip the SharedState seed so Coordinator.__init__
         # picks up the existing state.json + SQLite event log unchanged.
         session_dir = session_root() / args.resume
         if not session_dir.exists():
@@ -298,7 +301,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # CRITICAL: a leftover stop_reason from the prior run (most often
         # "time_exhausted") fools Orchestration into thinking the work is
         # already done — it just heartbeats forever. Clear it so the new
-        # run has a clean signal. The Conductor's run() always re-sets
+        # run has a clean signal. The Coordinator's run() always re-sets
         # stop_reason at exit anyway.
         prior_crash = state.crash_count
         if prior_stop or prior_crash >= 3:
@@ -340,13 +343,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # task.params. This is read in report.py::_resolve_session_dir.
     os.environ["INFERENCE_OPTIMIZER_SESSION_DIR"] = str(session_dir)
 
-    conductor = Conductor(session_dir, backends=backends)
-    conductor.system_prompt_overrides = {
+    coordinator = Coordinator(session_dir, backends=backends)
+    coordinator.system_prompt_overrides = {
         "orchestration": args.orch_prompt or _DEFAULT_ORCH_PROMPT,
         "critic":        args.critic_prompt or _DEFAULT_CRITIC_PROMPT,
         "kernel":        args.kernel_prompt or _DEFAULT_KERNEL_PROMPT,
     }
-    _register_executors(conductor)
+    _register_executors(coordinator)
 
     print(f"Backends        : "
           f"orchestration=Claude({args.claude_model}), "
@@ -359,7 +362,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     print()
 
     try:
-        stop_reason = await conductor.run(
+        stop_reason = await coordinator.run(
             objective=objective,
             max_minutes=args.max_hours * 60.0,
             tick_interval_sec=args.tick_interval_sec,
@@ -367,9 +370,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             install_signal_handlers=True,
         )
     finally:
-        await conductor.stop()
+        await coordinator.stop()
 
-    _print_final_summary(conductor.shared_state, stop_reason)
+    _print_final_summary(coordinator.shared_state, stop_reason)
     return 0 if stop_reason in ("target_reached", "time_exhausted", "max_ticks") else 1
 
 
@@ -400,7 +403,7 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Override auto-generated session id (for new runs)")
     opt.add_argument("--resume", type=str, default=None,
                       help="Resume from an existing session id. Skips the "
-                           "SharedState seed and lets the Conductor replay "
+                           "SharedState seed and lets the Coordinator replay "
                            "the prior event log + state.json. Mutually "
                            "exclusive with --session-name in practice.")
     opt.add_argument("--model-class", type=str, default=None,
