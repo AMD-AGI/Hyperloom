@@ -5,12 +5,12 @@ and that PolicyGate uses to enforce CORE_STATE_FIELDS guards.
 
 Backed by JSON at ``$SESSION_DIR/state.json``. The file write is atomic
 (``tmp`` + ``os.replace``) so concurrent readers never see a partial blob.
-The Conductor is the **only** writer; LLM agents go through
-``UPDATE_STATE`` intents which the Conductor validates + persists.
+The Coordinator is the **only** writer; LLM agents go through
+``UPDATE_STATE`` intents which the Coordinator validates + persists.
 
 v0.6 fields:
 
-    session_id          str   — set by Conductor at session creation
+    session_id          str   — set by Coordinator at session creation
     model_name          str   — e.g. "meta-llama/Llama-3.1-8B-Instruct"
     model_path          str   — local NFS path to weights
     model_class         str   — set by `classify` action
@@ -25,7 +25,7 @@ v0.6 fields:
     pruned_families     list[str]  — set by Robustness via PRUNE_BRANCH
     start_ts            str   — ISO timestamp
     max_minutes         int   — wall-clock budget (0 = unlimited)
-    last_profile_trace  str   — set by Conductor when `profile` returns a
+    last_profile_trace  str   — set by Coordinator when `profile` returns a
                                 trace path; consumed by Orch to populate
                                 `select_kernels` REQUEST `trace_input` param
 """
@@ -72,13 +72,13 @@ class SharedState:
     # hot-kernel distribution; identical args means the same trace.
     last_profile_args: str = ""
     # Cached result of the most recent `select_kernels` request keyed by
-    # `trace_input`. Conductor short-circuits subsequent identical requests
+    # `trace_input`. Coordinator short-circuits subsequent identical requests
     # so Orchestration does not waste budget re-analysing the same trace.
     last_select_kernels: dict[str, Any] = field(default_factory=dict)
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
-    # Kernel-opt response tracking — Conductor records the most recent
+    # Kernel-opt response tracking — Coordinator records the most recent
     # `run_optimization_done` so Orch sees what's been tried and doesn't
     # re-dispatch the same kernel_id every tick.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
@@ -96,7 +96,7 @@ class SharedState:
     # current_best advances.
     params_no_promote_streak: int = 0
     # Persistent params DFS state. ParamsExecutor owns the search mechanics,
-    # Conductor is still the only writer to state.json.
+    # Coordinator is still the only writer to state.json.
     params_search: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
@@ -143,7 +143,7 @@ class SharedState:
             raise
 
     # ------------------------------------------------------------------
-    # Mutators (used by the Conductor only — LLM agents go via intents)
+    # Mutators (used by the Coordinator only — LLM agents go via intents)
     # ------------------------------------------------------------------
     def add_pruned_family(self, family: str) -> bool:
         """Idempotent add. Returns True iff the family was newly added."""
@@ -162,7 +162,7 @@ class SharedState:
     def apply_changes(self, changes: dict[str, Any], *, allow_core: bool) -> dict[str, Any]:
         """Merge a non-empty changes dict into this state.
 
-        ``allow_core=True`` is reserved for Conductor-internal callers that
+        ``allow_core=True`` is reserved for Coordinator-internal callers that
         update fields in :data:`policy.CORE_STATE_FIELDS` (current_best,
         baseline_tput, etc.). LLM-driven UPDATE_STATE intents pass
         ``allow_core=False`` and PolicyGate already filtered them upstream

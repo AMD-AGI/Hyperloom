@@ -10,7 +10,7 @@ before insert. v0.6 changes:
 * Removed ``objection`` / ``vote`` / ``vote_request`` / ``parliament_open``
   (parliament gone — ADR-38).
 * Added ``review_verdict`` (Critic Review Protocol).
-* ``kill`` mirror topic stays; emitted by Robustness via Conductor.
+* ``kill`` mirror topic stays; emitted by Robustness via Coordinator.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ TOPIC_ALLOWLIST = frozenset({
     # Storage-layer events
     "lease_expired", "lease_acquire_failed",
     # Agent-to-agent RPC topics carrying REQUEST / RESPONSE intents.
-    # Conductor mirrors request/response payloads onto these topics so the
+    # Coordinator mirrors request/response payloads onto these topics so the
     # target agent's inbox picks them up (kernel agent contract).
     "request", "response",
     # v0.6 Critic Review Protocol — verdict broadcast topic.

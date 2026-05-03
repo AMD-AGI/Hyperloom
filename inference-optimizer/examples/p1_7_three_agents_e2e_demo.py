@@ -18,7 +18,7 @@ End-to-end flow this exercises:
           kind="select_kernels"} so the Kernel agent (real Claude) is
           actually exercised, not just heartbeating.
   tick 3: Kernel (real Claude) reads inbox, sees the request, emits a
-          real RESPONSE intent. Conductor routes back to Orchestration.
+          real RESPONSE intent. Coordinator routes back to Orchestration.
 
 Run::
 
@@ -41,7 +41,7 @@ from ..orchestrator.backends import (
     CodexBackend,
     MockRobustnessBackend,
 )
-from ..orchestrator.conductor import Conductor
+from ..orchestrator.coordinator import Coordinator
 from ..orchestrator.shared_state import SharedState
 from ..paths import make_session_dir
 
@@ -141,17 +141,17 @@ async def _run(ticks: int, claude_model: str, codex_model: str) -> int:
         "critic":        CodexBackend(model=codex_model),
         "robustness":    MockRobustnessBackend(),
     }
-    conductor = Conductor(session_dir, backends=backends)
-    conductor.sub.register_executor("baseline", baseline_executor)
+    coordinator = Coordinator(session_dir, backends=backends)
+    coordinator.sub.register_executor("baseline", baseline_executor)
 
     # Stub prep executors — DESIGN §16 prereq actions; not exercised in
     # this smoke run because the orch prompt skips them.
     async def _noop_prep(ctx) -> dict:
         return {"status": "succeeded", "kind": ctx.task.kind, "note": "noop"}
     for kind in ("setup", "classify", "target_analysis", "report"):
-        conductor.sub.register_executor(kind, _noop_prep)
+        coordinator.sub.register_executor(kind, _noop_prep)
 
-    conductor.system_prompt_overrides = {
+    coordinator.system_prompt_overrides = {
         "orchestration": _ORCH_PROMPT,
         "critic":        _CRITIC_PROMPT,
         "kernel":        _KERNEL_PROMPT,
@@ -165,7 +165,7 @@ async def _run(ticks: int, claude_model: str, codex_model: str) -> int:
     try:
         for n in range(ticks):
             try:
-                await conductor.tick(1)
+                await coordinator.tick(1)
             except Exception as exc:  # noqa: BLE001
                 print(f"  [tick {n+1}] ERROR: {type(exc).__name__}: {exc}")
                 continue
@@ -173,17 +173,17 @@ async def _run(ticks: int, claude_model: str, codex_model: str) -> int:
             for topic in ("proposal", "review_verdict", "decision",
                            "delegated_result", "request", "response",
                            "heartbeat", "alert", "observation"):
-                msgs = await conductor.bus.tail(topic=topic, n=200)
+                msgs = await coordinator.bus.tail(topic=topic, n=200)
                 if msgs:
                     counts[topic] = len(msgs)
-            tput = conductor.shared_state.baseline_tput
+            tput = coordinator.shared_state.baseline_tput
             print(f"  [tick {n+1}] events={counts} baseline_tput={tput:.1f}")
 
         print()
         print("---- highlights ----")
         for topic in ("proposal", "review_verdict", "decision",
                        "delegated_result", "request", "response", "alert"):
-            msgs = await conductor.bus.tail(topic=topic, n=20)
+            msgs = await coordinator.bus.tail(topic=topic, n=20)
             for m in msgs:
                 summary = {k: v for k, v in m.payload.items()
                             if k in ("action_name", "verdict", "reasoning",
@@ -198,7 +198,7 @@ async def _run(ticks: int, claude_model: str, codex_model: str) -> int:
 
         print()
         print("---- final SharedState ----")
-        print(conductor.shared_state.to_prompt_summary())
+        print(coordinator.shared_state.to_prompt_summary())
 
         print()
         print("---- backend call counts ----")
@@ -206,7 +206,7 @@ async def _run(ticks: int, claude_model: str, codex_model: str) -> int:
             calls = getattr(b, "calls", [])
             print(f"  {name:13s}: {len(calls)} calls")
     finally:
-        await conductor.stop()
+        await coordinator.stop()
     return 0
 
 

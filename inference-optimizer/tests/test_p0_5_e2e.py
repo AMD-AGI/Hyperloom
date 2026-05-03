@@ -3,10 +3,10 @@
 Covers the full P0 main path with all 4 agents wired to mock backends:
 
 * Orchestration proposes → Critic mock approves → task materialized →
-  dispatcher runs the registered baseline executor → succeeded.
+  dispatcher runs the registered baseline runner → succeeded.
 * Orchestration emits REQUEST{target=kernel, kind=select_kernels} →
-  Conductor mirrors to kernel inbox → Kernel mock auto-RESPONSEs →
-  Conductor routes response back to orchestration inbox.
+  Coordinator mirrors to kernel inbox → Kernel mock auto-RESPONSEs →
+  Coordinator routes response back to orchestration inbox.
 * Robustness mock keeps ticking heartbeats throughout — no scheduling
   police intervention.
 * The bundled demo script (``examples.p0_main_loop._run_demo``) finishes
@@ -28,7 +28,7 @@ from inference_optimizer.orchestrator.backends import (
     MockTurn,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.conductor import Conductor
+from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.paths import make_session_dir
 
@@ -110,12 +110,12 @@ async def test_e2e_propose_approve_dispatch_with_mock_executor(session_dir):
         "critic":     MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
-    c = Conductor(session_dir, backends=backends)
+    c = Coordinator(session_dir, backends=backends)
     c.sub.register_executor("baseline", lambda ctx: _async_value({"tput": 1840}))
     try:
         # tick 1: orchestration proposes
-        # tick 2: critic sees + approves; conductor materializes task
-        # tick 3: dispatcher runs the executor → delegated_result succeeded
+        # tick 2: critic sees + approves; coordinator materializes task
+        # tick 3: dispatcher runs the runner → delegated_result succeeded
         await c.tick(3)
 
         proposals = await c.bus.tail(topic="proposal")
@@ -165,10 +165,10 @@ async def test_e2e_request_response_round_trip(session_dir):
         "critic":     MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
-    c = Conductor(session_dir, backends=backends)
+    c = Coordinator(session_dir, backends=backends)
     try:
-        # tick 1: orchestration emits REQUEST → conductor mirrors to kernel inbox
-        # tick 2: kernel sees request → emits RESPONSE → conductor routes back
+        # tick 1: orchestration emits REQUEST → coordinator mirrors to kernel inbox
+        # tick 2: kernel sees request → emits RESPONSE → coordinator routes back
         await c.tick(2)
 
         # Request mirrored to kernel
@@ -196,7 +196,7 @@ async def test_e2e_robustness_heartbeats_throughout(session_dir):
         "critic":     MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
-    c = Conductor(session_dir, backends=backends)
+    c = Coordinator(session_dir, backends=backends)
     try:
         await c.tick(4)
         beats = await c.bus.tail(topic="heartbeat", n=100)

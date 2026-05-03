@@ -6,7 +6,7 @@ Two distinct path concepts:
    personas, results, findings). Production NFS layout::
 
         /hyperloom/inference-optimizer-sessions/<session_id>/
-            storage/conductor.db
+            storage/coordinator.db
             state.json
             personas/  checkpoints/  kb/  results/  findings/
 
@@ -68,7 +68,11 @@ def db_path_for(session_dir: Path) -> Path:
     explicit = os.environ.get(ENV_OVERRIDE_DB_PATH)
     if explicit:
         return Path(explicit)
-    return session_dir / "storage" / "conductor.db"
+    path = session_dir / "storage" / "coordinator.db"
+    legacy_path = session_dir / "storage" / "conductor.db"
+    if legacy_path.exists() and not path.exists():
+        return legacy_path
+    return path
 
 
 def asset_root() -> Path:

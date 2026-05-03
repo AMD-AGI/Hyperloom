@@ -1,4 +1,4 @@
-"""Real ``profile`` ActionExecutor — Magpie SGLang run with torch profiler on.
+"""Real ``profile`` ActionRunner — Magpie SGLang run with torch profiler on.
 
 DESIGN v0.6 §16 profile action.
 
