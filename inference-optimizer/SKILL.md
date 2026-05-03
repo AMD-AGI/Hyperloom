@@ -20,12 +20,12 @@ objective progress.
 
 ## What This Skill Runs
 
-The CLI starts a Python Conductor that coordinates:
+The CLI starts a Python Coordinator that coordinates:
 
 - Orchestration: decides next actions (`baseline`, `profile`, `backends`, `params`, `sweep`, Kernel requests, `report`).
 - Kernel: responder path for `select_kernels`, `run_optimization`, `integrate`.
 - Critic: proposal review; can be real Codex or `--critic-mock` when Codex credentials are unavailable.
-- Robustness: mock watchdog in this branch.
+- Robustness: mock robustness monitor in this branch.
 
 State lives in one session directory. Production defaults to
 `/hyperloom/inference-optimizer-sessions`, but portable launches should set
@@ -34,12 +34,12 @@ State lives in one session directory. Production defaults to
 ```bash
 /hyperloom/inference-optimizer-sessions/<session_id>/
 ├── state.json
-├── storage/conductor.db
+├── storage/coordinator.db
 ├── results/
 └── kernel-agent-workspace/
 ```
 
-Always prefer `state.json` and `conductor.db` over guessing from terminal logs.
+Always prefer `state.json` and `coordinator.db` over guessing from terminal logs.
 
 ## Portable Environment Setup
 
@@ -441,17 +441,17 @@ Resume preserves baseline, current best, params search state, event history, and
 kernel-agent artifacts. The CLI clears stale `stop_reason` and `crash_count`
 before retrying.
 
-## Watchdog For Long Runs
+## Robustness monitor For Long Runs
 
-For any run longer than 5 minutes, start a watchdog in its own `setsid nohup`
+For any run longer than 5 minutes, start a robustness monitor in its own `setsid nohup`
 process. It must poll no more often than every 5 minutes, stop when the session
 has a terminal `stop_reason`, and resume the same session if the optimizer exits
 unexpectedly.
 
 ```bash
-export WATCHDOG_SCRIPT="$RUN_ROOT/watchdog_${SESSION_NAME}.sh"
-export WATCHDOG_LOG="$RUN_ROOT/watchdog_${SESSION_NAME}_$(date +%Y%m%d_%H%M%S).log"
-export WATCHDOG_PID_FILE="$RUN_ROOT/watchdog_${SESSION_NAME}.pid"
+export WATCHDOG_SCRIPT="$RUN_ROOT/robustness monitor_${SESSION_NAME}.sh"
+export WATCHDOG_LOG="$RUN_ROOT/robustness monitor_${SESSION_NAME}_$(date +%Y%m%d_%H%M%S).log"
+export WATCHDOG_PID_FILE="$RUN_ROOT/robustness monitor_${SESSION_NAME}.pid"
 
 cat > "$WATCHDOG_SCRIPT" <<'SH'
 #!/usr/bin/env bash
@@ -480,16 +480,16 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   stop_reason="$(read_stop_reason)"
   case "$stop_reason" in
     target_reached|time_exhausted|max_ticks)
-      echo "[watchdog] terminal stop_reason=$stop_reason $(date -Is)"
+      echo "[robustness monitor] terminal stop_reason=$stop_reason $(date -Is)"
       exit 0
       ;;
   esac
   if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
-    echo "[watchdog] alive pid=$pid stop_reason=${stop_reason:-none} $(date -Is)"
+    echo "[robustness monitor] alive pid=$pid stop_reason=${stop_reason:-none} $(date -Is)"
     sleep 300
     continue
   fi
-  echo "[watchdog] optimizer stopped; resuming $SESSION_NAME $(date -Is)"
+  echo "[robustness monitor] optimizer stopped; resuming $SESSION_NAME $(date -Is)"
   resume_log="$RUN_ROOT/resume_${SESSION_NAME}_$(date +%Y%m%d_%H%M%S).log"
   set -a; . "$REPO_ROOT/.env"; set +a
   setsid nohup "$PYTHON" -m inference_optimizer.cli --verbose optimize \
@@ -503,7 +503,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   echo $! > "$PID_FILE"
   sleep 300
 done
-echo "[watchdog] deadline reached $(date -Is)"
+echo "[robustness monitor] deadline reached $(date -Is)"
 SH
 
 chmod +x "$WATCHDOG_SCRIPT"
@@ -537,7 +537,7 @@ Use SQLite for recent action counts:
 "$PYTHON" - <<'PY'
 import json, os, pathlib, sqlite3
 from collections import Counter
-db = pathlib.Path(os.environ["SESSION"]) / "storage" / "conductor.db"
+db = pathlib.Path(os.environ["SESSION"]) / "storage" / "coordinator.db"
 con = sqlite3.connect(db)
 c = Counter()
 for fa, ta, topic, payload in con.execute(
@@ -596,7 +596,7 @@ apply/rebuild and ask. Dry-run and analysis are safe.
 
 - `ANTHROPIC_AUTH_TOKEN not set`: source `.env`.
 - `Fatal error in message reader`: retry/resume; transient Claude CLI failures
-are tolerated up to the Conductor emergency threshold.
+are tolerated up to the Coordinator emergency threshold.
 - `No accelerator`: ensure Magpie subprocess PATH includes `/opt/venv/bin` and
 use `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
 - Repeated `select_kernels`: check `last_select_kernels`; if trace/config did

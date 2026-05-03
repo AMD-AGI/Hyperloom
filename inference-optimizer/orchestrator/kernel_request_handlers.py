@@ -1,4 +1,4 @@
-"""Conductor-side handlers for Kernel-agent REQUEST kinds.
+"""Coordinator-side handlers for Kernel-agent REQUEST kinds.
 
 DESIGN v0.6 §7.2 says the Kernel agent is responder-only: it answers
 Orchestration's ``request{target_agent='kernel', kind=...}`` with a
@@ -6,7 +6,7 @@ Orchestration's ``request{target_agent='kernel', kind=...}`` with a
 
   1. **LLM responder** — the request is mirrored into Kernel's inbox; on
      the next reactor pass the Kernel LLM emits a ``response`` intent.
-  2. **Programmatic handler** — the Conductor recognises the ``kind`` and
+  2. **Programmatic handler** — the Coordinator recognises the ``kind`` and
      runs a deterministic Python callable instead of routing to the LLM.
 
 P2-2 wires (2) for the well-defined kinds that map onto the existing
@@ -319,7 +319,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
 async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str, str]:
     """asyncio-friendly wrapper around blocking subprocess.run.
 
-    Conductor reactor stays responsive while the shell tool runs.
+    Coordinator reactor stays responsive while the shell tool runs.
     """
     def _run() -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
@@ -715,7 +715,7 @@ async def integrate_handler(
         }
     """
     from .action_executors.baseline import BaselineExecutor
-    from .sub_agent_runner import ExecutorContext
+    from .sub_agent_runner import RunnerContext
     from .task_registry import Task
 
     base_tput = float(payload.get("base_tput", 0.0))
@@ -762,7 +762,7 @@ async def integrate_handler(
     extra_args = str(payload.get("extra_sglang_args", "") or "").strip()
 
     # Build a Task wrapper around BaselineExecutor (which expects an
-    # ExecutorContext with a Task in it). The "extra_sglang_args" hand-
+    # RunnerContext with a Task in it). The "extra_sglang_args" hand-
     # off goes via the task params even though baseline_executor doesn't
     # use them yet — kept for forward compat (P3 will inject EXTRA_SGLANG_ARGS).
     workspace = session_dir / "integrate" / (kernel_id or "anon")
@@ -779,7 +779,7 @@ async def integrate_handler(
         },
         idempotency_key=f"integrate-{kernel_id or 'anon'}-rebaseline",
     )
-    ctx = ExecutorContext(task=fake_task, lease=None)
+    ctx = RunnerContext(task=fake_task, lease=None)
 
     try:
         bench_result = await BaselineExecutor()(ctx)

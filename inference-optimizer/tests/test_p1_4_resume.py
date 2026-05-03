@@ -1,4 +1,4 @@
-"""P1-4 Conductor resume tests.
+"""P1-4 Coordinator resume tests.
 
 Covers:
 
@@ -10,7 +10,7 @@ Covers:
 * Approved proposals are NOT re-instantiated as pending after resume
 * Rejected proposals are NOT re-instantiated as pending after resume
 * Multiple proposals + mixed decisions reconstruct correct pending set
-* Conductor restart preserves pruned_families AND restores undecided
+* Coordinator restart preserves pruned_families AND restores undecided
   pending_proposals AND keeps task lifecycle intact
 * tick() lazily triggers replay_for_resume on first call (so callers
   don't have to remember to call it explicitly)
@@ -30,7 +30,7 @@ from inference_optimizer.orchestrator.backends import (
     MockTurn,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.conductor import Conductor
+from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
@@ -65,7 +65,7 @@ def _backends_full() -> dict[str, object]:
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_fresh_session_is_not_resume(session_dir):
-    c = Conductor(session_dir, backends=_backends_full())
+    c = Coordinator(session_dir, backends=_backends_full())
     try:
         info = c.resumed_from
         assert info["is_resume"] is False
@@ -79,7 +79,7 @@ async def test_fresh_session_is_not_resume(session_dir):
 @pytest.mark.asyncio
 async def test_existing_state_json_triggers_resume(session_dir):
     SharedState(session_id="resumed").save(session_dir)
-    c = Conductor(session_dir, backends=_backends_full())
+    c = Coordinator(session_dir, backends=_backends_full())
     try:
         assert c.resumed_from["is_resume"] is True
         assert c.resumed_from["state_json_present"] is True
@@ -89,14 +89,14 @@ async def test_existing_state_json_triggers_resume(session_dir):
 
 @pytest.mark.asyncio
 async def test_existing_events_triggers_resume(session_dir):
-    # First Conductor: emit a heartbeat to populate the events table.
-    c1 = Conductor(session_dir, backends=_backends_full())
+    # First Coordinator: emit a heartbeat to populate the events table.
+    c1 = Coordinator(session_dir, backends=_backends_full())
     try:
         await c1.tick(1)
     finally:
         await c1.stop()
-    # Second Conductor on the same session_dir sees events ≥1.
-    c2 = Conductor(session_dir, backends=_backends_full())
+    # Second Coordinator on the same session_dir sees events ≥1.
+    c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         assert c2.resumed_from["is_resume"] is True
         assert c2.resumed_from["event_count"] >= 1
@@ -123,7 +123,7 @@ async def test_replay_rebuilds_undecided_proposals(session_dir):
         "critic":        MockBackend(silent, name="c"),
         "robustness":    MockBackend(silent, name="r"),
     }
-    c1 = Conductor(session_dir, backends=backends_no_critic)
+    c1 = Coordinator(session_dir, backends=backends_no_critic)
     try:
         await c1.tick(1)
         assert len(c1.state.pending_proposals) == 1
@@ -131,7 +131,7 @@ async def test_replay_rebuilds_undecided_proposals(session_dir):
     finally:
         await c1.stop()
 
-    c2 = Conductor(session_dir, backends=_backends_full())
+    c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         stats = await c2.replay_for_resume()
         assert stats["pending_restored"] == 1
@@ -155,14 +155,14 @@ async def test_replay_skips_approved_proposals(session_dir):
                      default_intent=_heartbeat()),
         name="orch",
     )
-    c1 = Conductor(session_dir, backends=backends)
+    c1 = Coordinator(session_dir, backends=backends)
     try:
         await c1.tick(2)  # tick 1: propose, tick 2: critic auto-approves
         assert any(p.verdict == "approve" for p in c1.state.pending_proposals.values())
     finally:
         await c1.stop()
 
-    c2 = Conductor(session_dir, backends=_backends_full())
+    c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         stats = await c2.replay_for_resume()
         # The approved proposal should be filtered out.
@@ -189,7 +189,7 @@ async def test_replay_skips_rejected_proposals(session_dir):
         "critic":     MockBackend(silent, name="c"),
         "robustness": MockBackend(silent, name="r"),
     }
-    c1 = Conductor(session_dir, backends=backends)
+    c1 = Coordinator(session_dir, backends=backends)
     try:
         await c1.tick(1)
         proposal_id = next(iter(c1.state.pending_proposals.keys()))
@@ -201,7 +201,7 @@ async def test_replay_skips_rejected_proposals(session_dir):
     finally:
         await c1.stop()
 
-    c2 = Conductor(session_dir, backends=_backends_full())
+    c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         stats = await c2.replay_for_resume()
         assert stats["pending_restored"] == 0
@@ -220,7 +220,7 @@ async def test_replay_mixed_pending_and_decided(session_dir):
         "critic":        MockBackend(silent, name="c"),
         "robustness":    MockBackend(silent, name="r"),
     }
-    c1 = Conductor(session_dir, backends=backends)
+    c1 = Coordinator(session_dir, backends=backends)
     try:
         proposal_ids = []
         for action in ("baseline", "profile", "backends"):
@@ -248,7 +248,7 @@ async def test_replay_mixed_pending_and_decided(session_dir):
     finally:
         await c1.stop()
 
-    c2 = Conductor(session_dir, backends=_backends_full())
+    c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         stats = await c2.replay_for_resume()
         assert stats["pending_restored"] == 1
@@ -270,7 +270,7 @@ async def test_resume_preserves_pruned_and_restores_pending(session_dir):
         "critic":        MockBackend(silent, name="c"),
         "robustness":    MockBackend(silent, name="r"),
     }
-    c1 = Conductor(session_dir, backends=backends)
+    c1 = Coordinator(session_dir, backends=backends)
     try:
         # 1 prune + 1 undecided proposal
         await c1._handle_intent("robustness", Intent(
@@ -284,7 +284,7 @@ async def test_resume_preserves_pruned_and_restores_pending(session_dir):
     finally:
         await c1.stop()
 
-    c2 = Conductor(session_dir, backends=_backends_full())
+    c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         await c2.replay_for_resume()
         assert c2.shared_state.is_pruned("deep_kernel")
@@ -304,7 +304,7 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
         "critic":        MockBackend(silent, name="c"),
         "robustness":    MockBackend(silent, name="r"),
     }
-    c1 = Conductor(session_dir, backends=backends)
+    c1 = Coordinator(session_dir, backends=backends)
     try:
         await c1._handle_intent("orchestration", Intent(
             type=IntentType.PROPOSE_ACTION,
@@ -313,7 +313,7 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
     finally:
         await c1.stop()
 
-    c2 = Conductor(session_dir, backends=_backends_full())
+    c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         # No explicit replay_for_resume — tick should trigger it
         assert c2.resumed_from["rebuilt"] is False

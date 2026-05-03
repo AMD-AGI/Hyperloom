@@ -1,4 +1,4 @@
-"""Real ``sweep`` ActionExecutor — DESIGN v0.6 §16 sweep action.
+"""Real ``sweep`` ActionRunner — DESIGN v0.6 §16 sweep action.
 
 Mirrors marathon/skills/actions/sweep.md: full ISL/OSL/CONC sweep with
 the optimized server config to map the Pareto frontier. P2-3 keeps the
@@ -117,7 +117,7 @@ def _pareto_front(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 # ---------------------------------------------------------------------------
 class SweepExecutor:
-    """ActionExecutor for the ``sweep`` action."""
+    """ActionRunner for the ``sweep`` action."""
 
     def __init__(
         self,
