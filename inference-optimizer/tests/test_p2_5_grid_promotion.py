@@ -2,11 +2,11 @@
 
 Locks the post-1h-validation fixes:
 
-1. ``Conductor._materialize_approved_proposal`` injects ``base_tput`` +
+1. ``Coordinator._materialize_approved_proposal`` injects ``base_tput`` +
    ``base_extra_args`` into task.params for backends/params/sweep so the
-   grid-runner executor can compute a real ``best_gain_pct`` against
+   grid-runner runner can compute a real ``best_gain_pct`` against
    current_best (not against 0.0, which the 1h validation hit).
-2. ``Conductor._promote_to_shared_state`` lifts a winning grid result
+2. ``Coordinator._promote_to_shared_state`` lifts a winning grid result
    into ``SharedState.current_best`` + recomputes ``cumulative_gain``
    when the new tput beats the current best by ≥ 1% (per marathon's
    KEEP threshold).
@@ -23,7 +23,7 @@ from inference_optimizer.orchestrator.backends import (
     MockBackend,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.conductor import Conductor, PendingProposal
+from inference_optimizer.orchestrator.coordinator import Coordinator, PendingProposal
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.paths import make_session_dir
 
@@ -55,7 +55,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_materialize_injects_base_tput_for_backends(session_dir):
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.baseline_tput = 800.0
         c.shared_state.current_best = {"action": "baseline", "tput": 820.0,
@@ -83,7 +83,7 @@ async def test_materialize_injects_base_tput_for_backends(session_dir):
 
 @pytest.mark.asyncio
 async def test_materialize_falls_back_to_baseline_when_no_current_best(session_dir):
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.baseline_tput = 750.0
         c.shared_state.current_best = {}  # nothing yet
@@ -105,7 +105,7 @@ async def test_materialize_falls_back_to_baseline_when_no_current_best(session_d
 
 @pytest.mark.asyncio
 async def test_materialize_does_not_inject_for_non_grid_actions(session_dir):
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.baseline_tput = 1000.0
         c.shared_state.save(session_dir)
@@ -128,7 +128,7 @@ async def test_materialize_does_not_inject_for_non_grid_actions(session_dir):
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_promote_backends_winner_updates_current_best_and_gain(session_dir):
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.baseline_tput = 800.0
         c.shared_state.current_best = {"action": "baseline", "tput": 800.0}
@@ -161,7 +161,7 @@ async def test_promote_backends_winner_updates_current_best_and_gain(session_dir
 async def test_promote_backends_does_not_overwrite_when_below_threshold(session_dir):
     """Improvement < 0.5% (P5 relaxed threshold; marathon was 1.0%) and
     not yet a consistent winner across rounds → current_best stays."""
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.baseline_tput = 800.0
         c.shared_state.current_best = {"action": "baseline", "tput": 800.0}
@@ -187,7 +187,7 @@ async def test_promote_backends_does_not_overwrite_when_below_threshold(session_
 @pytest.mark.asyncio
 async def test_promote_params_chains_on_top_of_backends_winner(session_dir):
     """A 2nd winning grid round (params on top of backends) keeps stacking."""
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.baseline_tput = 800.0
         # Pretend backends already won — current_best is now the +5% winner.
@@ -223,7 +223,7 @@ async def test_promote_params_chains_on_top_of_backends_winner(session_dir):
 
 @pytest.mark.asyncio
 async def test_promote_handles_missing_best_variant_gracefully(session_dir):
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.baseline_tput = 800.0
         c.shared_state.current_best = {"action": "baseline", "tput": 800.0}
@@ -242,7 +242,7 @@ async def test_promote_handles_missing_best_variant_gracefully(session_dir):
 
 @pytest.mark.asyncio
 async def test_sweep_result_records_last_sweep_without_overwriting_best(session_dir):
-    c = Conductor(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.baseline_tput = 800.0
         c.shared_state.current_best = {

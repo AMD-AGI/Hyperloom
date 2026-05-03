@@ -1,4 +1,4 @@
-"""Conductor + protocol layer (DESIGN v0.6 §7 / §13 / §14 / §15).
+"""Coordinator + protocol layer (DESIGN v0.6 §7 / §13 / §14 / §15).
 
 The orchestrator package owns:
 
@@ -7,5 +7,5 @@ The orchestrator package owns:
 * TaskRegistry (DelegatedTask state machine)
 * CursorStore (per-agent idempotent replay)
 * AgentRole + PolicyGate (added in P0-2)
-* Conductor main loop (added in P0-3)
+* Coordinator main loop (added in P0-3)
 """

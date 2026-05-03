@@ -1,6 +1,6 @@
 """Shared helper for backends / params executors.
 
-Each executor's job is essentially: take a base Magpie YAML + a list of
+Each runner's job is essentially: take a base Magpie YAML + a list of
 (name, extra_sglang_args, extra_envs) variants, run Magpie once per
 variant, parse `benchmark_report.json`, return the winners.
 
@@ -167,7 +167,7 @@ async def run_grid(
     including failed ones). Caller decides which variants are "winners".
 
     Synchronous subprocess call wrapped in ``asyncio.to_thread`` so the
-    Conductor reactor isn't blocked.
+    Coordinator reactor isn't blocked.
     """
     results: list[VariantResult] = []
     for i, variant in enumerate(grid):

@@ -1,8 +1,8 @@
-"""Backend protocol — what the Conductor needs from any LLM provider.
+"""Backend protocol — what the Coordinator needs from any LLM provider.
 
 Concrete implementations (Claude SDK, Codex, multi-CLI bridge, mock)
 return a :class:`BackendTurnResult` carrying the intents emitted in this
-turn. The Conductor handles validation, PolicyGate, and persistence —
+turn. The Coordinator handles validation, PolicyGate, and persistence —
 backends only need to produce intents.
 """
 
@@ -17,7 +17,7 @@ from ..intent_parser import Intent
 class BackendError(RuntimeError):
     """Backend invocation failed (network, schema, etc.).
 
-    Conductor catches this, surfaces a ``policy_denied``-style observation
+    Coordinator catches this, surfaces a ``policy_denied``-style observation
     so the next reactor turn sees the failure context.
     """
 
@@ -33,7 +33,7 @@ class BackendTurnResult:
 
 @runtime_checkable
 class Backend(Protocol):
-    """Async LLM backend protocol used by the Conductor reactor loop.
+    """Async LLM backend protocol used by the Coordinator reactor loop.
 
     Backends are stateful (they hold conversation continuation, tool
     config, etc.) but each ``run`` invocation is one logical turn — given

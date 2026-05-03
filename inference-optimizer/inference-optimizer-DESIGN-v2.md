@@ -1,13 +1,13 @@
 # Inference Optimizer — Multi-Agent 自适应优化 Skill 设计方案
 
-> **状态**: Final v0.6（v0.5 基础上统一为单一全模式 + 4 角色重组 + Critic 接管 KB / Sage 能力 + Robustness 接管 Watchdog/RCA/Handle + 删除议会模式 + executor 改名 orchestration + triage 改名 robustness）
+> **状态**: Final v0.6（v0.5 基础上统一为单一全模式 + 4 角色重组 + Critic 接管 KB / Sage 能力 + Robustness 接管 Robustness monitor/RCA/Handle + 删除议会模式 + orchestration 改名 orchestration + triage 改名 robustness）
 > **作者**: 主 Agent + xiaofei 共同设计
 > **日期**: 2026-04-30
 > **占位 skill 名**: `inference-optimizer`
 > **目标读者**: 工程领导评审 + 落地实施 Agent
 > **基线**: 本文档替代 `inference-optimizer-DESIGN.md` v0.4 / `inference-optimizer-DESIGN-modified.md` v0.5;后两者作为历史参考保留
-> **实施分工**: zhenggong 已不再继续开发;xiaofei 在当前 kernelAgent 分支上做整体落地（合并或参考 zhenggong 分支重写）;**P0 先跑通 Conductor + Orchestration + KernelAgent 主链路**;Critic / Robustness 角色由其他人按本文档协议实现,在 P0 阶段先用 mock adapter,不得阻塞主链路
-> **v0.5 → v0.6 摘要**: 删除 quick / guided / marathon 三档分段,统一为单一"全模式";executor 改名 orchestration、triage 改名 robustness(贴合 Hyperloom 优化栈架构图 6-agent 命名:4 layer experts = Orchestration/Framework/Kernel/Comm + 2 cross-layer = Critic/Robustness;v0.6 实现其中 4 个,Framework/Comm 见 §7.7 占位);critic 改 Codex gpt-5.4 + 接管 KB read/write + 接管 Sage 能力 + 负责 review 优化建议(approve/reject/redirect/advise),**不做 RCA**;robustness 正式确立为 Watchdog + RootCauseAnalysis + Handle 合并体并保留调度警察权限;删除议会(parliament / objection / vote)由 Critic 单 agent review 替代;framework + comm agent 不做;framework-rebuild action 已移除;multi-cli runtime 作为本地过渡方案保留,等待 claw 子 session 能力上线后退役
+> **实施分工**: zhenggong 已不再继续开发;xiaofei 在当前 kernelAgent 分支上做整体落地（合并或参考 zhenggong 分支重写）;**P0 先跑通 Coordinator + Orchestration + KernelAgent 主链路**;Critic / Robustness 角色由其他人按本文档协议实现,在 P0 阶段先用 mock adapter,不得阻塞主链路
+> **v0.5 → v0.6 摘要**: 删除 quick / guided / marathon 三档分段,统一为单一"全模式";orchestration 改名 orchestration、triage 改名 robustness(贴合 Hyperloom 优化栈架构图 6-agent 命名:4 layer experts = Orchestration/Framework/Kernel/Comm + 2 cross-layer = Critic/Robustness;v0.6 实现其中 4 个,Framework/Comm 见 §7.7 占位);critic 改 Codex gpt-5.4 + 接管 KB read/write + 接管 Sage 能力 + 负责 review 优化建议(approve/reject/redirect/advise),**不做 RCA**;robustness 正式确立为 Robustness monitor + RootCauseAnalysis + Handle 合并体并保留调度警察权限;删除议会(parliament / objection / vote)由 Critic 单 agent review 替代;framework + comm agent 不做;framework-rebuild action 已移除;multi-cli runtime 作为本地过渡方案保留,等待 claw 子 session 能力上线后退役
 
 ---
 
@@ -17,20 +17,20 @@
 | 类别            | 变更                                                                                                                                                                                                                                                                                                                                           | 触发原因                                                                                                         |
 | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | **架构主线**      | 删除 `quick_param_sweep` / `guided_kernel_opt` / `marathon_multi_agent` 三档,统一为**单一全模式**;`MAX_HOURS` 不再用于 mode 选择,只用于早停预算 + 调度 pressure                                                                                                                                                                                                         | xiaofei #7:v0.5 实现里 guided 与 marathon 的 reactor roster 已经一致,只剩 checkpoint cadence + 少量 flag 差别;按"专注于全模式"原则统一 |
-| **角色重组**      | `executor` → `orchestration`(改名 + 职责对齐架构图 Layer-1 expert)                                                                                                                                                                                                                                                                                    | xiaofei #排版2:贴合新架构图                                                                                          |
-| **角色重组**      | `watchdog` + `sage 主动维护`中的 RCA/handle 相关职责合入 `robustness`;`robustness` 正式确立为 `Watchdog + RootCauseAnalysis + Handle` 合并体                                                                                                                                                                                                                     | xiaofei #2:robustness 本身就是这三件事的合并体;实现已经走这个方向                                                                 |
+| **角色重组**      | `orchestration` → `orchestration`(改名 + 职责对齐架构图 Layer-1 expert)                                                                                                                                                                                                                                                                                    | xiaofei #排版2:贴合新架构图                                                                                          |
+| **角色重组**      | `robustness monitor` + `sage 主动维护`中的 RCA/handle 相关职责合入 `robustness`;`robustness` 正式确立为 `Robustness monitor + RootCauseAnalysis + Handle` 合并体                                                                                                                                                                                                                     | xiaofei #2:robustness 本身就是这三件事的合并体;实现已经走这个方向                                                                 |
 | **角色重组**      | `critic` 改回 Codex `gpt-5.4`(litellm 暂不支持 5.5),并接管:review 优化建议(approve/reject/redirect/advise) + KB read/write + KB 召回服务(原 Sage 在 quick/guided 的形态) + Devil's advocate(无议会);**Critic 不做 RCA,RCA 属于 Robustness**                                                                                                                               | xiaofei #3 #4:critic 用 codex 5.4;KB 逻辑放 critic;后续确认 Critic 不做 RCA                                            |
 | **协作模式**      | 删除议会模式 + `objection` / `vote` / `parliament_open` / `vote_request` topic 与 intent;由 **Critic Review 协议**(approve / reject / redirect / advise 四种常规 verdict + P0/mock 用 `needs_review`)替代                                                                                                                                                     | xiaofei #5:不要议会,只 critic review                                                                              |
 | **KB 归属**     | KB 最终由中心化共享存储收集和查询,按 `<model_family>/<model_name>` 分区,跨 sandbox/session/user 共享;**但中心化 KB 不属于 P0**,由 Critic owner 后续实现;P0 Critic mock 不依赖真实 KB                                                                                                                                                                                               | xiaofei #4 + 后续追问:KB 中心化、按模型分类、Critic 做;最新确认中心化 KB 先不做                                                       |
 | **Action 体系** | `framework-rebuild` action 删除,总数 20 → 19;`deep-kernel-analysis` / `operator-tuning` / `vendor-kernel-config` 这 3 个深层 kernel action 与 `kernel-opt` / `integrate` 一并由 **Kernel agent owns**,Orchestration 通过 REQUEST 派发                                                                                                                        | zhenggong 已删 framework-rebuild;架构图里 Kernel 拥有这 5 个                                                           |
 | **Agent 范围**  | 架构图里的 `framework agent` / `comm agent` 不做                                                                                                                                                                                                                                                                                                    | xiaofei:这两个先不做                                                                                               |
-| **落地优先级**     | **P0 只要求 Conductor + Orchestration + KernelAgent 跑通**;Critic / Robustness 先 mock,协议边界先留好,不阻塞主链路;后续由专人替换为真实实现                                                                                                                                                                                                                                 | xiaofei:critic 和 robustness 有专人做,先 mock;当前先把主链路跑通                                                            |
+| **落地优先级**     | **P0 只要求 Coordinator + Orchestration + KernelAgent 跑通**;Critic / Robustness 先 mock,协议边界先留好,不阻塞主链路;后续由专人替换为真实实现                                                                                                                                                                                                                                 | xiaofei:critic 和 robustness 有专人做,先 mock;当前先把主链路跑通                                                            |
 | **持久化**       | 沿用 v0.5 SQLite WAL 单库(4 表 leases/events/cursors/tasks);多文件 jsonl + file lock 方案彻底退役                                                                                                                                                                                                                                                          | xiaofei #1:SQLite 保留                                                                                         |
-| **持久化生命周期**   | **显式契约:SQLite per-session,每次 run 在 `$SESSION_DIR/storage/conductor.db` 新建独立 DB,session 结束即废弃**;**DB 直接落 NFS(WekaFS),不再用"本地盘 + backup"两层** → conductor crash / sandbox 重新分配都自然恢复,不需要 restore 流程;跨 session 经验只走中心化 KB(ADR-42 修订)                                                                                                               | xiaofei:每次任务都是独立的,每个任务都新建一个;直接固化到 NFS 防 crash 丢失                                                             |
+| **持久化生命周期**   | **显式契约:SQLite per-session,每次 run 在 `$SESSION_DIR/storage/coordinator.db` 新建独立 DB,session 结束即废弃**;**DB 直接落 NFS(WekaFS),不再用"本地盘 + backup"两层** → coordinator crash / sandbox 重新分配都自然恢复,不需要 restore 流程;跨 session 经验只走中心化 KB(ADR-42 修订)                                                                                                               | xiaofei:每次任务都是独立的,每个任务都新建一个;直接固化到 NFS 防 crash 丢失                                                             |
 | **KB 形态**     | **明确为中心化共享存储,按 `<model_family>/<model_name>` 分区,Critic 是唯一 read/write/synthesis 入口**;具体载体(NFS 共享路径 vs HTTP service)由 T3 落地;v0.5 描述模糊,v0.6 写死(ADR-43)                                                                                                                                                                                         | xiaofei:KB 共享、按模型分类、中心化、Critic 做                                                                             |
 | **传输模式**      | `MULTI_CLI`(基于 `claude --print --continue` + JSONL inbox/outbox)作为**本地运行过渡方案**保留,默认 `SINGLE_PROC`;后期 claw 提供"一 agent 一 sub-session"能力后退役                                                                                                                                                                                                     | xiaofei #6                                                                                                   |
 | **文档卫生**      | 删除 `IMPLEMENTATION-CHECKLIST.md`(已删,不再维护);v0.4 / v0.5 文档作为历史保留                                                                                                                                                                                                                                                                               | xiaofei #8                                                                                                   |
-| **新增 ADR**    | ADR-34(单一全模式)/ ADR-35(Critic 接管 KB + Sage 能力 + Review)/ ADR-36(Robustness = Watchdog + RCA + Handle)/ ADR-37(executor → orchestration 改名)/ ADR-38(删除议会,Critic Review 替代)/ ADR-39(multi-cli 作为本地过渡)/ ADR-40(framework/comm agent 不做)/ ADR-41(删除 IMPLEMENTATION-CHECKLIST)/ ADR-42(SQLite per-session)/ ADR-43(KB 中心化共享 + 按模型分区 + Critic 唯一入口) | 上述决策对应记录                                                                                                     |
+| **新增 ADR**    | ADR-34(单一全模式)/ ADR-35(Critic 接管 KB + Sage 能力 + Review)/ ADR-36(Robustness = Robustness monitor + RCA + Handle)/ ADR-37(orchestration → orchestration 改名)/ ADR-38(删除议会,Critic Review 替代)/ ADR-39(multi-cli 作为本地过渡)/ ADR-40(framework/comm agent 不做)/ ADR-41(删除 IMPLEMENTATION-CHECKLIST)/ ADR-42(SQLite per-session)/ ADR-43(KB 中心化共享 + 按模型分区 + Critic 唯一入口) | 上述决策对应记录                                                                                                     |
 | **保留**        | Iron Rules / KERNEL_OPT 常量表 / Process Management / Accuracy Gate / Initial Score Priors / Objective 抽象 / Budget-Aware 调度器 / Resource Lock 4-lane / Intent Transport / Plan A Kernel agent / SubAgentRunner                                                                                                                                   | 沿用 v0.4 / v0.5                                                                                               |
 
 
@@ -48,11 +48,11 @@
 
 具体到 4 个 persistent agent:
 
-- **Orchestration agent**(原 Executor,Claude opus-4-7)— 提议 action / 委托 sub-agent / 解读结果 / 通过 REQUEST 调 Kernel agent / 接受 Critic review
+- **Orchestration agent**(原 Orchestration,Claude opus-4-7)— 提议 action / 委托 sub-agent / 解读结果 / 通过 REQUEST 调 Kernel agent / 接受 Critic review
 - **Kernel agent**(Plan A,Claude opus-4-7,responder-only)— 独占 5 个 kernel 类 action(`kernel-opt` / `integrate` / `deep-kernel-analysis` / `operator-tuning` / `vendor-kernel-config`),只响应 Orchestration 的 REQUEST,不主动 propose / delegate
 - **Critic agent**(Codex gpt-5.4,no-tools 原则 + KB 例外)— review Orchestration/Kernel 提出的优化建议(approve / reject / redirect / advise) + 给更高层建议 + KB read/write + 跨 run 召回 + Devil's advocate(无议会);**不做 RCA**;Brier-tracked
-- **Robustness agent**(Claude opus-4-7,always-on)= **Watchdog + RootCauseAnalysis + Handle** 合并体 — event_log 监控 + 健康检查 + server lifecycle + accuracy gate exec + recovery + 调度警察 4 个 intent(`kill_task` / `force_dispatch` / `prune_branch` / `escalate_strategy_change`)
-- **Conductor**(Python,无 LLM)— 主循环 + bus + state + 资源锁 + REQUEST/RESPONSE 路由 + 早停 + checkpoint + resume
+- **Robustness agent**(Claude opus-4-7,always-on)= **Robustness monitor + RootCauseAnalysis + Handle** 合并体 — event_log 监控 + 健康检查 + server lifecycle + accuracy gate exec + recovery + 调度警察 4 个 intent(`kill_task` / `force_dispatch` / `prune_branch` / `escalate_strategy_change`)
+- **Coordinator**(Python,无 LLM)— 主循环 + bus + state + 资源锁 + REQUEST/RESPONSE 路由 + 早停 + checkpoint + resume
 
 加上 **Ephemeral Sub-agent 池**(`bench_runner` / `profile_runner` / `kernel_extract` / `geak_submitter` / `patch_applier` / `eval_runner` / `rca_runner`),完成所有 GPU / workspace 副作用动作。
 
@@ -80,7 +80,7 @@
 
 ### 1.4 载体
 
-单 GPU sandbox(默认,简单优先)+ NFS(WekaFS)上的 **per-session** SQLite WAL DB(每次 run 在 `$SESSION_DIR/storage/conductor.db` 新建一个,session 结束即废弃,原子语义,任何 crash 都不丢失)+ NFS(personas / state snapshot / findings)。**中心化 KB 服务是 Critic 后续工作,不属于 P0 载体依赖**。多 sandbox 拓扑作为扩展能力保留(详见 §26)。Multi-CLI runtime 作为本地过渡方案,等 claw 提供子 session 能力后,改成"一 agent 一 sub-session"形态。
+单 GPU sandbox(默认,简单优先)+ NFS(WekaFS)上的 **per-session** SQLite WAL DB(每次 run 在 `$SESSION_DIR/storage/coordinator.db` 新建一个,session 结束即废弃,原子语义,任何 crash 都不丢失)+ NFS(personas / state snapshot / findings)。**中心化 KB 服务是 Critic 后续工作,不属于 P0 载体依赖**。多 sandbox 拓扑作为扩展能力保留(详见 §26)。Multi-CLI runtime 作为本地过渡方案,等 claw 提供子 session 能力后,改成"一 agent 一 sub-session"形态。
 
 ### 1.5 预期效果
 
@@ -102,7 +102,7 @@
 | 单 agent context 撑不住 24h | ✓ 是问题(≤3h 上限)       | 用 tmux+claude CLI 解决                              |
 | 长跑没有效果驱动早停              | —                   | ✗ MAX_HOURS 是硬墙钟                                  |
 | 协议被 skill 边界切开          | sprint 11 浅层 action | marathon 9 深层 action(不能用在短任务)                     |
-| 单模型决策偏差                 | ✗ Executor 自决       | ✗ 同                                               |
+| 单模型决策偏差                 | ✗ Orchestration 自决       | ✗ 同                                               |
 | KB 分裂                   | sprint kb/          | marathon SPEC_ROOT/kb/,跨 run 知识不复用                |
 | 长跑载体重                   | —                   | tmux + npm install + base64 prompt + NFS file IPC |
 | 角色边界不清                  | 单 agent             | 多 agent 但责任划分混乱                                   |
@@ -113,9 +113,9 @@
 
 | 阶段            | 设计                                                                                                                            | 落地结果                                                                        |
 | ------------- | ----------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| v0.4          | 4 角色(executor/critic/watchdog/sage) + 三档 mode + 议会 + 多文件持久化 + KB 全 mode 启用                                                    | 角色边界过细,议会成本高,持久化容易半截饭                                                       |
-| v0.5          | + SQLite WAL 单库 + Plan A Kernel agent                                                                                         | 持久化扎实了;但 watchdog 与 sage 的"常驻 vs 兼任"分歧没收口,critic 在 guided/marathon 介入策略也没收口 |
-| v0.5 实现       | 实际删了 watchdog + sage,新增 robustness,critic 改成 Claude no-tools                                                                  | 文档与代码脱节;KB 设施在但全 mode flag 关闭;quick / guided / marathon 在实现里 roster 几乎相同    |
+| v0.4          | 4 角色(orchestration/critic/robustness monitor/sage) + 三档 mode + 议会 + 多文件持久化 + KB 全 mode 启用                                                    | 角色边界过细,议会成本高,持久化容易半截饭                                                       |
+| v0.5          | + SQLite WAL 单库 + Plan A Kernel agent                                                                                         | 持久化扎实了;但 robustness monitor 与 sage 的"常驻 vs 兼任"分歧没收口,critic 在 guided/marathon 介入策略也没收口 |
+| v0.5 实现       | 实际删了 robustness monitor + sage,新增 robustness,critic 改成 Claude no-tools                                                                  | 文档与代码脱节;KB 设施在但全 mode flag 关闭;quick / guided / marathon 在实现里 roster 几乎相同    |
 | **v0.6**(本文档) | **统一全模式 + 4 角色明确(Orchestration / Kernel / Critic / Robustness) + Critic owns KB + 删除议会 + Multi-CLI 作为过渡 + Framework/Comm 不做** | **目标:文档 = 代码,角色边界清晰,KB 真用上,议会成本归零**                                         |
 
 
@@ -142,7 +142,7 @@
                               ↓
 ╔═══════════════════ GPU Sandbox (单实例) ═══════════════════════════════════╗
 ║                                                                             ║
-║  ┌───────── Conductor (Python, 无 LLM, 永远存在) ───────────────────┐      ║
+║  ┌───────── Coordinator (Python, 无 LLM, 永远存在) ───────────────────┐      ║
 ║  │  主循环 / MessageBus / SharedState / ResourceLockManager /         │      ║
 ║  │  TaskRegistry / PolicyGate / Scheduler / Checkpoint /              │      ║
 ║  │  REQUEST/RESPONSE 路由 (Plan A) / Critic Review 闸门 (§18)         │      ║
@@ -159,7 +159,7 @@
 ║       │  │    └─ Review 优化建议 + KB read/write(后续) +            │        ║
 ║       │  │       Devil's advocate;不做 RCA                         │        ║
 ║       │  │  Robustness         Claude opus-4-7  reactor (always-on)   │        ║
-║       │  │    └─ Watchdog + RCA + Handle:event_log monitor /       │        ║
+║       │  │    └─ Robustness monitor + RCA + Handle:event_log monitor /       │        ║
 ║       │  │       crash signal / health check / server lifecycle /  │        ║
 ║       │  │       accuracy gate exec / recovery /                   │        ║
 ║       │  │       调度警察 4 intent(kill_task / force_dispatch /    │        ║
@@ -175,7 +175,7 @@
 ║       │  │  eval_runner     (benchmark_lane,跑 GSM8K)                 │      ║
 ║       │  │  rca_runner      (按需,Robustness 调起)                        │      ║
 ║       │  │                                                             │      ║
-║       │  │  实现:Conductor 直接 spawn OOB ClaudeBackend.run()          │      ║
+║       │  │  实现:Coordinator 直接 spawn OOB ClaudeBackend.run()          │      ║
 ║       │  │       / CodexBackend.run(),fresh context、跑完即销毁        │      ║
 ║       │  ╚═══════════════════╤═════════════════════════════════════════╝      ║
 ║                              ↓                                                ║
@@ -187,7 +187,7 @@
         ║   Shared NFS (WekaFS) — 所有持久化资产都在这里                  ║
         ║                                                             ║
         ║  $SESSION_DIR/  (per-session,session 结束即废弃)             ║
-        ║   - storage/conductor.db        (SQLite WAL 单库,4 张表:    ║
+        ║   - storage/coordinator.db        (SQLite WAL 单库,4 张表:    ║
         ║                                  leases / events / cursors / ║
         ║                                  tasks;直接落 NFS,无 backup ║
         ║                                  层,任何 crash 都不丢失)    ║
@@ -206,15 +206,15 @@
 **核心设计点**:
 
 - **同一份代码,无 mode 分支**:不再写 `if mode == quick / guided / marathon`,所有 reactor / action / cadence 都常开
-- **Conductor 永远存在**:Python、无 LLM;负责调度 / 锁 / 状态机 / 早停 / checkpoint / Critic Review 闸门 / REQUEST/RESPONSE 路由
+- **Coordinator 永远存在**:Python、无 LLM;负责调度 / 锁 / 状态机 / 早停 / checkpoint / Critic Review 闸门 / REQUEST/RESPONSE 路由
 - **4 个 LLM agent 全启用**:Orchestration + Kernel + Critic + Robustness(注:架构图里 Framework / Comm 不做)
 - **Sub-agent 是 fresh OOB backend.run()**:不复用 Claw runSubagent;跑完即销毁
 - **资源 lane 通过 SQLite WAL 单事务原子互斥**:取代 v0.4 的多文件 `O_CREAT|O_EXCL` 方案
-- **持久化分两类**:**SQLite 单库**(协调原语,要原子性)**per-session 直接落 NFS**(WekaFS,`$SESSION_DIR/storage/conductor.db`),session 结束即废弃,任何 crash 都不丢失,无需 backup → restore 两层(前提:WekaFS 支持 SQLite WAL fcntl lock,落地前 self-test 验证,见 T20);**其它资产**(state snapshot / personas / findings)同 SESSION_DIR 直接落 NFS;**跨 session 长期记忆**走中心化 KB 服务,与 SESSION_DIR 解耦
+- **持久化分两类**:**SQLite 单库**(协调原语,要原子性)**per-session 直接落 NFS**(WekaFS,`$SESSION_DIR/storage/coordinator.db`),session 结束即废弃,任何 crash 都不丢失,无需 backup → restore 两层(前提:WekaFS 支持 SQLite WAL fcntl lock,落地前 self-test 验证,见 T20);**其它资产**(state snapshot / personas / findings)同 SESSION_DIR 直接落 NFS;**跨 session 长期记忆**走中心化 KB 服务,与 SESSION_DIR 解耦
 
 ### 3.2 多 sandbox 扩展方向(TODO,详见 §26)
 
-未来可拓展到 CPU + GPU 分离:CPU sandbox 跑 Conductor + LLM agent + 思考型 sub-agent;GPU sandbox 跑推理 + benchmark。需要跟 sandbox 团队确认能力。multi-cli runtime(§20)是这个方向的过渡形态。
+未来可拓展到 CPU + GPU 分离:CPU sandbox 跑 Coordinator + LLM agent + 思考型 sub-agent;GPU sandbox 跑推理 + benchmark。需要跟 sandbox 团队确认能力。multi-cli runtime(§20)是这个方向的过渡形态。
 
 ### 3.3 关键概念分离
 
@@ -222,12 +222,12 @@
 | 概念                      | 定义                                                                                                     |
 | ----------------------- | ------------------------------------------------------------------------------------------------------ |
 | **Persistent Agent**    | 长期"角色"(思考 / 决策 / 协商 / review),通过 callable 多次唤醒;v0.6 全启用,无 mode gating                                  |
-| **Ephemeral Sub-agent** | 短期"动作"(具体执行),fresh OOB backend.run(),跑完销毁;由 Conductor 调起                                               |
-| **Conductor**           | 协议管理员(不是中央决策者),编排 message + 时钟 + 仲裁 + 早停 + 资源锁 + REQUEST/RESPONSE 路由 + Critic Review 闸门                |
+| **Ephemeral Sub-agent** | 短期"动作"(具体执行),fresh OOB backend.run(),跑完销毁;由 Coordinator 调起                                               |
+| **Coordinator**           | 协议管理员(不是中央决策者),编排 message + 时钟 + 仲裁 + 早停 + 资源锁 + REQUEST/RESPONSE 路由 + Critic Review 闸门                |
 | **Backend**             | OOB 抽象,把 Claude / Codex 包成统一 `run(prompt, ...) → AgentResult`                                          |
 | **Resource Lane**       | 互斥资源类别(server_lifecycle / workspace_mutation / benchmark_lane / profile_lane),sub-agent 必须先取 lease 才能动 |
-| **Critic Review 闸门**    | 副作用 action 在执行前必须由 Critic 出 verdict(approve / reject / redirect / advise),由 Conductor 拦截执行(§18)        |
-| **Robustness 干预**       | always-on Watchdog,可发 4 个调度警察 intent 主动改变执行轨迹(§19)                                                     |
+| **Critic Review 闸门**    | 副作用 action 在执行前必须由 Critic 出 verdict(approve / reject / redirect / advise),由 Coordinator 拦截执行(§18)        |
+| **Robustness 干预**       | always-on Robustness monitor,可发 4 个调度警察 intent 主动改变执行轨迹(§19)                                                     |
 | **REQUEST/RESPONSE 路由** | Plan A 跨 agent RPC;Orchestration → Kernel agent 是当前唯一启用的 (source, target) 对                            |
 
 
@@ -237,7 +237,7 @@
 
 #### 3.4.1 v0.5 实现观察
 
-v0.5 实施过程中,`guided` 与 `marathon` 的 reactor roster 已经收敛成同一个集合(`[executor, critic, kernel, robustness]`),区别只剩:
+v0.5 实施过程中,`guided` 与 `marathon` 的 reactor roster 已经收敛成同一个集合(`[orchestration, critic, kernel, robustness]`),区别只剩:
 
 - `enable_strategic_review` / `enable_event_driven_alert` 两个 flag(其实 marathon 也没真用上)
 - checkpoint cadence 略不同
@@ -337,7 +337,7 @@ workspace_mutation 持有 → 禁止: 任何 reader 读相关文件
 
 ```python
 class SqliteLeaseBackend:
-    """v0.5+ default: 4 类持久化合并到 $SESSION_DIR/storage/conductor.db。"""
+    """v0.5+ default: 4 类持久化合并到 $SESSION_DIR/storage/coordinator.db。"""
 
     async def acquire_many(self, lanes, holder_id, ttl_sec):
         # 1. Expand cross-lane conflicts into a canonical lane set.
@@ -360,16 +360,16 @@ class SqliteLeaseBackend:
 - lease 必须有 TTL 和 heartbeat;超时后不能静默抢锁,必须先写 `lease_expired` event
 - **acquire_many 失败策略**:非阻塞 + 指数退避(100ms → 1s → 5s),总等待上限 `action.lease_ttl × 2`;超过则任务转 `failed` 并把 action 回灌给调度器,不阻塞 reactor
 
-#### 3.5.6 Conductor 调度时检查
+#### 3.5.6 Coordinator 调度时检查
 
 调度器决定下一个 action 时,如果它需要的 lane 已被占,要么 wait,要么选另一个 action。这通过 action.metadata 里的 `requires_lanes` 字段声明。真正执行前仍必须调用 `acquire_many()`;调度检查只是优化,不能替代 lease。
 
 #### 3.5.7 部署 & 生命周期(per-session,直接落 NFS)
 
 - **每次 run = 一个新 session = 一个独立 SQLite DB**:每次 `@inference-optimizer` 触发都新建 `$SESSION_DIR`,在其中初始化空 DB;不跨 session 复用、不跨 user 共享、不需要 schema migration(每次都是 fresh schema)
-- **DB 直接落 NFS(WekaFS)**:`$SESSION_DIR/storage/conductor.db`,与 personas / state / findings 同 SESSION_DIR;这样 conductor 进程 crash / sandbox 重启 / sandbox 重新分配只要 `SESSION_DIR` 可访问就能直接重新打开,**不需要 backup → restore 两层**(ADR-42)
+- **DB 直接落 NFS(WekaFS)**:`$SESSION_DIR/storage/coordinator.db`,与 personas / state / findings 同 SESSION_DIR;这样 coordinator 进程 crash / sandbox 重启 / sandbox 重新分配只要 `SESSION_DIR` 可访问就能直接重新打开,**不需要 backup → restore 两层**(ADR-42)
 - **前提**:WekaFS 是企业级 POSIX 兼容文件系统,fcntl lock + SQLite WAL 模式应该可用;落地前必须跑 self-test 验证(T20):多进程并发写、断电恢复、wal/shm 文件交互;**self-test 失败的 fallback** 是回到"本地盘 DB + 30min NFS VACUUM INTO backup + restore"两层方案
-- Resume 范围:**仅同一 session 内**有效——conductor / sandbox 任何形式的 crash 重启,只要 `SESSION_DIR` 还在,DB 就还在,直接打开继续;**session 结束 = DB 废弃**,跨 session 一律不复用
+- Resume 范围:**仅同一 session 内**有效——coordinator / sandbox 任何形式的 crash 重启,只要 `SESSION_DIR` 还在,DB 就还在,直接打开继续;**session 结束 = DB 废弃**,跨 session 一律不复用
 - 长期记忆走 KB(L4):跨 session 的"同模型历史经验"目标上通过**中心化共享 KB 服务**(按 `<model_family>/<model_name>` 分区,Critic owns)传递,不依赖 SQLite;**该能力非 P0**,P0 可无真实 KB;这样可以让 SQLite 始终保持"小、快、可丢弃"
 
 ---
@@ -496,19 +496,19 @@ GEAK 是外部服务 —— 视为**只读基础设施**。skill 不能修改 GE
 
 ## 7. Agent 角色与模型分配
 
-> 这是 v0.6 与 v0.4 / v0.5 最大的语义重组所在。下面 4 个角色全部常驻、全部启用,**没有 mode gating**;角色之间通过 Conductor 中介通信(无议会、无投票),由 **Critic Review 协议(§18)** 决定方向、由 **Robustness 干预协议(§19)** 兜底救场。
+> 这是 v0.6 与 v0.4 / v0.5 最大的语义重组所在。下面 4 个角色全部常驻、全部启用,**没有 mode gating**;角色之间通过 Coordinator 中介通信(无议会、无投票),由 **Critic Review 协议(§18)** 决定方向、由 **Robustness 干预协议(§19)** 兜底救场。
 
-### 7.1 Orchestration agent(原 Executor,Claude `claude-opus-4-7`)
+### 7.1 Orchestration agent(原 Orchestration,Claude `claude-opus-4-7`)
 
-> v0.5 名字是 `executor`;v0.6 改名 `orchestration` 以贴合架构图 Layer-1 expert 命名。**当前是开发阶段,本分支整体开发时一并完成代码 rename,不单独提 PR**。
+> v0.5 名字是 `orchestration`;v0.6 改名 `orchestration` 以贴合架构图 Layer-1 expert 命名。**当前是开发阶段,本分支整体开发时一并完成代码 rename,不单独提 PR**。
 
 #### 职责
 
 - **提议 action**:基于当前 SharedState + Objective + Critic KB 召回 + Robustness 当前告警,选下一步要做的 action,通过 `propose_action` intent 发出
-- **委托 sub-agent**:对自己 owns 的 9 个 action(setup / classify / target-analysis / baseline / profile / backends / params / sweep / report),通过 `delegate` intent 让 Conductor spawn 对应 ActionExecutor / ephemeral sub-agent
+- **委托 sub-agent**:对自己 owns 的 9 个 action(setup / classify / target-analysis / baseline / profile / backends / params / sweep / report),通过 `delegate` intent 让 Coordinator spawn 对应 ActionOrchestration / ephemeral sub-agent
 - **REQUEST Kernel agent**:对 5 个 kernel-owned action,通过 `request{target_agent="kernel", kind=...}` 派发,等待 `response`(Plan A,§13)
 - **解读结果**:消费 `delegated_result` / `response`,更新 SharedState(`update_state`),写 prediction
-- **接受 Critic Review**:Conductor 把 Critic 的 verdict(approve / reject / redirect / advise)注入下一轮 prompt;Orchestration 必须按 verdict 调整 plan(reject 或 redirect 不能强行执行,详见 §18)
+- **接受 Critic Review**:Coordinator 把 Critic 的 verdict(approve / reject / redirect / advise)注入下一轮 prompt;Orchestration 必须按 verdict 调整 plan(reject 或 redirect 不能强行执行,详见 §18)
 - **写 persona**:`update_persona` append-only 自己的 `personas/orchestration.md`
 
 #### 不能做
@@ -516,7 +516,7 @@ GEAK 是外部服务 —— 视为**只读基础设施**。skill 不能修改 GE
 - 不能 delegate kernel-owned 的 5 个 action(PolicyGate `kernel_owned_by_kernel_agent` 规则拒绝)
 - 不能直接读写 KB(KB 是 Critic 的;Orchestration 通过 prompt 注入消费 KB 召回结果)
 - 不能发 `kill_task` / `force_dispatch` / `prune_branch` / `escalate_strategy_change`(robustness-only)
-- 不能 `update_state` 改核心字段(`current_best` / `stop_reason` 等,只 Conductor 写)
+- 不能 `update_state` 改核心字段(`current_best` / `stop_reason` 等,只 Coordinator 写)
 
 #### 工具
 
@@ -536,7 +536,7 @@ GEAK 是外部服务 —— 视为**只读基础设施**。skill 不能修改 GE
 
 - **只接受 `request{target_agent="kernel"}`** 触发;不主动 `propose_action` / `delegate`
 - 处理完后必须发 `response{in_reply_to=<request_msg_id>, kind=<request_kind>, status, result}`
-- Critic Review 仍然适用:在执行真正的副作用前(`integrate` 这种带 KEEP/REVERT 决策的),Conductor 拦截走 §18 流程
+- Critic Review 仍然适用:在执行真正的副作用前(`integrate` 这种带 KEEP/REVERT 决策的),Coordinator 拦截走 §18 流程
 
 #### 工具
 
@@ -545,7 +545,7 @@ GEAK 是外部服务 —— 视为**只读基础设施**。skill 不能修改 GE
 
 #### 与 Critic / Robustness 交互
 
-- Critic 可对 Kernel 的 `response` 做 review(approve / reject / redirect / advise),由 Conductor 在写入 `decision` 前拦截
+- Critic 可对 Kernel 的 `response` 做 review(approve / reject / redirect / advise),由 Coordinator 在写入 `decision` 前拦截
 - Robustness 可对长跑 GEAK turn 发 `kill_task` 终止;可对反复失败发 `prune_branch{family="deep_kernel"}`
 
 ### 7.3 Critic agent(Codex `gpt-5.4`,no-tools 原则 + KB 例外)
@@ -592,18 +592,18 @@ PolicyGate 强制(见 §14.4):Critic 的 Bash allowlist 是**两条精确命令*
 
 ### 7.4 Robustness agent(原 Triage,Claude `claude-opus-4-7`,always-on)
 
-> v0.6 改名:`triage` → `robustness`,贴合架构图 cross-layer 命名;职责保持不变(Watchdog + RootCauseAnalysis + Handle 三合一)。代码层 rename 与 executor → orchestration 一并在本分支整体开发时完成,不单独提 PR。
-> v0.6 正式确立:Robustness = **Watchdog + RootCauseAnalysis + Handle** 三合一。
-> 不再有 v0.4 "marathon 才常驻 Watchdog,guided emergency 另走临时 RCA" 的复杂分支。Robustness always-on,所有 RCA / recovery / handle 均归 Robustness;Critic 不做 RCA。
+> v0.6 改名:`triage` → `robustness`,贴合架构图 cross-layer 命名;职责保持不变(Robustness monitor + RootCauseAnalysis + Handle 三合一)。代码层 rename 与 orchestration → orchestration 一并在本分支整体开发时完成,不单独提 PR。
+> v0.6 正式确立:Robustness = **Robustness monitor + RootCauseAnalysis + Handle** 三合一。
+> 不再有 v0.4 "marathon 才常驻 Robustness monitor,guided emergency 另走临时 RCA" 的复杂分支。Robustness always-on,所有 RCA / recovery / handle 均归 Robustness;Critic 不做 RCA。
 
 #### 职责矩阵
 
 
 | 子角色          | 子职责                                                                                                                                                                                                                                                                                                            | 触发                                                                                                 |
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| **Watchdog** | 监控 event_log 实时流;crash 信号检测;agent stall 检测;health check(server pid / port / GPU memory / lease holder); 写 `findings/alerts.jsonl`                                                                                                                                                                              | always-on tick(60s 默认) + 事件驱动                                                                      |
+| **Robustness monitor** | 监控 event_log 实时流;crash 信号检测;agent stall 检测;health check(server pid / port / GPU memory / lease holder); 写 `findings/alerts.jsonl`                                                                                                                                                                              | always-on tick(60s 默认) + 事件驱动                                                                      |
 | **RCA**      | 深度根因分析:读 event_log tail + state snapshot + 最近 KEEP/REVERT;输出 RCAFinding 写 `findings/<ts>.json`;调起 `rca_runner` ephemeral sub-agent 跑深度分析                                                                                                                                                                       | crash_count >= 2 / repeated KEEP/REVERT bouncing                                                   |
-| **Handle**   | server lifecycle 管理(kill_server / start / restart / health-wait,遵守 IR-4 / IR-5 / SERVER_KILL_WAIT_S);accuracy gate exec(`accuracy_risk > 0` 的 action 跑完后,Robustness 调起 `eval_runner` 跑 GSM8K,`compare_to_baseline`,FAIL 时通知 Conductor `revert`);recovery(从 checkpoint / evidence-check 矩阵出发的 `recover` action) | 由 Orchestration / Kernel `delegate(server_lifecycle / accuracy_gate / recover)` 触发,或 Robustness 自发 |
+| **Handle**   | server lifecycle 管理(kill_server / start / restart / health-wait,遵守 IR-4 / IR-5 / SERVER_KILL_WAIT_S);accuracy gate exec(`accuracy_risk > 0` 的 action 跑完后,Robustness 调起 `eval_runner` 跑 GSM8K,`compare_to_baseline`,FAIL 时通知 Coordinator `revert`);recovery(从 checkpoint / evidence-check 矩阵出发的 `recover` action) | 由 Orchestration / Kernel `delegate(server_lifecycle / accuracy_gate / recover)` 触发,或 Robustness 自发 |
 
 
 #### 调度警察 4 intent(robustness-only,PolicyGate 严格限源)
@@ -630,17 +630,17 @@ PolicyGate 的 `ROBUSTNESS_ONLY_SOURCE_ALLOWLIST = {"robustness"}` 强制其它 
 - 不能 `delegate` kernel-owned action
 - 不能改 SharedState 核心字段(`current_best` / `stop_reason` 等)
 
-### 7.5 Conductor(Python,无 LLM)
+### 7.5 Coordinator(Python,无 LLM)
 
 #### 职责
 
 - 主循环 + asyncio reactor 调度
 - MessageBus + SharedState + ResourceLockManager + TaskRegistry + PolicyGate + Scheduler + Checkpoint/Resume
-- **REQUEST/RESPONSE 路由**(Plan A):Orchestration 发 `request` → Conductor 投递到 Kernel agent inbox;Kernel 发 `response` → Conductor 回投到 Orchestration inbox + 触发 Critic Review
+- **REQUEST/RESPONSE 路由**(Plan A):Orchestration 发 `request` → Coordinator 投递到 Kernel agent inbox;Kernel 发 `response` → Coordinator 回投到 Orchestration inbox + 触发 Critic Review
 - **Critic Review 闸门**(§18):副作用 proposal 必经 Critic verdict 才能进入执行;`reject` 拦截、`redirect` 替换、`advise` 注入下一轮 prompt、`approve` 放行
 - **Robustness 干预执行**:`force_dispatch` 改 task `created_at`、`prune_branch` 写 `state.pruned_families` + `cancel_tasks_of_family`、`kill_task` 调 task lifecycle;`escalate_strategy_change` 只广播 priority-0 非破坏性建议,不直接改调度状态
 - **早停 + checkpoint cadence**:见 §9 / §17
-- **不做决策**:Conductor 不替任何 LLM agent 做 action 选择 / verdict;它只是协议管理员
+- **不做决策**:Coordinator 不替任何 LLM agent 做 action 选择 / verdict;它只是协议管理员
 
 ### 7.6 角色 × Intent 能力矩阵(PolicyGate 强制)
 
@@ -651,7 +651,7 @@ PolicyGate 的 `ROBUSTNESS_ONLY_SOURCE_ALLOWLIST = {"robustness"}` 强制其它 
 | `delegate`                 | ✓※1           | ✗      | ✗      | ✓※2        | ※1 不能 delegate kernel-owned 5 个;※2 仅可 delegate accuracy_gate / recover / server_lifecycle 这类 handle action |
 | `request`                  | ✓※3           | ✗      | ✗      | ✗          | ※3 target_agent 限 `kernel`(REQUEST_ROUTING 表)                                                              |
 | `response`                 | ✗             | ✓※4    | ✗      | ✗          | ※4 必带 `in_reply_to`                                                                                        |
-| `update_state`             | ✓             | ✓※5    | ✗      | ✓          | ※5 仅写自己 action 产出的 metric 字段;CORE_STATE_FIELDS 只 Conductor 写                                               |
+| `update_state`             | ✓             | ✓※5    | ✗      | ✓          | ※5 仅写自己 action 产出的 metric 字段;CORE_STATE_FIELDS 只 Coordinator 写                                               |
 | `update_persona`           | ✓             | ✓      | ✓      | ✓          | append-only 写自己的 `personas/<name>.md`                                                                      |
 | `send_message`             | ✓             | ✓      | ✓      | ✓          | 任意 topic;不在白名单的软降级为 `observation`                                                                          |
 | `ask_question`             | ✓             | ✓      | ✓      | ✓          | 通常给 Critic(KB 查询)                                                                                          |
@@ -697,21 +697,21 @@ PolicyGate 的 `ROBUSTNESS_ONLY_SOURCE_ALLOWLIST = {"robustness"}` 强制其它 
 | 层                     | 内容                                        | 载体                                                                                         | 生命周期                     | 维护者                                                                                                                           | v0.6 启用     |
 | --------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | ----------- |
 | **L1 即时上下文**          | 当前思考链 + 工具结果                              | 单次 `backend.run()` 内 LLM context                                                           | run 内                    | LLM 自然                                                                                                                        | ✓           |
-| **L2 本 session 工作记忆** | events / cursors / tasks / leases / state | SQLite WAL `storage/conductor.db`(events / cursors / tasks / leases 4 表)+ NFS `state.json` | session(含 resume)        | Conductor                                                                                                                     | ✓           |
+| **L2 本 session 工作记忆** | events / cursors / tasks / leases / state | SQLite WAL `storage/coordinator.db`(events / cursors / tasks / leases 4 表)+ NFS `state.json` | session(含 resume)        | Coordinator                                                                                                                     | ✓           |
 | **L3 本 run 人格**       | "我是 X,对此 run 的累积观点"                       | NFS `personas/<agent>.md`                                                                  | run 持久;蒸馏每 4h 或 8K token | agent 自主 + 自动蒸馏                                                                                                               | ✓ 全 4 角色    |
 | **L4 跨 run 长期记忆**     | "这模型以前优化 N 次,结论 ..."                      | **中心化共享 KB**(按 `<model_family>/<model_name>` 分区,具体载体 T13 后续落地:NFS 共享路径或 HTTP service)      | 永久,跨 session、跨 user      | **Critic 主导**(唯一 read/write/synthesis 入口,通过 `kb_query.py` / `kb_ingest.py` 包裹);其它 agent 不直接读写,只通过 prompt 注入消费;**P0 不依赖真实 KB** | P1+;P0 mock |
 
 
 ### 8.2 L4 KB 操作(中心化共享 + Critic owns,非 P0)
 
-> **P0 说明**:中心化 KB 先不做,由 Critic owner 后续实现。P0 的 Critic mock 可以返回空 KB hint / 固定 mock evidence,不得阻塞 Conductor + Orchestration + KernelAgent 主链路。
+> **P0 说明**:中心化 KB 先不做,由 Critic owner 后续实现。P0 的 Critic mock 可以返回空 KB hint / 固定 mock evidence,不得阻塞 Coordinator + Orchestration + KernelAgent 主链路。
 >
 > **目标存储形态**:KB 是**中心化共享存储**,对所有 sandbox / session / user 可见;按 `<model_family>/<model_name>` 二级分区(如 `kb/deepseek/DeepSeek-R1-0528/entries.jsonl`、`kb/qwen/Qwen3-8B/entries.jsonl`)。具体载体由 T13 落地,候选两种:
 >
 > - **Option A — NFS 共享路径**:`/wekafs/kb/<model_family>/<model_name>/entries.jsonl`,append-only + 简单文件锁
 > - **Option B — HTTP KB service**:Critic 通过 REST API 访问,服务侧统一并发控制 + embedding-based recall
 >
-> 两种载体下,Critic 都是**唯一 read/write/synthesis 入口**,通过 `kb_query.py` / `kb_ingest.py` 两个脚本包裹具体后端;其它 agent(Orchestration / Kernel / Robustness)**不直接读写 KB**,只通过 Conductor 在 prompt 里注入 KB 召回结果消费(`=== Critic KB hint ===` 段)。这样写入并发只由 Critic 一家控制,简化竞争。
+> 两种载体下,Critic 都是**唯一 read/write/synthesis 入口**,通过 `kb_query.py` / `kb_ingest.py` 两个脚本包裹具体后端;其它 agent(Orchestration / Kernel / Robustness)**不直接读写 KB**,只通过 Coordinator 在 prompt 里注入 KB 召回结果消费(`=== Critic KB hint ===` 段)。这样写入并发只由 Critic 一家控制,简化竞争。
 
 #### Read(warm-start,所有 agent prompt 都注入)
 
@@ -737,7 +737,7 @@ python3 $SKILL_ROOT/kb/kb_ingest.py \
     --tags $TAGS --gain $GAIN --status $STATUS
 ```
 
-触发时机:Orchestration / Kernel 的 `delegated_result` 或 `response` 进入 Conductor 后,Conductor 通知 Critic;Critic 在下一轮 reactor tick 写入。
+触发时机:Orchestration / Kernel 的 `delegated_result` 或 `response` 进入 Coordinator 后,Coordinator 通知 Critic;Critic 在下一轮 reactor tick 写入。
 
 #### Cross-run synthesis(每 6h,Critic 自发)
 
@@ -871,7 +871,7 @@ async def graceful_stop(self, reason: StopReason):
 
 ## 10. Accuracy Gate 协议(沿用 sprint,所有 `accuracy_risk > 0` 必跑)
 
-> v0.6 由 **Robustness handle 子角色**调起 `eval_runner` 跑;FAIL 时通知 Conductor,Conductor 把 task 标 `needs_revert` 并通知 Orchestration / Kernel。
+> v0.6 由 **Robustness handle 子角色**调起 `eval_runner` 跑;FAIL 时通知 Coordinator,Coordinator 把 task 标 `needs_revert` 并通知 Orchestration / Kernel。
 
 ### 10.1 哪些 action 触发 gate
 
@@ -902,7 +902,7 @@ async def graceful_stop(self, reason: StopReason):
   ```
    accuracy_drop = baseline_accuracy - new_accuracy
    if accuracy_drop > 0.01:
-       通知 Conductor: task → needs_revert
+       通知 Coordinator: task → needs_revert
        Critic ingest KB: accuracy_risk=1.0 for this action+model
        Orchestration / Kernel 收到 revert request,执行 revert
    else:
@@ -1024,7 +1024,7 @@ score = base × pressure × prune_gate × depth_gate × diminishing × lane_avai
 默认: Critic 等权重
 启用后: Critic 维护历史 Brier score (prediction calibration)
         Brier 低(更准)的 Critic 在 review verdict 里权重高
-        — 但 v0.6 单 Critic 单 verdict,Brier 主要影响 Conductor 是否启用
+        — 但 v0.6 单 Critic 单 verdict,Brier 主要影响 Coordinator 是否启用
         sample-down(对低风险 proposal 降级为 sampled review)
 ```
 
@@ -1062,7 +1062,7 @@ class Message:
 - ~~`vote`~~
 - ~~`vote_request`~~
 - ~~`parliament_open`~~
-- ~~`objection`~~ → 软降级:Critic 仍可发 `objection` intent,但 Conductor 把它转成 `topic="advice"` 的 `send_message` 进 event log,不触发任何议会流程
+- ~~`objection`~~ → 软降级:Critic 仍可发 `objection` intent,但 Coordinator 把它转成 `topic="advice"` 的 `send_message` 进 event log,不触发任何议会流程
 
 ### 13.3 协议规则
 
@@ -1072,17 +1072,17 @@ class Message:
 4. Rate limit:每 agent 10 msg/min(Critic 20,因 KB 召回 + review)
 5. `priority>=2` 立即触发,<2 batch
 6. 接收方按 `id` 去重(幂等,通过 cursor 文件中的 `last_processed_msg_id`)
-7. **Critic Review 闸门**(§18):副作用 proposal 必须在 Conductor 收到 `review_verdict` 后才能进入 task dispatch
+7. **Critic Review 闸门**(§18):副作用 proposal 必须在 Coordinator 收到 `review_verdict` 后才能进入 task dispatch
 
 ### 13.4 4 种协作模式(v0.6,无议会)
 
 
 | 模式                               | 描述                                                                                                          | 启用          |
 | -------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------- |
-| **委托(Delegate)**                 | Orchestration / Robustness → SubAgentRunner → ActionExecutor / ephemeral sub-agent                          | ✓ 全启用       |
+| **委托(Delegate)**                 | Orchestration / Robustness → SubAgentRunner → ActionOrchestration / ephemeral sub-agent                          | ✓ 全启用       |
 | **流水线(Pipeline)**                | 多 sub-agent 串行编排(profile → kernel-opt → integrate)                                                          | ✓ 全启用       |
 | **事件驱动(Alert)**                  | Robustness 监听 event_log → emit alert / kill_task / force_dispatch / prune_branch / escalate_strategy_change | ✓ always-on |
-| **RPC(REQUEST/RESPONSE,Plan A)** | Orchestration → Kernel agent;Conductor 路由 + Critic Review 闸门                                                | ✓ 全启用       |
+| **RPC(REQUEST/RESPONSE,Plan A)** | Orchestration → Kernel agent;Coordinator 路由 + Critic Review 闸门                                                | ✓ 全启用       |
 | ~~**议会(Parliament)**~~           | ~~多 agent 投票~~                                                                                              | **删除**      |
 
 
@@ -1145,7 +1145,7 @@ Do not include markdown, prose, code fences outside the validated_json_output fe
 or explanations outside JSON.
 ```
 
-Conductor 对 Critic 输出:
+Coordinator 对 Critic 输出:
 
 1. 提取完整 JSON object(支持 fenced `validated_json_output` / fenced `json` / 裸 JSON 三种)
 2. 用 `INTENT_ENVELOPE_SCHEMA` 做 runtime validation
@@ -1153,7 +1153,7 @@ Conductor 对 Critic 输出:
 4. 校验角色权限(§7.6 矩阵)
 5. 失败时最多发一次 repair prompt;仍失败记录 `protocol_error`,转 Robustness RCA(若 Robustness 不可用,记 alert 不阻塞主循环)
 
-### 14.4 Conductor 解析侧
+### 14.4 Coordinator 解析侧
 
 ```python
 def parse_intents(trajectory) -> list[Intent]:
@@ -1215,7 +1215,7 @@ class PolicyGate:
             # Codex no-tools 原则 + KB 例外(§7.3)
             return ["Read", "Bash(kb_query.py|kb_ingest.py)"]
         if role.name == "robustness":
-            # Watchdog 受限 Bash + Read + emit_intent
+            # Robustness monitor 受限 Bash + Read + emit_intent
             return ["Read", "Bash(robustness_allowlist)", "emit_intent"]
         if role.name == "kernel":
             return ["Read", "Bash(kernel_allowlist)", "Edit", "emit_intent"]
@@ -1246,18 +1246,18 @@ class PolicyGate:
 
 ---
 
-## 15. Sub-agent 委托 + ActionExecutor
+## 15. Sub-agent 委托 + ActionOrchestration
 
 ### 15.1 决策:不依赖 Claw runSubagent(同 v0.4 ADR-14)
 
-Conductor 直接 spawn OOB `ClaudeBackend.run()` / `CodexBackend.run()` 作为 sub-agent。`runSubagent` 是 TS 内部函数,没 HTTP route 暴露,从 Python 调用要么改 Brain 要么 TS 重写,工作量都大。OOB 已现成。
+Coordinator 直接 spawn OOB `ClaudeBackend.run()` / `CodexBackend.run()` 作为 sub-agent。`runSubagent` 是 TS 内部函数,没 HTTP route 暴露,从 Python 调用要么改 Brain 要么 TS 重写,工作量都大。OOB 已现成。
 
 ### 15.2 两种 sub-agent 形态
 
 
 | 形态                                 | 触发                                                                                               | 实现                                                                                                          |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
-| **ActionExecutor**(Python 类,无 LLM) | Conductor 调度 → SubAgentRunner.run(task) → 查 `EXECUTOR_REGISTRY[task.kind]` → 直接 subprocess shell | `BaselineExecutor` / `BenchRunnerExecutor` / `ProfileExecutor` / `ParamSweepRunExecutor` 等;无 LLM,纯 shell 包装 |
+| **ActionOrchestration**(Python 类,无 LLM) | Coordinator 调度 → SubAgentRunner.run(task) → 查 `EXECUTOR_REGISTRY[task.kind]` → 直接 subprocess shell | `BaselineOrchestration` / `BenchRunnerOrchestration` / `ProfileOrchestration` / `ParamSweepRunOrchestration` 等;无 LLM,纯 shell 包装 |
 | **OOB sub-agent**(LLM)             | EXECUTOR_REGISTRY 没有命中 → fallback → spawn fresh `backend.run()`                                  | `kernel_extract` / `geak_submitter` / `patch_applier` / `eval_runner` / `rca_runner` 等                      |
 
 
@@ -1286,15 +1286,15 @@ class SubAgentRunner:
         allowed_tools = self.policy.allowed_tools_for_action(action)
 
         async with self.locks.acquire_many(action.requires_lanes, task.task_id, task.lease_ttl_sec):
-            # Path A: ActionExecutor
-            executor = EXECUTOR_REGISTRY.get(task.kind)
-            if executor is not None:
+            # Path A: ActionOrchestration
+            orchestration = EXECUTOR_REGISTRY.get(task.kind)
+            if orchestration is not None:
                 try:
-                    result = await executor.run(ExecutorContext(task, action, env=self.env))
+                    result = await orchestration.run(OrchestrationContext(task, action, env=self.env))
                     self._publish_intents_via_sink(result.intents)
                     task.transition("succeeded", result.evidence)
                     return result
-                except ExecutorEnvError:
+                except OrchestrationEnvError:
                     pass  # fallback to LLM
             # Path B: OOB backend
             backend = self.backends_pool.pick(action.preferred_backend)
@@ -1327,16 +1327,16 @@ class SubAgentRunner:
 | 层级                          | 作用                                           | 例子                                                                                                                                 | 是否进入 Scheduler                           |
 | --------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | **OptimizationAction**      | 调度器评估的优化方向 / 策略节点                            | `baseline` / `profile` / `backends` / `params` / `deep-kernel-analysis` / `operator-tuning` / `vendor-kernel-config` / `recover`   | ✓                                        |
-| **TaskKind / ExecutorKind** | Conductor 真正 dispatch 的执行任务                  | `bench_runner` / `param_sweep_run` / `profile_runner` / `eval_runner` / `patch_applier` / `geak_submitter` / `kernel_optimization` | ✗ 直接由 action 展开                          |
+| **TaskKind / OrchestrationKind** | Coordinator 真正 dispatch 的执行任务                  | `bench_runner` / `param_sweep_run` / `profile_runner` / `eval_runner` / `patch_applier` / `geak_submitter` / `kernel_optimization` | ✗ 直接由 action 展开                          |
 | **KernelRequestKind**       | Orchestration → Kernel agent 的 Plan A RPC 类型 | `select_kernels` / `run_optimization` / `apply_patch` / `integrate_result`                                                         | 通过 `request{target_agent="kernel"}` 间接触发 |
 
 
 **兼容 Gongzheng MVP 的规则**:
 
-- `bench_runner` / `param_sweep_run` 保留为 **TaskKind**,不计入 19 个 OptimizationAction,但必须在 `ActionExecutorRegistry` 中存在
+- `bench_runner` / `param_sweep_run` 保留为 **TaskKind**,不计入 19 个 OptimizationAction,但必须在 `ActionOrchestrationRegistry` 中存在
 - `kernel-opt` / `integrate` 在本文档中是 Kernel agent owns 的**优化阶段名**;落地时可映射到 KernelRequestKind(`run_optimization` / `apply_patch`)或作为 synthetic OptimizationAction 保留,但不能和 `bench_runner` 这类 TaskKind 混成一张表
 - PolicyGate 的 `KERNEL_OWNED_ACTIONS` 应校验 OptimizationAction / KernelRequestKind 两层,避免 Orchestration 直接 dispatch kernel-owned 副作用 task
-- P0 只要求 Conductor + Orchestration + KernelAgent 主链路跑通:Orchestration 发 REQUEST,Kernel agent 返回 RESPONSE,Conductor 能把结果入账并触发必要的 bench/evidence-check;Critic/Robustness mock 不阻塞
+- P0 只要求 Coordinator + Orchestration + KernelAgent 主链路跑通:Orchestration 发 REQUEST,Kernel agent 返回 RESPONSE,Coordinator 能把结果入账并触发必要的 bench/evidence-check;Critic/Robustness mock 不阻塞
 
 ### 16.1 完整 19 个 OptimizationAction(v0.6,framework-rebuild 已删)
 
@@ -1367,7 +1367,7 @@ class SubAgentRunner:
 注:
 
 - ※ `params` 一般 0.0,但 `kv-cache-dtype fp8` / 量化变更属于 0.30
-- ※2 架构图里 `comm-optimization` 应由 Comm agent owns,但 v0.6 不做 Comm agent;`compiler-tuning` 同理(原 Framework agent owned)。**这两个 action 在 P0 禁用**,只作为 P1+ 粗粒度入口保留,避免干扰 Conductor + Orchestration + KernelAgent 主链路验收
+- ※2 架构图里 `comm-optimization` 应由 Comm agent owns,但 v0.6 不做 Comm agent;`compiler-tuning` 同理(原 Framework agent owned)。**这两个 action 在 P0 禁用**,只作为 P1+ 粗粒度入口保留,避免干扰 Coordinator + Orchestration + KernelAgent 主链路验收
 - ※3 `dream` 让 Critic 生成"如果 X 是真的,会发生什么"假设,由 Orchestration delegate
 - ※4 `recover` 由 Robustness handle 主导
 
@@ -1399,11 +1399,11 @@ applicable_when:
 ---
 ```
 
-调度器 `prune_gate` 因子读 `family`,`lane_available` 因子读 `requires_lanes`,`depth_gate` 读 `cost_minutes_p75`。当 `dispatch_kind=request_kernel_agent` 时,Conductor 不直接 spawn sub-agent,而是向 Kernel agent 发 `request{kind=kernel_request_kind}`;Kernel agent 内部再决定是否调 `geak_submitter` / `patch_applier` / `bench_runner` 等 TaskKind。Sub-agent 启动时,Conductor 还必须按 `allowed_tools` 注入工具白名单;只读 action 不给 `Edit`。
+调度器 `prune_gate` 因子读 `family`,`lane_available` 因子读 `requires_lanes`,`depth_gate` 读 `cost_minutes_p75`。当 `dispatch_kind=request_kernel_agent` 时,Coordinator 不直接 spawn sub-agent,而是向 Kernel agent 发 `request{kind=kernel_request_kind}`;Kernel agent 内部再决定是否调 `geak_submitter` / `patch_applier` / `bench_runner` 等 TaskKind。Sub-agent 启动时,Coordinator 还必须按 `allowed_tools` 注入工具白名单;只读 action 不给 `Edit`。
 
 ### 16.3 dream / re-explore / recover 三个特殊 action
 
-- **dream**:让 Critic 生成"如果 X 是真的,会发生什么"假设;用于跳出 DFS 局部最优。无副作用,无 lane 需求。Orchestration `delegate(dream)` → Conductor 调起 Critic 走专门的 dream-mode prompt
+- **dream**:让 Critic 生成"如果 X 是真的,会发生什么"假设;用于跳出 DFS 局部最优。无副作用,无 lane 需求。Orchestration `delegate(dream)` → Coordinator 调起 Critic 走专门的 dream-mode prompt
 - **re-explore**:把已 discard 的 candidate 重新打分(基于新 KB 信息或新 baseline);DFS 回溯。无副作用
 - **recover**:Robustness 主导,从 checkpoint 恢复一个之前 crash 的子任务;走 §17 Resume 流程
 
@@ -1414,7 +1414,7 @@ applicable_when:
 
 ### 16.5 P0 Action allowlist
 
-P0 目标是先跑通 Conductor + Orchestration + KernelAgent 主链路,因此 action 范围收窄:
+P0 目标是先跑通 Coordinator + Orchestration + KernelAgent 主链路,因此 action 范围收窄:
 
 - **允许**:`setup` / `classify` / `target-analysis` / `baseline` / `profile` / `backends` / `params` / `sweep` / `report`
 - **允许(通过 KernelAgent request)**:`deep-kernel-analysis` / `kernel-opt` / `integrate` / `operator-tuning` / `vendor-kernel-config` 的最小闭环
@@ -1437,7 +1437,7 @@ P0 目标是先跑通 Conductor + Orchestration + KernelAgent 主链路,因此 a
 ```
 $SESSION_DIR/  ($SESSION_DIR 本身就在 NFS / WekaFS 上)
 ├── storage/
-│   └── conductor.db                 # SQLite WAL,4 表(per-session,直接落 NFS,无 backup 层)
+│   └── coordinator.db                 # SQLite WAL,4 表(per-session,直接落 NFS,无 backup 层)
 │       ├── leases     (PK=lane)
 │       ├── events     (PK=seq AUTOINCREMENT, msg_id UNIQUE)
 │       ├── cursors    (PK=agent, last_processed_seq + last_processed_msg_id)
@@ -1516,7 +1516,7 @@ async def dispatch_task(task, action):
 ```python
 async def resume_from_session(session_dir):
     # 1. DB 直接落 NFS,任何 crash 重启后 SESSION_DIR 仍可访问 → DB 直接打开,无 restore
-    db = SqliteConnection(session_dir / "storage" / "conductor.db")
+    db = SqliteConnection(session_dir / "storage" / "coordinator.db")
     # 2. 加载 state snapshot(辅助调试用,真值在 db)
     state = SharedState.load(session_dir / "state.json")
     # 3. cursors / tasks / leases / events 都从 db 自动加载
@@ -1567,7 +1567,7 @@ async def resume_from_session(session_dir):
 
 ### 18.1 哪些 intent 触发 review
 
-> P0 阶段 Critic 由 mock adapter 代替,用于保证 Conductor + Orchestration + KernelAgent 主链路先跑通。mock 的原则是**不阻塞主链路**,但不能让高风险副作用在没有明确 verdict 的情况下静默通过:低风险 action 可自动 `advise` 或 `approve(source="mock")`;高风险 action 要么走明确 mock verdict,要么标记 `needs_review` 并由当前 P0 流程选择跳过/延后,不能误报为已被真实 Critic 批准。
+> P0 阶段 Critic 由 mock adapter 代替,用于保证 Coordinator + Orchestration + KernelAgent 主链路先跑通。mock 的原则是**不阻塞主链路**,但不能让高风险副作用在没有明确 verdict 的情况下静默通过:低风险 action 可自动 `advise` 或 `approve(source="mock")`;高风险 action 要么走明确 mock verdict,要么标记 `needs_review` 并由当前 P0 流程选择跳过/延后,不能误报为已被真实 Critic 批准。
 
 
 | 触发场景                                                                           | 是否需 verdict                                                       |
@@ -1597,15 +1597,15 @@ Critic / Robustness 由专人实现,在 xiaofei 当前分支的 P0 目标里先 
 | Robustness mock                                      | 只发 heartbeat / basic alert;不主动 `kill_task` / `prune_branch` / `force_dispatch` | P0 先验证主链路,调度警察行为后续由 robustness owner 接入   |
 
 
-P0 验收重点:Conductor 能正确识别 mock verdict,并把 `source=mock` 写入 events/tasks/history;真实 Critic 接入后只替换 adapter,不改 Orchestration / KernelAgent 协议。
+P0 验收重点:Coordinator 能正确识别 mock verdict,并把 `source=mock` 写入 events/tasks/history;真实 Critic 接入后只替换 adapter,不改 Orchestration / KernelAgent 协议。
 
 ### 18.2 Verdict 集合
 
 ```python
 class Verdict(str, Enum):
     APPROVE  = "approve"   # 同意,放行进入 task dispatch
-    REJECT   = "reject"    # 否决,Conductor 拦截不执行;Orchestration 必须重新提议
-    REDIRECT = "redirect"  # 改方向:Critic 给出 alternative_action(必须是 ActionRegistry 已注册的);Conductor 替换执行
+    REJECT   = "reject"    # 否决,Coordinator 拦截不执行;Orchestration 必须重新提议
+    REDIRECT = "redirect"  # 改方向:Critic 给出 alternative_action(必须是 ActionRegistry 已注册的);Coordinator 替换执行
     ADVISE   = "advise"    # 不阻塞放行,但注入 advice 到下一轮 prompt 让 Orchestration 注意
     NEEDS_REVIEW = "needs_review"  # P0/mock/timeout 场景:高风险 proposal 不放行,等待真实 Critic 或人工处理
 ```
@@ -1613,14 +1613,14 @@ class Verdict(str, Enum):
 #### 18.2.1 `approve`
 
 - payload:`{target_proposal_msg_id, verdict="approve", reasoning, kb_evidence?}`
-- Conductor 行为:proposal 转成 task 进入 dispatch 队列;`reasoning` + `kb_evidence` 写入 task 的 `history`
+- Coordinator 行为:proposal 转成 task 进入 dispatch 队列;`reasoning` + `kb_evidence` 写入 task 的 `history`
 - KB 加分:这条 proposal 完成后,Critic 的 Brier predictor 校准 +1 entry
 
 #### 18.2.2 `reject`
 
 - payload:`{target_proposal_msg_id, verdict="reject", reasoning, kb_evidence}`
 - `**kb_evidence` 必填**:必须给出至少 1 条 KB entry id 或 insight id 作为否决依据(防止 Critic 拍脑袋)
-- Conductor 行为:proposal 不进入 task 队列;Orchestration inbox 收到 `review_rejected{proposal_msg_id, reasoning, kb_evidence}`
+- Coordinator 行为:proposal 不进入 task 队列;Orchestration inbox 收到 `review_rejected{proposal_msg_id, reasoning, kb_evidence}`
 - Orchestration 必须在下一轮基于 reasoning + kb_evidence 重新提议(不能强行重发同样的 propose)
 - 连续 3 次 reject 同一 family 触发 Robustness `escalate_strategy_change`
 
@@ -1628,19 +1628,19 @@ class Verdict(str, Enum):
 
 - payload:`{target_proposal_msg_id, verdict="redirect", reasoning, kb_evidence, alternative_action: {name, params}}`
 - `alternative_action.name` 必须在 ActionRegistry 中,且 owner 与原 proposal 同(避免 redirect 后跨 owner 派发)
-- Conductor 行为:用 `alternative_action` 创建 task 进入 dispatch;Orchestration inbox 收到 `review_redirected`
+- Coordinator 行为:用 `alternative_action` 创建 task 进入 dispatch;Orchestration inbox 收到 `review_redirected`
 - 用例:Orchestration 提议 `params{kv_cache_dtype=fp8}`,Critic 召回 KB 知道这个模型 fp8 mismatch 严重 → redirect 到 `params{kv_cache_dtype=bf16, mem_fraction=0.85}`
 
 #### 18.2.4 `advise`
 
 - payload:`{target_proposal_msg_id, verdict="advise", reasoning, advice_text, kb_evidence?}`
-- Conductor 行为:proposal 正常进入 task dispatch;`advice_text` 写入 Orchestration 下一轮 prompt 的 `=== Critic advice ===` 段
+- Coordinator 行为:proposal 正常进入 task dispatch;`advice_text` 写入 Orchestration 下一轮 prompt 的 `=== Critic advice ===` 段
 - 用例:proposal 没问题,但 Critic 想提醒"这个 backend 上次 KEEP 边际很小,如果这次 gain < 3% 不要再深挖"
 
 #### 18.2.5 `needs_review`
 
 - payload:`{target_proposal_msg_id, verdict="needs_review", reasoning, source?="mock|timeout|critic_unavailable"}`
-- Conductor 行为:proposal **不进入 task dispatch**,task/proposal 标记为 `needs_review`;P0 阶段可选择跳过该高风险 action 或只跑到 `approve(source="mock")` 分支,但最终报告必须明确"未经过真实 Critic 审阅"
+- Coordinator 行为:proposal **不进入 task dispatch**,task/proposal 标记为 `needs_review`;P0 阶段可选择跳过该高风险 action 或只跑到 `approve(source="mock")` 分支,但最终报告必须明确"未经过真实 Critic 审阅"
 - 用例:Critic mock / timeout 时遇到 `integrate keep_proposed` 或 `accuracy_risk > 0` 的 proposal,不能静默 approve
 
 ### 18.3 KB 如何注入 review 决策
@@ -1690,7 +1690,7 @@ async def review_proposal(self, proposal_msg) -> Verdict:
 brier = (predicted_gain_pct / 100 - actual_gain_pct / 100) ** 2
 ```
 
-`brier` 滑动窗口 N=20,Critic 自己写 `personas/critic.md` 时附带 brier 历史。Conductor 用 brier 决定:
+`brier` 滑动窗口 N=20,Critic 自己写 `personas/critic.md` 时附带 brier 历史。Coordinator 用 brier 决定:
 
 - `brier < 0.05`(预测准):对低风险 proposal 启用 sample-down(默认 review,但 20% 概率跳过 → 直接 approve)节省 token
 - `brier > 0.15`(预测差):停用 sample-down,所有 proposal 都过完整 review
@@ -1701,7 +1701,7 @@ brier = (predicted_gain_pct / 100 - actual_gain_pct / 100) ** 2
 议会删除后,Critic 仍保留 `objection` intent 作为"反对意见"出口:
 
 - 与 `review_verdict` 不同:`review_verdict` 是闸门(approve/reject/redirect/advise/needs_review);`objection` 是**主动 flag**,可以对当前已批准的 task / 已经 KEEP 的决策事后反对
-- Conductor 行为:`objection` 转成 `topic="advice", priority=1` 的 `send_message` 进 event log;Orchestration 在下一轮 prompt 看到;**不触发任何议会、不投票**
+- Coordinator 行为:`objection` 转成 `topic="advice", priority=1` 的 `send_message` 进 event log;Orchestration 在下一轮 prompt 看到;**不触发任何议会、不投票**
 - 用例:Critic 看到 KEEP 后 cumulative_gain 涨了 +3%,但 KB 知道这模型在这个参数下半小时后会 OOM,主动发 objection 提醒
 
 ---
@@ -1746,7 +1746,7 @@ async def do_rca(self):
     )
     finding_data = parse_rca_finding(finding.trajectory)
     write_finding(self.session_dir / "findings" / f"{ts}.json", finding_data)
-    await self.bus.send("conductor", {"topic": "rca_done", "finding": finding_data})
+    await self.bus.send("coordinator", {"topic": "rca_done", "finding": finding_data})
 
     # 根据 finding 决定后续动作
     if finding_data.action == "kill_task":
@@ -1759,16 +1759,16 @@ async def do_rca(self):
 
 #### Robustness 不可用时的处理
 
-- Robustness process / reactor 自身 hang / crash → Conductor 探测到 5min 没 heartbeat → 写 `robustness_unavailable` alert,暂停新的高风险 action,已有低风险 task 可继续
+- Robustness process / reactor 自身 hang / crash → Coordinator 探测到 5min 没 heartbeat → 写 `robustness_unavailable` alert,暂停新的高风险 action,已有低风险 task 可继续
 - **不把 RCA 路由给 Critic**。Critic 不做 RCA,也不会临时拿 Bash 诊断权限;RCA 等 Robustness owner 接入或人工处理
 
-### 19.3 调度警察 4 个 intent(详细 payload + Conductor 行为)
+### 19.3 调度警察 4 个 intent(详细 payload + Coordinator 行为)
 
 #### 19.3.1 `kill_task`
 
 - payload:`{task_id, reason, force?: bool, scope: "task"}`
 - 限制:`scope` 强制 `"task"`,**不允许** `"process"` / `"server"`(IR-5 仍主导 server lifecycle;Robustness handle 子角色才能在 server lifecycle lane 内合法操作)
-- Conductor 行为:
+- Coordinator 行为:
   - task 状态是 `queued` → 直接转 `cancelled`,不进入 dispatch
   - task 状态是 `running` → 通知对应 sub-agent 中断(SIGTERM,5s 后 SIGKILL),task 转 `cancelled`,释放 lease
   - 镜像到 `findings/kills.jsonl`
@@ -1776,14 +1776,14 @@ async def do_rca(self):
 #### 19.3.2 `force_dispatch`
 
 - payload:`{task_id, reason}`
-- Conductor 行为:把 task `created_at` 改成 unix epoch(1970-01-01)→ dispatcher 按 `created_at` 升序选,自然排到队首
+- Coordinator 行为:把 task `created_at` 改成 unix epoch(1970-01-01)→ dispatcher 按 `created_at` 升序选,自然排到队首
 - 用例:high-value `bench_runner` 卡在 6 个低价值 proposal 后面,Robustness 判断"surface validation now"
 
 #### 19.3.3 `prune_branch`
 
 - payload:`{family, reason}`
 - `family` 必须是 `prep` / `analysis` / `shallow` / `deep_kernel` / `long` / `creative` / `resilience` 之一
-- Conductor 行为:
+- Coordinator 行为:
   - 把 family 加到 `state.pruned_families`(set)
   - 把所有 `kind in actions_with_family(family)` 且 `state in {queued}` 的 task 转 `cancelled`
   - Scheduler 下次 `score_action` 时,`prune_gate = 0` 永不再选这个 family
@@ -1793,7 +1793,7 @@ async def do_rca(self):
 #### 19.3.4 `escalate_strategy_change`
 
 - payload:`{reason, next_action_hint, severity?: "high" | "medium"}`
-- Conductor 行为:
+- Coordinator 行为:
   - emit `topic="strategy_change", priority=0` 的 broadcast(所有 agent 都收到)
   - Orchestration 下一 tick 必须读这条,prompt 里高亮显示
   - **不直接修改 scheduler / pruned_families / dispatch queue**,因此不存在 rollback 问题
@@ -1809,7 +1809,7 @@ Robustness 还承担"执行手"角色,通过 `delegate` intent 调起 ephemeral 
 | Handle 任务              | 调起                                                                                       | Lane               |
 | ---------------------- | ---------------------------------------------------------------------------------------- | ------------------ |
 | **server lifecycle**   | `delegate(server_restart)` → spawn `patch_applier` 或直接 Bash(IR-4 / IR-5)                 | server_lifecycle   |
-| **accuracy gate exec** | `delegate(eval_runner)` → spawn `eval_runner` 跑 GSM8K,FAIL → 通知 Conductor `needs_revert` | benchmark_lane     |
+| **accuracy gate exec** | `delegate(eval_runner)` → spawn `eval_runner` 跑 GSM8K,FAIL → 通知 Coordinator `needs_revert` | benchmark_lane     |
 | **recovery**           | `delegate(recover)` → SubAgentRunner 执行 §17.6 evidence-check 矩阵                          | 按对应 action 的 lanes |
 
 
@@ -1824,7 +1824,7 @@ Robustness 还承担"执行手"角色,通过 `delegate` intent 调起 ephemeral 
 
 | Mode                  | 实现                                                                                                                                                                    | 用途                                   |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| `**SINGLE_PROC`**(默认) | 所有 agent 在 Conductor 进程内跑 asyncio reactor,通过 `backend.run()` 直接调 SDK                                                                                                  | 单测 / 短任务 / 当前默认                      |
+| `**SINGLE_PROC`**(默认) | 所有 agent 在 Coordinator 进程内跑 asyncio reactor,通过 `backend.run()` 直接调 SDK                                                                                                  | 单测 / 短任务 / 当前默认                      |
 | `**MULTI_CLI`**       | 每个 agent 起独立 OS 进程,跑 `claude --print --continue` 或 `codex` CLI;进程间靠 `$SESSION_DIR/agents/<name>/inbox.jsonl` / `outbox.jsonl` 通信;`MultiCLIRouter` 桥接到 SQLite events 表 | **本地全功能跑**(沿用 marathon tmux 形态);崩溃隔离 |
 
 
@@ -1842,12 +1842,12 @@ Robustness 还承担"执行手"角色,通过 `delegate` intent 调起 ephemeral 
 - claw 提供"在主 sandbox 内创建子 sub-session"能力(目前未完成)
 - 每个 persistent agent 绑定一个 claw sub-session,sub-session 内独立 process / 独立 conversation
 - 取代 multi-cli 的"本地起 N 个 OS 进程"形态:稳定性更好、claw 平台原生管理、跨 sandbox 也能扩展
-- 切换契约:agent 与 Conductor 的协议(intent / inbox/outbox JSONL / cursor / SQLite events)**完全不变**,只是底层进程载体从 OS process 换成 claw sub-session
+- 切换契约:agent 与 Coordinator 的协议(intent / inbox/outbox JSONL / cursor / SQLite events)**完全不变**,只是底层进程载体从 OS process 换成 claw sub-session
 
 ### 20.4 切换契约(三种形态共享同一个上层接口)
 
 ```
-Conductor 视角的 agent reactor:
+Coordinator 视角的 agent reactor:
     bus.recv(agent_name) → list[Message]
     bus.send(agent_name, msg)
     cursor.advance(agent_name, seq, msg_id)
@@ -1862,13 +1862,13 @@ Conductor 视角的 agent reactor:
 
 ---
 
-## 21. Conductor 主循环骨架
+## 21. Coordinator 主循环骨架
 
 ```python
 from oob.backends import ClaudeBackend, CodexBackend
 from .agent_role import AgentRole, default_role_registry, roles_for_run
 
-class Conductor:
+class Coordinator:
     def __init__(self, session_dir, env, transport_mode="single-proc"):
         self.objective = build_objective(env)         # §11
         self.session_dir = session_dir
@@ -1884,7 +1884,7 @@ class Conductor:
         }
 
         # 基础设施
-        self.db        = SqliteConnection(session_dir / "storage" / "conductor.db")
+        self.db        = SqliteConnection(session_dir / "storage" / "coordinator.db")
         self.bus       = MessageBus(self.db)
         self.state     = SharedState(session_dir)
         self.scheduler = BudgetAwareScheduler(self.objective, env, self.action_registry)
@@ -1895,8 +1895,8 @@ class Conductor:
         self.policy    = PolicyGate(self.role_registry, self.action_registry)
         self.actions   = ActionRegistry("actions/")
         self.sub       = SubAgentRunner(self.locks, self.workspace, self.actions, self.policy,
-                                        executor_registry=EXECUTOR_REGISTRY,
-                                        intent_sink=self._executor_intent_sink)
+                                        orchestration_registry=EXECUTOR_REGISTRY,
+                                        intent_sink=self._orchestration_intent_sink)
         self.review_gate = CriticReviewGate(self.bus, self.agents["critic"], self.policy)  # §18
 
         # transport 选择
@@ -1962,7 +1962,7 @@ class Conductor:
         try:
             self.policy.validate_intent(from_agent, intent, self.state)
         except PolicyDenied as exc:
-            await self._record_observation("conductor", "policy_denied", {
+            await self._record_observation("coordinator", "policy_denied", {
                 "agent": from_agent, "intent_type": intent.type.value,
                 "rule": exc.rule, "reason": str(exc), "hint": exc.hint,
             })
@@ -2105,7 +2105,7 @@ python -m inference_optimizer \
 
 src/inference_optimizer/              # 实现独立目录(统一代码库)
 ├── orchestrator/
-│   ├── conductor.py
+│   ├── coordinator.py
 │   ├── agent_role.py                 # 4 角色 default_registry
 │   ├── message_bus.py                # SQLite events 表
 │   ├── shared_state.py
@@ -2129,7 +2129,7 @@ src/inference_optimizer/              # 实现独立目录(统一代码库)
 │   ├── critic_review.py              # ★ §18 NEW v0.6
 │   ├── robustness_intervention.py        # ★ §19 NEW v0.6
 │   ├── action_registry.py            # actions/_meta/*.yaml 加载
-│   ├── action_executors/             # §15.2 ActionExecutor
+│   ├── action_orchestrations/             # §15.2 ActionOrchestration
 │   │   ├── base.py
 │   │   ├── baseline.py
 │   │   ├── bench_runner.py
@@ -2148,10 +2148,10 @@ src/inference_optimizer/              # 实现独立目录(统一代码库)
 │   │   ├── agent_card.py
 │   │   └── codex_continuity.py
 │   └── system_prompts/
-│       ├── orchestration.md          # 改名(原 executor.md)
+│       ├── orchestration.md          # 改名(原 orchestration.md)
 │       ├── kernel.md
 │       ├── critic.md                 # 含 KB / Sage / Devil's advocate / Review 段;不含 RCA
-│       ├── robustness.md                 # 含 Watchdog + RCA + Handle + 调度警察 4 intent 段
+│       ├── robustness.md                 # 含 Robustness monitor + RCA + Handle + 调度警察 4 intent 段
 ├── agents/                            # 每个 agent 独立 skill 目录(multi-cli 用)
 │   ├── orchestration/
 │   ├── kernel/                       # ★ xiaofei 当前分支正在做
@@ -2220,7 +2220,7 @@ src/inference_optimizer/              # 实现独立目录(统一代码库)
 | 资源锁死锁                                | 低   | 高   | SQLite 单事务 acquire-many + 按 lane 顺序 + timeout + 调度器全局检测                                                                                                                                                    |
 | 任务状态机崩在 transition 中间                | 低   | 高   | §17.6 evidence-check 矩阵;needs_manual_review 兜底                                                                                                                                                             |
 | Critic Bash allowlist 被绕过            | 低   | 中   | PolicyGate 字符串前缀严格匹配 + e2e 黑盒测试;违规 → `policy_denied` + 不 retry                                                                                                                                             |
-| Robustness 自身 hang(单点失效)             | 低   | 高   | Conductor 5min heartbeat 探测,写 `robustness_unavailable` alert,暂停新的高风险 action;不路由给 Critic,等待 Robustness owner / 人工处理                                                                                         |
+| Robustness 自身 hang(单点失效)             | 低   | 高   | Coordinator 5min heartbeat 探测,写 `robustness_unavailable` alert,暂停新的高风险 action;不路由给 Critic,等待 Robustness owner / 人工处理                                                                                         |
 | Multi-CLI 进程间消息丢失                    | 中   | 中   | inbox/outbox JSONL + cursor + Router seq 桥接;Resume 时按 SQLite events 回放                                                                                                                                     |
 | Plan A REQUEST/RESPONSE 路由抖动         | 低   | 中   | request_msg_id 必填 + response.in_reply_to 必填 + 60s 超时则 Robustness 介入                                                                                                                                        |
 | Orchestration 改名后 zhenggong 分支不一致    | 中   | 低   | 文档统一新名;开发阶段直接在本分支整体 rename(不单独 PR);zhenggong 分支不再继续开发                                                                                                                                                      |
@@ -2239,12 +2239,12 @@ src/inference_optimizer/              # 实现独立目录(统一代码库)
 | ID     | 决策                                                                      | v0.6 状态                                                                        |
 | ------ | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | ADR-1  | 合并 sprint + marathon 成新 skill                                           | 沿用                                                                             |
-| ADR-2  | 完整形态 4 个 persistent agent + Conductor                                   | 沿用,角色名重组(Orchestration/Kernel/Critic/Robustness)                               |
+| ADR-2  | 完整形态 4 个 persistent agent + Coordinator                                   | 沿用,角色名重组(Orchestration/Kernel/Critic/Robustness)                               |
 | ADR-3  | ~~Sage 合并 Brainstormer + Historian~~ → **Critic 接管 KB / Sage / Review** | **修订**(v0.6 ADR-35);RCA 改归 Robustness                                          |
 | ADR-4  | Callable + 4 层记忆                                                        | 沿用                                                                             |
-| ADR-5  | Orchestration / Kernel / Robustness = Claude `claude-opus-4-7`          | 沿用 + 改名(原 ADR-5 是 Executor/Watchdog)                                           |
+| ADR-5  | Orchestration / Kernel / Robustness = Claude `claude-opus-4-7`          | 沿用 + 改名(原 ADR-5 是 Orchestration/Robustness monitor)                                           |
 | ADR-6  | Critic = Codex `gpt-5.4`(litellm 暂不支持 5.5)                              | 沿用 + model 显式标注                                                                |
-| ADR-7  | Conductor 是 Python                                                      | 沿用                                                                             |
+| ADR-7  | Coordinator 是 Python                                                      | 沿用                                                                             |
 | ADR-8  | 复用 OOB backend 抽象                                                       | 沿用                                                                             |
 | ADR-9  | ~~复用 Claw runSubagent~~ Superseded by ADR-14                            | 已超越                                                                            |
 | ADR-10 | 早停 5 信号 OR                                                              | 沿用                                                                             |
@@ -2264,7 +2264,7 @@ src/inference_optimizer/              # 实现独立目录(统一代码库)
 | ADR-24 | ~~PoC 前必须通过 Design Gate~~ 已删                                            | 已删                                                                             |
 | ADR-25 | 运行时三档执行模式                                                               | **超越**:v0.6 ADR-34 单一全模式                                                       |
 | ADR-26 | 统一代码 + Feature Flag 子集                                                  | **超越**:v0.6 ADR-34 单一全模式后无需 feature flag                                       |
-| ADR-27 | Watchdog guided 不常驻,曾考虑非 Robustness RCA fallback                        | **超越**:Robustness always-on(v0.6 ADR-36),Critic 不做 RCA                         |
+| ADR-27 | Robustness monitor guided 不常驻,曾考虑非 Robustness RCA fallback                        | **超越**:Robustness always-on(v0.6 ADR-36),Critic 不做 RCA                         |
 | ADR-28 | L4 KB 全 mode 启用                                                         | 沿用                                                                             |
 | ADR-29 | Sage 三段都启用                                                              | **超越**:Sage 角色删除,Critic 接管(v0.6 ADR-35)                                        |
 | ADR-30 | Iron Rules 等硬资产全 mode 强制                                                | 沿用,改成"全模式强制"                                                                   |
@@ -2280,13 +2280,13 @@ src/inference_optimizer/              # 实现独立目录(统一代码库)
 | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | **ADR-34** | **单一全模式**(无 quick / guided / marathon)                                                                                                                                                                                                             | 三档分段 / 二档                                     | v0.5 实施观察:guided 与 marathon roster 已收敛;成本 > 收益;短任务限制由 Objective + 调度器 + Critic Review 自然实现                            |
 | **ADR-35** | **Critic 接管 KB / Sage / Devil's advocate / Review 优化建议;不做 RCA;Codex no-tools 原则在 KB 处放开**(`Bash(kb_query.py / kb_ingest.py)`)                                                                                                                      | Sage 独立 / KB 独立服务 / 非 Robustness RCA fallback | 用户明确:Critic 负责 review 和更高层建议,不做 RCA                                                                                   |
-| **ADR-36** | **Robustness = Watchdog + RCA + Handle 三合一,always-on,保留调度警察 4 intent**(`kill_task` / `force_dispatch` / `prune_branch` / `escalate_strategy_change`)                                                                                               | Watchdog 与 Sage 独立                            | xiaofei #2:robustness 本身就是这三件事的合并体                                                                                    |
-| **ADR-37** | **executor → orchestration 改名**(贴合架构图 Layer-1 expert)                                                                                                                                                                                              | 保留 executor                                   | xiaofei:统一用新名                                                                                                         |
+| **ADR-36** | **Robustness = Robustness monitor + RCA + Handle 三合一,always-on,保留调度警察 4 intent**(`kill_task` / `force_dispatch` / `prune_branch` / `escalate_strategy_change`)                                                                                               | Robustness monitor 与 Sage 独立                            | xiaofei #2:robustness 本身就是这三件事的合并体                                                                                    |
+| **ADR-37** | **orchestration → orchestration 改名**(贴合架构图 Layer-1 expert)                                                                                                                                                                                              | 保留 orchestration                                   | xiaofei:统一用新名                                                                                                         |
 | **ADR-38** | **删除议会模式**(parliament / vote / vote_request / parliament_open),Critic Review 协议(approve / reject / redirect / advise)替代                                                                                                                            | 保留议会                                          | xiaofei #5:议会成本高,单 critic verdict 已经够用                                                                                |
 | **ADR-39** | **Multi-CLI runtime 作为本地过渡方案保留**,默认 SINGLE_PROC,等 claw 子 session 能力上线后退役                                                                                                                                                                           | Multi-CLI 作为默认 / 立即删                          | xiaofei #6:本地全功能跑 + 平滑过渡                                                                                              |
-| **ADR-40** | **Framework agent / Comm agent 不做**,架构图里的 framework-rebuild action 已删,`comm-optimization` / `compiler-tuning` 作为 P1+ 粗粒度入口保留,**P0 禁用**                                                                                                             | 完整 6 agent                                    | xiaofei:这两个先不做;P0 先跑通 Conductor + Orchestration + KernelAgent 主链路                                                     |
+| **ADR-40** | **Framework agent / Comm agent 不做**,架构图里的 framework-rebuild action 已删,`comm-optimization` / `compiler-tuning` 作为 P1+ 粗粒度入口保留,**P0 禁用**                                                                                                             | 完整 6 agent                                    | xiaofei:这两个先不做;P0 先跑通 Coordinator + Orchestration + KernelAgent 主链路                                                     |
 | **ADR-41** | **删除 IMPLEMENTATION-CHECKLIST.md**                                                                                                                                                                                                                 | 维护 checklist                                  | xiaofei #8                                                                                                            |
-| **ADR-42** | **SQLite per-session 直接落 NFS**:每次 run 在 `$SESSION_DIR/storage/conductor.db` 新建独立 DB,session 结束即废弃,不跨 session/user 复用;DB 直接落 NFS(WekaFS)→ conductor crash / sandbox 重新分配都自然恢复,**不再需要 backup → restore 两层**;跨 session 经验通过中心化 KB 服务传递                | 长期共享单库 / 跨 session 复用 / 本地盘 + NFS backup 两层   | 简化部署 + 无需 schema migration + 任何 crash 都不丢失 + KB 已覆盖跨 session 知识 + WekaFS 是企业级 POSIX 兼容,WAL 模式可用(需 self-test 验证,见 T20) |
+| **ADR-42** | **SQLite per-session 直接落 NFS**:每次 run 在 `$SESSION_DIR/storage/coordinator.db` 新建独立 DB,session 结束即废弃,不跨 session/user 复用;DB 直接落 NFS(WekaFS)→ coordinator crash / sandbox 重新分配都自然恢复,**不再需要 backup → restore 两层**;跨 session 经验通过中心化 KB 服务传递                | 长期共享单库 / 跨 session 复用 / 本地盘 + NFS backup 两层   | 简化部署 + 无需 schema migration + 任何 crash 都不丢失 + KB 已覆盖跨 session 知识 + WekaFS 是企业级 POSIX 兼容,WAL 模式可用(需 self-test 验证,见 T20) |
 | **ADR-43** | **KB 中心化共享存储 + 按模型分区 + Critic 唯一入口**:KB 是跨 sandbox/session/user 的中心化共享服务,按 `<model_family>/<model_name>` 二级分区;具体载体由 T13 后续落地(NFS 共享路径 / HTTP service);Critic 是唯一 read/write/synthesis 入口,通过 `kb_query.py` / `kb_ingest.py` 包裹后端;**P0 不依赖真实中心化 KB** | 各 session 本地 KB / 多 agent 直接读写 / P0 即实现中心化 KB | 用户明确要求中心化 + 按模型分类 + Critic 做;但中心化 KB 不是当前主链路阻塞项                                                                       |
 
 
@@ -2296,11 +2296,11 @@ src/inference_optimizer/              # 实现独立目录(统一代码库)
 
 ### 26.0 P0 落地顺序(当前分支优先级)
 
-当前分支不要求一次性完成 4 个真实 agent。为了复用 Gongzheng MVP 已跑通的 Conductor/SQLite/Kernel RPC 底座,落地顺序固定为:
+当前分支不要求一次性完成 4 个真实 agent。为了复用 Gongzheng MVP 已跑通的 Coordinator/SQLite/Kernel RPC 底座,落地顺序固定为:
 
-1. **先跑通主链路**:Conductor + Orchestration + KernelAgent
+1. **先跑通主链路**:Coordinator + Orchestration + KernelAgent
   - Orchestration 能产生 proposal/request
-  - Conductor 能路由 `request{target_agent="kernel"}` / `response`
+  - Coordinator 能路由 `request{target_agent="kernel"}` / `response`
   - KernelAgent 能完成 `select_kernels` / `run_optimization` / `apply_patch` 的最小闭环
   - SQLite events/tasks/cursors/leases 能记录并支持同 session resume
   - P0 action 范围按 §16.5 allowlist;`comm-optimization` / `compiler-tuning` 禁用
@@ -2313,7 +2313,7 @@ src/inference_optimizer/              # 实现独立目录(统一代码库)
   - 只做 heartbeat / basic alert
   - 不主动 `kill_task` / `force_dispatch` / `prune_branch` / `escalate_strategy_change`
   - 调度警察能力等 robustness owner 接入后再启用
-4. **真实 Critic / Robustness 接入后**只替换 adapter 和 prompt,不改 Conductor / Orchestration / KernelAgent 的 wire protocol。
+4. **真实 Critic / Robustness 接入后**只替换 adapter 和 prompt,不改 Coordinator / Orchestration / KernelAgent 的 wire protocol。
 
 
 | ID             | TODO                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 负责人                         | 状态                       |
@@ -2328,8 +2328,8 @@ src/inference_optimizer/              # 实现独立目录(统一代码库)
 | T8             | SQLite WAL 死锁检测算法(环路检测 / timeout 全局监控)和 multi-lane lease 原子获取测试                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | TBD                         | 未启动                      |
 | T9             | 验证 §17.6 evidence-check 规则和崩溃点恢复矩阵是否覆盖所有 19 action                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | TBD                         | 未启动                      |
 | T10            | kernel-opt 只优化原生 kernel,不优化 torch.compile 之后的 kernel(理由:1) torch.compile 后的 kernel 不好优化,2) 损失精度的可能性比较大);先记 TODO,不一定哪期做                                                                                                                                                                                                                                                                                                                                                                                                                                                               | xiaofei                     | 未启动                      |
-| **T0 (P0)**    | **跑通 Conductor + Orchestration + KernelAgent 主链路**:基于 Gongzheng MVP 底座,先不等待真实 Critic/Robustness;Critic/Robustness 使用 mock adapter;验收:REQUEST/RESPONSE 路由、KernelAgent 最小闭环、SQLite 入账、同 session resume、final report 能输出                                                                                                                                                                                                                                                                                                                                                                | xiaofei(当前分支)               | 最高优先级                    |
-| **T11 (v0.6)** | ~~executor → orchestration 代码 rename~~ → **细化到 T19**(具体文件清单)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | xiaofei(本分支整体开发)            | 合并到 T19                  |
+| **T0 (P0)**    | **跑通 Coordinator + Orchestration + KernelAgent 主链路**:基于 Gongzheng MVP 底座,先不等待真实 Critic/Robustness;Critic/Robustness 使用 mock adapter;验收:REQUEST/RESPONSE 路由、KernelAgent 最小闭环、SQLite 入账、同 session resume、final report 能输出                                                                                                                                                                                                                                                                                                                                                                | xiaofei(当前分支)               | 最高优先级                    |
+| **T11 (v0.6)** | ~~orchestration → orchestration 代码 rename~~ → **细化到 T19**(具体文件清单)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | xiaofei(本分支整体开发)            | 合并到 T19                  |
 | **T12 (v0.6)** | **Critic Review 协议(§18)落地**:`CriticReviewGate` 实现 + `REVIEW_VERDICT` intent + 5 verdict(`approve/reject/redirect/advise/needs_review`) + sample-down + Brier 集成;P0 阶段先接 mock adapter,不阻塞 T0                                                                                                                                                                                                                                                                                                                                                                                          | critic 负责人(其他人)+ 先 mock     | P0 用 mock                |
 | **T13 (v0.6)** | **Critic 接管中心化 KB(非 P0)**:(a) `kb.py` 接通 Critic;Codex no-tools + KB 例外 Bash allowlist 落地;(b) **中心化 KB 后端选型**:Option A(`/wekafs/kb/<model_family>/<model_name>/entries.jsonl` + 文件锁,过渡)/ Option B(HTTP service + REST + embedding recall,目标);(c) `kb_query.py` / `kb_ingest.py` 抽象成 client,后端可切换;(d) schema:`{run_id, user_id, model_family, model_name, action, lesson, gain_pct, status, tags, predicted_gain_pct, ts}`;P0 使用空/固定 mock KB hint                                                                                                                                      | critic 负责人(其他人)+ 先 mock     | 后续,不阻塞 T0                |
 | **T14 (v0.6)** | **Robustness always-on + RCA + Handle**:`robustness_intervention.py` + `do_rca` + 4 个调度警察 intent payload schema;P0 阶段只启 heartbeat/basic alert mock,不启调度警察动作,不阻塞 T0                                                                                                                                                                                                                                                                                                                                                                                                                   | robustness 负责人(其他人)+ 先 mock | 部分已实现(Phase G),P0 用 mock |
@@ -2337,8 +2337,8 @@ src/inference_optimizer/              # 实现独立目录(统一代码库)
 | **T16 (v0.6)** | **Multi-CLI 默认关闭**:`cli.py` 默认 `--transport single-proc`;长任务 warning;claw 子 session 能力跟进                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | xiaofei                     | 未启动                      |
 | **T17 (v0.6)** | **单一全模式兼容迁移**:第一步不直接删除 `execution_mode.py` / `feature_flags.py`,而是把所有 mode 映射到同一个 full runtime config,`allowed_modes` 字段先忽略但保留兼容;T0 e2e 跑通后再删除 mode/feature_flags 文件和对应测试                                                                                                                                                                                                                                                                                                                                                                                                            | 整体开发                        | T0 后执行                   |
 | **T18 (v0.6)** | **议会相关代码彻底清理**:`vote` / `parliament_open` / `vote_request` / `_open_parliament` / `_record_vote`;`objection` 改成 `topic="advice"` 软降级                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 整体开发                        | 未启动                      |
-| **T19 (v0.6)** | **executor → orchestration 代码 rename 文件清单**(本分支整体改,不单独 PR):(a) `src/inference_optimizer/orchestrator/system_prompts/executor.md` → `orchestration.md`;(b) `src/inference_optimizer/agents/executor/` → `agents/orchestration/`;(c) `agent_role.py` 里 `AgentName.EXECUTOR` → `ORCHESTRATION` + `default_role_registry` key + `roles_for_run` / `roles_for_mode` 引用;(d) `policy.py` 里 `EXECUTOR_INTENTS` / `KERNEL_OWNED_BY`_* 等常量;(e) `conductor.py` / `agent_card.yaml` / 所有测试 / 所有 `system_prompts/*.md` 提及;(f) `multi_cli/*.py` agent name 字典;(g) docs:`docs/README.md` / 本设计文档已更新 | xiaofei(本分支整体开发)            | 未启动                      |
-| **T20 (v0.6)** | **WekaFS SQLite WAL self-test**(ADR-42 前置):落地前必须跑通(a) 多进程并发 INSERT / SELECT(模拟 Conductor + multi-cli agents 并发 events 写入);(b) `BEGIN IMMEDIATE` 跨表事务原子性;(c) 模拟 sandbox 重启:启动 → 写 → kill -9 → 重启 → 验证 wal/shm 自动 recover;(d) 长跑(2h+)无 lock 升级失败;失败则 fallback 回 "本地盘 + 30min NFS VACUUM INTO backup + restore"两层方案,且更新 §3.5.7 / §17 文档                                                                                                                                                                                                                                                 | xiaofei(本分支整体开发)            | 未启动                      |
+| **T19 (v0.6)** | **orchestration → orchestration 代码 rename 文件清单**(本分支整体改,不单独 PR):(a) `src/inference_optimizer/orchestrator/system_prompts/orchestration.md` → `orchestration.md`;(b) `src/inference_optimizer/agents/orchestration/` → `agents/orchestration/`;(c) `agent_role.py` 里 `AgentName.EXECUTOR` → `ORCHESTRATION` + `default_role_registry` key + `roles_for_run` / `roles_for_mode` 引用;(d) `policy.py` 里 `EXECUTOR_INTENTS` / `KERNEL_OWNED_BY`_* 等常量;(e) `coordinator.py` / `agent_card.yaml` / 所有测试 / 所有 `system_prompts/*.md` 提及;(f) `multi_cli/*.py` agent name 字典;(g) docs:`docs/README.md` / 本设计文档已更新 | xiaofei(本分支整体开发)            | 未启动                      |
+| **T20 (v0.6)** | **WekaFS SQLite WAL self-test**(ADR-42 前置):落地前必须跑通(a) 多进程并发 INSERT / SELECT(模拟 Coordinator + multi-cli agents 并发 events 写入);(b) `BEGIN IMMEDIATE` 跨表事务原子性;(c) 模拟 sandbox 重启:启动 → 写 → kill -9 → 重启 → 验证 wal/shm 自动 recover;(d) 长跑(2h+)无 lock 升级失败;失败则 fallback 回 "本地盘 + 30min NFS VACUUM INTO backup + restore"两层方案,且更新 §3.5.7 / §17 文档                                                                                                                                                                                                                                                 | xiaofei(本分支整体开发)            | 未启动                      |
 
 
 ---

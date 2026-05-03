@@ -1,7 +1,7 @@
 """Objective abstraction — DESIGN v0.6 §11.
 
 The Objective is the goal that drives early-stop, pressure scoring, and
-the Orchestration prompt. The Conductor's long-run loop checks
+the Orchestration prompt. The Coordinator's long-run loop checks
 `objective.reached(state)` after each tick to decide whether to stop.
 
 Four concrete implementations (DESIGN §11.2):
@@ -34,10 +34,10 @@ class ObjectiveError(ValueError):
 # ---------------------------------------------------------------------------
 @dataclass
 class Objective(ABC):
-    """Goal that the Conductor + Orchestration optimize against.
+    """Goal that the Coordinator + Orchestration optimize against.
 
     All implementations are pure functions of the SharedState — they don't
-    touch the bus, the DB, or the LLMs. PolicyGate / Conductor read their
+    touch the bus, the DB, or the LLMs. PolicyGate / Coordinator read their
     output to make stop / pressure / prompt decisions.
     """
 
@@ -60,7 +60,7 @@ class Objective(ABC):
         """Feed to scheduler.pressure(): 0.0 = relaxed, 1.0 = max urgency.
 
         Used by §12 Budget-Aware Scheduler. P2 doesn't run the full
-        scheduler yet but the Conductor still surfaces this value in the
+        scheduler yet but the Coordinator still surfaces this value in the
         Orchestration prompt so the LLM can self-pace.
         """
 
@@ -241,7 +241,7 @@ class TimeOnlyObjective(Objective):
 def build_objective(env: dict[str, Any]) -> Objective:
     """Factory mirroring DESIGN §11.3.
 
-    Required: MAX_HOURS (validated as positive float; the Conductor uses
+    Required: MAX_HOURS (validated as positive float; the Coordinator uses
     it for the wall-clock stop, not us, but we still validate).
     Optional: at most ONE of TARGET_GAIN_PCT / TARGET_TPUT_PER_GPU /
     TARGET_DIR. None → TimeOnlyObjective.
