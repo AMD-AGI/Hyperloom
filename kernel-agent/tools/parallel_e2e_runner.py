@@ -421,8 +421,8 @@ def main() -> int:
                 "--session-id", args.session_id,
                 "--model-name", Path(args.model_path).name,
                 "--framework", "sglang",
-                "--budget-minutes", "30",
-            ], env=env, timeout_s=1800, log_path=run_dir / "logs" / "tracelens_analysis_driver.log")
+                "--budget-minutes", "60",
+            ], env=env, timeout_s=3600, log_path=run_dir / "logs" / "tracelens_analysis_driver.log")
             candidates = analysis.get("hot_kernels", [])
         selected = choose_candidate(candidates, kernel_name=args.kernel_name, kernel_id=args.kernel_id)
         summary["analysis"] = {

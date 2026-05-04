@@ -39,6 +39,8 @@ RUNTIME_API_NAMES = {
     "cudadevicesynchronize",
     "cudastreamsynchronize",
 }
+DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
+LOCAL_BUNDLE_TRACELENS_ROOT = "/wekafs/fully-local/TraceLens-internal"
 
 
 def utc_now() -> str:
@@ -978,9 +980,9 @@ def main() -> int:
     parser.add_argument("--analysis-mode", default="default")
     parser.add_argument("--runtime-env", default="local")
     parser.add_argument("--workspace-path", default=os.environ.get("WORKSPACE_PATH", "/workspace"))
-    parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", "/hyperloom/TraceLens-internal"))
+    parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
     parser.add_argument("--compat-report-path", default="")
-    parser.add_argument("--budget-minutes", type=float, default=30.0)
+    parser.add_argument("--budget-minutes", type=float, default=60.0)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -1007,8 +1009,8 @@ def main() -> int:
                           log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                           started_at=started_at)
             tl_root = Path(args.tracelens_root)
-            if not tl_root.exists() and Path("/wekafs/fully-local/TraceLens-internal").exists():
-                tl_root = Path("/wekafs/fully-local/TraceLens-internal")
+            if not tl_root.exists() and Path(LOCAL_BUNDLE_TRACELENS_ROOT).exists():
+                tl_root = Path(LOCAL_BUNDLE_TRACELENS_ROOT)
             if not tl_root.exists():
                 raise FileNotFoundError(f"TraceLens root not found: {tl_root}")
             run_command([sys.executable, "-m", "pip", "install", "-e", "."],

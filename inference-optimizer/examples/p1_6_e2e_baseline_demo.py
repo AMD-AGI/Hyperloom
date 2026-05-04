@@ -52,10 +52,11 @@ from ..paths import make_session_dir
 
 
 def _check_env() -> None:
-    if not any(os.environ.get(n) for n in ("ANTHROPIC_AUTH_TOKEN",
-                                            "ANTHROPIC_API_KEY")):
+    if not any(os.environ.get(n) for n in (
+        "SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
+    )):
         print(
-            "ERROR: ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY not set.\n"
+            "ERROR: SAFE_API_KEY / legacy ANTHROPIC key not set.\n"
             "Run: set -a && source /wekafs/xiaofei/AgentKernelArena/.env && set +a",
             file=sys.stderr,
         )
@@ -182,7 +183,7 @@ async def _run(ticks: int, model: str | None) -> int:
 
 def main() -> None:
     _check_env()
-    ticks = int(os.environ.get("CONDUCTOR_TICKS", "3"))
+    ticks = int(os.environ.get("COORDINATOR_TICKS", "3"))
     model = os.environ.get("CLAUDE_MODEL", "claude-opus-4-7")
     sys.exit(asyncio.run(_run(ticks=ticks, model=model)))
 
