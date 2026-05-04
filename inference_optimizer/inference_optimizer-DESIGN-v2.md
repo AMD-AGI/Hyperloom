@@ -3,9 +3,9 @@
 > **状态**: Final v0.6（v0.5 基础上统一为单一全模式 + 4 角色重组 + Critic 接管 KB / Sage 能力 + Robustness 接管 Robustness monitor/RCA/Handle + 删除议会模式 + orchestration 改名 orchestration + triage 改名 robustness）
 > **作者**: 主 Agent + xiaofei 共同设计
 > **日期**: 2026-04-30
-> **占位 skill 名**: `inference-optimizer`
+> **占位 skill 名**: `inference_optimizer`
 > **目标读者**: 工程领导评审 + 落地实施 Agent
-> **基线**: 本文档替代 `inference-optimizer-DESIGN.md` v0.4 / `inference-optimizer-DESIGN-modified.md` v0.5;后两者作为历史参考保留
+> **基线**: 本文档替代 `inference_optimizer-DESIGN.md` v0.4 / `inference_optimizer-DESIGN-modified.md` v0.5;后两者作为历史参考保留
 > **实施分工**: zhenggong 已不再继续开发;xiaofei 在当前 kernelAgent 分支上做整体落地（合并或参考 zhenggong 分支重写）;**P0 先跑通 Coordinator + Orchestration + KernelAgent 主链路**;Critic / Robustness 角色由其他人按本文档协议实现,在 P0 阶段先用 mock adapter,不得阻塞主链路
 > **v0.5 → v0.6 摘要**: 删除 quick / guided / marathon 三档分段,统一为单一"全模式";orchestration 改名 orchestration、triage 改名 robustness(贴合 Hyperloom 优化栈架构图 6-agent 命名:4 layer experts = Orchestration/Framework/Kernel/Comm + 2 cross-layer = Critic/Robustness;v0.6 实现其中 4 个,Framework/Comm 见 §7.7 占位);critic 改 Codex gpt-5.4 + 接管 KB read/write + 接管 Sage 能力 + 负责 review 优化建议(approve/reject/redirect/advise),**不做 RCA**;robustness 正式确立为 Robustness monitor + RootCauseAnalysis + Handle 合并体并保留调度警察权限;删除议会(parliament / objection / vote)由 Critic 单 agent review 替代;framework + comm agent 不做;framework-rebuild action 已移除;multi-cli runtime 作为本地过渡方案保留,等待 claw 子 session 能力上线后退役
 
@@ -366,7 +366,7 @@ class SqliteLeaseBackend:
 
 #### 3.5.7 部署 & 生命周期(per-session,直接落 NFS)
 
-- **每次 run = 一个新 session = 一个独立 SQLite DB**:每次 `@inference-optimizer` 触发都新建 `$SESSION_DIR`,在其中初始化空 DB;不跨 session 复用、不跨 user 共享、不需要 schema migration(每次都是 fresh schema)
+- **每次 run = 一个新 session = 一个独立 SQLite DB**:每次 `@inference_optimizer` 触发都新建 `$SESSION_DIR`,在其中初始化空 DB;不跨 session 复用、不跨 user 共享、不需要 schema migration(每次都是 fresh schema)
 - **DB 直接落 NFS(WekaFS)**:`$SESSION_DIR/storage/coordinator.db`,与 personas / state / findings 同 SESSION_DIR;这样 coordinator 进程 crash / sandbox 重启 / sandbox 重新分配只要 `SESSION_DIR` 可访问就能直接重新打开,**不需要 backup → restore 两层**(ADR-42)
 - **前提**:WekaFS 是企业级 POSIX 兼容文件系统,fcntl lock + SQLite WAL 模式应该可用;落地前必须跑 self-test 验证(T20):多进程并发写、断电恢复、wal/shm 文件交互;**self-test 失败的 fallback** 是回到"本地盘 DB + 30min NFS VACUUM INTO backup + restore"两层方案
 - Resume 范围:**仅同一 session 内**有效——coordinator / sandbox 任何形式的 crash 重启,只要 `SESSION_DIR` 还在,DB 就还在,直接打开继续;**session 结束 = DB 废弃**,跨 session 一律不复用
@@ -2021,7 +2021,7 @@ class Coordinator:
 ### 22.1 极简入口(单一全模式)
 
 ```bash
-@inference-optimizer
+@inference_optimizer
 
 MODEL_PATH=/hyperloom/models/DeepSeek-R1-0528
 MODEL_NAME=deepseek-ai/DeepSeek-R1-0528
@@ -2040,7 +2040,7 @@ TARGET_GAIN_PCT=30                   # 或 TARGET_TPUT_PER_GPU=700
 ### 22.2 短任务示例(等价原 quick mode)
 
 ```bash
-@inference-optimizer
+@inference_optimizer
 
 MODEL_PATH=/hyperloom/models/Qwen3-8B
 MODEL_NAME=Qwen/Qwen3-8B
@@ -2059,7 +2059,7 @@ TARGET_GAIN_PCT=10
 ### 22.3 长任务示例
 
 ```bash
-@inference-optimizer
+@inference_optimizer
 
 MODEL_PATH=/hyperloom/models/DeepSeek-R1-0528
 MODEL_NAME=deepseek-ai/DeepSeek-R1-0528
@@ -2098,7 +2098,7 @@ python -m inference_optimizer \
 ## 23. 文件 / 目录结构
 
 ```
-.cursor/skills/inference-optimizer/   # 入口与规则
+.cursor/skills/inference_optimizer/   # 入口与规则
 ├── SKILL.md
 ├── README.md
 └── KNOWLEDGE-BASE.md
@@ -2323,7 +2323,7 @@ src/inference_optimizer/              # 实现独立目录(统一代码库)
 | T3             | ~~KB 跨 user/多 session 隔离策略~~ → **合并到 T13**(中心化 KB 服务原生按 `<model_family>/<model_name>` 分区,user 维度由服务侧 ACL 决定;过渡期可加 user_id 前缀作 namespace)                                                                                                                                                                                                                                                                                                                                                                                                                                             | TBD                         | 合并                       |
 | T4             | 验证 Codex no-tools + KB 例外 allowlist 的稳定性、repair 策略和 schema validation;测试 PolicyGate 字符串前缀匹配是否能挡住 `python3 kb_query.py && malicious_cmd`                                                                                                                                                                                                                                                                                                                                                                                                                                              | 实施 agent                    | 未启动                      |
 | T5             | KB schema(entries.jsonl + insights.jsonl + conflicts.jsonl + embeddings)的具体 schema 设计;`kb_query` 是否引入 embedding-based recall                                                                                                                                                                                                                                                                                                                                                                                                                                                         | TBD                         | 未启动                      |
-| T6             | 新 skill 名最终定稿(占位 `inference-optimizer`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | xiaofei                     | 占位                       |
+| T6             | 新 skill 名最终定稿(占位 `inference_optimizer`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | xiaofei                     | 占位                       |
 | T7             | 跨前端(Cursor / ClaudeCode)测试矩阵                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | TBD                         | 未启动                      |
 | T8             | SQLite WAL 死锁检测算法(环路检测 / timeout 全局监控)和 multi-lane lease 原子获取测试                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | TBD                         | 未启动                      |
 | T9             | 验证 §17.6 evidence-check 规则和崩溃点恢复矩阵是否覆盖所有 19 action                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | TBD                         | 未启动                      |

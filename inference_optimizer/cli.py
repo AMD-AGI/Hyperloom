@@ -2,7 +2,7 @@
 
 Usage::
 
-    inference-optimizer optimize \\
+    inference_optimizer optimize \\
         --model /wekafs/models/Qwen-Qwen3-8B \\
         --target-gain 10 \\
         --max-hours 2
@@ -378,7 +378,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="inference-optimizer",
+        prog="inference_optimizer",
         description="Inference Optimizer v0.6 — multi-agent SGLang/vLLM optimization",
     )
     p.add_argument("--verbose", "-v", action="count", default=0,
