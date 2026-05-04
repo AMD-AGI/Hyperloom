@@ -13,7 +13,7 @@ and starts ``Coordinator.run()`` until target / time / SIGTERM.
 
 Env vars consumed (besides the standard backend creds):
 
-  ANTHROPIC_AUTH_TOKEN  /  ANTHROPIC_BASE_URL  — required for Claude
+  OPENAI_BASE_URL + SAFE_API_KEY — canonical LiteLLM endpoint; compatibility aliases are exported for Claude/OOB/GEAK
   ROCR_VISIBLE_DEVICES                         — pin the GPU
   CLAUDE_MODEL                                 — default claude-opus-4-7
   CODEX_MODEL                                  — default gpt-5.4
