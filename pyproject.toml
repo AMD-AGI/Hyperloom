@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hyperloom-inference-optimizer"
+name = "hyperloom-inference_optimizer"
 version = "0.6.0"
 description = "Inference Optimizer v0.6 — single-mode 4-agent (Orchestration/Kernel/Critic/Robustness) autonomous LLM inference optimization runtime for AMD GPU platforms."
 readme = "README.md"
@@ -22,19 +22,10 @@ test = [
 ]
 
 [project.scripts]
-inference-optimizer = "inference_optimizer.cli:main"
+inference_optimizer = "inference_optimizer.cli:main"
 
-# v0.6 follows the Hyperloom "top-level skill directory" convention
-# (alongside `marathon/` and `kernel-agent/`). The skill directory uses a
-# hyphen (`inference-optimizer/`) to match those siblings; setuptools maps
-# it to the Python module name `inference_optimizer` (underscore) so that
-# code can `import inference_optimizer.orchestrator` etc.
-#
-# Because the hyphen ↔ underscore mapping doesn't compose with
-# `[tool.setuptools.packages.find]`, packages + package_dir are computed
-# dynamically in `setup.py` (which simply walks the skill dir).
-[tool.setuptools.dynamic]
-# packages + package-dir provided by setup.py
+# Packages are provided by setup.py so editable installs use the same package
+# discovery as local source runs.
 
 [tool.setuptools.package-data]
 inference_optimizer = [
@@ -53,5 +44,5 @@ inference_optimizer = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["inference-optimizer/tests"]
+testpaths = ["inference_optimizer/tests"]
 pythonpath = ["."]

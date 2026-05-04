@@ -5,7 +5,7 @@ Two distinct path concepts:
 1. **Session paths** — per-run mutable artifacts (SQLite DB, state.json,
    personas, results, findings). Production NFS layout::
 
-        /hyperloom/inference-optimizer-sessions/<session_id>/
+        /hyperloom/inference_optimizer-sessions/<session_id>/
             storage/coordinator.db
             state.json
             personas/  checkpoints/  kb/  results/  findings/
@@ -26,7 +26,7 @@ import os
 import uuid
 from pathlib import Path
 
-DEFAULT_PROD_ROOT = Path("/hyperloom/inference-optimizer-sessions")
+DEFAULT_PROD_ROOT = Path("/hyperloom/inference_optimizer-sessions")
 ENV_OVERRIDE_ROOT = "INFERENCE_OPTIMIZER_SESSION_ROOT"
 ENV_OVERRIDE_DB_PATH = "INFERENCE_OPTIMIZER_DB_PATH"
 ENV_OVERRIDE_ASSET_ROOT = "INFERENCE_OPTIMIZER_ASSET_ROOT"
