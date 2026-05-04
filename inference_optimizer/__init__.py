@@ -1,17 +1,13 @@
-"""Import-compatible package facade for the legacy ``inference-optimizer`` tree."""
+"""Inference Optimizer v0.6 — single-mode 4-agent runtime.
 
-from __future__ import annotations
+Roles (DESIGN v0.6 §7):
 
-from pathlib import Path
+* Orchestration — proposes actions, delegates sub-agents, REQUESTs Kernel
+* Kernel        — owns 5 deep-kernel actions, responder-only via REQUEST/RESPONSE
+* Critic        — reviews proposals (approve/reject/redirect/advise), owns KB
+* Robustness    — always-on health monitoring, RCA, recovery, scheduling police
 
-_LEGACY_PACKAGE_ROOT = Path(__file__).resolve().parent.parent / "inference-optimizer"
+See ``inference_optimizer-DESIGN-v2.md`` for the canonical specification.
+"""
 
-if not _LEGACY_PACKAGE_ROOT.is_dir():
-    raise ImportError(f"legacy inference-optimizer package root not found: {_LEGACY_PACKAGE_ROOT}")
-
-# Keep submodule imports such as ``inference_optimizer.orchestrator`` resolving
-# to the existing source tree without renaming the on-disk directory.
-__path__ = [str(_LEGACY_PACKAGE_ROOT)]
-
-_legacy_init = _LEGACY_PACKAGE_ROOT / "__init__.py"
-exec(compile(_legacy_init.read_text(encoding="utf-8"), str(_legacy_init), "exec"), globals())
+__version__ = "0.6.0"
