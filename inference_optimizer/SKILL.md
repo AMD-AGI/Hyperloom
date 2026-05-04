@@ -109,19 +109,28 @@ Kernel-agent is a reusable downstream skill. Before launching
 `inference_optimizer.cli`, read and follow `$REPO_ROOT/kernel-agent/SKILL.md`,
 especially `Installation`, `TraceLens Requirements`, and `Backend Selection`.
 This makes the same kernel-agent work both standalone and under
-inference_optimizer. The launcher should invoke kernel-agent's installer rather
-than duplicating backend setup logic:
+inference_optimizer. A user request to optimize a model is approval to install
+the required kernel-agent runtime on a fresh node; do not stop for an extra
+confirmation before running the installer. The installer may set up TraceLens,
+OOB, Node/npm, Claude/Codex CLIs, local auth files, and the OOB auth-proxy.
+Invoke it instead of duplicating backend setup logic:
 
 ```bash
 export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
-export PATH="/opt/venv/bin:/usr/local/bin:$PATH"
+export PATH="/opt/venv/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
 bash "$HYPERLOOM_KERNEL_AGENT_ROOT/scripts/install.sh" --with-oob
 . "$HYPERLOOM_KERNEL_AGENT_ROOT/env.sh"
 ```
+
+Do not collapse dependent exports into a single command when `set -u` is active.
+Bash expands every right-hand side before assigning the left-hand sides, so
+`export HYPERLOOM_KERNEL_AGENT_ROOT=... KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"`
+can fail with `unbound variable` on a clean environment. Assign and export
+dependent variables on separate lines as shown above.
 
 Kernel backends submit Ray tasks with `num_gpus>=1`, so Ray must advertise all
 visible GPUs. Do not start Ray with `--num-gpus=0`; that leaves kernel
@@ -136,11 +145,16 @@ except Exception:
     print(1)
 PY
 )}"
-"$PYTHON" -m ray stop --force || true
-"$PYTHON" -m ray start --head --disable-usage-stats \
+command -v ray >/dev/null
+ray stop --force || true
+ray start --head --disable-usage-stats \
   --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
-"$PYTHON" -m ray status
+ray status
 ```
+
+Use the `ray` CLI from `PATH`, not `"$PYTHON" -m ray`; Ray does not expose a
+`ray.__main__` module in this environment, so `python -m ray` fails before the
+optimizer can launch.
 
 Magpie must be importable by the launcher Python. If it is missing, install it
 before launching:
