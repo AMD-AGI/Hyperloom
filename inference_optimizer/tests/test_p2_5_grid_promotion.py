@@ -98,7 +98,7 @@ async def test_materialize_falls_back_to_baseline_when_no_current_best(session_d
         assert tasks
         assert tasks[0].params["base_tput"] == 750.0
         assert tasks[0].params["base_extra_args"] == ""
-        assert tasks[0].params["max_candidates_per_round"] == 3
+        assert tasks[0].params["max_candidates_per_round"] == 5
     finally:
         await c.stop()
 

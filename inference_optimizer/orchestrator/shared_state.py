@@ -98,6 +98,11 @@ class SharedState:
     # Persistent params DFS state. ParamsExecutor owns the search mechanics,
     # Coordinator is still the only writer to state.json.
     params_search: dict[str, Any] = field(default_factory=dict)
+    # E2E integrate bookkeeping keyed by kernel_id + patch_path + args. This
+    # prevents Orchestration from spending hours re-validating the same patch
+    # after repeated NEEDS_REVIEW/REVERT outcomes.
+    kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
+    rejected_kernel_patches: list[dict[str, Any]] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Persistence
@@ -191,6 +196,142 @@ class SharedState:
             f"decision={ko.get('decision','?')} "
             f"speedup={ko.get('micro_speedup','?')}"
         )
+
+    def _resolve_kernel_patch_identity(
+        self, payload: dict[str, Any] | None,
+    ) -> tuple[str, str, str, str]:
+        payload = payload or {}
+        kernel_id = str(payload.get("kernel_id") or "")
+        patch_path = str(
+            payload.get("patch_path")
+            or payload.get("best_artifact_path")
+            or ""
+        )
+        if (
+            not patch_path
+            and kernel_id
+            and str((self.last_kernel_opt or {}).get("kernel_id") or "") == kernel_id
+        ):
+            patch_path = str(
+                (self.last_kernel_opt or {}).get("best_artifact_path")
+                or (self.last_kernel_opt or {}).get("patch_path")
+                or ""
+            )
+        target_file = str(
+            payload.get("target_file")
+            or payload.get("source_file")
+            or ""
+        )
+        extra_args = str(payload.get("extra_sglang_args") or "").strip()
+        return kernel_id, patch_path, target_file, extra_args
+
+    def kernel_patch_key(self, payload: dict[str, Any] | None) -> str:
+        kernel_id, patch_path, _target_file, extra_args = (
+            self._resolve_kernel_patch_identity(payload)
+        )
+        if not kernel_id or not patch_path:
+            return ""
+        return "|".join([kernel_id, patch_path, extra_args])
+
+    def find_rejected_kernel_patch(
+        self,
+        payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        key = self.kernel_patch_key(payload)
+        if not key:
+            return None
+        for entry in self.rejected_kernel_patches:
+            if isinstance(entry, dict) and entry.get("key") == key:
+                return entry
+        return None
+
+    def record_kernel_integrate_result(
+        self,
+        result: dict[str, Any],
+        *,
+        max_attempts: int = 3,
+        keep_threshold_pct: float = 1.0,
+    ) -> dict[str, Any] | None:
+        """Persist one integrate E2E result and reject exhausted patch attempts."""
+        if not isinstance(result, dict):
+            return None
+        key = self.kernel_patch_key(result)
+        if not key:
+            return None
+        kernel_id, patch_path, target_file, extra_args = (
+            self._resolve_kernel_patch_identity(result)
+        )
+        entry = dict(self.kernel_integrate_attempts.get(key) or {})
+        attempts = list(entry.get("attempts") or [])
+        attempt = {
+            "decision": result.get("decision"),
+            "status": result.get("status"),
+            "new_tput": result.get("new_tput"),
+            "gain_pct": result.get("gain_pct"),
+            "workspace": result.get("workspace"),
+            "report_path": result.get("report_path"),
+            "ts": _now_iso(),
+        }
+        attempts.append(attempt)
+        best_gain = max(
+            (
+                float(a.get("gain_pct"))
+                for a in attempts
+                if isinstance(a, dict) and isinstance(a.get("gain_pct"), (int, float))
+            ),
+            default=0.0,
+        )
+        entry.update({
+            "key": key,
+            "kernel_id": kernel_id,
+            "patch_path": patch_path,
+            "target_file": target_file,
+            "extra_sglang_args": extra_args,
+            "attempts": attempts,
+            "attempt_count": len(attempts),
+            "best_gain_pct": best_gain,
+            "last_decision": result.get("decision"),
+            "last_status": result.get("status"),
+            "updated_at": _now_iso(),
+        })
+        self.kernel_integrate_attempts[key] = entry
+
+        if result.get("decision") == "KEEP":
+            return entry
+
+        should_reject = (
+            result.get("decision") == "REVERT"
+            or len(attempts) >= max_attempts
+        )
+        if not should_reject:
+            return entry
+
+        reason = (
+            "revert_decision"
+            if result.get("decision") == "REVERT"
+            else f"max_e2e_attempts_{max_attempts}_without_keep"
+        )
+        rejected = {
+            "key": key,
+            "kernel_id": kernel_id,
+            "patch_path": patch_path,
+            "target_file": target_file,
+            "extra_sglang_args": extra_args,
+            "attempt_count": len(attempts),
+            "best_gain_pct": best_gain,
+            "keep_threshold_pct": keep_threshold_pct,
+            "last_decision": result.get("decision"),
+            "reason": reason,
+            "ts": _now_iso(),
+        }
+        self.rejected_kernel_patches = [
+            r for r in self.rejected_kernel_patches
+            if not (isinstance(r, dict) and r.get("key") == key)
+        ]
+        self.rejected_kernel_patches.append(rejected)
+        entry["rejected"] = rejected
+        self.kernel_integrate_attempts[key] = entry
+        return entry
 
     def record_kernel_opt(self, result: dict[str, Any]) -> None:
         """Capture the result returned by kernel_optimization_handler so the
@@ -364,9 +505,22 @@ class SharedState:
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"params_search={self._format_params_search()}",
             f"last_kernel_opt={self._format_last_kernel_opt()}",
+            f"rejected_kernel_patches={self._format_rejected_kernel_patches()}",
             f"stop_reason={self.stop_reason or '(none)'}",
         ]
         return "\n".join(lines)
+
+    def _format_rejected_kernel_patches(self) -> str:
+        if not self.rejected_kernel_patches:
+            return "(none)"
+        return [
+            (
+                f"{r.get('kernel_id','?')}: attempts={r.get('attempt_count','?')} "
+                f"best_gain={r.get('best_gain_pct','?')} reason={r.get('reason','?')}"
+            )
+            for r in self.rejected_kernel_patches[-5:]
+            if isinstance(r, dict)
+        ] or "(none)"
 
     def _format_params_search(self) -> str:
         if not self.params_search:
