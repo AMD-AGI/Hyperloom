@@ -47,8 +47,10 @@ from ..paths import make_session_dir
 
 
 def _check_env() -> None:
-    if not any(os.environ.get(n) for n in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")):
-        print("ERROR: ANTHROPIC_AUTH_TOKEN not set.", file=sys.stderr)
+    if not any(os.environ.get(n) for n in (
+        "SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
+    )):
+        print("ERROR: SAFE_API_KEY not set.", file=sys.stderr)
         sys.exit(2)
     if os.environ.get("HIP_VISIBLE_DEVICES"):
         print(
@@ -212,7 +214,7 @@ async def _run(ticks: int, claude_model: str, codex_model: str) -> int:
 
 def main() -> None:
     _check_env()
-    ticks = int(os.environ.get("CONDUCTOR_TICKS", "4"))
+    ticks = int(os.environ.get("COORDINATOR_TICKS", "4"))
     claude_model = os.environ.get("CLAUDE_MODEL", "claude-opus-4-7")
     codex_model = os.environ.get("CODEX_MODEL", "gpt-5.4")
     sys.exit(asyncio.run(_run(ticks=ticks, claude_model=claude_model,

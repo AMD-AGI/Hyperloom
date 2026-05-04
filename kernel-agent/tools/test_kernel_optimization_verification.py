@@ -13,20 +13,30 @@ def _args(**overrides):
         "accuracy_passed": None,
         "correctness_passed": None,
         "dry_run": False,
+        "source_file": "/tmp/source.hip",
     }
     base.update(overrides)
     return Namespace(**base)
 
 
-def _attempt(report: Path | None = None):
+def _attempt(report: Path | None = None, artifact: Path | None = None):
     paths = {}
     if report is not None:
         paths["report"] = str(report)
+        if artifact is None:
+            artifact = report.parent / "optimized.hip"
+    if artifact is not None:
+        if not artifact.exists():
+            artifact.write_text(
+                "#include <hip/hip_runtime.h>\nextern \"C\" void optimized_kernel() {}\n",
+                encoding="utf-8",
+            )
+        paths["partial_latest_optimized"] = str(artifact)
     return {
         "status": "completed",
         "attempt_id": "a1",
         "backend": "claude",
-        "optimized_path": "/tmp/optimized.hip",
+        "optimized_path": str(artifact or "/tmp/optimized.hip"),
         "backend_paths": paths,
     }
 
@@ -62,6 +72,80 @@ def test_report_correctness_passes_when_explicit(tmp_path):
     assert ko.make_proposal(verification)["decision"] == "KEEP"
 
 
+def test_report_correctness_passes_with_machine_marker(tmp_path):
+    report = tmp_path / "optimization_report.md"
+    report.write_text(
+        "Compared with the baseline.\n[CORRECTNESS] PASS\n[MICRO_SPEEDUP] 1.28x\n",
+        encoding="utf-8",
+    )
+    verification = ko.build_verification(
+        _args(e2e_gain_pct=1.0, accuracy_passed=True),
+        [_attempt(report)],
+        benchmark_available=True,
+    )
+    assert verification["correctness_passed"] is True
+    assert verification["correctness_source"] == "report_scan"
+    assert verification["micro_speedup"] == 1.28
+
+
+def test_report_correctness_passes_with_reference_language(tmp_path):
+    report = tmp_path / "optimization_report.md"
+    report.write_text(
+        "The optimized implementation matches reference outputs for all test shapes.\n"
+        "Speedup: 1.41x\n",
+        encoding="utf-8",
+    )
+    verification = ko.build_verification(
+        _args(e2e_gain_pct=1.0, accuracy_passed=True),
+        [_attempt(report)],
+        benchmark_available=True,
+    )
+    assert verification["correctness_passed"] is True
+    assert verification["correctness_source"] == "report_scan"
+
+
+def test_extracts_complete_source_from_text_artifact(tmp_path):
+    artifact = tmp_path / "optimized.txt"
+    artifact.write_text(
+        "Final code:\n```hip\n#include <hip/hip_runtime.h>\n"
+        "extern \"C\" void optimized_kernel() {}\n```\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "optimization_report.md"
+    report.write_text(
+        "[CORRECTNESS] PASS\n[MICRO_SPEEDUP] 1.25x\n",
+        encoding="utf-8",
+    )
+    verification = ko.build_verification(
+        _args(e2e_gain_pct=1.0, accuracy_passed=True),
+        [_attempt(report, artifact=artifact)],
+        benchmark_available=True,
+    )
+    assert verification["artifact_valid"] is True
+    assert verification["artifact_source"] == "extracted_code_block"
+    assert verification["best_artifact_path"].endswith("_extracted.hip")
+    assert ko.make_proposal(verification)["decision"] == "KEEP"
+
+
+def test_complete_kernel_artifact_can_integrate_without_e2e_yet(tmp_path):
+    report = tmp_path / "optimization_report.md"
+    report.write_text(
+        "[CORRECTNESS] PASS\n[MICRO_SPEEDUP] 1.30x\n",
+        encoding="utf-8",
+    )
+    verification = ko.build_verification(
+        _args(),
+        [_attempt(report)],
+        benchmark_available=True,
+    )
+    proposal = ko.make_proposal(verification)
+    assert verification["artifact_valid"] is True
+    assert verification["e2e_gain_pct"] is None
+    assert verification["accuracy_passed"] is None
+    assert proposal["decision"] == "KEEP"
+    assert "deferred to integrate" in proposal["reasons"][0]
+
+
 def test_report_correctness_failure_blocks_keep(tmp_path):
     report = tmp_path / "optimization_report.md"
     report.write_text(
@@ -79,10 +163,11 @@ def test_report_correctness_failure_blocks_keep(tmp_path):
 
 
 def test_cli_correctness_override(tmp_path):
+    artifact = tmp_path / "optimized.hip"
     verification = ko.build_verification(
         _args(correctness_passed=True, micro_speedup=1.25,
               e2e_gain_pct=0.5, accuracy_passed=True),
-        [_attempt()],
+        [_attempt(artifact=artifact)],
         benchmark_available=False,
     )
     assert verification["correctness_passed"] is True
