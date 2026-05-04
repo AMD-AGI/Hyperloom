@@ -1,6 +1,6 @@
 """P2-4 end-to-end demo: full skill flow exercised with bounded ticks.
 
-This is the runnable companion to ``inference-optimizer optimize`` for
+This is the runnable companion to ``inference_optimizer optimize`` for
 people who want a Python script form (and a small smoke ticks count by
 default so it doesn't take 2h to validate).
 
@@ -29,7 +29,7 @@ Usage::
 
 For a true 2h end-to-end run with a hard target, prefer the CLI::
 
-    inference-optimizer optimize \\
+    inference_optimizer optimize \\
         --model /wekafs/models/Qwen-Qwen3-8B \\
         --target-gain 10 --max-hours 2 -v
 """

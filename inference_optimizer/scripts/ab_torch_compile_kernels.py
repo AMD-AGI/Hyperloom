@@ -34,7 +34,7 @@ from typing import Any
 
 import yaml
 
-# kernel-agent lives next to inference-optimizer under Hyperloom/
+# kernel-agent lives next to inference_optimizer under Hyperloom/
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _TL = _REPO_ROOT / "kernel-agent" / "tools" / "tracelens_analysis.py"
 if _TL.is_file():
