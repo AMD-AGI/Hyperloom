@@ -281,6 +281,9 @@ runs) because raw random prompts can make acceptance-rate results misleading.
 When judging a SGLang candidate, compare at least `1k/1k` and `8k/1k`, and
 include both low and high concurrency if the model fits. Keep parameters only
 when throughput improves without unacceptable TTFT/E2E or correctness regressions.
+Coordinator-managed long runs test params incrementally with
+`max_candidates_per_round=5` by default; direct runner calls may pass `0` to run
+the full grid.
 
 Do not edit the default Qwen YAML for a new model. Materialize a run-specific
 asset root and override only the benchmark configs for that run:
@@ -605,6 +608,25 @@ backed up.
 
 If the user has not explicitly approved environment mutation, stop before real
 apply/rebuild and ask. Dry-run and analysis are safe.
+
+## Kernel E2E Retry Discipline
+
+Microbench speedups are not enough. After `run_optimization` returns a candidate
+kernel patch, `integrate` must validate the patch with E2E Magpie throughput and
+record every attempt in `state.json`.
+
+For the same `kernel_id + patch_path + EXTRA_SGLANG_ARGS`:
+
+- `KEEP`: accept only when E2E gain clears the configured threshold.
+- `REVERT`: reject that patch immediately and do not run it again.
+- `NEEDS_REVIEW`: allow at most 3 E2E attempts. If none clears the KEEP
+  threshold, reject that patch and move on to params search or a different
+  reusable native kernel.
+
+Do not repeatedly integrate the same patch because its microbench was strong.
+If E2E results are unstable around zero gain, the correct action is to mark the
+patch rejected, preserve the artifacts for human review, and spend the remaining
+budget on untested params/backend candidates or the next kernel.
 
 ## Failure Handling
 
