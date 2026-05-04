@@ -70,7 +70,7 @@ EMIT_INTENT_TOOL_INPUT_SCHEMA: dict[str, Any] = {
 
 
 EMIT_INTENT_TOOL_DESCRIPTION = (
-    "Emit ONE structured intent into the inference-optimizer system. This "
+    "Emit ONE structured intent into the inference_optimizer system. This "
     "is the only way to communicate decisions, messages, or actions; "
     "free-text replies are ignored. Call once per intent — to emit several "
     "intents in a single turn, call this tool multiple times."

@@ -245,7 +245,7 @@ class PolicyGate:
             raise PolicyDenied(
                 f"unknown action_name={action_name!r} (not in ActionRegistry)",
                 rule="unknown_action",
-                hint="register a yaml under inference-optimizer/actions/_meta/<name>.yaml",
+                hint="register a yaml under inference_optimizer/actions/_meta/<name>.yaml",
             )
 
     def _validate_propose_action(self, role: "AgentRole", payload: dict[str, Any]) -> None:
