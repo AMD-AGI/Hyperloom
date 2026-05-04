@@ -15,7 +15,7 @@ What it exercises:
   Coordinator's `kernel_request_handlers` runs the Hyperloom kernel-agent
   shell tools (or stub for integrate) and emits the RESPONSE.
 
-  After ``CONDUCTOR_TICKS`` (default 6), the report runner writes the
+  After ``COORDINATOR_TICKS`` (default 6), the report runner writes the
   final.md / final.json under ``$SESSION_DIR/report/``.
 
 Usage::
@@ -24,7 +24,7 @@ Usage::
     unset HIP_VISIBLE_DEVICES
     export ROCR_VISIBLE_DEVICES=1 PATH=/opt/venv/bin:$PATH
     export CLAUDE_MODEL=claude-opus-4-7  CODEX_MODEL=gpt-5.4
-    export CONDUCTOR_TICKS=6        # ~5-10 min total
+    export COORDINATOR_TICKS=6        # ~5-10 min total
     python -m inference_optimizer.examples.p2_full_optimize_demo
 
 For a true 2h end-to-end run with a hard target, prefer the CLI::
@@ -169,7 +169,7 @@ async def _run(ticks: int, target_gain: float) -> int:
 
 
 def main() -> None:
-    ticks = int(os.environ.get("CONDUCTOR_TICKS", "6"))
+    ticks = int(os.environ.get("COORDINATOR_TICKS", "6"))
     target_gain = float(os.environ.get("TARGET_GAIN", "10"))
     sys.exit(asyncio.run(_run(ticks=ticks, target_gain=target_gain)))
 
