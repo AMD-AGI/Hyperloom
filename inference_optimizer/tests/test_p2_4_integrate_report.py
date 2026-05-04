@@ -72,7 +72,7 @@ def _write_baseline_yaml(path: Path) -> None:
 
 def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
     workspace = slot / "benchmark_sglang_smoke"
-    workspace.mkdir(parents=True)
+    workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "benchmark_report.json").write_text(json.dumps({
         "success": True, "framework": "sglang",
         "model": "/wekafs/models/Qwen-Qwen3-8B",
@@ -466,7 +466,10 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
                     },
                 },
             ))
-        responses = await c.bus.tail(topic="response", to_agent="orchestration")
+        responses = sorted(
+            await c.bus.tail(topic="response", to_agent="orchestration"),
+            key=lambda msg: msg.seq,
+        )
         assert responses
         r = responses[0]
         assert r.payload["kind"] == "integrate_done"
@@ -481,6 +484,74 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
             and item.get("kernel_id") == "k1"
             for item in c.shared_state.optimization_stack
         )
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
+    session_dir, tmp_path,
+):
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+    run_calls = 0
+
+    def _fake_run(cmd, *args, **kwargs):
+        nonlocal run_calls
+        run_calls += 1
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=805.0)  # +0.625%, below KEEP threshold.
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="ok", stderr="",
+        )
+
+    c = Coordinator(session_dir, backends=_backends_silent())
+    try:
+        payload = {
+            "target_agent": "kernel",
+            "kind": "integrate",
+            "params": {
+                "base_tput": 800.0,
+                "config_path": str(base_yaml),
+                "kernel_id": "k_repeat",
+                "patch_path": str(patch_file),
+                "target_file": str(target),
+                "allow_unknown_target": True,
+                "skip_rebuild": True,
+            },
+        }
+        with patch("subprocess.run", side_effect=_fake_run):
+            for _ in range(4):
+                await c._handle_intent(
+                    "orchestration",
+                    Intent(type=IntentType.REQUEST, payload=payload),
+                )
+
+        responses = sorted(
+            await c.bus.tail(topic="response", to_agent="orchestration"),
+            key=lambda msg: msg.seq,
+        )
+        integrate_results = [
+            r.payload["result"]
+            for r in responses
+            if r.payload.get("kind") == "integrate_done"
+        ]
+        assert len(integrate_results) == 4
+        assert run_calls == 3
+        assert [r["decision"] for r in integrate_results[:3]] == [
+            "NEEDS_REVIEW",
+            "NEEDS_REVIEW",
+            "NEEDS_REVIEW",
+        ]
+        assert integrate_results[-1]["status"] == "skipped"
+        assert integrate_results[-1]["decision"] == "REVERT"
+        assert integrate_results[-1]["error_class"] == "kernel_patch_rejected"
+
+        saved = SharedState.load_or_init(session_dir)
+        assert saved.rejected_kernel_patches
+        assert saved.rejected_kernel_patches[0]["kernel_id"] == "k_repeat"
     finally:
         await c.stop()
 
