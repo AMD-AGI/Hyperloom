@@ -2,7 +2,7 @@
 # Kernel Agent installer.
 #
 # Base install is intentionally small and deterministic:
-#   - ray==2.44.1 + click<8.3
+#   - ray[default]==2.44.1 + click<8.3.0
 #   - TraceLens editable install + CLI verification
 #
 # Backends are lazy: install only what a request needs, or use --all-backends.
@@ -13,7 +13,7 @@ WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${WORKSPACE_PATH}/kernel-agent}"
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
-TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens-internal}"
+TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 # Default to the LitellmModel-fixed branch. Upstream main works ONLY when the
 # model is reached via amd_llm + AMD LLM Gateway (anthropic SDK direct). On
@@ -54,7 +54,7 @@ usage() {
 Usage: install.sh [options]
 
 Base install always ensures:
-  ray==2.44.1, click<8.3, TraceLens CLI
+  ray[default]==2.44.1, click<8.3.0, TraceLens CLI
 
 Options:
   --with-geak        Install GEAK CLI/config only
@@ -108,9 +108,9 @@ ensure_python() {
 }
 
 ensure_ray() {
-  log "ensuring ray==2.44.1 and click<8.3"
+  log "ensuring ray[default]==2.44.1 and click<8.3.0"
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install -q --no-cache-dir "ray==2.44.1" "click<8.3"
+    run python3 -m pip install --quiet --no-cache-dir "click<8.3.0" "ray[default]==2.44.1"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
     python3 - <<'PY'
@@ -335,7 +335,7 @@ write_env_file() {
     [ -n "${GEAK_API_KEY_VAL}" ] && echo "export GEAK_API_KEY='${GEAK_API_KEY_VAL}'"
     [ -n "${GEAK_BASE_URL_VAL}" ] && echo "export GEAK_BASE_URL='${GEAK_BASE_URL_VAL}'"
   } > "$env_file"
-  chmod 644 "$env_file"
+  chmod 600 "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
 }
 

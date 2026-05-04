@@ -1,6 +1,6 @@
 ---
 name: kernel-agent
-description: Resident Claude skill for Hyperloom Kernel Agent. Use when Executor asks to analyze TraceLens traces, find hot kernels, run GEAK/Claude/Codex kernel optimization, monitor CLI logs, and return optimization results with KEEP/PARTIAL/NEEDS_REVIEW/REVERT proposals.
+description: Resident Claude skill for Hyperloom Kernel Agent. Use when Coordinator or Orchestration requests TraceLens trace analysis, hot-kernel discovery, GEAK/Claude/Codex kernel optimization, CLI log monitoring, and KEEP/PARTIAL/NEEDS_REVIEW/REVERT proposals.
 ---
 
 # Kernel Agent
@@ -126,11 +126,11 @@ planned actions without installing.
 
 ### `tracelens_analysis`
 
-Use this when Executor asks for hot kernels from a trace.
+Use this when Coordinator or Orchestration requests hot kernels from a trace.
 
 Inputs:
 - `trace_input`: trace file, filtered trace, or TraceLens capture directory.
-- `session_id`: stable session id from Executor; generate one only if absent.
+- `session_id`: stable session id from Coordinator; generate one only if absent.
 - `model_name`, `framework`, `top_k`.
 - Optional: `target_platform` default `MI355X`, `analysis_mode` default
   `default`, `runtime_env` default `local`.
@@ -151,13 +151,13 @@ The tool must return `hot_kernels`, `trace_report_path`, `cli_log_path`, and
 
 ### `kernel_optimization`
 
-Use this when Executor asks to optimize a specific kernel.
+Use this when Coordinator or Orchestration requests optimization for a specific kernel.
 
 Inputs:
 - `kernel_id`.
 - Optional explicit `backends`: comma separated `geak,claude,codex`.
 - Optional `benchmark_file` or `test_harness_path`.
-- Optional E2E/accuracy evidence from Executor.
+- Optional E2E/accuracy evidence from Coordinator or Orchestration.
 
 Run:
 

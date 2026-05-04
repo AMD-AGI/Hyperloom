@@ -12,10 +12,10 @@ Usage::
 
 The script:
 
-* Verifies that ``ANTHROPIC_AUTH_TOKEN`` (or ``ANTHROPIC_API_KEY``) is set
+* Verifies that ``SAFE_API_KEY`` (or legacy ``ANTHROPIC_AUTH_TOKEN`` / ``ANTHROPIC_API_KEY``) is set
 * Builds a Coordinator with all 4 agents wired
 * Registers a one-line ``baseline`` runner (same as p0_main_loop)
-* Runs ``CONDUCTOR_TICKS`` ticks (default 4) so Orchestration has room
+* Runs ``COORDINATOR_TICKS`` ticks (default 4) so Orchestration has room
   to propose → see verdict → request Kernel → see response
 * Prints highlight events + a per-tick event count so we can watch the
   4-agent main path actually flow with a real LLM driving Orchestration
@@ -37,7 +37,7 @@ from ..orchestrator.coordinator import Coordinator
 from ..paths import make_session_dir
 
 
-ENV_TOKEN_NAMES = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
+ENV_TOKEN_NAMES = ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
 
 
 def _check_env() -> None:
@@ -49,9 +49,9 @@ def _check_env() -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-    base = os.environ.get("ANTHROPIC_BASE_URL")
+    base = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
     if base:
-        print(f"Using ANTHROPIC_BASE_URL={base}")
+        print(f"Using LLM base URL={base}")
 
 
 async def _baseline_executor(ctx) -> dict:
@@ -122,7 +122,7 @@ async def _run(ticks: int, model: str | None) -> int:
 
 def main() -> None:
     _check_env()
-    ticks = int(os.environ.get("CONDUCTOR_TICKS", "4"))
+    ticks = int(os.environ.get("COORDINATOR_TICKS", "4"))
     model = os.environ.get("CLAUDE_MODEL")  # None → SDK default
     sys.exit(asyncio.run(_run(ticks=ticks, model=model)))
 

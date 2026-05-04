@@ -41,15 +41,20 @@ def run_json_allow_fail(cmd: list[str], *, workspace: Path) -> tuple[int, dict]:
     return proc.returncode, payload
 
 
-def write_trace(path: Path) -> None:
+def write_trace(
+    path: Path,
+    *,
+    kernel_name: str = "triton_rmsnorm_kernel",
+    source_file: str = "/src/kernels/rmsnorm.py",
+) -> None:
     payload = {
         "traceEvents": [
             {
-                "name": "triton_rmsnorm_kernel",
+                "name": kernel_name,
                 "cat": "kernel",
                 "dur": 7000,
                 "args": {
-                    "source_file": "/src/kernels/rmsnorm.py",
+                    "source_file": source_file,
                     "shape": {"M": 64, "N": 4096},
                 },
             },
@@ -105,13 +110,29 @@ class KernelAgentToolTests(unittest.TestCase):
         )
         self.assertEqual(dry_proc.returncode, 0)
         self.assertIn("TraceLens root not found", dry_proc.stderr)
-        self.assertIn("ensuring ray==2.44.1", dry_proc.stdout)
+        self.assertIn("ensuring ray[default]==2.44.1", dry_proc.stdout)
+
+    def test_new_environment_defaults_are_documented_in_tools(self) -> None:
+        install_text = INSTALL_SCRIPT.read_text(encoding="utf-8")
+        trace_tool_text = TRACE_TOOL.read_text(encoding="utf-8")
+        skill_text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"', install_text)
+        self.assertIn('"click<8.3.0" "ray[default]==2.44.1"', install_text)
+        self.assertIn('chmod 600 "$env_file"', install_text)
+        self.assertIn('DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"', trace_tool_text)
+        self.assertNotIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens-internal}"', install_text)
+        self.assertNotIn("Executor asks", skill_text)
 
     def test_trace_file_analysis_writes_report_logs_and_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             trace = workspace / "trace.json"
-            write_trace(trace)
+            write_trace(
+                trace,
+                kernel_name="triton_unmapped_kernel",
+                source_file="/src/kernels/unmapped.py",
+            )
 
             result = run_json([
                 sys.executable, str(TRACE_TOOL),
@@ -158,7 +179,11 @@ class KernelAgentToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             trace = workspace / "trace.json"
-            write_trace(trace)
+            write_trace(
+                trace,
+                kernel_name="triton_unmapped_kernel",
+                source_file="/src/kernels/unmapped.py",
+            )
             run_json([
                 sys.executable, str(TRACE_TOOL),
                 "--trace-input", str(trace),
@@ -183,7 +208,11 @@ class KernelAgentToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             trace = workspace / "trace.json"
-            write_trace(trace)
+            write_trace(
+                trace,
+                kernel_name="triton_unmapped_kernel",
+                source_file="/src/kernels/unmapped.py",
+            )
             run_json([
                 sys.executable, str(TRACE_TOOL),
                 "--trace-input", str(trace),
