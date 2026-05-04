@@ -177,7 +177,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     # can route to the right agent (hip / triton / other).
     geak_kernel_type = _GEAK_KERNEL_TYPE.get(str(candidate.get("source_type", "unknown")), "other")
     kernel_name = str(candidate.get("name", args.kernel_id))
-    budget_min = int(getattr(args, "budget_minutes", 30) or 30)
+    budget_min = int(getattr(args, "budget_minutes", 60) or 60)
     bench_block = ""
     if bench_files:
         bench_block = "\nKnown benchmark/test files (also copied into your workspace as -f):\n"
@@ -230,6 +230,19 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "- Always print the final number in the form `speedup: X.XXx` (lowercase `x`)\n"
         "  at the END of `optimization_report.md` so the runner can extract it; if you\n"
         "  cannot measure, write `speedup: N/A`.\n"
+        "- End `optimization_report.md` with machine-readable markers on separate lines:\n"
+        "  `[CORRECTNESS] PASS` or `[CORRECTNESS] FAIL`, and\n"
+        "  `[MICRO_SPEEDUP] X.XXx` or `[MICRO_SPEEDUP] N/A`.\n"
+        "- Write the final optimized implementation as a COMPLETE source file under\n"
+        "  `optimized_versions/` with the SAME extension as `kernel_url` (for example\n"
+        "  `.cu` stays `.cu`, `.py` stays `.py`). Do NOT submit markdown, a diff, or\n"
+        "  an excerpt as the optimized artifact; integration replaces the target file\n"
+        "  byte-for-byte and will reject non-source artifacts.\n"
+        "- The optimized source must be an IN-PLACE replacement for `kernel_url`:\n"
+        "  start from the original file, preserve its namespace, exported host entry\n"
+        "  functions, registration macros, includes, and public signatures. Do NOT\n"
+        "  create a standalone `torch.utils.cpp_extension`/`PYBIND11_MODULE` module\n"
+        "  unless the original file already uses that pattern.\n"
         "\n"
         "PRIORITY ORDER for picking an optimization path — check IN ORDER, use the\n"
         "FIRST that applies. Do NOT default to the C++ source you were given:\n"
@@ -426,9 +439,9 @@ def invoke_backend(
     # salvage). 90 min is the new default; override via --geak-budget-min.
     if backend == "geak":
         budget_min = float(getattr(args, "geak_budget_min", 0)
-                           or getattr(args, "budget_minutes", 30) or 30)
+                           or getattr(args, "budget_minutes", 60) or 60)
     else:
-        budget_min = float(getattr(args, "budget_minutes", 30) or 30)
+        budget_min = float(getattr(args, "budget_minutes", 60) or 60)
     timeout_s = max(60, int(budget_min * 60))
     prefer_ray = ray_available()
     candidate = candidate or {}
@@ -583,7 +596,8 @@ def run_attempt(
     started = time.time()
     append_log(log_path, f"[attempt {attempt_id}] backend={backend}")
 
-    optimized_path = run_dir / "optimized" / f"{attempt_id}_optimized.txt"
+    source_suffix = Path(source_file).suffix if source_file else ".txt"
+    optimized_path = run_dir / "optimized" / f"{attempt_id}_optimized{source_suffix or '.txt'}"
     optimized_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.dry_run:
@@ -591,7 +605,11 @@ def run_attempt(
         returncode = 0
         stdout_tail = "[dry-run] backend execution skipped"
         full_stdout = stdout_tail
-        optimized_path.write_text("# dry-run optimized kernel placeholder\n", encoding="utf-8")
+        if source_suffix == ".py":
+            placeholder = "def optimized_kernel_placeholder():\n    return None\n"
+        else:
+            placeholder = "extern \"C\" __global__ void optimized_kernel_placeholder() {}\n"
+        optimized_path.write_text(placeholder, encoding="utf-8")
         result = {}
     else:
         append_log(log_path, f"$ invoke_backend({backend})")
@@ -719,6 +737,7 @@ def run_attempt(
 
 _SPEEDUP_PATTERNS = [
     # Match `speedup: 1.28x` / `Speedup: **1.076x**` / `avg=1.044x` etc.
+    re.compile(r"(?im)^\s*\[micro_speedup\]\s*([0-9]+(?:\.[0-9]+)?)\s*[xX]\b"),
     re.compile(r"(?i)\bspeedup\b[^\n]{0,40}?([0-9]+(?:\.[0-9]+)?)\s*[xX]"),
     re.compile(r"(?i)\bavg(?:erage)?\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)\s*[xX]\s+(?:speedup|across)"),
     re.compile(r"(?i)\b([0-9]+(?:\.[0-9]+)?)\s*[xX]\s+(?:speedup|faster)"),
@@ -787,14 +806,24 @@ def _extract_correctness_from_report(report_path: str | Path) -> bool | None:
     except Exception:
         return None
     lower = text.lower()
+    marker = re.search(r"(?im)^\s*\[correctness\]\s*(pass|passed|fail|failed)\b", text)
+    if marker:
+        return marker.group(1).lower().startswith("pass")
     fail_markers = (
         "correctness failed", "incorrect", "mismatch", "assert_close failed",
-        "not close", "wrong output", "validation failed",
+        "not close", "wrong output", "validation failed", "correctness: fail",
+        "correctness: failed", "does not match", "do not match",
+        "failed against reference", "reference check failed",
     )
     pass_markers = (
         "correctness passed", "correctness: pass", "all tests passed",
         "assert_close passed", "torch.testing.assert_close passed",
-        "validation passed",
+        "validation passed", "matches reference", "match reference",
+        "matched reference", "matches the reference", "verified against original",
+        "verified against the original", "validated against original",
+        "validated against the original", "validated against baseline",
+        "outputs match", "output matches", "numerically matches",
+        "reference comparison passed",
     )
     if any(marker in lower for marker in fail_markers):
         return False
@@ -843,6 +872,153 @@ def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None
     return None
 
 
+_SOURCE_SUFFIXES = {
+    ".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".hip", ".py",
+}
+_FENCE_RE = re.compile(
+    r"```(?P<lang>[A-Za-z0-9_+.-]*)\s*\n(?P<body>.*?)\n```",
+    re.DOTALL,
+)
+
+
+def _source_text_looks_complete(text: str, suffix: str) -> bool:
+    stripped = text.strip()
+    if not stripped or "```" in stripped:
+        return False
+    if suffix == ".py":
+        try:
+            compile(stripped + "\n", "<optimized_kernel>", "exec")
+        except SyntaxError:
+            return False
+        return any(
+            marker in stripped
+            for marker in ("def ", "class ", "import ", "@triton.jit", "torch.")
+        )
+    if suffix in {".cu", ".cuh", ".hip", ".cpp", ".cc", ".c", ".h", ".hpp"}:
+        return any(
+            marker in stripped
+            for marker in (
+                "#include", "__global__", "__device__", "extern ", "namespace ",
+                "template", "void ", "int ", "float ", "half", "torch::",
+            )
+        )
+    return False
+
+
+def _extract_source_block(text_path: Path, target_suffix: str, output_path: Path) -> str:
+    try:
+        text = text_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    lang_hints = {
+        ".py": {"python", "py"},
+        ".cu": {"cuda", "cu", "cpp", "c++"},
+        ".cuh": {"cuda", "cu", "cpp", "c++"},
+        ".hip": {"hip", "cpp", "c++"},
+        ".cpp": {"cpp", "c++"},
+        ".cc": {"cpp", "c++"},
+        ".c": {"c"},
+        ".h": {"c", "cpp", "c++"},
+        ".hpp": {"cpp", "c++"},
+    }.get(target_suffix, set())
+    candidates: list[str] = []
+    for match in _FENCE_RE.finditer(text):
+        lang = match.group("lang").strip().lower()
+        body = match.group("body").strip()
+        if lang_hints and lang and lang not in lang_hints:
+            continue
+        if _source_text_looks_complete(body, target_suffix):
+            candidates.append(body)
+    if not candidates:
+        return ""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(candidates[-1].rstrip() + "\n", encoding="utf-8")
+    return str(output_path)
+
+
+def _candidate_artifact_paths(attempt: dict[str, Any], target_suffix: str) -> list[Path]:
+    paths: list[Path] = []
+    bp = attempt.get("backend_paths") or {}
+    for key in (
+        "partial_latest_optimized",
+        "geak_per_task_best_patch",
+        "geak_latest_patch",
+    ):
+        value = bp.get(key)
+        if value:
+            paths.append(Path(value))
+    cli_workspace = bp.get("cli_workspace")
+    if cli_workspace:
+        opt_dir = Path(cli_workspace) / "optimized_versions"
+        if opt_dir.is_dir():
+            paths.extend(sorted(
+                (p for p in opt_dir.iterdir() if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            ))
+    out_dir = bp.get("output_dir")
+    if out_dir:
+        opt_dir = Path(out_dir) / "optimized_versions"
+        if opt_dir.is_dir():
+            paths.extend(sorted(
+                (p for p in opt_dir.iterdir() if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            ))
+    optimized_path = attempt.get("optimized_path")
+    if optimized_path:
+        paths.append(Path(optimized_path))
+
+    seen: set[Path] = set()
+    deduped: list[Path] = []
+    for path in paths:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        if resolved in seen or not path.is_file():
+            continue
+        seen.add(resolved)
+        deduped.append(path)
+    return deduped
+
+
+def _select_source_artifact(
+    attempt: dict[str, Any],
+    *,
+    target_file: str,
+    run_dir: Path | None = None,
+) -> tuple[str, str, str]:
+    """Return (artifact_path, source, error) for a complete source artifact."""
+    target_suffix = Path(target_file).suffix.lower()
+    if target_suffix not in _SOURCE_SUFFIXES:
+        return "", "unsupported", f"unsupported target suffix: {target_suffix or '<none>'}"
+
+    candidates = _candidate_artifact_paths(attempt, target_suffix)
+    for path in candidates:
+        suffix = path.suffix.lower()
+        if suffix == target_suffix and _source_text_looks_complete(
+            path.read_text(encoding="utf-8", errors="replace"),
+            target_suffix,
+        ):
+            return str(path), "source_file", ""
+
+    extraction_root = run_dir or Path(attempt.get("optimized_path") or "/tmp").parent
+    for path in candidates:
+        if path.suffix.lower() not in {".txt", ".md", ".markdown", ".log", ".patch", ".diff"}:
+            continue
+        extracted = _extract_source_block(
+            path,
+            target_suffix,
+            extraction_root / f"{attempt.get('attempt_id', 'attempt')}_extracted{target_suffix}",
+        )
+        if extracted:
+            return extracted, "extracted_code_block", ""
+
+    tried = ", ".join(str(p) for p in candidates[:6])
+    return "", "missing", f"no complete {target_suffix} source artifact found; tried: {tried}"
+
+
 def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]], benchmark_available: bool) -> dict[str, Any]:
     # An attempt is usable if it either completed cleanly OR was killed past
     # the budget but left optimized_versions/ + report on disk (status=partial).
@@ -879,8 +1055,26 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
     if best is None and usable:
         best = usable[0]
     compile_passed = bool(best)
+    best_artifact_path = ""
+    artifact_source = "missing"
+    artifact_error = "no usable backend attempt"
+    if best is not None:
+        target_file = str(getattr(args, "source_file", "") or "")
+        run_dir = None
+        optimized_path = best.get("optimized_path")
+        if optimized_path:
+            run_dir = Path(optimized_path).parent
+        best_artifact_path, artifact_source, artifact_error = _select_source_artifact(
+            best,
+            target_file=target_file,
+            run_dir=run_dir,
+        )
+    artifact_valid = bool(best_artifact_path)
     correctness_signal = getattr(args, "correctness_passed", None)
     correctness_source = "cli_override" if correctness_signal is not None else "missing"
+    if correctness_signal is None and getattr(args, "accuracy_passed", None) is True:
+        correctness_signal = True
+        correctness_source = "accuracy_override"
     if correctness_signal is None and best is not None:
         bp = best.get("backend_paths") or {}
         correctness_signal = _extract_correctness_from_report(
@@ -927,7 +1121,10 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
         "verification_status": "complete" if correctness_passed and e2e_gain_pct is not None else "deferred",
         "best_attempt_id": best["attempt_id"] if best else "",
         "best_backend": best["backend"] if best else "",
-        "best_artifact_path": best.get("optimized_path", "") if best else "",
+        "best_artifact_path": best_artifact_path,
+        "artifact_valid": artifact_valid,
+        "artifact_source": artifact_source,
+        "artifact_error": "" if artifact_valid else artifact_error,
     }
 
 
@@ -937,6 +1134,8 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         return {"decision": "REVERT", "reasons": ["compile failed"]}
     if not verification["correctness_passed"]:
         reasons.append("correctness evidence missing or failed")
+    if not verification.get("artifact_valid"):
+        reasons.append("optimized source artifact missing or invalid")
     # Distinguish "we have artifacts but didn't measure a speedup" (PARTIAL,
     # human review can salvage) from "we measured and it's a regression"
     # (REVERT). The signal is verification["micro_speedup_source"]:
@@ -962,17 +1161,22 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
             f"speedup {verification['micro_speedup']:.3f}x below KEEP "
             f"threshold {KEEP_THRESHOLD:.2f}x"
         )
-    if verification["e2e_gain_pct"] is None:
-        reasons.append("E2E evidence missing")
-    elif verification["e2e_gain_pct"] < 0:
+    if verification["e2e_gain_pct"] is not None and verification["e2e_gain_pct"] < 0:
         return {"decision": "REVERT", "reasons": ["E2E regressed"]}
-    if verification["accuracy_passed"] is None:
-        reasons.append("accuracy evidence missing")
-    elif verification["accuracy_passed"] is False:
+    if verification["accuracy_passed"] is False:
         return {"decision": "REVERT", "reasons": ["accuracy gate failed"]}
+    if reasons and verification["e2e_gain_pct"] is None:
+        reasons.append("E2E evidence missing")
+    if reasons and verification["accuracy_passed"] is None:
+        reasons.append("accuracy evidence missing")
 
     if reasons:
         return {"decision": "NEEDS_REVIEW", "reasons": reasons}
+    if verification["e2e_gain_pct"] is None or verification["accuracy_passed"] is None:
+        return {
+            "decision": "KEEP",
+            "reasons": ["kernel artifact ready; E2E/accuracy deferred to integrate"],
+        }
     return {"decision": "KEEP", "reasons": ["all required evidence passed"]}
 
 
@@ -986,7 +1190,7 @@ def main() -> int:
     parser.add_argument("--benchmark-file", default="")
     parser.add_argument("--test-harness-path", default="")
     parser.add_argument("--source-file", default="")
-    parser.add_argument("--budget-minutes", type=float, default=30.0,
+    parser.add_argument("--budget-minutes", type=float, default=60.0,
                         help="Per-attempt wall-clock budget for claude/codex "
                              "OOB backends. GEAK uses --geak-budget-min.")
     parser.add_argument("--geak-budget-min", type=float, default=90.0,
@@ -1025,6 +1229,7 @@ def main() -> int:
         candidates_path = Path(args.candidates_path) if args.candidates_path else run_dir / "kernel_candidates.json"
         candidate = find_candidate(load_candidates(candidates_path), args.kernel_id)
         resolved_source = args.source_file or str(candidate.get("source_file") or "")
+        args.source_file = resolved_source
         if not args.dry_run and not resolved_source:
             raise RuntimeError(
                 f"source file not resolved for kernel {args.kernel_id}; "
@@ -1065,6 +1270,8 @@ def main() -> int:
             "session_id": session_id,
             "run_id": run_id,
             "kernel_id": args.kernel_id,
+            "source_file": resolved_source,
+            "best_artifact_path": verification.get("best_artifact_path", ""),
             "selected_backends": selected_backends,
             "backend_selection": backend_notes,
             "attempts": attempts,
