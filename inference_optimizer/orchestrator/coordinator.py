@@ -624,10 +624,11 @@ class Coordinator:
             params.setdefault("base_extra_args", cb_args)
             if pending.action_name == "params":
                 params.setdefault("params_search", self.shared_state.params_search)
-                # Long runs should advance the search incrementally so params
-                # does not monopolize the whole optimization budget. Direct
-                # runner calls/tests can still pass 0 to run the full grid.
-                params.setdefault("max_candidates_per_round", 3)
+                # Long runs should advance the search incrementally while
+                # still covering the params grid quickly enough to compete
+                # with kernel work. Direct runner calls/tests can still pass
+                # 0 to run the full grid.
+                params.setdefault("max_candidates_per_round", 5)
                 if isinstance(cb, dict) and cb.get("variant_name"):
                     params.setdefault("base_variant_name", str(cb["variant_name"]))
         task = await self.tasks.create(
@@ -687,21 +688,42 @@ class Coordinator:
                     result = cached_result
                     cache_hit_source = "shared_state_cache"
                 else:
-                    try:
-                        result = await handler(
-                            merged_payload,
-                            session_dir=self.session_dir,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        log.exception(
-                            "kernel_request_handler[%s] crashed for source=%s",
-                            kind, source,
-                        )
+                    rejected = (
+                        self.shared_state.find_rejected_kernel_patch(merged_payload)
+                        if kind == "integrate"
+                        else None
+                    )
+                    if rejected is not None:
                         result = {
-                            "status": "failed",
-                            "error_class": "handler_exception",
-                            "error": repr(exc),
+                            "status": "skipped",
+                            "decision": "REVERT",
+                            "error_class": "kernel_patch_rejected",
+                            "error": "same kernel patch already exhausted E2E attempts",
+                            "kernel_id": rejected.get("kernel_id"),
+                            "patch_path": rejected.get("patch_path"),
+                            "target_file": rejected.get("target_file"),
+                            "extra_sglang_args": rejected.get("extra_sglang_args", ""),
+                            "attempt_count": rejected.get("attempt_count"),
+                            "best_gain_pct": rejected.get("best_gain_pct"),
+                            "reason": rejected.get("reason"),
                         }
+                        cache_hit_source = "shared_state_kernel_rejection"
+                    else:
+                        try:
+                            result = await handler(
+                                merged_payload,
+                                session_dir=self.session_dir,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            log.exception(
+                                "kernel_request_handler[%s] crashed for source=%s",
+                                kind, source,
+                            )
+                            result = {
+                                "status": "failed",
+                                "error_class": "handler_exception",
+                                "error": repr(exc),
+                            }
                 await self.bus.append_and_seq(Message.new(
                     "kernel", source, "response",
                     {
@@ -729,8 +751,11 @@ class Coordinator:
                 if kind == "run_optimization":
                     self.shared_state.record_kernel_opt(result)
                     self.shared_state.save(self.session_dir)
-                if kind == "integrate" and result.get("decision") == "KEEP":
-                    self._record_integrate_keep(result)
+                if kind == "integrate":
+                    if result.get("status") != "skipped":
+                        self.shared_state.record_kernel_integrate_result(result)
+                    if result.get("decision") == "KEEP":
+                        self._record_integrate_keep(result)
                     self.shared_state.save(self.session_dir)
                 # Bug B fix: the request was just answered programmatically,
                 # so the LLM-backed kernel agent should NOT see the request
