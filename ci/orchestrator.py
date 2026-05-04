@@ -353,7 +353,7 @@ def main():
             try:
                 result = subprocess.run(
                     [sys.executable, str(check_script),
-                     "--config-files", str(yaml_path)],
+                     "--config-files", str(yaml_path), "--update"],
                     capture_output=True, text=True, timeout=120,
                 )
                 if result.stdout:
