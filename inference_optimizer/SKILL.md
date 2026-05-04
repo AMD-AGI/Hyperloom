@@ -1,20 +1,20 @@
 ---
-name: inference-optimizer
+name: inference_optimizer
 description: |
   Launches and monitors Hyperloom's multi-agent inference optimizer for LLM
   serving on AMD GPUs. Use when the user asks to optimize an inference model,
-  run Magpie benchmarks/profiles, resume an inference-optimizer session, tune
+  run Magpie benchmarks/profiles, resume an inference_optimizer session, tune
   SGLang/vLLM serving parameters, run TraceLens/kernel-agent, or validate
   end-to-end throughput gains in a new inference environment.
 globs:
   - "**/inference*optim*"
-  - "**/inference-optimizer*"
+  - "**/inference_optimizer*"
 ---
 
 # Inference Optimizer Skill
 
 You are the launcher and monitor. The optimizer itself is the Python
-`inference-optimizer` runtime under this repository. Do not manually optimize
+`inference_optimizer` runtime under this repository. Do not manually optimize
 inside chat unless debugging; launch the CLI, poll persisted state, and report
 objective progress.
 
@@ -28,11 +28,11 @@ The CLI starts a Python Coordinator that coordinates:
 - Robustness: mock robustness monitor in this branch.
 
 State lives in one session directory. Production defaults to
-`/hyperloom/inference-optimizer-sessions`, but portable launches should set
+`/hyperloom/inference_optimizer-sessions`, but portable launches should set
 `INFERENCE_OPTIMIZER_SESSION_ROOT` to a writable run-local directory:
 
 ```bash
-/hyperloom/inference-optimizer-sessions/<session_id>/
+/hyperloom/inference_optimizer-sessions/<session_id>/
 ├── state.json
 ├── storage/coordinator.db
 ├── results/
@@ -101,7 +101,7 @@ Install or validate the optimizer package in the same Python environment that
 will launch the long run:
 
 ```bash
-"$PYTHON" -m pip install -e "$REPO_ROOT[test]"
+"$PYTHON" -m pip install -e "${REPO_ROOT}[test]"
 "$PYTHON" -m inference_optimizer.cli --help
 ```
 
@@ -109,7 +109,7 @@ Kernel-agent is a reusable downstream skill. Before launching
 `inference_optimizer.cli`, read and follow `$REPO_ROOT/kernel-agent/SKILL.md`,
 especially `Installation`, `TraceLens Requirements`, and `Backend Selection`.
 This makes the same kernel-agent work both standalone and under
-inference-optimizer. The launcher should invoke kernel-agent's installer rather
+inference_optimizer. The launcher should invoke kernel-agent's installer rather
 than duplicating backend setup logic:
 
 ```bash
@@ -185,7 +185,7 @@ Use a repo-local session root by default so the skill works in sandboxes where
 `/hyperloom` is absent:
 
 ```bash
-export INFERENCE_OPTIMIZER_SESSION_ROOT="$RUN_ROOT/inference-optimizer-sessions"
+export INFERENCE_OPTIMIZER_SESSION_ROOT="$RUN_ROOT/inference_optimizer-sessions"
 mkdir -p "$INFERENCE_OPTIMIZER_SESSION_ROOT"
 ```
 
@@ -224,8 +224,8 @@ PY
 Default configs live here:
 
 ```bash
-inference-optimizer/scripts/configs/baseline_qwen3_8b_sglang.yaml
-inference-optimizer/scripts/configs/profile_qwen3_8b_sglang.yaml
+inference_optimizer/scripts/configs/baseline_qwen3_8b_sglang.yaml
+inference_optimizer/scripts/configs/profile_qwen3_8b_sglang.yaml
 ```
 
 Before a new model run, verify these fields match the environment:
@@ -291,7 +291,7 @@ import os, yaml
 
 repo = Path(os.environ["REPO_ROOT"])
 asset = Path(os.environ["ASSET_ROOT"])
-src = repo / "inference-optimizer"
+src = repo / "inference_optimizer"
 (asset / "scripts" / "configs").mkdir(parents=True, exist_ok=True)
 
 for name in ["actions", "kernel_opt", "orchestrator"]:
