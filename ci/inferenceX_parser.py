@@ -59,7 +59,12 @@ def get_latest_commit(repo_url: str, ref: str = "main") -> str:
 
 def parse_model_entry(entry: dict) -> dict:
     """Extract structured config from an amd-master.yaml model entry."""
-    seq_configs = entry.get("seq-len-configs", [])
+    # Support both old format (seq-len-configs) and new format (scenarios.fixed-seq-len)
+    seq_configs = (
+        entry.get("seq-len-configs")
+        or (entry.get("scenarios") or {}).get("fixed-seq-len")
+        or []
+    )
     first_seq = seq_configs[0] if seq_configs else {}
     first_search = (first_seq.get("search-space") or [{}])[0]
 
