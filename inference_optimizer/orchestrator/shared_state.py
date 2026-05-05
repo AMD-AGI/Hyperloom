@@ -103,6 +103,9 @@ class SharedState:
     # after repeated NEEDS_REVIEW/REVERT outcomes.
     kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
     rejected_kernel_patches: list[dict[str, Any]] = field(default_factory=list)
+    # Kernel ids with no remaining automated path. This is fed by
+    # run_optimization REVERTs and exhausted integrate attempts.
+    rejected_kernel_ids: list[str] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Persistence
@@ -329,6 +332,8 @@ class SharedState:
             if not (isinstance(r, dict) and r.get("key") == key)
         ]
         self.rejected_kernel_patches.append(rejected)
+        if kernel_id and kernel_id not in self.rejected_kernel_ids:
+            self.rejected_kernel_ids.append(kernel_id)
         entry["rejected"] = rejected
         self.kernel_integrate_attempts[key] = entry
         return entry
@@ -350,6 +355,10 @@ class SharedState:
             "best_artifact_path": verification.get("best_artifact_path", ""),
             "ts": _now_iso(),
         }
+        kernel_id = str(self.last_kernel_opt.get("kernel_id") or "")
+        if kernel_id and self.last_kernel_opt.get("decision") == "REVERT":
+            if kernel_id not in self.rejected_kernel_ids:
+                self.rejected_kernel_ids.append(kernel_id)
 
     def record_select_kernels(self, payload: dict[str, Any],
                               result: dict[str, Any]) -> None:
@@ -506,6 +515,7 @@ class SharedState:
             f"params_search={self._format_params_search()}",
             f"last_kernel_opt={self._format_last_kernel_opt()}",
             f"rejected_kernel_patches={self._format_rejected_kernel_patches()}",
+            f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
             f"stop_reason={self.stop_reason or '(none)'}",
         ]
         return "\n".join(lines)
