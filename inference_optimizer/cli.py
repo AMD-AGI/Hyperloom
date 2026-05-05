@@ -373,7 +373,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         await coordinator.stop()
 
     _print_final_summary(coordinator.shared_state, stop_reason)
-    return 0 if stop_reason in ("target_reached", "time_exhausted", "max_ticks") else 1
+    return 0 if stop_reason in (
+        "target_reached",
+        "no_more_leverage",
+        "time_exhausted",
+        "max_ticks",
+    ) else 1
 
 
 def _build_parser() -> argparse.ArgumentParser:

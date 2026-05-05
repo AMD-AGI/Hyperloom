@@ -496,7 +496,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   [ -f "$PID_FILE" ] && read -r pid < "$PID_FILE" || true
   stop_reason="$(read_stop_reason)"
   case "$stop_reason" in
-    target_reached|time_exhausted|max_ticks)
+    target_reached|no_more_leverage|time_exhausted|max_ticks)
       echo "[robustness monitor] terminal stop_reason=$stop_reason $(date -Is)"
       exit 0
       ;;
@@ -639,6 +639,8 @@ use `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
 not change, this is a bug. Reuse cached candidates and run optimization.
 - `correctness_passed=false`: do not integrate. Inspect the kernel-agent report;
 the report must contain explicit correctness evidence.
+- `no_more_leverage`: stop the run and report results; do not resume the same
+  session unless the user changes workload, search space, model, or strategy.
 - `time_exhausted`: resume the same session id; do not start from scratch.
 
 ## Report Back To User
