@@ -287,6 +287,7 @@ class Coordinator:
         * ``self._stop`` set (from SIGINT/SIGTERM or ``stop()``)
             → ``stop_reason="signal"``
         * objective.reached(shared_state)  → ``"target_reached"``
+        * no remaining automated levers     → ``"no_more_leverage"``
         * wall-clock budget exceeded        → ``"time_exhausted"``
         * crash_count >= ``crash_emergency_threshold`` → ``"emergency"``
         * custom ``stop_when`` callback returns True → ``"custom"``
@@ -342,6 +343,9 @@ class Coordinator:
                 if objective.reached(self.shared_state):
                     stop_reason = "target_reached"
                     break
+                if await self._has_no_more_leverage():
+                    stop_reason = "no_more_leverage"
+                    break
                 if deadline is not None and time.monotonic() >= deadline:
                     stop_reason = "time_exhausted"
                     break
@@ -393,6 +397,65 @@ class Coordinator:
                 except (NotImplementedError, RuntimeError):
                     pass
         return self.shared_state.stop_reason
+
+    async def _has_no_more_leverage(self) -> bool:
+        """Return True when automated params/backend/kernel levers are exhausted."""
+        if self.shared_state.baseline_tput <= 0:
+            return False
+        if not self.shared_state.current_best:
+            return False
+        if self.state.pending_proposals:
+            return False
+        if await self.tasks.queued() or await self.tasks.running():
+            return False
+
+        if self.shared_state.params_no_promote_streak < 5:
+            return False
+        if not self._params_grid_exhausted():
+            return False
+        return self._all_reusable_kernels_rejected()
+
+    def _params_grid_exhausted(self) -> bool:
+        search = self.shared_state.params_search or {}
+        if not isinstance(search, dict) or not search:
+            return False
+        try:
+            from .action_executors.params import DEFAULT_PARAMS_GRID
+            grid_size = len(DEFAULT_PARAMS_GRID)
+        except Exception:  # noqa: BLE001
+            grid_size = 0
+        tested = search.get("tested") or {}
+        tested_count = len(tested) if isinstance(tested, dict) else 0
+        cursor = int(search.get("cursor") or 0)
+        rejected_count = len(search.get("rejected") or [])
+        if grid_size <= 0:
+            return bool(search.get("params_search_exhausted"))
+        return (
+            tested_count >= grid_size
+            or cursor >= grid_size
+            or rejected_count >= grid_size
+        )
+
+    def _all_reusable_kernels_rejected(self) -> bool:
+        select = self.shared_state.last_select_kernels or {}
+        reusable = {
+            str(k) for k in (select.get("reusable_native_kernel_ids") or [])
+            if k
+        }
+        if not reusable:
+            return bool(self.shared_state.last_profile_trace)
+
+        rejected = {
+            str(k) for k in (self.shared_state.rejected_kernel_ids or [])
+            if k
+        }
+        for entry in self.shared_state.rejected_kernel_patches or []:
+            if isinstance(entry, dict) and entry.get("kernel_id"):
+                rejected.add(str(entry["kernel_id"]))
+        last = self.shared_state.last_kernel_opt or {}
+        if last.get("kernel_id") and last.get("decision") == "REVERT":
+            rejected.add(str(last["kernel_id"]))
+        return reusable <= rejected
 
     # ==================================================================
     # Reactor
