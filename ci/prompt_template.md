@@ -56,21 +56,8 @@ Your skill has ready-to-use scripts at `$SKILL_ROOT/scripts/`:
 Where $SKILL_ROOT is at: /workspace/users/*/sessions/*/.skills/ci-mix300
 Find it with: `ls /workspace/users/*/sessions/*/.skills/ci-mix300/scripts/submit_workload.mjs`
 
-If those scripts don't exist, use this curl format instead:
-
-IMPORTANT: The correct SaFE workload create format (DO NOT deviate — use this EXACTLY):
-```bash
-curl -sk -X POST "https://core42.primus-safe.amd.com/api/v1/workloads" \
-  -H "Authorization: Bearer {safe_api_key}" \
-  -H "Content-Type: application/json" \
-  -d '{{"displayName":"JOBNAME","workspaceId":"{sandbox_workspace}","kind":"PyTorchJob","images":["vllm/vllm-openai-rocm:v0.17.0"],"resources":[{{"replica":1,"cpu":"96","gpu":"8","memory":"1024Gi"}}],"entryPoints":["echo HELLO"],"isTolerateAll":true,"ttlSecondsAfterFinished":600}}'
-```
-- `entryPoints` must be an array of strings: `["bash /path/to/script.sh"]`
-- `images` must be an array: `["image:tag"]`
-- To poll status: `curl -sk "https://core42.primus-safe.amd.com/api/v1/workloads/$WID" -H "Authorization: Bearer {safe_api_key}"`
-- To get logs: `curl -sk "https://core42.primus-safe.amd.com/api/v1/workloads/$WID/pods/$PID/logs" -H "Authorization: Bearer {safe_api_key}"`
-
-Do NOT waste turns exploring the SaFE API format. Use the exact format above.
+If the scripts are not visible yet, wait 30 seconds and retry the ls command (skill mount can take a moment).
+NEVER fall back to direct curl against the SaFE API — this is strictly forbidden (IR-12) in local mode and will terminate your session immediately. You MUST use submit_workload.mjs.
 Do NOT call exit_plan_mode or enter_plan_mode — these tools don't exist. Just execute directly.
 
 InferenceX Baseline:
