@@ -182,6 +182,38 @@ async def test_coordinator_starts_with_silent_backends(session_dir):
 
 
 @pytest.mark.asyncio
+async def test_coordinator_stops_when_no_more_leverage(session_dir):
+    backends = _build_backends({})
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        c.shared_state.baseline_tput = 100.0
+        c.shared_state.current_best = {"action": "backends", "tput": 101.0}
+        c.shared_state.params_no_promote_streak = 5
+        c.shared_state.params_search = {
+            "cursor": 29,
+            "tested": {f"v{i}": {} for i in range(29)},
+            "accepted": [],
+            "rejected": [],
+        }
+        c.shared_state.last_select_kernels = {
+            "reusable_native_kernel_ids": ["k003", "k006", "k007"],
+        }
+        c.shared_state.rejected_kernel_ids = ["k003"]
+        c.shared_state.rejected_kernel_patches = [
+            {"kernel_id": "k006", "reason": "max_e2e_attempts_3_without_keep"},
+            {"kernel_id": "k007", "reason": "revert_decision"},
+        ]
+        c.shared_state.save(session_dir)
+
+        stop_reason = await c.run(max_ticks=5, tick_interval_sec=0.0)
+
+        assert stop_reason == "no_more_leverage"
+        assert c.shared_state.stop_reason == "no_more_leverage"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_coordinator_propose_action_creates_pending(session_dir):
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "baseline", "predicted_gain_pct": 0.0,
