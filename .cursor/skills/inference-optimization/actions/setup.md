@@ -94,7 +94,22 @@ _mirror_if_readonly() {
 INFERENCEX_PATH=$(_mirror_if_readonly "$INFERENCEX_PATH" "/tmp/InferenceX")
 export INFERENCEX_PATH
 
-MAGPIE_PATH="${MAGPIE_PATH:-/shared_nfs/Magpie}"
+# Resolve Magpie path: caller override > current workspace > NFS user dir > legacy default.
+# The current workspace is hard-coded as first candidate so the sweep_matrix-aware
+# Magpie checkout that lives next to Hyperloom is picked up automatically.
+_resolve_magpie_path() {
+    local candidate
+    if [ -n "${MAGPIE_PATH:-}" ] && [ -d "$MAGPIE_PATH" ]; then
+        echo "$MAGPIE_PATH"; return 0
+    fi
+    candidate="/hyperloom/users/8cf535bc3ad11fa15e48157cf3b3f726/Magpie"
+    [ -d "$candidate" ] && { echo "$candidate"; return 0; }
+    candidate=$(ls -d /shared_nfs/*/Magpie 2>/dev/null | head -1)
+    [ -n "$candidate" ] && [ -d "$candidate" ] && { echo "$candidate"; return 0; }
+    echo "/shared_nfs/Magpie"
+}
+
+MAGPIE_PATH=$(_resolve_magpie_path)
 MAGPIE_PATH=$(_mirror_if_readonly "$MAGPIE_PATH" "/tmp/Magpie")
 export MAGPIE_PATH
 
@@ -102,6 +117,10 @@ export MAGPIE_PATH
 if ! command -v magpie &>/dev/null; then
     pip install -e "$MAGPIE_PATH" 2>&1 | tail -3
 fi
+
+# Sweep capability check: actions/sweep.md needs SweepMatrix support in Magpie
+python3 -c "from Magpie.modes.benchmark.config import SweepMatrix" 2>/dev/null || \
+    echo "WARNING: Installed Magpie at $MAGPIE_PATH lacks sweep_matrix support; actions/sweep.md will fail." >&2
 ```
 
 Environment variables are set in the YAML config `envs` section and passed via `magpie benchmark --benchmark-config`. Each benchmark call generates its own YAML config file.

@@ -128,7 +128,7 @@ All values below are the **single source of truth**. All actions reference these
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `MAGPIE_PATH` | `/shared_nfs/Magpie` | Magpie installation path (auto-mirrored to `/tmp/Magpie` when read-only) |
+| `MAGPIE_PATH` | auto-resolved (see below) | Magpie installation path (auto-mirrored to `/tmp/Magpie` when read-only) |
 | `MAGPIE_RUN_MODE` | `local` | Benchmark execution mode (local, no Docker) |
 | `MAGPIE_DFS_NUM_PROMPTS_MULTIPLIER` | 3 | NUM_PROMPTS = CONC × this for DFS loop (short runs) |
 | `MAGPIE_BASELINE_NUM_PROMPTS_MULTIPLIER` | 10 | NUM_PROMPTS = CONC × this for baseline (default) |
@@ -174,13 +174,20 @@ TraceLens trace analysis, and gap analysis.
 
 **Prerequisites — Install Magpie:**
 
-`actions/setup.md` Step 2 automatically mirrors `MAGPIE_PATH` and `INFERENCEX_PATH`
-to `/tmp` when the source is read-only (NFS / container overlay). After setup, both
-variables point to writable copies, so `pip install -e "$MAGPIE_PATH"` and all
-`inferencex_path: $INFERENCEX_PATH` YAML references work without further handling.
+`actions/setup.md` Step 2 resolves `MAGPIE_PATH` with the following priority and then
+mirrors it to `/tmp/Magpie` when the source is read-only:
+
+1. Caller-provided `MAGPIE_PATH` env var (must point to an existing directory)
+2. `/hyperloom/users/8cf535bc3ad11fa15e48157cf3b3f726/Magpie` (current workspace checkout)
+3. First match of `/shared_nfs/*/Magpie` (per-user NFS layout)
+4. Legacy default `/shared_nfs/Magpie`
+
+After resolution `pip install -e "$MAGPIE_PATH"` runs once if `magpie` is not yet on PATH,
+and a `from Magpie.modes.benchmark.config import SweepMatrix` sanity check warns when the
+installed Magpie predates `sweep_matrix` (required by `actions/sweep.md`).
 
 ```bash
-# Already handled by setup.md _mirror_if_readonly helper.
+# Already handled by setup.md _resolve_magpie_path + _mirror_if_readonly helpers.
 # Manual fallback (only if setup was skipped):
 if ! command -v magpie &>/dev/null; then
     cp -r "$MAGPIE_PATH" /tmp/Magpie 2>/dev/null || true

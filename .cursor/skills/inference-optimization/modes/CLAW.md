@@ -253,6 +253,44 @@ claw-specific execution details for each action.
 In claw mode, after environment detection, create the RayJob (see "RayJob Lifecycle" above)
 before proceeding to classify/baseline.
 
+#### Magpie installation on the RayJob head pod
+
+After `workload_get` reports `Running`, install Magpie inside the head pod via
+`exec_on_gpu` so subsequent `magpie benchmark` invocations resolve. The path
+priority mirrors `actions/setup.md` `_resolve_magpie_path`:
+
+1. `$MAGPIE_PATH` if explicitly exported (must be reachable from the head pod)
+2. `/hyperloom/users/8cf535bc3ad11fa15e48157cf3b3f726/Magpie` (current workspace checkout)
+3. First match of `/shared_nfs/*/Magpie`
+4. Legacy default `/shared_nfs/Magpie`
+
+```bash
+# Resolve and install Magpie inside the Ray head pod (idempotent).
+exec_on_gpu '
+set -e
+candidates=(
+    "${MAGPIE_PATH:-}"
+    "/hyperloom/users/8cf535bc3ad11fa15e48157cf3b3f726/Magpie"
+)
+for c in "${candidates[@]}"; do
+    if [ -n "$c" ] && [ -d "$c" ]; then MAGPIE_PATH="$c"; break; fi
+done
+if [ -z "${MAGPIE_PATH:-}" ]; then
+    MAGPIE_PATH=$(ls -d /shared_nfs/*/Magpie 2>/dev/null | head -1)
+fi
+MAGPIE_PATH="${MAGPIE_PATH:-/shared_nfs/Magpie}"
+export MAGPIE_PATH
+echo "Resolved MAGPIE_PATH=$MAGPIE_PATH"
+command -v magpie >/dev/null || pip install -e "$MAGPIE_PATH" 2>&1 | tail -5
+python3 -c "from Magpie.modes.benchmark.config import SweepMatrix" \
+    || { echo "ERROR: Magpie at $MAGPIE_PATH lacks sweep_matrix support" >&2; exit 1; }
+'
+```
+
+Run this once per RayJob (immediately after `workload_get` shows `Running`).
+`actions/sweep.md` and any DFS action that uses `sweep_matrix` will fail without
+this step.
+
 ### Baseline (`actions/baseline.md`)
 
 All `magpie benchmark` commands must be wrapped with `exec_on_gpu`.
