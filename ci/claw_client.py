@@ -301,8 +301,9 @@ class ClawClient:
                         log.info(">>> SESSION COMPLETED (agent idle) <<< %s after %.0fs",
                                  session_id, elapsed)
                         return "completed"
-                    elif sess_status == "failed":
-                        log.error(">>> SESSION FAILED <<< %s after %.0fs", session_id, elapsed)
+                    elif agent_status == "failed" or sess_status == "failed":
+                        log.error(">>> SESSION FAILED <<< %s after %.0fs (status=%s, agent=%s)",
+                                  session_id, elapsed, sess_status, agent_status)
                         return "failed"
 
                 except Exception as e:
