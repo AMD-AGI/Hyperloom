@@ -466,11 +466,11 @@ has a terminal `stop_reason`, and resume the same session if the optimizer exits
 unexpectedly.
 
 ```bash
-export WATCHDOG_SCRIPT="$RUN_ROOT/robustness monitor_${SESSION_NAME}.sh"
-export WATCHDOG_LOG="$RUN_ROOT/robustness monitor_${SESSION_NAME}_$(date +%Y%m%d_%H%M%S).log"
-export WATCHDOG_PID_FILE="$RUN_ROOT/robustness monitor_${SESSION_NAME}.pid"
+export ROBUSTNESS_MONITOR_SCRIPT="$RUN_ROOT/robustness_monitor_${SESSION_NAME}.sh"
+export ROBUSTNESS_MONITOR_LOG="$RUN_ROOT/robustness_monitor_${SESSION_NAME}_$(date +%Y%m%d_%H%M%S).log"
+export ROBUSTNESS_MONITOR_PID_FILE="$RUN_ROOT/robustness_monitor_${SESSION_NAME}.pid"
 
-cat > "$WATCHDOG_SCRIPT" <<'SH'
+cat > "$ROBUSTNESS_MONITOR_SCRIPT" <<'SH'
 #!/usr/bin/env bash
 set -u
 deadline="$("$PYTHON" - <<'PY'
@@ -523,9 +523,9 @@ done
 echo "[robustness monitor] deadline reached $(date -Is)"
 SH
 
-chmod +x "$WATCHDOG_SCRIPT"
-setsid nohup bash "$WATCHDOG_SCRIPT" > "$WATCHDOG_LOG" 2>&1 < /dev/null &
-echo $! > "$WATCHDOG_PID_FILE"
+chmod +x "$ROBUSTNESS_MONITOR_SCRIPT"
+setsid nohup bash "$ROBUSTNESS_MONITOR_SCRIPT" > "$ROBUSTNESS_MONITOR_LOG" 2>&1 < /dev/null &
+echo $! > "$ROBUSTNESS_MONITOR_PID_FILE"
 ```
 
 ## Monitoring
