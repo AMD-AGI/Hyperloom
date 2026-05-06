@@ -739,6 +739,27 @@ class Coordinator:
         )
         await self.bus.append_and_seq(request_msg)
 
+        # Safety net: if target agent was removed from the role registry
+        # (e.g. --no-kernel), auto-reject the request so Orchestration
+        # does not hang waiting for a response from a non-existent agent.
+        if target_agent not in self.role_registry:
+            await self.bus.append_and_seq(Message.new(
+                target_agent, source, "response",
+                {
+                    "in_reply_to": request_msg.msg_id,
+                    "kind": f"{kind}_done",
+                    "status": "failed",
+                    "result": {
+                        "status": "failed",
+                        "error_class": "agent_disabled",
+                        "error": f"{target_agent} agent is disabled for this session",
+                    },
+                    "source": "coordinator_auto_reject",
+                },
+                in_reply_to=request_msg.msg_id, priority=1,
+            ))
+            return
+
         # Programmatic shortcut: if the kernel agent has a registered
         # handler for this `kind`, run it inline and emit RESPONSE on its
         # behalf so we don't burn an extra LLM turn for a deterministic
