@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import time
 from dataclasses import dataclass, field
@@ -532,7 +533,6 @@ class Coordinator:
             # Framework is resolved at CLI start time and re-exported as
             # $FRAMEWORK so the KB digest reads the right partition. Fall
             # back to sglang for parity with the CLI default.
-            import os
             kb_text = format_kb_digest_for_orchestration(
                 model_name=getattr(self.shared_state, "model_name", "") or "",
                 framework=os.environ.get("FRAMEWORK", "sglang").strip().lower() or "sglang",
