@@ -3,9 +3,9 @@
 Multi-round kernel optimization loop using configurable backends.
 
 Backend references:
-- [`../kernel-opt/geak.md`](../kernel-opt/geak.md) — GEAK MCP (remote GPU pod)
-- [`../kernel-opt/codex.md`](../kernel-opt/codex.md) — Codex via OOB GPU Optimizer MCP
-- [`../kernel-opt/claude.md`](../kernel-opt/claude.md) — Claude Code via OOB GPU Optimizer MCP
+- [`../kernel-opt/geak.md`](../kernel-opt/geak.md) — GEAK (MCP in claw; Ray-scheduled CLI in local)
+- [`../kernel-opt/codex.md`](../kernel-opt/codex.md) — Codex via OOB (MCP in claw; `oob_ray_submit.py run` CLI in local)
+- [`../kernel-opt/claude.md`](../kernel-opt/claude.md) — Claude Code via OOB (MCP in claw; `oob_ray_submit.py run` CLI in local)
 - [`../kernel-opt/llm.md`](../kernel-opt/llm.md) — LLM Proxy (direct API)
 
 ## Inputs
@@ -29,7 +29,7 @@ Use `trace_action.py` to record start/end for each external component:
 
 **GEAK** — if `geak` is in `KERNEL_OPT_BACKENDS`:
 1. `python3 $SCRIPTS_DIR/trace_action.py --component geak --action start`
-2. Call `geak_get_model_config` → `geak_set_model_config` with `extra_headers` from script output
+2. **claw (MCP) only:** Call `geak_get_model_config` → `geak_set_model_config` with `extra_headers` from script output. **Local:** skip MCP header injection (GEAK config is pre-rendered; `geak_ray_submit.py` handles invocation).
 3. After ALL GEAK tasks: `python3 $SCRIPTS_DIR/trace_action.py --component geak --action end`
 
 **OOB (Codex/Claude)** — if `codex` or `claude` is in `KERNEL_OPT_BACKENDS`:
@@ -41,7 +41,7 @@ Use `trace_action.py` to record start/end for each external component:
 2. After all LLM calls: `python3 $SCRIPTS_DIR/trace_action.py --component llm --action end`
 
 See each backend's skill doc for details. OOB header injection is automatic
-(via `auth_proxy.py`). GEAK headers require `geak_set_model_config`.
+(via `auth_proxy.py` in claw, or the `:4002` proxy in local).
 
 ### Step 1: Locate kernel source
 
@@ -69,11 +69,11 @@ find /sgl-workspace/aiter -name "*.py" -exec grep -l "@triton.jit" {} \;
 override in prompt (e.g., `"Use only geak"`, `"Use geak,codex,claude"`).
 All active backends run **simultaneously** for every candidate kernel.
 
-| Backend | MCP | Full round latency | GPU on pod | Reference |
-|---------|-----|--------------------|------------|-----------|
-| `geak` | GEAK (`geak_create_task`) | 10–30 min | Yes | [`../kernel-opt/geak.md`](../kernel-opt/geak.md) |
-| `codex` | OOB GPU Optimizer (`agent_create_task(agent="codex")`) | 2–6 min (3 iters) | No | [`../kernel-opt/codex.md`](../kernel-opt/codex.md) |
-| `claude` | OOB GPU Optimizer (`agent_create_task(agent="claude")`) | 3–15 min (3 iters) | No | [`../kernel-opt/claude.md`](../kernel-opt/claude.md) |
+| Backend | Invocation | Full round latency | GPU on pod | Reference |
+|---------|------------|--------------------|------------|-----------|
+| `geak` | **Local:** `geak_ray_submit.py` (Ray CLI) / **Claw (MCP):** `geak_create_task` (MCP) | 10–30 min | Yes | [`../kernel-opt/geak.md`](../kernel-opt/geak.md) |
+| `codex` | **Local:** `python $SKILL_ROOT/scripts/oob_ray_submit.py run -a codex` (CLI subprocess) / **Claw (MCP):** OOB MCP | 2–6 min (3 iters) | No | [`../kernel-opt/codex.md`](../kernel-opt/codex.md) |
+| `claude` | **Local:** `python $SKILL_ROOT/scripts/oob_ray_submit.py run -a claude` (CLI subprocess) / **Claw (MCP):** OOB MCP | 3–15 min (3 iters) | No | [`../kernel-opt/claude.md`](../kernel-opt/claude.md) |
 | `llm` | Direct OpenAI API (LLM Proxy) | 1–30s | No | [`../kernel-opt/llm.md`](../kernel-opt/llm.md) |
 
 **For each candidate kernel, launch all active backends CONCURRENTLY (not sequentially):**
@@ -94,9 +94,9 @@ Pick the one with highest verified speedup → Step 3.
 
 **Per-backend execution:**
 
-1. **`geak`**: `geak_create_task` + `geak_submit_task` → poll until done (single submission, GEAK verifies on-pod)
-2. **`codex`**: iterative refinement loop — `OOB_ROUND_ITERATIONS` (3) iterations, each: submit → download → **local benchmark** → feed result back as context. Take best speedup from all iterations. See [`../kernel-opt/codex.md`](../kernel-opt/codex.md).
-3. **`claude`**: same iterative refinement loop as codex, with `agent="claude"`. See [`../kernel-opt/claude.md`](../kernel-opt/claude.md).
+1. **`geak`**: **Local:** `geak_ray_submit.py run -t task.md --yolo` (Ray schedules `geak` with isolated GPU, blocks until done). **Claw (MCP):** `geak_create_task` + `geak_submit_task` → poll until done (single submission, GEAK verifies on-pod)
+2. **`codex`**: iterative refinement loop — `OOB_ROUND_ITERATIONS` (3) iterations, each: submit → download → **local benchmark** → feed result back as context. Take best speedup from all iterations. **Local:** each iteration is one blocking `python $SKILL_ROOT/scripts/oob_ray_submit.py run -a codex -p "$PROMPT" -f kernel.py --max-turns 20 --no-live --json` call; read `$(jq -r .workspace)`/`optimized_kernel.py` from the result (no `output/` subdir). **Claw (MCP):** `agent_create_task` + `agent_submit_task` + poll. See [`../kernel-opt/codex.md`](../kernel-opt/codex.md).
+3. **`claude`**: same iterative refinement loop as codex, with `agent="claude"` (or `python $SKILL_ROOT/scripts/oob_ray_submit.py run -a claude -p "$PROMPT" -f kernel.py --max-turns 30 --no-live --json` in local). See [`../kernel-opt/claude.md`](../kernel-opt/claude.md) — note Claude's prompt should include the MANDATORY CONSTRAINTS block from `claude.md` (function signature / block size / output filename).
 4. **`llm`**: `openai.Client.chat.completions.create` (multi-model parallel). See [`../kernel-opt/llm.md`](../kernel-opt/llm.md).
 
 **IMPORTANT:** Do NOT run backends sequentially (geak first, then codex, then claude...).
