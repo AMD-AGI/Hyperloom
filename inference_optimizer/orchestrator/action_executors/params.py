@@ -23,6 +23,7 @@ The runner now follows a round-based incremental search:
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -362,12 +363,20 @@ class ParamsExecutor:
                 "params_search_exhausted": True,
             }
 
+        # Resolve runtime model_path (task.params > $MODEL_PATH) and forward
+        # to run_grid so each Magpie variant benchmarks the user's selected
+        # model rather than the YAML's hardcoded fallback.
+        resolved_model = (
+            str(params.get("model_path") or "").strip()
+            or os.environ.get("MODEL_PATH", "").strip()
+        )
         single_results = await run_grid(
             base_yaml_path=config_path,
             base_extra_args=base_extra_args,
             grid=candidates,
             output_root=output_root,
             variant_timeout_sec=timeout_sec,
+            model_path=resolved_model,
         )
 
         candidate_by_name = {v.name: v for v in candidates}
@@ -399,6 +408,7 @@ class ParamsExecutor:
                     grid=[combo],
                     output_root=output_root / "combo",
                     variant_timeout_sec=timeout_sec,
+                    model_path=resolved_model,
                 )
 
         all_results = single_results + combo_results
