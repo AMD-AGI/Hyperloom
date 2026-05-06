@@ -91,6 +91,7 @@ def _build_variant_yaml(
     *,
     output_subdir: Path,
     model_path: str | None = None,
+    gpu_type: str | None = None,
 ) -> Path:
     """Materialize a per-variant Magpie YAML on disk.
 
@@ -101,12 +102,19 @@ def _build_variant_yaml(
     ``model_path`` (when non-empty) overrides ``benchmark.model``; the
     shipped configs all have a legacy hardcoded Qwen-Qwen3-8B path that
     would otherwise win over the user's runtime selection.
+
+    ``gpu_type`` (when non-empty) injects ``benchmark.runner_type`` and
+    pops any explicit ``benchmark.benchmark_script`` so Magpie's
+    runner_type -> script logic actually fires for the requested GPU.
     """
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     bench = cfg.setdefault("benchmark", {})
     if model_path:
         bench["model"] = str(model_path)
+    if gpu_type:
+        bench["runner_type"] = str(gpu_type)
+        bench.pop("benchmark_script", None)
     envs = bench.setdefault("envs", {})
     extra_args_env = server_args_env_name(bench.get("framework"))
 
@@ -168,6 +176,7 @@ async def run_grid(
     variant_timeout_sec: int = _VARIANT_TIMEOUT_SEC_DEFAULT,
     keep_going_on_failure: bool = True,
     model_path: str | None = None,
+    gpu_type: str | None = None,
 ) -> list[VariantResult]:
     """Execute every variant in ``grid`` once, in order.
 
@@ -177,10 +186,11 @@ async def run_grid(
     Synchronous subprocess call wrapped in ``asyncio.to_thread`` so the
     Coordinator reactor isn't blocked.
 
-    ``model_path`` is forwarded to every variant's YAML render; pass the
-    value resolved by the executor (task.params or $MODEL_PATH) so each
-    Magpie invocation benchmarks the user's actual model rather than the
-    YAML's legacy default.
+    ``model_path`` and ``gpu_type`` are forwarded to every variant's YAML
+    render; pass the values resolved by the executor (task.params or
+    $MODEL_PATH / $GPU_TYPE) so each Magpie invocation benchmarks the
+    user's actual model on the user's actual GPU rather than the YAML's
+    legacy default.
     """
     results: list[VariantResult] = []
     for i, variant in enumerate(grid):
@@ -189,6 +199,7 @@ async def run_grid(
             cfg_path = _build_variant_yaml(
                 base_yaml_path, base_extra_args, variant, output_subdir=slot,
                 model_path=model_path,
+                gpu_type=gpu_type,
             )
         except Exception as exc:  # noqa: BLE001
             results.append(VariantResult(
