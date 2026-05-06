@@ -22,7 +22,8 @@ Auto-detected when Claw client context is present, or user specifies `Mode: claw
 ```bash
 if [ "${GEAK_LOCAL:-false}" != "true" ]; then
     MODE="claw"
-    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/wekafs/inference-optimization}"
+    NFS_ROOT="${NFS_ROOT:-/wekafs}"
+    WORKSPACE_ROOT="${WORKSPACE_ROOT:-${NFS_ROOT}/inference-optimization}"
 fi
 ```
 
@@ -84,17 +85,17 @@ knows at creation time), NEVER a runtime timestamp:
 
 ```bash
 # CORRECT — agent knows the workload name
-NFS_DIR="/wekafs/hyperloom-results/${JOB_NAME}"
+NFS_DIR="${NFS_ROOT}/hyperloom-results/${JOB_NAME}"
 
 # WRONG — agent cannot predict the timestamp
-NFS_DIR="/wekafs/hyperloom-results/opt-$(date +%Y%m%d-%H%M%S)"
+NFS_DIR="${NFS_ROOT}/hyperloom-results/opt-$(date +%Y%m%d-%H%M%S)"
 ```
 
 If a timestamp sub-directory is needed for internal organization, write a **beacon
 file** at a predictable path so the agent can discover it:
 
 ```bash
-BEACON="/wekafs/hyperloom-results/${JOB_NAME}.nfs_dir"
+BEACON="${NFS_ROOT}/hyperloom-results/${JOB_NAME}.nfs_dir"
 echo "$NFS_DIR" > "$BEACON"
 ```
 
@@ -161,7 +162,7 @@ Ray 2.44.1 fix). The same image is used for both the RayJob and kernel-opt backe
 The custom SGLang image is based on upstream SGLang with Ray compatibility fixes:
 
 ```dockerfile
-FROM harbor.core42.example-internal-host.invalid/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x
+FROM ${HARBOR_PREFIX}/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x
 RUN python -m pip install ray[default]==2.44.1 click==8.1.7
 ```
 
@@ -283,8 +284,8 @@ export INFERENCEX_PATH="<path_on_shared_nfs>"
 
 # Use workload name (deterministic) — NEVER use $(date) timestamps (see IR-12)
 WORKLOAD_NAME="<workload_display_name>"  # e.g. inference-opt-gptoss120b
-export RESULT_DIR="/wekafs/inference-optimization/results/${WORKLOAD_NAME}"
-export TRACE_DIR="/wekafs/inference-optimization/traces/${WORKLOAD_NAME}"
+export RESULT_DIR="${NFS_ROOT}/inference-optimization/results/${WORKLOAD_NAME}"
+export TRACE_DIR="${NFS_ROOT}/inference-optimization/traces/${WORKLOAD_NAME}"
 
 source scripts/executor.sh
 
@@ -537,7 +538,7 @@ def run_sweep_config(model, tp, conc, isl, osl, result_dir, extra_args):
 configs = [(64, 1024, 1024), (16, 1024, 1024), (4, 1024, 1024),
            (64, 8192, 1024), (16, 8192, 1024)]
 futures = [run_sweep_config.remote(MODEL, TP, c, i, o,
-    f"/wekafs/inference-optimization/results/{WORKLOAD_NAME}/sweep/c{c}_i{i}_o{o}",
+    f"{os.environ['NFS_ROOT']}/inference-optimization/results/{WORKLOAD_NAME}/sweep/c{c}_i{i}_o{o}",
     TUNED_SERVER_ARGS) for c, i, o in configs]
 results = ray.get(futures)
 ```

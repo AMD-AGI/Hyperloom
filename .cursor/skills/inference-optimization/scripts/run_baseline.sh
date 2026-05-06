@@ -36,8 +36,9 @@ trap baseline_cleanup EXIT INT TERM
 FRAMEWORK="${FRAMEWORK:-sglang}"
 PORT=${PORT:-8888}
 TIMESTAMP=$(date +%Y-%m-%d-%H-%M)
-RESULT_DIR="${RESULT_DIR:-/wekafs/inference-optimization/results/${TIMESTAMP}}"
-TRACE_DIR="${TRACE_DIR:-/wekafs/inference-optimization/traces/${TIMESTAMP}}"
+NFS_ROOT="${NFS_ROOT:-/wekafs}"
+RESULT_DIR="${RESULT_DIR:-${NFS_ROOT}/inference-optimization/results/${TIMESTAMP}}"
+TRACE_DIR="${TRACE_DIR:-${NFS_ROOT}/inference-optimization/traces/${TIMESTAMP}}"
 NUM_PROMPTS_MULTIPLIER="${NUM_PROMPTS_MULTIPLIER:-3}"
 NUM_PROMPTS=$((CONC * NUM_PROMPTS_MULTIPLIER))
 RESULT_FILENAME="baseline_${FRAMEWORK}_tp${TP}_conc${CONC}_isl${ISL}_osl${OSL}"
