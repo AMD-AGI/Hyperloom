@@ -160,6 +160,58 @@ def _parse_report(workspace: Path) -> dict[str, Any] | None:
         return json.load(f)
 
 
+def _kill_stale_servers() -> None:
+    """Deep-clean any lingering inference server processes + shared memory.
+
+    Magpie's server_cleanup.sh only kills the process group leader and waits,
+    but vLLM::Worker / EngineCore children often escape the pgrp (Ray-spawned
+    or multiprocessing.spawn). Without this pre-clean, the next vLLM startup
+    hangs for 5 minutes on zmq socket / shared mem conflicts:
+      "Did not receive response from front-end process within 5 minutes"
+
+    We call this BEFORE every Magpie invocation so each grid variant starts
+    on a pristine server state.
+
+    NOTE: uses /proc scan instead of `subprocess.run(["pgrep",...])` to avoid
+    conflicting with test mocks that patch subprocess.run for Magpie calls.
+    """
+    import signal
+    import glob
+    import time
+
+    _KILL_PATTERNS = ("VLLM::Worker", "VLLM::EngineCore", "vllm.entrypoints",
+                      "vllm serve", "sglang.srt", "sglang.launch_server")
+
+    my_pid = os.getpid()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == my_pid:
+            continue
+        try:
+            cmdline = open(f"/proc/{pid}/cmdline", "rb").read()
+        except (OSError, PermissionError):
+            continue
+        text = cmdline.replace(b"\0", b" ").decode("utf-8", "replace")
+        if any(pat in text for pat in _KILL_PATTERNS):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    # Clear /dev/shm vllm/nccl/cuda segments that prevent re-binding.
+    for pattern in ("/dev/shm/vllm*", "/dev/shm/nccl*", "/dev/shm/cuda*"):
+        for f in glob.glob(pattern):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+    # Brief pause for KFD (ROCm kernel driver) async VRAM release.
+    time.sleep(2)
+
+
 def _run_magpie(
     *,
     magpie_python: str,
@@ -169,6 +221,12 @@ def _run_magpie(
     cwd: str,
 ) -> tuple[int, str, str]:
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr)."""
+    # Pre-clean: kill lingering server processes + clear shared memory so the
+    # next vLLM/SGLang startup doesn't collide with stale resources.
+    # Skip in test environments to avoid 2s sleep per variant.
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        _kill_stale_servers()
+
     env = os.environ.copy()
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
     cmd = [
