@@ -27,15 +27,10 @@ GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 GEAK_BRANCH="${GEAK_BRANCH:-feature/xiaofei/claw}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_ROOT}/geak-config/local.yaml}"
-# litellm picks the protocol from the model_name prefix:
-#  - bare 'claude-...' -> Anthropic /v1/messages route (gateway rejects with 401)
-#  - 'openai/...'      -> OpenAI /v1/chat/completions route (gateway accepts)
-# The AMD gateway only speaks OpenAI chat-completions, so we force the prefix.
-_GEAK_RAW_MODEL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
-case "${_GEAK_RAW_MODEL}" in
-  openai/*|anthropic/*|bedrock/*|azure/*|vertex_ai/*) GEAK_MODEL_NAME_VAL="${_GEAK_RAW_MODEL}" ;;
-  *) GEAK_MODEL_NAME_VAL="openai/${_GEAK_RAW_MODEL}" ;;
-esac
+# GEAK's LitellmModel (feature/xiaofei/claw) auto-routes bare claude-* model
+# names to OpenAI ChatCompletion when api_base contains llm-proxy/openai. So we
+# pass GEAK_MODEL_NAME through unchanged; do NOT prepend openai/ here.
+GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
 # GEAK/OOB use the user's LiteLLM-compatible endpoint. The canonical env is
 # OPENAI_BASE_URL + SAFE_API_KEY; keep fallbacks for older launchers.
 GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}"
