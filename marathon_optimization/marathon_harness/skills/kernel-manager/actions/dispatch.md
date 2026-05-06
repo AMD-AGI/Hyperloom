@@ -85,7 +85,7 @@ import httpx, os
 
 http_client = httpx.Client(verify=False, timeout=180)
 client = OpenAI(
-    base_url="https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1",
+    base_url=os.environ.get("SAFE_BASE_URL", "") + "/api/v1/llm-proxy/v1",
     api_key=os.environ["LLM_PROXY_API_KEY"],
     http_client=http_client,
 )
