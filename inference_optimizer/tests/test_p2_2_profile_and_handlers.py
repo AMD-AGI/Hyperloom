@@ -12,11 +12,14 @@ import pytest
 
 from inference_optimizer.orchestrator import kernel_request_handlers as krh
 from inference_optimizer.orchestrator.action_executors.baseline import (
+    BaselineExecutor,
+    _default_baseline_config,
     _materialize_config_with_envs,
 )
 from inference_optimizer.orchestrator.action_executors.profile import (
     PROFILE_DEFAULT_CONFIG,
     ProfileExecutor,
+    _default_profile_config,
 )
 from inference_optimizer.orchestrator.backends import (
     MockBackend,
@@ -162,6 +165,57 @@ def test_materialize_config_pops_legacy_benchmark_script(tmp_path):
     assert rendered["benchmark"]["runner_type"] == "mi355x"
     assert "benchmark_script" not in rendered["benchmark"], \
         "legacy benchmark_script must be popped so runner_type wins"
+
+
+# ===========================================================================
+# Regression: $FRAMEWORK env switches the default yaml between sglang/vllm
+# without anyone passing config_path explicitly. Locks down the entry-layer
+# fix for vLLM support — the optimizer used to be sglang-only because all 5
+# executors hardcoded baseline_sglang.yaml.
+# ===========================================================================
+def test_default_baseline_config_resolves_sglang_by_default(monkeypatch):
+    monkeypatch.delenv("FRAMEWORK", raising=False)
+    assert _default_baseline_config().name == "baseline_sglang.yaml"
+
+
+def test_default_baseline_config_resolves_vllm_when_env_set(monkeypatch):
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    assert _default_baseline_config().name == "baseline_vllm.yaml"
+
+
+def test_default_baseline_config_falls_back_on_unknown_value(monkeypatch):
+    """Unknown $FRAMEWORK is treated as sglang (matches CLI default).
+    The CLI fail-fasts on unknown values, but if a user shell has a stale
+    or weird FRAMEWORK env, we should not blow up — sglang is the safe
+    default."""
+    monkeypatch.setenv("FRAMEWORK", "tensorrt")
+    assert _default_baseline_config().name == "baseline_sglang.yaml"
+
+
+def test_default_profile_config_tracks_framework(monkeypatch):
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    assert _default_profile_config().name == "profile_vllm.yaml"
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    assert _default_profile_config().name == "profile_sglang.yaml"
+
+
+def test_baseline_executor_picks_framework_yaml_at_call_time(tmp_path, monkeypatch):
+    """No config_path override + FRAMEWORK=vllm => baseline_vllm.yaml is
+    the resolved default, NOT baseline_sglang.yaml. This is the very
+    regression that was blocking vllm users."""
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    pe = BaselineExecutor()
+    # Default constructor leaves default_config_path=None so the resolver
+    # is consulted at call time.
+    assert pe.default_config_path is None
+    assert pe._resolve_default_config().name == "baseline_vllm.yaml"
+
+
+def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    pe = ProfileExecutor()
+    assert pe.default_config_path is None
+    assert pe._resolve_default_config().name == "profile_vllm.yaml"
 
 
 @pytest.mark.asyncio
