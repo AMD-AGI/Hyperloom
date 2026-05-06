@@ -90,16 +90,23 @@ def _build_variant_yaml(
     variant: GridVariant,
     *,
     output_subdir: Path,
+    model_path: str | None = None,
 ) -> Path:
     """Materialize a per-variant Magpie YAML on disk.
 
     Magpie's sglang_mi300x.sh honors ``EXTRA_SGLANG_ARGS`` from envs to
     append flags after the auto-generated server args, so we just inject
     the variant's flags there.
+
+    ``model_path`` (when non-empty) overrides ``benchmark.model``; the
+    shipped configs all have a legacy hardcoded Qwen-Qwen3-8B path that
+    would otherwise win over the user's runtime selection.
     """
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     bench = cfg.setdefault("benchmark", {})
+    if model_path:
+        bench["model"] = str(model_path)
     envs = bench.setdefault("envs", {})
     extra_args_env = server_args_env_name(bench.get("framework"))
 
@@ -160,6 +167,7 @@ async def run_grid(
     cwd: str = _MAGPIE_CWD_DEFAULT,
     variant_timeout_sec: int = _VARIANT_TIMEOUT_SEC_DEFAULT,
     keep_going_on_failure: bool = True,
+    model_path: str | None = None,
 ) -> list[VariantResult]:
     """Execute every variant in ``grid`` once, in order.
 
@@ -168,6 +176,11 @@ async def run_grid(
 
     Synchronous subprocess call wrapped in ``asyncio.to_thread`` so the
     Coordinator reactor isn't blocked.
+
+    ``model_path`` is forwarded to every variant's YAML render; pass the
+    value resolved by the executor (task.params or $MODEL_PATH) so each
+    Magpie invocation benchmarks the user's actual model rather than the
+    YAML's legacy default.
     """
     results: list[VariantResult] = []
     for i, variant in enumerate(grid):
@@ -175,6 +188,7 @@ async def run_grid(
         try:
             cfg_path = _build_variant_yaml(
                 base_yaml_path, base_extra_args, variant, output_subdir=slot,
+                model_path=model_path,
             )
         except Exception as exc:  # noqa: BLE001
             results.append(VariantResult(
