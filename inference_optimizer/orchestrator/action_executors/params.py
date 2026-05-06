@@ -29,7 +29,7 @@ from typing import Any
 
 import yaml
 
-from ._grid_runner import GridVariant, VariantResult, run_grid
+from ._grid_runner import GridVariant, VariantResult, run_grid, _resolve_output_root
 from .baseline import _default_baseline_config
 
 
@@ -236,7 +236,7 @@ class ParamsExecutor:
         default_vllm_grid: list[GridVariant] | None = None,
         default_nccl_grid: list[GridVariant] | None = None,
         default_config_path: Path | str | None = None,
-        default_output_root: Path | str = "/workspace/hyperloom",
+        default_output_root: Path | str | None = None,
         variant_timeout_sec: int = 900,
         include_nccl: bool = False,
         default_max_candidates_per_round: int = 0,
@@ -249,7 +249,7 @@ class ParamsExecutor:
         self.default_config_path = (
             Path(default_config_path) if default_config_path else None
         )
-        self.default_output_root = Path(default_output_root)
+        self.default_output_root = Path(default_output_root or _resolve_output_root())
         self.variant_timeout_sec = variant_timeout_sec
         self.include_nccl = include_nccl
         self.default_max_candidates_per_round = int(default_max_candidates_per_round)
