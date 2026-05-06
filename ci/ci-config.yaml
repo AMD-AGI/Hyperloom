@@ -14,7 +14,7 @@ inferenceX:
   harbor_prefix: ${HARBOR_PREFIX}
 
 results:
-  result_dir: /workspace/hyperloom/
+  result_dir: ${SANDBOX_WORKSPACE}/hyperloom/
   nfs_base: ${NFS_ROOT}/results/ci
   artifact_retention_days: 90
 
