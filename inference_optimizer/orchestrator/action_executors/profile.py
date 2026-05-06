@@ -58,9 +58,9 @@ class ProfileExecutor(BaselineExecutor):
     def __init__(
         self,
         *,
-        magpie_python: str = "/opt/venv/bin/python",
+        magpie_python: str | None = None,
         default_config_path: Path | str | None = None,
-        default_output_root: Path | str = "/workspace/hyperloom",
+        default_output_root: Path | str | None = None,
         default_timeout_sec: int = PROFILE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
     ):
