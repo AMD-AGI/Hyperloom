@@ -40,6 +40,8 @@ import asyncio
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -370,7 +372,52 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     print("===============================================")
 
 
+def _preflight() -> None:
+    """Auto-install missing runtime deps before the optimizer loop starts.
+
+    Always required: ray (Magpie uses it) + Magpie itself.
+    Runs once at session start; subsequent calls are fast noops (import
+    checks are ~0ms).
+    """
+    from .orchestrator.action_executors._grid_runner import _resolve_magpie_python
+    magpie_python = _resolve_magpie_python()
+
+    # 1. Ray — needed by Magpie for task scheduling even without kernel-agent.
+    if shutil.which("ray") is None:
+        print("Preflight: ray not found, installing ray[default]==2.44.1 + click<8.3.0 ...")
+        subprocess.run(
+            [magpie_python, "-m", "pip", "install", "--quiet",
+             "ray[default]==2.44.1", "click<8.3.0"],
+            check=True,
+        )
+        print("Preflight: ray installed OK")
+
+    # 2. Magpie — the benchmark engine all executors shell out to.
+    check = subprocess.run(
+        [magpie_python, "-c", "import Magpie"],
+        capture_output=True,
+    )
+    if check.returncode != 0:
+        workspace_root = os.environ.get("WORKSPACE_ROOT") or "/workspace"
+        magpie_dir = Path(workspace_root) / "Magpie"
+        if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
+            print(f"Preflight: Magpie not importable and not found at {magpie_dir}; cloning ...")
+            subprocess.run(
+                ["git", "clone", "--depth", "1",
+                 "https://github.com/AMD-AGI/Magpie.git", str(magpie_dir)],
+                check=True,
+            )
+        print(f"Preflight: installing Magpie from {magpie_dir} ...")
+        subprocess.run(
+            [magpie_python, "-m", "pip", "install", "--quiet", "-e", str(magpie_dir)],
+            check=True,
+        )
+        print("Preflight: Magpie installed OK")
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
+    _preflight()
+
     if args.resume:
         # Resume mode: skip the SharedState seed so Coordinator.__init__
         # picks up the existing state.json + SQLite event log unchanged.
