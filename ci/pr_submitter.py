@@ -28,7 +28,7 @@ DEFAULT_CONFIG = CI_DIR / "ci-config.yaml"
 
 # ── LLM-based extraction (fallback when diff-based fails) ──
 
-LLM_ENDPOINT = "https://oci-slc.example-internal-host.invalid/api/v1/llm-proxy/v1/chat/completions"
+LLM_ENDPOINT = os.environ.get("SAFE_BASE_URL", "") + "/api/v1/llm-proxy/v1/chat/completions"
 
 LLM_EXTRACT_PROMPT = """\
 You are analyzing an inference optimization report. Extract the specific server
