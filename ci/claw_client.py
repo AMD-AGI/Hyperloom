@@ -25,6 +25,7 @@ class ClawClient:
         self.agent_id = agent_id
         self.sandbox_workspace = sandbox_workspace
         self.default_tools: list[int] = []
+        self._last_event_id: str | None = None
         self._session = requests.Session()
         self._session.headers.update({
             "Content-Type": "application/json",

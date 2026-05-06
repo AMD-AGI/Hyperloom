@@ -7,6 +7,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -267,7 +268,6 @@ def run_model(
                                 src = os.path.join(root, fn)
                                 dst = os.path.join(result_dir, fn)
                                 if not os.path.exists(dst):
-                                    import shutil
                                     shutil.copy2(src, dst)
                                     log.info("NFS fallback: copied %s → %s", src, dst)
                                     if fn == "optimization_report.md":
