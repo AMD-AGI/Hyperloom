@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -153,12 +154,19 @@ class BackendsExecutor:
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
 
+        # Resolve runtime model_path (task.params > $MODEL_PATH) and forward
+        # so each variant's YAML overrides the legacy hardcoded model field.
+        resolved_model = (
+            str(params.get("model_path") or "").strip()
+            or os.environ.get("MODEL_PATH", "").strip()
+        )
         results = await run_grid(
             base_yaml_path=config_path,
             base_extra_args=base_extra_args,
             grid=grid,
             output_root=output_root,
             variant_timeout_sec=timeout_sec,
+            model_path=resolved_model,
         )
         winners = pick_winners(results, baseline_tput=base_tput)
         best = max(
