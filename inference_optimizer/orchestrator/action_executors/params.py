@@ -31,6 +31,7 @@ import yaml
 
 from ...paths import asset_root
 from ._grid_runner import GridVariant, VariantResult, run_grid
+from .baseline import _default_baseline_config
 
 
 log = logging.getLogger(__name__)
@@ -245,9 +246,9 @@ class ParamsExecutor:
         self.default_grid = list(default_grid or DEFAULT_PARAMS_GRID)
         self.default_vllm_grid = list(default_vllm_grid or DEFAULT_VLLM_PARAMS_GRID)
         self.default_nccl_grid = list(default_nccl_grid or DEFAULT_NCCL_GRID)
+        # None = resolve at call time from $FRAMEWORK (sglang/vllm).
         self.default_config_path = (
-            Path(default_config_path) if default_config_path
-            else asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
+            Path(default_config_path) if default_config_path else None
         )
         self.default_output_root = Path(default_output_root)
         self.variant_timeout_sec = variant_timeout_sec
@@ -257,7 +258,11 @@ class ParamsExecutor:
 
     async def __call__(self, ctx) -> dict[str, Any]:
         params = ctx.task.params or {}
-        config_path = Path(params.get("config_path") or self.default_config_path)
+        config_path = Path(
+            params.get("config_path")
+            or self.default_config_path
+            or _default_baseline_config()
+        )
         if not config_path.exists():
             return {"status": "failed",
                     "error_class": "missing_config",
