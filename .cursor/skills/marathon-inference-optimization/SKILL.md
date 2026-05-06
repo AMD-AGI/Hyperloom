@@ -40,18 +40,29 @@ responsibility, defined here once so the prompt can stay short.
    A 24h foreground call would exhaust your context. The background approach
    hands control back immediately so you can poll.
 
-3. **Poll every 60s** with a SEPARATE shell tool call:
+3. **Poll every 60s** with a SEPARATE shell tool call. Always pair the tail
+   with a liveness check on the marathon PID; otherwise an early `run.sh`
+   death can look like a quiet long-running marathon for hours:
    ```bash
-   tail -120 /tmp/marathon.log
+   sleep 60 && (kill -0 $marathon_pid 2>/dev/null || echo MARATHON_DEAD) && tail -200 /tmp/marathon.log
    ```
    The monitor inside `run.sh` already writes a progress block every 60s
    containing `state.json` fields (`phase`, `tput`, `gain%`, `completed`,
    `crash`, `dream`, `km`) **plus the last 3 activity lines from EACH of
    the three pane logs** (`orchestrator` / `kernel-mgr` / `watchdog` —
-   `assistant text`, `tool: <name> <cmd>`, `result: ...`). Do NOT separately
-   tail the three per-pane logs on every poll — that duplicates output. Only
-   do a one-off `tail -200 $SESSION_DIR/logs/<pane>.log` when you need deeper
-   detail on a specific pane.
+   `assistant text`, `tool: <name> <cmd>`, `result: ...`). 200 lines covers
+   several progress blocks, enough buffer for autocompact gaps. Do NOT
+   separately tail the three per-pane logs on every poll — that duplicates
+   output. Only do a one-off `tail -200 $SESSION_DIR/logs/<pane>.log` when
+   you need deeper detail on a specific pane.
+
+   If the liveness check prints `MARATHON_DEAD` before `[run.sh] Done`,
+   immediately classify as "MARATHON DIED EARLY", forward the last 200
+   lines plus a `ps -ef | grep -E 'run.sh|claude'` snapshot, and stop polling.
+   If `/tmp/marathon.log` stays on the same `preflight_deps` /
+   `missing apt pkgs: ... installing` line for 10 consecutive polls, classify
+   as `PREFLIGHT_STALLED`, forward the last 200 lines plus the same process
+   snapshot, and stop polling instead of burning the full `MAX_HOURS`.
 
 4. **Stop polling** when `/tmp/marathon.log` contains the line `[run.sh] Done`.
    That line is the authoritative finish signal. When you see it, forward the
@@ -127,6 +138,10 @@ user must export them before invoking the skill.
 | `KERNEL_OPT_BACKENDS` | `geak,claude,codex` | OOB allowlist |
 | `DRY_RUN` | 0 | `1` = preflight only, no tmux |
 | `REPORT_INTERVAL_S` | 60 | monitor cadence |
+| `PREFLIGHT_STEP_TIMEOUT_S` | `300` | wallclock cap for each preflight install/download step |
+| `PANE_CLAUDE_TIMEOUT_S` | `1800` (30 min) | per-`claude --print` wallclock cap; on expiry the pane launcher restarts with `--continue` |
+| `PANE_MAX_RESTARTS` | `200` | restart-loop cap per pane |
+| `PANE_CLAUDE_DEBUG` | `0` | `1` injects `ANTHROPIC_LOG=debug` into inner `claude --print` calls for hang diagnosis |
 
 ## How `run.sh` self-adapts
 
@@ -150,6 +165,7 @@ per run) and a trigger pointing at this skill. No Rules to repeat.
 ```
 @marathon-inference-optimization
 
+PANE_CLAUDE_DEBUG=1 \
 STRICT=1 MODEL_NAME=deepseek-ai/DeepSeek-R1-0528 \
 BASE_DIR=/shared_nfs/xiaofei/marathon-runs/dsr1-$(date +%m%d-%H%M) \
 MODEL_PATH=/hyperloom/models/DeepSeek-R1-0528 \
@@ -158,7 +174,9 @@ GPU_COUNT=8 GPU_TYPE=MI355X TP=8 EP=1 PRECISION=fp8 \
 CONC=64 ISL=1024 OSL=1024 \
 IMAGE=harbor.core42.example-internal-host.invalid/custom/lmsysorg/sglang:202603270958 \
 KERNEL_OPT_WORKSPACE=core42-sandbox KERNEL_OPT_BACKENDS=claude \
-INFERENCEX_PATH=/hyperloom/InferenceX
+INFERENCEX_PATH=/hyperloom/InferenceX \
+bash $SKILL_ROOT/scripts/launcher/run.sh > /tmp/marathon.log 2>&1 &
+echo "marathon_pid=$!"
 ```
 
 ### Claw sandbox
@@ -177,7 +195,7 @@ MAX_HOURS=... (...same as above...)
 The agent reads this SKILL.md when `@marathon-inference-optimization` is
 triggered (or when the glob `**/marathon*` matches), follows the "Your role"
 section, constructs the `bash $SKILL_ROOT/scripts/launcher/run.sh > /tmp/marathon.log 2>&1 &`
-invocation from the env vars, polls `tail -120 /tmp/marathon.log`, and forwards
+invocation from the env vars, polls with the `kill -0` + `tail -200` command above, and forwards
 the final SESSION_REPORT when `[run.sh] Done` appears.
 
 ### Sandbox vs local — what differs
