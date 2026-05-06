@@ -279,7 +279,7 @@ jobs:
                   lines.append(f"| {'**'+comp+'**' if is_diff else comp} | {va} | {vb} |{marker}")
               lines.append("")
           lines.append(f"| Model | A Optimized (Gain) | B Optimized (Gain) | Winner |")
-          lines.append("|-------|--------------------|--------------------|---------")
+          lines.append("|-------|--------------------|--------------------|--------|")
           for model in models:
               ra, rb = a.get(model, {}), b.get(model, {})
               a_opt, a_gain = ra.get("optimized_tok_per_gpu"), ra.get("gain_pct")
