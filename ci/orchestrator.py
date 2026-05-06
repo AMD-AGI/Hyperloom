@@ -305,6 +305,7 @@ def main():
     parser.add_argument("--tools", default=None, help="Comma-separated Claw tool IDs (overrides ci-config)")
     parser.add_argument("--dry-run", action="store_true", help="Print prompts without executing")
     parser.add_argument("--output-dir", default="ci-output", help="Output directory for reports")
+    parser.add_argument("--update", action="store_true", help="Update images to latest stable before running")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -347,15 +348,16 @@ def main():
         )
         yaml_path = Path(_tmpdir) / ifx_cfg["config_path"]
 
-        # Update images in the cloned amd-master.yaml to latest stable before reading
+        # Optionally update images in the cloned amd-master.yaml to latest stable
         check_script = CI_DIR.parent / "inference_optimization" / "InferenceX" / "utils" / "check_image_versions.py"
         if check_script.exists():
+            cmd = [sys.executable, str(check_script), "--config-files", str(yaml_path)]
+            if args.update:
+                cmd.append("--update")
+                log.info("--update flag set: upgrading images to latest stable")
             try:
-                result = subprocess.run(
-                    [sys.executable, str(check_script),
-                     "--config-files", str(yaml_path), "--update"],
-                    capture_output=True, text=True, timeout=120,
-                )
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                                        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
                 if result.stdout:
                     log.info("Image version check:\n%s", result.stdout.strip())
                 if result.returncode != 0 and result.stderr:
@@ -363,7 +365,7 @@ def main():
             except Exception as e:
                 log.warning("Image version check failed (non-fatal): %s", e)
         else:
-            log.warning("check_image_versions.py not found at %s, skipping image version check", check_script)
+            log.warning("check_image_versions.py not found at %s, skipping", check_script)
 
         with open(yaml_path) as f:
             amd_master = yaml.safe_load(f)
