@@ -51,11 +51,20 @@ from ._grid_runner import server_args_env_name
 log = logging.getLogger(__name__)
 
 
-# Defaults — overridable per-task via task.params.
+# Legacy module-level constant kept pointing at the sglang yaml so existing
+# tests that import it as a fixture path continue to work. Runtime selection
+# of sglang vs vllm yaml goes through `_default_baseline_config()` below.
 BASELINE_DEFAULT_CONFIG = (
     asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
 )
 BASELINE_DEFAULT_TIMEOUT_SEC = 1200
+
+
+def _default_baseline_config() -> Path:
+    """Resolve default Magpie YAML based on $FRAMEWORK env (sglang/vllm)."""
+    fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
+    name = "baseline_vllm.yaml" if fw == "vllm" else "baseline_sglang.yaml"
+    return asset_root() / "scripts" / "configs" / name
 
 
 def _materialize_config_with_envs(
@@ -113,20 +122,32 @@ class BaselineExecutor:
         self,
         *,
         magpie_python: str = "/opt/venv/bin/python",
-        default_config_path: Path | str = BASELINE_DEFAULT_CONFIG,
+        default_config_path: Path | str | None = None,
         default_output_root: Path | str = "/workspace/hyperloom",
         default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
     ):
         self.magpie_python = magpie_python
-        self.default_config_path = Path(default_config_path)
+        # None = resolve from $FRAMEWORK at call time. Tests may pass an
+        # explicit fixture path which then wins over the env-based resolver.
+        self.default_config_path = (
+            Path(default_config_path) if default_config_path else None
+        )
         self.default_output_root = Path(default_output_root)
         self.default_timeout_sec = default_timeout_sec
         self.cwd = Path(cwd)
 
+    def _resolve_default_config(self) -> Path:
+        """Hook for subclasses (ProfileExecutor) to swap the resolver."""
+        return _default_baseline_config()
+
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         params = ctx.task.params or {}
-        config_path = Path(params.get("config_path") or self.default_config_path)
+        config_path = Path(
+            params.get("config_path")
+            or self.default_config_path
+            or self._resolve_default_config()
+        )
         if not config_path.exists():
             raise FileNotFoundError(f"baseline config not found: {config_path}")
 
