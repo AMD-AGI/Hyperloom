@@ -22,52 +22,61 @@ jobs:
         run: |
           LABELS=""
 
-          # --- Detect target release ---
-          if echo "$ISSUE_BODY" | grep -qi "Target release"; then
-            release_val=$(echo "$ISSUE_BODY" | grep -A1 "Target release" | tail -1 | xargs)
-            case "$release_val" in
-              v0.2|v0.3|v0.4) LABELS="$LABELS,release:$release_val" ;;
-            esac
-          fi
+          # Helper: extract the first non-empty line after a "### Heading" line.
+          # GitHub issue forms render as:
+          #   ### Heading
+          #   <blank line>
+          #   value
+          get_form_value() {
+            local heading="$1"
+            printf '%s' "$ISSUE_BODY" | awk -v h="^### $heading$" '
+              $0 ~ h { found = 1; next }
+              found {
+                sub(/^[ \t]+/, "")
+                sub(/[ \t]+$/, "")
+                if ($0 != "") { print; exit }
+              }
+            '
+          }
 
-          # --- Detect domain from "Optimization domain" or "Related area" dropdown ---
-          if echo "$ISSUE_BODY" | grep -qiE "Optimization domain|Related area"; then
-            domain_val=$(echo "$ISSUE_BODY" | grep -A1 -iE "Optimization domain|Related area" | tail -1 | xargs)
-            case "$domain_val" in
-              Inference)          LABELS="$LABELS,domain:inference" ;;
-              Training)           LABELS="$LABELS,domain:training" ;;
-              Both)               LABELS="$LABELS,domain:inference,domain:training" ;;
-              "MCP tools")        LABELS="$LABELS,domain:mcp" ;;
-              "UI / PrimusClaw")  LABELS="$LABELS,domain:ui" ;;
-            esac
-          fi
+          # --- Detect target release ---
+          release_val=$(get_form_value "Target release")
+          case "$release_val" in
+            v0.2|v0.3|v0.4) LABELS="$LABELS,release:$release_val" ;;
+          esac
+
+          # --- Detect domain from "Optimization domain" (Bug/Feature) ---
+          domain_val=$(get_form_value "Optimization domain")
+          case "$domain_val" in
+            Inference)  LABELS="$LABELS,domain:inference" ;;
+            Training)   LABELS="$LABELS,domain:training" ;;
+            Both)       LABELS="$LABELS,domain:inference,domain:training" ;;
+          esac
+
+          # --- Detect domain from "Related area" (General template) ---
+          related_val=$(get_form_value "Related area")
+          case "$related_val" in
+            Inference)          LABELS="$LABELS,domain:inference" ;;
+            Training)           LABELS="$LABELS,domain:training" ;;
+            "MCP tools")        LABELS="$LABELS,domain:mcp" ;;
+            "UI / PrimusClaw")  LABELS="$LABELS,domain:ui" ;;
+          esac
 
           # --- Detect sub-domain from "Issue type" dropdown (bug report) ---
-          if echo "$ISSUE_BODY" | grep -qi "Issue type"; then
-            issue_type=$(echo "$ISSUE_BODY" | grep -A1 "Issue type" | tail -1 | xargs)
-            case "$issue_type" in
-              "MCP tool failure") LABELS="$LABELS,domain:mcp" ;;
-              "UI issue")         LABELS="$LABELS,domain:ui" ;;
-            esac
-          fi
-
-          # --- Detect entry point ---
-          if echo "$ISSUE_BODY" | grep -qi "Hyperloom UI (PrimusClaw)"; then
-            if ! echo "$LABELS" | grep -q "domain:ui"; then
-              LABELS="$LABELS,domain:ui"
-            fi
-          fi
+          issue_type_val=$(get_form_value "Issue type")
+          case "$issue_type_val" in
+            "MCP tool failure") LABELS="$LABELS,domain:mcp" ;;
+            "UI issue")         LABELS="$LABELS,domain:ui" ;;
+          esac
 
           # --- Detect type from General template ---
-          if echo "$ISSUE_BODY" | grep -qi "What kind of issue"; then
-            kind_val=$(echo "$ISSUE_BODY" | grep -A1 "What kind of issue" | tail -1 | xargs)
-            case "$kind_val" in
-              "Suggestion / Feature idea") LABELS="$LABELS,type:feature" ;;
-              "Question")                  LABELS="$LABELS,type:question" ;;
-              "Task / Chore")              LABELS="$LABELS,type:task" ;;
-              "Documentation")             LABELS="$LABELS,type:docs" ;;
-            esac
-          fi
+          kind_val=$(get_form_value "What kind of issue is this\\?")
+          case "$kind_val" in
+            "Suggestion / Feature idea") LABELS="$LABELS,type:feature" ;;
+            "Question")                  LABELS="$LABELS,type:question" ;;
+            "Task / Chore")              LABELS="$LABELS,type:task" ;;
+            "Documentation")             LABELS="$LABELS,type:docs" ;;
+          esac
 
           # Clean up leading comma
           LABELS=$(echo "$LABELS" | sed 's/^,//')
