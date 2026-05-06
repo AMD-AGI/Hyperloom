@@ -268,16 +268,6 @@ fi
 GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
 GEAK_API_KEY_VAL="${GEAK_API_KEY:-${LLM_API_KEY:-${AMD_LLM_API_KEY:-}}}"
 GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${LLM_API_BASE:-}}"
-# litellm needs a `<provider>/` prefix on `model_name` to know which client
-# protocol to use. We send claude-opus-4-* via the AMD primus-safe proxy
-# which speaks OpenAI ChatCompletion, so the prefix MUST be `openai/`
-# (NOT `anthropic/` — that would route through the Anthropic SDK, ignore
-# `base_url`, and require ANTHROPIC_API_KEY). litellm strips the prefix
-# before sending to the proxy.
-case "$GEAK_MODEL_NAME_VAL" in
-    */*) ;;  # already prefixed by caller, trust it
-    *)   GEAK_MODEL_NAME_VAL="openai/${GEAK_MODEL_NAME_VAL}" ;;
-esac
 
 sed -e "s|__GEAK_MODEL_NAME__|${GEAK_MODEL_NAME_VAL}|g" \
     -e "s|__GEAK_API_KEY__|${GEAK_API_KEY_VAL}|g" \
