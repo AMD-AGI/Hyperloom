@@ -85,13 +85,15 @@ shell_id ← bash(
   run_in_background = true
 )
 
-# Step 2 — poll every 120s (sweep server startup + N cases takes longer than baseline):
+# Step 2 — poll with bash_output only. NO separate sleep bash.
+# bash(sleep N) for any N ≥ proxy-idle-timeout (~60s) causes false MCP -32001.
+# Each bash_output call is a fresh short TCP connection, immune to teardown.
 while True:
-    bash(command = "sleep 120", timeout = 130)
     out ← bash_output(shell_id = shell_id)
     if out matches "Benchmark Result|sweep_report\.json|Execution time"  : break (DONE)
     if out matches "Traceback|FATAL|exit [1-9]|signal=SIG|OOM|server failed": break (ERROR)
     if elapsed > 7200 : kill_shell(shell_id); break (TIMEOUT)
+    # If you need a minimal pause: bash(command="true", timeout=5) — NOT sleep 60+
 
 # Step 3 — collect results:
 bash(command = "cat $SWEEP_DIR/benchmark_*/sweep_report.json 2>/dev/null \

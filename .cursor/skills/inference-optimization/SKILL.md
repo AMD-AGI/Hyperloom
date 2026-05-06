@@ -117,8 +117,9 @@ sleep 600 && tail server.log
 while ps aux | grep benchmark_serving | grep -v grep > /dev/null; do sleep 30; done
 ```
 
-**Right:** start in background, then poll incrementally. Each poll is fast (< 100 ms
-on the MCP side) and returns only the new lines since the previous read.
+**Right:** start in background, then poll incrementally with `bash_output` only.
+Each `bash_output` is a new short-lived TCP connection (< 100 ms), immune to
+proxy idle-connection teardown.
 
 ```bash
 # Step 1: launch in background — returns shell_id immediately
@@ -128,10 +129,12 @@ bash(
 )
 # → Started background shell shell-XXXXXX
 
-# Step 2: poll output. Sleep BETWEEN polls in agent (LLM turn), NOT inside bash.
-bash(command="sleep 60", timeout=70)         # short sleep is fine; ≪ MCP timeout
-bash_output(shell_id="shell-XXXXXX")         # incremental; cheap
-# Repeat sleep + bash_output until you see "Benchmark Result" or report file.
+# Step 2: poll output — NO separate sleep bash call.
+# Just call bash_output directly; each poll is a fresh short TCP connection.
+bash_output(shell_id="shell-XXXXXX")         # incremental; cheap; new TCP each time
+# Repeat bash_output each agent turn until DONE_REGEX or ERROR_REGEX matches.
+# If you need a delay between polls, use bash(command="true", timeout=5) as a
+# minimal no-op rather than sleep 60 (long sleeps are cut by proxy idle timeout).
 
 # Step 3: read final result
 bash(command="cat conc128/results/benchmark_*/benchmark_report.json")
@@ -155,12 +158,15 @@ shell_id ← bash(
 )
 
 # Step 2 — poll loop (each iteration is one agent turn):
+# DO NOT use bash(sleep N) between polls — even 60s sleeps are cut by
+# proxy idle-connection teardown (~60s), causing false MCP -32001 errors.
+# Call bash_output directly; each call opens a new short-lived TCP connection.
 while True:
-    bash(command = "sleep 60", timeout = 70)            # short sleep ≪ 600s MCP cap
-    out ← bash_output(shell_id = shell_id)              # incremental, cheap
+    out ← bash_output(shell_id = shell_id)              # incremental, cheap, new TCP
     if out matches DONE_REGEX  : break
     if out matches ERROR_REGEX : break
     if elapsed > <max_minutes> : kill_shell(shell_id); break
+    # If you need a brief pause: bash(command="true", timeout=5) — minimal, not sleep 60
 
 # Step 3 — collect result (only after DONE):
 bash(command = "cat <report_path>")
@@ -175,15 +181,16 @@ bash(command = "cat <report_path>")
 | `ERROR_REGEX` (always) | `Traceback\|FATAL\|exit [1-9]\|signal=SIG\|OOM\|CUDA out of memory` |
 
 **Poll cadence:**
-- Default: 60s
-- Fast cmds (<5 min expected): 30s
-- Server warmup (model load, first benchmark): 120s
-- NEVER 0s busy-loop; NEVER 600s+ (defeats the point — same as foreground)
+- Default: call `bash_output` once per agent turn (no separate sleep bash needed)
+- Agent turn cycle is naturally 2-10s; this is sufficient cadence for any benchmark
+- If output hasn't changed for 3+ consecutive polls → consider the cmd hung
 
 **Hard prohibitions:**
-- ❌ `sleep 600 && tail`           — opaque, no progress visibility, blocks 10 min in MCP
+- ❌ `bash(command="sleep N")` as polling delay — even sleep 60 hits proxy idle teardown
+  (validated: session ed26388c 2026-05-06, every `sleep 100` bash got MCP -32001)
+- ❌ `sleep 600 && tail`           — opaque, no progress visibility, blocks MCP
 - ❌ `while ps aux \| grep ... ; do sleep 30 ; done` — same problem
-- ❌ Foreground `magpie benchmark` even with `timeout 3600` — MCP caps at 600s anyway
+- ❌ Foreground `magpie benchmark` even with `timeout 3600` — proxy cuts idle connection
 - ❌ `find /` for kernel discovery — see Common Pitfalls #4
 
 When `bash_output` repeatedly returns no new lines (e.g., 3 polls in a row), consider
