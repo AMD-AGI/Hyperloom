@@ -382,6 +382,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # the Magpie YAML instead of trusting the YAML's hardcoded `model:`.
         os.environ["MODEL_PATH"] = str(args.model)
 
+        # Resolve framework: --framework > $FRAMEWORK env > "sglang".
+        # Session-wide; mixing sglang/vllm in one session is not supported.
+        framework = (
+            (args.framework or os.environ.get("FRAMEWORK", "")).strip().lower()
+            or "sglang"
+        )
+        if framework not in ("sglang", "vllm"):
+            print(
+                f"ERROR: --framework must be sglang or vllm (got {framework!r}); "
+                "set $FRAMEWORK accordingly or pass --framework",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        os.environ["FRAMEWORK"] = framework
+        print(f"Framework       : {framework}")
+
         # Resolve GPU runner type: --gpu-type > $GPU_TYPE > rocm-smi probe.
         # Result is the canonical Magpie label (mi300x / mi355x). MI325X has
         # the same architecture as MI300X but Magpie does not yet ship
@@ -487,6 +503,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "rocm-smi; falls back to Magpie's own auto-detection if rocm-smi "
              "is unavailable. mi325x is treated as mi300x (same architecture; "
              "Magpie does not yet ship sglang_mi325x.sh / vllm_mi325x.sh).",
+    )
+    opt.add_argument(
+        "--framework", choices=["sglang", "vllm"], default=None,
+        help="Inference framework to benchmark / optimize. Resolution order: "
+             "--framework > $FRAMEWORK env > sglang (default). Selection is "
+             "session-wide; mixing sglang and vllm in a single session is "
+             "not supported.",
     )
     opt.add_argument("--max-hours", type=float, default=2.0,
                       help="Wall-clock budget in hours (default 2.0)")
