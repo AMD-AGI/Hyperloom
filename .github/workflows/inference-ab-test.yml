@@ -1,24 +1,24 @@
-name: "Inference A/B Test: TraceLens MCP vs CLI"
+name: "Inference A/B Test"
 
 on:
   workflow_dispatch:
     inputs:
       tools_a:
-        description: 'A group: Claw tool IDs (default: current MCP-based)'
+        description: 'A group: Claw tool IDs'
         required: false
-        default: '22,23'
+        default: '67'
       label_a:
         description: 'A group label (shown in comparison table)'
         required: false
-        default: 'MCP TraceLens'
+        default: 'Baseline (no-update)'
       tools_b:
-        description: 'B group: Claw tool IDs (default: CLI-based)'
+        description: 'B group: Claw tool IDs'
         required: false
-        default: '24,25'
+        default: '67'
       label_b:
         description: 'B group label (shown in comparison table)'
         required: false
-        default: 'CLI TraceLens'
+        default: 'Latest images (--update)'
       mode:
         description: 'ab = run both A and B, single = run B only (cheaper)'
         required: false
@@ -27,6 +27,14 @@ on:
         options:
           - ab
           - single
+      update_b:
+        description: 'Run group B with --update (latest images from InferenceX)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
       models:
         description: 'Comma-separated model keys (empty = all from ci-config.yaml)'
         required: false
@@ -113,7 +121,8 @@ jobs:
             --trigger "ab-test-B" \
             --models "${{ matrix.key }}" \
             --tools "${{ github.event.inputs.tools_b }}" \
-            --output-dir "${{ github.workspace }}/ci-output"
+            --output-dir "${{ github.workspace }}/ci-output" \
+            ${{ github.event.inputs.update_b == 'true' && '--update' || '' }}
 
       - name: Upload report
         if: always()
