@@ -38,9 +38,17 @@ GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-${L
 OOB_API_KEY_VAL="${OOB_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}}}}"
 OOB_BASE_URL_VAL="${OOB_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}}"
 
-WITH_GEAK=0
-WITH_OOB=0
-WITH_LLM=0
+# Install everything by default. The previous lazy `--with-geak / --with-oob`
+# scheme caused recurring "OOB proxy not running, request errored, found
+# the missing service after the fact" issues — when the resident skill
+# triggered a kernel-opt that needed claude/codex but install.sh had only
+# brought up GEAK, the auth-proxy was missing and every CLI request 401'd.
+# Per user direction: "kernel-agent skills 不区别别的, 直接全部安装". The
+# old --with-* / --all-backends / --backend flags are accepted but no-op
+# for backwards compatibility with existing call sites.
+WITH_GEAK=1
+WITH_OOB=1
+WITH_LLM=1
 CHECK_ONLY=0
 DRY_RUN=0
 
@@ -48,33 +56,31 @@ usage() {
   cat <<'EOF'
 Usage: install.sh [options]
 
-Base install always ensures:
-  ray[default]==2.44.1, click<8.3.0, TraceLens CLI
+Always installs (no --with-* selectivity any more):
+  ray[default]==2.44.1, click<8.3.0, TraceLens CLI,
+  GEAK CLI/config, OOB + claude/codex CLI auth, LLM proxy env/auth,
+  and the OOB auth-proxy on :4002 (via ensure_auth_proxy.sh).
 
 Options:
-  --with-geak        Install GEAK CLI/config only
-  --with-oob         Install OOB + claude/codex CLI auth only
-  --with-llm         Write LLM proxy env/auth only
-  --all-backends     Install GEAK + OOB + LLM pieces
-  --backend NAME     Install one backend: geak | oob | llm
   --check-only       Verify current environment, do not install
   --dry-run          Print actions without running installs
   -h, --help         Show this help
+
+Legacy options (accepted but no-op, kept for backwards compat):
+  --with-geak / --with-oob / --with-llm / --all-backends / --backend NAME
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --with-geak) WITH_GEAK=1 ;;
-    --with-oob) WITH_OOB=1 ;;
-    --with-llm) WITH_LLM=1 ;;
-    --all-backends) WITH_GEAK=1; WITH_OOB=1; WITH_LLM=1 ;;
+    --with-geak|--with-oob|--with-llm|--all-backends)
+      # No-op: install.sh always installs everything now. Accepted for
+      # backwards compat with older call sites / docs.
+      ;;
     --backend)
       shift
       case "${1:-}" in
-        geak) WITH_GEAK=1 ;;
-        oob) WITH_OOB=1 ;;
-        llm) WITH_LLM=1 ;;
+        geak|oob|llm) ;;  # no-op, see above
         *) echo "[kernel-agent] ERROR: unknown backend '${1:-}'" >&2; exit 2 ;;
       esac
       ;;
@@ -254,54 +260,39 @@ EOF
   chmod 600 /root/.codex/auth.json
 }
 
-# Start the OOB auth-proxy on :4002 that rewrites Bearer headers for the AMD
-# LLM gateway. Without this proxy, claude/codex CLI requests get 401
-# "token not present" because the gateway's auth is non-standard.
+# Delegate to the standalone idempotent supervisor script. It handles the
+# port probe + curl probe + stuck-proxy restart cases. Sourcing it lets us
+# pick up its PROXY_*_BASE_URL exports for write_env_file.
 ensure_auth_proxy() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
-  if [ -z "$OOB_BASE_URL_VAL" ]; then
-    warn "OOB_BASE_URL not set; cannot start auth-proxy"
+  local script
+  script="$(dirname "$0")/ensure_auth_proxy.sh"
+  if [ ! -f "$script" ]; then
+    warn "ensure_auth_proxy.sh not found at $script"
     return 0
   fi
-  local proxy_py="${HYPERLOOM_ROOT}/OOB/oob_cli/auth_proxy.py"
-  if [ ! -f "$proxy_py" ]; then
-    warn "auth_proxy.py not found at $proxy_py; OOB Bearer rewrite skipped"
+  # Re-export the env vars the helper expects, then capture its KEY=VALUE
+  # output and source it back so PROXY_*_BASE_URL land in this shell.
+  local out
+  if ! out=$(
+    HYPERLOOM_ROOT="$HYPERLOOM_ROOT" \
+    OOB_BASE_URL="$OOB_BASE_URL_VAL" \
+    OOB_API_KEY="$OOB_API_KEY_VAL" \
+    bash "$script" 2>&1
+  ); then
+    warn "ensure_auth_proxy.sh failed; OOB requests may 401"
+    echo "$out" | sed 's/^/  /' >&2
     return 0
   fi
-  local port=4002
-  local scheme host parsed_port path port_target
-  scheme=$(echo "$OOB_BASE_URL_VAL" | grep -oP '^https?' || true)
-  host=$(echo "$OOB_BASE_URL_VAL" | grep -oP '(?<=://)[^:/]+' || true)
-  parsed_port=$(echo "$OOB_BASE_URL_VAL" | grep -oP '(?<=:)\d+(?=/)' || true)
-  if [ -n "$parsed_port" ]; then
-    port_target="$parsed_port"
-  elif [ "$scheme" = "https" ]; then
-    port_target=443
-  else
-    port_target=80
-  fi
-  path=$(echo "$OOB_BASE_URL_VAL" | grep -oP '(?<=://)[^/]+(/.+)' | grep -oP '/.*' || true)
-
-  if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
-    log "OOB auth-proxy already listening on :${port}"
-  else
-    log "starting OOB auth-proxy on :${port} -> ${scheme}://${host}:${port_target}${path}"
-    mkdir -p "${HYPERLOOM_ROOT}/logs"
-    LLM_PROXY_SCHEME="$scheme" LLM_PROXY_HOST="$host" LLM_PROXY_PORT="$port_target" \
-      AUTH_PROXY_PORT="$port" PROXY_AUTH_TOKEN="$OOB_API_KEY_VAL" \
-      nohup python3 "$proxy_py" >"${HYPERLOOM_ROOT}/logs/oob-auth-proxy.log" 2>&1 &
-    sleep 2
-    if ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
-      warn "auth-proxy did not bind :${port}; see ${HYPERLOOM_ROOT}/logs/oob-auth-proxy.log"
-      return 0
-    fi
-  fi
-  PROXY_ANTHROPIC_BASE_URL="http://127.0.0.1:${port}$(echo "$path" | sed 's|/v1$||')"
-  PROXY_OPENAI_BASE_URL="http://127.0.0.1:${port}${path}"
-  log "auth-proxy ready: ANTHROPIC_BASE_URL=${PROXY_ANTHROPIC_BASE_URL}"
-  log "auth-proxy ready: OPENAI_BASE_URL=${PROXY_OPENAI_BASE_URL}"
+  echo "$out" | sed 's/^/[ensure-auth-proxy] /'
+  while IFS='=' read -r key value; do
+    case "$key" in
+      PROXY_ANTHROPIC_BASE_URL) PROXY_ANTHROPIC_BASE_URL="$value" ;;
+      PROXY_OPENAI_BASE_URL)    PROXY_OPENAI_BASE_URL="$value" ;;
+    esac
+  done <<<"$out"
 }
 
 # Write a kernel-agent env file users should source so subsequent CLI calls
@@ -361,12 +352,10 @@ main() {
   ensure_ray
   ensure_tracelens
 
-  [ "$WITH_GEAK" -eq 1 ] && ensure_geak
-  [ "$WITH_OOB" -eq 1 ] && ensure_oob
-  [ "$WITH_LLM" -eq 1 ] && ensure_llm_auth_files
-  if [ "$WITH_OOB" -eq 1 ] || [ "$WITH_LLM" -eq 1 ]; then
-    ensure_auth_proxy
-  fi
+  # Always install everything; ensure_oob also calls ensure_llm_auth_files.
+  ensure_geak
+  ensure_oob
+  ensure_auth_proxy
   write_env_file
 
   report_status
