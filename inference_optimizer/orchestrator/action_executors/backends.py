@@ -120,7 +120,7 @@ class BackendsExecutor:
         self.default_grid = list(default_grid or DEFAULT_BACKENDS_GRID)
         self.default_config_path = (
             Path(default_config_path) if default_config_path
-            else asset_root() / "scripts" / "configs" / "baseline_qwen3_8b_sglang.yaml"
+            else asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
         )
         self.default_output_root = Path(default_output_root)
         self.variant_timeout_sec = variant_timeout_sec
