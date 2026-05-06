@@ -173,7 +173,7 @@ ls /tmp/torchinductor_*/*/triton/*.py | head -20
 ```bash
 source .env  # loads LITELLM_API_KEY and GEAK_AUTH_KEY
 
-GEAK_URL="https://core42.example-internal-host.invalid/core42/core42-hyperloom/geak-agent-8rmr6/mcp/sse"
+GEAK_URL="${GEAK_URL:?GEAK_URL must be set (SaFE GEAK agent SSE endpoint)}"
 GEAK_AUTH="Authorization: Bearer $GEAK_AUTH_KEY"
 ```
 
@@ -576,8 +576,8 @@ For most distributed training workloads, you'll use manual extraction (Phase 2) 
 - `LITELLM_API_KEY` is used internally by GEAK to call its LLM backend
 - Both must be set in `.env` before submitting tasks
 
-### GEAK Pod Scheduling — Use `core42-sandbox` Space
-GEAK MCP submits workloads to `control-plane-anthropic` by default, which is often resource-constrained. To avoid long queue times, launch workloads directly via the Primus-SaFE API targeting `core42-sandbox`:
+### GEAK Pod Scheduling — Use `$KERNEL_OPT_WORKSPACE` Space
+GEAK MCP submits workloads to `control-plane-anthropic` by default, which is often resource-constrained. To avoid long queue times, launch workloads directly via the Primus-SaFE API targeting `$KERNEL_OPT_WORKSPACE`:
 ```bash
 curl -sk -X POST "$PRIMUS_SAFE_API_URL/api/v1/workloads" \
   -H "Authorization: Bearer $GEAK_AUTH_KEY" \

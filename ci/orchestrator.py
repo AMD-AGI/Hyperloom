@@ -111,6 +111,7 @@ def render_prompt(merged: dict) -> str:
         skill_section += f"\n<common_sh>\n{COMMON_SH}\n</common_sh>\n"
 
     safe_api_key = os.environ.get("CLAW_API_KEY", "")
+    safe_base_url = os.environ.get("SAFE_BASE_URL", "")
     sandbox_workspace = os.environ.get("SANDBOX_WORKSPACE", "")
 
     return PROMPT_TEMPLATE.format(
@@ -139,6 +140,7 @@ def render_prompt(merged: dict) -> str:
         benchmark_script_section=bss,
         skill_section=skill_section,
         safe_api_key=safe_api_key,
+        safe_base_url=safe_base_url,
         sandbox_workspace=sandbox_workspace,
     )
 
