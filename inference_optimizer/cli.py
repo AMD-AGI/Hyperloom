@@ -402,12 +402,19 @@ def _preflight() -> None:
     from .orchestrator.action_executors._grid_runner import _resolve_magpie_python
     magpie_python = _resolve_magpie_python()
 
+    # Detect whether we're in a venv; if not, add --break-system-packages
+    # so pip doesn't refuse to install on bare-metal Debian/Ubuntu hosts.
+    pip_extra: list[str] = []
+    if not (hasattr(sys, "real_prefix") or
+            (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix)):
+        pip_extra = ["--break-system-packages"]
+
     # 1. Ray — needed by Magpie for task scheduling even without kernel-agent.
     if shutil.which("ray") is None:
         print("Preflight: ray not found, installing ray[default]==2.44.1 + click<8.3.0 ...")
         subprocess.run(
             [magpie_python, "-m", "pip", "install", "--quiet",
-             "ray[default]==2.44.1", "click<8.3.0"],
+             *pip_extra, "ray[default]==2.44.1", "click<8.3.0"],
             check=True,
         )
         print("Preflight: ray installed OK")
@@ -429,7 +436,8 @@ def _preflight() -> None:
             )
         print(f"Preflight: installing Magpie from {magpie_dir} ...")
         subprocess.run(
-            [magpie_python, "-m", "pip", "install", "--quiet", "-e", str(magpie_dir)],
+            [magpie_python, "-m", "pip", "install", "--quiet",
+             *pip_extra, "-e", str(magpie_dir)],
             check=True,
         )
         print("Preflight: Magpie installed OK")
@@ -551,9 +559,23 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         else:
             os.environ.pop("GPU_TYPE", None)
             print("GPU type        : <unset> (Magpie will auto-detect)")
-        session_dir = make_session_dir(args.session_name) if args.session_name \
-            else make_session_dir()
-        print(f"Session dir: {session_dir}")
+
+        # Compute MAX_MODEL_LEN = ISL + OSL + 4096 headroom, export for yaml injection.
+        max_model_len = args.isl + args.osl + 4096
+        os.environ["MAX_MODEL_LEN"] = str(max_model_len)
+        os.environ["ISL"] = str(args.isl)
+        os.environ["OSL"] = str(args.osl)
+        os.environ["PRECISION"] = args.precision
+        print(f"Workload        : ISL={args.isl} OSL={args.osl} "
+              f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision}")
+
+        # session_name: --session-name > default "<model>_<YYYYMMDD_HHMMSS>"
+        from datetime import datetime, timezone
+        session_name = args.session_name or (
+            f"{Path(args.model).name}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        )
+        session_dir = make_session_dir(session_name)
+        print(f"Session dir     : {session_dir}")
         state = _seed_shared_state(session_dir, args)
 
     objective = build_objective({
@@ -665,6 +687,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--max-hours", type=float, default=2.0,
                       help="Wall-clock budget in hours (default 2.0)")
+    opt.add_argument("--isl", type=int, default=int(os.environ.get("ISL", "256")),
+                      help="Input sequence length (default $ISL or 256)")
+    opt.add_argument("--osl", type=int, default=int(os.environ.get("OSL", "256")),
+                      help="Output sequence length (default $OSL or 256)")
+    opt.add_argument("--precision", type=str,
+                      default=os.environ.get("PRECISION", "bf16"),
+                      help="Model precision (default $PRECISION or bf16)")
     grp = opt.add_mutually_exclusive_group()
     grp.add_argument("--target-gain", type=float, default=None,
                       help="Stop when cumulative_gain >= N%% over baseline")
@@ -673,7 +702,8 @@ def _build_parser() -> argparse.ArgumentParser:
     grp.add_argument("--target-baseline-dir", type=str, default=None,
                       help="Stop when current best matches the baseline in DIR")
     opt.add_argument("--session-name", type=str, default=None,
-                      help="Override auto-generated session id (for new runs)")
+                      help="Override auto-generated session id. Default: "
+                           "<model_name>_<YYYYMMDD_HHMMSS>")
     opt.add_argument("--resume", type=str, default=None,
                       help="Resume from an existing session id. Skips the "
                            "SharedState seed and lets the Coordinator replay "
@@ -702,9 +732,11 @@ def _build_parser() -> argparse.ArgumentParser:
                            "Pass --kernel-claude to switch.")
     opt.add_argument("--kernel-claude", action="store_false", dest="kernel_codex",
                       help="Use Claude backend for Kernel agent")
-    opt.add_argument("--critic-mock", action="store_true", default=False,
-                      help="Use mock Critic auto-approval when Codex credentials "
-                           "are unavailable. Intended for validation runs.")
+    opt.add_argument("--critic-mock", action="store_true", default=True,
+                      help="Use mock Critic auto-approval (default). Pass "
+                           "--critic-real to use the Codex-backed Critic.")
+    opt.add_argument("--critic-real", action="store_false", dest="critic_mock",
+                      help="Use real Codex-backed Critic instead of mock")
     opt.add_argument("--orch-prompt", type=str, default=None,
                       help="Override Orchestration system prompt (file path or inline)")
     opt.add_argument("--critic-prompt", type=str, default=None,
