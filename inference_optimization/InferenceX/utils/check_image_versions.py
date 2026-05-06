@@ -90,7 +90,7 @@ def _parse_version_from_tag(tag: str, repo: str) -> Optional[tuple]:
             # fallback: try semver from leading v
             v_match = re.match(r'v([\d.]+(?:\.post\d+)?)', tag)
             if v_match:
-                return (str(Version(v_match.group(1))),)
+                return (Version(v_match.group(1)),)
             return None
 
         if repo.startswith("rocm/atom"):
