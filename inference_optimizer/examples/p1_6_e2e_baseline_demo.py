@@ -8,7 +8,7 @@ Wire-up:
 * **Robustness**     — MockRobustnessBackend (heartbeat-only)
 
 * `baseline` runner — :func:`baseline_executor` runs the Magpie SGLang
-  CLI subprocess against ``baseline_qwen3_8b_sglang.yaml``, parses
+  CLI subprocess against ``baseline_sglang.yaml``, parses
   ``benchmark_report.json``, returns real throughput / latency numbers.
 
 * SharedState seeded with ``model_name`` + ``model_path`` + ``baseline_tput=0``

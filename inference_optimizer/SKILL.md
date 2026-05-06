@@ -238,9 +238,14 @@ PY
 Default configs live here:
 
 ```bash
-inference_optimizer/scripts/configs/baseline_qwen3_8b_sglang.yaml
-inference_optimizer/scripts/configs/profile_qwen3_8b_sglang.yaml
+inference_optimizer/scripts/configs/baseline_sglang.yaml
+inference_optimizer/scripts/configs/baseline_vllm.yaml
+inference_optimizer/scripts/configs/profile_sglang.yaml
+inference_optimizer/scripts/configs/profile_vllm.yaml
 ```
+
+`benchmark.model` in each YAML is a fallback only — the optimizer
+overrides it at runtime from `--model` / `MODEL_PATH`.
 
 Before a new model run, verify these fields match the environment:
 
@@ -347,11 +352,11 @@ def write_config(src_name, dst_name, profile_enabled, timeout_seconds):
         encoding="utf-8",
     )
 
-write_config("baseline_qwen3_8b_sglang.yaml",
-             "baseline_qwen3_8b_sglang.yaml",
+write_config("baseline_sglang.yaml",
+             "baseline_sglang.yaml",
              False, int(os.environ.get("BASELINE_TIMEOUT_SEC", "1800")))
-write_config("profile_qwen3_8b_sglang.yaml",
-             "profile_qwen3_8b_sglang.yaml",
+write_config("profile_sglang.yaml",
+             "profile_sglang.yaml",
              True, int(os.environ.get("PROFILE_TIMEOUT_SEC", "2400")))
 print("asset_root=", asset)
 PY

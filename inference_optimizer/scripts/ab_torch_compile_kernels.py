@@ -189,7 +189,7 @@ async def main_async() -> int:
         "--profile-config",
         type=Path,
         default=Path(__file__).resolve().parent / "configs"
-        / "profile_qwen3_8b_sglang.yaml",
+        / "profile_sglang.yaml",
     )
     ap.add_argument("--base-extra-args", default="")
     ap.add_argument(
