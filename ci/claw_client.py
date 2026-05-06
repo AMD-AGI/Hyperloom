@@ -193,7 +193,7 @@ class ClawClient:
         The main polling loop handles completion detection independently.
         """
         try:
-            for event_data in self.subscribe_sse(session_id, timeout=0):
+            for event_data in self.subscribe_sse(session_id, timeout=self.timeout):
                 if stop_event.is_set():
                     break
                 elapsed_label = ""
