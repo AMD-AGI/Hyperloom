@@ -111,7 +111,7 @@ def render_prompt(merged: dict) -> str:
         skill_section += f"\n<common_sh>\n{COMMON_SH}\n</common_sh>\n"
 
     safe_api_key = os.environ.get("CLAW_API_KEY", "")
-    sandbox_workspace = os.environ.get("SANDBOX_WORKSPACE", "core42-sandbox")
+    sandbox_workspace = os.environ.get("SANDBOX_WORKSPACE", "")
 
     return PROMPT_TEMPLATE.format(
         model_hf=merged["model_hf"],
@@ -239,13 +239,13 @@ def run_model(
     except Exception as e:
         log.warning("Failed to list/download files for %s: %s", session_id, e)
 
-    # 3b. NFS fallback: scan /wekafs/hyperloom-results/ for results
-    #     Agent may write to NFS via PyTorchJob/RayJob instead of sandbox.
+    # 3b. NFS fallback: scan NFS for results written by PyTorchJob/RayJob.
     if not report_content:
+        nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
         nfs_scan_dirs = [
-            "/wekafs/hyperloom-results",
-            "/wekafs/results/ci",
-            "/wekafs/inference-optimization/results",
+            f"{nfs_root}/hyperloom-results",
+            f"{nfs_root}/results/ci",
+            f"{nfs_root}/inference-optimization/results",
         ]
         model_short = model_name.lower().replace("-", "").replace("_", "")
         for scan_dir in nfs_scan_dirs:
@@ -321,6 +321,12 @@ def main():
     results_cfg = config.get("results", {})
 
     harbor_prefix = resolve_var(ifx_cfg.get("harbor_prefix", ""))
+    claw_cfg["endpoint"] = resolve_var(claw_cfg["endpoint"])
+    results_cfg["nfs_base"] = resolve_var(results_cfg.get("nfs_base", ""))
+    defaults["inferencex_path"] = resolve_var(defaults.get("inferencex_path", ""))
+    for m in config.get("models", []):
+        if "model_path_override" in m:
+            m["model_path_override"] = resolve_var(m["model_path_override"])
 
     # Resolve which models to run
     model_list = config.get("models", [])

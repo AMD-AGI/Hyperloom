@@ -24,7 +24,7 @@ function arg(name, env, fallback) {
 }
 
 const apiKey    = arg('api-key', 'SAFE_API_KEY');
-const workspace = arg('workspace', 'SANDBOX_WORKSPACE', 'core42-hyperloom');
+const workspace = arg('workspace', 'SANDBOX_WORKSPACE', '');
 const name      = arg('name', null, 'opt-job');
 const image     = arg('image');
 const scriptPath = arg('script');
@@ -32,9 +32,11 @@ const gpu       = arg('gpu', null, '8');
 const cpu       = arg('cpu', null, '64');
 const memory    = arg('memory', null, '1024Gi');
 const ttl       = arg('ttl', null, '7200');
-const baseUrl   = arg('base-url', null, 'https://core42.primus-safe.amd.com');
+const baseUrl   = arg('base-url', 'SAFE_BASE_URL', '');
 
 if (!apiKey)     { console.error('Missing --api-key or SAFE_API_KEY'); process.exit(1); }
+if (!baseUrl)    { console.error('Missing --base-url or SAFE_BASE_URL'); process.exit(1); }
+if (!workspace)  { console.error('Missing --workspace or SANDBOX_WORKSPACE'); process.exit(1); }
 if (!image)      { console.error('Missing --image'); process.exit(1); }
 if (!scriptPath) { console.error('Missing --script'); process.exit(1); }
 
@@ -55,7 +57,7 @@ const body = JSON.stringify({
     ephemeralStorage: '100Gi',
   }],
   entryPoints: [scriptContent],
-  env: { MODELS_ROOT: '/wekafs/models' },
+  env: { MODELS_ROOT: `${process.env.NFS_ROOT || ''}/models` },
   isTolerateAll: true,
   ttlSecondsAfterFinished: parseInt(ttl),
 });
