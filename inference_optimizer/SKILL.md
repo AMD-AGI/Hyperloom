@@ -264,6 +264,32 @@ Before a new model run, verify these fields match the environment:
 - `benchmark.envs.ROCR_VISIBLE_DEVICES`: GPU pinning.
 - `benchmark.envs.PATH`: must put `/opt/venv/bin` first.
 
+## Framework selection
+
+A session is single-framework. Pick `sglang` (default) or `vllm` via
+`--framework` or `$FRAMEWORK`:
+
+```bash
+inference_optimizer optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
+FRAMEWORK=vllm inference_optimizer optimize --model "$MODEL_PATH" --max-hours 2
+```
+
+Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
+
+What this controls:
+- Which Magpie YAML the executors default to
+  (`baseline_sglang.yaml` / `baseline_vllm.yaml`,
+  `profile_sglang.yaml` / `profile_vllm.yaml`)
+- Which params grid `params` action runs (`DEFAULT_VLLM_PARAMS_GRID`
+  vs `DEFAULT_PARAMS_GRID`)
+- Which extra-args env name `_grid_runner` writes
+  (`EXTRA_VLLM_ARGS` vs `EXTRA_SGLANG_ARGS`)
+- Which Marathon KB partition orchestration reads for hints
+
+Mixing sglang and vllm in a single session is not supported; the CLI
+locks `$FRAMEWORK` for the run. Resume re-reads `$FRAMEWORK` from the
+shell — set it when you resume a vLLM session.
+
 ## GPU runner type
 
 Pick the GPU explicitly with `--gpu-type` or `$GPU_TYPE`; without
