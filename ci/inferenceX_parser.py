@@ -258,7 +258,8 @@ def merge_model_config(
     kern_backends = model_cfg.get(
         "kernel_opt_backends", defaults.get("kernel_opt_backends", "geak"))
 
-    model_path = model_cfg.get("model_path_override") or f"/hyperloom/models/{model_hf.replace('/', '-')}"
+    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    model_path = model_cfg.get("model_path_override") or f"{nfs_root}/models/{model_hf.replace('/', '-')}"
 
     return {
         "model_hf": model_hf,
