@@ -203,6 +203,34 @@ _DEFAULT_KERNEL_PROMPT = (
 )
 
 
+_DEFAULT_ORCH_PROMPT_NO_KERNEL = (
+    "You are the Orchestration agent for an inference-optimization run.\n"
+    "Read the Shared session state below to see progress against the goal.\n\n"
+    "IMPORTANT: The Kernel agent is DISABLED for this session. DO NOT\n"
+    "propose `profile`, `kernel_opt`, `integrate`, `select_kernels`,\n"
+    "`run_optimization`, `deep_kernel_analysis`, `operator_tuning`, or\n"
+    "`vendor_kernel_config`. Only params / backends / sweep / report are\n"
+    "available for driving throughput improvements.\n\n"
+    "===== DECISION FRAMEWORK =====\n"
+    "  if `cumulative_gain >= target_gain_pct`:\n"
+    "      → propose `report` (one shot). Then heartbeat 'goal-reached'.\n"
+    "  if `stop_reason` is set:\n"
+    "      → emit one heartbeat 'goal-reached' and stop emitting actions.\n"
+    "  if `baseline_tput == 0`:\n"
+    "      → propose `baseline`.\n"
+    "  if backends haven't been tried (no backends result in shared state):\n"
+    "      → propose backends first.\n"
+    "  otherwise:\n"
+    "      → propose params or sweep (alternate each round).\n\n"
+    "===== HARD RULES =====\n"
+    "* Do NOT emit REQUEST to any agent — kernel agent is disabled.\n"
+    "* If your last action was a propose_action, do NOT re-propose the same\n"
+    "  action in the next 3 ticks (give the dispatcher time to run it).\n"
+    "* Every turn MUST emit at least one `emit_intent` tool call.\n"
+    "  Free-text replies are dropped.\n"
+)
+
+
 _GFX_TO_RUNNER: dict[str, str] = {
     # Mirror Magpie/modes/benchmark/image_selector.py:138-140. Listed here so
     # we can log the resolved value at session start instead of waiting for
@@ -248,18 +276,18 @@ async def _noop_prep(ctx) -> dict:
 def _build_backends(
     *, claude_model: str, codex_model: str, kernel_codex: bool,
     critic_mock: bool = False,
+    no_kernel: bool = False,
 ) -> dict[str, Any]:
     backends: dict[str, Any] = {
         "orchestration": ClaudeBackend(model=claude_model, max_turns_default=4),
         "critic":        MockCriticBackend() if critic_mock else CodexBackend(model=codex_model),
         "robustness":    MockRobustnessBackend(),
     }
-    if kernel_codex:
-        # Per user request — Codex Kernel agent is faster than Claude for
-        # short responder-only turns.
-        backends["kernel"] = CodexBackend(model=codex_model)
-    else:
-        backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=4)
+    if not no_kernel:
+        if kernel_codex:
+            backends["kernel"] = CodexBackend(model=codex_model)
+        else:
+            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=4)
     return backends
 
 
@@ -271,6 +299,7 @@ def _seed_shared_state(session_dir: Path, args: argparse.Namespace) -> SharedSta
         model_class=args.model_class or "",
         framework=os.environ.get("FRAMEWORK", "sglang"),
         gpu_type=os.environ.get("GPU_TYPE", ""),
+        kernel_enabled=not getattr(args, "no_kernel", False),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
         cumulative_gain=0.0,
@@ -295,25 +324,36 @@ def _default_target_summary(args: argparse.Namespace) -> str:
     return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
 
 
-def _register_executors(coordinator: Coordinator) -> None:
+def _register_executors(coordinator: Coordinator, *, no_kernel: bool = False) -> None:
     """Wire all currently-available action executors.
 
     P2-1 ships only `baseline` (real Magpie). Stubs for prep + kernel-owned
     actions keep the Orchestration loop from stalling while later phases
     fill in the real ones.
+
+    When ``no_kernel`` is True, kernel-owned action stubs are skipped and
+    ``profile`` is also skipped (profiling only feeds kernel-opt).
     """
     coordinator.sub.register_executor("baseline", baseline_executor)
-    coordinator.sub.register_executor("profile",  profile_executor)
     coordinator.sub.register_executor("backends", backends_executor)
     coordinator.sub.register_executor("params",   params_executor)
     coordinator.sub.register_executor("sweep",    sweep_executor)
     coordinator.sub.register_executor("report",   report_executor)
-    for kind in ("setup", "classify", "target_analysis",
-                  "kernel_opt", "integrate", "deep_kernel_analysis",
-                  "operator_tuning", "vendor_kernel_config",
-                  "dream", "re_explore", "recover",
-                  "comm_optimization", "compiler_tuning"):
-        coordinator.sub.register_executor(kind, _noop_prep)
+
+    if no_kernel:
+        # No profile (it only feeds kernel-opt), no kernel-owned actions.
+        for kind in ("setup", "classify", "target_analysis",
+                      "dream", "re_explore", "recover",
+                      "comm_optimization", "compiler_tuning"):
+            coordinator.sub.register_executor(kind, _noop_prep)
+    else:
+        coordinator.sub.register_executor("profile", profile_executor)
+        for kind in ("setup", "classify", "target_analysis",
+                      "kernel_opt", "integrate", "deep_kernel_analysis",
+                      "operator_tuning", "vendor_kernel_config",
+                      "dream", "re_explore", "recover",
+                      "comm_optimization", "compiler_tuning"):
+            coordinator.sub.register_executor(kind, _noop_prep)
 
 
 def _print_final_summary(state: SharedState, stop_reason: str) -> None:
@@ -363,6 +403,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if state.gpu_type:
             os.environ["GPU_TYPE"] = state.gpu_type
             print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
+        # Honour persisted kernel_enabled flag on resume; CLI --no-kernel
+        # can still override on a previously-enabled session.
+        if not state.kernel_enabled:
+            args.no_kernel = True
+            print("  kernel agent          : DISABLED (persisted from original run)")
 
         # CRITICAL: a leftover stop_reason from the prior run (most often
         # "time_exhausted") fools Orchestration into thinking the work is
@@ -451,28 +496,50 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         "TARGET_DIR": args.target_baseline_dir or "",
     })
     print(f"Objective       : kind={objective.kind()} {objective.describe()}")
+    no_kernel = getattr(args, "no_kernel", False)
     backends = _build_backends(
         claude_model=args.claude_model,
         codex_model=args.codex_model,
         kernel_codex=args.kernel_codex,
         critic_mock=args.critic_mock,
+        no_kernel=no_kernel,
     )
     # Bug A fix: expose the active session_dir to in-process executors
     # (e.g. ReportExecutor) that don't get session_dir threaded through
     # task.params. This is read in report.py::_resolve_session_dir.
     os.environ["INFERENCE_OPTIMIZER_SESSION_DIR"] = str(session_dir)
 
-    coordinator = Coordinator(session_dir, backends=backends)
-    coordinator.system_prompt_overrides = {
-        "orchestration": args.orch_prompt or _DEFAULT_ORCH_PROMPT,
-        "critic":        args.critic_prompt or _DEFAULT_CRITIC_PROMPT,
-        "kernel":        args.kernel_prompt or _DEFAULT_KERNEL_PROMPT,
-    }
-    _register_executors(coordinator)
+    # When kernel is disabled, strip it from the role registry so
+    # Coordinator does not tick a non-existent agent and PolicyGate does
+    # not expect a backend for it.
+    role_registry = None
+    if no_kernel:
+        from .orchestrator.agent_role import default_role_registry
+        role_registry = {
+            k: v for k, v in default_role_registry().items() if k != "kernel"
+        }
 
+    coordinator = Coordinator(
+        session_dir, backends=backends, role_registry=role_registry,
+    )
+    prompts: dict[str, str] = {
+        "orchestration": args.orch_prompt or (
+            _DEFAULT_ORCH_PROMPT if not no_kernel
+            else _DEFAULT_ORCH_PROMPT_NO_KERNEL
+        ),
+        "critic": args.critic_prompt or _DEFAULT_CRITIC_PROMPT,
+    }
+    if not no_kernel:
+        prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
+    coordinator.system_prompt_overrides = prompts
+    _register_executors(coordinator, no_kernel=no_kernel)
+
+    kernel_str = "DISABLED" if no_kernel else (
+        f"{'Codex' if args.kernel_codex else 'Claude'}"
+    )
     print(f"Backends        : "
           f"orchestration=Claude({args.claude_model}), "
-          f"kernel={'Codex' if args.kernel_codex else 'Claude'}, "
+          f"kernel={kernel_str}, "
           f"critic={'mock' if args.critic_mock else f'Codex({args.codex_model})'}, "
           f"robustness=mock")
     print(f"Max ticks       : {args.max_ticks or 'unlimited'} "
@@ -557,6 +624,12 @@ def _build_parser() -> argparse.ArgumentParser:
                       default=os.environ.get("CLAUDE_MODEL", "claude-opus-4-7"))
     opt.add_argument("--codex-model", type=str,
                       default=os.environ.get("CODEX_MODEL", "gpt-5.4"))
+    opt.add_argument("--no-kernel", action="store_true", default=False,
+                      help="Disable the Kernel agent entirely. The run will "
+                           "only do baseline + params + backends + sweep (pure "
+                           "parameter search). Useful when GEAK/OOB/GPU "
+                           "compile env is unavailable or you just want the "
+                           "quick-win parameter path. Default: kernel enabled.")
     opt.add_argument("--kernel-codex", action="store_true", default=True,
                       help="Use Codex backend for Kernel agent (default — faster). "
                            "Pass --kernel-claude to switch.")
