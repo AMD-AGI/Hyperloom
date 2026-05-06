@@ -11,6 +11,9 @@ from unittest.mock import patch
 import pytest
 
 from inference_optimizer.orchestrator import kernel_request_handlers as krh
+from inference_optimizer.orchestrator.action_executors.baseline import (
+    _materialize_config_with_envs,
+)
 from inference_optimizer.orchestrator.action_executors.profile import (
     PROFILE_DEFAULT_CONFIG,
     ProfileExecutor,
@@ -68,6 +71,54 @@ def test_profile_yaml_has_torch_profiler_enabled():
     with PROFILE_DEFAULT_CONFIG.open() as f:
         cfg = yaml.safe_load(f)
     assert cfg["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
+
+
+# ===========================================================================
+# Regression: model_path injection beats the YAML's hardcoded fallback.
+#
+# Bug: the shipped baseline_qwen3_8b_sglang.yaml / profile_qwen3_8b_sglang.yaml
+# pin `benchmark.model: /wekafs/models/Qwen-Qwen3-8B`. The CLI's --model arg
+# only flowed into SharedState.model_path; if the executor did not propagate
+# it into the materialized YAML, Magpie silently benchmarked Qwen3-8B no
+# matter what the user asked for. _materialize_config_with_envs(model_path=...)
+# is the single seam that prevents this — locking it down here.
+# ===========================================================================
+def test_materialize_config_injects_model_path(tmp_path):
+    """Default YAML's hardcoded Qwen3-8B must be overridden when caller
+    passes ``model_path`` — otherwise the silent fallback bug returns."""
+    import yaml
+    out = _materialize_config_with_envs(
+        PROFILE_DEFAULT_CONFIG,
+        tmp_path,
+        model_path="/wekafs/models/DeepSeek-R1-0528",
+    )
+    with out.open() as f:
+        rendered = yaml.safe_load(f)
+    assert rendered["benchmark"]["model"] == "/wekafs/models/DeepSeek-R1-0528"
+
+
+def test_materialize_config_leaves_model_alone_without_override(tmp_path):
+    """When no model_path is passed AND no other overrides, the helper
+    short-circuits and returns the original path verbatim — preserves
+    backwards compat for tests that pass an explicit fixture YAML."""
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    assert out == PROFILE_DEFAULT_CONFIG  # short-circuit, no rewrite
+
+
+def test_materialize_config_injects_model_with_other_overrides(tmp_path):
+    """Co-existence: model_path + extra_envs should both land in the
+    materialized YAML."""
+    import yaml
+    out = _materialize_config_with_envs(
+        PROFILE_DEFAULT_CONFIG,
+        tmp_path,
+        extra_envs={"FOO": "bar"},
+        model_path="/some/model",
+    )
+    with out.open() as f:
+        rendered = yaml.safe_load(f)
+    assert rendered["benchmark"]["model"] == "/some/model"
+    assert rendered["benchmark"]["envs"]["FOO"] == "bar"
 
 
 @pytest.mark.asyncio

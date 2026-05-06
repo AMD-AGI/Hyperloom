@@ -65,13 +65,25 @@ def _materialize_config_with_envs(
     extra_sglang_args: str = "",
     extra_server_args: str = "",
     extra_envs: dict[str, Any] | None = None,
+    model_path: str | None = None,
 ) -> Path:
+    """Render a per-run Magpie YAML with caller-provided overrides.
+
+    ``model_path`` (when non-empty) overrides the YAML's ``benchmark.model``
+    field. This is the single most important override: every shipped config
+    under ``scripts/configs/`` has a hardcoded model path (legacy default:
+    Qwen-Qwen3-8B) that would otherwise silently win over the user's
+    ``--model`` / ``MODEL_PATH`` selection. Always pass ``model_path`` from
+    the CLI / SharedState.
+    """
     server_args = (extra_server_args or extra_sglang_args).strip()
-    if not server_args and not extra_envs:
+    if not server_args and not extra_envs and not model_path:
         return config_path
     with config_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     bench = cfg.setdefault("benchmark", {})
+    if model_path:
+        bench["model"] = str(model_path)
     envs = bench.setdefault("envs", {})
     if server_args:
         envs[server_args_env_name(bench.get("framework"))] = server_args
@@ -114,6 +126,13 @@ class BaselineExecutor:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         timeout_sec = int(params.get("timeout_sec") or self.default_timeout_sec)
+        # Resolve model path: task.params['model_path'] (Coordinator-supplied) >
+        # $MODEL_PATH (CLI re-exported). If neither, leave the YAML's hardcoded
+        # `model:` alone so unit tests with explicit fixture paths still work.
+        resolved_model = (
+            str(params.get("model_path") or "").strip()
+            or os.environ.get("MODEL_PATH", "").strip()
+        )
         config_path = _materialize_config_with_envs(
             config_path,
             output_dir,
@@ -124,6 +143,7 @@ class BaselineExecutor:
                 or ""
             ),
             extra_envs=dict(params.get("extra_envs") or {}),
+            model_path=resolved_model,
         )
 
         cmd = [
