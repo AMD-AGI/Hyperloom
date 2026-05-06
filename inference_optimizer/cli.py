@@ -269,6 +269,8 @@ def _seed_shared_state(session_dir: Path, args: argparse.Namespace) -> SharedSta
         model_name=Path(args.model).name,
         model_path=str(args.model),
         model_class=args.model_class or "",
+        framework=os.environ.get("FRAMEWORK", "sglang"),
+        gpu_type=os.environ.get("GPU_TYPE", ""),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
         cumulative_gain=0.0,
@@ -346,6 +348,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
               f"{(state.current_best or {}).get('action')}/"
               f"{(state.current_best or {}).get('tput')}")
         print(f"  prior stop_reason     : {prior_stop or '(none)'}")
+
+        # Re-export session-level env vars from persisted state so the
+        # executors (baseline / profile / sweep / backends / params) resolve
+        # model / framework / gpu_type correctly. Without this, a resume
+        # in a fresh shell would fall back to YAML hardcoded defaults,
+        # potentially benchmarking the wrong model on the wrong framework.
+        if state.model_path:
+            os.environ["MODEL_PATH"] = state.model_path
+            print(f"  re-exported MODEL_PATH: {state.model_path}")
+        if state.framework:
+            os.environ["FRAMEWORK"] = state.framework
+            print(f"  re-exported FRAMEWORK : {state.framework}")
+        if state.gpu_type:
+            os.environ["GPU_TYPE"] = state.gpu_type
+            print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
+
         # CRITICAL: a leftover stop_reason from the prior run (most often
         # "time_exhausted") fools Orchestration into thinking the work is
         # already done — it just heartbeats forever. Clear it so the new
