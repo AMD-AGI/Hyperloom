@@ -121,19 +121,22 @@ class BaselineExecutor:
     def __init__(
         self,
         *,
-        magpie_python: str = "/opt/venv/bin/python",
+        magpie_python: str | None = None,
         default_config_path: Path | str | None = None,
-        default_output_root: Path | str = "/workspace/hyperloom",
+        default_output_root: Path | str | None = None,
         default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
     ):
-        self.magpie_python = magpie_python
+        from ._grid_runner import _resolve_magpie_python, _resolve_output_root
+        self.magpie_python = magpie_python or _resolve_magpie_python()
         # None = resolve from $FRAMEWORK at call time. Tests may pass an
         # explicit fixture path which then wins over the env-based resolver.
         self.default_config_path = (
             Path(default_config_path) if default_config_path else None
         )
-        self.default_output_root = Path(default_output_root)
+        self.default_output_root = Path(
+            default_output_root or _resolve_output_root()
+        )
         self.default_timeout_sec = default_timeout_sec
         self.cwd = Path(cwd)
 

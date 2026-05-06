@@ -27,7 +27,27 @@ import yaml
 log = logging.getLogger(__name__)
 
 
-_MAGPIE_PYTHON_DEFAULT = "/opt/venv/bin/python"
+def _resolve_magpie_python() -> str:
+    """Resolve the Python interpreter for Magpie subprocesses.
+
+    Order: $MAGPIE_PYTHON env > `which python3` > /opt/venv/bin/python.
+    """
+    import shutil
+    return (
+        os.environ.get("MAGPIE_PYTHON", "").strip()
+        or shutil.which("python3")
+        or "/opt/venv/bin/python"
+    )
+
+
+def _resolve_output_root() -> str:
+    """Resolve output root for Magpie workspaces.
+
+    Order: $INFERENCE_OPTIMIZER_OUTPUT_ROOT env > /workspace/hyperloom.
+    """
+    return os.environ.get("INFERENCE_OPTIMIZER_OUTPUT_ROOT", "").strip() or "/workspace/hyperloom"
+
+
 _MAGPIE_CWD_DEFAULT = "/tmp"
 _VARIANT_TIMEOUT_SEC_DEFAULT = 900
 
@@ -171,7 +191,7 @@ async def run_grid(
     base_extra_args: str,
     grid: list[GridVariant],
     output_root: Path,
-    magpie_python: str = _MAGPIE_PYTHON_DEFAULT,
+    magpie_python: str | None = None,
     cwd: str = _MAGPIE_CWD_DEFAULT,
     variant_timeout_sec: int = _VARIANT_TIMEOUT_SEC_DEFAULT,
     keep_going_on_failure: bool = True,
@@ -192,6 +212,8 @@ async def run_grid(
     user's actual model on the user's actual GPU rather than the YAML's
     legacy default.
     """
+    if not magpie_python:
+        magpie_python = _resolve_magpie_python()
     results: list[VariantResult] = []
     for i, variant in enumerate(grid):
         slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
