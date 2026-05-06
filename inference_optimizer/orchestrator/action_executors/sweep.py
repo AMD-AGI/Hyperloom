@@ -132,7 +132,7 @@ class SweepExecutor:
     ):
         self.default_config_path = (
             Path(default_config_path) if default_config_path
-            else asset_root() / "scripts" / "configs" / "baseline_qwen3_8b_sglang.yaml"
+            else asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
         )
         self.default_output_root = Path(default_output_root)
         self.default_conc_values = list(default_conc_values or DEFAULT_CONC_VALUES)
