@@ -1,11 +1,11 @@
-# Magpie baseline benchmark config for Qwen3-8B on vLLM / MI300X.
-# Use this as the single-node vLLM smoke config while the optimizer's vLLM
-# path is being validated. Profile and multi-node vLLM configs are separate
-# follow-up work.
+# Magpie baseline benchmark config for vLLM / MI300X.
+# Used as the single-node vLLM smoke config; the inference_optimizer
+# pipeline overrides `benchmark.model` at runtime (see baseline_sglang.yaml
+# header for the full rationale).
 
 benchmark:
   framework: vllm
-  model: /wekafs/models/Qwen-Qwen3-8B
+  model: /wekafs/models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
   precision: bf16
   run_mode: local
 
