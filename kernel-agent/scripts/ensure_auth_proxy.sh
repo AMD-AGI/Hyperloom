@@ -55,13 +55,17 @@ proxy_responds() {
     port_open
     return $?
   fi
-  local http_code
+  local http_code=""
+  # Capture http_code separately; do NOT use `|| echo 000` inside $(...)
+  # because curl -w '%{http_code}' already outputs "000" on connect failure,
+  # and the fallback echo would concatenate to "000000" which doesn't match
+  # the "000" case pattern below → false positive "healthy".
   http_code=$(curl -s -o /dev/null -w '%{http_code}' \
                    --max-time "$PROBE_TIMEOUT" \
-                   "http://127.0.0.1:${PROXY_PORT}/" 2>/dev/null || echo 000)
+                   "http://127.0.0.1:${PROXY_PORT}/" 2>/dev/null) || true
   case "$http_code" in
-    "" | 000) return 1 ;;  # connect/timeout failure
-    *)        return 0 ;;  # any HTTP status counts as "alive"
+    ""|"000"|"0") return 1 ;;  # connect refused / timeout / no output
+    *)            return 0 ;;  # any real HTTP status = proxy is alive
   esac
 }
 
