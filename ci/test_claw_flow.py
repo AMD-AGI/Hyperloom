@@ -3,6 +3,7 @@
 
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -23,7 +24,6 @@ TIMEOUT = 120
 
 
 def main():
-    import os
     api_key = os.environ.get("CLAW_API_KEY")
     claw = ClawClient(ENDPOINT, api_key=api_key)
     if not api_key:
