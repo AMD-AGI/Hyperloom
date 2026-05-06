@@ -1,19 +1,25 @@
-# Magpie baseline benchmark config for SGLang / MI300X.
+# Magpie baseline benchmark config for SGLang.
 # Used by inference_optimizer.orchestrator.action_executors.baseline /
 # sweep / backends / params as the default benchmark config.
 #
-# `benchmark.model` below is a FALLBACK ONLY. The CLI resolves the active
-# model from --model > $MODEL_PATH and the executor injects it into a
-# materialized copy of this YAML at run time, so this hardcoded path is
-# overridden whenever the inference_optimizer pipeline is in charge. It
-# stays in the file as a convenience for offline `Magpie -v benchmark`
-# invocations against this YAML directly.
+# Two fields are FALLBACK ONLY and overridden at run time by the executor:
+#   - `benchmark.model`     <- --model / $MODEL_PATH
+#   - `benchmark.runner_type` <- --gpu-type / $GPU_TYPE / rocm-smi probe
+# So the hardcoded `model:` below is just a placeholder; `runner_type:` is
+# deliberately omitted so Magpie auto-detects the GPU when this YAML is
+# used directly with `Magpie -v benchmark`.
+#
+# `benchmark_script:` is also intentionally NOT set: with runner_type fed
+# in at run time, Magpie's resolver picks `{framework}_{runner_type}.sh`
+# (e.g. sglang_mi300x.sh / sglang_mi355x.sh). To force a specific script
+# during manual debugging, uncomment the line under `framework:` below.
 #
 # Local mode (no Docker) — the orchestrator already runs inside the sglang
 # container; no need to nest one.
 
 benchmark:
   framework: sglang
+  # benchmark_script: sglang_mi300x.sh  # uncomment to force a specific Magpie script
   model: /wekafs/models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
   precision: bf16              # 8B fits comfortably on a single MI300X
   run_mode: local
@@ -40,7 +46,6 @@ benchmark:
   gpu_selection:
     auto: false                # we already pinned via HIP_VISIBLE_DEVICES
 
-  benchmark_script: sglang_mi300x.sh
   timeout_seconds: 600         # 10 min hard cap
 
   profiler:
