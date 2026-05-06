@@ -101,12 +101,17 @@ def test_materialize_config_injects_model_path(tmp_path):
     assert rendered["benchmark"]["model"] == "/wekafs/models/DeepSeek-R1-0528"
 
 
-def test_materialize_config_leaves_model_alone_without_override(tmp_path):
-    """When no model_path is passed AND no other overrides, the helper
-    short-circuits and returns the original path verbatim — preserves
-    backwards compat for tests that pass an explicit fixture YAML."""
+def test_materialize_config_leaves_model_alone_without_override(tmp_path, monkeypatch):
+    """When no model_path is passed, the materialized YAML still has the
+    original model field from the source YAML (not overwritten)."""
+    import yaml
+    # Clear ISL/OSL/MAX_MODEL_LEN env so they don't inject
+    for k in ("ISL", "OSL", "MAX_MODEL_LEN", "PRECISION"):
+        monkeypatch.delenv(k, raising=False)
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
-    assert out == PROFILE_DEFAULT_CONFIG  # short-circuit, no rewrite
+    with out.open() as f:
+        rendered = yaml.safe_load(f)
+    assert "Qwen" in rendered["benchmark"]["model"]
 
 
 def test_materialize_config_injects_model_with_other_overrides(tmp_path):
