@@ -51,6 +51,8 @@ class SharedState:
     model_name: str = ""
     model_path: str = ""
     model_class: str = ""
+    framework: str = ""
+    gpu_type: str = ""
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
