@@ -1,0 +1,119 @@
+name: SaFE Optimize Submit
+
+# Submits SaFE inference optimization tasks via the same API the SaFE script
+# (Primus-SaFE/scripts/optimize_submit.py) uses, reusing CLAW_API_KEY.
+# Independent of inference-optimization-ci.yml — no shared state.
+
+on:
+  workflow_dispatch:
+    inputs:
+      hf_top:
+        description: 'HuggingFace top-N (leave empty if specifying "models" below)'
+        required: false
+        default: '10'
+      min_params:
+        description: 'Min parameter count in Billions (e.g. 7 for >=7B). 0 to skip filter.'
+        required: false
+        default: '7'
+      models:
+        description: 'Explicit HF repo IDs, space-separated. Overrides hf_top when set.'
+        required: false
+        default: ''
+      isl:
+        description: 'Input sequence length'
+        required: false
+        default: '1024'
+      osl:
+        description: 'Output sequence length'
+        required: false
+        default: '1024'
+      mode:
+        description: 'Execution mode forwarded to SaFE'
+        required: false
+        default: 'local'
+        type: choice
+        options: [local, claw]
+      dry_run:
+        description: 'Dry run (auto-detect and print plan only, do not submit)'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  submit:
+    name: Submit to SaFE
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # Reused secrets (already configured for inference-optimization-ci.yml).
+      CLAW_API_KEY:   ${{ secrets.CLAW_API_KEY }}
+      SAFE_BASE_URL:  ${{ secrets.SAFE_BASE_URL }}
+      HARBOR_PREFIX:  ${{ secrets.HARBOR_PREFIX }}
+      # New secret: HuggingFace token for gated models (optional).
+      HF_TOKEN:       ${{ secrets.HF_TOKEN }}
+      # Workspace/volume defaults are baked into the script
+      # (core42-hyperloom / /wekafs); override via secret only if SaFE
+      # changes its convention again.
+      SAFE_OPTIMIZE_WORKSPACE: ${{ secrets.SAFE_OPTIMIZE_WORKSPACE }}
+      SAFE_OPTIMIZE_VOLUME:    ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: ci
+        run: pip install --quiet requests
+
+      - name: Submit optimization tasks
+        working-directory: ci
+        env:
+          INPUT_HF_TOP:     ${{ github.event.inputs.hf_top }}
+          INPUT_MIN_PARAMS: ${{ github.event.inputs.min_params }}
+          INPUT_MODELS:     ${{ github.event.inputs.models }}
+          INPUT_ISL:        ${{ github.event.inputs.isl }}
+          INPUT_OSL:        ${{ github.event.inputs.osl }}
+          INPUT_MODE:       ${{ github.event.inputs.mode }}
+          INPUT_DRY_RUN:    ${{ github.event.inputs.dry_run }}
+          OUTPUT_DIR:       ${{ github.workspace }}/submit-output
+        run: |
+          set -euo pipefail
+          ARGS=()
+          if [ -n "${INPUT_MODELS:-}" ]; then
+            # shellcheck disable=SC2206
+            ARGS+=(--model ${INPUT_MODELS})
+          else
+            ARGS+=(--hf-top "${INPUT_HF_TOP:-10}")
+            if [ "${INPUT_MIN_PARAMS:-0}" != "0" ] && [ -n "${INPUT_MIN_PARAMS:-}" ]; then
+              ARGS+=(--min-params "${INPUT_MIN_PARAMS}")
+            fi
+          fi
+          ARGS+=(--isl "${INPUT_ISL:-1024}" --osl "${INPUT_OSL:-1024}")
+          ARGS+=(--mode "${INPUT_MODE:-local}")
+          if [ "${INPUT_DRY_RUN:-false}" = "true" ]; then
+            ARGS+=(--dry-run)
+          fi
+          ARGS+=(--output-dir "${OUTPUT_DIR}")
+          python3 optimize_submit.py "${ARGS[@]}"
+
+      - name: Render manifest to job summary
+        if: always()
+        run: |
+          if [ -f "${{ github.workspace }}/submit-output/submission_manifest.md" ]; then
+            cat "${{ github.workspace }}/submit-output/submission_manifest.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No manifest produced (script likely failed before writing)._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: submission-manifest
+          path: submit-output/
+          retention-days: 90
+          if-no-files-found: warn
