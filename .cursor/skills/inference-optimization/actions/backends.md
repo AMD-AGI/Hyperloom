@@ -1,5 +1,11 @@
 # Action: Backend & Scheduling Exploration
 
+> **TL;DR — Phase 4 (DFS loop, read when entering backend exploration).**
+> Test attention backends (e.g. `aiter`) and scheduling flags. Combine
+> winners. Optional re-profile to confirm gains. Use Background Runner
+> Recipe (IR-8) for each magpie call. Output: `$WINNING_BACKEND_ARGS` for
+> use by `params.md` and downstream phases.
+
 ## Inputs
 - Running server with baseline config
 - Model classification from `classify.md`

@@ -1,5 +1,10 @@
 # Action: Target Analysis (NVIDIA / InferenceX Baseline Inspection)
 
+> **TL;DR — Phase 1 (optional, read ONLY if `$TARGET_DIR` is provided).**
+> Inspect external NVIDIA / InferenceX run data, extract optimization
+> techniques, set throughput target. Output: target gap multiplier used as
+> DFS urgency scaling. Skip entirely if no external target.
+
 Inspect competitor code, extract optimization techniques, set throughput targets, and adapt techniques for AMD GPUs.
 
 ## Inputs

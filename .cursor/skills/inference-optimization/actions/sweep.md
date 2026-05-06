@@ -1,5 +1,11 @@
 # Action: Parameter Sweep
 
+> **TL;DR — Phase 9 (read after kernel-opt + integrate finish).** Sweep
+> ISL/OSL/CONC matrix using final optimized config (`$WINNING_BACKEND_ARGS`
+> + `$ALL_WINNING_PARAMS` + integrated kernels). Use Background Runner
+> Recipe (IR-8). Output: Pareto frontier `results.tsv` + per-case
+> `benchmark_report.json`.
+
 Full ISL/OSL/CONC sweep with the optimized version to map the Pareto frontier.
 
 ## Inputs

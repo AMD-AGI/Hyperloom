@@ -1,6 +1,11 @@
 # Action: Integrate, Benchmark, Decide
 
-Per-kernel integration phase. Called by `kernel-opt.md` for each GEAK result.
+> **TL;DR — Per-kernel sub-action invoked by `kernel-opt.md`** (IR-3 mandatory
+> after every GEAK result). For each optimized kernel: patch into target
+> file via `patch_inductor.py --target-file` (IR-6), re-baseline using same
+> YAML envs as the original baseline (Background Runner Recipe / IR-8),
+> decide keep/discard. Output: keep/discard verdict + final benchmark
+> numbers. Read only when integrating GEAK results.
 
 ## Inputs
 - GEAK output: optimized kernel source file

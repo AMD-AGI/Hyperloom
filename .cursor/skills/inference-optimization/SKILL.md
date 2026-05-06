@@ -193,6 +193,59 @@ Violation = run inefficiency, but not invalidation.
 
 **Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-9 through IR-12) and [`modes/LOCAL.md`](modes/LOCAL.md) (IR-13).**
 
+## How to Read This Skill (Performance Critical)
+
+This skill is ~150 KB across 16 markdown files. Loading it inefficiently costs
+real wall-clock time and LLM budget. Validated regression: session 37dbaecd
+spent **14 minutes** reading the skill via 11 explore sub-agents where direct
+`read` calls would have taken ~2 minutes.
+
+### Hard rules
+
+1. **NEVER dispatch sub-agents (`task` tool) to read this skill.**
+   The `read` tool is one round-trip per file. Sub-agents add 4-7 LLM turns
+   each AND their `final_text` is bounded — when content overflows, the agent
+   sees a `[truncated]` marker and dispatches **another** sub-agent to re-read,
+   triggering an exponential cascade. Always call `read` directly for static
+   skill files: `SKILL.md`, `actions/*.md`, `kernel-opt/*.md`, `modes/*.md`.
+
+2. **Lazy load action files.** At session start read only `SKILL.md` (this
+   file) + the relevant `modes/<your_mode>.md`. Then read `actions/<phase>.md`
+   **only when you are about to enter that phase**. Same for
+   `kernel-opt/<backend>.md` — only read backends appearing in
+   `KERNEL_OPT_BACKENDS`. Each `actions/*.md` carries a TL;DR header so you
+   can decide from the TL;DR alone whether to deep-read.
+
+3. **NEVER `read` `kb/entries.jsonl` directly.** That file is 100KB+ of
+   structured KB entries. Always query via:
+   `python3 $SKILL_ROOT/kb/kb_query.py "<topic>" --top-k 5 --compact`
+
+### Acceptable sub-agent uses (still encouraged)
+
+- Parallel GEAK candidate submissions (kernel-opt phase)
+- Parallel benchmark / sweep configs
+- External directory exploration / log scanning unrelated to this skill
+- Discrete sub-tasks producing bounded final summary
+
+### Recommended reading order
+
+| Step | File | When |
+|---|---|---|
+| 1 | `SKILL.md` (this file) | Once at session start |
+| 2 | `modes/<MODE>.md` | Once at session start |
+| 3 | `actions/setup.md` | Phase 0 (env detection) |
+| 4 | `actions/classify.md` | Phase 1 |
+| 5 | `actions/target-analysis.md` | Phase 1 (only if target provided) |
+| 6 | `actions/baseline.md` | Phase 2 |
+| 7 | `actions/profile.md` | Phase 3 |
+| 8 | `actions/backends.md` / `params.md` / `kernel-opt.md` / `sweep.md` | DFS loop, lazy |
+| 9 | `actions/integrate.md` | After each kernel-opt batch |
+| 10 | `actions/report.md` | Final phase |
+| 11 | `kernel-opt/<backend>.md` | When dispatching that backend |
+
+Skip steps that don't apply to your config (e.g. step 5 only when external
+target data is given; step 11 only for backends in `KERNEL_OPT_BACKENDS`).
+
 ## Kernel Optimization & Tooling Constants
 
 All values below are the **single source of truth**. All actions reference these by name.
@@ -430,15 +483,36 @@ These are recurring errors observed in production CI runs. **Read before executi
    Failure mode: 3+ consecutive `MCP error -32001: Request timed out` events at exactly
    600 000 ms (validated regression, session 65b9de54 2026-05-05).
 
-5. **vLLM flags differ from SGLang.** Common mistake: `--disable-log-requests` is NOT
+5. **NEVER use `cat > FILE <<EOF` heredoc for content larger than ~2 KB.**
+   Bash command arguments live inside the LLM output stream — a single tool
+   call carrying tens of KB of heredoc body risks LLM stream truncation
+   from gateway / proxy / SDK timeouts. Validated regression: session
+   65c2518b cut at output_token=4641 while writing a comprehensive
+   markdown report via `cat > /workspace/.../*.md <<EOF`, then burned
+   2.5 hours in `command undefined` retry loop. ALWAYS use the dedicated
+   `write` tool for files; `write` arguments are an independent JSON
+   object that does not compete with bash command streaming.
+
+   **Wrong:**
+   ```bash
+   cat > /workspace/hyperloom/baseline_report.md <<'EOF'
+   # Baseline Report
+   ... 30 KB of markdown ...
+   EOF
+   ```
+
+   **Right:**
+   `write(path="/workspace/hyperloom/baseline_report.md", content="# Baseline Report\n... 30 KB ...")`
+
+6. **vLLM flags differ from SGLang.** Common mistake: `--disable-log-requests` is NOT
    a valid vLLM flag. Use `--disable-log-stats` for vLLM. Always check `vllm serve --help`
    before using unfamiliar flags. Failure mode: `unrecognized arguments` → server crash.
 
-6. **Use `magpie benchmark --benchmark-config` instead of manual server launch.** Magpie
+7. **Use `magpie benchmark --benchmark-config` instead of manual server launch.** Magpie
    handles server startup, health wait, benchmark, and cleanup in a tested sequence. Manual
    launch skips health checks and often hits Exit code 144 (SIGTERM from stale processes).
 
-7. **Never call `geak_set_model_config`.** See IR-7. GEAK LLM backend is pre-configured.
+8. **Never call `geak_set_model_config`.** See IR-7. GEAK LLM backend is pre-configured.
 
 ## DFS Search Tree
 

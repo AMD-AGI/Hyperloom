@@ -1,5 +1,10 @@
 # Action: Environment Setup
 
+> **TL;DR — Phase 0 (read first, before any other action).** Prepend
+> `/opt/venv/bin` to PATH, auto-detect or accept user-specified
+> `$MODEL` / `$TP` / `$CONC` / `$ISL` / `$OSL` / `$FRAMEWORK`, lock framework
+> as a hard constraint, create `$RESULT_DIR`. Output: env vars exported.
+
 ## Inputs
 - User-specified MODEL, TP, CONC, ISL, OSL, FRAMEWORK (optional — auto-detect if not provided)
 

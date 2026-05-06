@@ -1,5 +1,12 @@
 # Action: Baseline Benchmark
 
+> **TL;DR — Phase 2 (read when about to run the first benchmark).** Run
+> `magpie benchmark --benchmark-config` with torch.compile (fall back to eager
+> on failure). Framework MUST equal user-specified `$FRAMEWORK` (Common
+> Pitfall #3). Use the Background Runner Recipe (IR-8) to launch + poll.
+> Output: `benchmark_report.json` with `output_throughput`, plus
+> `baseline_tput_per_gpu` for downstream comparisons.
+
 ## Inputs
 - Environment set up (from `setup.md`)
 - Model classification (from `classify.md`) — determines whether to try torch.compile

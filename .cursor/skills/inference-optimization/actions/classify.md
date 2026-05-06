@@ -1,5 +1,11 @@
 # Action: Model Classification & Strategy Selection
 
+> **TL;DR — Phase 1 (read once after setup).** Classify model (MoE / dense /
+> quantization / attention type) and pick a strategy (whether torch.compile,
+> FP8 dtype, attention backend hints). Inputs: `$MODEL` weights dir. Output:
+> classification record consumed by `baseline.md`, `profile.md`,
+> `kernel-opt.md`.
+
 ## Inputs
 - `$MODEL` path to model weights directory
 - Access to framework test suites (`/sgl-workspace/sglang/test/`, vLLM source)

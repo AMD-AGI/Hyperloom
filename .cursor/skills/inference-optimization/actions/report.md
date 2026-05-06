@@ -1,5 +1,12 @@
 # Action: Optimization Report
 
+> **TL;DR — Phase 10 (final, read at very end).** Generate optimization
+> report markdown in `/workspace/hyperloom/` from all artifacts (sweep
+> `results.tsv`, GEAK results, baseline/optimized numbers, target gap if
+> any). Contribute new findings to the KB via `kb_ingest.py`. Use the
+> `write` tool (Common Pitfall #5: NEVER `cat > FILE <<EOF` for large
+> reports).
+
 Generate the final optimization report and contribute new knowledge to the KB.
 
 ## Inputs

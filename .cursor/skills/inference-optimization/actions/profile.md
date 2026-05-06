@@ -1,5 +1,11 @@
 # Action: Profile & Analyze
 
+> **TL;DR — Phase 3 (read after baseline completes).** Profile the running
+> server with torch profiler, run TraceLens for kernel breakdown, identify
+> GEAK candidates by GPU%. Use Background Runner Recipe (IR-8). Output:
+> trace files in `$RESULT_DIR/profile/` + ranked candidate kernel list with
+> GPU% / latency.
+
 Combines profiling (Phase 3), TraceLens analysis (Phase 4), and candidate identification (Phase 5).
 
 ## Inputs

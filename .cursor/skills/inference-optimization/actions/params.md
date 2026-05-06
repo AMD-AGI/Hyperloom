@@ -1,5 +1,11 @@
 # Action: Server Parameter Tuning
 
+> **TL;DR — Phase 5 (DFS loop, after backends).** Tune server parameters
+> (decode steps, mem fraction, schedule conservativeness, etc.) on top of
+> `$WINNING_BACKEND_ARGS`. Each parameter tested independently, then
+> winners combined. Use Background Runner Recipe (IR-8). Output:
+> `$ALL_WINNING_PARAMS`.
+
 ## Inputs
 - Winning backend config from `backends.md` (or baseline if backends skipped)
 - `baseline_tput_per_gpu` (from current best, not original baseline)

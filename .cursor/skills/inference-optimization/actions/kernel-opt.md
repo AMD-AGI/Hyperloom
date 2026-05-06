@@ -1,5 +1,12 @@
 # Action: Kernel Optimization
 
+> **TL;DR — Phase 6 (DFS loop, read when entering kernel-opt).** Multi-round
+> kernel optimization across backends in `KERNEL_OPT_BACKENDS`
+> (`geak` / `codex` / `claude` / `llm`). Submit `GEAK_TOP_CANDIDATES` (=5)
+> kernels in parallel per IR-1, integrate winners via `integrate.md`.
+> Read this file + the per-backend `kernel-opt/<backend>.md` ONLY for
+> backends actually configured (lazy load).
+
 Multi-round kernel optimization loop using configurable backends.
 
 Backend references:
