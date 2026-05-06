@@ -173,12 +173,17 @@ class SweepExecutor:
             base_extra_args=base_extra_args,
         )
 
-        # Resolve runtime model_path (task.params > $MODEL_PATH) and forward
-        # so each variant's YAML overrides the legacy hardcoded model field.
-        # See baseline.py / _grid_runner.py for the rationale.
+        # Resolve runtime model_path / gpu_type (task.params > $MODEL_PATH /
+        # $GPU_TYPE from CLI re-export). See baseline.py / _grid_runner.py
+        # for the rationale on why both must be threaded into every variant
+        # YAML render — yaml-level defaults would otherwise win.
         resolved_model = (
             str(params.get("model_path") or "").strip()
             or os.environ.get("MODEL_PATH", "").strip()
+        )
+        resolved_gpu = (
+            str(params.get("gpu_type") or "").strip().lower()
+            or os.environ.get("GPU_TYPE", "").strip().lower()
         )
         results = await run_grid(
             base_yaml_path=config_path,
@@ -187,6 +192,7 @@ class SweepExecutor:
             output_root=output_root,
             variant_timeout_sec=timeout_sec,
             model_path=resolved_model,
+            gpu_type=resolved_gpu,
         )
 
         entries = [_result_dict(v) for v in results]
