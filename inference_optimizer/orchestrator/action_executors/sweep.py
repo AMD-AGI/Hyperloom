@@ -33,7 +33,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ._grid_runner import GridVariant, VariantResult, run_grid
+from ._grid_runner import GridVariant, VariantResult, run_grid, _resolve_output_root
 from .baseline import _default_baseline_config
 
 
@@ -124,7 +124,7 @@ class SweepExecutor:
         self,
         *,
         default_config_path: Path | str | None = None,
-        default_output_root: Path | str = "/workspace/hyperloom",
+        default_output_root: Path | str | None = None,
         default_conc_values: list[int] | None = None,
         default_isl_osl_configs: list[str] | None = None,
         default_num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
@@ -135,7 +135,7 @@ class SweepExecutor:
         self.default_config_path = (
             Path(default_config_path) if default_config_path else None
         )
-        self.default_output_root = Path(default_output_root)
+        self.default_output_root = Path(default_output_root or _resolve_output_root())
         self.default_conc_values = list(default_conc_values or DEFAULT_CONC_VALUES)
         self.default_isl_osl_configs = list(
             default_isl_osl_configs or DEFAULT_ISL_OSL
