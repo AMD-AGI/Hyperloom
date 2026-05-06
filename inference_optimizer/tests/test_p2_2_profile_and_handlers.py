@@ -60,7 +60,7 @@ def _backends_silent() -> dict[str, object]:
 # ProfileExecutor
 # ===========================================================================
 def test_profile_default_config_path_is_in_assets():
-    assert "profile_qwen3_8b_sglang.yaml" in str(PROFILE_DEFAULT_CONFIG)
+    assert "profile_sglang.yaml" in str(PROFILE_DEFAULT_CONFIG)
     assert PROFILE_DEFAULT_CONFIG.exists(), \
         "profile YAML must ship as a package asset"
 
@@ -76,12 +76,13 @@ def test_profile_yaml_has_torch_profiler_enabled():
 # ===========================================================================
 # Regression: model_path injection beats the YAML's hardcoded fallback.
 #
-# Bug: the shipped baseline_qwen3_8b_sglang.yaml / profile_qwen3_8b_sglang.yaml
-# pin `benchmark.model: /wekafs/models/Qwen-Qwen3-8B`. The CLI's --model arg
-# only flowed into SharedState.model_path; if the executor did not propagate
-# it into the materialized YAML, Magpie silently benchmarked Qwen3-8B no
-# matter what the user asked for. _materialize_config_with_envs(model_path=...)
-# is the single seam that prevents this — locking it down here.
+# Bug: the shipped baseline_sglang.yaml / profile_sglang.yaml pin
+# `benchmark.model: /wekafs/models/Qwen-Qwen3-8B` as a fallback for offline
+# Magpie use. The CLI's --model arg only flowed into SharedState.model_path;
+# if the executor did not propagate it into the materialized YAML, Magpie
+# silently benchmarked Qwen3-8B no matter what the user asked for.
+# _materialize_config_with_envs(model_path=...) is the single seam that
+# prevents this — locking it down here.
 # ===========================================================================
 def test_materialize_config_injects_model_path(tmp_path):
     """Default YAML's hardcoded Qwen3-8B must be overridden when caller
