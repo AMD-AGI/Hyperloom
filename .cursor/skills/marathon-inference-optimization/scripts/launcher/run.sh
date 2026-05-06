@@ -188,7 +188,7 @@ fi
 : "${OSL:=1024}"
 : "${MODEL_PATH:=}"
 : "${IMAGE:=}"
-: "${KERNEL_OPT_WORKSPACE:=core42-sandbox}"
+: "${KERNEL_OPT_WORKSPACE:=${SANDBOX_WORKSPACE:-}}"
 : "${KERNEL_OPT_BACKENDS:=geak,claude,codex}"
 : "${INFERENCEX_PATH:=/hyperloom/InferenceX}"
 : "${DRY_RUN:=0}"
@@ -410,17 +410,17 @@ cat > "$MCP_CONFIG" <<JSON
   "mcpServers": {
     "geak": {
       "type": "sse",
-      "url": "https://core42.example-internal-host.invalid/core42/core42-hyperloom/geak-agent-8rmr6/mcp/sse",
+      "url": "${GEAK_MCP_URL:?GEAK_MCP_URL must be set}",
       "headers": { "Authorization": "Bearer ${SAFE_API_KEY}" }
     },
     "oob": {
       "type": "sse",
-      "url": "https://core42.example-internal-host.invalid/core42/core42-hyperloom/oob-agent-kgdt6/sse",
+      "url": "${OOB_MCP_URL:?OOB_MCP_URL must be set}",
       "headers": { "Authorization": "Bearer ${SAFE_API_KEY}" }
     },
     "traceLens": {
       "type": "http",
-      "url": "https://core42.example-internal-host.invalid/core42/core42-hyperloom/tracelens-agent-rlchx/mcp"
+      "url": "${TRACELENS_MCP_URL:?TRACELENS_MCP_URL must be set}"
     }
   }
 }
