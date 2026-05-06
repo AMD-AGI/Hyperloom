@@ -39,11 +39,16 @@ PERIODIC_BENCH_INTERVAL = 3      # force E2E benchmark every N completed actions
 PLATEAU_THRESHOLD = 6            # consecutive no-gain actions → re-explore
 LOOP_DETECT_WINDOW = 8
 CIRCUIT_BREAKER = 5              # consecutive failures → re-analyze
+CONSECUTIVE_REGRESSION_CAP = 3   # clean-but-losing actions → re-explore
 MAX_WALL_HOURS = 24
 MAX_CONSECUTIVE_RE_EXPLORES = 3
 RE_PROFILE_CADENCE_MIN = 180     # re-profile every 3h for new targets
 MAX_CRASH_COUNT = 10
 MAX_SELF_RETRY = 3               # Orchestrator self-diagnosis retry cap per action
+
+KM_HEARTBEAT_CHECK_INTERVAL_S = 300
+KM_HEARTBEAT_STALE_MIN = 60
+KM_HEARTBEAT_RESTART_MIN = 120
 
 _NUMERIC_RESULT_KEYS = frozenset({
     "accuracy_risk", "crash_risk", "gain_pct", "micro_speedup",
@@ -240,6 +245,7 @@ class Orchestrator:
                     if self._analysis_task is None or self._analysis_task.done():
                         self._analysis_task = asyncio.create_task(self._deep_analysis())
 
+                self._check_km_heartbeat()
                 self._check_tier_boundary()
                 await self._dfs_iteration()
                 # Yield to event loop and throttle when repeatedly failing
@@ -1042,6 +1048,9 @@ class Orchestrator:
                         action, symptom="dfs-action regression",
                         root_cause=f"new_tput={new_tput:.1f} < best={best_ever:.1f} (-{drop_pct:.2f}%)",
                     )
+                    self.state.consecutive_regressions = (
+                        getattr(self.state, "consecutive_regressions", 0) + 1
+                    )
                     verify_bench = await self._run_benchmark()
                     if verify_bench:
                         verify_tput = verify_bench.get("tput_per_gpu", 0)
@@ -1071,6 +1080,7 @@ class Orchestrator:
                         result["gain_pct"] = gain
                         log.info("Action %s improved throughput: %.1f → %.1f (+%.1f%%)",
                                  action.get("id"), prev_tput, new_tput, gain)
+                        self.state.consecutive_regressions = 0
 
                         self._snapshot_diffs(action, prev_tput, new_tput)
 
@@ -1285,6 +1295,38 @@ class Orchestrator:
 
         # Check plateau -> re-explore
         if self.state.actions_since_gain >= PLATEAU_THRESHOLD:
+            await self._re_explore()
+
+        # Regression circuit breaker: branch is exhausted if we got several
+        # clean-but-losing actions in a row. This is independent from
+        # CIRCUIT_BREAKER, which counts crashes.
+        cr = getattr(self.state, "consecutive_regressions", 0)
+        if cr >= CONSECUTIVE_REGRESSION_CAP:
+            log.warning(
+                "Regression circuit breaker: %d consecutive regressions "
+                "(>= %d) — branch exhausted, forcing re-explore",
+                cr, CONSECUTIVE_REGRESSION_CAP,
+            )
+            try:
+                ipc.write_event(self.session_dir, {
+                    "source": "marathon",
+                    "type": "branch-exhausted",
+                    "task_id": action.get("id"),
+                    "severity": "warning",
+                    "promising": False,
+                    "details": {
+                        "consecutive_regressions": cr,
+                        "cap": CONSECUTIVE_REGRESSION_CAP,
+                        "last_action_id": action.get("id"),
+                        "last_action_type": action.get("action"),
+                        "current_tput": self.state.current_tput_per_gpu,
+                        "best_tput": self.state.best_tput_per_gpu,
+                    },
+                })
+                self.state.events_written += 1
+            except Exception as exc:
+                log.warning("Failed to write branch-exhausted event: %s", exc)
+            self.state.consecutive_regressions = 0
             await self._re_explore()
 
         # Log completion
@@ -2985,6 +3027,126 @@ READ-ONLY: Do NOT edit any source files. Only analyze and write to $OUTPUT_FILE.
     # ------------------------------------------------------------------
     # Stopping conditions + tier checks
     # ------------------------------------------------------------------
+
+    def _check_km_heartbeat(self) -> None:
+        """Request a kernel-mgr pane restart when pending work goes silent.
+
+        The heartbeat must look only at KM-owned files. `event_log.jsonl` and
+        `work_queue.jsonl` are shared with the orchestrator, so using their
+        mtimes would let our own writes make a dead KM look alive.
+        """
+        now = time.monotonic()
+        last_check = getattr(self, "_km_heartbeat_last_check_mono", 0.0)
+        if now - last_check < KM_HEARTBEAT_CHECK_INTERVAL_S:
+            return
+        self._km_heartbeat_last_check_mono = now
+
+        if self.state.kernel_manager_targets_pushed <= 0:
+            return
+
+        pending_km_targets = 0
+        try:
+            wq = ipc.read_work_queue_all(self.session_dir)
+        except Exception:
+            wq = []
+        processed = set(getattr(self.state, "kernel_manager_processed_ids", []) or [])
+        for t in wq:
+            if t.get("status") == "pending" and t.get("id") not in processed:
+                pending_km_targets += 1
+
+        # A silent KM with no pending work is idle, not hung.
+        if pending_km_targets <= 0 and not getattr(
+            self.state, "km_requested_restart", False
+        ):
+            return
+
+        session_path = Path(self.session_dir)
+        heartbeat_sources = [
+            session_path / "logs" / "kernel-mgr.log",
+            session_path / "kernel_manager" / "results.jsonl",
+        ]
+        latest_mtime = 0.0
+        for p in heartbeat_sources:
+            if not p.exists():
+                continue
+            try:
+                latest_mtime = max(latest_mtime, p.stat().st_mtime)
+            except OSError:
+                continue
+
+        if latest_mtime <= 0:
+            return
+
+        silence_min = (time.time() - latest_mtime) / 60
+
+        if (getattr(self.state, "km_requested_restart", False)
+                and silence_min < KM_HEARTBEAT_STALE_MIN):
+            log.info(
+                "kernel-mgr heartbeat recovered (silence %.1f min < %d) — "
+                "clearing restart request",
+                silence_min, KM_HEARTBEAT_STALE_MIN,
+            )
+            self.state.km_requested_restart = False
+            self.state.save()
+            return
+
+        if getattr(self.state, "km_requested_restart", False):
+            return
+
+        if silence_min >= KM_HEARTBEAT_RESTART_MIN:
+            log.error(
+                "kernel-mgr heartbeat: %.1f min of silence (>= %d) — "
+                "requesting pane restart via run.sh monitor",
+                silence_min, KM_HEARTBEAT_RESTART_MIN,
+            )
+            self.state.km_requested_restart = True
+            self.state.km_restart_count = (
+                getattr(self.state, "km_restart_count", 0) + 1
+            )
+            try:
+                ipc.write_event(self.session_dir, {
+                    "source": "marathon",
+                    "type": "km-restart-requested",
+                    "severity": "error",
+                    "promising": False,
+                    "details": {
+                        "silence_min": round(silence_min, 1),
+                        "restart_count": self.state.km_restart_count,
+                        "threshold_min": KM_HEARTBEAT_RESTART_MIN,
+                        "pending_km_targets": pending_km_targets,
+                    },
+                })
+                self.state.events_written += 1
+            except Exception as exc:
+                log.warning("Failed to write km-restart-requested event: %s", exc)
+            try:
+                self.state.save()
+            except Exception as exc:
+                log.warning("Failed to save state after km-restart request: %s", exc)
+            return
+
+        if silence_min >= KM_HEARTBEAT_STALE_MIN:
+            last_warn = getattr(self, "_km_stale_last_warn_min", 0.0)
+            if silence_min - last_warn >= 30:
+                log.warning(
+                    "kernel-mgr heartbeat stale: %.1f min of silence (>= %d)",
+                    silence_min, KM_HEARTBEAT_STALE_MIN,
+                )
+                self._km_stale_last_warn_min = silence_min
+                try:
+                    ipc.write_event(self.session_dir, {
+                        "source": "marathon",
+                        "type": "km-stale",
+                        "severity": "warning",
+                        "promising": False,
+                        "details": {
+                            "silence_min": round(silence_min, 1),
+                            "threshold_min": KM_HEARTBEAT_STALE_MIN,
+                        },
+                    })
+                    self.state.events_written += 1
+                except Exception as exc:
+                    log.warning("Failed to write km-stale event: %s", exc)
 
     def _should_stop(self) -> bool:
         """Five stopping conditions from SKILL.md + shutdown signal."""

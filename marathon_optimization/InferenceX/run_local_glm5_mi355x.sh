@@ -10,7 +10,7 @@ set -euo pipefail
 
 CURDIR=$(cd $(dirname $0); pwd)
 
-export HF_TOKEN="${HF_TOKEN:-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}"
+export HF_TOKEN="${HF_TOKEN:$HF_TOKEN}"
 export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"
 
 export HF_HUB_CACHE="${HF_HUB_CACHE:-/mnt/hf_hub_cache}"
