@@ -1,5 +1,5 @@
 claw:
-  endpoint: https://core42.primus-safe.amd.com/claw-api/v1
+  endpoint: ${SAFE_BASE_URL}/claw-api/v1
   api_key_env: CLAW_API_KEY
   sandbox_workspace_env: SANDBOX_WORKSPACE
   sandbox_timeout: 28800
@@ -15,7 +15,7 @@ inferenceX:
 
 results:
   result_dir: /workspace/hyperloom/
-  nfs_base: /wekafs/results/ci
+  nfs_base: ${NFS_ROOT}/results/ci
   artifact_retention_days: 90
 
 notification:
@@ -45,7 +45,7 @@ defaults:
   geak_step_limit: 100
   kernel_opt_workspace: ${KERNEL_OPT_WORKSPACE}
   min_kernels: 5
-  inferencex_path: /wekafs/InferenceX
+  inferencex_path: ${NFS_ROOT}/InferenceX
   kernel_opt_backends: geak
   random_range_ratio: 0.8
 
@@ -53,7 +53,7 @@ models:
   # ── DeepSeek R1 (FP8, TP=8) ──
   - inferenceX_key: dsr1-fp8-mi300x-sglang
     inferenceX_api_name: DeepSeek-R1-0528
-    model_path_override: /wekafs/models/DeepSeek-R1-0528
+    model_path_override: ${NFS_ROOT}/models/DeepSeek-R1-0528
     optimization_depth: full
     kernel_opt_backends: claude
     target_gpu: mi300x
@@ -61,7 +61,7 @@ models:
   # ── gpt-oss 120B (FP4, TP=8, vLLM) ──
   - inferenceX_key: gptoss-fp4-mi300x-vllm
     inferenceX_api_name: gpt-oss-120b
-    model_path_override: /wekafs/models/gpt-oss-120b
+    model_path_override: ${NFS_ROOT}/models/gpt-oss-120b
     optimization_depth: full
     kernel_opt_backends: claude
     target_gpu: mi300x
@@ -69,7 +69,7 @@ models:
   # ── Kimi K2.5 (INT4, TP=8, vLLM) ──
   - inferenceX_key: kimik2.5-int4-mi300x-vllm
     inferenceX_api_name: Kimi-K2.5
-    model_path_override: /wekafs/models/Kimi-K2.5
+    model_path_override: ${NFS_ROOT}/models/Kimi-K2.5
     optimization_depth: full
     kernel_opt_backends: claude
     target_gpu: mi300x
@@ -77,7 +77,7 @@ models:
   # ── MiniMax M2.5 (FP8, TP=8, vLLM) ──
   - inferenceX_key: minimaxm2.5-fp8-mi300x-vllm
     inferenceX_api_name: MiniMax-M2.5
-    model_path_override: /wekafs/models/MiniMaxAI-MiniMax-M2.5
+    model_path_override: ${NFS_ROOT}/models/MiniMaxAI-MiniMax-M2.5
     optimization_depth: full
     kernel_opt_backends: claude
     target_gpu: mi300x
@@ -94,7 +94,7 @@ models:
   # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
   - inferenceX_key: qwen3.5-bf16-mi300x-sglang
     inferenceX_api_name: Qwen-3.5-397B-A17B
-    model_path_override: /wekafs/models/Qwen-Qwen3.5-397B-A17B
+    model_path_override: ${NFS_ROOT}/models/Qwen-Qwen3.5-397B-A17B
     optimization_depth: full
     kernel_opt_backends: claude
     target_gpu: mi300x

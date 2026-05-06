@@ -22,7 +22,8 @@ unset PROFILE SGLANG_TORCH_PROFILER_DIR VLLM_TORCH_PROFILER_DIR
 FRAMEWORK="${FRAMEWORK:-sglang}"
 PORT=${PORT:-8888}
 TIMESTAMP=$(date +%Y-%m-%d-%H-%M)
-RESULT_DIR="${RESULT_DIR:-/wekafs/inference-optimization/results/sweep_$TIMESTAMP}"
+NFS_ROOT="${NFS_ROOT:-/wekafs}"
+RESULT_DIR="${RESULT_DIR:-${NFS_ROOT}/inference-optimization/results/sweep_$TIMESTAMP}"
 CONC_VALUES="${CONC_VALUES:-4 16 64}"
 ISL_OSL_CONFIGS="${ISL_OSL_CONFIGS:-1024:1024 8192:1024 1024:8192}"
 MAX_CONC=$(echo "$CONC_VALUES" | tr ' ' '\n' | sort -n | tail -1)
