@@ -16,7 +16,7 @@ export PATH="/opt/venv/bin:$PATH"
 
 SKILL_ROOT="${SKILL_ROOT:-.cursor/skills/inference-optimization}"
 BOOTSTRAP_SCRIPT="$SKILL_ROOT/scripts/bootstrap.sh"
-HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
+HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-${NFS_ROOT:-/wekafs}/fully-local}"
 
 if [ "$MODE" = "local" ] \
    && [ ! -f /opt/entrypoint.sh ] \
@@ -34,10 +34,11 @@ fi
 ```bash
 export PATH="/opt/venv/bin:$PATH"
 
-MODEL="${MODEL:-$(ls -d /wekafs/*/models/*/ 2>/dev/null | head -1)}"
+NFS_ROOT="${NFS_ROOT:-/wekafs}"
+MODEL="${MODEL:-$(ls -d ${NFS_ROOT}/*/models/*/ 2>/dev/null | head -1)}"
 GPU_COUNT="${GPU_COUNT:-$(amd-smi list 2>/dev/null | grep "^GPU:" | wc -l)}"
 GPU_TYPE="${GPU_TYPE:-$(rocm-smi --showproductname 2>/dev/null | grep "GFX Version" | head -1 | grep -o "gfx[0-9]*")}"
-INFERENCEX_PATH="${INFERENCEX_PATH:-$(ls -d /wekafs/*/InferenceX 2>/dev/null | head -1)}"
+INFERENCEX_PATH="${INFERENCEX_PATH:-$(ls -d ${NFS_ROOT}/*/InferenceX 2>/dev/null | head -1)}"
 if [ "$MODE" = "local" ]; then
     INFERENCEX_PATH="${INFERENCEX_PATH:-/opt/hyperloom/InferenceX}"
 fi
@@ -67,7 +68,7 @@ SCRIPTS_DIR="$SKILL_ROOT/scripts"
 # Mode detection (local = Hyperloom container, Ray CLIs; claw = SaFE + exec_on_gpu)
 if [ "${MODE:-}" = "claw" ]; then
     MODE="claw"
-    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/wekafs/inference-optimization}"
+    WORKSPACE_ROOT="${WORKSPACE_ROOT:-${NFS_ROOT}/inference-optimization}"
 else
     MODE="local"
     WORKSPACE_ROOT="${WORKSPACE_ROOT:-/opt/hyperloom}"
