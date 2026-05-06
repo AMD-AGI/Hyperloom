@@ -437,7 +437,7 @@ def main():
 
     # Execute
     claw = ClawClient.from_config(claw_cfg)
-    nfs_base = results_cfg.get("nfs_base", "/hyperloom/results/ci")
+    nfs_base = results_cfg.get("nfs_base") or (os.environ.get("NFS_ROOT", "/wekafs") + "/results/ci")
     sandbox_timeout = claw_cfg.get("sandbox_timeout", 14400)
     results = []
 

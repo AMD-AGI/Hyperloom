@@ -40,22 +40,74 @@ docker run -d --shm-size=16g \
 
 ### 2. Configure SSH
 
+#### If Docker runs on your local machine
+
 Add to your `~/.ssh/config` (Linux/macOS) or `C:\Users\<you>\.ssh\config` (Windows):
 
 ```
 Host hyperloom
-    HostName <gpu-machine-ip>
+    HostName localhost
     Port 20022
     User root
 ```
 
-> If Docker runs on your local machine, set `HostName localhost`.
+#### If Docker runs on a remote GPU server
+
+The container is not directly reachable from your laptop — you must proxy through the host first.
+
+**Linux/macOS** (`~/.ssh/config`):
+
+```
+Host hyperloom
+    HostName localhost
+    Port 20022
+    User root
+    IdentityFile ~/.ssh/private_key
+    ProxyJump <user>@<gpu-server-hostname-or-ip>
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+```
+
+**Windows** (`C:\Users\<you>\.ssh\config`):
+
+```
+Host hyperloom
+    HostName localhost
+    Port 20022
+    User root
+    IdentityFile "C:\Users\<you>\.ssh\private_key"
+    ProxyJump <user>@<gpu-server-hostname-or-ip>
+    StrictHostKeyChecking no
+    UserKnownHostsFile NUL
+```
+
+Then inject your SSH public key into the container (run once from your local machine):
+
+```bash
+PUBKEY=$(cat ~/.ssh/private_key.pub)
+ssh <user>@<gpu-server-hostname-or-ip> \
+  "docker exec <CONTAINER_ID> bash -c \
+  'mkdir -p /root/.ssh && \
+   echo \"$PUBKEY\" >> /root/.ssh/authorized_keys && \
+   chmod 600 /root/.ssh/authorized_keys && \
+   chmod 700 /root/.ssh'"
+```
+
+> To find `<CONTAINER_ID>`, run `docker ps` on the GPU server.
+
+Verify the connection before opening Cursor:
+
+```bash
+ssh hyperloom echo "Connected successfully!"
+```
 
 ### 3. Connect with Cursor
 
 1. Open Cursor → Remote SSH → Connect to Host → `hyperloom` (user: `root`, password: `root`)
 2. Open folder: `/opt/hyperloom`
 3. Skills load automatically
+
+> **Remote server users:** Open the `/opt/hyperloom` folder as the workspace **before** attaching to the container — attaching first and then opening the folder can cause path resolution issues.
 
 > Local mode runs **no persistent MCP services** — TraceLens, GEAK, and OOB are all invoked as in-container CLIs (`tracelens-*`, `geak` via `geak_ray_submit.py` through Ray, OOB via `oob_ray_submit.py` through Ray). No MCP toggles need to be enabled.
 
