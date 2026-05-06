@@ -95,6 +95,13 @@ done
 log() { echo "[kernel-agent] $*"; }
 warn() { echo "[kernel-agent WARN] $*" >&2; }
 die() { echo "[kernel-agent ERROR] $*" >&2; exit 1; }
+# In --check-only mode, downgrade post-install verification failures to a
+# warning so report_status can still enumerate what's missing. The caller
+# explicitly asked us NOT to install; failing on the first missing piece
+# defeats the point of check-only.
+verify_die() {
+  if [ "$CHECK_ONLY" -eq 1 ]; then warn "$1"; else die "$1"; fi
+}
 
 run() {
   log "$*"
@@ -128,7 +135,7 @@ ensure_tracelens() {
     TRACELENS_ROOT="${HYPERLOOM_BUNDLE}/TraceLens-internal"
   fi
   if [ ! -d "$TRACELENS_ROOT" ]; then
-    if [ "$DRY_RUN" -eq 1 ]; then
+    if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
       warn "TraceLens root not found: $TRACELENS_ROOT"
       return
     fi
@@ -139,9 +146,11 @@ ensure_tracelens() {
     run bash -lc "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir -e ."
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1 \
-      || die "TraceLens_generate_perf_report_pytorch not found after install"
-    TraceLens_generate_perf_report_pytorch --help >/dev/null
+    if command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
+      TraceLens_generate_perf_report_pytorch --help >/dev/null
+    else
+      verify_die "TraceLens_generate_perf_report_pytorch not found after install"
+    fi
   fi
 }
 
@@ -178,7 +187,7 @@ EOF
     fi
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    command -v geak >/dev/null 2>&1 || die "geak CLI not found"
+    command -v geak >/dev/null 2>&1 || verify_die "geak CLI not found"
   fi
 }
 
