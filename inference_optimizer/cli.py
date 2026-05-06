@@ -3,9 +3,13 @@
 Usage::
 
     inference_optimizer optimize \\
-        --model /wekafs/models/Qwen-Qwen3-8B \\
+        --model /wekafs/models/<your-model> \\
         --target-gain 10 \\
         --max-hours 2
+
+    # or via env (matches the rest of the pipeline / Dockerfile convention):
+    export MODEL_PATH=/wekafs/models/<your-model>
+    inference_optimizer optimize --target-gain 10 --max-hours 2
 
 Single subcommand for now (``optimize``). Wires Claude+Codex backends,
 registers all available action_executors, builds the requested objective,
@@ -13,6 +17,12 @@ and starts ``Coordinator.run()`` until target / time / SIGTERM.
 
 Env vars consumed (besides the standard backend creds):
 
+  MODEL_PATH                                   — required if --model not passed;
+                                                 also exported back to subprocess
+                                                 env so Magpie YAMLs get the
+                                                 correct model path injected
+                                                 instead of the YAML's hardcoded
+                                                 fallback.
   OPENAI_BASE_URL + SAFE_API_KEY — canonical LiteLLM endpoint; compatibility aliases are exported for Claude/OOB/GEAK
   ROCR_VISIBLE_DEVICES                         — pin the GPU
   CLAUDE_MODEL                                 — default claude-opus-4-7
@@ -316,10 +326,23 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 f"(was {prior_crash}) for fresh resume"
             )
     else:
+        # Resolve model path from --model first, then $MODEL_PATH env. Without
+        # either, fail fast: silently falling back to the YAML's hardcoded
+        # `/wekafs/models/Qwen-Qwen3-8B` was the cause of "the optimizer ran
+        # the wrong model" reports — explicit > implicit.
         if not args.model:
-            print("ERROR: --model is required for new runs (or use --resume "
-                  "<session_id>)", file=sys.stderr)
+            args.model = os.environ.get("MODEL_PATH") or ""
+        if not args.model:
+            print(
+                "ERROR: model is required. Pass --model <path> or set "
+                "MODEL_PATH env (or use --resume <session_id>).",
+                file=sys.stderr,
+            )
             sys.exit(2)
+        # Re-export the resolved value so downstream subprocess executors
+        # (baseline / profile / sweep / backends / params) inject it into
+        # the Magpie YAML instead of trusting the YAML's hardcoded `model:`.
+        os.environ["MODEL_PATH"] = str(args.model)
         session_dir = make_session_dir(args.session_name) if args.session_name \
             else make_session_dir()
         print(f"Session dir: {session_dir}")
