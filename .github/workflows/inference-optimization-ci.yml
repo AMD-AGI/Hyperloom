@@ -15,6 +15,8 @@ on:
         default: 'manual'
 
 env:
+  SAFE_BASE_URL: ${{ secrets.SAFE_BASE_URL }}
+  NFS_ROOT: ${{ secrets.NFS_ROOT }}
   HARBOR_PREFIX: ${{ secrets.HARBOR_PREFIX }}
   KERNEL_OPT_WORKSPACE: ${{ secrets.KERNEL_OPT_WORKSPACE }}
   CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
