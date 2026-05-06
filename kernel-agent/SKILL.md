@@ -63,17 +63,30 @@ PY
 
 ## Installation
 
-Before the first request, run the base installer:
+Before the first request, run the installer:
 
 ```bash
 bash $WORKSPACE_PATH/kernel-agent/scripts/install.sh
 ```
 
-Base install provides:
-- `ray==2.44.1`
-- `click<8.3.0`
+The installer always installs everything in one shot:
+- `ray==2.44.1` + `click<8.3.0`
 - TraceLens editable install from `/wekafs/hyperloom/TraceLens-internal`
-- `TraceLens_generate_perf_report_pytorch --help` verification
+- GEAK CLI + `geak-config/local.yaml` (model resolution: `GEAK_MODEL_NAME` /
+  `GEAK_API_KEY` / `GEAK_BASE_URL` from env)
+- OOB CLI + claude/codex npm CLIs + `/root/.claude/config.json` /
+  `/root/.codex/auth.json`
+- OOB auth-proxy on `127.0.0.1:4002` (header rewrite for the AMD LLM
+  gateway), supervised by `scripts/ensure_auth_proxy.sh`
+
+The previous lazy `--with-geak / --with-oob / --with-llm` selectivity was
+removed because it caused recurring "OOB proxy not running, request 401'd,
+discovered the missing service after the fact" issues. Those flags are still
+accepted as no-ops for backwards compatibility; new call sites should drop
+them.
+
+Use `--check-only` to verify the current environment and `--dry-run` to print
+planned actions without installing.
 
 If a pod or venv was rebuilt, repair the Ray/Click pair before any kernel
 optimization request. `click>=8.3` is incompatible with the Ray 2.44 CLI in this
@@ -102,25 +115,22 @@ ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dash
 ray status
 ```
 
-Backends are installed lazily. Install only the requested backend:
+### Auth-proxy supervision
+
+The OOB auth-proxy on `:4002` rewrites `x-api-key` -> `Authorization: Bearer`
+for the AMD LLM gateway; without it, every claude/codex CLI request returns
+HTTP 401 "token not present". It is started by `install.sh` and can be re-
+verified at any time via:
 
 ```bash
-bash $WORKSPACE_PATH/kernel-agent/scripts/install.sh --with-geak
-bash $WORKSPACE_PATH/kernel-agent/scripts/install.sh --with-oob
+bash $WORKSPACE_PATH/kernel-agent/scripts/ensure_auth_proxy.sh
 ```
 
-The legacy `--with-llm` (single-shot HTTP-only LLM backend, max_tokens=2048)
-was removed because it could not produce useful output on real (>4 KB) HIP
-or Triton kernels. Use `claude` / `codex` (via OOB) instead — both run an
-agentic loop with iterative file edits and sandbox tool calls.
-
-Use `--all-backends` only when startup time is less important than avoiding
-first-use latency. GEAK may clone/install a repo; OOB may copy the WekaFS bundle
-and install npm CLIs. These are slower and more failure-prone than the base
-Ray/TraceLens install, so default to lazy backend install.
-
-Use `--check-only` to verify the current environment and `--dry-run` to print
-planned actions without installing.
+The script is idempotent: it TCP-probes :4002, then HTTP-probes via curl. If
+the port is open but the probe times out (a stuck proxy), it kills the
+existing `auth_proxy.py` process and relaunches. If port :4002 is healthy,
+it noops. Run it before any kernel-agent tool that talks to claude/codex,
+or simply re-run `install.sh` (which calls it as part of normal install).
 
 ## Tools
 
