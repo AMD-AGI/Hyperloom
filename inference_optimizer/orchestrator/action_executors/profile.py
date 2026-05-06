@@ -26,6 +26,7 @@ works unchanged.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -36,10 +37,19 @@ from .baseline import BaselineExecutor
 log = logging.getLogger(__name__)
 
 
+# Legacy constant kept pointing at the sglang profile yaml for fixture use.
+# Runtime sglang/vllm selection goes through `_default_profile_config()`.
 PROFILE_DEFAULT_CONFIG = (
     asset_root() / "scripts" / "configs" / "profile_sglang.yaml"
 )
 PROFILE_DEFAULT_TIMEOUT_SEC = 1500     # Magpie + sglang profile is heavier
+
+
+def _default_profile_config() -> Path:
+    """Resolve default profile YAML based on $FRAMEWORK env (sglang/vllm)."""
+    fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
+    name = "profile_vllm.yaml" if fw == "vllm" else "profile_sglang.yaml"
+    return asset_root() / "scripts" / "configs" / name
 
 
 class ProfileExecutor(BaselineExecutor):
@@ -49,7 +59,7 @@ class ProfileExecutor(BaselineExecutor):
         self,
         *,
         magpie_python: str = "/opt/venv/bin/python",
-        default_config_path: Path | str = PROFILE_DEFAULT_CONFIG,
+        default_config_path: Path | str | None = None,
         default_output_root: Path | str = "/workspace/hyperloom",
         default_timeout_sec: int = PROFILE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
@@ -61,6 +71,10 @@ class ProfileExecutor(BaselineExecutor):
             default_timeout_sec=default_timeout_sec,
             cwd=cwd,
         )
+
+    def _resolve_default_config(self) -> Path:
+        """Override BaselineExecutor's resolver to pick the profile yaml."""
+        return _default_profile_config()
 
     async def __call__(self, ctx) -> dict[str, Any]:
         result = await super().__call__(ctx)
