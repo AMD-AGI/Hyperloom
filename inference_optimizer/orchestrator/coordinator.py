@@ -529,9 +529,13 @@ class Coordinator:
 
         # 1b. Marathon KB retrieval — curated lessons (validated stacks).
         if agent_name == "orchestration":
+            # Framework is resolved at CLI start time and re-exported as
+            # $FRAMEWORK so the KB digest reads the right partition. Fall
+            # back to sglang for parity with the CLI default.
+            import os
             kb_text = format_kb_digest_for_orchestration(
                 model_name=getattr(self.shared_state, "model_name", "") or "",
-                framework="sglang",
+                framework=os.environ.get("FRAMEWORK", "sglang").strip().lower() or "sglang",
             )
             if kb_text.strip():
                 sections.append("=== Knowledge base hints ===")
