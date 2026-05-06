@@ -347,8 +347,7 @@ def main():
     scripts_path = ifx_cfg.get("scripts_path", "benchmarks/single_node")
     ifx_scripts: dict[str, str | None] = {}
 
-    import tempfile as _tmpmod
-    with _tmpmod.TemporaryDirectory() as _tmpdir:
+    with tempfile.TemporaryDirectory() as _tmpdir:
         subprocess.run(
             ["git", "clone", "--depth=1", "--branch=main",
              ifx_cfg["repo"], _tmpdir],
