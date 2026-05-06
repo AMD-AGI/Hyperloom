@@ -14,7 +14,7 @@ Outputs JSON with both arms' benchmark_report paths and throughput.
 
 Usage::
     /opt/venv/bin/python scripts/ab_torch_compile_magpie.py \\
-      --config scripts/configs/baseline_qwen3_8b_sglang.yaml \\
+      --config scripts/configs/baseline_sglang.yaml \\
       --out-json /tmp/ab_torch_compile.json
 """
 
@@ -133,7 +133,7 @@ async def main_async() -> int:
         "--config",
         type=Path,
         default=Path(__file__).resolve().parent / "configs"
-        / "baseline_qwen3_8b_sglang.yaml",
+        / "baseline_sglang.yaml",
     )
     ap.add_argument(
         "--base-extra-args",
