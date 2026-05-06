@@ -80,13 +80,17 @@ benchmark:
     torch_profiler:
       enabled: false
 EOF
-magpie benchmark --benchmark-config "$RESULT_DIR/param_decode_steps_16_config.yaml" \
-  -o "$RESULT_DIR/param_decode_steps_16"
-
-# Extract result
-WORKSPACE=$(ls -td "$RESULT_DIR"/param_decode_steps_16/benchmark_* | head -1)
-new_tput=$(python3 -c "import json; d=json.load(open('$WORKSPACE/benchmark_report.json')); print(d['throughput']['output_throughput'])")
 ```
+
+**Run via Background Runner Recipe** (see [`../SKILL.md`](../SKILL.md) "Background Runner Recipe (canonical)"):
+
+- launch: `bash(command="export PATH=/opt/venv/bin:$PATH && magpie benchmark --benchmark-config $RESULT_DIR/param_decode_steps_16_config.yaml -o $RESULT_DIR/param_decode_steps_16 2>&1", run_in_background=true)`
+- poll every 60s with `bash_output(shell_id)` until DONE / ERROR regex
+- extract result:
+  ```bash
+  WORKSPACE=$(ls -td "$RESULT_DIR"/param_decode_steps_16/benchmark_* | head -1)
+  new_tput=$(python3 -c "import json; d=json.load(open('$WORKSPACE/benchmark_report.json')); print(d['throughput']['output_throughput'])")
+  ```
 
 Compare output_throughput and TPOT against backend-optimized baseline:
 
@@ -122,9 +126,13 @@ benchmark:
     torch_profiler:
       enabled: false
 EOF
-magpie benchmark --benchmark-config "$RESULT_DIR/param_combined_config.yaml" \
-  -o "$RESULT_DIR/param_combined"
 ```
+
+**Run via Background Runner Recipe** (see [`../SKILL.md`](../SKILL.md) "Background Runner Recipe (canonical)"):
+
+- launch: `bash(command="export PATH=/opt/venv/bin:$PATH && magpie benchmark --benchmark-config $RESULT_DIR/param_combined_config.yaml -o $RESULT_DIR/param_combined 2>&1", run_in_background=true)`
+- poll every 60s with `bash_output(shell_id)` until DONE / ERROR regex
+- collect: `bash(command="cat $RESULT_DIR/param_combined/benchmark_*/benchmark_report.json")`
 
 If combined result is worse than individual winners, test subsets to find conflicting pairs.
 

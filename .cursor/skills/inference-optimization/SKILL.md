@@ -96,7 +96,102 @@ administrator. Changing it risks setting a non-existent model and breaking all t
 
 Violation = immediate run invalidation.
 
-**Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11) and [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12).**
+### IR-8: Long-running commands MUST use background execution
+
+**Any bash command expected to run >2 minutes** (server startup, model load, magpie
+benchmark, profiling, multi-config DFS run) MUST use `bash(run_in_background=true)`
+and poll output with `bash_output(shell_id=...)`. NEVER use synchronous patterns
+like `sleep 600 && tail`, `while ps aux | grep ... ; do sleep 30; done`, or rely on
+the bash tool to block for 10+ minutes — these waste turns when MCP times out and
+prevent observability of intermediate progress.
+
+**Wrong (validated waste pattern, 2026-05-05 sessions):**
+
+```bash
+# Single bash call blocks 10+ min, MCP times out near 600s, agent doesn't know
+# whether benchmark finished:
+timeout 3600 magpie benchmark --benchmark-config conc128/config.yaml -o conc128/results
+
+# Or: agent burns turns waiting for server boot
+sleep 600 && tail server.log
+while ps aux | grep benchmark_serving | grep -v grep > /dev/null; do sleep 30; done
+```
+
+**Right:** start in background, then poll incrementally. Each poll is fast (< 100 ms
+on the MCP side) and returns only the new lines since the previous read.
+
+```bash
+# Step 1: launch in background — returns shell_id immediately
+bash(
+  command="export PATH=/opt/venv/bin:$PATH && magpie benchmark --benchmark-config conc128/config.yaml -o conc128/results 2>&1",
+  run_in_background=true
+)
+# → Started background shell shell-XXXXXX
+
+# Step 2: poll output. Sleep BETWEEN polls in agent (LLM turn), NOT inside bash.
+bash(command="sleep 60", timeout=70)         # short sleep is fine; ≪ MCP timeout
+bash_output(shell_id="shell-XXXXXX")         # incremental; cheap
+# Repeat sleep + bash_output until you see "Benchmark Result" or report file.
+
+# Step 3: read final result
+bash(command="cat conc128/results/benchmark_*/benchmark_report.json")
+```
+
+When the agent decides to stop the background command (e.g., timeout decision), use
+`kill_shell(shell_id=...)`. Do NOT rely on the wrapping bash command's `timeout` to
+free up MCP — that only kills the spawned process, not the MCP request.
+
+#### Background Runner Recipe (canonical)
+
+Every action that runs `magpie benchmark`, server boot, or any command expected to
+exceed ~2 minutes follows this exact 3-step recipe. ALL action files reference this
+section by name; do NOT inline a different polling pattern.
+
+```text
+# Step 1 — launch (returns shell_id immediately, < 100 ms):
+shell_id ← bash(
+  command = "<long_cmd_with_2>&1>",
+  run_in_background = true
+)
+
+# Step 2 — poll loop (each iteration is one agent turn):
+while True:
+    bash(command = "sleep 60", timeout = 70)            # short sleep ≪ 600s MCP cap
+    out ← bash_output(shell_id = shell_id)              # incremental, cheap
+    if out matches DONE_REGEX  : break
+    if out matches ERROR_REGEX : break
+    if elapsed > <max_minutes> : kill_shell(shell_id); break
+
+# Step 3 — collect result (only after DONE):
+bash(command = "cat <report_path>")
+```
+
+**Regexes (defaults — override per command if needed):**
+
+| Pattern | Regex (ripgrep flavor) |
+|---|---|
+| `DONE_REGEX` (magpie) | `Benchmark Result\|benchmark_report\.json\|✅` |
+| `DONE_REGEX` (server boot) | `Application startup complete\|Uvicorn running on\|Server ready` |
+| `ERROR_REGEX` (always) | `Traceback\|FATAL\|exit [1-9]\|signal=SIG\|OOM\|CUDA out of memory` |
+
+**Poll cadence:**
+- Default: 60s
+- Fast cmds (<5 min expected): 30s
+- Server warmup (model load, first benchmark): 120s
+- NEVER 0s busy-loop; NEVER 600s+ (defeats the point — same as foreground)
+
+**Hard prohibitions:**
+- ❌ `sleep 600 && tail`           — opaque, no progress visibility, blocks 10 min in MCP
+- ❌ `while ps aux \| grep ... ; do sleep 30 ; done` — same problem
+- ❌ Foreground `magpie benchmark` even with `timeout 3600` — MCP caps at 600s anyway
+- ❌ `find /` for kernel discovery — see Common Pitfalls #4
+
+When `bash_output` repeatedly returns no new lines (e.g., 3 polls in a row), consider
+the cmd hung; use `kill_shell` and report.
+
+Violation = run inefficiency, but not invalidation.
+
+**Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-9 through IR-12) and [`modes/LOCAL.md`](modes/LOCAL.md) (IR-13).**
 
 ## Kernel Optimization & Tooling Constants
 
@@ -133,7 +228,7 @@ All values below are the **single source of truth**. All actions reference these
 | `MAGPIE_DFS_NUM_PROMPTS_MULTIPLIER` | 3 | NUM_PROMPTS = CONC × this for DFS loop (short runs) |
 | `MAGPIE_BASELINE_NUM_PROMPTS_MULTIPLIER` | 10 | NUM_PROMPTS = CONC × this for baseline (default) |
 | `MAGPIE_PROFILE_NUM_PROMPTS` | `CONC * 10` | NUM_PROMPTS for profiling runs (steady-state windowing controls trace size) |
-| `MAGPIE_TIMEOUT_S` | 3600 | Bash/YAML timeout for all magpie benchmark calls (must cover server startup) |
+| `MAGPIE_TIMEOUT_S` | 3600 | YAML/inner timeout for magpie benchmark (covers server startup). Outer agent uses background bash + polling per IR-8 — do NOT set this as the foreground bash timeout. |
 
 ### TraceLens Profiler Constants
 
@@ -219,8 +314,13 @@ benchmark:
     torch_profiler:
       enabled: false
 EOF
-magpie benchmark --benchmark-config "$RESULT_DIR/config.yaml" -o "$RESULT_DIR/<action_name>"
 ```
+
+Then launch via the Background Runner Recipe (see "Background Runner Recipe (canonical)" section above):
+
+- launch: `bash(command="export PATH=/opt/venv/bin:$PATH && magpie benchmark --benchmark-config $RESULT_DIR/config.yaml -o $RESULT_DIR/<action_name> 2>&1", run_in_background=true)`
+- poll every 60s with `bash_output(shell_id)` until DONE_REGEX or ERROR_REGEX matches
+- collect: `bash(command="cat $RESULT_DIR/<action_name>/benchmark_*/benchmark_report.json")`
 
 **CI baseline YAML template (with placeholders for `render_prompt`):**
 
@@ -259,9 +359,11 @@ benchmark:
   env vars, memory settings, expert parallelism flags). Put these as `EXTRA_{FRAMEWORK}_ARGS`
   in the YAML envs section. Do NOT run the InferenceX script directly.
 
-**CRITICAL — Bash timeout:** Every `magpie benchmark` call includes server startup (up
-to 45 min for large models). Set Bash `timeout` to at least **3600 seconds (1 hour)**.
-Without this, the Claw executor kills the process before the server finishes loading.
+**CRITICAL — Background execution required (IR-8):** Every `magpie benchmark` call
+includes server startup (up to 45 min for large models) plus the benchmark itself.
+Run `magpie benchmark` via `bash(run_in_background=true)` and poll progress with
+`bash_output(shell_id=...)`. Foreground bash calls block the MCP request and lose
+observability when the run exceeds the request timeout (~10 min).
 
 **`benchmark_script`:** Always specify the Magpie-authored script (e.g.,
 `sglang_mi355x.sh`) to ensure `EXTRA_SGLANG_ARGS` / `EXTRA_VLLM_ARGS` are respected.
@@ -305,15 +407,38 @@ These are recurring errors observed in production CI runs. **Read before executi
    auto-detect GPU_COUNT and override to TP=1 — large models (120B+) cannot run on
    a single GPU. Failure mode: OOM or server crash.
 
-3. **vLLM flags differ from SGLang.** Common mistake: `--disable-log-requests` is NOT
+3. **Never override user-specified Framework.** If the prompt says `Framework: sglang`,
+   you MUST use sglang. Do NOT silently switch to vllm (or vice versa) just because
+   InferenceX only ships a ready-made script for the other framework. SGLang on MI300X
+   supports MXFP4 / gpt-oss-120b (sgl-project/sglang PR #13929 + #17735, see SGLang
+   GPT-OSS cookbook). If no `${MODEL}_${PRECISION}_${GPU}_${FRAMEWORK}.sh` reference
+   exists, adapt the closest same-framework script (e.g., adapt `dsr1_fp4_mi355x_sglang.sh`
+   for a different MoE FP4 model) or build the YAML envs from upstream cookbook docs —
+   do NOT fall back to a different framework. Same applies to `SandboxImage` /
+   `KERNEL_OPT_IMAGE`: if the user supplied an sglang image, baseline must run sglang.
+   Failure mode: `framework: vllm` written into baseline yaml when user requested sglang
+   (validated regression, session 0143efa3 2026-05-05).
+
+4. **Never `find /` for kernel discovery.** Whole-disk scans take 10–30 minutes and
+   trigger the 10-min MCP timeout — agent then loses the result, retries, and burns
+   turns in a timeout loop. ALWAYS restrict kernel-source searches to known paths:
+   - `/sgl-workspace/aiter/`, `/sgl-workspace/sglang/` — aiter + sglang Triton/HIP kernels
+   - `/opt/venv/lib/python*/site-packages/{sglang,vllm,aiter,triton}/` — installed packages
+   - `/tmp/torchinductor_root/` — runtime torch.compile cache
+   Example correct invocation:
+   `find /sgl-workspace/aiter /opt/venv/lib/python*/site-packages/sglang -name "*.py" -path "*kernel*"`
+   Failure mode: 3+ consecutive `MCP error -32001: Request timed out` events at exactly
+   600 000 ms (validated regression, session 65b9de54 2026-05-05).
+
+5. **vLLM flags differ from SGLang.** Common mistake: `--disable-log-requests` is NOT
    a valid vLLM flag. Use `--disable-log-stats` for vLLM. Always check `vllm serve --help`
    before using unfamiliar flags. Failure mode: `unrecognized arguments` → server crash.
 
-4. **Use `magpie benchmark --benchmark-config` instead of manual server launch.** Magpie
+6. **Use `magpie benchmark --benchmark-config` instead of manual server launch.** Magpie
    handles server startup, health wait, benchmark, and cleanup in a tested sequence. Manual
    launch skips health checks and often hits Exit code 144 (SIGTERM from stale processes).
 
-5. **Never call `geak_set_model_config`.** See IR-7. GEAK LLM backend is pre-configured.
+7. **Never call `geak_set_model_config`.** See IR-7. GEAK LLM backend is pre-configured.
 
 ## DFS Search Tree
 

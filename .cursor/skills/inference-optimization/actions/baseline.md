@@ -13,6 +13,11 @@ python3 $SKILL_ROOT/kb/kb_query.py "$MODEL_NAME torch.compile baseline" --top-k 
 
 **Claw mode:** Wrap all `magpie benchmark` commands below with `exec_on_gpu`. See [`../modes/CLAW.md`](../modes/CLAW.md) "Baseline" section for the exact wrapper syntax.
 
+**Framework constraint:** `framework:` in the YAML below MUST equal user-specified
+`$FRAMEWORK`. Never substitute a different framework even when InferenceX has no
+ready-made script for `${MODEL}_${FRAMEWORK}` — see SKILL.md Common Pitfalls #3 and
+setup.md Step 1b.
+
 **Try torch.compile first, then fall back if incompatible.**
 
 ### Step 1: Try with torch.compile
@@ -40,8 +45,13 @@ benchmark:
     torch_profiler:
       enabled: false
 EOF
-magpie benchmark --benchmark-config "$RESULT_DIR/baseline_compile_config.yaml" -o "$RESULT_DIR/baseline_compile"
 ```
+
+**Run via Background Runner Recipe** (see [`../SKILL.md`](../SKILL.md) "Background Runner Recipe (canonical)"):
+
+- launch: `bash(command="export PATH=/opt/venv/bin:$PATH && magpie benchmark --benchmark-config $RESULT_DIR/baseline_compile_config.yaml -o $RESULT_DIR/baseline_compile 2>&1", run_in_background=true)` — keep the shell_id
+- poll: every 60s call `bash_output(shell_id)` until DONE_REGEX (`Benchmark Result|benchmark_report\.json|✅`) or ERROR_REGEX (`Traceback|exit [1-9]|signal=SIG|OOM`) matches
+- collect: `bash(command="cat $RESULT_DIR/baseline_compile/benchmark_*/benchmark_report.json")`
 
 **For vLLM (torch.compile enabled by default at level=3):**
 ```bash
@@ -66,8 +76,13 @@ benchmark:
     torch_profiler:
       enabled: false
 EOF
-magpie benchmark --benchmark-config "$RESULT_DIR/baseline_compile_config.yaml" -o "$RESULT_DIR/baseline_compile"
 ```
+
+**Run via Background Runner Recipe** (see [`../SKILL.md`](../SKILL.md) "Background Runner Recipe (canonical)"):
+
+- launch: `bash(command="export PATH=/opt/venv/bin:$PATH && magpie benchmark --benchmark-config $RESULT_DIR/baseline_compile_config.yaml -o $RESULT_DIR/baseline_compile 2>&1", run_in_background=true)` — keep the shell_id
+- poll: every 60s call `bash_output(shell_id)` until DONE_REGEX (`Benchmark Result|benchmark_report\.json|✅`) or ERROR_REGEX (`Traceback|exit [1-9]|signal=SIG|OOM`) matches
+- collect: `bash(command="cat $RESULT_DIR/baseline_compile/benchmark_*/benchmark_report.json")`
 
 **NOTE:** `--mem-fraction-static` is model-dependent. torch.compile needs extra memory — use 0.6 (vs 0.8 without compile).
 
@@ -104,8 +119,13 @@ benchmark:
     torch_profiler:
       enabled: false
 EOF
-magpie benchmark --benchmark-config "$RESULT_DIR/baseline_eager_config.yaml" -o "$RESULT_DIR/baseline_eager"
 ```
+
+**Run via Background Runner Recipe** (see [`../SKILL.md`](../SKILL.md) "Background Runner Recipe (canonical)"):
+
+- launch: `bash(command="export PATH=/opt/venv/bin:$PATH && magpie benchmark --benchmark-config $RESULT_DIR/baseline_eager_config.yaml -o $RESULT_DIR/baseline_eager 2>&1", run_in_background=true)` — keep the shell_id
+- poll: every 60s call `bash_output(shell_id)` until DONE_REGEX (`Benchmark Result|benchmark_report\.json|✅`) or ERROR_REGEX (`Traceback|exit [1-9]|signal=SIG|OOM`) matches
+- collect: `bash(command="cat $RESULT_DIR/baseline_eager/benchmark_*/benchmark_report.json")`
 
 **If torch.compile fails (vLLM):**
 ```bash
@@ -130,8 +150,13 @@ benchmark:
     torch_profiler:
       enabled: false
 EOF
-magpie benchmark --benchmark-config "$RESULT_DIR/baseline_eager_config.yaml" -o "$RESULT_DIR/baseline_eager"
 ```
+
+**Run via Background Runner Recipe** (see [`../SKILL.md`](../SKILL.md) "Background Runner Recipe (canonical)"):
+
+- launch: `bash(command="export PATH=/opt/venv/bin:$PATH && magpie benchmark --benchmark-config $RESULT_DIR/baseline_eager_config.yaml -o $RESULT_DIR/baseline_eager 2>&1", run_in_background=true)` — keep the shell_id
+- poll: every 60s call `bash_output(shell_id)` until DONE_REGEX (`Benchmark Result|benchmark_report\.json|✅`) or ERROR_REGEX (`Traceback|exit [1-9]|signal=SIG|OOM`) matches
+- collect: `bash(command="cat $RESULT_DIR/baseline_eager/benchmark_*/benchmark_report.json")`
 
 ### Step 3: Record baseline throughput
 

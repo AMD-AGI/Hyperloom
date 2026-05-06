@@ -78,7 +78,7 @@ def patch_standalone_kernels(kernel_name, geak_source_path, target_signature_pat
     return patched, skipped
 ```
 
-**Alternative: Use `patch_inductor.py` (recommended, IR-8):**
+**Alternative: Use `patch_inductor.py` (recommended, IR-6):**
 
 ```bash
 # Patch a single standalone kernel file (kernel source only)
@@ -156,9 +156,13 @@ benchmark:
     torch_profiler:
       enabled: false
 EOF
-magpie benchmark --benchmark-config "$RESULT_DIR/optimized_${KERNEL_NAME}_config.yaml" \
-  -o "$RESULT_DIR/optimized_${KERNEL_NAME}"
 ```
+
+**Run via Background Runner Recipe** (see [`../SKILL.md`](../SKILL.md) "Background Runner Recipe (canonical)"):
+
+- launch: `bash(command="export PATH=/opt/venv/bin:$PATH && magpie benchmark --benchmark-config $RESULT_DIR/optimized_${KERNEL_NAME}_config.yaml -o $RESULT_DIR/optimized_${KERNEL_NAME} 2>&1", run_in_background=true)`
+- poll every 60s with `bash_output(shell_id)` until DONE / ERROR regex
+- collect: `bash(command="cat $RESULT_DIR/optimized_${KERNEL_NAME}/benchmark_*/benchmark_report.json")`
 
 **MUST use EXACTLY the same YAML envs as baseline for fairness:**
 - `--num-continuous-decode-steps` must match

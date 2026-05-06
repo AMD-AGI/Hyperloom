@@ -30,7 +30,7 @@ fi
 - Traces and results stored on local disk
 - `patch_inductor.py` operates on local Inductor cache
 
-## IR-12: SaFE MCP is FORBIDDEN in Local Mode
+## IR-13: SaFE MCP is FORBIDDEN in Local Mode
 
 **Do NOT call any SaFE MCP tool in local mode.** This includes `workload_create`,
 `workload_get`, `workload_stop`, and any other SaFE MCP operation. Do NOT create

@@ -46,9 +46,13 @@ benchmark:
     on_failure: continue
     inter_client_sleep_s: 5
 EOF
-
-magpie benchmark --benchmark-config "$SWEEP_DIR/sweep_config.yaml" -o "$SWEEP_DIR"
 ```
+
+**Run via Background Runner Recipe** (see [`../SKILL.md`](../SKILL.md) "Background Runner Recipe (canonical)"):
+
+- launch: `bash(command="export PATH=/opt/venv/bin:$PATH && magpie benchmark --benchmark-config $SWEEP_DIR/sweep_config.yaml -o $SWEEP_DIR 2>&1", run_in_background=true)` — sweep can run 30+ min for N cases × benchmark_duration
+- poll: every 120s call `bash_output(shell_id)`. Sweep emits one `Benchmark Result` per case; treat the run as DONE only when the **last** case completes (regex `All N cases done|Sweep complete` or final `benchmark_report.json` count matches case count). ERROR_REGEX same as default.
+- collect: `bash(command="ls -td $SWEEP_DIR/benchmark_* | head -N")` then read each `benchmark_report.json`
 
 ### Constraints
 

@@ -4,7 +4,7 @@ This document contains ALL claw-mode-specific instructions. Read this **before s
 when using Claw client with SaFE cluster.
 
 **Agent:** Read `SKILL.md` for the orchestrator loop and shared Iron Rules (IR-1 through
-IR-7). This file defines claw-specific Iron Rules (IR-8 through IR-11), constants,
+IR-8). This file defines claw-specific Iron Rules (IR-9 through IR-12), constants,
 architecture, and per-action execution overrides.
 
 ## Environment
@@ -30,7 +30,7 @@ fi
 
 ## Claw-Mode Iron Rules
 
-### IR-8: Use `exec_on_gpu` for ALL GPU-side commands
+### IR-9: Use `exec_on_gpu` for ALL GPU-side commands
 
 After `source scripts/executor.sh`, ALL commands that run on the Ray cluster MUST go
 through `exec_on_gpu()` or `exec_on_gpu_bg()`. **NEVER** manually call `ray_submit.py`
@@ -44,13 +44,13 @@ exec_on_gpu "magpie benchmark --benchmark-config $RESULT_DIR/config.yaml -o $RES
 python3 scripts/ray_submit.py --ray-address ... --command "..."
 ```
 
-### IR-9: Main inference workload MUST use `kind: "RayJob"`
+### IR-10: Main inference workload MUST use `kind: "RayJob"`
 
 The persistent inference cluster **MUST** be `kind: "RayJob"`. PyTorchJob is ONLY
 created internally by GEAK MCP for kernel optimization — the skill itself MUST NOT
 create PyTorchJob workloads.
 
-### IR-10: SaFE MCP — ONLY `workload_create(kind="RayJob")` and `workload_stop`
+### IR-11: SaFE MCP — ONLY `workload_create(kind="RayJob")` and `workload_stop`
 
 In Claw mode, the skill may use SaFE MCP **only** for:
 
@@ -67,7 +67,7 @@ In Claw mode, the skill may use SaFE MCP **only** for:
 
 Violation = immediate run invalidation.
 
-### IR-11: GEAK configuration is read-only
+### IR-12: GEAK configuration is read-only
 
 Same as IR-7 in `SKILL.md` — NEVER modify GEAK configuration, test data, or settings.
 Interact with GEAK exclusively through GEAK MCP tool calls.
@@ -457,9 +457,9 @@ for CONC_VAL in 4 16 64; do
 done
 ```
 
-**~~Option B: SaFE MCP parallel sweep~~ — DEPRECATED (violates IR-10)**
+**~~Option B: SaFE MCP parallel sweep~~ — DEPRECATED (violates IR-11)**
 
-> Per IR-10, the skill MUST NOT create SaFE workloads other than the main RayJob.
+> Per IR-11, the skill MUST NOT create SaFE workloads other than the main RayJob.
 > Use Option A (serial) or Option C (Ray submit) instead.
 
 **Option B: Parallel sweep via Ray submit:**

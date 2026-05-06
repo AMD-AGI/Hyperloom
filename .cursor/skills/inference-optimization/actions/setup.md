@@ -46,6 +46,24 @@ if [ "$TP" -le 1 ]; then CONC=4; elif [ "$TP" -le 4 ]; then CONC=32; else CONC=6
 User-specified values override auto-detected ones. **NEVER override user-specified TP**
 — if the prompt says TP=8, use TP=8 even if GPU_COUNT differs.
 
+### Step 1b: Framework Lock (HARD CONSTRAINT)
+
+`FRAMEWORK` resolved above is a HARD CONSTRAINT for every subsequent phase. The skill
+MUST NOT change it during baseline / backends / params / sweep / integrate / report:
+
+- Every YAML config's `framework:` field MUST equal `$FRAMEWORK`
+- Do NOT pick a different framework just because InferenceX has no
+  `${MODEL}_${PRECISION}_${RUNNER_TYPE}_${FRAMEWORK}.sh` ready-made script.
+  Adapt the closest same-framework script (e.g., adapt
+  `dsr1_fp4_mi355x_sglang.sh` envs for a different FP4 MoE model) or build
+  the YAML envs from upstream cookbook docs (e.g.,
+  `https://cookbook.sglang.io/autoregressive/OpenAI/GPT-OSS`).
+- If user-supplied `SandboxImage` / `KERNEL_OPT_IMAGE` framework disagrees
+  with `FRAMEWORK` (e.g. image is sglang but `Framework: vllm`), STOP and
+  ask the user — do NOT silently choose one.
+
+See SKILL.md Common Pitfalls #3 for the failure mode.
+
 ### Step 2: Set paths and env vars
 
 ```bash

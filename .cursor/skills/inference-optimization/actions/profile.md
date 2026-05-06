@@ -135,9 +135,12 @@ fi
 ```
 
 #### Step 1c: Run the profiling benchmark
-```bash
-magpie benchmark --benchmark-config "$RESULT_DIR/profile_config.yaml" -o "$RESULT_DIR/profile"
-```
+
+**Run via Background Runner Recipe** (see [`../SKILL.md`](../SKILL.md) "Background Runner Recipe (canonical)"):
+
+- launch: `bash(command="export PATH=/opt/venv/bin:$PATH && magpie benchmark --benchmark-config $RESULT_DIR/profile_config.yaml -o $RESULT_DIR/profile 2>&1", run_in_background=true)`
+- poll: every 120s (profiling is slower than vanilla benchmark) call `bash_output(shell_id)` until DONE_REGEX (`Benchmark Result|benchmark_report\.json|✅`) or ERROR_REGEX (`Traceback|exit [1-9]|signal=SIG|OOM`) matches
+- collect: `bash(command="cat $RESULT_DIR/profile/benchmark_*/benchmark_report.json")`
 
 **NOTE:** The profiling run uses `CONC * 10` prompts (via `PROFILE_NUM_PROMPTS`) with
 steady-state windowing (`DELAY_ITERS`/`MAX_ITERS`) to capture a representative slice

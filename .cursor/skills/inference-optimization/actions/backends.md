@@ -98,10 +98,16 @@ benchmark:
     torch_profiler:
       enabled: false
 EOF
-magpie benchmark --benchmark-config "$RESULT_DIR/backend_aiter_config.yaml" \
-  -o "$RESULT_DIR/backend_aiter"
+```
 
-# Extract throughput from Magpie result
+**Run via Background Runner Recipe** (see [`../SKILL.md`](../SKILL.md) "Background Runner Recipe (canonical)"):
+
+- launch: `bash(command="export PATH=/opt/venv/bin:$PATH && magpie benchmark --benchmark-config $RESULT_DIR/backend_aiter_config.yaml -o $RESULT_DIR/backend_aiter 2>&1", run_in_background=true)`
+- poll every 60s with `bash_output(shell_id)` until DONE / ERROR regex
+
+Extract throughput from Magpie result:
+
+```bash
 WORKSPACE=$(ls -td "$RESULT_DIR"/backend_aiter/benchmark_* | head -1)
 new_tput=$(python3 -c "import json; d=json.load(open('$WORKSPACE/benchmark_report.json')); print(d['throughput']['output_throughput'])")
 new_tput_per_gpu=$(python3 -c "print($new_tput / $TP)")
@@ -136,9 +142,13 @@ benchmark:
     torch_profiler:
       enabled: false
 EOF
-magpie benchmark --benchmark-config "$RESULT_DIR/backend_combined_config.yaml" \
-  -o "$RESULT_DIR/backend_combined"
 ```
+
+**Run via Background Runner Recipe** (see [`../SKILL.md`](../SKILL.md) "Background Runner Recipe (canonical)"):
+
+- launch: `bash(command="export PATH=/opt/venv/bin:$PATH && magpie benchmark --benchmark-config $RESULT_DIR/backend_combined_config.yaml -o $RESULT_DIR/backend_combined 2>&1", run_in_background=true)`
+- poll every 60s with `bash_output(shell_id)` until DONE / ERROR regex
+- collect: `bash(command="cat $RESULT_DIR/backend_combined/benchmark_*/benchmark_report.json")`
 
 ### Step 6: After combining, re-profile
 
@@ -172,9 +182,13 @@ benchmark:
     enabled: true
     top_k: 30
 EOF
-magpie benchmark --benchmark-config "$RESULT_DIR/backend_reprofile_config.yaml" \
-  -o "$RESULT_DIR/backend_reprofile"
 ```
+
+**Run via Background Runner Recipe** (see [`../SKILL.md`](../SKILL.md) "Background Runner Recipe (canonical)"):
+
+- launch: `bash(command="export PATH=/opt/venv/bin:$PATH && magpie benchmark --benchmark-config $RESULT_DIR/backend_reprofile_config.yaml -o $RESULT_DIR/backend_reprofile 2>&1", run_in_background=true)`
+- poll every 120s (profiling enabled, slower) with `bash_output(shell_id)` until DONE / ERROR regex
+- collect: `bash(command="cat $RESULT_DIR/backend_reprofile/benchmark_*/benchmark_report.json")`
 
 ### Step 7: Check for code-level bypasses and fast-path blockers
 
