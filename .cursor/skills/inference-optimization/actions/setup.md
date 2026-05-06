@@ -69,6 +69,32 @@ MUST NOT change it during baseline / backends / params / sweep / integrate / rep
 
 See SKILL.md Common Pitfalls #3 for the failure mode.
 
+### Step 1c: Precision → `--quantization` mapping (HARD CONSTRAINT)
+
+`PRECISION` from the user prompt MUST be translated into an explicit
+`--quantization` flag in `EXTRA_SGLANG_ARGS` / `EXTRA_VLLM_ARGS`. Without
+this, the framework reads `quantization_config` from the model's
+`config.json` and silently picks a different quantization scheme (e.g.
+sglang selects `mxfp4` for gpt-oss-120b when `--quantization` is omitted,
+even though the user requested `FP8`). Validated regression: session
+532b9eb4 2026-05-06.
+
+```bash
+# Derive --quantization argument from user-specified PRECISION
+case "${PRECISION,,}" in      # lower-case comparison
+  fp8|fp8_e4m3|w8a8_fp8) QUANTIZATION_ARG="--quantization fp8" ;;
+  fp4|mxfp4|w4afp8)      QUANTIZATION_ARG="--quantization fp4" ;;
+  int8|int4|awq|gptq)    QUANTIZATION_ARG="--quantization ${PRECISION,,}" ;;
+  bf16|fp16|float16)     QUANTIZATION_ARG="" ;;           # native, no flag needed
+  *)                     QUANTIZATION_ARG="" ;;           # unknown — leave to framework
+esac
+export QUANTIZATION_ARG
+```
+
+**Always include `$QUANTIZATION_ARG` in `EXTRA_SGLANG_ARGS` / `EXTRA_VLLM_ARGS`**
+when writing YAML benchmark configs (baseline, profiling, sweep, integrate).
+If `QUANTIZATION_ARG` is empty it simply adds nothing.
+
 ### Step 2: Set paths and env vars
 
 ```bash

@@ -512,7 +512,17 @@ These are recurring errors observed in production CI runs. **Read before executi
    handles server startup, health wait, benchmark, and cleanup in a tested sequence. Manual
    launch skips health checks and often hits Exit code 144 (SIGTERM from stale processes).
 
-8. **Never call `geak_set_model_config`.** See IR-7. GEAK LLM backend is pre-configured.
+8. **Always pass `--quantization <scheme>` explicitly; never rely on framework
+   auto-detection.** When `PRECISION` is specified, frameworks (sglang, vLLM)
+   read `quantization_config` from the model's `config.json` and silently
+   override the intended precision. Example: sglang on gpt-oss-120b selects
+   `mxfp4` (from the model's native quantization config) instead of `fp8` even
+   when `precision: fp8` is set in the Magpie YAML, because `--quantization`
+   was omitted. Always derive the flag via `QUANTIZATION_ARG` (see
+   `actions/setup.md` Step 1c) and inject it into every `EXTRA_SGLANG_ARGS` /
+   `EXTRA_VLLM_ARGS`. Validated regression: session 532b9eb4 2026-05-06.
+
+9. **Never call `geak_set_model_config`.** See IR-7. GEAK LLM backend is pre-configured.
 
 ## DFS Search Tree
 

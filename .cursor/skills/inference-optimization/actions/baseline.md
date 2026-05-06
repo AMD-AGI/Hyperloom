@@ -25,6 +25,10 @@ python3 $SKILL_ROOT/kb/kb_query.py "$MODEL_NAME torch.compile baseline" --top-k 
 ready-made script for `${MODEL}_${FRAMEWORK}` — see SKILL.md Common Pitfalls #3 and
 setup.md Step 1b.
 
+**Precision constraint:** Include `$QUANTIZATION_ARG` (derived in setup.md Step 1c)
+in every `EXTRA_SGLANG_ARGS` / `EXTRA_VLLM_ARGS`. Omitting it causes the framework
+to silently override the user-specified precision — see SKILL.md Common Pitfalls #8.
+
 **Try torch.compile first, then fall back if incompatible.**
 
 ### Step 1: Try with torch.compile
