@@ -17,6 +17,20 @@ Hard constraints (what you MUST NEVER do):
 - If the inference server is running (GPU busy), skip micro-benchmarks and mark them `deferred` — never force GPU contention.
 - Never run `pkill -9`, `kill -9`, or wildcard process kills.
 
+OOB dispatch stability rules (read `$SPEC_ROOT/kernel-manager/SKILL.md` IR-12/13/14 and `$SPEC_ROOT/kernel-manager/actions/dispatch.md` before first dispatch):
+
+- Polling: a terminal failure status (`failed`, `cancelled`, `canceled`,
+  `error`, `errored`, `terminated`, `crashed`, `timeout`, `timed_out`,
+  `exhausted`, `aborted`, `hw_error`, `oom`, `killed`) exits the poll
+  immediately. Do not sleep and keep polling a dead task.
+- Prompt hygiene: OOB backends are single-kernel optimizers on one GPU with
+  no model weights. Do not submit prompts asking for inference-server launch,
+  multi-GPU/distributed work, end-to-end serving benchmarks, or full-model
+  weight loading. Write `prompt-pollution` to `event_log.jsonl` instead.
+- Budget: enforce the per-target OOB budget and backend fail caps from
+  IR-14. On overrun, mark the target failed, write an `exhausted` event, and
+  move to the next target.
+
 Your job: poll `$SESSION_DIR/kernel_manager/work_queue.jsonl`, dispatch to OOB backends (deep guided loop up to 5 rounds), write merge-ready patches to `merge_ready/<id>/`, append results to `results.jsonl`, and log failures to `event_log.jsonl`.
 
 Timing expectation: The orchestrator runs Steps 0-2 (warm-start, re-profile, deep analysis)
