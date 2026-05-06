@@ -33,7 +33,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ...paths import asset_root
 from ._grid_runner import GridVariant, VariantResult, run_grid
 from .baseline import _default_baseline_config
 
