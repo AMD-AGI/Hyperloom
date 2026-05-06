@@ -58,7 +58,7 @@ These supplement the shared constants in `SKILL.md`.
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `GEAK_IMAGE_SGLANG_RAY` | `harbor.core42.primus-safe.amd.com/custom/lmsysorg/sglang:202603270958` | SGLang image with Ray 2.44.1 fix |
+| `GEAK_IMAGE_SGLANG_RAY` | `${HARBOR_PREFIX}/custom/lmsysorg/sglang:202603270958` | SGLang image with Ray 2.44.1 fix |
 | `RAY_CLIENT_PORT` | 10001 | Ray Client port on RayJob head node |
 
 ### GEAK Image Selection (Claw Mode)
@@ -77,7 +77,7 @@ the RayJob serving environment.
 The custom SGLang image is based on upstream SGLang with Ray compatibility fixes:
 
 ```dockerfile
-FROM harbor.core42.primus-safe.amd.com/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x
+FROM ${HARBOR_PREFIX}/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x
 RUN python -m pip install ray[default]==2.44.1 click==8.1.7
 ```
 

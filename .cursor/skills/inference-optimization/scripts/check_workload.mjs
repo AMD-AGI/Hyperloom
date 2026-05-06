@@ -20,7 +20,8 @@ const apiKey  = arg('api-key', 'SAFE_API_KEY');
 const wid     = arg('id');
 const doWait  = hasFlag('wait');
 const doLogs  = hasFlag('logs');
-const baseUrl = arg('base-url') || 'https://core42.primus-safe.amd.com';
+const baseUrl = arg('base-url', 'SAFE_BASE_URL') || '';
+if (!baseUrl) { console.error('Missing --base-url or SAFE_BASE_URL'); process.exit(1); }
 
 if (!apiKey || !wid) { console.error('Missing --api-key/--id'); process.exit(1); }
 
