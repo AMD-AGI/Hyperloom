@@ -49,12 +49,14 @@ class TestRingBuffer:
 
 class TestCreateProvider:
 
-    def test_no_url_returns_local(self, tmp_path) -> None:
+    @pytest.mark.asyncio
+    async def test_no_url_returns_local(self, tmp_path) -> None:
         cfg = Config(session_dir=tmp_path)
-        provider = create_provider(cfg)
+        provider = await create_provider(cfg)
         assert isinstance(provider, LocalProvider)
 
-    def test_with_url_returns_hybrid(self, tmp_path) -> None:
+    @pytest.mark.asyncio
+    async def test_with_url_returns_hybrid(self, tmp_path) -> None:
         cfg = Config(session_dir=tmp_path, robust_analyzer_url="http://fake:8085")
-        provider = create_provider(cfg)
+        provider = await create_provider(cfg)
         assert isinstance(provider, HybridProvider)

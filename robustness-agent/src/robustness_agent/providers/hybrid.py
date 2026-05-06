@@ -59,16 +59,18 @@ class HybridProvider(MetricsProvider):
         return True
 
 
-def create_provider(config: Config) -> MetricsProvider:
-    """Factory: build the right provider based on config."""
+async def create_provider(config: Config) -> MetricsProvider:
+    """Factory: build the right provider based on auto-detected config."""
     local = LocalProvider(history_seconds=config.local_metrics_history_s)
 
     if not config.robust_analyzer_url:
-        log.info("No ROBUST_ANALYZER_URL set, using LocalProvider only")
+        log.info("robust-analyzer not reachable, using LocalProvider only")
         return local
 
     robust = RobustProvider(
         analyzer_url=config.robust_analyzer_url,
         workload_uid="",
     )
-    return HybridProvider(robust=robust, local=local)
+    hybrid = HybridProvider(robust=robust, local=local)
+    await hybrid.probe()
+    return hybrid

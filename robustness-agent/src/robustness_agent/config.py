@@ -1,26 +1,47 @@
 """Configuration for the Robustness Agent.
 
-All tunables are loaded from environment variables with sensible defaults.
+No custom environment variables — everything is auto-detected or uses
+hardcoded defaults.  Claw v2 brain-hands mode does not allow injecting
+extra env vars into the sandbox, so the agent must discover its runtime
+context on its own.
+
+Discovery strategy:
+  1. session_dir: scan well-known paths for conductor.db
+  2. robust-analyzer: probe known service endpoints, fallback to local
+  3. LLM endpoint: reuse OPENAI_BASE_URL / SAFE_API_KEY already present
+     in the Claw sandbox (set by Claw brain, not by us)
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
+
+import httpx
+
+log = logging.getLogger(__name__)
+
+ROBUST_ANALYZER_CANDIDATES: list[str] = [
+    "http://robust-analyzer.primus-robust.svc.cluster.local:8085",
+    "http://robust-analyzer:8085",
+]
+
+SESSION_DIR_CANDIDATES: list[Path] = [
+    Path("/workspace/session"),
+    Path("/tmp/robustness-session"),
+]
 
 
-@dataclass(frozen=True)
+@dataclass
 class Config:
-    # -- deployment mode --
-    # If set, use Primus-Robust-Internal analyzer API for GPU/RDMA/fault metrics.
-    # If empty, fall back to local shell commands.
-    robust_analyzer_url: str = ""
+    session_dir: Path = field(default_factory=lambda: Path("/tmp/robustness-session"))
 
-    # -- conductor integration --
-    session_dir: Path = field(default_factory=lambda: Path(os.environ.get(
-        "SESSION_DIR", "/tmp/robustness-session",
-    )))
+    # Filled by auto-detection; empty means local-only mode.
+    robust_analyzer_url: str = ""
 
     @property
     def conductor_db_path(self) -> Path:
@@ -44,7 +65,7 @@ class Config:
     benchmark_timeout_s: float = 600.0
     server_start_timeout_s: float = 480.0
 
-    # -- LLM for RCA --
+    # -- LLM for RCA (auto-detected from Claw sandbox env) --
     llm_model: str = "claude-opus-4-7"
     llm_base_url: str = ""
     llm_api_key: str = ""
@@ -63,26 +84,75 @@ class Config:
     ])
 
     @classmethod
-    def from_env(cls) -> Config:
-        return cls(
-            robust_analyzer_url=os.environ.get("ROBUST_ANALYZER_URL", ""),
-            session_dir=Path(os.environ.get("SESSION_DIR", "/tmp/robustness-session")),
-            process_check_interval=float(os.environ.get("PROCESS_CHECK_INTERVAL", "10")),
-            gpu_check_interval=float(os.environ.get("GPU_CHECK_INTERVAL", "15")),
-            disk_check_interval=float(os.environ.get("DISK_CHECK_INTERVAL", "60")),
-            event_poll_interval=float(os.environ.get("EVENT_POLL_INTERVAL", "5")),
-            health_check_interval=float(os.environ.get("HEALTH_CHECK_INTERVAL", "30")),
-            gpu_vram_warn_pct=float(os.environ.get("GPU_VRAM_WARN_PCT", "90")),
-            gpu_vram_crit_pct=float(os.environ.get("GPU_VRAM_CRIT_PCT", "95")),
-            gpu_temp_warn_c=float(os.environ.get("GPU_TEMP_WARN_C", "85")),
-            disk_usage_warn_pct=float(os.environ.get("DISK_USAGE_WARN_PCT", "85")),
-            disk_usage_crit_pct=float(os.environ.get("DISK_USAGE_CRIT_PCT", "95")),
-            agent_stall_timeout_s=float(os.environ.get("AGENT_STALL_TIMEOUT_S", "300")),
-            benchmark_timeout_s=float(os.environ.get("BENCHMARK_TIMEOUT_S", "600")),
-            server_start_timeout_s=float(os.environ.get("SERVER_START_TIMEOUT_S", "480")),
-            llm_model=os.environ.get("LLM_MODEL", "claude-opus-4-7"),
-            llm_base_url=os.environ.get("OPENAI_BASE_URL", ""),
-            llm_api_key=os.environ.get("SAFE_API_KEY", os.environ.get("OPENAI_API_KEY", "")),
-            local_metrics_history_s=int(os.environ.get("LOCAL_METRICS_HISTORY_S", "3600")),
-            local_metrics_sample_interval=int(os.environ.get("LOCAL_METRICS_SAMPLE_INTERVAL", "5")),
+    async def discover(cls) -> "Config":
+        """Auto-detect all configuration from the runtime environment."""
+        session_dir = _discover_session_dir()
+        analyzer_url = await _probe_robust_analyzer()
+        llm_base_url, llm_api_key = _discover_llm_credentials()
+
+        config = cls(
+            session_dir=session_dir,
+            robust_analyzer_url=analyzer_url,
+            llm_base_url=llm_base_url,
+            llm_api_key=llm_api_key,
         )
+
+        log.info(
+            "Config discovered: session_dir=%s analyzer=%s llm=%s",
+            config.session_dir,
+            config.robust_analyzer_url or "(local mode)",
+            "(configured)" if config.llm_base_url else "(not available)",
+        )
+        return config
+
+
+def _discover_session_dir() -> Path:
+    """Find session directory by scanning well-known paths."""
+    if "SESSION_DIR" in os.environ:
+        p = Path(os.environ["SESSION_DIR"])
+        if p.exists():
+            log.info("Session dir from SESSION_DIR env: %s", p)
+            return p
+
+    for candidate in SESSION_DIR_CANDIDATES:
+        db = candidate / "storage" / "conductor.db"
+        if db.exists():
+            log.info("Session dir discovered at: %s", candidate)
+            return candidate
+
+    cwd = Path.cwd()
+    db = cwd / "storage" / "conductor.db"
+    if db.exists():
+        log.info("Session dir is cwd: %s", cwd)
+        return cwd
+
+    fallback = SESSION_DIR_CANDIDATES[-1]
+    log.warning("No session dir found, using fallback: %s", fallback)
+    return fallback
+
+
+async def _probe_robust_analyzer() -> str:
+    """Try known robust-analyzer endpoints, return first reachable one."""
+    for url in ROBUST_ANALYZER_CANDIDATES:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as client:
+                resp = await client.get(f"{url}/health")
+                if resp.status_code == 200:
+                    log.info("Robust-analyzer reachable at %s", url)
+                    return url
+        except Exception:
+            continue
+
+    log.info("Robust-analyzer not reachable, will use local provider")
+    return ""
+
+
+def _discover_llm_credentials() -> tuple[str, str]:
+    """Pick up LLM credentials already in the Claw sandbox environment."""
+    base_url = os.environ.get("OPENAI_BASE_URL", "")
+    api_key = (
+        os.environ.get("SAFE_API_KEY", "")
+        or os.environ.get("OPENAI_API_KEY", "")
+        or os.environ.get("LLM_API_KEY", "")
+    )
+    return base_url, api_key

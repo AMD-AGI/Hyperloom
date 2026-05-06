@@ -20,18 +20,14 @@ def _setup_logging() -> None:
     )
 
 
-def main() -> None:
-    _setup_logging()
+async def _async_main() -> None:
     log = logging.getLogger("robustness_agent")
 
-    config = Config.from_env()
-    log.info("Config: session_dir=%s robust_url=%s",
-             config.session_dir, config.robust_analyzer_url or "(local mode)")
+    config = await Config.discover()
 
     agent = RobustnessAgent(config)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    loop = asyncio.get_running_loop()
 
     def _shutdown(sig: signal.Signals) -> None:
         log.info("Received %s, shutting down", sig.name)
@@ -43,13 +39,15 @@ def main() -> None:
         except NotImplementedError:
             pass
 
+    await agent.run_forever()
+
+
+def main() -> None:
+    _setup_logging()
     try:
-        loop.run_until_complete(agent.run_forever())
+        asyncio.run(_async_main())
     except KeyboardInterrupt:
-        log.info("KeyboardInterrupt, shutting down")
-        loop.run_until_complete(agent.stop())
-    finally:
-        loop.close()
+        logging.getLogger("robustness_agent").info("KeyboardInterrupt, exiting")
 
 
 if __name__ == "__main__":

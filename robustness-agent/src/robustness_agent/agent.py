@@ -24,7 +24,7 @@ from .monitors.gpu_monitor import GpuMonitor
 from .monitors.log_tailer import LogTailer
 from .monitors.process_monitor import ProcessMonitor
 from .monitors.server_health import ServerHealthMonitor
-from .providers import HybridProvider, create_provider
+from .providers import create_provider
 from .rca import RcaEngine
 
 log = logging.getLogger(__name__)
@@ -35,17 +35,9 @@ class RobustnessAgent:
 
     def __init__(self, config: Config):
         self.config = config
-        self._provider = create_provider(config)
+        self._provider: Any = None
         self._conductor_reader = ConductorReader(config.conductor_db_path)
         self._intent_emitter = IntentEmitter(config.conductor_db_path)
-
-        self._process_monitor = ProcessMonitor(config, self._provider)
-        self._gpu_monitor = GpuMonitor(config, self._provider)
-        self._server_health = ServerHealthMonitor()
-        self._log_tailer = LogTailer()
-        self._disk_check = DiskCheck(config, self._provider)
-        self._stall_check = StallCheck(config, self._conductor_reader)
-        self._event_check = EventCheck(config)
         self._rca_engine = RcaEngine(config)
 
         self._alert_history: list[Alert] = []
@@ -55,8 +47,15 @@ class RobustnessAgent:
     async def start(self) -> None:
         log.info("Robustness Agent starting (session_dir=%s)", self.config.session_dir)
 
-        if isinstance(self._provider, HybridProvider):
-            await self._provider.probe()
+        self._provider = await create_provider(self.config)
+
+        self._process_monitor = ProcessMonitor(self.config, self._provider)
+        self._gpu_monitor = GpuMonitor(self.config, self._provider)
+        self._server_health = ServerHealthMonitor()
+        self._log_tailer = LogTailer()
+        self._disk_check = DiskCheck(self.config, self._provider)
+        self._stall_check = StallCheck(self.config, self._conductor_reader)
+        self._event_check = EventCheck(self.config)
 
         self._conductor_reader.connect()
         self._intent_emitter.connect()
