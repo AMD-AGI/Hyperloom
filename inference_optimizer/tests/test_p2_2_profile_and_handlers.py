@@ -122,6 +122,48 @@ def test_materialize_config_injects_model_with_other_overrides(tmp_path):
     assert rendered["benchmark"]["envs"]["FOO"] == "bar"
 
 
+# ===========================================================================
+# Regression: gpu_type injection sets runner_type AND removes the legacy
+# `benchmark_script` field so Magpie's runner_type -> script logic wins.
+# ===========================================================================
+def test_materialize_config_injects_runner_type(tmp_path):
+    """gpu_type kwarg must land in benchmark.runner_type as-is."""
+    import yaml
+    out = _materialize_config_with_envs(
+        PROFILE_DEFAULT_CONFIG,
+        tmp_path,
+        gpu_type="mi355x",
+    )
+    with out.open() as f:
+        rendered = yaml.safe_load(f)
+    assert rendered["benchmark"]["runner_type"] == "mi355x"
+
+
+def test_materialize_config_pops_legacy_benchmark_script(tmp_path):
+    """If the source YAML still hardcodes a benchmark_script (priority 1
+    in Magpie's resolver), gpu_type must remove it; otherwise runner_type
+    is silently ignored and the run uses the wrong GPU's script."""
+    import yaml
+    src_yaml = tmp_path / "src.yaml"
+    src_yaml.write_text(yaml.safe_dump({
+        "benchmark": {
+            "framework": "sglang",
+            "model": "/m",
+            "benchmark_script": "sglang_mi300x.sh",  # legacy field
+        },
+    }))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    out = _materialize_config_with_envs(
+        src_yaml, out_dir, gpu_type="mi355x",
+    )
+    with out.open() as f:
+        rendered = yaml.safe_load(f)
+    assert rendered["benchmark"]["runner_type"] == "mi355x"
+    assert "benchmark_script" not in rendered["benchmark"], \
+        "legacy benchmark_script must be popped so runner_type wins"
+
+
 @pytest.mark.asyncio
 async def test_profile_executor_extracts_trace_dir(tmp_path):
     """When the workspace contains torch_trace/*.trace.json.gz, the
