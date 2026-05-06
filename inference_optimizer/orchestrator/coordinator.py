@@ -1085,7 +1085,12 @@ class Coordinator:
             # Auto-promote certain succeeded results into SharedState core
             # fields (Coordinator is the only writer of CORE_STATE_FIELDS;
             # see DESIGN §14.5 / §17.2).
-            if result.state == "succeeded":
+            # Guard: SubAgentResult.state == "succeeded" only means the
+            # executor didn't throw. The executor itself may report
+            # status="failed" (e.g. Magpie benchmark report success=false
+            # or 0 completed requests). Only promote truly successful runs.
+            executor_status = (result.result or {}).get("status", "")
+            if result.state == "succeeded" and executor_status != "failed":
                 await self._promote_to_shared_state(
                     task.kind, result.result, task=task,
                 )
