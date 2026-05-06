@@ -93,18 +93,28 @@ def _materialize_config_with_envs(
     over runner_type and lock the run to the wrong GPU's script.
     """
     server_args = (extra_server_args or extra_sglang_args).strip()
-    if (not server_args and not extra_envs
-            and not model_path and not gpu_type):
-        return config_path
+    # Always materialize: ISL/OSL/MAX_MODEL_LEN/PRECISION from env should
+    # override the yaml defaults even when no other explicit overrides are
+    # passed. The short-circuit "return config_path" path led to the yaml's
+    # hardcoded ISL=256/OSL=256 winning over the user's --isl/--osl.
     with config_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     bench = cfg.setdefault("benchmark", {})
     if model_path:
         bench["model"] = str(model_path)
+    # Precision override from CLI/env.
+    precision = os.environ.get("PRECISION", "").strip()
+    if precision:
+        bench["precision"] = precision
     if gpu_type:
         bench["runner_type"] = str(gpu_type)
         bench.pop("benchmark_script", None)
     envs = bench.setdefault("envs", {})
+    # Inject ISL/OSL/MAX_MODEL_LEN from env (CLI computed ISL+OSL+4096).
+    for env_key in ("ISL", "OSL", "MAX_MODEL_LEN"):
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            envs[env_key] = int(val)
     if server_args:
         envs[server_args_env_name(bench.get("framework"))] = server_args
     for key, value in (extra_envs or {}).items():
