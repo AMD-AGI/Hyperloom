@@ -363,12 +363,17 @@ class ParamsExecutor:
                 "params_search_exhausted": True,
             }
 
-        # Resolve runtime model_path (task.params > $MODEL_PATH) and forward
-        # to run_grid so each Magpie variant benchmarks the user's selected
-        # model rather than the YAML's hardcoded fallback.
+        # Resolve runtime model_path / gpu_type (task.params > $MODEL_PATH /
+        # $GPU_TYPE) and forward to run_grid so each Magpie variant
+        # benchmarks the user's selected model on the user's selected GPU
+        # rather than the YAML's hardcoded fallback.
         resolved_model = (
             str(params.get("model_path") or "").strip()
             or os.environ.get("MODEL_PATH", "").strip()
+        )
+        resolved_gpu = (
+            str(params.get("gpu_type") or "").strip().lower()
+            or os.environ.get("GPU_TYPE", "").strip().lower()
         )
         single_results = await run_grid(
             base_yaml_path=config_path,
@@ -377,6 +382,7 @@ class ParamsExecutor:
             output_root=output_root,
             variant_timeout_sec=timeout_sec,
             model_path=resolved_model,
+            gpu_type=resolved_gpu,
         )
 
         candidate_by_name = {v.name: v for v in candidates}
@@ -409,6 +415,7 @@ class ParamsExecutor:
                     output_root=output_root / "combo",
                     variant_timeout_sec=timeout_sec,
                     model_path=resolved_model,
+                    gpu_type=resolved_gpu,
                 )
 
         all_results = single_results + combo_results

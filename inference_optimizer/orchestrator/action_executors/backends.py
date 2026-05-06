@@ -154,11 +154,16 @@ class BackendsExecutor:
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
 
-        # Resolve runtime model_path (task.params > $MODEL_PATH) and forward
-        # so each variant's YAML overrides the legacy hardcoded model field.
+        # Resolve runtime model_path / gpu_type (task.params > $MODEL_PATH /
+        # $GPU_TYPE) and forward so each variant's YAML overrides the legacy
+        # hardcoded model + benchmark_script fields.
         resolved_model = (
             str(params.get("model_path") or "").strip()
             or os.environ.get("MODEL_PATH", "").strip()
+        )
+        resolved_gpu = (
+            str(params.get("gpu_type") or "").strip().lower()
+            or os.environ.get("GPU_TYPE", "").strip().lower()
         )
         results = await run_grid(
             base_yaml_path=config_path,
@@ -167,6 +172,7 @@ class BackendsExecutor:
             output_root=output_root,
             variant_timeout_sec=timeout_sec,
             model_path=resolved_model,
+            gpu_type=resolved_gpu,
         )
         winners = pick_winners(results, baseline_tput=base_tput)
         best = max(
