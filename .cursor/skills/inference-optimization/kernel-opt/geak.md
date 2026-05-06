@@ -15,13 +15,21 @@ This document provides detailed reference material for GEAK kernel optimization 
 | Kernel pattern                  | Framework     | Source available?    | GEAK target?                    |
 | ------------------------------- | ------------- | -------------------- | ------------------------------- |
 | `Cijk_Ailk_Bljk_*`              | hipBLASLt     | No (compiled)        | No — vendor BLAS                |
-| `aiter::fmha_v3_fwd`            | aiter         | No (.so)             | No — vendor attention           |
-| `aiter::mha_fwd`                | aiter         | No (.so)             | No — switch backend instead     |
-| `moe_ck2stages_gemm*`           | aiter         | No (.so)             | No — vendor fused MoE           |
+| `aiter::fmha_v3_fwd`            | aiter         | No (.so) by default  | No by default — **Yes if user provides `.cu`/`.hip` source** |
+| `aiter::mha_fwd`                | aiter         | No (.so) by default  | No by default — **Yes if user provides source** |
+| `moe_ck2stages_gemm*`           | aiter         | No (.so) by default  | No by default — **Yes if user provides source** |
+| `aiter::fmoe_*`, `moe_sorting_*` | aiter       | No (.so) by default  | No by default — **Yes if user provides `.cu`/`.hip` source** |
 | `triton_*` from SGLang          | SGLang        | Yes (Python)         | **Yes**                         |
 | `triton_poi_`*, `triton_red_*`  | torch.compile | Yes (Inductor cache) | **Yes**                         |
 | `vectorized_elementwise_kernel` | PyTorch       | No (C++)             | Maybe — try torch.compile first |
 | Custom HIP `__global__`         | User code     | Yes                  | **Yes**                         |
+
+**User-provided source override:** When the user specifies kernel source paths (e.g.,
+`/opt/aiter/csrc/`, `/opt/sglang/`), kernels found at those paths are GEAK targets
+regardless of the default classification above. Map trace kernel names (e.g.,
+`aiter::fmoe_bf16_pertokenFp8`) back to source files using `rg` in the provided repo.
+Include full `.cu`/`.hip`/`.py` source in `files[].content` — GEAK can rewrite both
+Triton and HIP kernels.
 
 
 ### Where to find kernel source
@@ -43,7 +51,7 @@ rg "@triton.jit" "$SGLANG_PATH" --files-with-matches
 ls /tmp/torchinductor_*/*/triton/*.py | head -20
 ```
 
-**aiter kernels (NOT GEAK targets — reference only):**
+**aiter kernels (NOT GEAK targets by default — GEAK targets if user provides `.cu`/`.hip` source):**
 
 ```bash
 AITER_PATH=$(python3 -c "import aiter; import os; print(os.path.dirname(aiter.__file__))")
@@ -66,10 +74,9 @@ inject observability headers. See "Tracing Setup" section below.
 
 ## Tracing Setup
 
-At the **start** of the kernel-opt action (before any `geak_create_task`), perform
-these steps in order:
+At the **start** of the kernel-opt action, record timestamps for cost correlation.
 
-### Step A: Record start timestamp + generate tracing config
+### Step A: Record start timestamp
 
 ```bash
 python3 $SCRIPTS_DIR/trace_action.py --component geak --action start
@@ -77,7 +84,11 @@ python3 $SCRIPTS_DIR/trace_action.py --component geak --action start
 
 The script outputs `extra_headers` JSON and writes state to `/workspace/.trace_action_geak.json`.
 
-### Step B: Inject tracing headers via MCP
+### Step B: Inject tracing headers (claw only)
+
+> **This step applies to claw mode ONLY.** In local mode, GEAK runs as a CLI
+> tool with config rendered by `entrypoint.sh` — there is no MCP server and no
+> `geak_get_model_config` / `geak_set_model_config` tools available. Skip this step.
 
 1. Call `geak_get_model_config` to read current config.
 2. Call `geak_set_model_config` with:
@@ -94,7 +105,7 @@ The script outputs `extra_headers` JSON and writes state to `/workspace/.trace_a
 
 ### Step C: Record end timestamp (after all tasks)
 
-After the last `geak_get_task` returns completed:
+After the last GEAK task completes:
 
 ```bash
 python3 $SCRIPTS_DIR/trace_action.py --component geak --action end
@@ -109,17 +120,40 @@ by querying `LiteLLM_SpendLogs` with time ranges.
 - Do NOT change `model_class`, `api_base`, or `api_key`.
 - If `geak_get_model_config` returns empty/error, skip tracing (do not block).
 
-## GEAK MCP Tool Reference
+## GEAK Tool Reference
 
-### Authentication
+GEAK invocation differs by mode. **Check your mode before proceeding.**
 
-Requires two keys:
+### Local Mode (Ray-scheduled CLI)
 
+No MCP tools, no REST API. GEAK runs as the `geak` CLI, scheduled by Ray.
+
+| Step | Command | Purpose |
+|------|---------|---------|
+| 1 | `$GEAK_CLI status` | Verify Ray cluster has GPUs available |
+| 2 | `$GEAK_CLI run -t task.md --yolo` | Single task (blocking) |
+| 2b | `$GEAK_CLI batch -t a.md -t b.md ... --yolo` | Batch: all candidates in parallel (IR-1) |
+| 3 | *(automatic)* | Ray assigns GPU per task, `geak` runs with `--gpu-ids` |
+| 4 | *(automatic)* | Blocks until done, prints OK/FAIL + output path |
+
+Where `$GEAK_CLI="python3 $SKILL_ROOT/scripts/geak_ray_submit.py"`.
+
+**Authentication & model config:** `entrypoint.sh` renders `$GEAK_CONFIG`
+(`/opt/hyperloom/geak-config/local.yaml`) from a LiteLLM template at container start
+using `GEAK_MODEL_NAME` (default `claude-opus-4-7`), `GEAK_API_KEY`/`LLM_API_KEY`,
+and `GEAK_BASE_URL`/`LLM_API_BASE`. `geak_ray_submit.py` auto-injects `--config $GEAK_CONFIG`,
+so users do not need to pass it manually.
+
+### MCP Mode (claw)
+
+Requires GEAK MCP server running. Uses MCP tools:
+
+
+**Authentication (MCP mode):**
 - `GEAK_AUTH_KEY` — Bearer token for GEAK endpoint (set in `.env`)
 - `LITELLM_API_KEY` — Used internally by GEAK to call its LLM backend
 
-### Tool sequence
-
+**FORBIDDEN:** `geak_set_model_config` — NEVER call this tool. Use existing config.
 
 | Step | Tool                                                    | Purpose                                  |
 | ---- | ------------------------------------------------------- | ---------------------------------------- |
@@ -133,8 +167,11 @@ Requires two keys:
 | 6    | `bash: trace_action.py --component geak --action end`   | Record end timestamp                     |
 | -    | `geak_list_tasks`                                       | Debug: list all tasks                    |
 
+### geak_create_task — critical details (claw MCP only)
 
-### geak_create_task — critical details
+> **Claw mode only.** In local mode, GEAK is invoked via `$GEAK_CLI run -t task.md`
+> (see "Local Mode" table above). The parameters below map to fields in the task
+> `.md` file instead of MCP arguments.
 
 - `input_type` is **required** — use `"file"`
 - The instruction field is `prompt`, NOT `instructions`
@@ -194,6 +231,10 @@ Use `KERNEL_OPT_IMAGE` (provided by CI or user prompt) for all `geak_create_task
 
 ### GEAK latency breakdown
 
+**Local mode:** GEAK runs in-container via Ray — no pod scheduling or image pull.
+Typical latency: 3–10 min per task (agent execution only).
+
+**Claw mode (SaFE pods):**
 
 | Phase             | Duration      | Notes                                     |
 | ----------------- | ------------- | ----------------------------------------- |
@@ -201,7 +242,6 @@ Use `KERNEL_OPT_IMAGE` (provided by CI or user prompt) for all `geak_create_task
 | Docker image pull | 1-5 min       | ROCm image is ~15GB                       |
 | Agent execution   | 3-10 min      | Depends on step_limit                     |
 | **Total**         | **10-30 min** | Poll every 30s                            |
-
 
 The `updated_at` timestamp stays frozen until the pod starts. Once it changes, the agent has started. If stuck >30 min with no update, the cluster may be overloaded — cancel and retry.
 
@@ -282,7 +322,7 @@ shutil.rmtree(os.path.expanduser("~/.triton/cache"), ignore_errors=True)
 - GEAK must preserve the exact function signature (args + constexprs)
 - Clear `.json` metadata files to force Inductor to reload source
 
-**Recommended: Use `patch_inductor.py` (IR-8):**
+**Recommended: Use `patch_inductor.py` (IR-6):**
 
 ```bash
 # Patch kernel source + update .best_config tiling parameters
@@ -361,7 +401,7 @@ Before patching any GEAK output into the serving environment:
 - Function signature (parameters, constexprs) matches original
 - Decorators preserved (`@triton_heuristics`, `@triton.jit`, etc.)
 - No new imports that don't exist in the target environment
-- Block sizes within IR-8 constraints (not exceeding 2x original)
+- Block sizes within IR-6 constraints (not exceeding 2x original)
 - Source code is actual code, not comments or path references
 - `files[].content` contains the full source (not truncated)
 - `.best_config` values identified from GEAK output (XBLOCK, R0_BLOCK, BLOCK_N, BLOCK_K, num_warps, num_stages) and passed via `--best-config`
@@ -384,9 +424,10 @@ Before patching any GEAK output into the serving environment:
 - Revert to backup: `cp "$WORK_DIR/kernels/xxx.bak" "$SGLANG_PATH/..."`
 - Clear Python cache: `find "$SGLANG_PATH" -name "__pycache__" -exec rm -rf {} +`
 
-### GEAK task stuck in pending
+### GEAK task stuck in pending (claw only)
 
 - Pod scheduling can take 15+ min if cluster is loaded
 - Check with `geak_get_task` — if `updated_at` hasn't changed in 30 min, cancel and retry
 - Always use `workspace_id: KERNEL_OPT_WORKSPACE` for reliable scheduling (default `"control-plane-moe"` from `SKILL.md`; default workspace is resource-constrained)
+- In local mode, tasks run in-container via Ray — no pod scheduling. If a task hangs, check `$GEAK_CLI status` for Ray cluster health.
 

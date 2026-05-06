@@ -278,7 +278,12 @@ WHILE NOT stopping_criteria_met():
   h. Measure: new_tput_per_gpu (MANDATORY — this is the bench result)
   i. Update state: current_tput_per_gpu, cumulative_gain_pct, best_tput_per_gpu
   j. RE-SCORE all remaining actions on the stack
-  k. Push new sub-actions discovered during execution
+  k. DYNAMIC SUB-ACTION GENERATION (see "Dynamic Idea Generation" below)
+     After EVERY action (success, failure, or crash), generate sub-actions:
+     → On SUCCESS: generate follow-on actions (variations, adjacent targets)
+     → On FAILURE: generate retry with alternate strategy
+     → On CRASH: escalate to KM + generate defensive retry
+     Push all generated sub-actions onto the stack with inherited/boosted scores.
   l. Log to completed_actions with FULL schema (IR-18: tput_before, tput_after,
      gain_pct, timestamp — never omit)
   m. If KEEP: sync $BASE_DIR/state.json (IR-19)
