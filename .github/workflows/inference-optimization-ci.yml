@@ -84,12 +84,22 @@ jobs:
 
       - name: Upload model report
         if: always()
+        run: |
+          # Rename summary to include model key so merge-multiple doesn't overwrite it
+          KEY="${{ matrix.key }}"
+          if [ -f "${{ github.workspace }}/ci-output/ci_summary.json" ]; then
+            cp "${{ github.workspace }}/ci-output/ci_summary.json" \
+               "${{ github.workspace }}/ci-output/ci_summary_${KEY}.json"
+          fi
+
+      - name: Upload model report artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: report-${{ matrix.key }}
           path: |
             ci-output/ci_report.md
-            ci-output/ci_summary.json
+            ci-output/ci_summary_${{ matrix.key }}.json
             ci-output/github_summary.md
             ci-output/*/optimization_report.md
           retention-days: 90
@@ -118,7 +128,11 @@ jobs:
         run: |
           python3 -c "
           import json, glob, sys
-          summaries = glob.glob('${{ github.workspace }}/ci-output/ci_summary.json')
+          summaries = glob.glob('${{ github.workspace }}/ci-output/ci_summary_*.json')
+          if not summaries:
+              # fallback: single-model run — ci_summary.json present directly
+              fallback = '${{ github.workspace }}/ci-output/ci_summary.json'
+              summaries = [fallback] if __import__('os').path.exists(fallback) else []
           if not summaries:
               print('No ci_summary.json found'); sys.exit(0)
           merged = json.loads(open(summaries[0]).read())
