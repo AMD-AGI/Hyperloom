@@ -115,6 +115,25 @@ def _materialize_config_with_envs(
         val = os.environ.get(env_key, "").strip()
         if val:
             envs[env_key] = int(val)
+    # Adaptive NUM_PROMPTS / NUM_WARMUPS based on sequence length.
+    # Goal: keep each benchmark variant under ~3-5 min wall time.
+    # Priority: env (CLI-exported) > yaml envs (may be yaml defaults like CONC=8).
+    isl_val = int(os.environ.get("ISL") or envs.get("ISL") or 256)
+    osl_val = int(os.environ.get("OSL") or envs.get("OSL") or 256)
+    conc_val = int(os.environ.get("CONC") or envs.get("CONC") or 8)
+    seq_cost = isl_val + osl_val
+    if seq_cost <= 1024:
+        factor = 10
+    elif seq_cost <= 4096:
+        factor = 5
+    elif seq_cost <= 16384:
+        factor = 3
+    else:
+        factor = 2
+    if "NUM_PROMPTS" not in envs:
+        envs["NUM_PROMPTS"] = max(conc_val * factor, conc_val)
+    if "NUM_WARMUPS" not in envs:
+        envs["NUM_WARMUPS"] = min(conc_val, 8)
     if server_args:
         envs[server_args_env_name(bench.get("framework"))] = server_args
     for key, value in (extra_envs or {}).items():
