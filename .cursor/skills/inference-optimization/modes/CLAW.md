@@ -4,7 +4,7 @@ This document contains ALL claw-mode-specific instructions. Read this **before s
 when using Claw client with SaFE cluster.
 
 **Agent:** Read `SKILL.md` for the orchestrator loop and shared Iron Rules (IR-1 through
-IR-7). This file defines claw-specific Iron Rules (IR-8 through IR-11), constants,
+IR-7b). This file defines claw-specific Iron Rules (IR-8 through IR-11), constants,
 architecture, and per-action execution overrides.
 
 ## Environment
