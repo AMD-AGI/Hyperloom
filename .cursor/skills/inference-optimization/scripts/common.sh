@@ -17,7 +17,7 @@ MODE="${MODE:-local}"
 if [ "$MODE" = "claw" ]; then
     WORKSPACE_ROOT="${WORKSPACE_ROOT:-/wekafs/inference-optimization}"
 else
-    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace/inference-optimization}"
+    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/opt/hyperloom}"
 fi
 
 # Constants

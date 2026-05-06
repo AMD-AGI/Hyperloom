@@ -184,6 +184,18 @@ class MarathonState:
     kernel_manager_targets_pushed: int = 0
     kernel_manager_merges_completed: int = 0
     kernel_manager_merges_kept: int = 0
+    # Heartbeat liveness signal for the kernel-mgr pane.  The
+    # orchestrator probes KM-exclusive mtimes (logs/kernel-mgr.log and
+    # kernel_manager/results.jsonl) and sets `km_requested_restart=True`
+    # once activity is silent for longer than KM_HEARTBEAT_RESTART_MIN
+    # *while pending work exists in the work queue*.  run.sh's monitor
+    # reads the flag and SIGTERMs the pane's current `claude --print`
+    # PID; the pane's outer while-loop relaunches with `--continue`.
+    # The flag auto-clears when activity resumes (silence drops back
+    # below KM_HEARTBEAT_STALE_MIN).
+    km_last_observed_activity_ts: float = 0.0
+    km_requested_restart: bool = False
+    km_restart_count: int = 0
 
     # --- watchdog IPC ---
     watchdog_last_seen_finding_id: str = ""
@@ -225,6 +237,13 @@ class MarathonState:
 
     # --- error ---
     consecutive_failures: int = 0
+    # `consecutive_failures` counts CRASHED actions; it triggers re-analyze.
+    # `consecutive_regressions` counts actions that ran-clean but lost
+    # throughput (and were reverted).  The DFS branch may be exhausted /
+    # over-committed even when no action crashes — without this counter
+    # the orchestrator can spin forever trying near-relatives of the
+    # same losing hypothesis.  Triggers a forced re-explore.
+    consecutive_regressions: int = 0
     actions_since_gain: int = 0
     actions_since_rescore: int = 0
     actions_since_bench: int = 0
