@@ -166,7 +166,14 @@ curl -s -X POST "http://0.0.0.0:$PORT/start_profile" 2>/dev/null \
     || curl -s "http://0.0.0.0:$PORT/start_profile" 2>/dev/null \
     || echo "WARNING: start_profile failed"
 
-PROFILE_PROMPTS=$((CONC < 16 ? CONC : 16))
+SEQ_LEN=$((ISL + OSL))
+if [ "$SEQ_LEN" -gt 8192 ]; then
+    PROFILE_PROMPTS=$((CONC < 4 ? CONC : 4))
+elif [ "$SEQ_LEN" -gt 4096 ]; then
+    PROFILE_PROMPTS=$((CONC < 8 ? CONC : 8))
+else
+    PROFILE_PROMPTS=$((CONC < 16 ? CONC : 16))
+fi
 echo "Running profiling benchmark ($PROFILE_PROMPTS prompts, reduced for trace size)..."
 export RESULT_FILENAME="profile_run"
 python3 "$INFERENCEX_PATH/utils/bench_serving/benchmark_serving.py" \
