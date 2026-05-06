@@ -414,6 +414,8 @@ def main():
             model_cfg, amd_master[ifx_key], defaults, harbor_prefix, ifx_benchmarks)
         merged["benchmark_script"] = ifx_scripts.get(ifx_key)
         merged["benchmark_script_content"] = ifx_script_contents.get(ifx_key, "")
+        if results_cfg.get("result_dir"):
+            merged["result_dir"] = resolve_var(results_cfg["result_dir"])
         merged_models.append(merged)
 
     if not merged_models:
