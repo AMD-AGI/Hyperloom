@@ -203,6 +203,44 @@ _DEFAULT_KERNEL_PROMPT = (
 )
 
 
+_GFX_TO_RUNNER: dict[str, str] = {
+    # Mirror Magpie/modes/benchmark/image_selector.py:138-140. Listed here so
+    # we can log the resolved value at session start instead of waiting for
+    # Magpie subprocess output deep in the run.
+    "gfx942":  "mi300x",
+    "gfx950":  "mi355x",
+    "gfx1100": "mi325x",
+}
+
+
+def _autodetect_gpu_type() -> str | None:
+    """Return mi300x|mi325x|mi355x or None if undetectable.
+
+    Tries `rocm-smi --showproductname` first (most reliable), then falls
+    back to torch.cuda.get_device_properties(0).gcnArchName parsing. Both
+    are best-effort — on CPU-only or non-ROCm boxes we silently return
+    None so the caller can defer to Magpie's own detection layer.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["rocm-smi", "--showproductname"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.upper()
+        for tag in ("MI355X", "MI325X", "MI300X"):
+            if tag in out:
+                return tag.lower()
+    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
+        pass
+    try:
+        import torch
+        arch = torch.cuda.get_device_properties(0).gcnArchName
+        gfx = arch.split(":", 1)[0].lower()
+        return _GFX_TO_RUNNER.get(gfx)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def _noop_prep(ctx) -> dict:
     return {"status": "succeeded", "kind": ctx.task.kind, "note": "noop-stub"}
 
@@ -343,6 +381,30 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # (baseline / profile / sweep / backends / params) inject it into
         # the Magpie YAML instead of trusting the YAML's hardcoded `model:`.
         os.environ["MODEL_PATH"] = str(args.model)
+
+        # Resolve GPU runner type: --gpu-type > $GPU_TYPE > rocm-smi probe.
+        # Result is the canonical Magpie label (mi300x / mi355x). MI325X has
+        # the same architecture as MI300X but Magpie does not yet ship
+        # sglang_mi325x.sh / vllm_mi325x.sh, so we map mi325x -> mi300x with
+        # a warning so the run actually succeeds.
+        gpu_type = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
+        if not gpu_type:
+            gpu_type = _autodetect_gpu_type() or ""
+            if gpu_type:
+                print(f"GPU type        : {gpu_type} (auto-detected)")
+        if gpu_type == "mi325x":
+            print(
+                "WARN: mi325x maps to mi300x (same arch; Magpie has no "
+                "sglang_mi325x.sh / vllm_mi325x.sh yet)",
+                file=sys.stderr,
+            )
+            gpu_type = "mi300x"
+        if gpu_type:
+            os.environ["GPU_TYPE"] = gpu_type
+            print(f"GPU type        : {gpu_type} (will inject runner_type into Magpie YAML)")
+        else:
+            os.environ.pop("GPU_TYPE", None)
+            print("GPU type        : <unset> (Magpie will auto-detect)")
         session_dir = make_session_dir(args.session_name) if args.session_name \
             else make_session_dir()
         print(f"Session dir: {session_dir}")
@@ -418,6 +480,14 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--model", "-m", type=Path, default=None,
                       help="Model path (required for new runs; ignored when "
                            "--resume is set — model is read from state.json)")
+    opt.add_argument(
+        "--gpu-type", choices=["mi300x", "mi325x", "mi355x"], default=None,
+        help="Override GPU runner type passed to Magpie (sets benchmark."
+             "runner_type). When omitted, the optimizer auto-detects via "
+             "rocm-smi; falls back to Magpie's own auto-detection if rocm-smi "
+             "is unavailable. mi325x is treated as mi300x (same architecture; "
+             "Magpie does not yet ship sglang_mi325x.sh / vllm_mi325x.sh).",
+    )
     opt.add_argument("--max-hours", type=float, default=2.0,
                       help="Wall-clock budget in hours (default 2.0)")
     grp = opt.add_mutually_exclusive_group()

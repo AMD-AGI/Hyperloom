@@ -66,6 +66,7 @@ def _materialize_config_with_envs(
     extra_server_args: str = "",
     extra_envs: dict[str, Any] | None = None,
     model_path: str | None = None,
+    gpu_type: str | None = None,
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
@@ -75,15 +76,25 @@ def _materialize_config_with_envs(
     Qwen-Qwen3-8B) that would otherwise silently win over the user's
     ``--model`` / ``MODEL_PATH`` selection. Always pass ``model_path`` from
     the CLI / SharedState.
+
+    ``gpu_type`` (e.g. ``mi300x`` / ``mi355x``) injects ``benchmark.runner_type``
+    so Magpie picks the matching ``{framework}_{gpu_type}.sh`` benchmark
+    script. We also ``pop`` any explicit ``benchmark.benchmark_script``
+    field, otherwise Magpie's priority-1 user-specified path would win
+    over runner_type and lock the run to the wrong GPU's script.
     """
     server_args = (extra_server_args or extra_sglang_args).strip()
-    if not server_args and not extra_envs and not model_path:
+    if (not server_args and not extra_envs
+            and not model_path and not gpu_type):
         return config_path
     with config_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     bench = cfg.setdefault("benchmark", {})
     if model_path:
         bench["model"] = str(model_path)
+    if gpu_type:
+        bench["runner_type"] = str(gpu_type)
+        bench.pop("benchmark_script", None)
     envs = bench.setdefault("envs", {})
     if server_args:
         envs[server_args_env_name(bench.get("framework"))] = server_args
@@ -133,6 +144,12 @@ class BaselineExecutor:
             str(params.get("model_path") or "").strip()
             or os.environ.get("MODEL_PATH", "").strip()
         )
+        # Same pattern for gpu_type: cli.py canonicalizes (mi325x->mi300x) and
+        # re-exports $GPU_TYPE; tests / Coordinator can also override per-task.
+        resolved_gpu = (
+            str(params.get("gpu_type") or "").strip().lower()
+            or os.environ.get("GPU_TYPE", "").strip().lower()
+        )
         config_path = _materialize_config_with_envs(
             config_path,
             output_dir,
@@ -144,6 +161,7 @@ class BaselineExecutor:
             ),
             extra_envs=dict(params.get("extra_envs") or {}),
             model_path=resolved_model,
+            gpu_type=resolved_gpu,
         )
 
         cmd = [
