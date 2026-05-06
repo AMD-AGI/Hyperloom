@@ -244,8 +244,17 @@ inference_optimizer/scripts/configs/profile_sglang.yaml
 inference_optimizer/scripts/configs/profile_vllm.yaml
 ```
 
-`benchmark.model` in each YAML is a fallback only — the optimizer
-overrides it at runtime from `--model` / `MODEL_PATH`.
+Two fields in each YAML are fallback only — the optimizer overrides
+them at runtime:
+
+- `benchmark.model` <- `--model` / `$MODEL_PATH`
+- `benchmark.runner_type` <- `--gpu-type` / `$GPU_TYPE` / rocm-smi auto-detect
+
+`benchmark.benchmark_script` is deliberately NOT set in the shipped
+YAMLs. With `runner_type` injected at run time, Magpie picks
+`{framework}_{runner_type}.sh` itself (e.g. `sglang_mi300x.sh` /
+`sglang_mi355x.sh`). Each YAML has a commented `# benchmark_script: ...`
+template right under `framework:` for manual debug overrides.
 
 Before a new model run, verify these fields match the environment:
 
@@ -254,7 +263,24 @@ Before a new model run, verify these fields match the environment:
 - `benchmark.envs.CONC`, `ISL`, `OSL`: workload.
 - `benchmark.envs.ROCR_VISIBLE_DEVICES`: GPU pinning.
 - `benchmark.envs.PATH`: must put `/opt/venv/bin` first.
-- `benchmark.benchmark_script`: usually `sglang_mi300x.sh`.
+
+## GPU runner type
+
+Pick the GPU explicitly with `--gpu-type` or `$GPU_TYPE`; without
+either, the optimizer auto-detects via `rocm-smi --showproductname`
+(falling back to `torch.cuda.get_device_properties(0).gcnArchName`).
+
+```bash
+inference_optimizer optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
+GPU_TYPE=mi300x inference_optimizer optimize --model "$MODEL_PATH" --max-hours 2
+```
+
+Accepted values: `mi300x`, `mi325x`, `mi355x`. **`mi325x` is mapped to
+`mi300x`** with a warning, since the two GPUs share the same arch and
+Magpie has not shipped `sglang_mi325x.sh` / `vllm_mi325x.sh` yet. If you
+need a true MI325X-specific script, uncomment the `benchmark_script:`
+template in the relevant YAML and point it at your script under
+`InferenceX/benchmarks/...`.
 
 Do not set `HIP_VISIBLE_DEVICES` on the known ROCm stack unless the user asks;
 it can make `torch.cuda.is_available()` return false. Use
