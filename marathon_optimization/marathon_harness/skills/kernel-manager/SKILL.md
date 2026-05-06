@@ -772,6 +772,28 @@ exhausted target. Include the full session_history so the Watchdog has context.
 The accumulated context of what was tried and why it failed is the most
 valuable input to the next attempt.
 
+**IR-12 (polling template):** When polling OOB/GEAK task status, use the
+mandatory defensive template from `actions/dispatch.md` §"Polling and
+Collection". A status in `OOB_TERMINAL_FAIL` MUST cause immediate exit
+(no sleep, no retry inside the round). Unknown statuses MUST strike up to
+`OOB_UNKNOWN_STATUS_STRIKES` and then cancel. Never simplify to a single
+`if status == "completed"` branch — that is the bug that made a dead task
+chew through `MAX_OOB_ROUNDS × OOB_POLL_TIMEOUT_MIN` of wall-clock.
+
+**IR-13 (prompt hygiene):** Before calling `agent_create_task` /
+`geak_create_task`, run the prompt through the guard in `actions/dispatch.md`
+§"Prompt Hygiene Guard". If the guard matches any `POLLUTION_PATTERNS`
+(inference-server launch, multi-GPU/distributed, end-to-end serving
+benchmarks, full-model weight loading) OR the prompt exceeds
+`OOB_PROMPT_MAX_BYTES`, DO NOT submit. Write a `prompt-pollution` event
+and let the deep-guidance loop reshape the prompt on the next round.
+
+**IR-14 (per-target budget):** Track `OOB_TASK_TOTAL_BUDGET_MIN` across all
+rounds and backends for the same target. On overrun, abort the target with
+`failed / reason=oob-budget-exceeded`, write an `exhausted` event, and move
+on. Also honour `OOB_PER_TARGET_BACKEND_FAIL_CAP` and
+`OOB_PER_SESSION_BACKEND_FAIL_CAP`.
+
 **IR-15 (GPU lock):** Before running micro-benchmarks, read the GPU lock file
 at `/tmp/.marathon_gpu_lock.json`. The orchestrator writes this file before
 starting the inference server. Schema:
