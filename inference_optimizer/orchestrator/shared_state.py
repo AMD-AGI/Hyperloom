@@ -53,6 +53,7 @@ class SharedState:
     model_class: str = ""
     framework: str = ""
     gpu_type: str = ""
+    kernel_enabled: bool = True
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
