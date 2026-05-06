@@ -1,11 +1,12 @@
-# Magpie profile config for Qwen3-8B on SGLang / MI300X.
-# Same shape as baseline_qwen3_8b_sglang.yaml but with torch_profiler ON
-# so the run produces a torch_trace dir downstream consumers (Kernel
-# agent / TraceLens) can read.
+# Magpie profile config for SGLang / MI300X.
+# Same shape as baseline_sglang.yaml but with torch_profiler ON so the run
+# produces a torch_trace dir downstream consumers (Kernel agent /
+# TraceLens) can read. `benchmark.model` is OVERRIDDEN at runtime — see
+# baseline_sglang.yaml header for the full rationale.
 
 benchmark:
   framework: sglang
-  model: /wekafs/models/Qwen-Qwen3-8B
+  model: /wekafs/models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
   precision: bf16
   run_mode: local
 
