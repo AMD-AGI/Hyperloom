@@ -35,6 +35,7 @@ from typing import Any
 
 from ...paths import asset_root
 from ._grid_runner import GridVariant, VariantResult, run_grid
+from .baseline import _default_baseline_config
 
 
 log = logging.getLogger(__name__)
@@ -130,9 +131,10 @@ class SweepExecutor:
         default_num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
         variant_timeout_sec: int = 1200,
     ):
+        # None = resolve at call time from $FRAMEWORK (sglang/vllm). Tests
+        # that pass an explicit fixture path keep their override.
         self.default_config_path = (
-            Path(default_config_path) if default_config_path
-            else asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
+            Path(default_config_path) if default_config_path else None
         )
         self.default_output_root = Path(default_output_root)
         self.default_conc_values = list(default_conc_values or DEFAULT_CONC_VALUES)
@@ -144,7 +146,11 @@ class SweepExecutor:
 
     async def __call__(self, ctx) -> dict[str, Any]:
         params = ctx.task.params or {}
-        config_path = Path(params.get("config_path") or self.default_config_path)
+        config_path = Path(
+            params.get("config_path")
+            or self.default_config_path
+            or _default_baseline_config()
+        )
         if not config_path.exists():
             return {"status": "failed",
                     "error_class": "missing_config",
