@@ -16,9 +16,8 @@ FAIL_THRESHOLD="${FAIL_THRESHOLD:-3}"
 LOG_PREFIX="[claw-watchdog]"
 
 export BACKEND_VENV_DIR="${BACKEND_VENV_DIR:-/tmp/primus-claw-backend-venv}"
-: "${PROXY_AUTH_TOKEN:?PROXY_AUTH_TOKEN must be set (Primus-SaFE ak- key)}"
-export PROXY_AUTH_TOKEN
-export LLM_PROXY_HOST="${LLM_PROXY_HOST:-core42.example-internal-host.invalid}"
+export PROXY_AUTH_TOKEN="${PROXY_AUTH_TOKEN:-${ANTHROPIC_AUTH_TOKEN:-}}"
+export LLM_PROXY_HOST="${LLM_PROXY_HOST:-$(echo "${SAFE_BASE_URL:-}" | sed 's|https\?://||')}"
 export AUTH_PROXY_PORT="${AUTH_PROXY_PORT:-4002}"
 
 consecutive_fails=0
