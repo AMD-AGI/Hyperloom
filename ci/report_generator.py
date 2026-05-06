@@ -17,7 +17,6 @@ LLM_ENDPOINT = os.environ.get("SAFE_BASE_URL", "") + "/api/v1/llm-proxy/v1/chat/
 
 def _extract_metrics_via_llm(report_content: str) -> dict:
     """Use LLM to extract baseline/optimized throughput from optimization report."""
-    import os
     api_key = os.environ.get("LLM_API_KEY")
     if not api_key:
         return {}
