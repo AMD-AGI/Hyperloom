@@ -68,6 +68,76 @@ DEFAULT_BACKENDS_GRID: list[GridVariant] = [
                  note="tier5_comm"),
 ]
 
+# vLLM-specific backends grid. The SGLang grid above uses flags vLLM doesn't
+# recognize (--attention-backend, --schedule-policy, --enable-fused-moe, etc.)
+# which causes every variant to silently fail. This grid uses flags from vLLM
+# 0.17-0.20+ CLI (`vllm serve --help`). Sources:
+#   - marathon_optimization/marathon_harness/skills/KNOWLEDGE-BASE.md
+#   - marathon_optimization/marathon_harness/skills/actions/params.md
+#   - .cursor/skills/inference-optimization/KNOWLEDGE-BASE.md (Kimi-K2.5, gpt-oss)
+#
+# Validated wins from marathon:
+#   - gpu-memory-utilization 0.90 + max-num-seqs 256 = +84% (Kimi-K2.5)
+#   - FP8 KV + max-num-seqs 512 + max-cudagraph 2048 = +4.3% (gpt-oss-120b)
+#   - FULL_AND_PIECEWISE compile is ESSENTIAL for gpt-oss (enforce-eager = -85.8%)
+DEFAULT_VLLM_BACKENDS_GRID: list[GridVariant] = [
+    # --- Memory / KV cache (biggest impact tier from marathon) ---
+    GridVariant("vllm_gpu_mem_0_90",       "--gpu-memory-utilization 0.90",
+                 note="memory"),
+    GridVariant("vllm_gpu_mem_0_92",       "--gpu-memory-utilization 0.92",
+                 note="memory"),
+    GridVariant("vllm_gpu_mem_0_95",       "--gpu-memory-utilization 0.95",
+                 note="memory"),
+    GridVariant("vllm_kv_fp8",             "--kv-cache-dtype fp8_e4m3",
+                 note="kv_cache"),
+    GridVariant("vllm_block_size_1",       "--block-size 1",
+                 note="cache_mla"),
+    # --- Scheduling (high-concurrency wins from marathon) ---
+    GridVariant("vllm_max_seqs_256",       "--max-num-seqs 256",
+                 note="scheduling"),
+    GridVariant("vllm_max_seqs_512",       "--max-num-seqs 512",
+                 note="scheduling"),
+    GridVariant("vllm_max_seqs_1024",      "--max-num-seqs 1024",
+                 note="scheduling"),
+    GridVariant("vllm_batched_tokens_16k", "--max-num-batched-tokens 16384",
+                 note="prefill"),
+    GridVariant("vllm_batched_tokens_32k", "--max-num-batched-tokens 32768",
+                 note="prefill"),
+    # --- Compile / CUDA graph ---
+    GridVariant("vllm_full_piecewise",
+                 "--compilation-config '{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\","
+                 "\"custom_ops\":[\"all\"]}'",
+                 note="compile"),
+    GridVariant("vllm_compile_off",        "--enforce-eager",
+                 note="compile_off"),
+    GridVariant("vllm_cudagraph_512",      "--max-cudagraph-capture-size 512",
+                 note="cuda_graph"),
+    GridVariant("vllm_cudagraph_2048",     "--max-cudagraph-capture-size 2048",
+                 note="cuda_graph"),
+    # --- Prefix cache ---
+    GridVariant("vllm_no_prefix_cache",    "--no-enable-prefix-caching",
+                 note="cache"),
+    # --- ROCm-specific env toggles (marathon workload.py + KNOWLEDGE-BASE) ---
+    GridVariant("vllm_aiter_on",
+                 extra_envs={"VLLM_ROCM_USE_AITER": "1"},
+                 note="rocm_aiter"),
+    GridVariant("vllm_aiter_off",
+                 extra_envs={"VLLM_ROCM_USE_AITER": "0"},
+                 note="rocm_aiter"),
+    GridVariant("vllm_aiter_fp4_asm",
+                 extra_envs={"VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": "1"},
+                 note="rocm_fp4"),
+    GridVariant("vllm_aiter_triton_rope",
+                 extra_envs={"VLLM_ROCM_USE_AITER_TRITON_ROPE": "1"},
+                 note="rocm_rope"),
+    GridVariant("vllm_quick_reduce_int4",
+                 extra_envs={"VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT4"},
+                 note="rocm_collectives"),
+    GridVariant("vllm_buffer_ops_off",
+                 extra_envs={"AMDGCN_USE_BUFFER_OPS": "0"},
+                 note="rocm_buffer"),
+]
+
 
 _BACKEND_KEYWORDS = (
     "backend", "enable_", "disable_", "fused", "mixed", "overlap",
@@ -113,11 +183,13 @@ class BackendsExecutor:
         self,
         *,
         default_grid: list[GridVariant] | None = None,
+        default_vllm_grid: list[GridVariant] | None = None,
         default_config_path: Path | str | None = None,
         default_output_root: Path | str | None = None,
         variant_timeout_sec: int = 900,
     ):
         self.default_grid = list(default_grid or DEFAULT_BACKENDS_GRID)
+        self.default_vllm_grid = list(default_vllm_grid or DEFAULT_VLLM_BACKENDS_GRID)
         # None = resolve at call time from $FRAMEWORK (sglang/vllm).
         self.default_config_path = (
             Path(default_config_path) if default_config_path else None
@@ -154,7 +226,17 @@ class BackendsExecutor:
                 for v in grid_override
             ]
         else:
-            grid = list(self.default_grid)
+            # Pick the framework-appropriate grid; SGLang flags (--attention-
+            # backend, --schedule-policy) are rejected by vLLM and vice versa.
+            import yaml
+            with config_path.open(encoding="utf-8") as _f:
+                _cfg = yaml.safe_load(_f) or {}
+            _fw = str((_cfg.get("benchmark") or {}).get("framework") or "").lower()
+            grid = (
+                list(self.default_vllm_grid)
+                if "vllm" in _fw
+                else list(self.default_grid)
+            )
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
 
