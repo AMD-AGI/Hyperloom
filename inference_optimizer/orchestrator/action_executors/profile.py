@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 
 
 PROFILE_DEFAULT_CONFIG = (
-    asset_root() / "scripts" / "configs" / "profile_qwen3_8b_sglang.yaml"
+    asset_root() / "scripts" / "configs" / "profile_sglang.yaml"
 )
 PROFILE_DEFAULT_TIMEOUT_SEC = 1500     # Magpie + sglang profile is heavier
 

@@ -53,7 +53,7 @@ log = logging.getLogger(__name__)
 
 # Defaults — overridable per-task via task.params.
 BASELINE_DEFAULT_CONFIG = (
-    asset_root() / "scripts" / "configs" / "baseline_qwen3_8b_sglang.yaml"
+    asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
 )
 BASELINE_DEFAULT_TIMEOUT_SEC = 1200
 
