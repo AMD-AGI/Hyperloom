@@ -1,11 +1,13 @@
-# Magpie profile config for SGLang / MI300X.
+# Magpie profile config for SGLang.
 # Same shape as baseline_sglang.yaml but with torch_profiler ON so the run
 # produces a torch_trace dir downstream consumers (Kernel agent /
-# TraceLens) can read. `benchmark.model` is OVERRIDDEN at runtime — see
-# baseline_sglang.yaml header for the full rationale.
+# TraceLens) can read. `benchmark.model` and `benchmark.runner_type` are
+# OVERRIDDEN at runtime — see baseline_sglang.yaml header for the full
+# rationale.
 
 benchmark:
   framework: sglang
+  # benchmark_script: sglang_mi300x.sh  # uncomment to force a specific Magpie script
   model: /wekafs/models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
   precision: bf16
   run_mode: local
@@ -23,7 +25,6 @@ benchmark:
   gpu_selection:
     auto: false
 
-  benchmark_script: sglang_mi300x.sh
   timeout_seconds: 900               # profile adds ~30-90s vs plain baseline
 
   profiler:
