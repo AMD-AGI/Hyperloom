@@ -34,7 +34,7 @@ from typing import Any, Awaitable, Callable
 
 from ..paths import db_path_for, make_session_dir
 from ..storage.connection import SqliteConnection
-from .agent_role import AgentRole, default_role_registry, roles_for_run
+from .agent_role import AgentRole, default_role_registry
 from .backends.base import Backend, BackendError, BackendTurnResult
 from .cursor_store import CursorStore
 from .intent_parser import Intent, IntentType, NoIntentEmitted
@@ -129,6 +129,14 @@ class Coordinator:
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
+
+        # Stable tick order derived from the live role_registry. Must NOT
+        # use the module-level `roles_for_run()` which is a cached hardcoded
+        # tuple containing "kernel" even when --no-kernel stripped it.
+        _CANONICAL_ORDER = ("orchestration", "kernel", "critic", "robustness")
+        self._tick_roles: tuple[str, ...] = tuple(
+            r for r in _CANONICAL_ORDER if r in self.role_registry
+        )
 
         # Resume: rebuild CoordinatorState.pending_proposals from the SQLite
         # event log so a Coordinator restart picks up undecided proposals
@@ -262,7 +270,7 @@ class Coordinator:
         if self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]:
             await self.replay_for_resume()
         for _ in range(n):
-            for name in roles_for_run():
+            for name in self._tick_roles:
                 await self._reactor_pass(name)
             await self._pump_dispatcher_once()
 
@@ -330,7 +338,7 @@ class Coordinator:
             while not stop_reason:
                 tick_n += 1
                 # Run one reactor + dispatcher pass.
-                for name in roles_for_run():
+                for name in self._tick_roles:
                     if self._stop.is_set():
                         break
                     await self._reactor_pass(name)

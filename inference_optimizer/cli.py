@@ -373,12 +373,32 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
 
 
 def _preflight() -> None:
-    """Auto-install missing runtime deps before the optimizer loop starts.
+    """Auto-install missing runtime deps and export auth aliases.
 
-    Always required: ray (Magpie uses it) + Magpie itself.
-    Runs once at session start; subsequent calls are fast noops (import
-    checks are ~0ms).
+    1. Auth aliases: SKILL.md §75-83 requires ANTHROPIC_AUTH_TOKEN,
+       ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, OPENAI_API_KEY, etc. for
+       the Claude/Codex CLIs. Users only set OPENAI_BASE_URL + SAFE_API_KEY
+       in their .env; we export the aliases here so backends work.
+    2. ray + Magpie auto-install.
     """
+    # --- Auth alias export (mirrors SKILL.md LLM Environment section) ---
+    safe_key = os.environ.get("SAFE_API_KEY", "")
+    base_url = os.environ.get("OPENAI_BASE_URL", "")
+    if safe_key:
+        for alias in ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                      "ANTHROPIC_API_KEY", "OOB_API_KEY", "GEAK_API_KEY",
+                      "LLM_API_KEY", "AMD_LLM_API_KEY"):
+            os.environ.setdefault(alias, safe_key)
+    if base_url:
+        for alias in ("ANTHROPIC_BASE_URL", "OOB_BASE_URL",
+                      "GEAK_BASE_URL", "LLM_API_BASE"):
+            os.environ.setdefault(alias, base_url)
+
+    # --- Log resolved asset root (confirms ASSET_ROOT mechanism) ---
+    from .paths import asset_root
+    print(f"Preflight: asset_root = {asset_root()}")
+
+    # --- Runtime dep install ---
     from .orchestrator.action_executors._grid_runner import _resolve_magpie_python
     magpie_python = _resolve_magpie_python()
 
