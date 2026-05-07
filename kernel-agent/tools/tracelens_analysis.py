@@ -12,6 +12,7 @@ import argparse
 import gzip
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -41,6 +42,16 @@ RUNTIME_API_NAMES = {
 }
 DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
 LOCAL_BUNDLE_TRACELENS_ROOT = "/wekafs/fully-local/TraceLens-internal"
+
+# TraceLens ships two perf-report CLIs:
+#   - `..._inference` is the correct entry for vLLM/SGLang inference traces
+#     (issue #124 Bug 1). It assumes graph-replay execution and emits the
+#     fields that downstream fusion / roofline analysis expects.
+#   - `..._pytorch` is the legacy / training default. We keep it as a
+#     fallback so older TraceLens installs (without the inference variant)
+#     still work.
+INFERENCE_PERF_CLI = "TraceLens_generate_perf_report_pytorch_inference"
+LEGACY_PERF_CLI = "TraceLens_generate_perf_report_pytorch"
 
 
 def utc_now() -> str:
@@ -886,6 +897,31 @@ def build_notes(candidate: dict[str, Any]) -> str:
     return f"resolved source: {candidate['source_file']}"
 
 
+def select_perf_report_cli(log_path: Path) -> str:
+    """Pick the TraceLens perf-report CLI for the current install (#124).
+
+    Prefers ``TraceLens_generate_perf_report_pytorch_inference`` (the correct
+    entry for vLLM/SGLang inference traces) and falls back to the legacy
+    ``TraceLens_generate_perf_report_pytorch`` when only an older TraceLens
+    build is on PATH. Raises if neither is available.
+    """
+    if shutil.which(INFERENCE_PERF_CLI):
+        append_log(log_path, f"perf report CLI: {INFERENCE_PERF_CLI} (TraceLens #124)")
+        return INFERENCE_PERF_CLI
+    if shutil.which(LEGACY_PERF_CLI):
+        append_log(
+            log_path,
+            f"WARNING: {INFERENCE_PERF_CLI} not on PATH; falling back to "
+            f"{LEGACY_PERF_CLI} (legacy TraceLens build)",
+        )
+        return LEGACY_PERF_CLI
+    raise RuntimeError(
+        f"No TraceLens perf-report CLI found on PATH. "
+        f"Looked for {INFERENCE_PERF_CLI!r} (preferred, #124) and "
+        f"{LEGACY_PERF_CLI!r} (legacy fallback)."
+    )
+
+
 def run_command(cmd: list[str], *, cwd: Path | None, log_path: Path, timeout_s: int) -> int:
     append_log(log_path, f"$ {' '.join(cmd)}")
     proc = subprocess.run(
@@ -1025,10 +1061,11 @@ def main() -> int:
             run_command([sys.executable, "-m", "pip", "install", "-e", "."],
                         cwd=tl_root, log_path=log_path,
                         timeout_s=max(60, int(args.budget_minutes * 60)))
-            rc = run_command(["TraceLens_generate_perf_report_pytorch", "--help"],
+            perf_cli = select_perf_report_cli(log_path)
+            rc = run_command([perf_cli, "--help"],
                              cwd=tl_root, log_path=log_path, timeout_s=60)
             if rc != 0:
-                raise RuntimeError("TraceLens_generate_perf_report_pytorch --help failed")
+                raise RuntimeError(f"{perf_cli} --help failed")
             skill = tl_root / "TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
             if not skill.exists():
                 raise FileNotFoundError(f"TraceLens standalone skill not found: {skill}")
@@ -1090,7 +1127,7 @@ def main() -> int:
             csv_dir = tracelens_dir / "csvs"
             xlsx_path = tracelens_dir / "perf_report.xlsx"
             rc = run_command([
-                "TraceLens_generate_perf_report_pytorch",
+                perf_cli,
                 "--profile_json_path", str(cli_trace_path),
                 "--output_xlsx_path", str(xlsx_path),
                 "--output_csvs_dir", str(csv_dir),
