@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robustness-server"
+version = "0.1.0"
+description = "Hyperloom Robustness Server — bridges Claw NATS with Robust workload + pod-dimension metrics and serves session/sub-agent views."
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "httpx>=0.27",
+    "asyncpg>=0.29",
+    "nats-py>=2.7",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=1.0",
+    "pytest-httpx>=0.30",
+]
+
+[project.scripts]
+robustness-server = "robustness_server.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"robustness_server.store.migrations" = ["*.sql"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]

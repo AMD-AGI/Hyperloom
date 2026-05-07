@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "robustness-server.fullname" . }}
+  labels: {{- include "robustness-server.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "robustness-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "robustness-server.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "robustness-server.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: ROBUSTNESS_SERVER_HOST
+              value: "0.0.0.0"
+            - name: ROBUSTNESS_SERVER_PORT
+              value: "8080"
+            - name: ROBUSTNESS_SERVER_LOG_LEVEL
+              value: {{ .Values.config.logLevel | quote }}
+            {{- if .Values.existingDatabaseSecret }}
+            - name: ROBUSTNESS_SERVER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingDatabaseSecret }}
+                  key: database-url
+            {{- else }}
+            - name: ROBUSTNESS_SERVER_DATABASE_URL
+              value: {{ .Values.config.database.url | quote }}
+            {{- end }}
+            - name: ROBUSTNESS_SERVER_DATABASE_SCHEMA
+              value: {{ .Values.config.database.schema | quote }}
+            - name: ROBUSTNESS_SERVER_DATABASE_POOL_MIN
+              value: {{ .Values.config.database.poolMin | quote }}
+            - name: ROBUSTNESS_SERVER_DATABASE_POOL_MAX
+              value: {{ .Values.config.database.poolMax | quote }}
+            - name: ROBUSTNESS_SERVER_APPLY_MIGRATIONS_ON_START
+              value: {{ .Values.config.database.applyMigrationsOnStart | quote }}
+            - name: ROBUSTNESS_SERVER_NATS_SERVERS
+              value: {{ join "," .Values.config.nats.servers | quote }}
+            - name: ROBUSTNESS_SERVER_NATS_STREAM
+              value: {{ .Values.config.nats.stream | quote }}
+            - name: ROBUSTNESS_SERVER_NATS_DURABLE_NAME
+              value: {{ .Values.config.nats.durableName | quote }}
+            - name: ROBUSTNESS_SERVER_NATS_SUBJECT_FILTER
+              value: {{ .Values.config.nats.subjectFilter | quote }}
+            - name: ROBUSTNESS_SERVER_NATS_KV_BUCKET
+              value: {{ .Values.config.nats.kvBucket | quote }}
+            - name: ROBUSTNESS_SERVER_ROBUST_API_URL
+              value: {{ .Values.config.robustApi.url | quote }}
+            - name: ROBUSTNESS_SERVER_ROBUST_API_TIMEOUT_SECONDS
+              value: {{ .Values.config.robustApi.timeoutSeconds | quote }}
+            - name: ROBUSTNESS_SERVER_WORKLOAD_RECONCILE_INTERVAL_SECONDS
+              value: {{ .Values.config.workloadReconcile.intervalSeconds | quote }}
+            - name: ROBUSTNESS_SERVER_ENABLE_NATS_CONSUMER
+              value: {{ .Values.config.toggles.natsConsumer | quote }}
+            - name: ROBUSTNESS_SERVER_ENABLE_KV_WATCHER
+              value: {{ .Values.config.toggles.kvWatcher | quote }}
+            - name: ROBUSTNESS_SERVER_ENABLE_WORKLOAD_RECONCILER
+              value: {{ .Values.config.toggles.workloadReconciler | quote }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

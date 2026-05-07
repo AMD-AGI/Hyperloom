@@ -1,0 +1,80 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/amd-agi/hyperloom-robustness-server
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Created by default for clean separation; not bound to any
+  # ClusterRole/Role since the server only talks to PG / NATS / Robust
+  # over HTTP. No Kubernetes API access required after the workload
+  # reconciler was switched to poll Robust instead of SaFE CRDs.
+  create: true
+  annotations: {}
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 1
+    memory: 1Gi
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+config:
+  logLevel: INFO
+  database:
+    url: postgresql://robustness:robustness@postgres:5432/robustness
+    schema: hyperloom_robustness
+    poolMin: 2
+    poolMax: 10
+    applyMigrationsOnStart: true
+  nats:
+    servers:
+      - nats://nats:4222
+    stream: PRIMUS_CLAW_EVENTS
+    durableName: hyperloom-robustness-server
+    subjectFilter: events.>
+    kvBucket: BRAIN_REGISTRY
+  robustApi:
+    # Robust API base URL. The workload reconciler hits
+    # GET /api/v1/workloads + /api/v1/workloads/{id}/hierarchy and
+    # the query API hits /api/v1/pod-metrics/...
+    url: http://robust-analyzer.primus-robust.svc.cluster.local:8085
+    timeoutSeconds: 10
+  workloadReconcile:
+    # Tick rate of the periodic Robust workload poller used as
+    # eventual-consistency backstop for missed NATS events.
+    intervalSeconds: 60
+  toggles:
+    natsConsumer: true
+    kvWatcher: true
+    workloadReconciler: true
+
+# Reference an existing secret with the database password / DSN. When
+# set, key `database-url` overrides config.database.url at runtime.
+existingDatabaseSecret: ""
+
+probes:
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 3
+    periodSeconds: 5
