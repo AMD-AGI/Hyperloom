@@ -47,7 +47,8 @@ fi
 FRAMEWORK="${FRAMEWORK:-sglang}"
 PORT=${PORT:-8888}
 TIMESTAMP=$(date +%Y-%m-%d-%H-%M)
-RESULT_DIR="${RESULT_DIR:-/shared_nfs/inference-optimization/results/$TIMESTAMP}"
+NFS_ROOT="${NFS_ROOT:-/wekafs}"
+RESULT_DIR="${RESULT_DIR:-${NFS_ROOT}/inference-optimization/results/$TIMESTAMP}"
 TRACE_DIR="${TRACE_DIR:-}"
 
 : "${MODEL:?MODEL env var required (or load via RUN_CONTEXT_FILE)}"
@@ -61,7 +62,7 @@ if [ -z "$TRACE_DIR" ]; then
     echo "Provide either:"
     echo "  1. RUN_CONTEXT_FILE=<baseline RESULT_DIR>/run_context.env"
     echo "  2. RESULT_DIR=<baseline RESULT_DIR>  (script will auto-load run_context.env)"
-    echo "  3. TRACE_DIR=/shared_nfs/inference-optimization/traces/<timestamp>"
+    echo "  3. TRACE_DIR=\${NFS_ROOT}/inference-optimization/traces/<timestamp>"
     exit 1
 fi
 

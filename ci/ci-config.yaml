@@ -1,10 +1,10 @@
 claw:
-  endpoint: https://oci-slc.primus-safe.amd.com/claw-api/v1
+  endpoint: ${SAFE_BASE_URL}/claw-api/v1
   api_key_env: CLAW_API_KEY
   sandbox_workspace_env: SANDBOX_WORKSPACE
   sandbox_timeout: 28800
   agent_id: agent_default
-  tools: [22,23]
+  tools: [74]  # 74=ci-mix300 v1.3.0(skill) with submit_workload.mjs + check_workload.mjs + NFS_ROOT paths
 
 inferenceX:
   repo: https://github.com/SemiAnalysisAI/InferenceX.git
@@ -14,8 +14,8 @@ inferenceX:
   harbor_prefix: ${HARBOR_PREFIX}
 
 results:
-  result_dir: /workspace/hyperloom/
-  nfs_base: /hyperloom/results/ci
+  result_dir: ${SANDBOX_WORKSPACE}/hyperloom/
+  nfs_base: ${NFS_ROOT}/results/ci
   artifact_retention_days: 90
 
 notification:
@@ -45,56 +45,56 @@ defaults:
   geak_step_limit: 100
   kernel_opt_workspace: ${KERNEL_OPT_WORKSPACE}
   min_kernels: 5
-  inferencex_path: /hyperloom/InferenceX
+  inferencex_path: ${NFS_ROOT}/InferenceX
   kernel_opt_backends: geak
   random_range_ratio: 0.8
 
 models:
   # ── DeepSeek R1 (FP8, TP=8) ──
-  - inferenceX_key: dsr1-fp8-mi355x-sglang
+  - inferenceX_key: dsr1-fp8-mi300x-sglang
     inferenceX_api_name: DeepSeek-R1-0528
-    model_path_override: /hyperloom/models/DeepSeek-R1-0528
+    model_path_override: ${NFS_ROOT}/models/DeepSeek-R1-0528
     optimization_depth: full
     kernel_opt_backends: claude
-    target_gpu: mi355x
+    target_gpu: mi300x
 
   # ── gpt-oss 120B (FP4, TP=8, vLLM) ──
-  - inferenceX_key: gptoss-fp4-mi355x-vllm
+  - inferenceX_key: gptoss-fp4-mi300x-vllm
     inferenceX_api_name: gpt-oss-120b
-    model_path_override: /hyperloom/models/gpt-oss-120b
+    model_path_override: ${NFS_ROOT}/models/gpt-oss-120b
     optimization_depth: full
     kernel_opt_backends: claude
-    target_gpu: mi355x
+    target_gpu: mi300x
 
   # ── Kimi K2.5 (INT4, TP=8, vLLM) ──
-  - inferenceX_key: kimik2.5-int4-mi355x-vllm
+  - inferenceX_key: kimik2.5-int4-mi300x-vllm
     inferenceX_api_name: Kimi-K2.5
-    model_path_override: /hyperloom/models/Kimi-K2.5
+    model_path_override: ${NFS_ROOT}/models/Kimi-K2.5
     optimization_depth: full
     kernel_opt_backends: claude
-    target_gpu: mi355x
+    target_gpu: mi300x
 
   # ── MiniMax M2.5 (FP8, TP=8, vLLM) ──
-  - inferenceX_key: minimaxm2.5-fp8-mi355x-vllm
+  - inferenceX_key: minimaxm2.5-fp8-mi300x-vllm
     inferenceX_api_name: MiniMax-M2.5
-    model_path_override: /hyperloom/models/MiniMaxAI-MiniMax-M2.5
+    model_path_override: ${NFS_ROOT}/models/MiniMaxAI-MiniMax-M2.5
     optimization_depth: full
     kernel_opt_backends: claude
-    target_gpu: mi355x
+    target_gpu: mi300x
 
-  # ── GLM 5 (FP8, TP=8) ──
-  - inferenceX_key: glm5-fp8-mi355x-sglang
-    inferenceX_api_name: GLM-5
-    model_path_override: /hyperloom/models/zai-org-GLM-5
-    optimization_depth: full
-    kernel_opt_backends: claude
-    target_gpu: mi355x
+  # ── GLM 5 (FP8) — requires multi-node (TP=16), pending RayJob support ──
+  # - inferenceX_key: glm5-fp8-mi355x-sglang
+  #   inferenceX_api_name: GLM-5
+  #   model_path_override: /wekafs/models/zai-org-GLM-5
+  #   optimization_depth: full
+  #   kernel_opt_backends: claude
+  #   target_gpu: mi300x
+  #   tp: 16
 
   # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
-  - inferenceX_key: qwen3.5-bf16-mi355x-sglang
+  - inferenceX_key: qwen3.5-bf16-mi300x-sglang
     inferenceX_api_name: Qwen-3.5-397B-A17B
-    model_path_override: /hyperloom/models/Qwen-Qwen3.5-397B-A17B
+    model_path_override: ${NFS_ROOT}/models/Qwen-Qwen3.5-397B-A17B
     optimization_depth: full
     kernel_opt_backends: claude
-    target_gpu: mi355x
-
+    target_gpu: mi300x

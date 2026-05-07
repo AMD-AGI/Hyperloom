@@ -13,7 +13,7 @@ architecture, and per-action execution overrides.
 - **Runtime**: SaFE cluster with multi-node GPU
 - **MCP Servers**: SaFE MCP + GEAK MCP + OOB GPU Optimizer MCP
 - **TraceLens**: Local CLI (`pip install -e /hyperloom/TraceLens-internal`)
-- **Storage**: Shared NFS (`/shared_nfs/` inside Pod, maps to NFS root)
+- **Storage**: Shared NFS (`/wekafs/` inside Pod, maps to NFS root)
 
 ## Mode Detection
 
@@ -22,7 +22,8 @@ Auto-detected when Claw client context is present, or user specifies `Mode: claw
 ```bash
 if [ "${GEAK_LOCAL:-false}" != "true" ]; then
     MODE="claw"
-    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/shared_nfs/inference-optimization}"
+    NFS_ROOT="${NFS_ROOT:-/wekafs}"
+    WORKSPACE_ROOT="${WORKSPACE_ROOT:-${NFS_ROOT}/inference-optimization}"
 fi
 ```
 
@@ -72,6 +73,74 @@ Violation = immediate run invalidation.
 Same as IR-7 in `SKILL.md` — NEVER modify GEAK configuration, test data, or settings.
 Interact with GEAK exclusively through GEAK MCP tool calls.
 
+### IR-12: NFS result paths MUST be deterministic — NO `$(date)` in paths
+
+**Problem:** When a workload writes results to a timestamped NFS directory (e.g.
+`/wekafs/results/opt-$(date +%Y%m%d-%H%M%S)`), the agent cannot discover the path
+to poll for completion. This causes the agent to loop `sleep` indefinitely, wasting
+hours until sandbox timeout.
+
+**Rule:** ALL NFS output directories MUST use the **workload name** (which the agent
+knows at creation time), NEVER a runtime timestamp:
+
+```bash
+# CORRECT — agent knows the workload name
+NFS_DIR="${NFS_ROOT}/hyperloom-results/${JOB_NAME}"
+
+# WRONG — agent cannot predict the timestamp
+NFS_DIR="${NFS_ROOT}/hyperloom-results/opt-$(date +%Y%m%d-%H%M%S)"
+```
+
+If a timestamp sub-directory is needed for internal organization, write a **beacon
+file** at a predictable path so the agent can discover it:
+
+```bash
+BEACON="${NFS_ROOT}/hyperloom-results/${JOB_NAME}.nfs_dir"
+echo "$NFS_DIR" > "$BEACON"
+```
+
+When **polling** workload results, the agent MUST:
+1. Use the workload name to construct the NFS path directly, OR
+2. Read the beacon file `<workload_name>.nfs_dir` to discover the actual path
+3. NEVER rely on globbing timestamped directories — it is fragile and slow
+
+Violation = wasted GPU hours from blind polling loops.
+
+### IR-13: NEVER `sleep` longer than 60 seconds in a single bash command
+
+**Problem:** The Hands sandbox has a bash idle timeout. When the agent runs
+`sleep 900` or `sleep 1800` to wait for compilation/warmup, the MCP connection
+drops with error `-32001` before the sleep finishes. The agent then reconnects,
+checks status, sleeps again — repeating this cycle for **3-4 hours** of wasted
+wall-clock time.
+
+**Rule:** ALL polling loops MUST use short sleep intervals (≤ 60s) with an
+explicit check between each iteration:
+
+```bash
+# CORRECT — short sleep + check each iteration
+for i in $(seq 1 60); do
+  if [ -f "$NFS_DIR/ci_metrics.json" ]; then echo "DONE"; break; fi
+  # or: check workload status via workload_get
+  sleep 60
+done
+
+# WRONG — long sleep triggers MCP timeout
+sleep 1800
+cat "$NFS_DIR/ci_metrics.json"
+```
+
+When waiting for a workload (RayJob / PyTorchJob) to complete:
+1. Use `workload_get` to poll status every 60s — NOT `sleep` + file check
+2. Once status is `Succeeded`, THEN read the NFS results
+3. If status is `Failed`, abort immediately — do NOT keep polling
+
+**Also applies to `exec_on_gpu`:** Any command that blocks for >60s (e.g.,
+`exec_on_gpu "sleep 300 && check_results"`) will trigger the same timeout.
+Break it into multiple short calls.
+
+Violation = hours of wasted sandbox time from MCP reconnect loops.
+
 ---
 
 ## Claw-Mode Constants
@@ -93,7 +162,7 @@ Ray 2.44.1 fix). The same image is used for both the RayJob and kernel-opt backe
 The custom SGLang image is based on upstream SGLang with Ray compatibility fixes:
 
 ```dockerfile
-FROM harbor.oci-slc.primus-safe.amd.com/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x
+FROM ${HARBOR_PREFIX}/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi35x
 RUN python -m pip install ray[default]==2.44.1 click==8.1.7
 ```
 
@@ -213,9 +282,10 @@ export OSL=256
 export FRAMEWORK=<sglang|vllm>
 export INFERENCEX_PATH="<path_on_shared_nfs>"
 
-TIMESTAMP=$(date +%Y-%m-%d-%H-%M)
-export RESULT_DIR="/shared_nfs/inference-optimization/results/${TIMESTAMP}"
-export TRACE_DIR="/shared_nfs/inference-optimization/traces/${TIMESTAMP}"
+# Use workload name (deterministic) — NEVER use $(date) timestamps (see IR-12)
+WORKLOAD_NAME="<workload_display_name>"  # e.g. inference-opt-gptoss120b
+export RESULT_DIR="${NFS_ROOT}/inference-optimization/results/${WORKLOAD_NAME}"
+export TRACE_DIR="${NFS_ROOT}/inference-optimization/traces/${WORKLOAD_NAME}"
 
 source scripts/executor.sh
 
@@ -372,7 +442,7 @@ exec_on_gpu "python3 $SCRIPTS_DIR/patch_inductor.py patch \
     --best-config '{\"XBLOCK\": 4, \"R0_BLOCK\": 2048, \"num_warps\": 4}'"
 ```
 
-GEAK output is on shared NFS: `/shared_nfs/geak/tasks/<user_hash>/<task_id>/output/`.
+GEAK output is on shared NFS: `/wekafs/geak/tasks/<user_hash>/<task_id>/output/`.
 
 **Re-Baseline:**
 
@@ -403,7 +473,7 @@ find /sgl-workspace/aiter -name '__pycache__' -exec rm -rf {} + 2>/dev/null
 
 For multi-node RayJob, kernel patching requires patching on ALL nodes:
 - **Inductor cache** (Strategy A): Cache is local to each node. Must patch on ALL nodes,
-  OR use a shared Inductor cache directory on NFS (`TORCHINDUCTOR_CACHE_DIR=/shared_nfs/inductor_cache`).
+  OR use a shared Inductor cache directory on NFS (`TORCHINDUCTOR_CACHE_DIR=/wekafs/inductor_cache`).
 - **Framework source** (Strategy B): If framework is installed on shared NFS, patching on
   head is sufficient.
 
@@ -468,7 +538,7 @@ def run_sweep_config(model, tp, conc, isl, osl, result_dir, extra_args):
 configs = [(64, 1024, 1024), (16, 1024, 1024), (4, 1024, 1024),
            (64, 8192, 1024), (16, 8192, 1024)]
 futures = [run_sweep_config.remote(MODEL, TP, c, i, o,
-    f"/shared_nfs/inference-optimization/results/sweep_{TIMESTAMP}/c{c}_i{i}_o{o}",
+    f"{os.environ['NFS_ROOT']}/inference-optimization/results/{WORKLOAD_NAME}/sweep/c{c}_i{i}_o{o}",
     TUNED_SERVER_ARGS) for c, i, o in configs]
 results = ray.get(futures)
 ```

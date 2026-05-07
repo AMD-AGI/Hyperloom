@@ -7,8 +7,10 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -38,6 +40,22 @@ log = logging.getLogger("ci-orchestrator")
 CI_DIR = Path(__file__).resolve().parent
 PROMPT_TEMPLATE = (CI_DIR / "prompt_template.md").read_text()
 
+# Load skill files from repo — embedded in prompt to bypass tool-mounting failures
+_SKILL_ROOT = CI_DIR.parent / ".cursor" / "skills" / "inference-optimization"
+
+
+def _read_skill_file(*parts: str) -> str:
+    p = _SKILL_ROOT.joinpath(*parts)
+    return p.read_text() if p.exists() else ""
+
+
+SKILL_MD = _read_skill_file("SKILL.md")
+CLAW_MD = _read_skill_file("modes", "CLAW.md")
+RUN_BASELINE_SH = _read_skill_file("scripts", "run_baseline.sh")
+RUN_SWEEP_SH = _read_skill_file("scripts", "run_sweep.sh")
+EXECUTOR_SH = _read_skill_file("scripts", "executor.sh")
+COMMON_SH = _read_skill_file("scripts", "common.sh")
+
 
 def load_config(config_path: str | None = None) -> dict:
     path = Path(config_path) if config_path else CI_DIR / "ci-config.yaml"
@@ -55,22 +73,47 @@ def render_prompt(merged: dict) -> str:
         conc=merged.get("conc"),
     )
     script = merged.get("benchmark_script")
-    if script:
+    script_content = merged.get("benchmark_script_content", "")
+    if script and script_content:
         bss = (
-            f"MANDATORY: Read the InferenceX benchmark script and replicate its server config:\n"
-            f"  {merged['inferencex_path']}/{script}\n"
+            f"MANDATORY: Replicate the server config from this InferenceX benchmark script "
+            f"({script}).\n"
             f"Key env vars for this run: MODEL={merged['model_path']} TP={merged['tp']} "
             f"EP_SIZE={merged['ep']} CONC={merged['conc']} ISL={isl} OSL={osl} "
             f"MAX_MODEL_LEN=4096 RANDOM_RANGE_RATIO=0.8 "
             f"NUM_PROMPTS_MULTIPLIER=10 RESULT_FILENAME=baseline\n"
-            f"Also export: RANDOM_RANGE_RATIO=0.8 NUM_PROMPTS_MULTIPLIER=10 "
-            f"before running skill scripts (run_baseline.sh / run_sweep.sh).\n"
-            f"DO NOT run the script directly (it depends on benchmark_lib.sh and hf download).\n"
-            f"Instead: read the script, extract the server launch command, env vars, and "
-            f"server flags, then use them to launch the server and run the benchmark yourself."
+            f"DO NOT run the script directly. Extract server launch command and env vars, "
+            f"then reproduce them yourself.\n\n"
+            f"<benchmark_script>\n{script_content}\n</benchmark_script>"
+        )
+    elif script:
+        bss = (
+            f"MANDATORY: Read the InferenceX benchmark script and replicate its server config:\n"
+            f"  {merged['inferencex_path']}/{script}\n"
+            f"Key env vars: MODEL={merged['model_path']} TP={merged['tp']} "
+            f"CONC={merged['conc']} ISL={isl} OSL={osl}"
         )
     else:
         bss = "No InferenceX benchmark script found. Construct server launch manually."
+
+    # Embed skill files so agent doesn't depend on tool mounting
+    skill_section = ""
+    if SKILL_MD:
+        skill_section += f"\n<skill_md>\n{SKILL_MD}\n</skill_md>\n"
+    if CLAW_MD:
+        skill_section += f"\n<claw_md>\n{CLAW_MD}\n</claw_md>\n"
+    if RUN_BASELINE_SH:
+        skill_section += f"\n<run_baseline_sh>\n{RUN_BASELINE_SH}\n</run_baseline_sh>\n"
+    if RUN_SWEEP_SH:
+        skill_section += f"\n<run_sweep_sh>\n{RUN_SWEEP_SH}\n</run_sweep_sh>\n"
+    if EXECUTOR_SH:
+        skill_section += f"\n<executor_sh>\n{EXECUTOR_SH}\n</executor_sh>\n"
+    if COMMON_SH:
+        skill_section += f"\n<common_sh>\n{COMMON_SH}\n</common_sh>\n"
+
+    safe_api_key = os.environ.get("CLAW_API_KEY", "")
+    safe_base_url = os.environ.get("SAFE_BASE_URL", "")
+    sandbox_workspace = os.environ.get("SANDBOX_WORKSPACE", "")
 
     return PROMPT_TEMPLATE.format(
         model_hf=merged["model_hf"],
@@ -96,6 +139,10 @@ def render_prompt(merged: dict) -> str:
         inferenceX_data=ifx_text,
         runner=merged["runner"],
         benchmark_script_section=bss,
+        skill_section=skill_section,
+        safe_api_key=safe_api_key,
+        safe_base_url=safe_base_url,
+        sandbox_workspace=sandbox_workspace,
     )
 
 
@@ -108,7 +155,8 @@ def run_model(
     """Execute the full optimization flow for a single model."""
     model_name = merged["model_hf"].split("/")[-1]
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
-    result_dir = f"{nfs_base}/{model_name}/{timestamp}"
+    # Use a local temp dir for downloading files — nfs_base may be read-only on the runner
+    result_dir = os.path.join(tempfile.gettempdir(), "hyperloom-ci", model_name, timestamp)
 
     log.info("═" * 60)
     log.info("Starting model: %s (%s)", model_name, merged["precision"])
@@ -170,21 +218,19 @@ def run_model(
                      session_id, sandbox_timeout)
     log.info("Session %s finished with status: %s", session_id, status)
 
-    # Step 3: Download optimization report from Claw
-    # Wait for report upload to finalize before querying files
-    wait_secs = 300
-    log.info("Waiting %ds for report upload to finalize...", wait_secs)
-    time.sleep(wait_secs)
-
+    # Step 3: Download optimization report from Claw, with NFS fallback
+    # No sleep here — sandbox is already gone after session ends; download immediately.
     report_content = None
+    os.makedirs(result_dir, exist_ok=True)
+    download_suffixes = ("optimization_report.md", "ci_metrics.json")
+
+    # 3a. Try Claw file API (sandbox /workspace)
     try:
         files = claw.list_files(session_id)
         log.info("Session %s has %d files", session_id, len(files))
-        os.makedirs(result_dir, exist_ok=True)
-        download_suffixes = ("optimization_report.md", "ci_metrics.json")
         for f in files:
-            fpath = f["path"]
-            if not any(fpath.endswith(s) for s in download_suffixes):
+            fpath = f.get("path") or f.get("Path") or ""
+            if not fpath or not any(fpath.endswith(s) for s in download_suffixes):
                 continue
             local = os.path.join(result_dir, os.path.basename(fpath))
             try:
@@ -195,6 +241,42 @@ def run_model(
                 log.warning("Failed to download %s: %s", fpath, e)
     except Exception as e:
         log.warning("Failed to list/download files for %s: %s", session_id, e)
+
+    # 3b. NFS fallback: scan NFS for results written by PyTorchJob/RayJob.
+    if not report_content:
+        nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+        nfs_scan_dirs = [
+            f"{nfs_root}/hyperloom-results",
+            f"{nfs_root}/results/ci",
+            f"{nfs_root}/inference-optimization/results",
+        ]
+        model_short = model_name.lower().replace("-", "").replace("_", "")
+        for scan_dir in nfs_scan_dirs:
+            if not os.path.isdir(scan_dir):
+                continue
+            for entry in sorted(os.listdir(scan_dir), reverse=True):
+                entry_clean = entry.lower().replace("-", "").replace("_", "")
+                if model_short not in entry_clean:
+                    continue
+                candidate = os.path.join(scan_dir, entry)
+                if not os.path.isdir(candidate):
+                    continue
+                for suffix in download_suffixes:
+                    for root, _, fnames in os.walk(candidate):
+                        for fn in fnames:
+                            if fn.endswith(suffix.split("/")[-1]):
+                                src = os.path.join(root, fn)
+                                dst = os.path.join(result_dir, fn)
+                                if not os.path.exists(dst):
+                                    shutil.copy2(src, dst)
+                                    log.info("NFS fallback: copied %s → %s", src, dst)
+                                    if fn == "optimization_report.md":
+                                        report_content = Path(dst).read_text()
+                if report_content:
+                    log.info("NFS fallback found results in %s", candidate)
+                    break
+            if report_content:
+                break
 
     # Step 4: Build result
     ifx_ref = None
@@ -225,6 +307,7 @@ def main():
     parser.add_argument("--tools", default=None, help="Comma-separated Claw tool IDs (overrides ci-config)")
     parser.add_argument("--dry-run", action="store_true", help="Print prompts without executing")
     parser.add_argument("--output-dir", default="ci-output", help="Output directory for reports")
+    parser.add_argument("--update", action="store_true", help="Update images to latest stable before running")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -240,6 +323,12 @@ def main():
     results_cfg = config.get("results", {})
 
     harbor_prefix = resolve_var(ifx_cfg.get("harbor_prefix", ""))
+    claw_cfg["endpoint"] = resolve_var(claw_cfg["endpoint"])
+    results_cfg["nfs_base"] = resolve_var(results_cfg.get("nfs_base", ""))
+    defaults["inferencex_path"] = resolve_var(defaults.get("inferencex_path", ""))
+    for m in config.get("models", []):
+        if "model_path_override" in m:
+            m["model_path_override"] = resolve_var(m["model_path_override"])
 
     # Resolve which models to run
     model_list = config.get("models", [])
@@ -258,26 +347,49 @@ def main():
     scripts_path = ifx_cfg.get("scripts_path", "benchmarks/single_node")
     ifx_scripts: dict[str, str | None] = {}
 
-    import tempfile as _tmpmod
-    with _tmpmod.TemporaryDirectory() as _tmpdir:
+    with tempfile.TemporaryDirectory() as _tmpdir:
         subprocess.run(
             ["git", "clone", "--depth=1", "--branch=main",
              ifx_cfg["repo"], _tmpdir],
             check=True, capture_output=True, text=True,
         )
         yaml_path = Path(_tmpdir) / ifx_cfg["config_path"]
+
+        # Optionally update images in the cloned amd-master.yaml to latest stable
+        check_script = CI_DIR.parent / "inference_optimization" / "InferenceX" / "utils" / "check_image_versions.py"
+        if check_script.exists():
+            cmd = [sys.executable, str(check_script), "--config-files", str(yaml_path)]
+            if args.update:
+                cmd.append("--update")
+                log.info("--update flag set: upgrading images to latest stable")
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                                        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+                if result.stdout:
+                    log.info("Image version check:\n%s", result.stdout.strip())
+                if result.returncode != 0 and result.stderr:
+                    log.warning("Image version check stderr: %s", result.stderr.strip())
+            except Exception as e:
+                log.warning("Image version check failed (non-fatal): %s", e)
+        else:
+            log.warning("check_image_versions.py not found at %s, skipping", check_script)
+
         with open(yaml_path) as f:
             amd_master = yaml.safe_load(f)
         log.info("InferenceX commit: %s", ifx_commit[:7])
 
+        ifx_script_contents: dict[str, str] = {}
         for model_cfg in model_list:
             ifx_key = model_cfg["inferenceX_key"]
             script = find_benchmark_script(_tmpdir, ifx_key, scripts_path)
             ifx_scripts[ifx_key] = script
             if script:
                 log.info("Found benchmark script for %s: %s", ifx_key, script)
+                script_path = Path(_tmpdir) / script
+                ifx_script_contents[ifx_key] = script_path.read_text() if script_path.exists() else ""
             else:
                 log.warning("No benchmark script found for %s", ifx_key)
+                ifx_script_contents[ifx_key] = ""
 
     # Merge configs and fetch API data
     merged_models = []
@@ -300,6 +412,9 @@ def main():
         merged = merge_model_config(
             model_cfg, amd_master[ifx_key], defaults, harbor_prefix, ifx_benchmarks)
         merged["benchmark_script"] = ifx_scripts.get(ifx_key)
+        merged["benchmark_script_content"] = ifx_script_contents.get(ifx_key, "")
+        if results_cfg.get("result_dir"):
+            merged["result_dir"] = resolve_var(results_cfg["result_dir"])
         merged_models.append(merged)
 
     if not merged_models:
@@ -323,7 +438,7 @@ def main():
 
     # Execute
     claw = ClawClient.from_config(claw_cfg)
-    nfs_base = results_cfg.get("nfs_base", "/hyperloom/results/ci")
+    nfs_base = results_cfg.get("nfs_base") or (os.environ.get("NFS_ROOT", "/wekafs") + "/results/ci")
     sandbox_timeout = claw_cfg.get("sandbox_timeout", 14400)
     results = []
 
