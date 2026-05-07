@@ -1302,8 +1302,40 @@ class Coordinator:
                 )
             promoted = False
             if gain_vs_cb is not None and gain_vs_cb >= PROMOTE_THRESHOLD_PCT:
-                self._lift_to_current_best(task_kind, best_tput, bv)
-                promoted = True
+                # Accuracy gate: if the winner touches precision-affecting
+                # flags, verify its GSM8K accuracy didn't drop > 5%.
+                # The eval ran during the benchmark (RUN_EVAL=true) so we
+                # check the result that came back.
+                from .action_executors._accuracy_gate import (
+                    accuracy_passed,
+                    is_high_accuracy_risk,
+                )
+                winner_args = str(bv.get("extra_sglang_args") or "")
+                winner_envs = dict(bv.get("extra_envs") or {})
+                accuracy_ok = True
+                if is_high_accuracy_risk(winner_args, winner_envs):
+                    new_acc = result.get("accuracy")
+                    base_acc = self.shared_state.baseline_accuracy
+                    if isinstance(new_acc, (int, float)) and base_acc > 0:
+                        accuracy_ok = accuracy_passed(base_acc, new_acc)
+                        if not accuracy_ok:
+                            log.warning(
+                                "accuracy gate FAILED for %s variant=%s: "
+                                "baseline=%.4f new=%.4f (drop=%.4f > 0.05)",
+                                task_kind, bv.get("name"),
+                                base_acc, new_acc, base_acc - new_acc,
+                            )
+                    elif base_acc <= 0:
+                        log.info(
+                            "accuracy gate skipped (no baseline_accuracy yet) "
+                            "for high-risk variant=%s", bv.get("name"),
+                        )
+                if accuracy_ok:
+                    self._lift_to_current_best(task_kind, best_tput, bv)
+                    promoted = True
+                else:
+                    log.info("accuracy gate blocked promotion of %s/%s",
+                             task_kind, bv.get("name"))
             else:
                 # Cross-round signal: same variant winning consistently
                 # at sub-threshold but real gains.
