@@ -5,7 +5,7 @@ description: Claude Code backend for kernel optimization via OOB Agent MCP. Mult
 
 # Claude Code — Kernel Optimization Backend
 
-Claude Code backend for kernel optimization via the OOB Agent MCP (`oci-oob-agent`).
+Claude Code backend for kernel optimization via the OOB Agent MCP (`oob`).
 Multi-turn agent with tool-use capability (file I/O, shell commands). No GPU access —
 the calling skill is responsible for compilation checking, correctness verification,
 and micro-benchmarking.

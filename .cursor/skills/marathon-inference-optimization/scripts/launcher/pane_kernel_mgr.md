@@ -7,7 +7,7 @@ IGNORE $SPEC_ROOT/modes/CLAW.md. Execute bash natively, never wrap with `exec_on
 Context (from env): SESSION_DIR, BASE_DIR, IMAGE, KERNEL_OPT_WORKSPACE, KERNEL_OPT_BACKENDS, MAX_HOURS, SPEC_ROOT.
 
 MCP backend dispatch:
-- Always pass `workspace_id=$KERNEL_OPT_WORKSPACE` to both `mcp__oci-geak-agent__*` and `mcp__oci-oob-agent__*` tools.
+- Always pass `workspace_id=$KERNEL_OPT_WORKSPACE` to both `mcp__geak__*` and `mcp__oob__*` tools.
 - For GEAK, also pass `image=$IMAGE`; if `IMAGE` is empty, skip the geak backend silently and rely on claude/codex backends.
 - Respect `$KERNEL_OPT_BACKENDS` (comma-separated) as the allowlist.
 
