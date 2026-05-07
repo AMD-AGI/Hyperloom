@@ -197,12 +197,19 @@ TraceLens runs through its CLI and its own skill.
 export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 cd "$TRACELENS_ROOT"
 pip install -e .
-TraceLens_generate_perf_report_pytorch --help
+# TraceLens #124: prefer the `_inference` perf-report CLI for vLLM/SGLang
+# traces (correct execution mode = graph-replay). The legacy
+# `TraceLens_generate_perf_report_pytorch` is acceptable on older builds.
+TraceLens_generate_perf_report_pytorch_inference --help \
+  || TraceLens_generate_perf_report_pytorch --help
 ```
 
-If the command is missing, stop and fix installation before analysis. Do not
-fall back to the open-source TraceLens clone when the internal mount exists; the
-internal mount contains the standalone skills expected by this tool.
+If neither CLI is on PATH, stop and fix installation before analysis. Do not
+fall back to the open-source TraceLens clone when the internal mount exists;
+the internal mount contains the standalone skills expected by this tool.
+
+`tools/tracelens_analysis.py` picks the right CLI at runtime (preferring
+`_inference`, falling back to the legacy name) — see `select_perf_report_cli`.
 
 2. Read this skill file and strictly follow its order:
 

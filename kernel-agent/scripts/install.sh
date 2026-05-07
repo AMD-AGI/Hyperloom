@@ -146,10 +146,16 @@ ensure_tracelens() {
     run bash -lc "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir -e ."
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    if command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
+    # TraceLens #124: prefer the inference variant (correct entry for
+    # vLLM/SGLang traces). Fall back to the legacy CLI for older builds.
+    if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
+      TraceLens_generate_perf_report_pytorch_inference --help >/dev/null
+      log "TraceLens perf CLI verified: TraceLens_generate_perf_report_pytorch_inference (#124)"
+    elif command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
       TraceLens_generate_perf_report_pytorch --help >/dev/null
+      warn "TraceLens_generate_perf_report_pytorch_inference not found; using legacy TraceLens_generate_perf_report_pytorch"
     else
-      verify_die "TraceLens_generate_perf_report_pytorch not found after install"
+      verify_die "Neither TraceLens_generate_perf_report_pytorch_inference nor TraceLens_generate_perf_report_pytorch found after install"
     fi
   fi
 }
@@ -344,7 +350,17 @@ except Exception:
     raise SystemExit(1)
 PY
 )"
-  for tool in TraceLens_generate_perf_report_pytorch geak oob claude codex; do
+  # TraceLens perf-report CLI: report whichever variant is available
+  # (#124 prefers the _inference suffix; the legacy CLI is acceptable as
+  # a fallback, the dispatcher in tools/tracelens_analysis.py picks at runtime).
+  if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
+    log "found TraceLens_generate_perf_report_pytorch_inference: $(command -v TraceLens_generate_perf_report_pytorch_inference)"
+  elif command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
+    warn "TraceLens_generate_perf_report_pytorch_inference not found; using legacy TraceLens_generate_perf_report_pytorch: $(command -v TraceLens_generate_perf_report_pytorch)"
+  else
+    warn "TraceLens perf-report CLI not found (looked for both _inference and legacy)"
+  fi
+  for tool in geak oob claude codex; do
     if command -v "$tool" >/dev/null 2>&1; then
       log "found ${tool}: $(command -v "$tool")"
     else
