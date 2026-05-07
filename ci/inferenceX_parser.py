@@ -59,7 +59,12 @@ def get_latest_commit(repo_url: str, ref: str = "main") -> str:
 
 def parse_model_entry(entry: dict) -> dict:
     """Extract structured config from an amd-master.yaml model entry."""
-    seq_configs = entry.get("seq-len-configs", [])
+    # Support both old format (seq-len-configs) and new format (scenarios.fixed-seq-len)
+    seq_configs = (
+        entry.get("seq-len-configs")
+        or (entry.get("scenarios") or {}).get("fixed-seq-len")
+        or []
+    )
     first_seq = seq_configs[0] if seq_configs else {}
     first_search = (first_seq.get("search-space") or [{}])[0]
 
@@ -253,7 +258,8 @@ def merge_model_config(
     kern_backends = model_cfg.get(
         "kernel_opt_backends", defaults.get("kernel_opt_backends", "geak"))
 
-    model_path = model_cfg.get("model_path_override") or f"/hyperloom/models/{model_hf.replace('/', '-')}"
+    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    model_path = model_cfg.get("model_path_override") or f"{nfs_root}/models/{model_hf.replace('/', '-')}"
 
     return {
         "model_hf": model_hf,
@@ -263,7 +269,7 @@ def merge_model_config(
         "precision": parsed["precision"],
         "framework": parsed["framework"],
         "runner": parsed["runner"],
-        "tp": parsed["tp"],
+        "tp": model_cfg.get("tp", parsed["tp"]),
         "ep": model_cfg.get("ep", parsed["ep"]),
         "conc": parsed["conc_end"],
         "isl_osl_configs": parsed["isl_osl_configs"],
@@ -273,11 +279,11 @@ def merge_model_config(
         "geak_step_limit": model_cfg.get("geak_step_limit", defaults.get("geak_step_limit", 100)),
         "kernel_opt_backends": kern_backends,
         "min_kernels": min_k,
-        "target_gpu": model_cfg.get("target_gpu", "h200"),
-        "mode": defaults.get("mode", "local"),
+        "target_gpu": model_cfg.get("target_gpu", "mi300x"),
+        "mode": defaults.get("mode", "claw"),
         "gpu_type": parsed["runner"].upper(),
-        "inferencex_path": defaults.get("inferencex_path", "/hyperloom/InferenceX"),
-        "result_dir": "/workspace/hyperloom",
+        "inferencex_path": defaults.get("inferencex_path") or (os.environ.get("NFS_ROOT", "/wekafs") + "/InferenceX"),
+        "result_dir": defaults.get("result_dir", "/workspace/hyperloom"),
         "inferenceX_benchmarks": ifx_benchmarks,
         "inferenceX_api_name": model_cfg.get("inferenceX_api_name", ""),
         "inferenceX_key": model_cfg.get("inferenceX_key", ""),
