@@ -61,8 +61,16 @@ log = logging.getLogger("optimize-submit")
 # ── Defaults ────────────────────────────────────────────────────────────────────
 
 DEFAULT_API_URL = "https://core42.primus-safe.amd.com"
-DEFAULT_WORKSPACE = "core42-hyperloom"
-DEFAULT_VOLUME = "/wekafs"
+# core42-hyperloom workspace.scopes does NOT include 'Sandbox' (by ops design).
+# SaFE optimization tasks materialize as Sandbox-typed K8s workloads, so the
+# admission webhook (vworkload.kb.io) rejects them in core42-hyperloom with
+# Primus.00003. We submit to core42-sandbox instead — the same workspace the
+# existing inference-optimization-ci.yml uses for kernel optimization.
+DEFAULT_WORKSPACE = "core42-sandbox"
+# /wekafs is mounted ReadOnlyMany in core42-sandbox, so model downloads can't
+# write there. /hyperloom is the same underlying weka volume but mounted
+# ReadWriteMany — that's where new HF models actually land.
+DEFAULT_VOLUME = "/hyperloom"
 DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
 
 # Architectures well-supported by SGLang on ROCm 7.x.
@@ -294,9 +302,23 @@ class SafeOptimizeClient:
         return resp.json() if resp.content else {}
 
     def find_model(self, repo_id: str) -> dict | None:
+        """Look up an existing SaFE Model by HF source URL, scoped to our workspace.
+
+        Filtering by workspace is critical: a sibling-workspace registration
+        (e.g. someone else registered the same HF repo in core42-hyperloom)
+        will share the same sourceURL but its status.localPaths won't have an
+        entry for *our* workspace — so POST /optimization/tasks would later
+        400 with "model X is not downloaded to workspace Y". By matching
+        within our workspace only we either find a directly usable Model or
+        fall through to register a fresh one.
+        """
         hf_url = f"https://huggingface.co/{repo_id}".rstrip("/")
+        from urllib.parse import quote
         try:
-            data = self._request("GET", "api/v1/playground/models?limit=200")
+            data = self._request(
+                "GET",
+                f"api/v1/playground/models?limit=200&workspace={quote(self.workspace)}",
+            )
         except Exception as e:
             log.warning("list models failed: %s", e)
             return None
