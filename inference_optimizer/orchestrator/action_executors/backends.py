@@ -80,57 +80,59 @@ DEFAULT_BACKENDS_GRID: list[GridVariant] = [
 #   - gpu-memory-utilization 0.90 + max-num-seqs 256 = +84% (Kimi-K2.5)
 #   - FP8 KV + max-num-seqs 512 + max-cudagraph 2048 = +4.3% (gpt-oss-120b)
 #   - FULL_AND_PIECEWISE compile is ESSENTIAL for gpt-oss (enforce-eager = -85.8%)
-DEFAULT_VLLM_BACKENDS_GRID: list[GridVariant] = [
-    # --- Memory / KV cache (biggest impact tier from marathon) ---
-    GridVariant("vllm_gpu_mem_0_90",       "--gpu-memory-utilization 0.90",
-                 note="memory"),
-    GridVariant("vllm_gpu_mem_0_92",       "--gpu-memory-utilization 0.92",
-                 note="memory"),
-    GridVariant("vllm_gpu_mem_0_95",       "--gpu-memory-utilization 0.95",
-                 note="memory"),
+# Tier 1: highest-impact variants, run first. These are the most likely to
+# produce wins based on marathon KB validated results. ~10 variants.
+_VLLM_TIER1: list[GridVariant] = [
+    # Memory + KV (marathon: +84% Kimi-K2.5 from gpu-mem + max-seqs combo)
     GridVariant("vllm_kv_fp8",             "--kv-cache-dtype fp8_e4m3",
                  note="kv_cache"),
-    GridVariant("vllm_block_size_1",       "--block-size 1",
-                 note="cache_mla"),
-    # --- Scheduling (high-concurrency wins from marathon) ---
-    GridVariant("vllm_max_seqs_256",       "--max-num-seqs 256",
-                 note="scheduling"),
+    GridVariant("vllm_gpu_mem_0_95",       "--gpu-memory-utilization 0.95",
+                 note="memory"),
     GridVariant("vllm_max_seqs_512",       "--max-num-seqs 512",
                  note="scheduling"),
-    GridVariant("vllm_max_seqs_1024",      "--max-num-seqs 1024",
-                 note="scheduling"),
-    GridVariant("vllm_batched_tokens_16k", "--max-num-batched-tokens 16384",
-                 note="prefill"),
-    GridVariant("vllm_batched_tokens_32k", "--max-num-batched-tokens 32768",
-                 note="prefill"),
-    # --- Compile / CUDA graph ---
+    # Compile (marathon: ESSENTIAL for gpt-oss, +85.8% vs enforce-eager)
     GridVariant("vllm_full_piecewise",
                  "--compilation-config '{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\","
                  "\"custom_ops\":[\"all\"]}'",
                  note="compile"),
+    GridVariant("vllm_cudagraph_2048",     "--max-cudagraph-capture-size 2048",
+                 note="cuda_graph"),
+    # AITER core (most common production toggle)
+    GridVariant("vllm_aiter_on",
+                 extra_envs={"VLLM_ROCM_USE_AITER": "1"},
+                 note="rocm_aiter"),
+    # Attention backend (new, high potential)
+    GridVariant("vllm_attn_aiter_fa",      "--attention-backend ROCM_AITER_FA",
+                 note="attention_backend"),
+    # Prefix cache off (some MoE models faster without it)
+    GridVariant("vllm_no_prefix_cache",    "--no-enable-prefix-caching",
+                 note="cache"),
+    # Batched tokens (prefill throughput)
+    GridVariant("vllm_batched_tokens_16k", "--max-num-batched-tokens 16384",
+                 note="prefill"),
+    # Max seqs high (decode throughput at high CONC)
+    GridVariant("vllm_max_seqs_1024",      "--max-num-seqs 1024",
+                 note="scheduling"),
+]
+
+# Tier 2: additional variants, run after Tier 1 if time budget allows.
+_VLLM_TIER2: list[GridVariant] = [
+    GridVariant("vllm_gpu_mem_0_90",       "--gpu-memory-utilization 0.90",
+                 note="memory"),
+    GridVariant("vllm_gpu_mem_0_92",       "--gpu-memory-utilization 0.92",
+                 note="memory"),
+    GridVariant("vllm_block_size_1",       "--block-size 1",
+                 note="cache_mla"),
+    GridVariant("vllm_max_seqs_256",       "--max-num-seqs 256",
+                 note="scheduling"),
+    GridVariant("vllm_max_seqs_128",       "--max-num-seqs 128",
+                 note="scheduling"),
+    GridVariant("vllm_batched_tokens_32k", "--max-num-batched-tokens 32768",
+                 note="prefill"),
     GridVariant("vllm_compile_off",        "--enforce-eager",
                  note="compile_off"),
     GridVariant("vllm_cudagraph_512",      "--max-cudagraph-capture-size 512",
                  note="cuda_graph"),
-    GridVariant("vllm_cudagraph_2048",     "--max-cudagraph-capture-size 2048",
-                 note="cuda_graph"),
-    # --- Prefix cache ---
-    GridVariant("vllm_no_prefix_cache",    "--no-enable-prefix-caching",
-                 note="cache"),
-    # --- Scheduling (additional) ---
-    GridVariant("vllm_max_seqs_128",       "--max-num-seqs 128",
-                 note="scheduling"),
-    # --- Attention backend ---
-    GridVariant("vllm_attn_aiter_fa",      "--attention-backend ROCM_AITER_FA",
-                 note="attention_backend"),
-    # --- ROCm-specific env toggles (marathon workload.py + KNOWLEDGE-BASE) ---
-    # NOTE: AITER sub-features (linear, rmsnorm, fp8bmm) often need to be
-    # combined with --kv-cache-dtype fp8 or each other to show gains. The
-    # grid tests them individually first; the params executor's combo round
-    # then stacks winners together for the combined effect.
-    GridVariant("vllm_aiter_on",
-                 extra_envs={"VLLM_ROCM_USE_AITER": "1"},
-                 note="rocm_aiter"),
     GridVariant("vllm_aiter_off",
                  extra_envs={"VLLM_ROCM_USE_AITER": "0"},
                  note="rocm_aiter"),
@@ -165,6 +167,11 @@ DEFAULT_VLLM_BACKENDS_GRID: list[GridVariant] = [
                  extra_envs={"VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": "1"},
                  note="rocm_kv_layout"),
 ]
+
+# Full grid = Tier 1 first, then Tier 2. Tier 1 always runs; Tier 2 runs
+# when the grid is not time-constrained. The BackendsExecutor runs the full
+# list sequentially (Tier 1 items appear first).
+DEFAULT_VLLM_BACKENDS_GRID: list[GridVariant] = _VLLM_TIER1 + _VLLM_TIER2
 
 
 # ---------------------------------------------------------------------------
