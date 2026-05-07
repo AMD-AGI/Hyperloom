@@ -42,7 +42,10 @@ on:
 jobs:
   submit:
     name: Submit to SaFE
-    runs-on: ubuntu-latest
+    # SaFE base URL (core42.primus-safe.amd.com) is not resolvable from
+    # GitHub-hosted runners. Must use the self-hosted runner that lives
+    # inside the corp network (same as inference-optimization-ci.yml).
+    runs-on: hyperloom-mh826
     timeout-minutes: 120
     env:
       # Reused secrets (already configured for inference-optimization-ci.yml).
@@ -60,13 +63,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       - name: Install dependencies
         working-directory: ci
+        # Self-hosted runner already ships with Python 3; no setup-python needed.
         run: pip install --quiet requests
 
       - name: Submit optimization tasks
@@ -115,5 +114,6 @@ jobs:
         with:
           name: submission-manifest
           path: submit-output/
-          retention-days: 90
+          # Repo cap is 45 days; explicit value avoids the auto-downgrade warning.
+          retention-days: 45
           if-no-files-found: warn
