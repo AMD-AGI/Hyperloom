@@ -393,6 +393,9 @@ log "  writing $ENV_FILE"
     echo "export GEAK_MODEL_NAME='${GEAK_MODEL_NAME_VAL}'"
     [ -n "${GEAK_BASE_URL_VAL}" ] && echo "export GEAK_BASE_URL='${GEAK_BASE_URL_VAL}'"
     [ -n "${GEAK_API_KEY_VAL}" ]  && echo "export GEAK_API_KEY='${GEAK_API_KEY_VAL}'"
+    # Skip mini-swe-agent first-time setup() prompt; GEAK reads creds from
+    # local.yaml + env, so the interactive wizard would only Abort under Ray.
+    echo "export MSWEA_CONFIGURED=true"
     echo "export INFERENCEX_PATH='${INFERENCEX_PATH:-$HYPERLOOM_BUNDLE/inference_optimization/InferenceX}'"
     echo "export SKILL_ROOT='${SKILL_ROOT:-$SKILL_ROOT_DEFAULT}'"
     echo "export NFS_BASE_PATH='${NFS_BASE_PATH}'"
