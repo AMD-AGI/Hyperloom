@@ -747,7 +747,7 @@ def submit_pr(
         if len(title_models) > 60:
             prefixes = list(dict.fromkeys(k.split("-")[0] for k in config_keys))
             title_models = ", ".join(prefixes)
-        pr_title = f"[AMD/Hyperloom] Optimize {title_models}"
+        pr_title = f"[AMD] Optimize {title_models}"
 
         if dry_run:
             log.info("=== DRY RUN ===")
@@ -763,7 +763,7 @@ def submit_pr(
         append_perf_changelog(changelog_path, config_keys, descriptions)
         any_changed = True
 
-        commit_msg = f"[Hyperloom CI] {pr_title}\n\n" + "\n".join(f"- {d}" for d in descriptions)
+        commit_msg = f"[AMD] {pr_title}\n\n" + "\n".join(f"- {d}" for d in descriptions)
         if not commit_and_push(tmpdir, branch_name, commit_msg, token):
             log.info("Nothing to push")
             return

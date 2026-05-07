@@ -19,7 +19,7 @@ warn() { echo -e "${YELLOW}[bootstrap WARN]${NC} $*"; }
 err()  { echo -e "${RED}[bootstrap ERROR]${NC} $*" >&2; }
 
 # ---------- config (env-overridable, see deploy/local/DESIGN.md) ----------
-HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
+HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/hyperloom}"
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 GEAK_BRANCH="${GEAK_BRANCH:-main}"
@@ -76,7 +76,7 @@ if ! python3 -c "import ${FRAMEWORK}" 2>/dev/null; then
     HARD_FAIL=1
 fi
 
-# WekaFS bundle layout (validated against actual /wekafs/fully-local layout)
+# WekaFS bundle layout (validated against actual /wekafs/hyperloom layout)
 for sub in OOB TraceLens-internal inference_optimization/InferenceX; do
     if [ ! -d "$HYPERLOOM_BUNDLE/$sub" ]; then
         err "WekaFS bundle missing: $HYPERLOOM_BUNDLE/$sub"

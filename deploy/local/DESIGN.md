@@ -302,7 +302,7 @@ The user-supplied image must satisfy:
 **WekaFS bundle layout** (user places Hyperloom artifacts on shared WekaFS for all GPU nodes):
 
 ```
-$HYPERLOOM_BUNDLE/                # default /wekafs/fully-local/
+$HYPERLOOM_BUNDLE/                # default /wekafs/hyperloom/
 ├── OOB/                          # OOB sources (flat: cli.py, auth_proxy.py, pyproject.toml at root)
 ├── TraceLens-internal/           # TraceLens sources
 └── inference_optimization/
@@ -447,7 +447,7 @@ In addition to Method A variables, BYOI supports:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_BUNDLE` | `/wekafs/fully-local` | **Required** — shared storage root for Hyperloom artifacts (`OOB/`, `TraceLens-internal/`, `inference_optimization/InferenceX`) |
+| `HYPERLOOM_BUNDLE` | `/wekafs/hyperloom` | **Required** — shared storage root for Hyperloom artifacts (`OOB/`, `TraceLens-internal/`, `inference_optimization/InferenceX`) |
 | `HYPERLOOM_ROOT` | `/opt/hyperloom` | Install root inside the container (OOB/TraceLens copy targets) |
 | `GEAK_REPO` | `https://github.com/AMD-AGI/GEAK.git` | GEAK Git URL |
 | `GEAK_BRANCH` | `main` | GEAK branch when `GEAK_SHA` is empty |
