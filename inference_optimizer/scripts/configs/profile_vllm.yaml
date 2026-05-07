@@ -4,6 +4,12 @@
 # TraceLens) can read. `benchmark.model` and `benchmark.runner_type` are
 # OVERRIDDEN at runtime — see baseline_sglang.yaml header for the full
 # rationale.
+#
+# TraceLens integration (#126): profiler is configured for:
+#   1. Graph capture tracing (--profiler-config.capture_torch_profiler_dir)
+#   2. Detailed annotations (--profiler-config.detailed_trace_annotation)
+#   3. Steady-state windowing (--profiler-config.delay_iterations/max_iterations)
+# These are required for TraceLens fusion / roofline analysis.
 
 benchmark:
   framework: vllm
@@ -21,6 +27,16 @@ benchmark:
     MAX_MODEL_LEN: 8192
     ROCR_VISIBLE_DEVICES: "1"
     PATH: "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    # --- Profiler: vLLM graph capture + annotations + steady-state (#126) ---
+    # These flags are appended to the vllm serve command via EXTRA_VLLM_ARGS.
+    # delay_iterations and max_iterations control the steady-state window:
+    #   delay = 5 * CONC (skip warmup); max = clamp(16 * OSL / CONC, 4, 64)
+    # Values are overridden at runtime by _materialize_config_with_envs.
+    EXTRA_VLLM_ARGS: "--profiler-config.detailed_trace_annotation True --profiler-config.ignore_frontend True"
+    # vLLM timeout must be extended during profiling (graph capture is slow)
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+    # --- Profile mode: cap prompts to reduce trace size ---
+    PROFILE: "1"
 
   gpu_selection:
     auto: false
