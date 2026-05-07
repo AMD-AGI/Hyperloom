@@ -442,6 +442,31 @@ def _preflight() -> None:
         )
         print("Preflight: Magpie installed OK")
 
+    # 3. InferenceX + lm-eval — required for accuracy evaluation (GSM8K).
+    # Magpie's benchmark scripts call `run_eval` which sources
+    # InferenceX/benchmarks/benchmark_lib.sh → _install_lm_eval_deps.
+    # We just ensure the InferenceX checkout exists; lm-eval deps are
+    # auto-installed by benchmark_lib.sh at runtime.
+    inferencex_path = os.environ.get("INFERENCEX_PATH", "")
+    if not inferencex_path:
+        workspace_root = os.environ.get("WORKSPACE_ROOT") or "/workspace"
+        # Check common mount points
+        for candidate in (
+            Path(workspace_root) / "Magpie" / "InferenceX",
+            Path("/opt/hyperloom/InferenceX"),
+            Path("/wekafs/fully-local/inference_optimization/InferenceX"),
+        ):
+            if candidate.is_dir():
+                inferencex_path = str(candidate)
+                break
+    if inferencex_path and Path(inferencex_path).is_dir():
+        os.environ.setdefault("INFERENCEX_PATH", inferencex_path)
+        print(f"Preflight: InferenceX = {inferencex_path}")
+    else:
+        print("Preflight: WARNING — InferenceX not found. GSM8K accuracy "
+              "eval will fail. Set INFERENCEX_PATH or clone Magpie with "
+              "InferenceX submodule.")
+
 
 async def _run_optimize(args: argparse.Namespace) -> int:
     _preflight()
