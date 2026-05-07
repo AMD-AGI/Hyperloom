@@ -117,13 +117,35 @@ DEFAULT_VLLM_BACKENDS_GRID: list[GridVariant] = [
     # --- Prefix cache ---
     GridVariant("vllm_no_prefix_cache",    "--no-enable-prefix-caching",
                  note="cache"),
+    # --- Scheduling (additional) ---
+    GridVariant("vllm_max_seqs_128",       "--max-num-seqs 128",
+                 note="scheduling"),
+    # --- Attention backend ---
+    GridVariant("vllm_attn_aiter_fa",      "--attention-backend ROCM_AITER_FA",
+                 note="attention_backend"),
     # --- ROCm-specific env toggles (marathon workload.py + KNOWLEDGE-BASE) ---
+    # NOTE: AITER sub-features (linear, rmsnorm, fp8bmm) often need to be
+    # combined with --kv-cache-dtype fp8 or each other to show gains. The
+    # grid tests them individually first; the params executor's combo round
+    # then stacks winners together for the combined effect.
     GridVariant("vllm_aiter_on",
                  extra_envs={"VLLM_ROCM_USE_AITER": "1"},
                  note="rocm_aiter"),
     GridVariant("vllm_aiter_off",
                  extra_envs={"VLLM_ROCM_USE_AITER": "0"},
                  note="rocm_aiter"),
+    GridVariant("vllm_aiter_linear",
+                 extra_envs={"VLLM_ROCM_USE_AITER": "1",
+                             "VLLM_ROCM_USE_AITER_LINEAR": "1"},
+                 note="rocm_aiter_linear"),
+    GridVariant("vllm_aiter_rmsnorm",
+                 extra_envs={"VLLM_ROCM_USE_AITER": "1",
+                             "VLLM_ROCM_USE_AITER_RMSNORM": "1"},
+                 note="rocm_aiter_rmsnorm"),
+    GridVariant("vllm_aiter_fp8bmm",
+                 extra_envs={"VLLM_ROCM_USE_AITER": "1",
+                             "VLLM_ROCM_USE_AITER_FP8BMM": "1"},
+                 note="rocm_aiter_fp8bmm"),
     GridVariant("vllm_aiter_fp4_asm",
                  extra_envs={"VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": "1"},
                  note="rocm_fp4"),
@@ -136,6 +158,12 @@ DEFAULT_VLLM_BACKENDS_GRID: list[GridVariant] = [
     GridVariant("vllm_buffer_ops_off",
                  extra_envs={"AMDGCN_USE_BUFFER_OPS": "0"},
                  note="rocm_buffer"),
+    GridVariant("vllm_no_scratch_reclaim",
+                 extra_envs={"HSA_NO_SCRATCH_RECLAIM": "1"},
+                 note="rocm_scratch"),
+    GridVariant("vllm_shuffle_kv_layout",
+                 extra_envs={"VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": "1"},
+                 note="rocm_kv_layout"),
 ]
 
 
