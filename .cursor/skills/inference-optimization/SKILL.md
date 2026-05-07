@@ -212,6 +212,25 @@ These are recurring errors observed in production CI runs. **Read before executi
    those. If not, apply this rule as a fallback. Failure to trace does NOT block
    execution — skip if the script is unavailable.
 
+10. **AITER JIT crash / stale batons: clear orphaned lock files before restarting SGLang.**
+    AITER guards Triton/HIP JIT compilation with file locks ("batons") under
+    `/sgl-workspace/aiter/aiter/jit/build/lock_*`. If the previous SGLang process was
+    hard-killed (SIGKILL, watchdog timeout, OOM, segfault) **during** a JIT compile,
+    the lock file remains on disk with no live owner. The next IR-4 relaunch then
+    blocks forever with `waiting for baton release at .../jit/build/lock_*` and never
+    reaches the health endpoint. After kill + GPU-memory check, verify no live
+    sglang process is legitimately compiling and clear stale locks before relaunch:
+
+    ```bash
+    pgrep -f 'python.*-m sglang.launch_server' >/dev/null || \
+      find /sgl-workspace/aiter/aiter/jit/build -maxdepth 1 -name 'lock_*' -type f -delete
+    ```
+
+    Pair the restart with a longer `--watchdog-timeout` so the watchdog does not kill
+    the new process while it is mid-JIT and is itself the legitimate baton holder.
+    Failure mode: setup/baseline phase hangs, server.log shows repeated
+    `waiting for baton release`, and no benchmark output is ever produced.
+
 ## DFS Search Tree
 
 **Phases:** SETUP → CLASSIFY → TARGET ANALYSIS (optional) → BASELINE (+ GSM8K accuracy) → PROFILE → HEURISTIC SCORING → DFS LOOP (pick highest-scored action → execute → re-score → repeat) → SWEEP → REPORT
