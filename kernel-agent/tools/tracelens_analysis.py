@@ -984,6 +984,15 @@ def main() -> int:
     parser.add_argument("--compat-report-path", default="")
     parser.add_argument("--budget-minutes", type=float, default=60.0)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--skip-split",
+        action="store_true",
+        help=(
+            "Disable TraceLens trace splitting (#127). When set, the raw "
+            "filtered trace is fed directly to TraceLens; useful for debugging "
+            "or when the splitter binary isn't available."
+        ),
+    )
     args = parser.parse_args()
 
     session_id = args.session_id or uuid.uuid4().hex[:12]
@@ -1024,16 +1033,65 @@ def main() -> int:
             if not skill.exists():
                 raise FileNotFoundError(f"TraceLens standalone skill not found: {skill}")
             append_log(log_path, f"TraceLens skill: {skill}")
+
+            tracelens_dir = run_dir / "tracelens"
+            tracelens_dir.mkdir(parents=True, exist_ok=True)
+
+            # ---- #127: split inference trace into steady-state chunks ----
+            # The filtered trace from vLLM/SGLang spans the full benchmark
+            # window (warmup + tear-down + steady-state mixed together).
+            # TraceLens's perf report expects a single steady-state chunk.
+            # Use TraceLens's own splitter to produce
+            # mixed_steady_state_*_trace.json.gz, then feed the first chunk
+            # to TraceLens_generate_perf_report_pytorch_inference. Fail-soft:
+            # if the splitter is unavailable or produces no output, fall back
+            # to the original filtered trace (legacy behaviour).
+            cli_trace_path = trace_files[0]
+            if not args.skip_split:
+                update_status(status_path, state="running", current_step="split_trace",
+                              log_path=log_path, artifact_paths=artifacts, run_id=run_id,
+                              started_at=started_at)
+                split_dir = tracelens_dir / "trace_split"
+                split_dir.mkdir(parents=True, exist_ok=True)
+                platform = (args.target_platform or "").lower() or "mi300x"
+                split_rc = run_command(
+                    [
+                        sys.executable, "-m",
+                        "TraceLens.TraceUtils.split_inference_trace_annotation",
+                        "--input", str(trace_files[0]),
+                        "--output-dir", str(split_dir),
+                        "--platform", platform,
+                    ],
+                    cwd=tl_root,
+                    log_path=log_path,
+                    timeout_s=max(60, int(args.budget_minutes * 60)),
+                )
+                steady_chunks = sorted(split_dir.glob("mixed_steady_state_*_trace.json.gz"))
+                if split_rc == 0 and steady_chunks:
+                    cli_trace_path = steady_chunks[0]
+                    artifacts["tracelens_trace_split_dir"] = str(split_dir)
+                    artifacts["tracelens_steady_state_trace"] = str(cli_trace_path)
+                    append_log(
+                        log_path,
+                        f"trace split OK: {len(steady_chunks)} steady-state chunk(s); "
+                        f"using {cli_trace_path.name} for perf report",
+                    )
+                else:
+                    append_log(
+                        log_path,
+                        f"WARNING: trace split unavailable "
+                        f"(rc={split_rc}, chunks={len(steady_chunks)}); "
+                        f"falling back to filtered trace {trace_files[0].name}",
+                    )
+
             update_status(status_path, state="running", current_step="run_tracelens_cli",
                           log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                           started_at=started_at)
-            tracelens_dir = run_dir / "tracelens"
-            tracelens_dir.mkdir(parents=True, exist_ok=True)
             csv_dir = tracelens_dir / "csvs"
             xlsx_path = tracelens_dir / "perf_report.xlsx"
             rc = run_command([
                 "TraceLens_generate_perf_report_pytorch",
-                "--profile_json_path", str(trace_files[0]),
+                "--profile_json_path", str(cli_trace_path),
                 "--output_xlsx_path", str(xlsx_path),
                 "--output_csvs_dir", str(csv_dir),
                 "--include_unlinked_kernels",
