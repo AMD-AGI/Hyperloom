@@ -15,6 +15,8 @@ on:
         default: 'manual'
 
 env:
+  SAFE_BASE_URL: ${{ secrets.SAFE_BASE_URL }}
+  NFS_ROOT: ${{ secrets.NFS_ROOT }}
   HARBOR_PREFIX: ${{ secrets.HARBOR_PREFIX }}
   KERNEL_OPT_WORKSPACE: ${{ secrets.KERNEL_OPT_WORKSPACE }}
   CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
@@ -43,7 +45,7 @@ jobs:
   optimize:
     name: "${{ matrix.key }}"
     needs: prepare
-    runs-on: hyperloom-qn7cd
+    runs-on: hyperloom-mh826
     timeout-minutes: 510
     strategy:
       fail-fast: false
@@ -52,6 +54,24 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Report latest InferenceX image versions
+        continue-on-error: true
+        run: |
+          SCRIPT="$GITHUB_WORKSPACE/inference_optimization/InferenceX/utils/check_image_versions.py"
+          for INFERENCEX_CONFIG in \
+            "${NFS_ROOT}/InferenceX/.github/configs/amd-master.yaml" \
+            /wekafs/InferenceX/.github/configs/amd-master.yaml \
+            /hyperloom/InferenceX/.github/configs/amd-master.yaml; do
+            if [ -f "$INFERENCEX_CONFIG" ]; then
+              pip install requests packaging pyyaml --quiet
+              python3 "$SCRIPT" --config-files "$INFERENCEX_CONFIG"
+              break
+            fi
+          done
+          if [ ! -f "$INFERENCEX_CONFIG" ]; then
+            echo "amd-master.yaml not found, skipping image version report"
+          fi
 
       - name: Run optimization
         working-directory: ci
@@ -64,12 +84,22 @@ jobs:
 
       - name: Upload model report
         if: always()
+        run: |
+          # Rename summary to include model key so merge-multiple doesn't overwrite it
+          KEY="${{ matrix.key }}"
+          if [ -f "${{ github.workspace }}/ci-output/ci_summary.json" ]; then
+            cp "${{ github.workspace }}/ci-output/ci_summary.json" \
+               "${{ github.workspace }}/ci-output/ci_summary_${KEY}.json"
+          fi
+
+      - name: Upload model report artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: report-${{ matrix.key }}
           path: |
             ci-output/ci_report.md
-            ci-output/ci_summary.json
+            ci-output/ci_summary_${{ matrix.key }}.json
             ci-output/github_summary.md
             ci-output/*/optimization_report.md
           retention-days: 90
@@ -98,7 +128,11 @@ jobs:
         run: |
           python3 -c "
           import json, glob, sys
-          summaries = glob.glob('${{ github.workspace }}/ci-output/ci_summary.json')
+          summaries = glob.glob('${{ github.workspace }}/ci-output/ci_summary_*.json')
+          if not summaries:
+              # fallback: single-model run — ci_summary.json present directly
+              fallback = '${{ github.workspace }}/ci-output/ci_summary.json'
+              summaries = [fallback] if __import__('os').path.exists(fallback) else []
           if not summaries:
               print('No ci_summary.json found'); sys.exit(0)
           merged = json.loads(open(summaries[0]).read())

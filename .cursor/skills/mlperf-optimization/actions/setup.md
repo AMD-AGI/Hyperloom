@@ -118,7 +118,7 @@ MCP_JSON = ".cursor/mcp.json"
 
 REQUIRED_SERVERS = {
     "oob-optimizer-dev":   "OOB Agent (Codex/Claude kernel opt)",
-    "oci-geak-agent":      "GEAK (GPU kernel opt)",
+    "geak":      "GEAK (GPU kernel opt)",
 }
 
 def _post_jsonrpc(url, method, params, auth, req_id=1):
@@ -266,7 +266,7 @@ r = json.load(open("/tmp/mcp_probe_results.json"))
 state["mcp_status"] = {name: v["status"] for name, v in r.items()}
 state["mcp_tools"] = {name: v.get("tools", []) for name, v in r.items()}
 state["oob_available"]       = r.get("oob-optimizer-dev", {}).get("status") == "ok"
-state["geak_available"]      = r.get("oci-geak-agent", {}).get("status") == "ok"
+state["geak_available"]      = r.get("geak", {}).get("status") == "ok"
 state["kernel_opt_available"] = state["oob_available"] or state["geak_available"]
 
 # TraceLens now runs via local CLI, not MCP

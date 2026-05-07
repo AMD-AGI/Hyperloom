@@ -5,7 +5,7 @@ description: Deep reference for GEAK kernel optimization in MLPerf training. Cov
 
 # GEAK — Kernel Optimization Backend
 
-GEAK backend for kernel optimization via the GEAK MCP (`oci-geak-agent`).
+GEAK backend for kernel optimization via the GEAK MCP (`geak`).
 Runs on a remote GPU pod with the Primus training image — GEAK can compile,
 benchmark, and validate kernels on-pod. Results are downloaded and verified
 locally before integration via `actions/integrate.md`.
@@ -14,8 +14,8 @@ locally before integration via `actions/integrate.md`.
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `GEAK_IMAGE` | `harbor.oci-slc.example-internal-host.invalid/sync/tasimage/primus:gpt-oss-20b_training_6.0_2026-04-07-19-47-24_dev` | Primus training image for GEAK pod |
-| `GEAK_WORKSPACE` | `control-plane-sandbox` | GEAK workspace for reliable scheduling |
+| `GEAK_IMAGE` | `harbor.core42.example-internal-host.invalid/sync/tasimage/primus:gpt-oss-20b_training_6.0_2026-04-07-19-47-24_dev` | Primus training image for GEAK pod |
+| `GEAK_WORKSPACE` | `core42-sandbox` | GEAK workspace for reliable scheduling |
 | `GEAK_STEP_LIMIT` | 100 | Max agent steps per GEAK task |
 | `GEAK_MAX_RETRIES` | 3 | Max submission retries per kernel |
 | `GEAK_MAX_SUBMISSIONS` | 25 | Total GEAK submissions budget per run |
@@ -99,14 +99,14 @@ Requires `GEAK_AUTH_KEY` — Bearer token for GEAK endpoint (configured in `.cur
 - The instruction field is `prompt`, NOT `instructions`
 - `step_limit` controls agent iterations (**use 100** — GEAK needs room to analyze, write, compile, fix errors, benchmark, and iterate. 20 is often not enough; 5 is completely insufficient)
 - `gpu_count` defaults to 1
-- **`workspace_id`**: Always specify `GEAK_WORKSPACE` (`"control-plane-sandbox"`) for reliable scheduling
+- **`workspace_id`**: Always specify `GEAK_WORKSPACE` (`"core42-sandbox"`) for reliable scheduling
 - Include ALL dependent files in the `files` array (GEAK needs self-contained code)
 
 ### Configure LLM backend
 
 ```python
 CallMcpTool(
-    server="oci-geak-agent",
+    server="geak",
     toolName="geak_set_model_config",
     arguments={"temperature": 0.3}
 )
@@ -116,7 +116,7 @@ CallMcpTool(
 
 ```python
 result = CallMcpTool(
-    server="oci-geak-agent",
+    server="geak",
     toolName="geak_create_task",
     arguments={
         "input_type": "file",
@@ -131,7 +131,7 @@ result = CallMcpTool(
 task_id = result["task_id"]
 
 CallMcpTool(
-    server="oci-geak-agent",
+    server="geak",
     toolName="geak_submit_task",
     arguments={"task_id": task_id}
 )
@@ -144,7 +144,7 @@ import time
 start = time.time()
 while (time.time() - start) < GEAK_POLL_TIMEOUT_MIN * 60:
     result = CallMcpTool(
-        server="oci-geak-agent",
+        server="geak",
         toolName="geak_get_task",
         arguments={"task_id": task_id}
     )
@@ -160,13 +160,13 @@ retry (up to `GEAK_MAX_RETRIES`).
 
 ```python
 outputs = CallMcpTool(
-    server="oci-geak-agent",
+    server="geak",
     toolName="geak_get_outputs",
     arguments={"task_id": task_id}
 )
 for f in outputs["files"]:
     CallMcpTool(
-        server="oci-geak-agent",
+        server="geak",
         toolName="geak_download_file",
         arguments={"task_id": task_id, "filename": f["name"]}
     )

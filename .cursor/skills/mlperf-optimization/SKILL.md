@@ -208,7 +208,7 @@ Connectivity is verified and auth-propagated in `actions/setup.md` Step 8.
 | Server | Name in mcp.json | Auth | Role |
 |--------|-------------------|------|------|
 | OOB Agent | `oob-optimizer-dev` | Bearer token | Kernel opt (parallel backend) |
-| GEAK | `oci-geak-agent` | Bearer token | Kernel opt (parallel backend) |
+| GEAK | `geak` | Bearer token | Kernel opt (parallel backend) |
 
 **TraceLens (local CLI):** `pip install -e /hyperloom/TraceLens-internal`. Commands:
 `TraceLens_generate_perf_report_pytorch` + `orchestrator_prepare.py`. No MCP server needed.

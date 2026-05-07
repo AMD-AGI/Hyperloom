@@ -6,6 +6,7 @@ concurrency:
     cancel-in-progress: true
 
 on:
+    workflow_dispatch:
     push:
         branches:
             - main
@@ -49,6 +50,14 @@ jobs:
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
               with:
                   fetch-depth: 0
+
+            - name: Check AMD image versions
+              continue-on-error: true
+              run: |
+                  pip install requests packaging pyyaml --quiet
+                  python3 ${GITHUB_WORKSPACE}/utils/check_image_versions.py \
+                      --config-files ${GITHUB_WORKSPACE}/.github/configs/amd-master.yaml \
+                      | tee -a $GITHUB_STEP_SUMMARY
 
             - id: setup
               run: |
