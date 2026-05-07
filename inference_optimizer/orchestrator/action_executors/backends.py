@@ -167,6 +167,76 @@ DEFAULT_VLLM_BACKENDS_GRID: list[GridVariant] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Synergy groups: pairs/triples of variants that often need to be combined
+# to see real gains. Phase 2 of BackendsExecutor tests these after phase 1
+# identifies individual winners.
+#
+# Format: each entry is a list of variant names from the grid above. If ALL
+# members of a group are present in the grid (even if they didn't individually
+# win), we generate a combo variant that stacks them all.
+#
+# The trigger condition is: at least ONE member of the group won in phase 1.
+# This way we don't blindly test all combos, only those where at least one
+# constituent showed promise.
+SYNERGY_GROUPS: list[list[str]] = [
+    # FP8 KV cache unlocks FP8BMM / aiter linear / shuffle KV layout
+    ["vllm_kv_fp8", "vllm_aiter_fp8bmm"],
+    ["vllm_kv_fp8", "vllm_aiter_linear"],
+    ["vllm_kv_fp8", "vllm_shuffle_kv_layout"],
+    # Full aiter stack (common in production tomls)
+    ["vllm_aiter_on", "vllm_aiter_linear", "vllm_aiter_rmsnorm"],
+    ["vllm_aiter_on", "vllm_aiter_linear", "vllm_aiter_rmsnorm", "vllm_aiter_fp8bmm"],
+    # aiter + kv fp8 (the most common production stack)
+    ["vllm_kv_fp8", "vllm_aiter_on", "vllm_aiter_linear", "vllm_aiter_rmsnorm", "vllm_aiter_fp8bmm"],
+    # Memory + scheduling (often co-beneficial)
+    ["vllm_gpu_mem_0_95", "vllm_max_seqs_512"],
+    ["vllm_kv_fp8", "vllm_max_seqs_512"],
+    # Compile + scheduling
+    ["vllm_full_piecewise", "vllm_cudagraph_2048"],
+]
+
+
+def _build_synergy_combos(
+    grid: list[GridVariant],
+    winner_names: set[str],
+) -> list[GridVariant]:
+    """Generate combo variants from synergy groups where at least one member won."""
+    grid_by_name = {v.name: v for v in grid}
+    combos: list[GridVariant] = []
+    seen_combo_names: set[str] = set()
+
+    for group in SYNERGY_GROUPS:
+        # All members must exist in the grid
+        if not all(name in grid_by_name for name in group):
+            continue
+        # At least one must have won in phase 1
+        if not any(name in winner_names for name in group):
+            continue
+        combo_name = "combo_" + "+".join(group)
+        if combo_name in seen_combo_names:
+            continue
+        seen_combo_names.add(combo_name)
+
+        # Merge args and envs from all group members
+        combined_args_parts: list[str] = []
+        combined_envs: dict[str, str] = {}
+        for name in group:
+            v = grid_by_name[name]
+            if v.extra_sglang_args.strip():
+                combined_args_parts.append(v.extra_sglang_args.strip())
+            combined_envs.update(v.extra_envs)
+
+        combos.append(GridVariant(
+            name=combo_name,
+            extra_sglang_args=" ".join(combined_args_parts),
+            extra_envs=combined_envs,
+            note="synergy_combo",
+        ))
+
+    return combos
+
+
 _BACKEND_KEYWORDS = (
     "backend", "enable_", "disable_", "fused", "mixed", "overlap",
     "schedule", "allreduce", "fusion",
@@ -279,6 +349,7 @@ class BackendsExecutor:
             str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower()
         )
+        # --- Phase 1: single-variable grid ---
         results = await run_grid(
             base_yaml_path=config_path,
             base_extra_args=base_extra_args,
@@ -289,8 +360,33 @@ class BackendsExecutor:
             gpu_type=resolved_gpu,
         )
         winners = pick_winners(results, baseline_tput=base_tput)
+        winner_names = {w.name for w in winners}
+
+        # --- Phase 2: synergy combos ---
+        # Many ROCm env toggles only show gains when combined (e.g.
+        # FP8BMM needs KV fp8, aiter_linear needs aiter base). After
+        # phase 1, we generate combo variants from known synergy groups
+        # and test them. This avoids underestimating stacked configs.
+        combo_results: list[VariantResult] = []
+        if len(winners) >= 1:
+            combos = _build_synergy_combos(grid, winner_names)
+            if combos:
+                log.info("backends phase 2: testing %d synergy combos",
+                         len(combos))
+                combo_results = await run_grid(
+                    base_yaml_path=config_path,
+                    base_extra_args=base_extra_args,
+                    grid=combos,
+                    output_root=output_root / "combos",
+                    variant_timeout_sec=timeout_sec,
+                    model_path=resolved_model,
+                    gpu_type=resolved_gpu,
+                )
+
+        all_results = results + combo_results
+        all_winners = pick_winners(all_results, baseline_tput=base_tput)
         best = max(
-            (r for r in results
+            (r for r in all_results
              if r.status == "succeeded"
              and isinstance(r.output_throughput, (int, float))),
             default=None,
@@ -302,15 +398,16 @@ class BackendsExecutor:
         )
 
         return {
-            "status": "succeeded" if results else "failed",
+            "status": "succeeded" if all_results else "failed",
             "base_tput": base_tput,
-            "grid_size": len(results),
-            "all_results": [r.to_dict() for r in results],
-            "winners": [w.to_dict() for w in winners],
+            "grid_size": len(all_results),
+            "all_results": [r.to_dict() for r in all_results],
+            "winners": [w.to_dict() for w in all_winners],
             "best_variant": best.to_dict() if best else None,
             "best_gain_pct": best_gain,
             "output_throughput": best.output_throughput if best else None,
             "workspace": output_root.as_posix(),
+            "phase2_combos_tested": len(combo_results),
         }
 
 
