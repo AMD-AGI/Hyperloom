@@ -205,13 +205,35 @@ mkdir -p "$INFERENCE_OPTIMIZER_SESSION_ROOT"
 
 ## Portable Preflight
 
-Before every new model run, verify the model path, GPU visibility, and duplicate
-processes. Never print tokens.
+Before every new model run, execute ALL of the following checks. Never print
+tokens. If any step fails, fix it before proceeding.
 
 ```bash
 export MODEL_PATH=/path/to/model
 test -d "$MODEL_PATH"
 
+# --- 1. Auth proxy (REQUIRED for Claude SDK / Codex CLI) ---
+# The AMD primus-safe gateway only accepts Authorization: Bearer, but the
+# Claude CLI sends x-api-key. The auth_proxy on :4002 rewrites the header.
+# Without it, every Claude SDK call exits with code 1.
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+if [ -f "$REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh" ]; then
+  bash "$REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh"
+else
+  # Fallback: check port directly
+  (echo > /dev/tcp/127.0.0.1/4002) 2>/dev/null || \
+    echo "WARNING: auth-proxy :4002 not running. Claude SDK will fail."
+fi
+
+# --- 2. Ensure ~/.claude/config.json points at the proxy ---
+if [ -f /root/.claude/config.json ]; then
+  if ! grep -q "127.0.0.1" /root/.claude/config.json; then
+    echo "WARNING: ~/.claude/config.json customApiUrl not pointing at proxy."
+    echo "Fix: set customApiUrl to http://127.0.0.1:4002/<path>"
+  fi
+fi
+
+# --- 3. GPU / torch check ---
 "$PYTHON" - <<'PY'
 import os
 try:
@@ -221,7 +243,7 @@ try:
 except Exception as exc:
     print("torch_check_error=", type(exc).__name__, str(exc)[:300])
 
-patterns = ("inference_optimizer.cli", "Magpie", "sglang.launch_server")
+patterns = ("inference_optimizer.cli", "Magpie", "sglang.launch_server", "vllm.entrypoints")
 for pid in filter(str.isdigit, os.listdir("/proc")):
     try:
         cmd = open(f"/proc/{pid}/cmdline", "rb").read()
@@ -231,6 +253,10 @@ for pid in filter(str.isdigit, os.listdir("/proc")):
     if text and any(p in text for p in patterns):
         print(f"existing_process {pid}: {text[:300]}")
 PY
+
+# --- 4. Ray + Magpie availability ---
+command -v ray >/dev/null || echo "WARNING: ray not installed (pip install ray[default]==2.44.1)"
+"$PYTHON" -c "import Magpie" 2>/dev/null || echo "WARNING: Magpie not importable"
 ```
 
 ## Benchmark Config
