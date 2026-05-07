@@ -1,0 +1,239 @@
+"""Real ``sweep`` ActionRunner — DESIGN v0.6 §16 sweep action.
+
+Mirrors marathon/skills/actions/sweep.md: full ISL/OSL/CONC sweep with
+the optimized server config to map the Pareto frontier. P2-3 keeps the
+implementation simple — relaunches sglang once per (CONC, ISL, OSL)
+combo via the same Magpie shell. A future single-server mode (one
+launch, many bench calls) is a natural follow-up if wall time becomes
+the bottleneck.
+
+Inputs (task.params):
+
+* ``config_path``      — base Magpie YAML (defaults to baseline asset)
+* ``base_extra_args``  — current best EXTRA_SGLANG_ARGS to layer in
+* ``conc_values``      — list of int CONC, default [4, 16, 64]
+* ``isl_osl_configs``  — list of "<ISL>:<OSL>" str, default ["1024:1024",
+                          "8192:1024", "1024:8192"]
+* ``num_prompts_factor`` — multiplier vs CONC (default 5; matches
+                            marathon's adaptive default for OSL ≤ 1024)
+
+Result::
+
+    status:        "succeeded" | "failed"
+    sweep_grid:    [{conc, isl, osl, output_throughput, ttft_mean_ms,
+                    e2el_mean_ms, status, workspace, error}]
+    pareto_front:  subset of sweep_grid that's not dominated
+    best_for_each_conc: dict[conc → entry with highest tput]
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+from typing import Any
+
+from ._grid_runner import GridVariant, VariantResult, run_grid, _resolve_output_root
+from .baseline import _default_baseline_config
+
+
+log = logging.getLogger(__name__)
+
+
+DEFAULT_CONC_VALUES = [4, 16, 64]
+DEFAULT_ISL_OSL = ["1024:1024", "8192:1024", "1024:8192"]
+DEFAULT_NUM_PROMPTS_FACTOR = 5
+
+
+def _build_grid(
+    *,
+    conc_values: list[int],
+    isl_osl_configs: list[str],
+    num_prompts_factor: int,
+    base_extra_args: str,
+) -> list[GridVariant]:
+    """Fan out CONC × (ISL, OSL) into per-combo Magpie variants.
+
+    Each variant overrides ``CONC`` / ``ISL`` / ``OSL`` envs in the YAML
+    so the same Magpie shell reuses our existing baseline machinery.
+    """
+    out: list[GridVariant] = []
+    for conc in conc_values:
+        num_prompts = max(int(conc) * num_prompts_factor, conc)
+        for io_cfg in isl_osl_configs:
+            try:
+                isl_str, osl_str = io_cfg.split(":", 1)
+                isl, osl = int(isl_str), int(osl_str)
+            except (ValueError, AttributeError) as exc:
+                log.warning("sweep: malformed isl_osl=%s: %s — skipping",
+                             io_cfg, exc)
+                continue
+            name = f"conc{conc}_isl{isl}_osl{osl}"
+            out.append(GridVariant(
+                name=name,
+                extra_sglang_args=base_extra_args,
+                extra_envs={
+                    "CONC":         str(conc),
+                    "ISL":          str(isl),
+                    "OSL":          str(osl),
+                    "NUM_PROMPTS":  str(num_prompts),
+                },
+                note=f"conc={conc} isl={isl} osl={osl}",
+            ))
+    return out
+
+
+def _result_dict(v: VariantResult) -> dict[str, Any]:
+    d = v.to_dict()
+    # Pull conc/isl/osl out of extra_envs so consumers don't have to
+    # parse them.
+    envs = v.extra_envs or {}
+    d["conc"] = int(envs.get("CONC", 0))
+    d["isl"] = int(envs.get("ISL", 0))
+    d["osl"] = int(envs.get("OSL", 0))
+    return d
+
+
+def _pareto_front(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Naive O(N²) Pareto for (max output_throughput, min e2el_mean_ms)."""
+    succ = [e for e in entries if e["status"] == "succeeded"
+            and isinstance(e.get("output_throughput"), (int, float))
+            and isinstance(e.get("e2el_mean_ms"), (int, float))]
+    front: list[dict[str, Any]] = []
+    for cand in succ:
+        dominated = False
+        for other in succ:
+            if other is cand:
+                continue
+            if (other["output_throughput"] >= cand["output_throughput"]
+                and other["e2el_mean_ms"] <= cand["e2el_mean_ms"]
+                and (other["output_throughput"] > cand["output_throughput"]
+                     or other["e2el_mean_ms"] < cand["e2el_mean_ms"])):
+                dominated = True
+                break
+        if not dominated:
+            front.append(cand)
+    return front
+
+
+# ---------------------------------------------------------------------------
+class SweepExecutor:
+    """ActionRunner for the ``sweep`` action."""
+
+    def __init__(
+        self,
+        *,
+        default_config_path: Path | str | None = None,
+        default_output_root: Path | str | None = None,
+        default_conc_values: list[int] | None = None,
+        default_isl_osl_configs: list[str] | None = None,
+        default_num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
+        variant_timeout_sec: int = 1200,
+    ):
+        # None = resolve at call time from $FRAMEWORK (sglang/vllm). Tests
+        # that pass an explicit fixture path keep their override.
+        self.default_config_path = (
+            Path(default_config_path) if default_config_path else None
+        )
+        self.default_output_root = Path(default_output_root or _resolve_output_root())
+        self.default_conc_values = list(default_conc_values or DEFAULT_CONC_VALUES)
+        self.default_isl_osl_configs = list(
+            default_isl_osl_configs or DEFAULT_ISL_OSL
+        )
+        self.default_num_prompts_factor = int(default_num_prompts_factor)
+        self.variant_timeout_sec = variant_timeout_sec
+
+    async def __call__(self, ctx) -> dict[str, Any]:
+        params = ctx.task.params or {}
+        config_path = Path(
+            params.get("config_path")
+            or self.default_config_path
+            or _default_baseline_config()
+        )
+        if not config_path.exists():
+            return {"status": "failed",
+                    "error_class": "missing_config",
+                    "error": f"config not found: {config_path}"}
+        output_root = Path(
+            params.get("output_dir")
+            or (self.default_output_root / f"sweep-{ctx.task.task_id[:8]}")
+        )
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        conc_values = list(params.get("conc_values") or self.default_conc_values)
+        isl_osl_configs = list(
+            params.get("isl_osl_configs") or self.default_isl_osl_configs
+        )
+        num_prompts_factor = int(
+            params.get("num_prompts_factor", self.default_num_prompts_factor)
+        )
+        base_extra_args = params.get("base_extra_args", "")
+        timeout_sec = int(params.get("variant_timeout_sec",
+                                       self.variant_timeout_sec))
+
+        grid = _build_grid(
+            conc_values=conc_values,
+            isl_osl_configs=isl_osl_configs,
+            num_prompts_factor=num_prompts_factor,
+            base_extra_args=base_extra_args,
+        )
+
+        # Resolve runtime model_path / gpu_type (task.params > $MODEL_PATH /
+        # $GPU_TYPE from CLI re-export). See baseline.py / _grid_runner.py
+        # for the rationale on why both must be threaded into every variant
+        # YAML render — yaml-level defaults would otherwise win.
+        resolved_model = (
+            str(params.get("model_path") or "").strip()
+            or os.environ.get("MODEL_PATH", "").strip()
+        )
+        resolved_gpu = (
+            str(params.get("gpu_type") or "").strip().lower()
+            or os.environ.get("GPU_TYPE", "").strip().lower()
+        )
+        results = await run_grid(
+            base_yaml_path=config_path,
+            base_extra_args="",  # sweep variants carry args themselves
+            grid=grid,
+            output_root=output_root,
+            variant_timeout_sec=timeout_sec,
+            model_path=resolved_model,
+            gpu_type=resolved_gpu,
+        )
+
+        entries = [_result_dict(v) for v in results]
+        front = _pareto_front(entries)
+
+        # Best per CONC.
+        best_for_each_conc: dict[int, dict[str, Any]] = {}
+        for e in entries:
+            if e["status"] != "succeeded":
+                continue
+            cur = best_for_each_conc.get(e["conc"])
+            if cur is None or (
+                isinstance(e.get("output_throughput"), (int, float))
+                and isinstance(cur.get("output_throughput"), (int, float))
+                and e["output_throughput"] > cur["output_throughput"]
+            ):
+                best_for_each_conc[e["conc"]] = e
+
+        return {
+            "status": "succeeded" if entries else "failed",
+            "grid_size": len(entries),
+            "sweep_grid": entries,
+            "pareto_front": front,
+            "best_for_each_conc": {str(k): v
+                                    for k, v in best_for_each_conc.items()},
+            "workspace": output_root.as_posix(),
+        }
+
+
+sweep_executor = SweepExecutor()
+
+
+__all__ = [
+    "DEFAULT_CONC_VALUES",
+    "DEFAULT_ISL_OSL",
+    "DEFAULT_NUM_PROMPTS_FACTOR",
+    "SweepExecutor",
+    "sweep_executor",
+]
