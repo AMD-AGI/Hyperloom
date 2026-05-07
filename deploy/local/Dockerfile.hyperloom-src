@@ -8,6 +8,7 @@
 #   docker push docker.io/primussafe/hyperloom-src:latest
 
 FROM scratch
+# OOB binary is stored at /wekafs/hyperloom on Core42 cluster
 COPY deploy/local/OOB /OOB/oob_cli
 COPY TraceLens-internal /TraceLens
 COPY inference_optimization/InferenceX /InferenceX
