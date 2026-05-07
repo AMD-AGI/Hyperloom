@@ -375,18 +375,89 @@ class SafeOptimizeClient:
             body["image"] = image
         return self._request("POST", "api/v1/optimization/tasks", body)
 
+    # ── Task lifecycle ──
+
+    # Lifecycle states observed in SaFE (see types.go OptimizationTaskStatus).
+    TERMINAL_TASK_STATUSES = {"Succeeded", "Failed", "Interrupted"}
+
+    def get_task(self, task_id: str) -> dict:
+        return self._request("GET", f"api/v1/optimization/tasks/{task_id}")
+
+    def wait_task_done(
+        self, task_id: str, timeout_min: int = 480, poll_s: int = 60,
+    ) -> tuple[str, dict]:
+        """Poll task until it reaches a terminal status. Returns (status, last_task_dict).
+
+        Returns ('Timeout', {}) if the deadline elapses while still Pending/Running.
+        Transient HTTP errors are logged and retried — they don't abort the wait.
+        """
+        log.info("[task %s] waiting for completion (timeout=%dm, poll=%ds)",
+                 task_id, timeout_min, poll_s)
+        deadline = time.time() + timeout_min * 60
+        last_status = ""
+        last_phase = -1
+        last_task: dict = {}
+        while time.time() < deadline:
+            try:
+                t = self.get_task(task_id)
+                last_task = t
+                status = t.get("status", "")
+                phase = t.get("currentPhase", -1)
+                if status != last_status or phase != last_phase:
+                    log.info("[task %s] status=%s phase=%s message=%s",
+                             task_id, status or "?", phase, (t.get("message") or "")[:120])
+                    last_status, last_phase = status, phase
+                if status in self.TERMINAL_TASK_STATUSES:
+                    return status, t
+            except Exception as e:
+                log.debug("[task %s] poll error (will retry): %s", task_id, e)
+            time.sleep(poll_s)
+        log.warning("[task %s] wait timed out after %dm", task_id, timeout_min)
+        return "Timeout", last_task
+
+    def list_artifacts(self, task_id: str) -> list[dict]:
+        try:
+            data = self._request("GET", f"api/v1/optimization/tasks/{task_id}/artifacts")
+        except Exception as e:
+            log.warning("[task %s] list_artifacts failed: %s", task_id, e)
+            return []
+        return data.get("items", [])
+
+    def download_artifact(self, task_id: str, path: str) -> bytes:
+        url = (f"{self.base_url}/api/v1/optimization/tasks/{task_id}/artifacts/download"
+               f"?path={requests.utils.quote(path, safe='')}")
+        resp = self._sess.get(url, timeout=120)
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"download {path} -> HTTP {resp.status_code}: {resp.text[:200]}")
+        return resp.content
+
+    def download_artifact_to(self, task_id: str, path: str, local_path: str) -> int:
+        data = self.download_artifact(task_id, path)
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        with open(local_path, "wb") as f:
+            f.write(data)
+        return len(data)
+
 
 # ── Per-model record ────────────────────────────────────────────────────────────
 
 @dataclass
 class SubmissionRecord:
     model: str
-    status: str = "pending"
+    status: str = "pending"            # local stage: submitted/dry-run/skipped/failed
     task_id: str | None = None
     display_name: str | None = None
     detected: dict | None = None
     overrides: dict = field(default_factory=dict)
     error: str | None = None
+    # Filled in by process_completion when --wait-for-completion is on.
+    final_status: str | None = None    # SaFE: Succeeded/Failed/Interrupted/Timeout
+    final_phase: int | None = None     # currentPhase at terminal moment
+    final_message: str | None = None   # task.Message
+    artifacts_dir: str | None = None   # local dir where artifacts landed
+    artifact_count: int = 0
+    artifact_files: list[str] = field(default_factory=list)
 
 
 # ── Per-model flow ──────────────────────────────────────────────────────────────
@@ -477,6 +548,124 @@ def process_model(
     return rec
 
 
+# ── Post-submission: wait for completion + collect artifacts ───────────────────
+
+# Default artifact filter — matches what SaFE prompt_builder.go forces the agent
+# to copy at end of Phase 10 (cp .../optimization_report.md .../ci_metrics.json
+# /workspace/), plus reasonable variants observed in production.
+DEFAULT_ARTIFACT_PATTERNS = (
+    "optimization_report",   # matches optimization_report.md / *-optimization_report.md / etc.
+    "ci_metrics.json",
+    "ci_summary.json",
+    "ci_report.md",
+)
+
+
+def _is_wanted_artifact(path: str, all_artifacts: bool) -> bool:
+    if all_artifacts:
+        return True
+    p = path.lower()
+    return any(pat in p for pat in DEFAULT_ARTIFACT_PATTERNS)
+
+
+def _safe_local_path(artifacts_dir: Path, task_id: str, remote_path: str) -> Path:
+    """Map a session-relative remote path to a local file path.
+
+    Strips leading slashes and normalizes separators so we never escape the
+    artifacts dir even if the remote returns absolute or '../' paths.
+    """
+    rel = remote_path.lstrip("/").replace("\\", "/")
+    parts = [seg for seg in rel.split("/") if seg and seg != ".." and seg != "."]
+    return artifacts_dir / task_id / Path(*parts) if parts else artifacts_dir / task_id / "artifact.bin"
+
+
+def wait_and_collect_one(
+    safe: SafeOptimizeClient,
+    rec: SubmissionRecord,
+    artifacts_dir: Path,
+    task_timeout_min: int,
+    poll_s: int,
+    collect: bool,
+    all_artifacts: bool,
+) -> SubmissionRecord:
+    """Wait for one task to finish, then optionally download its artifacts."""
+    if not rec.task_id:
+        return rec  # nothing to wait for (skipped/failed during submit)
+
+    final_status, last_task = safe.wait_task_done(
+        rec.task_id, timeout_min=task_timeout_min, poll_s=poll_s)
+    rec.final_status = final_status
+    rec.final_phase = last_task.get("currentPhase")
+    rec.final_message = (last_task.get("message") or "")[:500] or None
+
+    if not collect:
+        return rec
+
+    items = safe.list_artifacts(rec.task_id)
+    wanted = [it for it in items if _is_wanted_artifact(it.get("path", ""), all_artifacts)]
+    log.info("[task %s] artifacts: %d total, %d to download",
+             rec.task_id, len(items), len(wanted))
+
+    task_dir = artifacts_dir / rec.task_id
+    rec.artifacts_dir = str(task_dir)
+    for it in wanted:
+        path = it.get("path", "")
+        if not path:
+            continue
+        local = _safe_local_path(artifacts_dir, rec.task_id, path)
+        try:
+            n = safe.download_artifact_to(rec.task_id, path, str(local))
+            rec.artifact_files.append(str(local))
+            rec.artifact_count += 1
+            log.info("[task %s] saved %s (%d bytes)", rec.task_id, path, n)
+        except Exception as e:
+            log.warning("[task %s] failed to download %s: %s", rec.task_id, path, e)
+    return rec
+
+
+def process_completion(
+    safe: SafeOptimizeClient,
+    records: list[SubmissionRecord],
+    artifacts_dir: Path,
+    task_timeout_min: int,
+    poll_s: int,
+    collect: bool,
+    all_artifacts: bool,
+    parallel: int,
+) -> None:
+    """Wait + collect for all submitted records, in parallel up to ``parallel``."""
+    pending = [r for r in records if r.status == "submitted" and r.task_id]
+    if not pending:
+        log.info("no submitted tasks to wait for")
+        return
+
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    log.info("waiting for %d task(s) to finish (parallel=%d, timeout=%dm each)",
+             len(pending), parallel, task_timeout_min)
+
+    if parallel <= 1:
+        for rec in pending:
+            wait_and_collect_one(safe, rec, artifacts_dir,
+                                 task_timeout_min, poll_s, collect, all_artifacts)
+        return
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=parallel) as ex:
+        futures = {
+            ex.submit(wait_and_collect_one, safe, rec, artifacts_dir,
+                      task_timeout_min, poll_s, collect, all_artifacts): rec
+            for rec in pending
+        }
+        for fut in as_completed(futures):
+            rec = futures[fut]
+            try:
+                fut.result()  # mutates rec in place
+            except Exception as e:
+                log.exception("[task %s] unexpected wait/collect error", rec.task_id)
+                rec.final_status = rec.final_status or "Error"
+                rec.final_message = (rec.final_message or "") + f" | wait error: {e}"
+
+
 # ── Manifest ────────────────────────────────────────────────────────────────────
 
 def write_manifest(
@@ -503,20 +692,26 @@ def write_manifest(
         f"- Volume: `{volume}`",
         f"- Submitted at: {payload['submitted_at']}",
         "",
-        "| Model | Status | Task ID | Display Name | Framework | Precision | TP | Conc | Note |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| Model | Submit | Final | Phase | Task ID | Display Name | Artifacts | Note |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for r in records:
-        det = r.detected or {}
-        ov = r.overrides or {}
-        fw = ov.get("framework") or det.get("framework", "-")
-        pr = ov.get("precision") or det.get("precision", "-")
-        tp = ov.get("tp") or det.get("tp", "-")
-        cc = ov.get("concurrency") or det.get("concurrency", "-")
-        note = (r.error or "").replace("|", "\\|")[:120]
+        # Final status only meaningful when --wait-for-completion was on.
+        final = r.final_status or ("-" if r.status == "submitted" else "")
+        phase = "-" if r.final_phase is None else str(r.final_phase)
+        artifacts_cell = (
+            f"{r.artifact_count} files in `{r.artifacts_dir}`"
+            if r.artifact_count else "-"
+        )
+        note_parts = []
+        if r.error:
+            note_parts.append(r.error)
+        if r.final_message:
+            note_parts.append(r.final_message)
+        note = " \\| ".join(note_parts).replace("|", "\\|")[:200]
         md.append(
-            f"| `{r.model}` | {r.status} | `{r.task_id or '-'}` | "
-            f"{r.display_name or '-'} | {fw} | {pr} | {tp} | {cc} | {note} |"
+            f"| `{r.model}` | {r.status} | {final or '-'} | {phase} | "
+            f"`{r.task_id or '-'}` | {r.display_name or '-'} | {artifacts_cell} | {note} |"
         )
     (out_dir / "submission_manifest.md").write_text("\n".join(md) + "\n")
     log.info("manifest written to %s", out_dir)
@@ -573,6 +768,37 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Write submission_manifest.{json,md} to this dir (for CI artifacts)")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+
+    # Post-submission: wait for tasks + collect artifacts.
+    wait_group = parser.add_mutually_exclusive_group()
+    wait_group.add_argument("--wait-for-completion", dest="wait_for_completion",
+                            action="store_true", default=True,
+                            help="(default) After submitting, poll each task until it reaches "
+                                 "Succeeded/Failed/Interrupted/Timeout")
+    wait_group.add_argument("--no-wait-for-completion", dest="wait_for_completion",
+                            action="store_false",
+                            help="Fire-and-forget: exit immediately after submitting")
+
+    collect_group = parser.add_mutually_exclusive_group()
+    collect_group.add_argument("--collect-artifacts", dest="collect_artifacts",
+                               action="store_true", default=True,
+                               help="(default) Download each finished task's artifacts to "
+                                    "--artifacts-dir (implies --wait-for-completion)")
+    collect_group.add_argument("--no-collect-artifacts", dest="collect_artifacts",
+                               action="store_false",
+                               help="Skip artifact download even when waiting")
+
+    parser.add_argument("--all-artifacts", action="store_true",
+                        help=f"Download every artifact (default keeps only files matching "
+                             f"{', '.join(DEFAULT_ARTIFACT_PATTERNS)})")
+    parser.add_argument("--artifacts-dir", default="task-artifacts",
+                        help="Local directory where per-task artifacts land (default: ./task-artifacts)")
+    parser.add_argument("--task-timeout-min", type=int, default=480,
+                        help="Per-task wait timeout in minutes (default: 480 = 8h)")
+    parser.add_argument("--poll-interval-s", type=int, default=60,
+                        help="How often to poll task status, seconds (default: 60)")
+    parser.add_argument("--wait-parallel", type=int, default=8,
+                        help="How many tasks to wait for in parallel (default: 8)")
     return parser
 
 
@@ -645,19 +871,42 @@ def main() -> int:
         )
         records.append(rec)
 
+    submitted = sum(1 for r in records if r.status == "submitted")
+    submit_failed = [r for r in records if r.status == "failed"]
+    log.info("=" * 60)
+    log.info("Submitted: %d ok, %d failed, %d total",
+             submitted, len(submit_failed), len(records))
+    for r in submit_failed:
+        log.warning("  submit failed: %s — %s", r.model, r.error)
+
+    # Wait + collect (default on). Skip on dry-run since nothing was submitted.
+    if not args.dry_run and submitted > 0 and args.wait_for_completion:
+        process_completion(
+            safe, records,
+            artifacts_dir=Path(args.artifacts_dir),
+            task_timeout_min=args.task_timeout_min,
+            poll_s=args.poll_interval_s,
+            collect=args.collect_artifacts,
+            all_artifacts=args.all_artifacts,
+            parallel=args.wait_parallel,
+        )
+
+        # Per-status summary after completion.
+        from collections import Counter
+        final_counts = Counter(r.final_status or "Pending"
+                               for r in records if r.task_id)
+        log.info("=" * 60)
+        log.info("Final task statuses: %s",
+                 ", ".join(f"{k}={v}" for k, v in sorted(final_counts.items())))
+
+    # Manifest is written *after* wait/collect so it captures final_status etc.
     if args.output_dir:
         write_manifest(Path(args.output_dir), records, base_url, workspace, volume)
 
-    submitted = sum(1 for r in records if r.status == "submitted")
-    failed = [r for r in records if r.status == "failed"]
-    log.info("=" * 60)
-    log.info("Done: %d submitted, %d failed, %d total",
-             submitted, len(failed), len(records))
-    for r in failed:
-        log.warning("  failed: %s — %s", r.model, r.error)
-
     if args.dry_run:
         return 0
+    # Non-zero only when nothing was submitted at all (per user request:
+    # "完成就算成功" — partial task failures don't fail the workflow).
     return 0 if submitted > 0 else 1
 
 
