@@ -231,6 +231,8 @@ If you already have a custom image with your inference stack (specific driver bu
 - sglang or vllm installed
 - Hyperloom resource bundle mounted in the container (OOB / TraceLens / InferenceX; can live on any shared storage)
 
+> **Core42 cluster**: dependency bundle is pre-staged at `/wekafs/hyperloom` — mount it directly as `HYPERLOOM_BUNDLE`.
+
 ### How to launch
 
 ```bash
@@ -246,7 +248,7 @@ docker run -d --shm-size=16g \
   your-custom-image:latest
 ```
 
-> The image must ship with sshd. `HYPERLOOM_BUNDLE` is the in-container path to the mounted bundle (default in some setups is `/wekafs/fully-local`; set it to your real mount). Prefer a persistent volume at `/opt/hyperloom` so bootstrap state survives container recreation.
+> The image must ship with sshd. `HYPERLOOM_BUNDLE` is the in-container path to the mounted bundle (default: `/wekafs/hyperloom`). Prefer a persistent volume at `/opt/hyperloom` so bootstrap state survives container recreation.
 
 ### Workflow
 

@@ -108,7 +108,7 @@ jobs:
     name: Submit InferenceX PR
     needs: optimize
     runs-on: ubuntu-latest
-    if: always() && contains(needs.optimize.result, 'success')
+    if: always() && !cancelled()
     steps:
       - uses: actions/checkout@v4
 
