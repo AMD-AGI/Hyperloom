@@ -3,6 +3,7 @@
 
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -17,13 +18,12 @@ logging.basicConfig(
 )
 log = logging.getLogger("test")
 
-ENDPOINT = "https://oci-slc.example-internal-host.invalid/claw-api/v1"
+ENDPOINT = os.environ.get("SAFE_BASE_URL", "") + "/claw-api/v1"
 TEST_PROMPT = "Reply with exactly: HELLO_FROM_CI_TEST. Do not run any tools or commands. Just reply with that text."
 TIMEOUT = 120
 
 
 def main():
-    import os
     api_key = os.environ.get("CLAW_API_KEY")
     claw = ClawClient(ENDPOINT, api_key=api_key)
     if not api_key:

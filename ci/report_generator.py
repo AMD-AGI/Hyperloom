@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -11,12 +12,11 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-LLM_ENDPOINT = "https://oci-slc.example-internal-host.invalid/api/v1/llm-proxy/v1/chat/completions"
+LLM_ENDPOINT = os.environ.get("SAFE_BASE_URL", "") + "/api/v1/llm-proxy/v1/chat/completions"
 
 
 def _extract_metrics_via_llm(report_content: str) -> dict:
     """Use LLM to extract baseline/optimized throughput from optimization report."""
-    import os
     api_key = os.environ.get("LLM_API_KEY")
     if not api_key:
         return {}

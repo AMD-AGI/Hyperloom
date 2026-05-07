@@ -27,7 +27,7 @@
 #   CONC=64  ISL=1024  OSL=1024
 #   MODEL_PATH                — absolute path to weights (optional)
 #   IMAGE                     — GEAK container image (if empty, geak backend skipped)
-#   KERNEL_OPT_WORKSPACE=control-plane-sandbox
+#   KERNEL_OPT_WORKSPACE=core42-sandbox
 #   KERNEL_OPT_BACKENDS=geak,claude,codex
 #   DRY_RUN=0                 — 1 = preflight only, no tmux
 #   REPORT_INTERVAL_S=60      — monitor cadence
@@ -188,7 +188,7 @@ fi
 : "${OSL:=1024}"
 : "${MODEL_PATH:=}"
 : "${IMAGE:=}"
-: "${KERNEL_OPT_WORKSPACE:=control-plane-sandbox}"
+: "${KERNEL_OPT_WORKSPACE:=${SANDBOX_WORKSPACE:-}}"
 : "${KERNEL_OPT_BACKENDS:=geak,claude,codex}"
 : "${INFERENCEX_PATH:=/hyperloom/InferenceX}"
 : "${DRY_RUN:=0}"
@@ -408,19 +408,19 @@ MCP_CONFIG="$WORK_DIR/mcp.json"
 cat > "$MCP_CONFIG" <<JSON
 {
   "mcpServers": {
-    "oci-geak-agent": {
+    "geak": {
       "type": "sse",
-      "url": "https://oci-slc.example-internal-host.invalid/control-plane/control-plane-dev/geak-agent-wvsbv/mcp/sse",
+      "url": "${GEAK_MCP_URL:?GEAK_MCP_URL must be set}",
       "headers": { "Authorization": "Bearer ${SAFE_API_KEY}" }
     },
-    "oci-oob-agent": {
+    "oob": {
       "type": "sse",
-      "url": "https://oci-slc.example-internal-host.invalid/control-plane/control-plane-dev/agent-mcp-server-gpu-62tcr/sse",
+      "url": "${OOB_MCP_URL:?OOB_MCP_URL must be set}",
       "headers": { "Authorization": "Bearer ${SAFE_API_KEY}" }
     },
-    "oci-traceLens-agent": {
+    "traceLens": {
       "type": "http",
-      "url": "https://oci-slc.example-internal-host.invalid/control-plane/control-plane-dev/trace-lens-agent-qqpfv/mcp"
+      "url": "${TRACELENS_MCP_URL:?TRACELENS_MCP_URL must be set}"
     }
   }
 }
@@ -463,7 +463,7 @@ ENVEOF
 chmod 600 "$ENV_FILE"
 
 MODEL_ARG="${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-6}"
-ALLOWED_TOOLS="Bash Read Write Edit MultiEdit Glob Grep TodoWrite Task WebSearch WebFetch mcp__oci-geak-agent mcp__oci-oob-agent mcp__oci-traceLens-agent"
+ALLOWED_TOOLS="Bash Read Write Edit MultiEdit Glob Grep TodoWrite Task WebSearch WebFetch mcp__geak mcp__oob mcp__traceLens"
 
 # Compose a restart-loop pane launcher. The inner `claude --print` is one-shot;
 # outer `while` with `--continue` resumes prior conversation context indefinitely.

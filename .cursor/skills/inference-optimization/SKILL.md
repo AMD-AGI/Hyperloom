@@ -188,7 +188,23 @@ These are recurring errors observed in production CI runs. **Read before executi
 
 5. **Never call `geak_set_model_config` to change the model.** See IR-7. Only exception: tracing headers.
 
-6. **Record start/end timestamps for ALL external calls.** Before invoking
+6. **When writing entrypoint scripts, declare ALL referenced variables with defaults.**
+   If using `set -u` (or `set -uo pipefail`), every variable MUST have a default:
+   `EVAL_ONLY=${EVAL_ONLY:-false}`. Failure mode: `unbound variable` → exit 1 → job
+   fails after minutes of GPU startup, wasting the entire compilation/warmup time.
+
+7. **NEVER use `sleep` longer than 60 seconds.** The MCP bash connection has an idle
+   timeout. `sleep 900` or `sleep 1800` will trigger MCP error `-32001`, forcing a
+   reconnect cycle that wastes hours. Use a polling loop with `sleep 60` + status check
+   between each iteration. See IR-13 in `modes/CLAW.md`.
+
+8. **Skill scripts live in the sandbox, NOT on NFS.** When creating RayJob/PyTorchJob
+   entrypoints, do NOT reference sandbox paths like `/hyperloom/...` or
+   `/workspace/.skills/...` — these paths don't exist inside the GPU workload container.
+   Use `exec_on_gpu` to run scripts on an existing RayJob, or inline the script content
+   directly in the entrypoint. Failure mode: exit 127 / "file not found" at 0s.
+
+9. **Record start/end timestamps for ALL external calls** (IR-13). Before invoking
    any external component (GEAK, OOB, LLM proxy, TraceLens, or future backends),
    run `python3 $SCRIPTS_DIR/trace_action.py --component <name> --action start`.
    After the component finishes, run `--action end`. This enables per-message cost
