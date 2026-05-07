@@ -228,6 +228,28 @@ TraceLens CLI output, or artifacts written by subagents.
 If Executor requests compatibility output, also write
 `/workspace/hyperloom/standalone_analysis.md`.
 
+### Debug Mode (#78)
+
+Set `DEBUG_TRACELENS=true` (or pass `--debug-tracelens` to
+`tracelens_analysis.py`) to capture the orchestrator agent's complete event
+stream as JSONL for offline replay.
+
+When enabled, `tools/tracelens_analysis.py` reserves the artifact path
+`$WORKSPACE_PATH/kernel-agent/runs/<session_id>/tracelens/tracelens_agent_stream.jsonl`
+and exposes it under `artifact_paths.tracelens_agent_stream`. The streamJSON
+file itself is produced by the upstream `cursor-agent run --output-format
+stream-json --output-file <path>` invocation — `build_orchestrator_invocation`
+in the same module returns the corresponding argv for callers.
+
+```bash
+DEBUG_TRACELENS=true python $WORKSPACE_PATH/kernel-agent/tools/tracelens_analysis.py \
+  --trace-input "$TRACE_INPUT" --session-id "$SESSION_ID" ...
+```
+
+Each line of the resulting `tracelens_agent_stream.jsonl` is a single
+event (`type` ∈ {`system`, `assistant`, `user`, `result`}); see
+`https://cursor.com/docs/cli/reference/output-format` for schema.
+
 ## Backend Selection
 
 User-specified backends win, subject to feasibility checks. If user does not
