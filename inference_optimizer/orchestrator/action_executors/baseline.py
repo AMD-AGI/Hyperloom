@@ -120,12 +120,45 @@ def _materialize_config_with_envs(
     # while the server is still alive, avoiding an extra server restart.
     envs.setdefault("RUN_EVAL", "true")
 
-    # Adaptive NUM_PROMPTS / NUM_WARMUPS based on sequence length.
-    # Goal: keep each benchmark variant under ~3-5 min wall time.
+    # Resolve ISL/OSL/CONC early — needed by both profiler config and
+    # adaptive NUM_PROMPTS below.
     # Priority: env (CLI-exported) > yaml envs (may be yaml defaults like CONC=8).
     isl_val = int(os.environ.get("ISL") or envs.get("ISL") or 256)
     osl_val = int(os.environ.get("OSL") or envs.get("OSL") or 256)
     conc_val = int(os.environ.get("CONC") or envs.get("CONC") or 8)
+
+    # TraceLens #126: compute steady-state window for profiling configs.
+    # Only inject into profile yamls (detected by PROFILE env or
+    # torch_profiler.enabled in the yaml). The formulas match issue #126 §3.1.6.
+    is_profile = (
+        str(envs.get("PROFILE", "")).strip() == "1"
+        or (bench.get("profiler", {}).get("torch_profiler", {}).get("enabled") is True)
+    )
+    if is_profile:
+        delay_iters = 5 * conc_val
+        max_iters = max(4, min(64, 16 * osl_val // max(conc_val, 1)))
+        fw = str(bench.get("framework") or "").lower()
+        if "vllm" in fw:
+            existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
+            profiler_args = (
+                f"--profiler-config.delay_iterations {delay_iters} "
+                f"--profiler-config.max_iterations {max_iters}"
+            )
+            if "delay_iterations" not in existing_vllm_args:
+                envs["EXTRA_VLLM_ARGS"] = f"{existing_vllm_args} {profiler_args}".strip()
+        else:
+            import json as _json
+            try:
+                extra_body = _json.loads(str(envs.get("PROFILE_EXTRA_BODY", "{}")))
+            except (ValueError, TypeError):
+                extra_body = {}
+            # Always override start_step/num_steps with computed values —
+            # the yaml template has placeholder defaults for CONC=8.
+            extra_body["start_step"] = delay_iters
+            extra_body["num_steps"] = max_iters
+            extra_body.setdefault("shape_discovery", True)
+            extra_body.setdefault("roofline_annotations", True)
+            envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
     seq_cost = isl_val + osl_val
     if seq_cost <= 1024:
         factor = 10
