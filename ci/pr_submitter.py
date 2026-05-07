@@ -28,7 +28,7 @@ DEFAULT_CONFIG = CI_DIR / "ci-config.yaml"
 
 # ── LLM-based extraction (fallback when diff-based fails) ──
 
-LLM_ENDPOINT = "https://oci-slc.primus-safe.amd.com/api/v1/llm-proxy/v1/chat/completions"
+LLM_ENDPOINT = os.environ.get("SAFE_BASE_URL", "") + "/api/v1/llm-proxy/v1/chat/completions"
 
 LLM_EXTRACT_PROMPT = """\
 You are analyzing an inference optimization report. Extract the specific server
@@ -746,7 +746,7 @@ def submit_pr(
         title_models = ", ".join(config_keys)
         if len(title_models) > 60:
             prefixes = list(dict.fromkeys(k.split("-")[0] for k in config_keys))
-            title_models = ", ".join(prefixes) + " (mi355x)"
+            title_models = ", ".join(prefixes)
         pr_title = f"[AMD/Hyperloom] Optimize {title_models}"
 
         if dry_run:

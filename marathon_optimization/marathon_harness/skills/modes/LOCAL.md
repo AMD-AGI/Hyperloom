@@ -7,7 +7,7 @@ Applies when running on a single machine with direct GPU access.
 
 - **Client**: Cursor IDE
 - **Runtime**: Local GPU machine (single node)
-- **MCP Servers**: GEAK MCP, OOB Agent MCP (`oci-oob-agent`), LLM Proxy
+- **MCP Servers**: GEAK MCP, OOB Agent MCP (`oob`), LLM Proxy
 - **Storage**: Local disk (`/workspace/inference-optimization` or `/tmp`)
 
 ## Mode Detection
@@ -49,7 +49,7 @@ When `GEAK_LOCAL=true`, GEAK runs locally as a subprocess — no Docker image ne
 
 ## OOB Agents in Local Mode
 
-OOB agents (Codex, Claude) work in local mode with no extra setup. The `oci-oob-agent`
+OOB agents (Codex, Claude) work in local mode with no extra setup. The `oob`
 MCP is a remote HTTP endpoint — the agent generates code on a remote pod (no GPU), and
 the calling skill verifies locally on the machine's GPU.
 

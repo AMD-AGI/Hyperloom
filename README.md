@@ -24,7 +24,7 @@ Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintai
 
 ## Prerequisites
 
-Bind your **[LLM Gateway](https://llm.amd.com/)** key to **[Hyperloom](https://oci-slc.primus-safe.amd.com/hyperloom/)** to obtain your `AK_YOUR_API_KEY`. This key is required for both the Hyperloom UI and the local optimization workflow — it provides access to TraceLens, GEAK, and OOB services.
+Bind your **[LLM Gateway](https://llm.amd.com/)** key to **[Hyperloom](https://core42.primus-safe.amd.com/hyperloom/)** to obtain your `AK_YOUR_API_KEY`. This key is required for both the Hyperloom UI and the local optimization workflow — it provides access to TraceLens, GEAK, and OOB services.
 
 ---
 
@@ -36,7 +36,7 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 - **Data flywheel** — every optimization run feeds results back through Minio storage and Langfuse observability, creating a closed feedback loop that continuously improves the agent's knowledge base and scoring heuristics.
 - **Full MCP + Skills support** — sandboxes connect to BenchMark/RayJob, GEAK, OOB, and InferenceX via MCP (local and remote), run TraceLens profiling via local CLI, and load optimization Skills on demand, giving the agent the same profiling, kernel-rewrite, and domain-specific capabilities at cloud scale.
 
-1. Go to **[oci-slc.primus-safe.amd.com/hyperloom](https://oci-slc.primus-safe.amd.com/hyperloom/)**
+1. Go to **[core42.primus-safe.amd.com/hyperloom](https://core42.primus-safe.amd.com/hyperloom/)**
 2. Select **Claw Agent** or **Get Started** from the landing page to enter PrimusClaw
    <p align="center"><img width="500" alt="Hyperloom Landing" src="slides/hyperloom_landing.png" /></p>
 3. Hyperloom (tab): End-to-end Model Performance Optimization
@@ -77,7 +77,7 @@ Update the GEAK authorization key in `.cursor/mcp.json`:
 
 ### 2. Environment
 
-A GPU node is required to run benchmarks. You can either use a local GPU machine or request an Authoring Pod on **[Primus-SaFE](https://oci-slc.primus-safe.amd.com/authoring)**. For example, an inference optimization workload typically runs on an image like:
+A GPU node is required to run benchmarks. You can either use a local GPU machine or request an Authoring Pod on **[Primus-SaFE](https://core42.primus-safe.amd.com/authoring)**. For example, an inference optimization workload typically runs on an image like:
 
 ```bash
 docker run --rm -it --device=/dev/kfd --device=/dev/dri --group-add video \
@@ -113,7 +113,7 @@ Config: examples/megatron/configs/MI355X/gpt_oss_20B-BF16-pretrain.yaml
 
 **MLPerf Training (GPT-OSS-20B):**
 
-> **Image:** `harbor.oci-slc.primus-safe.amd.com/custom/tasimage/primus:202604070309`
+> **Image:** `harbor.core42.primus-safe.amd.com/custom/tasimage/primus:202604070309`
 >
 > Before running, configure two API keys:
 > 1. `training_optimization/mlperf/config_MI355X_1x8x1_fp8.sh` line 29 — set `HF_TOKEN` to your HuggingFace token
