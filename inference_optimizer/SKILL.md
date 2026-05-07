@@ -41,6 +41,11 @@ State lives in one session directory. Production defaults to
 
 Always prefer `state.json` and `coordinator.db` over guessing from terminal logs.
 
+Session root resolution order (in `paths.py`):
+1. `INFERENCE_OPTIMIZER_SESSION_ROOT` env → use as-is.
+2. `USER_DATA_PATH` env → `$USER_DATA_PATH/inference_optimizer-sessions`.
+3. Default `/workspace/hyperloom/inference_optimizer-sessions`.
+
 ## Setup
 
 This skill is **two commands**. Do NOT replicate setup steps inside chat —
@@ -155,7 +160,8 @@ Before a new model run, verify these fields match the environment:
 - `benchmark.envs.TP`: tensor parallel size.
 - `benchmark.envs.CONC`, `ISL`, `OSL`: workload.
 - `benchmark.envs.ROCR_VISIBLE_DEVICES`: GPU pinning.
-- `benchmark.envs.PATH`: must put `/opt/venv/bin` first.
+- `benchmark.envs.PATH`: must include the Python venv `bin/` dir first
+  (e.g. `/opt/venv/bin` when that venv exists; otherwise `$(dirname $(which python3))`).
 
 ## Framework Selection
 
@@ -477,8 +483,9 @@ budget on untested params/backend candidates or the next kernel.
 - `ANTHROPIC_AUTH_TOKEN not set`: re-source `$REPO_ROOT/kernel-agent/env.sh`.
 - `Fatal error in message reader`: retry/resume; transient Claude CLI failures
   are tolerated up to the Coordinator emergency threshold.
-- `No accelerator`: ensure Magpie subprocess PATH includes `/opt/venv/bin` and
-  use `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
+- `No accelerator`: ensure Magpie subprocess PATH includes the Python venv
+  `bin/` dir (or set `MAGPIE_PYTHON` to the correct interpreter) and use
+  `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
 - Repeated `select_kernels`: check `last_select_kernels`; if trace/config did
   not change, this is a bug. Reuse cached candidates and run optimization.
 - `correctness_passed=false`: do not integrate. Inspect the kernel-agent report;
