@@ -236,3 +236,223 @@ def test_known_rmsnorm_harness_is_registered_without_repo_root():
         "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
     )
     assert any("rmsnorm" in path.lower() for path in files)
+
+
+# ===========================================================================
+# #125 — TraceLens structured output consumption
+# (kernel_category / shape / source_path triple for GEAK)
+# ===========================================================================
+
+
+def test_125_csv_extracts_parent_op_category(tl_csv):
+    """csv parser surfaces 'Parent op category' as tracelens_category."""
+    out = tla.parse_tracelens_kernel_summary(tl_csv, top_k=10)
+    assert out is not None
+    for cand in out:
+        assert cand.get("tracelens_category") == "graph", (
+            f"missing/wrong tracelens_category on {cand['name']}: {cand}"
+        )
+
+
+def test_125_finalize_adds_kernel_category_for_attention():
+    cand = {"name": "paged_attention_ll4mi_QKV_mfma16_kernel<bf16>"}
+    assert tla.derive_kernel_category(cand) == "SDPA"
+
+
+def test_125_derive_category_explicit_wins_over_heuristic():
+    cand = {"name": "Cijk_Alik_GEMM_x", "tracelens_category": "MoE"}
+    assert tla.derive_kernel_category(cand) == "MoE"
+
+
+def test_125_derive_category_unknown_for_opaque_name():
+    cand = {"name": "ZZZ_some_opaque_thunk_42"}
+    assert tla.derive_kernel_category(cand) == "unknown"
+
+
+def test_125_derive_category_normalizations():
+    cases = [
+        ("rocblas_sgemm_kernel", "GEMM"),
+        ("flash_fmha_decode_kernel", "SDPA"),
+        ("rmsnorm_kernel<bf16>", "LayerNorm"),
+        ("act_and_mul_kernel<bf16>", "Activation"),
+        ("moe_dispatch_kernel", "MoE"),
+        ("softmax_kernel_v2", "Softmax"),
+        ("all_reduce_xgmi_kernel", "Communication"),
+    ]
+    for name, expected in cases:
+        assert tla.derive_kernel_category({"name": name}) == expected, name
+
+
+@pytest.fixture
+def tl_category_data(tmp_path: Path) -> Path:
+    """Mock TraceLens orchestrator category_data/ directory."""
+    cd = tmp_path / "category_data"
+    cd.mkdir()
+    (cd / "GEMM.json").write_text(
+        '{"category": "GEMM", "kernels": ['
+        '{"name": "Cijk_Alik_Bljk_MT256x16x64", "duration_us": 5077.2, '
+        '"call_count": 37, "shape": [16, 64, 64], "source_path": '
+        '"/sgl-workspace/aiter/csrc/kernels/gemm.cu"},'
+        '{"name": "rocblas_dgemm_kernel", "duration_us": 1200.0, '
+        '"call_count": 10, "shape": [16, 16, 512]}'
+        ']}'
+    )
+    (cd / "SDPA.json").write_text(
+        '{"name": "SDPA", "items": ['
+        '{"name": "paged_attention_ll4mi_QKV_mfma16_kernel<bf16>", '
+        '"duration_us": 889.1, "call_count": 36, '
+        '"input_shape": [1, 2048, 64], "path": '
+        '"/sgl-workspace/sglang/csrc/attention.cu"}'
+        ']}'
+    )
+    return cd
+
+
+def test_125_parses_category_data_with_full_triple(tl_category_data):
+    out = tla.parse_tracelens_category_data(tl_category_data, top_k=10)
+    assert out is not None
+    assert len(out) == 3, f"expected 3 kernels, got {len(out)}"
+    by_name = {c["name"]: c for c in out}
+
+    gemm = by_name["Cijk_Alik_Bljk_MT256x16x64"]
+    assert gemm["kernel_category"] == "GEMM"
+    assert gemm["shapes"]
+    assert gemm["source_file"] == "/sgl-workspace/aiter/csrc/kernels/gemm.cu"
+    assert gemm["source_path"] == gemm["source_file"]
+    assert gemm["duration_us"] == pytest.approx(5077.2, rel=1e-3)
+
+    sdpa = by_name["paged_attention_ll4mi_QKV_mfma16_kernel<bf16>"]
+    assert sdpa["kernel_category"] == "SDPA"
+    assert sdpa["source_file"] == "/sgl-workspace/sglang/csrc/attention.cu"
+
+
+def test_125_category_data_returns_none_when_dir_missing(tmp_path):
+    out = tla.parse_tracelens_category_data(tmp_path / "nope", top_k=10)
+    assert out is None
+
+
+def test_125_category_data_returns_none_when_dir_empty(tmp_path):
+    cd = tmp_path / "category_data"
+    cd.mkdir()
+    out = tla.parse_tracelens_category_data(cd, top_k=10)
+    assert out is None
+
+
+def test_125_category_data_handles_flat_dict_layout(tmp_path):
+    cd = tmp_path / "category_data"
+    cd.mkdir()
+    (cd / "all.json").write_text(
+        '{"GEMM": [{"name": "k1", "duration_us": 10, "shape": [1,2]}],'
+        ' "SDPA": [{"name": "k2", "duration_us": 20}]}'
+    )
+    out = tla.parse_tracelens_category_data(cd, top_k=10)
+    assert out is not None
+    assert len(out) == 2
+    by_name = {c["name"]: c for c in out}
+    assert by_name["k1"]["kernel_category"] == "GEMM"
+    assert by_name["k2"]["kernel_category"] == "SDPA"
+
+
+def test_125_category_data_skips_invalid_json(tmp_path):
+    cd = tmp_path / "category_data"
+    cd.mkdir()
+    (cd / "bad.json").write_text("not valid json{")
+    (cd / "good.json").write_text(
+        '{"category": "GEMM", "kernels": [{"name": "k1", "duration_us": 10}]}'
+    )
+    out = tla.parse_tracelens_category_data(cd, top_k=10)
+    assert out is not None
+    assert len(out) == 1
+    assert out[0]["name"] == "k1"
+
+
+def test_125_csv_carries_category_through_to_finalize(tl_csv):
+    out = tla.parse_tracelens_kernel_summary(tl_csv, top_k=10)
+    assert out is not None
+    for cand in out:
+        assert cand["tracelens_category"] == "graph"
+        assert cand["kernel_category"]
+
+
+def test_125_augment_csv_with_raw_shapes(tmp_path: Path, tl_csv):
+    """augment_csv_candidates_with_raw_shapes pulls shape from raw trace."""
+    import gzip
+    import json as _json
+
+    raw = tmp_path / "raw.json.gz"
+    with gzip.open(raw, "wt") as f:
+        _json.dump({
+            "traceEvents": [
+                {
+                    "name": "Cijk_Alik_Bljk_*MT256x16x64",
+                    "cat": "kernel",
+                    "dur": 137.22,
+                    "ts": 1,
+                    "args": {"shape": [[256, 16, 64]]},
+                },
+            ]
+        }, f)
+
+    candidates = tla.parse_tracelens_kernel_summary(tl_csv, top_k=10)
+    gemm = next(c for c in candidates if c["name"].startswith("Cijk_Alik_Bljk_*MT256x16x64"))
+    assert gemm.get("shapes") == [], "csv path should produce empty shapes pre-augment"
+
+    tla.augment_csv_candidates_with_raw_shapes(candidates, [raw])
+
+    gemm = next(c for c in candidates if c["name"].startswith("Cijk_Alik_Bljk_*MT256x16x64"))
+    assert gemm["shapes"], f"expected shape backfilled, got {gemm['shapes']}"
+
+
+def test_125_csv_no_parent_op_category_column_degrades_gracefully(tmp_path):
+    """Older TraceLens builds lack 'Parent op category' — must not crash."""
+    csv = tmp_path / "kernel_summary.csv"
+    csv.write_text(
+        "Kernel name,Kernel duration (\u00b5s)_sum,Kernel duration (\u00b5s)_count\n"
+        "my_kernel,100.0,5\n",
+        encoding="utf-8",
+    )
+    out = tla.parse_tracelens_kernel_summary(csv, top_k=10)
+    assert out is not None
+    assert len(out) == 1
+    assert out[0].get("tracelens_category", "") == ""  # field absent or empty
+    assert "kernel_category" in out[0]
+
+
+def test_125_extract_category_kernels_layouts():
+    """_extract_category_kernels handles all three observed layouts."""
+    # Layout 1: kernels array
+    out1 = tla._extract_category_kernels(
+        {"category": "GEMM", "kernels": [{"name": "k1"}]}
+    )
+    assert len(out1) == 1 and out1[0]["category"] == "GEMM"
+
+    # Layout 2: items array (alt key)
+    out2 = tla._extract_category_kernels(
+        {"name": "SDPA", "items": [{"name": "k2"}]}
+    )
+    assert len(out2) == 1 and out2[0]["category"] == "SDPA"
+
+    # Layout 3: flat dict-of-lists
+    out3 = tla._extract_category_kernels(
+        {"GEMM": [{"name": "k1"}], "SDPA": [{"name": "k2"}]}
+    )
+    assert {e["category"] for e in out3} == {"GEMM", "SDPA"}
+
+    # Layout 4: bare list
+    out4 = tla._extract_category_kernels([{"name": "k", "category": "X"}])
+    assert len(out4) == 1
+
+
+def test_125_finalize_outputs_source_path_field():
+    """_finalize_candidates exposes source_path mirror of source_file (#125)."""
+    candidates = [{
+        "name": "rmsnorm_kernel",
+        "duration_us": 100.0,
+        "call_count": 10,
+        "source_file": "/path/to/rmsnorm.cu",
+        "source_type": "hip_cpp",
+        "shapes": [[16, 1024]],
+    }]
+    out = tla._finalize_candidates(candidates, total_dur=100.0)
+    assert out[0]["source_path"] == "/path/to/rmsnorm.cu"
+    assert out[0]["kernel_category"] == "LayerNorm"
