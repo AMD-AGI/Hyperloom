@@ -464,16 +464,51 @@ def _ensure_auth_proxy_and_claude_config(safe_key: str, base_url: str) -> None:
         print(f"Preflight: ~/.claude/config.json already points at proxy")
 
 
+def _load_dotenv_fallback() -> None:
+    """Env always wins over .env. If SAFE_API_KEY or OPENAI_BASE_URL is
+    missing from os.environ, source ``$REPO_ROOT/.env`` (defaults to
+    ``os.getcwd()``) but never overwrite a key that is already in env.
+    """
+    if os.environ.get("SAFE_API_KEY") and os.environ.get("OPENAI_BASE_URL"):
+        return
+    repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
+    env_file = Path(repo_root) / ".env"
+    if not env_file.exists():
+        return
+    loaded = 0
+    for raw in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key not in os.environ:
+            os.environ[key] = value
+            loaded += 1
+    if loaded:
+        print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
+
+
 def _preflight() -> None:
     """Auto-install missing runtime deps and export auth aliases.
 
-    1. Auth aliases: SKILL.md §75-83 requires ANTHROPIC_AUTH_TOKEN,
-       ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, OPENAI_API_KEY, etc. for
-       the Claude/Codex CLIs. Users only set OPENAI_BASE_URL + SAFE_API_KEY
-       in their .env; we export the aliases here so backends work.
-    2. ray + Magpie auto-install.
+    1. Credentials fallback: env > $REPO_ROOT/.env (env always wins).
+    2. Auth aliases for Claude/Codex CLIs from SAFE_API_KEY/OPENAI_BASE_URL.
+    3. Auth-proxy + ~/.claude/config.json supervision.
+    4. ray + Magpie + InferenceX auto-install.
     """
-    # --- Auth alias export (mirrors SKILL.md LLM Environment section) ---
+    _load_dotenv_fallback()
+
+    # --- Auth alias export ---
     safe_key = os.environ.get("SAFE_API_KEY", "")
     base_url = os.environ.get("OPENAI_BASE_URL", "")
     if safe_key:
