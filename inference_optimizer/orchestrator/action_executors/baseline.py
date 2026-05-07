@@ -115,6 +115,11 @@ def _materialize_config_with_envs(
         val = os.environ.get(env_key, "").strip()
         if val:
             envs[env_key] = int(val)
+    # Always run accuracy eval (GSM8K) as part of the benchmark.
+    # Magpie's benchmark scripts check RUN_EVAL=true and call run_eval
+    # while the server is still alive, avoiding an extra server restart.
+    envs.setdefault("RUN_EVAL", "true")
+
     # Adaptive NUM_PROMPTS / NUM_WARMUPS based on sequence length.
     # Goal: keep each benchmark variant under ~3-5 min wall time.
     # Priority: env (CLI-exported) > yaml envs (may be yaml defaults like CONC=8).
@@ -302,6 +307,22 @@ class BaselineExecutor:
             "report_path": str(report_path),
             "workspace": str(workspace),
         }
+
+        # Parse accuracy eval results (GSM8K). RUN_EVAL=true was injected
+        # into the yaml so Magpie ran lm-eval while the server was still up.
+        from ._accuracy_gate import parse_eval_results
+        eval_data = parse_eval_results(workspace)
+        if eval_data.get("accuracy") is not None:
+            result["accuracy"] = eval_data["accuracy"]
+            result["accuracy_task"] = eval_data.get("task", "gsm8k")
+            result["accuracy_metric"] = eval_data.get("metric", "")
+            result["accuracy_source"] = eval_data.get("source_file", "")
+            log.info("baseline_executor: accuracy=%.4f (%s)",
+                     result["accuracy"], result["accuracy_task"])
+        else:
+            log.warning("baseline_executor: accuracy eval not found: %s",
+                        eval_data.get("error", "unknown"))
+
         log.info(
             "baseline_executor: success tput=%.1f tok/s/gpu (output) e2el=%.1fms",
             result["output_throughput"] or 0.0,
