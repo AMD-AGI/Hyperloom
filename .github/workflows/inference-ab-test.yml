@@ -1,24 +1,24 @@
-name: "Inference A/B Test: TraceLens MCP vs CLI"
+name: "Inference A/B Test"
 
 on:
   workflow_dispatch:
     inputs:
       tools_a:
-        description: 'A group: Claw tool IDs (default: current MCP-based)'
+        description: 'A group: Claw tool IDs'
         required: false
-        default: '22,23'
+        default: '67'
       label_a:
         description: 'A group label (shown in comparison table)'
         required: false
-        default: 'MCP TraceLens'
+        default: 'Baseline (no-update)'
       tools_b:
-        description: 'B group: Claw tool IDs (default: CLI-based)'
+        description: 'B group: Claw tool IDs'
         required: false
-        default: '24,25'
+        default: '67'
       label_b:
         description: 'B group label (shown in comparison table)'
         required: false
-        default: 'CLI TraceLens'
+        default: 'Latest images (--update)'
       mode:
         description: 'ab = run both A and B, single = run B only (cheaper)'
         required: false
@@ -27,12 +27,22 @@ on:
         options:
           - ab
           - single
+      update_b:
+        description: 'Run group B with --update (latest images from InferenceX)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
       models:
         description: 'Comma-separated model keys (empty = all from ci-config.yaml)'
         required: false
         default: ''
 
 env:
+  SAFE_BASE_URL: ${{ secrets.SAFE_BASE_URL }}
+  NFS_ROOT: ${{ secrets.NFS_ROOT }}
   HARBOR_PREFIX: ${{ secrets.HARBOR_PREFIX }}
   KERNEL_OPT_WORKSPACE: ${{ secrets.KERNEL_OPT_WORKSPACE }}
   CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
@@ -62,7 +72,7 @@ jobs:
     name: "A: ${{ matrix.key }}"
     needs: prepare
     if: github.event.inputs.mode != 'single'
-    runs-on: hyperloom-qn7cd
+    runs-on: hyperloom-mh826
     timeout-minutes: 510
     strategy:
       fail-fast: false
@@ -96,7 +106,7 @@ jobs:
   group-b:
     name: "B: ${{ matrix.key }}"
     needs: prepare
-    runs-on: hyperloom-qn7cd
+    runs-on: hyperloom-mh826
     timeout-minutes: 510
     strategy:
       fail-fast: false
@@ -113,7 +123,8 @@ jobs:
             --trigger "ab-test-B" \
             --models "${{ matrix.key }}" \
             --tools "${{ github.event.inputs.tools_b }}" \
-            --output-dir "${{ github.workspace }}/ci-output"
+            --output-dir "${{ github.workspace }}/ci-output" \
+            ${{ github.event.inputs.update_b == 'true' && '--update' || '' }}
 
       - name: Upload report
         if: always()
@@ -131,7 +142,7 @@ jobs:
     name: "Compare A vs B"
     needs: [group-a, group-b]
     if: always()
-    runs-on: hyperloom-qn7cd
+    runs-on: hyperloom-mh826
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -189,7 +200,7 @@ jobs:
 
           def fetch_tool_configs(tool_ids_str):
               api_key = os.environ.get("CLAW_API_KEY", "")
-              api_url = "https://oci-slc.example-internal-host.invalid/api/tools/api/v1/tools?offset=0&limit=100&order=desc"
+              api_url = os.environ.get("SAFE_BASE_URL", "") + "/api/tools/api/v1/tools?offset=0&limit=100&order=desc"
               ctx = ssl.create_default_context()
               ctx.check_hostname = False
               ctx.verify_mode = ssl.CERT_NONE
@@ -268,7 +279,7 @@ jobs:
                   lines.append(f"| {'**'+comp+'**' if is_diff else comp} | {va} | {vb} |{marker}")
               lines.append("")
           lines.append(f"| Model | A Optimized (Gain) | B Optimized (Gain) | Winner |")
-          lines.append("|-------|--------------------|--------------------|---------")
+          lines.append("|-------|--------------------|--------------------|--------|")
           for model in models:
               ra, rb = a.get(model, {}), b.get(model, {})
               a_opt, a_gain = ra.get("optimized_tok_per_gpu"), ra.get("gain_pct")

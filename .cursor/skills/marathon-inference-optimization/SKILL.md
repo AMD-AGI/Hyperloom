@@ -134,7 +134,7 @@ user must export them before invoking the skill.
 | `CONC` / `ISL` / `OSL` | `64` / `1024` / `1024` | benchmark workload |
 | `MODEL_PATH` | (empty) | absolute path to weights (optional for warm-start) |
 | `IMAGE` | (empty) | container image for GEAK; empty → geak backend skipped |
-| `KERNEL_OPT_WORKSPACE` | `control-plane-sandbox` | SaFE workspace id |
+| `KERNEL_OPT_WORKSPACE` | `core42-sandbox` | SaFE workspace id |
 | `KERNEL_OPT_BACKENDS` | `geak,claude,codex` | OOB allowlist |
 | `DRY_RUN` | 0 | `1` = preflight only, no tmux |
 | `REPORT_INTERVAL_S` | 60 | monitor cadence |
@@ -172,8 +172,8 @@ MODEL_PATH=/hyperloom/models/DeepSeek-R1-0528 \
 MAX_HOURS=2 FRAMEWORK=sglang MODEL_CLASS=moe_mla \
 GPU_COUNT=8 GPU_TYPE=MI355X TP=8 EP=1 PRECISION=fp8 \
 CONC=64 ISL=1024 OSL=1024 \
-IMAGE=harbor.oci-slc.example-internal-host.invalid/custom/lmsysorg/sglang:202603270958 \
-KERNEL_OPT_WORKSPACE=control-plane-sandbox KERNEL_OPT_BACKENDS=claude \
+IMAGE=harbor.core42.example-internal-host.invalid/custom/lmsysorg/sglang:202603270958 \
+KERNEL_OPT_WORKSPACE=core42-sandbox KERNEL_OPT_BACKENDS=claude \
 INFERENCEX_PATH=/hyperloom/InferenceX \
 bash $SKILL_ROOT/scripts/launcher/run.sh > /tmp/marathon.log 2>&1 &
 echo "marathon_pid=$!"
@@ -186,7 +186,7 @@ Same body, plus one sandbox header:
 ```
 @marathon-inference-optimization
 
-SandboxImage: harbor.oci-slc.example-internal-host.invalid/custom/lmsysorg/sglang:202603270958
+SandboxImage: harbor.core42.example-internal-host.invalid/custom/lmsysorg/sglang:202603270958
 
 STRICT=1 MODEL_NAME=... BASE_DIR=/workspace/hyperloom/... MODEL_PATH=... \
 MAX_HOURS=... (...same as above...)
