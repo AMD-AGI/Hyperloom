@@ -372,6 +372,98 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     print("===============================================")
 
 
+def _ensure_auth_proxy_and_claude_config(safe_key: str, base_url: str) -> None:
+    """Start auth-proxy on :4002 and ensure ~/.claude/config.json uses it.
+
+    The AMD primus-safe gateway rejects x-api-key (returns "token not
+    present"). Claude CLI only sends x-api-key. The auth_proxy bridges
+    the gap by rewriting to Authorization: Bearer. We must:
+    1. Start the proxy (idempotent — reuses ensure_auth_proxy.sh logic)
+    2. Point ~/.claude/config.json at the proxy, not directly at the gateway
+    """
+    import json as _json
+
+    proxy_port = int(os.environ.get("AUTH_PROXY_PORT", "4002"))
+    # Resolve upstream URL for the proxy
+    upstream_url = base_url or os.environ.get(
+        "ANTHROPIC_BASE_URL",
+        os.environ.get("OPENAI_BASE_URL", ""),
+    )
+    if not upstream_url:
+        print("Preflight: no LLM base URL set; skipping auth-proxy setup")
+        return
+
+    # 1. Start/verify auth_proxy (reuse the shell script if available)
+    proxy_script = Path(__file__).resolve().parent.parent / "kernel-agent" / "scripts" / "ensure_auth_proxy.sh"
+    if proxy_script.exists():
+        env_for_proxy = os.environ.copy()
+        env_for_proxy["OOB_BASE_URL"] = upstream_url
+        env_for_proxy["OOB_API_KEY"] = safe_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        env_for_proxy["AUTH_PROXY_PORT"] = str(proxy_port)
+        result = subprocess.run(
+            ["bash", str(proxy_script)],
+            capture_output=True, text=True, env=env_for_proxy,
+        )
+        for line in (result.stdout or "").strip().splitlines():
+            print(f"  {line}")
+        if result.returncode != 0:
+            print(f"Preflight: WARNING — ensure_auth_proxy.sh failed (rc={result.returncode})")
+            for line in (result.stderr or "").strip().splitlines()[-5:]:
+                print(f"  {line}")
+    else:
+        # Fallback: just check if port is open
+        try:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2)
+            s.connect(("127.0.0.1", proxy_port))
+            s.close()
+            print(f"Preflight: auth-proxy :4002 already open")
+        except (ConnectionRefusedError, OSError):
+            print(f"Preflight: WARNING — auth-proxy :4002 not running and "
+                  f"ensure_auth_proxy.sh not found at {proxy_script}")
+            return
+
+    # 2. Ensure ~/.claude/config.json points at the proxy, not the gateway.
+    # If customApiUrl is already pointing at 127.0.0.1:4002, leave it alone.
+    claude_config_path = Path.home() / ".claude" / "config.json"
+    proxy_base = f"http://127.0.0.1:{proxy_port}"
+    # Derive the path suffix from the upstream URL (e.g. /api/v1/llm-proxy)
+    from urllib.parse import urlparse
+    parsed = urlparse(upstream_url)
+    path_suffix = parsed.path.rstrip("/")
+    # For Anthropic SDK, strip trailing /v1 (SDK adds it back)
+    anthropic_path = path_suffix.rstrip("/v1").rstrip("/") if path_suffix.endswith("/v1") else path_suffix
+    proxy_api_url = f"{proxy_base}{anthropic_path}"
+
+    needs_update = False
+    config_data: dict = {}
+    if claude_config_path.exists():
+        try:
+            config_data = _json.loads(claude_config_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            config_data = {}
+        current_url = config_data.get("customApiUrl", "")
+        if "127.0.0.1" not in current_url and "localhost" not in current_url:
+            needs_update = True
+    else:
+        needs_update = True
+
+    if needs_update:
+        config_data.setdefault("theme", "dark")
+        config_data.setdefault("hasCompletedOnboarding", True)
+        config_data["primaryApiKey"] = safe_key or config_data.get("primaryApiKey", "")
+        config_data["customApiUrl"] = proxy_api_url
+        claude_config_path.parent.mkdir(parents=True, exist_ok=True)
+        claude_config_path.write_text(
+            _json.dumps(config_data, indent=2) + "\n", encoding="utf-8",
+        )
+        claude_config_path.chmod(0o600)
+        print(f"Preflight: updated ~/.claude/config.json customApiUrl → {proxy_api_url}")
+    else:
+        print(f"Preflight: ~/.claude/config.json already points at proxy")
+
+
 def _preflight() -> None:
     """Auto-install missing runtime deps and export auth aliases.
 
@@ -397,6 +489,12 @@ def _preflight() -> None:
     # --- Log resolved asset root (confirms ASSET_ROOT mechanism) ---
     from .paths import asset_root
     print(f"Preflight: asset_root = {asset_root()}")
+
+    # --- Ensure auth-proxy is running + ~/.claude/config.json points at it ---
+    # The AMD primus-safe gateway only accepts Authorization: Bearer, but the
+    # Claude CLI (bundled in claude_agent_sdk) sends x-api-key. The auth_proxy
+    # on :4002 rewrites the header. Without this, Claude SDK exits with code 1.
+    _ensure_auth_proxy_and_claude_config(safe_key, base_url)
 
     # --- Runtime dep install ---
     from .orchestrator.action_executors._grid_runner import _resolve_magpie_python
