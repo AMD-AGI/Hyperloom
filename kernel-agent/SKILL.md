@@ -72,8 +72,16 @@ bash $WORKSPACE_PATH/kernel-agent/scripts/install.sh
 The installer always installs everything in one shot:
 - `ray==2.44.1` + `click<8.3.0`
 - TraceLens editable install from `/wekafs/hyperloom/TraceLens-internal`
-- GEAK CLI + `geak-config/local.yaml` (model resolution: `GEAK_MODEL_NAME` /
-  `GEAK_API_KEY` / `GEAK_BASE_URL` from env)
+- GEAK CLI from `GEAK_REF` (default `v3.1.0`) + `geak-config/local.yaml`
+  (model resolution: `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL`
+  from env)
+- GEAK RAG MCP (`mcp_tools/rag-mcp`) with `tools.rag: true`; the first RAG
+  index build writes to `~/.cache/amd-ai-devtool/semantic-index/` and may
+  download the ~1.3 GB BGE embedding model
+- GEAK cross-session memory env; by default Hyperloom stores GEAK's SQLite
+  memory DB at `/wekafs/hyperloom/geak-memory/memory.db`, enables
+  `GEAK_SAVE_TO_KNOWLEDGE_BASE=1`, and aligns
+  `GEAK_MEMORY_MIN_SPEEDUP=1.20` with the KEEP gate
 - OOB CLI + claude/codex npm CLIs + `/root/.claude/config.json` /
   `/root/.codex/auth.json`
 - OOB auth-proxy on `127.0.0.1:4002` (header rewrite for the AMD LLM
@@ -168,6 +176,9 @@ Inputs:
 - Optional explicit `backends`: comma separated `geak,claude,codex`.
 - Optional `benchmark_file` or `test_harness_path`.
 - Optional E2E/accuracy evidence from Coordinator or Orchestration.
+- Optional `enable_rag: false` to pass `--disable-rag` for this request only.
+- Optional `enable_xs_memory: false` to pass `--disable-xs-memory` for this
+  request only.
 
 Run:
 
@@ -182,6 +193,9 @@ python $WORKSPACE_PATH/kernel-agent/tools/kernel_optimization.py \
 
 The tool returns optimization attempts, verification, and a proposal in one
 response. Do not split proposal generation into a third tool.
+The response always includes `rag_hits` and `xs_memory_hits` arrays for
+observability. They may be empty when GEAK does not emit structured retrieval
+metadata.
 
 If a requested backend is missing, run the matching lazy install command before
 retrying. Missing backend attempts must be recorded in `optimization_attempts.jsonl`
