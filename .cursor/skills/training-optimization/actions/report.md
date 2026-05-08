@@ -27,17 +27,42 @@ torchrun --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT \
 
 Copy the trace to `$RESULT_DIR/final_trace.json`.
 
-### Step 2: Run TraceLens comparative analysis
+### Step 2: Run TraceLens analysis on the optimized trace
 
+Run the same TraceLens analysis as `actions/profile.md` Step 5, but pointing at the final/optimized trace and a separate output directory. The baseline run's `tracelens_output/baseline/` is reused for before/after comparison.
+
+```bash
+TL_DIR="/hyperloom/TraceLens-internal"
+[ -d "/opt/TraceLens" ] && TL_DIR="/opt/TraceLens"
+if ! command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
+  if [ -d "$TL_DIR" ]; then
+    cp -r "$TL_DIR" /tmp/TraceLens-internal && TL_DIR=/tmp/TraceLens-internal
+  else
+    git clone "${TRACELENS_GIT_URL:-https://github.com/AMD-AIG-AIMA/TraceLens-internal.git}" /tmp/TraceLens-internal && TL_DIR=/tmp/TraceLens-internal
+  fi
+  pip install -e "$TL_DIR"
+fi
 ```
-Tool: run_comparative_analysis
-Arguments:
-  gpu1_kineto: $RESULT_DIR/baseline_trace.json
-  gpu2_kineto: $RESULT_DIR/final_trace.json
-  gpu1_name: "baseline"
-  gpu2_name: "optimized"
-  cleanup: false
-```
+
+Read the Analysis Orchestrator skill file `$TL_DIR/TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md` installed with TraceLens and strictly follow the instructions inside to perform the full agentic analysis workflow.
+
+Inputs for this run:
+
+| Orchestrator input | Value |
+|---|---|
+| `<trace_path>` | `$RESULT_DIR/final_trace.json` |
+| `<platform>` | `$PLATFORM` (e.g. `MI355X`) |
+| `<analysis_mode>` | `default` |
+| `<output_dir>` | `$RESULT_DIR/tracelens_output/optimized` |
+
+Requirements:
+- Strictly follow the step order in the skill file — do not skip any steps.
+- In Step 6 and Step 7, each category must be executed by an independent Task subagent to ensure context isolation.
+- Each subagent must write out the corresponding findings file (`system_findings/` or `category_findings/`).
+- Do not fabricate analysis results — all data must come from agent analysis output.
+- Write the final report to `$RESULT_DIR/tracelens_output/optimized/analysis.md`.
+
+Comparison: load `category_data/<cat>_findings.json` and `priority_data.json` from `tracelens_output/baseline/` and `tracelens_output/optimized/` and diff per-category GPU-time / efficiency to fill the "TraceLens Analysis" section of the report.
 
 ### Step 3: Write optimization report
 

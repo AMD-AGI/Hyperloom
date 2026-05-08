@@ -352,7 +352,7 @@ After profiling, unset profiler env vars inside the Ray cluster:
 exec_on_gpu "unset PROFILE SGLANG_TORCH_PROFILER_DIR VLLM_TORCH_PROFILER_DIR"
 ```
 
-Trace files on shared NFS — accessible from both Claw client and TraceLens CLI.
+Trace files on shared NFS — accessible from both Claw client and TraceLens. TraceLens analysis runs through the analysis-orchestrator skill (see `actions/profile.md` Step 2); results land at `$TRACE_DIR/tracelens_output/`.
 
 Filesystem searches for kernel source must also go through `exec_on_gpu`:
 

@@ -147,15 +147,32 @@ python3 "$SKILL_ROOT/scripts/parse_trace.py" \
 
 Outputs: `profiler_summary.json`, `categories.json`, `kernel_breakdown.json`, `geak_candidates.json`.
 
-### Step 6: TraceLens CLI — Install check and trace validation
+### Step 6: TraceLens — Install check and trace validation
 
-**Ensure TraceLens CLI is installed:**
+**Resolve `analysis_mode`.** MLPerf is Megatron/Primus pretraining, so:
+
 ```bash
-TraceLens_generate_perf_report_pytorch --help >/dev/null 2>&1 || \
-  (cp -r /hyperloom/TraceLens-internal /tmp/TraceLens-internal && pip install -e /tmp/TraceLens-internal)
+ANALYSIS_MODE=default
+PLATFORM=MI355X
+```
+
+**Ensure TraceLens is installed (with git-clone fallback):**
+
+```bash
+TL_DIR="/hyperloom/TraceLens-internal"
+[ -d "/opt/TraceLens" ] && TL_DIR="/opt/TraceLens"
+if ! command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
+  if [ -d "$TL_DIR" ]; then
+    cp -r "$TL_DIR" /tmp/TraceLens-internal && TL_DIR=/tmp/TraceLens-internal
+  else
+    git clone "${TRACELENS_GIT_URL:-https://github.com/AMD-AIG-AIMA/TraceLens-internal.git}" /tmp/TraceLens-internal && TL_DIR=/tmp/TraceLens-internal
+  fi
+  pip install -e "$TL_DIR"
+fi
 ```
 
 **Validate trace file:**
+
 ```bash
 python3 -c "
 import gzip, json, sys
@@ -170,35 +187,37 @@ except Exception as e:
 
 If validation fails, log a warning and continue with local-only analysis (Step 5). Do not block the pipeline.
 
-### Step 7: TraceLens CLI — Generate performance report and category data
+### Step 7: TraceLens analysis
 
-**Generate performance report:**
-```bash
-mkdir -p "$RESULT_DIR/tracelens_output/baseline/perf_report_csvs"
-TraceLens_generate_perf_report_pytorch \
-  --profile_json_path "$RESULT_DIR/filtered_trace.json.gz" \
-  --output_csvs_dir "$RESULT_DIR/tracelens_output/baseline/perf_report_csvs" \
-  --gpu_arch_json_path /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/utils/arch/MI355X.json \
-  --enable_pseudo_ops
-```
+This step runs the full agentic analysis workflow through TraceLens's own `analysis-orchestrator` skill. 
 
-**Prepare category data (GPU utilization, top ops, tree data, category filtering):**
-```bash
-PYTHONPATH="/hyperloom/TraceLens-internal:$PYTHONPATH" \
-python3 /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/orchestrator_prepare.py \
-  --trace-path "$RESULT_DIR/filtered_trace.json.gz" \
-  --platform MI355X \
-  --output-dir "$RESULT_DIR/tracelens_output/baseline"
-```
+Read the Analysis Orchestrator skill file `$TL_DIR/TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md` installed with TraceLens and strictly follow the instructions inside to perform the full agentic analysis workflow.
 
-**Run standalone analysis subagents:**
+Inputs for this run:
 
-Read the skill file `/hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md` and follow Steps 6-10 (system-level analysis, compute kernel analysis, validation, aggregation, and report generation) using:
-- Output directory: `$RESULT_DIR/tracelens_output/baseline`
-- Platform: `MI355X`
-- Analysis mode: `default`
+| Orchestrator input | Value |
+|---|---|
+| `<trace_path>` | `$RESULT_DIR/filtered_trace.json.gz` |
+| `<platform>` | `$PLATFORM` (e.g. `MI355X`) |
+| `<analysis_mode>` | `default` |
+| `<output_dir>` | `$RESULT_DIR/tracelens_output/baseline` |
 
-The final standalone analysis report will be at `$RESULT_DIR/tracelens_output/baseline/standalone_analysis.md`.
+Requirements:
+- Strictly follow the step order in the skill file — do not skip any steps.
+- In Step 6 and Step 7, each category must be executed by an independent Task subagent to ensure context isolation.
+- Each subagent must write out the corresponding findings file (`system_findings/` or `category_findings/`).
+- Do not fabricate analysis results — all data must come from agent analysis output.
+- Write the final report to `$RESULT_DIR/tracelens_output/baseline/analysis.md`.
+
+After completion, the following artifacts are available under `$RESULT_DIR/tracelens_output/baseline/`:
+
+- `analysis.md` — final composable report (system + compute sections)
+- `category_data/<category>_findings.json` — per-category efficiency + `impact_estimates`
+- `category_data/category_manifest.json` — GPU utilization summary (consumed in Step 8)
+- `priority_data.json` — ranked bottlenecks driving the perf-improvement plot
+- `metadata/model_info.json` — detected model architecture
+- `perf_report_csvs/` — raw CSV exports from the perf report
+- `system_findings/multi_kernel_findings.json` — comm/compute overlap + multi-kernel analysis (consumed by `comm-tuning.md`)
 
 ### Step 8: Parse TraceLens CLI Results
 
@@ -317,8 +336,8 @@ state["tracelens_latest_output"] = state["tracelens_baseline_output"]
 - Profiling crashes: lower `profile_step_end`, fewer iters.
 - Trace too large: `scripts/run_profile.sh` size-check / re-filter.
 - RPD conversion fails: `sqlite3 <file>.rpd ".tables"`; install `rocmProfileData` for `rpd2tracing`.
-- TraceLens CLI not installed: `cp -r /hyperloom/TraceLens-internal /tmp/TraceLens-internal && pip install -e /tmp/TraceLens-internal`
-- TraceLens CLI fails: fall back to Step 5 (`parse_trace.py`) only; `state["tracelens_baseline_output"] = None`; run `parse_trace.py --compute-heuristics` without `--tracelens` for category-only rules.
+- TraceLens CLI not installed: install path tried in order — `/hyperloom/TraceLens-internal`, `/opt/TraceLens`, `git clone $TRACELENS_GIT_URL /tmp/TraceLens-internal` — then `pip install -e <dir>` (see Step 6 install block).
+- TraceLens orchestrator run fails (perf report, prepare, or any subagent): fall back to Step 5 (`parse_trace.py`) only; `state["tracelens_baseline_output"] = None`; run `parse_trace.py --compute-heuristics` without `--tracelens` for category-only rules.
 - Re-profile failure → warn, skip re-profile, continue with prior kernel candidates.
 - Re-profile category deltas all < 1% → log `stable`, no prior adjustments.
 

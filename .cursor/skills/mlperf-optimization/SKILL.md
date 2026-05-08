@@ -210,9 +210,13 @@ Connectivity is verified and auth-propagated in `actions/setup.md` Step 8.
 | OOB Agent | `oob-optimizer-dev` | Bearer token | Kernel opt (parallel backend) |
 | GEAK | `geak` | Bearer token | Kernel opt (parallel backend) |
 
-**TraceLens (local CLI):** `pip install -e /hyperloom/TraceLens-internal`. Commands:
-`TraceLens_generate_perf_report_pytorch` + `orchestrator_prepare.py`. No MCP server needed.
-If the CLI is absent, the pipeline degrades to `scripts/parse_trace.py` + category-only heuristics.
+**TraceLens (local, no MCP):** the perf report and category data are produced
+by TraceLens's `analysis-orchestrator` skill at `TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md` — Hyperloom no
+longer calls `TraceLens_generate_perf_report_pytorch` or `orchestrator_prepare.py`
+directly. Install path: `/hyperloom/TraceLens-internal` → `/opt/TraceLens` →
+`git clone $TRACELENS_GIT_URL /tmp/TraceLens-internal` → `pip install -e <dir>`. No MCP
+server needed. If the CLI is absent or the orchestrator run fails, the pipeline degrades to
+`scripts/parse_trace.py` + category-only heuristics.
 
 **OOB tools:** `agent_create_task`, `agent_submit_task`, `agent_get_task`, `agent_get_outputs`,
 `agent_download_file`, `agent_cancel_task`.

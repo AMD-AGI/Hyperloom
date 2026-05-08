@@ -185,13 +185,17 @@ The agent runs the full MLPerf optimization pipeline autonomously:
 
 ## MCP Integrations
 
-**TraceLens** (local CLI, no MCP): TraceLens profiling now runs via local CLI
-(`pip install -e /hyperloom/TraceLens-internal`). Commands:
-`TraceLens_generate_perf_report_pytorch` for performance reports and
-`orchestrator_prepare.py` for category analysis. The report step runs TraceLens
-CLI on both baseline and final traces for before/after kernel breakdown. If the
-CLI is not installed, the pipeline degrades gracefully to local Python-based
-kernel analysis (`parse_trace.py`).
+**TraceLens** (local, no MCP): TraceLens analysis runs by reading TraceLens's own
+`analysis-orchestrator` skill at `TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md`
+and following the full agentic analysis workflow it defines, which internally
+produces the perf report and category data and runs the system / compute subagents.
+Hyperloom no longer drives `TraceLens_generate_perf_report_pytorch`
+or `orchestrator_prepare.py` directly. Install path tried in order:
+`/hyperloom/TraceLens-internal` → `/opt/TraceLens` → `git clone $TRACELENS_GIT_URL
+/tmp/TraceLens-internal` → `pip install -e <dir>`. The report step runs the same
+analysis on both baseline and final traces for before/after kernel breakdown. If the
+CLI is not installed or the orchestrator run fails, the pipeline degrades gracefully
+to local Python-based kernel analysis (`parse_trace.py`).
 
 **GEAK** (`oci-geak-agent`, Bearer token), **OOB-Claude** and **OOB-Codex**
 (`oob-optimizer-dev`, Bearer token): three parallel kernel optimization backends.

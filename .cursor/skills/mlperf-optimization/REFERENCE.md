@@ -391,7 +391,7 @@ PROCEDURE optimize():
 
   6. PROFILE + TRACELENS
      → Execute actions/profile.md (Tier 1 with profiling enabled)
-     → Populate kernel_candidates; run TraceLens CLI (MANDATORY)
+     → Populate kernel_candidates; run the TraceLens analysis-orchestrator (MANDATORY, see actions/profile.md Step 7)
      → Compute baseline_loss_efficiency and baseline_projected_ttt from baseline Tier 4 log
      → === REVIEW CHECKPOINT RC-3 ===
 

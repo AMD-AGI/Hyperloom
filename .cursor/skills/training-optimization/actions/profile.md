@@ -82,44 +82,60 @@ for name, t in kernel_time.items():
         categories["other"] += pct
 ```
 
-### Step 5: REQUIRED — TraceLens analysis (CLI)
+### Step 5: REQUIRED — TraceLens analysis
 
-TraceLens is **mandatory** for every profile. Use the TraceLens CLI tools directly.
+TraceLens is **mandatory** for every profile. This step runs the full agentic analysis workflow through TraceLens's own `analysis-orchestrator` skill. Do not call `TraceLens_generate_perf_report_pytorch*` or `orchestrator_prepare.py` directly — the orchestrator runs them internally.
 
-**Ensure TraceLens CLI is installed:**
+**Resolve `analysis_mode`.** Training-optimization runs Megatron/Primus pretraining, so:
+
 ```bash
-TraceLens_generate_perf_report_pytorch --help >/dev/null 2>&1 || \
-  (cp -r /hyperloom/TraceLens-internal /tmp/TraceLens-internal && pip install -e /tmp/TraceLens-internal)
+ANALYSIS_MODE=default   # uses TraceLens_generate_perf_report_pytorch internally
+PLATFORM=MI355X         # adjust to actual GPU
 ```
 
-**Generate performance report:**
+**Ensure TraceLens is installed (with git-clone fallback):**
+
 ```bash
-mkdir -p "$RESULT_DIR/tracelens_output/baseline"
-TraceLens_generate_perf_report_pytorch \
-  --profile_json_path "$TRACE_FILE" \
-  --output_xlsx_path "$RESULT_DIR/tracelens_output/baseline/perf_report.xlsx" \
-  --output_csvs_dir "$RESULT_DIR/tracelens_output/baseline/perf_report_csvs" \
-  --gpu_arch_json_path /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/utils/arch/MI355X.json \
-  --enable_pseudo_ops \
-  --group_by_num_kernels
+TL_DIR="/hyperloom/TraceLens-internal"
+[ -d "/opt/TraceLens" ] && TL_DIR="/opt/TraceLens"
+if ! command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
+  if [ -d "$TL_DIR" ]; then
+    cp -r "$TL_DIR" /tmp/TraceLens-internal && TL_DIR=/tmp/TraceLens-internal
+  else
+    git clone "${TRACELENS_GIT_URL:-https://github.com/AMD-AIG-AIMA/TraceLens-internal.git}" /tmp/TraceLens-internal && TL_DIR=/tmp/TraceLens-internal
+  fi
+  pip install -e "$TL_DIR"
+fi
 ```
 
-**Prepare category data (GPU utilization, top ops, tree data, category filtering):**
-```bash
-python3 /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/orchestrator_prepare.py \
-  --trace-path "$TRACE_FILE" \
-  --platform MI355X \
-  --output-dir "$RESULT_DIR/tracelens_output/baseline"
-```
+**Run the analysis orchestrator:**
 
-**Run standalone analysis subagents:**
+Read the Analysis Orchestrator skill file `$TL_DIR/TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md` installed with TraceLens and strictly follow the instructions inside to perform the full agentic analysis workflow.
 
-Read the skill file `/hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md` and follow Steps 6–10 (system-level analysis, compute kernel analysis, validation, aggregation, and report generation) using:
-- Output directory: `$RESULT_DIR/tracelens_output/baseline`
-- Platform: `MI355X`
-- Analysis mode: `default`
+Inputs for this run:
 
-The final standalone analysis report will be at `$RESULT_DIR/tracelens_output/baseline/standalone_analysis.md`.
+| Orchestrator input | Value |
+|---|---|
+| `<trace_path>` | `$TRACE_FILE` |
+| `<platform>` | `$PLATFORM` (e.g. `MI355X`) |
+| `<analysis_mode>` | `default` |
+| `<output_dir>` | `$RESULT_DIR/tracelens_output/baseline` |
+
+Requirements:
+- Strictly follow the step order in the skill file — do not skip any steps.
+- In Step 6 and Step 7, each category must be executed by an independent Task subagent to ensure context isolation.
+- Each subagent must write out the corresponding findings file (`system_findings/` or `category_findings/`).
+- Do not fabricate analysis results — all data must come from agent analysis output.
+- Write the final report to `$RESULT_DIR/tracelens_output/baseline/analysis.md`.
+
+After completion, the following artifacts are available under `$RESULT_DIR/tracelens_output/baseline/`:
+
+- `analysis.md` — final composable report (system + compute sections)
+- `category_data/<category>_findings.json` — per-category efficiency + `impact_estimates`
+- `priority_data.json` — ranked bottlenecks driving the perf-improvement plot
+- `metadata/model_info.json` — detected model architecture
+- `perf_report.xlsx` + `perf_report_csvs/` — raw perf report
+- `system_findings/` — CPU/idle + multi-kernel findings
 
 ### Step 6: Identify GEAK candidates
 
@@ -172,5 +188,5 @@ if categories["elementwise"] > 5:
 ## Failure Handling
 - If no trace produced: check profile=true was set, check output directory
 - If trace too large: filter using `scripts/common.sh:filter_trace()`
-- TraceLens CLI not installed: copy to `/tmp` and install (`cp -r /hyperloom/TraceLens-internal /tmp/ && pip install -e /tmp/TraceLens-internal`)
-- TraceLens CLI fails: fall back to manual kernel analysis (Step 3)
+- TraceLens CLI not installed: install path tried in order — `/hyperloom/TraceLens-internal`, `/opt/TraceLens`, `git clone $TRACELENS_GIT_URL /tmp/TraceLens-internal` — then `pip install -e <dir>` (see Step 5 install block).
+- TraceLens orchestrator run fails (perf report, prepare, or any subagent): fall back to manual kernel analysis (Step 3); GEAK candidates from Step 6 still derive from raw trace parsing.

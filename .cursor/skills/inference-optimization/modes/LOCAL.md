@@ -281,16 +281,9 @@ cancellation of the underlying Ray task and agent subprocess, and return rc=130.
 
 ## TraceLens in Local Mode
 
-TraceLens is a CLI tool with no persistent service. Use directly:
+TraceLens is invoked by reading its `analysis-orchestrator` skill at `TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md` and following the full agentic analysis workflow it defines. The orchestrator handles perf-report generation, category data preparation, and all subagents internally. Hyperloom does NOT call `TraceLens_generate_perf_report_pytorch*` or `orchestrator_prepare.py` directly.
 
-```bash
-# Generate performance report
-TraceLens_generate_perf_report_pytorch_inference \
-  --trace-file "$TRACE_DIR/$FILTERED_TRACE_NAME" \
-  --output-dir "$RESULT_DIR/tracelens"
-
-# Other TraceLens CLI commands available via pip install
-```
+See [`../actions/profile.md`](../actions/profile.md) Step 2 for the full block (analysis_mode resolution, install/git-clone fallback, orchestrator inputs, output artifacts).
 
 ---
 
@@ -332,13 +325,7 @@ bash "$SCRIPTS_DIR/run_baseline.sh"
 bash "$SCRIPTS_DIR/run_profile.sh"
 ```
 
-Trace files written to `$TRACE_DIR`. TraceLens analyzes locally:
-
-```bash
-TraceLens_generate_perf_report_pytorch_inference \
-  --trace-file "$TRACE_DIR/$FILTERED_TRACE_NAME" \
-  --output-dir "$RESULT_DIR/tracelens"
-```
+Trace files written to `$TRACE_DIR`. TraceLens runs through the analysis-orchestrator skill — see `actions/profile.md` Step 2. Output lands at `$TRACE_DIR/tracelens_output/`.
 
 ### Kernel Optimization (`actions/kernel-opt.md`)
 

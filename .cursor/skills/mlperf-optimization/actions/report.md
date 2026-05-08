@@ -122,59 +122,80 @@ fallback → `filter_trace` pipeline from profile.md with these variable values.
 gzip/validation steps that are specific to the baseline run; Step 5 below re-gzips and
 validates the final trace on demand.
 
-### Step 5: TraceLens CLI Comparative Analysis
+### Step 5: TraceLens Comparative Analysis
 
-If both baseline and final traces exist, run TraceLens CLI on the final trace and compare against the baseline analysis; otherwise skip and note unavailability in the report.
+If both baseline and final traces exist, run a second TraceLens analysis on the final trace and compare against the baseline analysis from `actions/profile.md` Step 7; otherwise skip and note unavailability in the report.
 
-**Ensure TraceLens CLI is installed:**
+**Ensure TraceLens is installed (with git-clone fallback):**
+
 ```bash
-TraceLens_generate_perf_report_pytorch --help >/dev/null 2>&1 || \
-  (cp -r /hyperloom/TraceLens-internal /tmp/TraceLens-internal && pip install -e /tmp/TraceLens-internal)
-```
+TL_DIR="/hyperloom/TraceLens-internal"
+[ -d "/opt/TraceLens" ] && TL_DIR="/opt/TraceLens"
+if ! command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
+  if [ -d "$TL_DIR" ]; then
+    cp -r "$TL_DIR" /tmp/TraceLens-internal && TL_DIR=/tmp/TraceLens-internal
+  else
+    git clone "${TRACELENS_GIT_URL:-https://github.com/AMD-AIG-AIMA/TraceLens-internal.git}" /tmp/TraceLens-internal && TL_DIR=/tmp/TraceLens-internal
+  fi
+  pip install -e "$TL_DIR"
+fi
 
-**Run TraceLens CLI on final trace:**
-```bash
 gzip -kf "$RESULT_DIR/final_filtered_trace.json" 2>/dev/null || true
-
-mkdir -p "$RESULT_DIR/tracelens_output/final/perf_report_csvs"
-TraceLens_generate_perf_report_pytorch \
-  --profile_json_path "$RESULT_DIR/final_filtered_trace.json.gz" \
-  --output_csvs_dir "$RESULT_DIR/tracelens_output/final/perf_report_csvs" \
-  --gpu_arch_json_path /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/utils/arch/MI355X.json \
-  --enable_pseudo_ops
-
-PYTHONPATH="/hyperloom/TraceLens-internal:$PYTHONPATH" \
-python3 /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/orchestrator_prepare.py \
-  --trace-path "$RESULT_DIR/final_filtered_trace.json.gz" \
-  --platform MI355X \
-  --output-dir "$RESULT_DIR/tracelens_output/final"
 ```
 
-**Compare baseline vs final:**
+**Run the analysis orchestrator on the final trace:**
+
+Read the Analysis Orchestrator skill file `$TL_DIR/TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md` installed with TraceLens and strictly follow the instructions inside to perform the full agentic analysis workflow.
+
+Inputs for this run:
+
+| Orchestrator input | Value |
+|---|---|
+| `<trace_path>` | `$RESULT_DIR/final_filtered_trace.json.gz` |
+| `<platform>` | `$PLATFORM` (e.g. `MI355X`) |
+| `<analysis_mode>` | `default` |
+| `<output_dir>` | `$RESULT_DIR/tracelens_output/final` |
+
+Requirements:
+- Strictly follow the step order in the skill file — do not skip any steps.
+- In Step 6 and Step 7, each category must be executed by an independent Task subagent to ensure context isolation.
+- Each subagent must write out the corresponding findings file (`system_findings/` or `category_findings/`).
+- Do not fabricate analysis results — all data must come from agent analysis output.
+- Write the final report to `$RESULT_DIR/tracelens_output/final/analysis.md`.
+
+**Compare baseline vs final using structured outputs (no raw-trace re-parsing):**
+
 ```python
-import json, csv, os
+import json, os
 
-def load_gpu_timeline(tl_dir):
-    path = os.path.join(tl_dir, "perf_report_csvs", "gpu_timeline.csv")
-    if not os.path.exists(path):
-        return {}
-    with open(path) as f:
-        return {row["type"]: float(row["percent"]) for row in csv.DictReader(f)}
+def load_category_findings(tl_dir):
+    """Load per-category findings JSON written by orchestrator Step 7."""
+    cat_dir = os.path.join(tl_dir, "category_data")
+    out = {}
+    if not os.path.isdir(cat_dir):
+        return out
+    for fname in os.listdir(cat_dir):
+        if not fname.endswith("_findings.json"):
+            continue
+        cat = fname.replace("_findings.json", "")
+        with open(os.path.join(cat_dir, fname)) as f:
+            out[cat] = json.load(f)
+    return out
 
-def load_category_summary(tl_dir):
-    path = os.path.join(tl_dir, "perf_report_csvs", "ops_summary_by_category.csv")
-    if not os.path.exists(path):
-        return {}
-    with open(path) as f:
-        return {row["op category"]: float(row["Percentage (%)"]) for row in csv.DictReader(f)}
+def load_manifest(tl_dir):
+    """GPU utilization summary written by orchestrator Steps 2-5."""
+    path = os.path.join(tl_dir, "category_data", "category_manifest.json")
+    return json.load(open(path)) if os.path.exists(path) else {}
 
 baseline_dir = f"{RESULT_DIR}/tracelens_output/baseline"
-final_dir = f"{RESULT_DIR}/tracelens_output/final"
+final_dir    = f"{RESULT_DIR}/tracelens_output/final"
 
-baseline_timeline = load_gpu_timeline(baseline_dir)
-final_timeline = load_gpu_timeline(final_dir)
-baseline_cats = load_category_summary(baseline_dir)
-final_cats = load_category_summary(final_dir)
+baseline_cats     = load_category_findings(baseline_dir)
+final_cats        = load_category_findings(final_dir)
+baseline_manifest = load_manifest(baseline_dir)
+final_manifest    = load_manifest(final_dir)
+
+# Per-category GPU% delta drives the "TraceLens Analysis" table in the report.
 ```
 
 ### Step 6: Write optimization report

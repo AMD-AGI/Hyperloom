@@ -126,18 +126,43 @@ run_mlperf_trial "overlap_verify" 1 10
 ```bash
 gzip -kf "$RESULT_DIR/overlap_verify_filtered.json" 2>/dev/null || true
 
-mkdir -p "$RESULT_DIR/tracelens_output/overlap_verify/perf_report_csvs"
-TraceLens_generate_perf_report_pytorch \
-  --profile_json_path "$RESULT_DIR/overlap_verify_filtered.json.gz" \
-  --output_csvs_dir "$RESULT_DIR/tracelens_output/overlap_verify/perf_report_csvs" \
-  --gpu_arch_json_path /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/utils/arch/MI355X.json \
-  --enable_pseudo_ops
+TL_DIR="/hyperloom/TraceLens-internal"
+[ -d "/opt/TraceLens" ] && TL_DIR="/opt/TraceLens"
+if ! command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
+  if [ -d "$TL_DIR" ]; then
+    cp -r "$TL_DIR" /tmp/TraceLens-internal && TL_DIR=/tmp/TraceLens-internal
+  else
+    git clone "${TRACELENS_GIT_URL:-https://github.com/AMD-AIG-AIMA/TraceLens-internal.git}" /tmp/TraceLens-internal && TL_DIR=/tmp/TraceLens-internal
+  fi
+  pip install -e "$TL_DIR"
+fi
+```
 
-PYTHONPATH="/hyperloom/TraceLens-internal:$PYTHONPATH" \
-python3 /hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/orchestrator_prepare.py \
-  --trace-path "$RESULT_DIR/overlap_verify_filtered.json.gz" \
-  --platform MI355X \
-  --output-dir "$RESULT_DIR/tracelens_output/overlap_verify"
+Read the Analysis Orchestrator skill file `$TL_DIR/TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md` installed with TraceLens and strictly follow the instructions inside to perform the full agentic analysis workflow.
+
+Inputs for this run:
+
+| Orchestrator input | Value |
+|---|---|
+| `<trace_path>` | `$RESULT_DIR/overlap_verify_filtered.json.gz` |
+| `<platform>` | `$PLATFORM` (e.g. `MI355X`) |
+| `<analysis_mode>` | `default` |
+| `<output_dir>` | `$RESULT_DIR/tracelens_output/overlap_verify` |
+
+Requirements:
+- Strictly follow the step order in the skill file — do not skip any steps.
+- In Step 6 and Step 7, each category must be executed by an independent Task subagent to ensure context isolation.
+- Each subagent must write out the corresponding findings file (`system_findings/` or `category_findings/`).
+- Do not fabricate analysis results — all data must come from agent analysis output.
+- Write the final report to `$RESULT_DIR/tracelens_output/overlap_verify/analysis.md`.
+
+Read overlap metrics from the orchestrator's structured output (no raw-trace re-parsing):
+
+```python
+import json, os
+mk_path = f"{RESULT_DIR}/tracelens_output/overlap_verify/system_findings/multi_kernel_findings.json"
+overlap = json.load(open(mk_path)) if os.path.exists(mk_path) else {}
+# overlap["comm_compute_overlap"] feeds the keep/revert decision below.
 ```
 
 Keep settings if overlap improves; else revert and log to KB.

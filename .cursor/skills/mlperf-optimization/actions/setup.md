@@ -269,13 +269,20 @@ state["oob_available"]       = r.get("oob-optimizer-dev", {}).get("status") == "
 state["geak_available"]      = r.get("geak", {}).get("status") == "ok"
 state["kernel_opt_available"] = state["oob_available"] or state["geak_available"]
 
-# TraceLens now runs via local CLI, not MCP
+# TraceLens runs via the analysis-orchestrator skill in actions/profile.md.
+# We only check that the underlying CLI used by orchestrator Step 1 is installed;
+# the orchestrator picks the right binary based on <analysis_mode> at run time.
 state["tracelens_cli_available"] = subprocess.run(
     ["TraceLens_generate_perf_report_pytorch", "--help"],
     capture_output=True, timeout=10
 ).returncode == 0
 if not state["tracelens_cli_available"]:
-    print("TraceLens CLI not found. Install: cp -r /hyperloom/TraceLens-internal /tmp/TraceLens-internal && pip install -e /tmp/TraceLens-internal")
+    print(
+        "TraceLens CLI not found. Install path tried in order:\n"
+        "  /hyperloom/TraceLens-internal -> /opt/TraceLens -> "
+        "git clone $TRACELENS_GIT_URL /tmp/TraceLens-internal\n"
+        "Then: pip install -e <dir>. See actions/profile.md Step 6 for the full block."
+    )
 ```
 
 ## Outputs

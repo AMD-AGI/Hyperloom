@@ -29,7 +29,7 @@ Closed-loop LLM inference optimization on AMD Instinct GPUs: profile with TraceL
 1. Classify model architecture and select optimization strategy (Phase 0)
 2. Run a baseline inference benchmark — SGLang or vLLM (Phase 1-2)
 3. Profile the serving engine with torch.profiler (Phase 3)
-4. Send trace to **TraceLens** for kernel-level bottleneck analysis (Phase 4)
+4. Run TraceLens's `analysis-orchestrator` on the filtered trace for kernel-level bottleneck analysis (Phase 4)
 5. Identify hot kernels that GEAK can optimize (Phase 5)
 6. Tune server parameters — CUDA graph coverage, decode-steps, memory (Phase 6)
 7. Submit kernels to active backends (**GEAK**, **Codex**, **Claude**, **LLM proxy**) for AI-driven optimization in parallel (Phase 7)
@@ -153,7 +153,7 @@ Step 8 (~2 min): Restart SGLang → benchmark → 653 tok/s (+14.4%)
 - **Use torch.compile path for GEAK**: Without torch.compile, SGLang uses aiter C++ kernels (not Triton), giving GEAK no targets. With torch.compile, Inductor generates 293 Triton kernels — GEAK can optimize them.
 - **DeepSeek-R1 on SGLang**: ~90% GPU time is vendor kernels — limited GEAK targets even with torch.compile
 - **Qwen3-30B-A3B is a good test model**: Smaller, faster iteration, proven +14.4% E2E gain
-- **TraceLens may fail on large traces (>300MB)**: Parse locally with Python instead (see Phase 4 in SKILL.md)
+- **TraceLens may fail on large traces (>300MB)**: Always pass the filtered TP-0 trace to the analysis-orchestrator; if Step 1 of the orchestrator still fails, Hyperloom Step 3 falls back to direct trace parsing on `filtered-TP-0.trace.json.gz`.
 - **GEAK tasks take 5-30 min**: Fast if pod is warm (~5 min), slow on cold start (~30 min). Submit early.
 - **Server restart with torch.compile takes ~3 min** (compilation overhead). Budget for this.
 - **Always `unset PROFILE SGLANG_TORCH_PROFILER_DIR`** after profiling to avoid 30x slowdown
