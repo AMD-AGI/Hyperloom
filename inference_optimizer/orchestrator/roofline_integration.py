@@ -47,9 +47,9 @@ def _to_int(value: Any) -> int:
 def _normalize_kernel_name(raw: str) -> str:
     """Shorten rocprofv3 kernel names to stable categories."""
     lower = (raw or "").lower()
-    if "Cijk_" in raw:
+    if "cijk_" in lower:
         return "hipblaslt_gemm"
-    if "gemm_a16w16_asm" in lower or "A16W16" in raw:
+    if "gemm_a16w16_asm" in lower or "a16w16" in lower:
         return "aiter_asm_gemm"
     if "attn_fwd" in lower or "flash_attn" in lower:
         return "attention"

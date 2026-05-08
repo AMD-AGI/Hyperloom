@@ -905,9 +905,9 @@ def roofline_match_key(name: str) -> str:
     """Normalize trace and rocprof names enough to join roofline data."""
     raw = name or ""
     lower = raw.lower()
-    if "cijk_" in raw:
+    if "cijk_" in lower:
         return "hipblaslt_gemm"
-    if "gemm_a16w16_asm" in lower or "a16w16" in raw:
+    if "gemm_a16w16_asm" in lower or "a16w16" in lower:
         return "aiter_asm_gemm"
     if "attn_fwd" in lower or "flash_attn" in lower:
         return "attention"
