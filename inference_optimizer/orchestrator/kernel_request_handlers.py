@@ -387,6 +387,13 @@ async def select_kernels_handler(
         cmd += ["--target-platform", str(payload["target_platform"])]
     if payload.get("roofline_json"):
         cmd += ["--roofline-json", str(payload["roofline_json"])]
+    capture_folder = (
+        payload.get("capture_folder")
+        or payload.get("graph_capture_path")
+        or payload.get("capture_folder_path")
+    )
+    if capture_folder:
+        cmd += ["--capture-folder", str(capture_folder)]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
