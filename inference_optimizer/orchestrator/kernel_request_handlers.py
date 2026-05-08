@@ -564,6 +564,8 @@ async def _run_optimization_single(
         budget_minutes:  default 60
         source_file:     path to original kernel source (for context)
         candidates_path: path to JSON describing candidates (optional)
+        enable_rag:      default True; false disables GEAK RAG tools
+        enable_xs_memory: default True; false disables GEAK cross-session memory
         dry_run:         default False (testing)
 
     Returns the tool's JSON output verbatim under ``result``.
@@ -612,6 +614,10 @@ async def _run_optimization_single(
             "--accuracy-passed",
             "true" if bool(payload["accuracy_passed"]) else "false",
         ]
+    if payload.get("enable_rag") is False:
+        cmd += ["--disable-rag"]
+    if payload.get("enable_xs_memory") is False:
+        cmd += ["--disable-xs-memory"]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     # Give kernel_optimization.py time to handle its own backend timeout and
