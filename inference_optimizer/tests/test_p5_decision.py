@@ -210,6 +210,13 @@ async def test_run_optimization_response_records_to_shared_state(
 ):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
+        c.shared_state.baseline_tput = 800.0
+        c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
+        c.shared_state.last_select_kernels = {
+            "trace_input": "/tmp/profile.trace.json.gz",
+            "reusable_native_kernel_ids": ["k006"],
+        }
+        c.shared_state.save(session_dir)
         # Stub the handler so we don't shell out.
         from inference_optimizer.orchestrator import kernel_request_handlers
         async def fake(payload, *, session_dir):
