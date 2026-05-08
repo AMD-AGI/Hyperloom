@@ -31,7 +31,10 @@ from pathlib import Path
 from typing import Any
 
 from ._grid_runner import GridVariant, VariantResult, pick_winners, run_grid, _resolve_output_root
-from .baseline import _default_baseline_config
+from ._workload_envs import (
+    default_baseline_config,
+    materialize_config_with_envs,
+)
 
 
 log = logging.getLogger(__name__)
@@ -307,7 +310,7 @@ class BackendsExecutor:
         config_path = Path(
             params.get("config_path")
             or self.default_config_path
-            or _default_baseline_config()
+            or default_baseline_config()
         )
         if not config_path.exists():
             return {"status": "failed",
@@ -318,6 +321,27 @@ class BackendsExecutor:
             or (self.default_output_root / f"backends-{ctx.task.task_id[:8]}")
         )
         output_root.mkdir(parents=True, exist_ok=True)
+
+        # Workload-contract materialization (single source of truth).
+        # See params.py for the full rationale; same fix applies here so
+        # backend variants run at the operator's actual workload (CONC/ISL/
+        # OSL/TP/MAX_MODEL_LEN/PRECISION) rather than the shipped YAML's
+        # smoke defaults. Idempotent when input already matches process env.
+        resolved_model = (
+            str(params.get("model_path") or "").strip()
+            or os.environ.get("MODEL_PATH", "").strip()
+        )
+        resolved_gpu = (
+            str(params.get("gpu_type") or "").strip().lower()
+            or os.environ.get("GPU_TYPE", "").strip().lower()
+        )
+        config_path = materialize_config_with_envs(
+            config_path,
+            output_root,
+            model_path=resolved_model or None,
+            gpu_type=resolved_gpu or None,
+            out_name="backends_base.with_envs.yaml",
+        )
 
         base_extra_args = params.get("base_extra_args", "")
         base_tput = float(params.get("base_tput", 0.0))
@@ -345,17 +369,9 @@ class BackendsExecutor:
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
 
-        # Resolve runtime model_path / gpu_type (task.params > $MODEL_PATH /
-        # $GPU_TYPE) and forward so each variant's YAML overrides the legacy
-        # hardcoded model + benchmark_script fields.
-        resolved_model = (
-            str(params.get("model_path") or "").strip()
-            or os.environ.get("MODEL_PATH", "").strip()
-        )
-        resolved_gpu = (
-            str(params.get("gpu_type") or "").strip().lower()
-            or os.environ.get("GPU_TYPE", "").strip().lower()
-        )
+        # `resolved_model` / `resolved_gpu` were resolved above for the
+        # materialization step; reuse them here so each variant's YAML
+        # overrides the legacy hardcoded model + benchmark_script fields.
         # --- Phase 1: single-variable grid ---
         results = await run_grid(
             base_yaml_path=config_path,
