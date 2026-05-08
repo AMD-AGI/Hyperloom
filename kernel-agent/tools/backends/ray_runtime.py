@@ -75,8 +75,7 @@ SAFE_ENV_KEYS = (
     "LLM_API_KEY", "LLM_API_BASE", "LLM_PROXY_API_KEY", "LLM_PROXY_BASE_URL",
     "GEAK_CONFIG", "GEAK_MODEL_NAME", "GEAK_API_KEY", "GEAK_BASE_URL",
     "GEAK_WORK_DIR",
-    # Skips mini-swe-agent first-time setup() that Aborts on non-tty stdin.
-    "MSWEA_MODEL_NAME", "MSWEA_CONFIGURED",
+    "MSWEA_MODEL_NAME",
     "AGENT_WORKSPACE_ROOT",
 )
 
