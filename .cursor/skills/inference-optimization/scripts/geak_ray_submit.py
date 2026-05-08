@@ -42,8 +42,9 @@ _FORWARDED_ENV_KEYS = (
     "AMD_LLM_API_KEY", "LLM_API_KEY", "LLM_API_BASE", "LLM_GATEWAY_KEY",
     "OPENAI_API_KEY", "OPENAI_BASE_URL",
     "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
-    "MSWEA_MODEL_NAME", "MSWEA_CONFIGURED", "GEAK_WORK_DIR",
+    "MSWEA_MODEL_NAME", "GEAK_WORK_DIR",
     "GEAK_CONFIG", "GEAK_MODEL_NAME", "GEAK_API_KEY", "GEAK_BASE_URL",
+    "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
     "PATH", "HOME", "LD_LIBRARY_PATH",
 )
 
@@ -89,35 +90,28 @@ def _ensure_yolo(extra_args: list[str]) -> list[str]:
 def _run_geak_task(task_file: str, extra_args: list[str], num_gpus: int) -> dict:
     """Execute a single geak task inside a Ray worker with GPU isolation.
 
-    On AMD/ROCm, Ray sets ROCR_VISIBLE_DEVICES (not CUDA_VISIBLE_DEVICES).
-    ROCR pre-filters at the driver layer so HIP/CUDA see logical device 0..N-1.
-    We map ROCR → logical ids for HIP/CUDA and pass them to GEAK's --gpu-ids.
+    Ray sets CUDA_VISIBLE_DEVICES automatically; we mirror it to HIP for AMD.
+    GEAK accepts a task file path for `-t`; the submitter resolves it before
+    dispatch so Ray workers do not depend on their own current directory.
     """
-    rocr_raw = os.environ.get("ROCR_VISIBLE_DEVICES", "")
-    if rocr_raw:
-        n_visible = len([x for x in rocr_raw.split(",") if x.strip()])
-        logical_ids = ",".join(str(i) for i in range(n_visible))
-        os.environ["HIP_VISIBLE_DEVICES"] = logical_ids
-        os.environ["CUDA_VISIBLE_DEVICES"] = logical_ids
-        gpu_ids = logical_ids
-    else:
-        cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-        if cuda_vis:
-            os.environ["HIP_VISIBLE_DEVICES"] = cuda_vis
-        gpu_ids = cuda_vis or "0"
+    cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if cuda_vis:
+        os.environ["HIP_VISIBLE_DEVICES"] = cuda_vis
 
     geak_bin = _find_geak_bin()
+    # Auto-inject --config from $GEAK_CONFIG unless user already supplied one
     config_args: list[str] = []
     geak_config = os.environ.get("GEAK_CONFIG", "")
     if geak_config and Path(geak_config).is_file() and "--config" not in extra_args:
         config_args = ["--config", geak_config]
-    cmd = [geak_bin, "-t", task_file, "--gpu-ids", gpu_ids] + config_args + extra_args
+    # Pass the file path directly to the CLI instead of reading its content as a string
+    cmd = [geak_bin, "-t", task_file, "--gpu-ids", cuda_vis or "0"] + config_args + extra_args
 
     start_ts = time.time()
     task_label = Path(task_file).stem
 
-    print(f"[geak-ray] {task_label}: starting on GPU {gpu_ids}")
-    print(f"[geak-ray] {task_label}: cmd = {geak_bin} -t {task_file} --gpu-ids {gpu_ids} {' '.join(config_args + extra_args)}")
+    print(f"[geak-ray] {task_label}: starting on GPU {cuda_vis or '0'}")
+    print(f"[geak-ray] {task_label}: cmd = {geak_bin} -t {task_file} --gpu-ids {cuda_vis or '0'} {' '.join(config_args + extra_args)}")
 
     result = subprocess.run(
         cmd,
@@ -135,7 +129,7 @@ def _run_geak_task(task_file: str, extra_args: list[str], num_gpus: int) -> dict
         "status": status,
         "returncode": result.returncode,
         "elapsed_s": round(elapsed, 1),
-        "gpu": gpu_ids,
+        "gpu": cuda_vis or "0",
         "stdout_tail": result.stdout[-2000:] if result.stdout else "",
         "stderr_tail": result.stderr[-2000:] if result.stderr else "",
     }
