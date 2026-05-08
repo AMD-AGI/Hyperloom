@@ -5,7 +5,7 @@
 #   - ray[default]==2.44.1 + click<8.3.0
 #   - TraceLens editable install + CLI verification
 #
-# Backends are lazy: install only what a request needs, or use --all-backends.
+# The installer prepares all kernel-agent backends in one pass.
 
 set -euo pipefail
 
@@ -15,22 +15,18 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
 TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
-# Default to the LitellmModel-fixed branch. Upstream main works ONLY when the
-# model is reached via amd_llm + AMD LLM Gateway (anthropic SDK direct). On
-# the AMD primus-safe OpenAI-compat proxy that we have here, main's litellm
-# path does not normalize tool-call args and returns Python repr (single
-# quotes) for `submit({summary: [...]}`), making _parse_llm_response crash
-# with "Expecting property name in double quotes char 2". The PR branch
-# `feature/xiaofei/claw` adds use_amd_openai_compatible_litellm_route /
-# litellm_model_name_for_completion / format_messages_openai_chat which
-# normalize the OpenAI-compat path. Verified end-to-end on r36.
-GEAK_BRANCH="${GEAK_BRANCH:-feature/xiaofei/claw}"
+# Pin GEAK to the first release that ships RAG MCP retrieval and cross-session
+# memory together. Keep this overridable so future GEAK fixes can move Hyperloom
+# forward without reworking the installer contract.
+GEAK_REF="${GEAK_REF:-v3.1.0}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_ROOT}/geak-config/local.yaml}"
-# GEAK's LitellmModel (feature/xiaofei/claw) auto-routes bare claude-* model
-# names to OpenAI ChatCompletion when api_base contains llm-proxy/openai. So we
-# pass GEAK_MODEL_NAME through unchanged; do NOT prepend openai/ here.
+# Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
 GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
+RAG_INDEX_DIR="${HOME}/.cache/amd-ai-devtool/semantic-index"
+GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
+GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
+GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
 # GEAK/OOB use the user's LiteLLM-compatible endpoint. The canonical env is
 # OPENAI_BASE_URL + SAFE_API_KEY; keep fallbacks for older launchers.
 GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}"
@@ -157,15 +153,18 @@ ensure_tracelens() {
 ensure_geak() {
   log "ensuring GEAK backend"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    mkdir -p "${HYPERLOOM_ROOT}" "$(dirname "$GEAK_CONFIG")"
+    mkdir -p "${HYPERLOOM_ROOT}" "$(dirname "$GEAK_CONFIG")" "$(dirname "$GEAK_MEMORY_STORE_PATH_VAL")"
   fi
-  if ! command -v geak >/dev/null 2>&1; then
-    if [ ! -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
-      run git clone --depth 1 -b "$GEAK_BRANCH" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
-    fi
-    run python3 -m pip install -q --no-cache-dir -e "${HYPERLOOM_ROOT}/geak"
+  if [ ! -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
+    run git clone --depth 1 --branch "$GEAK_REF" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
   else
-    log "geak already installed: $(command -v geak)"
+    log "GEAK checkout already present: ${HYPERLOOM_ROOT}/geak"
+  fi
+  if [ "$CHECK_ONLY" -eq 0 ]; then
+    run python3 -m pip install -q --no-cache-dir -e "${HYPERLOOM_ROOT}/geak"
+    run python3 -m pip install -q --no-cache-dir -e "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"
+  else
+    log "check-only: skipping GEAK and rag-mcp installation"
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
     if [ -z "$GEAK_API_KEY_VAL" ] || [ -z "$GEAK_BASE_URL_VAL" ]; then
@@ -180,6 +179,8 @@ model:
   base_url: ${GEAK_BASE_URL_VAL}
   model_kwargs:
     max_tokens: 16384
+tools:
+  rag: true
 EOF
       chmod 600 "$GEAK_CONFIG"
     else
@@ -189,6 +190,19 @@ EOF
   if [ "$DRY_RUN" -eq 0 ]; then
     command -v geak >/dev/null 2>&1 || verify_die "geak CLI not found"
   fi
+}
+
+ensure_rag_index() {
+  if [ -d "$RAG_INDEX_DIR" ] && [ -n "$(ls -A "$RAG_INDEX_DIR" 2>/dev/null)" ]; then
+    log "RAG index already present at $RAG_INDEX_DIR"
+    return
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "RAG index missing at $RAG_INDEX_DIR"
+    return
+  fi
+  log "building RAG index at $RAG_INDEX_DIR (first run downloads ~1.3 GB embedding model)"
+  run bash -lc "cd '${HYPERLOOM_ROOT}/geak' && python3 scripts/build_index.py --force"
 }
 
 ensure_oob() {
@@ -329,6 +343,9 @@ write_env_file() {
     [ -n "${GEAK_MODEL_NAME_VAL}" ] && echo "export GEAK_MODEL_NAME='${GEAK_MODEL_NAME_VAL}'"
     [ -n "${GEAK_API_KEY_VAL}" ] && echo "export GEAK_API_KEY='${GEAK_API_KEY_VAL}'"
     [ -n "${GEAK_BASE_URL_VAL}" ] && echo "export GEAK_BASE_URL='${GEAK_BASE_URL_VAL}'"
+    [ -n "${GEAK_MEMORY_STORE_PATH_VAL}" ] && echo "export GEAK_MEMORY_STORE_PATH='${GEAK_MEMORY_STORE_PATH_VAL}'"
+    [ -n "${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}" ] && echo "export GEAK_SAVE_TO_KNOWLEDGE_BASE='${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}'"
+    [ -n "${GEAK_MEMORY_MIN_SPEEDUP_VAL}" ] && echo "export GEAK_MEMORY_MIN_SPEEDUP='${GEAK_MEMORY_MIN_SPEEDUP_VAL}'"
   } > "$env_file"
   chmod 600 "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
@@ -351,6 +368,27 @@ PY
       warn "${tool} not found"
     fi
   done
+  if [ -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
+    log "GEAK ref: $(git -C "${HYPERLOOM_ROOT}/geak" describe --tags --always 2>/dev/null || echo unknown)"
+  else
+    warn "GEAK checkout missing at ${HYPERLOOM_ROOT}/geak"
+  fi
+  if python3 -c "import rag_mcp" >/dev/null 2>&1; then
+    log "rag-mcp installed: yes"
+  else
+    warn "rag-mcp not installed"
+  fi
+  if [ -d "$RAG_INDEX_DIR" ] && [ -n "$(ls -A "$RAG_INDEX_DIR" 2>/dev/null)" ]; then
+    log "RAG index: present at $RAG_INDEX_DIR"
+  else
+    warn "RAG index missing at $RAG_INDEX_DIR"
+  fi
+  if grep -q "rag: true" "$GEAK_CONFIG" 2>/dev/null; then
+    log "tools.rag enabled in $GEAK_CONFIG"
+  else
+    warn "tools.rag not enabled in $GEAK_CONFIG"
+  fi
+  log "GEAK memory store: ${GEAK_MEMORY_STORE_PATH_VAL}"
 }
 
 main() {
@@ -363,6 +401,7 @@ main() {
 
   # Always install everything; ensure_oob also calls ensure_llm_auth_files.
   ensure_geak
+  ensure_rag_index
   ensure_oob
   ensure_auth_proxy
   write_env_file
