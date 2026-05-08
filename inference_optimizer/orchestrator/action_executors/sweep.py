@@ -34,7 +34,10 @@ from pathlib import Path
 from typing import Any
 
 from ._grid_runner import GridVariant, VariantResult, run_grid, _resolve_output_root
-from .baseline import _default_baseline_config
+from ._workload_envs import (
+    default_baseline_config,
+    materialize_config_with_envs,
+)
 
 
 log = logging.getLogger(__name__)
@@ -148,7 +151,7 @@ class SweepExecutor:
         config_path = Path(
             params.get("config_path")
             or self.default_config_path
-            or _default_baseline_config()
+            or default_baseline_config()
         )
         if not config_path.exists():
             return {"status": "failed",
@@ -159,6 +162,30 @@ class SweepExecutor:
             or (self.default_output_root / f"sweep-{ctx.task.task_id[:8]}")
         )
         output_root.mkdir(parents=True, exist_ok=True)
+
+        # Workload-contract materialization. Sweep deliberately overrides
+        # CONC/ISL/OSL/NUM_PROMPTS per variant via _build_grid below, so
+        # those four envs are immaterial here, but TP/MAX_MODEL_LEN/
+        # PRECISION/RUN_EVAL/ROCR_VISIBLE_DEVICES still flow from process
+        # env onto the materialized YAML and become the per-variant base.
+        # Without this step `_build_variant_yaml` would silently inherit
+        # the shipped YAML's TP=1 default and run sweep variants single-
+        # GPU on a TP=8 model. Idempotent when input already matches env.
+        resolved_model = (
+            str(params.get("model_path") or "").strip()
+            or os.environ.get("MODEL_PATH", "").strip()
+        )
+        resolved_gpu = (
+            str(params.get("gpu_type") or "").strip().lower()
+            or os.environ.get("GPU_TYPE", "").strip().lower()
+        )
+        config_path = materialize_config_with_envs(
+            config_path,
+            output_root,
+            model_path=resolved_model or None,
+            gpu_type=resolved_gpu or None,
+            out_name="sweep_base.with_envs.yaml",
+        )
 
         conc_values = list(params.get("conc_values") or self.default_conc_values)
         isl_osl_configs = list(
@@ -178,18 +205,9 @@ class SweepExecutor:
             base_extra_args=base_extra_args,
         )
 
-        # Resolve runtime model_path / gpu_type (task.params > $MODEL_PATH /
-        # $GPU_TYPE from CLI re-export). See baseline.py / _grid_runner.py
-        # for the rationale on why both must be threaded into every variant
-        # YAML render — yaml-level defaults would otherwise win.
-        resolved_model = (
-            str(params.get("model_path") or "").strip()
-            or os.environ.get("MODEL_PATH", "").strip()
-        )
-        resolved_gpu = (
-            str(params.get("gpu_type") or "").strip().lower()
-            or os.environ.get("GPU_TYPE", "").strip().lower()
-        )
+        # `resolved_model` / `resolved_gpu` were resolved above for the
+        # materialization step; reuse them here. See baseline.py /
+        # _grid_runner.py for the rationale on why both must flow through.
         results = await run_grid(
             base_yaml_path=config_path,
             base_extra_args="",  # sweep variants carry args themselves

@@ -35,7 +35,8 @@ benchmark:
     OSL: 256
     RANDOM_RANGE_RATIO: 1
     MAX_MODEL_LEN: 8192
-    ROCR_VISIBLE_DEVICES: "1"
+    # ROCR_VISIBLE_DEVICES injected at runtime by baseline.py
+    # (`0..TP-1`); export `ROCR_VISIBLE_DEVICES=...` to override.
     PATH: "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     # --- Profiler: vLLM steady-state + annotations (#126) ---
     # Appended to the vllm serve command via EXTRA_VLLM_ARGS. Magpie's
@@ -52,7 +53,7 @@ benchmark:
     PROFILE: "1"
 
   gpu_selection:
-    auto: false
+    auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime
 
   timeout_seconds: 900               # profile adds ~30-90s vs plain baseline
 
