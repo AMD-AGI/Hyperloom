@@ -29,6 +29,7 @@ if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 
 import tracelens_analysis as tla  # noqa: E402
+import tracelens_skill_runner as tlr  # noqa: E402
 
 
 # ===========================================================================
@@ -459,6 +460,124 @@ def test_125_finalize_outputs_source_path_field():
 
 
 # ===========================================================================
+# #124 — SDK runner for TraceLens standalone-analysis-orchestrator
+# ===========================================================================
+def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
+    skill = tmp_path / "standalone-analysis-orchestrator.md"
+    trace = tmp_path / "mixed_steady_state_0_trace.json.gz"
+    out = tmp_path / "tracelens"
+    root = tmp_path / "TraceLens-internal"
+    capture = tmp_path / "capture_traces"
+
+    prompt = tlr.build_orchestrator_prompt(
+        skill_path=skill,
+        trace_path=trace,
+        output_dir=out,
+        tracelens_root=root,
+        platform="MI300X",
+        framework="vllm",
+        analysis_mode="default",
+        capture_folder=capture,
+    )
+
+    assert str(skill) in prompt
+    assert str(trace) in prompt
+    assert str(out) in prompt
+    assert "Analysis mode: inference" in prompt
+    assert "Inference execution mode: graph_capture" in prompt
+    assert "Do not ask the user" in prompt
+
+
+def test_124_priority_data_members_convert_to_raw_candidates(tmp_path):
+    import json as _json
+
+    priority = tmp_path / "priority_data.json"
+    priority.write_text(_json.dumps({
+        "findings": [{
+            "category": "gemm",
+            "impact_score": 4.2,
+            "library": "hipBLASLt",
+            "members": [{
+                "operation": "Cijk_Alik_Bljk_MT256",
+                "time_ms": 5.5,
+                "impact_score": 3.1,
+                "library": "hipBLASLt",
+                "bound_type": "compute",
+            }],
+        }],
+    }), encoding="utf-8")
+
+    rows = tlr.raw_candidates_from_priority_data(priority, top_k=10)
+    assert rows == [{
+        "name": "Cijk_Alik_Bljk_MT256",
+        "duration_us": 5500.0,
+        "call_count": 1,
+        "source_file": "",
+        "source_type": "unknown",
+        "shapes": [],
+        "tracelens_category": "gemm",
+        "impact_score": 3.1,
+        "impact_score_low": 0.0,
+        "impact_score_high": 0.0,
+        "library": "hipBLASLt",
+        "bound_type": "compute",
+    }]
+
+
+def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
+    import asyncio
+    import json as _json
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class _TextBlock:
+        text: str
+
+    @dataclass
+    class _Message:
+        content: list[Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+    captured: dict[str, Any] = {}
+
+    async def _fake_query(*, prompt, options):
+        captured["prompt"] = prompt
+        captured["options"] = options.kwargs
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "standalone_analysis.md").write_text("# report\n", encoding="utf-8")
+        (output_dir / "priority_data.json").write_text(
+            _json.dumps({"findings": [], "priorities": []}),
+            encoding="utf-8",
+        )
+        yield _Message(content=[_TextBlock("done")])
+
+    res = asyncio.run(tlr.run_tracelens_skill(
+        skill_path=tmp_path / "skill.md",
+        trace_path=tmp_path / "trace.json.gz",
+        output_dir=output_dir,
+        tracelens_root=tmp_path,
+        platform="MI300X",
+        framework="sglang",
+        analysis_mode="default",
+        capture_folder=None,
+        budget_minutes=1,
+        sdk_query_factory=_fake_query,
+        sdk_options_cls=_FakeOptions,
+    ))
+
+    assert res.report_path.exists()
+    assert res.priority_data_path.exists()
+    assert "standalone-analysis-orchestrator" in captured["prompt"] or "skill.md" in captured["prompt"]
+    assert "Bash" in captured["options"]["allowed_tools"]
+    assert "Task" in captured["options"]["allowed_tools"]
+
+
+# ===========================================================================
 # #127 — TraceLens splitter CLI must match the real
 # split_inference_trace_annotation interface (positional trace_path,
 # -o/--output-dir, --find-steady-state). The previous --input/--platform
@@ -507,6 +626,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
         "--target-platform", "MI300X",
         "--top-k", "5",
         "--budget-minutes", "1",
+        "--no-llm-orchestrator",
         "--split-conc", "8",
         "--split-osl", "1024",
     ]
