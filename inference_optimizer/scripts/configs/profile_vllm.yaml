@@ -31,7 +31,10 @@ benchmark:
     # These flags are appended to the vllm serve command via EXTRA_VLLM_ARGS.
     # delay_iterations and max_iterations control the steady-state window:
     #   delay = 5 * CONC (skip warmup); max = clamp(16 * OSL / CONC, 4, 64)
-    # Values are overridden at runtime by _materialize_config_with_envs.
+    # capture_torch_profiler_dir enables graph-capture tracing (issue #126
+    # §3.1.4 item 1) — TraceLens needs this dir to resolve the actual
+    # kernels executed under cudagraph mode (vs the eager prefill kernels).
+    # All values are overridden at runtime by _materialize_config_with_envs.
     EXTRA_VLLM_ARGS: "--profiler-config.detailed_trace_annotation True --profiler-config.ignore_frontend True"
     # vLLM timeout must be extended during profiling (graph capture is slow)
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
