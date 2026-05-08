@@ -329,9 +329,6 @@ write_env_file() {
     [ -n "${GEAK_MODEL_NAME_VAL}" ] && echo "export GEAK_MODEL_NAME='${GEAK_MODEL_NAME_VAL}'"
     [ -n "${GEAK_API_KEY_VAL}" ] && echo "export GEAK_API_KEY='${GEAK_API_KEY_VAL}'"
     [ -n "${GEAK_BASE_URL_VAL}" ] && echo "export GEAK_BASE_URL='${GEAK_BASE_URL_VAL}'"
-    # Skip mini-swe-agent first-time setup() prompt; GEAK reads creds from
-    # local.yaml + env, so the interactive wizard would only Abort under Ray.
-    echo "export MSWEA_CONFIGURED=true"
   } > "$env_file"
   chmod 600 "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
