@@ -110,11 +110,32 @@ def _materialize_config_with_envs(
         bench["runner_type"] = str(gpu_type)
         bench.pop("benchmark_script", None)
     envs = bench.setdefault("envs", {})
-    # Inject ISL/OSL/MAX_MODEL_LEN from env (CLI computed ISL+OSL+4096).
-    for env_key in ("ISL", "OSL", "MAX_MODEL_LEN"):
+    # Inject runtime-resolvable envs from $ENV. Without these the yaml
+    # defaults (ISL=256, OSL=256, TP=1, CONC=8, ROCR_VISIBLE_DEVICES="1")
+    # silently win over the user's --tp / TP=N / etc., which is fatal for
+    # large models that need TP=8 (e.g. DeepSeek-R1-0528).
+    for env_key in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC"):
         val = os.environ.get(env_key, "").strip()
         if val:
             envs[env_key] = int(val)
+    # ROCR_VISIBLE_DEVICES: explicit env override wins. Otherwise, when TP
+    # was overridden upward (yaml default TP=1, user set TP=8), expand the
+    # GPU list to match TP (0,1,...,TP-1). This avoids vLLM/SGLang seeing
+    # only 1 device and OOM-ing on multi-GPU models.
+    explicit_rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
+    if explicit_rocr:
+        envs["ROCR_VISIBLE_DEVICES"] = explicit_rocr
+    else:
+        tp_in_yaml = int(envs.get("TP", 1))
+        existing_rocr = str(envs.get("ROCR_VISIBLE_DEVICES", "")).strip()
+        existing_count = (
+            len([x for x in existing_rocr.split(",") if x.strip()])
+            if existing_rocr else 0
+        )
+        if tp_in_yaml > 1 and existing_count < tp_in_yaml:
+            envs["ROCR_VISIBLE_DEVICES"] = ",".join(
+                str(i) for i in range(tp_in_yaml)
+            )
     # Always run accuracy eval (GSM8K) as part of the benchmark.
     # Magpie's benchmark scripts check RUN_EVAL=true and call run_eval
     # while the server is still alive, avoiding an extra server restart.
