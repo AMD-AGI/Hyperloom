@@ -222,17 +222,21 @@ class HuggingFaceClient:
                 if (total / 1e9) < min_params_b:
                     continue
 
-            # Belt-and-suspenders: also validate architectures[0] looks generative.
-            # config.json is a separate fetch; do it last so we don't waste it on
-            # candidates already rejected above.
+            # Final gate: config.json must be reachable AND architectures[0]
+            # must be a generative LM. If config.json 401/403s (gated repo
+            # whose model card is public but the actual files aren't grant-ed
+            # to our HF token), skip the candidate so the pool auto-replaces
+            # it with the next eligible repo. Same treatment for non-generative
+            # architectures (BertModel / Qwen3Model / classifier / etc.).
             try:
                 cfg = self.model_config(repo)
-            except Exception:
-                # Some repos hide config.json behind gating even when info is public —
-                # don't kill the candidate over it.
-                cfg = {}
+            except Exception as e:
+                log.info("skip %s: config.json unreachable (%s) — "
+                         "likely a gated repo your HF_TOKEN hasn't been granted",
+                         repo, e)
+                continue
             arch = (cfg.get("architectures") or [""])[0]
-            if arch and not is_generative_arch(arch):
+            if not is_generative_arch(arch):
                 log.info("skip %s: arch=%s is non-generative", repo, arch)
                 continue
 
