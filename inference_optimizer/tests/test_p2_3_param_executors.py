@@ -637,3 +637,226 @@ async def test_sweep_executor_returns_pareto_front(sub_agent_runner, tmp_path):
 def test_sweep_default_grid_size():
     expected = len(DEFAULT_CONC_VALUES) * len(DEFAULT_ISL_OSL)
     assert expected == 9  # 3×3
+
+
+# ===========================================================================
+# Workload-contract regression (baseline 4367 tok/s vs variants ~360 tok/s bug)
+# ===========================================================================
+# Before the `_workload_envs.materialize_config_with_envs` call was added to
+# params/backends/sweep, every variant rendered from the shipped YAML's
+# smoke defaults (CONC=8 / ISL=256 / OSL=256 / TP=1) regardless of what the
+# operator exported, so on the user's vLLM 32B/8-GPU run the baseline ran
+# at CONC=64/ISL=1024/OSL=1024 (4367 tok/s) while every variant ran at
+# CONC=8/ISL=256/OSL=256 (~360 tok/s). These tests pin the fix.
+@pytest.mark.asyncio
+async def test_params_variants_inherit_process_env_workload(
+    sub_agent_runner, tmp_path, monkeypatch,
+):
+    """`os.environ["CONC"]=64` must reach the variant YAML even though the
+    base YAML's hardcoded default is CONC=8 and the variant defines no CONC
+    override. Same for ISL/OSL/TP — pinning the workload-contract reuse fix.
+    """
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)  # YAML defaults: TP=1 CONC=8 ISL=256 OSL=256
+    output_dir = tmp_path / "params-out"
+
+    monkeypatch.setenv("CONC", "64")
+    monkeypatch.setenv("ISL", "1024")
+    monkeypatch.setenv("OSL", "1024")
+    monkeypatch.setenv("TP", "8")
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=900.0)
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="ok", stderr="",
+        )
+
+    grid = [{"name": "no_workload_override", "extra_sglang_args": "--flag-x"}]
+    task = await tr.create(
+        kind="params",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": grid,
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="pa-workload-1",
+    )
+    sub.register_executor("params", ParamsExecutor())
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+                side_effect=_fake_run):
+        res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    cfg = yaml.safe_load(
+        (output_dir / "variant_00_no_workload_override" / "config.yaml")
+        .read_text()
+    )
+    envs = cfg["benchmark"]["envs"]
+    assert envs["CONC"] == 64, f"variant lost process-env CONC; got {envs.get('CONC')}"
+    assert envs["ISL"] == 1024
+    assert envs["OSL"] == 1024
+    assert envs["TP"] == 8
+
+
+@pytest.mark.asyncio
+async def test_backends_variants_inherit_process_env_workload(
+    sub_agent_runner, tmp_path, monkeypatch,
+):
+    """Same workload-contract pin for BackendsExecutor."""
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "backends-out"
+
+    monkeypatch.setenv("CONC", "32")
+    monkeypatch.setenv("TP", "4")
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=900.0)
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="ok", stderr="",
+        )
+
+    grid = [{"name": "no_workload_override", "extra_sglang_args": "--flag-y"}]
+    task = await tr.create(
+        kind="backends",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": grid,
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="be-workload-1",
+    )
+    sub.register_executor("backends", BackendsExecutor())
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+                side_effect=_fake_run):
+        res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    cfg = yaml.safe_load(
+        (output_dir / "variant_00_no_workload_override" / "config.yaml")
+        .read_text()
+    )
+    envs = cfg["benchmark"]["envs"]
+    assert envs["CONC"] == 32
+    assert envs["TP"] == 4
+
+
+@pytest.mark.asyncio
+async def test_sweep_per_variant_envs_still_win_over_baseline_workload(
+    sub_agent_runner, tmp_path, monkeypatch,
+):
+    """Sweep deliberately overrides CONC/ISL/OSL per variant — those must
+    still beat the baseline-materialized contract (last-wins ordering in
+    `_grid_runner._build_variant_yaml`)."""
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "sweep-out"
+
+    monkeypatch.setenv("CONC", "64")
+    monkeypatch.setenv("TP", "8")  # baseline contract: TP=8 must propagate
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=900.0)
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="ok", stderr="",
+        )
+
+    task = await tr.create(
+        kind="sweep",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "conc_values": [4],  # sweep overrides CONC=4
+            "isl_osl_configs": ["1024:1024"],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="sw-workload-1",
+    )
+    sub.register_executor("sweep", SweepExecutor())
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+                side_effect=_fake_run):
+        res = await sub.run_task(task)
+    assert res.state == "succeeded"
+
+    cfg = yaml.safe_load(
+        (output_dir / "variant_00_conc4_isl1024_osl1024" / "config.yaml")
+        .read_text()
+    )
+    envs = cfg["benchmark"]["envs"]
+    assert envs["CONC"] == "4", "sweep variant CONC override must win over baseline contract"
+    assert envs["ISL"] == "1024"
+    assert envs["OSL"] == "1024"
+    assert envs["TP"] == 8, "TP must still inherit from process env (baseline contract)"
+
+
+def test_baseline_executor_surfaces_materialized_config_path(tmp_path):
+    """BaselineExecutor result must include `materialized_config` so the
+    Coordinator can store it in SharedState.baseline_config_path and plumb
+    it forward to params/backends/sweep tasks."""
+    from inference_optimizer.orchestrator.action_executors.baseline import (
+        BaselineExecutor,
+    )
+    from inference_optimizer.orchestrator.task_registry import TaskRegistry
+    from inference_optimizer.orchestrator.resource_lock import (
+        ResourceLockManager, SqliteLeaseBackend,
+    )
+    from inference_optimizer.orchestrator.sub_agent_runner import SubAgentRunner
+    from inference_optimizer.storage import SqliteConnection
+    import asyncio
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "baseline-out"
+
+    async def _go():
+        db = SqliteConnection(tmp_path / "db.db")
+        try:
+            locks = ResourceLockManager(SqliteLeaseBackend(db))
+            tr = TaskRegistry(db)
+            sub = SubAgentRunner(locks, tr)
+            task = await tr.create(
+                kind="baseline",
+                params={
+                    "config_path": str(base),
+                    "output_dir": str(output_dir),
+                    "timeout_sec": 30,
+                },
+                idempotency_key="bl-workload-surface-1",
+            )
+
+            def _fake_run(cmd, *args, **kwargs):
+                out_idx = cmd.index("--output-dir")
+                slot = Path(cmd[out_idx + 1])
+                _fake_workspace(slot, tput=900.0)
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout="ok", stderr="",
+                )
+
+            sub.register_executor("baseline", BaselineExecutor(cwd=tmp_path))
+            with patch(
+                "inference_optimizer.orchestrator.action_executors.baseline.subprocess.run",
+                side_effect=_fake_run,
+            ):
+                return await sub.run_task(task)
+        finally:
+            db.close()
+
+    res = asyncio.run(_go())
+    assert res.state == "succeeded"
+    materialized = res.result.get("materialized_config")
+    assert materialized, "baseline result missing `materialized_config`"
+    assert Path(materialized).exists()
+    assert Path(materialized).name == "baseline_config.with_envs.yaml"
