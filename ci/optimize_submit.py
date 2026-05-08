@@ -254,8 +254,26 @@ class DetectedConfig:
 
 
 def _quant_type(config: dict) -> str:
+    """Read the quantization tag from a HF config.json.
+
+    HF doesn't standardize on a single field name across vendors:
+      - quant_type           : transformers built-in (older / GPTQ flow)
+      - quantization_type    : variant seen on a few legacy repos
+      - quant_method         : the de-facto current standard (gpt-oss mxfp4,
+                               AWQ via autoawq, DeepSeek-V3.x fp8, ...)
+      - method               : occasional corner case
+    Try them in order; first non-empty wins. Always lowercase so callers can
+    just do string contains/equality checks against {fp8, mxfp4, awq, ...}.
+    """
     quant = config.get("quantization_config") or {}
-    return (quant.get("quant_type") or quant.get("quantization_type") or "").lower()
+    raw = (
+        quant.get("quant_type")
+        or quant.get("quantization_type")
+        or quant.get("quant_method")
+        or quant.get("method")
+        or ""
+    )
+    return raw.lower() if isinstance(raw, str) else ""
 
 
 def detect_framework(config: dict) -> str:
