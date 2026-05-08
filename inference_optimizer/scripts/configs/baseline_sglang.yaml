@@ -31,12 +31,13 @@ benchmark:
     OSL: 256
     RANDOM_RANGE_RATIO: 1
     MAX_MODEL_LEN: 8192        # smaller context = faster warmup
-    # Bypass Magpie's auto-GPU-selection — KFD has zombie contexts from a
-    # dead Ray session that fool the "find_idle_gpus" check even though
-    # actual VRAM is 0. Pin to GPU 1 via ROCR_VISIBLE_DEVICES only.
+    # ROCR_VISIBLE_DEVICES is INTENTIONALLY NOT SET here. The executor
+    # (`_materialize_config_with_envs` in baseline.py) injects it at
+    # runtime as `0..TP-1` (or whatever the operator exports), which
+    # keeps the YAML host-agnostic. To pin to specific GPUs, export
+    # `ROCR_VISIBLE_DEVICES=4,5,6,7` before launch — env always wins.
     # NOTE: do NOT set HIP_VISIBLE_DEVICES — on this stack HIP_VISIBLE
     # makes torch.cuda.is_available() return False even when device_count=1.
-    ROCR_VISIBLE_DEVICES: "1"
 
     # The benchmark script uses bare `python3`; without putting venv first
     # the subprocess picks /usr/bin/python3 (no torch with ROCm) and sglang
@@ -44,9 +45,9 @@ benchmark:
     PATH: "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
   gpu_selection:
-    auto: false                # we already pinned via HIP_VISIBLE_DEVICES
+    auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime
 
-  timeout_seconds: 600         # 10 min hard cap
+  timeout_seconds: 900         # 15 min hard cap
 
   profiler:
     torch_profiler:
