@@ -1258,6 +1258,32 @@ def main() -> int:
             "or when the splitter binary isn't available."
         ),
     )
+    parser.add_argument(
+        "--split-num-steps",
+        type=int,
+        default=int(os.environ.get("TRACELENS_SPLIT_NUM_STEPS", "32") or 32),
+        help=(
+            "Number of steady-state iterations for the splitter to extract "
+            "(#127). Maps to --num-steps on TraceLens.TraceUtils."
+            "split_inference_trace_annotation."
+        ),
+    )
+    parser.add_argument(
+        "--split-conc",
+        default=os.environ.get("TRACELENS_SPLIT_CONC", "") or os.environ.get("CONC", ""),
+        help=(
+            "Expected peak concurrency for the splitter (#127). Maps to "
+            "--CONC. Defaults to $CONC when set."
+        ),
+    )
+    parser.add_argument(
+        "--split-osl",
+        default=os.environ.get("TRACELENS_SPLIT_OSL", "") or os.environ.get("OSL", ""),
+        help=(
+            "Maximum output sequence length hint for the splitter (#127). "
+            "Maps to --OSL. Defaults to $OSL when set."
+        ),
+    )
     args = parser.parse_args()
 
     session_id = args.session_id or uuid.uuid4().hex[:12]
@@ -1319,34 +1345,64 @@ def main() -> int:
                               started_at=started_at)
                 split_dir = tracelens_dir / "trace_split"
                 split_dir.mkdir(parents=True, exist_ok=True)
-                platform = (args.target_platform or "").lower() or "mi300x"
+                # TraceLens splitter CLI (real interface):
+                #   python -m TraceLens.TraceUtils.split_inference_trace_annotation
+                #     <trace_path> -o <output_dir> --find-steady-state
+                #     [--num-steps N] [--CONC C] [--OSL O]
+                # `--platform` does not exist; --find-steady-state writes
+                # mixed_steady_state_* / decode_only_steady_state_* /
+                # prefilldecode_steady_state_* into output_dir.
+                split_cmd = [
+                    sys.executable, "-m",
+                    "TraceLens.TraceUtils.split_inference_trace_annotation",
+                    str(trace_files[0]),
+                    "-o", str(split_dir),
+                    "--find-steady-state",
+                    "--num-steps", str(max(8, int(args.split_num_steps or 32))),
+                ]
+                conc = args.split_conc or os.environ.get("CONC", "").strip()
+                if str(conc).strip():
+                    split_cmd += ["--CONC", str(conc).strip()]
+                osl = args.split_osl or os.environ.get("OSL", "").strip()
+                if str(osl).strip():
+                    split_cmd += ["--OSL", str(osl).strip()]
                 split_rc = run_command(
-                    [
-                        sys.executable, "-m",
-                        "TraceLens.TraceUtils.split_inference_trace_annotation",
-                        "--input", str(trace_files[0]),
-                        "--output-dir", str(split_dir),
-                        "--platform", platform,
-                    ],
+                    split_cmd,
                     cwd=tl_root,
                     log_path=log_path,
                     timeout_s=max(60, int(args.budget_minutes * 60)),
                 )
-                steady_chunks = sorted(split_dir.glob("mixed_steady_state_*_trace.json.gz"))
+                # Splitter writes <type>_steady_state_*.json[.gz]; accept any of
+                # the three windows (mixed first, then decode_only, then
+                # prefilldecode) and prefer mixed for perf-report consumption.
+                def _collect(prefix: str) -> list[Path]:
+                    out: list[Path] = []
+                    for ext in ("trace.json.gz", "json.gz", "trace.json", "json"):
+                        out.extend(sorted(split_dir.rglob(f"{prefix}_steady_state_*.{ext}")))
+                    return out
+
+                mixed_chunks = _collect("mixed")
+                decode_chunks = _collect("decode_only")
+                prefill_chunks = _collect("prefilldecode")
+                steady_chunks = mixed_chunks or decode_chunks or prefill_chunks
                 if split_rc == 0 and steady_chunks:
                     cli_trace_path = steady_chunks[0]
                     artifacts["tracelens_trace_split_dir"] = str(split_dir)
                     artifacts["tracelens_steady_state_trace"] = str(cli_trace_path)
                     append_log(
                         log_path,
-                        f"trace split OK: {len(steady_chunks)} steady-state chunk(s); "
+                        f"trace split OK: mixed={len(mixed_chunks)} "
+                        f"decode_only={len(decode_chunks)} "
+                        f"prefilldecode={len(prefill_chunks)}; "
                         f"using {cli_trace_path.name} for perf report",
                     )
                 else:
                     append_log(
                         log_path,
                         f"WARNING: trace split unavailable "
-                        f"(rc={split_rc}, chunks={len(steady_chunks)}); "
+                        f"(rc={split_rc}, mixed={len(mixed_chunks)}, "
+                        f"decode_only={len(decode_chunks)}, "
+                        f"prefilldecode={len(prefill_chunks)}); "
                         f"falling back to filtered trace {trace_files[0].name}",
                     )
 
