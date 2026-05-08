@@ -10,6 +10,13 @@
 #   2. Shape + callstack annotations (SGLANG_PROFILE_* env vars)
 #   3. Steady-state windowing (PROFILE_EXTRA_BODY start_step/num_steps)
 # These are required for TraceLens fusion / roofline analysis.
+#
+# Note: upstream issue #126 also lists
+# `--enable-shape-discovery-for-cuda-graph-profile`, but the SGLang
+# build on the current validation nodes rejects it ("unrecognized
+# arguments"). It stays out of the default args until the deployed
+# SGLang accepts it; override via EXTRA_SGLANG_ARGS or the materialized
+# ASSET_ROOT yaml when running on a newer SGLang.
 
 benchmark:
   framework: sglang
@@ -30,8 +37,9 @@ benchmark:
     # --- Profiler: shape + callstack annotations (#126) ---
     SGLANG_PROFILE_WITH_STACK: "true"
     SGLANG_PROFILE_RECORD_SHAPE: "true"
-    # --- Profiler: graph capture + shape discovery (#126) ---
-    EXTRA_SGLANG_ARGS: "--enable-profile-cuda-graph --enable-shape-discovery-for-cuda-graph-profile"
+    # --- Profiler: graph capture (#126; shape-discovery flag dropped
+    # because the deployed SGLang argparse rejects it) ---
+    EXTRA_SGLANG_ARGS: "--enable-profile-cuda-graph"
     # --- Profiler: steady-state window via extra_body (#126) ---
     # PROFILE_EXTRA_BODY is consumed by InferenceX benchmark_lib.sh to inject
     # into the benchmark request body. start_step skips warmup, num_steps

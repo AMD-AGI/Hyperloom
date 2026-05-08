@@ -45,7 +45,11 @@ import yaml
 
 from ...paths import asset_root
 from ..sub_agent_runner import RunnerContext
-from ._grid_runner import server_args_env_name
+from ._grid_runner import (
+    apply_runtime_benchmark_overrides,
+    merge_server_args,
+    server_args_env_name,
+)
 
 
 log = logging.getLogger(__name__)
@@ -100,42 +104,9 @@ def _materialize_config_with_envs(
     with config_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     bench = cfg.setdefault("benchmark", {})
-    if model_path:
-        bench["model"] = str(model_path)
-    # Precision override from CLI/env.
-    precision = os.environ.get("PRECISION", "").strip()
-    if precision:
-        bench["precision"] = precision
-    if gpu_type:
-        bench["runner_type"] = str(gpu_type)
-        bench.pop("benchmark_script", None)
-    envs = bench.setdefault("envs", {})
-    # Inject runtime-resolvable envs from $ENV. Without these the yaml
-    # defaults (ISL=256, OSL=256, TP=1, CONC=8, ROCR_VISIBLE_DEVICES="1")
-    # silently win over the user's --tp / TP=N / etc., which is fatal for
-    # large models that need TP=8 (e.g. DeepSeek-R1-0528).
-    for env_key in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC"):
-        val = os.environ.get(env_key, "").strip()
-        if val:
-            envs[env_key] = int(val)
-    # ROCR_VISIBLE_DEVICES: explicit env override wins. Otherwise, when TP
-    # was overridden upward (yaml default TP=1, user set TP=8), expand the
-    # GPU list to match TP (0,1,...,TP-1). This avoids vLLM/SGLang seeing
-    # only 1 device and OOM-ing on multi-GPU models.
-    explicit_rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
-    if explicit_rocr:
-        envs["ROCR_VISIBLE_DEVICES"] = explicit_rocr
-    else:
-        tp_in_yaml = int(envs.get("TP", 1))
-        existing_rocr = str(envs.get("ROCR_VISIBLE_DEVICES", "")).strip()
-        existing_count = (
-            len([x for x in existing_rocr.split(",") if x.strip()])
-            if existing_rocr else 0
-        )
-        if tp_in_yaml > 1 and existing_count < tp_in_yaml:
-            envs["ROCR_VISIBLE_DEVICES"] = ",".join(
-                str(i) for i in range(tp_in_yaml)
-            )
+    envs = apply_runtime_benchmark_overrides(
+        bench, model_path=model_path, gpu_type=gpu_type,
+    )
     # Always run accuracy eval (GSM8K) as part of the benchmark.
     # Magpie's benchmark scripts check RUN_EVAL=true and call run_eval
     # while the server is still alive, avoiding an extra server restart.
@@ -161,16 +132,14 @@ def _materialize_config_with_envs(
         fw = str(bench.get("framework") or "").lower()
         if "vllm" in fw:
             existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
-            # Magpie's vllm_*.sh expands $EXTRA_VLLM_ARGS unquoted, so
-            # ${WORKSPACE_DIR} is substituted at server-launch time.
-            # capture_torch_profiler_dir enables graph-capture tracing
-            # (#126 §3.1.4 item 1) — TraceLens needs this to resolve the
-            # actual kernels executed under cudagraph mode.
+            # Do not inject capture_torch_profiler_dir by default: the vLLM
+            # build on current MI355X validation nodes rejects that field in
+            # --profiler-config. Magpie's vllm_*.sh already injects the
+            # supported torch profiler fields and we add TraceLens' stable
+            # timing/annotation knobs here.
             profiler_args = (
                 f"--profiler-config.delay_iterations {delay_iters} "
-                f"--profiler-config.max_iterations {max_iters} "
-                f"--profiler-config.capture_torch_profiler_dir "
-                f"${{WORKSPACE_DIR}}/torch_trace/capture_traces"
+                f"--profiler-config.max_iterations {max_iters}"
             )
             if "delay_iterations" not in existing_vllm_args:
                 envs["EXTRA_VLLM_ARGS"] = f"{existing_vllm_args} {profiler_args}".strip()
@@ -201,7 +170,8 @@ def _materialize_config_with_envs(
     if "NUM_WARMUPS" not in envs:
         envs["NUM_WARMUPS"] = min(conc_val, 8)
     if server_args:
-        envs[server_args_env_name(bench.get("framework"))] = server_args
+        args_key = server_args_env_name(bench.get("framework"))
+        envs[args_key] = merge_server_args(envs.get(args_key, ""), server_args)
     for key, value in (extra_envs or {}).items():
         envs[str(key)] = str(value)
     materialized = output_dir / "baseline_config.with_envs.yaml"
