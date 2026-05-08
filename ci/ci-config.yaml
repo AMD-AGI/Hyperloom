@@ -4,7 +4,7 @@ claw:
   sandbox_workspace_env: SANDBOX_WORKSPACE
   sandbox_timeout: 28800
   agent_id: agent_default
-  tools: [74]  # 74=ci-mix300 v1.3.0(skill) with submit_workload.mjs + check_workload.mjs + NFS_ROOT paths
+  tools: [4, 74]  # 4=base tools (bash/read/write/grep etc), 74=ci-mix300 v1.3.0 skill (scripts on disk)
 
 inferenceX:
   repo: https://github.com/SemiAnalysisAI/InferenceX.git
