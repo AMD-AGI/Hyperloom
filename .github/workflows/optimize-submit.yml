@@ -3,6 +3,12 @@ name: SaFE Optimize Submit
 # Submits SaFE inference optimization tasks via the same API the SaFE script
 # (Primus-SaFE/scripts/optimize_submit.py) uses, reusing CLAW_API_KEY.
 # Independent of inference-optimization-ci.yml — no shared state.
+#
+# Three-stage pipeline:
+#   1. prepare    (ubuntu-latest)  — HF top-N or explicit list -> matrix JSON
+#   2. optimize   (matrix, hyperloom-mh826) — one model per parallel job
+#   3. summarize  (ubuntu-latest)  — collect ci_metrics.json + InferenceX ref
+#                                    -> ci_summary.{md,json}
 
 on:
   workflow_dispatch:
@@ -10,7 +16,7 @@ on:
       hf_top:
         description: 'HuggingFace top-N (leave empty if specifying "models" below)'
         required: false
-        default: '10'
+        default: '5'
       min_params:
         description: 'Min parameter count in Billions (e.g. 7 for >=7B). 0 to skip filter.'
         required: false
@@ -41,6 +47,12 @@ on:
         description: 'InferenceX checkout path inside the sandbox. Leave empty to use script default (/wekafs/InferenceX for core42).'
         required: false
         default: ''
+      target_gpu:
+        description: 'Reference GPU for InferenceX comparison in the summary table'
+        required: false
+        default: 'b200'
+        type: choice
+        options: [b200, h100, mi300x, mi355x]
       wait_for_completion:
         description: 'Wait for tasks to finish (default true). Uncheck for fire-and-forget.'
         type: boolean
@@ -67,43 +79,62 @@ on:
         default: false
 
 jobs:
-  submit:
-    name: Submit to SaFE
-    # SaFE base URL (core42.primus-safe.amd.com) is not resolvable from
-    # GitHub-hosted runners. Must use the self-hosted runner that lives
-    # inside the corp network (same as inference-optimization-ci.yml).
-    runs-on: hyperloom-mh826
-    # Headroom for: model registration (up to ~2h for fresh weights) +
-    # task wait (up to 8h per task, run in parallel) + artifact collection.
-    timeout-minutes: 600
+  # ── Stage 1: build matrix ────────────────────────────────────────────────────
+  prepare:
+    name: Build matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count:  ${{ steps.matrix.outputs.count }}
     env:
-      # Reused secrets (already configured for inference-optimization-ci.yml).
-      CLAW_API_KEY:   ${{ secrets.CLAW_API_KEY }}
-      SAFE_BASE_URL:  ${{ secrets.SAFE_BASE_URL }}
-      HARBOR_PREFIX:  ${{ secrets.HARBOR_PREFIX }}
-      # New secret: HuggingFace token for gated models (optional).
-      HF_TOKEN:       ${{ secrets.HF_TOKEN }}
-      # Workspace/volume defaults are baked into the script
-      # (register=core42-hyperloom, submit=core42-sandbox, volume=/wekafs).
-      # Override via secret only if the SaFE convention changes again.
+      HF_TOKEN:        ${{ secrets.HF_TOKEN }}
+      INPUT_HF_TOP:    ${{ github.event.inputs.hf_top }}
+      INPUT_MIN_PARAMS: ${{ github.event.inputs.min_params }}
+      INPUT_MODELS:    ${{ github.event.inputs.models }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install requests
+        run: pip install --quiet requests
+      - name: Generate matrix
+        id: matrix
+        working-directory: ci
+        run: python3 generate_hf_matrix.py
+
+  # ── Stage 2: per-model optimization (parallel) ──────────────────────────────
+  optimize:
+    name: optimize-${{ matrix.key }}
+    needs: prepare
+    if: needs.prepare.outputs.count != '0'
+    runs-on: hyperloom-mh826
+    # 8h per-task timeout + buffer for register/wait/collect.
+    timeout-minutes: 600
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    env:
+      CLAW_API_KEY:                     ${{ secrets.CLAW_API_KEY }}
+      SAFE_BASE_URL:                    ${{ secrets.SAFE_BASE_URL }}
+      HARBOR_PREFIX:                    ${{ secrets.HARBOR_PREFIX }}
+      HF_TOKEN:                         ${{ secrets.HF_TOKEN }}
       SAFE_OPTIMIZE_REGISTER_WORKSPACE: ${{ secrets.SAFE_OPTIMIZE_REGISTER_WORKSPACE }}
       SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
       SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
-
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
         working-directory: ci
-        # Self-hosted runner already ships with Python 3; no setup-python needed.
         run: pip install --quiet requests
 
-      - name: Submit optimization tasks
+      - name: Submit + wait + collect (single model)
         working-directory: ci
         env:
-          INPUT_HF_TOP:           ${{ github.event.inputs.hf_top }}
-          INPUT_MIN_PARAMS:       ${{ github.event.inputs.min_params }}
-          INPUT_MODELS:           ${{ github.event.inputs.models }}
+          MODEL_REPO:             ${{ matrix.model }}
           INPUT_ISL:              ${{ github.event.inputs.isl }}
           INPUT_OSL:              ${{ github.event.inputs.osl }}
           INPUT_MODE:             ${{ github.event.inputs.mode }}
@@ -118,16 +149,7 @@ jobs:
           ARTIFACTS_DIR:          ${{ github.workspace }}/task-artifacts
         run: |
           set -euo pipefail
-          ARGS=()
-          if [ -n "${INPUT_MODELS:-}" ]; then
-            # shellcheck disable=SC2206
-            ARGS+=(--model ${INPUT_MODELS})
-          else
-            ARGS+=(--hf-top "${INPUT_HF_TOP:-10}")
-            if [ "${INPUT_MIN_PARAMS:-0}" != "0" ] && [ -n "${INPUT_MIN_PARAMS:-}" ]; then
-              ARGS+=(--min-params "${INPUT_MIN_PARAMS}")
-            fi
-          fi
+          ARGS=(--model "${MODEL_REPO}")
           ARGS+=(--isl "${INPUT_ISL:-1024}" --osl "${INPUT_OSL:-1024}")
           ARGS+=(--mode "${INPUT_MODE:-local}")
           if [ -n "${INPUT_GPU_TYPE:-}" ]; then
@@ -153,32 +175,95 @@ jobs:
           ARGS+=(--artifacts-dir "${ARTIFACTS_DIR}")
           python3 optimize_submit.py "${ARGS[@]}"
 
-      - name: Render manifest to job summary
+      - name: Render per-model manifest to job summary
         if: always()
         run: |
           if [ -f "${{ github.workspace }}/submit-output/submission_manifest.md" ]; then
             cat "${{ github.workspace }}/submit-output/submission_manifest.md" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "_No manifest produced (script likely failed before writing)._" >> "$GITHUB_STEP_SUMMARY"
+            echo "_No manifest produced for ${{ matrix.model }}._" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Upload manifest
+      - name: Upload per-model manifest
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: submission-manifest
+          name: submission-manifest-${{ matrix.key }}
           path: submit-output/
-          # Repo cap is 45 days; explicit value avoids the auto-downgrade warning.
           retention-days: 45
           if-no-files-found: warn
 
-      - name: Upload task artifacts
+      - name: Upload per-model task artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: task-artifacts
+          name: task-artifacts-${{ matrix.key }}
           path: task-artifacts/
           retention-days: 45
-          # Empty when --no-collect-artifacts or all tasks failed before producing
-          # any output — that's expected, don't fail the job over it.
           if-no-files-found: ignore
+
+  # ── Stage 3: aggregate summary ───────────────────────────────────────────────
+  summarize:
+    name: Build summary
+    needs: optimize
+    if: always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install --quiet requests pyyaml
+
+      - name: Download all submission manifests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ github.workspace }}/manifests
+          pattern: submission-manifest-*
+          merge-multiple: false
+
+      - name: Download all task artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ github.workspace }}/task-artifacts-merged
+          pattern: task-artifacts-*
+          # merge-multiple flattens all <task_id>/ subdirs into one root,
+          # which is exactly what build_summary.py expects.
+          merge-multiple: true
+
+      - name: Build summary table
+        working-directory: ci
+        env:
+          INPUT_TARGET_GPU: ${{ github.event.inputs.target_gpu }}
+          INPUT_ISL:        ${{ github.event.inputs.isl }}
+          INPUT_OSL:        ${{ github.event.inputs.osl }}
+        run: |
+          python3 build_summary.py \
+            --artifacts-dir "${{ github.workspace }}/task-artifacts-merged" \
+            --manifests-dir "${{ github.workspace }}/manifests" \
+            --target-gpu    "${INPUT_TARGET_GPU:-b200}" \
+            --isl           "${INPUT_ISL:-1024}" \
+            --osl           "${INPUT_OSL:-1024}" \
+            --out-dir       "${{ github.workspace }}/summary-out"
+
+      - name: Render summary to job summary
+        if: always()
+        run: |
+          if [ -f "${{ github.workspace }}/summary-out/ci_summary.md" ]; then
+            cat "${{ github.workspace }}/summary-out/ci_summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No summary produced._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload final summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-summary
+          path: summary-out/
+          retention-days: 45
+          if-no-files-found: warn
