@@ -140,9 +140,16 @@ def _materialize_config_with_envs(
         fw = str(bench.get("framework") or "").lower()
         if "vllm" in fw:
             existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
+            # Magpie's vllm_*.sh expands $EXTRA_VLLM_ARGS unquoted, so
+            # ${WORKSPACE_DIR} is substituted at server-launch time.
+            # capture_torch_profiler_dir enables graph-capture tracing
+            # (#126 §3.1.4 item 1) — TraceLens needs this to resolve the
+            # actual kernels executed under cudagraph mode.
             profiler_args = (
                 f"--profiler-config.delay_iterations {delay_iters} "
-                f"--profiler-config.max_iterations {max_iters}"
+                f"--profiler-config.max_iterations {max_iters} "
+                f"--profiler-config.capture_torch_profiler_dir "
+                f"${{WORKSPACE_DIR}}/torch_trace/capture_traces"
             )
             if "delay_iterations" not in existing_vllm_args:
                 envs["EXTRA_VLLM_ARGS"] = f"{existing_vllm_args} {profiler_args}".strip()
