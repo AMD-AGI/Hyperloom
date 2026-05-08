@@ -316,6 +316,9 @@ async def test_coordinator_request_routes_to_kernel(session_dir):
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
+        c.shared_state.baseline_tput = 100.0
+        c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
+        c.shared_state.save(session_dir)
         await c.tick(1)
         kernel_inbox = await c.bus.tail(to_agent="kernel", topic="request")
         assert any(m.payload.get("kind") == "select_kernels" for m in kernel_inbox)
@@ -331,6 +334,9 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
+        c.shared_state.baseline_tput = 100.0
+        c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
+        c.shared_state.save(session_dir)
         await c.tick(1)
         # Find the request msg_id Coordinator inserted
         kernel_inbox = await c.bus.tail(to_agent="kernel", topic="request")
@@ -349,6 +355,77 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
         responses = await c.bus.tail(topic="response", to_agent="orchestration")
         assert responses
         assert responses[0].payload["status"] == "ok"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_execution_order_denies_backends_before_profile(session_dir):
+    """After baseline, profile is mandatory before backends/params/sweep."""
+    propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
+        "action_name": "backends", "predicted_gain_pct": 5.0,
+    })
+    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
+    c = Coordinator(session_dir, backends=_build_backends(plans))
+    try:
+        c.shared_state.baseline_tput = 100.0
+        c.shared_state.last_profile_trace = ""
+        c.shared_state.save(session_dir)
+
+        await c.tick(1)
+
+        assert not c.state.pending_proposals
+        obs = await c.bus.tail(to_agent="orchestration", topic="observation")
+        assert any(
+            m.payload.get("kind") == "policy_denied"
+            and m.payload.get("rule") == "execution_order"
+            and "profile" in str(m.payload.get("hint"))
+            for m in obs
+        )
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_execution_order_denies_backends_before_select_kernels(session_dir):
+    """After profile, select_kernels is mandatory before backends/params/sweep."""
+    propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
+        "action_name": "params", "predicted_gain_pct": 3.0,
+    })
+    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
+    c = Coordinator(session_dir, backends=_build_backends(plans))
+    try:
+        c.shared_state.baseline_tput = 100.0
+        c.shared_state.last_profile_trace = "/tmp/trace-a.json.gz"
+        c.shared_state.last_select_kernels = {}
+        c.shared_state.save(session_dir)
+
+        await c.tick(1)
+
+        assert not c.state.pending_proposals
+        obs = await c.bus.tail(to_agent="orchestration", topic="observation")
+        assert any(
+            m.payload.get("kind") == "policy_denied"
+            and m.payload.get("rule") == "execution_order"
+            and "select_kernels" in str(m.payload.get("hint"))
+            for m in obs
+        )
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_execution_checklist_is_in_orchestration_prompt(session_dir):
+    c = Coordinator(session_dir, backends=_build_backends({}))
+    try:
+        c.shared_state.baseline_tput = 100.0
+        c.shared_state.last_profile_trace = ""
+        c.shared_state.save(session_dir)
+
+        prompt = await c._compose_prompt("orchestration")
+
+        assert "Execution checklist" in prompt
+        assert "profile is required now" in prompt
     finally:
         await c.stop()
 
