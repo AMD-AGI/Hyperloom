@@ -24,6 +24,7 @@ from inference_optimizer.orchestrator.action_executors import (
 from inference_optimizer.orchestrator.action_executors._grid_runner import (
     GridVariant,
     VariantResult,
+    _build_variant_yaml,
     pick_winners,
     run_grid,
 )
@@ -337,6 +338,57 @@ def test_baseline_materialize_uses_vllm_extra_args_env(tmp_path):
     envs = cfg["benchmark"]["envs"]
     assert envs["EXTRA_VLLM_ARGS"] == "--block-size 256"
     assert "EXTRA_SGLANG_ARGS" not in envs
+
+
+def test_grid_variant_yaml_preserves_base_extra_args_and_env_overrides(
+    tmp_path, monkeypatch,
+):
+    """Backends/params grid materialization must match baseline env handling.
+
+    Regression: grid runner used to ignore TP/ISL/OSL env overrides and
+    overwrite base EXTRA_VLLM_ARGS, so DSR1 ran backend variants with TP=1 and
+    dropped the model-required `--block-size 1`.
+    """
+    base = tmp_path / "vllm.yaml"
+    _write_vllm_yaml(base)
+
+    # Simulate a model-specific asset yaml with a required global vLLM arg.
+    cfg = yaml.safe_load(base.read_text())
+    envs = cfg["benchmark"]["envs"]
+    envs["EXTRA_VLLM_ARGS"] = "--block-size 1"
+    base.write_text(yaml.safe_dump(cfg))
+
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("CONC", "64")
+    monkeypatch.setenv("ISL", "1024")
+    monkeypatch.setenv("OSL", "1024")
+    monkeypatch.setenv("MAX_MODEL_LEN", "6144")
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+
+    out = _build_variant_yaml(
+        base,
+        base_extra_args="--kv-cache-dtype fp8",
+        variant=GridVariant("vllm_max_seqs", "--max-num-seqs 512"),
+        output_subdir=tmp_path / "variant",
+        model_path="/wekafs/models/DeepSeek-R1-0528",
+        gpu_type="mi355x",
+    )
+    rendered = yaml.safe_load(out.read_text())
+    bench = rendered["benchmark"]
+    envs = bench["envs"]
+
+    assert bench["model"] == "/wekafs/models/DeepSeek-R1-0528"
+    assert bench["runner_type"] == "mi355x"
+    assert "benchmark_script" not in bench
+    assert envs["TP"] == 8
+    assert envs["CONC"] == 64
+    assert envs["ISL"] == 1024
+    assert envs["OSL"] == 1024
+    assert envs["MAX_MODEL_LEN"] == 6144
+    assert envs["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
+    assert envs["EXTRA_VLLM_ARGS"] == (
+        "--block-size 1 --kv-cache-dtype fp8 --max-num-seqs 512"
+    )
 
 
 # ===========================================================================
