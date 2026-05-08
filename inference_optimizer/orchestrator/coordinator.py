@@ -814,6 +814,16 @@ class Coordinator:
                 else self.shared_state.baseline_tput
             params.setdefault("base_tput", float(base or 0.0))
             params.setdefault("base_extra_args", cb_args)
+            # Plumb baseline's materialized YAML so variant runs honor the
+            # same workload contract (CONC/ISL/OSL/TP/etc.) baseline ran.
+            # Without this each variant would re-render from the shipped
+            # YAML's smoke defaults and produce ~10x lower throughput.
+            # `setdefault` lets the proposer override (e.g. profile re-uses
+            # this path too, or a deliberate cross-workload sweep).
+            if self.shared_state.baseline_config_path:
+                params.setdefault(
+                    "config_path", self.shared_state.baseline_config_path
+                )
             if pending.action_name == "params":
                 params.setdefault("params_search", self.shared_state.params_search)
                 # Long runs should advance the search incrementally while
@@ -843,7 +853,18 @@ class Coordinator:
         if denied is not None:
             await self._record_policy_denied(source, intent, denied)
             return
-        params = intent.payload.get("params") or {}
+        params = dict(intent.payload.get("params") or {})
+        # Plumb baseline's materialized YAML into grid-style delegated tasks
+        # so they inherit the workload contract (CONC/ISL/OSL/TP/...) baseline
+        # ran. See `_materialize_approved_proposal` for the same logic on the
+        # proposal/review path. `setdefault` lets the delegator override.
+        if (
+            action_name in ("backends", "params", "sweep")
+            and self.shared_state.baseline_config_path
+        ):
+            params.setdefault(
+                "config_path", self.shared_state.baseline_config_path
+            )
         idempotency_key = intent.payload.get("idempotency_key") or f"{source}:{action_name}:{len(self.state.pending_proposals)}"
         task = await self.tasks.create(
             kind=action_name,
@@ -903,6 +924,12 @@ class Coordinator:
             if handler is not None:
                 params = intent.payload.get("params") or {}
                 merged_payload = {**intent.payload, **params}
+                if (
+                    kind == "select_kernels"
+                    and self.shared_state.last_profile_roofline
+                    and not merged_payload.get("roofline_json")
+                ):
+                    merged_payload["roofline_json"] = self.shared_state.last_profile_roofline
                 cache_hit_source = None
                 cached_result = self._cached_kernel_request(kind, merged_payload)
                 if cached_result is not None:
@@ -1321,6 +1348,14 @@ class Coordinator:
             if isinstance(acc, (int, float)):
                 self.shared_state.baseline_accuracy = float(acc)
                 changed = True
+            # Persist the materialized YAML so downstream params/backends/
+            # sweep tasks can reuse the exact workload contract baseline ran
+            # (see _materialize_approved_proposal / _handle_delegate where we
+            # plumb this in as ``task.params["config_path"]``).
+            materialized = result.get("materialized_config")
+            if isinstance(materialized, str) and materialized:
+                self.shared_state.baseline_config_path = materialized
+                changed = True
             self.shared_state.current_best = {
                 "action": "baseline",
                 "tput": float(tput) if isinstance(tput, (int, float)) else None,
@@ -1350,6 +1385,14 @@ class Coordinator:
                 self.shared_state.last_profile_args = profile_args
                 # Stale select_kernels cache no longer matches this trace.
                 self.shared_state.last_select_kernels = {}
+                self.shared_state.last_profile_pmc_summary = ""
+                self.shared_state.last_profile_roofline = ""
+                changed = True
+            if result.get("pmc_summary_path"):
+                self.shared_state.last_profile_pmc_summary = str(result["pmc_summary_path"])
+                changed = True
+            if result.get("roofline_path"):
+                self.shared_state.last_profile_roofline = str(result["roofline_path"])
                 changed = True
             # profile result may also include a tput; promote into
             # current_best on the same +1% rule the grid path uses below.

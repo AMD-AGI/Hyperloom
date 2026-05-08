@@ -214,17 +214,32 @@ def test_materialize_config_rocr_visible_devices_auto_expands_when_tp_overridden
     )
 
 
-def test_materialize_config_rocr_visible_devices_explicit_env_wins(
+def test_materialize_config_rocr_visible_devices_explicit_env_wins_when_enough(
     tmp_path, monkeypatch,
 ):
-    """Explicit ROCR_VISIBLE_DEVICES env wins over auto-expansion."""
+    """Explicit ROCR_VISIBLE_DEVICES wins when it has at least TP devices."""
+    import yaml
+    monkeypatch.setenv("TP", "4")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    assert envs["ROCR_VISIBLE_DEVICES"] == "4,5,6,7"
+
+
+def test_materialize_config_rocr_visible_devices_expands_when_under_tp(
+    tmp_path, monkeypatch,
+):
+    """If explicit ROCR_VISIBLE_DEVICES has fewer devices than TP requires,
+    `_workload_envs` auto-expands to 0..TP-1 and logs a warning, so SGLang
+    actually sees enough GPUs to start."""
     import yaml
     monkeypatch.setenv("TP", "8")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
-    assert envs["ROCR_VISIBLE_DEVICES"] == "4,5,6,7"
+    assert envs["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
 
 
 def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
@@ -388,7 +403,10 @@ async def test_select_kernels_handler_dry_run_returns_structured_result(session_
 
 @pytest.mark.asyncio
 async def test_select_kernels_handler_surfaces_candidates_path(session_dir, monkeypatch):
+    captured: dict = {}
+
     async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = cmd
         payload = {
             "status": "ok",
             "hot_kernels": [],
@@ -400,10 +418,16 @@ async def test_select_kernels_handler_surfaces_candidates_path(session_dir, monk
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
     res = await krh.select_kernels_handler(
-        {"trace_input": str(session_dir), "dry_run": True},
+        {
+            "trace_input": str(session_dir),
+            "dry_run": True,
+            "roofline_json": "/tmp/roofline.json",
+        },
         session_dir=session_dir,
     )
     assert res["candidates_path"] == "/tmp/kernel_candidates.json"
+    assert "--roofline-json" in captured["cmd"]
+    assert "/tmp/roofline.json" in captured["cmd"]
 
 
 @pytest.mark.asyncio
@@ -449,6 +473,7 @@ async def test_coordinator_request_select_kernels_uses_handler(session_dir):
     should run the registered handler programmatically and emit RESPONSE
     on the bus *without* waiting for the Kernel LLM."""
     c = Coordinator(session_dir, backends=_backends_silent())
+    c.shared_state.last_profile_roofline = "/tmp/roofline.json"
 
     captured: dict = {}
 
@@ -484,6 +509,7 @@ async def test_coordinator_request_select_kernels_uses_handler(session_dir):
 
             # And the handler did receive merged payload (params flattened in).
             assert captured["payload"].get("trace_input") == "/tmp/fake-trace.json.gz"
+            assert captured["payload"].get("roofline_json") == "/tmp/roofline.json"
             assert captured["session_dir"] == session_dir
         finally:
             await c.stop()
