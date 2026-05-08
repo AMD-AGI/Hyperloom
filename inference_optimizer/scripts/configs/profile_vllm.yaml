@@ -6,9 +6,10 @@
 # rationale.
 #
 # TraceLens integration (#126): profiler is configured for:
-#   1. Graph capture tracing (--profiler-config.capture_torch_profiler_dir)
-#   2. Detailed annotations (--profiler-config.detailed_trace_annotation)
-#   3. Steady-state windowing (--profiler-config.delay_iterations/max_iterations)
+#   1. Detailed annotations (--profiler-config.detailed_trace_annotation)
+#   2. Steady-state windowing (--profiler-config.delay_iterations/max_iterations)
+#   3. Torch profiler shape/memory/flops/gzip fields injected by Magpie's
+#      vllm_*.sh when PROFILE=1.
 # These are required for TraceLens fusion / roofline analysis.
 
 benchmark:
@@ -31,10 +32,11 @@ benchmark:
     # These flags are appended to the vllm serve command via EXTRA_VLLM_ARGS.
     # delay_iterations and max_iterations control the steady-state window:
     #   delay = 5 * CONC (skip warmup); max = clamp(16 * OSL / CONC, 4, 64)
-    # capture_torch_profiler_dir enables graph-capture tracing (issue #126
-    # §3.1.4 item 1) — TraceLens needs this dir to resolve the actual
-    # kernels executed under cudagraph mode (vs the eager prefill kernels).
-    # All values are overridden at runtime by _materialize_config_with_envs.
+    # Runtime values are overridden by _materialize_config_with_envs.
+    # NOTE: current validation-node vLLM rejects capture_torch_profiler_dir,
+    # so graph-capture trace export remains blocked on a vLLM-side feature /
+    # version update. Do not add that flag here until the deployed vLLM
+    # accepts it.
     EXTRA_VLLM_ARGS: "--profiler-config.detailed_trace_annotation True --profiler-config.ignore_frontend True"
     # vLLM timeout must be extended during profiling (graph capture is slow)
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
