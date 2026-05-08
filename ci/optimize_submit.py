@@ -600,21 +600,81 @@ class SafeOptimizeClient:
         log.warning("[task %s] wait timed out after %dm", task_id, timeout_min)
         return "Timeout", last_task
 
-    def list_artifacts(self, task_id: str) -> list[dict]:
+    # WORKAROUND: SaFE's /api/v1/optimization/tasks/<id>/artifacts has a bug
+    # where it returns only 1 file even when the underlying Claw session has
+    # 11-31 files. Bypass the SaFE optimization API and hit Claw API directly
+    # via the task's clawSessionId. Same auth (Bearer ak-...) works for both.
+    # When SaFE backend ListSessionFiles is fixed, this can revert to the
+    # SaFE optimization API (one less GET per task).
+
+    def _claw_session_id_for(self, task_id: str) -> str | None:
+        """Resolve clawSessionId for a task, with a small per-instance cache.
+
+        Calls GET /api/v1/optimization/tasks/<id> once and caches the result.
+        Returns None if SaFE doesn't have a session attached (e.g. task that
+        failed before Claw session creation).
+        """
+        if not hasattr(self, "_claw_session_cache"):
+            self._claw_session_cache = {}
+        if task_id in self._claw_session_cache:
+            return self._claw_session_cache[task_id]
         try:
-            data = self._request("GET", f"api/v1/optimization/tasks/{task_id}/artifacts")
+            t = self.get_task(task_id)
         except Exception as e:
-            log.warning("[task %s] list_artifacts failed: %s", task_id, e)
+            log.warning("[task %s] get_task failed while resolving clawSessionId: %s",
+                        task_id, e)
+            return None
+        sid = (t.get("clawSessionId") or "").strip()
+        self._claw_session_cache[task_id] = sid or None
+        return sid or None
+
+    def list_artifacts(self, task_id: str) -> list[dict]:
+        """List session files via Claw API directly (workaround for SaFE bug).
+
+        Claw API returns the full file tree (incl. subdirectories like
+        ``hyperloom/ci_metrics.json``). Items shape mirrors what SaFE
+        ArtifactInfo would have produced: ``{"path": "...", "size": ..., ...}``.
+        """
+        session_id = self._claw_session_id_for(task_id)
+        if not session_id:
+            log.warning("[task %s] no clawSessionId — empty artifact list", task_id)
             return []
-        return data.get("items", [])
+        url = f"{self.base_url}/claw-api/v1/sessions/{session_id}/files"
+        try:
+            resp = self._sess.get(url, timeout=self.timeout)
+        except Exception as e:
+            log.warning("[task %s] claw list files request failed: %s", task_id, e)
+            return []
+        if resp.status_code >= 400:
+            log.warning("[task %s] claw list files HTTP %d: %s",
+                        task_id, resp.status_code, resp.text[:200])
+            return []
+        try:
+            payload = resp.json()
+        except Exception as e:
+            log.warning("[task %s] claw list files JSON parse failed: %s", task_id, e)
+            return []
+        # Claw returns {"data": [...]} envelope; tolerate other shapes too.
+        if isinstance(payload, dict):
+            items = payload.get("data") or payload.get("items") or []
+        else:
+            items = payload
+        return items if isinstance(items, list) else []
 
     def download_artifact(self, task_id: str, path: str) -> bytes:
-        url = (f"{self.base_url}/api/v1/optimization/tasks/{task_id}/artifacts/download"
-               f"?path={requests.utils.quote(path, safe='')}")
+        """Download a single session artifact via Claw API stream endpoint."""
+        session_id = self._claw_session_id_for(task_id)
+        if not session_id:
+            raise RuntimeError(f"no clawSessionId for task {task_id}; cannot download")
+        # Claw expects path components to be URL-encoded, but '/' is left as-is
+        # (the endpoint matches the path under /sessions/<id>/files/<path>/stream).
+        encoded = requests.utils.quote(path, safe="/")
+        url = (f"{self.base_url}/claw-api/v1/sessions/{session_id}"
+               f"/files/{encoded}/stream")
         resp = self._sess.get(url, timeout=120)
         if resp.status_code >= 400:
             raise RuntimeError(
-                f"download {path} -> HTTP {resp.status_code}: {resp.text[:200]}")
+                f"claw download {path} -> HTTP {resp.status_code}: {resp.text[:200]}")
         return resp.content
 
     def download_artifact_to(self, task_id: str, path: str, local_path: str) -> int:
