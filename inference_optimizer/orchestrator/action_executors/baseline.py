@@ -1,0 +1,412 @@
+"""Real ``baseline`` ActionRunner — runs Magpie SGLang benchmark.
+
+DESIGN v0.6 §15.2 + §16.1 baseline action.
+
+Wire-up:
+
+    sub.register_executor("baseline", baseline_executor)
+
+Orchestration emits ``delegate{action_name="baseline", params={...}}``;
+SubAgentRunner pulls this runner, acquires the action's lanes
+(`benchmark_lane` + `server_lifecycle`), runs the Magpie CLI as a
+subprocess, parses ``benchmark_report.json``, and returns the result on
+the bus as a ``delegated_result`` event so Orchestration can read the
+real ``baseline_tput`` next tick.
+
+The runner honours the following RunnerContext.task.params keys
+(all optional — defaults below come from BASELINE_DEFAULT_CONFIG):
+
+    config_path:  absolute path to a Magpie YAML config to use
+    output_dir:   workspace root for Magpie outputs
+    timeout_sec:  hard timeout (overrides YAML's timeout_seconds)
+
+Implementation notes:
+
+* We don't import Magpie programmatically (its CLI takes care of
+  InferenceX setup, GPU monitor, workspace creation). subprocess.run
+  is the cleanest seam.
+* Parses ``benchmark_report.json`` rather than ``inferencex_result.json``
+  because the former has the cleaner top-level schema.
+* Returns ``error_class`` on failure so the coordinator can route to
+  Robustness RCA later (P1-7).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import subprocess
+from pathlib import Path
+from typing import Any
+
+from ...paths import asset_root
+from ..sub_agent_runner import RunnerContext
+from ._workload_envs import (
+    default_baseline_config,
+    materialize_config_with_envs,
+)
+
+
+log = logging.getLogger(__name__)
+
+
+# Legacy module-level constant kept pointing at the sglang yaml so existing
+# tests that import it as a fixture path continue to work. Runtime selection
+# of sglang vs vllm yaml goes through `default_baseline_config()` (re-exported
+# below as the legacy `_default_baseline_config` alias).
+BASELINE_DEFAULT_CONFIG = (
+    asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
+)
+BASELINE_DEFAULT_TIMEOUT_SEC = 1500           # WARM-start cap (aiter jit cache populated)
+BASELINE_COLD_START_TIMEOUT_SEC = 3600        # COLD-start cap (aiter jit cache empty/sparse)
+COLD_START_KERNEL_THRESHOLD = 20              # < N .so files under aiter jit/build/ ⇒ COLD
+
+# Probe order for aiter's JIT cache root. First path that exists wins.
+# Override via env `INFERENCE_OPTIMIZER_AITER_JIT_DIR=/abs/path` (single path,
+# tried before this list).
+AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
+    "/sgl-workspace/aiter/aiter/jit/build",
+    "/usr/local/lib/python3.10/site-packages/aiter/jit/build",
+    "/usr/local/lib/python3.12/dist-packages/aiter/jit/build",
+    "/usr/local/lib/python3.12/site-packages/aiter/jit/build",
+    "/opt/venv/lib/python3.10/site-packages/aiter/jit/build",
+    "/opt/venv/lib/python3.12/site-packages/aiter/jit/build",
+)
+
+
+# Backward-compat aliases — the canonical names live in `_workload_envs`.
+# Tests, sweep.py / params.py / backends.py used to import these from here;
+# keeping the underscore-prefixed names re-exported avoids a churny rename.
+_default_baseline_config = default_baseline_config
+_materialize_config_with_envs = materialize_config_with_envs
+
+
+def _probe_aiter_jit_cache() -> dict[str, Any]:
+    """Inspect aiter's JIT cache root to decide cold vs warm start.
+
+    Pure read-only filesystem probe — no subprocess, no GPU touch. The
+    first path under `AITER_JIT_PROBE_PATHS` (or `$INFERENCE_OPTIMIZER_AITER_JIT_DIR`
+    if set) that exists wins; we count `.so` files recursively and sum
+    their byte sizes. Any IO error degrades to ``probe_status="error"``
+    so callers (and unit tests on hosts with no aiter install) fall back
+    to the default WARM timeout instead of crashing.
+
+    Returns a dict with keys:
+        path           Path that was probed, or None if nothing found.
+        kernel_count   Number of `.so` files under `path` (recursive).
+        size_mb        Total size of those `.so` files, in MiB (int).
+        is_cold        True iff kernel_count < COLD_START_KERNEL_THRESHOLD;
+                       None when probe failed.
+        probe_status   "found" | "not_found" | "error".
+    """
+    info: dict[str, Any] = {
+        "path": None,
+        "kernel_count": 0,
+        "size_mb": 0,
+        "is_cold": None,
+        "probe_status": "not_found",
+    }
+    candidates: list[str] = []
+    override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
+    if override:
+        candidates.append(override)
+    candidates.extend(AITER_JIT_PROBE_PATHS)
+
+    try:
+        chosen: Path | None = None
+        for raw in candidates:
+            p = Path(raw)
+            if p.exists() and p.is_dir():
+                chosen = p
+                break
+        if chosen is None:
+            return info
+        info["path"] = str(chosen)
+
+        total_bytes = 0
+        kernel_count = 0
+        for so_path in chosen.rglob("*.so"):
+            try:
+                total_bytes += so_path.stat().st_size
+                kernel_count += 1
+            except OSError:
+                continue
+        info["kernel_count"] = kernel_count
+        info["size_mb"] = total_bytes // (1024 * 1024)
+        info["is_cold"] = kernel_count < COLD_START_KERNEL_THRESHOLD
+        info["probe_status"] = "found"
+        return info
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "baseline_executor: aiter jit cache probe failed: %s", exc,
+        )
+        info["probe_status"] = "error"
+        info["is_cold"] = None
+        return info
+
+
+class BaselineExecutor:
+    """Class form for tests / DI; ``baseline_executor`` is the bare callable."""
+
+    def __init__(
+        self,
+        *,
+        magpie_python: str | None = None,
+        default_config_path: Path | str | None = None,
+        default_output_root: Path | str | None = None,
+        default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
+        cwd: Path | str = "/tmp",
+    ):
+        from ._grid_runner import _resolve_magpie_python, _resolve_output_root
+        self.magpie_python = magpie_python or _resolve_magpie_python()
+        # None = resolve from $FRAMEWORK at call time. Tests may pass an
+        # explicit fixture path which then wins over the env-based resolver.
+        self.default_config_path = (
+            Path(default_config_path) if default_config_path else None
+        )
+        self.default_output_root = Path(
+            default_output_root or _resolve_output_root()
+        )
+        self.default_timeout_sec = default_timeout_sec
+        self.cwd = Path(cwd)
+
+    def _resolve_default_config(self) -> Path:
+        """Hook for subclasses (ProfileExecutor) to swap the resolver."""
+        return _default_baseline_config()
+
+    def _resolve_timeout(self, params: dict[str, Any]) -> int:
+        """Pick the subprocess timeout for this baseline launch.
+
+        Decision order:
+        1. ``task.params['timeout_sec']`` — explicit caller wins, no probe.
+        2. Probe ``aiter/jit/build/`` — if found AND
+           ``kernel_count < COLD_START_KERNEL_THRESHOLD``, return the
+           cold-start cap (env-overridable via
+           ``INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC``).
+        3. Otherwise fall back to ``self.default_timeout_sec`` (warm cap).
+
+        Every path emits exactly one log line so the chosen timeout +
+        rationale is greppable in ``optimizer_runs/run_*.log``.
+        """
+        explicit = params.get("timeout_sec")
+        if explicit:
+            timeout_sec = int(explicit)
+            log.info(
+                "baseline_executor: timeout=%ds (explicit task param)",
+                timeout_sec,
+            )
+            return timeout_sec
+
+        cache = _probe_aiter_jit_cache()
+        cold_cap = int(os.environ.get(
+            "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC",
+            BASELINE_COLD_START_TIMEOUT_SEC,
+        ))
+        if cache["probe_status"] == "found" and cache["is_cold"]:
+            log.warning(
+                "baseline_executor: COLD_START detected — aiter jit/build/ "
+                "at %s has %d .so (< %d threshold), %d MB. Bumping timeout "
+                "%ds -> %ds. First-time JIT compile on a new "
+                "(model, dtype, TP, max_model_len) signature can take 30+ "
+                "minutes for large FP8 / MoE models.",
+                cache["path"], cache["kernel_count"],
+                COLD_START_KERNEL_THRESHOLD, cache["size_mb"],
+                self.default_timeout_sec, cold_cap,
+            )
+            return cold_cap
+        if cache["probe_status"] == "found":
+            log.info(
+                "baseline_executor: WARM start — aiter jit/build/ at %s "
+                "has %d .so, %d MB. Using default timeout=%ds.",
+                cache["path"], cache["kernel_count"], cache["size_mb"],
+                self.default_timeout_sec,
+            )
+            return self.default_timeout_sec
+        log.warning(
+            "baseline_executor: aiter jit cache not located "
+            "(probe_status=%s). Using default timeout=%ds. Cold-start "
+            "auto-bump disabled for this run.",
+            cache["probe_status"], self.default_timeout_sec,
+        )
+        return self.default_timeout_sec
+
+    async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        params = ctx.task.params or {}
+        config_path = Path(
+            params.get("config_path")
+            or self.default_config_path
+            or self._resolve_default_config()
+        )
+        if not config_path.exists():
+            raise FileNotFoundError(f"baseline config not found: {config_path}")
+
+        output_dir = Path(
+            params.get("output_dir")
+            or (self.default_output_root / f"baseline-{ctx.task.task_id[:8]}")
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        timeout_sec = self._resolve_timeout(params)
+        # Resolve model path: task.params['model_path'] (Coordinator-supplied) >
+        # $MODEL_PATH (CLI re-exported). If neither, leave the YAML's hardcoded
+        # `model:` alone so unit tests with explicit fixture paths still work.
+        resolved_model = (
+            str(params.get("model_path") or "").strip()
+            or os.environ.get("MODEL_PATH", "").strip()
+        )
+        # Same pattern for gpu_type: cli.py canonicalizes (mi325x->mi300x) and
+        # re-exports $GPU_TYPE; tests / Coordinator can also override per-task.
+        resolved_gpu = (
+            str(params.get("gpu_type") or "").strip().lower()
+            or os.environ.get("GPU_TYPE", "").strip().lower()
+        )
+        config_path = materialize_config_with_envs(
+            config_path,
+            output_dir,
+            extra_sglang_args=str(params.get("extra_sglang_args") or ""),
+            extra_server_args=str(
+                params.get("extra_server_args")
+                or params.get("extra_vllm_args")
+                or ""
+            ),
+            extra_envs=dict(params.get("extra_envs") or {}),
+            model_path=resolved_model,
+            gpu_type=resolved_gpu,
+        )
+        # Stash for the result so Coordinator can plumb it forward to
+        # downstream params/backends/sweep tasks (workload-contract reuse).
+        materialized_config_path = config_path
+
+        cmd = [
+            self.magpie_python, "-m", "Magpie", "-v", "benchmark",
+            "--benchmark-config", str(config_path),
+            "--output-dir", str(output_dir),
+            "--run-mode", "local",
+        ]
+        env = os.environ.copy()
+        # Make sure the venv is first in PATH so the benchmark script's
+        # `python3` resolves to one with torch+rocm. Magpie YAML also sets
+        # this but defending in depth costs nothing.
+        env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+
+        log.info("baseline_executor: launching Magpie cmd=%s output_dir=%s",
+                 cmd, output_dir)
+
+        # subprocess.run is sync — wrap in asyncio.to_thread so we don't
+        # block the Coordinator reactor loop.
+        try:
+            proc = await asyncio.to_thread(
+                subprocess.run, cmd,
+                capture_output=True, text=True, timeout=timeout_sec,
+                env=env, cwd=str(self.cwd),
+            )
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "status": "failed",
+                "error_class": "timeout",
+                "error": f"baseline benchmark exceeded {timeout_sec}s: {exc}",
+                "output_dir": str(output_dir),
+            }
+
+        if proc.returncode != 0:
+            tail_stderr = (proc.stderr or "")[-2000:]
+            return {
+                "status": "failed",
+                "error_class": "subprocess_nonzero",
+                "returncode": proc.returncode,
+                "error": tail_stderr,
+                "output_dir": str(output_dir),
+            }
+
+        # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
+        candidates = sorted(output_dir.glob("benchmark_*"))
+        if not candidates:
+            return {
+                "status": "failed",
+                "error_class": "no_workspace",
+                "error": "Magpie completed but produced no benchmark_* workspace",
+                "output_dir": str(output_dir),
+            }
+        workspace = candidates[-1]
+        report_path = workspace / "benchmark_report.json"
+        if not report_path.exists():
+            return {
+                "status": "failed",
+                "error_class": "no_report",
+                "error": f"benchmark_report.json missing under {workspace}",
+                "output_dir": str(output_dir),
+                "workspace": str(workspace),
+            }
+
+        with report_path.open(encoding="utf-8") as f:
+            report = json.load(f)
+
+        tput = report.get("throughput", {}) or {}
+        latency = report.get("latency", {}) or {}
+        ttft = latency.get("ttft", {}) or {}
+        e2el = latency.get("e2el", {}) or {}
+
+        result = {
+            "status": "succeeded" if report.get("success") else "failed",
+            "framework": report.get("framework"),
+            "model": report.get("model"),
+            "request_throughput": tput.get("request_throughput"),
+            "output_throughput": tput.get("output_throughput"),
+            "total_token_throughput": tput.get("total_token_throughput"),
+            "completed_requests": tput.get("completed_requests"),
+            "duration_seconds": tput.get("duration_seconds"),
+            "ttft_mean_ms": ttft.get("mean_ms"),
+            "ttft_p99_ms": ttft.get("p99_ms"),
+            "e2el_mean_ms": e2el.get("mean_ms"),
+            "e2el_p99_ms": e2el.get("p99_ms"),
+            "report_path": str(report_path),
+            "workspace": str(workspace),
+            # Path to the materialized YAML used for THIS baseline. Coordinator
+            # promotes this into SharedState.baseline_config_path so subsequent
+            # params/backends/sweep tasks reuse it as their `config_path` —
+            # without this, `_grid_runner._build_variant_yaml` would render
+            # variants from the shipped YAML's smoke defaults (CONC=8/ISL=256/
+            # OSL=256/TP=1) and produce ~10x lower throughput than baseline.
+            # See `_workload_envs.py` for the bug history.
+            "materialized_config": str(materialized_config_path),
+        }
+
+        # Parse accuracy eval results (GSM8K). RUN_EVAL=true was injected
+        # into the yaml so Magpie ran lm-eval while the server was still up.
+        from ._accuracy_gate import parse_eval_results
+        eval_data = parse_eval_results(workspace)
+        if eval_data.get("accuracy") is not None:
+            result["accuracy"] = eval_data["accuracy"]
+            result["accuracy_task"] = eval_data.get("task", "gsm8k")
+            result["accuracy_metric"] = eval_data.get("metric", "")
+            result["accuracy_source"] = eval_data.get("source_file", "")
+            log.info("baseline_executor: accuracy=%.4f (%s)",
+                     result["accuracy"], result["accuracy_task"])
+        else:
+            log.warning("baseline_executor: accuracy eval not found: %s",
+                        eval_data.get("error", "unknown"))
+
+        log.info(
+            "baseline_executor: success tput=%.1f tok/s/gpu (output) e2el=%.1fms",
+            result["output_throughput"] or 0.0,
+            result["e2el_mean_ms"] or 0.0,
+        )
+        return result
+
+
+# Module-level callable so callers can do ``register_executor("baseline",
+# baseline_executor)`` without instantiating.
+baseline_executor = BaselineExecutor()
+
+
+__all__ = [
+    "AITER_JIT_PROBE_PATHS",
+    "BASELINE_COLD_START_TIMEOUT_SEC",
+    "BASELINE_DEFAULT_CONFIG",
+    "BASELINE_DEFAULT_TIMEOUT_SEC",
+    "BaselineExecutor",
+    "COLD_START_KERNEL_THRESHOLD",
+    "baseline_executor",
+]

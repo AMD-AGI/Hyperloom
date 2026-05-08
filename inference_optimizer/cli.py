@@ -1,0 +1,1042 @@
+"""CLI entry — DESIGN v0.6 §22.
+
+Usage::
+
+    inference_optimizer optimize \\
+        --model /wekafs/models/<your-model> \\
+        --target-gain 10 \\
+        --max-hours 2
+
+    # or via env (matches the rest of the pipeline / Dockerfile convention):
+    export MODEL_PATH=/wekafs/models/<your-model>
+    inference_optimizer optimize --target-gain 10 --max-hours 2
+
+Single subcommand for now (``optimize``). Wires Claude+Codex backends,
+registers all available action_executors, builds the requested objective,
+and starts ``Coordinator.run()`` until target / time / SIGTERM.
+
+Env vars consumed (besides the standard backend creds):
+
+  MODEL_PATH                                   — required if --model not passed;
+                                                 also exported back to subprocess
+                                                 env so Magpie YAMLs get the
+                                                 correct model path injected
+                                                 instead of the YAML's hardcoded
+                                                 fallback.
+  OPENAI_BASE_URL + SAFE_API_KEY — canonical LiteLLM endpoint; compatibility aliases are exported for Claude/OOB/GEAK
+  ROCR_VISIBLE_DEVICES                         — pin the GPU
+  CLAUDE_MODEL                                 — default claude-opus-4-7
+  CODEX_MODEL                                  — default gpt-5.4
+  INFERENCE_OPTIMIZER_SESSION_ROOT             — overrides default session root
+  INFERENCE_OPTIMIZER_KB_ROOT                  — marathon KB dir (kb_query.py +
+                                                 entries.jsonl); default:
+                                                 Hyperloom/marathon/skills/kb
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+from .orchestrator.action_executors import (
+    backends_executor,
+    baseline_executor,
+    params_executor,
+    profile_executor,
+    report_executor,
+    sweep_executor,
+)
+from .orchestrator.backends import (
+    ClaudeBackend,
+    CodexBackend,
+    MockCriticBackend,
+    MockRobustnessBackend,
+)
+from .orchestrator.coordinator import Coordinator
+from .orchestrator.objective import build_objective
+from .orchestrator.shared_state import SharedState
+from .paths import make_session_dir, session_root
+
+
+log = logging.getLogger("inference_optimizer.cli")
+
+
+_DEFAULT_ORCH_PROMPT = (
+    "You are the Orchestration agent for an inference-optimization run.\n"
+    "Read the Shared session state below to see progress against the goal.\n\n"
+    "===== DECISION FRAMEWORK (follow EVERY tick) =====\n"
+    "Before proposing anything, evaluate Shared state to pick the next\n"
+    "highest-value action:\n"
+    "  if `cumulative_gain >= target_gain_pct`:\n"
+    "      → propose `report` (one shot). Then emit a single\n"
+    "        send_message{topic='heartbeat', body_md='goal-reached'}\n"
+    "        every following tick.\n"
+    "  if `stop_reason` is set:\n"
+    "      → emit one heartbeat 'goal-reached' and stop emitting actions.\n"
+    "  if `baseline_tput == 0`:\n"
+    "      → propose `baseline`.\n"
+    "  if `last_profile_trace` is empty:\n"
+    "      → propose `profile` (writes torch_trace; SharedState then has\n"
+    "        last_profile_trace = real path you'll use for select_kernels).\n"
+    "  if `last_profile_trace` is set AND `last_profile_args` already\n"
+    "  matches the active server config (current_best.extra_sglang_args,\n"
+    "  or empty when current_best.tput == baseline_tput):\n"
+    "      → DO NOT propose `profile` again. Profile is deterministic for\n"
+    "        the same server config + workload, so re-running it cannot\n"
+    "        change the hot-kernel list.\n"
+    "  if `last_select_kernels.reusable_native_kernel_ids` is empty AND\n"
+    "  `last_profile_trace` is set:\n"
+    "      → kernel-opt has no eligible target. DO NOT propose `profile`,\n"
+    "        DO NOT emit select_kernels/run_optimization. Fall back to\n"
+    "        params/sweep/heartbeat instead.\n"
+    "  if `params_no_promote_streak >= 5`:\n"
+    "      → params has plateaued (5+ rounds didn't promote). Switch to\n"
+    "        kernel-opt path (REQUEST select_kernels → run_optimization →\n"
+    "        integrate). Do NOT re-propose params/backends/sweep until\n"
+    "        kernel-opt produces a result.\n"
+    "  if backends/params haven't been tried this session (count proposals\n"
+    "  in your inbox):\n"
+    "      → propose backends first, then params. One round each.\n"
+    "  otherwise:\n"
+    "      → kernel-opt path (see Pipeline below). It's the most expensive\n"
+    "        but also the highest-ceiling lever once params plateaued.\n\n"
+    "===== KERNEL-OPT PIPELINE (sequential, no backtracking) =====\n"
+    "step K1 (skip when cached): emit\n"
+    "  request{target_agent: 'kernel', kind: 'select_kernels',\n"
+    "          params: {trace_input: <verbatim last_profile_trace value>,\n"
+    "                   top_k: 10}}\n"
+    "  STRICT: if `last_select_kernels.trace_input` already equals\n"
+    "  `last_profile_trace`, the candidate list is cached and you MUST\n"
+    "  skip K1. Go directly to K2 using `last_select_kernels.candidates_path`\n"
+    "  and the kernel_id list under `last_select_kernels.top5`. Re-emit\n"
+    "  `select_kernels` only when `last_profile_trace` changes (i.e. after\n"
+    "  a fresh `profile`).\n\n"
+    "step K2: pick the next reusable native kernel from\n"
+    "  `last_select_kernels.reusable_native_kernel_ids` in order, skipping\n"
+    "  any whose kernel_id already appears in last_kernel_opt.kernel_id.\n"
+    "  HARD RULES:\n"
+    "    - kernel_id MUST appear in `reusable_native_kernel_ids`. Do NOT\n"
+    "      pick from raw `hot_kernels_top15` if the entry is not in that\n"
+    "      list — top hot kernels are often Tensile/CK/vendor binaries\n"
+    "      and will be rejected with `non_reusable_kernel`.\n"
+    "    - If `reusable_native_kernel_ids` is empty, do NOT keep emitting\n"
+    "      run_optimization. Heartbeat instead and consider re-profiling.\n"
+    "  Then emit\n"
+    "  request{target_agent: 'kernel', kind: 'run_optimization',\n"
+    "          params: {kernel_id: <picked kernel_id>,\n"
+    "                   source_file: <from hot_kernels[i].source_file>,\n"
+    "                   candidates_path: <select_kernels_done.candidates_path>,\n"
+    "                   backends: 'claude',\n"
+    "                   budget_minutes: 60}}\n\n"
+    "step K3: when `run_optimization_done` arrives, look at\n"
+    "  result.proposal.decision and result.verification:\n"
+    "    KEEP        → emit request{kind: 'integrate', params:\n"
+    "                               {kernel_id: <result.kernel_id>,\n"
+    "                                patch_path: <result.best_artifact_path OR result.verification.best_artifact_path>,\n"
+    "                                target_file: <result.source_file>,\n"
+    "                                base_tput: <current_best.tput>,\n"
+    "                                extra_sglang_args: <current_best.extra_sglang_args>,\n"
+    "                                config_path: <baseline yaml absolute path>}}\n"
+    "    PARTIAL/REVERT → don't integrate; pick the NEXT hot kernel\n"
+    "                     (skip kernels with kernel_id == last_kernel_opt.kernel_id)\n"
+    "                     and re-issue step K2 with that one.\n\n"
+    "===== KERNEL TARGETING (native vs torch.compile) =====\n"
+    "First decide the final serving mode as a framework/params choice:\n"
+    "SGLang may run with or without `--enable-torch-compile`; vLLM commonly\n"
+    "runs with compile/CUDAGraph optimizations by default unless eager/-O0 is\n"
+    "explicitly requested. `select_kernels` should profile that final serving\n"
+    "mode, BUT kernel-opt may only rewrite reusable native sources that still\n"
+    "appear in that trace. Never optimize `/tmp/torchinductor*`, Inductor cache,\n"
+    "or `triton_poi_*`/`triton_red_*` runtime-generated kernels — they are tied\n"
+    "to one compile graph/cache and the patch is not reusable. If compile-on\n"
+    "leaves no high-share reusable native kernels, stop kernel-opt and continue\n"
+    "with framework/params/compile configuration tuning instead.\n\n"
+    "===== HARD RULES =====\n"
+    "* `kind` MUST be EXACTLY one of: 'select_kernels' / 'run_optimization' /\n"
+    "  'integrate' / 'apply_patch' (these have programmatic handlers).\n"
+    "  `kernel_opt` is NOT a recognised kind — never use it.\n"
+    "* Never invent a trace_input path. ONLY use SharedState.last_profile_trace.\n"
+    "* If your last action was a propose_action, do NOT re-propose the same\n"
+    "  action in the next 3 ticks (give the dispatcher time to run it).\n"
+    "* Every turn MUST emit at least one `emit_intent` tool call.\n"
+    "  Free-text replies are dropped.\n"
+)
+
+_DEFAULT_CRITIC_PROMPT = (
+    "You are the Critic agent. Your only job: review proposals from\n"
+    "Orchestration and emit one `review_verdict` per un-reviewed proposal.\n\n"
+    "Decision rule (smoke-grade — keep it simple):\n"
+    "  * baseline / profile / classify / setup / target_analysis / report /\n"
+    "    backends / params / sweep / dream  → approve\n"
+    "  * kernel_opt / integrate / operator_tuning / vendor_kernel_config /\n"
+    "    deep_kernel_analysis  → approve (Orchestration sends them via\n"
+    "    REQUEST anyway, you just OK the proposal flow)\n"
+    "  * Reject only if action_name is unknown or accuracy_risk > 0.3\n"
+    "    without obvious justification.\n\n"
+    "Required payload: target_proposal_msg_id, verdict, reasoning."
+)
+
+_DEFAULT_KERNEL_PROMPT = (
+    "You are the Kernel agent — responder-only. You receive `request`\n"
+    "events from Orchestration in your inbox.\n\n"
+    "For every un-answered request, emit ONE `response` intent in reply.\n"
+    "Schema:\n"
+    "  intent_type: response\n"
+    "  payload: {\n"
+    "    in_reply_to: <request msg_id>,\n"
+    "    kind:        '<request.kind>_done',\n"
+    "    status:      'ok' | 'failed' | 'needs_review',\n"
+    "    result:      { /* whatever the request asked for */ }\n"
+    "  }\n\n"
+    "Native-only rule: run_optimization must refuse runtime-generated\n"
+    "torch.compile/Inductor/Triton cache kernels. Only reusable framework\n"
+    "sources under stable repos (aiter/sglang/vllm source trees) are valid\n"
+    "kernel-opt targets; otherwise return status='failed' with a clear reason.\n\n"
+    "If your inbox has no requests, emit one send_message{topic='heartbeat',\n"
+    "body_md='ok'}. You may NOT propose, delegate, or initiate REQUESTs."
+)
+
+
+_DEFAULT_ORCH_PROMPT_NO_KERNEL = (
+    "You are the Orchestration agent for an inference-optimization run.\n"
+    "Read the Shared session state below to see progress against the goal.\n\n"
+    "IMPORTANT: The Kernel agent is DISABLED for this session. DO NOT\n"
+    "propose `profile`, `kernel_opt`, `integrate`, `select_kernels`,\n"
+    "`run_optimization`, `deep_kernel_analysis`, `operator_tuning`, or\n"
+    "`vendor_kernel_config`. Only params / backends / sweep / report are\n"
+    "available for driving throughput improvements.\n\n"
+    "===== DECISION FRAMEWORK =====\n"
+    "  if `cumulative_gain >= target_gain_pct`:\n"
+    "      → propose `report` (one shot). Then heartbeat 'goal-reached'.\n"
+    "  if `stop_reason` is set:\n"
+    "      → emit one heartbeat 'goal-reached' and stop emitting actions.\n"
+    "  if `baseline_tput == 0`:\n"
+    "      → propose `baseline`.\n"
+    "  if backends haven't been tried (no backends result in shared state):\n"
+    "      → propose backends first.\n"
+    "  otherwise:\n"
+    "      → propose params or sweep (alternate each round).\n\n"
+    "===== HARD RULES =====\n"
+    "* Do NOT emit REQUEST to any agent — kernel agent is disabled.\n"
+    "* If your last action was a propose_action, do NOT re-propose the same\n"
+    "  action in the next 3 ticks (give the dispatcher time to run it).\n"
+    "* Every turn MUST emit at least one `emit_intent` tool call.\n"
+    "  Free-text replies are dropped.\n"
+)
+
+
+_GFX_TO_RUNNER: dict[str, str] = {
+    # Mirror Magpie/modes/benchmark/image_selector.py:138-140. Listed here so
+    # we can log the resolved value at session start instead of waiting for
+    # Magpie subprocess output deep in the run.
+    "gfx942":  "mi300x",
+    "gfx950":  "mi355x",
+    "gfx1100": "mi325x",
+}
+
+
+def _autodetect_gpu_type() -> str | None:
+    """Return mi300x|mi325x|mi355x or None if undetectable.
+
+    Tries `rocm-smi --showproductname` first (most reliable), then falls
+    back to torch.cuda.get_device_properties(0).gcnArchName parsing. Both
+    are best-effort — on CPU-only or non-ROCm boxes we silently return
+    None so the caller can defer to Magpie's own detection layer.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["rocm-smi", "--showproductname"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.upper()
+        for tag in ("MI355X", "MI325X", "MI300X"):
+            if tag in out:
+                return tag.lower()
+    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
+        pass
+    try:
+        import torch
+        arch = torch.cuda.get_device_properties(0).gcnArchName
+        gfx = arch.split(":", 1)[0].lower()
+        return _GFX_TO_RUNNER.get(gfx)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _noop_prep(ctx) -> dict:
+    return {"status": "succeeded", "kind": ctx.task.kind, "note": "noop-stub"}
+
+
+def _build_backends(
+    *, claude_model: str, codex_model: str, kernel_codex: bool,
+    critic_mock: bool = False,
+    no_kernel: bool = False,
+) -> dict[str, Any]:
+    backends: dict[str, Any] = {
+        "orchestration": ClaudeBackend(model=claude_model, max_turns_default=4),
+        "critic":        MockCriticBackend() if critic_mock else CodexBackend(model=codex_model),
+        "robustness":    MockRobustnessBackend(),
+    }
+    if not no_kernel:
+        if kernel_codex:
+            backends["kernel"] = CodexBackend(model=codex_model)
+        else:
+            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=4)
+    return backends
+
+
+def _seed_shared_state(session_dir: Path, args: argparse.Namespace) -> SharedState:
+    state = SharedState(
+        session_id=session_dir.name,
+        model_name=Path(args.model).name,
+        model_path=str(args.model),
+        model_class=args.model_class or "",
+        framework=os.environ.get("FRAMEWORK", "sglang"),
+        gpu_type=os.environ.get("GPU_TYPE", ""),
+        kernel_enabled=not getattr(args, "no_kernel", False),
+        target_summary=args.target_summary or _default_target_summary(args),
+        baseline_tput=0.0,
+        cumulative_gain=0.0,
+        max_minutes=int((args.max_hours or 0) * 60),
+    )
+    state.save(session_dir)
+    return state
+
+
+def _default_target_summary(args: argparse.Namespace) -> str:
+    if args.target_gain:
+        return (
+            f"Establish baseline on {Path(args.model).name} then drive "
+            f"cumulative_gain to >= {args.target_gain}% within "
+            f"{args.max_hours}h."
+        )
+    if args.target_tput:
+        return (
+            f"Establish baseline on {Path(args.model).name} then reach "
+            f"{args.target_tput} tok/s/GPU within {args.max_hours}h."
+        )
+    return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
+
+
+def _register_executors(coordinator: Coordinator, *, no_kernel: bool = False) -> None:
+    """Wire all currently-available action executors.
+
+    P2-1 ships only `baseline` (real Magpie). Stubs for prep + kernel-owned
+    actions keep the Orchestration loop from stalling while later phases
+    fill in the real ones.
+
+    When ``no_kernel`` is True, kernel-owned action stubs are skipped and
+    ``profile`` is also skipped (profiling only feeds kernel-opt).
+    """
+    coordinator.sub.register_executor("baseline", baseline_executor)
+    coordinator.sub.register_executor("backends", backends_executor)
+    coordinator.sub.register_executor("params",   params_executor)
+    coordinator.sub.register_executor("sweep",    sweep_executor)
+    coordinator.sub.register_executor("report",   report_executor)
+
+    if no_kernel:
+        # No profile (it only feeds kernel-opt), no kernel-owned actions.
+        for kind in ("setup", "classify", "target_analysis",
+                      "dream", "re_explore", "recover",
+                      "comm_optimization", "compiler_tuning"):
+            coordinator.sub.register_executor(kind, _noop_prep)
+    else:
+        coordinator.sub.register_executor("profile", profile_executor)
+        for kind in ("setup", "classify", "target_analysis",
+                      "kernel_opt", "integrate", "deep_kernel_analysis",
+                      "operator_tuning", "vendor_kernel_config",
+                      "dream", "re_explore", "recover",
+                      "comm_optimization", "compiler_tuning"):
+            coordinator.sub.register_executor(kind, _noop_prep)
+
+
+def _print_final_summary(state: SharedState, stop_reason: str) -> None:
+    print()
+    print("================ Final summary ================")
+    print(f"  stop_reason     : {stop_reason}")
+    print(f"  session_id      : {state.session_id}")
+    print(f"  model           : {state.model_name}")
+    print(f"  baseline_tput   : {state.baseline_tput:.1f} tok/s/GPU")
+    print(f"  cumulative_gain : {state.cumulative_gain:.2f}%")
+    print(f"  current_best    : {state.current_best}")
+    print(f"  pruned_families : {state.pruned_families}")
+    print(f"  crash_count     : {state.crash_count}")
+    print("===============================================")
+
+
+def _derive_proxy_urls(upstream_url: str, proxy_port: int) -> tuple[str, str]:
+    """Mirror of bash ``derive_proxy_urls`` in ``ensure_auth_proxy.sh``.
+
+    Returns ``(proxy_anthropic_url, proxy_openai_url)`` from a LiteLLM-style
+    ``upstream_url`` like ``https://host/api/v1/llm-proxy/v1``:
+
+    * The OpenAI URL keeps the path verbatim → ``http://127.0.0.1:4002/api/v1/llm-proxy/v1``.
+    * The Anthropic URL strips a trailing ``/v1`` because the Anthropic SDK
+      appends it itself → ``http://127.0.0.1:4002/api/v1/llm-proxy``.
+    """
+    from urllib.parse import urlparse
+
+    path = urlparse(upstream_url).path.rstrip("/")
+    anthropic_path = path[: -len("/v1")] if path.endswith("/v1") else path
+    base = f"http://127.0.0.1:{proxy_port}"
+    return f"{base}{anthropic_path}", f"{base}{path}"
+
+
+def _proxy_alive(proxy_port: int, timeout: float = 2.0) -> bool:
+    """TCP-probe ``127.0.0.1:proxy_port``. Returns True iff connect succeeds."""
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect(("127.0.0.1", proxy_port))
+        return True
+    except (ConnectionRefusedError, OSError):
+        return False
+
+
+def _ensure_auth_proxy_and_claude_config(
+    safe_key: str, base_url: str
+) -> tuple[str, str] | None:
+    """Start auth-proxy on :4002 and ensure ~/.claude/config.json uses it.
+
+    The AMD primus-safe gateway rejects x-api-key (returns "token not
+    present"). Claude CLI only sends x-api-key. The auth_proxy bridges
+    the gap by rewriting to Authorization: Bearer. We must:
+
+    1. Start the proxy (idempotent — reuses ``ensure_auth_proxy.sh`` logic).
+       If the supervisor reports success but the port is not actually open,
+       retry the supervisor once before giving up (the "127 retry" leg).
+    2. Point ~/.claude/config.json at the proxy, not directly at the gateway.
+
+    Returns ``(proxy_anthropic_url, proxy_openai_url)`` when the proxy is
+    confirmed alive on ``127.0.0.1:proxy_port``; ``None`` otherwise. The
+    caller is responsible for force-overriding ``ANTHROPIC_BASE_URL`` /
+    ``OPENAI_BASE_URL`` based on this return value.
+    """
+    import json as _json
+
+    proxy_port = int(os.environ.get("AUTH_PROXY_PORT", "4002"))
+    upstream_url = base_url or os.environ.get(
+        "ANTHROPIC_BASE_URL",
+        os.environ.get("OPENAI_BASE_URL", ""),
+    )
+    if not upstream_url:
+        print("Preflight: no LLM base URL set; skipping auth-proxy setup")
+        return None
+
+    proxy_anthropic_url, proxy_openai_url = _derive_proxy_urls(
+        upstream_url, proxy_port
+    )
+
+    proxy_script = (
+        Path(__file__).resolve().parent.parent
+        / "kernel-agent"
+        / "scripts"
+        / "ensure_auth_proxy.sh"
+    )
+
+    def _run_supervisor() -> bool:
+        """Run ensure_auth_proxy.sh once. Returns True if it exited 0."""
+        if not proxy_script.exists():
+            return False
+        env_for_proxy = os.environ.copy()
+        env_for_proxy["OOB_BASE_URL"] = upstream_url
+        env_for_proxy["OOB_API_KEY"] = safe_key or os.environ.get(
+            "ANTHROPIC_API_KEY", ""
+        )
+        env_for_proxy["AUTH_PROXY_PORT"] = str(proxy_port)
+        result = subprocess.run(
+            ["bash", str(proxy_script)],
+            capture_output=True,
+            text=True,
+            env=env_for_proxy,
+        )
+        for line in (result.stdout or "").strip().splitlines():
+            print(f"  {line}")
+        if result.returncode != 0:
+            print(
+                f"Preflight: WARNING — ensure_auth_proxy.sh failed "
+                f"(rc={result.returncode})"
+            )
+            for line in (result.stderr or "").strip().splitlines()[-5:]:
+                print(f"  {line}")
+            return False
+        return True
+
+    proxy_ready = False
+    if proxy_script.exists():
+        if _run_supervisor() and _proxy_alive(proxy_port):
+            proxy_ready = True
+        else:
+            # 127 retry leg — supervisor may have just unblocked a stuck
+            # port or swapped credentials. One re-run is cheap and recovers
+            # from "port_open but probe timed out" races.
+            print("Preflight: auth-proxy not alive after first attempt; retrying")
+            if _run_supervisor() and _proxy_alive(proxy_port):
+                proxy_ready = True
+    else:
+        # Supervisor missing — best-effort: trust the port if it is open.
+        if _proxy_alive(proxy_port):
+            print("Preflight: auth-proxy :4002 already open")
+            proxy_ready = True
+        else:
+            print(
+                "Preflight: WARNING — auth-proxy :4002 not running and "
+                f"ensure_auth_proxy.sh not found at {proxy_script}"
+            )
+
+    if not proxy_ready:
+        print(
+            "Preflight: WARNING — auth-proxy could not be brought up; "
+            "falling back to original env"
+        )
+        return None
+
+    # Proxy is alive. Update ~/.claude/config.json to match.
+    claude_config_path = Path.home() / ".claude" / "config.json"
+    needs_update = False
+    config_data: dict = {}
+    if claude_config_path.exists():
+        try:
+            config_data = _json.loads(
+                claude_config_path.read_text(encoding="utf-8")
+            )
+        except (ValueError, OSError):
+            config_data = {}
+        current_url = config_data.get("customApiUrl", "")
+        if "127.0.0.1" not in current_url and "localhost" not in current_url:
+            needs_update = True
+    else:
+        needs_update = True
+
+    if needs_update:
+        config_data.setdefault("theme", "dark")
+        config_data.setdefault("hasCompletedOnboarding", True)
+        config_data["primaryApiKey"] = safe_key or config_data.get(
+            "primaryApiKey", ""
+        )
+        config_data["customApiUrl"] = proxy_anthropic_url
+        claude_config_path.parent.mkdir(parents=True, exist_ok=True)
+        claude_config_path.write_text(
+            _json.dumps(config_data, indent=2) + "\n", encoding="utf-8",
+        )
+        claude_config_path.chmod(0o600)
+        print(
+            f"Preflight: updated ~/.claude/config.json customApiUrl -> "
+            f"{proxy_anthropic_url}"
+        )
+    else:
+        print("Preflight: ~/.claude/config.json already points at proxy")
+
+    return proxy_anthropic_url, proxy_openai_url
+
+
+def _load_dotenv_fallback() -> None:
+    """Env always wins over .env. If SAFE_API_KEY or OPENAI_BASE_URL is
+    missing from os.environ, source ``$REPO_ROOT/.env`` (defaults to
+    ``os.getcwd()``) but never overwrite a key that is already in env.
+    """
+    if os.environ.get("SAFE_API_KEY") and os.environ.get("OPENAI_BASE_URL"):
+        return
+    repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
+    env_file = Path(repo_root) / ".env"
+    if not env_file.exists():
+        return
+    loaded = 0
+    for raw in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key not in os.environ:
+            os.environ[key] = value
+            loaded += 1
+    if loaded:
+        print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
+
+
+def _preflight() -> None:
+    """Auto-install missing runtime deps and export auth aliases.
+
+    1. Credentials fallback: env > $REPO_ROOT/.env (env always wins).
+    2. Auth aliases for Claude/Codex CLIs from SAFE_API_KEY/OPENAI_BASE_URL.
+    3. Auth-proxy + ~/.claude/config.json supervision.
+    4. ray + Magpie + InferenceX auto-install.
+    """
+    _load_dotenv_fallback()
+
+    # --- Auth alias export ---
+    safe_key = os.environ.get("SAFE_API_KEY", "")
+    base_url = os.environ.get("OPENAI_BASE_URL", "")
+    if safe_key:
+        for alias in ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                      "ANTHROPIC_API_KEY", "OOB_API_KEY", "GEAK_API_KEY",
+                      "LLM_API_KEY", "AMD_LLM_API_KEY"):
+            os.environ.setdefault(alias, safe_key)
+    # OOB / GEAK / LLM_API_BASE keep upstream URL: those clients speak Bearer
+    # auth natively and do NOT need the auth-proxy. ANTHROPIC_BASE_URL and
+    # OPENAI_BASE_URL are handled separately below — the auth-proxy step
+    # force-overrides them so any externally-preset value (shell rc, .env,
+    # k8s secret, container env) cannot bypass :4002.
+    if base_url:
+        for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
+            os.environ.setdefault(alias, base_url)
+
+    # --- Log resolved asset root (confirms ASSET_ROOT mechanism) ---
+    from .paths import asset_root
+    print(f"Preflight: asset_root = {asset_root()}")
+
+    # --- Ensure auth-proxy is running + ~/.claude/config.json points at it ---
+    # The AMD primus-safe gateway only accepts Authorization: Bearer, but the
+    # Claude CLI (bundled in claude_agent_sdk) sends x-api-key. The auth_proxy
+    # on :4002 rewrites the header. Without this, Claude SDK hangs at
+    # "Waiting for first result" / exits with code 1.
+    #
+    # Snapshot any externally-preset URLs BEFORE supervision so we can either
+    # force-override them (proxy alive) or restore them (proxy unavailable).
+    # The two env vars MUST stay consistent — either both proxy or both orig.
+    orig_anthropic = os.environ.get("ANTHROPIC_BASE_URL", "")
+    orig_openai = os.environ.get("OPENAI_BASE_URL", "")
+    proxy_urls = _ensure_auth_proxy_and_claude_config(safe_key, base_url)
+    if proxy_urls is not None:
+        proxy_anthropic, proxy_openai = proxy_urls
+        for var, want, prev in (
+            ("ANTHROPIC_BASE_URL", proxy_anthropic, orig_anthropic),
+            ("OPENAI_BASE_URL", proxy_openai, orig_openai),
+        ):
+            if os.environ.get(var) != want:
+                os.environ[var] = want
+                print(
+                    f"Preflight: {var} {prev or '<unset>'} -> {want} "
+                    f"(auth-proxy)"
+                )
+    else:
+        # Proxy unavailable after retry — restore the originals so both vars
+        # stay consistent with whatever the user had (no half-overridden state).
+        for var, prev in (
+            ("ANTHROPIC_BASE_URL", orig_anthropic),
+            ("OPENAI_BASE_URL", orig_openai),
+        ):
+            if prev:
+                os.environ[var] = prev
+            else:
+                os.environ.pop(var, None)
+        print(
+            "Preflight: WARNING — Claude/Codex SDKs may receive 401 "
+            "without auth-proxy"
+        )
+
+    # --- Runtime dep install ---
+    from .orchestrator.action_executors._grid_runner import _resolve_magpie_python
+    magpie_python = _resolve_magpie_python()
+
+    # Detect whether we're in a venv; if not, add --break-system-packages
+    # so pip doesn't refuse to install on bare-metal Debian/Ubuntu hosts.
+    pip_extra: list[str] = []
+    if not (hasattr(sys, "real_prefix") or
+            (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix)):
+        pip_extra = ["--break-system-packages"]
+
+    # 1. Ray — needed by Magpie for task scheduling even without kernel-agent.
+    if shutil.which("ray") is None:
+        print("Preflight: ray not found, installing ray[default]==2.44.1 + click<8.3.0 ...")
+        subprocess.run(
+            [magpie_python, "-m", "pip", "install", "--quiet",
+             *pip_extra, "ray[default]==2.44.1", "click<8.3.0"],
+            check=True,
+        )
+        print("Preflight: ray installed OK")
+
+    # 2. Magpie — the benchmark engine all executors shell out to.
+    check = subprocess.run(
+        [magpie_python, "-c", "import Magpie"],
+        capture_output=True,
+    )
+    if check.returncode != 0:
+        workspace_root = os.environ.get("WORKSPACE_ROOT") or "/workspace"
+        magpie_dir = Path(workspace_root) / "Magpie"
+        if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
+            print(f"Preflight: Magpie not importable and not found at {magpie_dir}; cloning ...")
+            subprocess.run(
+                ["git", "clone", "--depth", "1",
+                 "https://github.com/AMD-AGI/Magpie.git", str(magpie_dir)],
+                check=True,
+            )
+        print(f"Preflight: installing Magpie from {magpie_dir} ...")
+        subprocess.run(
+            [magpie_python, "-m", "pip", "install", "--quiet",
+             *pip_extra, "-e", str(magpie_dir)],
+            check=True,
+        )
+        print("Preflight: Magpie installed OK")
+
+    # 3. InferenceX + lm-eval — required for accuracy evaluation (GSM8K).
+    # Magpie's benchmark scripts call `run_eval` which sources
+    # InferenceX/benchmarks/benchmark_lib.sh → _install_lm_eval_deps.
+    # We just ensure the InferenceX checkout exists; lm-eval deps are
+    # auto-installed by benchmark_lib.sh at runtime.
+    inferencex_path = os.environ.get("INFERENCEX_PATH", "")
+    if not inferencex_path:
+        workspace_root = os.environ.get("WORKSPACE_ROOT") or "/workspace"
+        # Check common mount points
+        for candidate in (
+            Path(workspace_root) / "Magpie" / "InferenceX",
+            Path("/opt/hyperloom/InferenceX"),
+            Path("/wekafs/fully-local/inference_optimization/InferenceX"),
+        ):
+            if candidate.is_dir():
+                inferencex_path = str(candidate)
+                break
+    if inferencex_path and Path(inferencex_path).is_dir():
+        os.environ.setdefault("INFERENCEX_PATH", inferencex_path)
+        print(f"Preflight: InferenceX = {inferencex_path}")
+    else:
+        print("Preflight: WARNING — InferenceX not found. GSM8K accuracy "
+              "eval will fail. Set INFERENCEX_PATH or clone Magpie with "
+              "InferenceX submodule.")
+
+
+async def _run_optimize(args: argparse.Namespace) -> int:
+    _preflight()
+
+    if args.resume:
+        # Resume mode: skip the SharedState seed so Coordinator.__init__
+        # picks up the existing state.json + SQLite event log unchanged.
+        session_dir = session_root() / args.resume
+        if not session_dir.exists():
+            print(f"ERROR: --resume session not found: {session_dir}",
+                  file=sys.stderr)
+            sys.exit(2)
+        state = SharedState.load_or_init(session_dir)
+        prior_stop = state.stop_reason
+        print(f"Resuming session: {session_dir}")
+        print(f"  prior baseline_tput   : {state.baseline_tput:.1f}")
+        print(f"  prior cumul_gain      : {state.cumulative_gain:.2f}%")
+        print(f"  prior current_best    : "
+              f"{(state.current_best or {}).get('action')}/"
+              f"{(state.current_best or {}).get('tput')}")
+        print(f"  prior stop_reason     : {prior_stop or '(none)'}")
+
+        # Re-export session-level env vars from persisted state so the
+        # executors (baseline / profile / sweep / backends / params) resolve
+        # model / framework / gpu_type correctly. Without this, a resume
+        # in a fresh shell would fall back to YAML hardcoded defaults,
+        # potentially benchmarking the wrong model on the wrong framework.
+        if state.model_path:
+            os.environ["MODEL_PATH"] = state.model_path
+            print(f"  re-exported MODEL_PATH: {state.model_path}")
+        if state.framework:
+            os.environ["FRAMEWORK"] = state.framework
+            print(f"  re-exported FRAMEWORK : {state.framework}")
+        if state.gpu_type:
+            os.environ["GPU_TYPE"] = state.gpu_type
+            print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
+        # Honour persisted kernel_enabled flag on resume; CLI --no-kernel
+        # can still override on a previously-enabled session.
+        if not state.kernel_enabled:
+            args.no_kernel = True
+            print("  kernel agent          : DISABLED (persisted from original run)")
+
+        # CRITICAL: a leftover stop_reason from the prior run (most often
+        # "time_exhausted") fools Orchestration into thinking the work is
+        # already done — it just heartbeats forever. Clear it so the new
+        # run has a clean signal. The Coordinator's run() always re-sets
+        # stop_reason at exit anyway.
+        prior_crash = state.crash_count
+        if prior_stop or prior_crash >= 3:
+            state.stop_reason = ""
+            # Reset persisted crash_count so a fresh resume isn't immediately
+            # tripped into "emergency" by accumulated failures from prior runs
+            # (e.g. authentication errors before .env was loaded).
+            state.crash_count = 0
+            state.save(session_dir)
+            print(
+                f"  → cleared stop_reason and reset crash_count "
+                f"(was {prior_crash}) for fresh resume"
+            )
+    else:
+        # Resolve model path from --model first, then $MODEL_PATH env. Without
+        # either, fail fast: silently falling back to the YAML's hardcoded
+        # `/wekafs/models/Qwen-Qwen3-8B` was the cause of "the optimizer ran
+        # the wrong model" reports — explicit > implicit.
+        if not args.model:
+            args.model = os.environ.get("MODEL_PATH") or ""
+        if not args.model:
+            print(
+                "ERROR: model is required. Pass --model <path> or set "
+                "MODEL_PATH env (or use --resume <session_id>).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # Re-export the resolved value so downstream subprocess executors
+        # (baseline / profile / sweep / backends / params) inject it into
+        # the Magpie YAML instead of trusting the YAML's hardcoded `model:`.
+        os.environ["MODEL_PATH"] = str(args.model)
+
+        # Resolve framework: --framework > $FRAMEWORK env > "sglang".
+        # Session-wide; mixing sglang/vllm in one session is not supported.
+        framework = (
+            (args.framework or os.environ.get("FRAMEWORK", "")).strip().lower()
+            or "sglang"
+        )
+        if framework not in ("sglang", "vllm"):
+            print(
+                f"ERROR: --framework must be sglang or vllm (got {framework!r}); "
+                "set $FRAMEWORK accordingly or pass --framework",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        os.environ["FRAMEWORK"] = framework
+        print(f"Framework       : {framework}")
+
+        # Resolve GPU runner type: --gpu-type > $GPU_TYPE > rocm-smi probe.
+        # Result is the canonical Magpie label (mi300x / mi355x). MI325X has
+        # the same architecture as MI300X but Magpie does not yet ship
+        # sglang_mi325x.sh / vllm_mi325x.sh, so we map mi325x -> mi300x with
+        # a warning so the run actually succeeds.
+        gpu_type = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
+        if not gpu_type:
+            gpu_type = _autodetect_gpu_type() or ""
+            if gpu_type:
+                print(f"GPU type        : {gpu_type} (auto-detected)")
+        if gpu_type == "mi325x":
+            print(
+                "WARN: mi325x maps to mi300x (same arch; Magpie has no "
+                "sglang_mi325x.sh / vllm_mi325x.sh yet)",
+                file=sys.stderr,
+            )
+            gpu_type = "mi300x"
+        if gpu_type:
+            os.environ["GPU_TYPE"] = gpu_type
+            print(f"GPU type        : {gpu_type} (will inject runner_type into Magpie YAML)")
+        else:
+            os.environ.pop("GPU_TYPE", None)
+            print("GPU type        : <unset> (Magpie will auto-detect)")
+
+        # Compute MAX_MODEL_LEN = ISL + OSL + 4096 headroom, export for yaml injection.
+        max_model_len = args.isl + args.osl + 4096
+        os.environ["MAX_MODEL_LEN"] = str(max_model_len)
+        os.environ["ISL"] = str(args.isl)
+        os.environ["OSL"] = str(args.osl)
+        os.environ["PRECISION"] = args.precision
+        print(f"Workload        : ISL={args.isl} OSL={args.osl} "
+              f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision}")
+
+        # session_name: --session-name > default "<model>_<YYYYMMDD_HHMMSS>"
+        from datetime import datetime, timezone
+        session_name = args.session_name or (
+            f"{Path(args.model).name}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        )
+        session_dir = make_session_dir(session_name)
+        print(f"Session dir     : {session_dir}")
+        state = _seed_shared_state(session_dir, args)
+
+    objective = build_objective({
+        "MAX_HOURS": str(args.max_hours),
+        "TARGET_GAIN_PCT": str(args.target_gain) if args.target_gain else "",
+        "TARGET_TPUT_PER_GPU": str(args.target_tput) if args.target_tput else "",
+        "TARGET_DIR": args.target_baseline_dir or "",
+    })
+    print(f"Objective       : kind={objective.kind()} {objective.describe()}")
+    no_kernel = getattr(args, "no_kernel", False)
+    backends = _build_backends(
+        claude_model=args.claude_model,
+        codex_model=args.codex_model,
+        kernel_codex=args.kernel_codex,
+        critic_mock=args.critic_mock,
+        no_kernel=no_kernel,
+    )
+    # Bug A fix: expose the active session_dir to in-process executors
+    # (e.g. ReportExecutor) that don't get session_dir threaded through
+    # task.params. This is read in report.py::_resolve_session_dir.
+    os.environ["INFERENCE_OPTIMIZER_SESSION_DIR"] = str(session_dir)
+
+    # When kernel is disabled, strip it from the role registry so
+    # Coordinator does not tick a non-existent agent and PolicyGate does
+    # not expect a backend for it.
+    role_registry = None
+    if no_kernel:
+        from .orchestrator.agent_role import default_role_registry
+        role_registry = {
+            k: v for k, v in default_role_registry().items() if k != "kernel"
+        }
+
+    coordinator = Coordinator(
+        session_dir, backends=backends, role_registry=role_registry,
+    )
+    prompts: dict[str, str] = {
+        "orchestration": args.orch_prompt or (
+            _DEFAULT_ORCH_PROMPT if not no_kernel
+            else _DEFAULT_ORCH_PROMPT_NO_KERNEL
+        ),
+        "critic": args.critic_prompt or _DEFAULT_CRITIC_PROMPT,
+    }
+    if not no_kernel:
+        prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
+    coordinator.system_prompt_overrides = prompts
+    _register_executors(coordinator, no_kernel=no_kernel)
+
+    kernel_str = "DISABLED" if no_kernel else (
+        f"{'Codex' if args.kernel_codex else 'Claude'}"
+    )
+    print(f"Backends        : "
+          f"orchestration=Claude({args.claude_model}), "
+          f"kernel={kernel_str}, "
+          f"critic={'mock' if args.critic_mock else f'Codex({args.codex_model})'}, "
+          f"robustness=mock")
+    print(f"Max ticks       : {args.max_ticks or 'unlimited'} "
+          f"(budget = {args.max_hours}h)")
+    print(f"Tick interval   : {args.tick_interval_sec}s")
+    print()
+
+    try:
+        stop_reason = await coordinator.run(
+            objective=objective,
+            max_minutes=args.max_hours * 60.0,
+            tick_interval_sec=args.tick_interval_sec,
+            max_ticks=args.max_ticks,
+            install_signal_handlers=True,
+        )
+    finally:
+        await coordinator.stop()
+
+    _print_final_summary(coordinator.shared_state, stop_reason)
+    return 0 if stop_reason in (
+        "target_reached",
+        "no_more_leverage",
+        "time_exhausted",
+        "max_ticks",
+    ) else 1
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="inference_optimizer",
+        description="Inference Optimizer v0.6 — multi-agent SGLang/vLLM optimization",
+    )
+    p.add_argument("--verbose", "-v", action="count", default=0,
+                    help="Verbose logging (-v INFO, -vv DEBUG)")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    opt = sub.add_parser("optimize",
+                          help="Drive a multi-agent optimization run on a model")
+    opt.add_argument("--model", "-m", type=Path, default=None,
+                      help="Model path (required for new runs; ignored when "
+                           "--resume is set — model is read from state.json)")
+    opt.add_argument(
+        "--gpu-type", choices=["mi300x", "mi325x", "mi355x"], default=None,
+        help="Override GPU runner type passed to Magpie (sets benchmark."
+             "runner_type). When omitted, the optimizer auto-detects via "
+             "rocm-smi; falls back to Magpie's own auto-detection if rocm-smi "
+             "is unavailable. mi325x is treated as mi300x (same architecture; "
+             "Magpie does not yet ship sglang_mi325x.sh / vllm_mi325x.sh).",
+    )
+    opt.add_argument(
+        "--framework", choices=["sglang", "vllm"], default=None,
+        help="Inference framework to benchmark / optimize. Resolution order: "
+             "--framework > $FRAMEWORK env > sglang (default). Selection is "
+             "session-wide; mixing sglang and vllm in a single session is "
+             "not supported.",
+    )
+    opt.add_argument("--max-hours", type=float, default=2.0,
+                      help="Wall-clock budget in hours (default 2.0)")
+    opt.add_argument("--isl", type=int, default=int(os.environ.get("ISL", "256")),
+                      help="Input sequence length (default $ISL or 256)")
+    opt.add_argument("--osl", type=int, default=int(os.environ.get("OSL", "256")),
+                      help="Output sequence length (default $OSL or 256)")
+    opt.add_argument("--precision", type=str,
+                      default=os.environ.get("PRECISION", "bf16"),
+                      help="Model precision (default $PRECISION or bf16)")
+    grp = opt.add_mutually_exclusive_group()
+    grp.add_argument("--target-gain", type=float, default=None,
+                      help="Stop when cumulative_gain >= N%% over baseline")
+    grp.add_argument("--target-tput", type=float, default=None,
+                      help="Stop when current best tok/s/GPU >= N")
+    grp.add_argument("--target-baseline-dir", type=str, default=None,
+                      help="Stop when current best matches the baseline in DIR")
+    opt.add_argument("--session-name", type=str, default=None,
+                      help="Override auto-generated session id. Default: "
+                           "<model_name>_<YYYYMMDD_HHMMSS>")
+    opt.add_argument("--resume", type=str, default=None,
+                      help="Resume from an existing session id. Skips the "
+                           "SharedState seed and lets the Coordinator replay "
+                           "the prior event log + state.json. Mutually "
+                           "exclusive with --session-name in practice.")
+    opt.add_argument("--model-class", type=str, default=None,
+                      help="Optional model class hint (dense_8B / moe_mla / ...)")
+    opt.add_argument("--target-summary", type=str, default=None,
+                      help="Free-text goal summary surfaced in prompts")
+    opt.add_argument("--max-ticks", type=int, default=None,
+                      help="Hard tick cap (None = unlimited; mostly for tests)")
+    opt.add_argument("--tick-interval-sec", type=float, default=0.0,
+                      help="Sleep between ticks (0 = no sleep)")
+    opt.add_argument("--claude-model", type=str,
+                      default=os.environ.get("CLAUDE_MODEL", "claude-opus-4-7"))
+    opt.add_argument("--codex-model", type=str,
+                      default=os.environ.get("CODEX_MODEL", "gpt-5.4"))
+    opt.add_argument("--no-kernel", action="store_true", default=False,
+                      help="Disable the Kernel agent entirely. The run will "
+                           "only do baseline + params + backends + sweep (pure "
+                           "parameter search). Useful when GEAK/OOB/GPU "
+                           "compile env is unavailable or you just want the "
+                           "quick-win parameter path. Default: kernel enabled.")
+    opt.add_argument("--kernel-codex", action="store_true", default=True,
+                      help="Use Codex backend for Kernel agent (default — faster). "
+                           "Pass --kernel-claude to switch.")
+    opt.add_argument("--kernel-claude", action="store_false", dest="kernel_codex",
+                      help="Use Claude backend for Kernel agent")
+    opt.add_argument("--critic-mock", action="store_true", default=True,
+                      help="Use mock Critic auto-approval (default). Pass "
+                           "--critic-real to use the Codex-backed Critic.")
+    opt.add_argument("--critic-real", action="store_false", dest="critic_mock",
+                      help="Use real Codex-backed Critic instead of mock")
+    opt.add_argument("--orch-prompt", type=str, default=None,
+                      help="Override Orchestration system prompt (file path or inline)")
+    opt.add_argument("--critic-prompt", type=str, default=None,
+                      help="Override Critic system prompt")
+    opt.add_argument("--kernel-prompt", type=str, default=None,
+                      help="Override Kernel system prompt")
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    level = logging.WARNING - 10 * min(args.verbose, 2)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(name)s [%(levelname)s] %(message)s",
+    )
+    if args.command == "optimize":
+        # Resolve any --*-prompt that point at a file.
+        for attr in ("orch_prompt", "critic_prompt", "kernel_prompt"):
+            v = getattr(args, attr)
+            if v and Path(v).exists():
+                setattr(args, attr, Path(v).read_text(encoding="utf-8"))
+        return asyncio.run(_run_optimize(args))
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
