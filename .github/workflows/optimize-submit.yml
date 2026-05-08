@@ -33,6 +33,14 @@ on:
         default: 'local'
         type: choice
         options: [local, claw]
+      gpu_type:
+        description: 'GPU type tag (overrides SaFE backend default MI355X). Leave empty to use script default (MI300X for core42).'
+        required: false
+        default: ''
+      inferencex_path:
+        description: 'InferenceX checkout path inside the sandbox. Leave empty to use script default (/wekafs/InferenceX for core42).'
+        required: false
+        default: ''
       wait_for_completion:
         description: 'Wait for tasks to finish (default true). Uncheck for fire-and-forget.'
         type: boolean
@@ -99,6 +107,8 @@ jobs:
           INPUT_ISL:              ${{ github.event.inputs.isl }}
           INPUT_OSL:              ${{ github.event.inputs.osl }}
           INPUT_MODE:             ${{ github.event.inputs.mode }}
+          INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
+          INPUT_INFERENCEX_PATH:  ${{ github.event.inputs.inferencex_path }}
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
@@ -120,6 +130,12 @@ jobs:
           fi
           ARGS+=(--isl "${INPUT_ISL:-1024}" --osl "${INPUT_OSL:-1024}")
           ARGS+=(--mode "${INPUT_MODE:-local}")
+          if [ -n "${INPUT_GPU_TYPE:-}" ]; then
+            ARGS+=(--gpu-type "${INPUT_GPU_TYPE}")
+          fi
+          if [ -n "${INPUT_INFERENCEX_PATH:-}" ]; then
+            ARGS+=(--inferencex-path "${INPUT_INFERENCEX_PATH}")
+          fi
           if [ "${INPUT_WAIT:-true}" = "false" ]; then
             ARGS+=(--no-wait-for-completion)
           fi

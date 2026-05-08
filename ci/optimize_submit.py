@@ -86,6 +86,13 @@ DEFAULT_REGISTER_WORKSPACE = "core42-hyperloom"
 DEFAULT_SUBMIT_WORKSPACE = "core42-sandbox"
 DEFAULT_VOLUME = "/wekafs"
 DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
+# Cluster-aware defaults: SaFE backend's NormalizePromptConfig uses MI355X /
+# /hyperloom/InferenceX which are wrong for core42 (it's MI300X and the
+# InferenceX checkout actually lives on /wekafs). Without overriding here the
+# generated prompt sends the agent on a 5-10 min wild goose chase looking for
+# /hyperloom/InferenceX, and it picks GPU-architecture-wrong heuristics later.
+DEFAULT_GPU_TYPE = "MI300X"
+DEFAULT_INFERENCEX_PATH = "/wekafs/InferenceX"
 
 # Architectures well-supported by SGLang on ROCm 7.x.
 SGLANG_ARCHS: set[str] = {
@@ -396,6 +403,8 @@ class SafeOptimizeClient:
         osl: int,
         image: str | None,
         mode: str = "local",
+        gpu_type: str | None = None,
+        inferencex_path: str | None = None,
     ) -> dict:
         body = {
             "displayName": display_name,
@@ -413,6 +422,12 @@ class SafeOptimizeClient:
         }
         if image:
             body["image"] = image
+        # Override SaFE backend's wrong-for-core42 defaults (MI355X /
+        # /hyperloom/InferenceX). See DEFAULT_GPU_TYPE/_INFERENCEX_PATH above.
+        if gpu_type:
+            body["gpuType"] = gpu_type
+        if inferencex_path:
+            body["inferencexPath"] = inferencex_path
         return self._request("POST", "api/v1/optimization/tasks", body)
 
     # ── Task lifecycle ──
@@ -513,6 +528,8 @@ def process_model(
     hf_token: str,
     manual_mode: bool,
     mode: str,
+    gpu_type: str | None = None,
+    inferencex_path: str | None = None,
 ) -> SubmissionRecord:
     rec = SubmissionRecord(
         model=repo_id,
@@ -576,7 +593,7 @@ def process_model(
     try:
         result = safe.submit_task(
             model_id, display_name, framework, precision, tp, conc, isl, osl, image,
-            mode=mode)
+            mode=mode, gpu_type=gpu_type, inferencex_path=inferencex_path)
     except Exception as e:
         rec.status = "failed"
         rec.error = f"submit_task: {e}"
@@ -810,6 +827,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--volume", default="",
                         help=f"Wekafs volume mounted RW in --register-workspace "
                              f"(defaults to $SAFE_OPTIMIZE_VOLUME then '{DEFAULT_VOLUME}')")
+    parser.add_argument("--gpu-type", default="",
+                        help=f"GPU type tag for the prompt (defaults to "
+                             f"$SAFE_OPTIMIZE_GPU_TYPE then '{DEFAULT_GPU_TYPE}'). "
+                             f"SaFE backend default is MI355X — must override on core42.")
+    parser.add_argument("--inferencex-path", default="",
+                        help=f"InferenceX checkout path inside the sandbox "
+                             f"(defaults to $SAFE_OPTIMIZE_INFERENCEX_PATH then "
+                             f"'{DEFAULT_INFERENCEX_PATH}'). SaFE backend default is "
+                             f"/hyperloom/InferenceX which doesn't exist on core42.")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""),
                         help="HuggingFace token (or set $HF_TOKEN)")
 
@@ -887,6 +913,12 @@ def main() -> int:
     volume = (args.volume
               or os.environ.get("SAFE_OPTIMIZE_VOLUME")
               or DEFAULT_VOLUME)
+    gpu_type = (args.gpu_type
+                or os.environ.get("SAFE_OPTIMIZE_GPU_TYPE")
+                or DEFAULT_GPU_TYPE)
+    inferencex_path = (args.inferencex_path
+                       or os.environ.get("SAFE_OPTIMIZE_INFERENCEX_PATH")
+                       or DEFAULT_INFERENCEX_PATH)
 
     if not api_key and not args.dry_run:
         log.error("no API key set (CLAW_API_KEY / SAFE_API_KEY / --api-key)")
@@ -894,6 +926,8 @@ def main() -> int:
 
     log.info("SaFE base_url=%s register_workspace=%s submit_workspace=%s volume=%s",
              base_url, register_workspace, submit_workspace, volume)
+    log.info("Cluster prompt fields: gpu_type=%s inferencex_path=%s",
+             gpu_type, inferencex_path)
     if register_workspace != submit_workspace:
         log.info("cross-workspace mode — needs SaFE selectLocalPath path-accessible "
                  "fallback to be deployed; will 400 on submit_task otherwise")
@@ -939,6 +973,8 @@ def main() -> int:
             args.isl, args.osl, args.dry_run, args.hf_token,
             manual_mode=args.manual,
             mode=args.mode,
+            gpu_type=gpu_type,
+            inferencex_path=inferencex_path,
         )
         records.append(rec)
 
