@@ -107,10 +107,9 @@ def _materialize_config_with_envs(
     envs = apply_runtime_benchmark_overrides(
         bench, model_path=model_path, gpu_type=gpu_type,
     )
-    # Always run accuracy eval (GSM8K) as part of the benchmark.
-    # Magpie's benchmark scripts check RUN_EVAL=true and call run_eval
-    # while the server is still alive, avoiding an extra server restart.
-    envs.setdefault("RUN_EVAL", "true")
+    # NOTE: RUN_EVAL is resolved after extra_envs is merged below — that way
+    # callers (params/backends/sweep variants) can still opt in explicitly
+    # without triggering the "defaulted to false" warning.
 
     # Resolve ISL/OSL/CONC early — needed by both profiler config and
     # adaptive NUM_PROMPTS below.
@@ -174,6 +173,27 @@ def _materialize_config_with_envs(
         envs[args_key] = merge_server_args(envs.get(args_key, ""), server_args)
     for key, value in (extra_envs or {}).items():
         envs[str(key)] = str(value)
+    # Accuracy eval (GSM8K) is OFF by default because Magpie main and
+    # InferenceX main currently disagree on the lm-eval CLI shape:
+    # Magpie's benchmark scripts call `run_eval ... --concurrent-requests N`,
+    # but InferenceX's `run_lm_eval` rejects `--concurrent-requests` (it reads
+    # `EVAL_CONCURRENT_REQUESTS` from env instead and the unknown flag makes
+    # the wrapper return 1, failing the whole benchmark). Magpie does not
+    # pin InferenceX, so any fresh clone hits this. Until upstream realigns,
+    # leave RUN_EVAL off and let the user opt in via env or extra_envs.
+    # The accuracy gate in coordinator.py treats a missing GSM8K result as
+    # "no regression", which is the safe behaviour for a flag-only run.
+    if "RUN_EVAL" not in envs:
+        env_run_eval = os.environ.get("RUN_EVAL")
+        if env_run_eval is not None:
+            envs["RUN_EVAL"] = env_run_eval
+        else:
+            envs["RUN_EVAL"] = "false"
+            log.warning(
+                "RUN_EVAL defaulted to false: Magpie main / InferenceX main "
+                "disagree on `run_eval --concurrent-requests`. Export "
+                "RUN_EVAL=true once your InferenceX checkout accepts that flag."
+            )
     materialized = output_dir / "baseline_config.with_envs.yaml"
     with materialized.open("w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
