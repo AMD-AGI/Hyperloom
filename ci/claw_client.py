@@ -89,6 +89,7 @@ class ClawClient:
         content: str,
         task_mode: str = "agent",
         tools: list[int] | None = None,
+        plugin_id: int | None = 4,
     ) -> dict:
         body = {
             "content": content,
@@ -98,6 +99,7 @@ class ClawClient:
             "attachments": [],
             "tools": tools if tools is not None else self.default_tools,
             "workspaceId": self.sandbox_workspace or os.environ.get("SANDBOX_WORKSPACE", ""),
+            "pluginId": plugin_id,
         }
         resp = self._session.post(
             self._url(f"/sessions/{session_id}/messages"),
