@@ -9,6 +9,7 @@ local validation without requiring TraceLens to be installed.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import gzip
 import json
 import os
@@ -21,6 +22,12 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from tracelens_skill_runner import (
+    discover_capture_folder,
+    raw_candidates_from_priority_data,
+    run_tracelens_skill,
+)
 
 
 KERNEL_HINTS = (
@@ -937,7 +944,25 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
     """
     cat = (candidate.get("tracelens_category") or "").strip()
     if cat:
-        return cat
+        normalized = cat.lower().replace("-", "_").replace(" ", "_")
+        category_map = {
+            "gemm": "GEMM",
+            "sdpa": "SDPA",
+            "sdpa_fwd": "SDPA",
+            "sdpa_bwd": "SDPA",
+            "attention": "SDPA",
+            "norm": "LayerNorm",
+            "layernorm": "LayerNorm",
+            "rmsnorm": "LayerNorm",
+            "elementwise": "Elementwise",
+            "reduce": "Reduction",
+            "triton": "Triton",
+            "moe": "MoE",
+            "moe_fused": "MoE",
+            "moe_unfused": "MoE",
+            "other": "Other",
+        }
+        return category_map.get(normalized, cat)
     name = str(candidate.get("name") or "").lower()
     if any(t in name for t in ("gemm", "matmul", "rocblas", "hipblas",
                                 "cijk", "sgemm", "hgemm")):
@@ -1247,6 +1272,7 @@ def write_reports(
     trace_files: list[Path],
     candidates: list[dict[str, Any]],
     args: argparse.Namespace,
+    existing_report_path: Path | None = None,
 ) -> dict[str, str]:
     tracelens_dir = run_dir / "tracelens"
     (tracelens_dir / "system_findings").mkdir(parents=True, exist_ok=True)
@@ -1274,25 +1300,29 @@ def write_reports(
     atomic_write_json(run_dir / "kernel_candidates.json", {"hot_kernels": candidates, **report})
 
     md_path = tracelens_dir / "standalone_analysis.md"
-    lines = [
-        "# TraceLens Standalone Analysis",
-        "",
-        f"- Model: {args.model_name}",
-        f"- Framework: {args.framework}",
-        f"- Target platform: {args.target_platform}",
-        f"- Trace input type: {trace_input_type}",
-        "",
-        "## Hot Kernels",
-        "",
-    ]
-    for item in candidates:
-        bottleneck = item.get("bottleneck") or "unknown"
-        lines.append(
-            f"- `{item['kernel_id']}` `{item['name']}`: {item['gpu_pct']}% GPU, "
-            f"{item['call_count']} calls, bottleneck `{bottleneck}`, "
-            f"source `{item.get('source_file') or 'unresolved'}`"
-        )
-    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if existing_report_path and existing_report_path.exists():
+        if existing_report_path.resolve() != md_path.resolve():
+            md_path.write_text(existing_report_path.read_text(encoding="utf-8"), encoding="utf-8")
+    else:
+        lines = [
+            "# TraceLens Standalone Analysis",
+            "",
+            f"- Model: {args.model_name}",
+            f"- Framework: {args.framework}",
+            f"- Target platform: {args.target_platform}",
+            f"- Trace input type: {trace_input_type}",
+            "",
+            "## Hot Kernels",
+            "",
+        ]
+        for item in candidates:
+            bottleneck = item.get("bottleneck") or "unknown"
+            lines.append(
+                f"- `{item['kernel_id']}` `{item['name']}`: {item['gpu_pct']}% GPU, "
+                f"{item['call_count']} calls, bottleneck `{bottleneck}`, "
+                f"source `{item.get('source_file') or 'unresolved'}`"
+            )
+        md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     readable_report = tracelens_dir / "tracelens_report.md"
     readable_report.write_text(md_path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -1326,6 +1356,26 @@ def main() -> int:
     parser.add_argument("--compat-report-path", default="")
     parser.add_argument("--budget-minutes", type=float, default=60.0)
     parser.add_argument("--dry-run", action="store_true")
+    default_llm_orchestrator = os.environ.get(
+        "KERNEL_AGENT_USE_LLM_ORCHESTRATOR", "1",
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    parser.add_argument(
+        "--use-llm-orchestrator",
+        dest="use_llm_orchestrator",
+        action="store_true",
+        default=default_llm_orchestrator,
+        help=(
+            "Run TraceLens standalone-analysis-orchestrator through "
+            "claude_agent_sdk before falling back to the deterministic parser "
+            "(default: env KERNEL_AGENT_USE_LLM_ORCHESTRATOR, on)."
+        ),
+    )
+    parser.add_argument(
+        "--no-llm-orchestrator",
+        dest="use_llm_orchestrator",
+        action="store_false",
+        help="Disable the Claude SDK TraceLens skill runner and use inline parsing only.",
+    )
     parser.add_argument(
         "--skip-split",
         action="store_true",
@@ -1371,6 +1421,10 @@ def main() -> int:
     log_path = run_dir / "logs" / "tracelens_analysis" / f"{run_id}.log"
     status_path = run_dir / "status" / "tracelens_analysis" / f"{run_id}.json"
     artifacts: dict[str, str] = {}
+    agent_candidates: list[dict[str, Any]] | None = None
+    agent_report_path: Path | None = None
+    orchestrator_mode = "inline"
+    orchestrator_error = ""
 
     try:
         update_status(status_path, state="running", current_step="discover_trace_input",
@@ -1483,25 +1537,83 @@ def main() -> int:
                         f"falling back to filtered trace {trace_files[0].name}",
                     )
 
-            update_status(status_path, state="running", current_step="run_tracelens_cli",
-                          log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                          started_at=started_at)
-            csv_dir = tracelens_dir / "csvs"
-            xlsx_path = tracelens_dir / "perf_report.xlsx"
-            rc = run_command([
-                perf_cli,
-                "--profile_json_path", str(cli_trace_path),
-                "--output_xlsx_path", str(xlsx_path),
-                "--output_csvs_dir", str(csv_dir),
-                "--include_unlinked_kernels",
-                "--enable_kernel_summary",
-            ], cwd=None, log_path=log_path,
-                timeout_s=max(60, int(args.budget_minutes * 60)))
-            if rc != 0:
-                append_log(log_path, "WARNING: TraceLens report CLI failed; falling back to raw trace parser")
-            else:
-                artifacts["tracelens_xlsx"] = str(xlsx_path)
-                artifacts["tracelens_csv_dir"] = str(csv_dir)
+            if args.use_llm_orchestrator:
+                update_status(status_path, state="running",
+                              current_step="run_tracelens_sdk_orchestrator",
+                              log_path=log_path, artifact_paths=artifacts,
+                              run_id=run_id, started_at=started_at)
+                try:
+                    trace_input_path = Path(args.trace_input).expanduser().resolve()
+                    capture_folder = discover_capture_folder(trace_input_path, trace_files)
+                    skill_result = asyncio.run(run_tracelens_skill(
+                        skill_path=skill,
+                        trace_path=cli_trace_path,
+                        output_dir=tracelens_dir,
+                        tracelens_root=tl_root,
+                        platform=args.target_platform,
+                        framework=args.framework,
+                        analysis_mode=args.analysis_mode,
+                        capture_folder=capture_folder,
+                        budget_minutes=args.budget_minutes,
+                        model=os.environ.get("ANTHROPIC_MODEL", ""),
+                        log=lambda msg: append_log(log_path, msg),
+                    ))
+                    artifacts.update(skill_result.artifact_paths)
+                    agent_report_path = skill_result.report_path
+                    orchestrator_mode = "claude_agent_sdk"
+                    raw_agent_candidates = raw_candidates_from_priority_data(
+                        skill_result.priority_data_path, args.top_k,
+                    )
+                    if raw_agent_candidates:
+                        total_dur = sum(
+                            float(c.get("duration_us") or 0)
+                            for c in raw_agent_candidates
+                        )
+                        agent_candidates = _finalize_candidates(
+                            raw_agent_candidates,
+                            total_dur=total_dur or None,
+                        )
+                        append_log(
+                            log_path,
+                            f"TraceLens SDK orchestrator produced "
+                            f"{len(agent_candidates)} hot kernels",
+                        )
+                    else:
+                        orchestrator_mode = "claude_agent_sdk_with_inline_candidates"
+                        append_log(
+                            log_path,
+                            "WARNING: TraceLens SDK orchestrator produced no "
+                            "priority candidates; using inline parser for "
+                            "hot-kernel candidate extraction",
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    orchestrator_error = f"{type(exc).__name__}: {exc}"
+                    append_log(
+                        log_path,
+                        f"WARNING: TraceLens SDK orchestrator failed; "
+                        f"falling back to inline parser: {type(exc).__name__}: {exc}",
+                    )
+
+            if agent_candidates is None:
+                update_status(status_path, state="running", current_step="run_tracelens_cli",
+                              log_path=log_path, artifact_paths=artifacts, run_id=run_id,
+                              started_at=started_at)
+                csv_dir = tracelens_dir / "csvs"
+                xlsx_path = tracelens_dir / "perf_report.xlsx"
+                rc = run_command([
+                    perf_cli,
+                    "--profile_json_path", str(cli_trace_path),
+                    "--output_xlsx_path", str(xlsx_path),
+                    "--output_csvs_dir", str(csv_dir),
+                    "--include_unlinked_kernels",
+                    "--enable_kernel_summary",
+                ], cwd=None, log_path=log_path,
+                    timeout_s=max(60, int(args.budget_minutes * 60)))
+                if rc != 0:
+                    append_log(log_path, "WARNING: TraceLens report CLI failed; falling back to raw trace parser")
+                else:
+                    artifacts["tracelens_xlsx"] = str(xlsx_path)
+                    artifacts["tracelens_csv_dir"] = str(csv_dir)
         else:
             append_log(log_path, "[dry-run] skipping TraceLens install and external CLI")
 
@@ -1514,9 +1626,14 @@ def main() -> int:
         #   2. TraceLens kernel_summary.csv — name + duration + framework
         #      category; we backfill shape from the raw trace
         #   3. Raw-trace parser — last-resort legacy path
-        candidates = None
+        candidates = agent_candidates
+        if candidates:
+            append_log(
+                log_path,
+                f"hot kernels from TraceLens SDK orchestrator ({len(candidates)})",
+            )
         tl_csv_dir_local = artifacts.get("tracelens_csv_dir")
-        if tl_csv_dir_local:
+        if not candidates and tl_csv_dir_local:
             # category_data may sit peer-of-csv or inside-csv depending on
             # the TraceLens release; probe both.
             for cat_dir_candidate in (
@@ -1556,7 +1673,8 @@ def main() -> int:
         merge_roofline_into_candidates(candidates, roofline_by_name)
         artifacts.update(write_reports(run_dir, trace_input_type=trace_input_type,
                                        trace_files=trace_files, candidates=candidates,
-                                       args=args))
+                                       args=args,
+                                       existing_report_path=agent_report_path))
         if args.roofline_json:
             artifacts["roofline_json"] = str(Path(args.roofline_json).expanduser())
         artifacts["cli_log_path"] = str(log_path)
@@ -1572,6 +1690,8 @@ def main() -> int:
             "cli_log_path": str(log_path),
             "status_path": str(status_path),
             "artifact_paths": artifacts,
+            "orchestrator_mode": orchestrator_mode,
+            "orchestrator_error": orchestrator_error,
         }
         atomic_write_json(run_dir / "session_state.json", {
             "session_id": session_id,
