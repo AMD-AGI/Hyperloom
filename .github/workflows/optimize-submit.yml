@@ -16,7 +16,7 @@ on:
       hf_top:
         description: 'HuggingFace top-N (leave empty if specifying "models" below)'
         required: false
-        default: '5'
+        default: '20'
       min_params:
         description: 'Min parameter count in Billions (e.g. 7 for >=7B). 0 to skip filter.'
         required: false
@@ -114,7 +114,7 @@ jobs:
     timeout-minutes: 600
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 20
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     env:
       CLAW_API_KEY:                     ${{ secrets.CLAW_API_KEY }}
