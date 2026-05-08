@@ -599,6 +599,8 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
     (skill_dir / "standalone-analysis-orchestrator.md").write_text("stub")
     workspace = tmp_path / "ws"
     workspace.mkdir()
+    capture = tmp_path / "capture_traces"
+    capture.mkdir()
     trace = tmp_path / "trace.json.gz"
     with gzip.open(trace, "wt") as f:
         _json.dump({"traceEvents": []}, f)
@@ -627,6 +629,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
         "--top-k", "5",
         "--budget-minutes", "1",
         "--no-llm-orchestrator",
+        "--capture-folder", str(capture),
         "--split-conc", "8",
         "--split-osl", "1024",
     ]
@@ -665,3 +668,17 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
     # CONC / OSL passthroughs.
     assert "--CONC" in splitter_cmd and "8" in splitter_cmd, splitter_cmd
     assert "--OSL" in splitter_cmd and "1024" in splitter_cmd, splitter_cmd
+
+    perf_cmd = next(
+        (c for c in captured
+         if c
+         and "TraceLens_generate_perf_report_pytorch_inference" in str(c[0])
+         and "--profile_json_path" in c),
+        None,
+    )
+    assert perf_cmd is not None, f"perf-report CLI never invoked; cmds={captured}"
+    assert "--group_by_parent_module" in perf_cmd, perf_cmd
+    assert "--enable_pseudo_ops" in perf_cmd, perf_cmd
+    assert "--group_by_num_kernels" in perf_cmd, perf_cmd
+    assert "--gpu_arch_json_path" in perf_cmd, perf_cmd
+    assert "--capture_folder" in perf_cmd and str(capture) in perf_cmd, perf_cmd
