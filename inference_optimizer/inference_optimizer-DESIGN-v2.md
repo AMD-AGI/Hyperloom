@@ -460,15 +460,14 @@ GEAK 是外部服务 —— 视为**只读基础设施**。skill 不能修改 GE
 | `OOB_ROUND_ITERATIONS`      | 3                             | Codex/Claude round 数(submit → local benchmark → feedback → re-submit)      |
 | `KERNEL_OPT_IMAGE`          | *(CI 或用户提供)*                  | kernel-opt 所有 backend 用的 framework image,每次 run 一个                         |
 | `KERNEL_OPT_WORKSPACE`      | `control-plane-moe`           | SaFE workspace(用户可 override)                                               |
-| `GEAK_STEP_LIMIT`           | 200                           | 每个 GEAK task 的最大 agent step(GEAK 推荐值;v1 曾为 100,过低导致优化不充分)               |
-| `GEAK_MAX_ROUNDS`           | 5                             | GEAK orchestrator 轮次(GEAK 推荐值;v1 曾为 1,严重削弱优化能力)                           |
+| `GEAK_STEP_LIMIT`           | 100                           | 每个 GEAK task 的最大 agent step                                                |
 | `GEAK_MAX_RETRIES`          | 3                             | 每个 kernel 的最大 submission 重试                                                |
 | `GEAK_MAX_SUBMISSIONS`      | 15                            | 每次 run 的总 GEAK submission 预算                                               |
 | `GEAK_TOP_CANDIDATES`       | 5                             | 提交的 top kernel candidate 数                                                 |
 | `GEAK_CONSECUTIVE_DISCARDS` | 5                             | 连续这么多 discard 后停止                                                          |
-| `GEAK_WALL_CLOCK_MIN`       | 90                            | 单个 GEAK 任务的 wall-clock 预算(与 kernel-agent SKILL 对齐;v1 为整阶段 120 分钟不够用)      |
+| `GEAK_WALL_CLOCK_MIN`       | 120                           | `kernel-opt` action 的最大 wall-clock minutes                                 |
 | `GEAK_POLL_INTERVAL_S`      | 60                            | GEAK task status 轮询间隔(秒)                                                   |
-| `GEAK_POLL_TIMEOUT_MIN`     | 90                            | 单个 GEAK task 的最大轮询时间(分钟;v1 为 15 分钟远不够 GEAK 推荐参数跑完)                       |
+| `GEAK_POLL_TIMEOUT_MIN`     | 15                            | 单个 GEAK task 的最大轮询时间(分钟)                                                   |
 | `MIN_GPU_PCT`               | 3                             | 作为 GEAK candidate 的最小 GPU 时间百分比                                            |
 | `SERVER_KILL_WAIT_S`        | 10                            | server kill 与 relaunch 之间的等待秒数                                             |
 | `FILTERED_TRACE_NAME`       | `filtered-TP-0.trace.json.gz` | TraceLens 分析用的优选 trace 文件                                                  |
