@@ -82,6 +82,31 @@ kill_stuck_proxy() {
   sleep 1
 }
 
+# Derive the proxy-side URLs from $OOB_BASE_URL_VAL. Sets the global vars
+# PROXY_ANTHROPIC_BASE_URL / PROXY_OPENAI_BASE_URL. Idempotent; safe to call
+# from both the healthy-noop and the just-started branches of main(). The
+# Anthropic SDK appends "/v1" itself, so the Anthropic URL strips a trailing
+# "/v1" while the OpenAI URL keeps the path verbatim.
+derive_proxy_urls() {
+  local path
+  path=$(echo "$OOB_BASE_URL_VAL" | grep -oP '(?<=://)[^/]+(/.+)' | grep -oP '/.*' || true)
+  PROXY_ANTHROPIC_BASE_URL="http://127.0.0.1:${PROXY_PORT}$(echo "$path" | sed 's|/v1$||')"
+  PROXY_OPENAI_BASE_URL="http://127.0.0.1:${PROXY_PORT}${path}"
+}
+
+# Print the PROXY_*_BASE_URL key=value lines for callers that source/parse
+# this script's stdout (install.sh's write_env_file does this). Returns
+# non-zero if OOB_BASE_URL_VAL is empty so install.sh can warn loudly
+# instead of silently emitting an env.sh missing the proxy URLs.
+emit_proxy_urls() {
+  if [ -z "$OOB_BASE_URL_VAL" ]; then
+    return 1
+  fi
+  derive_proxy_urls
+  echo "PROXY_ANTHROPIC_BASE_URL=${PROXY_ANTHROPIC_BASE_URL}"
+  echo "PROXY_OPENAI_BASE_URL=${PROXY_OPENAI_BASE_URL}"
+}
+
 start_proxy() {
   if [ ! -f "$PROXY_PY" ]; then
     warn "auth_proxy.py not found at ${PROXY_PY}; OOB Bearer rewrite skipped"
@@ -91,7 +116,7 @@ start_proxy() {
     warn "OOB_BASE_URL/OPENAI_BASE_URL not set; cannot start auth-proxy"
     return 1
   fi
-  local scheme host parsed_port path port_target
+  local scheme host parsed_port port_target
   scheme=$(echo "$OOB_BASE_URL_VAL" | grep -oP '^https?' || true)
   host=$(echo "$OOB_BASE_URL_VAL" | grep -oP '(?<=://)[^:/]+' || true)
   parsed_port=$(echo "$OOB_BASE_URL_VAL" | grep -oP '(?<=:)\d+(?=/)' || true)
@@ -102,9 +127,10 @@ start_proxy() {
   else
     port_target=80
   fi
-  path=$(echo "$OOB_BASE_URL_VAL" | grep -oP '(?<=://)[^/]+(/.+)' | grep -oP '/.*' || true)
 
-  log "starting auth-proxy on :${PROXY_PORT} -> ${scheme}://${host}:${port_target}${path}"
+  derive_proxy_urls
+
+  log "starting auth-proxy on :${PROXY_PORT} -> ${scheme}://${host}:${port_target}"
   mkdir -p "$LOG_DIR"
   LLM_PROXY_SCHEME="$scheme" \
   LLM_PROXY_HOST="$host" \
@@ -117,11 +143,7 @@ start_proxy() {
   while [ "$elapsed" -lt "$START_WAIT_SEC" ]; do
     if port_open; then
       log "auth-proxy bound :${PROXY_PORT} after ${elapsed}s"
-      # Stash for the caller (and for SKILL.md instructions).
-      PROXY_ANTHROPIC_BASE_URL="http://127.0.0.1:${PROXY_PORT}$(echo "$path" | sed 's|/v1$||')"
-      PROXY_OPENAI_BASE_URL="http://127.0.0.1:${PROXY_PORT}${path}"
-      echo "PROXY_ANTHROPIC_BASE_URL=${PROXY_ANTHROPIC_BASE_URL}"
-      echo "PROXY_OPENAI_BASE_URL=${PROXY_OPENAI_BASE_URL}"
+      emit_proxy_urls
       return 0
     fi
     sleep 1
@@ -134,6 +156,12 @@ start_proxy() {
 main() {
   if proxy_responds; then
     log "auth-proxy already healthy on :${PROXY_PORT}"
+    # Always emit PROXY_*_BASE_URL on the healthy-noop path too — install.sh
+    # parses our stdout to populate kernel-agent/env.sh. Without this, env.sh
+    # silently lacks ANTHROPIC_BASE_URL/OPENAI_BASE_URL whenever the proxy
+    # was already healthy at install time, and externally-preset upstream
+    # URLs leak into Claude/Codex CLIs.
+    emit_proxy_urls || warn "OOB_BASE_URL not set; PROXY_*_BASE_URL not emitted"
     return 0
   fi
 
