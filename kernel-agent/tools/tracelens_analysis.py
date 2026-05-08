@@ -1354,6 +1354,14 @@ def main() -> int:
     parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
     parser.add_argument("--roofline-json", default="")
     parser.add_argument("--compat-report-path", default="")
+    parser.add_argument(
+        "--capture-folder",
+        default=os.environ.get("TRACELENS_CAPTURE_FOLDER", ""),
+        help=(
+            "Optional graph-capture folder for TraceLens inference graph "
+            "replay analysis. Also accepts env TRACELENS_CAPTURE_FOLDER."
+        ),
+    )
     parser.add_argument("--budget-minutes", type=float, default=60.0)
     parser.add_argument("--dry-run", action="store_true")
     default_llm_orchestrator = os.environ.get(
@@ -1544,7 +1552,11 @@ def main() -> int:
                               run_id=run_id, started_at=started_at)
                 try:
                     trace_input_path = Path(args.trace_input).expanduser().resolve()
-                    capture_folder = discover_capture_folder(trace_input_path, trace_files)
+                    capture_folder = (
+                        Path(args.capture_folder).expanduser().resolve()
+                        if args.capture_folder else
+                        discover_capture_folder(trace_input_path, trace_files)
+                    )
                     skill_result = asyncio.run(run_tracelens_skill(
                         skill_path=skill,
                         trace_path=cli_trace_path,
@@ -1600,14 +1612,27 @@ def main() -> int:
                               started_at=started_at)
                 csv_dir = tracelens_dir / "csvs"
                 xlsx_path = tracelens_dir / "perf_report.xlsx"
-                rc = run_command([
+                perf_cmd = [
                     perf_cli,
                     "--profile_json_path", str(cli_trace_path),
                     "--output_xlsx_path", str(xlsx_path),
                     "--output_csvs_dir", str(csv_dir),
+                    "--gpu_arch_json_path",
+                    str(tl_root / "TraceLens/AgenticMode/Standalone/utils/arch" / f"{args.target_platform}.json"),
                     "--include_unlinked_kernels",
+                    "--group_by_parent_module",
+                    "--enable_pseudo_ops",
                     "--enable_kernel_summary",
-                ], cwd=None, log_path=log_path,
+                    "--group_by_num_kernels",
+                ]
+                explicit_capture_folder = (
+                    Path(args.capture_folder).expanduser().resolve()
+                    if args.capture_folder else
+                    discover_capture_folder(Path(args.trace_input).expanduser().resolve(), trace_files)
+                )
+                if explicit_capture_folder:
+                    perf_cmd += ["--capture_folder", str(explicit_capture_folder)]
+                rc = run_command(perf_cmd, cwd=None, log_path=log_path,
                     timeout_s=max(60, int(args.budget_minutes * 60)))
                 if rc != 0:
                     append_log(log_path, "WARNING: TraceLens report CLI failed; falling back to raw trace parser")
