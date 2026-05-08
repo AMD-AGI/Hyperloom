@@ -230,9 +230,23 @@ def test_materialize_config_rocr_visible_devices_explicit_env_wins(
 def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
     """When TP=1 (default), don't auto-touch ROCR_VISIBLE_DEVICES."""
     import yaml
+    src_yaml = tmp_path / "src.yaml"
+    src_yaml.write_text(yaml.safe_dump({
+        "benchmark": {
+            "framework": "sglang",
+            "model": "/m",
+            "envs": {
+                "TP": 1,
+                "CONC": 8,
+                "ISL": 256,
+                "OSL": 256,
+                "ROCR_VISIBLE_DEVICES": "1",
+            },
+        },
+    }))
     for k in ("TP", "ROCR_VISIBLE_DEVICES"):
         monkeypatch.delenv(k, raising=False)
-    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    out = _materialize_config_with_envs(src_yaml, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
     # yaml default is "1" — should be preserved as-is when TP not overridden upward
