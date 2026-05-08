@@ -173,6 +173,73 @@ def test_materialize_config_pops_legacy_benchmark_script(tmp_path):
 
 
 # ===========================================================================
+# Regression: TP / CONC env override yaml hardcode (DSR1-0528 verification
+# was deadlooping because TP=8 env was silently ignored, vllm ran with
+# yaml-hardcoded TP=1 and OOM-ed retry forever).
+# ===========================================================================
+def test_materialize_config_tp_env_overrides_yaml_hardcode(tmp_path, monkeypatch):
+    """TP env var must override yaml hardcode (was 1, becomes 8)."""
+    import yaml
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    assert envs["TP"] == 8, f"TP not overridden: {envs.get('TP')}"
+
+
+def test_materialize_config_conc_env_overrides_yaml_hardcode(tmp_path, monkeypatch):
+    """CONC env var must override yaml hardcode."""
+    import yaml
+    monkeypatch.setenv("CONC", "64")
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    assert envs["CONC"] == 64, f"CONC not overridden: {envs.get('CONC')}"
+
+
+def test_materialize_config_rocr_visible_devices_auto_expands_when_tp_overridden(
+    tmp_path, monkeypatch,
+):
+    """When TP=8 is set via env but ROCR_VISIBLE_DEVICES isn't explicit,
+    expand the GPU list to 0..TP-1 so vllm/sglang sees enough devices."""
+    import yaml
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    assert envs["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7", (
+        f"ROCR_VISIBLE_DEVICES not auto-expanded: {envs.get('ROCR_VISIBLE_DEVICES')}"
+    )
+
+
+def test_materialize_config_rocr_visible_devices_explicit_env_wins(
+    tmp_path, monkeypatch,
+):
+    """Explicit ROCR_VISIBLE_DEVICES env wins over auto-expansion."""
+    import yaml
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    assert envs["ROCR_VISIBLE_DEVICES"] == "4,5,6,7"
+
+
+def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
+    """When TP=1 (default), don't auto-touch ROCR_VISIBLE_DEVICES."""
+    import yaml
+    for k in ("TP", "ROCR_VISIBLE_DEVICES"):
+        monkeypatch.delenv(k, raising=False)
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    # yaml default is "1" — should be preserved as-is when TP not overridden upward
+    assert envs.get("ROCR_VISIBLE_DEVICES") == "1"
+
+
+# ===========================================================================
 # Regression: $FRAMEWORK env switches the default yaml between sglang/vllm
 # without anyone passing config_path explicitly. Locks down the entry-layer
 # fix for vLLM support — the optimizer used to be sglang-only because all 5
