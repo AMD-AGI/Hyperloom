@@ -76,10 +76,11 @@ jobs:
       # New secret: HuggingFace token for gated models (optional).
       HF_TOKEN:       ${{ secrets.HF_TOKEN }}
       # Workspace/volume defaults are baked into the script
-      # (core42-hyperloom / /wekafs); override via secret only if SaFE
-      # changes its convention again.
-      SAFE_OPTIMIZE_WORKSPACE: ${{ secrets.SAFE_OPTIMIZE_WORKSPACE }}
-      SAFE_OPTIMIZE_VOLUME:    ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
+      # (register=core42-hyperloom, submit=core42-sandbox, volume=/wekafs).
+      # Override via secret only if the SaFE convention changes again.
+      SAFE_OPTIMIZE_REGISTER_WORKSPACE: ${{ secrets.SAFE_OPTIMIZE_REGISTER_WORKSPACE }}
+      SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
+      SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
 
     steps:
       - uses: actions/checkout@v4

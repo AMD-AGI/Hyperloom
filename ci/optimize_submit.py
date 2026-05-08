@@ -61,16 +61,30 @@ log = logging.getLogger("optimize-submit")
 # ── Defaults ────────────────────────────────────────────────────────────────────
 
 DEFAULT_API_URL = "https://core42.primus-safe.amd.com"
-# core42-hyperloom workspace.scopes does NOT include 'Sandbox' (by ops design).
-# SaFE optimization tasks materialize as Sandbox-typed K8s workloads, so the
-# admission webhook (vworkload.kb.io) rejects them in core42-hyperloom with
-# Primus.00003. We submit to core42-sandbox instead — the same workspace the
-# existing inference-optimization-ci.yml uses for kernel optimization.
-DEFAULT_WORKSPACE = "core42-sandbox"
-# /wekafs is mounted ReadOnlyMany in core42-sandbox, so model downloads can't
-# write there. /hyperloom is the same underlying weka volume but mounted
-# ReadWriteMany — that's where new HF models actually land.
-DEFAULT_VOLUME = "/hyperloom"
+# Two-workspace split — necessary because of conflicting K8s constraints:
+#
+#   register: core42-hyperloom + /wekafs
+#     - core42-hyperloom workspace has /wekafs mounted ReadWriteMany so model
+#       weights can actually be downloaded there.
+#     - The path /wekafs/models/<repo> is on a shared weka volume that ALL
+#       sandbox pods (including core42-sandbox) can read via their own
+#       ReadOnlyMany /wekafs mount — i.e. it's effectively global storage.
+#
+#   submit: core42-sandbox
+#     - Only workspaces whose spec.scopes includes 'Sandbox' can host the
+#       Sandbox-typed K8s workload that SaFE creates for an optimization
+#       task. core42-hyperloom intentionally excludes Sandbox (ops design)
+#       and the admission webhook (vworkload.kb.io) rejects with
+#       Primus.00003 if you try.
+#
+# Requires SaFE backend selectLocalPath to do path-accessible fallback when
+# submit_workspace != register_workspace (see SaFE/.../optimization/
+# model_helper.go — same pattern as sft.go:resolveModelLocalPathFromK8sModel).
+# Until that lands, submit_task will 400; --submit-workspace can be set equal
+# to --register-workspace as a workaround.
+DEFAULT_REGISTER_WORKSPACE = "core42-hyperloom"
+DEFAULT_SUBMIT_WORKSPACE = "core42-sandbox"
+DEFAULT_VOLUME = "/wekafs"
 DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
 
 # Architectures well-supported by SGLang on ROCm 7.x.
@@ -276,12 +290,19 @@ class SafeOptimizeClient:
         self,
         base_url: str,
         token: str,
-        workspace: str,
+        register_workspace: str,
+        submit_workspace: str,
         volume: str,
         timeout: int = 30,
     ):
         self.base_url = base_url.rstrip("/")
-        self.workspace = workspace
+        # Where the model gets registered + downloaded (must allow RW writes
+        # to the configured volume).
+        self.register_workspace = register_workspace
+        # Where the optimization task is created (must allow Sandbox scope).
+        # Can equal register_workspace when both constraints are satisfied
+        # by a single workspace (rare in practice on core42).
+        self.submit_workspace = submit_workspace
         self.volume = volume
         self.timeout = timeout
         self._sess = requests.Session()
@@ -302,22 +323,19 @@ class SafeOptimizeClient:
         return resp.json() if resp.content else {}
 
     def find_model(self, repo_id: str) -> dict | None:
-        """Look up an existing SaFE Model by HF source URL, scoped to our workspace.
+        """Look up an existing SaFE Model by HF source URL, scoped to register_workspace.
 
-        Filtering by workspace is critical: a sibling-workspace registration
-        (e.g. someone else registered the same HF repo in core42-hyperloom)
-        will share the same sourceURL but its status.localPaths won't have an
-        entry for *our* workspace — so POST /optimization/tasks would later
-        400 with "model X is not downloaded to workspace Y". By matching
-        within our workspace only we either find a directly usable Model or
-        fall through to register a fresh one.
+        We filter by the *register* workspace because that's where the
+        canonical Model CR + LocalPaths live. Submitting to a different
+        submit_workspace later relies on selectLocalPath's path-accessible
+        fallback to find the file via shared storage.
         """
         hf_url = f"https://huggingface.co/{repo_id}".rstrip("/")
         from urllib.parse import quote
         try:
             data = self._request(
                 "GET",
-                f"api/v1/playground/models?limit=200&workspace={quote(self.workspace)}",
+                f"api/v1/playground/models?limit=200&workspace={quote(self.register_workspace)}",
             )
         except Exception as e:
             log.warning("list models failed: %s", e)
@@ -334,11 +352,11 @@ class SafeOptimizeClient:
                 "accessMode": "local",
                 **({"token": hf_token} if hf_token else {}),
             },
-            "workspace": self.workspace,
+            "workspace": self.register_workspace,
             "target": {"volume": self.volume},
         }
         log.info("[%s] register: workspace=%s volume=%s",
-                 repo_id, self.workspace, self.volume)
+                 repo_id, self.register_workspace, self.volume)
         result = self._request("POST", "api/v1/playground/models", body)
         return result.get("id", "")
 
@@ -382,7 +400,7 @@ class SafeOptimizeClient:
         body = {
             "displayName": display_name,
             "modelId": model_id,
-            "workspace": self.workspace,
+            "workspace": self.submit_workspace,
             "mode": mode,
             "framework": framework,
             "precision": precision,
@@ -694,14 +712,16 @@ def write_manifest(
     out_dir: Path,
     records: list[SubmissionRecord],
     base_url: str,
-    workspace: str,
+    register_workspace: str,
+    submit_workspace: str,
     volume: str,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "api_url": base_url,
-        "workspace": workspace,
+        "register_workspace": register_workspace,
+        "submit_workspace": submit_workspace,
         "volume": volume,
         "records": [asdict(r) for r in records],
     }
@@ -710,7 +730,8 @@ def write_manifest(
     md = [
         "# SaFE Optimization Submission Manifest",
         f"- API: `{base_url}`",
-        f"- Workspace: `{workspace}`",
+        f"- Register workspace: `{register_workspace}`",
+        f"- Submit workspace: `{submit_workspace}`",
         f"- Volume: `{volume}`",
         f"- Submitted at: {payload['submitted_at']}",
         "",
@@ -775,12 +796,20 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="SaFE base URL (defaults to $SAFE_BASE_URL or $SAFE_API_URL)")
     parser.add_argument("--api-key", default="",
                         help="SaFE bearer token (defaults to $CLAW_API_KEY or $SAFE_API_KEY)")
+    parser.add_argument("--register-workspace", default="",
+                        help=f"Workspace where models are registered + downloaded "
+                             f"(defaults to $SAFE_OPTIMIZE_REGISTER_WORKSPACE "
+                             f"then '{DEFAULT_REGISTER_WORKSPACE}')")
+    parser.add_argument("--submit-workspace", default="",
+                        help=f"Workspace where the optimization task runs "
+                             f"(defaults to $SAFE_OPTIMIZE_SUBMIT_WORKSPACE "
+                             f"then '{DEFAULT_SUBMIT_WORKSPACE}')")
     parser.add_argument("--workspace", default="",
-                        help=f"SaFE workspace (defaults to $SAFE_OPTIMIZE_WORKSPACE "
-                             f"then '{DEFAULT_WORKSPACE}')")
+                        help="Shorthand: set both --register-workspace and "
+                             "--submit-workspace to the same value (back-compat)")
     parser.add_argument("--volume", default="",
-                        help=f"Wekafs volume (defaults to $SAFE_OPTIMIZE_VOLUME "
-                             f"then '{DEFAULT_VOLUME}')")
+                        help=f"Wekafs volume mounted RW in --register-workspace "
+                             f"(defaults to $SAFE_OPTIMIZE_VOLUME then '{DEFAULT_VOLUME}')")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""),
                         help="HuggingFace token (or set $HF_TOKEN)")
 
@@ -841,9 +870,20 @@ def main() -> int:
                or os.environ.get("CLAW_API_KEY")
                or os.environ.get("SAFE_API_KEY")
                or "")
-    workspace = (args.workspace
+    # --workspace is shorthand for "set both to the same value" (back-compat
+    # with single-workspace usage from before the split). Explicit
+    # --register-workspace / --submit-workspace override it.
+    shared_ws = (args.workspace
                  or os.environ.get("SAFE_OPTIMIZE_WORKSPACE")
-                 or DEFAULT_WORKSPACE)
+                 or "")
+    register_workspace = (args.register_workspace
+                          or os.environ.get("SAFE_OPTIMIZE_REGISTER_WORKSPACE")
+                          or shared_ws
+                          or DEFAULT_REGISTER_WORKSPACE)
+    submit_workspace = (args.submit_workspace
+                        or os.environ.get("SAFE_OPTIMIZE_SUBMIT_WORKSPACE")
+                        or shared_ws
+                        or DEFAULT_SUBMIT_WORKSPACE)
     volume = (args.volume
               or os.environ.get("SAFE_OPTIMIZE_VOLUME")
               or DEFAULT_VOLUME)
@@ -852,11 +892,20 @@ def main() -> int:
         log.error("no API key set (CLAW_API_KEY / SAFE_API_KEY / --api-key)")
         return 2
 
-    log.info("SaFE base_url=%s workspace=%s volume=%s", base_url, workspace, volume)
+    log.info("SaFE base_url=%s register_workspace=%s submit_workspace=%s volume=%s",
+             base_url, register_workspace, submit_workspace, volume)
+    if register_workspace != submit_workspace:
+        log.info("cross-workspace mode — needs SaFE selectLocalPath path-accessible "
+                 "fallback to be deployed; will 400 on submit_task otherwise")
 
     hf = HuggingFaceClient(args.hf_token)
     # Dry-run never hits SaFE; pass an empty token so callers don't need a real one.
-    safe = SafeOptimizeClient(base_url, api_key or "dry-run", workspace, volume)
+    safe = SafeOptimizeClient(
+        base_url, api_key or "dry-run",
+        register_workspace=register_workspace,
+        submit_workspace=submit_workspace,
+        volume=volume,
+    )
 
     if args.hf_top:
         log.info("fetching HF top-%d (>=%.1fB)", args.hf_top, args.min_params)
@@ -923,7 +972,8 @@ def main() -> int:
 
     # Manifest is written *after* wait/collect so it captures final_status etc.
     if args.output_dir:
-        write_manifest(Path(args.output_dir), records, base_url, workspace, volume)
+        write_manifest(Path(args.output_dir), records,
+                       base_url, register_workspace, submit_workspace, volume)
 
     if args.dry_run:
         return 0
