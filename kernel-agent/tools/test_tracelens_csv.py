@@ -456,3 +456,92 @@ def test_125_finalize_outputs_source_path_field():
     out = tla._finalize_candidates(candidates, total_dur=100.0)
     assert out[0]["source_path"] == "/path/to/rmsnorm.cu"
     assert out[0]["kernel_category"] == "LayerNorm"
+
+
+# ===========================================================================
+# #127 — TraceLens splitter CLI must match the real
+# split_inference_trace_annotation interface (positional trace_path,
+# -o/--output-dir, --find-steady-state). The previous --input/--platform
+# form failed at runtime against a real Magpie/SGLang trace.
+# ===========================================================================
+def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_path):
+    """The end-to-end split path must call the real splitter interface,
+    not the broken --input/--platform form. Drives a mock subprocess.run
+    and asserts argv shape."""
+    import gzip
+    import json as _json
+    from unittest.mock import patch
+
+    # Pretend TraceLens root + perf-report CLI are present so the run
+    # reaches the splitter step.
+    tl_root = tmp_path / "TraceLens-internal"
+    skill_dir = tl_root / "TraceLens" / "AgenticMode" / "Standalone" / ".cursor" / "skills"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "standalone-analysis-orchestrator.md").write_text("stub")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trace = tmp_path / "trace.json.gz"
+    with gzip.open(trace, "wt") as f:
+        _json.dump({"traceEvents": []}, f)
+
+    captured: list[list[str]] = []
+
+    class _Result:
+        def __init__(self, returncode=0, stdout=""):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    def fake_run(cmd, *args, **kwargs):
+        captured.append(list(cmd))
+        # Make the perf-report CLI probe + actual run + pip install all succeed.
+        return _Result(returncode=0, stdout="ok")
+
+    def fake_which(name):
+        return f"/usr/bin/{name}"
+
+    argv = [
+        "tracelens_analysis.py",
+        "--trace-input", str(trace),
+        "--workspace-path", str(workspace),
+        "--tracelens-root", str(tl_root),
+        "--target-platform", "MI300X",
+        "--top-k", "5",
+        "--budget-minutes", "1",
+        "--split-conc", "8",
+        "--split-osl", "1024",
+    ]
+    import os as _os
+    env_backup = dict(_os.environ)
+    try:
+        with patch.object(tla.subprocess, "run", side_effect=fake_run), \
+             patch.object(tla.shutil, "which", side_effect=fake_which), \
+             patch.object(tla.sys, "argv", argv):
+            try:
+                tla.main()
+            except SystemExit:
+                pass
+    finally:
+        _os.environ.clear()
+        _os.environ.update(env_backup)
+
+    splitter_cmd = next(
+        (c for c in captured
+         if any("split_inference_trace_annotation" in str(p) for p in c)),
+        None,
+    )
+    assert splitter_cmd is not None, f"splitter never invoked; cmds={captured}"
+    # Real CLI: positional trace_path, -o output, --find-steady-state.
+    assert "--input" not in splitter_cmd, (
+        f"--input must be removed: {splitter_cmd}"
+    )
+    assert "--platform" not in splitter_cmd, (
+        f"--platform is not a valid splitter flag: {splitter_cmd}"
+    )
+    assert "--find-steady-state" in splitter_cmd, splitter_cmd
+    assert "-o" in splitter_cmd, splitter_cmd
+    assert str(trace) in splitter_cmd, (
+        f"trace_path must be passed positionally: {splitter_cmd}"
+    )
+    # CONC / OSL passthroughs.
+    assert "--CONC" in splitter_cmd and "8" in splitter_cmd, splitter_cmd
+    assert "--OSL" in splitter_cmd and "1024" in splitter_cmd, splitter_cmd
