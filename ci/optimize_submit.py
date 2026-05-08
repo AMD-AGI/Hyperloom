@@ -117,6 +117,27 @@ VLLM_REQUIRED_ARCHS: set[str] = {
 # Quantization types that require vLLM.
 VLLM_QUANT_TYPES: set[str] = {"mxfp4", "nvfp4", "int4", "gptq", "awq"}
 
+# Architecture name suffixes that indicate the model is a generative LM (i.e.
+# something we can run inference benchmarks on). Used to filter out embedding
+# models, encoders, classifiers, etc. — for those, sglang/vllm won't even
+# start a server.
+GENERATIVE_ARCH_SUFFIXES: tuple[str, ...] = (
+    "ForCausalLM",
+    "ForConditionalGeneration",
+    "LMHeadModel",
+    "ForSeq2SeqLM",
+)
+
+
+def is_generative_arch(arch: str) -> bool:
+    """True if the HF model architecture is suitable for causal-LM-style
+    inference. Falls back to False for empty / unknown arch — better to
+    skip than to waste a sandbox slot on something that won't run.
+    """
+    if not arch:
+        return False
+    return any(arch.endswith(s) for s in GENERATIVE_ARCH_SUFFIXES)
+
 
 def _proxy() -> str:
     return os.environ.get("HARBOR_PREFIX", DEFAULT_PROXY)
@@ -158,9 +179,16 @@ class HuggingFaceClient:
     def top_models(self, limit: int, min_params_b: float = 0.0) -> list[str]:
         """Return top-N text-generation repos by downloads, optionally filtered by size.
 
-        Pool-then-filter: the listing API doesn't expose param counts, so we fetch
-        a generous pool and call model_info() per repo to read safetensors.total.
-        Gated/errored repos are skipped silently (size unknowable without auth).
+        Pool-then-filter: the listing API's ``filter=text-generation`` matches
+        on tags only and lets through embedding / sentence-similarity / classifier
+        models that happen to carry that tag. We re-validate per-repo against:
+
+          1. ``pipeline_tag == "text-generation"`` (model card classification)
+          2. ``architectures[0]`` ends in a generative suffix (ForCausalLM /
+             ForConditionalGeneration / LMHeadModel / ForSeq2SeqLM)
+
+        Either signal failing → skip. Saves a sandbox slot per garbage candidate.
+        Gated repos that 401 on metadata also get silently skipped.
         """
         pool_size = max(limit * 10, 100)
         listing = self._get(
@@ -174,14 +202,40 @@ class HuggingFaceClient:
             repo = m.get("modelId") or m.get("id", "")
             if not repo or "/" not in repo:
                 continue
+
+            # We need model_info() for both pipeline_tag and (optionally)
+            # safetensors.total — fetch once.
+            try:
+                info = self.model_info(repo)
+            except Exception:
+                # Gated / network error → skip silently
+                continue
+
+            pipeline_tag = (info.get("pipeline_tag") or "").strip()
+            if pipeline_tag and pipeline_tag != "text-generation":
+                log.info("skip %s: pipeline_tag=%s (not text-generation)",
+                         repo, pipeline_tag)
+                continue
+
             if min_params_b > 0:
-                try:
-                    info = self.model_info(repo)
-                    total = (info.get("safetensors") or {}).get("total", 0)
-                    if (total / 1e9) < min_params_b:
-                        continue
-                except Exception:
+                total = (info.get("safetensors") or {}).get("total", 0)
+                if (total / 1e9) < min_params_b:
                     continue
+
+            # Belt-and-suspenders: also validate architectures[0] looks generative.
+            # config.json is a separate fetch; do it last so we don't waste it on
+            # candidates already rejected above.
+            try:
+                cfg = self.model_config(repo)
+            except Exception:
+                # Some repos hide config.json behind gating even when info is public —
+                # don't kill the candidate over it.
+                cfg = {}
+            arch = (cfg.get("architectures") or [""])[0]
+            if arch and not is_generative_arch(arch):
+                log.info("skip %s: arch=%s is non-generative", repo, arch)
+                continue
+
             repos.append(repo)
         return repos
 
@@ -266,12 +320,30 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str) -> DetectedConfig | None:
         log.error("[%s] HF fetch failed: %s", repo_id, e)
         return None
 
+    arch = (config.get("architectures") or ["unknown"])[0]
+
+    # Defensive: even when the user passes --model X explicitly, refuse to
+    # submit non-generative repos. sglang/vllm won't start a server for these
+    # (Qwen3-Embedding-8B, BertModel, etc.) and the task would just burn a
+    # sandbox slot before failing in phase 0.
+    if not is_generative_arch(arch):
+        log.error("[%s] arch=%s is not a generative LM "
+                  "(expected ForCausalLM / ForConditionalGeneration / LMHeadModel / ForSeq2SeqLM "
+                  "suffix). Skipping — pass an actual causal-LM repo, or override "
+                  "with --manual --framework vllm if you really want to try.",
+                  repo_id, arch)
+        return None
+    pipeline_tag = (info.get("pipeline_tag") or "").strip()
+    if pipeline_tag and pipeline_tag != "text-generation":
+        log.error("[%s] pipeline_tag=%s is not 'text-generation' — skipping",
+                  repo_id, pipeline_tag)
+        return None
+
     framework = detect_framework(config)
     precision = detect_precision(config)
     params_b = detect_param_count(info, config)
     tp = detect_tp(params_b)
     conc = detect_concurrency(tp, framework)
-    arch = (config.get("architectures") or ["unknown"])[0]
     image = detect_image(framework)
 
     cfg = DetectedConfig(
