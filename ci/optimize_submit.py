@@ -257,17 +257,23 @@ def _quant_type(config: dict) -> str:
     """Read the quantization tag from a HF config.json.
 
     HF doesn't standardize on a single field name across vendors:
-      - quant_type           : transformers built-in (older / GPTQ flow)
-      - quantization_type    : variant seen on a few legacy repos
-      - quant_method         : the de-facto current standard (gpt-oss mxfp4,
-                               AWQ via autoawq, DeepSeek-V3.x fp8, ...)
-      - method               : occasional corner case
+      - quant_algo           : NVIDIA modelopt (NVFP4 / FP8 / W4A8_AWQ / INT8_SQ).
+                               Quant_method on these is "modelopt" — that's the
+                               *tool name* not the precision, so we have to
+                               look at quant_algo. Highest priority.
+      - quant_type           : transformers built-in (older / GPTQ flow).
+      - quantization_type    : legacy variant seen on a few older repos.
+      - quant_method         : the de-facto current standard for most other
+                               vendors (gpt-oss mxfp4, AWQ via autoawq,
+                               DeepSeek-V3.x fp8, ...).
+      - method               : occasional corner case.
     Try them in order; first non-empty wins. Always lowercase so callers can
-    just do string contains/equality checks against {fp8, mxfp4, awq, ...}.
+    just do string contains/equality checks against {fp8, mxfp4, nvfp4, awq, ...}.
     """
     quant = config.get("quantization_config") or {}
     raw = (
-        quant.get("quant_type")
+        quant.get("quant_algo")
+        or quant.get("quant_type")
         or quant.get("quantization_type")
         or quant.get("quant_method")
         or quant.get("method")
@@ -312,10 +318,40 @@ def detect_param_count(hf_info: dict, config: dict) -> float:
     return 0.0
 
 
-def detect_tp(params_b: float) -> int:
-    if params_b <= 0:  return 1
-    if params_b < 15:  return 1
-    if params_b < 40:  return 4
+def detect_tp(params_b: float, precision: str = "BF16") -> int:
+    """Pick a tensor-parallel size based on quantization-aware weight footprint.
+
+    The old logic only looked at params_b and hit two real bugs in production:
+      - gpt-oss-20b   (21.5B FP4 → ~11 GB weights) was given TP=4 even though
+        it fits comfortably on 1× MI300X (192 GB). TP=4 then failed the
+        baseline benchmark (vllm + EP=1 + non-divisible shape on a 21B MoE).
+      - 30B FP8 models (e.g. Qwen3-Coder-30B-A3B) similarly got TP=4 when
+        TP=1 would have been fine.
+
+    Bytes per param by precision:
+      FP4 / INT4 / NVFP4   = 0.5
+      FP8                  = 1.0
+      BF16 / FP16 (default)= 2.0
+
+    Snap-to thresholds (after ~30% headroom for KV cache + activations):
+      weight_gb < 50   → TP=1   (single-GPU comfortable)
+      weight_gb < 280  → TP=4   (single GPU technically fits but multi-GPU
+                                 gives better throughput; matches MI300X
+                                 memory budget for 1024/1024 ISL/OSL @ conc=64)
+      weight_gb ≥ 280  → TP=8   (must shard across the full node)
+    """
+    if params_b <= 0:
+        return 1
+    p = (precision or "").upper()
+    if p in ("FP4", "INT4", "NVFP4", "MXFP4"):
+        bytes_per_param = 0.5
+    elif p == "FP8":
+        bytes_per_param = 1.0
+    else:                       # BF16 / FP16 / unknown
+        bytes_per_param = 2.0
+    weight_gb = params_b * bytes_per_param
+    if weight_gb < 50:   return 1
+    if weight_gb < 280:  return 4
     return 8
 
 
@@ -360,7 +396,7 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str) -> DetectedConfig | None:
     framework = detect_framework(config)
     precision = detect_precision(config)
     params_b = detect_param_count(info, config)
-    tp = detect_tp(params_b)
+    tp = detect_tp(params_b, precision)
     conc = detect_concurrency(tp, framework)
     image = detect_image(framework)
 
