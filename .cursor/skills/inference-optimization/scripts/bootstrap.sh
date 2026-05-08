@@ -23,6 +23,7 @@ HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/hyperloom}"
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 GEAK_BRANCH="${GEAK_BRANCH:-main}"
+GEAK_TAG="${GEAK_TAG-v3.1.0}"
 GEAK_SHA="${GEAK_SHA:-}"
 INTELLIKIT_REPO="${INTELLIKIT_REPO:-https://github.com/AMDResearch/intellikit.git}"
 INTELLIKIT_SHA="${INTELLIKIT_SHA:-bcbfa0252df9d55f3aab68c95dd3ce45ccbe5b46}"
@@ -145,6 +146,10 @@ if ! command -v geak >/dev/null 2>&1; then
         log "  cloning GEAK @ ${GEAK_SHA}"
         git clone "$GEAK_REPO" "$HYPERLOOM_ROOT/geak" 2>/dev/null || warn "GEAK clone failed (may already exist)"
         git -C "$HYPERLOOM_ROOT/geak" checkout "$GEAK_SHA" 2>/dev/null || warn "GEAK checkout ${GEAK_SHA} failed"
+    elif [ -n "$GEAK_TAG" ]; then
+        log "  cloning GEAK @ ${GEAK_TAG}"
+        git clone --depth 1 -b "$GEAK_TAG" "$GEAK_REPO" "$HYPERLOOM_ROOT/geak" 2>/dev/null \
+            || warn "GEAK clone failed (may already exist)"
     else
         log "  cloning GEAK @ ${GEAK_BRANCH}"
         git clone --depth 1 -b "$GEAK_BRANCH" "$GEAK_REPO" "$HYPERLOOM_ROOT/geak" 2>/dev/null \
