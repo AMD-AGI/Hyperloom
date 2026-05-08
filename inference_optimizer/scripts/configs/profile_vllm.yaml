@@ -6,11 +6,20 @@
 # rationale.
 #
 # TraceLens integration (#126): profiler is configured for:
-#   1. Detailed annotations (--profiler-config.detailed_trace_annotation)
-#   2. Steady-state windowing (--profiler-config.delay_iterations/max_iterations)
+#   1. Steady-state windowing
+#      (--profiler-config.delay_iterations/max_iterations)
+#   2. Frontend filtering (--profiler-config.ignore_frontend) so the
+#      trace contains only the engine forward path
 #   3. Torch profiler shape/memory/flops/gzip fields injected by Magpie's
 #      vllm_*.sh when PROFILE=1.
 # These are required for TraceLens fusion / roofline analysis.
+#
+# Note: `--profiler-config.detailed_trace_annotation` was a transient
+# field on a fork of vLLM 0.15. It is NOT part of the upstream
+# ProfilerConfig schema (vLLM 0.19 rejects it as an unknown JSON key),
+# so we no longer inject it. capture_torch_profiler_dir is also not
+# in the upstream schema yet; re-enable both once they land in the
+# deployed vLLM build.
 
 benchmark:
   framework: vllm
@@ -28,16 +37,15 @@ benchmark:
     MAX_MODEL_LEN: 8192
     ROCR_VISIBLE_DEVICES: "1"
     PATH: "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    # --- Profiler: vLLM graph capture + annotations + steady-state (#126) ---
-    # These flags are appended to the vllm serve command via EXTRA_VLLM_ARGS.
-    # delay_iterations and max_iterations control the steady-state window:
+    # --- Profiler: vLLM steady-state + annotations (#126) ---
+    # Appended to the vllm serve command via EXTRA_VLLM_ARGS. Magpie's
+    # vllm_*.sh wires the torch profiler core (profiler / dir /
+    # record_shapes / with_memory / with_flops / use_gzip); we add the
+    # TraceLens-relevant knobs that map to upstream ProfilerConfig in
+    # the validation vLLM build (0.19+). delay_iterations and
+    # max_iterations are overridden by _materialize_config_with_envs:
     #   delay = 5 * CONC (skip warmup); max = clamp(16 * OSL / CONC, 4, 64)
-    # Runtime values are overridden by _materialize_config_with_envs.
-    # NOTE: current validation-node vLLM rejects capture_torch_profiler_dir,
-    # so graph-capture trace export remains blocked on a vLLM-side feature /
-    # version update. Do not add that flag here until the deployed vLLM
-    # accepts it.
-    EXTRA_VLLM_ARGS: "--profiler-config.detailed_trace_annotation True --profiler-config.ignore_frontend True"
+    EXTRA_VLLM_ARGS: "--profiler-config.ignore_frontend True"
     # vLLM timeout must be extended during profiling (graph capture is slow)
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
     # --- Profile mode: cap prompts to reduce trace size ---
