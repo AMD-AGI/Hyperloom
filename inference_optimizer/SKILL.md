@@ -97,33 +97,28 @@ print("compat_aliases_present=", all(bool(os.environ.get(k)) for k in [
 PY
 ```
 
-Install or validate the optimizer package in the same Python environment that
-will launch the long run:
-
-```bash
-"$PYTHON" -m pip install -e "${REPO_ROOT}[test]"
-"$PYTHON" -m inference_optimizer.cli --help
-```
-
-Kernel-agent is a reusable downstream skill. Before launching
-`inference_optimizer.cli`, read and follow `$REPO_ROOT/kernel-agent/SKILL.md`,
-especially `Installation`, `TraceLens Requirements`, and `Backend Selection`.
-This makes the same kernel-agent work both standalone and under
-inference_optimizer. A user request to optimize a model is approval to install
-the required kernel-agent runtime on a fresh node; do not stop for an extra
-confirmation before running the installer. The installer may set up TraceLens,
-OOB, Node/npm, Claude/Codex CLIs, local auth files, and the OOB auth-proxy.
-Invoke it instead of duplicating backend setup logic:
+Install or validate the optimizer + downstream stack with the bundled
+installer. It is idempotent and chains to `kernel-agent/scripts/install.sh`,
+so a single call covers: inference_optimizer + claude_agent_sdk extras,
+Magpie, InferenceX detection, Ray (with a live ray head started), TraceLens
+CLI, GEAK + OOB CLI, the OOB auth-proxy on `:4002`, and `kernel-agent/env.sh`.
+A user request to optimize a model is approval to run this on a fresh node;
+do not stop for an extra confirmation:
 
 ```bash
 export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
-export PATH="/opt/venv/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-bash "$HYPERLOOM_KERNEL_AGENT_ROOT/scripts/install.sh" --with-oob
+# Prefer the launcher Python's bin dir, then standard system paths. Do NOT
+# hardcode /opt/venv/bin: in bare images that path may not exist.
+PYTHON_BIN_DIR="$(dirname "$PYTHON")"
+export PATH="${PYTHON_BIN_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
+bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 . "$HYPERLOOM_KERNEL_AGENT_ROOT/env.sh"
+"$PYTHON" -m inference_optimizer.cli --help
 ```
 
 Do not collapse dependent exports into a single command when `set -u` is active.
@@ -132,68 +127,15 @@ Bash expands every right-hand side before assigning the left-hand sides, so
 can fail with `unbound variable` on a clean environment. Assign and export
 dependent variables on separate lines as shown above.
 
-Kernel backends submit Ray tasks with `num_gpus>=1`, so Ray must advertise all
-visible GPUs. Do not start Ray with `--num-gpus=0`; that leaves kernel
-optimization pending forever even when ROCm sees idle GPUs.
+The installer leaves a live Ray head running; `ray status` should succeed.
+`select_kernels` and downstream kernel agents need this — they submit Ray
+tasks with `num_gpus>=1`. Do not pass `--num-gpus=0` if you ever restart Ray
+manually; that leaves kernel optimization pending forever even when ROCm
+sees idle GPUs.
 
-```bash
-export RAY_NUM_GPUS="${RAY_NUM_GPUS:-$("$PYTHON" - <<'PY'
-try:
-    import torch
-    print(torch.cuda.device_count() or 1)
-except Exception:
-    print(1)
-PY
-)}"
-command -v ray >/dev/null
-ray stop --force || true
-ray start --head --disable-usage-stats \
-  --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
-ray status
-```
-
-Use the `ray` CLI from `PATH`, not `"$PYTHON" -m ray`; Ray does not expose a
-`ray.__main__` module in this environment, so `python -m ray` fails before the
-optimizer can launch.
-
-Magpie must be importable by the launcher Python. If it is missing, install it
-before launching:
-
-```bash
-"$PYTHON" - <<'PY' || {
-import Magpie
-print("Magpie OK")
-PY
-  git clone https://github.com/AMD-AGI/Magpie "$WORKSPACE_ROOT/Magpie"
-  "$PYTHON" -m pip install -e "$WORKSPACE_ROOT/Magpie"
-}
-```
-
-TraceLens is used by `select_kernels`. Prefer the internal mount because it
-contains the standalone TraceLens skills required by `kernel-agent`; clone the
-open-source repo only as a fallback when the internal mount is unavailable:
-
-```bash
-if [ -d "/wekafs/hyperloom/TraceLens-internal" ]; then
-  export TRACELENS_ROOT="/wekafs/hyperloom/TraceLens-internal"
-elif [ -d "$WORKSPACE_ROOT/TraceLens" ]; then
-  export TRACELENS_ROOT="$WORKSPACE_ROOT/TraceLens"
-else
-  git clone https://github.com/AMD-AGI/TraceLens "$WORKSPACE_ROOT/TraceLens"
-  export TRACELENS_ROOT="$WORKSPACE_ROOT/TraceLens"
-fi
-test -f "$TRACELENS_ROOT/TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
-```
-
-Kernel-agent is expected in the same repository. Resolve it relative to
-`REPO_ROOT` and treat its skill as the source of truth for TraceLens, Ray, GEAK,
-and OOB setup:
-
-```bash
-export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
-test -d "$HYPERLOOM_KERNEL_AGENT_ROOT"
-test -f "$HYPERLOOM_KERNEL_AGENT_ROOT/SKILL.md"
-```
+`kernel-agent/SKILL.md` (`Installation`, `TraceLens Requirements`, `Backend
+Selection`) is the source of truth for what the chained installer covers;
+read it if you need to debug the kernel-agent layer.
 
 Use a repo-local session root by default so the skill works in sandboxes where
 `/hyperloom` is absent:
@@ -262,7 +204,9 @@ Before a new model run, verify these fields match the environment:
 - `benchmark.envs.TP`: tensor parallel size.
 - `benchmark.envs.CONC`, `ISL`, `OSL`: workload.
 - `benchmark.envs.ROCR_VISIBLE_DEVICES`: GPU pinning.
-- `benchmark.envs.PATH`: must put `/opt/venv/bin` first.
+- `benchmark.envs.PATH`: must lead with the launcher Python's bin dir
+  (`$(dirname "$PYTHON")` — typically `/opt/venv/bin` in hyperloom containers,
+  but adapt to the active interpreter on bare images).
 
 ## Framework selection
 
@@ -392,7 +336,7 @@ def write_config(src_name, dst_name, profile_enabled, timeout_seconds):
         "RANDOM_RANGE_RATIO": os.environ.get("RANDOM_RANGE_RATIO", "1"),
         "MAX_MODEL_LEN": int(os.environ.get("MAX_MODEL_LEN", "8192")),
         "ROCR_VISIBLE_DEVICES": os.environ["ROCR_VISIBLE_DEVICES"],
-        "PATH": "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "PATH": os.environ.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
     })
     bench["gpu_selection"] = {"auto": False}
     profiler = bench.setdefault("profiler", {})
@@ -424,7 +368,7 @@ Use this for a fresh model/session:
 cd "$REPO_ROOT"
 if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
 . "$HYPERLOOM_KERNEL_AGENT_ROOT/env.sh"
-export PATH="/opt/venv/bin:/usr/local/bin:$PATH"
+export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 
 export SESSION_NAME="${MODEL_NAME}-$(date +%Y%m%d_%H%M%S)"
 export RUN_LOG="$RUN_ROOT/run_${SESSION_NAME}.log"
@@ -690,8 +634,9 @@ budget on untested params/backend candidates or the next kernel.
 - `ANTHROPIC_AUTH_TOKEN not set`: source `.env`.
 - `Fatal error in message reader`: retry/resume; transient Claude CLI failures
 are tolerated up to the Coordinator emergency threshold.
-- `No accelerator`: ensure Magpie subprocess PATH includes `/opt/venv/bin` and
-use `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
+- `No accelerator`: ensure Magpie subprocess `PATH` leads with the launcher
+  Python's bin dir (`$(dirname "$PYTHON")`) and use `ROCR_VISIBLE_DEVICES`,
+  not `HIP_VISIBLE_DEVICES`.
 - Repeated `select_kernels`: check `last_select_kernels`; if trace/config did
 not change, this is a bug. Reuse cached candidates and run optimization.
 - `correctness_passed=false`: do not integrate. Inspect the kernel-agent report;
