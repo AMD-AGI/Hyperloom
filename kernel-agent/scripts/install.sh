@@ -62,9 +62,9 @@ OOB_BASE_URL_VAL="${OOB_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}}"
 # the missing service after the fact" issues — when the resident skill
 # triggered a kernel-opt that needed claude/codex but install.sh had only
 # brought up GEAK, the auth-proxy was missing and every CLI request 401'd.
-# Per user direction: "kernel-agent skills 不区别别的, 直接全部安装". The
-# old --with-* / --all-backends / --backend flags are accepted but no-op
-# for backwards compatibility with existing call sites.
+# Per user direction: "do not distinguish kernel-agent skills, just install
+# all of them". The old --with-* / --all-backends / --backend flags are
+# accepted but no-op for backwards compatibility with existing call sites.
 WITH_GEAK=1
 WITH_OOB=1
 WITH_LLM=1
