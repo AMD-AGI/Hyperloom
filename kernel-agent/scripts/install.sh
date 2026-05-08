@@ -15,15 +15,21 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
 TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
-# Prefer a released GEAK tag for local mode stability. GEAK_SHA can still pin
-# an exact commit; GEAK_BRANCH is the fallback when GEAK_TAG is explicitly empty.
-GEAK_TAG="${GEAK_TAG-v3.1.0}"
-GEAK_SHA="${GEAK_SHA:-}"
-GEAK_BRANCH="${GEAK_BRANCH:-main}"
+# Default to the LitellmModel-fixed branch. Upstream main works ONLY when the
+# model is reached via amd_llm + AMD LLM Gateway (anthropic SDK direct). On
+# the AMD primus-safe OpenAI-compat proxy that we have here, main's litellm
+# path does not normalize tool-call args and returns Python repr (single
+# quotes) for `submit({summary: [...]}`), making _parse_llm_response crash
+# with "Expecting property name in double quotes char 2". The PR branch
+# `feature/xiaofei/claw` adds use_amd_openai_compatible_litellm_route /
+# litellm_model_name_for_completion / format_messages_openai_chat which
+# normalize the OpenAI-compat path. Verified end-to-end on r36.
+GEAK_BRANCH="${GEAK_BRANCH:-feature/xiaofei/claw}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_ROOT}/geak-config/local.yaml}"
-# GEAK's LitellmModel auto-routes bare claude-* model names to OpenAI
-# ChatCompletion when api_base contains llm-proxy/openai. Do not prepend openai/.
+# GEAK's LitellmModel (feature/xiaofei/claw) auto-routes bare claude-* model
+# names to OpenAI ChatCompletion when api_base contains llm-proxy/openai. So we
+# pass GEAK_MODEL_NAME through unchanged; do NOT prepend openai/ here.
 GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
 # GEAK/OOB use the user's LiteLLM-compatible endpoint. The canonical env is
 # OPENAI_BASE_URL + SAFE_API_KEY; keep fallbacks for older launchers.
@@ -155,14 +161,7 @@ ensure_geak() {
   fi
   if ! command -v geak >/dev/null 2>&1; then
     if [ ! -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
-      if [ -n "$GEAK_SHA" ]; then
-        run git clone "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
-        run git -C "${HYPERLOOM_ROOT}/geak" checkout "$GEAK_SHA"
-      elif [ -n "$GEAK_TAG" ]; then
-        run git clone --depth 1 -b "$GEAK_TAG" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
-      else
-        run git clone --depth 1 -b "$GEAK_BRANCH" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
-      fi
+      run git clone --depth 1 -b "$GEAK_BRANCH" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
     fi
     run python3 -m pip install -q --no-cache-dir -e "${HYPERLOOM_ROOT}/geak"
   else
