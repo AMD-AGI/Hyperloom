@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """GEAK Ray Submit — schedule geak CLI tasks via local Ray cluster.
 
-Replaces geak_client.py for fully-local mode. Each task gets an isolated
+Replaces geak_client.py for local mode. Each task gets an isolated
 GPU allocated by Ray; multiple tasks run concurrently up to GPU count.
 
 GEAK config: auto-loaded from $GEAK_CONFIG (default: /opt/hyperloom/geak-config/local.yaml).

@@ -16,9 +16,9 @@ export PATH="/opt/venv/bin:$PATH"
 
 SKILL_ROOT="${SKILL_ROOT:-.cursor/skills/inference-optimization}"
 BOOTSTRAP_SCRIPT="$SKILL_ROOT/scripts/bootstrap.sh"
-HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
+HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-${NFS_ROOT:-/wekafs}/fully-local}"
 
-if [ "${MODE:-}" = "fully-local" ] \
+if [ "$MODE" = "local" ] \
    && [ ! -f /opt/entrypoint.sh ] \
    && [ ! -f /opt/hyperloom/.bootstrap_done ] \
    && [ -d "$HYPERLOOM_BUNDLE" ]; then
@@ -34,11 +34,12 @@ fi
 ```bash
 export PATH="/opt/venv/bin:$PATH"
 
-MODEL="${MODEL:-$(ls -d /shared_nfs/*/models/*/ 2>/dev/null | head -1)}"
+NFS_ROOT="${NFS_ROOT:-/wekafs}"
+MODEL="${MODEL:-$(ls -d ${NFS_ROOT}/*/models/*/ 2>/dev/null | head -1)}"
 GPU_COUNT="${GPU_COUNT:-$(amd-smi list 2>/dev/null | grep "^GPU:" | wc -l)}"
 GPU_TYPE="${GPU_TYPE:-$(rocm-smi --showproductname 2>/dev/null | grep "GFX Version" | head -1 | grep -o "gfx[0-9]*")}"
-INFERENCEX_PATH="${INFERENCEX_PATH:-$(ls -d /shared_nfs/*/InferenceX 2>/dev/null | head -1)}"
-if [ "${MODE:-}" = "fully-local" ]; then
+INFERENCEX_PATH="${INFERENCEX_PATH:-$(ls -d ${NFS_ROOT}/*/InferenceX 2>/dev/null | head -1)}"
+if [ "$MODE" = "local" ]; then
     INFERENCEX_PATH="${INFERENCEX_PATH:-/opt/hyperloom/InferenceX}"
 fi
 
@@ -64,30 +65,24 @@ User-specified values override auto-detected ones. **NEVER override user-specifi
 SKILL_ROOT="${SKILL_ROOT:-.cursor/skills/inference-optimization}"
 SCRIPTS_DIR="$SKILL_ROOT/scripts"
 
-# Mode detection
-if [ "${MODE:-}" = "fully-local" ]; then
-    MODE="fully-local"
+# Mode detection (local = Hyperloom container, Ray CLIs; claw = SaFE + exec_on_gpu)
+if [ "${MODE:-}" = "claw" ]; then
+    MODE="claw"
+    WORKSPACE_ROOT="${WORKSPACE_ROOT:-${NFS_ROOT}/inference-optimization}"
+else
+    MODE="local"
     WORKSPACE_ROOT="${WORKSPACE_ROOT:-/opt/hyperloom}"
     GEAK_CLI="python3 $SCRIPTS_DIR/geak_ray_submit.py"
     OOB_RAY_CLI="python3 $SCRIPTS_DIR/oob_ray_submit.py"
     OOB_CLI="${OOB_CLI:-oob}"
-elif [ "${MODE:-}" = "claw" ]; then
-    MODE="claw"
-    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/shared_nfs/inference-optimization}"
-elif [ "${GEAK_LOCAL:-true}" = "true" ]; then
-    MODE="local"
-    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace/inference-optimization}"
-else
-    MODE="claw"
-    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/shared_nfs/inference-optimization}"
 fi
 
 # Source mode-specific helpers
-if [ "$MODE" = "fully-local" ]; then
+if [ "$MODE" = "local" ]; then
     source "$SCRIPTS_DIR/common.sh"
     WORKSPACE_ROOT="/opt/hyperloom"
 else
-    # Enables exec_on_gpu for local/claw dispatch.
+    # Enables exec_on_gpu for claw dispatch.
     source "$SCRIPTS_DIR/executor.sh"
 fi
 
@@ -119,4 +114,4 @@ payloads, wait logic, and claw execution environment setup.
 ## Failure Handling
 - If no model found: ask user for MODEL path
 - If no GPUs detected: check `amd-smi` / `rocm-smi` installation
-- If InferenceX not found: check `/shared_nfs/*/InferenceX/`
+- If InferenceX not found: check `/wekafs/*/InferenceX/`

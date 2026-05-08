@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hyperloom-inference-optimizer"
-version = "0.8.0"
-description = "Autonomous LLM inference optimization runtime for AMD GPU platforms."
+name = "hyperloom-inference_optimizer"
+version = "0.6.0"
+description = "Inference Optimizer v0.6 — single-mode 4-agent (Orchestration/Kernel/Critic/Robustness) autonomous LLM inference optimization runtime for AMD GPU platforms."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -22,23 +22,27 @@ test = [
 ]
 
 [project.scripts]
-inference-optimizer = "inference_optimizer.cli:main"
+inference_optimizer = "inference_optimizer.cli:main"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
+# Packages are provided by setup.py so editable installs use the same package
+# discovery as local source runs.
 
 [tool.setuptools.package-data]
 inference_optimizer = [
+    "SKILL.md",
+    "README.md",
     "actions/*.md",
     "actions/_meta/*.yaml",
     "agents/*/agent_card.yaml",
     "agents/*/system_prompt.md",
+    "agents/*/SKILL.md",
     "agents/*/scripts/*",
     "kernel_opt/*.md",
     "orchestrator/system_prompts/*.md",
-    "requirements.txt",
     "scripts/*",
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["inference_optimizer/tests"]
+pythonpath = ["."]

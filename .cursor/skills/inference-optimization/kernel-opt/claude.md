@@ -1,6 +1,6 @@
 ---
 name: claude-inference-kernel-reference
-description: Claude Code backend for kernel optimization. In local/claw modes uses the OOB GPU Optimizer MCP; in fully-local mode uses `oob_ray_submit.py run` (Ray-scheduled CLI). Multi-turn agent with tool-use capability. Verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
+description: Claude Code backend for kernel optimization. In claw mode uses the OOB GPU Optimizer MCP; in local mode uses `oob_ray_submit.py run` (Ray-scheduled CLI). Multi-turn agent with tool-use capability. Verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
 ---
 
 # Claude Code — Kernel Optimization Backend
@@ -9,8 +9,8 @@ Claude Code backend for kernel optimization. Two transport modes:
 
 | Mode | How Claude is invoked |
 |------|-----------------------|
-| `local` / `claw` | OOB GPU Optimizer MCP (`agent_create_task(agent="claude")` etc.) |
-| `fully-local` | `oob_ray_submit.py run -a claude ...` CLI (single blocking subprocess per iteration) |
+| `claw` | OOB GPU Optimizer MCP (`agent_create_task(agent="claude")` etc.) |
+| `local` | `oob_ray_submit.py run -a claude ...` CLI (single blocking subprocess per iteration) |
 
 Multi-turn agent with tool-use capability (file I/O, shell commands).
 The calling skill is responsible for compilation checking, correctness verification,
@@ -63,7 +63,10 @@ is handled automatically by `auth_proxy.py` inside the OOB workload pod — no m
 header configuration needed (unlike GEAK). The timestamps allow correlating OOB's
 LLM spend to specific messages by querying `LiteLLM_SpendLogs` with time ranges.
 
-## Tool Sequence
+## Tool Sequence (claw MCP only)
+
+> **Local mode:** Skip this MCP sequence entirely. Use `oob_ray_submit.py run -a claude`
+> instead — see "Local Execution" section below.
 
 Identical to Codex — same MCP, different `agent` parameter.
 
@@ -78,7 +81,10 @@ Identical to Codex — same MCP, different `agent` parameter.
 | 6 | `bash: trace_action.py --component oob --action end` | Record end timestamp (once, after all iterations) |
 | - | `agent_cancel_task` | Cancel if stuck past `CLAUDE_POLL_TIMEOUT_MIN` |
 
-## agent_create_task — Critical Details
+## agent_create_task — Critical Details (claw MCP only)
+
+> **Claw mode only.** In local mode, these MCP tools are not available.
+> Use `oob_ray_submit.py run -a claude` CLI instead (see "Local Execution" below).
 
 - `agent`: `"claude"` (required)
 - `prompt`: kernel optimization instructions (same core as Codex — see [`codex.md`](codex.md))
@@ -158,14 +164,14 @@ Then write the COMPLETE optimized file to optimized_kernel.py and exit.
 
 Same as Codex: optimized kernel written to `optimized_kernel.py` in the task workspace.
 
-- **MCP modes:** Use `agent_get_outputs` to list, then `agent_download_file`.
-- **Fully-local mode:** The `oob_ray_submit.py run --json` result's `.workspace` field points at the
+- **MCP (claw):** Use `agent_get_outputs` to list, then `agent_download_file`.
+- **Local mode:** The `oob_ray_submit.py run --json` result's `.workspace` field points at the
   task workspace. Read `$WORKSPACE/optimized_kernel.py` directly. There is no
   `output/` subdir.
 
-## Fully-Local Execution
+## Local Execution
 
-Identical to Codex's "Fully-Local Execution" section in [`codex.md`](codex.md);
+Identical to Codex's "Local Execution" section in [`codex.md`](codex.md);
 swap `-a codex` → `-a claude` and use Claude-specific constants:
 
 ```bash
@@ -191,9 +197,17 @@ Claude uses the **same iterative refinement loop** as Codex. See [`codex.md`](co
 "Iterative Refinement Loop" section for the full flow, pseudocode, feedback context
 format, and key rules.
 
-The only difference: use `agent="claude"` (or `oob_ray_submit.py run -a claude` in fully-local) and
+The only difference: use `agent="claude"` (or `oob_ray_submit.py run -a claude` in local mode) and
 Claude-specific constants (`CLAUDE_MAX_TURNS`, `CLAUDE_POLL_INTERVAL_S`,
 `CLAUDE_POLL_TIMEOUT_MIN`).
+
+**Timeout recovery:** When the user passes `--timeout` to `oob run` and the agent
+exceeds that deadline, OOB kills the subprocess and marks the task as `failed` — but
+the agent may have already written output files. The OOB JSON result includes a
+`partial_outputs` field listing workspace files; check it before discarding the
+iteration. Claude's multi-turn nature makes timeout more likely, but it often writes
+intermediate files before the deadline. See `codex.md` pseudocode for the exact
+salvage logic.
 
 Claude's multi-turn capability means it may produce higher quality output per
 iteration (at the cost of higher latency). With feedback from prior iterations,

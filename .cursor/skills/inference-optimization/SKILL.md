@@ -27,16 +27,14 @@ gap acts as an urgency multiplier on all action scores.
 
 ## Execution Mode
 
-This skill supports three execution modes. **Read the mode-specific document for your mode
+This skill supports two execution modes. **Read the mode-specific document for your mode
 before starting:**
 
-- **Fully-local mode** (Hyperloom container, Ray-scheduled GEAK CLI): see [`modes/FULLY_LOCAL.md`](modes/FULLY_LOCAL.md)
-- **Local mode** (Cursor IDE, GEAK MCP, direct shell): see [`modes/LOCAL.md`](modes/LOCAL.md)
+- **Local mode** (Hyperloom container, Ray-scheduled GEAK CLI): see [`modes/LOCAL.md`](modes/LOCAL.md)
 - **Claw mode** (SaFE RayJob, `exec_on_gpu`): see [`modes/CLAW.md`](modes/CLAW.md)
 
 **Auto-detection:**
-- `MODE=fully-local` → fully-local mode
-- `GEAK_LOCAL=true` (outside fully-local container) → local mode
+- `MODE=local` → local mode
 - Claw client context → claw mode
 
 ## Iron Rules (non-negotiable)
@@ -79,7 +77,10 @@ Always use `scripts/patch_inductor.py` with `--target-file`. The `--cache-dir` o
 
 ### IR-7: NEVER modify GEAK configuration
 
-GEAK is an external service — treat it as **read-only infrastructure**. The skill MUST NOT
+**Local mode:** GEAK is CLI-only via Ray (`geak_ray_submit.py`); do not use GEAK MCP or
+`geak_client.py`. See [`modes/LOCAL.md`](modes/LOCAL.md) IR-13 and IR-14.
+
+**Claw mode:** GEAK is an external service — treat it as **read-only infrastructure**. The skill MUST NOT
 modify any GEAK configuration files, settings, or parameters beyond what is passed as
 arguments to `geak_create_task`. Specifically:
 
@@ -91,7 +92,7 @@ arguments to `geak_create_task`. Specifically:
 - **Do NOT** modify any test data, results, or configuration files belonging to GEAK
   (e.g., `tests/test_data/`, `server/config.py`, `server/templates/`)
 
-The ONLY interaction allowed is through these GEAK MCP tool calls:
+In claw mode, the ONLY interaction allowed is through these GEAK MCP tool calls:
 `geak_get_model_config` (read-only), `geak_create_task`, `geak_submit_task`,
 `geak_get_task`, `geak_get_outputs`, `geak_download_file`, `geak_list_tasks`.
 
@@ -99,7 +100,7 @@ The ONLY interaction allowed is through these GEAK MCP tool calls:
 pre-configured by the administrator. Changing `model_class`, `model_name`, or
 `api_base` risks setting a non-existent model and breaking all tasks.
 
-**Exception — tracing headers:** At the start of the kernel-opt action, you MUST
+**Exception — tracing headers (claw / MCP path):** At the start of the kernel-opt action, you MUST
 call `geak_set_model_config` exactly once to inject observability headers. Run
 `trace_action.py --component geak --action start` first to record timing and
 generate the config, then apply the `extra_headers` via MCP (see kernel-opt/geak.md
@@ -121,7 +122,7 @@ Ray-managed GPU scheduling that direct in-chat generation lacks.
 
 Violation = immediate run invalidation.
 
-**Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11), [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12), and [`modes/FULLY_LOCAL.md`](modes/FULLY_LOCAL.md) (IR-12 through IR-16).**
+**Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11) and [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12 through IR-16).**
 
 ## Kernel Optimization & Tooling Constants
 
@@ -161,7 +162,7 @@ kernel-opt/                    — Per-backend kernel optimization references
   llm.md                       — LLM Proxy (direct API)
 kb/                            — RAG knowledge base (JSONL + query/ingest scripts)
 scripts/                       — Baseline/profiling/accuracy shell scripts
-modes/                         — Mode-specific execution details (FULLY_LOCAL.md, LOCAL.md, CLAW.md)
+modes/                         — Mode-specific execution details (LOCAL.md, CLAW.md)
 KNOWLEDGE-BASE.md              — Legacy KB (archived, seeded into kb/entries.jsonl)
 ```
 
@@ -187,13 +188,48 @@ These are recurring errors observed in production CI runs. **Read before executi
 
 5. **Never call `geak_set_model_config` to change the model.** See IR-7. Only exception: tracing headers.
 
-6. **Record start/end timestamps for ALL external calls.** Before invoking
+6. **When writing entrypoint scripts, declare ALL referenced variables with defaults.**
+   If using `set -u` (or `set -uo pipefail`), every variable MUST have a default:
+   `EVAL_ONLY=${EVAL_ONLY:-false}`. Failure mode: `unbound variable` → exit 1 → job
+   fails after minutes of GPU startup, wasting the entire compilation/warmup time.
+
+7. **NEVER use `sleep` longer than 60 seconds.** The MCP bash connection has an idle
+   timeout. `sleep 900` or `sleep 1800` will trigger MCP error `-32001`, forcing a
+   reconnect cycle that wastes hours. Use a polling loop with `sleep 60` + status check
+   between each iteration. See IR-13 in `modes/CLAW.md`.
+
+8. **Skill scripts live in the sandbox, NOT on NFS.** When creating RayJob/PyTorchJob
+   entrypoints, do NOT reference sandbox paths like `/hyperloom/...` or
+   `/workspace/.skills/...` — these paths don't exist inside the GPU workload container.
+   Use `exec_on_gpu` to run scripts on an existing RayJob, or inline the script content
+   directly in the entrypoint. Failure mode: exit 127 / "file not found" at 0s.
+
+9. **Record start/end timestamps for ALL external calls** (IR-13). Before invoking
    any external component (GEAK, OOB, LLM proxy, TraceLens, or future backends),
    run `python3 $SCRIPTS_DIR/trace_action.py --component <name> --action start`.
    After the component finishes, run `--action end`. This enables per-message cost
    attribution. If the specific backend skill already includes tracing steps, follow
    those. If not, apply this rule as a fallback. Failure to trace does NOT block
    execution — skip if the script is unavailable.
+
+10. **AITER JIT crash / stale batons: clear orphaned lock files before restarting SGLang.**
+    AITER guards Triton/HIP JIT compilation with file locks ("batons") under
+    `/sgl-workspace/aiter/aiter/jit/build/lock_*`. If the previous SGLang process was
+    hard-killed (SIGKILL, watchdog timeout, OOM, segfault) **during** a JIT compile,
+    the lock file remains on disk with no live owner. The next IR-4 relaunch then
+    blocks forever with `waiting for baton release at .../jit/build/lock_*` and never
+    reaches the health endpoint. After kill + GPU-memory check, verify no live
+    sglang process is legitimately compiling and clear stale locks before relaunch:
+
+    ```bash
+    pgrep -f 'python.*-m sglang.launch_server' >/dev/null || \
+      find /sgl-workspace/aiter/aiter/jit/build -maxdepth 1 -name 'lock_*' -type f -delete
+    ```
+
+    Pair the restart with a longer `--watchdog-timeout` so the watchdog does not kill
+    the new process while it is mid-JIT and is itself the legitimate baton holder.
+    Failure mode: setup/baseline phase hangs, server.log shows repeated
+    `waiting for baton release`, and no benchmark output is ever produced.
 
 ## DFS Search Tree
 

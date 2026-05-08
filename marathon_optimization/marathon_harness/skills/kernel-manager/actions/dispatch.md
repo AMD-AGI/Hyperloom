@@ -85,7 +85,7 @@ import httpx, os
 
 http_client = httpx.Client(verify=False, timeout=180)
 client = OpenAI(
-    base_url="https://oci-slc.primus-safe.amd.com/api/v1/llm-proxy/v1",
+    base_url=os.environ.get("SAFE_BASE_URL", "") + "/api/v1/llm-proxy/v1",
     api_key=os.environ["LLM_PROXY_API_KEY"],
     http_client=http_client,
 )
@@ -116,6 +116,99 @@ response = client.chat.completions.create(
 
 ## Prompt Engineering
 
+### What OOB can and cannot do (READ FIRST)
+
+OOB (the `oob-gpu-optimizer` MCP, backends `claude` / `codex`) runs a
+single-turn agent inside a SaFE workload with **exactly these resources**:
+
+- `gpu_count: 1` (default; single-GPU micro-benchmarking only)
+- `cpu: 4`, `memory: 16Gi`, `ephemeral_storage: 50Gi` (defaults)
+- `timeout: 1800s` (30 min hard wall-clock, enforced by MCP)
+- No model weights mounted, no multi-node, no RDMA fabric
+
+**OOB CAN**: rewrite a single kernel source file, compile it with the
+toolchain present in the pod, run a micro-benchmark against shapes
+embedded in the prompt, return the optimised file.
+
+**OOB CANNOT** — and if you ask it to, the pod will stall until the MCP
+timeout fires, costing the marathon up to `MAX_OOB_ROUNDS × 30min` per
+bad target:
+
+- Launch an inference server (`vllm serve`, `sglang.launch_server`, …)
+- Load full model weights (no weights are mounted)
+- Run end-to-end serving benchmarks (`benchmark_serving`, ShareGPT, …)
+- Multi-GPU / tensor-parallel / distributed work (only 1 GPU)
+- NCCL / RCCL collective tests
+- Anything requiring more than 50 GiB of disk
+
+### Prompt Hygiene Guard (MANDATORY before every submission)
+
+Before calling `agent_create_task` (OOB) or `geak_create_task` (GEAK),
+the kernel-manager MUST run the prompt string through this guard:
+
+```python
+import re
+
+# Patterns that indicate a pollution target — things OOB physically
+# cannot do. Matching ANY of these aborts the submission.
+POLLUTION_PATTERNS = [
+    # Inference server launch
+    r"\bvllm\s+serve\b",
+    r"sglang[\w\.]*\.?launch_server",
+    r"python\s+-m\s+vllm\.entrypoints",
+    r"\buvicorn\b",
+    r"\btrtllm-serve\b",
+
+    # Multi-GPU / distributed
+    r"tensor[-_ ]parallel[-_ ]size\s*[=:]?\s*[2-9]",
+    r"--tp[ =][2-9]",
+    r"torchrun\s+[^\n]*--nproc[-_]per[-_]node\s*[=]?\s*[2-9]",
+    r"\bNCCL_[A-Z_]+",
+    r"\bRCCL_[A-Z_]+",
+
+    # End-to-end serving benchmark
+    r"\bbenchmark_serving\b",
+    r"\bsharegpt\b",
+    r"--num-prompts\s+\d{3,}",
+    r"\bTTFT\b",
+    r"\bTPOT\b",
+    r"end[- ]to[- ]end\s+(benchmark|throughput|latency)",
+
+    # Full-model weight loading
+    r"--model\s+[^ \n]+\.safetensors",
+    r"MODEL_PATH\s*=\s*[^\s]+/[A-Za-z0-9_.-]+-\d+B",
+]
+_POLLUTION_RE = re.compile("|".join(POLLUTION_PATTERNS), re.IGNORECASE)
+
+
+def sanitise_oob_prompt(prompt: str, target: dict, write_event) -> bool:
+    """Return True if prompt is safe to submit; False if polluted."""
+    m = _POLLUTION_RE.search(prompt)
+    if m is None and len(prompt) <= 8 * 1024:
+        return True
+
+    reason = (
+        f"prompt-too-long ({len(prompt)} bytes > 8KB)"
+        if m is None else f"banned-pattern: {m.group(0)!r}"
+    )
+    write_event({
+        "type": "prompt-pollution",
+        "kernel_name": target.get("kernel_name"),
+        "task_id": target.get("id"),
+        "reason": reason,
+        "prompt_snippet": prompt[:2000],
+    })
+    return False
+
+
+# Usage at submission site:
+if not sanitise_oob_prompt(prompt, target, write_event):
+    # Do NOT submit. Mark the round as failed; let the deep-guidance
+    # loop either rewrite the prompt on the next round with accumulated
+    # context, or exhaust and move on.
+    return "prompt-pollution"
+```
+
 ### Hardware Context Block (include in every prompt)
 
 ```
@@ -131,6 +224,12 @@ Context: LLM inference serving (decode path).
 
 ```
 MANDATORY CONSTRAINTS (violation = rejected):
+0. You are a SINGLE-KERNEL OPTIMIZER running on 1 GPU with no model
+   weights mounted. Do NOT launch vllm/sglang/any inference server.
+   Do NOT run end-to-end benchmarks or ShareGPT traces. Do NOT attempt
+   tensor-parallel / multi-GPU / NCCL work. Your ONLY deliverable is
+   the rewritten kernel source file, validated by a single-kernel
+   micro-benchmark on the shapes given below.
 1. The output function name MUST be EXACTLY: {original_function_name}. Do NOT rename it.
 2. The function signature (parameter names, order, types) MUST be IDENTICAL to the original.
 3. Decorators MUST be preserved (@triton_heuristics, @triton.jit, etc.).
@@ -333,56 +432,217 @@ with concurrent.futures.ThreadPoolExecutor() as pool:
 
 ## Polling and Collection
 
-### GEAK Polling
+### MANDATORY: Defensive polling template
+
+**Prior production bug** — the polling loop used to only recognise two
+failure strings:
+
+```python
+elif result["status"] in ("failed", "cancelled"):
+    return None
+```
+
+Real OOB / GEAK workloads also emit `error`, `errored`, `terminated`,
+`crashed`, `timeout`, `timed_out`, `exhausted`, `aborted`, `hw_error`,
+etc. Any status outside that tiny whitelist sent the loop to `sleep` and
+kept polling for the full `POLL_TIMEOUT_MIN`; with 5 deep-guidance rounds
+that wastes **~75 minutes per already-dead target**. This happened in
+practice and consumed entire marathons.
+
+You MUST use the template below verbatim. Do NOT simplify it to a single
+`if status == "completed"` branch.
 
 ```python
 import time
 
+# Terminal states — break out immediately. No sleep, no retry.
+TERMINAL_OK = {"completed", "succeeded", "success", "done", "finished"}
+TERMINAL_FAIL = {
+    "failed", "cancelled", "canceled", "error", "errored",
+    "terminated", "crashed", "timeout", "timed_out", "exhausted",
+    "aborted", "hw_error", "oom", "killed",
+}
+
+# Active states — legitimate reasons to keep polling.
+ACTIVE = {"running", "pending", "queued", "in_progress", "starting",
+          "scheduling", "initializing"}
+
+
+def poll_backend(get_task_fn, cancel_task_fn, get_outputs_fn,
+                 download_file_fn, task_id, *,
+                 poll_interval_s, task_timeout_min,
+                 backend_name, kernel_name, write_event):
+    """Unified polling used for GEAK / Codex / Claude / OOB.
+
+    Returns downloaded code string on success, None on any failure.
+    Writes an event_log.jsonl entry on every non-success exit so the
+    Watchdog sees the failure mode.
+    """
+    start = time.time()
+    unknown_strikes = 0
+    transport_strikes = 0
+    last_status = None
+
+    while True:
+        elapsed = time.time() - start
+
+        # Hard per-task wall-clock budget.
+        if elapsed >= task_timeout_min * 60:
+            try:
+                cancel_task_fn(task_id=task_id)
+            except Exception:
+                pass
+            write_event({
+                "type": "oob-timeout",
+                "backend": backend_name,
+                "kernel_name": kernel_name,
+                "task_id": task_id,
+                "elapsed_min": round(elapsed / 60, 1),
+                "last_status": last_status,
+            })
+            return None
+
+        # Resilient status fetch — MCP transport can hiccup.
+        try:
+            result = get_task_fn(task_id=task_id)
+            transport_strikes = 0
+        except Exception as e:
+            transport_strikes += 1
+            if transport_strikes >= 3:
+                write_event({
+                    "type": "oob-transport-fail",
+                    "backend": backend_name,
+                    "kernel_name": kernel_name,
+                    "task_id": task_id,
+                    "error": str(e)[:500],
+                })
+                return None
+            time.sleep(poll_interval_s)
+            continue
+
+        status = (result.get("status") or "").strip().lower()
+        last_status = status
+
+        # ① Terminal failure — STOP, do not retry in this round.
+        if status in TERMINAL_FAIL:
+            write_event({
+                "type": "oob-failed",
+                "backend": backend_name,
+                "kernel_name": kernel_name,
+                "task_id": task_id,
+                "status": status,
+                "elapsed_min": round(elapsed / 60, 1),
+                "error": (result.get("error") or result.get("message") or "")[:2000],
+            })
+            return None
+
+        # ② Terminal success — fetch outputs. Empty output = failure.
+        if status in TERMINAL_OK:
+            try:
+                outputs = get_outputs_fn(task_id=task_id)
+            except Exception as e:
+                write_event({
+                    "type": "oob-output-fetch-fail",
+                    "backend": backend_name,
+                    "kernel_name": kernel_name,
+                    "task_id": task_id,
+                    "error": str(e)[:500],
+                })
+                return None
+
+            files = outputs.get("files") or []
+            candidate = next(
+                (f for f in files
+                 if "optimized" in f["filename"]
+                 or f["filename"].endswith((".py", ".cu", ".hip", ".cuh"))),
+                None,
+            )
+            if candidate is None:
+                write_event({
+                    "type": "oob-empty-output",
+                    "backend": backend_name,
+                    "kernel_name": kernel_name,
+                    "task_id": task_id,
+                    "files_seen": [f["filename"] for f in files][:10],
+                })
+                return None
+
+            return download_file_fn(
+                task_id=task_id, filename=candidate["filename"],
+            )
+
+        # ③ Unknown (neither terminal nor active) — strike-and-cancel.
+        #    This catches new states the backend may introduce over time.
+        if status not in ACTIVE:
+            unknown_strikes += 1
+            if unknown_strikes >= 5:
+                try:
+                    cancel_task_fn(task_id=task_id)
+                except Exception:
+                    pass
+                write_event({
+                    "type": "oob-unknown-status-stuck",
+                    "backend": backend_name,
+                    "kernel_name": kernel_name,
+                    "task_id": task_id,
+                    "status": status,
+                    "elapsed_min": round(elapsed / 60, 1),
+                })
+                return None
+        else:
+            unknown_strikes = 0
+
+        time.sleep(poll_interval_s)
+```
+
+### Per-backend invocation
+
+```python
 GEAK_POLL_INTERVAL_S = 30
 GEAK_POLL_TIMEOUT_MIN = 30
 
-start = time.time()
-while (time.time() - start) < GEAK_POLL_TIMEOUT_MIN * 60:
-    result = geak_get_task(task_id=task_id)
-    if result["status"] == "completed":
-        outputs = geak_get_outputs(task_id=task_id)
-        for f in outputs["files"]:
-            if f["filename"].endswith(".py"):
-                code = geak_download_file(task_id=task_id, filename=f["filename"])
-                return code
-    elif result["status"] == "failed":
-        return None  # GEAK failed, rely on other backends
-    time.sleep(GEAK_POLL_INTERVAL_S)
-
-# Timeout — cancel and move on
-return None
-```
-
-### Codex/Claude Polling
-
-```python
 OOB_POLL_INTERVAL_S = 15
-OOB_POLL_TIMEOUT_MIN = {
-    "codex": 10,
-    "claude": 15,
-}
+OOB_POLL_TIMEOUT_MIN = {"codex": 10, "claude": 15}
 
-start = time.time()
-while (time.time() - start) < OOB_POLL_TIMEOUT_MIN[backend] * 60:
-    result = agent_get_task(task_id=task_id)
-    if result["status"] == "completed":
-        outputs = agent_get_outputs(task_id=task_id)
-        for f in outputs["files"]:
-            if "optimized" in f["filename"] or f["filename"].endswith(".py"):
-                code = agent_download_file(task_id=task_id, filename=f["filename"])
-                return code
-    elif result["status"] in ("failed", "cancelled"):
-        return None
-    time.sleep(OOB_POLL_INTERVAL_S)
+# GEAK
+code = poll_backend(
+    get_task_fn=geak_get_task,
+    cancel_task_fn=lambda task_id: None,     # GEAK has no cancel; fall through
+    get_outputs_fn=geak_get_outputs,
+    download_file_fn=geak_download_file,
+    task_id=task_id,
+    poll_interval_s=GEAK_POLL_INTERVAL_S,
+    task_timeout_min=GEAK_POLL_TIMEOUT_MIN,
+    backend_name="geak",
+    kernel_name=target["kernel_name"],
+    write_event=write_event,
+)
 
-agent_cancel_task(task_id=task_id)
-return None
+# OOB (Codex / Claude via oob-gpu-optimizer MCP)
+code = poll_backend(
+    get_task_fn=agent_get_task,
+    cancel_task_fn=agent_cancel_task,
+    get_outputs_fn=agent_get_outputs,
+    download_file_fn=agent_download_file,
+    task_id=task_id,
+    poll_interval_s=OOB_POLL_INTERVAL_S,
+    task_timeout_min=OOB_POLL_TIMEOUT_MIN[backend],
+    backend_name=backend,
+    kernel_name=target["kernel_name"],
+    write_event=write_event,
+)
 ```
+
+### Circuit breakers on top of the template
+
+| Counter | Trigger | Effect |
+|---|---|---|
+| `per_target_backend_fails[target_id][backend]` | 3 consecutive non-`TERMINAL_OK` returns from `poll_backend` for the same `(target, backend)` | Skip that backend for the remainder of the target's deep-guidance loop. |
+| `per_session_backend_fails[backend]` | 8 cumulative failures across all targets this session | Deprioritise the backend for the rest of the session (submit only if no other active backend). |
+| `OOB_TASK_TOTAL_BUDGET_MIN` (default 30) | Sum of `elapsed_min` across all rounds for the same target exceeds the budget | Abort the target entirely, mark `failed / reason=oob-budget-exceeded` in `results.jsonl`, write `exhausted` event. |
+
+These are enforced in the Deep Guidance Loop (§below), not inside
+`poll_backend` itself.
 
 ---
 

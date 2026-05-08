@@ -27,7 +27,7 @@
 #   CONC=64  ISL=1024  OSL=1024
 #   MODEL_PATH                — absolute path to weights (optional)
 #   IMAGE                     — GEAK container image (if empty, geak backend skipped)
-#   KERNEL_OPT_WORKSPACE=control-plane-sandbox
+#   KERNEL_OPT_WORKSPACE=core42-sandbox
 #   KERNEL_OPT_BACKENDS=geak,claude,codex
 #   DRY_RUN=0                 — 1 = preflight only, no tmux
 #   REPORT_INTERVAL_S=60      — monitor cadence
@@ -55,6 +55,104 @@ if [[ ! -d "$SPEC_ROOT" ]]; then
 fi
 
 log() { echo "[run.sh $(date +%H:%M:%S)] $*"; }
+
+# ============================================================
+# preflight_deps() — fail-fast dependency check + auto-install
+# ============================================================
+# Run before STRICT/defaults/mode detection so missing CLI dependencies show up
+# as the first visible failure, not deep inside a backgrounded tmux launch.
+run_preflight_step() {
+    local label=$1
+    shift
+    local timeout_s="${PREFLIGHT_STEP_TIMEOUT_S:-300}"
+    log "  ${label} (timeout=${timeout_s}s)"
+    set +e
+    timeout --signal=TERM --kill-after=30s "$timeout_s" "$@"
+    local rc=$?
+    set -e
+    if [[ $rc -eq 124 || $rc -eq 137 || $rc -eq 143 ]]; then
+        echo "ERROR: preflight step '$label' timed out after ${timeout_s}s" >&2
+        exit 14
+    fi
+    if [[ $rc -ne 0 ]]; then
+        echo "ERROR: preflight step '$label' failed with exit $rc" >&2
+        exit 14
+    fi
+}
+
+ensure_node() {
+    if command -v node >/dev/null 2>&1; then
+        local ver
+        ver="$(node --version 2>/dev/null | sed 's/v\([0-9]*\).*/\1/')"
+        if [[ -n "$ver" && "$ver" -ge 18 ]]; then
+            log "  node: $(node --version) (>=18, OK)"
+            return 0
+        fi
+        log "  node $(node --version) is <18, installing Node 20 binary"
+    else
+        log "  node not on PATH, installing Node 20 binary"
+    fi
+    local NODE_VER=v20.18.0 arch
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64)  arch=x64 ;;
+        aarch64) arch=arm64 ;;
+        *) echo "ERROR: unsupported arch '$arch' for Node binary install" >&2; return 1 ;;
+    esac
+    local url="https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-linux-$arch.tar.xz"
+    run_preflight_step "install Node $NODE_VER" \
+        bash -o pipefail -c 'curl -fsSL "$1" | tar -xJ -C /usr/local --strip-components=1 --exclude="*.md" --exclude="LICENSE"' _ "$url"
+    hash -r
+    log "  installed: node $(node --version)  npm $(npm --version)"
+}
+
+preflight_deps() {
+    log "preflight_deps: checking required CLIs (tmux jq curl claude)"
+    log "  hostname=$(hostname)  arch=$(uname -m)"
+
+    command -v timeout >/dev/null 2>&1 \
+        || { echo "ERROR: required CLI 'timeout' is missing (coreutils); cannot enforce preflight timeouts" >&2; exit 9; }
+
+    local need_apt=()
+    for tool in tmux jq curl; do
+        command -v "$tool" >/dev/null 2>&1 || need_apt+=("$tool")
+    done
+
+    if [[ ${#need_apt[@]} -gt 0 ]]; then
+        log "  missing apt pkgs: ${need_apt[*]} — installing"
+        if ! command -v apt-get >/dev/null 2>&1; then
+            echo "ERROR: need ${need_apt[*]} but apt-get unavailable; install manually then re-run" >&2
+            exit 10
+        fi
+        run_preflight_step "apt-get update" \
+            bash -o pipefail -c 'apt-get update -qq 2>&1 | tail -2'
+        run_preflight_step "apt-get install ${need_apt[*]}" \
+            bash -o pipefail -c 'apt-get install -y -qq "$@" 2>&1 | tail -2' _ "${need_apt[@]}"
+        for t in "${need_apt[@]}"; do
+            command -v "$t" >/dev/null 2>&1 \
+                || { echo "ERROR: $t still missing after apt-get install — check apt sources / network" >&2; exit 11; }
+        done
+    fi
+
+    if ! command -v claude >/dev/null 2>&1 && [[ "${STAGE_ONLY:-0}" != "1" ]]; then
+        log "  claude CLI missing — installing via npm"
+        if ! command -v npm >/dev/null 2>&1; then
+            ensure_node || { echo "ERROR: Node.js install failed (prereq for claude CLI)" >&2; exit 12; }
+        fi
+        run_preflight_step "npm install @anthropic-ai/claude-code" \
+            bash -o pipefail -c 'npm install -g @anthropic-ai/claude-code 2>&1 | tail -3'
+        command -v claude >/dev/null 2>&1 \
+            || { echo "ERROR: claude CLI unavailable after 'npm install -g @anthropic-ai/claude-code'" >&2; exit 13; }
+    fi
+
+    log "preflight_deps OK:"
+    if command -v tmux   >/dev/null 2>&1; then log "  tmux:   $(tmux -V 2>&1)"; fi
+    if command -v jq     >/dev/null 2>&1; then log "  jq:     $(jq --version 2>&1)"; fi
+    if command -v curl   >/dev/null 2>&1; then log "  curl:   $(curl --version 2>&1 | head -1)"; fi
+    if command -v claude >/dev/null 2>&1; then log "  claude: $(command -v claude) ($(claude --version 2>&1 | head -1))"; fi
+}
+
+preflight_deps
 
 # ---------- STRICT mode (MUST run BEFORE defaults) ----------
 # When STRICT=1, every parameter that has a default must ALSO be explicitly passed
@@ -90,7 +188,7 @@ fi
 : "${OSL:=1024}"
 : "${MODEL_PATH:=}"
 : "${IMAGE:=}"
-: "${KERNEL_OPT_WORKSPACE:=control-plane-sandbox}"
+: "${KERNEL_OPT_WORKSPACE:=${SANDBOX_WORKSPACE:-}}"
 : "${KERNEL_OPT_BACKENDS:=geak,claude,codex}"
 : "${INFERENCEX_PATH:=/hyperloom/InferenceX}"
 : "${DRY_RUN:=0}"
@@ -281,67 +379,15 @@ if [[ "$DRY_RUN" == "1" ]]; then
     exit 0
 fi
 
-# ========== STEP 2 — INSTALL DEPS (local mode only) ==========
-# Ubuntu apt nodejs is too old (v12) to run claude CLI (needs >=18). Pull the
-# Node 20 binary tarball from nodejs.org when npm is missing or node is too old.
-ensure_node() {
-    if command -v node >/dev/null 2>&1; then
-        local ver
-        ver="$(node --version 2>/dev/null | sed 's/v\([0-9]*\).*/\1/')"
-        if [[ -n "$ver" && "$ver" -ge 18 ]]; then
-            log "  node: $(node --version) (>=18, OK)"
-            return 0
-        fi
-        log "  node $(node --version) is <18, installing Node 20 binary"
-    else
-        log "  node not on PATH, installing Node 20 binary"
-    fi
-    local NODE_VER=v20.18.0 arch
-    arch="$(uname -m)"
-    case "$arch" in
-        x86_64)  arch=x64 ;;
-        aarch64) arch=arm64 ;;
-        *) echo "ERROR: unsupported arch '$arch' for Node binary install" >&2; return 1 ;;
-    esac
-    local url="https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-linux-$arch.tar.xz"
-    log "  fetching $url"
-    curl -fsSL "$url" \
-      | tar -xJ -C /usr/local --strip-components=1 --exclude='*.md' --exclude='LICENSE' \
-      || { echo "ERROR: failed to download/extract Node $NODE_VER" >&2; return 1; }
-    hash -r
-    log "  installed: node $(node --version)  npm $(npm --version)"
-}
-
-if [[ "$MODE" == "local" ]]; then
-    need=()
-    command -v tmux >/dev/null 2>&1 || need+=(tmux)
-    command -v jq   >/dev/null 2>&1 || need+=(jq)
-    command -v curl >/dev/null 2>&1 || need+=(curl)
-    if [[ ${#need[@]} -gt 0 ]]; then
-        log "Installing: ${need[*]}"
-        if command -v apt-get >/dev/null 2>&1; then
-            apt-get update -qq 2>&1 | tail -2
-            apt-get install -y -qq "${need[@]}" 2>&1 | tail -2
-        else
-            echo "ERROR: need ${need[*]} but apt-get not available" >&2; exit 10
-        fi
-    fi
-    if ! command -v claude >/dev/null 2>&1 && [[ "${STAGE_ONLY:-0}" != "1" ]]; then
-        log "claude CLI not on PATH — installing via npm"
-        if ! command -v npm >/dev/null 2>&1; then
-            ensure_node || { echo "ERROR: failed to install Node.js (prerequisite for claude CLI)" >&2; exit 12; }
-        fi
-        npm install -g @anthropic-ai/claude-code 2>&1 | tail -3
-    fi
-    if [[ "${STAGE_ONLY:-0}" != "1" ]]; then
-        command -v claude >/dev/null 2>&1 || { echo "ERROR: claude CLI unavailable after install" >&2; exit 13; }
-    fi
+# ========== STEP 2 — DEP VERIFY (install was done up-front in preflight_deps) ==========
+for t in tmux jq; do
+    command -v "$t" >/dev/null 2>&1 \
+        || { echo "ERROR: '$t' disappeared after preflight_deps — PATH was mutated" >&2; exit 16; }
+done
+if [[ "${STAGE_ONLY:-0}" != "1" ]]; then
+    command -v claude >/dev/null 2>&1 \
+        || { echo "ERROR: 'claude' disappeared after preflight_deps — PATH was mutated" >&2; exit 16; }
 fi
-
-if command -v claude >/dev/null 2>&1; then
-    log "  claude: $(command -v claude) ($(claude --version 2>&1 | head -1))"
-fi
-command -v tmux >/dev/null 2>&1 && log "  tmux: $(tmux -V 2>&1)" || log "  tmux: (not installed; STAGE_ONLY)"
 
 # ========== STEP 3 — BOOTSTRAP (session dir + mcp.json + env file + pane scripts) ==========
 mkdir -p "$SESSION_DIR/logs" \
@@ -362,19 +408,19 @@ MCP_CONFIG="$WORK_DIR/mcp.json"
 cat > "$MCP_CONFIG" <<JSON
 {
   "mcpServers": {
-    "oci-geak-agent": {
+    "geak": {
       "type": "sse",
-      "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/geak-agent-wvsbv/mcp/sse",
+      "url": "${GEAK_MCP_URL:?GEAK_MCP_URL must be set}",
       "headers": { "Authorization": "Bearer ${SAFE_API_KEY}" }
     },
-    "oci-oob-agent": {
+    "oob": {
       "type": "sse",
-      "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/agent-mcp-server-gpu-62tcr/sse",
+      "url": "${OOB_MCP_URL:?OOB_MCP_URL must be set}",
       "headers": { "Authorization": "Bearer ${SAFE_API_KEY}" }
     },
-    "oci-traceLens-agent": {
+    "traceLens": {
       "type": "http",
-      "url": "https://oci-slc.primus-safe.amd.com/control-plane/control-plane-dev/trace-lens-agent-qqpfv/mcp"
+      "url": "${TRACELENS_MCP_URL:?TRACELENS_MCP_URL must be set}"
     }
   }
 }
@@ -408,13 +454,16 @@ KERNEL_OPT_WORKSPACE=$KERNEL_OPT_WORKSPACE
 KERNEL_OPT_BACKENDS=$KERNEL_OPT_BACKENDS
 INFERENCEX_PATH=$INFERENCEX_PATH
 MAX_HOURS=$MAX_HOURS
+PANE_CLAUDE_TIMEOUT_S=${PANE_CLAUDE_TIMEOUT_S:-1800}
+PANE_MAX_RESTARTS=${PANE_MAX_RESTARTS:-200}
+PANE_CLAUDE_DEBUG=${PANE_CLAUDE_DEBUG:-0}
 ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
 ANTHROPIC_BASE_URL=$ANTHROPIC_BASE_URL
 ENVEOF
 chmod 600 "$ENV_FILE"
 
 MODEL_ARG="${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-6}"
-ALLOWED_TOOLS="Bash Read Write Edit MultiEdit Glob Grep TodoWrite Task WebSearch WebFetch mcp__oci-geak-agent mcp__oci-oob-agent mcp__oci-traceLens-agent"
+ALLOWED_TOOLS="Bash Read Write Edit MultiEdit Glob Grep TodoWrite Task WebSearch WebFetch mcp__geak mcp__oob mcp__traceLens"
 
 # Compose a restart-loop pane launcher. The inner `claude --print` is one-shot;
 # outer `while` with `--continue` resumes prior conversation context indefinitely.
@@ -439,16 +488,29 @@ B64
 
 LOG="$log_file"
 STOP_FILE="$SESSION_DIR/STOP_PANE_${name}"
-MAX_RESTARTS=50
+# PID file for the currently-running \`claude --print\` invocation. run.sh's
+# monitor uses this to soft-restart a wedged kernel-mgr pane when the
+# orchestrator sets state.json:km_requested_restart=true.
+PID_FILE="$SESSION_DIR/.pane_${name}.pid"
+MAX_RESTARTS=\${PANE_MAX_RESTARTS:-200}
+CLAUDE_TIMEOUT_S=\${PANE_CLAUDE_TIMEOUT_S:-1800}
+CLAUDE_DEBUG=\${PANE_CLAUDE_DEBUG:-0}
+DIAG_DIR="\$SESSION_DIR/diagnostics/${name}"
+mkdir -p "\$DIAG_DIR" 2>/dev/null || true
 ATTEMPT=0
 CONTINUE_FLAG=""
 USER_MSG=${um_q}
 
-echo "[\$(date -Iseconds)] [pane:${name}] launcher starting" >> "\$LOG"
+echo "[\$(date -Iseconds)] [pane:${name}] launcher starting (max_restarts=\$MAX_RESTARTS claude_timeout=\${CLAUDE_TIMEOUT_S}s debug=\$CLAUDE_DEBUG)" >> "\$LOG"
 while [ ! -f "\$STOP_FILE" ] && [ \$ATTEMPT -lt \$MAX_RESTARTS ]; do
     ATTEMPT=\$((ATTEMPT + 1))
     echo "[\$(date -Iseconds)] [pane:${name}] attempt=\$ATTEMPT continue=\$CONTINUE_FLAG" >> "\$LOG"
-    claude --print \\
+    CLAUDE_START=\$(date +%s)
+    DEBUG_ENV=""
+    if [ "\$CLAUDE_DEBUG" = "1" ]; then
+        DEBUG_ENV="ANTHROPIC_LOG=debug"
+    fi
+    env \$DEBUG_ENV timeout --signal=TERM --kill-after=30s "\$CLAUDE_TIMEOUT_S" claude --print \\
         --output-format stream-json --verbose \\
         \$CONTINUE_FLAG \\
         --model "$MODEL_ARG" \\
@@ -462,15 +524,47 @@ while [ ! -f "\$STOP_FILE" ] && [ \$ATTEMPT -lt \$MAX_RESTARTS ]; do
         --allowedTools "$ALLOWED_TOOLS" \\
         --system-prompt "\$SYSTEM_PROMPT" \\
         \$USER_MSG \\
-        >> "\$LOG" 2>&1 < /dev/null
+        >> "\$LOG" 2>&1 < /dev/null &
+    INNER_PID=\$!
+    echo \$INNER_PID > "\$PID_FILE"
+    wait \$INNER_PID
     EXIT=\$?
-    echo "[\$(date -Iseconds)] [pane:${name}] claude exit=\$EXIT" >> "\$LOG"
+    rm -f "\$PID_FILE" 2>/dev/null || true
+    CLAUDE_DURATION=\$(( \$(date +%s) - CLAUDE_START ))
+    if [ "\$EXIT" = "124" ] || [ "\$EXIT" = "137" ]; then
+        echo "[\$(date -Iseconds)] [pane:${name}] WARN: claude --print exceeded \${CLAUDE_TIMEOUT_S}s wallclock (exit=\$EXIT, ran for \${CLAUDE_DURATION}s); restarting with --continue" >> "\$LOG"
+        DIAG_FILE="\$DIAG_DIR/hang_attempt\${ATTEMPT}_\$(date +%Y%m%dT%H%M%S).txt"
+        {
+            echo "=== Hang post-mortem for [pane:${name}] attempt=\$ATTEMPT ==="
+            echo "timestamp: \$(date -Iseconds)"
+            echo "duration_seconds: \$CLAUDE_DURATION"
+            echo "timeout_setting: \$CLAUDE_TIMEOUT_S"
+            echo "exit_code: \$EXIT"
+            echo
+            echo "--- claude/node processes (post-timeout, may already be reaped) ---"
+            ps -eo pid,ppid,etime,stat,cmd 2>/dev/null | grep -E '\\b(claude|node)\\b' | grep -v grep | head -20 || echo "(none)"
+            echo
+            echo "--- ESTABLISHED TCP to candidate hang targets ---"
+            (ss -tnp 2>/dev/null || netstat -tnp 2>/dev/null) | grep -E 'ESTAB|ESTABLISHED' | grep -E 'anthropic|claude|amd\\.com|primus|oci-' | head -20 || echo "(none)"
+            echo
+            echo "--- log mtime ---"
+            stat -c '%y %n' "\$LOG" 2>/dev/null || echo "(stat failed)"
+            echo "now: \$(date -Iseconds)"
+            echo
+            echo "--- last 20 lines of pane log ---"
+            tail -20 "\$LOG" 2>/dev/null
+            echo "=== end ==="
+        } > "\$DIAG_FILE" 2>&1
+        echo "[\$(date -Iseconds)] [pane:${name}] hang diagnostic snapshot -> \$DIAG_FILE" >> "\$LOG"
+    else
+        echo "[\$(date -Iseconds)] [pane:${name}] claude exit=\$EXIT (ran for \${CLAUDE_DURATION}s)" >> "\$LOG"
+    fi
     [ -f "\$STOP_FILE" ] && break
     sleep 15
     CONTINUE_FLAG="--continue"
     USER_MSG="Continue. Read \$SESSION_DIR/state.json to resume; then proceed with the next protocol step."
 done
-echo "[\$(date -Iseconds)] [pane:${name}] launcher exiting" >> "\$LOG"
+echo "[\$(date -Iseconds)] [pane:${name}] launcher exiting (attempt=\$ATTEMPT stop_file=\$([ -f \"\$STOP_FILE\" ] && echo yes || echo no))" >> "\$LOG"
 PANE
     chmod +x "$script_path"
     echo "$script_path"
@@ -565,20 +659,10 @@ cleanup() {
     for name in watchdog orchestrator kernel-mgr; do
         touch "$SESSION_DIR/STOP_PANE_$name" 2>/dev/null || true
     done
-    # Graded grace window for SESSION_REPORT.md:
-    #   Phase 1 (0-180s):  let the orchestrator pane write its proper report
-    #                      after seeing STOP_PANE_orchestrator (best path).
-    #   Phase 2 (>180s):   pane is stuck in a long tool call (compile/bench).
-    #                      run.sh writes a fallback SESSION_REPORT.md from
-    #                      state.json so we never end with zero report.
-    #   Then proceed to TERM/KILL of pane claude processes (Phase 3).
-    local waited=0
-    while [[ $waited -lt 180 ]]; do
-        [[ -f "$SESSION_DIR/SESSION_REPORT.md" ]] && { log "  SESSION_REPORT.md present after ${waited}s (pane wrote it)"; break; }
-        sleep 5; waited=$((waited + 5))
-    done
+    # SESSION_REPORT.md is produced in FINALIZE before `[run.sh] Done`; the
+    # EXIT trap may race sandbox teardown, so only attempt a last-ditch fallback here.
     if [[ ! -f "$SESSION_DIR/SESSION_REPORT.md" ]]; then
-        log "  pane did not write SESSION_REPORT.md within 180s; using fallback"
+        log "  cleanup: SESSION_REPORT.md still missing — last-ditch fallback attempt"
         generate_fallback_report
     fi
     # Kill pane claude processes BEFORE tmux kill, so they don't reparent to PID 1 as zombies.
@@ -621,8 +705,39 @@ BUDGET=$(awk "BEGIN{printf \"%d\", $MAX_HOURS * 3600}")
 LAST_REPORT=0
 log "monitor: budget=${MAX_HOURS}h  report every ${REPORT_INTERVAL_S}s"
 
+KM_LAST_RESTART=0
 while tmux has-session -t marathon 2>/dev/null; do
     NOW=$(date +%s); ELAPSED=$(( NOW - START ))
+
+    # Orchestrator sets state.json:km_requested_restart=true after kernel-mgr
+    # silence while pending work exists. Soft-kill the current inner claude;
+    # the pane launcher will relaunch with --continue.
+    if [[ -f "$SESSION_DIR/state.json" ]] \
+        && [[ $(( NOW - KM_LAST_RESTART )) -ge 300 ]] \
+        && jq -e '.km_requested_restart == true' "$SESSION_DIR/state.json" >/dev/null 2>&1; then
+        KM_PID_FILE="$SESSION_DIR/.pane_kernel-mgr.pid"
+        if [[ -f "$KM_PID_FILE" ]]; then
+            KM_PID=$(cat "$KM_PID_FILE" 2>/dev/null || true)
+            if [[ -n "$KM_PID" ]] && kill -0 "$KM_PID" 2>/dev/null; then
+                log "monitor: km_requested_restart=true -> SIGTERM inner claude pid=$KM_PID"
+                kill -TERM "$KM_PID" 2>/dev/null || true
+                for _ in $(seq 1 12); do
+                    kill -0 "$KM_PID" 2>/dev/null || break
+                    sleep 5
+                done
+                if kill -0 "$KM_PID" 2>/dev/null; then
+                    log "monitor: km pid=$KM_PID still alive after 60s SIGTERM grace; escalating to SIGKILL"
+                    kill -KILL "$KM_PID" 2>/dev/null || true
+                fi
+                KM_LAST_RESTART=$NOW
+            else
+                rm -f "$KM_PID_FILE" 2>/dev/null || true
+            fi
+        else
+            log "monitor: km_requested_restart=true but no PID file at $KM_PID_FILE; skipping"
+            KM_LAST_RESTART=$NOW
+        fi
+    fi
 
     if [[ $(( NOW - LAST_REPORT )) -ge $REPORT_INTERVAL_S ]]; then
         printf "[%s elapsed=%dmin]" "$(date +%H:%M:%S)" $(( ELAPSED / 60 ))
@@ -678,6 +793,25 @@ done
 
 # ========== STEP 6 — FINALIZE ==========
 log "marathon complete"
+
+# SESSION_REPORT.md must exist before `[run.sh] Done`. In the Claw sandbox the
+# polling agent stops as soon as it sees Done, often triggering container
+# snapshot/teardown before the EXIT trap has time to write the fallback report.
+if [[ ! -f "$SESSION_DIR/SESSION_REPORT.md" ]]; then
+    log "finalize: 60s grace window for orchestrator pane to produce SESSION_REPORT.md"
+    waited=0
+    while [[ $waited -lt 60 ]]; do
+        [[ -f "$SESSION_DIR/SESSION_REPORT.md" ]] && { log "  pane wrote SESSION_REPORT.md after ${waited}s"; break; }
+        sleep 5; waited=$((waited + 5))
+    done
+fi
+if [[ ! -f "$SESSION_DIR/SESSION_REPORT.md" ]]; then
+    log "finalize: pane never produced SESSION_REPORT.md within grace; invoking fallback writer"
+    generate_fallback_report
+fi
+sync 2>/dev/null || true
+sleep 5
+
 echo ""
 echo "============================================"
 echo "  MARATHON FINAL"

@@ -1,0 +1,24 @@
+name: deep_kernel_analysis
+family: deep_kernel
+cost_minutes_p50: 10.0
+cost_minutes_p75: 20.0
+expected_gain_pct: [0.0, 0.0]
+accuracy_risk: 0.0
+crash_risk: 0.05
+prerequisites:
+  - profile
+requires_lanes:
+  - profile_lane
+allowed_tools:
+  - emit_intent
+  - Read
+  - Bash
+side_effects:
+  - reads_trace
+  - writes_results
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 25
+lease_ttl_sec: 1800
+applicable_when:
+  - "trace_path != ''"
