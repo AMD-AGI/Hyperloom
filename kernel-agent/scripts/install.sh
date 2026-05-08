@@ -329,6 +329,17 @@ write_env_file() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
+  # ensure_auth_proxy.sh now always emits PROXY_*_BASE_URL on success
+  # (both the just-started and the healthy-noop branches). If we still don't
+  # have them, the supervisor either failed or OOB_BASE_URL was empty —
+  # either way env.sh would silently lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL,
+  # which is the exact failure mode that lets externally-preset upstream
+  # URLs leak into Claude/Codex CLIs and 401-hang the SDK. Warn loudly so
+  # the install operator notices instead of debugging at runtime.
+  if [ -z "${PROXY_ANTHROPIC_BASE_URL:-}" ] || [ -z "${PROXY_OPENAI_BASE_URL:-}" ]; then
+    warn "PROXY_*_BASE_URL not captured from ensure_auth_proxy.sh; env.sh will lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL"
+    warn "This means an externally-preset ANTHROPIC_BASE_URL will reach Claude CLI directly and hang on gateway 401"
+  fi
   local env_file="${KERNEL_AGENT_ROOT}/env.sh"
   mkdir -p "${KERNEL_AGENT_ROOT}"
   {
