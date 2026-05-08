@@ -926,39 +926,6 @@ def augment_csv_candidates_with_raw_shapes(
             cand["shapes"] = sh
 
 
-# ---------------------------------------------------------------------------
-# #78: TraceLens debug mode (stream-json offline capture)
-# ---------------------------------------------------------------------------
-
-
-def build_orchestrator_invocation(
-    *,
-    prompt: str,
-    debug: bool,
-    stream_path: Path | None = None,
-) -> list[str]:
-    """Return a cursor-agent argv that runs the standalone TraceLens
-    orchestrator skill, optionally with stream-json capture (#78).
-
-    The returned argv is suitable for ``subprocess.run`` from the upstream
-    invoker (Hyperloom skill or inference_optimizer); kernel-agent's tool
-    layer doesn't run cursor-agent itself, but it owns this contract so the
-    invoker pipeline stays consistent.
-
-    Without ``debug``, returns the plain prompt path (the default text
-    output). With ``debug`` and ``stream_path``, the argv adds
-    ``--output-format stream-json --output-file <stream_path>``.
-    """
-    argv = ["cursor-agent", "run", "--prompt", prompt]
-    if debug:
-        argv.insert(2, "--output-format")
-        argv.insert(3, "stream-json")
-        if stream_path is not None:
-            argv.insert(4, "--output-file")
-            argv.insert(5, str(stream_path))
-    return argv
-
-
 def derive_kernel_category(candidate: dict[str, Any]) -> str:
     """Map a candidate to its GEAK-facing kernel category (#125).
 
@@ -1291,20 +1258,6 @@ def main() -> int:
             "or when the splitter binary isn't available."
         ),
     )
-    parser.add_argument(
-        "--debug-tracelens",
-        action="store_true",
-        default=os.environ.get("DEBUG_TRACELENS", "").lower() in ("1", "true", "yes"),
-        help=(
-            "Enable TraceLens debug mode (#78). Records the orchestrator "
-            "agent's full event stream as JSONL at "
-            "<run>/tracelens/tracelens_agent_stream.jsonl for offline replay. "
-            "May also be enabled via DEBUG_TRACELENS=true env var. The actual "
-            "stream-json capture happens in the upstream cursor-agent invoker "
-            "— this flag exposes the artifact path and signals downstream "
-            "consumers to enable streamJSON output."
-        ),
-    )
     args = parser.parse_args()
 
     session_id = args.session_id or uuid.uuid4().hex[:12]
@@ -1324,24 +1277,6 @@ def main() -> int:
         trace_input_type, trace_files = discover_trace_inputs(trace_input)
         append_log(log_path, f"trace_input_type={trace_input_type}")
         append_log(log_path, f"trace_files={len(trace_files)}")
-
-        # #78: TraceLens debug mode artifact reservation. The kernel-agent
-        # tool itself doesn't invoke cursor-agent (the standalone TraceLens
-        # orchestrator skill is launched by the upstream Hyperloom workflow),
-        # but we own the contract for where the streamJSON file lives so
-        # session log uploads / S3 sync know where to look. The actual file
-        # is produced by `cursor-agent run --output-format stream-json
-        # --output-file <path>` — see `build_orchestrator_invocation`.
-        if args.debug_tracelens:
-            tracelens_dir = run_dir / "tracelens"
-            tracelens_dir.mkdir(parents=True, exist_ok=True)
-            stream_path = tracelens_dir / "tracelens_agent_stream.jsonl"
-            artifacts["tracelens_agent_stream"] = str(stream_path)
-            append_log(
-                log_path,
-                f"DEBUG_TRACELENS=true: streamJSON artifact reserved at "
-                f"{stream_path} (will be populated by upstream cursor-agent run)",
-            )
 
         if not args.dry_run:
             update_status(status_path, state="running", current_step="install_tracelens",
