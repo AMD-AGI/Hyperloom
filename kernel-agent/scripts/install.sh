@@ -14,6 +14,25 @@ KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${WORKSPACE_PATH}/kernel-agent}"
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
 TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+
+# Credentials fallback: env always wins. If SAFE_API_KEY or OPENAI_BASE_URL
+# is missing from env, source $REPO_ROOT/.env (defaults to $(pwd)) but
+# protect any keys already set in env from being overwritten by .env.
+REPO_ROOT="${REPO_ROOT:-$(pwd)}"
+if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ]; then
+  if [ -f "$REPO_ROOT/.env" ]; then
+    _snap_safe="${SAFE_API_KEY-}"
+    _snap_url="${OPENAI_BASE_URL-}"
+    set -a
+    # shellcheck disable=SC1091
+    . "$REPO_ROOT/.env"
+    set +a
+    [ -n "$_snap_safe" ] && export SAFE_API_KEY="$_snap_safe"
+    [ -n "$_snap_url" ]  && export OPENAI_BASE_URL="$_snap_url"
+    unset _snap_safe _snap_url
+    echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
+  fi
+fi
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 # Default to the LitellmModel-fixed branch. Upstream main works ONLY when the
 # model is reached via amd_llm + AMD LLM Gateway (anthropic SDK direct). On
