@@ -1191,80 +1191,6 @@ def run_command(cmd: list[str], *, cwd: Path | None, log_path: Path, timeout_s: 
     return proc.returncode
 
 
-def roofline_match_key(name: str) -> str:
-    """Normalize trace and rocprof names enough to join roofline data."""
-    raw = name or ""
-    lower = raw.lower()
-    if "cijk_" in lower:
-        return "hipblaslt_gemm"
-    if "gemm_a16w16_asm" in lower or "a16w16" in lower:
-        return "aiter_asm_gemm"
-    if "attn_fwd" in lower or "flash_attn" in lower:
-        return "attention"
-    if "moe_ck2stages" in lower or "moe_ck_tile" in lower:
-        return "moe_gemm"
-    if "vectorized_layer_norm" in lower or "rms_norm" in lower:
-        return "rms_norm"
-    if "topk" in lower:
-        return "topk"
-    if "rope" in lower or "rotary" in lower:
-        return "rope"
-    if "nccl" in lower or "allreduce" in lower:
-        return "allreduce"
-    if "copy" in lower or "memcpy" in lower:
-        return "memcpy"
-    if "softmax" in lower:
-        return "softmax"
-    if "skinny" in lower:
-        return "skinny_gemm"
-    return lower[:80]
-
-
-def load_roofline_results(path: str | None) -> dict[str, dict[str, Any]]:
-    if not path:
-        return {}
-    p = Path(path).expanduser()
-    if not p.exists():
-        return {}
-    try:
-        payload = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    rows = payload.get("results") if isinstance(payload, dict) else payload
-    if not isinstance(rows, list):
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        if not isinstance(row, dict) or not row.get("name"):
-            continue
-        out[roofline_match_key(str(row["name"]))] = row
-    return out
-
-
-def merge_roofline_into_candidates(
-    candidates: list[dict[str, Any]],
-    roofline_by_name: dict[str, dict[str, Any]],
-) -> None:
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        roofline = roofline_by_name.get(roofline_match_key(str(item.get("name") or "")))
-        if roofline:
-            item["bottleneck"] = roofline.get("bottleneck", "unknown")
-            item["arithmetic_intensity"] = roofline.get("arithmetic_intensity")
-            item["compute_utilization_pct"] = roofline.get("compute_utilization_pct", 0.0)
-            item["bandwidth_utilization_pct"] = roofline.get("bandwidth_utilization_pct", 0.0)
-            item["suggestion"] = roofline.get("suggestion", "")
-            item["recommended_actions"] = roofline.get("recommended_actions") or []
-            item["roofline_name"] = roofline.get("name")
-        else:
-            item.setdefault("bottleneck", "unknown")
-            item.setdefault("arithmetic_intensity", None)
-            item.setdefault("compute_utilization_pct", 0.0)
-            item.setdefault("bandwidth_utilization_pct", 0.0)
-            item.setdefault("recommended_actions", [])
-
-
 def write_reports(
     run_dir: Path,
     *,
@@ -1316,11 +1242,9 @@ def write_reports(
             "",
         ]
         for item in candidates:
-            bottleneck = item.get("bottleneck") or "unknown"
             lines.append(
                 f"- `{item['kernel_id']}` `{item['name']}`: {item['gpu_pct']}% GPU, "
-                f"{item['call_count']} calls, bottleneck `{bottleneck}`, "
-                f"source `{item.get('source_file') or 'unresolved'}`"
+                f"{item['call_count']} calls, source `{item.get('source_file') or 'unresolved'}`"
             )
         md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1352,7 +1276,6 @@ def main() -> int:
     parser.add_argument("--runtime-env", default="local")
     parser.add_argument("--workspace-path", default=os.environ.get("WORKSPACE_PATH", "/workspace"))
     parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
-    parser.add_argument("--roofline-json", default="")
     parser.add_argument("--compat-report-path", default="")
     parser.add_argument(
         "--capture-folder",
@@ -1692,16 +1615,10 @@ def main() -> int:
             append_log(log_path,
                        "fallback: raw trace parser (TraceLens outputs unavailable)")
             candidates = analyze_trace_files(trace_files, args.top_k)
-        roofline_by_name = load_roofline_results(args.roofline_json)
-        if roofline_by_name:
-            append_log(log_path, f"merged roofline results: {len(roofline_by_name)} kernels")
-        merge_roofline_into_candidates(candidates, roofline_by_name)
         artifacts.update(write_reports(run_dir, trace_input_type=trace_input_type,
                                        trace_files=trace_files, candidates=candidates,
                                        args=args,
                                        existing_report_path=agent_report_path))
-        if args.roofline_json:
-            artifacts["roofline_json"] = str(Path(args.roofline_json).expanduser())
         artifacts["cli_log_path"] = str(log_path)
         artifacts["status_path"] = str(status_path)
 
