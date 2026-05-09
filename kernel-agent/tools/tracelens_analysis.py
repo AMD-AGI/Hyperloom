@@ -25,6 +25,8 @@ from typing import Any
 
 from tracelens_skill_runner import (
     discover_capture_folder,
+    normalize_upstream_category,
+    parse_analysis_md,
     raw_candidates_from_priority_data,
     run_tracelens_skill,
 )
@@ -967,32 +969,20 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
     """Map a candidate to its GEAK-facing kernel category (#125).
 
     Priority:
-      1. Explicit category from TraceLens (csv ``Parent op category`` or
-         category_data ``category``)
-      2. Heuristic from kernel name (gemm / attn / norm / activation / …)
+      1. Explicit category from TraceLens (the ``analysis.md`` 9-column table
+         in the Detailed Analysis section, or the legacy
+         ``priority_data.findings[].category`` / category_data ``category``).
+         Mapped via the upstream ``CATEGORY_SKILL_MAP`` keyset
+         (``orchestrator_prepare.py``) — see PR #155 review comment from
+         @tsrikris (TraceLens team).
+      2. Heuristic from kernel name (gemm / attn / norm / activation / …) for
+         any candidate that pre-dates the orchestrator's category tagging
+         (e.g. raw-trace fallback path).
       3. ``unknown``
     """
     cat = (candidate.get("tracelens_category") or "").strip()
     if cat:
-        normalized = cat.lower().replace("-", "_").replace(" ", "_")
-        category_map = {
-            "gemm": "GEMM",
-            "sdpa": "SDPA",
-            "sdpa_fwd": "SDPA",
-            "sdpa_bwd": "SDPA",
-            "attention": "SDPA",
-            "norm": "LayerNorm",
-            "layernorm": "LayerNorm",
-            "rmsnorm": "LayerNorm",
-            "elementwise": "Elementwise",
-            "reduce": "Reduction",
-            "triton": "Triton",
-            "moe": "MoE",
-            "moe_fused": "MoE",
-            "moe_unfused": "MoE",
-            "other": "Other",
-        }
-        return category_map.get(normalized, cat)
+        return normalize_upstream_category(cat)
     name = str(candidate.get("name") or "").lower()
     if any(t in name for t in ("gemm", "matmul", "rocblas", "hipblas",
                                 "cijk", "sgemm", "hgemm")):
@@ -1556,9 +1546,36 @@ def main() -> int:
                     artifacts.update(skill_result.artifact_paths)
                     agent_report_path = skill_result.report_path
                     orchestrator_mode = "claude_agent_sdk"
-                    raw_agent_candidates = raw_candidates_from_priority_data(
-                        skill_result.priority_data_path, args.top_k,
+
+                    # Per PR #155 review (TraceLens team @tsrikris):
+                    # the final ``analysis.md`` report is the contracted exit
+                    # point; intermediate ``priority_data.json`` /
+                    # ``category_data/*.json`` are sub-agent inputs and should
+                    # not be the primary source. Try the report first; only if
+                    # the report has no Detailed Analysis blocks do we fall
+                    # back to ``priority_data.json`` (legacy path).
+                    raw_agent_candidates = []
+                    report_source = ""
+                    report_cands = parse_analysis_md(
+                        skill_result.report_path, args.top_k,
                     )
+                    if report_cands:
+                        raw_agent_candidates = report_cands
+                        report_source = "analysis.md"
+                    else:
+                        legacy_cands = raw_candidates_from_priority_data(
+                            skill_result.priority_data_path, args.top_k,
+                        )
+                        if legacy_cands:
+                            raw_agent_candidates = legacy_cands
+                            report_source = "priority_data.json"
+                            append_log(
+                                log_path,
+                                "TraceLens analysis.md had no Detailed "
+                                "Analysis blocks; falling back to "
+                                "priority_data.json",
+                            )
+
                     if raw_agent_candidates:
                         total_dur = sum(
                             float(c.get("duration_us") or 0)
@@ -1571,7 +1588,8 @@ def main() -> int:
                         append_log(
                             log_path,
                             f"TraceLens SDK orchestrator produced "
-                            f"{len(agent_candidates)} hot kernels",
+                            f"{len(agent_candidates)} hot kernels "
+                            f"(source={report_source})",
                         )
                     else:
                         orchestrator_mode = "claude_agent_sdk_with_inline_candidates"
@@ -1682,6 +1700,18 @@ def main() -> int:
         artifacts["cli_log_path"] = str(log_path)
         artifacts["status_path"] = str(status_path)
 
+        # Per PR #155 review (TraceLens team @tsrikris) the final ``analysis.md``
+        # is the contracted "exit interface" of the orchestrator. Surface its
+        # path explicitly so downstream consumers (GEAK, Coordinator) can read
+        # the report alongside the structured ``hot_kernels`` payload, and so
+        # that an incoming kernel-optimization sub-agent has the full
+        # stakeholder report to ground its actions on.
+        analysis_report_path = ""
+        for cand_key in ("tracelens_agent_report", "trace_report_path"):
+            if artifacts.get(cand_key):
+                analysis_report_path = str(artifacts[cand_key])
+                break
+
         result = {
             "tool": "tracelens_analysis",
             "session_id": session_id,
@@ -1689,6 +1719,7 @@ def main() -> int:
             "trace_input_type": trace_input_type,
             "hot_kernels": candidates,
             "trace_report_path": artifacts["trace_report_path"],
+            "analysis_report_path": analysis_report_path,
             "cli_log_path": str(log_path),
             "status_path": str(status_path),
             "artifact_paths": artifacts,
