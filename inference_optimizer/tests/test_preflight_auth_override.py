@@ -490,14 +490,22 @@ def test_unset_hip_visible_devices_keeps_hip_when_rocr_unset(monkeypatch):
 # _validate_and_resolve_claude_model — hard gate
 # ---------------------------------------------------------------------------
 def _make_args(**overrides) -> argparse.Namespace:
-    """Build a minimal Namespace for _validate_and_resolve_claude_model."""
+    """Build a minimal Namespace for _validate_and_resolve_claude_model.
+
+    Tests historically passed ``critic_mock=True/False`` here; that flag was
+    folded into ``critic_backend`` (one of ``mock`` / ``agent`` /
+    ``codex_bare``) when CriticAgentBackend landed. We translate
+    ``critic_mock`` into the new attribute for back-compat.
+    """
     base = dict(
         claude_model="claude-opus-4-7",
         codex_model="gpt-5.4",
-        critic_mock=True,
+        critic_backend="mock",
         kernel_codex=True,
         no_kernel=False,
     )
+    if "critic_mock" in overrides:
+        base["critic_backend"] = "mock" if overrides.pop("critic_mock") else "codex_bare"
     base.update(overrides)
     return argparse.Namespace(**base)
 
