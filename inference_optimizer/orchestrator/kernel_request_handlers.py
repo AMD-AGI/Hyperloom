@@ -370,6 +370,27 @@ async def select_kernels_handler(
     )
     Path(workspace_path).mkdir(parents=True, exist_ok=True)
 
+    # Backfill workload context from SharedState so downstream
+    # tracelens_analysis.py / TraceLens skill receive the correct
+    # framework / platform / model / analysis_mode instead of defaulting to
+    # "" / MI355X / "default" when Orchestration omits them in the payload.
+    from .shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    framework = (payload.get("framework") or state.framework or "").strip()
+    target_platform = (
+        payload.get("target_platform") or state.gpu_type or ""
+    ).strip()
+    model_name = (
+        payload.get("model_name")
+        or state.model_name
+        or state.model_path
+        or ""
+    ).strip()
+    analysis_mode = (payload.get("analysis_mode") or "").strip()
+    if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
+        analysis_mode = "inference"
+
     cmd = [
         "python3",
         str(HYPERLOOM_KERNEL_AGENT_ROOT / "tools" / "tracelens_analysis.py"),
@@ -378,12 +399,14 @@ async def select_kernels_handler(
         "--top-k", str(payload.get("top_k", 10)),
         "--workspace-path", workspace_path,
     ]
-    if payload.get("model_name"):
-        cmd += ["--model-name", str(payload["model_name"])]
-    if payload.get("framework"):
-        cmd += ["--framework", str(payload["framework"])]
-    if payload.get("target_platform"):
-        cmd += ["--target-platform", str(payload["target_platform"])]
+    if model_name:
+        cmd += ["--model-name", str(model_name)]
+    if framework:
+        cmd += ["--framework", str(framework)]
+    if target_platform:
+        cmd += ["--target-platform", str(target_platform)]
+    if analysis_mode:
+        cmd += ["--analysis-mode", str(analysis_mode)]
     capture_folder = (
         payload.get("capture_folder")
         or payload.get("graph_capture_path")
