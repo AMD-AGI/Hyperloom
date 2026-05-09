@@ -355,7 +355,14 @@ async def select_kernels_handler(
         {
           "status": "ok" | "failed",
           "hot_kernels": [...],
-          "trace_report_path": "...",
+          "trace_report_path": "...",        # tracelens_report.json (structured)
+          "analysis_report_path": "...",      # analysis.md from TraceLens v0.3
+                                              #   orchestrator (markdown final
+                                              #   stakeholder report — pass to
+                                              #   GEAK so it can ground its
+                                              #   actions on the same Detailed
+                                              #   Analysis prose Hyperloom
+                                              #   parsed for hot_kernels[]).
           "cli_log_path": "...",
           "details": {...},  # raw tool output
         }
@@ -423,6 +430,17 @@ async def select_kernels_handler(
     artifacts = result.get("artifact_paths") if isinstance(result, dict) else None
     if isinstance(artifacts, dict) and artifacts.get("kernel_candidates"):
         result["candidates_path"] = artifacts["kernel_candidates"]
+    # Surface analysis.md path at the handler boundary so the Coordinator can
+    # forward it to GEAK without having to dig through artifact_paths.
+    if isinstance(result, dict):
+        report_path = result.get("analysis_report_path")
+        if not report_path and isinstance(artifacts, dict):
+            report_path = (
+                artifacts.get("tracelens_agent_report")
+                or artifacts.get("trace_report_path")
+            )
+        if report_path:
+            result["analysis_report_path"] = str(report_path)
     return result
 
 
