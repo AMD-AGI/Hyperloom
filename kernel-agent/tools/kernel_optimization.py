@@ -377,6 +377,81 @@ def _geak_output_dir(session_id: str, prompt_file: Path) -> Path:
     return out
 
 
+def _set_yaml_tools_rag(text: str, enabled: bool) -> str:
+    """Return YAML text with tools.rag set without mutating the source config."""
+    value = "true" if enabled else "false"
+    lines = text.splitlines()
+    out: list[str] = []
+    in_tools = False
+    tools_indent = 0
+    saw_tools = False
+    wrote_rag = False
+
+    for line in lines:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        is_comment = line.lstrip().startswith("#")
+        if re.match(r"\s*tools\s*:\s*(?:#.*)?$", line) and not is_comment:
+            saw_tools = True
+            in_tools = True
+            tools_indent = indent
+            out.append(line)
+            continue
+        if in_tools:
+            if stripped and indent <= tools_indent and not is_comment:
+                if not wrote_rag:
+                    out.append(f"{' ' * (tools_indent + 2)}rag: {value}")
+                    wrote_rag = True
+                in_tools = False
+            elif re.match(r"\s*rag\s*:", line):
+                out.append(f"{' ' * indent}rag: {value}")
+                wrote_rag = True
+                continue
+        out.append(line)
+
+    if in_tools and not wrote_rag:
+        out.append(f"{' ' * (tools_indent + 2)}rag: {value}")
+    if not saw_tools:
+        if out and out[-1].strip():
+            out.append("")
+        out.extend(["tools:", f"  rag: {value}"])
+    return "\n".join(out) + "\n"
+
+
+def _geak_config_for_run(args: argparse.Namespace, prompt_file: Path) -> str:
+    """Create a per-run GEAK config only when runtime overrides need it."""
+    base_config = os.environ.get("GEAK_CONFIG", "")
+    if not getattr(args, "disable_rag", False):
+        return base_config
+    if not base_config or not Path(base_config).is_file():
+        return base_config
+    override = prompt_file.parent / f"{prompt_file.stem}.geak-config.yaml"
+    text = Path(base_config).read_text(encoding="utf-8", errors="replace")
+    override.write_text(_set_yaml_tools_rag(text, enabled=False), encoding="utf-8")
+    return str(override)
+
+
+def _apply_geak_env_overrides(args: argparse.Namespace, prompt_file: Path) -> dict[str, str | None]:
+    """Temporarily tune GEAK env for this attempt; caller must restore."""
+    keys = ("GEAK_CONFIG", "GEAK_USE_KNOWLEDGE_BASE", "GEAK_SAVE_TO_KNOWLEDGE_BASE")
+    previous = {key: os.environ.get(key) for key in keys}
+    config = _geak_config_for_run(args, prompt_file)
+    if config:
+        os.environ["GEAK_CONFIG"] = config
+    if getattr(args, "disable_xs_memory", False):
+        os.environ["GEAK_USE_KNOWLEDGE_BASE"] = "0"
+        os.environ["GEAK_SAVE_TO_KNOWLEDGE_BASE"] = "0"
+    return previous
+
+
+def _restore_env(previous: dict[str, str | None]) -> None:
+    for key, value in previous.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 def _oob_output_dir(session_id: str) -> Path:
     out = _kernel_agent_root() / "oob" / session_id
     out.mkdir(parents=True, exist_ok=True)
@@ -477,17 +552,21 @@ def invoke_backend(
                     ):
                         test_command = f"python {bf}"
                         break
-            result = geak.submit(
-                prompt_file=prompt_file,
-                output_dir=out_dir,
-                kernel_path=source_file,
-                cost_limit=args.geak_cost_limit,
-                timeout_s=timeout_s,
-                num_gpus=num_gpus,
-                prefer_ray=prefer_ray,
-                kernel_repo=kernel_repo,
-                test_command=test_command,
-            )
+            previous_env = _apply_geak_env_overrides(args, prompt_file)
+            try:
+                result = geak.submit(
+                    prompt_file=prompt_file,
+                    output_dir=out_dir,
+                    kernel_path=source_file,
+                    cost_limit=args.geak_cost_limit,
+                    timeout_s=timeout_s,
+                    num_gpus=num_gpus,
+                    prefer_ray=prefer_ray,
+                    kernel_repo=kernel_repo,
+                    test_command=test_command,
+                )
+            finally:
+                _restore_env(previous_env)
             result["stdout"] = result.get("stdout_tail", "")
             result["output_dir"] = str(out_dir)
             # Surface GEAK partial outputs (final_report.json / results dir)
@@ -1205,6 +1284,10 @@ def main() -> int:
     parser.add_argument("--accuracy-passed", choices=["true", "false", "unknown"], default="unknown")
     parser.add_argument("--oob-max-turns", type=int, default=int(os.environ.get("KERNEL_AGENT_OOB_MAX_TURNS", "100")))
     parser.add_argument("--geak-cost-limit", type=float, default=None)
+    parser.add_argument("--disable-rag", action="store_true",
+                        help="Run GEAK with tools.rag disabled for this request.")
+    parser.add_argument("--disable-xs-memory", action="store_true",
+                        help="Disable GEAK cross-session memory retrieval/write-back for this request.")
     parser.add_argument("--num-gpus", type=int,
                         default=int(os.environ.get("KERNEL_AGENT_NUM_GPUS", "0")),
                         help="Per-task GPU reservation; 0 means follow the "
@@ -1236,6 +1319,8 @@ def main() -> int:
                 "skipping backend dispatch (no fabricated source allowed)"
             )
         selected_backends, backend_notes = choose_backends(args, candidate)
+        backend_notes["rag_enabled"] = not args.disable_rag
+        backend_notes["xs_memory_enabled"] = not args.disable_xs_memory
         benchmark_available = bool(backend_notes["benchmark_available"])
         append_log(log_path, f"kernel_id={args.kernel_id}")
         append_log(log_path, f"resolved_source={resolved_source or 'NONE'}")
@@ -1275,6 +1360,8 @@ def main() -> int:
             "selected_backends": selected_backends,
             "backend_selection": backend_notes,
             "attempts": attempts,
+            "rag_hits": [],
+            "xs_memory_hits": [],
             "verification": verification,
             "proposal": proposal,
             "cli_log_path": str(log_path),
