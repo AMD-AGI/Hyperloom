@@ -57,6 +57,14 @@ class SharedState:
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
+    # Path to the YAML the baseline executor materialized with the operator's
+    # workload envs (CONC/ISL/OSL/TP/MAX_MODEL_LEN/PRECISION/RUN_EVAL/...).
+    # Coordinator injects this into params/backends/sweep tasks as
+    # ``task.params["config_path"]`` so downstream variants inherit the same
+    # workload contract baseline ran. Empty before the first baseline result;
+    # downstream executors fall back to materializing the shipped YAML
+    # against current process env when this is empty.
+    baseline_config_path: str = ""
     current_best: dict[str, Any] = field(default_factory=dict)
     # Full accepted configuration stack across action families. Each entry
     # records the incremental candidate that was accepted; current_best keeps

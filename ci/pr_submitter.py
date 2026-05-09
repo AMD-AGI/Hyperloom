@@ -423,11 +423,12 @@ def clone_fork(fork_url: str, target_dir: str, branch: str = "main"):
 
 def sync_fork_from_upstream(repo_dir: str, upstream_url: str,
                             branch: str, token: str | None) -> None:
-    """Align fork's branch with upstream by rebasing fork-only commits on top.
+    """Merge upstream into the fork branch before creating a PR branch.
 
-    Conflicts (upstream and fork both touched the same file) raise and abort
-    the PR flow, since fork is intended as a passive mirror plus minimal infra.
-    Requires full history (no --depth=1) for rebase to work.
+    The fork keeps verify-pr/sync workflow files that upstream does not have.
+    Rebase is fragile with fork-only merge commits, while reset would make the
+    later PR appear to delete fork-only files. Merge preserves those files and
+    keeps the fork base current.
     """
     _run_git(["remote", "add", "upstream", upstream_url], repo_dir, check=False)
     _run_git(["fetch", "upstream", branch], repo_dir)
@@ -440,8 +441,8 @@ def sync_fork_from_upstream(repo_dir: str, upstream_url: str,
         log.info("Fork %s is already up-to-date with upstream", branch)
         return
 
-    log.info("Fork %s is %s commit(s) behind upstream, rebasing", branch, behind)
-    _run_git(["rebase", f"upstream/{branch}"], repo_dir)
+    log.info("Fork %s is %s commit(s) behind upstream, merging", branch, behind)
+    _run_git(["merge", f"upstream/{branch}", "--no-edit"], repo_dir)
 
     push_url = None
     if token:
@@ -453,11 +454,11 @@ def sync_fork_from_upstream(repo_dir: str, upstream_url: str,
             repo_path = url.replace("git@github.com:", "")
             push_url = f"https://x-access-token:{token}@github.com/{repo_path}"
 
-    push_args = ["push", "--force-with-lease"]
+    push_args = ["push"]
     push_args.append(push_url if push_url else "origin")
     push_args.append(branch)
     _run_git(push_args, repo_dir)
-    log.info("Synced fork %s with upstream (rebase + force-with-lease)", branch)
+    log.info("Synced fork %s with upstream (merge)", branch)
 
 
 def create_pr_branch(repo_dir: str, branch_name: str):
@@ -763,7 +764,7 @@ def submit_pr(
         append_perf_changelog(changelog_path, config_keys, descriptions)
         any_changed = True
 
-        commit_msg = f"[AMD] {pr_title}\n\n" + "\n".join(f"- {d}" for d in descriptions)
+        commit_msg = f"{pr_title}\n\n" + "\n".join(f"- {d}" for d in descriptions)
         if not commit_and_push(tmpdir, branch_name, commit_msg, token):
             log.info("Nothing to push")
             return

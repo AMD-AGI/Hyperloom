@@ -41,11 +41,12 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from ...paths import asset_root
 from ..sub_agent_runner import RunnerContext
-from ._grid_runner import server_args_env_name
+from ._workload_envs import (
+    default_baseline_config,
+    materialize_config_with_envs,
+)
 
 
 log = logging.getLogger(__name__)
@@ -53,100 +54,97 @@ log = logging.getLogger(__name__)
 
 # Legacy module-level constant kept pointing at the sglang yaml so existing
 # tests that import it as a fixture path continue to work. Runtime selection
-# of sglang vs vllm yaml goes through `_default_baseline_config()` below.
+# of sglang vs vllm yaml goes through `default_baseline_config()` (re-exported
+# below as the legacy `_default_baseline_config` alias).
 BASELINE_DEFAULT_CONFIG = (
     asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
 )
-BASELINE_DEFAULT_TIMEOUT_SEC = 1200
+BASELINE_DEFAULT_TIMEOUT_SEC = 1500           # WARM-start cap (aiter jit cache populated)
+BASELINE_COLD_START_TIMEOUT_SEC = 3600        # COLD-start cap (aiter jit cache empty/sparse)
+COLD_START_KERNEL_THRESHOLD = 20              # < N .so files under aiter jit/build/ ⇒ COLD
+
+# Probe order for aiter's JIT cache root. First path that exists wins.
+# Override via env `INFERENCE_OPTIMIZER_AITER_JIT_DIR=/abs/path` (single path,
+# tried before this list).
+AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
+    "/sgl-workspace/aiter/aiter/jit/build",
+    "/usr/local/lib/python3.10/site-packages/aiter/jit/build",
+    "/usr/local/lib/python3.12/dist-packages/aiter/jit/build",
+    "/usr/local/lib/python3.12/site-packages/aiter/jit/build",
+    "/opt/venv/lib/python3.10/site-packages/aiter/jit/build",
+    "/opt/venv/lib/python3.12/site-packages/aiter/jit/build",
+)
 
 
-def _default_baseline_config() -> Path:
-    """Resolve default Magpie YAML based on $FRAMEWORK env (sglang/vllm)."""
-    fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    name = "baseline_vllm.yaml" if fw == "vllm" else "baseline_sglang.yaml"
-    return asset_root() / "scripts" / "configs" / name
+# Backward-compat aliases — the canonical names live in `_workload_envs`.
+# Tests, sweep.py / params.py / backends.py used to import these from here;
+# keeping the underscore-prefixed names re-exported avoids a churny rename.
+_default_baseline_config = default_baseline_config
+_materialize_config_with_envs = materialize_config_with_envs
 
 
-def _materialize_config_with_envs(
-    config_path: Path,
-    output_dir: Path,
-    *,
-    extra_sglang_args: str = "",
-    extra_server_args: str = "",
-    extra_envs: dict[str, Any] | None = None,
-    model_path: str | None = None,
-    gpu_type: str | None = None,
-) -> Path:
-    """Render a per-run Magpie YAML with caller-provided overrides.
+def _probe_aiter_jit_cache() -> dict[str, Any]:
+    """Inspect aiter's JIT cache root to decide cold vs warm start.
 
-    ``model_path`` (when non-empty) overrides the YAML's ``benchmark.model``
-    field. This is the single most important override: every shipped config
-    under ``scripts/configs/`` has a hardcoded model path (legacy default:
-    Qwen-Qwen3-8B) that would otherwise silently win over the user's
-    ``--model`` / ``MODEL_PATH`` selection. Always pass ``model_path`` from
-    the CLI / SharedState.
+    Pure read-only filesystem probe — no subprocess, no GPU touch. The
+    first path under `AITER_JIT_PROBE_PATHS` (or `$INFERENCE_OPTIMIZER_AITER_JIT_DIR`
+    if set) that exists wins; we count `.so` files recursively and sum
+    their byte sizes. Any IO error degrades to ``probe_status="error"``
+    so callers (and unit tests on hosts with no aiter install) fall back
+    to the default WARM timeout instead of crashing.
 
-    ``gpu_type`` (e.g. ``mi300x`` / ``mi355x``) injects ``benchmark.runner_type``
-    so Magpie picks the matching ``{framework}_{gpu_type}.sh`` benchmark
-    script. We also ``pop`` any explicit ``benchmark.benchmark_script``
-    field, otherwise Magpie's priority-1 user-specified path would win
-    over runner_type and lock the run to the wrong GPU's script.
+    Returns a dict with keys:
+        path           Path that was probed, or None if nothing found.
+        kernel_count   Number of `.so` files under `path` (recursive).
+        size_mb        Total size of those `.so` files, in MiB (int).
+        is_cold        True iff kernel_count < COLD_START_KERNEL_THRESHOLD;
+                       None when probe failed.
+        probe_status   "found" | "not_found" | "error".
     """
-    server_args = (extra_server_args or extra_sglang_args).strip()
-    # Always materialize: ISL/OSL/MAX_MODEL_LEN/PRECISION from env should
-    # override the yaml defaults even when no other explicit overrides are
-    # passed. The short-circuit "return config_path" path led to the yaml's
-    # hardcoded ISL=256/OSL=256 winning over the user's --isl/--osl.
-    with config_path.open(encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
-    bench = cfg.setdefault("benchmark", {})
-    if model_path:
-        bench["model"] = str(model_path)
-    # Precision override from CLI/env.
-    precision = os.environ.get("PRECISION", "").strip()
-    if precision:
-        bench["precision"] = precision
-    if gpu_type:
-        bench["runner_type"] = str(gpu_type)
-        bench.pop("benchmark_script", None)
-    envs = bench.setdefault("envs", {})
-    # Inject ISL/OSL/MAX_MODEL_LEN from env (CLI computed ISL+OSL+4096).
-    for env_key in ("ISL", "OSL", "MAX_MODEL_LEN"):
-        val = os.environ.get(env_key, "").strip()
-        if val:
-            envs[env_key] = int(val)
-    # Always run accuracy eval (GSM8K) as part of the benchmark.
-    # Magpie's benchmark scripts check RUN_EVAL=true and call run_eval
-    # while the server is still alive, avoiding an extra server restart.
-    envs.setdefault("RUN_EVAL", "true")
+    info: dict[str, Any] = {
+        "path": None,
+        "kernel_count": 0,
+        "size_mb": 0,
+        "is_cold": None,
+        "probe_status": "not_found",
+    }
+    candidates: list[str] = []
+    override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
+    if override:
+        candidates.append(override)
+    candidates.extend(AITER_JIT_PROBE_PATHS)
 
-    # Adaptive NUM_PROMPTS / NUM_WARMUPS based on sequence length.
-    # Goal: keep each benchmark variant under ~3-5 min wall time.
-    # Priority: env (CLI-exported) > yaml envs (may be yaml defaults like CONC=8).
-    isl_val = int(os.environ.get("ISL") or envs.get("ISL") or 256)
-    osl_val = int(os.environ.get("OSL") or envs.get("OSL") or 256)
-    conc_val = int(os.environ.get("CONC") or envs.get("CONC") or 8)
-    seq_cost = isl_val + osl_val
-    if seq_cost <= 1024:
-        factor = 10
-    elif seq_cost <= 4096:
-        factor = 5
-    elif seq_cost <= 16384:
-        factor = 3
-    else:
-        factor = 2
-    if "NUM_PROMPTS" not in envs:
-        envs["NUM_PROMPTS"] = max(conc_val * factor, conc_val)
-    if "NUM_WARMUPS" not in envs:
-        envs["NUM_WARMUPS"] = min(conc_val, 8)
-    if server_args:
-        envs[server_args_env_name(bench.get("framework"))] = server_args
-    for key, value in (extra_envs or {}).items():
-        envs[str(key)] = str(value)
-    materialized = output_dir / "baseline_config.with_envs.yaml"
-    with materialized.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False)
-    return materialized
+    try:
+        chosen: Path | None = None
+        for raw in candidates:
+            p = Path(raw)
+            if p.exists() and p.is_dir():
+                chosen = p
+                break
+        if chosen is None:
+            return info
+        info["path"] = str(chosen)
+
+        total_bytes = 0
+        kernel_count = 0
+        for so_path in chosen.rglob("*.so"):
+            try:
+                total_bytes += so_path.stat().st_size
+                kernel_count += 1
+            except OSError:
+                continue
+        info["kernel_count"] = kernel_count
+        info["size_mb"] = total_bytes // (1024 * 1024)
+        info["is_cold"] = kernel_count < COLD_START_KERNEL_THRESHOLD
+        info["probe_status"] = "found"
+        return info
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "baseline_executor: aiter jit cache probe failed: %s", exc,
+        )
+        info["probe_status"] = "error"
+        info["is_cold"] = None
+        return info
 
 
 class BaselineExecutor:
@@ -178,6 +176,62 @@ class BaselineExecutor:
         """Hook for subclasses (ProfileExecutor) to swap the resolver."""
         return _default_baseline_config()
 
+    def _resolve_timeout(self, params: dict[str, Any]) -> int:
+        """Pick the subprocess timeout for this baseline launch.
+
+        Decision order:
+        1. ``task.params['timeout_sec']`` — explicit caller wins, no probe.
+        2. Probe ``aiter/jit/build/`` — if found AND
+           ``kernel_count < COLD_START_KERNEL_THRESHOLD``, return the
+           cold-start cap (env-overridable via
+           ``INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC``).
+        3. Otherwise fall back to ``self.default_timeout_sec`` (warm cap).
+
+        Every path emits exactly one log line so the chosen timeout +
+        rationale is greppable in ``optimizer_runs/run_*.log``.
+        """
+        explicit = params.get("timeout_sec")
+        if explicit:
+            timeout_sec = int(explicit)
+            log.info(
+                "baseline_executor: timeout=%ds (explicit task param)",
+                timeout_sec,
+            )
+            return timeout_sec
+
+        cache = _probe_aiter_jit_cache()
+        cold_cap = int(os.environ.get(
+            "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC",
+            BASELINE_COLD_START_TIMEOUT_SEC,
+        ))
+        if cache["probe_status"] == "found" and cache["is_cold"]:
+            log.warning(
+                "baseline_executor: COLD_START detected — aiter jit/build/ "
+                "at %s has %d .so (< %d threshold), %d MB. Bumping timeout "
+                "%ds -> %ds. First-time JIT compile on a new "
+                "(model, dtype, TP, max_model_len) signature can take 30+ "
+                "minutes for large FP8 / MoE models.",
+                cache["path"], cache["kernel_count"],
+                COLD_START_KERNEL_THRESHOLD, cache["size_mb"],
+                self.default_timeout_sec, cold_cap,
+            )
+            return cold_cap
+        if cache["probe_status"] == "found":
+            log.info(
+                "baseline_executor: WARM start — aiter jit/build/ at %s "
+                "has %d .so, %d MB. Using default timeout=%ds.",
+                cache["path"], cache["kernel_count"], cache["size_mb"],
+                self.default_timeout_sec,
+            )
+            return self.default_timeout_sec
+        log.warning(
+            "baseline_executor: aiter jit cache not located "
+            "(probe_status=%s). Using default timeout=%ds. Cold-start "
+            "auto-bump disabled for this run.",
+            cache["probe_status"], self.default_timeout_sec,
+        )
+        return self.default_timeout_sec
+
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         params = ctx.task.params or {}
         config_path = Path(
@@ -194,7 +248,7 @@ class BaselineExecutor:
         )
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        timeout_sec = int(params.get("timeout_sec") or self.default_timeout_sec)
+        timeout_sec = self._resolve_timeout(params)
         # Resolve model path: task.params['model_path'] (Coordinator-supplied) >
         # $MODEL_PATH (CLI re-exported). If neither, leave the YAML's hardcoded
         # `model:` alone so unit tests with explicit fixture paths still work.
@@ -208,7 +262,7 @@ class BaselineExecutor:
             str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower()
         )
-        config_path = _materialize_config_with_envs(
+        config_path = materialize_config_with_envs(
             config_path,
             output_dir,
             extra_sglang_args=str(params.get("extra_sglang_args") or ""),
@@ -221,6 +275,9 @@ class BaselineExecutor:
             model_path=resolved_model,
             gpu_type=resolved_gpu,
         )
+        # Stash for the result so Coordinator can plumb it forward to
+        # downstream params/backends/sweep tasks (workload-contract reuse).
+        materialized_config_path = config_path
 
         cmd = [
             self.magpie_python, "-m", "Magpie", "-v", "benchmark",
@@ -306,6 +363,14 @@ class BaselineExecutor:
             "e2el_p99_ms": e2el.get("p99_ms"),
             "report_path": str(report_path),
             "workspace": str(workspace),
+            # Path to the materialized YAML used for THIS baseline. Coordinator
+            # promotes this into SharedState.baseline_config_path so subsequent
+            # params/backends/sweep tasks reuse it as their `config_path` —
+            # without this, `_grid_runner._build_variant_yaml` would render
+            # variants from the shipped YAML's smoke defaults (CONC=8/ISL=256/
+            # OSL=256/TP=1) and produce ~10x lower throughput than baseline.
+            # See `_workload_envs.py` for the bug history.
+            "materialized_config": str(materialized_config_path),
         }
 
         # Parse accuracy eval results (GSM8K). RUN_EVAL=true was injected
@@ -337,8 +402,11 @@ baseline_executor = BaselineExecutor()
 
 
 __all__ = [
+    "AITER_JIT_PROBE_PATHS",
+    "BASELINE_COLD_START_TIMEOUT_SEC",
     "BASELINE_DEFAULT_CONFIG",
     "BASELINE_DEFAULT_TIMEOUT_SEC",
     "BaselineExecutor",
+    "COLD_START_KERNEL_THRESHOLD",
     "baseline_executor",
 ]
