@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TRACE_TOOL = ROOT / "tools" / "tracelens_analysis.py"
 OPT_TOOL = ROOT / "tools" / "kernel_optimization.py"
 INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
+RAY_RUNTIME = ROOT / "tools" / "backends" / "ray_runtime.py"
 
 
 def run_json(cmd: list[str], *, workspace: Path) -> dict:
@@ -116,10 +117,22 @@ class KernelAgentToolTests(unittest.TestCase):
         install_text = INSTALL_SCRIPT.read_text(encoding="utf-8")
         trace_tool_text = TRACE_TOOL.read_text(encoding="utf-8")
         skill_text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        ray_runtime_text = RAY_RUNTIME.read_text(encoding="utf-8")
 
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"', install_text)
+        self.assertIn('GEAK_REF="${GEAK_REF:-v3.1.0}"', install_text)
+        self.assertIn('python3 -m pip install -q --no-cache-dir -e "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"', install_text)
+        self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cuda}"', install_text)
+        self.assertIn("python3 scripts/build_index.py --force --device", install_text)
+        self.assertIn("GEAK_RAG_INDEX_DEVICE=cuda", skill_text)
+        self.assertIn("tools:", install_text)
+        self.assertIn("  rag: true", install_text)
+        self.assertIn("GEAK_MEMORY_STORE_PATH", install_text)
+        self.assertNotIn("GEAK_MEMORY_KB_PATH", install_text)
         self.assertIn('"click<8.3.0" "ray[default]==2.44.1"', install_text)
         self.assertIn('chmod 600 "$env_file"', install_text)
+        self.assertIn("GEAK_MEMORY_STORE_PATH", ray_runtime_text)
+        self.assertIn("GEAK_SAVE_TO_KNOWLEDGE_BASE", ray_runtime_text)
         self.assertIn('DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"', trace_tool_text)
         self.assertNotIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens-internal}"', install_text)
         self.assertNotIn("Executor asks", skill_text)
@@ -227,11 +240,17 @@ class KernelAgentToolTests(unittest.TestCase):
                 "--kernel-id", "k001",
                 "--session-id", "s4",
                 "--backends", "geak",
+                "--disable-rag",
+                "--disable-xs-memory",
                 "--dry-run",
             ], workspace=workspace)
 
             self.assertEqual(result["selected_backends"], ["geak"])
             self.assertTrue(result["backend_selection"]["geak_without_benchmark"])
+            self.assertFalse(result["backend_selection"]["rag_enabled"])
+            self.assertFalse(result["backend_selection"]["xs_memory_enabled"])
+            self.assertEqual(result["rag_hits"], [])
+            self.assertEqual(result["xs_memory_hits"], [])
 
     def test_keep_requires_benchmark_e2e_and_accuracy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -264,6 +283,8 @@ class KernelAgentToolTests(unittest.TestCase):
 
             self.assertIn("geak", result["selected_backends"])
             self.assertEqual(result["proposal"]["decision"], "KEEP")
+            self.assertIn("rag_hits", result)
+            self.assertIn("xs_memory_hits", result)
 
     def test_missing_trace_input_fails_with_status_and_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
