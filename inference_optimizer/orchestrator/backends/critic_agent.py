@@ -265,8 +265,13 @@ class CriticAgentBackend:
     name: str = "critic-agent"
 
     # Runtime state — populated in __post_init__ and mutated turn-over-turn.
+    # NOTE: ``_runtime_caller`` is intentionally NOT declared as a dataclass
+    # field with ``default=_default_runtime_caller``. Module-level functions
+    # used as class attributes go through Python's descriptor protocol on
+    # instance access and get bound as methods (passing ``self`` as the first
+    # arg). We assign on the instance in ``__post_init__`` instead, so it
+    # stays a plain ``Callable``.
     _client: Any = field(default=None, init=False, repr=False)
-    _runtime_caller: RuntimeCaller = field(default=_default_runtime_caller, init=False, repr=False)
     _turn_idx: int = field(default=0, init=False, repr=False)
     _skill_preamble: str | None = field(default=None, init=False, repr=False)
     calls: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
@@ -287,8 +292,16 @@ class CriticAgentBackend:
             )
 
         if self.runtime_caller_factory is not None:
-            self._runtime_caller = self.runtime_caller_factory()
-        # else: keep the module-level default (real subprocess).
+            # Assign on the instance directly so the callable doesn't go
+            # through the descriptor protocol (which would bind it as a
+            # method).
+            object.__setattr__(
+                self, "_runtime_caller", self.runtime_caller_factory(),
+            )
+        else:
+            object.__setattr__(
+                self, "_runtime_caller", _default_runtime_caller,
+            )
 
         if self.codex_client_factory is not None:
             self._client = self.codex_client_factory()
