@@ -234,8 +234,10 @@ class SweepExecutor:
             ):
                 best_for_each_conc[e["conc"]] = e
 
+        successful_entries = [e for e in entries if e.get("status") == "succeeded"]
+
         return {
-            "status": "succeeded" if entries else "failed",
+            "status": "succeeded" if successful_entries else "failed",
             "grid_size": len(entries),
             "sweep_grid": entries,
             "pareto_front": front,
