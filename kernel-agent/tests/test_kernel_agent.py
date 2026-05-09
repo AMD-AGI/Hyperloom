@@ -136,6 +136,22 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"', trace_tool_text)
         self.assertNotIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens-internal}"', install_text)
         self.assertNotIn("Executor asks", skill_text)
+        # Read-only TRACELENS_ROOT must trigger a writable mirror under
+        # ${HYPERLOOM_ROOT}/TraceLens-internal (parallel to GEAK / OOB),
+        # and write_env_file() must export the resolved TRACELENS_ROOT so
+        # CLI subprocesses inherit the mirror instead of falling back to
+        # the read-only /wekafs default. Regression guard for the
+        # tracelens-oob-mirror change.
+        self.assertIn(
+            'TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"',
+            install_text,
+        )
+        self.assertIn('cp -r "$TRACELENS_ROOT" "$TRACELENS_MIRROR_DIR"', install_text)
+        self.assertIn('export TRACELENS_ROOT', install_text)
+        self.assertIn(
+            "echo \"export TRACELENS_ROOT='${TRACELENS_ROOT}'\"",
+            install_text,
+        )
 
     def test_trace_file_analysis_writes_report_logs_and_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
