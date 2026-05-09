@@ -173,6 +173,102 @@ def test_materialize_config_pops_legacy_benchmark_script(tmp_path):
 
 
 # ===========================================================================
+# Regression: TP / CONC env override yaml hardcode (DSR1-0528 verification
+# was deadlooping because TP=8 env was silently ignored, vllm ran with
+# yaml-hardcoded TP=1 and OOM-ed retry forever).
+# ===========================================================================
+def test_materialize_config_tp_env_overrides_yaml_hardcode(tmp_path, monkeypatch):
+    """TP env var must override yaml hardcode (was 1, becomes 8)."""
+    import yaml
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    assert envs["TP"] == 8, f"TP not overridden: {envs.get('TP')}"
+
+
+def test_materialize_config_conc_env_overrides_yaml_hardcode(tmp_path, monkeypatch):
+    """CONC env var must override yaml hardcode."""
+    import yaml
+    monkeypatch.setenv("CONC", "64")
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    assert envs["CONC"] == 64, f"CONC not overridden: {envs.get('CONC')}"
+
+
+def test_materialize_config_rocr_visible_devices_auto_expands_when_tp_overridden(
+    tmp_path, monkeypatch,
+):
+    """When TP=8 is set via env but ROCR_VISIBLE_DEVICES isn't explicit,
+    expand the GPU list to 0..TP-1 so vllm/sglang sees enough devices."""
+    import yaml
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    assert envs["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7", (
+        f"ROCR_VISIBLE_DEVICES not auto-expanded: {envs.get('ROCR_VISIBLE_DEVICES')}"
+    )
+
+
+def test_materialize_config_rocr_visible_devices_explicit_env_wins_when_enough(
+    tmp_path, monkeypatch,
+):
+    """Explicit ROCR_VISIBLE_DEVICES wins when it has at least TP devices."""
+    import yaml
+    monkeypatch.setenv("TP", "4")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    assert envs["ROCR_VISIBLE_DEVICES"] == "4,5,6,7"
+
+
+def test_materialize_config_rocr_visible_devices_expands_when_under_tp(
+    tmp_path, monkeypatch,
+):
+    """If explicit ROCR_VISIBLE_DEVICES has fewer devices than TP requires,
+    `_workload_envs` auto-expands to 0..TP-1 and logs a warning, so SGLang
+    actually sees enough GPUs to start."""
+    import yaml
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    assert envs["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
+
+
+def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
+    """When TP=1 (default), don't auto-touch ROCR_VISIBLE_DEVICES."""
+    import yaml
+    src_yaml = tmp_path / "src.yaml"
+    src_yaml.write_text(yaml.safe_dump({
+        "benchmark": {
+            "framework": "sglang",
+            "model": "/m",
+            "envs": {
+                "TP": 1,
+                "CONC": 8,
+                "ISL": 256,
+                "OSL": 256,
+                "ROCR_VISIBLE_DEVICES": "1",
+            },
+        },
+    }))
+    for k in ("TP", "ROCR_VISIBLE_DEVICES"):
+        monkeypatch.delenv(k, raising=False)
+    out = _materialize_config_with_envs(src_yaml, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    # yaml default is "1" — should be preserved as-is when TP not overridden upward
+    assert envs.get("ROCR_VISIBLE_DEVICES") == "1"
+
+
+# ===========================================================================
 # Regression: $FRAMEWORK env switches the default yaml between sglang/vllm
 # without anyone passing config_path explicitly. Locks down the entry-layer
 # fix for vLLM support — the optimizer used to be sglang-only because all 5
@@ -374,7 +470,10 @@ async def test_select_kernels_handler_dry_run_returns_structured_result(session_
 
 @pytest.mark.asyncio
 async def test_select_kernels_handler_surfaces_candidates_path(session_dir, monkeypatch):
+    captured: dict = {}
+
     async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
         payload = {
             "status": "ok",
             "hot_kernels": [],
@@ -386,10 +485,111 @@ async def test_select_kernels_handler_surfaces_candidates_path(session_dir, monk
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
     res = await krh.select_kernels_handler(
-        {"trace_input": str(session_dir), "dry_run": True},
+        {
+            "trace_input": str(session_dir),
+            "dry_run": True,
+            "capture_folder": "/tmp/capture_traces",
+        },
         session_dir=session_dir,
     )
     assert res["candidates_path"] == "/tmp/kernel_candidates.json"
+    assert "--capture-folder" in captured["cmd"]
+    assert "/tmp/capture_traces" in captured["cmd"]
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_backfills_workload_context_from_state(
+    session_dir, monkeypatch,
+):
+    """When the payload omits framework/gpu_type/model, the handler must
+    fall back to SharedState so tracelens_analysis.py receives the real
+    workload context (vllm/MI300X/Qwen3-30B-A3B/inference) instead of
+    the script defaults (""/MI355X/default)."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.framework = "vllm"
+    state.gpu_type = "mi300x"
+    state.model_path = "/wekafs/models/Qwen3-30B-A3B"
+    state.model_name = "Qwen3-30B-A3B"
+    state.save(session_dir)
+
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok"}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert "--framework" in cmd and "vllm" in cmd
+    assert "--target-platform" in cmd and "mi300x" in cmd
+    assert "--model-name" in cmd and "Qwen3-30B-A3B" in cmd
+    assert "--analysis-mode" in cmd and "inference" in cmd
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_surfaces_analysis_report_path(
+    session_dir, monkeypatch,
+):
+    """The handler must forward the TraceLens v0.3 ``analysis.md`` path so
+    GEAK / Coordinator can ground their actions on the same final stakeholder
+    report Hyperloom parsed for ``hot_kernels`` (PR #155 review, scheme C)."""
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        # Mimic both the explicit field set by tracelens_analysis.py and the
+        # backwards-compatible nested location, so a partial-rollout SDK still
+        # surfaces the path through the handler.
+        payload = {
+            "status": "ok",
+            "hot_kernels": [],
+            "analysis_report_path": "/tmp/runs/abc/tracelens/analysis.md",
+            "artifact_paths": {
+                "tracelens_agent_report": "/tmp/runs/abc/tracelens/analysis.md",
+                "kernel_candidates": "/tmp/runs/abc/kernel_candidates.json",
+            },
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["analysis_report_path"] == "/tmp/runs/abc/tracelens/analysis.md"
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_falls_back_to_artifact_paths_for_report(
+    session_dir, monkeypatch,
+):
+    """If the underlying tool only surfaces analysis.md inside artifact_paths
+    (e.g. an older tracelens_analysis.py build that wasn't updated yet), the
+    handler must still hoist it to the top-level ``analysis_report_path`` for
+    Coordinator/GEAK consumers."""
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "ok",
+            "hot_kernels": [],
+            "artifact_paths": {
+                "tracelens_agent_report": "/tmp/legacy/tracelens/analysis.md",
+            },
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["analysis_report_path"] == "/tmp/legacy/tracelens/analysis.md"
 
 
 @pytest.mark.asyncio
