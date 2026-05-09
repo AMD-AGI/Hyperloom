@@ -190,10 +190,30 @@ found", re-run `install.sh` instead of cloning the open-source TraceLens
 repo from chat — the open-source clone does NOT contain the standalone
 skills required by `tools/tracelens_analysis.py`.
 
+If `install.sh` did not finish or the CLI is unexpectedly missing, run a
+manual editable install + smoke test before analysis:
+
+```bash
+export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+cd "$TRACELENS_ROOT"
+pip install -e .
+# TraceLens #124: prefer the `_inference` perf-report CLI for vLLM/SGLang
+# traces (correct execution mode = graph-replay). The legacy
+# `TraceLens_generate_perf_report_pytorch` is acceptable on older builds.
+TraceLens_generate_perf_report_pytorch_inference --help \
+  || TraceLens_generate_perf_report_pytorch --help
+```
+
+If neither CLI is on PATH, stop and fix installation before analysis. Do not
+fall back to the open-source TraceLens clone when the internal mount exists;
+the internal mount contains the standalone skills expected by this tool.
+`tools/tracelens_analysis.py` picks the right CLI at runtime (preferring
+`_inference`, falling back to the legacy name) — see `select_perf_report_cli`.
+
 When running TraceLens analysis, read this skill file and strictly follow
 its order:
 
-`/wekafs/hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md`
+`/wekafs/hyperloom/TraceLens-internal/TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md`
 
 Step 6 and Step 7 categories must run in independent Task subagents. Each
 subagent must write findings under `system_findings/` or `category_findings/`.
