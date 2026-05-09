@@ -255,6 +255,33 @@ class DecisionReviewer:
             bundle.kb_read_skipped_reason = "kb_draft_does_not_need_priors"
             return bundle
 
+        # KB reads disabled wholesale (operator switch) → reflect in bundle.
+        if not self.kb_writer.read_enabled:
+            bundle.kb_read_skipped_reason = "kb_read_disabled"
+            bundle.notes.append("KB_READ_ENABLED=false — proceeding without priors")
+            self.session_memory.append_event(req.session_id, {
+                "kind": "prepare_review",
+                "kb_skipped": True,
+                "reason": "kb_read_disabled",
+            })
+            return bundle
+
+        # Breaker already open from an earlier failure → short-circuit
+        # before paying another timeout for this request.
+        if self.kb_writer.is_kb_unreachable():
+            bundle.kb_read_skipped_reason = "kb_unreachable"
+            bundle.notes.append(
+                "KB service unreachable (circuit breaker open); proceeding without priors"
+            )
+            bundle.review_constraints["kb_breaker"] = self.kb_writer.kb_breaker_state()
+            self.session_memory.append_event(req.session_id, {
+                "kind": "prepare_review",
+                "kb_skipped": True,
+                "reason": "kb_unreachable",
+                "breaker": self.kb_writer.kb_breaker_state(),
+            })
+            return bundle
+
         scope = build_scope(req.context, session_context=merge.merged, require_critical=False)
         # Hide unknown values when listing priors so the service doesn't filter
         # to literal "unknown" rows.
@@ -262,6 +289,7 @@ class DecisionReviewer:
 
         topic_hits: dict[str, list[dict[str, Any]]] = {}
         ctx = WriteContext(session_id=req.session_id, review_id=req.decision_id)
+        any_kb_unreachable = False
         if req.proposals:
             for p in req.proposals:
                 topic = self._topic_for_proposal(p)
@@ -274,6 +302,8 @@ class DecisionReviewer:
                     ctx=ctx,
                 )
                 topic_hits[p.msg_id] = priors.get("priors") or []
+                if priors.get("cache") == "kb_unreachable":
+                    any_kb_unreachable = True
                 self.session_memory.append_event(req.session_id, {
                     "kind": "kb_prior_lookup",
                     "msg_id": p.msg_id,
@@ -293,12 +323,21 @@ class DecisionReviewer:
                 ctx=ctx,
             )
             bundle.kb_priors_for_decision = priors.get("priors") or []
+            if priors.get("cache") == "kb_unreachable":
+                any_kb_unreachable = True
             self.session_memory.append_event(req.session_id, {
                 "kind": "kb_prior_lookup_decision",
                 "topic": topic,
                 "cache": priors.get("cache"),
                 "count": len(bundle.kb_priors_for_decision),
             })
+
+        if any_kb_unreachable:
+            bundle.kb_read_skipped_reason = "kb_unreachable"
+            bundle.notes.append(
+                "KB service unreachable for at least one lookup — priors may be incomplete"
+            )
+            bundle.review_constraints["kb_breaker"] = self.kb_writer.kb_breaker_state()
 
         if scope.get("model") == "unknown" or scope.get("framework") == "unknown":
             bundle.notes.append("scope partially unknown — proceed with caution")
