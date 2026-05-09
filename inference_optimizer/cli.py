@@ -27,7 +27,8 @@ Env vars consumed (besides the standard backend creds):
   ROCR_VISIBLE_DEVICES                         — pin the GPU
   CLAUDE_MODEL                                 — default claude-opus-4-7
   CODEX_MODEL                                  — default gpt-5.4
-  INFERENCE_OPTIMIZER_SESSION_ROOT             — overrides default session root
+  INFERENCE_OPTIMIZER_SESSION_DIR              — override session dir for tests
+                                                 (default: /workspace/hyperloom).
   INFERENCE_OPTIMIZER_KB_ROOT                  — marathon KB dir (kb_query.py +
                                                  entries.jsonl); default:
                                                  Hyperloom/marathon/skills/kb
@@ -57,13 +58,25 @@ from .orchestrator.action_executors import (
 from .orchestrator.backends import (
     ClaudeBackend,
     CodexBackend,
+    CriticAgentBackend,
     MockCriticBackend,
     MockRobustnessBackend,
 )
+from .manifest import load_manifest, write_manifest
 from .orchestrator.coordinator import Coordinator
 from .orchestrator.objective import build_objective
 from .orchestrator.shared_state import SharedState
-from .paths import make_session_dir, session_root
+from .paths import (
+    DEFAULT_SESSION_DIR,
+    ENV_OVERRIDE_SESSION_DIR,
+    _SESSION_SKELETON,
+    make_session_dir,
+    session_dir as _session_dir_resolve,
+)
+from .session_paths import (
+    agent_prompt_snapshot,
+    manifest_path,
+)
 
 
 log = logging.getLogger("inference_optimizer.cli")
@@ -162,6 +175,20 @@ _DEFAULT_ORCH_PROMPT = (
     "to one compile graph/cache and the patch is not reusable. If compile-on\n"
     "leaves no high-share reusable native kernels, stop kernel-opt and continue\n"
     "with framework/params/compile configuration tuning instead.\n\n"
+    "===== SESSION_DIR contract =====\n"
+    "SESSION_DIR is injected per tick as the absolute path of the session\n"
+    "root (a flat directory; no user_id / session_id suffix). NEVER\n"
+    "concatenate it yourself; reference SESSION_DIR-rooted artefacts ONLY\n"
+    "via field values you find in SharedState (e.g. last_profile_trace,\n"
+    "last_select_kernels.candidates_path, current_best fields). Any path\n"
+    "you emit MUST be one of:\n"
+    "  (a) verbatim from SharedState, OR\n"
+    "  (b) prefixed by SESSION_DIR, OR\n"
+    "  (c) under one of the framework source allowlists\n"
+    "      (`/sgl-workspace/aiter/`, `/sgl-workspace/sglang/`,\n"
+    "      `/sgl-workspace/vllm/`) for `source_file` references.\n"
+    "PolicyGate will REJECT intents whose path fields fall outside this\n"
+    "set; the rejection lands in your inbox as `policy_denied`.\n\n"
     "===== HARD RULES =====\n"
     "* `kind` MUST be EXACTLY one of: 'select_kernels' / 'run_optimization' /\n"
     "  'integrate' / 'apply_patch' (these have programmatic handlers).\n"
@@ -206,6 +233,11 @@ _DEFAULT_KERNEL_PROMPT = (
     "torch.compile/Inductor/Triton cache kernels. Only reusable framework\n"
     "sources under stable repos (aiter/sglang/vllm source trees) are valid\n"
     "kernel-opt targets; otherwise return status='failed' with a clear reason.\n\n"
+    "SESSION_DIR contract: every path you emit in result.* must be either\n"
+    "verbatim from the request payload, prefixed by SESSION_DIR (injected\n"
+    "per tick), or under one of `/sgl-workspace/aiter/`, `/sgl-workspace/\n"
+    "sglang/`, `/sgl-workspace/vllm/` (the framework source allowlists).\n"
+    "PolicyGate rejects responses whose path fields escape this set.\n\n"
     "If your inbox has no requests, emit one send_message{topic='heartbeat',\n"
     "body_md='ok'}. You may NOT propose, delegate, or initiate REQUESTs."
 )
@@ -233,6 +265,14 @@ _DEFAULT_ORCH_PROMPT_NO_KERNEL = (
     "      → propose backends first.\n"
     "  otherwise:\n"
     "      → propose params or sweep (alternate each round).\n\n"
+    "===== SESSION_DIR contract =====\n"
+    "SESSION_DIR is injected per tick as the absolute path of the session\n"
+    "root (a flat directory; no user_id / session_id suffix). NEVER\n"
+    "concatenate it yourself; reference SESSION_DIR-rooted artefacts ONLY\n"
+    "via field values you find in SharedState. Any path you emit MUST be\n"
+    "either verbatim from SharedState or prefixed by SESSION_DIR.\n"
+    "PolicyGate will REJECT intents whose path fields fall outside this\n"
+    "set; the rejection lands in your inbox as `policy_denied`.\n\n"
     "===== HARD RULES =====\n"
     "* Do NOT emit REQUEST to any agent — kernel agent is disabled.\n"
     "* InferenceX serving benchmarks use `--max-concurrency`; do NOT diagnose\n"
@@ -338,9 +378,14 @@ def _build_backends(
     return backends
 
 
-def _seed_shared_state(session_dir: Path, args: argparse.Namespace) -> SharedState:
+def _seed_shared_state(
+    session_dir: Path,
+    args: argparse.Namespace,
+    *,
+    session_id: str,
+) -> SharedState:
     state = SharedState(
-        session_id=session_dir.name,
+        session_id=session_id,
         model_name=Path(args.model).name,
         model_path=str(args.model),
         model_class=args.model_class or "",
@@ -354,6 +399,32 @@ def _seed_shared_state(session_dir: Path, args: argparse.Namespace) -> SharedSta
     )
     state.save(session_dir)
     return state
+
+
+def _print_session_skeleton(session_dir: Path) -> None:
+    """Echo the freshly-created skeleton so launchers see the exact layout."""
+    print(f"Session layout under {session_dir}:")
+    for sub in _SESSION_SKELETON:
+        marker = "ok" if (session_dir / sub).is_dir() else "MISSING"
+        print(f"  [{marker}] {sub}/")
+    print(f"  [ok] manifest.json (written first)")
+
+
+def _snapshot_system_prompts(
+    session_dir: Path,
+    *,
+    prompts: dict[str, str],
+) -> None:
+    """Persist each persistent agent's effective system prompt.
+
+    Writes to ``agents/<role>/system_prompt.snapshot.md`` so resume
+    runs and post-mortem inspection can compare against the in-memory
+    prompt without re-deriving it from CLI args.
+    """
+    for role, body in prompts.items():
+        target = agent_prompt_snapshot(session_dir, role)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body or "(empty)", encoding="utf-8")
 
 
 def _default_target_summary(args: argparse.Namespace) -> str:
@@ -834,7 +905,7 @@ def _emit_preflight_diagnostics(
         BASELINE_DEFAULT_TIMEOUT_SEC,
         _probe_aiter_jit_cache,
     )
-    from .paths import asset_root, session_root
+    from .paths import asset_root
 
     probe = _probe_aiter_jit_cache()
     cold_cap = os.environ.get(
@@ -853,10 +924,10 @@ def _emit_preflight_diagnostics(
     print("Preflight diagnostics:")
     print(f"  asset_root          = {asset_root()}")
     print(
-        f"  session_root        = {session_root()}  "
-        f"(USER_DATA_PATH={os.environ.get('USER_DATA_PATH', '<unset>')} "
-        f"INFERENCE_OPTIMIZER_SESSION_ROOT="
-        f"{os.environ.get('INFERENCE_OPTIMIZER_SESSION_ROOT', '<unset>')})"
+        f"  session_dir         = {_session_dir_resolve()}  "
+        f"({ENV_OVERRIDE_SESSION_DIR}="
+        f"{os.environ.get(ENV_OVERRIDE_SESSION_DIR, '<unset>')}, "
+        f"default={DEFAULT_SESSION_DIR})"
     )
     print(f"  magpie_python       = {magpie_python}")
     print(
@@ -1260,16 +1331,27 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     _smoke_test_codex_model(args, catalog_ids)
 
     if args.resume:
-        # Resume mode: skip the SharedState seed so Coordinator.__init__
-        # picks up the existing state.json + SQLite event log unchanged.
-        session_dir = session_root() / args.resume
-        if not session_dir.exists():
-            print(f"ERROR: --resume session not found: {session_dir}",
-                  file=sys.stderr)
+        # Resume mode: session_dir is fixed at /workspace/hyperloom (or
+        # $INFERENCE_OPTIMIZER_SESSION_DIR for tests). We re-mkdir the
+        # skeleton (idempotent) so a partially-initialised previous run
+        # is healed before we touch state.
+        session_dir = make_session_dir()
+        try:
+            manifest = load_manifest(session_dir)
+        except FileNotFoundError as exc:
+            print(f"ERROR: --resume failed: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not (session_dir / "state.json").exists():
+            print(
+                f"ERROR: --resume failed: {session_dir}/state.json missing "
+                f"(manifest exists but Coordinator never wrote SharedState)",
+                file=sys.stderr,
+            )
             sys.exit(2)
         state = SharedState.load_or_init(session_dir)
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
+        print(f"  manifest.session_id    : {manifest.get('session_id')}")
         print(f"  prior baseline_tput   : {state.baseline_tput:.1f}")
         print(f"  prior cumul_gain      : {state.cumulative_gain:.2f}%")
         print(f"  prior current_best    : "
@@ -1324,7 +1406,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if not args.model:
             print(
                 "ERROR: model is required. Pass --model <path> or set "
-                "MODEL_PATH env (or use --resume <session_id>).",
+                "MODEL_PATH env (or use --resume to continue an existing "
+                "session at the canonical session_dir).",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -1382,14 +1465,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print(f"Workload        : ISL={args.isl} OSL={args.osl} "
               f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision}")
 
-        # session_name: --session-name > default "<model>_<YYYYMMDD_HHMMSS>"
-        from datetime import datetime, timezone
-        session_name = args.session_name or (
-            f"{Path(args.model).name}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-        )
-        session_dir = make_session_dir(session_name)
+        # session_dir is fixed at /workspace/hyperloom (override:
+        # $INFERENCE_OPTIMIZER_SESSION_DIR). Each sandbox is single-use,
+        # so collision detection is unnecessary; mkdir -p is enough.
+        session_dir = make_session_dir()
+        manifest = write_manifest(session_dir, args=args)
         print(f"Session dir     : {session_dir}")
-        state = _seed_shared_state(session_dir, args)
+        print(f"Session id      : {manifest['session_id']}  (manifest label only)")
+        _print_session_skeleton(session_dir)
+        state = _seed_shared_state(
+            session_dir, args, session_id=manifest["session_id"],
+        )
 
     objective = build_objective({
         "MAX_HOURS": str(args.max_hours),
@@ -1410,6 +1496,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # (e.g. ReportExecutor) that don't get session_dir threaded through
     # task.params. This is read in report.py::_resolve_session_dir.
     os.environ["INFERENCE_OPTIMIZER_SESSION_DIR"] = str(session_dir)
+    # Production: enable strict path-containment checks in PolicyGate so
+    # any LLM-emitted intent whose path field escapes session_dir lands
+    # as `policy_denied` in its inbox. Tests omit this and keep the
+    # legacy lenient mode for fixture paths under /tmp.
+    os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
 
     # When kernel is disabled, strip it from the role registry so
     # Coordinator does not tick a non-existent agent and PolicyGate does
@@ -1435,6 +1526,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
     coordinator.system_prompt_overrides = prompts
     _register_executors(coordinator, no_kernel=no_kernel)
+    # Persist effective system prompts for resume / drift inspection.
+    _snapshot_system_prompts(session_dir, prompts=prompts)
 
     kernel_str = "DISABLED" if no_kernel else (
         f"{'Codex' if args.kernel_codex else 'Claude'}"
@@ -1482,7 +1575,8 @@ def _build_parser() -> argparse.ArgumentParser:
                           help="Drive a multi-agent optimization run on a model")
     opt.add_argument("--model", "-m", type=Path, default=None,
                       help="Model path (required for new runs; ignored when "
-                           "--resume is set — model is read from state.json)")
+                           "--resume is set — model is read from manifest.json/"
+                           "state.json)")
     opt.add_argument(
         "--gpu-type", choices=["mi300x", "mi325x", "mi355x"], default=None,
         help="Override GPU runner type passed to Magpie (sets benchmark."
@@ -1514,14 +1608,14 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Stop when current best tok/s/GPU >= N")
     grp.add_argument("--target-baseline-dir", type=str, default=None,
                       help="Stop when current best matches the baseline in DIR")
-    opt.add_argument("--session-name", type=str, default=None,
-                      help="Override auto-generated session id. Default: "
-                           "<model_name>_<YYYYMMDD_HHMMSS>")
-    opt.add_argument("--resume", type=str, default=None,
-                      help="Resume from an existing session id. Skips the "
-                           "SharedState seed and lets the Coordinator replay "
-                           "the prior event log + state.json. Mutually "
-                           "exclusive with --session-name in practice.")
+    opt.add_argument("--resume", action="store_true", default=False,
+                      help="Resume the session at the canonical session_dir "
+                           "(/workspace/hyperloom by default, or "
+                           "$INFERENCE_OPTIMIZER_SESSION_DIR for tests). "
+                           "Skips the SharedState seed and lets the "
+                           "Coordinator replay the prior event log + "
+                           "state.json. Refuses to start if manifest.json or "
+                           "state.json is missing.")
     opt.add_argument("--model-class", type=str, default=None,
                       help="Optional model class hint (dense_8B / moe_mla / ...)")
     opt.add_argument("--target-summary", type=str, default=None,

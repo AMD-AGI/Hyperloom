@@ -42,12 +42,16 @@ def _resolve_magpie_python() -> str:
     )
 
 
-def _resolve_output_root() -> str:
-    """Resolve output root for Magpie workspaces.
+def _resolve_session_dir() -> Path:
+    """Resolve the active session_dir for executors that need an output root.
 
-    Order: $INFERENCE_OPTIMIZER_OUTPUT_ROOT env > /workspace/hyperloom.
+    Reads :func:`inference_optimizer.paths.session_dir`; this honors
+    ``$INFERENCE_OPTIMIZER_SESSION_DIR`` and otherwise returns
+    ``/workspace/hyperloom``. Used by executor-class fallback paths when
+    ``ctx.extra["workspace"]`` was not pre-mkdir'd by SubAgentRunner.
     """
-    return os.environ.get("INFERENCE_OPTIMIZER_OUTPUT_ROOT", "").strip() or "/workspace/hyperloom"
+    from ...paths import session_dir as _sd
+    return _sd()
 
 
 _MAGPIE_CWD_DEFAULT = "/tmp"
