@@ -524,6 +524,102 @@ def test_124_priority_data_members_convert_to_raw_candidates(tmp_path):
     }]
 
 
+def test_count_gpu_kernel_events_distinguishes_cpu_only_and_real_traces(tmp_path):
+    import gzip, json as _json
+    cpu_only = tmp_path / "cpu_only.json.gz"
+    with gzip.open(cpu_only, "wt") as f:
+        _json.dump({"traceEvents": [
+            {"cat": "cpu_op", "name": "aten::add", "dur": 1.0},
+            {"cat": "python_function", "name": "wrapper", "dur": 2.0},
+            {"cat": "cuda_runtime", "name": "hipDeviceSynchronize", "dur": 3.0},
+        ]}, f)
+    assert tla.count_gpu_kernel_events(cpu_only) == 0
+
+    real = tmp_path / "real.json.gz"
+    with gzip.open(real, "wt") as f:
+        _json.dump({"traceEvents": [
+            {"cat": "cpu_op", "name": "aten::add", "dur": 1.0},
+            {"cat": "kernel", "name": "void some_gemm_kernel<...>", "dur": 7.0},
+            {"cat": "kernel", "name": "void some_attn_kernel<...>", "dur": 11.0},
+            {"cat": "cuda_runtime", "name": "hipLaunchKernel", "dur": 0.5},
+        ]}, f)
+    assert tla.count_gpu_kernel_events(real) == 2
+
+
+def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
+    """Issue #126/#124 regression: when the upstream profile run produces
+    a CPU-only trace (e.g. PMC LD_PRELOAD steals the rocprofiler-sdk slot
+    from torch.profiler), tracelens_analysis must fail loudly *before*
+    spending time on TraceLens install / split / SDK orchestrator runs."""
+    import gzip
+    import json as _json
+    from unittest.mock import patch
+
+    tl_root = tmp_path / "TraceLens-internal"
+    skill_dir = tl_root / "TraceLens" / "AgenticMode" / "Standalone" / ".cursor" / "skills"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "standalone-analysis-orchestrator.md").write_text("stub")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    trace = tmp_path / "cpu_only_trace.json.gz"
+    with gzip.open(trace, "wt") as f:
+        _json.dump({"traceEvents": [
+            {"cat": "cpu_op", "name": "aten::add", "dur": 1.0},
+            {"cat": "python_function", "name": "wrapper", "dur": 2.0},
+        ]}, f)
+
+    captured: list[list[str]] = []
+
+    class _Result:
+        def __init__(self):
+            self.returncode = 0
+            self.stdout = "ok"
+
+    def fake_run(cmd, *args, **kwargs):
+        captured.append(list(cmd))
+        return _Result()
+
+    def fake_which(name):
+        return f"/usr/bin/{name}"
+
+    argv = [
+        "tracelens_analysis.py",
+        "--trace-input", str(trace),
+        "--workspace-path", str(workspace),
+        "--tracelens-root", str(tl_root),
+        "--target-platform", "MI300X",
+        "--top-k", "5",
+        "--budget-minutes", "1",
+        "--no-llm-orchestrator",
+    ]
+    import os as _os
+    env_backup = dict(_os.environ)
+    rc = -1
+    try:
+        with patch.object(tla.subprocess, "run", side_effect=fake_run), \
+             patch.object(tla.shutil, "which", side_effect=fake_which), \
+             patch.object(tla.sys, "argv", argv):
+            try:
+                rc = tla.main()
+            except SystemExit as exc:
+                rc = int(exc.code or 0)
+    finally:
+        _os.environ.clear()
+        _os.environ.update(env_backup)
+
+    assert rc != 0, "fail-fast on CPU-only trace must return non-zero"
+    assert all(
+        "TraceLens.TraceUtils.split_inference_trace_annotation" not in str(p)
+        for cmd in captured for p in cmd
+    ), f"splitter must not run on CPU-only trace; captured={captured}"
+    assert all(
+        "TraceLens_generate_perf_report_pytorch_inference" not in str(c[0])
+        or "--help" in c
+        for c in captured if c
+    ), f"perf-report CLI must not be invoked for CPU-only trace; captured={captured}"
+
+
 def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     import asyncio
     import json as _json
@@ -603,7 +699,11 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
     capture.mkdir()
     trace = tmp_path / "trace.json.gz"
     with gzip.open(trace, "wt") as f:
-        _json.dump({"traceEvents": []}, f)
+        _json.dump({"traceEvents": [
+            # At least one real GPU kernel event so the new fail-fast
+            # validation lets the run continue into the splitter step.
+            {"cat": "kernel", "name": "void some_real_kernel<...>", "dur": 5.0},
+        ]}, f)
 
     captured: list[list[str]] = []
 
