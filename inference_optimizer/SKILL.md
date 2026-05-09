@@ -24,7 +24,11 @@ The CLI starts a Python Coordinator that coordinates:
 
 - Orchestration: decides next actions (`baseline`, `profile`, `backends`, `params`, `sweep`, Kernel requests, `report`).
 - Kernel: responder path for `select_kernels`, `run_optimization`, `integrate`.
-- Critic: proposal review; can be real Codex or `--critic-mock` when Codex credentials are unavailable.
+- Critic: proposal review (default: `--critic-agent` — drives the
+  `critic-agent/` skill runtime with KB priors / session memory /
+  `review_constraints`-gated verdicts). `--critic-mock` for offline /
+  smoke tests; `--critic-codex-bare` for debugging the LLM layer
+  without the runtime layer.
 - Robustness: mock robustness monitor in this branch.
 
 State lives in **one fixed session directory** — `/workspace/hyperloom`
@@ -215,8 +219,17 @@ After `_preflight()` returns, but BEFORE Coordinator boots, the CLI runs:
     WARNING is printed. If neither allowed model is in catalog OR the gateway
     is unreachable after all retries, refuse to start.
 11. **Codex smoke-test** (WARN-only). `--codex-model` is checked against
-    the same catalog when codex is actually used (`--critic-real` or
-    `--kernel-codex` with kernel enabled).
+    the same catalog when codex is actually used (`--critic-agent` /
+    `--critic-codex-bare`, or `--kernel-codex` with kernel enabled).
+12. **Critic-agent runtime probe** (only when `--critic-agent` is active —
+    it's the default). Resolves `critic_agent_root`: env
+    `CRITIC_AGENT_ROOT` > sibling `$REPO_ROOT/critic-agent/` > abort.
+    Then `python -m runtime.cli --help` (5s timeout, `cwd=root`) must
+    exit 0; if not, the optimizer aborts with rc=2 and a recovery hint
+    pointing at `--critic-mock` / `--critic-codex-bare`. Default-sets
+    `WORKSPACE_PATH=$REPO_ROOT`, `CRITIC_SESSION_MEMORY_DIR=$SESSION_DIR/critic-session-memory`,
+    and `CRITIC_KB_CLIENT_MODE=inmemory`; `live` mode additionally
+    requires `KB_BASE_URL` to be exported.
 
 The install.sh-based bring-up is the canonical entry point; `_preflight()`
 only catches drift mid-run. `kernel-agent/SKILL.md` (`Installation`,
@@ -348,6 +361,61 @@ before `baseline`. Sweep variants' explicit `CONC` / `ISL` / `OSL`
 overrides still win because `_grid_runner._build_variant_yaml` applies
 per-variant `extra_envs` last.
 
+## Critic Backend Selection
+
+The Critic role has three backend modes, picked by mutually-exclusive
+CLI flags. Default is `--critic-agent` (no flag needed).
+
+| Flag | Backend class | Behaviour |
+|---|---|---|
+| (none) / `--critic-agent` | `CriticAgentBackend` | Drives the standalone `critic-agent/` skill runtime via `python -m runtime.cli prepare-review` → Codex chat completion → `python -m runtime.cli commit-review`. Adds KB priors lookup (with circuit-breaker for unreachable services), per-session memory + idempotent `reviewed_msg_ids` (no double-verdict), `judge_bundle.review_constraints` injected into the LLM prompt, and `needs_review` / `critic_unavailable` source when context is missing. |
+| `--critic-mock` | `MockCriticBackend` | Always-approve adapter. Use for offline / smoke tests when Codex creds aren't available. |
+| `--critic-codex-bare` | `CodexBackend` | Legacy direct chat-completion path with no KB / session memory / `review_constraints`. Available for debugging the LLM layer in isolation. (`--critic-real` is a hidden back-compat alias.) |
+
+Default is overridable per pod via
+`INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` (one of `mock` / `agent` /
+`codex_bare`).
+
+### Required env (only when `--critic-agent` is active)
+
+| Var | Purpose | Default |
+|---|---|---|
+| `CRITIC_AGENT_ROOT` | Path to the directory containing `runtime/cli.py`. | sibling `$REPO_ROOT/critic-agent/` |
+| `CRITIC_KB_CLIENT_MODE` | `inmemory` keeps KB writes / reads off the wire. `live` requires `KB_BASE_URL`. | `inmemory` |
+| `KB_BASE_URL` | KB service URL when `CRITIC_KB_CLIENT_MODE=live`. | unset (live mode aborts at start if absent) |
+| `KB_TIMEOUT_MS` / `KB_RETRY_MAX` / `KB_DEAD_LETTER_DIR` | Forwarded to the runtime; see `critic-agent/AGENTS.md`. | runtime defaults |
+| `CRITIC_SESSION_MEMORY_DIR` | Where the runtime persists per-session decisions / reviewed_msg_ids. | `$SESSION_DIR/critic-session-memory` (auto-set by the optimizer; co-located with the Coordinator session and cleaned up alongside it). |
+| `WORKSPACE_PATH` | Skill root the critic-agent runtime resolves prompt assets against. | `$REPO_ROOT` (auto-set). |
+
+`_preflight()` checks `CRITIC_AGENT_ROOT` resolves to a real directory
+with `runtime/cli.py`, then runs `python -m runtime.cli --help` (5s
+timeout) before the Coordinator boots. Missing or broken runtime
+aborts the run with a clear error pointing at `--critic-mock` /
+`--critic-codex-bare` as bypasses.
+
+### Per-turn artefacts (audit trail)
+
+Each Critic turn writes:
+
+```text
+$SESSION_DIR/critic-workdir/<turn_idx 6-digit>/
+├── request.json         # raw_prompt + session_id passed to runtime.cli
+├── judge_bundle.json    # output of prepare-review (proposals, KB priors,
+│                          review_constraints, kb_read_skipped_reason)
+├── review.json          # LLM's verdicts (extracted JSON envelope)
+└── emit.json            # output of commit-review (intent_envelope +
+                           kb_writes); the Coordinator consumes
+                           intent_envelope verbatim.
+
+$SESSION_DIR/critic-session-memory/<session_id>/
+├── context.json          decisions.jsonl   events.jsonl
+└── kb_priors_cache.json  reviewed_msg_ids.json
+```
+
+The backend prunes everything older than the latest 50 turn workdirs
+on every tick to avoid unbounded growth.
+
+
 ## Framework Selection
 
 A session is single-framework. Pick `sglang` (default) or `vllm` via
@@ -473,7 +541,6 @@ setsid nohup inference_optimizer --verbose optimize \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
   --kernel-claude \
-  --critic-mock \
   > "$RUN_LOG" 2>&1 < /dev/null &
 echo $! > "$PID_FILE"
 ```
@@ -481,8 +548,12 @@ echo $! > "$PID_FILE"
 `setsid nohup ... &` is required for runs > 5 min. Cursor's background
 shell alone is not enough; it can die on SSH disconnect.
 
-Use real Critic only when Codex/OpenAI credentials are valid for that account;
-otherwise leave `--critic-mock`.
+The Critic now defaults to `--critic-agent` (the real critic-agent
+runtime — KB priors / session memory / `review_constraints`-gated
+verdicts). Pass `--critic-mock` to fall back to the always-approve
+adapter for offline / smoke runs, or `--critic-codex-bare` to run the
+legacy direct-Codex path with no runtime layer (for debugging the LLM
+in isolation). See [Critic Backend Selection](#critic-backend-selection).
 
 After launching, do a short health check:
 
@@ -516,7 +587,6 @@ setsid nohup inference_optimizer --verbose optimize \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
   --kernel-claude \
-  --critic-mock \
   > "$RUN_LOG" 2>&1 < /dev/null &
 echo $! > "$PID_FILE"
 ```
@@ -563,7 +633,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   setsid nohup inference_optimizer --verbose optimize \
     --resume \
     --target-gain "${TARGET_GAIN:-10}" --max-hours "${MAX_HOURS:-5}" \
-    --tick-interval-sec 30 --kernel-claude --critic-mock \
+    --tick-interval-sec 30 --kernel-claude \
     > "$resume_log" 2>&1 < /dev/null &
   echo $! > "$PID_FILE"
   sleep 300
@@ -833,6 +903,32 @@ budget on untested params/backend candidates or the next kernel.
   is missing, set `OOB_SRC` to a directory that contains it (or land
   one of `/wekafs/fully-local/OOB`, `/wekafs/fully-local/inference_optimization/OOB`)
   so `_ensure_oob_proxy_source()` can bootstrap it next run.
+- `ERROR: --critic-agent selected but critic-agent runtime not found`:
+  resolution order is `$CRITIC_AGENT_ROOT` env > sibling
+  `$REPO_ROOT/critic-agent/`. Fix one of:
+  ```bash
+  export CRITIC_AGENT_ROOT=/path/to/critic-agent
+  # or:
+  test -f "$REPO_ROOT/critic-agent/runtime/cli.py" || \
+    git -C "$REPO_ROOT" submodule update --init critic-agent
+  ```
+  Bypass with `--critic-mock` (offline / smoke) or `--critic-codex-bare`
+  (legacy direct Codex path) if a fix isn't available immediately.
+- `BackendError: critic-agent runtime.cli prepare-review/commit-review
+  exited rc=2`: the critic-agent runtime aborted with an adapter bug —
+  per `critic-agent/AGENTS.md` §Exit codes, rc=2 means schema or
+  validation failure inside the runtime. Inspect
+  `$SESSION_DIR/critic-workdir/<latest>/{request,judge_bundle,review,emit}.json`
+  for the offending payload, then either fix the upstream issue or
+  retry with `--critic-mock` so the run can keep moving while the
+  runtime bug is debugged.
+- `BackendError: critic-agent runtime.cli ... timed out after 30s`:
+  prepare-review / commit-review usually return in <1s. A timeout
+  indicates a stuck KB call or a heavy KB write fan-out. If
+  `CRITIC_KB_CLIENT_MODE=live`, drop to `inmemory` for the rest of the
+  run (no kill switch needed; the next process inherits the lower mode).
+  If the timeout reproduces in `inmemory` mode, capture the runtime
+  logs and file a bug — that path should not block on I/O.
 - `BackendError: claude-agent-sdk not installed`: should not happen
   after `_ensure_python_sdks()` lands, but if it does (frozen pip, no
   network) install manually:
