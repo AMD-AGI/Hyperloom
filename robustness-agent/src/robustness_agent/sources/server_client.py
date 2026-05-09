@@ -190,6 +190,113 @@ class RobustnessServerClient:
         )
         return body if isinstance(body, dict) else {}
 
+    # -- M2: cluster-physical proxies -----------------------------------
+
+    async def get_cluster_pod_metrics(
+        self,
+        namespace: str,
+        name: str,
+        window: _MetricsWindow,
+        *,
+        categories: list[str] | None = None,
+        step: str | None = None,
+    ) -> dict[str, Any]:
+        """GET ``/api/v1/cluster/pods/{ns}/{name}/metrics``.
+
+        Single-pod metrics; the response shape mirrors
+        ``get_session_metrics`` (``{"data": {"pods": [...]}}``).
+        """
+
+        params: dict[str, Any] = {
+            "start": str(window.start_unix),
+            "end": str(window.end_unix),
+        }
+        if categories:
+            params["categories"] = ",".join(categories)
+        if step:
+            params["step"] = step
+        body = await self._get_json(
+            f"/api/v1/cluster/pods/{namespace}/{name}/metrics",
+            params=params,
+        )
+        return body if isinstance(body, dict) else {}
+
+    async def list_cluster_pod_metric_categories(
+        self,
+        namespace: str,
+        name: str,
+        window: _MetricsWindow,
+        *,
+        categories: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """GET ``/api/v1/cluster/pods/{ns}/{name}/metrics/list``.
+
+        Returns the ``available`` array verbatim so callers can pick
+        which categories to query without probing each metric kind.
+        """
+
+        params: dict[str, Any] = {
+            "start": str(window.start_unix),
+            "end": str(window.end_unix),
+        }
+        if categories:
+            params["categories"] = ",".join(categories)
+        body = await self._get_json(
+            f"/api/v1/cluster/pods/{namespace}/{name}/metrics/list",
+            params=params,
+        )
+        if isinstance(body, dict):
+            available = body.get("available")
+            if isinstance(available, list):
+                return available
+        return []
+
+    async def get_cluster_workload_hierarchy(
+        self,
+        workload_id: str,
+    ) -> dict[str, Any]:
+        """GET ``/api/v1/cluster/workloads/{id}/hierarchy``."""
+
+        body = await self._get_json(
+            f"/api/v1/cluster/workloads/{workload_id}/hierarchy",
+        )
+        return body if isinstance(body, dict) else {}
+
+    async def list_cluster_faults(
+        self,
+        *,
+        since: str | None = None,
+        node: str | None = None,
+        phase: str | None = None,
+        page_size: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """GET ``/api/v1/cluster/faults``.
+
+        Returns the ``faults`` array (already paginated upstream). We
+        flatten dict / list responses so callers don't branch on shape.
+        """
+
+        params: dict[str, Any] = {}
+        if since:
+            params["since"] = since
+        if node:
+            params["node"] = node
+        if phase:
+            params["phase"] = phase
+        if page_size is not None:
+            params["page_size"] = str(page_size)
+        body = await self._get_json(
+            "/api/v1/cluster/faults",
+            params=params or None,
+        )
+        if isinstance(body, dict):
+            faults = body.get("faults")
+            if isinstance(faults, list):
+                return faults
+        if isinstance(body, list):
+            return body
+        return []
+
 
 def _to_iso(unix_seconds: int) -> str:
     """Format Unix seconds as ISO-8601 UTC for ``start`` / ``end`` query args."""
@@ -205,11 +312,17 @@ def _to_iso(unix_seconds: int) -> str:
 class RobustnessServerSource:
     """Adapter wrapping :class:`RobustnessServerClient` as a :class:`Source`.
 
-    Per tick we fetch ``pods`` + ``events`` + ``summary`` for the
-    session referenced by ``ctx.shared_state.session_id``. ``metrics``
-    is intentionally skipped in M1 because cluster-physical proxies
-    arrive in M2; the reactor still has plenty to chew on with pod
-    phase + recent events.
+    Per tick we fetch session-scoped data (``pods`` + ``events`` +
+    ``summary``) for the session referenced by
+    ``ctx.shared_state.session_id``, plus cluster-physical signals
+    (``cluster_faults``) introduced in M2 so the agent reacts to node
+    isolation events even when the local probe sees nothing wrong.
+
+    Cluster fetches are best-effort: a 4xx / 5xx on the cluster
+    endpoints does not invalidate the session-scoped snapshot. A
+    transport failure does, since it strongly suggests the server is
+    unreachable and the DegradeRouter should switch to the local
+    probe.
     """
 
     name = "robustness-server"
@@ -220,10 +333,16 @@ class RobustnessServerSource:
         *,
         metrics_window_s: int = 300,
         events_limit: int = 200,
+        faults_lookback_s: int = 300,
+        faults_page_size: int = 50,
+        enable_cluster_faults: bool = True,
     ) -> None:
         self._client = client
         self._metrics_window_s = max(60, int(metrics_window_s))
         self._events_limit = max(1, int(events_limit))
+        self._faults_lookback_s = max(0, int(faults_lookback_s))
+        self._faults_page_size = max(1, min(500, int(faults_page_size)))
+        self._enable_cluster_faults = bool(enable_cluster_faults)
 
     async def fetch(self, ctx: Any) -> SourceData:
         session_id = _extract_session_id(ctx)
@@ -251,10 +370,30 @@ class RobustnessServerSource:
         if window.start_unix and window.end_unix:
             summary = await self._client.get_session_summary(session_id, window)
 
+        cluster_faults: list[dict[str, Any]] = []
+        if self._enable_cluster_faults:
+            since = (
+                str(now_unix - self._faults_lookback_s)
+                if now_unix and self._faults_lookback_s
+                else None
+            )
+            try:
+                cluster_faults = await self._client.list_cluster_faults(
+                    since=since,
+                    page_size=self._faults_page_size,
+                )
+            except SourceUnavailable:
+                # Transport-level failure: re-raise so the DegradeRouter
+                # can count it. _get_json already wraps timeouts / 5xx
+                # into SourceUnavailable, so reaching here means the
+                # server is genuinely unreachable.
+                raise
+
         return SourceData(
             session_pods=pods,
             session_events=events,
             session_summary=summary,
+            cluster_faults=cluster_faults,
             sources_used=[self.name],
         )
 
