@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from .base import Source, SourceData, SourceUnavailable
+from .cluster_decoder import decode_gpu_snapshot, merge_gpu_snapshots
 
 
 log = logging.getLogger(__name__)
@@ -336,6 +337,9 @@ class RobustnessServerSource:
         faults_lookback_s: int = 300,
         faults_page_size: int = 50,
         enable_cluster_faults: bool = True,
+        enable_cluster_pod_metrics: bool = False,
+        pod_metrics_categories: tuple[str, ...] = ("gpu",),
+        max_pods_per_tick: int = 16,
     ) -> None:
         self._client = client
         self._metrics_window_s = max(60, int(metrics_window_s))
@@ -343,6 +347,14 @@ class RobustnessServerSource:
         self._faults_lookback_s = max(0, int(faults_lookback_s))
         self._faults_page_size = max(1, min(500, int(faults_page_size)))
         self._enable_cluster_faults = bool(enable_cluster_faults)
+        # Cluster pod metrics are off by default: they fan out one
+        # HTTP call per pod per tick, so callers need to opt in once
+        # they are happy with the cost. Setting the flag is what
+        # makes signals/local_health.py prefer server-decoded GPU
+        # data over LocalProbe rocm-smi.
+        self._enable_cluster_pod_metrics = bool(enable_cluster_pod_metrics)
+        self._pod_metrics_categories = tuple(pod_metrics_categories)
+        self._max_pods_per_tick = max(1, int(max_pods_per_tick))
 
     async def fetch(self, ctx: Any) -> SourceData:
         session_id = _extract_session_id(ctx)
@@ -389,18 +401,97 @@ class RobustnessServerSource:
                 # server is genuinely unreachable.
                 raise
 
+        local_gpu: dict[str, Any] = {}
+        if (
+            self._enable_cluster_pod_metrics
+            and pods
+            and window.start_unix
+            and window.end_unix
+        ):
+            local_gpu = await self._fetch_cluster_pod_metrics(pods, window)
+
         return SourceData(
             session_pods=pods,
             session_events=events,
             session_summary=summary,
             cluster_faults=cluster_faults,
+            local_gpu=local_gpu,
             sources_used=[self.name],
         )
+
+    async def _fetch_cluster_pod_metrics(
+        self,
+        pods: list[dict[str, Any]],
+        window: _MetricsWindow,
+    ) -> dict[str, Any]:
+        """Fan out cluster pod metrics across the session's pods.
+
+        Decodes each per-pod response into the LocalProbe ``local_gpu``
+        schema and merges them so a single ``SourceData.local_gpu``
+        carries every device the session is using. Server-decoded
+        snapshots win over what LocalProbe might have produced
+        because we only fill ``local_gpu`` from this path when the
+        primary source is healthy.
+
+        A 5xx / transport failure on any pod re-raises as
+        :class:`SourceUnavailable` so the DegradeRouter degrades —
+        exactly the same policy as ``list_cluster_faults`` above.
+        """
+
+        refs = _unique_pod_refs(pods)
+        if not refs:
+            return {}
+        if len(refs) > self._max_pods_per_tick:
+            refs = refs[: self._max_pods_per_tick]
+
+        snapshots: list[dict[str, Any]] = []
+        for ns, name in refs:
+            try:
+                metrics = await self._client.get_cluster_pod_metrics(
+                    ns,
+                    name,
+                    window,
+                    categories=list(self._pod_metrics_categories),
+                )
+            except SourceUnavailable:
+                raise
+            decoded = decode_gpu_snapshot(metrics)
+            if decoded:
+                snapshots.append(decoded)
+        return merge_gpu_snapshots(snapshots)
 
 
 def _extract_session_id(ctx: Any) -> str:
     shared = getattr(ctx, "shared_state", None)
     return getattr(shared, "session_id", "") or ""
+
+
+def _unique_pod_refs(pods: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Distinct (namespace, name) tuples extracted from session_pods.
+
+    ``session_pods`` rows shaped by robustness-server carry the
+    pod under ``pod.namespace`` / ``pod.name`` (mirrors
+    ``list_session_pods``). Same pod may appear in multiple
+    open/close cycles; we collapse to the unique set so the
+    cluster-metrics fan-out is not duplicated.
+    """
+
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+    for entry in pods or []:
+        if not isinstance(entry, dict):
+            continue
+        pod = entry.get("pod") if isinstance(entry.get("pod"), dict) else entry
+        ns = str(pod.get("namespace") or "")
+        name = str(pod.get("name") or "")
+        if not ns or not name:
+            continue
+        key = (ns, name)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
 
 
 __all__ = [
