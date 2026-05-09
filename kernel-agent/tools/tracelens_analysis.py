@@ -48,7 +48,6 @@ RUNTIME_API_NAMES = {
     "cudastreamsynchronize",
 }
 DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
-LOCAL_BUNDLE_TRACELENS_ROOT = "/wekafs/fully-local/TraceLens-internal"
 
 # TraceLens ships two perf-report CLIs:
 #   - `..._inference` is the correct entry for vLLM/SGLang inference traces
@@ -793,7 +792,7 @@ def parse_tracelens_kernel_summary(
 # ---------------------------------------------------------------------------
 # #125: TraceLens orchestrator structured outputs (category_data/*.json)
 # ---------------------------------------------------------------------------
-# When the standalone-analysis-orchestrator skill runs (Step 5+), TraceLens
+# When the analysis-orchestrator skill runs (Step 5+), TraceLens
 # emits per-category JSON files carrying the GEAK-required triple
 # (kernel_category, kernel_shape, kernel_path) directly. We consume them
 # when present; otherwise we fall back to the kernel_summary.csv parser
@@ -1327,7 +1326,7 @@ def main() -> int:
         action="store_true",
         default=default_llm_orchestrator,
         help=(
-            "Run TraceLens standalone-analysis-orchestrator through "
+            "Run TraceLens analysis-orchestrator skill through "
             "claude_agent_sdk before falling back to the deterministic parser "
             "(default: env KERNEL_AGENT_USE_LLM_ORCHESTRATOR, on)."
         ),
@@ -1425,10 +1424,11 @@ def main() -> int:
                           log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                           started_at=started_at)
             tl_root = Path(args.tracelens_root)
-            if not tl_root.exists() and Path(LOCAL_BUNDLE_TRACELENS_ROOT).exists():
-                tl_root = Path(LOCAL_BUNDLE_TRACELENS_ROOT)
             if not tl_root.exists():
-                raise FileNotFoundError(f"TraceLens root not found: {tl_root}")
+                raise FileNotFoundError(
+                    f"TraceLens root not found: {tl_root} "
+                    "(set TRACELENS_ROOT or pass --tracelens-root)"
+                )
             run_command([sys.executable, "-m", "pip", "install", "-e", "."],
                         cwd=tl_root, log_path=log_path,
                         timeout_s=max(60, int(args.budget_minutes * 60)))
@@ -1437,7 +1437,13 @@ def main() -> int:
                              cwd=tl_root, log_path=log_path, timeout_s=60)
             if rc != 0:
                 raise RuntimeError(f"{perf_cli} --help failed")
-            skill = tl_root / "TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
+            # TraceLens-internal v0.3 (#148): the standalone analysis skill
+            # lives under TraceLens/Agent/Analysis/ with the shorter file name
+            # `analysis-orchestrator.md` (renamed from
+            # `standalone-analysis-orchestrator.md` and moved out of the old
+            # `AgenticMode/Standalone/` tree). Override by setting
+            # TRACELENS_ROOT / --tracelens-root for older release branches.
+            skill = tl_root / "TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md"
             if not skill.exists():
                 raise FileNotFoundError(f"TraceLens standalone skill not found: {skill}")
             append_log(log_path, f"TraceLens skill: {skill}")
@@ -1595,7 +1601,7 @@ def main() -> int:
                     "--output_xlsx_path", str(xlsx_path),
                     "--output_csvs_dir", str(csv_dir),
                     "--gpu_arch_json_path",
-                    str(tl_root / "TraceLens/AgenticMode/Standalone/utils/arch" / f"{args.target_platform}.json"),
+                    str(tl_root / "TraceLens/Agent/Analysis/utils/arch" / f"{args.target_platform}.json"),
                     "--include_unlinked_kernels",
                     "--group_by_parent_module",
                     "--enable_pseudo_ops",
