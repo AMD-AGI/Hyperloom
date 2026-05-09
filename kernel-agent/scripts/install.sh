@@ -14,6 +14,11 @@ KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${WORKSPACE_PATH}/kernel-agent}"
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
 TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+# Writable mirror for TraceLens when $TRACELENS_ROOT is on a read-only mount
+# (e.g. /wekafs/...). Mirrors the OOB pattern: cp -r the read-only source into
+# ${HYPERLOOM_ROOT}/TraceLens-internal once, then pip install -e the mirror so
+# editable build artifacts land on a writable filesystem. See ensure_tracelens.
+TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"
 
 # Credentials fallback: env always wins. If SAFE_API_KEY or OPENAI_BASE_URL
 # is missing from env, source $REPO_ROOT/.env (defaults to $(pwd)) but
@@ -199,6 +204,33 @@ ensure_tracelens() {
       return
     fi
     die "TraceLens root not found: $TRACELENS_ROOT"
+  fi
+  # Read-only source guard (mirrors the OOB cp -r pattern). When
+  # $TRACELENS_ROOT is on a read-only mount (the WekaFS default), pip
+  # install -e fails because it must write *.egg-info into the source
+  # tree, and at runtime tools/tracelens_analysis.py re-runs the same
+  # editable install in a subprocess on every select_kernels request,
+  # producing a tight failure loop. Detecting unwritable source up front
+  # and mirroring to ${HYPERLOOM_ROOT}/TraceLens-internal (parallel to
+  # ${HYPERLOOM_ROOT}/geak / ${HYPERLOOM_ROOT}/OOB/oob_cli) lets both
+  # the install-time and the runtime pip install land on a writable
+  # filesystem. write_env_file() emits the resulting TRACELENS_ROOT into
+  # env.sh so subsequent CLI subprocesses (setsid nohup inference_optimizer
+  # optimize → kernel-agent → tracelens_analysis.py) inherit the mirror.
+  if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+    if ! ( : > "$TRACELENS_ROOT/.hl_write_test" ) 2>/dev/null; then
+      log "TraceLens root not writable ($TRACELENS_ROOT); mirroring to $TRACELENS_MIRROR_DIR"
+      mkdir -p "$(dirname "$TRACELENS_MIRROR_DIR")"
+      if [ ! -d "$TRACELENS_MIRROR_DIR" ]; then
+        run cp -r "$TRACELENS_ROOT" "$TRACELENS_MIRROR_DIR"
+      else
+        log "TraceLens mirror already present: $TRACELENS_MIRROR_DIR"
+      fi
+      TRACELENS_ROOT="$TRACELENS_MIRROR_DIR"
+      export TRACELENS_ROOT
+    else
+      rm -f "$TRACELENS_ROOT/.hl_write_test"
+    fi
   fi
   log "ensuring TraceLens CLI from $TRACELENS_ROOT"
   if [ "$CHECK_ONLY" -eq 0 ]; then
@@ -419,6 +451,11 @@ write_env_file() {
       echo "export OOB_API_KEY='${OOB_API_KEY_VAL}'"
     }
     [ -n "${OOB_BASE_URL_VAL}" ] && echo "export OOB_BASE_URL='${OOB_BASE_URL_VAL}'"
+    # Pin TRACELENS_ROOT to the (possibly mirrored) value resolved by
+    # ensure_tracelens(). This is what lets setsid nohup inference_optimizer
+    # optimize → kernel-agent/tools/tracelens_analysis.py inherit the writable
+    # mirror instead of falling back to the read-only /wekafs default.
+    [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
     [ -n "${GEAK_MODEL_NAME_VAL}" ] && echo "export GEAK_MODEL_NAME='${GEAK_MODEL_NAME_VAL}'"
     [ -n "${GEAK_API_KEY_VAL}" ] && echo "export GEAK_API_KEY='${GEAK_API_KEY_VAL}'"
