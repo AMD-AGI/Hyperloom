@@ -5,7 +5,7 @@
 #   - ray[default]==2.44.1 + click<8.3.0
 #   - TraceLens editable install + CLI verification
 #
-# Backends are lazy: install only what a request needs, or use --all-backends.
+# The installer prepares all kernel-agent backends in one pass.
 
 set -euo pipefail
 
@@ -34,22 +34,19 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ]; then
   fi
 fi
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
-# Default to the LitellmModel-fixed branch. Upstream main works ONLY when the
-# model is reached via amd_llm + AMD LLM Gateway (anthropic SDK direct). On
-# the AMD primus-safe OpenAI-compat proxy that we have here, main's litellm
-# path does not normalize tool-call args and returns Python repr (single
-# quotes) for `submit({summary: [...]}`), making _parse_llm_response crash
-# with "Expecting property name in double quotes char 2". The PR branch
-# `feature/xiaofei/claw` adds use_amd_openai_compatible_litellm_route /
-# litellm_model_name_for_completion / format_messages_openai_chat which
-# normalize the OpenAI-compat path. Verified end-to-end on r36.
-GEAK_BRANCH="${GEAK_BRANCH:-feature/xiaofei/claw}"
+# Pin GEAK to the first release that ships RAG MCP retrieval and cross-session
+# memory together. Keep this overridable so future GEAK fixes can move Hyperloom
+# forward without reworking the installer contract.
+GEAK_REF="${GEAK_REF:-v3.1.0}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_ROOT}/geak-config/local.yaml}"
-# GEAK's LitellmModel (feature/xiaofei/claw) auto-routes bare claude-* model
-# names to OpenAI ChatCompletion when api_base contains llm-proxy/openai. So we
-# pass GEAK_MODEL_NAME through unchanged; do NOT prepend openai/ here.
+# Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
 GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
+RAG_INDEX_DIR="${HOME}/.cache/amd-ai-devtool/semantic-index"
+GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cuda}"
+GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
+GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
+GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
 # GEAK/OOB use the user's LiteLLM-compatible endpoint. The canonical env is
 # OPENAI_BASE_URL + SAFE_API_KEY; keep fallbacks for older launchers.
 GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}"
@@ -149,6 +146,49 @@ PY
   fi
 }
 
+# Idempotently bring up a Ray head node. Kernel backends submit Ray tasks with
+# `num_gpus>=1`; if no head is running (or one is running with --num-gpus=0)
+# kernel optimization will hang forever even when GPUs are idle. We:
+#   1. detect a live Ray head via `ray status` (any successful return = live)
+#   2. if absent, force-stop any half-started Ray and start a fresh head with
+#      all visible GPUs advertised
+#   3. tolerate the no-GPU case (CPU-only dev box) so `--check-only` stays
+#      non-fatal in environments without ROCm
+ensure_ray_started() {
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  if ! command -v ray >/dev/null 2>&1; then
+    warn "ray CLI missing; cannot start ray head"
+    return 0
+  fi
+  if ray status >/dev/null 2>&1; then
+    log "ray head already running"
+    return 0
+  fi
+  log "no live ray head detected; starting one"
+  ray stop --force >/dev/null 2>&1 || true
+  local num_gpus
+  num_gpus="$(python3 - <<'PY' 2>/dev/null || echo 0
+try:
+    import torch
+    print(torch.cuda.device_count() or 0)
+except Exception:
+    print(0)
+PY
+)"
+  if [ "${RAY_NUM_GPUS:-}" != "" ]; then
+    num_gpus="$RAY_NUM_GPUS"
+  fi
+  log "starting ray head with --num-gpus=${num_gpus}"
+  if ! ray start --head --disable-usage-stats \
+       --num-gpus="$num_gpus" --include-dashboard=false >/dev/null; then
+    warn "ray start failed; kernel optimization will hang. Check ROCm visibility."
+    return 0
+  fi
+  ray status >/dev/null 2>&1 || warn "ray status reports no live head after start"
+}
+
 ensure_tracelens() {
   if [ ! -d "$TRACELENS_ROOT" ] && [ -d "${HYPERLOOM_BUNDLE}/TraceLens-internal" ]; then
     TRACELENS_ROOT="${HYPERLOOM_BUNDLE}/TraceLens-internal"
@@ -165,10 +205,16 @@ ensure_tracelens() {
     run bash -lc "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir -e ."
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    if command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
+    # TraceLens #124: prefer the inference variant (correct entry for
+    # vLLM/SGLang traces). Fall back to the legacy CLI for older builds.
+    if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
+      TraceLens_generate_perf_report_pytorch_inference --help >/dev/null
+      log "TraceLens perf CLI verified: TraceLens_generate_perf_report_pytorch_inference (#124)"
+    elif command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
       TraceLens_generate_perf_report_pytorch --help >/dev/null
+      warn "TraceLens_generate_perf_report_pytorch_inference not found; using legacy TraceLens_generate_perf_report_pytorch"
     else
-      verify_die "TraceLens_generate_perf_report_pytorch not found after install"
+      verify_die "Neither TraceLens_generate_perf_report_pytorch_inference nor TraceLens_generate_perf_report_pytorch found after install"
     fi
   fi
 }
@@ -176,15 +222,18 @@ ensure_tracelens() {
 ensure_geak() {
   log "ensuring GEAK backend"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    mkdir -p "${HYPERLOOM_ROOT}" "$(dirname "$GEAK_CONFIG")"
+    mkdir -p "${HYPERLOOM_ROOT}" "$(dirname "$GEAK_CONFIG")" "$(dirname "$GEAK_MEMORY_STORE_PATH_VAL")"
   fi
-  if ! command -v geak >/dev/null 2>&1; then
-    if [ ! -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
-      run git clone --depth 1 -b "$GEAK_BRANCH" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
-    fi
-    run python3 -m pip install -q --no-cache-dir -e "${HYPERLOOM_ROOT}/geak"
+  if [ ! -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
+    run git clone --depth 1 --branch "$GEAK_REF" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
   else
-    log "geak already installed: $(command -v geak)"
+    log "GEAK checkout already present: ${HYPERLOOM_ROOT}/geak"
+  fi
+  if [ "$CHECK_ONLY" -eq 0 ]; then
+    run python3 -m pip install -q --no-cache-dir -e "${HYPERLOOM_ROOT}/geak"
+    run python3 -m pip install -q --no-cache-dir -e "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"
+  else
+    log "check-only: skipping GEAK and rag-mcp installation"
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
     if [ -z "$GEAK_API_KEY_VAL" ] || [ -z "$GEAK_BASE_URL_VAL" ]; then
@@ -199,6 +248,8 @@ model:
   base_url: ${GEAK_BASE_URL_VAL}
   model_kwargs:
     max_tokens: 16384
+tools:
+  rag: true
 EOF
       chmod 600 "$GEAK_CONFIG"
     else
@@ -208,6 +259,19 @@ EOF
   if [ "$DRY_RUN" -eq 0 ]; then
     command -v geak >/dev/null 2>&1 || verify_die "geak CLI not found"
   fi
+}
+
+ensure_rag_index() {
+  if [ -d "$RAG_INDEX_DIR" ] && [ -n "$(ls -A "$RAG_INDEX_DIR" 2>/dev/null)" ]; then
+    log "RAG index already present at $RAG_INDEX_DIR"
+    return
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "RAG index missing at $RAG_INDEX_DIR"
+    return
+  fi
+  log "building RAG index at $RAG_INDEX_DIR on device=${GEAK_RAG_INDEX_DEVICE_VAL} (first run downloads ~1.3 GB embedding model)"
+  run bash -lc "cd '${HYPERLOOM_ROOT}/geak' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"
 }
 
 ensure_oob() {
@@ -359,6 +423,9 @@ write_env_file() {
     [ -n "${GEAK_MODEL_NAME_VAL}" ] && echo "export GEAK_MODEL_NAME='${GEAK_MODEL_NAME_VAL}'"
     [ -n "${GEAK_API_KEY_VAL}" ] && echo "export GEAK_API_KEY='${GEAK_API_KEY_VAL}'"
     [ -n "${GEAK_BASE_URL_VAL}" ] && echo "export GEAK_BASE_URL='${GEAK_BASE_URL_VAL}'"
+    [ -n "${GEAK_MEMORY_STORE_PATH_VAL}" ] && echo "export GEAK_MEMORY_STORE_PATH='${GEAK_MEMORY_STORE_PATH_VAL}'"
+    [ -n "${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}" ] && echo "export GEAK_SAVE_TO_KNOWLEDGE_BASE='${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}'"
+    [ -n "${GEAK_MEMORY_MIN_SPEEDUP_VAL}" ] && echo "export GEAK_MEMORY_MIN_SPEEDUP='${GEAK_MEMORY_MIN_SPEEDUP_VAL}'"
   } > "$env_file"
   chmod 600 "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
@@ -374,13 +441,45 @@ except Exception:
     raise SystemExit(1)
 PY
 )"
-  for tool in TraceLens_generate_perf_report_pytorch geak oob claude codex; do
+  # TraceLens perf-report CLI: report whichever variant is available
+  # (#124 prefers the _inference suffix; the legacy CLI is acceptable as
+  # a fallback, the dispatcher in tools/tracelens_analysis.py picks at runtime).
+  if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
+    log "found TraceLens_generate_perf_report_pytorch_inference: $(command -v TraceLens_generate_perf_report_pytorch_inference)"
+  elif command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
+    warn "TraceLens_generate_perf_report_pytorch_inference not found; using legacy TraceLens_generate_perf_report_pytorch: $(command -v TraceLens_generate_perf_report_pytorch)"
+  else
+    warn "TraceLens perf-report CLI not found (looked for both _inference and legacy)"
+  fi
+  for tool in geak oob claude codex; do
     if command -v "$tool" >/dev/null 2>&1; then
       log "found ${tool}: $(command -v "$tool")"
     else
       warn "${tool} not found"
     fi
   done
+  if [ -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
+    log "GEAK ref: $(git -C "${HYPERLOOM_ROOT}/geak" describe --tags --always 2>/dev/null || echo unknown)"
+  else
+    warn "GEAK checkout missing at ${HYPERLOOM_ROOT}/geak"
+  fi
+  if python3 -c "import rag_mcp" >/dev/null 2>&1; then
+    log "rag-mcp installed: yes"
+  else
+    warn "rag-mcp not installed"
+  fi
+  if [ -d "$RAG_INDEX_DIR" ] && [ -n "$(ls -A "$RAG_INDEX_DIR" 2>/dev/null)" ]; then
+    log "RAG index: present at $RAG_INDEX_DIR"
+  else
+    warn "RAG index missing at $RAG_INDEX_DIR"
+  fi
+  log "RAG index build device: ${GEAK_RAG_INDEX_DEVICE_VAL}"
+  if grep -q "rag: true" "$GEAK_CONFIG" 2>/dev/null; then
+    log "tools.rag enabled in $GEAK_CONFIG"
+  else
+    warn "tools.rag not enabled in $GEAK_CONFIG"
+  fi
+  log "GEAK memory store: ${GEAK_MEMORY_STORE_PATH_VAL}"
 }
 
 main() {
@@ -389,10 +488,12 @@ main() {
   fi
   ensure_python
   ensure_ray
+  ensure_ray_started
   ensure_tracelens
 
   # Always install everything; ensure_oob also calls ensure_llm_auth_files.
   ensure_geak
+  ensure_rag_index
   ensure_oob
   ensure_auth_proxy
   write_env_file
