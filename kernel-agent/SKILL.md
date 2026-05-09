@@ -176,38 +176,32 @@ The response always includes `rag_hits` and `xs_memory_hits` arrays for
 observability. They may be empty when GEAK does not emit structured retrieval
 metadata.
 
-If a requested backend is missing, run the matching lazy install command before
-retrying. Missing backend attempts must be recorded in `optimization_attempts.jsonl`
-instead of crashing the resident session.
+If a requested backend is missing after `install.sh` succeeded, this is a
+real bug; record the missing backend attempt in `optimization_attempts.jsonl`
+and report it instead of crashing the resident session.
 
 ## TraceLens Requirements
 
 TraceLens runs through its CLI and its own skill.
 
-1. Install/check TraceLens before analysis:
+`install.sh` already installs TraceLens (editable install) and verifies the
+perf-report CLI is on PATH. If `tracelens_analysis` fails with "CLI not
+found", re-run `install.sh` instead of cloning the open-source TraceLens
+repo from chat — the open-source clone does NOT contain the standalone
+skills required by `tools/tracelens_analysis.py`.
 
-```bash
-export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
-cd "$TRACELENS_ROOT"
-pip install -e .
-TraceLens_generate_perf_report_pytorch --help
-```
-
-If the command is missing, stop and fix installation before analysis. Do not
-fall back to the open-source TraceLens clone when the internal mount exists; the
-internal mount contains the standalone skills expected by this tool.
-
-2. Read this skill file and strictly follow its order:
+When running TraceLens analysis, read this skill file and strictly follow
+its order:
 
 `/wekafs/hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md`
 
-3. Step 6 and Step 7 categories must run in independent Task subagents. Each
+Step 6 and Step 7 categories must run in independent Task subagents. Each
 subagent must write findings under `system_findings/` or `category_findings/`.
 
-4. Do not fabricate results. All findings must come from Python script output,
+Do not fabricate results. All findings must come from Python script output,
 TraceLens CLI output, or artifacts written by subagents.
 
-5. The final report is written to:
+The final report is written to:
 
 `$WORKSPACE_PATH/kernel-agent/runs/<session_id>/tracelens/standalone_analysis.md`
 

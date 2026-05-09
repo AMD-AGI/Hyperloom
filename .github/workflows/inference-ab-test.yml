@@ -6,7 +6,7 @@ on:
       tools_a:
         description: 'A group: Claw tool IDs'
         required: false
-        default: '67'
+        default: '74'
       label_a:
         description: 'A group label (shown in comparison table)'
         required: false
@@ -14,7 +14,7 @@ on:
       tools_b:
         description: 'B group: Claw tool IDs'
         required: false
-        default: '67'
+        default: '74'
       label_b:
         description: 'B group label (shown in comparison table)'
         required: false
