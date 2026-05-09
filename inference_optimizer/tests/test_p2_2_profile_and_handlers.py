@@ -307,7 +307,10 @@ async def test_select_kernels_handler_dry_run_returns_structured_result(session_
 
 @pytest.mark.asyncio
 async def test_select_kernels_handler_surfaces_candidates_path(session_dir, monkeypatch):
+    captured: dict = {}
+
     async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = cmd
         payload = {
             "status": "ok",
             "hot_kernels": [],
@@ -319,10 +322,16 @@ async def test_select_kernels_handler_surfaces_candidates_path(session_dir, monk
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
     res = await krh.select_kernels_handler(
-        {"trace_input": str(session_dir), "dry_run": True},
+        {
+            "trace_input": str(session_dir),
+            "dry_run": True,
+            "roofline_json": "/tmp/roofline.json",
+        },
         session_dir=session_dir,
     )
     assert res["candidates_path"] == "/tmp/kernel_candidates.json"
+    assert "--roofline-json" in captured["cmd"]
+    assert "/tmp/roofline.json" in captured["cmd"]
 
 
 @pytest.mark.asyncio
