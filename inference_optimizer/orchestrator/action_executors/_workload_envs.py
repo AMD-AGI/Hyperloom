@@ -1,0 +1,168 @@
+"""Shared workload-env materialization (single source of truth).
+
+The optimizer used to have TWO YAML-rendering paths:
+
+* baseline executor's ``_materialize_config_with_envs`` — injected the full
+  set of process-env knobs (TP/CONC/ISL/OSL/MAX_MODEL_LEN/PRECISION/
+  RUN_EVAL/ROCR_VISIBLE_DEVICES + adaptive NUM_PROMPTS/NUM_WARMUPS).
+* grid runner's ``_build_variant_yaml`` (used by params/backends/sweep) —
+  only set ``model``, ``runner_type``, ``EXTRA_*_ARGS``, and per-variant
+  ``extra_envs``. Process-env workload knobs were silently dropped.
+
+The result was a "Benchmark fairness" bug (SKILL Lesson 4): baseline ran at
+the user's real workload (e.g. CONC=64, ISL=1024, OSL=1024) while every
+downstream variant ran at the YAML smoke defaults (CONC=8, ISL=256, OSL=256).
+Throughput numbers were 10x apart, every variant looked like a regression.
+
+This module is the **single source of truth** for "render a Magpie YAML
+with the user's actual workload contract":
+
+* :func:`materialize_config_with_envs` — write a per-run YAML file
+  honoring process env (and optional caller overrides).
+* :func:`default_baseline_config` — pick the shipped sglang/vllm YAML
+  based on ``$FRAMEWORK``.
+
+Callers:
+
+* ``baseline.py`` — runs first, materializes the contract once and
+  surfaces the rendered YAML path in its result so downstream actions
+  can reuse it verbatim (no env re-read race).
+* ``params.py`` / ``backends.py`` — fall back to materializing on
+  their own if Coordinator has not yet plumbed the baseline path
+  through ``task.params["config_path"]``.
+* ``sweep.py`` — same fallback; per-variant CONC/ISL/OSL still win
+  because ``_build_variant_yaml`` applies ``variant.extra_envs`` last.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from ...paths import asset_root
+from ._grid_runner import server_args_env_name
+
+log = logging.getLogger(__name__)
+
+
+def default_baseline_config() -> Path:
+    """Resolve the shipped Magpie YAML based on ``$FRAMEWORK`` env.
+
+    Returns the sglang YAML when ``$FRAMEWORK`` is unset/unknown so existing
+    sglang-default tests keep passing.
+    """
+    fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
+    name = "baseline_vllm.yaml" if fw == "vllm" else "baseline_sglang.yaml"
+    return asset_root() / "scripts" / "configs" / name
+
+
+def materialize_config_with_envs(
+    config_path: Path,
+    output_dir: Path,
+    *,
+    extra_sglang_args: str = "",
+    extra_server_args: str = "",
+    extra_envs: dict[str, Any] | None = None,
+    model_path: str | None = None,
+    gpu_type: str | None = None,
+    out_name: str = "baseline_config.with_envs.yaml",
+) -> Path:
+    """Render a per-run Magpie YAML with caller-provided overrides.
+
+    Process-env precedence on top of the YAML defaults (env wins):
+
+    * ``MODEL_PATH`` / ``model_path`` arg → ``benchmark.model`` (overrides
+      the legacy hardcoded ``Qwen-Qwen3-8B`` default that ships in every YAML).
+    * ``GPU_TYPE`` / ``gpu_type`` arg → ``benchmark.runner_type`` (and pop
+      any explicit ``benchmark.benchmark_script`` so Magpie's runner_type
+      → script logic actually fires).
+    * ``PRECISION`` → ``benchmark.precision``.
+    * ``CONC, ISL, OSL, MAX_MODEL_LEN, TP, RANDOM_RANGE_RATIO`` → injected
+      as integers into ``benchmark.envs``.
+    * ``ROCR_VISIBLE_DEVICES`` → reconciled against TP (if YAML pins fewer
+      devices than TP requires, expanded to ``0..TP-1``; logs a warning).
+    * ``RUN_EVAL=true`` is set as a default so accuracy eval (GSM8K) runs
+      while the server is alive.
+    * ``NUM_PROMPTS`` and ``NUM_WARMUPS`` are computed adaptively from
+      ``CONC`` and ``ISL+OSL`` (longer sequences → fewer prompts to keep
+      each variant under ~3-5 min wall time).
+    * ``extra_sglang_args`` / ``extra_server_args`` (the latter wins) are
+      written to ``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS`` based on the
+      configured framework.
+    * ``extra_envs`` overrides any of the above.
+
+    Returns the path to the materialized YAML written under ``output_dir``.
+    Reuses the file name across calls so callers can locate it predictably.
+    """
+    server_args = (extra_server_args or extra_sglang_args).strip()
+    with config_path.open(encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    bench = cfg.setdefault("benchmark", {})
+    if model_path:
+        bench["model"] = str(model_path)
+    precision = os.environ.get("PRECISION", "").strip()
+    if precision:
+        bench["precision"] = precision
+    if gpu_type:
+        bench["runner_type"] = str(gpu_type)
+        bench.pop("benchmark_script", None)
+    envs = bench.setdefault("envs", {})
+    for env_key in (
+        "CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "RANDOM_RANGE_RATIO",
+    ):
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            envs[env_key] = int(val)
+    rocr_env = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
+    if rocr_env:
+        envs["ROCR_VISIBLE_DEVICES"] = rocr_env
+    resolved_tp = int(envs.get("TP") or os.environ.get("TP") or 1)
+    rocr_yaml = str(envs.get("ROCR_VISIBLE_DEVICES") or "").strip()
+    rocr_devices = [d.strip() for d in rocr_yaml.split(",") if d.strip()]
+    if not rocr_yaml or len(rocr_devices) < resolved_tp:
+        derived = ",".join(str(i) for i in range(resolved_tp))
+        if rocr_yaml and rocr_yaml != derived:
+            log.warning(
+                "ROCR_VISIBLE_DEVICES=%r has %d devices but TP=%d; "
+                "expanding to %r so SGLang sees enough GPUs. Set "
+                "ROCR_VISIBLE_DEVICES explicitly to override.",
+                rocr_yaml, len(rocr_devices), resolved_tp, derived,
+            )
+        envs["ROCR_VISIBLE_DEVICES"] = derived
+    envs.setdefault("RUN_EVAL", "true")
+
+    isl_val = int(os.environ.get("ISL") or envs.get("ISL") or 256)
+    osl_val = int(os.environ.get("OSL") or envs.get("OSL") or 256)
+    conc_val = int(os.environ.get("CONC") or envs.get("CONC") or 8)
+    seq_cost = isl_val + osl_val
+    if seq_cost <= 1024:
+        factor = 10
+    elif seq_cost <= 4096:
+        factor = 5
+    elif seq_cost <= 16384:
+        factor = 3
+    else:
+        factor = 2
+    if "NUM_PROMPTS" not in envs:
+        envs["NUM_PROMPTS"] = max(conc_val * factor, conc_val)
+    if "NUM_WARMUPS" not in envs:
+        envs["NUM_WARMUPS"] = min(conc_val, 8)
+    if server_args:
+        envs[server_args_env_name(bench.get("framework"))] = server_args
+    for key, value in (extra_envs or {}).items():
+        envs[str(key)] = str(value)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    materialized = output_dir / out_name
+    with materialized.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+    return materialized
+
+
+__all__ = [
+    "default_baseline_config",
+    "materialize_config_with_envs",
+]
