@@ -27,24 +27,42 @@ The CLI starts a Python Coordinator that coordinates:
 - Critic: proposal review; can be real Codex or `--critic-mock` when Codex credentials are unavailable.
 - Robustness: mock robustness monitor in this branch.
 
-State lives in one session directory. Production defaults to
-`/hyperloom/inference_optimizer-sessions`, but portable launches should set
-`INFERENCE_OPTIMIZER_SESSION_ROOT` to a writable run-local directory:
+State lives in **one fixed session directory** — `/workspace/hyperloom`
+by default. v0.6.1 collapses the previous `<root>/<session_id>/` layout
+to a flat directory because every sandbox is single-use; there is no
+session_id in the path. Override only for tests via
+`$INFERENCE_OPTIMIZER_SESSION_DIR`.
 
-```bash
-/hyperloom/inference_optimizer-sessions/<session_id>/
-├── state.json
-├── storage/coordinator.db
-├── results/
-└── kernel-agent-workspace/
+```text
+/workspace/hyperloom/                     # session_dir (fixed)
+├── manifest.json                         # Python-written session resume tag
+├── state.json                            # SharedState (Coordinator-owned)
+├── storage/coordinator.db                # SQLite WAL
+├── agents/{orchestration,kernel,critic,robustness}/
+│   ├── inbox.jsonl  outbox.jsonl
+│   ├── persona.md
+│   └── system_prompt.snapshot.md
+├── personas/  checkpoints/  findings/  kb/
+├── runs/                                 # data-plane (executor outputs)
+│   ├── baseline/<task_id>/
+│   ├── profile/<task_id>/
+│   ├── backends/<task_id>/{variant_NN_*/, result.json}
+│   ├── params/<task_id>/{variant_NN_*/, combo/, result.json}
+│   ├── sweep/<task_id>/
+│   ├── integrate/<task_id>/
+│   └── kernel_opt/<kernel_id>/<task_id>/
+├── kernel-agent-workspace/<kernel_id>/   # cross-task GEAK/OOB artefacts
+├── patches/<kernel_id>/                  # KEEP'd patches + backup
+├── reports/                              # `report` action output
+└── logs/                                 # cli + reactor + auth-proxy logs
 ```
 
-Always prefer `state.json` and `coordinator.db` over guessing from terminal logs.
+Always prefer `manifest.json` / `state.json` / `coordinator.db` over
+guessing from terminal logs.
 
-Session root resolution order (in `paths.py`):
-1. `INFERENCE_OPTIMIZER_SESSION_ROOT` env → use as-is.
-2. `USER_DATA_PATH` env → `$USER_DATA_PATH/inference_optimizer-sessions`.
-3. Default `/workspace/hyperloom/inference_optimizer-sessions`.
+Session dir resolution order (`inference_optimizer/paths.py`):
+1. `$INFERENCE_OPTIMIZER_SESSION_DIR` env → use as-is.
+2. Default `/workspace/hyperloom`.
 
 ## Setup
 
@@ -179,7 +197,7 @@ above install. It will:
 7. Auto-detects `--gpu-type` if not given.
 8. WARN-only presence check on `node` / `claude` / `codex` CLIs.
 9. Emits a single canonical **`Preflight diagnostics:`** block with
-   `asset_root`, `session_root` (and the env vars that resolved it),
+   `asset_root`, `session_dir` (and the env var that resolved it),
    `magpie_python`, `INFERENCEX_PATH`, aiter jit cache state (WARM/COLD
    + `.so` count + path), cold/warm timeout caps, and the active proxy URL.
    Launchers should paste this block verbatim into status reports rather
@@ -232,13 +250,16 @@ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh" --check-only
 bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 ```
 
-Use a repo-local session root by default so the skill works in sandboxes where
-`/hyperloom` is absent:
+In sandboxes where `/workspace/hyperloom` is unwritable, override the
+session location with a single env var:
 
 ```bash
-export INFERENCE_OPTIMIZER_SESSION_ROOT="$RUN_ROOT/inference_optimizer-sessions"
-mkdir -p "$INFERENCE_OPTIMIZER_SESSION_ROOT"
+export INFERENCE_OPTIMIZER_SESSION_DIR="$RUN_ROOT/optimizer-session"
+mkdir -p "$INFERENCE_OPTIMIZER_SESSION_DIR"
 ```
+
+The CLI calls `make_session_dir()` once at startup; that creates the
+full subdirectory skeleton in place (idempotent — safe to re-run).
 
 ## Portable Preflight
 
@@ -431,22 +452,23 @@ enough; reach for `--asset-root` only when defaults don't fit the workload.
 
 ## Launch a New Optimization
 
-Single command — assumes Step 1 (install) already ran in this pod:
+Single command — assumes Step 1 (install) already ran in this pod.
+There is no `--session-name`; the session lives at the canonical
+`/workspace/hyperloom` (override with `$INFERENCE_OPTIMIZER_SESSION_DIR`):
 
 ```bash
 cd "$REPO_ROOT"
 if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
 . "$HYPERLOOM_KERNEL_AGENT_ROOT/env.sh"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
-export SESSION_NAME="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
-export RUN_LOG="$REPO_ROOT/optimizer_runs/run_${SESSION_NAME}.log"
-export PID_FILE="$REPO_ROOT/optimizer_runs/run_${SESSION_NAME}.pid"
+export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
+export RUN_LOG="$REPO_ROOT/optimizer_runs/run_${RUN_TAG}.log"
+export PID_FILE="$REPO_ROOT/optimizer_runs/run_${RUN_TAG}.pid"
 mkdir -p "$REPO_ROOT/optimizer_runs"
 
 setsid nohup inference_optimizer --verbose optimize \
   --model "$MODEL_PATH" \
   --framework "${FRAMEWORK:-sglang}" \
-  --session-name "$SESSION_NAME" \
   --target-gain "${TARGET_GAIN:-10}" \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
@@ -468,23 +490,28 @@ After launching, do a short health check:
 sleep 30
 pid="$(cat "$PID_FILE")"
 test -d "/proc/$pid" && echo "optimizer_alive=true pid=$pid"
-session_dir="${INFERENCE_OPTIMIZER_SESSION_ROOT:-/hyperloom/inference_optimizer-sessions}/$SESSION_NAME"
+session_dir="${INFERENCE_OPTIMIZER_SESSION_DIR:-/workspace/hyperloom}"
+test -f "$session_dir/manifest.json" && echo "manifest_present=true"
 test -f "$session_dir/state.json" && echo "state_exists=true" \
   && python3 -c "import json; print(json.load(open('$session_dir/state.json')).get('stop_reason'))"
 ```
 
-Healthy = optimizer process alive + `state.json` exists + no early
-`stop_reason`.
+Healthy = optimizer process alive + `manifest.json` + `state.json`
+exist + no early `stop_reason`.
 
 ## Resume Existing Session
 
+`--resume` is a flag (no argument); it picks up whatever lives at the
+canonical session_dir. The CLI refuses to start if `manifest.json` or
+`state.json` is missing.
+
 ```bash
-export SESSION_NAME=<existing_session_id>
-export RUN_LOG="$REPO_ROOT/optimizer_runs/resume_${SESSION_NAME}_$(date +%Y%m%d_%H%M%S).log"
-export PID_FILE="$REPO_ROOT/optimizer_runs/run_${SESSION_NAME}.pid"
+export RUN_TAG="resume-$(date +%Y%m%d_%H%M%S)"
+export RUN_LOG="$REPO_ROOT/optimizer_runs/resume_${RUN_TAG}.log"
+export PID_FILE="$REPO_ROOT/optimizer_runs/run_${RUN_TAG}.pid"
 
 setsid nohup inference_optimizer --verbose optimize \
-  --resume "$SESSION_NAME" \
+  --resume \
   --target-gain "${TARGET_GAIN:-10}" \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
@@ -502,18 +529,18 @@ before retrying.
 
 For any run longer than 5 minutes, start a robustness monitor in its own
 `setsid nohup` process. It must poll no more often than every 5 minutes,
-stop when the session has a terminal `stop_reason`, and resume the same
+stop when the session has a terminal `stop_reason`, and resume the
 session if the optimizer exits unexpectedly.
 
 ```bash
-export ROBUSTNESS_MONITOR_SCRIPT="$REPO_ROOT/optimizer_runs/robustness_monitor_${SESSION_NAME}.sh"
-export ROBUSTNESS_MONITOR_LOG="$REPO_ROOT/optimizer_runs/robustness_monitor_${SESSION_NAME}_$(date +%Y%m%d_%H%M%S).log"
-export ROBUSTNESS_MONITOR_PID_FILE="$REPO_ROOT/optimizer_runs/robustness_monitor_${SESSION_NAME}.pid"
+export ROBUSTNESS_MONITOR_SCRIPT="$REPO_ROOT/optimizer_runs/robustness_monitor.sh"
+export ROBUSTNESS_MONITOR_LOG="$REPO_ROOT/optimizer_runs/robustness_monitor_$(date +%Y%m%d_%H%M%S).log"
+export ROBUSTNESS_MONITOR_PID_FILE="$REPO_ROOT/optimizer_runs/robustness_monitor.pid"
 
 cat > "$ROBUSTNESS_MONITOR_SCRIPT" <<'SH'
 #!/usr/bin/env bash
 set -u
-session_dir="${INFERENCE_OPTIMIZER_SESSION_ROOT:-/hyperloom/inference_optimizer-sessions}/$SESSION_NAME"
+session_dir="${INFERENCE_OPTIMIZER_SESSION_DIR:-/workspace/hyperloom}"
 deadline=$(( $(date +%s) + (${MAX_HOURS:-5} + 1) * 3600 ))
 read_stop_reason() {
   python3 -c "import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); print((json.loads(p.read_text()).get('stop_reason') or '').strip() if p.exists() else '')" "$session_dir/state.json"
@@ -531,10 +558,10 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     echo "[robustness] alive pid=$pid stop_reason=${stop_reason:-none} $(date -Is)"
     sleep 300; continue
   fi
-  echo "[robustness] optimizer stopped; resuming $SESSION_NAME $(date -Is)"
-  resume_log="$REPO_ROOT/optimizer_runs/resume_${SESSION_NAME}_$(date +%Y%m%d_%H%M%S).log"
+  echo "[robustness] optimizer stopped; resuming $(date -Is)"
+  resume_log="$REPO_ROOT/optimizer_runs/resume_$(date +%Y%m%d_%H%M%S).log"
   setsid nohup inference_optimizer --verbose optimize \
-    --resume "$SESSION_NAME" \
+    --resume \
     --target-gain "${TARGET_GAIN:-10}" --max-hours "${MAX_HOURS:-5}" \
     --tick-interval-sec 30 --kernel-claude --critic-mock \
     > "$resume_log" 2>&1 < /dev/null &
@@ -554,7 +581,7 @@ echo $! > "$ROBUSTNESS_MONITOR_PID_FILE"
 Poll at most every 5 minutes unless debugging a startup failure.
 
 ```bash
-export SESSION="${INFERENCE_OPTIMIZER_SESSION_ROOT:-/hyperloom/inference_optimizer-sessions}/$SESSION_NAME"
+export SESSION="${INFERENCE_OPTIMIZER_SESSION_DIR:-/workspace/hyperloom}"
 python3 - <<'PY'
 import json, os, pathlib
 s = json.loads((pathlib.Path(os.environ["SESSION"]) / "state.json").read_text())
@@ -829,8 +856,55 @@ budget on untested params/backend candidates or the next kernel.
 
 Report concise status:
 
-- session id and log path
+- session id (from `manifest.json`) and log path
 - `cumulative_gain` and `current_best`
 - params accepted/rejected summary
 - last kernel optimized, correctness, micro speedup, E2E gain, decision
 - whether the process is still running or stopped and why
+
+## Session Layout (cheat sheet)
+
+The CLI flattens everything into a single fixed directory at
+`/workspace/hyperloom` (override: `$INFERENCE_OPTIMIZER_SESSION_DIR`).
+Python owns every mkdir; agents reference paths via the injected
+`SESSION_DIR` token. PolicyGate refuses path-like fields that escape
+the session_dir (or, for `source_file`, the framework allowlist
+`/sgl-workspace/{aiter,sglang,vllm}/`).
+
+```text
+$SESSION_DIR/                            # /workspace/hyperloom by default
+├── manifest.json                        # written first; v1 schema; resume tag
+├── state.json                           # SharedState — Coordinator-owned
+├── storage/coordinator.db               # SQLite WAL (events/leases/cursors/tasks)
+├── agents/<role>/                       # orchestration / kernel / critic / robustness
+│   ├── inbox.jsonl  outbox.jsonl
+│   ├── persona.md
+│   └── system_prompt.snapshot.md        # snapshot of the prompt at boot
+├── personas/  checkpoints/  findings/  kb/
+├── runs/                                # data-plane (executor outputs)
+│   ├── baseline/<task_id>/              # Magpie workspace + materialized YAML
+│   ├── profile/<task_id>/               # baseline + torch_trace/
+│   ├── backends/<task_id>/{variant_NN_*/, result.json}
+│   ├── params/<task_id>/{variant_NN_*/, combo/, result.json}
+│   ├── sweep/<task_id>/
+│   ├── integrate/<task_id>/             # patch → re-baseline workspace
+│   └── kernel_opt/<kernel_id>/<task_id>/
+├── kernel-agent-workspace/<kernel_id>/  # GEAK / OOB cross-task artefacts
+├── patches/<kernel_id>/                 # KEEP-promoted patches + backup/
+├── reports/                             # `report` action output (final.{md,json})
+└── logs/                                # cli.log / coordinator.log / <role>.log
+```
+
+Resolution helpers (use these — don't string-concat):
+
+| Helper | Returns |
+|---|---|
+| `paths.session_dir()` | `/workspace/hyperloom` (or env override) |
+| `paths.make_session_dir()` | session dir + full skeleton, idempotent |
+| `paths.db_path_for(sd)` | `<sd>/storage/coordinator.db` |
+| `session_paths.runs_dir(sd, kind, task_id)` | `<sd>/runs/<kind>/<task_id>/` |
+| `session_paths.kernel_workspace(sd, kernel_id)` | `<sd>/kernel-agent-workspace/<kernel_id>/` |
+| `session_paths.patches_dir(sd, kernel_id)` | `<sd>/patches/<kernel_id>/` |
+| `session_paths.agent_log(sd, role)` | `<sd>/logs/<role>.log` |
+| `session_paths.agent_prompt_snapshot(sd, role)` | `<sd>/agents/<role>/system_prompt.snapshot.md` |
+| `manifest.write_manifest(sd, args)` / `load_manifest(sd)` | manifest.json read/write |

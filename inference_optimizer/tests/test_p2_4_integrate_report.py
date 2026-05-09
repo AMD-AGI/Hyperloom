@@ -41,8 +41,8 @@ from inference_optimizer.storage import SqliteConnection
 # ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_ROOT", str(tmp_path))
-    return make_session_dir("p2-4-test")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    return make_session_dir()
 
 
 def _heartbeat() -> Intent:
@@ -692,7 +692,10 @@ async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path,
     the runner reports a structured failure (not a crash). Note the
     SubAgentRunner state stays "succeeded" because the runner returned
     a dict (didn't raise) — the failure signal is inside result['status']."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_SESSION_ROOT", raising=False)
+    # Pin INFERENCE_OPTIMIZER_SESSION_DIR at a path with no state.json so
+    # ReportExecutor's resolution returns None (canonical default would
+    # also work, but we use tmp_path to keep the test hermetic).
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path / "noses"))
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
