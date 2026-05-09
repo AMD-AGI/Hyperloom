@@ -924,12 +924,6 @@ class Coordinator:
             if handler is not None:
                 params = intent.payload.get("params") or {}
                 merged_payload = {**intent.payload, **params}
-                if (
-                    kind == "select_kernels"
-                    and self.shared_state.last_profile_roofline
-                    and not merged_payload.get("roofline_json")
-                ):
-                    merged_payload["roofline_json"] = self.shared_state.last_profile_roofline
                 cache_hit_source = None
                 cached_result = self._cached_kernel_request(kind, merged_payload)
                 if cached_result is not None:
@@ -1385,14 +1379,6 @@ class Coordinator:
                 self.shared_state.last_profile_args = profile_args
                 # Stale select_kernels cache no longer matches this trace.
                 self.shared_state.last_select_kernels = {}
-                self.shared_state.last_profile_pmc_summary = ""
-                self.shared_state.last_profile_roofline = ""
-                changed = True
-            if result.get("pmc_summary_path"):
-                self.shared_state.last_profile_pmc_summary = str(result["pmc_summary_path"])
-                changed = True
-            if result.get("roofline_path"):
-                self.shared_state.last_profile_roofline = str(result["roofline_path"])
                 changed = True
             # profile result may also include a tput; promote into
             # current_best on the same +1% rule the grid path uses below.
