@@ -57,13 +57,18 @@ class ClawClient:
 
     # ── Session CRUD ──
 
-    def create_session(self, name: str, agent_id: str | None = None) -> dict:
+    def create_session(self, name: str, agent_id: str | None = None,
+                       sandbox_image: str | None = None) -> dict:
         agent_id = agent_id or self.agent_id
+        body: dict = {"name": name, "agent_id": agent_id}
+        if sandbox_image:
+            body["sandbox_image"] = sandbox_image
         data = self._check(self._session.post(
             self._url("/sessions"),
-            json={"name": name, "agent_id": agent_id},
+            json=body,
         ))
-        log.info("Created session %s (name=%s)", data["data"]["session_id"], name)
+        log.info("Created session %s (name=%s, sandbox_image=%s)",
+                 data["data"]["session_id"], name, sandbox_image or "cpu")
         return data["data"]
 
     def get_session(self, session_id: str) -> dict:
@@ -84,6 +89,7 @@ class ClawClient:
         content: str,
         task_mode: str = "agent",
         tools: list[int] | None = None,
+        plugin_id: int | None = 4,
     ) -> dict:
         body = {
             "content": content,
@@ -93,6 +99,7 @@ class ClawClient:
             "attachments": [],
             "tools": tools if tools is not None else self.default_tools,
             "workspaceId": self.sandbox_workspace or os.environ.get("SANDBOX_WORKSPACE", ""),
+            "pluginId": plugin_id,
         }
         resp = self._session.post(
             self._url(f"/sessions/{session_id}/messages"),
