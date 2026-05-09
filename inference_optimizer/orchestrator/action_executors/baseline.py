@@ -47,6 +47,7 @@ from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
 )
+from .benchmark_result import extract_benchmark_measurement
 
 
 log = logging.getLogger(__name__)
@@ -310,19 +311,18 @@ class BaselineExecutor:
                 "output_dir": str(output_dir),
             }
 
-        if proc.returncode != 0:
-            tail_stderr = (proc.stderr or "")[-2000:]
-            return {
-                "status": "failed",
-                "error_class": "subprocess_nonzero",
-                "returncode": proc.returncode,
-                "error": tail_stderr,
-                "output_dir": str(output_dir),
-            }
-
         # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
         candidates = sorted(output_dir.glob("benchmark_*"))
         if not candidates:
+            if proc.returncode != 0:
+                tail = (proc.stderr or proc.stdout or "")[-2000:]
+                return {
+                    "status": "failed",
+                    "error_class": "subprocess_nonzero",
+                    "returncode": proc.returncode,
+                    "error": tail,
+                    "output_dir": str(output_dir),
+                }
             return {
                 "status": "failed",
                 "error_class": "no_workspace",
@@ -331,37 +331,49 @@ class BaselineExecutor:
             }
         workspace = candidates[-1]
         report_path = workspace / "benchmark_report.json"
-        if not report_path.exists():
+        report: dict[str, Any] | None = None
+        if report_path.exists():
+            try:
+                with report_path.open(encoding="utf-8") as f:
+                    loaded = json.load(f)
+                report = loaded if isinstance(loaded, dict) else None
+            except (OSError, json.JSONDecodeError):
+                report = None
+
+        measurement = extract_benchmark_measurement(report, workspace=workspace)
+        warnings = list(measurement.pop("nonfatal_warnings", []) or [])
+        if proc.returncode != 0:
+            warnings.append("magpie_nonzero_after_valid_measurement")
+
+        if not measurement.get("valid_measurement"):
+            if proc.returncode != 0:
+                tail = (proc.stderr or proc.stdout or "")[-2000:]
+                error_class = "subprocess_nonzero"
+                error = tail
+            elif not report_path.exists():
+                error_class = "no_report"
+                error = f"benchmark_report.json missing under {workspace}"
+            else:
+                error_class = "invalid_measurement"
+                error = "benchmark report did not contain positive throughput and completed requests"
             return {
                 "status": "failed",
-                "error_class": "no_report",
-                "error": f"benchmark_report.json missing under {workspace}",
+                "error_class": error_class,
+                "returncode": proc.returncode,
+                "error": error,
                 "output_dir": str(output_dir),
                 "workspace": str(workspace),
+                "report_path": str(report_path) if report_path.exists() else None,
+                "reported_success": measurement.get("reported_success"),
+                "nonfatal_warnings": warnings,
             }
 
-        with report_path.open(encoding="utf-8") as f:
-            report = json.load(f)
-
-        tput = report.get("throughput", {}) or {}
-        latency = report.get("latency", {}) or {}
-        ttft = latency.get("ttft", {}) or {}
-        e2el = latency.get("e2el", {}) or {}
-
         result = {
-            "status": "succeeded" if report.get("success") else "failed",
-            "framework": report.get("framework"),
-            "model": report.get("model"),
-            "request_throughput": tput.get("request_throughput"),
-            "output_throughput": tput.get("output_throughput"),
-            "total_token_throughput": tput.get("total_token_throughput"),
-            "completed_requests": tput.get("completed_requests"),
-            "duration_seconds": tput.get("duration_seconds"),
-            "ttft_mean_ms": ttft.get("mean_ms"),
-            "ttft_p99_ms": ttft.get("p99_ms"),
-            "e2el_mean_ms": e2el.get("mean_ms"),
-            "e2el_p99_ms": e2el.get("p99_ms"),
-            "report_path": str(report_path),
+            "status": "succeeded",
+            **measurement,
+            "nonfatal_warnings": warnings,
+            "returncode": proc.returncode,
+            "report_path": str(report_path) if report_path.exists() else None,
             "workspace": str(workspace),
             # Path to the materialized YAML used for THIS baseline. Coordinator
             # promotes this into SharedState.baseline_config_path so subsequent
@@ -389,7 +401,8 @@ class BaselineExecutor:
                         eval_data.get("error", "unknown"))
 
         log.info(
-            "baseline_executor: success tput=%.1f tok/s/gpu (output) e2el=%.1fms",
+            "baseline_executor: %s tput=%.1f tok/s/gpu (output) e2el=%.1fms",
+            "success_with_warning" if warnings else "success",
             result["output_throughput"] or 0.0,
             result["e2el_mean_ms"] or 0.0,
         )

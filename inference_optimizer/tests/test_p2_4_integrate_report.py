@@ -146,6 +146,42 @@ async def test_integrate_handler_keep_decision(session_dir, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_integrate_handler_accepts_valid_rebaseline_with_wrapper_warning(session_dir, tmp_path):
+    """Valid throughput should drive KEEP even if Magpie reports success=false."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        workspace = _fake_workspace(slot, tput=900.0)
+        report_path = workspace / "benchmark_report.json"
+        data = json.loads(report_path.read_text())
+        data["success"] = False
+        report_path.write_text(json.dumps(data))
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=1, stdout="", stderr="cleanup failed",
+        )
+
+    payload = {
+        "base_tput": 800.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k_warn",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+    }
+    with patch("subprocess.run", side_effect=_fake_run):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert res["status"] == "ok"
+    assert res["decision"] == "KEEP"
+    assert res["new_tput"] == 900.0
+
+
+@pytest.mark.asyncio
 async def test_integrate_handler_revert_decision(session_dir, tmp_path):
     """re-baseline returns 700 vs base 800 → REVERT."""
     base_yaml = tmp_path / "base.yaml"

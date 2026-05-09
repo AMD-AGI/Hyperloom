@@ -224,6 +224,73 @@ def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_baseline_executor_keeps_valid_measurement_with_wrapper_failure(tmp_path):
+    """A cleanup/profile wrapper failure must not discard completed requests."""
+    db = SqliteConnection(tmp_path / "baseline.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    output_dir = tmp_path / "out"
+    workspace = output_dir / "benchmark_sglang_20260501_001122"
+    workspace.mkdir(parents=True)
+    (workspace / "benchmark_report.json").write_text(json.dumps({
+        "success": False,
+        "framework": "sglang",
+        "model": "/wekafs/models/Qwen-Qwen3-8B",
+        "throughput": {
+            "request_throughput": 1.8,
+            "output_throughput": 1872.0,
+            "total_token_throughput": 3744.0,
+            "completed_requests": 320,
+            "duration_seconds": 177.0,
+        },
+        "latency": {"ttft": {"mean_ms": 140}, "e2el": {"mean_ms": 2500}},
+    }))
+
+    fake_completed = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="", stderr="cleanup failed",
+    )
+
+    task = await tr.create(
+        kind="baseline",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="baseline-valid-warning",
+    )
+    sub.register_executor("baseline", BaselineExecutor(default_output_root=tmp_path))
+    with patch("subprocess.run", return_value=fake_completed):
+        res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    assert res.result["status"] == "succeeded"
+    assert res.result["reported_success"] is False
+    assert res.result["output_throughput"] == 1872.0
+    assert res.result["completed_requests"] == 320
+    assert "benchmark_report_success_false" in res.result["nonfatal_warnings"]
+    assert "magpie_nonzero_after_valid_measurement" in res.result["nonfatal_warnings"]
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_promotes_valid_baseline_even_with_failed_status(session_dir):
+    c = Coordinator(session_dir, backends=_backends_silent())
+    payload = {
+        "status": "failed",
+        "output_throughput": 1855.76,
+        "completed_requests": 320,
+        "workspace": "/tmp/baseline",
+        "materialized_config": "/tmp/baseline/config.yaml",
+    }
+    assert c._is_promotable_result("baseline", payload)
+
+    await c._promote_to_shared_state("baseline", payload)
+
+    assert c.shared_state.baseline_tput == pytest.approx(1855.76)
+    assert c.shared_state.current_best["tput"] == pytest.approx(1855.76)
+    assert c.shared_state.baseline_config_path == "/tmp/baseline/config.yaml"
+
+
+@pytest.mark.asyncio
 async def test_profile_executor_extracts_trace_dir(tmp_path):
     """When the workspace contains torch_trace/*.trace.json.gz, the
     runner surfaces them in the result so downstream consumers can
