@@ -114,6 +114,7 @@ def render_prompt(merged: dict) -> str:
     safe_api_key = os.environ.get("CLAW_API_KEY", "")
     safe_base_url = os.environ.get("SAFE_BASE_URL", "")
     sandbox_workspace = os.environ.get("SANDBOX_WORKSPACE", "")
+    nfs_root = os.environ.get("NFS_ROOT", "/workspace")
 
     return PROMPT_TEMPLATE.format(
         model_hf=merged["model_hf"],
@@ -143,7 +144,23 @@ def render_prompt(merged: dict) -> str:
         safe_api_key=safe_api_key,
         safe_base_url=safe_base_url,
         sandbox_workspace=sandbox_workspace,
+        nfs_root=nfs_root,
     )
+
+
+_STREAM_TRUNCATION_MIN_TOOL_CALLS = 3  # fewer tool calls than this in <10min = likely truncation
+_STREAM_TRUNCATION_MAX_ELAPSED_S = 600  # session completed in under this → suspect truncation
+_MAX_RETRY_ATTEMPTS = 2  # retry once on stream truncation
+
+
+def _is_stream_truncated(status: str, sse_events: list[dict], elapsed_s: float) -> bool:
+    """Detect Vertex AI stream truncation: session 'completed' suspiciously fast with no work."""
+    if status != "completed":
+        return False
+    if elapsed_s > _STREAM_TRUNCATION_MAX_ELAPSED_S:
+        return False
+    tool_calls = sum(1 for e in sse_events if e.get("type") == "toolUsed")
+    return tool_calls < _STREAM_TRUNCATION_MIN_TOOL_CALLS
 
 
 def run_model(
@@ -162,61 +179,86 @@ def run_model(
     log.info("Starting model: %s (%s)", model_name, merged["precision"])
     log.info("═" * 60)
 
-    # Step 1: Create session
-    session_name = f"ci-{model_name}-{timestamp}"
-    try:
-        session = claw.create_session(session_name)
-        session_id = session["session_id"]
-    except Exception as e:
-        log.error("Failed to create session for %s: %s", model_name, e)
-        return build_model_result(
-            model_name, merged["inferenceX_key"], merged["image"],
-            merged["precision"], "failed", timestamp, result_dir)
-
-    log.info("Session created: %s", session_id)
-
-    # Step 2: Subscribe SSE in background thread, then send message
     prompt = render_prompt(merged)
     log.info("Prompt length: %d chars", len(prompt))
 
-    sse_events: list[dict] = []
-    status_holder = {"status": "running"}
+    status = "failed"
+    session_id = None
 
-    def _monitor():
-        def _on_event(evt):
-            sse_events.append(evt)
-            evt_type = evt.get("type", "")
-            if evt_type == "chatDelta" and evt.get("sender") == "assistant":
-                delta = evt.get("delta", {})
-                content = delta.get("content", "") if isinstance(delta, dict) else ""
-                if content and len(content) > 20:
-                    log.info("[%s] Agent: ...%s", model_name, content[:150])
-            elif evt_type == "toolUsed":
-                log.info("[%s] Tool: %s", model_name, evt.get("tool", "unknown"))
+    for attempt in range(1, _MAX_RETRY_ATTEMPTS + 1):
+        if attempt > 1:
+            wait_s = 60
+            log.warning("[%s] Stream truncation detected on attempt %d — waiting %ds then retrying",
+                        model_name, attempt - 1, wait_s)
+            time.sleep(wait_s)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
 
-        status_holder["status"] = claw.monitor_session(
-            session_id, timeout=sandbox_timeout, on_event=_on_event)
+        # Step 1: Create session — pass sandbox_image to get GPU sandbox
+        session_name = f"ci-{model_name}-{timestamp}"
+        if attempt > 1:
+            session_name = f"ci-{model_name}-{timestamp}-retry{attempt - 1}"
+        sandbox_image = merged.get("sandbox_image", "")
+        try:
+            session = claw.create_session(session_name, sandbox_image=sandbox_image or None)
+            session_id = session["session_id"]
+        except Exception as e:
+            log.error("Failed to create session for %s: %s", model_name, e)
+            break
 
-    monitor_thread = threading.Thread(target=_monitor, daemon=True)
-    monitor_thread.start()
-    time.sleep(1)
+        log.info("Session created: %s (attempt %d)", session_id, attempt)
 
-    # Send the prompt after SSE is connected
-    try:
-        claw.send_message(session_id, prompt)
-        log.info("Prompt sent to session %s", session_id)
-    except Exception as e:
-        log.error("Failed to send message to %s: %s", session_id, e)
-        status_holder["status"] = "failed"
+        # Step 2: Subscribe SSE in background thread, then send message
+        sse_events: list[dict] = []
+        status_holder = {"status": "running"}
+        attempt_start = time.time()
 
-    # Wait for completion
-    monitor_thread.join(timeout=sandbox_timeout + 60)
-    status = status_holder["status"]
-    if status == "running":
-        status = "timeout"
-        log.warning("Session %s still running after sandbox_timeout (%ds), marking as timeout",
-                     session_id, sandbox_timeout)
-    log.info("Session %s finished with status: %s", session_id, status)
+        def _monitor():
+            def _on_event(evt):
+                sse_events.append(evt)
+                evt_type = evt.get("type", "")
+                if evt_type == "chatDelta" and evt.get("sender") == "assistant":
+                    delta = evt.get("delta", {})
+                    content = delta.get("content", "") if isinstance(delta, dict) else ""
+                    if content and len(content) > 20:
+                        log.info("[%s] Agent: ...%s", model_name, content[:150])
+                elif evt_type == "toolUsed":
+                    log.info("[%s] Tool: %s", model_name, evt.get("tool", "unknown"))
+
+            status_holder["status"] = claw.monitor_session(
+                session_id, timeout=sandbox_timeout, on_event=_on_event)
+
+        monitor_thread = threading.Thread(target=_monitor, daemon=True)
+        monitor_thread.start()
+        time.sleep(1)
+
+        try:
+            claw.send_message(session_id, prompt)
+            log.info("Prompt sent to session %s", session_id)
+        except Exception as e:
+            log.error("Failed to send message to %s: %s", session_id, e)
+            status_holder["status"] = "failed"
+
+        monitor_thread.join(timeout=sandbox_timeout + 60)
+        status = status_holder["status"]
+        elapsed = time.time() - attempt_start
+
+        if status == "running":
+            status = "timeout"
+            log.warning("Session %s still running after sandbox_timeout (%ds), marking as timeout",
+                        session_id, sandbox_timeout)
+
+        log.info("Session %s finished with status: %s (elapsed %.0fs, %d tool calls)",
+                 session_id, status, elapsed, sum(1 for e in sse_events if e.get("type") == "toolUsed"))
+
+        if _is_stream_truncated(status, sse_events, elapsed):
+            log.warning("[%s] Stream truncation suspected (completed in %.0fs with %d tool calls)",
+                        model_name, elapsed,
+                        sum(1 for e in sse_events if e.get("type") == "toolUsed"))
+            if attempt < _MAX_RETRY_ATTEMPTS:
+                continue
+            log.error("[%s] Stream truncation on all %d attempts, giving up", model_name, _MAX_RETRY_ATTEMPTS)
+            status = "failed"
+        break
 
     # Step 3: Download optimization report from Claw, with NFS fallback
     # No sleep here — sandbox is already gone after session ends; download immediately.
@@ -226,6 +268,8 @@ def run_model(
 
     # 3a. Try Claw file API (sandbox /workspace)
     try:
+        if not session_id:
+            raise RuntimeError("No session_id — session never created")
         files = claw.list_files(session_id)
         log.info("Session %s has %d files", session_id, len(files))
         for f in files:
