@@ -33,6 +33,7 @@ from .profile import (
     ProfileExecutor,
     profile_executor,
 )
+from .pmc_roofline import PMCRooflineExecutor, pmc_roofline_executor
 from .report import ReportExecutor, report_executor
 from .sweep import (
     DEFAULT_CONC_VALUES,
@@ -52,6 +53,7 @@ __all__ = [
     "DEFAULT_PARAMS_GRID",
     "PROFILE_DEFAULT_CONFIG",
     "ParamsExecutor",
+    "PMCRooflineExecutor",
     "ProfileExecutor",
     "ReportExecutor",
     "SweepExecutor",
@@ -59,6 +61,7 @@ __all__ = [
     "baseline_executor",
     "discover_backend_flags",
     "params_executor",
+    "pmc_roofline_executor",
     "profile_executor",
     "report_executor",
     "sweep_executor",
