@@ -595,7 +595,6 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
     ]
     import os as _os
     env_backup = dict(_os.environ)
-    rc = -1
     try:
         with patch.object(tla.subprocess, "run", side_effect=fake_run), \
              patch.object(tla.shutil, "which", side_effect=fake_which), \
@@ -741,8 +740,13 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
              patch.object(tla.sys, "argv", argv):
             try:
                 tla.main()
-            except SystemExit:
-                pass
+            except SystemExit as exc:
+                # tla.main() may CLI-exit via sys.exit() depending on the
+                # mocked perf-report CLI's rc. Either a clean exit code (0 /
+                # None) or a soft-fallback non-zero is acceptable here — the
+                # test asserts the splitter command shape further down, not
+                # the program's overall exit status.
+                _ = exc
     finally:
         _os.environ.clear()
         _os.environ.update(env_backup)
@@ -782,3 +786,157 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
     assert "--group_by_num_kernels" in perf_cmd, perf_cmd
     assert "--gpu_arch_json_path" in perf_cmd, perf_cmd
     assert "--capture_folder" in perf_cmd and str(capture) in perf_cmd, perf_cmd
+
+
+# ===========================================================================
+# parse_analysis_md — TraceLens v0.3 final-report contract (#155 review)
+# ===========================================================================
+_FIXTURE_LLAMA70B_ANALYSIS_MD = (
+    Path(__file__).resolve().parents[1]
+    / "tests" / "fixtures" / "tracelens_v03_llama70b_analysis.md"
+)
+
+
+def test_parse_analysis_md_llama70b_fixture_yields_21_compute_candidates():
+    """Round-trip the TraceLens v0.3 reference fixture for Llama-3 70B.
+
+    The fixture (TraceLens-internal ``evals/analysis_tests/e2e_tests/
+    llama_70b/analysis_output_ref/analysis.md``) is the official golden
+    output, so its 9-column Detailed Analysis tables are the contract our
+    parser must round-trip without loss.
+    """
+    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
+    assert len(cands) == 21, (
+        f"expected 21 candidates (18 GEMM + 2 SDPA_fwd + 1 SDPA_bwd) from "
+        f"the fixture; got {len(cands)}"
+    )
+
+    by_cat = {}
+    for c in cands:
+        by_cat.setdefault(c["tracelens_category"], []).append(c)
+    assert len(by_cat["gemm"]) == 18
+    assert len(by_cat["sdpa_fwd"]) == 2
+    assert len(by_cat["sdpa_bwd"]) == 1
+
+    p1_first = cands[0]
+    assert p1_first["name"] == "aten::mm"
+    assert p1_first["tracelens_category"] == "gemm"
+    assert p1_first["tracelens_pitem_rank"] == 1
+    assert p1_first["library"] == "Tensile"
+    assert p1_first["bound_type"] == "compute-bound"
+    # Time (ms) -> duration_us; first row of P1 = 7607.463 ms.
+    assert abs(p1_first["duration_us"] - 7607463.0) < 1.0
+    assert p1_first["call_count"] == 320
+    assert abs(p1_first["percent_of_total"] - 13.42) < 0.001
+    assert abs(p1_first["efficiency_percent"] - 68.74) < 0.001
+    assert p1_first["efficiency_peak_value"] == 708.0
+    assert "TFLOPS" in p1_first["efficiency_peak_unit"]
+    assert p1_first["impact_score"] == 15.12  # mid value from p_item marker
+    # Args is "<br>"-joined upstream; parser must normalise to a list of
+    # whitespace-trimmed shape strings without losing entries.
+    assert p1_first["shapes"] == [
+        "(24576,8192) bf16",
+        "(8192,28672) bf16",
+        "(24576,28672) bf16",
+    ]
+    # Kernel Path is "—" for every row in this fixture; parser must keep the
+    # field as empty string (not the dash) so downstream "no source path"
+    # checks remain truthy.
+    assert p1_first["source_file"] == ""
+
+    # Last candidate is the lone SDPA_bwd row (P3 in the report).
+    p3_only = cands[-1]
+    assert p3_only["name"] == "flash_attn::_flash_attn_backward"
+    assert p3_only["tracelens_category"] == "sdpa_bwd"
+    assert p3_only["tracelens_pitem_rank"] == 3
+    assert p3_only["library"] == "CK"
+    assert p3_only["call_count"] == 160
+
+
+def test_parse_analysis_md_returns_empty_when_no_detailed_analysis(tmp_path):
+    """Empty Detailed Analysis -> 0 candidates, so caller can fall back."""
+    md = tmp_path / "analysis.md"
+    md.write_text(
+        "# Stub\n\n## Compute Kernel Optimizations\n\n"
+        "✅ No actionable per-category compute-kernel bottlenecks were promoted.\n\n"
+        "## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
+        "_No compute-kernel reasoning candidates were promoted._\n",
+        encoding="utf-8",
+    )
+    assert tlr.parse_analysis_md(md, top_k=10) == []
+
+
+def test_parse_analysis_md_missing_file_returns_empty(tmp_path):
+    """Non-existent report -> 0 candidates (callers fall back, never raise)."""
+    assert tlr.parse_analysis_md(tmp_path / "nope.md", top_k=10) == []
+
+
+def test_parse_analysis_md_top_k_caps_total_rows(tmp_path):
+    """top_k caps the per-row total across all P-items, not per category."""
+    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=5)
+    assert len(cands) == 5
+    # First 5 rows of the fixture are all P1 GEMMs.
+    assert all(c["tracelens_pitem_rank"] == 1 for c in cands)
+
+
+# ===========================================================================
+# normalize_upstream_category — TraceLens orchestrator_prepare.py enum (#155 #4)
+# ===========================================================================
+@pytest.mark.parametrize("raw,expected", [
+    ("gemm", "GEMM"),
+    ("groupedgemm_fwd", "GEMM"),
+    ("groupedgemm_bwd", "GEMM"),
+    ("moe_fused", "MoE"),
+    ("moe_unfused", "MoE"),
+    ("sdpa_fwd", "SDPA"),
+    ("sdpa_bwd", "SDPA"),
+    ("inferenceattention", "SDPA"),
+    ("rmsnorm", "LayerNorm"),
+    ("norm_fwd", "LayerNorm"),
+    ("norm_bwd", "LayerNorm"),
+    ("convolution", "Convolution"),
+    ("conv_fwd", "Convolution"),
+    ("conv_bwd", "Convolution"),
+    ("triton", "Triton"),
+    ("elementwise", "Elementwise"),
+    ("reduce", "Reduction"),
+    ("cpu_idle", "Other"),
+    ("other", "Other"),
+    # Mixed case + whitespace + alt separators must normalise the same way.
+    ("  GEMM  ", "GEMM"),
+    ("Sdpa-Fwd", "SDPA"),
+    ("MoE/Fused", "MoE"),
+])
+def test_normalize_upstream_category_matches_orchestrator_prepare_enum(raw, expected):
+    """Mirror TraceLens-internal CATEGORY_SKILL_MAP keys exactly."""
+    assert tlr.normalize_upstream_category(raw) == expected
+
+
+def test_normalize_upstream_category_passes_through_unknown():
+    """Unknown categories are surfaced verbatim — never silently coerced."""
+    assert tlr.normalize_upstream_category("brand_new_skill") == "brand_new_skill"
+
+
+def test_normalize_upstream_category_empty_returns_unknown():
+    assert tlr.normalize_upstream_category("") == "unknown"
+
+
+def test_derive_kernel_category_uses_upstream_enum_when_present():
+    """When TraceLens tags a candidate, GEAK label must come from upstream map."""
+    for raw, expected in [
+        ("gemm", "GEMM"),
+        ("groupedgemm_fwd", "GEMM"),
+        ("inferenceattention", "SDPA"),
+        ("moe_fused", "MoE"),
+        ("rmsnorm", "LayerNorm"),
+    ]:
+        cand = {"tracelens_category": raw, "name": "ignored_when_cat_present"}
+        assert tla.derive_kernel_category(cand) == expected, raw
+
+
+def test_derive_kernel_category_falls_back_to_name_heuristic():
+    """Raw-trace fallback path has no tracelens_category; heuristics still apply."""
+    assert tla.derive_kernel_category({"name": "rocblas_gemm_kernel"}) == "GEMM"
+    assert tla.derive_kernel_category({"name": "fmha_fwd_kernel"}) == "SDPA"
+    assert tla.derive_kernel_category({"name": "rmsnorm_fused"}) == "LayerNorm"
+    assert tla.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
