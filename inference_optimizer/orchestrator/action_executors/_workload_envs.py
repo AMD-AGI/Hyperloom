@@ -133,11 +133,50 @@ def materialize_config_with_envs(
                 rocr_yaml, len(rocr_devices), resolved_tp, derived,
             )
         envs["ROCR_VISIBLE_DEVICES"] = derived
-    envs.setdefault("RUN_EVAL", "true")
 
     isl_val = int(os.environ.get("ISL") or envs.get("ISL") or 256)
     osl_val = int(os.environ.get("OSL") or envs.get("OSL") or 256)
     conc_val = int(os.environ.get("CONC") or envs.get("CONC") or 8)
+
+    # TraceLens #126: compute steady-state window for profiling configs.
+    # Only inject when this is a profile yaml — detected by PROFILE env or
+    # `profiler.torch_profiler.enabled: true` in the YAML. The formulas
+    # match issue #126 §3.1.6.
+    is_profile = (
+        str(envs.get("PROFILE", "")).strip() == "1"
+        or (bench.get("profiler", {}).get("torch_profiler", {}).get("enabled") is True)
+    )
+    if is_profile:
+        delay_iters = 5 * conc_val
+        max_iters = max(4, min(64, 16 * osl_val // max(conc_val, 1)))
+        fw = str(bench.get("framework") or "").lower()
+        if "vllm" in fw:
+            existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
+            # Do not inject capture_torch_profiler_dir by default: the vLLM
+            # build on current MI355X validation nodes rejects that field in
+            # --profiler-config. Magpie's vllm_*.sh already injects the
+            # supported torch profiler fields and we add TraceLens' stable
+            # timing/annotation knobs here.
+            profiler_args = (
+                f"--profiler-config.delay_iterations {delay_iters} "
+                f"--profiler-config.max_iterations {max_iters}"
+            )
+            if "delay_iterations" not in existing_vllm_args:
+                envs["EXTRA_VLLM_ARGS"] = f"{existing_vllm_args} {profiler_args}".strip()
+        else:
+            import json as _json
+            try:
+                extra_body = _json.loads(str(envs.get("PROFILE_EXTRA_BODY", "{}")))
+            except (ValueError, TypeError):
+                extra_body = {}
+            # Always override start_step/num_steps with computed values —
+            # the yaml template has placeholder defaults for CONC=8.
+            extra_body["start_step"] = delay_iters
+            extra_body["num_steps"] = max_iters
+            extra_body.setdefault("shape_discovery", True)
+            extra_body.setdefault("roofline_annotations", True)
+            envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
+
     seq_cost = isl_val + osl_val
     if seq_cost <= 1024:
         factor = 10
@@ -155,6 +194,30 @@ def materialize_config_with_envs(
         envs[server_args_env_name(bench.get("framework"))] = server_args
     for key, value in (extra_envs or {}).items():
         envs[str(key)] = str(value)
+    # Accuracy eval (GSM8K) is OFF by default because Magpie main and
+    # InferenceX main currently disagree on the lm-eval CLI shape:
+    # Magpie's benchmark scripts call `run_eval ... --concurrent-requests N`,
+    # but InferenceX's `run_lm_eval` rejects `--concurrent-requests` (it
+    # reads `EVAL_CONCURRENT_REQUESTS` from env instead, and the unknown
+    # flag makes the wrapper return 1, failing the whole benchmark). Magpie
+    # does not pin InferenceX, so any fresh clone hits this. Until upstream
+    # realigns, leave RUN_EVAL off and let the user opt in via env or
+    # extra_envs. The accuracy gate in coordinator.py treats a missing
+    # GSM8K result as "no regression", which is the safe behaviour for a
+    # flag-only run. NOTE: this is resolved after extra_envs merging so
+    # callers (params/backends/sweep variants) that explicitly pass
+    # RUN_EVAL=true via extra_envs do not trigger the warning.
+    if "RUN_EVAL" not in envs:
+        env_run_eval = os.environ.get("RUN_EVAL")
+        if env_run_eval is not None:
+            envs["RUN_EVAL"] = env_run_eval
+        else:
+            envs["RUN_EVAL"] = "false"
+            log.warning(
+                "RUN_EVAL defaulted to false: Magpie main / InferenceX main "
+                "disagree on `run_eval --concurrent-requests`. Export "
+                "RUN_EVAL=true once your InferenceX checkout accepts that flag."
+            )
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:
