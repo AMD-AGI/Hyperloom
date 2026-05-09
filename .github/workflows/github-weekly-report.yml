@@ -1,14 +1,7 @@
 name: Weekly GitHub Issues Report
 
 on:
-  schedule:
-    # Every Thursday at 5:00 PM UTC
-    # Adjust for your timezone:
-    #   PST (UTC-8)    → cron: '0 1 * * 5'
-    #   EST (UTC-5)    → cron: '0 22 * * 4'
-    #   IST (UTC+5:30) → cron: '30 11 * * 4'
-    - cron: '0 17 * * 4'
-  workflow_dispatch: # Allows manual trigger from GitHub UI anytime
+  workflow_dispatch:
 
 jobs:
   weekly-issues-report:
