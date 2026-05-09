@@ -238,7 +238,7 @@ Hyperloom/
 │   │   └── backends/                     # GEAK/OOB submission (Ray-scheduled)
 │   └── scripts/                          # One-click installer (install.sh)
 ├── .cursor/
-│   ├── mcp.json                          # MCP server config (training/MLPerf)
+│   ├── mcp.json                          # MCP server config
 │   └── skills/
 │       ├── training-optimization/        # Training optimization skill + knowledge base
 │       └── mlperf-optimization/          # MLPerf training optimization skill
