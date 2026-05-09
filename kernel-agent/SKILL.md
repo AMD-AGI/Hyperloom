@@ -197,7 +197,7 @@ the internal mount contains the standalone skills expected by this tool.
 When running TraceLens analysis, read this skill file and strictly follow
 its order:
 
-`/wekafs/hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md`
+`/wekafs/hyperloom/TraceLens-internal/TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md`
 
 Step 6 and Step 7 categories must run in independent Task subagents. Each
 subagent must write findings under `system_findings/` or `category_findings/`.
