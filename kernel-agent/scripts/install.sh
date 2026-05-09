@@ -24,6 +24,7 @@ GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_ROOT}/geak-config/local.yaml}"
 # Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
 GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
 RAG_INDEX_DIR="${HOME}/.cache/amd-ai-devtool/semantic-index"
+GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cuda}"
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
@@ -201,8 +202,8 @@ ensure_rag_index() {
     warn "RAG index missing at $RAG_INDEX_DIR"
     return
   fi
-  log "building RAG index at $RAG_INDEX_DIR (first run downloads ~1.3 GB embedding model)"
-  run bash -lc "cd '${HYPERLOOM_ROOT}/geak' && python3 scripts/build_index.py --force"
+  log "building RAG index at $RAG_INDEX_DIR on device=${GEAK_RAG_INDEX_DEVICE_VAL} (first run downloads ~1.3 GB embedding model)"
+  run bash -lc "cd '${HYPERLOOM_ROOT}/geak' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"
 }
 
 ensure_oob() {
@@ -383,6 +384,7 @@ PY
   else
     warn "RAG index missing at $RAG_INDEX_DIR"
   fi
+  log "RAG index build device: ${GEAK_RAG_INDEX_DEVICE_VAL}"
   if grep -q "rag: true" "$GEAK_CONFIG" 2>/dev/null; then
     log "tools.rag enabled in $GEAK_CONFIG"
   else
