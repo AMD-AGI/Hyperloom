@@ -89,15 +89,19 @@ CRITIC_KB_DISTILL_TOKENS_TOTAL = "critic_kb_distill_tokens_total"
 CRITIC_KB_DISTILL_COST_TOTAL = "critic_kb_distill_cost_total"
 CRITIC_KB_PRIOR_CACHE_HIT = "critic_kb_prior_cache_hit"
 CRITIC_KB_PRIOR_CACHE_MISS = "critic_kb_prior_cache_miss"
+CRITIC_KB_UNREACHABLE_TOTAL = "critic_kb_unreachable_total"
+CRITIC_KB_BREAKER_OPEN_TOTAL = "critic_kb_breaker_open_total"
 CRITIC_REVIEW_VERDICT_TOTAL = "critic_review_verdict_total"
 
 
 __all__ = [
+    "CRITIC_KB_BREAKER_OPEN_TOTAL",
     "CRITIC_KB_DEAD_LETTER_COUNT",
     "CRITIC_KB_DISTILL_COST_TOTAL",
     "CRITIC_KB_DISTILL_TOKENS_TOTAL",
     "CRITIC_KB_PRIOR_CACHE_HIT",
     "CRITIC_KB_PRIOR_CACHE_MISS",
+    "CRITIC_KB_UNREACHABLE_TOTAL",
     "CRITIC_KB_WRITE_DURATION_SECONDS",
     "CRITIC_KB_WRITE_TOTAL",
     "CRITIC_REVIEW_VERDICT_TOTAL",

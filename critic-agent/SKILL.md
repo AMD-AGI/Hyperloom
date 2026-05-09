@@ -104,6 +104,12 @@ hard rules. These mirror the contract:
 - Critic-written `importance` is capped at `0.84`.
 - Verdicts must be drawn from the bundle's `allowed_verdicts` list.
 
+If `judge_bundle.kb_read_skipped_reason == "kb_unreachable"` (or
+`kb_read_disabled`), KB priors were not consulted for this turn. Treat
+the absence of priors as *unknown*, not as *no contradicting prior*:
+prefer `advise` / `needs_review` over `approve` based on packet
+evidence alone, and mention the missing KB recall in `notes`.
+
 ## Hard Rules
 
 - Do not return `approve` without comparable before/after benchmark
