@@ -77,7 +77,9 @@ The installer always installs everything in one shot:
   from env)
 - GEAK RAG MCP (`mcp_tools/rag-mcp`) with `tools.rag: true`; the first RAG
   index build writes to `~/.cache/amd-ai-devtool/semantic-index/` and may
-  download the ~1.3 GB BGE embedding model
+  download the ~1.3 GB BGE embedding model. The installer builds this index
+  with `GEAK_RAG_INDEX_DEVICE=cuda` by default because CPU embedding can take
+  hours; set `GEAK_RAG_INDEX_DEVICE=cpu` only for CPU-only environments.
 - GEAK cross-session memory env; by default Hyperloom stores GEAK's SQLite
   memory DB at `/wekafs/hyperloom/geak-memory/memory.db`, enables
   `GEAK_SAVE_TO_KNOWLEDGE_BASE=1`, and aligns
