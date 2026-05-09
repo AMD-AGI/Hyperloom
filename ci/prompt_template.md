@@ -40,6 +40,18 @@ Rules:
 - gain_pct = (optimized - baseline) / baseline * 100. Use 0.0 if no improvement.
 - All six field names are MANDATORY. The CI will show N/A if any are missing or renamed.
 
+CRITICAL — Result Directory:
+Before running ANY skill script (run_baseline.sh, run_sweep.sh, etc.), you MUST export these two env vars in your shell session:
+  export NFS_ROOT={nfs_root}
+  export RESULT_DIR={result_dir}
+This overrides the script defaults which point to a read-only NFS path. Failure to set these will cause all baseline/sweep writes to fail silently and the job will hang.
+
+CRITICAL — vLLM Forbidden Flags (will crash or error on current vLLM versions):
+- `--num-scheduler-steps` — removed in vLLM v0.4.0, NEVER use this flag
+- `--chunked-prefill-size` — SGLang-only flag, does NOT exist in vLLM
+- `--enable-chunked-prefill` — only safe on vLLM >= 0.6.0; check version before using
+If vLLM server crashes or exits with "unrecognized arguments", check for these flags first.
+
 SAFETY: Do NOT run broad kill commands like `kill -9 $(ps aux | grep "vllm|ray")`. This will kill the sandbox executor. Use the skill's kill_server function or kill specific PIDs only.
 
 CRITICAL — SaFE API Access:
