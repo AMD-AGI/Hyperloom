@@ -612,6 +612,7 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
         else:
             proc.terminate()
     except ProcessLookupError:
+        # Benign cleanup race: the process group may have already exited.
         pass
 
 
@@ -624,6 +625,7 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
         else:
             proc.kill()
     except ProcessLookupError:
+        # Benign cleanup race: the process group may have already exited.
         pass
 
 
@@ -690,7 +692,9 @@ def _wait_for_health(url: str, proc: subprocess.Popen, timeout_s: int) -> bool:
             with urlopen(url, timeout=3) as response:
                 if 200 <= response.status < 500:
                     return True
-        except Exception:
+        except (OSError, ValueError):
+            # The health endpoint may be temporarily unreachable while the
+            # server starts; keep polling until timeout or process exit.
             pass
         time.sleep(5)
     return False
