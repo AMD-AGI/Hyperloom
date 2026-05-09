@@ -535,6 +535,11 @@ class Coordinator:
         # even on tick 1 when the inbox is empty.
         sections.append("=== Shared session state ===")
         sections.append(self.shared_state.to_prompt_summary())
+        if agent_name == "orchestration":
+            required_step = self._required_next_step()
+            if required_step:
+                sections.append("=== Execution checklist (Coordinator-enforced) ===")
+                sections.append(required_step)
 
         # 1b. Marathon KB retrieval — curated lessons (validated stacks).
         if agent_name == "orchestration":
@@ -577,6 +582,114 @@ class Coordinator:
             return role.load_system_prompt()
         except FileNotFoundError:
             return f"(no system prompt for {agent_name})"
+
+    # ==================================================================
+    # Execution order guard
+    # ==================================================================
+    def _required_next_step(self) -> str:
+        """Return the coordinator-enforced next step, or empty if flexible.
+
+        The Orchestration prompt says baseline → profile → select_kernels,
+        but the LLM can still skip to backends/params. This guard makes that
+        sequence deterministic and visible in the prompt every tick.
+        """
+        if self.shared_state.stop_reason:
+            return ""
+        if self.shared_state.baseline_tput <= 0:
+            return (
+                "TODO 1/3: baseline is required now. Propose/delegate only "
+                "`baseline` until baseline_tput > 0."
+            )
+        if not self.shared_state.last_profile_trace:
+            return (
+                "TODO 2/3: profile is required now. Baseline exists but "
+                "last_profile_trace is empty; propose/delegate only `profile`. "
+                "Do not run backends/params/sweep yet."
+            )
+        select = self.shared_state.last_select_kernels or {}
+        if select.get("trace_input") != self.shared_state.last_profile_trace:
+            return (
+                "TODO 3/3: select_kernels is required now. Emit "
+                "request{target_agent='kernel', kind='select_kernels', "
+                "params={trace_input: last_profile_trace, top_k: 10}} before "
+                "backends/params/sweep."
+            )
+        return ""
+
+    def _sequence_denial_for_action(self, action_name: str) -> PolicyDenied | None:
+        """Reject orchestration action/delegate attempts that skip required steps."""
+        action = str(action_name or "").strip()
+        sequence_actions = {"baseline", "profile", "backends", "params", "sweep", "report"}
+        if action not in sequence_actions:
+            return None
+        if self.shared_state.stop_reason:
+            return None
+        if self.shared_state.baseline_tput <= 0 and action != "baseline":
+            return PolicyDenied(
+                f"action={action!r} denied: baseline must run first",
+                rule="execution_order",
+                hint="propose/delegate `baseline` until baseline_tput > 0",
+            )
+        if self.shared_state.baseline_tput > 0 and not self.shared_state.last_profile_trace:
+            if action != "profile":
+                return PolicyDenied(
+                    f"action={action!r} denied: profile must run before {action!r}",
+                    rule="execution_order",
+                    hint="propose/delegate `profile`; last_profile_trace is empty",
+                )
+        select = self.shared_state.last_select_kernels or {}
+        needs_select = (
+            bool(self.shared_state.last_profile_trace)
+            and select.get("trace_input") != self.shared_state.last_profile_trace
+        )
+        if needs_select and action in {"backends", "params", "sweep", "report"}:
+            return PolicyDenied(
+                f"action={action!r} denied: select_kernels must run first",
+                rule="execution_order",
+                hint=(
+                    "emit request{target_agent='kernel', kind='select_kernels', "
+                    "params={trace_input: last_profile_trace, top_k: 10}}"
+                ),
+            )
+        return None
+
+    def _sequence_denial_for_request(
+        self, target_agent: str, kind: str,
+    ) -> PolicyDenied | None:
+        """Reject kernel requests that skip baseline/profile prerequisites."""
+        target = str(target_agent or "").strip()
+        req_kind = str(kind or "").strip()
+        if target != "kernel" or self.shared_state.stop_reason:
+            return None
+        # select_kernels is the prerequisite request itself. It is also used
+        # directly by tests/tools that pass an explicit trace_input, so allow it
+        # through; later backends/params/sweep are guarded until the result is
+        # cached in SharedState.
+        if req_kind == "select_kernels":
+            return None
+        if get_handler(req_kind) is None:
+            return None
+        if self.shared_state.baseline_tput <= 0:
+            return PolicyDenied(
+                f"request kind={req_kind!r} denied: baseline must run first",
+                rule="execution_order",
+                hint="propose/delegate `baseline` before kernel requests",
+            )
+        if not self.shared_state.last_profile_trace:
+            return PolicyDenied(
+                f"request kind={req_kind!r} denied: profile must run first",
+                rule="execution_order",
+                hint="propose/delegate `profile` before select_kernels/run_optimization",
+            )
+        select = self.shared_state.last_select_kernels or {}
+        needs_select = select.get("trace_input") != self.shared_state.last_profile_trace
+        if needs_select and req_kind != "select_kernels":
+            return PolicyDenied(
+                f"request kind={req_kind!r} denied: select_kernels must run first",
+                rule="execution_order",
+                hint="emit request kind='select_kernels' for last_profile_trace",
+            )
+        return None
 
     # ==================================================================
     # Intent handling
@@ -633,6 +746,10 @@ class Coordinator:
                 "coordinator", "observation",
                 {"kind": "proposal_pruned", "from": source, "action": action_name},
             )
+            return
+        denied = self._sequence_denial_for_action(action_name)
+        if denied is not None:
+            await self._record_policy_denied(source, intent, denied)
             return
         msg = Message.new(
             source, "*", "proposal",
@@ -732,6 +849,10 @@ class Coordinator:
     # ------------------------------------------------------------------
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
         action_name = intent.payload["action_name"]
+        denied = self._sequence_denial_for_action(action_name)
+        if denied is not None:
+            await self._record_policy_denied(source, intent, denied)
+            return
         params = dict(intent.payload.get("params") or {})
         # Plumb baseline's materialized YAML into grid-style delegated tasks
         # so they inherit the workload contract (CONC/ISL/OSL/TP/...) baseline
@@ -761,6 +882,10 @@ class Coordinator:
     async def _handle_request(self, source: str, intent: Intent) -> None:
         target_agent = intent.payload["target_agent"]
         kind = intent.payload["kind"]
+        denied = self._sequence_denial_for_request(target_agent, kind)
+        if denied is not None:
+            await self._record_policy_denied(source, intent, denied)
+            return
         # Always record the request on the bus so the kernel reactor
         # (and tests / replay) can see it.
         request_msg = Message.new(
