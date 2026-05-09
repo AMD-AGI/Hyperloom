@@ -33,7 +33,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ._grid_runner import GridVariant, VariantResult, run_grid, _resolve_output_root
+from ...session_paths import runs_dir
+from ._grid_runner import GridVariant, VariantResult, run_grid, _resolve_session_dir
 from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
@@ -127,7 +128,7 @@ class SweepExecutor:
         self,
         *,
         default_config_path: Path | str | None = None,
-        default_output_root: Path | str | None = None,
+        session_dir: Path | str | None = None,
         default_conc_values: list[int] | None = None,
         default_isl_osl_configs: list[str] | None = None,
         default_num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
@@ -138,7 +139,7 @@ class SweepExecutor:
         self.default_config_path = (
             Path(default_config_path) if default_config_path else None
         )
-        self.default_output_root = Path(default_output_root or _resolve_output_root())
+        self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
         self.default_conc_values = list(default_conc_values or DEFAULT_CONC_VALUES)
         self.default_isl_osl_configs = list(
             default_isl_osl_configs or DEFAULT_ISL_OSL
@@ -157,9 +158,11 @@ class SweepExecutor:
             return {"status": "failed",
                     "error_class": "missing_config",
                     "error": f"config not found: {config_path}"}
+        extra = getattr(ctx, "extra", None) or {}
         output_root = Path(
             params.get("output_dir")
-            or (self.default_output_root / f"sweep-{ctx.task.task_id[:8]}")
+            or extra.get("workspace")
+            or runs_dir(self.session_dir, "sweep", ctx.task.task_id)
         )
         output_root.mkdir(parents=True, exist_ok=True)
 
