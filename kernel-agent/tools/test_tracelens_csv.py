@@ -460,10 +460,10 @@ def test_125_finalize_outputs_source_path_field():
 
 
 # ===========================================================================
-# #124 — SDK runner for TraceLens standalone-analysis-orchestrator
+# #124 — SDK runner for TraceLens analysis-orchestrator skill
 # ===========================================================================
 def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
-    skill = tmp_path / "standalone-analysis-orchestrator.md"
+    skill = tmp_path / "analysis-orchestrator.md"
     trace = tmp_path / "mixed_steady_state_0_trace.json.gz"
     out = tmp_path / "tracelens"
     root = tmp_path / "TraceLens-internal"
@@ -556,9 +556,9 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
     from unittest.mock import patch
 
     tl_root = tmp_path / "TraceLens-internal"
-    skill_dir = tl_root / "TraceLens" / "AgenticMode" / "Standalone" / ".cursor" / "skills"
+    skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / ".cursor" / "skills"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "standalone-analysis-orchestrator.md").write_text("stub")
+    (skill_dir / "analysis-orchestrator.md").write_text("stub")
     workspace = tmp_path / "ws"
     workspace.mkdir()
 
@@ -668,7 +668,7 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
 
     assert res.report_path.exists()
     assert res.priority_data_path.exists()
-    assert "standalone-analysis-orchestrator" in captured["prompt"] or "skill.md" in captured["prompt"]
+    assert "analysis-orchestrator" in captured["prompt"] or "skill.md" in captured["prompt"]
     assert "Bash" in captured["options"]["allowed_tools"]
     assert "Task" in captured["options"]["allowed_tools"]
 
@@ -690,9 +690,9 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
     # Pretend TraceLens root + perf-report CLI are present so the run
     # reaches the splitter step.
     tl_root = tmp_path / "TraceLens-internal"
-    skill_dir = tl_root / "TraceLens" / "AgenticMode" / "Standalone" / ".cursor" / "skills"
+    skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / ".cursor" / "skills"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "standalone-analysis-orchestrator.md").write_text("stub")
+    (skill_dir / "analysis-orchestrator.md").write_text("stub")
     workspace = tmp_path / "ws"
     workspace.mkdir()
     capture = tmp_path / "capture_traces"
