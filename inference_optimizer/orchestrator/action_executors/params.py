@@ -29,7 +29,8 @@ from typing import Any
 
 import yaml
 
-from ._grid_runner import GridVariant, VariantResult, run_grid, _resolve_output_root
+from ...session_paths import runs_dir
+from ._grid_runner import GridVariant, VariantResult, run_grid, _resolve_session_dir
 from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
@@ -239,7 +240,7 @@ class ParamsExecutor:
         default_vllm_grid: list[GridVariant] | None = None,
         default_nccl_grid: list[GridVariant] | None = None,
         default_config_path: Path | str | None = None,
-        default_output_root: Path | str | None = None,
+        session_dir: Path | str | None = None,
         variant_timeout_sec: int = 900,
         include_nccl: bool = False,
         default_max_candidates_per_round: int = 0,
@@ -252,7 +253,7 @@ class ParamsExecutor:
         self.default_config_path = (
             Path(default_config_path) if default_config_path else None
         )
-        self.default_output_root = Path(default_output_root or _resolve_output_root())
+        self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
         self.variant_timeout_sec = variant_timeout_sec
         self.include_nccl = include_nccl
         self.default_max_candidates_per_round = int(default_max_candidates_per_round)
@@ -269,9 +270,11 @@ class ParamsExecutor:
             return {"status": "failed",
                     "error_class": "missing_config",
                     "error": f"config not found: {config_path}"}
+        extra = getattr(ctx, "extra", None) or {}
         output_root = Path(
             params.get("output_dir")
-            or (self.default_output_root / f"params-{ctx.task.task_id[:8]}")
+            or extra.get("workspace")
+            or runs_dir(self.session_dir, "params", ctx.task.task_id)
         )
         output_root.mkdir(parents=True, exist_ok=True)
 

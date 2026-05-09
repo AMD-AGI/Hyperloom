@@ -121,8 +121,16 @@ class Coordinator:
         self.locks = ResourceLockManager(SqliteLeaseBackend(self.db))
         self.tasks = TaskRegistry(self.db)
         self.cursors = CursorStore(self.db)
-        self.policy = PolicyGate(role_registry=self.role_registry)
-        self.sub = sub_agent_runner or SubAgentRunner(self.locks, self.tasks)
+        # `strict_paths` defers to the env flag (CLI flips this on for
+        # production; tests omit the env so the path check stays off and
+        # legacy `/tmp/<fixture>` payload values still pass).
+        self.policy = PolicyGate(
+            role_registry=self.role_registry,
+            session_dir=self.session_dir,
+        )
+        self.sub = sub_agent_runner or SubAgentRunner(
+            self.locks, self.tasks, session_dir=self.session_dir,
+        )
 
         # Persistent session state (state.json) — load existing for resume;
         # save() is called whenever the Coordinator mutates a persistent field.
@@ -534,6 +542,11 @@ class Coordinator:
         ``in_reply_to`` / ``target_proposal_msg_id`` without extra lookups.
         """
         sections: list[str] = []
+
+        # 0. SESSION_DIR contract — tell every persistent agent the literal
+        # path so they reference it instead of fabricating one. This pairs
+        # with PolicyGate's path-containment guard.
+        sections.append(f"SESSION_DIR={self.session_dir}")
 
         # 1. Shared session state — gives the agent goal + progress context
         # even on tick 1 when the inbox is empty.

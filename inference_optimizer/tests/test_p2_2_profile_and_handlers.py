@@ -44,8 +44,8 @@ from inference_optimizer.storage import SqliteConnection
 # ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_ROOT", str(tmp_path))
-    return make_session_dir("p2-2-test")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    return make_session_dir()
 
 
 def _heartbeat() -> Intent:
@@ -353,7 +353,7 @@ async def test_baseline_executor_keeps_valid_measurement_with_wrapper_failure(tm
         params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
         idempotency_key="baseline-valid-warning",
     )
-    sub.register_executor("baseline", BaselineExecutor(default_output_root=tmp_path))
+    sub.register_executor("baseline", BaselineExecutor(session_dir=tmp_path))
     with patch("subprocess.run", return_value=fake_completed):
         res = await sub.run_task(task)
 
@@ -424,7 +424,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     def _fake_run(*args, **kwargs):
         return fake_completed
 
-    pe = ProfileExecutor(default_output_root=tmp_path / "ignored_root")
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
     task = await tr.create(
         kind="profile",
         params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
