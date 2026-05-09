@@ -718,6 +718,7 @@ async def integrate_handler(
         }
     """
     from .action_executors.baseline import BaselineExecutor
+    from .action_executors.benchmark_result import is_valid_measurement
     from .sub_agent_runner import RunnerContext
     from .task_registry import Task
 
@@ -798,7 +799,7 @@ async def integrate_handler(
             "revert_result": revert_result,
         }
 
-    if bench_result.get("status") != "succeeded":
+    if not is_valid_measurement(bench_result):
         revert_result = _maybe_revert_kernel_patch(apply_result)
         return {
             "status": "failed",
