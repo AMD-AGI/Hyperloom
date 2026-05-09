@@ -50,6 +50,7 @@ from .orchestrator.action_executors import (
     backends_executor,
     baseline_executor,
     params_executor,
+    pmc_roofline_executor,
     profile_executor,
     report_executor,
     sweep_executor,
@@ -350,6 +351,7 @@ def _register_executors(coordinator: Coordinator, *, no_kernel: bool = False) ->
             coordinator.sub.register_executor(kind, _noop_prep)
     else:
         coordinator.sub.register_executor("profile", profile_executor)
+        coordinator.sub.register_executor("pmc_roofline", pmc_roofline_executor)
         for kind in ("setup", "classify", "target_analysis",
                       "kernel_opt", "integrate", "deep_kernel_analysis",
                       "operator_tuning", "vendor_kernel_config",
