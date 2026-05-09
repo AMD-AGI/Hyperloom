@@ -352,6 +352,7 @@ async def select_kernels_handler(
         model_name:      default ''
         framework:       default 'sglang'
         target_platform: default 'MI300X'
+        roofline_json:   optional path from a separate pmc_roofline action
         dry_run:         default False (testing)
         budget_minutes:  default 60
 
@@ -426,6 +427,8 @@ async def select_kernels_handler(
     )
     if capture_folder:
         cmd += ["--capture-folder", str(capture_folder)]
+    if payload.get("roofline_json"):
+        cmd += ["--roofline-json", str(payload["roofline_json"])]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
