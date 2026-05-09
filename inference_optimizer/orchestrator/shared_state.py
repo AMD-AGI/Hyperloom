@@ -84,6 +84,7 @@ class SharedState:
     last_profile_args: str = ""
     last_profile_pmc_summary: str = ""
     last_profile_roofline: str = ""
+    last_profile_kernel_breakdown: str = ""
     # Cached result of the most recent `select_kernels` request keyed by
     # `trace_input`. Coordinator short-circuits subsequent identical requests
     # so Orchestration does not waste budget re-analysing the same trace.
@@ -527,6 +528,7 @@ class SharedState:
             f"last_profile_trace={self.last_profile_trace or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
             f"last_profile_roofline={self.last_profile_roofline or '(none)'}",
+            f"last_profile_kernel_breakdown={self.last_profile_kernel_breakdown or '(none)'}",
             f"last_select_kernels={self._format_last_select_kernels()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"params_search={self._format_params_search()}",

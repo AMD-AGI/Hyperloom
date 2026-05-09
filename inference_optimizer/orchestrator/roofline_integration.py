@@ -511,6 +511,60 @@ def _as_cmd(value: Any) -> list[str]:
     return []
 
 
+def _classify_kernel_tier(name: str) -> str:
+    """Keep the legacy 5-tier optimization routing alongside roofline data."""
+    lower = name.lower()
+    if any(x in name for x in ("triton_", "_permute_kernel", "triton_poi_", "triton_red_", "triton_tem_")):
+        return "T1_TRITON"
+    if any(x in name for x in ("aiter::", "fmha_v3", "mha_fwd", "fused_moe", "moe_ck", "topkGating",
+                                "_gemm_a8w8", "_fused_rms")):
+        return "T2_AITER_CK"
+    if "vectorized_elementwise_kernel" in name:
+        return "T2_AITER_CK"
+    if any(x in lower for x in ("launch_server", "schedule", "batch", "token_dispatch",
+                                 "kv_cache", "radix", "prefix_match")):
+        return "T3_FRAMEWORK"
+    if any(x in lower for x in ("nccl", "rccl", "allreduce", "broadcast", "all_gather", "reduce_scatter")):
+        return "T4_COMM"
+    if any(x in name for x in ("Cijk_", "ck::kernel")) or "hipmodule" in lower:
+        return "T5_COMPILED"
+    # Normalized rocprof names still need useful routing.
+    if name in {"hipblaslt_gemm", "skinny_gemm", "aiter_asm_gemm", "moe_gemm"}:
+        return "T5_COMPILED" if name == "hipblaslt_gemm" else "T2_AITER_CK"
+    return "T2_AITER_CK"
+
+
+def _write_kernel_breakdown(
+    path: Path,
+    *,
+    pmc_results: list[PMCKernelResult],
+    roofline_results: list[KernelRooflineResult],
+) -> None:
+    roofline_by_name = {result.name: result for result in roofline_results}
+    total_ns = sum(result.duration_ns for result in pmc_results)
+    rows: list[dict[str, Any]] = []
+    for result in sorted(pmc_results, key=lambda item: item.duration_ns, reverse=True):
+        roofline = roofline_by_name.get(result.name)
+        gpu_pct = getattr(result, "_gpu_time_pct", None)
+        if gpu_pct is None:
+            gpu_pct = result.duration_ns / total_ns * 100.0 if total_ns else 0.0
+        rows.append({
+            "name": result.name,
+            "gpu_pct": round(float(gpu_pct or 0.0), 3),
+            "count": result.dispatches,
+            "tier": _classify_kernel_tier(result.name),
+            "bottleneck": roofline.bottleneck.value if roofline else "unknown",
+            "arithmetic_intensity": roofline.arithmetic_intensity if roofline else None,
+            "compute_utilization_pct": roofline.compute_utilization_pct if roofline else 0.0,
+            "bandwidth_utilization_pct": roofline.bandwidth_utilization_pct if roofline else 0.0,
+            "recommended_actions": roofline.recommended_actions if roofline else [],
+            "suggestion": roofline.suggestion if roofline else "",
+            "duration_us": round(result.duration_ns / 1000.0, 3) if result.duration_ns else 0.0,
+            "dispatches": result.dispatches,
+        })
+    path.write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def _wait_for_health(url: str, proc: subprocess.Popen, timeout_s: int) -> bool:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
@@ -590,11 +644,18 @@ def run_isolated_pmc_roofline(
             json.dumps([result.to_dict() for result in roofline_results], indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        kernel_breakdown_path = session_dir / "profiles" / "kernel_breakdown.json"
+        _write_kernel_breakdown(
+            kernel_breakdown_path,
+            pmc_results=pmc_results,
+            roofline_results=roofline_results,
+        )
         return {
             "status": "ok",
             "server_log": str(log_path),
             "pmc_summary_path": str(pmc_summary_path),
             "roofline_path": str(roofline_path),
+            "kernel_breakdown_path": str(kernel_breakdown_path),
             "roofline_kernel_count": len(roofline_results),
         }
     except FileNotFoundError as exc:

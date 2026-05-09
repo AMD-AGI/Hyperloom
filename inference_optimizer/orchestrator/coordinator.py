@@ -1293,6 +1293,9 @@ class Coordinator:
                 self.shared_state.last_profile_roofline = str(result["roofline_path"])
                 self.shared_state.last_select_kernels = {}
                 changed = True
+            if result.get("kernel_breakdown_path"):
+                self.shared_state.last_profile_kernel_breakdown = str(result["kernel_breakdown_path"])
+                changed = True
         elif task_kind in ("backends", "params", "sweep"):
             if task_kind == "sweep":
                 self.shared_state.record_sweep(result)

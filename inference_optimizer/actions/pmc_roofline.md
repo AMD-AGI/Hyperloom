@@ -30,6 +30,8 @@ and uses that process only for `rocprofv3 --attach`.
 
 - `pmc_summary_path`: raw PMC summary JSON.
 - `roofline_path`: roofline JSON for kernel-agent merge.
+- `kernel_breakdown_path`: per-kernel breakdown with tier, bottleneck,
+  arithmetic intensity, utilization, and recommended actions.
 - `server_log`: dedicated server log.
 
 ## Failure Handling
