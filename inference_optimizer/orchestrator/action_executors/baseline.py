@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from ...paths import asset_root
+from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
 from ._workload_envs import (
     default_baseline_config,
@@ -149,33 +150,58 @@ def _probe_aiter_jit_cache() -> dict[str, Any]:
 
 
 class BaselineExecutor:
-    """Class form for tests / DI; ``baseline_executor`` is the bare callable."""
+    """Class form for tests / DI; ``baseline_executor`` is the bare callable.
+
+    ``session_dir`` is the canonical session root the executor will derive
+    its per-task workspace under (``<sd>/runs/baseline/<task_id>/``).
+    When the SubAgentRunner pre-creates that workspace and injects it via
+    ``ctx.extra["workspace"]``, the executor uses the injected path
+    verbatim — ``session_dir`` is then only the fallback for direct
+    instantiation in tests.
+    """
 
     def __init__(
         self,
         *,
         magpie_python: str | None = None,
         default_config_path: Path | str | None = None,
-        default_output_root: Path | str | None = None,
+        session_dir: Path | str | None = None,
         default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
     ):
-        from ._grid_runner import _resolve_magpie_python, _resolve_output_root
+        from ._grid_runner import _resolve_magpie_python, _resolve_session_dir
         self.magpie_python = magpie_python or _resolve_magpie_python()
         # None = resolve from $FRAMEWORK at call time. Tests may pass an
         # explicit fixture path which then wins over the env-based resolver.
         self.default_config_path = (
             Path(default_config_path) if default_config_path else None
         )
-        self.default_output_root = Path(
-            default_output_root or _resolve_output_root()
-        )
+        self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
         self.default_timeout_sec = default_timeout_sec
         self.cwd = Path(cwd)
 
     def _resolve_default_config(self) -> Path:
         """Hook for subclasses (ProfileExecutor) to swap the resolver."""
         return _default_baseline_config()
+
+    def _resolve_workspace(self, ctx: RunnerContext, action: str) -> Path:
+        """Pick the per-task workspace dir for this executor invocation.
+
+        Resolution order (highest priority first):
+
+        1. ``task.params['output_dir']`` — explicit caller wins.
+        2. ``ctx.extra['workspace']``    — SubAgentRunner pre-mkdir'd path.
+        3. ``runs_dir(self.session_dir, action, ctx.task.task_id)``
+           — direct-instantiation fallback (tests / examples that don't
+           wire the Coordinator).
+        """
+        params = ctx.task.params or {}
+        if params.get("output_dir"):
+            return Path(params["output_dir"])
+        extra = getattr(ctx, "extra", None) or {}
+        if extra.get("workspace"):
+            return Path(extra["workspace"])
+        return runs_dir(self.session_dir, action, ctx.task.task_id)
 
     def _resolve_timeout(self, params: dict[str, Any]) -> int:
         """Pick the subprocess timeout for this baseline launch.
@@ -243,10 +269,7 @@ class BaselineExecutor:
         if not config_path.exists():
             raise FileNotFoundError(f"baseline config not found: {config_path}")
 
-        output_dir = Path(
-            params.get("output_dir")
-            or (self.default_output_root / f"baseline-{ctx.task.task_id[:8]}")
-        )
+        output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)
 
         timeout_sec = self._resolve_timeout(params)

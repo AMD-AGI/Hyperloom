@@ -2,9 +2,9 @@
 
 Reads the session's SharedState + bus event log and produces:
 
-* ``$SESSION_DIR/report/final.json`` — machine-readable summary (the
+* ``$SESSION_DIR/reports/final.json`` — machine-readable summary (the
   same shape Hyperloom dashboards consume)
-* ``$SESSION_DIR/report/final.md``   — human-readable Markdown summary
+* ``$SESSION_DIR/reports/final.md``   — human-readable Markdown summary
 
 Returned dict surfaces both paths so the bus event has actionable
 references. The generated files are intentionally compact: stop_reason,
@@ -137,7 +137,7 @@ class ReportExecutor:
 
     Honours ``ctx.task.params``:
         output_dir:        write final.{md,json} here (default
-                           ``$SESSION_DIR/report``)
+                           ``$SESSION_DIR/reports``)
         highlight_topics:  list of topics to surface in ``highlights``
                            (default: proposal / review_verdict / decision /
                             delegated_result / response / alert)
@@ -163,7 +163,8 @@ class ReportExecutor:
                     "error": "report_executor: could not resolve session_dir"}
 
         params = ctx.task.params or {}
-        output_dir = Path(params.get("output_dir") or (session_dir / "report"))
+        from ...session_paths import reports_dir
+        output_dir = Path(params.get("output_dir") or reports_dir(session_dir))
         output_dir.mkdir(parents=True, exist_ok=True)
         max_highlights = int(params.get("max_highlights", self.max_highlights))
         highlight_topics = (
@@ -214,11 +215,11 @@ class ReportExecutor:
         Strategy (in order):
         1. ``ctx.extra['session_dir']``     — Coordinator injects this for in-process runs
         2. ``task.params['session_dir']``   — explicit wins (e.g. tests)
-        3. ``$INFERENCE_OPTIMIZER_SESSION_DIR`` env var — the CLI sets this
-           on every ``optimize`` invocation so report tasks dispatched from
-           an LLM proposal find the right session even when params is empty.
-        4. ``$INFERENCE_OPTIMIZER_SESSION_ROOT`` + most-recent heuristic — last resort
-        5. None → runner returns failed status with an error
+        3. :func:`paths.session_dir`        — honours
+           ``$INFERENCE_OPTIMIZER_SESSION_DIR`` and otherwise returns
+           ``/workspace/hyperloom``. Returns the path only if it exists
+           and contains ``state.json``.
+        4. None → runner returns failed status with an error
         """
         extra = getattr(ctx, "extra", None) or {}
         if extra.get("session_dir"):
@@ -226,17 +227,10 @@ class ReportExecutor:
         params = ctx.task.params or {}
         if params.get("session_dir"):
             return Path(params["session_dir"])
-        import os as _os
-        explicit = _os.environ.get("INFERENCE_OPTIMIZER_SESSION_DIR")
-        if explicit and Path(explicit).exists():
-            return Path(explicit)
-        root = _os.environ.get("INFERENCE_OPTIMIZER_SESSION_ROOT")
-        if root and Path(root).exists():
-            sessions = sorted(Path(root).iterdir(), key=lambda p: p.stat().st_mtime,
-                              reverse=True)
-            for s in sessions:
-                if (s / "state.json").exists():
-                    return s
+        from ...paths import session_dir as _sd
+        candidate = _sd()
+        if candidate.exists() and (candidate / "state.json").exists():
+            return candidate
         return None
 
 
