@@ -38,6 +38,33 @@ return `emit.json["critic_decision_review"]` instead.
 | `KB_READ_ENABLED` | Set to `false` to disable KB priors lookup. |
 | `KB_SERVICE_TOKEN` | Reserved for v2 auth. |
 | `CRITIC_PRIOR_CACHE_TTL_SECONDS` | Per-session KB prior cache TTL. |
+| `CRITIC_KB_BREAKER_THRESHOLD` | Consecutive transport errors before the circuit breaker opens (default `1` — first failure short-circuits the rest of the request). |
+| `CRITIC_KB_BREAKER_COOLDOWN_SECONDS` | How long the breaker stays open before allowing another KB attempt (default `60`). |
+
+## KB unreachable behaviour (default)
+
+The runtime treats KB unreachability as "skip KB, keep reviewing" by
+default — you do not need to flip a flag when the KB service is down:
+
+1. The first KB transport / network / 5xx-after-retries failure trips an
+   in-process circuit breaker per `KBWriter` instance.
+2. While the breaker is open (`CRITIC_KB_BREAKER_COOLDOWN_SECONDS`):
+   - `list_priors` returns `cache="kb_unreachable"` with empty priors and
+     never makes another transport call.
+   - `write_verdict`, `write_kb_drafts`, and `add_contradiction` return
+     `WriteResult(status="disabled", reason="kb_unreachable")` so the
+     review pipeline keeps emitting verdicts.
+   - `prepare-review` reports `judge_bundle.kb_read_skipped_reason =
+     "kb_unreachable"` and adds a note so the SKILL knows priors are
+     missing because of an outage rather than a clean miss.
+3. A successful KB call resets the breaker (`_record_kb_success`).
+4. 4xx errors (`KBValidationError`) do **not** open the breaker — they
+   indicate a client bug, not service unavailability, and are surfaced
+   as `error` on the response.
+
+`KB_READ_ENABLED=false` is still honoured for operator-driven kill
+switches; the breaker is the automatic equivalent for transient
+outages.
 
 ## Bash allowlist
 
