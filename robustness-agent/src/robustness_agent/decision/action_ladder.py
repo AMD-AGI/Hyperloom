@@ -177,6 +177,20 @@ class ActionLadder:
                     severity="high",
                 )
             )
+        elif sym.name == "cluster_fault":
+            # Wide-blast-radius cluster faults need an escalate so the
+            # orchestration agent reroutes work away from the affected
+            # node before the fault sweeps more sessions.
+            intents.append(
+                build_escalate(
+                    reason="cluster_fault_high",
+                    next_action_hint=(
+                        sym.suggestion
+                        or "drain affected node; reschedule away from fault"
+                    ),
+                    severity="high",
+                )
+            )
         elif sym.name == "repeated_failure":
             family = sym.evidence.get("family") if isinstance(sym.evidence, dict) else None
             if isinstance(family, str) and family.strip():
