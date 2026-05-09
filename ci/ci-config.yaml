@@ -82,14 +82,18 @@ models:
     kernel_opt_backends: claude
     target_gpu: mi300x
 
-  # ── GLM 5 (FP8) — requires multi-node (TP=16), pending RayJob support ──
-  # - inferenceX_key: glm5-fp8-mi355x-sglang
-  #   inferenceX_api_name: GLM-5
-  #   model_path_override: /wekafs/models/zai-org-GLM-5
-  #   optimization_depth: full
-  #   kernel_opt_backends: claude
-  #   target_gpu: mi300x
-  #   tp: 16
+  # ── GLM 5 (FP8, TP=16) — remote mode: agent submits RayJob via SaFE MCP ──
+  - inferenceX_key: glm5-fp8-mi355x-sglang
+    inferenceX_api_name: GLM-5
+    model_path_override: ${NFS_ROOT}/models/zai-org-GLM-5
+    optimization_depth: full
+    kernel_opt_backends: claude
+    target_gpu: mi300x
+    tp: 16
+    mode: remote
+    serving_mode: mori_1p1d
+    rayjob_image: harbor.core42.example-internal-host.invalid/custom/sync/sglang:202604290707
+    rayjob_workers: 2  # 2 worker nodes × 8 GPU = TP16 total (node 0: prefill, node 1: decode)
 
   # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
   - inferenceX_key: qwen3.5-bf16-mi300x-sglang
