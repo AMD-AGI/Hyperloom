@@ -485,6 +485,13 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
 
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
+        c.shared_state.baseline_tput = 800.0
+        c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
+        c.shared_state.last_select_kernels = {
+            "trace_input": "/tmp/profile.trace.json.gz",
+            "reusable_native_kernel_ids": ["k1"],
+        }
+        c.shared_state.save(session_dir)
         with patch("subprocess.run", side_effect=_fake_run):
             await c._handle_intent("orchestration", Intent(
                 type=IntentType.REQUEST,
@@ -545,6 +552,13 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
 
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
+        c.shared_state.baseline_tput = 800.0
+        c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
+        c.shared_state.last_select_kernels = {
+            "trace_input": "/tmp/profile.trace.json.gz",
+            "reusable_native_kernel_ids": ["k_repeat"],
+        }
+        c.shared_state.save(session_dir)
         payload = {
             "target_agent": "kernel",
             "kind": "integrate",

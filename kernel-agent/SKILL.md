@@ -50,9 +50,19 @@ are accepted as no-ops for backwards compat):
 - `ray==2.44.1` + `click<8.3.0`
 - TraceLens editable install from `/wekafs/hyperloom/TraceLens-internal` and
   verifies `TraceLens_generate_perf_report_pytorch --help`
-- GEAK CLI + `${HYPERLOOM_ROOT}/geak-config/local.yaml` (model resolution:
+- GEAK CLI from `GEAK_REF` (default `v3.1.0`) +
+  `${HYPERLOOM_ROOT}/geak-config/local.yaml` (model resolution:
   `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL` from env, default
   `claude-opus-4-7`)
+- GEAK RAG MCP (`mcp_tools/rag-mcp`) with `tools.rag: true`; the first RAG
+  index build writes to `~/.cache/amd-ai-devtool/semantic-index/` and may
+  download the ~1.3 GB BGE embedding model. The installer builds this index
+  with `GEAK_RAG_INDEX_DEVICE=cuda` by default because CPU embedding can take
+  hours; set `GEAK_RAG_INDEX_DEVICE=cpu` only for CPU-only environments.
+- GEAK cross-session memory env; by default Hyperloom stores GEAK's SQLite
+  memory DB at `/wekafs/hyperloom/geak-memory/memory.db`, enables
+  `GEAK_SAVE_TO_KNOWLEDGE_BASE=1`, and aligns
+  `GEAK_MEMORY_MIN_SPEEDUP=1.20` with the KEEP gate.
 - OOB CLI + claude/codex npm CLIs + `~/.claude/config.json` +
   `~/.codex/auth.json`
 - **OOB auth-proxy on `127.0.0.1:4002`**, supervised by
@@ -145,6 +155,9 @@ Inputs:
 - Optional explicit `backends`: comma separated `geak,claude,codex`.
 - Optional `benchmark_file` or `test_harness_path`.
 - Optional E2E/accuracy evidence from Coordinator or Orchestration.
+- Optional `enable_rag: false` to pass `--disable-rag` for this request only.
+- Optional `enable_xs_memory: false` to pass `--disable-xs-memory` for this
+  request only.
 
 Run:
 
@@ -159,6 +172,9 @@ python $WORKSPACE_PATH/kernel-agent/tools/kernel_optimization.py \
 
 The tool returns optimization attempts, verification, and a proposal in one
 response. Do not split proposal generation into a third tool.
+The response always includes `rag_hits` and `xs_memory_hits` arrays for
+observability. They may be empty when GEAK does not emit structured retrieval
+metadata.
 
 If a requested backend is missing after `install.sh` succeeded, this is a
 real bug; record the missing backend attempt in `optimization_attempts.jsonl`
@@ -174,10 +190,30 @@ found", re-run `install.sh` instead of cloning the open-source TraceLens
 repo from chat — the open-source clone does NOT contain the standalone
 skills required by `tools/tracelens_analysis.py`.
 
+If `install.sh` did not finish or the CLI is unexpectedly missing, run a
+manual editable install + smoke test before analysis:
+
+```bash
+export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+cd "$TRACELENS_ROOT"
+pip install -e .
+# TraceLens #124: prefer the `_inference` perf-report CLI for vLLM/SGLang
+# traces (correct execution mode = graph-replay). The legacy
+# `TraceLens_generate_perf_report_pytorch` is acceptable on older builds.
+TraceLens_generate_perf_report_pytorch_inference --help \
+  || TraceLens_generate_perf_report_pytorch --help
+```
+
+If neither CLI is on PATH, stop and fix installation before analysis. Do not
+fall back to the open-source TraceLens clone when the internal mount exists;
+the internal mount contains the standalone skills expected by this tool.
+`tools/tracelens_analysis.py` picks the right CLI at runtime (preferring
+`_inference`, falling back to the legacy name) — see `select_perf_report_cli`.
+
 When running TraceLens analysis, read this skill file and strictly follow
 its order:
 
-`/wekafs/hyperloom/TraceLens-internal/TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md`
+`/wekafs/hyperloom/TraceLens-internal/TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md`
 
 Step 6 and Step 7 categories must run in independent Task subagents. Each
 subagent must write findings under `system_findings/` or `category_findings/`.
