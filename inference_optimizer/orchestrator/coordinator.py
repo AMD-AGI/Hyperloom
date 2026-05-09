@@ -54,6 +54,7 @@ from .resource_lock import ResourceLockManager, SqliteLeaseBackend
 from .shared_state import SharedState
 from .sub_agent_runner import SubAgentRunner
 from .task_registry import Task, TaskRegistry
+from .action_executors.benchmark_result import is_valid_measurement
 
 
 log = logging.getLogger(__name__)
@@ -348,6 +349,9 @@ class Coordinator:
                 # ---- check stop conditions ----
                 if self._stop.is_set():
                     stop_reason = "signal"
+                    break
+                if self.shared_state.stop_reason:
+                    stop_reason = self.shared_state.stop_reason
                     break
                 if objective.reached(self.shared_state):
                     stop_reason = "target_reached"
@@ -1095,6 +1099,36 @@ class Coordinator:
     # ==================================================================
     # Dispatcher (pulls queued tasks → SubAgentRunner)
     # ==================================================================
+    def _is_promotable_result(self, task_kind: str, result: dict[str, Any]) -> bool:
+        if not isinstance(result, dict):
+            return False
+        if task_kind in ("baseline", "profile"):
+            return is_valid_measurement(result)
+        if task_kind in ("backends", "params", "sweep"):
+            return result.get("status") == "succeeded"
+        return result.get("status") != "failed"
+
+    async def _handle_unpromotable_result(
+        self, task: Task, result: dict[str, Any] | None,
+    ) -> None:
+        if task.kind != "baseline" or self.shared_state.baseline_tput > 0:
+            return
+        self.shared_state.baseline_failure_streak += 1
+        if self.shared_state.baseline_failure_streak >= 3:
+            self.shared_state.stop_reason = "baseline_failed"
+        self.shared_state.save(self.session_dir)
+        await self.bus.append_and_seq(Message.new(
+            "coordinator", "*", "event",
+            {
+                "kind": "baseline_not_promoted",
+                "task_id": task.task_id,
+                "failure_streak": self.shared_state.baseline_failure_streak,
+                "stop_reason": self.shared_state.stop_reason,
+                "result_status": (result or {}).get("status"),
+                "error_class": (result or {}).get("error_class"),
+            },
+        ))
+
     async def _pump_dispatcher_once(self) -> None:
         queued = await self.tasks.queued()
         for task in queued:
@@ -1113,14 +1147,18 @@ class Coordinator:
             # fields (Coordinator is the only writer of CORE_STATE_FIELDS;
             # see DESIGN §14.5 / §17.2).
             # Guard: SubAgentResult.state == "succeeded" only means the
-            # executor didn't throw. The executor itself may report
-            # status="failed" (e.g. Magpie benchmark report success=false
-            # or 0 completed requests). Only promote truly successful runs.
-            executor_status = (result.result or {}).get("status", "")
-            if result.state == "succeeded" and executor_status != "failed":
+            # executor didn't throw. Promotion is tied to task-specific
+            # invariants: baseline/profile require a real measurement, while
+            # grid actions require at least one successful variant.
+            if (
+                result.state == "succeeded"
+                and self._is_promotable_result(task.kind, result.result or {})
+            ):
                 await self._promote_to_shared_state(
                     task.kind, result.result, task=task,
                 )
+            else:
+                await self._handle_unpromotable_result(task, result.result)
 
     def _lift_to_current_best(
         self, task_kind: str, best_tput: float, bv: dict[str, Any],
@@ -1218,6 +1256,7 @@ class Coordinator:
             tput = result.get("output_throughput")
             if isinstance(tput, (int, float)) and tput > 0:
                 self.shared_state.baseline_tput = float(tput)
+                self.shared_state.baseline_failure_streak = 0
                 changed = True
             acc = result.get("accuracy")
             if isinstance(acc, (int, float)):
