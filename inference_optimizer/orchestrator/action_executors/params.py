@@ -30,7 +30,10 @@ from typing import Any
 import yaml
 
 from ._grid_runner import GridVariant, VariantResult, run_grid, _resolve_output_root
-from .baseline import _default_baseline_config
+from ._workload_envs import (
+    default_baseline_config,
+    materialize_config_with_envs,
+)
 
 
 log = logging.getLogger(__name__)
@@ -260,7 +263,7 @@ class ParamsExecutor:
         config_path = Path(
             params.get("config_path")
             or self.default_config_path
-            or _default_baseline_config()
+            or default_baseline_config()
         )
         if not config_path.exists():
             return {"status": "failed",
@@ -271,6 +274,35 @@ class ParamsExecutor:
             or (self.default_output_root / f"params-{ctx.task.task_id[:8]}")
         )
         output_root.mkdir(parents=True, exist_ok=True)
+
+        # Workload-contract materialization (single source of truth).
+        # Whether `config_path` points at the shipped YAML, an explicit
+        # operator path, or — most commonly — the baseline executor's already
+        # materialized YAML plumbed through Coordinator, we re-run
+        # materialize_config_with_envs() so the process env (CONC/ISL/OSL/TP/
+        # MAX_MODEL_LEN/PRECISION/RUN_EVAL/...) is honored. This is the fix
+        # for the "baseline 4367 tok/s vs variants ~360 tok/s" benchmark
+        # fairness bug: previously _grid_runner._build_variant_yaml read the
+        # raw shipped YAML's smoke defaults (CONC=8/ISL=256/OSL=256/TP=1)
+        # while baseline ran at the operator's real workload. Re-materializing
+        # is idempotent when the input YAML already matches process env.
+        # Per-variant CONC/ISL/OSL overrides (used by sweep) still win
+        # because _build_variant_yaml applies variant.extra_envs last.
+        resolved_model_for_render = (
+            str(params.get("model_path") or "").strip()
+            or os.environ.get("MODEL_PATH", "").strip()
+        )
+        resolved_gpu_for_render = (
+            str(params.get("gpu_type") or "").strip().lower()
+            or os.environ.get("GPU_TYPE", "").strip().lower()
+        )
+        config_path = materialize_config_with_envs(
+            config_path,
+            output_root,
+            model_path=resolved_model_for_render or None,
+            gpu_type=resolved_gpu_for_render or None,
+            out_name="params_base.with_envs.yaml",
+        )
 
         base_extra_args = params.get("base_extra_args", "")
         base_tput = float(params.get("base_tput", 0.0))
@@ -367,18 +399,11 @@ class ParamsExecutor:
                 "params_search_exhausted": True,
             }
 
-        # Resolve runtime model_path / gpu_type (task.params > $MODEL_PATH /
-        # $GPU_TYPE) and forward to run_grid so each Magpie variant
-        # benchmarks the user's selected model on the user's selected GPU
-        # rather than the YAML's hardcoded fallback.
-        resolved_model = (
-            str(params.get("model_path") or "").strip()
-            or os.environ.get("MODEL_PATH", "").strip()
-        )
-        resolved_gpu = (
-            str(params.get("gpu_type") or "").strip().lower()
-            or os.environ.get("GPU_TYPE", "").strip().lower()
-        )
+        # Reuse the resolved model/gpu from the materialization step above
+        # so each Magpie variant benchmarks the user's selected model on
+        # the user's selected GPU rather than the YAML's hardcoded fallback.
+        resolved_model = resolved_model_for_render
+        resolved_gpu = resolved_gpu_for_render
         single_results = await run_grid(
             base_yaml_path=config_path,
             base_extra_args=base_extra_args,
