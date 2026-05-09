@@ -146,6 +146,49 @@ PY
   fi
 }
 
+# Idempotently bring up a Ray head node. Kernel backends submit Ray tasks with
+# `num_gpus>=1`; if no head is running (or one is running with --num-gpus=0)
+# kernel optimization will hang forever even when GPUs are idle. We:
+#   1. detect a live Ray head via `ray status` (any successful return = live)
+#   2. if absent, force-stop any half-started Ray and start a fresh head with
+#      all visible GPUs advertised
+#   3. tolerate the no-GPU case (CPU-only dev box) so `--check-only` stays
+#      non-fatal in environments without ROCm
+ensure_ray_started() {
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  if ! command -v ray >/dev/null 2>&1; then
+    warn "ray CLI missing; cannot start ray head"
+    return 0
+  fi
+  if ray status >/dev/null 2>&1; then
+    log "ray head already running"
+    return 0
+  fi
+  log "no live ray head detected; starting one"
+  ray stop --force >/dev/null 2>&1 || true
+  local num_gpus
+  num_gpus="$(python3 - <<'PY' 2>/dev/null || echo 0
+try:
+    import torch
+    print(torch.cuda.device_count() or 0)
+except Exception:
+    print(0)
+PY
+)"
+  if [ "${RAY_NUM_GPUS:-}" != "" ]; then
+    num_gpus="$RAY_NUM_GPUS"
+  fi
+  log "starting ray head with --num-gpus=${num_gpus}"
+  if ! ray start --head --disable-usage-stats \
+       --num-gpus="$num_gpus" --include-dashboard=false >/dev/null; then
+    warn "ray start failed; kernel optimization will hang. Check ROCm visibility."
+    return 0
+  fi
+  ray status >/dev/null 2>&1 || warn "ray status reports no live head after start"
+}
+
 ensure_tracelens() {
   if [ ! -d "$TRACELENS_ROOT" ] && [ -d "${HYPERLOOM_BUNDLE}/TraceLens-internal" ]; then
     TRACELENS_ROOT="${HYPERLOOM_BUNDLE}/TraceLens-internal"
@@ -162,10 +205,16 @@ ensure_tracelens() {
     run bash -lc "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir -e ."
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    if command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
+    # TraceLens #124: prefer the inference variant (correct entry for
+    # vLLM/SGLang traces). Fall back to the legacy CLI for older builds.
+    if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
+      TraceLens_generate_perf_report_pytorch_inference --help >/dev/null
+      log "TraceLens perf CLI verified: TraceLens_generate_perf_report_pytorch_inference (#124)"
+    elif command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
       TraceLens_generate_perf_report_pytorch --help >/dev/null
+      warn "TraceLens_generate_perf_report_pytorch_inference not found; using legacy TraceLens_generate_perf_report_pytorch"
     else
-      verify_die "TraceLens_generate_perf_report_pytorch not found after install"
+      verify_die "Neither TraceLens_generate_perf_report_pytorch_inference nor TraceLens_generate_perf_report_pytorch found after install"
     fi
   fi
 }
@@ -392,7 +441,17 @@ except Exception:
     raise SystemExit(1)
 PY
 )"
-  for tool in TraceLens_generate_perf_report_pytorch geak oob claude codex; do
+  # TraceLens perf-report CLI: report whichever variant is available
+  # (#124 prefers the _inference suffix; the legacy CLI is acceptable as
+  # a fallback, the dispatcher in tools/tracelens_analysis.py picks at runtime).
+  if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
+    log "found TraceLens_generate_perf_report_pytorch_inference: $(command -v TraceLens_generate_perf_report_pytorch_inference)"
+  elif command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
+    warn "TraceLens_generate_perf_report_pytorch_inference not found; using legacy TraceLens_generate_perf_report_pytorch: $(command -v TraceLens_generate_perf_report_pytorch)"
+  else
+    warn "TraceLens perf-report CLI not found (looked for both _inference and legacy)"
+  fi
+  for tool in geak oob claude codex; do
     if command -v "$tool" >/dev/null 2>&1; then
       log "found ${tool}: $(command -v "$tool")"
     else
@@ -429,6 +488,7 @@ main() {
   fi
   ensure_python
   ensure_ray
+  ensure_ray_started
   ensure_tracelens
 
   # Always install everything; ensure_oob also calls ensure_llm_auth_files.
