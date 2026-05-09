@@ -222,6 +222,44 @@ async def test_run_grid_writes_per_variant_yaml_and_parses_report(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_run_grid_keeps_valid_measurement_with_report_failure_and_nonzero_rc(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_root = tmp_path / "out"
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=900.0, success=False)
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=1, stdout="", stderr="cleanup failed",
+        )
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+        side_effect=_fake_run,
+    ):
+        results = await run_grid(
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("valid_warning")],
+            output_root=output_root,
+            variant_timeout_sec=10,
+        )
+
+    assert len(results) == 1
+    assert results[0].status == "succeeded"
+    assert results[0].reported_success is False
+    assert results[0].returncode == 1
+    assert results[0].output_throughput == 900.0
+    assert results[0].completed_requests == 80
+    assert "benchmark_report_success_false" in results[0].nonfatal_warnings
+    assert "magpie_nonzero_after_valid_measurement" in results[0].nonfatal_warnings
+    winners = pick_winners(results, baseline_tput=800.0)
+    assert [w.name for w in winners] == ["valid_warning"]
+
+
+@pytest.mark.asyncio
 async def test_run_grid_keeps_going_on_subprocess_failure(tmp_path):
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)

@@ -528,8 +528,10 @@ class ParamsExecutor:
             },
         }
 
+        successful_runs = [r for r in all_results if r.status == "succeeded"]
+
         return {
-            "status": "succeeded" if all_results else "failed",
+            "status": "succeeded" if successful_runs else "failed",
             "base_tput": base_tput,
             "grid_size": len(single_results),
             "total_runs": len(all_results),
