@@ -25,14 +25,12 @@ works unchanged.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from pathlib import Path
 from typing import Any
 
 from ...paths import asset_root
-from ..roofline_integration import collect_profile_roofline, server_profiling_env
 from .baseline import BaselineExecutor
 
 
@@ -79,14 +77,6 @@ class ProfileExecutor(BaselineExecutor):
         return _default_profile_config()
 
     async def __call__(self, ctx) -> dict[str, Any]:
-        preload_env = server_profiling_env()
-        if preload_env:
-            params = dict(ctx.task.params or {})
-            extra_envs = dict(params.get("extra_envs") or {})
-            extra_envs.update(preload_env)
-            params["extra_envs"] = extra_envs
-            ctx.task.params = params
-
         result = await super().__call__(ctx)
         # Augment with trace_dir if the workspace produced one.
         workspace_str = result.get("workspace")
@@ -112,21 +102,6 @@ class ProfileExecutor(BaselineExecutor):
                     "profile_executor: workspace=%s has no torch_trace dir",
                     workspace_str,
                 )
-
-            if os.environ.get("ENABLE_PMC_ROOFLINE", "1").strip().lower() not in {
-                "0", "false", "no",
-            }:
-                pmc = await asyncio.to_thread(
-                    collect_profile_roofline,
-                    session_dir=Path(workspace_str),
-                    duration_ms=int(os.environ.get("PMC_PROFILE_DURATION_MS", "15000")),
-                    precision=os.environ.get("PRECISION", "fp16").strip() or "fp16",
-                )
-                result["pmc_roofline"] = pmc
-                if pmc.get("pmc_summary_path"):
-                    result["pmc_summary_path"] = pmc["pmc_summary_path"]
-                if pmc.get("roofline_path"):
-                    result["roofline_path"] = pmc["roofline_path"]
         return result
 
 
