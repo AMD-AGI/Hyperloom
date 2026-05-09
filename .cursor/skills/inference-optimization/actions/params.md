@@ -40,6 +40,11 @@ NCCL_GRID=(
 
 ### vLLM parameter grid
 
+**Version check required before building the grid:**
+```bash
+VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "0.0.0")
+```
+
 ```bash
 VLLM_PARAM_GRID=(
     "--gpu-memory-utilization 0.90"
@@ -50,7 +55,18 @@ VLLM_PARAM_GRID=(
     "--max-num-batched-tokens 32768"
     "--compilation-config level=0"
 )
+
+# --enable-chunked-prefill is supported from vLLM v0.4.3+, but causes OOM/crashes
+# on some large MoE models (e.g. Kimi-K2). Only add if vLLM >= 0.6.0.
+# NEVER add --num-scheduler-steps — this flag was removed in vLLM v0.4.0.
+if python3 -c "from packaging.version import Version; import vllm; assert Version(vllm.__version__) >= Version('0.6.0')" 2>/dev/null; then
+    VLLM_PARAM_GRID+=("--enable-chunked-prefill")
+fi
 ```
+
+**FORBIDDEN vLLM flags** (will crash or error on current versions):
+- `--num-scheduler-steps` — removed in vLLM v0.4.0, do not use
+- `--chunked-prefill-size` — SGLang-only flag, invalid for vLLM
 
 ### Test each parameter
 
