@@ -267,18 +267,13 @@ async def test_profile_promotion_records_args_and_clears_select_cache(session_di
             "main_trace_path": "/new/trace.json.gz",
             "trace_files": ["/new/trace.json.gz"],
             "trace_dir": "/new/torch_trace",
-            "pmc_summary_path": "/new/profiles/pmc_summary.json",
-            "roofline_path": "/new/profiles/roofline.json",
         }
         await c._promote_to_shared_state("profile", result, task=task)
         assert c.shared_state.last_profile_trace == "/new/trace.json.gz"
         assert c.shared_state.last_profile_args == "--cuda-graph-max-bs 8"
-        assert c.shared_state.last_profile_pmc_summary == "/new/profiles/pmc_summary.json"
-        assert c.shared_state.last_profile_roofline == "/new/profiles/roofline.json"
         assert c.shared_state.last_select_kernels == {}
         summary = c.shared_state.to_prompt_summary()
         assert "last_profile_args='--cuda-graph-max-bs 8'" in summary
-        assert "last_profile_roofline=/new/profiles/roofline.json" in summary
     finally:
         await c.stop()
 
