@@ -1,10 +1,14 @@
-"""Core Robustness Agent — event-driven guardian daemon.
+"""Core Robustness Agent — legacy event-driven daemon (pre-M1).
 
-Architecture:
-  - Multiple async monitoring tasks run at different intervals
-  - All alerts feed into a central alert bus
-  - Rule engine + RCA engine consume alerts and emit intents to Conductor
-  - LLM is only invoked when critical alerts accumulate (cost efficient)
+This loop wires monitors -> checks -> RCA -> ``IntentEmitter`` directly
+against the Coordinator's SQLite database.  M1 introduces a Backend-
+based pipeline (see :mod:`robustness_agent.role.reactor`) that emits
+intents to the Coordinator over the standard Backend protocol; this
+file is kept so the ``--mode legacy`` CLI flag still works while the
+MULTI_CLI transport (M3) is in flight.
+
+Prefer :class:`~robustness_agent.role.backend_adapter.RobustnessAgentBackend`
+for new deployments.
 """
 
 from __future__ import annotations

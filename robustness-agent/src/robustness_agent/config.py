@@ -30,6 +30,15 @@ ROBUST_ANALYZER_CANDIDATES: list[str] = [
     "http://robust-analyzer:8085",
 ]
 
+# robustness-server is the M1 primary data source; we look in cluster
+# DNS first and fall back to a local port-forward used during dev.
+ROBUSTNESS_SERVER_CANDIDATES: list[str] = [
+    "http://robustness-server.robustness.svc.cluster.local:8000",
+    "http://robustness-server.primus-safe.svc.cluster.local:8000",
+    "http://robustness-server:8000",
+    "http://localhost:8000",
+]
+
 SESSION_DIR_CANDIDATES: list[Path] = [
     Path("/workspace/session"),
     Path("/tmp/robustness-session"),
@@ -42,6 +51,9 @@ class Config:
 
     # Filled by auto-detection; empty means local-only mode.
     robust_analyzer_url: str = ""
+
+    # Primary M1 data source; empty means "skip server, only use local probe".
+    robustness_server_url: str = ""
 
     @property
     def conductor_db_path(self) -> Path:
@@ -71,6 +83,29 @@ class Config:
     llm_api_key: str = ""
     rca_max_turns: int = 10
 
+    # -- M1.5 LLM RCA throttle / activation --
+    # ``None`` = auto-enable when llm_base_url + llm_api_key are both set.
+    # ``False`` = forcibly disable (env override
+    # ROBUSTNESS_LLM_RCA_DISABLED=1 also flips this off).
+    llm_rca_enabled: Optional[bool] = None
+    llm_rca_severity_min: str = "high"  # one of low/medium/high
+    llm_rca_cooldown_s: float = 60.0
+    llm_rca_max_calls_per_tick: int = 1
+    llm_rca_timeout_s: float = 8.0
+    llm_rca_max_chars: int = 1500
+
+    # -- M1 reactor knobs --
+    cooldown_ticks: int = 5
+    metrics_window_s: int = 300
+    server_request_timeout_s: float = 5.0
+    source_fail_threshold: int = 3
+    source_recheck_interval_s: float = 30.0
+    standalone_tick_interval_s: float = 10.0
+
+    # -- M1.5 LocalProbe extras --
+    health_probe_targets: list[str] = field(default_factory=list)
+    health_probe_timeout_s: float = 1.5
+
     # -- ring buffer (local mode only) --
     local_metrics_history_s: int = 3600
     local_metrics_sample_interval: int = 5
@@ -88,18 +123,21 @@ class Config:
         """Auto-detect all configuration from the runtime environment."""
         session_dir = _discover_session_dir()
         analyzer_url = await _probe_robust_analyzer()
+        server_url = await _probe_robustness_server()
         llm_base_url, llm_api_key = _discover_llm_credentials()
 
         config = cls(
             session_dir=session_dir,
             robust_analyzer_url=analyzer_url,
+            robustness_server_url=server_url,
             llm_base_url=llm_base_url,
             llm_api_key=llm_api_key,
         )
 
         log.info(
-            "Config discovered: session_dir=%s analyzer=%s llm=%s",
+            "Config discovered: session_dir=%s server=%s analyzer=%s llm=%s",
             config.session_dir,
+            config.robustness_server_url or "(local-only)",
             config.robust_analyzer_url or "(local mode)",
             "(configured)" if config.llm_base_url else "(not available)",
         )
@@ -144,6 +182,28 @@ async def _probe_robust_analyzer() -> str:
             continue
 
     log.info("Robust-analyzer not reachable, will use local provider")
+    return ""
+
+
+async def _probe_robustness_server() -> str:
+    """Probe known robustness-server endpoints + ROBUSTNESS_SERVER_URL env."""
+    candidates: list[str] = []
+    env_url = os.environ.get("ROBUSTNESS_SERVER_URL", "").strip()
+    if env_url:
+        candidates.append(env_url.rstrip("/"))
+    candidates.extend(ROBUSTNESS_SERVER_CANDIDATES)
+
+    for url in candidates:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as client:
+                resp = await client.get(f"{url}/healthz")
+                if resp.status_code == 200:
+                    log.info("Robustness-server reachable at %s", url)
+                    return url
+        except Exception:
+            continue
+
+    log.info("Robustness-server not reachable, will use local-only fallback")
     return ""
 
 

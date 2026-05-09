@@ -119,13 +119,26 @@ class ConductorReader:
 
 
 class IntentEmitter:
-    """Write robustness intents back to Conductor.
+    """Write robustness intents back to Conductor (legacy MVP path).
 
-    In the MVP, intents are written as events to the same SQLite DB.
-    In production, this may use NATS or A2A protocol instead.
+    Deprecated as of M1: the canonical integration is the
+    :class:`~robustness_agent.role.backend_adapter.RobustnessAgentBackend`
+    which returns intents to the Coordinator instead of writing them
+    into the SQLite DB. The class is retained so the legacy
+    :class:`RobustnessAgent` loop keeps functioning while M3 finishes
+    multi-cli transport.
     """
 
     def __init__(self, db_path: Path):
+        import warnings
+
+        warnings.warn(
+            "IntentEmitter writes intents directly into conductor.db, which is "
+            "deprecated. Migrate to RobustnessAgentBackend (SINGLE_PROC) or the "
+            "MULTI_CLI inbox/outbox transport.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._db_path = db_path
         self._conn: Optional[sqlite3.Connection] = None
 
