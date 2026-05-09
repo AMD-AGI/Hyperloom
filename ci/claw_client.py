@@ -57,18 +57,14 @@ class ClawClient:
 
     # ── Session CRUD ──
 
-    def create_session(self, name: str, agent_id: str | None = None,
-                       sandbox_image: str | None = None) -> dict:
+    def create_session(self, name: str, agent_id: str | None = None) -> dict:
         agent_id = agent_id or self.agent_id
         body: dict = {"name": name, "agent_id": agent_id}
-        if sandbox_image:
-            body["sandbox_image"] = sandbox_image
         data = self._check(self._session.post(
             self._url("/sessions"),
             json=body,
         ))
-        log.info("Created session %s (name=%s, sandbox_image=%s)",
-                 data["data"]["session_id"], name, sandbox_image or "cpu")
+        log.info("Created session %s (name=%s)", data["data"]["session_id"], name)
         return data["data"]
 
     def get_session(self, session_id: str) -> dict:
@@ -90,7 +86,11 @@ class ClawClient:
         task_mode: str = "agent",
         tools: list[int] | None = None,
         plugin_id: int | None = 4,
+        image: str | None = None,
+        resource: dict | None = None,
     ) -> dict:
+        # sessions.ts reads body.image as finalSandboxImage (priority over plugin default)
+        # and body.resource as finalResources (overrides plugin's fixed GPU/CPU/memory).
         body = {
             "content": content,
             "contents": [{"type": "text", "value": content}],
@@ -101,6 +101,10 @@ class ClawClient:
             "workspaceId": self.sandbox_workspace or os.environ.get("SANDBOX_WORKSPACE", ""),
             "pluginId": plugin_id,
         }
+        if image:
+            body["image"] = image
+        if resource:
+            body["resource"] = resource
         resp = self._session.post(
             self._url(f"/sessions/{session_id}/messages"),
             json=body,
