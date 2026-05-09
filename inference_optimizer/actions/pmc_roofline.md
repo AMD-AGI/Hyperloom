@@ -1,7 +1,9 @@
 # PMC Roofline
 
 Run PMC/roofline profiling in a dedicated server process. Do not use this action
-for the normal torch-profiler trace path.
+for the normal torch-profiler trace path. By default this action launches the
+server under `rocprofv3` instead of using `rocprofv3 --attach`, so it can run in
+containers that do not grant `CAP_SYS_PTRACE`.
 
 ## Why This Is Separate
 
@@ -25,6 +27,8 @@ and uses that process only for `rocprofv3 --attach`.
 - `precision`: roofline precision, default `fp16`.
 - `startup_timeout_s`: server health timeout, default `600`.
 - `extra_envs`: extra environment variables for the dedicated server.
+- `profile_mode`: `launch` (default) or `attach`. Use `attach` only when the
+  container grants ptrace permissions.
 
 ## Outputs
 

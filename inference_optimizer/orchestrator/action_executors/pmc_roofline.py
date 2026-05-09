@@ -51,6 +51,7 @@ class PMCRooflineExecutor:
             precision=str(params.get("precision") or "fp16"),
             startup_timeout_s=int(params.get("startup_timeout_s") or 600),
             env_overrides=env_overrides,
+            profile_mode=str(params.get("profile_mode") or "launch"),
         )
         result.setdefault("output_dir", str(output_dir))
         result.setdefault("health_url", health_url)

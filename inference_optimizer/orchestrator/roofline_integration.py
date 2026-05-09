@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import signal
 import shlex
 import shutil
 import subprocess
@@ -264,6 +265,81 @@ class PMCProfiler:
             if bench_proc and bench_proc.poll() is None:
                 bench_proc.terminate()
 
+    def profile_launch(
+        self,
+        *,
+        server_cmd: list[str],
+        health_url: str,
+        log_path: Path,
+        duration_ms: int = 15000,
+        benchmark_cmd: list[str] | None = None,
+        benchmark_env: dict[str, str] | None = None,
+        startup_timeout_s: int = 600,
+        server_env: dict[str, str] | None = None,
+    ) -> list[PMCKernelResult]:
+        """Launch the server under rocprofv3 instead of attaching by ptrace.
+
+        This avoids ``rocprofv3 --attach`` permissions such as CAP_SYS_PTRACE.
+        The server is still isolated from the normal torch-profiler trace run.
+        """
+        rocprof = self._find_rocprofv3()
+        run_tag = f"launch_{int(time.time())}"
+        output_dir = self.profile_dir / "pmc_launch" / run_tag
+        output_dir.mkdir(parents=True, exist_ok=True)
+        counter_file = self._write_counter_file()
+        cmd = [
+            rocprof,
+            "-i", str(counter_file),
+            "-d", str(output_dir),
+            "-f", "csv",
+            "--kernel-trace",
+            "--",
+            *server_cmd,
+        ]
+        with log_path.open("w", encoding="utf-8", errors="replace") as log:
+            log.write("$ " + " ".join(shlex.quote(part) for part in cmd) + "\n")
+            log.flush()
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=server_env,
+                **_process_group_kwargs(),
+            )
+            try:
+                if not _wait_for_health(health_url, proc, startup_timeout_s):
+                    return []
+
+                if benchmark_cmd:
+                    bench = subprocess.run(
+                        benchmark_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        env=benchmark_env,
+                        timeout=max(duration_ms / 1000.0 + 120, 180),
+                    )
+                    log.write("\n[benchmark output]\n")
+                    log.write(bench.stdout or "")
+                    log.write(f"\n[benchmark exit_code] {bench.returncode}\n")
+                    log.flush()
+                else:
+                    time.sleep(duration_ms / 1000.0)
+            finally:
+                _terminate_process_group(proc)
+                try:
+                    proc.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    _kill_process_group(proc)
+                    proc.wait(timeout=30)
+
+        counter_csvs = list(output_dir.rglob("*counter_collection*.csv"))
+        if counter_csvs:
+            return self._parse_counter_csvs(counter_csvs)
+        trace_csvs = list(output_dir.rglob("*kernel_trace*.csv"))
+        return self._parse_trace_only(trace_csvs) if trace_csvs else []
+
     def save_results(self, results: list[PMCKernelResult], tag: str = "pmc") -> str:
         path = self.profile_dir / f"{tag}_summary.json"
         path.write_text(
@@ -511,6 +587,36 @@ def _as_cmd(value: Any) -> list[str]:
     return []
 
 
+def _process_group_kwargs() -> dict[str, Any]:
+    if os.name == "posix":
+        return {"preexec_fn": os.setsid}
+    return {}
+
+
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except ProcessLookupError:
+        pass
+
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        pass
+
+
 def _classify_kernel_tier(name: str) -> str:
     """Keep the legacy 5-tier optimization routing alongside roofline data."""
     lower = name.lower()
@@ -590,44 +696,75 @@ def run_isolated_pmc_roofline(
     precision: str = "fp16",
     startup_timeout_s: int = 600,
     env_overrides: dict[str, str] | None = None,
+    profile_mode: str = "launch",
 ) -> dict[str, Any]:
-    """Launch a dedicated LD_PRELOAD server, collect PMC, then stop it.
+    """Launch a dedicated server, collect PMC, then stop it.
 
     This function deliberately owns a separate process so the normal
     torch-profiler/TraceLens server never competes with rocprofiler-sdk.
     """
     session_dir.mkdir(parents=True, exist_ok=True)
     log_path = session_dir / "pmc_roofline_server.log"
-    env = PMCProfiler.server_profiling_env(os.environ)
+    env = os.environ.copy()
+    preload_env = PMCProfiler.server_profiling_env(env)
+    if "librocprofiler-register.so" in preload_env.get("LD_PRELOAD", ""):
+        env = preload_env
     env.update({str(k): str(v) for k, v in (env_overrides or {}).items()})
-    if "librocprofiler-register.so" not in env.get("LD_PRELOAD", ""):
-        return {"status": "skipped", "reason": "librocprofiler-register.so unavailable"}
+    mode = (profile_mode or "launch").lower()
 
-    with log_path.open("w", encoding="utf-8", errors="replace") as log:
-        proc = subprocess.Popen(
-            server_cmd,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=env,
-        )
     try:
-        if not _wait_for_health(health_url, proc, startup_timeout_s):
-            return {
-                "status": "failed",
-                "reason": "dedicated server did not become healthy",
-                "server_log": str(log_path),
-                "server_returncode": proc.poll(),
-            }
         profiler = PMCProfiler(session_dir)
-        pmc_results = profiler.profile_attach(
-            proc.pid,
-            duration_ms=duration_ms,
-            benchmark_cmd=benchmark_cmd,
-            benchmark_env=os.environ.copy(),
-        )
+        if mode == "attach":
+            if "librocprofiler-register.so" not in env.get("LD_PRELOAD", ""):
+                return {"status": "skipped", "reason": "librocprofiler-register.so unavailable"}
+            with log_path.open("w", encoding="utf-8", errors="replace") as log:
+                proc = subprocess.Popen(
+                    server_cmd,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env=env,
+                    **_process_group_kwargs(),
+                )
+            try:
+                if not _wait_for_health(health_url, proc, startup_timeout_s):
+                    return {
+                        "status": "failed",
+                        "reason": "dedicated server did not become healthy",
+                        "profile_mode": mode,
+                        "server_log": str(log_path),
+                        "server_returncode": proc.poll(),
+                    }
+                pmc_results = profiler.profile_attach(
+                    proc.pid,
+                    duration_ms=duration_ms,
+                    benchmark_cmd=benchmark_cmd,
+                    benchmark_env=os.environ.copy(),
+                )
+            finally:
+                _terminate_process_group(proc)
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    _kill_process_group(proc)
+        else:
+            pmc_results = profiler.profile_launch(
+                server_cmd=server_cmd,
+                health_url=health_url,
+                log_path=log_path,
+                duration_ms=duration_ms,
+                benchmark_cmd=benchmark_cmd,
+                benchmark_env=os.environ.copy(),
+                startup_timeout_s=startup_timeout_s,
+                server_env=env,
+            )
         if not pmc_results:
-            return {"status": "skipped", "reason": "no PMC or kernel trace results", "server_log": str(log_path)}
+            return {
+                "status": "skipped",
+                "reason": "no PMC or kernel trace results",
+                "profile_mode": mode,
+                "server_log": str(log_path),
+            }
 
         pmc_summary_path = profiler.save_results(pmc_results, tag="pmc")
         total_ns = sum(result.duration_ns for result in pmc_results)
@@ -652,6 +789,7 @@ def run_isolated_pmc_roofline(
         )
         return {
             "status": "ok",
+            "profile_mode": mode,
             "server_log": str(log_path),
             "pmc_summary_path": str(pmc_summary_path),
             "roofline_path": str(roofline_path),
@@ -662,10 +800,3 @@ def run_isolated_pmc_roofline(
         return {"status": "skipped", "reason": "rocprofv3 unavailable", "error": str(exc), "server_log": str(log_path)}
     except subprocess.TimeoutExpired as exc:
         return {"status": "skipped", "reason": "rocprofv3 timed out", "error": str(exc), "server_log": str(log_path)}
-    finally:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                proc.kill()
