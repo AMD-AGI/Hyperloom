@@ -411,7 +411,6 @@ def _set_yaml_tools_rag(text: str, enabled: bool) -> str:
 
     if in_tools and not wrote_rag:
         out.append(f"{' ' * (tools_indent + 2)}rag: {value}")
-        wrote_rag = True
     if not saw_tools:
         if out and out[-1].strip():
             out.append("")
