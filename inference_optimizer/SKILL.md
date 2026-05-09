@@ -114,7 +114,18 @@ The CLI runs `_preflight()` automatically:
    from `SAFE_API_KEY`. `OOB_BASE_URL` / `GEAK_BASE_URL` / `LLM_API_BASE`
    inherit upstream from `OPENAI_BASE_URL` (those clients speak Bearer
    natively and do not need the proxy).
-2. Re-runs `ensure_auth_proxy.sh`, **rewrites `~/.claude/config.json`**
+2. **Auto-installs missing Python SDKs** into the running interpreter
+   (`sys.executable`): `claude-agent-sdk>=0.1.65`, `openai>=1.50`,
+   `httpx>=0.27`. These are declared in `pyproject.toml` but a sandbox
+   that only pulled the source tree without resolving deps lands here
+   without them, causing `BackendError: claude-agent-sdk not installed`
+   on the first reactor tick after baseline has already burned wall time.
+3. **Bootstraps `auth_proxy.py` source** from `$OOB_SRC` (or
+   `/wekafs/fully-local/OOB` / `/wekafs/fully-local/inference_optimization/OOB`)
+   into `${HYPERLOOM_ROOT:-/opt/hyperloom}/OOB/oob_cli/` if missing — this
+   is the file `ensure_auth_proxy.sh` actually executes. Without it the
+   supervisor warns + returns 1 and `:4002` stays dead.
+4. Re-runs `ensure_auth_proxy.sh`, **rewrites `~/.claude/config.json`**
    so its `customApiUrl` points at `127.0.0.1:4002`, **and force-overrides
    `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` in the running process to the
    proxy URL** (any pre-set values from shell rc, `.env`, k8s secret, or
@@ -122,13 +133,42 @@ The CLI runs `_preflight()` automatically:
    auth-proxy cannot be brought up after one retry, the original env values
    are restored so the two vars stay consistent and a WARNING is printed —
    Claude/Codex CLIs may then 401 against the gateway directly.
-3. Auto-installs missing `ray` / `Magpie` / `InferenceX` if the pod was rebuilt.
-4. Auto-detects `--gpu-type` if not given.
+5. **ROCm env hygiene** (WARN-only): pops `HIP_VISIBLE_DEVICES` when
+   `ROCR_VISIBLE_DEVICES` is also set (mixing the two makes
+   `torch.cuda.is_available()` return false inside the Magpie subprocess);
+   counts visible GPUs vs `$TP` via `rocm-smi --showid`; checks
+   `/dev/shm` free space ≥ 16 GiB.
+6. Auto-installs missing `ray` / `Magpie` / `InferenceX` if the pod was rebuilt.
+7. Auto-detects `--gpu-type` if not given.
+8. WARN-only presence check on `node` / `claude` / `codex` CLIs.
+9. Emits a single canonical **`Preflight diagnostics:`** block with
+   `asset_root`, `session_root` (and the env vars that resolved it),
+   `magpie_python`, `INFERENCEX_PATH`, aiter jit cache state (WARM/COLD
+   + `.so` count + path), cold/warm timeout caps, and the active proxy URL.
+   Launchers should paste this block verbatim into status reports rather
+   than grepping the source for env names.
 
-You do NOT need to manually `export ANTHROPIC_*`, manually start ray,
-manually pip install Magpie, manually source `.env`, or manually edit
-`~/.claude/config.json` from chat. Doing any of those by hand is the
-exact failure mode that produces "Claude SDK exit code 1" / HTTP 401 /
+After `_preflight()` returns, but BEFORE Coordinator boots, the CLI runs:
+
+10. **Hard model gate** for `--claude-model`. The arg must equal
+    `claude-opus-4-7` (preferred) or `claude-opus-4-6` (fallback). Anything
+    else aborts with `sys.exit(2)` — orchestration drift on opus-4-5 / haiku
+    silently degraded prior runs. Then the gateway catalog is probed
+    (`GET <OPENAI_BASE_URL>/models` with Bearer, `verify=False`,
+    3 retries with exponential backoff at 1s/3s/5s); if the chosen model
+    is missing but `claude-opus-4-6` is present, the arg is rewritten +
+    WARN. If neither allowed model is in catalog OR the gateway is
+    unreachable after all retries, refuse to start.
+11. **Codex smoke-test** (WARN-only). `--codex-model` is checked against
+    the same catalog when codex is actually used (`--critic-real` or
+    `--kernel-codex` with kernel enabled).
+
+You do NOT need to manually `pip install claude-agent-sdk`, copy
+`auth_proxy.py` from a bundle path, `export ANTHROPIC_*`, manually start
+ray, manually pip install Magpie, manually source `.env`, manually edit
+`~/.claude/config.json`, or manually `curl /v1/models` to pick a model
+name. Doing any of those by hand is the exact failure mode that produces
+"Claude SDK exit code 1" / HTTP 401 / "claude-sonnet-4 not in catalog" /
 "customApiUrl points to a local proxy that isn't running".
 
 ### Recovery
@@ -569,6 +609,22 @@ WARM. The first existing path under the probe list (see
 `baseline.py:AITER_JIT_PROBE_PATHS`) wins. Override paths by exporting
 `INFERENCE_OPTIMIZER_AITER_JIT_DIR=/abs/path/to/jit/build`.
 
+The same probe runs once at boot inside `_emit_preflight_diagnostics()`
+so the resolved cache state appears in the canonical preflight block:
+
+```
+Preflight diagnostics:
+  ...
+  aiter jit cache     = 98 .so / 887 MB (WARM) at /sgl-workspace/aiter/aiter/jit/build
+  cold_start_timeout  = 3600s
+  warm_timeout        = 1500s
+  proxy URLs          = http://127.0.0.1:4002/api/v1/llm-proxy (auth-proxy alive)
+```
+
+Launchers should read this block instead of grepping `cli.py` /
+`baseline.py` for env var names. The `cold_start_timeout` line reflects
+any active `INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC` override.
+
 Timeout selection (one-shot, per baseline `__call__`):
 
 | Condition | Resulting `subprocess.run(timeout=...)` |
@@ -629,10 +685,42 @@ budget on untested params/backend candidates or the next kernel.
 
 ## Failure Handling
 
+- `ERROR: --claude-model=... is not allowed`: the static gate rejected
+  the chosen model. Orchestration must use `claude-opus-4-7` (preferred)
+  or `claude-opus-4-6` (fallback). Drop or change `--claude-model` /
+  `$CLAUDE_MODEL` and re-run. This is **intentional** — opus-4-5 / haiku
+  silently degraded prior runs and the operator pinned the allowlist.
+- `ERROR: gateway catalog unreachable after retries`: the
+  `GET <base_url>/models` probe failed all 4 attempts (initial + 3
+  exponential-backoff retries at 1s/3s/5s). Reproduce manually with the
+  command in `terminals/6.txt`:
+  ```bash
+  curl -k -H "Authorization: Bearer $SAFE_API_KEY" \
+       "$OPENAI_BASE_URL/models" | jq '.data[].id' | sort
+  ```
+  If the gateway answers, the proxy / SSL path is the problem; if it
+  doesn't, the gateway itself is down. We deliberately fail-fast here
+  rather than launch a baseline that will 401 ~5 minutes in.
+- `ERROR: neither claude-opus-4-7 nor claude-opus-4-6 present in gateway catalog`:
+  catalog reachable but neither allowed model is listed. Either the
+  gateway dropped them (escalate to operator) or this is a wrong
+  endpoint. Don't bypass the gate — change the catalog or update the
+  allowlist constant `_CLAUDE_ALLOWED_MODELS` in `cli.py` if a successor
+  model has been blessed.
+- `WARNING — claude-opus-4-7 not in gateway catalog; falling back to claude-opus-4-6`:
+  expected when 4-7 is rotated out of the gateway. The run continues on
+  4-6; performance characteristics are nearly identical.
 - `Claude SDK exit code 1` / `Primus.00009 token not present`: auth-proxy
   is dead. Run `bash $REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh`
   and retry the CLI. Do NOT manually rewrite `~/.claude/config.json` —
-  `_preflight()` owns it.
+  `_preflight()` owns it. If the supervisor warns that `auth_proxy.py`
+  is missing, set `OOB_SRC` to a directory that contains it (or land
+  one of `/wekafs/fully-local/OOB`, `/wekafs/fully-local/inference_optimization/OOB`)
+  so `_ensure_oob_proxy_source()` can bootstrap it next run.
+- `BackendError: claude-agent-sdk not installed`: should not happen
+  after `_ensure_python_sdks()` lands, but if it does (frozen pip, no
+  network) install manually:
+  `python -m pip install claude-agent-sdk>=0.1.65 openai>=1.50 httpx>=0.27`.
 - `ANTHROPIC_AUTH_TOKEN not set`: re-source `$REPO_ROOT/kernel-agent/env.sh`.
 - `Fatal error in message reader`: retry/resume; transient Claude CLI failures
   are tolerated up to the Coordinator emergency threshold.
