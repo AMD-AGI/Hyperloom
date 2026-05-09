@@ -157,7 +157,7 @@ cat > "$TASK_DIR/kernel_${KERNEL_NAME}.md" <<'EOF'
 ## Optimization Instructions
 Optimize this Triton kernel for AMD MI355X (gfx950, CDNA4).
 Hardware: 304 CUs, 256 VGPR/CU, HBM3e ~8 TB/s, MFMA instructions.
-Use homogeneous mode. Set max_rounds to 5.
+Use homogeneous mode. Set max_rounds to 1.
 The kernel MUST be optimized to at least 1.5x speedup.
 Do NOT search the filesystem with find / or grep -r /.
 
