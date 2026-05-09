@@ -439,3 +439,258 @@ async def test_source_can_disable_cluster_faults():
 
     assert "/api/v1/cluster/faults" not in paths_hit
     assert data.cluster_faults == []
+
+
+# ---------------------------------------------------------------------------
+# M2.5: cluster pod metrics fan-out -> SourceData.local_gpu
+# ---------------------------------------------------------------------------
+
+
+def _gpu_metric_response(value: float, *, gpu_id: str = "0", ts: int = 100):
+    """Build a robust-api-shaped pod-metrics response for one GPU."""
+
+    return {
+        "data": {
+            "pods": [
+                {
+                    "namespace": "ns1",
+                    "name": "podA",
+                    "results": [
+                        {
+                            "name": "rocm_temperature_celsius",
+                            "category": "gpu",
+                            "unit": "C",
+                            "series": [
+                                {
+                                    "labels": {"gpu": gpu_id},
+                                    "values": [
+                                        {"timestamp": ts, "value": value}
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_source_disables_cluster_pod_metrics_by_default():
+    """The fan-out costs one HTTP call per pod; default off."""
+
+    paths_hit: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths_hit.append(request.url.path)
+        if "/sessions/sess-1/pods" in request.url.path:
+            return httpx.Response(
+                200,
+                json=[{"pod": {"namespace": "ns1", "name": "podA"}}],
+            )
+        if "/sessions/sess-1/events" in request.url.path:
+            return httpx.Response(200, json={"events": []})
+        if "/sessions/sess-1/summary" in request.url.path:
+            return httpx.Response(200, json={})
+        if request.url.path == "/api/v1/cluster/faults":
+            return httpx.Response(200, json={"faults": []})
+        return httpx.Response(404)
+
+    client = _client(handler)
+    try:
+        source = RobustnessServerSource(client)
+        data = await source.fetch(_ctx())
+    finally:
+        await client.aclose()
+
+    assert not any("/cluster/pods/" in p for p in paths_hit)
+    assert data.local_gpu == {}
+
+
+@pytest.mark.asyncio
+async def test_source_fans_out_pod_metrics_when_enabled():
+    """With enable_cluster_pod_metrics=True, fetch hits /cluster/pods/{ns}/{name}/metrics."""
+
+    paths_hit: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths_hit.append(request.url.path)
+        if "/sessions/sess-1/pods" in request.url.path:
+            return httpx.Response(
+                200,
+                json=[{"pod": {"namespace": "ns1", "name": "podA"}}],
+            )
+        if "/sessions/sess-1/events" in request.url.path:
+            return httpx.Response(200, json={"events": []})
+        if "/sessions/sess-1/summary" in request.url.path:
+            return httpx.Response(200, json={})
+        if request.url.path == "/api/v1/cluster/faults":
+            return httpx.Response(200, json={"faults": []})
+        if request.url.path == "/api/v1/cluster/pods/ns1/podA/metrics":
+            return httpx.Response(200, json=_gpu_metric_response(95.0))
+        return httpx.Response(404)
+
+    client = _client(handler)
+    try:
+        source = RobustnessServerSource(client, enable_cluster_pod_metrics=True)
+        data = await source.fetch(_ctx())
+    finally:
+        await client.aclose()
+
+    assert "/api/v1/cluster/pods/ns1/podA/metrics" in paths_hit
+    assert data.local_gpu["tool"] == "robust-api"
+    assert len(data.local_gpu["gpus"]) == 1
+    assert data.local_gpu["gpus"][0]["temperature_c"] == 95.0
+    assert data.local_gpu["gpus"][0]["pod_name"] == "podA"
+
+
+@pytest.mark.asyncio
+async def test_source_pod_metrics_5xx_propagates_for_degrade():
+    """Transport / 5xx on cluster metrics still triggers DegradeRouter."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/sessions/sess-1/pods" in request.url.path:
+            return httpx.Response(
+                200,
+                json=[{"pod": {"namespace": "ns1", "name": "podA"}}],
+            )
+        if "/sessions/sess-1/events" in request.url.path:
+            return httpx.Response(200, json={"events": []})
+        if "/sessions/sess-1/summary" in request.url.path:
+            return httpx.Response(200, json={})
+        if request.url.path == "/api/v1/cluster/faults":
+            return httpx.Response(200, json={"faults": []})
+        if request.url.path == "/api/v1/cluster/pods/ns1/podA/metrics":
+            return httpx.Response(503, text="busy")
+        return httpx.Response(404)
+
+    client = _client(handler)
+    try:
+        source = RobustnessServerSource(client, enable_cluster_pod_metrics=True)
+        with pytest.raises(SourceUnavailable):
+            await source.fetch(_ctx())
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_source_pod_metrics_dedups_repeated_pod_refs():
+    """Same pod appearing twice in session_pods should fan out once."""
+
+    seen_metrics_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/sessions/sess-1/pods" in request.url.path:
+            return httpx.Response(
+                200,
+                json=[
+                    {"pod": {"namespace": "ns1", "name": "podA"}},
+                    {"pod": {"namespace": "ns1", "name": "podA"}},
+                    {"pod": {"namespace": "ns1", "name": "podB"}},
+                ],
+            )
+        if "/sessions/sess-1/events" in request.url.path:
+            return httpx.Response(200, json={"events": []})
+        if "/sessions/sess-1/summary" in request.url.path:
+            return httpx.Response(200, json={})
+        if request.url.path == "/api/v1/cluster/faults":
+            return httpx.Response(200, json={"faults": []})
+        if "/api/v1/cluster/pods/" in request.url.path:
+            seen_metrics_paths.append(request.url.path)
+            return httpx.Response(200, json=_gpu_metric_response(80.0))
+        return httpx.Response(404)
+
+    client = _client(handler)
+    try:
+        source = RobustnessServerSource(client, enable_cluster_pod_metrics=True)
+        await source.fetch(_ctx())
+    finally:
+        await client.aclose()
+
+    assert sorted(seen_metrics_paths) == [
+        "/api/v1/cluster/pods/ns1/podA/metrics",
+        "/api/v1/cluster/pods/ns1/podB/metrics",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_source_pod_metrics_caps_fan_out_per_tick():
+    """Sessions with too many pods must not blow the per-tick budget."""
+
+    metrics_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal metrics_calls
+        if "/sessions/sess-1/pods" in request.url.path:
+            return httpx.Response(
+                200,
+                json=[
+                    {"pod": {"namespace": "ns1", "name": f"pod-{i:02d}"}}
+                    for i in range(10)
+                ],
+            )
+        if "/sessions/sess-1/events" in request.url.path:
+            return httpx.Response(200, json={"events": []})
+        if "/sessions/sess-1/summary" in request.url.path:
+            return httpx.Response(200, json={})
+        if request.url.path == "/api/v1/cluster/faults":
+            return httpx.Response(200, json={"faults": []})
+        if "/api/v1/cluster/pods/" in request.url.path:
+            metrics_calls += 1
+            return httpx.Response(200, json=_gpu_metric_response(80.0))
+        return httpx.Response(404)
+
+    client = _client(handler)
+    try:
+        source = RobustnessServerSource(
+            client,
+            enable_cluster_pod_metrics=True,
+            max_pods_per_tick=3,
+        )
+        await source.fetch(_ctx())
+    finally:
+        await client.aclose()
+
+    assert metrics_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_server_pod_metrics_drive_local_health_gpu_signal():
+    """End-to-end: server-decoded GPU >= warn threshold fires gpu_thermal_high."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/sessions/sess-1/pods" in request.url.path:
+            return httpx.Response(
+                200,
+                json=[{"pod": {"namespace": "ns1", "name": "podA"}}],
+            )
+        if "/sessions/sess-1/events" in request.url.path:
+            return httpx.Response(200, json={"events": []})
+        if "/sessions/sess-1/summary" in request.url.path:
+            return httpx.Response(200, json={})
+        if request.url.path == "/api/v1/cluster/faults":
+            return httpx.Response(200, json={"faults": []})
+        if request.url.path == "/api/v1/cluster/pods/ns1/podA/metrics":
+            # 95 C  -> warn (>= 90) but below crit (100) -> medium
+            return httpx.Response(200, json=_gpu_metric_response(95.0))
+        return httpx.Response(404)
+
+    client = _client(handler)
+    try:
+        source = RobustnessServerSource(client, enable_cluster_pod_metrics=True)
+        data = await source.fetch(_ctx())
+    finally:
+        await client.aclose()
+
+    from robustness_agent.signals import (
+        Classifier,
+        SymptomSeverity,
+    )
+
+    classifier = Classifier()
+    symptoms = classifier.classify(data, _ctx())
+    thermal = [s for s in symptoms if s.name == "gpu_thermal_high"]
+    assert len(thermal) == 1
+    assert thermal[0].severity is SymptomSeverity.MEDIUM
+    assert thermal[0].evidence["temperature_c"] == 95.0
