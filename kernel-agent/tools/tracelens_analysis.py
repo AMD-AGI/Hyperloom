@@ -122,6 +122,37 @@ def open_json(path: Path) -> dict[str, Any]:
         return json.load(fh)
 
 
+def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> int:
+    """Return the number of GPU kernel events in a torch_profiler trace.
+
+    Used as a fast pre-flight check so we fail loudly when the upstream
+    profile produced a CPU-only trace (e.g. when a tool such as PMC's
+    LD_PRELOAD steals the rocprofiler-sdk slot from torch.profiler / kineto
+    and leaves the dump with zero ``cat == 'kernel'`` events). Counts only
+    real GPU kernels — not host-side ``cuda_runtime`` / ``hipLaunchKernel``
+    wrappers — by deferring to :func:`is_kernel_event`.
+
+    The counter stops once it has confirmed at least one GPU kernel; we
+    only need to know whether GPU activity is present, not the exact
+    count, so the helper finishes in a fraction of a second on multi-GB
+    traces.
+    """
+    try:
+        payload = open_json(trace_file)
+    except Exception:
+        return 0
+    events = payload.get("traceEvents") if isinstance(payload, dict) else None
+    if not isinstance(events, list):
+        return 0
+    count = 0
+    for ev in events:
+        if isinstance(ev, dict) and is_kernel_event(ev):
+            count += 1
+            if count >= max_events:
+                break
+    return count
+
+
 def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
     if trace_input.is_file():
         return "file", [trace_input]
@@ -1365,6 +1396,29 @@ def main() -> int:
         trace_input_type, trace_files = discover_trace_inputs(trace_input)
         append_log(log_path, f"trace_input_type={trace_input_type}")
         append_log(log_path, f"trace_files={len(trace_files)}")
+
+        # Fail-fast on CPU-only traces. Without GPU kernel events nothing
+        # downstream — splitter, TraceLens perf-report CLI, the standalone
+        # SDK orchestrator — can produce useful output. Surfacing the
+        # missing-GPU-events condition here lets the caller (and the
+        # operator) trigger a fresh profile instead of silently producing
+        # an ABORTED report after a long detour.
+        if not args.dry_run and trace_files:
+            kernel_event_count = count_gpu_kernel_events(trace_files[0])
+            append_log(
+                log_path,
+                f"trace_gpu_kernel_events={kernel_event_count} "
+                f"(probe={trace_files[0].name})",
+            )
+            if kernel_event_count == 0:
+                raise RuntimeError(
+                    "Trace contains zero GPU kernel events "
+                    f"({trace_files[0]}); the upstream profile run "
+                    "captured CPU-only activity. Re-run profile with the "
+                    "torch.profiler GPU activities enabled (no LD_PRELOAD "
+                    "competing for ROCprofiler-SDK) before invoking "
+                    "tracelens_analysis."
+                )
 
         if not args.dry_run:
             update_status(status_path, state="running", current_step="install_tracelens",

@@ -431,6 +431,42 @@ async def test_select_kernels_handler_surfaces_candidates_path(session_dir, monk
 
 
 @pytest.mark.asyncio
+async def test_select_kernels_handler_backfills_workload_context_from_state(
+    session_dir, monkeypatch,
+):
+    """When the payload omits framework/gpu_type/model, the handler must
+    fall back to SharedState so tracelens_analysis.py receives the real
+    workload context (vllm/MI300X/Qwen3-30B-A3B/inference) instead of
+    the script defaults (""/MI355X/default)."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.framework = "vllm"
+    state.gpu_type = "mi300x"
+    state.model_path = "/wekafs/models/Qwen3-30B-A3B"
+    state.model_name = "Qwen3-30B-A3B"
+    state.save(session_dir)
+
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok"}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert "--framework" in cmd and "vllm" in cmd
+    assert "--target-platform" in cmd and "mi300x" in cmd
+    assert "--model-name" in cmd and "Qwen3-30B-A3B" in cmd
+    assert "--analysis-mode" in cmd and "inference" in cmd
+
+
+@pytest.mark.asyncio
 async def test_select_kernels_handler_missing_trace_input(session_dir):
     res = await krh.select_kernels_handler({}, session_dir=session_dir)
     assert res["status"] == "failed"
