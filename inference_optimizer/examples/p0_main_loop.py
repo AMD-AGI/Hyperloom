@@ -75,7 +75,7 @@ async def _baseline_executor(ctx) -> dict:
 
 
 async def _run_demo(ticks: int = 6) -> dict:
-    session_dir = make_session_dir("p0-demo-" + os.urandom(3).hex())
+    session_dir = make_session_dir()
 
     backends = {
         "orchestration": MockBackend(_orchestration_plan(), name="orchestration"),
