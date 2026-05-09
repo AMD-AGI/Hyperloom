@@ -57,6 +57,7 @@ class SharedState:
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
+    baseline_failure_streak: int = 0
     # Path to the YAML the baseline executor materialized with the operator's
     # workload envs (CONC/ISL/OSL/TP/MAX_MODEL_LEN/PRECISION/RUN_EVAL/...).
     # Coordinator injects this into params/backends/sweep tasks as
@@ -517,6 +518,7 @@ class SharedState:
             f"session_id={self.session_id or '(unset)'}",
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
             f"baseline_tput={self.baseline_tput}  baseline_acc={self.baseline_accuracy}",
+            f"baseline_failure_streak={self.baseline_failure_streak}",
             f"current_best={self.current_best or '(none)'}",
             f"optimization_stack={self._format_optimization_stack()}",
             f"cumulative_gain={self.cumulative_gain}%",

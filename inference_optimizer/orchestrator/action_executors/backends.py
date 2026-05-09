@@ -420,8 +420,10 @@ class BackendsExecutor:
             if best and base_tput > 0 else 0.0
         )
 
+        successful_runs = [r for r in all_results if r.status == "succeeded"]
+
         return {
-            "status": "succeeded" if all_results else "failed",
+            "status": "succeeded" if successful_runs else "failed",
             "base_tput": base_tput,
             "grid_size": len(all_results),
             "all_results": [r.to_dict() for r in all_results],

@@ -23,6 +23,8 @@ from typing import Any
 
 import yaml
 
+from .benchmark_result import extract_benchmark_measurement
+
 
 log = logging.getLogger(__name__)
 
@@ -72,9 +74,17 @@ class VariantResult:
     status: str
     output_throughput: float | None = None
     request_throughput: float | None = None
+    total_token_throughput: float | None = None
+    completed_requests: int | None = None
+    duration_seconds: float | None = None
     ttft_mean_ms: float | None = None
     e2el_mean_ms: float | None = None
     workspace: str | None = None
+    report_path: str | None = None
+    raw_result_path: str | None = None
+    reported_success: bool | None = None
+    returncode: int | None = None
+    nonfatal_warnings: list[str] = field(default_factory=list)
     error: str | None = None
     note: str = ""
 
@@ -86,9 +96,17 @@ class VariantResult:
             "status":             self.status,
             "output_throughput":  self.output_throughput,
             "request_throughput": self.request_throughput,
+            "total_token_throughput": self.total_token_throughput,
+            "completed_requests": self.completed_requests,
+            "duration_seconds":   self.duration_seconds,
             "ttft_mean_ms":       self.ttft_mean_ms,
             "e2el_mean_ms":       self.e2el_mean_ms,
             "workspace":          self.workspace,
+            "report_path":        self.report_path,
+            "raw_result_path":    self.raw_result_path,
+            "reported_success":   self.reported_success,
+            "returncode":         self.returncode,
+            "nonfatal_warnings":  self.nonfatal_warnings,
             "error":              self.error,
             "note":               self.note,
         }
@@ -156,8 +174,12 @@ def _parse_report(workspace: Path) -> dict[str, Any] | None:
     report = workspace / "benchmark_report.json"
     if not report.exists():
         return None
-    with report.open(encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with report.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _kill_stale_servers() -> None:
@@ -316,17 +338,6 @@ async def run_grid(
                 break
             continue
 
-        if rc != 0:
-            results.append(VariantResult(
-                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
-                extra_envs=dict(variant.extra_envs),
-                status="failed",
-                error=(stderr or stdout)[-2000:], note=variant.note,
-            ))
-            if not keep_going_on_failure:
-                break
-            continue
-
         # Locate workspace inside slot.
         candidates = sorted(slot.glob("benchmark_*"))
         if not candidates:
@@ -334,36 +345,66 @@ async def run_grid(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed",
-                error="no benchmark_* workspace produced",
+                returncode=rc,
+                error=(
+                    (stderr or stdout)[-2000:]
+                    if rc != 0 else "no benchmark_* workspace produced"
+                ),
                 note=variant.note,
             ))
+            if rc != 0 and not keep_going_on_failure:
+                break
             continue
         workspace = candidates[-1]
         report = _parse_report(workspace)
-        if not report or not report.get("success"):
+        report_path = workspace / "benchmark_report.json"
+        measurement = extract_benchmark_measurement(report, workspace=workspace)
+        warnings = list(measurement.pop("nonfatal_warnings", []) or [])
+        if rc != 0:
+            warnings.append("magpie_nonzero_after_valid_measurement")
+
+        if not measurement.get("valid_measurement"):
+            if rc != 0:
+                error = (stderr or stdout)[-2000:]
+            elif not report:
+                error = "benchmark_report missing"
+            else:
+                error = "benchmark_report missing valid throughput/completed requests"
             results.append(VariantResult(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed",
                 workspace=str(workspace),
-                error="benchmark_report missing or success=false",
+                report_path=str(report_path) if report_path.exists() else None,
+                raw_result_path=measurement.get("raw_result_path"),
+                reported_success=measurement.get("reported_success"),
+                returncode=rc,
+                nonfatal_warnings=warnings,
+                error=error,
                 note=variant.note,
             ))
+            if rc != 0 and not keep_going_on_failure:
+                break
             continue
 
-        tput = (report.get("throughput") or {})
-        latency = (report.get("latency") or {})
-        ttft = latency.get("ttft", {}) or {}
-        e2el = latency.get("e2el", {}) or {}
         results.append(VariantResult(
             name=variant.name, extra_sglang_args=variant.extra_sglang_args,
             extra_envs=dict(variant.extra_envs),
             status="succeeded",
-            output_throughput=tput.get("output_throughput"),
-            request_throughput=tput.get("request_throughput"),
-            ttft_mean_ms=ttft.get("mean_ms"),
-            e2el_mean_ms=e2el.get("mean_ms"),
+            output_throughput=measurement.get("output_throughput"),
+            request_throughput=measurement.get("request_throughput"),
+            total_token_throughput=measurement.get("total_token_throughput"),
+            completed_requests=measurement.get("completed_requests"),
+            duration_seconds=measurement.get("duration_seconds"),
+            ttft_mean_ms=measurement.get("ttft_mean_ms"),
+            e2el_mean_ms=measurement.get("e2el_mean_ms"),
             workspace=str(workspace),
+            report_path=str(report_path) if report_path.exists() else None,
+            raw_result_path=measurement.get("raw_result_path"),
+            reported_success=measurement.get("reported_success"),
+            returncode=rc,
+            nonfatal_warnings=warnings,
+            error=(stderr or stdout)[-2000:] if rc != 0 else None,
             note=variant.note,
         ))
         log.info(
