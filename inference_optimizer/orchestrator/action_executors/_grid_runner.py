@@ -103,6 +103,69 @@ def server_args_env_name(framework: str | None) -> str:
     return "EXTRA_SGLANG_ARGS"
 
 
+def merge_server_args(*parts: str | None) -> str:
+    """Merge server arg strings preserving left-to-right override semantics.
+
+    vLLM/SGLang command lines are assembled by shell-appending
+    ``EXTRA_{VLLM,SGLANG}_ARGS`` after the default server args. Some flags are
+    intentionally repeated so later variants can override base args (e.g. a
+    model-specific ``--block-size 1`` plus a grid candidate ``--block-size
+    256``). Therefore this helper only removes empty chunks; it does not try to
+    de-duplicate option names.
+    """
+    return " ".join(str(p).strip() for p in parts if str(p or "").strip())
+
+
+def apply_runtime_benchmark_overrides(
+    bench: dict[str, Any],
+    *,
+    model_path: str | None = None,
+    gpu_type: str | None = None,
+) -> dict[str, Any]:
+    """Apply runtime env/CLI overrides to a Magpie benchmark YAML.
+
+    This is the single shared path used by baseline/profile and grid
+    executors. Historically only ``baseline.py`` applied these overrides, so
+    backends/params/sweep silently fell back to shipped YAML defaults like
+    ``TP=1`` and ``ROCR_VISIBLE_DEVICES="1"``. Large models (DeepSeek-R1-0528)
+    then OOM-failed even though the launch environment had ``TP=8``.
+    """
+    if model_path:
+        bench["model"] = str(model_path)
+
+    precision = os.environ.get("PRECISION", "").strip()
+    if precision:
+        bench["precision"] = precision
+
+    if gpu_type:
+        bench["runner_type"] = str(gpu_type)
+        # Magpie priority: explicit benchmark_script > native script >
+        # runner_type-derived generic script. Drop stale explicit scripts so
+        # runtime GPU selection actually wins.
+        bench.pop("benchmark_script", None)
+
+    envs = bench.setdefault("envs", {})
+    for env_key in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC"):
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            envs[env_key] = int(val)
+
+    explicit_rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
+    if explicit_rocr:
+        envs["ROCR_VISIBLE_DEVICES"] = explicit_rocr
+    else:
+        tp_val = int(envs.get("TP", 1) or 1)
+        existing_rocr = str(envs.get("ROCR_VISIBLE_DEVICES", "")).strip()
+        existing_count = (
+            len([x for x in existing_rocr.split(",") if x.strip()])
+            if existing_rocr else 0
+        )
+        if tp_val > 1 and existing_count < tp_val:
+            envs["ROCR_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(tp_val))
+
+    return envs
+
+
 # ---------------------------------------------------------------------------
 def _build_variant_yaml(
     base_yaml_path: Path,
@@ -130,16 +193,16 @@ def _build_variant_yaml(
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     bench = cfg.setdefault("benchmark", {})
-    if model_path:
-        bench["model"] = str(model_path)
-    if gpu_type:
-        bench["runner_type"] = str(gpu_type)
-        bench.pop("benchmark_script", None)
-    envs = bench.setdefault("envs", {})
+    envs = apply_runtime_benchmark_overrides(
+        bench, model_path=model_path, gpu_type=gpu_type,
+    )
     extra_args_env = server_args_env_name(bench.get("framework"))
 
-    combined = " ".join(part for part in (base_extra_args.strip(),
-                                            variant.extra_sglang_args.strip()) if part)
+    combined = merge_server_args(
+        str(envs.get(extra_args_env, "")),
+        base_extra_args,
+        variant.extra_sglang_args,
+    )
     if combined:
         envs[extra_args_env] = combined
     for k, v in variant.extra_envs.items():

@@ -108,28 +108,70 @@ inference_optimizer optimize \
   --max-hours 2
 ```
 
-The CLI runs `_preflight()` automatically:
+Install or validate the optimizer + downstream stack with the bundled
+installer. It is idempotent and chains to `kernel-agent/scripts/install.sh`,
+so a single call covers: inference_optimizer + `claude_agent_sdk` extras,
+Magpie, InferenceX detection, Ray (with a live ray head started), TraceLens
+CLI, GEAK + OOB CLI, the OOB auth-proxy on `:4002`, and `kernel-agent/env.sh`.
+A user request to optimize a model is approval to run this on a fresh node;
+do not stop for an extra confirmation:
 
-1. Re-exports auth aliases (`ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, ...)
+```bash
+export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
+export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
+export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
+export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+
+# Prefer the launcher Python's bin dir, then standard system paths. Do NOT
+# hardcode /opt/venv/bin: in bare images that path may not exist.
+PYTHON_BIN_DIR="$(dirname "$PYTHON")"
+export PATH="${PYTHON_BIN_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
+bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
+. "$HYPERLOOM_KERNEL_AGENT_ROOT/env.sh"
+"$PYTHON" -m inference_optimizer.cli --help
+```
+
+Do not collapse dependent exports into a single command when `set -u` is active.
+Bash expands every right-hand side before assigning the left-hand sides, so
+`export HYPERLOOM_KERNEL_AGENT_ROOT=... KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"`
+can fail with `unbound variable` on a clean environment. Assign and export
+dependent variables on separate lines as shown above.
+
+The installer leaves a live Ray head running; `ray status` should succeed.
+`select_kernels` and downstream kernel agents need this — they submit Ray
+tasks with `num_gpus>=1`. Do not pass `--num-gpus=0` if you ever restart Ray
+manually; that leaves kernel optimization pending forever even when ROCm
+sees idle GPUs.
+
+The CLI also runs `_preflight()` on every launch as a safety net for the
+above install. It will:
+
+1. Re-export auth aliases (`ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, ...)
    from `SAFE_API_KEY`. `OOB_BASE_URL` / `GEAK_BASE_URL` / `LLM_API_BASE`
    inherit upstream from `OPENAI_BASE_URL` (those clients speak Bearer
    natively and do not need the proxy).
-2. Re-runs `ensure_auth_proxy.sh`, **rewrites `~/.claude/config.json`**
-   so its `customApiUrl` points at `127.0.0.1:4002`, **and force-overrides
+2. Re-run `ensure_auth_proxy.sh`, **rewrite `~/.claude/config.json`** so its
+   `customApiUrl` points at `127.0.0.1:4002`, **and force-override
    `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` in the running process to the
    proxy URL** (any pre-set values from shell rc, `.env`, k8s secret, or
    container env are replaced; the override is logged on stdout). If the
    auth-proxy cannot be brought up after one retry, the original env values
    are restored so the two vars stay consistent and a WARNING is printed —
    Claude/Codex CLIs may then 401 against the gateway directly.
-3. Auto-installs missing `ray` / `Magpie` / `InferenceX` if the pod was rebuilt.
-4. Auto-detects `--gpu-type` if not given.
+3. Auto-install missing `ray` / `Magpie` / `InferenceX` if the pod was rebuilt.
+4. Auto-detect `--gpu-type` if not given.
 
-You do NOT need to manually `export ANTHROPIC_*`, manually start ray,
-manually pip install Magpie, manually source `.env`, or manually edit
-`~/.claude/config.json` from chat. Doing any of those by hand is the
-exact failure mode that produces "Claude SDK exit code 1" / HTTP 401 /
-"customApiUrl points to a local proxy that isn't running".
+The install.sh-based bring-up is the canonical entry point; `_preflight()`
+only catches drift mid-run. You do NOT need to manually `export ANTHROPIC_*`,
+manually start ray, manually pip install Magpie, manually source `.env`,
+or manually edit `~/.claude/config.json` from chat. Doing any of those by
+hand is the exact failure mode that produces "Claude SDK exit code 1" /
+HTTP 401 / "customApiUrl points to a local proxy that isn't running".
+
+`kernel-agent/SKILL.md` (`Installation`, `TraceLens Requirements`, `Backend
+Selection`) is the source of truth for what the chained installer covers;
+read it if you need to debug the kernel-agent layer.
 
 ### Recovery
 
@@ -145,8 +187,46 @@ If `_preflight()` itself fails, run install in `--check-only` mode to see
 which piece is missing, then re-run full install:
 
 ```bash
-bash "$REPO_ROOT/kernel-agent/scripts/install.sh" --check-only
-bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+bash "$REPO_ROOT/inference_optimizer/scripts/install.sh" --check-only
+bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
+```
+
+Use a repo-local session root by default so the skill works in sandboxes where
+`/hyperloom` is absent:
+
+```bash
+export INFERENCE_OPTIMIZER_SESSION_ROOT="$RUN_ROOT/inference_optimizer-sessions"
+mkdir -p "$INFERENCE_OPTIMIZER_SESSION_ROOT"
+```
+
+## Portable Preflight
+
+Before every new model run, verify the model path, GPU visibility, and duplicate
+processes. Never print tokens.
+
+```bash
+export MODEL_PATH=/path/to/model
+test -d "$MODEL_PATH"
+
+"$PYTHON" - <<'PY'
+import os
+try:
+    import torch
+    print("torch_cuda_available=", torch.cuda.is_available())
+    print("torch_cuda_device_count=", torch.cuda.device_count())
+except Exception as exc:
+    print("torch_check_error=", type(exc).__name__, str(exc)[:300])
+
+patterns = ("inference_optimizer.cli", "Magpie", "sglang.launch_server")
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        cmd = open(f"/proc/{pid}/cmdline", "rb").read()
+    except Exception:
+        continue
+    text = cmd.replace(b"\0", b" ").decode("utf-8", "ignore")
+    if text and any(p in text for p in patterns):
+        print(f"existing_process {pid}: {text[:300]}")
+PY
 ```
 
 ## Benchmark Config
@@ -178,8 +258,9 @@ Before a new model run, verify these fields match the environment:
 - `benchmark.envs.TP`: tensor parallel size.
 - `benchmark.envs.CONC`, `ISL`, `OSL`: workload.
 - `benchmark.envs.ROCR_VISIBLE_DEVICES`: GPU pinning.
-- `benchmark.envs.PATH`: must include the Python venv `bin/` dir first
-  (e.g. `/opt/venv/bin` when that venv exists; otherwise `$(dirname $(which python3))`).
+- `benchmark.envs.PATH`: must lead with the launcher Python's bin dir
+  (`$(dirname "$PYTHON")` — typically `/opt/venv/bin` in hyperloom containers,
+  fall back to `$(dirname $(which python3))` on bare images).
 
 ### Workload-contract reuse (baseline → params/backends/sweep)
 
@@ -297,7 +378,10 @@ done
 ln -sfn "$REPO_ROOT/inference_optimizer/scripts/ab_torch_compile_magpie.py"  "$ASSET_ROOT/scripts/"
 ln -sfn "$REPO_ROOT/inference_optimizer/scripts/ab_torch_compile_kernels.py" "$ASSET_ROOT/scripts/"
 # Copy + edit baseline_*.yaml and profile_*.yaml under "$ASSET_ROOT/scripts/configs/" for
-# this run's TP/CONC/ISL/OSL/MAX_MODEL_LEN/ROCR_VISIBLE_DEVICES.
+# this run's TP/CONC/ISL/OSL/MAX_MODEL_LEN/ROCR_VISIBLE_DEVICES. The
+# `_workload_envs.materialize_config_with_envs` helper applies most of these
+# from process env automatically; you only need a custom asset root for
+# fields it does not touch (e.g. profiler.torch_profiler.enabled per yaml).
 inference_optimizer optimize --asset-root "$ASSET_ROOT" --model "$MODEL_PATH" ...
 ```
 
@@ -309,6 +393,10 @@ enough; reach for `--asset-root` only when defaults don't fit the workload.
 Single command — assumes Step 1 (install) already ran in this pod:
 
 ```bash
+cd "$REPO_ROOT"
+if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
+. "$HYPERLOOM_KERNEL_AGENT_ROOT/env.sh"
+export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 export SESSION_NAME="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
 export RUN_LOG="$REPO_ROOT/optimizer_runs/run_${SESSION_NAME}.log"
 export PID_FILE="$REPO_ROOT/optimizer_runs/run_${SESSION_NAME}.pid"
@@ -636,9 +724,10 @@ budget on untested params/backend candidates or the next kernel.
 - `ANTHROPIC_AUTH_TOKEN not set`: re-source `$REPO_ROOT/kernel-agent/env.sh`.
 - `Fatal error in message reader`: retry/resume; transient Claude CLI failures
   are tolerated up to the Coordinator emergency threshold.
-- `No accelerator`: ensure Magpie subprocess PATH includes the Python venv
-  `bin/` dir (or set `MAGPIE_PYTHON` to the correct interpreter) and use
-  `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
+- `No accelerator`: ensure Magpie subprocess `PATH` leads with the launcher
+  Python's bin dir (`$(dirname "$PYTHON")`, or set `MAGPIE_PYTHON` to the
+  correct interpreter) and use `ROCR_VISIBLE_DEVICES`, not
+  `HIP_VISIBLE_DEVICES`.
 - Repeated `select_kernels`: check `last_select_kernels`; if trace/config did
   not change, this is a bug. Reuse cached candidates and run optimization.
 - `correctness_passed=false`: do not integrate. Inspect the kernel-agent report;
