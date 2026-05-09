@@ -255,6 +255,39 @@ _GFX_TO_RUNNER: dict[str, str] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Hard model allowlist. Orchestration MUST resolve to one of these two ids
+# before Coordinator boots; anything else is a configuration error and the
+# CLI refuses to start the service. Per operator direction (2026-05-09):
+# only Opus 4-7 (preferred) or Opus 4-6 (fallback when 4-7 is missing from
+# the gateway catalog) are acceptable for the long-running orchestration
+# loop. Other catalog entries (haiku / opus 4-5) drift the agent's behaviour
+# enough that prior runs degraded measurably.
+_CLAUDE_PREFERRED_MODEL = "claude-opus-4-7"
+_CLAUDE_FALLBACK_MODEL  = "claude-opus-4-6"
+_CLAUDE_ALLOWED_MODELS  = (_CLAUDE_PREFERRED_MODEL, _CLAUDE_FALLBACK_MODEL)
+
+# Catalog probe retry contract (gateway is documented-flaky; the launcher
+# we replaced had to manually curl this endpoint a couple of times before it
+# returned 200). Sleep N seconds before attempt i+1; len(_CATALOG_RETRY_DELAYS_SEC)
+# is the retry count after the initial attempt.
+_CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
+_CATALOG_REQUEST_TIMEOUT_SEC = 5.0
+
+# Where ``ensure_auth_proxy.sh`` expects ``auth_proxy.py`` to live, plus the
+# read-only mount points that ship the source. ``OOB_SRC`` env wins; the
+# defaults below match the bundle layout used by ``kernel-agent/install.sh``.
+_OOB_SRC_CANDIDATES: tuple[str, ...] = (
+    "/wekafs/fully-local/OOB",
+    "/wekafs/fully-local/inference_optimization/OOB",
+)
+
+# /dev/shm threshold: vLLM IPC + NCCL shm segments routinely need >8GB; when
+# free space drops below this the next launch tends to collide with stale
+# segments and hang for 5 minutes inside zmq.
+_DEV_SHM_MIN_FREE_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
+
+
 def _autodetect_gpu_type() -> str | None:
     """Return mi300x|mi325x|mi355x or None if undetectable.
 
@@ -586,13 +619,481 @@ def _load_dotenv_fallback() -> None:
         print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
 
 
-def _preflight() -> None:
+def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
+    """Install Python SDKs that ``inference_optimizer`` imports at runtime.
+
+    Even though they're declared in ``pyproject.toml``, a sandbox that only
+    pulled the source tree (or used ``pip install`` without resolving the
+    dep tree) lands here without them. ``ClaudeBackend`` / ``CodexBackend``
+    lazy-import them, so without this guard the first reactor tick fails
+    with ``BackendError: claude-agent-sdk not installed`` after baseline
+    has already burned 5+ minutes of wall time.
+
+    We probe-then-install per package using the SAME interpreter that
+    will later import them (``sys.executable``); cross-interpreter installs
+    are the precise failure mode that "claude-agent-sdk was not installed
+    in /opt/venv → installed 0.1.77" reports come from.
+    """
+    candidates = (
+        ("claude_agent_sdk", "claude-agent-sdk>=0.1.65"),
+        ("openai",           "openai>=1.50"),
+        ("httpx",             "httpx>=0.27"),
+    )
+    for module_name, pip_spec in candidates:
+        check = subprocess.run(
+            [python_exe, "-c", f"import {module_name}"],
+            capture_output=True,
+        )
+        if check.returncode == 0:
+            print(f"Preflight: {module_name} OK")
+            continue
+        print(f"Preflight: {module_name} not importable, installing {pip_spec} ...")
+        subprocess.run(
+            [python_exe, "-m", "pip", "install", "--quiet",
+             *pip_extra, pip_spec],
+            check=True,
+        )
+        print(f"Preflight: installed {pip_spec}")
+
+
+def _ensure_oob_proxy_source() -> bool:
+    """Make sure ``auth_proxy.py`` exists at the path supervisor expects.
+
+    ``ensure_auth_proxy.sh`` looks for the script at
+    ``${HYPERLOOM_ROOT}/OOB/oob_cli/auth_proxy.py`` (default
+    ``/opt/hyperloom/OOB/oob_cli/auth_proxy.py``). On a fresh sandbox where
+    ``kernel-agent/scripts/install.sh`` has NOT run yet, that file is absent
+    and the supervisor silently noops + returns 1, leaving :4002 dead and
+    Claude SDK requests hitting the gateway directly with ``x-api-key`` →
+    HTTP 401 → "Waiting for first result" hang.
+
+    This helper bootstraps just the ``auth_proxy.py`` source from a known
+    bundle mount (``$OOB_SRC`` > ``/wekafs/fully-local/OOB`` > sibling
+    ``inference_optimization/OOB``) so the supervisor can find + start it.
+    Returns True if the file is present afterwards, False otherwise.
+    """
+    hyperloom_root = Path(os.environ.get("HYPERLOOM_ROOT", "/opt/hyperloom"))
+    target_dir = hyperloom_root / "OOB" / "oob_cli"
+    proxy_py = target_dir / "auth_proxy.py"
+    if proxy_py.is_file():
+        return True
+
+    candidates: list[Path] = []
+    env_src = os.environ.get("OOB_SRC", "").strip()
+    if env_src:
+        candidates.append(Path(env_src))
+    candidates.extend(Path(p) for p in _OOB_SRC_CANDIDATES)
+
+    for cand in candidates:
+        try:
+            if not cand or not cand.is_dir():
+                continue
+            if not (cand / "auth_proxy.py").is_file():
+                continue
+        except OSError:
+            continue
+        try:
+            target_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(cand, target_dir, dirs_exist_ok=True)
+        except (OSError, shutil.Error) as exc:
+            print(
+                f"Preflight: WARNING — failed to copy OOB source {cand} -> "
+                f"{target_dir}: {exc}"
+            )
+            continue
+        print(
+            f"Preflight: bootstrapped auth_proxy.py from {cand} -> {target_dir}"
+        )
+        return True
+
+    print(
+        f"Preflight: WARNING — auth_proxy.py source not located at any of "
+        f"$OOB_SRC / {_OOB_SRC_CANDIDATES}. The :4002 supervisor will "
+        f"warn-and-skip; ANTHROPIC_BASE_URL stays at upstream and Claude "
+        f"SDK may 401."
+    )
+    return False
+
+
+def _unset_hip_visible_devices() -> None:
+    """Drop ``HIP_VISIBLE_DEVICES`` if ``ROCR_VISIBLE_DEVICES`` is set.
+
+    Long-standing ROCm gotcha (mirrored in ``inference_optimizer/SKILL.md``
+    §"GPU Runner Type"): when both vars are set, ``HIP_VISIBLE_DEVICES``
+    can mask devices in a way that makes ``torch.cuda.is_available()``
+    return False inside the Magpie subprocess, which then logs "No
+    accelerator" and exits non-zero. We use ``ROCR_VISIBLE_DEVICES`` as the
+    canonical pinning; ``HIP_VISIBLE_DEVICES`` is a footgun left over from
+    upstream CUDA scripts that copy-pasted into ROCm sandboxes.
+    """
+    if "HIP_VISIBLE_DEVICES" not in os.environ:
+        return
+    if "ROCR_VISIBLE_DEVICES" not in os.environ:
+        return
+    value = os.environ.pop("HIP_VISIBLE_DEVICES")
+    print(
+        f"Preflight: WARNING — unset HIP_VISIBLE_DEVICES={value!r} "
+        f"(ROCR_VISIBLE_DEVICES wins on ROCm; HIP_VISIBLE_DEVICES can "
+        f"make torch.cuda.is_available() false inside Magpie subprocess)"
+    )
+
+
+def _check_gpu_visibility() -> None:
+    """Best-effort sanity check on visible GPU count vs ``$TP``.
+
+    rocm-smi may be missing on CPU-only test boxes; we return silently in
+    that case and let Magpie's own detection complain later. The check is
+    purely informational — TP can also be set inside the Magpie YAML, in
+    which case this WARN is a false positive but cheap.
+    """
+    try:
+        proc = subprocess.run(
+            ["rocm-smi", "--showid"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
+        return
+    if proc.returncode != 0:
+        return
+    visible = sum(
+        1 for line in (proc.stdout or "").splitlines()
+        if line.strip().startswith("GPU[")
+    )
+    try:
+        wanted = int(os.environ.get("TP", "1") or "1")
+    except ValueError:
+        wanted = 1
+    if visible == 0:
+        print("Preflight: WARNING — rocm-smi sees 0 GPUs; benchmark will fail")
+        return
+    if wanted > visible:
+        print(
+            f"Preflight: WARNING — TP={wanted} but rocm-smi sees {visible} "
+            f"GPU(s); sglang/vllm may fail to load weights. Lower TP or "
+            f"adjust ROCR_VISIBLE_DEVICES."
+        )
+
+
+def _check_shm_disk() -> None:
+    """Warn on tight ``/dev/shm`` (vLLM/NCCL IPC needs headroom).
+
+    ``_kill_stale_servers()`` already clears stale segments before each
+    Magpie variant, but if the partition itself is small the very first
+    launch can still collide. We don't fail-fast — partitions can be
+    short-lived (test sandboxes use tmpfs sized to the workload).
+    """
+    try:
+        usage = shutil.disk_usage("/dev/shm")
+    except (FileNotFoundError, OSError):
+        return
+    if usage.free < _DEV_SHM_MIN_FREE_BYTES:
+        free_gb = usage.free / (1024 ** 3)
+        total_gb = usage.total / (1024 ** 3)
+        print(
+            f"Preflight: WARNING — /dev/shm has {free_gb:.1f} GiB free of "
+            f"{total_gb:.1f} GiB total (< 16 GiB threshold). vLLM IPC + "
+            f"NCCL shm segments may collide with stale entries; if the "
+            f"first server launch hangs >5min, clear /dev/shm/{{vllm,nccl,cuda}}*"
+        )
+
+
+def _check_node_claude_cli() -> None:
+    """WARN-only presence check for the bundled ``claude`` / ``codex`` CLIs.
+
+    ``claude_agent_sdk`` typically shells out to the bundled
+    ``@anthropic-ai/claude-code`` CLI; without it on PATH the SDK falls
+    back to a direct HTTP path that our auth-proxy still services, so this
+    is informational rather than fatal. Same for ``codex`` (used by
+    ``CodexBackend`` only when --critic-real / --kernel-codex). ``node``
+    is a transitive dep — if it's missing, npm-based recovery via
+    ``kernel-agent/scripts/install.sh`` won't work either.
+    """
+    missing = [t for t in ("node", "claude", "codex") if shutil.which(t) is None]
+    if missing:
+        print(
+            f"Preflight: WARNING — CLI(s) not on PATH: {missing}. "
+            f"ClaudeBackend / CodexBackend may fall back to direct HTTP. "
+            f"Run kernel-agent/scripts/install.sh to bring them in."
+        )
+
+
+def _emit_preflight_diagnostics(
+    *,
+    magpie_python: str,
+    proxy_anthropic: str | None,
+) -> None:
+    """One canonical diagnostics block at the end of preflight.
+
+    Replaces the half-dozen scattered ``print(f"Preflight: ...")`` lines
+    with a single grep-friendly section that operators (and the launcher
+    LLM) can paste verbatim into status reports without spelunking the
+    source for env var names.
+    """
+    from .orchestrator.action_executors.baseline import (
+        BASELINE_COLD_START_TIMEOUT_SEC,
+        BASELINE_DEFAULT_TIMEOUT_SEC,
+        _probe_aiter_jit_cache,
+    )
+    from .paths import asset_root, session_root
+
+    probe = _probe_aiter_jit_cache()
+    cold_cap = os.environ.get(
+        "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC",
+        str(BASELINE_COLD_START_TIMEOUT_SEC),
+    )
+    if probe["probe_status"] == "found":
+        kind = "COLD" if probe["is_cold"] else "WARM"
+        cache_line = (
+            f"{probe['kernel_count']} .so / {probe['size_mb']} MB "
+            f"({kind}) at {probe['path']}"
+        )
+    else:
+        cache_line = f"<probe_status={probe['probe_status']}>"
+
+    print("Preflight diagnostics:")
+    print(f"  asset_root          = {asset_root()}")
+    print(
+        f"  session_root        = {session_root()}  "
+        f"(USER_DATA_PATH={os.environ.get('USER_DATA_PATH', '<unset>')} "
+        f"INFERENCE_OPTIMIZER_SESSION_ROOT="
+        f"{os.environ.get('INFERENCE_OPTIMIZER_SESSION_ROOT', '<unset>')})"
+    )
+    print(f"  magpie_python       = {magpie_python}")
+    print(
+        f"  INFERENCEX_PATH     = "
+        f"{os.environ.get('INFERENCEX_PATH', '<unset>')}"
+    )
+    print(f"  aiter jit cache     = {cache_line}")
+    print(f"  cold_start_timeout  = {cold_cap}s")
+    print(f"  warm_timeout        = {BASELINE_DEFAULT_TIMEOUT_SEC}s")
+    if proxy_anthropic:
+        print(f"  proxy URLs          = {proxy_anthropic} (auth-proxy alive)")
+    else:
+        print(
+            "  proxy URLs          = DIRECT — auth-proxy unavailable; "
+            "Claude SDK may 401"
+        )
+
+
+def _probe_llm_catalog(
+    *,
+    base_url: str,
+    api_key: str,
+) -> set[str] | None:
+    """Probe ``<base_url>/models`` with retry; return set of model ids or None.
+
+    Mirrors what the launcher had to do by hand (``terminals/6.txt``):
+
+        curl -k -H "Authorization: Bearer $SAFE_API_KEY" \
+             "https://gateway/api/v1/llm-proxy/v1/models" | jq '.data[].id'
+
+    The gateway has a documented flake rate; we retry up to
+    ``len(_CATALOG_RETRY_DELAYS_SEC)`` times with exponential backoff. SSL
+    verify is OFF because the gateway cert is occasionally self-signed;
+    we suppress the urllib3 InsecureRequestWarning so the diagnostics
+    section stays readable.
+    """
+    import time
+
+    if not base_url:
+        return None
+
+    try:
+        import httpx  # type: ignore[import-not-found]
+    except ImportError:
+        # _ensure_python_sdks should have installed it; if it didn't, we
+        # cannot probe — return None so the caller can decide how to react.
+        print(
+            "Preflight: WARNING — httpx not importable, skipping catalog "
+            "probe. _ensure_python_sdks should have installed it."
+        )
+        return None
+
+    try:
+        import urllib3  # type: ignore[import-not-found]
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except Exception:  # noqa: BLE001
+        pass
+
+    probe_url = base_url.rstrip("/") + "/models"
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    delays = (0.0, *_CATALOG_RETRY_DELAYS_SEC)
+    last_err: str = ""
+    for i, delay in enumerate(delays):
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            resp = httpx.get(
+                probe_url,
+                headers=headers,
+                timeout=_CATALOG_REQUEST_TIMEOUT_SEC,
+                verify=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_err = f"{type(exc).__name__}: {exc}"
+            print(
+                f"Preflight: catalog probe attempt {i + 1}/{len(delays)} "
+                f"failed: {last_err}"
+            )
+            continue
+        if resp.status_code != 200:
+            last_err = (
+                f"HTTP {resp.status_code}: "
+                f"{(resp.text or '')[:200]}"
+            )
+            print(
+                f"Preflight: catalog probe attempt {i + 1}/{len(delays)} "
+                f"got {last_err}"
+            )
+            continue
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            last_err = f"JSON decode: {exc}"
+            print(
+                f"Preflight: catalog probe attempt {i + 1}/{len(delays)} "
+                f"returned non-JSON: {last_err}"
+            )
+            continue
+        ids = {
+            m["id"] for m in data.get("data") or []
+            if isinstance(m, dict) and isinstance(m.get("id"), str)
+        }
+        if not ids:
+            last_err = "empty data[]"
+            continue
+        return ids
+
+    print(
+        f"Preflight: catalog probe exhausted {len(delays)} attempts "
+        f"({last_err}); cannot validate model availability"
+    )
+    return None
+
+
+def _validate_and_resolve_claude_model(
+    args: argparse.Namespace,
+    proxy_urls: tuple[str, str] | None,
+) -> set[str] | None:
+    """Hard-gate Claude model selection. Mutates ``args.claude_model``.
+
+    Per operator direction (2026-05-09):
+
+    * ``--claude-model`` MUST be one of ``_CLAUDE_ALLOWED_MODELS`` (4-7 or
+      4-6). Any other value aborts boot before Coordinator starts —
+      orchestration drift on opus-4-5 / haiku silently degraded prior runs.
+    * Probe the gateway catalog with retry (gateway flakes). If the chosen
+      model is missing but the fallback (4-6) is in catalog, rewrite the
+      arg + WARN. Otherwise sys.exit(2) — refuse to start the service.
+
+    Returns the catalog id set on success (so the codex smoke-test can
+    reuse it without re-probing); returns None if catalog probe failed but
+    the chosen model was already in ``_CLAUDE_ALLOWED_MODELS`` AND we
+    decide to proceed (we don't — gateway unreachable means abort).
+    """
+    chosen = (args.claude_model or "").strip()
+    if chosen not in _CLAUDE_ALLOWED_MODELS:
+        print(
+            f"ERROR: --claude-model={chosen!r} is not allowed. "
+            f"Orchestration model must be one of {list(_CLAUDE_ALLOWED_MODELS)} "
+            f"(preferred: {_CLAUDE_PREFERRED_MODEL}, "
+            f"fallback: {_CLAUDE_FALLBACK_MODEL}). Refusing to start.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    base_url = ""
+    if proxy_urls is not None:
+        base_url = proxy_urls[1]  # OpenAI-compat URL keeps the /v1 suffix
+    if not base_url:
+        base_url = os.environ.get("OPENAI_BASE_URL", "")
+
+    api_key = (
+        os.environ.get("SAFE_API_KEY", "")
+        or os.environ.get("OPENAI_API_KEY", "")
+        or os.environ.get("ANTHROPIC_API_KEY", "")
+    )
+
+    catalog_ids = _probe_llm_catalog(base_url=base_url, api_key=api_key)
+    if catalog_ids is None:
+        print(
+            "ERROR: gateway catalog unreachable after retries; cannot "
+            "verify Claude model availability. Refusing to start.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if chosen in catalog_ids:
+        print(f"Preflight: Claude model {chosen!r} confirmed in gateway catalog")
+        return catalog_ids
+
+    if _CLAUDE_FALLBACK_MODEL in catalog_ids:
+        print(
+            f"Preflight: WARNING — {chosen!r} not in gateway catalog; "
+            f"falling back to {_CLAUDE_FALLBACK_MODEL!r}"
+        )
+        args.claude_model = _CLAUDE_FALLBACK_MODEL
+        return catalog_ids
+
+    print(
+        f"ERROR: neither {_CLAUDE_PREFERRED_MODEL!r} nor "
+        f"{_CLAUDE_FALLBACK_MODEL!r} present in gateway catalog "
+        f"(catalog has {sorted(m for m in catalog_ids if m.startswith('claude-'))}). "
+        f"Refusing to start.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def _smoke_test_codex_model(
+    args: argparse.Namespace,
+    catalog_ids: set[str] | None,
+) -> None:
+    """WARN-only catalog check for ``--codex-model`` (no hard gate).
+
+    Operator pinned only Claude; Codex is allowed to use whatever is
+    requested. We still want to flag obvious typos / missing models BEFORE
+    the Coordinator starts ticking, since the Codex backend's
+    ``__post_init__`` does not pre-validate against the catalog.
+    """
+    if catalog_ids is None:
+        return
+    needs_codex = (not args.critic_mock) or (
+        args.kernel_codex and not getattr(args, "no_kernel", False)
+    )
+    if not needs_codex:
+        return
+    chosen = (args.codex_model or "").strip()
+    if chosen in catalog_ids:
+        print(f"Preflight: Codex model {chosen!r} confirmed in gateway catalog")
+        return
+    print(
+        f"Preflight: WARNING — codex model {chosen!r} not in gateway catalog "
+        f"({sorted(m for m in catalog_ids if m.startswith('gpt-'))}); "
+        f"CodexBackend will fail at first turn. Pass --codex-model with a "
+        f"value in the catalog or use --critic-mock + --kernel-claude."
+    )
+
+
+def _preflight() -> tuple[str, str] | None:
     """Auto-install missing runtime deps and export auth aliases.
 
     1. Credentials fallback: env > $REPO_ROOT/.env (env always wins).
     2. Auth aliases for Claude/Codex CLIs from SAFE_API_KEY/OPENAI_BASE_URL.
-    3. Auth-proxy + ~/.claude/config.json supervision.
-    4. ray + Magpie + InferenceX auto-install.
+    3. Python SDK (claude-agent-sdk / openai / httpx) auto-install.
+    4. ``auth_proxy.py`` source bootstrap (so ensure_auth_proxy.sh has fuel).
+    5. Auth-proxy + ~/.claude/config.json supervision.
+    6. ROCm env hygiene (HIP_VISIBLE_DEVICES unset, GPU/shm sanity).
+    7. ray + Magpie + InferenceX auto-install.
+    8. node / claude / codex CLI presence check (WARN-only).
+    9. Single canonical diagnostics block.
+
+    Returns the ``(proxy_anthropic_url, proxy_openai_url)`` tuple from
+    :func:`_ensure_auth_proxy_and_claude_config` so the caller
+    (``_run_optimize``) can route the catalog probe through the proxy.
     """
     _load_dotenv_fallback()
 
@@ -613,9 +1114,26 @@ def _preflight() -> None:
         for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
             os.environ.setdefault(alias, base_url)
 
-    # --- Log resolved asset root (confirms ASSET_ROOT mechanism) ---
-    from .paths import asset_root
-    print(f"Preflight: asset_root = {asset_root()}")
+    # --- Resolve install interpreters ---
+    from .orchestrator.action_executors._grid_runner import _resolve_magpie_python
+    magpie_python = _resolve_magpie_python()
+
+    # Detect whether we're in a venv; if not, add --break-system-packages
+    # so pip doesn't refuse to install on bare-metal Debian/Ubuntu hosts.
+    pip_extra: list[str] = []
+    if not (hasattr(sys, "real_prefix") or
+            (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix)):
+        pip_extra = ["--break-system-packages"]
+
+    # --- Python SDK auto-install (claude-agent-sdk / openai / httpx) ---
+    # Must happen BEFORE Coordinator import, since ClaudeBackend lazy-imports
+    # claude_agent_sdk at construction time and the catalog probe later in
+    # this preflight needs httpx. Use sys.executable so the package lands
+    # in the same site-packages this process imports from.
+    _ensure_python_sdks(sys.executable, pip_extra)
+
+    # --- Bootstrap auth_proxy.py source (so the supervisor has fuel) ---
+    _ensure_oob_proxy_source()
 
     # --- Ensure auth-proxy is running + ~/.claude/config.json points at it ---
     # The AMD primus-safe gateway only accepts Authorization: Bearer, but the
@@ -657,17 +1175,12 @@ def _preflight() -> None:
             "without auth-proxy"
         )
 
+    # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
+    _unset_hip_visible_devices()
+    _check_gpu_visibility()
+    _check_shm_disk()
+
     # --- Runtime dep install ---
-    from .orchestrator.action_executors._grid_runner import _resolve_magpie_python
-    magpie_python = _resolve_magpie_python()
-
-    # Detect whether we're in a venv; if not, add --break-system-packages
-    # so pip doesn't refuse to install on bare-metal Debian/Ubuntu hosts.
-    pip_extra: list[str] = []
-    if not (hasattr(sys, "real_prefix") or
-            (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix)):
-        pip_extra = ["--break-system-packages"]
-
     # 1. Ray — needed by Magpie for task scheduling even without kernel-agent.
     if shutil.which("ray") is None:
         print("Preflight: ray not found, installing ray[default]==2.44.1 + click<8.3.0 ...")
@@ -720,15 +1233,31 @@ def _preflight() -> None:
                 break
     if inferencex_path and Path(inferencex_path).is_dir():
         os.environ.setdefault("INFERENCEX_PATH", inferencex_path)
-        print(f"Preflight: InferenceX = {inferencex_path}")
     else:
         print("Preflight: WARNING — InferenceX not found. GSM8K accuracy "
               "eval will fail. Set INFERENCEX_PATH or clone Magpie with "
               "InferenceX submodule.")
 
+    # --- node / claude / codex CLI presence (WARN-only) ---
+    _check_node_claude_cli()
+
+    # --- Single canonical diagnostics block ---
+    _emit_preflight_diagnostics(
+        magpie_python=magpie_python,
+        proxy_anthropic=(proxy_urls[0] if proxy_urls is not None else None),
+    )
+
+    return proxy_urls
+
 
 async def _run_optimize(args: argparse.Namespace) -> int:
-    _preflight()
+    proxy_urls = _preflight()
+
+    # Hard-gate Claude model BEFORE any session work. Mutates args.claude_model
+    # in-place when falling back to opus-4-6; aborts with sys.exit(2) if the
+    # gateway catalog cannot be probed or neither allowed model is present.
+    catalog_ids = _validate_and_resolve_claude_model(args, proxy_urls)
+    _smoke_test_codex_model(args, catalog_ids)
 
     if args.resume:
         # Resume mode: skip the SharedState seed so Coordinator.__init__
