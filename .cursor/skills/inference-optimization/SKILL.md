@@ -134,14 +134,15 @@ All values below are the **single source of truth**. All actions reference these
 | `OOB_ROUND_ITERATIONS` | 3 | Iterations per Codex/Claude round (submit → local benchmark → feedback → re-submit). Best result wins. |
 | `KERNEL_OPT_IMAGE` | *(provided by CI or user)* | Framework image for all kernel-opt backends (GEAK + OOB). One image per run, determined by framework (SGLang/vLLM). |
 | `KERNEL_OPT_WORKSPACE` | `control-plane-moe` | SaFE workspace for kernel-opt backends (GEAK + OOB). User can override. |
-| `GEAK_STEP_LIMIT` | 100 | Max agent steps per GEAK task |
+| `GEAK_STEP_LIMIT` | 200 | Max agent steps per GEAK task (GEAK recommended; was 100) |
+| `GEAK_MAX_ROUNDS` | 5 | GEAK orchestrator rounds (GEAK recommended; was 1) |
 | `GEAK_MAX_RETRIES` | 3 | Max submission retries per kernel |
 | `GEAK_MAX_SUBMISSIONS` | 15 | Total GEAK submissions budget per run |
 | `GEAK_TOP_CANDIDATES` | 5 | Number of top kernel candidates to submit |
 | `GEAK_CONSECUTIVE_DISCARDS` | 5 | Stop after this many consecutive discards |
-| `GEAK_WALL_CLOCK_MIN` | 120 | Max wall-clock minutes for kernel-opt action |
+| `GEAK_WALL_CLOCK_MIN` | 90 | Max wall-clock minutes per GEAK task (was 120 for entire phase) |
 | `GEAK_POLL_INTERVAL_S` | 60 | Seconds between GEAK task status polls |
-| `GEAK_POLL_TIMEOUT_MIN` | 15 | Max minutes to poll a single GEAK task |
+| `GEAK_POLL_TIMEOUT_MIN` | 90 | Max minutes to poll a single GEAK task (was 15, too short for multi-round) |
 | `MIN_GPU_PCT` | 3 | Minimum GPU time % to consider a kernel as GEAK candidate |
 | `SERVER_KILL_WAIT_S` | 10 | Seconds to wait between server kill and relaunch |
 | `FILTERED_TRACE_NAME` | `filtered-TP-0.trace.json.gz` | Preferred trace file for TraceLens analysis |

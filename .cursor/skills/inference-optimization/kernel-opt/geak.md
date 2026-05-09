@@ -175,7 +175,7 @@ Requires GEAK MCP server running. Uses MCP tools:
 
 - `input_type` is **required** — use `"file"`
 - The instruction field is `prompt`, NOT `instructions`
-- `step_limit` controls agent iterations (**use 100** for kernel optimization — GEAK needs room to analyze, write, compile, fix errors, benchmark, and iterate. 20 is often not enough for a verified result; 5 is completely insufficient)
+- `step_limit` controls agent iterations (**use 200** for kernel optimization — GEAK needs room to analyze, write, compile, fix errors, benchmark, and iterate across multiple rounds. 100 limits multi-round optimization; 20 is not enough for a verified result)
 - `gpu_count` defaults to 1
 - `**workspace_id`**: Always specify `KERNEL_OPT_WORKSPACE` (constant from `SKILL.md`; default `"control-plane-moe"`) for reliable scheduling. Default workspace is often resource-constrained.
 - Include ALL dependent files in the `files` array (GEAK needs self-contained code)
@@ -215,7 +215,7 @@ Write the COMPLETE file (imports, decorator, function) to the output directory.
   - If the kernel source file **exists in the Docker image** (e.g., `/sgl-workspace/aiter/...`, `/opt/venv/...`), **MUST include** the kernel's absolute file path and repo path in the prompt. Example: `"The kernel source file is at /sgl-workspace/aiter/jit/core/compile.py"`, `"The kernel repo is at /sgl-workspace/aiter/"`.
   - If the kernel source is **runtime-generated** and only exists at runtime (e.g., `/tmp/torchinductor_root/...` from `torch.compile` Inductor cache), **DO NOT include** `kernel_url` or `kernel_repo` in the prompt. These files do not exist in the GEAK pod's image. Instead, copy the kernel files to a shared NFS path and reference the NFS path, OR omit these paths entirely and rely solely on `files[].content`.
   - **How to tell:** paths under `/tmp/`, `/root/.cache/`, or any `torchinductor_*` directory are runtime-generated. Paths under `/sgl-workspace/`, `/opt/`, `/usr/` are part of the image.
-2. **MUST specify homogeneous mode and max_rounds** — Always include: `"Use homogeneous mode. Set max_rounds to 1."` in the prompt.
+2. **MUST specify homogeneous mode and max_rounds** — Always include: `"Use homogeneous mode. Set max_rounds to 5."` in the prompt.
 3. **MUST specify 1.5x minimum speedup target** — Always include: `"The kernel MUST be optimized to at least 1.5x speedup."` in the prompt.
 
 Additional rules:
@@ -240,8 +240,8 @@ Typical latency: 3–10 min per task (agent execution only).
 | ----------------- | ------------- | ----------------------------------------- |
 | Pod scheduling    | 2-15 min      | Depends on cluster load, GPU availability |
 | Docker image pull | 1-5 min       | ROCm image is ~15GB                       |
-| Agent execution   | 3-10 min      | Depends on step_limit                     |
-| **Total**         | **10-30 min** | Poll every 30s                            |
+| Agent execution   | 10-60 min     | Depends on step_limit and max_rounds      |
+| **Total**         | **15-90 min** | Poll every 60s                            |
 
 The `updated_at` timestamp stays frozen until the pod starts. Once it changes, the agent has started. If stuck >30 min with no update, the cluster may be overloaded — cancel and retry.
 

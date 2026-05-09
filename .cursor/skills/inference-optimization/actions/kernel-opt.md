@@ -124,7 +124,7 @@ These rules apply to **every** kernel optimization submission regardless of back
 
 #### Prompt rules — backend-specific
 
-5. **`geak` only: mode and max_rounds** — Include: `"Use homogeneous mode. Set max_rounds to 1."` GEAK's optimization engine uses these parameters. Other backends ignore them.
+5. **`geak` only: mode and max_rounds** — Include: `"Use homogeneous mode. Set max_rounds to 5."` GEAK's optimization engine uses these parameters. Other backends ignore them.
 6. **`geak` + `codex` + `claude`: framework image** — Use `KERNEL_OPT_IMAGE` (provided by CI or user). This single image is shared across all kernel-opt backends.
 7. **`geak` + `codex` + `claude`: workspace** — Use `KERNEL_OPT_WORKSPACE` (default `"control-plane-moe"`). Shared across all kernel-opt backends.
 8. **`codex` / `claude` only: explicit output filename** — Include: `"Write the COMPLETE optimized file to optimized_kernel.py."` These backends need an explicit output path.
