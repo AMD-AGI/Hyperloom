@@ -72,7 +72,7 @@ jobs:
 
           # ── Build the full markdown summary ───────────────────────────────
           summary = f"""# 📋 Weekly Issues Report — {repo_name}
-**Week of {week_str}** &nbsp;|&nbsp; [View Full Board]({repo_url})
+**Week of {week_str}** | [View Full Board]({repo_url})
 
 ---
 
