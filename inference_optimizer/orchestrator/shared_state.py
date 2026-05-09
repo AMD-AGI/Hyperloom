@@ -83,8 +83,6 @@ class SharedState:
     # Orchestration uses this to decide whether re-profiling would change the
     # hot-kernel distribution; identical args means the same trace.
     last_profile_args: str = ""
-    last_profile_pmc_summary: str = ""
-    last_profile_roofline: str = ""
     # Cached result of the most recent `select_kernels` request keyed by
     # `trace_input`. Coordinator short-circuits subsequent identical requests
     # so Orchestration does not waste budget re-analysing the same trace.
@@ -408,12 +406,9 @@ class SharedState:
                 "kernel_id": kid,
                 "name": entry.get("name"),
                 "gpu_pct": entry.get("gpu_pct"),
-                "bottleneck": entry.get("bottleneck"),
-                "arithmetic_intensity": entry.get("arithmetic_intensity"),
                 "source_file": entry.get("source_file"),
                 "reusable_native_kernel": reusable,
                 "recommended_backends": entry.get("recommended_backends") or [],
-                "recommended_actions": entry.get("recommended_actions") or [],
             })
             if reusable and kid:
                 reusable_ids.append(str(kid))
@@ -528,7 +523,6 @@ class SharedState:
             f"pruned_families={self.pruned_families or '(none)'}",
             f"last_profile_trace={self.last_profile_trace or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
-            f"last_profile_roofline={self.last_profile_roofline or '(none)'}",
             f"last_select_kernels={self._format_last_select_kernels()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"params_search={self._format_params_search()}",
