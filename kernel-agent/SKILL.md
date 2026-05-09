@@ -14,67 +14,46 @@ All files live under `$WORKSPACE_PATH/kernel-agent`; default `WORKSPACE_PATH` is
 or source paths and the TraceLens install at
 `/wekafs/hyperloom/TraceLens-internal`.
 
-## LLM Environment
+## Setup
 
-The canonical LLM endpoint is LiteLLM-compatible and is configured by:
+This skill is **two commands**. The installer is idempotent and brings up
+everything in one shot — do NOT pip install ray / claude-agent-sdk / Magpie
+manually from chat, do NOT manually export auth aliases, do NOT manually
+edit `~/.claude/config.json`. All of that is what `install.sh` and the
+auth-proxy supervisor are for.
 
-- `OPENAI_BASE_URL`
-- `SAFE_API_KEY`
+### Credentials (env > .env, env always wins)
 
-If either variable is missing, load `.env` from the repository that launched the
-skill. Do not print the key. Before running installers or tools, export
-compatibility aliases used by OOB, GEAK, Claude/Codex CLIs, and older scripts:
+`SAFE_API_KEY` and `OPENAI_BASE_URL` are the only credentials needed.
+`install.sh` resolves them in this order:
 
-```bash
-if [ -n "${REPO_ROOT:-}" ] && [ -f "$REPO_ROOT/.env" ]; then
-  set -a
-  . "$REPO_ROOT/.env"
-  set +a
-elif [ -f .env ]; then
-  set -a
-  . ./.env
-  set +a
-fi
+1. If both are in env → use them, do not touch `.env`.
+2. Otherwise, source `$REPO_ROOT/.env` for **missing** keys only; keys
+   already in env are protected and never overwritten by `.env`.
 
-: "${OPENAI_BASE_URL:?OPENAI_BASE_URL must be set in env or .env}"
-: "${SAFE_API_KEY:?SAFE_API_KEY must be set in env or .env}"
+Caller either `export REPO_ROOT=<hyperloom_repo_root>` or invokes
+`install.sh` from the repo root (so `$(pwd)` becomes the fallback). Do
+NOT manually `source .env` from chat — `install.sh` does it with the
+correct env-wins semantics.
 
-export OPENAI_API_KEY="${OPENAI_API_KEY:-$SAFE_API_KEY}"
-export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-$SAFE_API_KEY}"
-export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$SAFE_API_KEY}"
-export OOB_API_KEY="${OOB_API_KEY:-$SAFE_API_KEY}"
-export GEAK_API_KEY="${GEAK_API_KEY:-$SAFE_API_KEY}"
-export LLM_API_KEY="${LLM_API_KEY:-$SAFE_API_KEY}"
-export AMD_LLM_API_KEY="${AMD_LLM_API_KEY:-$SAFE_API_KEY}"
-
-export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-$OPENAI_BASE_URL}"
-export OOB_BASE_URL="${OOB_BASE_URL:-$OPENAI_BASE_URL}"
-export GEAK_BASE_URL="${GEAK_BASE_URL:-$OPENAI_BASE_URL}"
-export LLM_API_BASE="${LLM_API_BASE:-$OPENAI_BASE_URL}"
-
-python3 - <<'PY'
-import os
-missing = [k for k in ("OPENAI_BASE_URL", "SAFE_API_KEY") if not os.environ.get(k)]
-print("llm_env_present=", not missing)
-if missing:
-    print("missing=", ",".join(missing))
-PY
-```
-
-## Installation
-
-Before the first request, run the installer:
+### Step 1 — Install (one-time per pod / venv rebuild)
 
 ```bash
+export REPO_ROOT="$(pwd)"  # hyperloom repo root that owns .env (or `cd` there)
 bash $WORKSPACE_PATH/kernel-agent/scripts/install.sh
+. $WORKSPACE_PATH/kernel-agent/env.sh   # exports SAFE_API_KEY/OPENAI_BASE_URL + auth aliases
 ```
 
-The installer always installs everything in one shot:
+`install.sh` always installs everything (no `--with-*` flags any more — those
+are accepted as no-ops for backwards compat):
+
 - `ray==2.44.1` + `click<8.3.0`
-- TraceLens editable install from `/wekafs/hyperloom/TraceLens-internal`
-- GEAK CLI from `GEAK_REF` (default `v3.1.0`) + `geak-config/local.yaml`
-  (model resolution: `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL`
-  from env)
+- TraceLens editable install from `/wekafs/hyperloom/TraceLens-internal` and
+  verifies `TraceLens_generate_perf_report_pytorch --help`
+- GEAK CLI from `GEAK_REF` (default `v3.1.0`) +
+  `${HYPERLOOM_ROOT}/geak-config/local.yaml` (model resolution:
+  `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL` from env, default
+  `claude-opus-4-7`)
 - GEAK RAG MCP (`mcp_tools/rag-mcp`) with `tools.rag: true`; the first RAG
   index build writes to `~/.cache/amd-ai-devtool/semantic-index/` and may
   download the ~1.3 GB BGE embedding model. The installer builds this index
@@ -83,64 +62,62 @@ The installer always installs everything in one shot:
 - GEAK cross-session memory env; by default Hyperloom stores GEAK's SQLite
   memory DB at `/wekafs/hyperloom/geak-memory/memory.db`, enables
   `GEAK_SAVE_TO_KNOWLEDGE_BASE=1`, and aligns
-  `GEAK_MEMORY_MIN_SPEEDUP=1.20` with the KEEP gate
-- OOB CLI + claude/codex npm CLIs + `/root/.claude/config.json` /
-  `/root/.codex/auth.json`
-- OOB auth-proxy on `127.0.0.1:4002` (header rewrite for the AMD LLM
-  gateway), supervised by `scripts/ensure_auth_proxy.sh`
+  `GEAK_MEMORY_MIN_SPEEDUP=1.20` with the KEEP gate.
+- OOB CLI + claude/codex npm CLIs + `~/.claude/config.json` +
+  `~/.codex/auth.json`
+- **OOB auth-proxy on `127.0.0.1:4002`**, supervised by
+  `scripts/ensure_auth_proxy.sh`. The proxy rewrites `x-api-key` →
+  `Authorization: Bearer` for the AMD primus-safe gateway; without it
+  every claude/codex CLI request returns HTTP 401 "token not present".
 
-The previous lazy `--with-geak / --with-oob / --with-llm` selectivity was
-removed because it caused recurring "OOB proxy not running, request 401'd,
-discovered the missing service after the fact" issues. Those flags are still
-accepted as no-ops for backwards compatibility; new call sites should drop
-them.
+`env.sh` is regenerated by `install.sh` and contains the proxy-rewritten
+URLs (`ANTHROPIC_BASE_URL=http://127.0.0.1:4002/...`) plus auth aliases.
+Source it instead of trying to derive these by hand.
 
-Use `--check-only` to verify the current environment and `--dry-run` to print
-planned actions without installing.
-
-If a pod or venv was rebuilt, repair the Ray/Click pair before any kernel
-optimization request. `click>=8.3` is incompatible with the Ray 2.44 CLI in this
-environment and can make backend submission fail before any kernel code compiles:
+Use `--check-only` to verify the current environment without installing,
+and `--dry-run` to print planned actions:
 
 ```bash
-pip install --quiet 'click<8.3.0' 'ray[default]==2.44.1'
-ray --version
+bash $WORKSPACE_PATH/kernel-agent/scripts/install.sh --check-only
 ```
 
-Start Ray with every visible GPU before OOB/GEAK kernel optimization. OOB and
-GEAK submit Ray tasks with `num_gpus>=1`; if Ray is started with
-`--num-gpus=0`, tasks stay pending even when the node has idle GPUs.
+### Step 2 — Start Ray with all visible GPUs
+
+GEAK and OOB submit Ray tasks with `num_gpus>=1`. If Ray is started with
+`--num-gpus=0`, tasks stay pending forever even when the node has idle GPUs:
 
 ```bash
-RAY_NUM_GPUS="${RAY_NUM_GPUS:-$(python3 - <<'PY'
-try:
-    import torch
-    print(torch.cuda.device_count() or 1)
-except Exception:
-    print(1)
-PY
-)}"
+RAY_NUM_GPUS="${RAY_NUM_GPUS:-$(python3 -c 'import torch; print(torch.cuda.device_count() or 1)')}"
 ray stop --force || true
 ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
 ray status
 ```
 
-### Auth-proxy supervision
+`inference_optimizer.cli` does NOT auto-start ray, so this step is required
+both standalone and under the inference-optimizer entry point.
 
-The OOB auth-proxy on `:4002` rewrites `x-api-key` -> `Authorization: Bearer`
-for the AMD LLM gateway; without it, every claude/codex CLI request returns
-HTTP 401 "token not present". It is started by `install.sh` and can be re-
-verified at any time via:
+### Recovery
+
+The auth-proxy is the most common failure point. If a tool fails with
+HTTP 401 / `Primus.00009 token not present` / `Claude SDK exit code 1`,
+re-run the supervisor (idempotent, noop if healthy):
 
 ```bash
 bash $WORKSPACE_PATH/kernel-agent/scripts/ensure_auth_proxy.sh
 ```
 
-The script is idempotent: it TCP-probes :4002, then HTTP-probes via curl. If
-the port is open but the probe times out (a stuck proxy), it kills the
-existing `auth_proxy.py` process and relaunches. If port :4002 is healthy,
-it noops. Run it before any kernel-agent tool that talks to claude/codex,
-or simply re-run `install.sh` (which calls it as part of normal install).
+It TCP-probes `:4002`, then HTTP-probes via `curl`. If the port is open
+but the probe times out (stuck proxy), it kills the existing
+`auth_proxy.py` process and relaunches. If `:4002` is healthy, it noops.
+
+If a pod or venv was rebuilt and `ray --version` fails / Ray CLI rejects
+`--num-gpus`, repair the Ray/Click pair (Click >= 8.3 is incompatible
+with the Ray 2.44 CLI in this environment):
+
+```bash
+pip install --quiet 'click<8.3.0' 'ray[default]==2.44.1'
+ray --version
+```
 
 ## Tools
 
