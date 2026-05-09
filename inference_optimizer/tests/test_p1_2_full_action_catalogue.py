@@ -1,4 +1,4 @@
-"""P1-2 full 19-action catalogue tests.
+"""P1-2 full action catalogue tests.
 
 Asserts the v0.6 OptimizationAction catalogue is complete and that
 families/owners line up with DESIGN §16.1.
@@ -15,15 +15,16 @@ from inference_optimizer.orchestrator.action_registry import (
 from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
 
 
-# DESIGN §16.1 — full v0.6 list (19 actions; framework-rebuild dropped)
+# DESIGN §16.1 plus isolated PMC roofline analysis action.
 EXPECTED_ACTIONS_V06: dict[str, str] = {
     # prep (4)
     "setup":                "prep",
     "classify":             "prep",
     "target_analysis":      "prep",
     "baseline":             "prep",
-    # analysis (1)
+    # analysis (2)
     "profile":              "analysis",
+    "pmc_roofline":         "analysis",
     # shallow (4) — report lives here per DESIGN §16.1
     "backends":             "shallow",
     "params":               "shallow",
@@ -52,13 +53,13 @@ def registry() -> ActionRegistry:
 
 
 def test_full_catalogue_loads_and_matches_design(registry):
-    """All 19 v0.6 OptimizationActions must be present with correct family."""
+    """All OptimizationActions must be present with correct family."""
     actual = {m.name: m.family for m in registry.all()}
     assert actual == EXPECTED_ACTIONS_V06
 
 
-def test_catalogue_count_is_exactly_19(registry):
-    assert len(registry.all()) == 19
+def test_catalogue_count_matches_expected(registry):
+    assert len(registry.all()) == len(EXPECTED_ACTIONS_V06)
 
 
 def test_kernel_owned_actions_all_in_registry(registry):
