@@ -41,9 +41,19 @@ KB_CATEGORIES = {
 }
 
 VERDICTS = {"approve", "reject", "redirect", "advise", "needs_review"}
+DECISION_VERDICTS = {"adopt", "reject", "revise", "needs_info"}
+DECISION_BASIS = {"kb", "llm", "mixed", "session", "insufficient_context"}
 SOURCES = {"critic", "mock", "timeout", "critic_unavailable"}
 CONFIDENCE = {"high", "medium", "low"}
 SEVERITIES = {"blocker", "major", "minor"}
+COORDINATOR_INTENT_TYPES = {
+    "review_verdict",
+    "send_message",
+    "ask_question",
+    "answer",
+    "alert",
+    "update_persona",
+}
 
 
 def fail(message: str) -> None:
@@ -97,6 +107,14 @@ def validate_case_file(path: Path) -> list[dict[str, Any]]:
             if expected_kind != "kb_draft":
                 fail(f"{case_id}: expected.kind must be kb_draft")
             validate_kb_expected(case_id, case["expected"])
+        elif request_type == "critic_decision_request":
+            if expected_kind != "critic_decision_review":
+                fail(f"{case_id}: expected.kind must be critic_decision_review")
+            validate_decision_expected(case_id, case["expected"])
+        elif request_type == "coordinator_inbox":
+            if expected_kind != "intent_envelope":
+                fail(f"{case_id}: expected.kind must be intent_envelope")
+            validate_coordinator_expected(case_id, case["expected"])
         else:
             fail(f"{case_id}: unsupported request_type {request_type!r}")
 
@@ -111,6 +129,34 @@ def validate_review_expected(case_id: str, expected: dict[str, Any]) -> None:
         for risk_type in as_list(expected.get(key)):
             if risk_type not in RISK_TYPES:
                 fail(f"{case_id}: unknown risk type {risk_type}")
+
+
+def validate_decision_expected(case_id: str, expected: dict[str, Any]) -> None:
+    require_type(case_id, expected, "verdict", str)
+    if expected["verdict"] not in DECISION_VERDICTS:
+        fail(f"{case_id}: invalid decision verdict {expected['verdict']}")
+    basis = expected.get("basis")
+    if basis is not None and basis not in DECISION_BASIS:
+        fail(f"{case_id}: invalid basis {basis}")
+
+
+def validate_coordinator_expected(case_id: str, expected: dict[str, Any]) -> None:
+    intent_types_any_of = as_list(expected.get("intent_types_any_of"))
+    for intent_type in intent_types_any_of:
+        if intent_type not in COORDINATOR_INTENT_TYPES:
+            fail(f"{case_id}: unknown intent_type {intent_type}")
+    expected_count = expected.get("intent_count")
+    if expected_count is not None:
+        try:
+            int(expected_count)
+        except (TypeError, ValueError):
+            fail(f"{case_id}: intent_count must be int")
+    proposals = as_list(expected.get("verdicts_per_proposal"))
+    for entry in proposals:
+        if not isinstance(entry, dict):
+            fail(f"{case_id}: verdicts_per_proposal items must be dicts")
+        if entry.get("verdict") not in VERDICTS:
+            fail(f"{case_id}: bad verdict in verdicts_per_proposal")
 
 
 def validate_kb_expected(case_id: str, expected: dict[str, Any]) -> None:
@@ -138,10 +184,17 @@ def validate_outputs(cases: list[dict[str, Any]], outputs_path: Path) -> None:
         output = outputs[case_id]
         if not isinstance(output, dict):
             fail(f"{case_id}: output must be an object")
-        if case["expected"]["kind"] == "review_verdict":
+        kind = case["expected"]["kind"]
+        if kind == "review_verdict":
             assert_review_output(case_id, case["expected"], output)
-        else:
+        elif kind == "kb_draft":
             assert_kb_output(case_id, case["expected"], output)
+        elif kind == "critic_decision_review":
+            assert_decision_output(case_id, case["expected"], output)
+        elif kind == "intent_envelope":
+            assert_intent_envelope_output(case_id, case["expected"], output)
+        else:
+            fail(f"{case_id}: unexpected expected.kind {kind!r}")
 
 
 def assert_review_output(case_id: str, expected: dict[str, Any], output: dict[str, Any]) -> None:
@@ -325,6 +378,64 @@ def validate_kb_draft(case_id: str, draft: Any) -> None:
             fail(f"{case_id}: KB draft confidence must be in [0, 1]")
 
 
+def assert_decision_output(case_id: str, expected: dict[str, Any], output: dict[str, Any]) -> None:
+    if output.get("kind") != "critic_decision_review":
+        fail(f"{case_id}: output.kind must be critic_decision_review")
+    require_type(case_id, output, "verdict", str)
+    if output["verdict"] not in DECISION_VERDICTS:
+        fail(f"{case_id}: invalid decision verdict {output['verdict']}")
+    if output["verdict"] != expected["verdict"]:
+        fail(f"{case_id}: decision verdict mismatch")
+    basis = output.get("basis")
+    if basis and basis not in DECISION_BASIS:
+        fail(f"{case_id}: invalid basis {basis}")
+    if expected.get("basis") and basis != expected["basis"]:
+        fail(f"{case_id}: basis mismatch")
+    required_keys = ("reason",)
+    if output["verdict"] in ("adopt", "reject", "revise"):
+        required_keys += ("session_evidence",)
+    for key in required_keys:
+        if key not in output:
+            fail(f"{case_id}: missing required key {key}")
+    if output["verdict"] == "needs_info":
+        if not output.get("required_context"):
+            fail(f"{case_id}: needs_info requires non-empty required_context")
+
+
+def assert_intent_envelope_output(case_id: str, expected: dict[str, Any], output: dict[str, Any]) -> None:
+    if output.get("kind") != "intent_envelope":
+        fail(f"{case_id}: output.kind must be intent_envelope")
+    require_type(case_id, output, "intents", list)
+    intents = output["intents"]
+    if not intents:
+        fail(f"{case_id}: intent envelope must be non-empty")
+    types = [item.get("intent_type") for item in intents]
+    for intent_type in types:
+        if intent_type not in COORDINATOR_INTENT_TYPES:
+            fail(f"{case_id}: invalid intent_type {intent_type!r}")
+    expected_count = expected.get("intent_count")
+    if expected_count is not None and len(intents) != int(expected_count):
+        fail(f"{case_id}: intent count mismatch — got {len(intents)}, expected {expected_count}")
+    for entry in as_list(expected.get("verdicts_per_proposal")):
+        target = entry.get("target_proposal_msg_id")
+        verdict = entry.get("verdict")
+        match = next(
+            (
+                i for i in intents
+                if i.get("intent_type") == "review_verdict"
+                and i.get("payload", {}).get("target_proposal_msg_id") == target
+            ),
+            None,
+        )
+        if match is None:
+            fail(f"{case_id}: missing review_verdict for proposal {target}")
+        if match["payload"].get("verdict") != verdict:
+            fail(f"{case_id}: verdict for {target} expected {verdict}, got {match['payload'].get('verdict')}")
+    intent_any = set(as_list(expected.get("intent_types_any_of")))
+    if intent_any and not intent_any.intersection(types):
+        fail(f"{case_id}: expected at least one intent_type from {sorted(intent_any)}")
+
+
 def validate_rejected_candidate(case_id: str, rejected_candidate: Any) -> None:
     if not isinstance(rejected_candidate, dict):
         fail(f"{case_id}: rejected_candidates entries must be objects")
@@ -342,7 +453,12 @@ def main() -> None:
     parser.add_argument(
         "--cases",
         nargs="+",
-        default=["review_verdict_cases.json", "kb_draft_cases.json"],
+        default=[
+            "review_verdict_cases.json",
+            "kb_draft_cases.json",
+            "decision_review_cases.json",
+            "coordinator_inbox_cases.json",
+        ],
         help="Case files to validate.",
     )
     parser.add_argument(
