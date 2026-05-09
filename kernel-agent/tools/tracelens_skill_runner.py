@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run TraceLens standalone-analysis-orchestrator through Claude SDK.
+"""Run TraceLens analysis-orchestrator skill through Claude SDK.
 
 This is the LLM-backed path for issue #124. It deliberately lives outside
 ``tracelens_analysis.py`` so the deterministic CLI/csv fallback remains
@@ -120,7 +120,7 @@ Execution context:
 
 Important requirements:
 1. Use the provided command prefix cache for all shell commands.
-2. Run the standalone-analysis-orchestrator workflow through Step 11.
+2. Run the analysis-orchestrator workflow through Step 11.
 3. If analysis_mode is inference and execution mode is graph_capture, pass the
    capture folder to the inference perf-report CLI exactly as the skill says.
 4. Write all TraceLens outputs under the output directory above.
