@@ -334,10 +334,10 @@ class PMCProfiler:
                     _kill_process_group(proc)
                     proc.wait(timeout=30)
 
-        counter_csvs = list(output_dir.rglob("*counter_collection*.csv"))
+        counter_csvs = _wait_for_csvs(output_dir, "*counter_collection*.csv")
         if counter_csvs:
             return self._parse_counter_csvs(counter_csvs)
-        trace_csvs = list(output_dir.rglob("*kernel_trace*.csv"))
+        trace_csvs = _wait_for_csvs(output_dir, "*kernel_trace*.csv")
         return self._parse_trace_only(trace_csvs) if trace_csvs else []
 
     def save_results(self, results: list[PMCKernelResult], tag: str = "pmc") -> str:
@@ -585,6 +585,16 @@ def _as_cmd(value: Any) -> list[str]:
     if isinstance(value, str):
         return shlex.split(value)
     return []
+
+
+def _wait_for_csvs(directory: Path, pattern: str, timeout_s: float = 10.0) -> list[Path]:
+    """Wait briefly for rocprofv3 CSV writers to flush after process exit."""
+    deadline = time.time() + timeout_s
+    while True:
+        files = list(directory.rglob(pattern))
+        if files or time.time() >= deadline:
+            return files
+        time.sleep(0.5)
 
 
 def _process_group_kwargs() -> dict[str, Any]:
