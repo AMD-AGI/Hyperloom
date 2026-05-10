@@ -136,6 +136,22 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"', trace_tool_text)
         self.assertNotIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens-internal}"', install_text)
         self.assertNotIn("Executor asks", skill_text)
+        # Read-only TRACELENS_ROOT must trigger a writable mirror under
+        # ${HYPERLOOM_ROOT}/TraceLens-internal (parallel to GEAK / OOB),
+        # and write_env_file() must export the resolved TRACELENS_ROOT so
+        # CLI subprocesses inherit the mirror instead of falling back to
+        # the read-only /wekafs default. Regression guard for the
+        # tracelens-oob-mirror change.
+        self.assertIn(
+            'TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"',
+            install_text,
+        )
+        self.assertIn('cp -r "$TRACELENS_ROOT" "$TRACELENS_MIRROR_DIR"', install_text)
+        self.assertIn('export TRACELENS_ROOT', install_text)
+        self.assertIn(
+            "echo \"export TRACELENS_ROOT='${TRACELENS_ROOT}'\"",
+            install_text,
+        )
 
     def test_trace_file_analysis_writes_report_logs_and_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -371,6 +387,69 @@ class KernelAgentToolTests(unittest.TestCase):
 
             self.assertNotEqual(code, 0)
             self.assertIn("unsupported backend", result["error"])
+
+
+class AuthFailureDetectionTests(unittest.TestCase):
+    """Cover :func:`_count_auth_failures` and the partial-promotion guard.
+
+    Regression for the r24 custom_allreduce loop where GEAK's inner
+    SelectPatchAgent kept hitting 401 against the wrong gateway
+    (``https://llm-api.amd.com/Anthropic`` expecting an
+    ``AMD_LLM_API_KEY`` distinct from ``SAFE_API_KEY``), left an empty
+    ``optimized_versions/`` directory on disk, got promoted to "partial"
+    by the evidence scanner, and shipped back ``decision=PARTIAL``. The
+    matching SharedState fix only retires kernels whose run_optimization
+    returns >= max_partial PARTIAL outcomes; this test fixture pins the
+    upstream half — when stdout shows a persistent 401 loop, the attempt
+    must NOT be promoted to partial in the first place, so make_proposal
+    returns REVERT and SharedState retires the kernel immediately.
+    """
+
+    def test_count_auth_failures_recognises_401_loop(self) -> None:
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            import kernel_optimization as ko  # type: ignore[import-not-found]
+        finally:
+            sys.path.pop(0)
+        log = (
+            "INFO calling https://llm-api.amd.com/Anthropic/v1/messages\n"
+            "HTTP/1.1 401 Unauthorized\n"
+            "INFO retry 1\n"
+            "HTTP/1.1 401 Unauthorized\n"
+            "AuthenticationError: Invalid API key (Subscription-Key not present)\n"
+        )
+        self.assertGreaterEqual(ko._count_auth_failures(log), 3)
+
+    def test_count_auth_failures_clean_logs(self) -> None:
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            import kernel_optimization as ko  # type: ignore[import-not-found]
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(ko._count_auth_failures(""), 0)
+        self.assertEqual(ko._count_auth_failures("speedup: 1.32x faster"), 0)
+        # A single 401 in a long run is recoverable; below threshold.
+        self.assertLess(
+            ko._count_auth_failures(
+                "WARN: HTTP/1.1 401 Unauthorized; retrying.\n"
+                "INFO retry succeeded\n"
+                "speedup: 1.21x"
+            ),
+            3,
+        )
+
+    def test_count_auth_failures_primus_token_pattern(self) -> None:
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            import kernel_optimization as ko  # type: ignore[import-not-found]
+        finally:
+            sys.path.pop(0)
+        log = (
+            "Primus.00009 token not present\n"
+            "Primus.00009 token not present\n"
+            "Primus.00009 token not present\n"
+        )
+        self.assertEqual(ko._count_auth_failures(log), 3)
 
 
 if __name__ == "__main__":
