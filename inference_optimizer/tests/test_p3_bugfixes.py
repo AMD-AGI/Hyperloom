@@ -63,8 +63,8 @@ def _silent_backends() -> dict[str, object]:
 
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_ROOT", str(tmp_path))
-    return make_session_dir("p3-test")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    return make_session_dir()
 
 
 # ===========================================================================
@@ -87,7 +87,6 @@ async def test_report_resolves_session_dir_from_env(tmp_path, monkeypatch):
     SqliteConnection(storage_dir / "coordinator.db").close()
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(sd))
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_SESSION_ROOT", raising=False)
 
     class _Ctx:
         task = Task(task_id="t-1", kind="report", params={},
