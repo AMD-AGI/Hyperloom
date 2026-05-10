@@ -144,11 +144,15 @@ def _proxy() -> str:
 
 
 def _default_sglang_image() -> str:
-    return f"{_proxy()}/lmsysorg/sglang:v0.5.10-rocm720-mi30x"
+    # v0.5.11 (2026-05-05): Spec V2 by default + DFLASH on ROCm + all-reduce/RMSNorm fusion.
+    # Confirmed available at harbor.core42.primus-safe.amd.com/proxy/lmsysorg/sglang.
+    return f"{_proxy()}/lmsysorg/sglang:v0.5.11-rocm720-mi30x"
 
 
 def _default_vllm_image() -> str:
-    return f"{_proxy()}/vllm/vllm-openai-rocm:v0.18.0"
+    # v0.19.0 (skip-listed v0.20.0 to stay one minor ahead of InferenceX baseline v0.17.0
+    # while avoiding any v0.20 breakage; bump to v0.20 once stability is confirmed).
+    return f"{_proxy()}/vllm/vllm-openai-rocm:v0.19.0"
 
 
 # ── HuggingFace client ──────────────────────────────────────────────────────────
