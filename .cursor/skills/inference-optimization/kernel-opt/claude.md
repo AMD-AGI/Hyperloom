@@ -1,15 +1,16 @@
 ---
 name: claude-inference-kernel-reference
-description: Claude Code backend for kernel optimization. In claw mode uses the OOB GPU Optimizer MCP; in local mode uses `oob_ray_submit.py run` (Ray-scheduled CLI). Multi-turn agent with tool-use capability. Verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
+description: Claude Code backend for kernel optimization via `oob_ray_submit.py run` (Ray-scheduled CLI). Multi-turn agent with tool-use capability. Verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
 ---
 
 # Claude Code — Kernel Optimization Backend
 
-Claude Code backend for kernel optimization. Two transport modes:
+Claude Code backend for kernel optimization. Local and Remote/RayJob modes use the
+same Ray-scheduled CLI transport:
 
 | Mode | How Claude is invoked |
 |------|-----------------------|
-| `claw` | OOB GPU Optimizer MCP (`agent_create_task(agent="claude")` etc.) |
+| `remote` | `oob_ray_submit.py run -a claude ...` CLI (single blocking subprocess per iteration) |
 | `local` | `oob_ray_submit.py run -a claude ...` CLI (single blocking subprocess per iteration) |
 
 Multi-turn agent with tool-use capability (file I/O, shell commands).
@@ -18,9 +19,8 @@ and micro-benchmarking.
 
 ## Status: Experimental
 
-Claude Code support in the OOB GPU Optimizer MCP is under active development. The tool
-interface is identical to Codex (`agent_create_task(agent="claude")`), but availability
-may be intermittent. **Fallback to `codex` if `claude` is unavailable.**
+Claude Code support depends on the `claude` CLI being installed in the runtime
+image. **Fallback to `codex` if `claude` is unavailable.**
 
 ## Constants
 
@@ -35,7 +35,7 @@ may be intermittent. **Fallback to `codex` if `claude` is unavailable.**
 
 | | Claude (this) | Codex | GEAK | LLM Proxy |
 |---|---|---|---|---|
-| **MCP** | OOB GPU Optimizer | OOB GPU Optimizer | GEAK | Direct API |
+| **Invocation** | `oob_ray_submit.py run -a claude` | `oob_ray_submit.py run -a codex` | `geak_ray_submit.py` | Direct API |
 | **Latency (per iter)** | 1–5 min | 30–120s | N/A | 1–30s |
 | **Latency (full round)** | 3–15 min | 2–6 min | 10–30 min | 1–30s |
 | **GPU on pod** | No | No | Yes | No |
@@ -45,7 +45,7 @@ may be intermittent. **Fallback to `codex` if `claude` is unavailable.**
 
 ## Tracing Setup
 
-At the **start** of OOB Claude usage (before the first `agent_create_task`), record
+At the **start** of OOB Claude usage (before the first `oob_ray_submit.py run`), record
 the start timestamp for message-level cost correlation:
 
 ```bash
@@ -63,71 +63,26 @@ is handled automatically by `auth_proxy.py` inside the OOB workload pod — no m
 header configuration needed (unlike GEAK). The timestamps allow correlating OOB's
 LLM spend to specific messages by querying `LiteLLM_SpendLogs` with time ranges.
 
-## Tool Sequence (claw MCP only)
+## CLI Sequence
 
-> **Local mode:** Skip this MCP sequence entirely. Use `oob_ray_submit.py run -a claude`
-> instead — see "Local Execution" section below.
+Identical to Codex — same `oob_ray_submit.py run` flow, different `-a` value.
 
-Identical to Codex — same MCP, different `agent` parameter.
-
-| Step | Tool | Purpose |
-|------|------|---------|
-| 0 | `bash: trace_action.py --component oob --action start --agent claude` | Record start timestamp (once) |
-| 1 | `agent_create_task` | Create task with kernel source + prompt |
-| 2 | `agent_submit_task` | Start execution |
-| 3 | `agent_get_task` | Poll status (every `CLAUDE_POLL_INTERVAL_S`) |
-| 4 | `agent_get_outputs` | List output files |
-| 5 | `agent_download_file` | Download optimized kernel |
-| 6 | `bash: trace_action.py --component oob --action end` | Record end timestamp (once, after all iterations) |
-| - | `agent_cancel_task` | Cancel if stuck past `CLAUDE_POLL_TIMEOUT_MIN` |
-
-## agent_create_task — Critical Details (claw MCP only)
-
-> **Claw mode only.** In local mode, these MCP tools are not available.
-> Use `oob_ray_submit.py run -a claude` CLI instead (see "Local Execution" below).
-
-- `agent`: `"claude"` (required)
-- `prompt`: kernel optimization instructions (same core as Codex — see [`codex.md`](codex.md))
-- `files`: array of `{filename, content}` — full kernel source embedded here
-- `max_turns`: use `CLAUDE_MAX_TURNS` (default 30, higher than Codex because Claude
-  benefits from multi-step reasoning)
-- `system_prompt`: recommended — Claude responds well to detailed persona prompts
-- `image`: optional — use `KERNEL_OPT_IMAGE` (shared with GEAK)
-- `workspace_id`: optional — use `KERNEL_OPT_WORKSPACE` (shared with GEAK, default `"control-plane-moe"`)
-
-### Example
-
+```bash
+$OOB_RAY_CLI run \
+  -a claude \
+  -p "$PROMPT" \
+  -f "$WORK_DIR/kernel.py" \
+  -o "$WORK_DIR/oob_claude_${KERNEL_NAME}" \
+  --max-turns 30 \
+  --timeout $((CLAUDE_POLL_TIMEOUT_MIN * 60)) \
+  --no-live --json
 ```
-Tool: agent_create_task
-Args: {
-    "agent": "claude",
-    "prompt": "<optimization instructions — same template as codex.md>",
-    "files": [
-        {"filename": "kernel.py", "content": "<full kernel source>"}
-    ],
-    "max_turns": 30,
-    "system_prompt": "<GPU expert persona — see codex.md>",
-    "image": "KERNEL_OPT_IMAGE",
-    "workspace_id": "KERNEL_OPT_WORKSPACE"
-}
-```
-
-Then:
-```
-Tool: agent_submit_task
-Args: { "task_id": "<task_id from create>" }
-```
-
-### Polling and Downloading
-
-Same pattern as Codex. See [`codex.md`](codex.md) for polling loop and download examples.
-Use `CLAUDE_POLL_INTERVAL_S` and `CLAUDE_POLL_TIMEOUT_MIN` instead of Codex constants.
 
 ## Prompt Template
 
 Same core prompt as Codex (see [`codex.md`](codex.md) Prompt Template section). All shared
 prompt rules from `actions/kernel-opt.md` apply. No GEAK-specific directives (no `mode`,
-no `max_rounds`). Image is passed as MCP parameter, not in prompt text.
+no `max_rounds`). Image/environment is provided by the RayJob/CLI environment, not in prompt text.
 
 ### MANDATORY CONSTRAINTS (must appear verbatim in every Claude prompt)
 
@@ -164,8 +119,7 @@ Then write the COMPLETE optimized file to optimized_kernel.py and exit.
 
 Same as Codex: optimized kernel written to `optimized_kernel.py` in the task workspace.
 
-- **MCP (claw):** Use `agent_get_outputs` to list, then `agent_download_file`.
-- **Local mode:** The `oob_ray_submit.py run --json` result's `.workspace` field points at the
+- The `oob_ray_submit.py run --json` result's `.workspace` field points at the
   task workspace. Read `$WORKSPACE/optimized_kernel.py` directly. There is no
   `output/` subdir.
 
@@ -188,7 +142,7 @@ RESULT_JSON=$($OOB_RAY_CLI run \
     --no-live --json)
 ```
 
-The same CLI ↔ MCP mapping table from [`codex.md`](codex.md) applies; Claude's
+The same CLI output convention from [`codex.md`](codex.md) applies; Claude's
 longer per-iteration latency just means a larger `--timeout` budget.
 
 ## Iterative Refinement Loop
@@ -197,7 +151,7 @@ Claude uses the **same iterative refinement loop** as Codex. See [`codex.md`](co
 "Iterative Refinement Loop" section for the full flow, pseudocode, feedback context
 format, and key rules.
 
-The only difference: use `agent="claude"` (or `oob_ray_submit.py run -a claude` in local mode) and
+The only difference: use `oob_ray_submit.py run -a claude` and
 Claude-specific constants (`CLAUDE_MAX_TURNS`, `CLAUDE_POLL_INTERVAL_S`,
 `CLAUDE_POLL_TIMEOUT_MIN`).
 
@@ -225,14 +179,20 @@ previously-failed approaches.
   round time: ~3–15 min for 3 iterations (vs Codex ~2–6 min).
 - **Feedback responsive**: Claude excels at incorporating iteration feedback —
   typically fixes compilation errors within 1–2 feedback iterations.
-- **Experimental**: If `agent_create_task(agent="claude")` returns an error, fall
-  back to `codex` automatically.
+- **Experimental**: If the `claude` CLI/backend is unavailable, fall back to
+  `codex` automatically.
 
 ## Troubleshooting
 
-### agent_create_task returns error
-- Claude backend may be unavailable. Fall back to Codex:
-  `agent_create_task(agent="codex", ...)` with the same prompt and files.
+### Claude CLI/backend unavailable
+- Fall back to Codex with the same prompt and files:
+  `oob_ray_submit.py run -a codex ...`
+- In Core42 RayJob remote mode, a valid Claude model can appear unavailable if
+  the local OOB auth proxy returns `404`. Before falling back, try the Core42
+  direct Anthropic pass-through workaround from
+  [`modes/REMOTE.md`](../modes/REMOTE.md): set
+  `ANTHROPIC_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy` and
+  `ANTHROPIC_CUSTOM_HEADERS="Authorization: Bearer ${ANTHROPIC_API_KEY}"`.
 
 ### Task runs but produces no output file
 - Claude may have spent all turns on analysis without writing a file.

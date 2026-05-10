@@ -14,7 +14,7 @@
 
 # Mode detection
 MODE="${MODE:-local}"
-if [ "$MODE" = "claw" ]; then
+if [ "$MODE" = "remote" ]; then
     WORKSPACE_ROOT="${WORKSPACE_ROOT:-/shared_nfs/inference-optimization}"
 else
     WORKSPACE_ROOT="${WORKSPACE_ROOT:-/opt/hyperloom}"

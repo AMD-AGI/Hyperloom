@@ -19,7 +19,7 @@ Generate the final optimization report and contribute new knowledge to the KB.
 ## Executive Summary
 - **Model**: {model_id} ({param_count})
 - **Hardware**: {gpu_count}x {gpu_type} ({num_nodes} nodes)
-- **Mode**: {Local | Claw (SaFE RayJob, {num_nodes} nodes, TP={tp})}
+- **Mode**: {Local | Remote (SaFE RayJob, {num_nodes} nodes, TP={tp})}
 - **Framework**: {framework} v{version}
 - **Optimization attempts**: {N} ({kept} kept, {discarded} discarded, {crashed} crashed)
 - **Total improvement**: {total_pct}% (baseline → optimized)
@@ -79,8 +79,8 @@ python3 $SKILL_ROOT/kb/kb_ingest.py \
 ## Heuristic Update
 N/A — terminal action.
 
-**Claw mode:** After the report is generated, stop the RayJob and clean up any parallel
-sweep workloads. See [`../modes/CLAW.md`](../modes/CLAW.md) "Cleanup" section.
+**Remote mode:** After the report is generated, stop the RayJob and clean up any parallel
+sweep workloads. See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Cleanup" section.
 
 ### CI Mode: Write ci_metrics.json
 

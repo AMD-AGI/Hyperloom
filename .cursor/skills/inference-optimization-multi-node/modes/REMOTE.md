@@ -1,58 +1,57 @@
-# Claw Mode — Complete Execution Reference
+# Remote Mode — Complete Execution Reference
 
-This document contains ALL claw-mode-specific instructions. Read this **before starting**
-when using Claw client with SaFE cluster.
+This document contains ALL remote-mode-specific instructions. Read this **before starting**
+when using remote client with SaFE cluster.
 
 **Agent:** Read `SKILL.md` for the orchestrator loop and shared Iron Rules (IR-1 through
-IR-7b). This file defines claw-specific Iron Rules (IR-8 through IR-11), constants,
+IR-7b). This file defines remote-specific Iron Rules (IR-8 through IR-11), constants,
 architecture, and per-action execution overrides.
 
 ## Environment
 
-- **Client**: Claw (internal platform, Claude Code-like)
+- **Client**: Remote client (external orchestration environment)
 - **Runtime**: SaFE cluster with multi-node GPU
-- **MCP Servers**: SaFE MCP + GEAK MCP + OOB GPU Optimizer MCP
+- **MCP Servers**: SaFE MCP only (RayJob lifecycle)
+- **OOB**: CLI (`oob_ray_submit.py run`) for Codex/Claude optimization tasks
 - **TraceLens**: Local CLI (`pip install -e /hyperloom/TraceLens-internal`)
-- **Storage**: Shared NFS (`/shared_nfs/` inside Pod, maps to NFS root)
+- **Storage**: Shared NFS (`/wekafs/` inside Pod, maps to NFS root)
 
 ## Mode Detection
 
-Auto-detected when Claw client context is present, or user specifies `Mode: claw`.
+Auto-detected when remote client context is present, or user specifies `Mode: remote`.
 
 ```bash
-if [ "${GEAK_LOCAL:-false}" != "true" ]; then
-    MODE="claw"
-    WORKSPACE_ROOT="${WORKSPACE_ROOT:-/shared_nfs/inference-optimization}"
-fi
+MODE="remote"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-/wekafs/inference-optimization}"
 ```
 
 ---
 
-## Claw-Mode Iron Rules
+## Remote-Mode Iron Rules
 
-### IR-8: Use `exec_on_gpu` for ALL GPU-side commands
+### IR-8: Use Ray Dashboard REST for ALL GPU-side commands
 
 After `source scripts/executor.sh`, ALL commands that run on the Ray cluster MUST go
-through `exec_on_gpu()` or `exec_on_gpu_bg()`. **NEVER** manually call `ray_submit.py`
-directly.
+through `exec_on_gpu()` or `exec_on_gpu_bg()`, which submit work through Ray Dashboard
+REST (`POST /api/jobs/`). **NEVER** drive the cluster from the sandbox with Ray Client
+or a manual submit wrapper.
 
 ```bash
 # CORRECT
 exec_on_gpu "export MODEL='$MODEL' ... && bash $SCRIPTS_DIR/run_baseline.sh"
 
-# WRONG — manual ray_submit.py
-python3 scripts/ray_submit.py --ray-address ... --command "..."
+# WRONG — bypassing executor.sh with a sandbox-side Ray client or custom submit wrapper
 ```
 
 ### IR-9: Main inference workload MUST use `kind: "RayJob"`
 
-The persistent inference cluster **MUST** be `kind: "RayJob"`. PyTorchJob is ONLY
-created internally by GEAK MCP for kernel optimization — the skill itself MUST NOT
-create PyTorchJob workloads.
+The persistent inference cluster **MUST** be `kind: "RayJob"`. Kernel optimization
+backends run through the OOB CLI wrapper (`oob_ray_submit.py`) on the RayJob.
+The skill itself MUST NOT create PyTorchJob workloads.
 
 ### IR-10: SaFE MCP — ONLY `workload_create(kind="RayJob")` and `workload_stop`
 
-In Claw mode, the skill may use SaFE MCP **only** for:
+In Remote mode, the skill may use SaFE MCP **only** for:
 
 - **`workload_create`** with `kind: "RayJob"` — to create the inference cluster
 - **`workload_get`** / **`workload_list`** — to check workload status
@@ -62,29 +61,33 @@ In Claw mode, the skill may use SaFE MCP **only** for:
 
 - **`workload_delete`** — NEVER delete workloads; use `workload_stop` instead
 - **`workload_create` with any kind other than `"RayJob"`** — no PyTorchJob, no other
-  types. GEAK creates its own PyTorchJobs internally via GEAK MCP; the skill MUST NOT
-  create them directly.
+  types. Kernel optimization is handled by the OOB CLI wrapper on Ray; the skill
+  MUST NOT create other workload types directly.
 
 Violation = immediate run invalidation.
 
-### IR-11: GEAK configuration is read-only
+### IR-11: OOB is CLI-only — no service API
 
-Same as IR-7 in `SKILL.md` — NEVER modify GEAK configuration, test data, or settings.
-Interact with GEAK exclusively through GEAK MCP tool calls.
+Same as IR-7 in `SKILL.md` — NEVER modify OOB configuration, auth files, test data,
+or settings. Use only the approved CLI tools:
+
+- OOB: `oob_ray_submit.py run`
+- TraceLens: `TraceLens_generate_perf_report_pytorch_inference` and
+  `orchestrator_prepare.py`
 
 ---
 
-## Claw-Mode Constants
+## Remote-Mode Constants
 
 These supplement the shared constants in `SKILL.md`.
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `RAY_CLIENT_PORT` | 10001 | Ray Client port on RayJob head node |
+| `RAY_DASHBOARD_PORT` | 8265 | Ray Dashboard REST port on RayJob head node |
 
-### Image Selection (Claw Mode)
+### Image Selection (Remote Mode)
 
-Use `KERNEL_OPT_IMAGE` (provided by CI or user). In claw mode, CI should supply the
+Use `KERNEL_OPT_IMAGE` (provided by CI or user). In remote mode, CI should supply the
 Ray-patched image for SGLang (e.g., `harbor.../custom/lmsysorg/sglang:202603270958` with
 Ray 2.44.1 fix). The same image is used for both the RayJob and kernel-opt backends.
 
@@ -103,23 +106,26 @@ click to avoid API incompatibilities with Ray CLI.
 
 ---
 
+
 ## RayJob Architecture
 
 ```
-Claw Client --> Skill (SKILL.md)
+Remote Client --> Skill (SKILL.md)
                  |-> SaFE MCP (workload_create kind="RayJob")
                  |     |-> Creates Ray Cluster: head (1 pod) + workers (N pods)
-                 |     |-> Exposes Ray Client port (10001)
+                 |     |-> Exposes Ray Dashboard REST port (8265)
                  |     \-> env.RAY_JOB_ENTRYPOINT = "tail -f /dev/null" (keeps cluster alive)
                  |
                  |-> exec_on_gpu (scripts/executor.sh)
-                 |     \-> ray_submit.py -> ray.init("ray://<head>:10001") -> run on cluster
+                 |     \-> POST http://<head>:8265/api/jobs/ -> run inside RayJob image
                  |
-                 |-> GEAK MCP (remote, unchanged)
-                 |     \-> SaFE API -> PyTorchJob -> kernel optimization
+                 |-> oob_ray_submit.py run -a {claude,codex} -p "..." -f kernel.py -o <work_dir>
+                 |     |-> Ray head schedules task with GPU isolation
+                 |     |-> Worker spawns claude/codex CLI as subprocess, blocks until done
+                 |     \-> Optimized files land in <work_dir>/<task_id>/workspace/
                  |
-                 |-> TraceLens CLI (local, pip install -e)
-                 |     \-> Reads traces from shared NFS
+                 |-> TraceLens CLI
+                 |     \-> Offline trace analysis from shared NFS
                  |
                  \-> Benchmark results on shared NFS
 ```
@@ -178,7 +184,7 @@ Args: {
 
 For N>2 nodes, set `resources[1].replica` to `N-1`. TP = GPU_PER_NODE × NUM_NODES.
 
-### Wait for RayJob Ready + get Ray head address
+### Wait for RayJob Ready + get Ray Dashboard address
 
 ```python
 import time
@@ -197,14 +203,15 @@ for attempt in range(60):
 pods = result.get("status", {}).get("pods", [])
 head_pod = next((p for p in pods if "head" in p.get("name", "")), pods[0] if pods else None)
 HEAD_IP = head_pod.get("ip", head_pod.get("podIP", ""))
-RAY_HEAD_ADDRESS = f"ray://{HEAD_IP}:{RAY_CLIENT_PORT}"
+RAY_DASHBOARD_URL = f"http://{HEAD_IP}:8265"
 ```
 
-### Set up claw execution environment
+### Set up remote execution environment
 
 ```bash
-export MODE=claw
-export RAY_HEAD_ADDRESS="ray://<HEAD_IP>:10001"
+export MODE=remote
+export HEAD_IP="<HEAD_IP>"
+export RAY_DASHBOARD_URL="http://<HEAD_IP>:8265"
 export MODEL="<model_path_on_shared_nfs>"
 export TP=<total_gpu_count>
 export CONC=<concurrency>
@@ -212,15 +219,49 @@ export ISL=1024
 export OSL=256
 export FRAMEWORK=<sglang|vllm>
 export INFERENCEX_PATH="<path_on_shared_nfs>"
+export SKILL_ROOT="${SKILL_ROOT:-/wekafs/yunkai/Hyperloom/.cursor/skills/inference-optimization}"
+export SCRIPTS_DIR="$SKILL_ROOT/scripts"
+export OOB_RAY_CLI="python3 $SCRIPTS_DIR/oob_ray_submit.py"
+export OOB_CLI="${OOB_CLI:-/opt/venv/bin/oob}"
+export TRACELENS_ROOT="${TRACELENS_ROOT:-/opt/hyperloom/TraceLens}"
 
 TIMESTAMP=$(date +%Y-%m-%d-%H-%M)
-export RESULT_DIR="/shared_nfs/inference-optimization/results/${TIMESTAMP}"
-export TRACE_DIR="/shared_nfs/inference-optimization/traces/${TIMESTAMP}"
+export RESULT_DIR="/wekafs/inference-optimization/results/${TIMESTAMP}"
+export TRACE_DIR="/wekafs/inference-optimization/traces/${TIMESTAMP}"
 
-source scripts/executor.sh
+source "$SCRIPTS_DIR/executor.sh"
 
 # Verify Ray cluster
 exec_on_gpu "python3 -c \"import ray; ray.init(); print(f'Nodes: {len(ray.nodes())}'); print(ray.cluster_resources()); ray.shutdown()\""
+```
+
+### Bootstrap / CLI preflight inside RayJob
+
+After the RayJob is running, reuse the BYOI bootstrap logic from
+`scripts/bootstrap.sh` to ensure CLI dependencies exist inside the RayJob image.
+This installs or verifies OOB, TraceLens, Ray/click compatibility, and the
+`codex` / `claude` CLIs. The generated environment file is reusable, but
+force `MODE=remote` again after sourcing it.
+
+```bash
+exec_on_gpu "
+export PATH='/opt/venv/bin:'\"\$PATH\"
+export MODE=remote
+export SKILL_ROOT='$SKILL_ROOT'
+export HYPERLOOM_BUNDLE='\${HYPERLOOM_BUNDLE:-/wekafs/fully-local}'
+
+if [ ! -f /opt/hyperloom/.bootstrap_done ] && [ -d \"\$HYPERLOOM_BUNDLE\" ]; then
+  bash '$SCRIPTS_DIR/bootstrap.sh'
+fi
+
+[ -f /etc/profile.d/hyperloom-env.sh ] && . /etc/profile.d/hyperloom-env.sh
+export MODE=remote
+export OOB_CLI='\${OOB_CLI:-/opt/venv/bin/oob}'
+
+command -v oob || echo 'WARN: oob CLI missing'
+command -v codex || command -v claude || echo 'WARN: codex/claude CLI missing'
+command -v TraceLens_generate_perf_report_pytorch_inference || echo 'WARN: TraceLens CLI missing'
+"
 ```
 
 ### Cleanup — Stop RayJob
@@ -243,15 +284,129 @@ for wl in sweep_workloads:
 
 ---
 
-## Per-Action Claw Overrides
+## Per-Action Remote Overrides
 
-The action modules in `actions/*.md` contain shared logic for both modes. Below are the
-claw-specific execution details for each action.
+The action modules in `actions/*.md` contain shared action logic. Below are the
+remote execution details for each action.
 
 ### Setup (`actions/setup.md`)
 
-In claw mode, after environment detection, create the RayJob (see "RayJob Lifecycle" above)
+In remote mode, after environment detection, create the RayJob (see "RayJob Lifecycle" above)
 before proceeding to classify/baseline.
+
+### OOB in Remote Mode
+
+OOB has no persistent service; each Codex / Claude task is one blocking
+`oob_ray_submit.py run` invocation. Ray assigns GPU isolation via
+`HIP_VISIBLE_DEVICES`.
+
+```bash
+# $OOB_RAY_CLI = "python3 $SCRIPTS_DIR/oob_ray_submit.py"
+$OOB_RAY_CLI status
+
+$OOB_RAY_CLI run \
+  -a codex \
+  -p "Optimize this Triton kernel ... (see prompt template in kernel-opt/codex.md)" \
+  -f $WORK_DIR/kernel.py \
+  -o $WORK_DIR/oob_codex_${KERNEL_NAME} \
+  --max-turns 20 \
+  --timeout 1200 \
+  --no-live --json
+```
+
+Output files land at:
+
+```
+<output-dir>/tasks/<user>/<task_id>/workspace/optimized_kernel.py
+<output-dir>/tasks/<user>/<task_id>/workspace/execution.log
+<output-dir>/tasks/<user>/<task_id>/workspace/trajectory_round_*.jsonl
+```
+
+Use the JSON `.workspace` field to get the workspace dir directly. There is no
+separate `output/` subdir.
+
+The RayJob image must contain both `/opt/venv/bin/oob` and the selected backend
+CLI (`codex` or `claude`) on `PATH`. If `oob_ray_submit.py` forwards a client
+`PATH` that hides `/opt/venv/bin`, set `OOB_CLI=/opt/venv/bin/oob`.
+
+Additional DSR1 RayJob pitfalls:
+
+- Always pass pod-visible `/wekafs/...` paths to `-f`, `-o`, and runtime file
+  references. Client paths such as `/mnt/weka/...` are not valid inside workers.
+- Use `OOB_CLI=/opt/venv/bin/oob` when launching from an external Cursor; the
+  forwarded client `PATH` can otherwise hide the pod venv.
+- The backend CLI must be installed and authenticated. Codex may need
+  `/root/.codex/auth.json` or an equivalent `--api-key` path; API key env alone
+  may not be enough.
+- `OPENAI_BASE_URL` should point at the Core42 proxy:
+  `https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1`.
+- **Core42 Claude/OOB auth smoke test:** If `oob run -a claude` or `claude --print`
+  fails with a model-not-found/access message for a known-valid model such as
+  `claude-opus-4-6` or `claude-opus-4-7`, use this one-shot request only to verify
+  that the Core42 Anthropic-compatible endpoint, key, headers, and model name are valid:
+  ```bash
+  curl -sS "$ANTHROPIC_BASE_URL/messages" \
+    -H "x-api-key: $ANTHROPIC_API_KEY" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "content-type: application/json" \
+    -d '{"model":"claude-opus-4-6","max_tokens":8,"messages":[{"role":"user","content":"Reply OK only."}]}'
+  ```
+  This request is **not** a kernel optimization path and MUST NOT replace OOB.
+  If it succeeds, repair the OOB/Claude environment and rerun `oob_ray_submit.py run`.
+  On Core42, Claude Code may fail through the bootstrap auth proxy because the proxy
+  path/header adaptation can return `404` even when the upstream model is valid.
+  For the Claude CLI smoke test only, use the Core42 Anthropic-style base path
+  without `/v1` and inject the Bearer header:
+  ```bash
+  export ANTHROPIC_BASE_URL="https://core42.primus-safe.amd.com/api/v1/llm-proxy"
+  export ANTHROPIC_CUSTOM_HEADERS="Authorization: Bearer ${ANTHROPIC_API_KEY}"
+
+  claude --bare --print --model claude-opus-4-6 "Reply with OK only."
+  ```
+  When invoking Claude through `oob_ray_submit.py`, ensure
+  `ANTHROPIC_CUSTOM_HEADERS` is forwarded to Ray workers. If this env is not
+  forwarded, run `oob run -a claude ...` directly inside the RayJob as a fallback.
+- A successful OOB smoke should return `status: completed` and produce a
+  workspace under `<output-dir>/tasks/cli/<task_id>/workspace/`.
+
+### TraceLens in Remote Mode
+
+TraceLens is a CLI tool with no persistent service. Use it directly on the
+remote client side against trace files on shared NFS:
+
+```bash
+mkdir -p "$RESULT_DIR/tracelens/perf_report_csvs"
+TraceLens_generate_perf_report_pytorch_inference \
+  --profile_json_path "$TRACE_PATH" \
+  --output_xlsx_path "$RESULT_DIR/tracelens/perf_report.xlsx" \
+  --output_csvs_dir "$RESULT_DIR/tracelens/perf_report_csvs" \
+  --gpu_arch_json_path "$TRACELENS_ROOT/TraceLens/AgenticMode/Standalone/utils/arch/$GPU_TYPE.json" \
+  --enable_pseudo_ops \
+  --group_by_num_kernels \
+  --enable_kernel_summary
+if [ -f "$RESULT_DIR/tracelens/perf_report_csvs/ops_summary.csv" ]; then
+  python3 "$TRACELENS_ROOT/TraceLens/AgenticMode/Standalone/orchestrator_prepare.py" \
+    --trace-path "$TRACE_PATH" \
+    --platform "$GPU_TYPE" \
+    --output-dir "$RESULT_DIR/tracelens"
+else
+  echo "TraceLens produced GPU-only output; use kernel_summary.csv as fallback"
+fi
+```
+
+vLLM worker traces can be GPU-only. In that case the inference CLI may generate
+only `gpu_timeline.csv` and `kernel_summary.csv`; use `kernel_summary.csv` as the
+fallback candidate source.
+
+TraceLens pitfalls seen in RayJob validation:
+
+- Use the CLI, not the TraceLens MCP, for Hyperloom CLI validation.
+- If `TraceLens_generate_perf_report_pytorch_inference` is missing on the
+  client side, install TraceLens with
+  `pip install -e /mnt/weka/yunkai/TraceLens-internal`, or rely on the
+  RayJob bootstrap-installed CLI.
+- `pandas 3.x` can trigger dtype assignment failures; pin `pandas<3` if the
+  TraceLens CLI fails during report generation.
 
 ### Baseline (`actions/baseline.md`)
 
@@ -264,7 +419,7 @@ exec_on_gpu "export MODEL='$MODEL' TP=$TP CONC=$CONC FRAMEWORK=sglang \
   bash $SCRIPTS_DIR/run_baseline.sh"
 ```
 
-Trace files and results are written to shared NFS — accessible from both Claw client and
+Trace files and results are written to shared NFS — accessible from both remote client and
 Ray cluster.
 
 ### Profile (`actions/profile.md`)
@@ -282,7 +437,7 @@ After profiling, unset profiler env vars inside the Ray cluster:
 exec_on_gpu "unset PROFILE SGLANG_TORCH_PROFILER_DIR VLLM_TORCH_PROFILER_DIR"
 ```
 
-Trace files on shared NFS — accessible from both Claw client and TraceLens CLI.
+Trace files on shared NFS — accessible from both remote client and TraceLens CLI.
 
 Filesystem searches for kernel source must also go through `exec_on_gpu`:
 
@@ -292,7 +447,7 @@ exec_on_gpu "find /sgl-workspace /opt/venv /tmp/torchinductor_root -name '*.py' 
 exec_on_gpu "cat /path/to/standalone_kernel.py"
 ```
 
-Trace parsing can be done on the Claw side (traces are on shared NFS).
+Trace parsing can be done on the remote client side (traces are on shared NFS).
 
 ### Backends (`actions/backends.md`)
 
@@ -360,6 +515,15 @@ exec_on_gpu "cat /path/to/standalone_kernel.py"
 
 Image selection: use `KERNEL_OPT_IMAGE` (provided by CI or user).
 
+Submit kernel candidates through OOB only:
+
+```bash
+# OOB Codex / Claude
+$OOB_RAY_CLI run -a codex -p "$PROMPT" -f "$WORK_DIR/kernel.py" \
+  -o "$WORK_DIR/oob_codex_${KERNEL_NAME}" --max-turns 20 --timeout 1200 \
+  --no-live --json
+```
+
 ### Integrate (`actions/integrate.md`)
 
 All patch commands go through `exec_on_gpu`:
@@ -367,12 +531,13 @@ All patch commands go through `exec_on_gpu`:
 ```bash
 exec_on_gpu "python3 $SCRIPTS_DIR/patch_inductor.py patch \
     --kernel-name $KERNEL_NAME \
-    --geak-file $GEAK_OUTPUT_PATH \
+    --optimized-file $OOB_OUTPUT_PATH \
     --target-file $STANDALONE_FILE_PATH \
     --best-config '{\"XBLOCK\": 4, \"R0_BLOCK\": 2048, \"num_warps\": 4}'"
 ```
 
-GEAK output is on shared NFS: `/shared_nfs/geak/tasks/<user_hash>/<task_id>/output/`.
+OOB outputs are on shared NFS or the CLI-reported workspace path. Use the
+JSON `.workspace` field from `oob_ray_submit.py run --json`.
 
 **Re-Baseline:**
 
@@ -402,8 +567,8 @@ find /sgl-workspace/aiter -name '__pycache__' -exec rm -rf {} + 2>/dev/null
 #### Multi-Node Kernel Patching
 
 For multi-node RayJob, kernel patching requires patching on ALL nodes:
-- **Inductor cache** (Strategy A): Cache is local to each node. Must patch on ALL nodes,
-  OR use a shared Inductor cache directory on NFS (`TORCHINDUCTOR_CACHE_DIR=/shared_nfs/inductor_cache`).
+- **Inductor cache** (Strategy A): Cache is node-local. Must patch on ALL nodes,
+  OR use a shared Inductor cache directory on NFS (`TORCHINDUCTOR_CACHE_DIR=/wekafs/inductor_cache`).
 - **Framework source** (Strategy B): If framework is installed on shared NFS, patching on
   head is sufficient.
 
@@ -442,16 +607,18 @@ exec_on_gpu "export MODEL='$MODEL' TP=$TP INFERENCEX_PATH='$INFERENCEX_PATH' \
 **~~Option B: SaFE MCP parallel sweep~~ — DEPRECATED (violates IR-10)**
 
 > Per IR-10, the skill MUST NOT create SaFE workloads other than the main RayJob.
-> Use Option A (serial) or Option C (Ray submit) instead.
+> Use Option A (serial) or Option B (Ray tasks inside the existing RayJob) instead.
 
-**Option B: Parallel sweep via Ray submit:**
+**Option B: Parallel sweep via Ray tasks inside the RayJob:**
 
-Submit each config as a separate Ray task (uses the existing RayJob cluster):
+Submit a Python driver through `exec_on_gpu` / Ray Dashboard REST. Inside the RayJob
+image, the driver can use in-cluster `ray.init()` (no `address=`) to schedule tasks on the
+existing cluster:
 
 ```python
 import ray
 
-ray.init(address=RAY_HEAD_ADDRESS)
+ray.init()
 
 @ray.remote(num_gpus=8)
 def run_sweep_config(model, tp, conc, isl, osl, result_dir, extra_args):
@@ -468,7 +635,7 @@ def run_sweep_config(model, tp, conc, isl, osl, result_dir, extra_args):
 configs = [(64, 1024, 1024), (16, 1024, 1024), (4, 1024, 1024),
            (64, 8192, 1024), (16, 8192, 1024)]
 futures = [run_sweep_config.remote(MODEL, TP, c, i, o,
-    f"/shared_nfs/inference-optimization/results/sweep_{TIMESTAMP}/c{c}_i{i}_o{o}",
+    f"/wekafs/inference-optimization/results/sweep_{TIMESTAMP}/c{c}_i{i}_o{o}",
     TUNED_SERVER_ARGS) for c, i, o in configs]
 results = ray.get(futures)
 ```
@@ -498,12 +665,10 @@ TP value should match total GPU count across all nodes (e.g., 2 nodes × 8 GPU =
 
 ## NFS Sharing Constraint
 
-GEAK optimization output and RayJob must share the same NFS:
-- GEAK server writes optimized kernels to `NFS_BASE_PATH/tasks/<user>/<task_id>/output/`
+OOB CLI output and RayJob patching must share the same NFS:
+- OOB CLI writes optimized kernels under `<output-dir>/tasks/<user>/<task_id>/workspace/`
 - RayJob's patch step reads from the same NFS path
-- Ensure RayJob's volume mount includes GEAK's storage path
-
-If GEAK uses separate storage, download kernel via `geak_download_file` before patching.
+- Ensure RayJob's volume mount includes the OOB output path
 
 ## Safe Process Management
 

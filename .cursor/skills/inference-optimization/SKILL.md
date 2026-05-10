@@ -31,11 +31,11 @@ This skill supports two execution modes. **Read the mode-specific document for y
 before starting:**
 
 - **Local mode** (Hyperloom container, Ray-scheduled GEAK CLI): see [`modes/LOCAL.md`](modes/LOCAL.md)
-- **Claw mode** (SaFE RayJob, `exec_on_gpu`): see [`modes/CLAW.md`](modes/CLAW.md)
+- **Remote mode** (SaFE RayJob, `exec_on_gpu`): see [`modes/REMOTE.md`](modes/REMOTE.md)
 
 **Auto-detection:**
 - `MODE=local` → local mode
-- Claw client context → claw mode
+- remote client context → remote mode
 
 ## Iron Rules (non-negotiable)
 
@@ -59,7 +59,7 @@ Every server launch must be preceded by killing any existing server process and 
 
 ### IR-5: Safe process management
 
-**NEVER use `pkill -f sglang`** — it kills Ray workers in claw mode. Only use:
+**NEVER use `pkill -f sglang`** — it kills Ray workers in remote mode. Only use:
 
 ```bash
 kill $(pgrep -f 'python.*-m sglang.launch_server') 2>/dev/null
@@ -77,34 +77,22 @@ Always use `scripts/patch_inductor.py` with `--target-file`. The `--cache-dir` o
 
 ### IR-7: NEVER modify GEAK configuration
 
-**Local mode:** GEAK is CLI-only via Ray (`geak_ray_submit.py`); do not use GEAK MCP or
-`geak_client.py`. See [`modes/LOCAL.md`](modes/LOCAL.md) IR-13 and IR-14.
+GEAK is CLI-only via Ray (`geak_ray_submit.py`) in both Local and Remote/RayJob
+modes; do not use GEAK service APIs or alternate clients. See
+[`modes/LOCAL.md`](modes/LOCAL.md) and [`modes/REMOTE.md`](modes/REMOTE.md).
 
-**Claw mode:** GEAK is an external service — treat it as **read-only infrastructure**. The skill MUST NOT
-modify any GEAK configuration files, settings, or parameters beyond what is passed as
-arguments to `geak_create_task`. Specifically:
+Treat GEAK configuration as **read-only infrastructure**. The skill MUST NOT
+modify any GEAK configuration files, settings, or parameters at runtime. Specifically:
 
 - **Do NOT** modify GEAK server config, workspace settings, or API configuration
 - **Do NOT** write to or alter any files under the GEAK config/settings directories
 - **Do NOT** change `KERNEL_OPT_WORKSPACE`, `GEAK_STEP_LIMIT`, or other constants
   at runtime (use the values from the constants table above or user overrides)
-- **Do NOT** modify the GEAK MCP server configuration (`cursor_mcp_config.json`, etc.)
 - **Do NOT** modify any test data, results, or configuration files belonging to GEAK
   (e.g., `tests/test_data/`, `server/config.py`, `server/templates/`)
 
-In claw mode, the ONLY interaction allowed is through these GEAK MCP tool calls:
-`geak_get_model_config` (read-only), `geak_create_task`, `geak_submit_task`,
-`geak_get_task`, `geak_get_outputs`, `geak_download_file`, `geak_list_tasks`.
-
-**NEVER call `geak_set_model_config` to change the model** — the LLM backend is
-pre-configured by the administrator. Changing `model_class`, `model_name`, or
-`api_base` risks setting a non-existent model and breaking all tasks.
-
-**Exception — tracing headers (claw / MCP path):** At the start of the kernel-opt action, you MUST
-call `geak_set_model_config` exactly once to inject observability headers. Run
-`trace_action.py --component geak --action start` first to record timing and
-generate the config, then apply the `extra_headers` via MCP (see kernel-opt/geak.md
-"Tracing Setup"). Do NOT modify `model_class`, `model_name`, `api_base`, or `api_key`.
+The ONLY allowed GEAK interaction is through `geak_ray_submit.py`, which invokes
+the `geak` CLI under Ray GPU isolation.
 
 Violation (changing model/backend) = immediate run invalidation.
 
@@ -122,7 +110,7 @@ Ray-managed GPU scheduling that direct in-chat generation lacks.
 
 Violation = immediate run invalidation.
 
-**Additional mode-specific Iron Rules are defined in [`modes/CLAW.md`](modes/CLAW.md) (IR-8 through IR-11) and [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12 through IR-16).**
+**Additional mode-specific Iron Rules are defined in [`modes/REMOTE.md`](modes/REMOTE.md) (IR-8 through IR-11) and [`modes/LOCAL.md`](modes/LOCAL.md) (IR-12 through IR-16).**
 
 ## Kernel Optimization & Tooling Constants
 
@@ -139,7 +127,7 @@ All values below are the **single source of truth**. All actions reference these
 | `GEAK_MAX_SUBMISSIONS` | 15 | Total GEAK submissions budget per run |
 | `GEAK_TOP_CANDIDATES` | 5 | Number of top kernel candidates to submit |
 | `GEAK_CONSECUTIVE_DISCARDS` | 5 | Stop after this many consecutive discards |
-| `GEAK_WALL_CLOCK_MIN` | 120 | Max wall-clock minutes for kernel-opt action |
+| `GEAK_WALL_CLOCK_MIN` | 30 | Max wall-clock minutes for kernel-opt action |
 | `GEAK_POLL_INTERVAL_S` | 60 | Seconds between GEAK task status polls |
 | `GEAK_POLL_TIMEOUT_MIN` | 15 | Max minutes to poll a single GEAK task |
 | `MIN_GPU_PCT` | 3 | Minimum GPU time % to consider a kernel as GEAK candidate |
@@ -148,7 +136,7 @@ All values below are the **single source of truth**. All actions reference these
 
 **ALWAYS pass `KERNEL_OPT_IMAGE` to all kernel-opt backends (GEAK + OOB), regardless of kernel type.** For kernels whose source exists in the image (e.g., `/sgl-workspace/aiter/`), the pod uses the same image. For runtime-generated kernels (e.g., `/tmp/torchinductor_root/` from `torch.compile`), do NOT include `kernel_url`/`kernel_repo` in the prompt; copy files to shared NFS or rely on `files[].content` only.
 
-**Claw-mode constants are in [`modes/CLAW.md`](modes/CLAW.md).**
+**Remote-mode constants are in [`modes/REMOTE.md`](modes/REMOTE.md).**
 
 ## Architecture
 
@@ -156,19 +144,20 @@ All values below are the **single source of truth**. All actions reference these
 SKILL.md (this file)          — DFS orchestrator: loop, heuristic, dispatch
 actions/*.md                   — Self-contained action modules (11 actions)
 kernel-opt/                    — Per-backend kernel optimization references
-  geak.md                      — GEAK MCP (remote GPU pod)
-  codex.md                     — Codex via OOB GPU Optimizer MCP
-  claude.md                    — Claude Code via OOB GPU Optimizer MCP
+  geak.md                      — GEAK via Ray-scheduled CLI
+  codex.md                     — Codex via OOB Ray-scheduled CLI
+  claude.md                    — Claude Code via OOB Ray-scheduled CLI
   llm.md                       — LLM Proxy (direct API)
 kb/                            — RAG knowledge base (JSONL + query/ingest scripts)
 scripts/                       — Baseline/profiling/accuracy shell scripts
-modes/                         — Mode-specific execution details (LOCAL.md, CLAW.md)
+modes/                         — Mode-specific execution details (LOCAL.md, REMOTE.md)
 KNOWLEDGE-BASE.md              — Legacy KB (archived, seeded into kb/entries.jsonl)
 ```
 
 ## Common Pitfalls (validated from CI logs)
 
 These are recurring errors observed in production CI runs. **Read before executing.**
+
 
 1. **PATH: Always `export PATH="/opt/venv/bin:$PATH"` first.** The system python3
    (`/usr/bin/python3`) does NOT have sglang/vllm/numpy. Every bash command must
@@ -186,7 +175,8 @@ These are recurring errors observed in production CI runs. **Read before executi
    server startup, health wait, benchmark, and profiling in a tested sequence. Manual
    launch skips health checks and often hits Exit code 144 (SIGTERM from stale processes).
 
-5. **Never call `geak_set_model_config` to change the model.** See IR-7. Only exception: tracing headers.
+5. **Never modify GEAK runtime configuration.** See IR-7. GEAK is invoked via
+   the rendered CLI config and `geak_ray_submit.py`.
 
 6. **Record start/end timestamps for ALL external calls.** Before invoking
    any external component (GEAK, OOB, LLM proxy, TraceLens, or future backends),
@@ -209,8 +199,8 @@ This is a single-agent sequential loop. Each action runs to completion before re
 ## Autonomy Rules
 
 **Execute autonomously — no human confirmation needed.** Do NOT ask the user before:
-- Creating/stopping RayJob on SaFE (claw mode)
-- Running baseline/profiling scripts via Ray (claw mode) or locally
+- Creating/stopping RayJob on SaFE (remote mode)
+- Running baseline/profiling scripts via Ray (remote mode) or locally
 - Submitting GEAK tasks
 - Killing/restarting servers (inside RayJob or locally)
 - Patching kernels (Inductor cache or source files)
