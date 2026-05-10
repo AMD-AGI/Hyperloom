@@ -925,6 +925,24 @@ budget on untested params/backend candidates or the next kernel.
   ```
   Bypass with `--critic-mock` (offline / smoke) or `--critic-codex-bare`
   (legacy direct Codex path) if a fix isn't available immediately.
+- Every critic verdict comes back as `('needs_review',
+  'critic_unavailable')` with `kb_skipped=missing_critical_context` and
+  `required_context=['model', 'framework', ...]` (see the
+  `critic_agent_backend turn=...` log line and
+  `BackendTurnResult.metadata['required_context']`): in older versions
+  this was a real bug — `CriticAgentBackend` shipped `request.context={}`
+  unconditionally, so the runtime's `CRITICAL_CONTEXT_KEYS=("model","framework")`
+  gate fired on every proposal and the orchestrator could never get an
+  `approve`. As of this fix the backend reads `manifest.json` once in
+  `__post_init__` (`_load_static_context_from_manifest()`) and injects
+  model / framework / gpu_type / model_path / tp / workload / precision
+  into every `prepare-review` request. If you see this symptom again,
+  check `manifest.json` for non-empty `model_name` and `framework`
+  (`build_manifest()` is the writer) and grep `logs/cli.log` for
+  `critic_agent_backend static_context source=... keys=[...]` — the keys
+  list shows what was actually loaded. To bypass while debugging, restart
+  with `--critic-mock` (always-approve, no review safety) or pass an
+  explicit `static_context=` if you're invoking the backend programmatically.
 - `BackendError: critic-agent runtime.cli prepare-review/commit-review
   exited rc=2`: the critic-agent runtime aborted with an adapter bug —
   per `critic-agent/AGENTS.md` §Exit codes, rc=2 means schema or
