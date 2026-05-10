@@ -126,12 +126,19 @@ def collect_rows(
             continue
 
         for rec in manifest.get("records", []):
+            detected = rec.get("detected") or {}
             row = {
                 "model":                rec.get("model"),
                 "task_id":              rec.get("task_id"),
                 "display_name":         rec.get("display_name"),
                 "submit_status":        rec.get("status"),
                 "final_status":         rec.get("final_status"),
+                "framework":            detected.get("framework"),
+                "precision":            detected.get("precision"),
+                "tp":                   detected.get("tp"),
+                "concurrency":          detected.get("concurrency"),
+                "params_b":             detected.get("params_b"),
+                "image":                detected.get("image"),
                 "baseline_tok_per_gpu":  None,
                 "optimized_tok_per_gpu": None,
                 "gain_pct":              None,
@@ -178,32 +185,116 @@ def fmt_pct(v) -> str:
         return str(v)
 
 
+def _short_name(model: str) -> str:
+    """Drop org prefix for compactness (e.g. `Qwen/Qwen2.5-7B` -> `Qwen2.5-7B`)."""
+    return model.split("/")[-1] if model else "—"
+
+
+def _gain_medal(gain_pct) -> str:
+    """Decorate gain% with medal emoji per the manual RESULTS_FINAL.md convention."""
+    if gain_pct is None:
+        return "—"
+    if gain_pct > 50:
+        return f"🥇🥇🥇🥇 **{gain_pct:+.2f}%**"
+    if gain_pct > 20:
+        return f"🥇🥇🥇 **{gain_pct:+.2f}%**"
+    if gain_pct > 10:
+        return f"🥇🥇 **{gain_pct:+.2f}%**"
+    if gain_pct > 1:
+        return f"🥇 **{gain_pct:+.2f}%**"
+    if gain_pct > 0.1:
+        return f"🟢 {gain_pct:+.2f}%"
+    return f"{gain_pct:+.2f}%"
+
+
+def _sort_key(r: dict) -> tuple:
+    """Sort: tasks with optimized data first (by gain desc), then partial-data, then failed."""
+    gain = r.get("gain_pct")
+    opt = r.get("optimized_tok_per_gpu")
+    has_data = gain is not None and opt is not None
+    has_partial = opt is not None
+    fail = r.get("final_status") not in ("Succeeded", "Running", None)
+    rank = 0 if has_data else (1 if has_partial else (3 if fail else 2))
+    return (rank, -(gain or 0), -(opt or 0))
+
+
 def render_markdown(rows: list[dict], target_gpu: str, isl: int, osl: int) -> str:
-    succeeded = sum(1 for r in rows if r.get("final_status") == "Succeeded")
+    rows_sorted = sorted(rows, key=_sort_key)
     n = len(rows)
+    succeeded = sum(1 for r in rows if r.get("final_status") == "Succeeded")
+    with_data = sum(1 for r in rows if r.get("gain_pct") is not None)
+    beat_ifx = [r for r in rows
+                if r.get("vs_inferenceX_pct") is not None and r["vs_inferenceX_pct"] > 0]
+    top_gains = sorted(
+        [r for r in rows if r.get("gain_pct") is not None and r["gain_pct"] > 1],
+        key=lambda r: -r["gain_pct"],
+    )[:5]
+
     lines = [
-        "# Hyperloom CI Summary",
-        f"- Models: {n} (final_status=Succeeded: {succeeded})",
-        f"- ISL/OSL: {isl} / {osl}",
-        f"- InferenceX reference GPU: `{target_gpu}`",
+        "# Hyperloom CI Summary — sorted by Optimization Gain",
         "",
-        "| Model | Baseline tok/s/GPU | Optimized tok/s/GPU | Gain % | "
-        f"InferenceX ({target_gpu}) tok/s/GPU | vs InferenceX % | Actions |",
-        "|---|---:|---:|---:|---:|---:|---|",
+        f"- **Models submitted**: {n}",
+        f"- **Succeeded (final_status)**: {succeeded}",
+        f"- **With baseline+optimized data**: {with_data}",
+        f"- **Beat InferenceX (`{target_gpu}`)**: {len(beat_ifx)}",
+        f"- **ISL/OSL**: {isl} / {osl}",
+        "",
+        "| # | Model | Frm | Prec | TP | Params (B) | "
+        "Baseline tok/s/GPU | **Optimized tok/s/GPU** | **Gain** | "
+        f"InferenceX ({target_gpu}) | vs InfX | Actions |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
-    for r in rows:
+    for i, r in enumerate(rows_sorted, 1):
         actions = ", ".join(r.get("actions") or []) or "—"
-        # Markdown-escape pipe chars in actions list
         actions = actions.replace("|", "\\|")[:200]
+        opt = r.get("optimized_tok_per_gpu")
+        opt_str = f"**{fmt_num(opt)}**" if opt is not None else "—"
+        params_b = r.get("params_b")
+        params_str = f"{params_b:.1f}" if params_b else "—"
+        vs_ifx = r.get("vs_inferenceX_pct")
+        vs_ifx_str = "—" if vs_ifx is None else (
+            f"**{vs_ifx:+.0f}%** ✅" if vs_ifx > 0 else f"{vs_ifx:+.0f}% ❌"
+        )
         lines.append(
-            f"| `{r['model']}` "
+            f"| {i} | `{_short_name(r['model'])}` "
+            f"| {r.get('framework') or '—'} "
+            f"| {r.get('precision') or '—'} "
+            f"| {r.get('tp') or '—'} "
+            f"| {params_str} "
             f"| {fmt_num(r['baseline_tok_per_gpu'])} "
-            f"| {fmt_num(r['optimized_tok_per_gpu'])} "
-            f"| {fmt_pct(r['gain_pct'])} "
+            f"| {opt_str} "
+            f"| {_gain_medal(r['gain_pct'])} "
             f"| {fmt_num(r['inferenceX_tok_per_gpu'])} "
-            f"| {fmt_pct(r['vs_inferenceX_pct'])} "
+            f"| {vs_ifx_str} "
             f"| {actions} |"
         )
+
+    if top_gains:
+        lines += ["", "## Top Optimization Gains", ""]
+        lines.append("| Rank | Model | Baseline → Optimized | Gain |")
+        lines.append("|---:|---|---|---:|")
+        for i, r in enumerate(top_gains, 1):
+            base = r.get("baseline_tok_per_gpu")
+            opt = r.get("optimized_tok_per_gpu")
+            lines.append(
+                f"| {i} | `{_short_name(r['model'])}` "
+                f"| {fmt_num(base)} → {fmt_num(opt)} tok/s/GPU "
+                f"| {_gain_medal(r['gain_pct'])} |"
+            )
+
+    if beat_ifx:
+        lines += ["", f"## vs InferenceX `{target_gpu}` (apples-to-apples wins)", ""]
+        lines.append(f"| Model | InferenceX ({target_gpu}) | Ours | Δ |")
+        lines.append("|---|---:|---:|---:|")
+        for r in sorted(beat_ifx, key=lambda r: -r["vs_inferenceX_pct"]):
+            opt = r.get("optimized_tok_per_gpu")
+            ref = r.get("inferenceX_tok_per_gpu")
+            lines.append(
+                f"| `{_short_name(r['model'])}` "
+                f"| {fmt_num(ref)} | **{fmt_num(opt)}** "
+                f"| **{r['vs_inferenceX_pct']:+.0f}%** ✅ |"
+            )
+
     return "\n".join(lines) + "\n"
 
 
