@@ -50,9 +50,9 @@ on:
       target_gpu:
         description: 'Reference GPU for InferenceX comparison in the summary table'
         required: false
-        default: 'b200'
+        default: 'mi300x'
         type: choice
-        options: [b200, h100, mi300x, mi355x]
+        options: [mi300x, b200, h100, mi355x, mi325x]
       wait_for_completion:
         description: 'Wait for tasks to finish (default true). Uncheck for fire-and-forget.'
         type: boolean
@@ -245,7 +245,7 @@ jobs:
           python3 build_summary.py \
             --artifacts-dir "${{ github.workspace }}/task-artifacts-merged" \
             --manifests-dir "${{ github.workspace }}/manifests" \
-            --target-gpu    "${INPUT_TARGET_GPU:-b200}" \
+            --target-gpu    "${INPUT_TARGET_GPU:-mi300x}" \
             --isl           "${INPUT_ISL:-1024}" \
             --osl           "${INPUT_OSL:-1024}" \
             --out-dir       "${{ github.workspace }}/summary-out"
