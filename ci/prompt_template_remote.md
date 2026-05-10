@@ -1,5 +1,5 @@
-Use the /wekafs/yunkai/Hyperloom/.cursor/skills/inference-optimization to optimize {model_hf} inference performance.
-Read /wekafs/yunkai/Hyperloom/.cursor/skills/inference-optimization/addendum.md carefully.
+Read /wekafs/yunkai/Hyperloom/.cursor/skills/inference-optimization-multi-node/addendum.md carefully.
+Use the /wekafs/yunkai/Hyperloom/.cursor/skills/inference-optimization-multi-node to optimize {model_hf} inference performance.
 mode: remote
 
 Configuration:
@@ -7,14 +7,14 @@ Model path: {model_path}
 Framework: {framework}
 Precision: {precision}
 Inference params: ISL={isl}, OSL={osl}, CONC={conc}, RANDOM_RANGE_RATIO=0.8
-TP={tp}, EP={ep}
+MoRI topology: prefill TP=8 EP=1, decode TP=8 EP=1
 GPU type: {gpu_type}
 InferenceX path: {inferencex_path}
 
 Environment:
 The current runtime (Claw client) cannot access /wekafs directly.
 RayJob / TraceLens can all access /wekafs.
-The default Python on the Claw client does not have the ray package; use /opt/ray-venv/bin/python3 to execute ray_submit.py.
+Use SaFE MCP for RayJob lifecycle and Ray Dashboard REST for commands inside the RayJob.
 
 Task submission:
 RayJob submit to the core42-sandbox workspace.
@@ -22,10 +22,37 @@ RayJob image: {rayjob_image}
 One head, one worker:
   head:   CPU=96, GPU=8, memory=1024Gi, ephemeralStorage=400Gi
   worker: CPU=96, GPU=8, memory=1024Gi, ephemeralStorage=400Gi
-env:
+
+env (all must be included in workload_create.env):
   - RAY_JOB_ENTRYPOINT=base64("tail -f /dev/null")
+  - SAFE_API_KEY={safe_api_key}
+  - OOB_API_KEY={safe_api_key}
+  - ANTHROPIC_API_KEY={safe_api_key}
+  - OPENAI_API_KEY={safe_api_key}
+  - AMD_LLM_API_KEY={safe_api_key}
+  - LLM_API_KEY={safe_api_key}
+  - OOB_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
   - PATH_TO_BNXT_TAR_PACKAGE=/wekafs/primus/data/libbnxt/libbnxt_re-234.0.154.0.tar.gz
   - REBUILD_BNXT=0
+
+entry_points (per resource, base64-encoded init scripts; same content for head and worker so bootstrap runs on BOTH nodes):
+  - head:   base64(
+      'export PATH=/opt/venv/bin:$PATH'
+      ' && export SKILL_ROOT=/wekafs/yunkai/Hyperloom/.cursor/skills/inference-optimization-multi-node'
+      ' && export HYPERLOOM_BUNDLE=/wekafs/fully-local'
+      ' && export FRAMEWORK={framework}'
+      ' && bash $SKILL_ROOT/scripts/bootstrap.sh'
+    )
+  - worker: base64(
+      'export PATH=/opt/venv/bin:$PATH'
+      ' && export SKILL_ROOT=/wekafs/yunkai/Hyperloom/.cursor/skills/inference-optimization-multi-node'
+      ' && export HYPERLOOM_BUNDLE=/wekafs/fully-local'
+      ' && export FRAMEWORK={framework}'
+      ' && bash $SKILL_ROOT/scripts/bootstrap.sh'
+    )
+
+After the RayJob is Running, verify with one short Ray Dashboard REST job:
+`source /etc/profile.d/hyperloom-env.sh && which oob && which claude && which codex && which ray && oob --help | head -5`.
 
 Serving:
 - Use SGLang MoRI 1P1D
@@ -38,6 +65,8 @@ KERNEL_OPT_BACKENDS: {kernel_opt_backends}
 KERNEL_OPT_CLAUDE_MODEL: claude-opus-4-7
 KERNEL_OPT_IMAGE: {kernel_opt_image}
 KERNEL_OPT_WORKSPACE: core42-sandbox
+Use OOB only via `oob_ray_submit.py run -a claude`.
+Submit the top 5 valid OOB optimization candidates if available. If fewer than 5 valid candidates exist, explain why in the report.
 Must optimize at least {min_kernels} kernels
 
 Requirements:
@@ -76,7 +105,6 @@ Use this MCP to create RayJob:
 If any pipeline step is not finished correctly, DO IT AGAIN until it returns correct results.
 DO NOT create PyTorchJob. Create RayJob only.
 Do NOT use existing RayJobs. Create a new RayJob.
-Use /wekafs/yunkai/Hyperloom/.cursor/skills/inspector to constrain and audit the agent's behavior.
 
 NEVER execute find / or find on network mount points (e.g., /wekafs, /mnt/weka) without depth limits.
 If you must use find, you MUST include -maxdepth 4 (e.g., find / -maxdepth 4 -name "...").
