@@ -39,12 +39,6 @@ jobs:
             '
           }
 
-          # --- Detect target release ---
-          release_val=$(get_form_value "Target release")
-          case "$release_val" in
-            v0.2|v0.3|v0.4) LABELS="$LABELS,release:$release_val" ;;
-          esac
-
           # --- Detect domain from "Optimization domain" (Bug/Feature) ---
           domain_val=$(get_form_value "Optimization domain")
           case "$domain_val" in
