@@ -39,6 +39,7 @@ log = logging.getLogger("ci-orchestrator")
 
 CI_DIR = Path(__file__).resolve().parent
 PROMPT_TEMPLATE = (CI_DIR / "prompt_template.md").read_text()
+PROMPT_TEMPLATE_REMOTE = (CI_DIR / "prompt_template_remote.md").read_text()
 
 # Load skill files from repo — embedded in prompt to bypass tool-mounting failures
 _SKILL_ROOT = CI_DIR.parent / ".cursor" / "skills" / "inference-optimization"
@@ -63,6 +64,30 @@ def load_config(config_path: str | None = None) -> dict:
         return yaml.safe_load(f)
 
 
+def _build_bss(merged: dict, isl: int, osl: int) -> str:
+    script = merged.get("benchmark_script")
+    script_content = merged.get("benchmark_script_content", "")
+    if script and script_content:
+        return (
+            f"MANDATORY: Replicate the server config from this InferenceX benchmark script "
+            f"({script}).\n"
+            f"Key env vars: MODEL={merged['model_path']} TP={merged['tp']} "
+            f"EP_SIZE={merged['ep']} CONC={merged['conc']} ISL={isl} OSL={osl} "
+            f"MAX_MODEL_LEN=4096 RANDOM_RANGE_RATIO=0.8 NUM_PROMPTS_MULTIPLIER=10\n"
+            f"DO NOT run the script directly. Extract server launch command and env vars, "
+            f"then reproduce them yourself.\n\n"
+            f"<benchmark_script>\n{script_content}\n</benchmark_script>"
+        )
+    elif script:
+        return (
+            f"MANDATORY: Read the InferenceX benchmark script and replicate its server config:\n"
+            f"  {merged['inferencex_path']}/{script}\n"
+            f"Key env vars: MODEL={merged['model_path']} TP={merged['tp']} "
+            f"CONC={merged['conc']} ISL={isl} OSL={osl}"
+        )
+    return "No InferenceX benchmark script found. Construct server launch manually."
+
+
 def render_prompt(merged: dict) -> str:
     isl, osl = merged["isl_osl_configs"][0]
     ifx_text = format_benchmark_for_prompt(
@@ -72,31 +97,38 @@ def render_prompt(merged: dict) -> str:
         tp=merged.get("tp"),
         conc=merged.get("conc"),
     )
-    script = merged.get("benchmark_script")
-    script_content = merged.get("benchmark_script_content", "")
-    if script and script_content:
-        bss = (
-            f"MANDATORY: Replicate the server config from this InferenceX benchmark script "
-            f"({script}).\n"
-            f"Key env vars for this run: MODEL={merged['model_path']} TP={merged['tp']} "
-            f"EP_SIZE={merged['ep']} CONC={merged['conc']} ISL={isl} OSL={osl} "
-            f"MAX_MODEL_LEN=4096 RANDOM_RANGE_RATIO=0.8 "
-            f"NUM_PROMPTS_MULTIPLIER=10 RESULT_FILENAME=baseline\n"
-            f"DO NOT run the script directly. Extract server launch command and env vars, "
-            f"then reproduce them yourself.\n\n"
-            f"<benchmark_script>\n{script_content}\n</benchmark_script>"
-        )
-    elif script:
-        bss = (
-            f"MANDATORY: Read the InferenceX benchmark script and replicate its server config:\n"
-            f"  {merged['inferencex_path']}/{script}\n"
-            f"Key env vars: MODEL={merged['model_path']} TP={merged['tp']} "
-            f"CONC={merged['conc']} ISL={isl} OSL={osl}"
-        )
-    else:
-        bss = "No InferenceX benchmark script found. Construct server launch manually."
+    bss = _build_bss(merged, isl, osl)
+    safe_api_key = os.environ.get("CLAW_API_KEY", "")
+    safe_base_url = os.environ.get("SAFE_BASE_URL", "")
+    nfs_root = os.environ.get("NFS_ROOT", "/workspace")
 
-    # Embed skill files so agent doesn't depend on tool mounting
+    if merged.get("mode") == "remote":
+        return PROMPT_TEMPLATE_REMOTE.format(
+            model_hf=merged["model_hf"],
+            model_path=merged["model_path"],
+            framework=merged["framework"],
+            precision=merged["precision"],
+            isl=isl,
+            osl=osl,
+            conc=merged["conc"],
+            tp=merged["tp"],
+            ep=merged["ep"],
+            gpu_type=merged["gpu_type"],
+            inferencex_path=merged["inferencex_path"],
+            rayjob_image=merged.get("rayjob_image", ""),
+            kernel_opt_backends=merged["kernel_opt_backends"],
+            kernel_opt_image=merged["kernel_opt_image"],
+            min_kernels=merged["min_kernels"],
+            result_dir=merged["result_dir"],
+            target_gpu=merged["target_gpu"],
+            inferenceX_data=ifx_text,
+            benchmark_script_section=bss,
+            safe_api_key=safe_api_key,
+            safe_base_url=safe_base_url,
+            nfs_root=nfs_root,
+        )
+
+    # Local mode: embed skill files so agent doesn't depend on tool mounting
     skill_section = ""
     if SKILL_MD:
         skill_section += f"\n<skill_md>\n{SKILL_MD}\n</skill_md>\n"
@@ -110,11 +142,6 @@ def render_prompt(merged: dict) -> str:
         skill_section += f"\n<executor_sh>\n{EXECUTOR_SH}\n</executor_sh>\n"
     if COMMON_SH:
         skill_section += f"\n<common_sh>\n{COMMON_SH}\n</common_sh>\n"
-
-    safe_api_key = os.environ.get("CLAW_API_KEY", "")
-    safe_base_url = os.environ.get("SAFE_BASE_URL", "")
-    sandbox_workspace = os.environ.get("SANDBOX_WORKSPACE", "")
-    nfs_root = os.environ.get("NFS_ROOT", "/workspace")
 
     return PROMPT_TEMPLATE.format(
         model_hf=merged["model_hf"],
@@ -143,7 +170,7 @@ def render_prompt(merged: dict) -> str:
         skill_section=skill_section,
         safe_api_key=safe_api_key,
         safe_base_url=safe_base_url,
-        sandbox_workspace=sandbox_workspace,
+        sandbox_workspace=os.environ.get("SANDBOX_WORKSPACE", ""),
         nfs_root=nfs_root,
     )
 
@@ -185,7 +212,6 @@ def run_model(
     status = "failed"
     session_id = None
 
-    is_remote = merged.get("mode") == "remote"
     tp = merged.get("tp", 1) or 1
     ep = merged.get("ep", 1) or 1
     gpu_count = max(tp * ep, 1)
@@ -236,15 +262,16 @@ def run_model(
         time.sleep(1)
 
         try:
-            # Remote mode: no pluginId (CPU sandbox, agent reads skill from /wekafs directly),
-            # no tool 74 (skill zip not needed).
-            # Local mode: pluginId=4 for base tools, tool 74 for ci-mix300 skill.
-            plugin_id = None if is_remote else 4
-            tools = [] if is_remote else claw.default_tools
-            claw.send_message(session_id, prompt, plugin_id=plugin_id, tools=tools)
-            log.info("Prompt sent to session %s (mode=%s, gpu_count=%s)",
-                     session_id, "remote" if is_remote else "local",
-                     "cpu" if is_remote else gpu_count)
+            is_remote = merged.get("mode") == "remote"
+            msg_tools = [] if is_remote else claw.default_tools
+            # Local mode: request GPU resources so the sandbox has access to the right GPU count.
+            # Remote mode: CPU sandbox only — the RayJob handles GPU allocation.
+            sandbox_resource = (
+                None if is_remote
+                else {"gpu": str(gpu_count), "amd.com/gpu": str(gpu_count)}
+            )
+            claw.send_message(session_id, prompt, plugin_id=4, tools=msg_tools, resource=sandbox_resource)
+            log.info("Prompt sent to session %s (gpu_count=%s, remote=%s)", session_id, gpu_count, is_remote)
         except Exception as e:
             log.error("Failed to send message to %s: %s", session_id, e)
             status_holder["status"] = "failed"
