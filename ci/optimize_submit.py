@@ -48,6 +48,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -575,14 +576,62 @@ class SafeOptimizeClient:
     def wait_task_done(
         self, task_id: str, timeout_min: int = 480, poll_s: int = 60,
     ) -> tuple[str, dict]:
-        """Poll task until it reaches a terminal status. Returns (status, last_task_dict).
+        """Wait until the task reaches a terminal status. Returns (status, last_task_dict).
 
-        Returns ('Timeout', {}) if the deadline elapses while still Pending/Running.
-        Transient HTTP errors are logged and retried — they don't abort the wait.
+        Strategy: prefer Claw SSE stream (sees the agent's `ResultMessage` event the
+        instant phase 11 finishes). Fall back to SaFE optimization-API polling if
+        no clawSessionId is available yet, or if the SSE stream fails.
+
+        Why SSE: SaFE's optimization-task `status` field is updated by a
+        background controller and frequently lags Claw by minutes (often shows
+        Timeout while the agent is still running phase 9/10/11). SSE on the
+        underlying Claw session is the source of truth for actual completion.
+
+        Returns ('Timeout', {}) if neither stream nor polling sees a terminal
+        status before the deadline.
         """
         log.info("[task %s] waiting for completion (timeout=%dm, poll=%ds)",
                  task_id, timeout_min, poll_s)
         deadline = time.time() + timeout_min * 60
+
+        # Step 1: wait briefly for clawSessionId to materialize. SaFE creates the
+        # Claw session as part of submit_task, so this almost always returns
+        # immediately; cap the wait at 60s to fall through to polling if not.
+        sid = None
+        for _ in range(12):
+            sid = self._claw_session_id_for(task_id)
+            if sid:
+                break
+            time.sleep(5)
+
+        if sid:
+            log.info("[task %s] using SSE on clawSessionId=%s", task_id, sid[:8])
+            sse_reason = self._sse_wait_until_done(sid, deadline)
+            log.info("[task %s] SSE finished: reason=%s", task_id, sse_reason)
+            # SSE done → grab the latest SaFE task detail (status may still be
+            # 'Running' if the SaFE controller is lagging; we trust SSE here).
+            try:
+                last_task = self.get_task(task_id)
+            except Exception:
+                last_task = {}
+            sf_status = last_task.get("status", "") if last_task else ""
+            if sf_status in self.TERMINAL_TASK_STATUSES:
+                return sf_status, last_task
+            if sse_reason == "ResultMessage":
+                return "Succeeded", last_task
+            if sse_reason == "stream_error":
+                # Fall through to polling
+                pass
+            elif sse_reason == "deadline":
+                return "Timeout", last_task
+            else:
+                # idle_timeout / Stopped phase / etc. — agent's chat ended but
+                # we didn't see ResultMessage; trust SaFE's view if it's terminal,
+                # otherwise return Succeeded (best-effort, agent likely finished).
+                return sf_status if sf_status else "Succeeded", last_task
+
+        # Step 2 (fallback): SaFE optimization-API polling.
+        log.info("[task %s] no clawSessionId — falling back to SaFE polling", task_id)
         last_status = ""
         last_phase = -1
         last_task: dict = {}
@@ -603,6 +652,75 @@ class SafeOptimizeClient:
             time.sleep(poll_s)
         log.warning("[task %s] wait timed out after %dm", task_id, timeout_min)
         return "Timeout", last_task
+
+    def _sse_wait_until_done(self, session_id: str, deadline: float) -> str:
+        """Subscribe to the Claw session SSE stream, return when the agent ends.
+
+        Stream protocol (text/event-stream over /claw-api/v1/chat/sessions/<id>/messages):
+          - Each event is `id:`/`event:`/`data:` lines + blank-line separator.
+          - Historical events are replayed from the beginning, then the stream
+            stays open with `: keepalive` heartbeats.
+          - When the agent ends a turn it emits `event: ResultMessage` carrying
+            the stop_reason. That's our signal.
+
+        Returns one of:
+          - "ResultMessage": agent emitted final ResultMessage event
+          - "Stopped":       sandboxStatus phase reached Stopped/Terminated
+          - "idle_timeout":  no events for >10min after replay finished
+          - "deadline":      hit the per-task wall-clock deadline
+          - "stream_error":  HTTP error or socket exception (caller will fall back)
+        """
+        url = f"{self.base_url}/claw-api/v1/chat/sessions/{session_id}/messages"
+        last_evt = time.time()
+        idle_grace_s = 600  # 10 min of pure keepalive after the last event
+        try:
+            with self._sess.get(url, stream=True, timeout=(10, 60)) as r:
+                if not r.ok:
+                    log.warning("SSE stream HTTP %d for session %s",
+                                r.status_code, session_id[:8])
+                    return "stream_error"
+                current_event = None
+                for raw in r.iter_lines(decode_unicode=True):
+                    now = time.time()
+                    if now > deadline:
+                        return "deadline"
+                    if raw is None:
+                        continue
+                    if raw == "" or raw.startswith(":"):
+                        # Blank-line separator or `: keepalive` heartbeat.
+                        if now - last_evt > idle_grace_s:
+                            return "idle_timeout"
+                        continue
+                    if raw.startswith("id:"):
+                        continue
+                    if raw.startswith("event:"):
+                        current_event = raw[6:].strip()
+                        continue
+                    if not raw.startswith("data:"):
+                        continue
+                    payload = raw[5:].strip()
+                    try:
+                        d = json.loads(payload)
+                    except Exception:
+                        continue
+                    last_evt = now
+                    et = d.get("type") or current_event
+                    if et == "ResultMessage":
+                        return "ResultMessage"
+                    if et == "sandboxStatus":
+                        ph = (d.get("phase") or "").lower()
+                        if ph in ("stopped", "terminated", "failed"):
+                            return "Stopped"
+        except requests.exceptions.RequestException as e:
+            log.warning("SSE stream error for session %s: %s",
+                        session_id[:8], type(e).__name__)
+            return "stream_error"
+        except Exception as e:
+            log.warning("SSE stream unexpected error for session %s: %s",
+                        session_id[:8], e)
+            return "stream_error"
+        # Stream closed cleanly without ResultMessage — treat as idle.
+        return "idle_timeout"
 
     # WORKAROUND: SaFE's /api/v1/optimization/tasks/<id>/artifacts has a bug
     # where it returns only 1 file even when the underlying Claw session has
@@ -830,6 +948,75 @@ def _safe_local_path(artifacts_dir: Path, task_id: str, remote_path: str) -> Pat
     return artifacts_dir / task_id / Path(*parts) if parts else artifacts_dir / task_id / "artifact.bin"
 
 
+_KEY_RESULT_SUFFIXES: tuple[str, ...] = ("optimization_report.md", "ci_metrics.json")
+
+
+def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
+    """Scan canonical NFS result directories for files matching this model.
+
+    Used when Claw API list_artifacts returned nothing useful (sandbox died
+    before agent flushed files, OR the agent wrote results to an NFS-mounted
+    PyTorchJob/RayJob workdir that's not visible via Claw's /files endpoint).
+
+    Mirrors the fallback in ci/orchestrator.py (3a → 3b) so optimize_submit
+    is consistent with the main CI pipeline. Returns count of files copied.
+    """
+    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    scan_dirs = [
+        f"{nfs_root}/hyperloom-results",
+        f"{nfs_root}/results/ci",
+        f"{nfs_root}/inference-optimization/results",
+    ]
+    model_basename = (rec.model or "").split("/")[-1]
+    model_short = model_basename.lower().replace("-", "").replace("_", "").replace(".", "")
+    if not model_short or not rec.task_id:
+        return 0
+    task_dir = artifacts_dir / rec.task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    copied = 0
+    for scan_dir in scan_dirs:
+        if not os.path.isdir(scan_dir):
+            continue
+        # Sort newest-first so we get the most recent run if multiple exist.
+        try:
+            entries = sorted(os.listdir(scan_dir), reverse=True)
+        except Exception:
+            continue
+        for entry in entries:
+            entry_clean = entry.lower().replace("-", "").replace("_", "").replace(".", "")
+            if model_short not in entry_clean:
+                continue
+            candidate = os.path.join(scan_dir, entry)
+            if not os.path.isdir(candidate):
+                continue
+            for suffix in _KEY_RESULT_SUFFIXES:
+                for root, _, fnames in os.walk(candidate):
+                    for fn in fnames:
+                        if not fn.endswith(suffix):
+                            continue
+                        src = os.path.join(root, fn)
+                        dst = task_dir / fn
+                        if dst.exists():
+                            continue
+                        try:
+                            shutil.copy2(src, dst)
+                        except Exception as e:
+                            log.warning("[task %s] NFS fallback copy %s -> %s failed: %s",
+                                        rec.task_id, src, dst, e)
+                            continue
+                        rec.artifact_files.append(str(dst))
+                        rec.artifact_count += 1
+                        copied += 1
+                        log.info("[task %s] NFS fallback: copied %s -> %s",
+                                 rec.task_id, src, dst)
+            if copied:
+                break  # don't keep walking once we found this model's dir
+        if copied:
+            break
+    return copied
+
+
 def wait_and_collect_one(
     safe: SafeOptimizeClient,
     rec: SubmissionRecord,
@@ -839,7 +1026,13 @@ def wait_and_collect_one(
     collect: bool,
     all_artifacts: bool,
 ) -> SubmissionRecord:
-    """Wait for one task to finish, then optionally download its artifacts."""
+    """Wait for one task to finish, then optionally download its artifacts.
+
+    Two-stage collection (mirrors orchestrator.py):
+      1. Claw API: list_artifacts(task_id) -> download each via Claw stream
+      2. NFS fallback: if we still don't have ci_metrics.json + optimization_report.md,
+         walk the canonical NFS result directories for a matching model dir
+    """
     if not rec.task_id:
         return rec  # nothing to wait for (skipped/failed during submit)
 
@@ -852,9 +1045,14 @@ def wait_and_collect_one(
     if not collect:
         return rec
 
-    items = safe.list_artifacts(rec.task_id)
+    # Stage 1: Claw API
+    try:
+        items = safe.list_artifacts(rec.task_id)
+    except Exception as e:
+        log.warning("[task %s] list_artifacts failed: %s", rec.task_id, e)
+        items = []
     wanted = [it for it in items if _is_wanted_artifact(it.get("path", ""), all_artifacts)]
-    log.info("[task %s] artifacts: %d total, %d to download",
+    log.info("[task %s] claw artifacts: %d total, %d to download",
              rec.task_id, len(items), len(wanted))
 
     task_dir = artifacts_dir / rec.task_id
@@ -871,6 +1069,18 @@ def wait_and_collect_one(
             log.info("[task %s] saved %s (%d bytes)", rec.task_id, path, n)
         except Exception as e:
             log.warning("[task %s] failed to download %s: %s", rec.task_id, path, e)
+
+    # Stage 2: NFS fallback if we didn't get the key result files via Claw.
+    has_metrics = any(p.endswith("ci_metrics.json") for p in rec.artifact_files)
+    has_report = any(p.endswith("optimization_report.md") for p in rec.artifact_files)
+    if not (has_metrics and has_report):
+        log.info("[task %s] missing key files (metrics=%s report=%s) — trying NFS fallback",
+                 rec.task_id, has_metrics, has_report)
+        n_added = _nfs_fallback_collect(rec, artifacts_dir)
+        if n_added:
+            log.info("[task %s] NFS fallback added %d files", rec.task_id, n_added)
+        else:
+            log.info("[task %s] NFS fallback found nothing", rec.task_id)
     return rec
 
 
