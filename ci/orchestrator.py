@@ -270,8 +270,10 @@ def run_model(
                 None if is_remote
                 else {"gpu": str(gpu_count), "amd.com/gpu": str(gpu_count)}
             )
-            claw.send_message(session_id, prompt, plugin_id=4, tools=msg_tools, resource=sandbox_resource)
-            log.info("Prompt sent to session %s (gpu_count=%s, remote=%s)", session_id, gpu_count, is_remote)
+            claw.send_message(session_id, prompt, plugin_id=4, tools=msg_tools,
+                              resource=sandbox_resource)
+            log.info("Prompt sent to session %s (gpu_count=%s, remote=%s)",
+                     session_id, gpu_count, is_remote)
         except Exception as e:
             log.error("Failed to send message to %s: %s", session_id, e)
             status_holder["status"] = "failed"
