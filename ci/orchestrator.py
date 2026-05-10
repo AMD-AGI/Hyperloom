@@ -186,21 +186,9 @@ def run_model(
     session_id = None
 
     is_remote = merged.get("mode") == "remote"
-    # sessions.ts reads body.image and body.resource on POST /messages (not POST /sessions).
-    # Remote mode: CPU sandbox — no image/resource override needed.
-    # Local mode: pass framework image so Brain uses the correct container, and
-    # compute resource from TP×EP so the GPU sandbox gets the right GPU count.
-    sandbox_image = None if is_remote else (merged.get("sandbox_image", "") or None)
     tp = merged.get("tp", 1) or 1
     ep = merged.get("ep", 1) or 1
     gpu_count = max(tp * ep, 1)
-    _cpu_map = {1: 32, 2: 64, 4: 96, 8: 128}
-    _mem_map = {1: 128, 2: 256, 4: 512, 8: 1024}
-    sandbox_resource = None if is_remote else {
-        "amd.com/gpu": str(gpu_count),
-        "cpu": str(_cpu_map.get(tp, 32)),
-        "memory": f"{_mem_map.get(tp, 128)}Gi",
-    }
 
     for attempt in range(1, _MAX_RETRY_ATTEMPTS + 1):
         if attempt > 1:
@@ -248,23 +236,15 @@ def run_model(
         time.sleep(1)
 
         try:
-            # Remote mode: no pluginId (CPU sandbox has no local tool mounting),
-            # no tool 74 (skill is on /wekafs, agent reads it directly).
+            # Remote mode: no pluginId (CPU sandbox, agent reads skill from /wekafs directly),
+            # no tool 74 (skill zip not needed).
             # Local mode: pluginId=4 for base tools, tool 74 for ci-mix300 skill.
-            # image + resource are passed here (not in create_session) because
-            # sessions.ts only reads them from POST /sessions/:id/messages body.
             plugin_id = None if is_remote else 4
             tools = [] if is_remote else claw.default_tools
-            claw.send_message(
-                session_id, prompt,
-                plugin_id=plugin_id,
-                tools=tools,
-                image=sandbox_image,
-                resource=sandbox_resource,
-            )
-            log.info("Prompt sent to session %s (mode=%s, image=%s, gpu=%s)",
+            claw.send_message(session_id, prompt, plugin_id=plugin_id, tools=tools)
+            log.info("Prompt sent to session %s (mode=%s, gpu_count=%s)",
                      session_id, "remote" if is_remote else "local",
-                     sandbox_image or "none", gpu_count if not is_remote else "cpu")
+                     "cpu" if is_remote else gpu_count)
         except Exception as e:
             log.error("Failed to send message to %s: %s", session_id, e)
             status_holder["status"] = "failed"
