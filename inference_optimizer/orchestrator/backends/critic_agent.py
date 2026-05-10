@@ -53,6 +53,7 @@ from ..intent_parser import (
     NoIntentEmitted,
     validate_envelope,
 )
+from ...session_paths import manifest_path
 from .base import Backend, BackendError, BackendTurnResult
 
 
@@ -251,6 +252,18 @@ class CriticAgentBackend:
     runtime_caller_factory:
         Test seam returning a :data:`RuntimeCaller`. Tests override this
         to bypass the real Python subprocess.
+    static_context:
+        Optional explicit per-session context (model / framework /
+        gpu_type / workload / precision / ...) injected as
+        ``request.context`` on every ``prepare-review`` call. When ``None``
+        (production path), the backend reads ``manifest.json`` under
+        ``session_dir`` once in ``__post_init__`` and derives the same
+        keys from there. Tests pass this in directly to bypass the
+        manifest read; the empty dict ``{}`` is a valid explicit override
+        that reproduces the legacy "no context" behaviour. Without this,
+        every verdict comes back as ``needs_review`` /
+        ``critic_unavailable`` because the runtime's ``CRITICAL_CONTEXT_KEYS
+        = ("model", "framework")`` check fails on an empty merged context.
     name:
         Backend instance name surfaced in the Coordinator startup banner.
     """
@@ -262,6 +275,7 @@ class CriticAgentBackend:
     kb_mode: Literal["inmemory", "live"] = "inmemory"
     kb_env: dict[str, str] | None = None
     runtime_caller_factory: Callable[[], RuntimeCaller] | None = None
+    static_context: dict[str, Any] | None = None
     name: str = "critic-agent"
 
     # Runtime state — populated in __post_init__ and mutated turn-over-turn.
@@ -274,6 +288,9 @@ class CriticAgentBackend:
     _client: Any = field(default=None, init=False, repr=False)
     _turn_idx: int = field(default=0, init=False, repr=False)
     _skill_preamble: str | None = field(default=None, init=False, repr=False)
+    _static_context: dict[str, Any] = field(
+        default_factory=dict, init=False, repr=False,
+    )
     calls: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -330,6 +347,22 @@ class CriticAgentBackend:
                 kwargs["base_url"] = base_url
             self._client = AsyncOpenAI(**kwargs)
 
+        # Resolve static per-session context (model / framework / ...) once.
+        # Without this the runtime's prepare-review sees req.context={} and
+        # falls back to needs_review + critic_unavailable for every proposal
+        # because CRITICAL_CONTEXT_KEYS=("model","framework") aren't present
+        # in the merged context. Explicit `static_context={}` is honoured
+        # (legacy / unit-test behaviour).
+        if self.static_context is not None:
+            self._static_context = dict(self.static_context)
+        else:
+            self._static_context = self._load_static_context_from_manifest()
+        log.info(
+            "critic_agent_backend static_context source=%s keys=%s",
+            "explicit" if self.static_context is not None else "manifest",
+            sorted(self._static_context.keys()),
+        )
+
     # ------------------------------------------------------------------
     # Public API — Backend.run
     # ------------------------------------------------------------------
@@ -358,7 +391,7 @@ class CriticAgentBackend:
             "kind": "coordinator_inbox",
             "session_id": session_id,
             "raw_prompt": prompt,
-            "context": {},
+            "context": dict(self._static_context),
         }
         request_path.write_text(
             json.dumps(request, ensure_ascii=False, indent=2),
@@ -442,21 +475,23 @@ class CriticAgentBackend:
             ) from exc
 
         kb_skipped = judge_bundle.get("kb_read_skipped_reason")
+        required_context = list(judge_bundle.get("required_context") or [])
         verdicts_summary = [
             (i.payload.get("verdict"), i.payload.get("source"))
             for i in intents if i.type.value == "review_verdict"
         ]
         log.info(
             "critic_agent_backend turn=%d session=%s proposals=%d "
-            "verdicts=%s kb_skipped=%s finish=%s",
+            "verdicts=%s kb_skipped=%s required_context=%s finish=%s",
             turn_idx, session_id, len(proposals),
-            verdicts_summary, kb_skipped, llm_finish,
+            verdicts_summary, kb_skipped, required_context, llm_finish,
         )
         self.calls.append({
             "turn_idx": turn_idx,
             "proposals": len(proposals),
             "verdicts": verdicts_summary,
             "kb_skipped": kb_skipped,
+            "required_context": required_context,
             "finish_reason": llm_finish,
             "workdir": str(workdir),
         })
@@ -469,6 +504,7 @@ class CriticAgentBackend:
                 "finish_reason": llm_finish,
                 "judge_bundle_path": str(judge_path),
                 "kb_read_skipped_reason": kb_skipped,
+                "required_context": required_context,
                 "kb_writes": [
                     w.get("result", {}).get("status")
                     for w in (emit.get("kb_writes") or [])
@@ -517,6 +553,74 @@ class CriticAgentBackend:
             except OSError:
                 # Best-effort prune — don't fail the turn over a janitor hiccup.
                 continue
+
+    def _load_static_context_from_manifest(self) -> dict[str, Any]:
+        """Derive per-session context for ``request.context`` from manifest.json.
+
+        Maps the inference_optimizer manifest schema (``inference_optimizer/
+        manifest.py:build_manifest``) onto the keys the critic-agent runtime
+        merges and treats as critical (``critic-agent/runtime/request_models.py:
+        CRITICAL_CONTEXT_KEYS`` and ``session_memory._MERGEABLE_CONTEXT_KEYS``):
+
+        * ``model``       <- ``manifest["model_name"]``    (CRITICAL)
+        * ``framework``   <- ``manifest["framework"]``     (CRITICAL)
+        * ``gpu_type``    <- ``manifest["gpu_type"]``
+        * ``model_path``  <- ``manifest["model_path"]``
+        * ``tp``          <- ``manifest["tp"]``
+        * ``workload``    <- ``manifest["workload"]``      (mergeable)
+        * ``precision``   <- ``manifest["workload"]["precision"]`` (mergeable)
+
+        Empty / ``"unknown"`` values are dropped so the runtime's
+        ``_is_missing()`` logic doesn't see them.
+
+        On any read error (missing file, bad JSON, permission), we log a
+        WARNING and return ``{}``. The Coordinator stays alive — the only
+        regression is that critic verdicts revert to the legacy
+        ``needs_review`` / ``critic_unavailable`` fallback until the
+        manifest is restored.
+        """
+        path = manifest_path(self.session_dir)
+        try:
+            raw = path.read_text(encoding="utf-8")
+            manifest = json.loads(raw)
+        except FileNotFoundError:
+            log.warning(
+                "critic_agent_backend: manifest.json not found at %s — "
+                "request.context will be empty; critic-agent runtime will "
+                "report missing_critical_context for every verdict",
+                path,
+            )
+            return {}
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning(
+                "critic_agent_backend: failed to load manifest.json at %s "
+                "(%s: %s); request.context will be empty",
+                path, type(exc).__name__, exc,
+            )
+            return {}
+
+        ctx: dict[str, Any] = {}
+        # CRITICAL keys — runtime hard-fails the verdict if either is missing.
+        if manifest.get("model_name"):
+            ctx["model"] = manifest["model_name"]
+        if manifest.get("framework"):
+            ctx["framework"] = manifest["framework"]
+        # Useful-but-non-critical context.
+        if manifest.get("gpu_type"):
+            ctx["gpu_type"] = manifest["gpu_type"]
+        if manifest.get("model_path"):
+            ctx["model_path"] = manifest["model_path"]
+        tp = manifest.get("tp")
+        if isinstance(tp, int) and tp > 0:
+            ctx["tp"] = tp
+        workload = manifest.get("workload")
+        if isinstance(workload, dict):
+            cleaned = {k: v for k, v in workload.items() if v not in (None, "")}
+            if cleaned:
+                ctx["workload"] = cleaned
+                if cleaned.get("precision"):
+                    ctx["precision"] = cleaned["precision"]
+        return ctx
 
     def _build_runtime_env(self) -> dict[str, str]:
         env = dict(os.environ)
