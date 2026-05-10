@@ -45,6 +45,16 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
+# Default partial-attempt cap for run_optimization. kernel_opt is an
+# expensive action (60–120 min p75); 2 attempts already burns 2–4 h of
+# budget on a single kernel, so retiring the kernel after the second
+# PARTIAL is the right balance between giving the LLM a second swing and
+# bailing out before a deterministic dead-end (auth-loop / unsupported
+# backend) consumes the whole run. Override via the matching env var
+# named in ``record_kernel_opt`` (1 disables the second-chance entirely).
+_DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
+
+
 @dataclass
 class SharedState:
     session_id: str = ""
@@ -97,6 +107,18 @@ class SharedState:
     # `run_optimization_done` so Orch sees what's been tried and doesn't
     # re-dispatch the same kernel_id every tick.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
+    # Per-kernel run_optimization attempt history keyed by kernel_id.
+    # Each entry: {"attempts": int, "partial_count": int, "last_decision": str,
+    #              "last_ts": str, "history": [{"decision","ts"}...max 10],
+    #              "rejected_reason": str (only when retired)}.
+    # `record_kernel_opt` retires kernels whose run_optimization keeps
+    # returning PARTIAL (no measurable speedup) — the prior policy only
+    # retired on REVERT, so a kernel stuck in PARTIAL/PARTIAL/... burned
+    # the whole wall-clock budget on the same dead-end (e.g. the r24
+    # custom_allreduce loop with inner GEAK 401-retry that prompted this
+    # field). Threshold defaults to 2 PARTIAL outcomes; override via
+    # ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL``.
+    kernel_opt_attempts: dict[str, Any] = field(default_factory=dict)
     # Cross-round params/backends/sweep aggregation. Each entry is
     # {action, variant_name, tput, gain_pct, ts}; we cap the list at 10
     # rows so the prompt summary stays bounded. Used by
@@ -209,10 +231,22 @@ class SharedState:
         if not self.last_kernel_opt:
             return "(none)"
         ko = self.last_kernel_opt
+        kid = str(ko.get("kernel_id") or "")
+        attempts_entry = self.kernel_opt_attempts.get(kid) or {}
+        history_tag = ""
+        if attempts_entry:
+            history_tag = (
+                f" history=attempts={attempts_entry.get('attempts', 0)}"
+                f"/partial={attempts_entry.get('partial_count', 0)}"
+            )
+            rej_reason = attempts_entry.get("rejected_reason")
+            if rej_reason:
+                history_tag += f"/retired={rej_reason}"
         return (
-            f"kernel_id={ko.get('kernel_id','?')} "
+            f"kernel_id={kid or '?'} "
             f"decision={ko.get('decision','?')} "
             f"speedup={ko.get('micro_speedup','?')}"
+            f"{history_tag}"
         )
 
     def _resolve_kernel_patch_identity(
@@ -355,14 +389,25 @@ class SharedState:
 
     def record_kernel_opt(self, result: dict[str, Any]) -> None:
         """Capture the result returned by kernel_optimization_handler so the
-        next Orch turn knows what's already been tried (and the outcome)."""
+        next Orch turn knows what's already been tried (and the outcome).
+
+        Retires ``kernel_id`` into ``rejected_kernel_ids`` when the same
+        kernel has accumulated >= ``max_partial`` PARTIAL outcomes (no
+        measurable speedup), not just on REVERT. Without this guard, an
+        inner-tool auth failure that surfaces as PARTIAL keeps the kernel
+        in ``applicable_kernel_set`` forever and Orch re-dispatches it
+        every tick (the r24 custom_allreduce dead-end). Threshold defaults
+        to 2 attempts; override via
+        ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL`` (>=1).
+        """
         if not isinstance(result, dict):
             return
         verification = result.get("verification") or {}
         proposal = result.get("proposal") or {}
+        decision = str(proposal.get("decision", ""))
         self.last_kernel_opt = {
             "kernel_id": result.get("kernel_id", ""),
-            "decision": proposal.get("decision", ""),
+            "decision": decision,
             "reasons": proposal.get("reasons", []),
             "micro_speedup": verification.get("micro_speedup", 0.0),
             "compile_passed": verification.get("compile_passed"),
@@ -371,9 +416,46 @@ class SharedState:
             "ts": _now_iso(),
         }
         kernel_id = str(self.last_kernel_opt.get("kernel_id") or "")
-        if kernel_id and self.last_kernel_opt.get("decision") == "REVERT":
+        if not kernel_id:
+            return
+
+        entry = dict(self.kernel_opt_attempts.get(kernel_id) or {})
+        history = list(entry.get("history") or [])
+        history.append({"decision": decision, "ts": self.last_kernel_opt["ts"]})
+        history = history[-10:]
+        entry["attempts"] = int(entry.get("attempts", 0)) + 1
+        if decision == "PARTIAL":
+            entry["partial_count"] = int(entry.get("partial_count", 0)) + 1
+        elif decision == "KEEP":
+            # A successful attempt resets the partial streak; a future
+            # regression should not be auto-retired on stale history.
+            entry["partial_count"] = 0
+        entry["last_decision"] = decision
+        entry["last_ts"] = self.last_kernel_opt["ts"]
+        entry["history"] = history
+
+        max_partial = _DEFAULT_KERNEL_OPT_MAX_PARTIAL
+        env_v = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL")
+        if env_v:
+            try:
+                max_partial = max(1, int(env_v))
+            except (TypeError, ValueError):
+                pass
+
+        should_reject = (
+            decision == "REVERT"
+            or int(entry.get("partial_count", 0)) >= max_partial
+        )
+        if should_reject:
             if kernel_id not in self.rejected_kernel_ids:
                 self.rejected_kernel_ids.append(kernel_id)
+            entry["rejected_reason"] = (
+                "revert_decision"
+                if decision == "REVERT"
+                else f"max_partial_attempts_{max_partial}_without_keep"
+            )
+
+        self.kernel_opt_attempts[kernel_id] = entry
 
     def record_select_kernels(self, payload: dict[str, Any],
                               result: dict[str, Any]) -> None:
