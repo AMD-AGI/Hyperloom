@@ -280,11 +280,12 @@ def merge_model_config(
         "kernel_opt_backends": kern_backends,
         "min_kernels": min_k,
         "target_gpu": model_cfg.get("target_gpu", "mi300x"),
-        "mode": defaults.get("mode", "claw"),
+        "mode": model_cfg.get("mode", defaults.get("mode", "claw")),
         "gpu_type": parsed["runner"].upper(),
         "inferencex_path": defaults.get("inferencex_path") or (os.environ.get("NFS_ROOT", "/wekafs") + "/InferenceX"),
         "result_dir": defaults.get("result_dir", "/workspace/hyperloom"),
         "inferenceX_benchmarks": ifx_benchmarks,
         "inferenceX_api_name": model_cfg.get("inferenceX_api_name", ""),
         "inferenceX_key": model_cfg.get("inferenceX_key", ""),
+        "rayjob_image": resolve_var(model_cfg.get("rayjob_image", "")),
     }
