@@ -275,6 +275,9 @@ attempt but mark `geak_without_benchmark: true`.
 - **Default budget**:
   - claude / codex: **60 minutes** per attempt (`--backend-budget-min 60`)
   - GEAK: **90 minutes** per attempt (`--geak-budget-min 90`)
+- **GEAK task parameters** (prompt-injected, align with GEAK team defaults):
+  - `max_rounds`: **5** (multi-round heterogeneous optimization)
+  - `step_limit`: **200** (GEAK recommended; 100 limits multi-round runs)
   
   Agents are instructed to **early-exit** as soon as they hit `>=1.50x` with
   passing correctness; otherwise they iterate up to ~85% of the budget and the
