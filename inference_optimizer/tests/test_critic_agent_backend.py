@@ -726,3 +726,249 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
     assert "JUDGE BUNDLE" in user_text
     assert "OUTPUT FORMAT" in user_text
     assert '"abc"' in user_text  # proposal msg_id from judge bundle
+
+
+# ---------------------------------------------------------------------------
+# Static context propagation — root-cause fix for the
+# "every verdict is needs_review/critic_unavailable" loop bug.
+#
+# The critic-agent runtime treats CRITICAL_CONTEXT_KEYS=("model","framework")
+# as a hard gate: if either is missing from `req.context` (and not yet in
+# session_memory), prepare-review sets `required_context` non-empty and
+# `kb_read_skipped_reason="missing_critical_context"`, and the prompt
+# template forces every verdict to `needs_review` / `critic_unavailable`.
+# The backend now sources these from manifest.json (production) or an
+# explicit `static_context=` (DI for tests / library callers).
+# ---------------------------------------------------------------------------
+def _write_manifest(session_dir: Path, payload: dict[str, Any]) -> Path:
+    """Write a minimal manifest.json the backend can ingest."""
+    target = session_dir / "manifest.json"
+    target.write_text(json.dumps(payload), encoding="utf-8")
+    return target
+
+
+@pytest.mark.asyncio
+async def test_run_populates_request_context_from_manifest(
+    fake_critic_root: Path, fake_session_dir: Path,
+):
+    _write_manifest(fake_session_dir, {
+        "schema_version": 1,
+        "session_id": "sess-1",
+        "model_name": "Llama-3.1-8B-Instruct",
+        "model_path": "/models/llama-3.1-8b",
+        "framework": "sglang",
+        "gpu_type": "mi300x",
+        "tp": 8,
+        "workload": {
+            "isl": 1024, "osl": 1024, "max_model_len": 4096,
+            "precision": "fp8", "conc": 64,
+        },
+    })
+    judge_bundle = {
+        "kind": "coordinator_inbox",
+        "merged_context": {"model": "Llama-3.1-8B-Instruct", "framework": "sglang"},
+        "proposals": [{
+            "msg_id": "p1", "from_agent": "orchestration",
+            "action_name": "baseline", "payload": {},
+            "predicted_gain_pct": 0.0,
+        }],
+        "kb_priors_by_proposal": {"p1": []},
+        "kb_read_skipped_reason": None,
+        "review_constraints": {},
+        "notes": [],
+        "missing_context": [],
+        "required_context": [],
+    }
+    reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve"}]}'
+    runtime_calls: list[RuntimeCall] = []
+    backend, _ = _make_backend(
+        fake_critic_root, fake_session_dir,
+        codex_replies=[reply], judge_bundle=judge_bundle,
+        runtime_calls=runtime_calls,
+    )
+    await backend.run("prompt")
+
+    # The backend persisted request.json to the per-turn workdir; read it
+    # back to verify context was populated from the manifest.
+    request = json.loads(
+        (fake_session_dir / "critic-workdir" / "000000" / "request.json")
+        .read_text(encoding="utf-8")
+    )
+    ctx = request["context"]
+    assert ctx["model"] == "Llama-3.1-8B-Instruct"
+    assert ctx["framework"] == "sglang"
+    assert ctx["gpu_type"] == "mi300x"
+    assert ctx["model_path"] == "/models/llama-3.1-8b"
+    assert ctx["tp"] == 8
+    assert ctx["precision"] == "fp8"
+    assert ctx["workload"]["isl"] == 1024
+    assert ctx["workload"]["osl"] == 1024
+    assert ctx["workload"]["conc"] == 64
+
+
+@pytest.mark.asyncio
+async def test_static_context_override_wins_over_manifest(
+    fake_critic_root: Path, fake_session_dir: Path,
+):
+    # Manifest says sglang, but the explicit static_context overrides it.
+    _write_manifest(fake_session_dir, {
+        "schema_version": 1,
+        "model_name": "ignored-by-test",
+        "framework": "sglang",
+    })
+    judge_bundle = {
+        "kind": "coordinator_inbox",
+        "merged_context": {},
+        "proposals": [],
+        "kb_priors_by_proposal": {},
+        "kb_read_skipped_reason": None,
+        "review_constraints": {},
+        "notes": [],
+        "missing_context": [],
+        "required_context": [],
+    }
+    fake_caller = _make_fake_runtime(judge_bundle=judge_bundle)
+    backend = CriticAgentBackend(
+        critic_agent_root=fake_critic_root,
+        session_dir=fake_session_dir,
+        codex_client_factory=lambda: FakeOpenAIClient([]),
+        runtime_caller_factory=lambda: fake_caller,
+        static_context={"model": "explicit-m", "framework": "vllm",
+                        "gpu_type": "mi355x"},
+    )
+    await backend.run("prompt")
+    request = json.loads(
+        (fake_session_dir / "critic-workdir" / "000000" / "request.json")
+        .read_text(encoding="utf-8")
+    )
+    assert request["context"] == {
+        "model": "explicit-m",
+        "framework": "vllm",
+        "gpu_type": "mi355x",
+    }
+
+
+@pytest.mark.asyncio
+async def test_missing_manifest_falls_back_to_empty_context(
+    fake_critic_root: Path, fake_session_dir: Path, caplog,
+):
+    # No manifest written. Backend must not raise; request.context = {};
+    # a WARNING describes the situation so operators can see it in logs.
+    judge_bundle = {
+        "kind": "coordinator_inbox",
+        "merged_context": {},
+        "proposals": [],
+        "kb_priors_by_proposal": {},
+        "kb_read_skipped_reason": None,
+        "review_constraints": {},
+        "notes": [],
+        "missing_context": [],
+        "required_context": [],
+    }
+    fake_caller = _make_fake_runtime(judge_bundle=judge_bundle)
+    with caplog.at_level("WARNING", logger="inference_optimizer.orchestrator.backends.critic_agent"):
+        backend = CriticAgentBackend(
+            critic_agent_root=fake_critic_root,
+            session_dir=fake_session_dir,
+            codex_client_factory=lambda: FakeOpenAIClient([]),
+            runtime_caller_factory=lambda: fake_caller,
+        )
+    assert backend._static_context == {}
+    assert any(
+        "manifest.json not found" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+    await backend.run("prompt")
+    request = json.loads(
+        (fake_session_dir / "critic-workdir" / "000000" / "request.json")
+        .read_text(encoding="utf-8")
+    )
+    assert request["context"] == {}
+
+
+@pytest.mark.asyncio
+async def test_malformed_manifest_logs_warning_and_falls_back(
+    fake_critic_root: Path, fake_session_dir: Path, caplog,
+):
+    # Manifest exists but is corrupt JSON — backend must log + fall back,
+    # not crash the Coordinator boot.
+    (fake_session_dir / "manifest.json").write_text(
+        "{ this is not json", encoding="utf-8",
+    )
+    with caplog.at_level("WARNING", logger="inference_optimizer.orchestrator.backends.critic_agent"):
+        backend = CriticAgentBackend(
+            critic_agent_root=fake_critic_root,
+            session_dir=fake_session_dir,
+            codex_client_factory=lambda: FakeOpenAIClient([]),
+            runtime_caller_factory=lambda: (lambda call: None),
+        )
+    assert backend._static_context == {}
+    assert any(
+        "failed to load manifest.json" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_load_static_context_skips_unknown_and_empty_fields(
+    fake_critic_root: Path, fake_session_dir: Path,
+):
+    # Empty / missing values must not leak into the context — the
+    # critic-agent runtime's _is_missing() treats "" / None / "unknown"
+    # as missing anyway, but we skip them upstream so the keys never
+    # show up in the JSON to begin with.
+    _write_manifest(fake_session_dir, {
+        "schema_version": 1,
+        "model_name": "m",
+        "framework": "",
+        "gpu_type": None,
+        "tp": 0,
+        "workload": {"isl": 1024, "precision": ""},
+    })
+    backend = CriticAgentBackend(
+        critic_agent_root=fake_critic_root,
+        session_dir=fake_session_dir,
+        codex_client_factory=lambda: FakeOpenAIClient([]),
+        runtime_caller_factory=lambda: (lambda call: None),
+    )
+    ctx = backend._static_context
+    assert ctx == {"model": "m", "workload": {"isl": 1024}}
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic plumbing — required_context surfaces in metadata + log line
+# so operators don't need to re-read the judge bundle to debug
+# missing_critical_context.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_required_context_surfaces_in_metadata(
+    fake_critic_root: Path, fake_session_dir: Path,
+):
+    judge_bundle = {
+        "kind": "coordinator_inbox",
+        "merged_context": {},
+        "proposals": [{
+            "msg_id": "p1", "from_agent": "orchestration",
+            "action_name": "baseline", "payload": {},
+            "predicted_gain_pct": 0.0,
+        }],
+        "kb_priors_by_proposal": {},
+        "kb_read_skipped_reason": "missing_critical_context",
+        "review_constraints": {},
+        "notes": [],
+        "missing_context": ["model", "framework"],
+        "required_context": ["model", "framework"],
+    }
+    reply = """```json
+{"review_verdicts": [
+  {"target_proposal_msg_id": "p1", "verdict": "needs_review",
+   "source": "critic_unavailable", "reasoning": "no ctx"}
+]}
+```"""
+    backend, _ = _make_backend(
+        fake_critic_root, fake_session_dir,
+        codex_replies=[reply], judge_bundle=judge_bundle,
+    )
+    res = await backend.run("prompt")
+    assert res.metadata["required_context"] == ["model", "framework"]
+    assert backend.calls[-1]["required_context"] == ["model", "framework"]
