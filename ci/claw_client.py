@@ -86,11 +86,7 @@ class ClawClient:
         task_mode: str = "agent",
         tools: list[int] | None = None,
         plugin_id: int | None = 4,
-        image: str | None = None,
-        resource: dict | None = None,
     ) -> dict:
-        # sessions.ts reads body.image as finalSandboxImage (priority over plugin default)
-        # and body.resource as finalResources (overrides plugin's fixed GPU/CPU/memory).
         body = {
             "content": content,
             "contents": [{"type": "text", "value": content}],
@@ -101,10 +97,6 @@ class ClawClient:
             "workspaceId": self.sandbox_workspace or os.environ.get("SANDBOX_WORKSPACE", ""),
             "pluginId": plugin_id,
         }
-        if image:
-            body["image"] = image
-        if resource:
-            body["resource"] = resource
         resp = self._session.post(
             self._url(f"/sessions/{session_id}/messages"),
             json=body,
