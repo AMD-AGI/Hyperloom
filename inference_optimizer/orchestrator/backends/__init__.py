@@ -15,6 +15,7 @@ Mock backends (P0):
 from .base import Backend, BackendError, BackendTurnResult
 from .claude import ClaudeBackend
 from .codex import CodexBackend
+from .critic_agent import CriticAgentBackend, RuntimeCall, RuntimeCaller
 from .critic_mock import MockCriticBackend
 from .kernel_mock import MockKernelBackend
 from .mcp_emit_intent import (
@@ -33,6 +34,7 @@ __all__ = [
     "BackendTurnResult",
     "ClaudeBackend",
     "CodexBackend",
+    "CriticAgentBackend",
     "EMIT_INTENT_TOOL_NAME",
     "EMIT_INTENT_TOOL_QUALIFIED",
     "MCP_SERVER_NAME",
@@ -41,6 +43,8 @@ __all__ = [
     "MockKernelBackend",
     "MockRobustnessBackend",
     "MockTurn",
+    "RuntimeCall",
+    "RuntimeCaller",
     "ScriptedPlan",
     "build_emit_intent_server",
     "validate_emit_intent_input",
