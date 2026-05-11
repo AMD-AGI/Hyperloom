@@ -55,6 +55,7 @@ from .orchestrator.action_executors import (
     profile_executor,
     report_executor,
     sweep_executor,
+    validate_stack_executor,
 )
 from .orchestrator.backends import (
     ClaudeBackend,
@@ -64,9 +65,14 @@ from .orchestrator.backends import (
     MockRobustnessBackend,
 )
 from .manifest import load_manifest, write_manifest
+from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
-from .orchestrator.objective import build_objective
+from .orchestrator.objective import Objective, build_objective
 from .orchestrator.shared_state import SharedState
+from .orchestrator.system_prompts.prompt_builder import (
+    build_orchestration_prompt,
+    default_enabled_actions,
+)
 from .paths import (
     DEFAULT_SESSION_DIR,
     ENV_OVERRIDE_SESSION_DIR,
@@ -83,16 +89,62 @@ from .session_paths import (
 log = logging.getLogger("inference_optimizer.cli")
 
 
-def _load_orchestration_prompt(no_kernel: bool) -> str:
-    """Return the Orchestration system prompt sourced from system_prompts/.
+def _orchestration_rules_fragment_path() -> Path:
+    """Path to the rules-only fragment consumed by ``prompt_builder``.
 
-    Two variants live in the asset directory:
-      * ``orchestration.md`` — full kernel-opt pipeline (default).
-      * ``orchestration.no_kernel.md`` — params/backends/sweep only;
-        used when the operator passed ``--no-kernel``.
+    Phase 1 collapsed ``orchestration.md`` to a small "rules + output protocol"
+    fragment; the full system prompt is composed at runtime from
+    :class:`ActionMetadata` and run-level parameters by
+    :func:`build_orchestration_prompt`. The legacy
+    ``orchestration.no_kernel.md`` was deleted — kernel-vs-no-kernel is now
+    a builder parameter, not a separate file.
     """
-    name = "orchestration.no_kernel.md" if no_kernel else "orchestration.md"
-    return (asset_system_prompts_dir() / name).read_text(encoding="utf-8")
+    return asset_system_prompts_dir() / "orchestration.md"
+
+
+def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | str | None]:
+    """Return ``(kind, value)`` strings consumed by the prompt builder."""
+    kind = objective.kind()
+    value: float | str | None = None
+    if hasattr(objective, "target_gain_pct"):
+        value = float(getattr(objective, "target_gain_pct"))
+    elif hasattr(objective, "target_tput_per_gpu"):
+        value = float(getattr(objective, "target_tput_per_gpu"))
+    elif hasattr(objective, "baseline_dir"):
+        value = str(getattr(objective, "baseline_dir"))
+    return kind, value
+
+
+def _build_orchestration_prompt(
+    *,
+    no_kernel: bool,
+    framework: str,
+    objective: Objective,
+    max_minutes: int,
+    action_registry: ActionRegistry | None = None,
+) -> str:
+    """Compose the Orchestration system prompt for this run.
+
+    The legacy ``_load_orchestration_prompt(no_kernel)`` returned a
+    hand-maintained markdown file; this replacement assembles the prompt
+    from typed inputs so kernel-enabled / no-kernel split is just a
+    parameter and every enabled action carries a 1-line description.
+
+    Callers may still pass ``--orch-prompt`` to fully override the result.
+    """
+    registry = action_registry or ActionRegistry().load()
+    enabled = default_enabled_actions(no_kernel=no_kernel)
+    kind, value = _objective_summary_for_prompt(objective)
+    return build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=enabled,
+        framework=framework,
+        kernel_enabled=not no_kernel,
+        objective_kind=kind,
+        objective_value=value,
+        max_minutes=int(max_minutes),
+        rules_fragment_path=_orchestration_rules_fragment_path(),
+    )
 
 
 def _load_critic_prompt() -> str:
@@ -394,11 +446,12 @@ def _register_executors(coordinator: Coordinator, *, no_kernel: bool = False) ->
     When ``no_kernel`` is True, kernel-owned action stubs are skipped and
     ``profile`` is also skipped (profiling only feeds kernel-opt).
     """
-    coordinator.sub.register_executor("baseline", baseline_executor)
-    coordinator.sub.register_executor("backends", backends_executor)
-    coordinator.sub.register_executor("params",   params_executor)
-    coordinator.sub.register_executor("sweep",    sweep_executor)
-    coordinator.sub.register_executor("report",   report_executor)
+    coordinator.sub.register_executor("baseline",       baseline_executor)
+    coordinator.sub.register_executor("backends",       backends_executor)
+    coordinator.sub.register_executor("params",         params_executor)
+    coordinator.sub.register_executor("sweep",          sweep_executor)
+    coordinator.sub.register_executor("report",         report_executor)
+    coordinator.sub.register_executor("validate_stack", validate_stack_executor)
 
     if no_kernel:
         # No profile (it only feeds kernel-opt), no kernel-owned actions.
@@ -420,14 +473,33 @@ def _register_executors(coordinator: Coordinator, *, no_kernel: bool = False) ->
 def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     print()
     print("================ Final summary ================")
-    print(f"  stop_reason     : {stop_reason}")
-    print(f"  session_id      : {state.session_id}")
-    print(f"  model           : {state.model_name}")
-    print(f"  baseline_tput   : {state.baseline_tput:.1f} tok/s/GPU")
-    print(f"  cumulative_gain : {state.cumulative_gain:.2f}%")
-    print(f"  current_best    : {state.current_best}")
-    print(f"  pruned_families : {state.pruned_families}")
-    print(f"  crash_count     : {state.crash_count}")
+    print(f"  stop_reason          : {stop_reason}")
+    print(f"  session_id           : {state.session_id}")
+    print(f"  model                : {state.model_name}")
+    print(f"  baseline_tput        : {state.baseline_tput:.1f} tok/s/GPU")
+    print(
+        f"  cumulative_gain      : {state.cumulative_gain:.2f}% "
+        f"(per-round sum — informational)"
+    )
+    if state.cumulative_gain_validated_ts:
+        stale = (
+            " ⚠ stack changed since validation"
+            if len(state.optimization_stack) > state.cumulative_gain_validated_stack_len
+            else ""
+        )
+        print(
+            f"  cumulative_gain_val  : {state.cumulative_gain_validated:.2f}% "
+            f"(validated_at_stack_len={state.cumulative_gain_validated_stack_len}, "
+            f"ts={state.cumulative_gain_validated_ts}){stale}"
+        )
+    else:
+        print(
+            f"  cumulative_gain_val  : 0.00% "
+            f"⚠ never validated — no `validate_stack` action ran"
+        )
+    print(f"  current_best         : {state.current_best}")
+    print(f"  pruned_families      : {state.pruned_families}")
+    print(f"  crash_count          : {state.crash_count}")
     print("===============================================")
 
 
@@ -1543,8 +1615,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     coordinator = Coordinator(
         session_dir, backends=backends, role_registry=role_registry,
     )
+    framework_for_prompt = (
+        os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
+    )
+    max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
     prompts: dict[str, str] = {
-        "orchestration": args.orch_prompt or _load_orchestration_prompt(no_kernel),
+        "orchestration": args.orch_prompt or _build_orchestration_prompt(
+            no_kernel=no_kernel,
+            framework=framework_for_prompt,
+            objective=objective,
+            max_minutes=max_minutes_for_prompt,
+        ),
         "critic":        args.critic_prompt or _load_critic_prompt(),
     }
     if not no_kernel:
