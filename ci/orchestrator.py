@@ -177,7 +177,9 @@ def render_prompt(merged: dict) -> str:
 
 _STREAM_TRUNCATION_MIN_TOOL_CALLS = 3  # fewer tool calls than this in <10min = likely truncation
 _STREAM_TRUNCATION_MAX_ELAPSED_S = 600  # session completed in under this → suspect truncation
-_MAX_RETRY_ATTEMPTS = 2  # retry once on stream truncation
+_MAX_RETRY_ATTEMPTS = 4  # 1 initial + up to 3 retries (covers transient Vertex overload bursts)
+_OVERLOADED_BACKOFF_S = (180, 360, 720)  # 3min, 6min, 12min — exponential for Vertex overloads
+_TRUNCATION_BACKOFF_S = 60                # 1min — fast retry, truncations are usually transient
 
 
 def _is_stream_truncated(status: str, sse_events: list[dict], elapsed_s: float) -> bool:
@@ -188,6 +190,39 @@ def _is_stream_truncated(status: str, sse_events: list[dict], elapsed_s: float) 
         return False
     tool_calls = sum(1 for e in sse_events if e.get("type") == "toolUsed")
     return tool_calls < _STREAM_TRUNCATION_MIN_TOOL_CALLS
+
+
+def _detect_vertex_overloaded(sse_events: list[dict]) -> bool:
+    """Detect Anthropic Vertex `overloaded_error` in SSE event tail.
+
+    Pattern observed in real failures:
+      {"type":"error","error":{"details":null,"type":"overloaded_error",
+       "message":"Overloaded"},"request_id":"req_vrtx_..."}
+
+    The error is usually emitted within the last few events before the session
+    terminates. Scan a window large enough to catch it but small enough to
+    avoid false positives from `overloaded` appearing in user content.
+    """
+    # Inspect tail of the stream — last 50 events is enough for any real session.
+    for evt in sse_events[-50:]:
+        if not isinstance(evt, dict):
+            continue
+        # Direct error events
+        evt_type = evt.get("type", "")
+        if evt_type in ("error", "agent_error", "stream_error"):
+            err = evt.get("error") if isinstance(evt.get("error"), dict) else evt
+            err_type = (err.get("type") or "").lower() if isinstance(err, dict) else ""
+            err_msg = (err.get("message") or "").lower() if isinstance(err, dict) else ""
+            if "overloaded" in err_type or "overloaded" in err_msg:
+                return True
+        # Sometimes errors get embedded inside chatDelta/statusUpdate as the
+        # provider response. Use a narrow JSON-string match keyed on req_vrtx_
+        # so we don't false-positive on the literal word "overloaded" in chat
+        # content.
+        blob = json.dumps(evt, default=str)
+        if "overloaded_error" in blob and "req_vrtx_" in blob:
+            return True
+    return False
 
 
 def run_model(
@@ -216,11 +251,23 @@ def run_model(
     ep = merged.get("ep", 1) or 1
     gpu_count = max(tp * ep, 1)
 
+    last_failure_reason: str | None = None  # "overloaded" | "truncated" | None
     for attempt in range(1, _MAX_RETRY_ATTEMPTS + 1):
         if attempt > 1:
-            wait_s = 60
-            log.warning("[%s] Stream truncation detected on attempt %d — waiting %ds then retrying",
-                        model_name, attempt - 1, wait_s)
+            # Pick backoff based on what killed the previous attempt.
+            if last_failure_reason == "overloaded":
+                idx = min(attempt - 2, len(_OVERLOADED_BACKOFF_S) - 1)
+                wait_s = _OVERLOADED_BACKOFF_S[idx]
+                log.warning(
+                    "[%s] Vertex overloaded_error on attempt %d — waiting %ds (~%dmin) then retrying",
+                    model_name, attempt - 1, wait_s, wait_s // 60,
+                )
+            else:
+                wait_s = _TRUNCATION_BACKOFF_S
+                log.warning(
+                    "[%s] Stream truncation on attempt %d — waiting %ds then retrying",
+                    model_name, attempt - 1, wait_s,
+                )
             time.sleep(wait_s)
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
 
@@ -296,13 +343,35 @@ def run_model(
         log.info("Session %s finished with status: %s (elapsed %.0fs, %d tool calls)",
                  session_id, status, elapsed, sum(1 for e in sse_events if e.get("type") == "toolUsed"))
 
-        if _is_stream_truncated(status, sse_events, elapsed):
-            log.warning("[%s] Stream truncation suspected (completed in %.0fs with %d tool calls)",
-                        model_name, elapsed,
-                        sum(1 for e in sse_events if e.get("type") == "toolUsed"))
+        # Decide whether the failure looks like one we can recover from:
+        #   - overloaded_error: upstream Vertex capacity blip; exponential backoff
+        #   - stream truncation: session marked completed too quickly; short retry
+        # Order matters — overloaded check is broader and may catch sessions that
+        # report status="failed", not just status="completed".
+        if _detect_vertex_overloaded(sse_events):
+            last_failure_reason = "overloaded"
+            log.warning(
+                "[%s] Anthropic Vertex overloaded_error detected (status=%s, elapsed=%.0fs, %d tool calls)",
+                model_name, status, elapsed,
+                sum(1 for e in sse_events if e.get("type") == "toolUsed"),
+            )
             if attempt < _MAX_RETRY_ATTEMPTS:
                 continue
-            log.error("[%s] Stream truncation on all %d attempts, giving up", model_name, _MAX_RETRY_ATTEMPTS)
+            log.error("[%s] Vertex overloaded on all %d attempts — giving up", model_name, _MAX_RETRY_ATTEMPTS)
+            status = "failed"
+        elif _is_stream_truncated(status, sse_events, elapsed):
+            last_failure_reason = "truncated"
+            log.warning(
+                "[%s] Stream truncation suspected (completed in %.0fs with %d tool calls)",
+                model_name, elapsed,
+                sum(1 for e in sse_events if e.get("type") == "toolUsed"),
+            )
+            if attempt < _MAX_RETRY_ATTEMPTS:
+                continue
+            log.error(
+                "[%s] Stream truncation on all %d attempts, giving up",
+                model_name, _MAX_RETRY_ATTEMPTS,
+            )
             status = "failed"
         break
 
