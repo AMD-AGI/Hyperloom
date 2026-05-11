@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from .base import Source, SourceData, SourceUnavailable
+from .cluster_decoder import decode_gpu_snapshot, merge_gpu_snapshots
 
 
 log = logging.getLogger(__name__)
@@ -190,6 +191,113 @@ class RobustnessServerClient:
         )
         return body if isinstance(body, dict) else {}
 
+    # -- M2: cluster-physical proxies -----------------------------------
+
+    async def get_cluster_pod_metrics(
+        self,
+        namespace: str,
+        name: str,
+        window: _MetricsWindow,
+        *,
+        categories: list[str] | None = None,
+        step: str | None = None,
+    ) -> dict[str, Any]:
+        """GET ``/api/v1/cluster/pods/{ns}/{name}/metrics``.
+
+        Single-pod metrics; the response shape mirrors
+        ``get_session_metrics`` (``{"data": {"pods": [...]}}``).
+        """
+
+        params: dict[str, Any] = {
+            "start": str(window.start_unix),
+            "end": str(window.end_unix),
+        }
+        if categories:
+            params["categories"] = ",".join(categories)
+        if step:
+            params["step"] = step
+        body = await self._get_json(
+            f"/api/v1/cluster/pods/{namespace}/{name}/metrics",
+            params=params,
+        )
+        return body if isinstance(body, dict) else {}
+
+    async def list_cluster_pod_metric_categories(
+        self,
+        namespace: str,
+        name: str,
+        window: _MetricsWindow,
+        *,
+        categories: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """GET ``/api/v1/cluster/pods/{ns}/{name}/metrics/list``.
+
+        Returns the ``available`` array verbatim so callers can pick
+        which categories to query without probing each metric kind.
+        """
+
+        params: dict[str, Any] = {
+            "start": str(window.start_unix),
+            "end": str(window.end_unix),
+        }
+        if categories:
+            params["categories"] = ",".join(categories)
+        body = await self._get_json(
+            f"/api/v1/cluster/pods/{namespace}/{name}/metrics/list",
+            params=params,
+        )
+        if isinstance(body, dict):
+            available = body.get("available")
+            if isinstance(available, list):
+                return available
+        return []
+
+    async def get_cluster_workload_hierarchy(
+        self,
+        workload_id: str,
+    ) -> dict[str, Any]:
+        """GET ``/api/v1/cluster/workloads/{id}/hierarchy``."""
+
+        body = await self._get_json(
+            f"/api/v1/cluster/workloads/{workload_id}/hierarchy",
+        )
+        return body if isinstance(body, dict) else {}
+
+    async def list_cluster_faults(
+        self,
+        *,
+        since: str | None = None,
+        node: str | None = None,
+        phase: str | None = None,
+        page_size: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """GET ``/api/v1/cluster/faults``.
+
+        Returns the ``faults`` array (already paginated upstream). We
+        flatten dict / list responses so callers don't branch on shape.
+        """
+
+        params: dict[str, Any] = {}
+        if since:
+            params["since"] = since
+        if node:
+            params["node"] = node
+        if phase:
+            params["phase"] = phase
+        if page_size is not None:
+            params["page_size"] = str(page_size)
+        body = await self._get_json(
+            "/api/v1/cluster/faults",
+            params=params or None,
+        )
+        if isinstance(body, dict):
+            faults = body.get("faults")
+            if isinstance(faults, list):
+                return faults
+        if isinstance(body, list):
+            return body
+        return []
+
 
 def _to_iso(unix_seconds: int) -> str:
     """Format Unix seconds as ISO-8601 UTC for ``start`` / ``end`` query args."""
@@ -205,11 +313,17 @@ def _to_iso(unix_seconds: int) -> str:
 class RobustnessServerSource:
     """Adapter wrapping :class:`RobustnessServerClient` as a :class:`Source`.
 
-    Per tick we fetch ``pods`` + ``events`` + ``summary`` for the
-    session referenced by ``ctx.shared_state.session_id``. ``metrics``
-    is intentionally skipped in M1 because cluster-physical proxies
-    arrive in M2; the reactor still has plenty to chew on with pod
-    phase + recent events.
+    Per tick we fetch session-scoped data (``pods`` + ``events`` +
+    ``summary``) for the session referenced by
+    ``ctx.shared_state.session_id``, plus cluster-physical signals
+    (``cluster_faults``) introduced in M2 so the agent reacts to node
+    isolation events even when the local probe sees nothing wrong.
+
+    Cluster fetches are best-effort: a 4xx / 5xx on the cluster
+    endpoints does not invalidate the session-scoped snapshot. A
+    transport failure does, since it strongly suggests the server is
+    unreachable and the DegradeRouter should switch to the local
+    probe.
     """
 
     name = "robustness-server"
@@ -220,10 +334,27 @@ class RobustnessServerSource:
         *,
         metrics_window_s: int = 300,
         events_limit: int = 200,
+        faults_lookback_s: int = 300,
+        faults_page_size: int = 50,
+        enable_cluster_faults: bool = True,
+        enable_cluster_pod_metrics: bool = False,
+        pod_metrics_categories: tuple[str, ...] = ("gpu",),
+        max_pods_per_tick: int = 16,
     ) -> None:
         self._client = client
         self._metrics_window_s = max(60, int(metrics_window_s))
         self._events_limit = max(1, int(events_limit))
+        self._faults_lookback_s = max(0, int(faults_lookback_s))
+        self._faults_page_size = max(1, min(500, int(faults_page_size)))
+        self._enable_cluster_faults = bool(enable_cluster_faults)
+        # Cluster pod metrics are off by default: they fan out one
+        # HTTP call per pod per tick, so callers need to opt in once
+        # they are happy with the cost. Setting the flag is what
+        # makes signals/local_health.py prefer server-decoded GPU
+        # data over LocalProbe rocm-smi.
+        self._enable_cluster_pod_metrics = bool(enable_cluster_pod_metrics)
+        self._pod_metrics_categories = tuple(pod_metrics_categories)
+        self._max_pods_per_tick = max(1, int(max_pods_per_tick))
 
     async def fetch(self, ctx: Any) -> SourceData:
         session_id = _extract_session_id(ctx)
@@ -251,17 +382,116 @@ class RobustnessServerSource:
         if window.start_unix and window.end_unix:
             summary = await self._client.get_session_summary(session_id, window)
 
+        cluster_faults: list[dict[str, Any]] = []
+        if self._enable_cluster_faults:
+            since = (
+                str(now_unix - self._faults_lookback_s)
+                if now_unix and self._faults_lookback_s
+                else None
+            )
+            try:
+                cluster_faults = await self._client.list_cluster_faults(
+                    since=since,
+                    page_size=self._faults_page_size,
+                )
+            except SourceUnavailable:
+                # Transport-level failure: re-raise so the DegradeRouter
+                # can count it. _get_json already wraps timeouts / 5xx
+                # into SourceUnavailable, so reaching here means the
+                # server is genuinely unreachable.
+                raise
+
+        local_gpu: dict[str, Any] = {}
+        if (
+            self._enable_cluster_pod_metrics
+            and pods
+            and window.start_unix
+            and window.end_unix
+        ):
+            local_gpu = await self._fetch_cluster_pod_metrics(pods, window)
+
         return SourceData(
             session_pods=pods,
             session_events=events,
             session_summary=summary,
+            cluster_faults=cluster_faults,
+            local_gpu=local_gpu,
             sources_used=[self.name],
         )
+
+    async def _fetch_cluster_pod_metrics(
+        self,
+        pods: list[dict[str, Any]],
+        window: _MetricsWindow,
+    ) -> dict[str, Any]:
+        """Fan out cluster pod metrics across the session's pods.
+
+        Decodes each per-pod response into the LocalProbe ``local_gpu``
+        schema and merges them so a single ``SourceData.local_gpu``
+        carries every device the session is using. Server-decoded
+        snapshots win over what LocalProbe might have produced
+        because we only fill ``local_gpu`` from this path when the
+        primary source is healthy.
+
+        A 5xx / transport failure on any pod re-raises as
+        :class:`SourceUnavailable` so the DegradeRouter degrades —
+        exactly the same policy as ``list_cluster_faults`` above.
+        """
+
+        refs = _unique_pod_refs(pods)
+        if not refs:
+            return {}
+        if len(refs) > self._max_pods_per_tick:
+            refs = refs[: self._max_pods_per_tick]
+
+        snapshots: list[dict[str, Any]] = []
+        for ns, name in refs:
+            try:
+                metrics = await self._client.get_cluster_pod_metrics(
+                    ns,
+                    name,
+                    window,
+                    categories=list(self._pod_metrics_categories),
+                )
+            except SourceUnavailable:
+                raise
+            decoded = decode_gpu_snapshot(metrics)
+            if decoded:
+                snapshots.append(decoded)
+        return merge_gpu_snapshots(snapshots)
 
 
 def _extract_session_id(ctx: Any) -> str:
     shared = getattr(ctx, "shared_state", None)
     return getattr(shared, "session_id", "") or ""
+
+
+def _unique_pod_refs(pods: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Distinct (namespace, name) tuples extracted from session_pods.
+
+    ``session_pods`` rows shaped by robustness-server carry the
+    pod under ``pod.namespace`` / ``pod.name`` (mirrors
+    ``list_session_pods``). Same pod may appear in multiple
+    open/close cycles; we collapse to the unique set so the
+    cluster-metrics fan-out is not duplicated.
+    """
+
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+    for entry in pods or []:
+        if not isinstance(entry, dict):
+            continue
+        pod = entry.get("pod") if isinstance(entry.get("pod"), dict) else entry
+        ns = str(pod.get("namespace") or "")
+        name = str(pod.get("name") or "")
+        if not ns or not name:
+            continue
+        key = (ns, name)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
 
 
 __all__ = [
