@@ -1,0 +1,87 @@
+name: Verify SaFE Artifacts API
+
+# One-shot probe: hit SaFE /api/v1/optimization/tasks/<id>/artifacts with the
+# CLAW_API_KEY secret and dump the JSON response so we can decide whether to
+# revert the Claw bypass. Will be deleted after verification.
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_ids:
+        description: 'Space-separated task_ids to probe'
+        required: false
+        default: 'opt-9a2bd79d-0bd6-4210-ae7e-d1f37082b136 opt-6b715236-5334-4f56-9dbd-40f83aecae48 opt-0c5f4582-55b2-4e15-92df-c8e1477cd9a7'
+
+jobs:
+  probe:
+    runs-on: hyperloom-mh826
+    timeout-minutes: 10
+    env:
+      CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
+      SAFE_BASE_URL: ${{ secrets.SAFE_BASE_URL }}
+    steps:
+      - name: Hit each artifacts endpoint
+        shell: bash
+        run: |
+          set -u
+          BASE="${SAFE_BASE_URL:-https://core42.example-internal-host.invalid}"
+          BASE="${BASE%/}"
+          echo "BASE=$BASE"
+          for tid in ${{ inputs.task_ids }}; do
+            echo ""
+            echo "===================================================="
+            echo "task_id = $tid"
+            echo "===================================================="
+
+            # 1) List artifacts (try /api/v1/... first, then /api/... as fallback)
+            for prefix in "/api/v1/optimization/tasks" "/api/optimization/tasks"; do
+              url="$BASE$prefix/$tid/artifacts"
+              echo ""
+              echo "--- GET $url ---"
+              code=$(curl -sS -o /tmp/resp.json -w "%{http_code}" \
+                -H "Authorization: Bearer $CLAW_API_KEY" \
+                -H "Accept: application/json" \
+                "$url" || echo "curl_err")
+              echo "HTTP $code"
+              if [ "$code" = "200" ]; then
+                echo "--- body (first 4KB) ---"
+                head -c 4096 /tmp/resp.json
+                echo ""
+                echo "--- pretty (jq) ---"
+                jq . /tmp/resp.json 2>/dev/null | head -80 || head -80 /tmp/resp.json
+                # If list succeeded, also probe ONE file's download URL on the same prefix.
+                first_path=$(jq -r '
+                  ( .data // .items // .artifacts // .files // . )
+                  | if type == "array" then .[0] else . end
+                  | ( .path // .name // .filename // .key // empty )
+                ' /tmp/resp.json 2>/dev/null | head -1)
+                first_id=$(jq -r '
+                  ( .data // .items // .artifacts // .files // . )
+                  | if type == "array" then .[0] else . end
+                  | ( .id // .artifact_id // empty )
+                ' /tmp/resp.json 2>/dev/null | head -1)
+                echo ""
+                echo "--- first_path=$first_path  first_id=$first_id ---"
+
+                # Try a few likely download URL patterns; just print status codes.
+                for dl_url in \
+                    "$BASE$prefix/$tid/artifacts/$first_path" \
+                    "$BASE$prefix/$tid/artifacts/$first_id/download" \
+                    "$BASE$prefix/$tid/artifacts/download?path=$first_path" \
+                    "$BASE$prefix/$tid/artifacts?path=$first_path" \
+                    "$BASE$prefix/$tid/artifact?path=$first_path"
+                do
+                  [ -z "$first_path$first_id" ] && break
+                  dl_code=$(curl -sS -o /tmp/dl.bin -w "%{http_code}|%{size_download}|%{content_type}" \
+                    -H "Authorization: Bearer $CLAW_API_KEY" \
+                    "$dl_url" || echo "curl_err")
+                  echo "  DL [$dl_code] $dl_url"
+                done
+                break  # don't try the next prefix once one works
+              else
+                echo "--- error body (first 400B) ---"
+                head -c 400 /tmp/resp.json
+                echo ""
+              fi
+            done
+          done
