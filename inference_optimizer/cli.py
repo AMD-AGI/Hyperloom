@@ -1469,11 +1469,11 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     return chosen
 
 
-# Default robustness backend. Stays on "mock" because the agent isn't
-# pip-installed by default and operators must explicitly opt into the
-# subprocess transport via --robustness-agent (or the env override below).
+# Default robustness backend. Production runs use the real subprocess
+# transport; operators can still force the heartbeat-only mock with
+# --robustness-mock or the env override below.
 DEFAULT_ROBUSTNESS_BACKEND = os.environ.get(
-    "INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND", "mock",
+    "INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND", "agent",
 )
 _VALID_ROBUSTNESS_BACKENDS = ("mock", "agent")
 
@@ -1975,7 +1975,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_const",
         const="mock",
         default=None,
-        help="Force the heartbeat-only mock Robustness backend (default).",
+        help="Force the heartbeat-only mock Robustness backend.",
     )
     opt.add_argument(
         "--robustness-agent",
