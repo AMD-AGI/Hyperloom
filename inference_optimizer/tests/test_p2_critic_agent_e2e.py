@@ -25,7 +25,6 @@ Verifies:
 
 from __future__ import annotations
 
-import ast
 import json
 import re
 from dataclasses import dataclass, field
@@ -163,7 +162,7 @@ async def test_critic_agent_real_runtime_clears_proposal(
         critic_agent_root=critic_agent_root,
         session_dir=session_dir,
         codex_model="gpt-5.4",
-        codex_client_factory=lambda: _DeterministicClient(),
+        codex_client_factory=_DeterministicClient,
         kb_mode="inmemory",
         # IMPORTANT: do NOT pass runtime_caller_factory — we want the
         # real subprocess path here.
@@ -275,7 +274,7 @@ async def test_critic_agent_heartbeat_when_no_proposal(
         critic_agent_root=critic_agent_root,
         session_dir=session_dir,
         codex_model="gpt-5.4",
-        codex_client_factory=lambda: _DeterministicClient(),
+        codex_client_factory=_DeterministicClient,
         kb_mode="inmemory",
     )
 
