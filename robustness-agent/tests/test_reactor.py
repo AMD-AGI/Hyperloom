@@ -16,7 +16,6 @@ from robustness_agent.role.prompt_inputs import (
     SharedStateSnapshot,
 )
 from robustness_agent.role.reactor import Reactor, ReactorComponents
-from robustness_agent.role.backend_adapter import RobustnessAgentBackend
 from robustness_agent.signals import Classifier
 from robustness_agent.signals.crash import CrashConfig
 from robustness_agent.sources.base import (
@@ -156,33 +155,6 @@ async def test_reactor_drops_invalid_intents_emitted_by_extra_evaluator(tmp_path
     assert all(i.payload.get("severity") for i in intents if i.type is IntentType.ALERT)
 
 
-# ---------------------------------------------------------------------------
-# Backend adapter
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_backend_adapter_returns_turn_result(tmp_path: Path):
-    primary = _FakeSource("server", SourceData(sources_used=["server"]))
-    reactor, _ = _build_reactor(primary=primary, tmp_path=tmp_path)
-    backend = RobustnessAgentBackend(reactor=reactor)
-    prompt = (
-        "=== Shared session state ===\n"
-        "session_id=sess-1\n"
-        "crash_count=2\n"
-        "=== Inbox for robustness ===\n"
-        "(no new messages)\n"
-    )
-    result = await backend.run(prompt)
-    assert result.raw_text == "(robustness-agent)"
-    assert result.metadata["tick_index"] == 1
-    assert any(i.type is IntentType.ALERT for i in result.intents)
-
-
-@pytest.mark.asyncio
-async def test_backend_adapter_advances_tick_index_per_call(tmp_path: Path):
-    primary = _FakeSource("server", SourceData(sources_used=["server"]))
-    reactor, _ = _build_reactor(primary=primary, tmp_path=tmp_path)
-    backend = RobustnessAgentBackend(reactor=reactor)
-    for expected in (1, 2, 3):
-        result = await backend.run("=== Shared session state ===\nsession_id=s\ncrash_count=0\n=== Inbox for robustness ===\n(no new messages)\n")
-        assert result.metadata["tick_index"] == expected
+# Backend-adapter level tests (subprocess transport: prompt -> ReactorContext
+# parsing + reactor tick advancement) live in test_runtime_cli.py — that's
+# where the host-visible JSON-IO contract is exercised end-to-end.
