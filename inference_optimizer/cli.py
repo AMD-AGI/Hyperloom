@@ -63,6 +63,7 @@ from .orchestrator.backends import (
     CriticAgentBackend,
     MockCriticBackend,
     MockRobustnessBackend,
+    RobustnessAgentBackend,
 )
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
@@ -283,6 +284,69 @@ def _validate_critic_agent_runtime(root: Path) -> None:
         sys.exit(2)
 
 
+# ---------------------------------------------------------------------------
+# Robustness-agent runtime location resolution. Mirrors the critic-agent
+# helpers above: hosts pick a backend through --robustness-mock /
+# --robustness-agent (env override INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND),
+# and when "agent" is selected we shell out to
+# ``python -m robustness_agent.runtime.cli`` with cwd=<root> and
+# PYTHONPATH=<root>/src.
+_ROBUSTNESS_AGENT_ROOT_ENV = "ROBUSTNESS_AGENT_ROOT"
+
+
+def _resolve_robustness_agent_root() -> Path | None:
+    """Return the robustness-agent skill root, or ``None`` if not found.
+
+    Order:
+    1. ``$ROBUSTNESS_AGENT_ROOT`` env var (operator override).
+    2. Sibling ``robustness-agent/`` next to the inference_optimizer package
+       (i.e. ``$REPO_ROOT/robustness-agent``).
+    """
+    override = os.environ.get(_ROBUSTNESS_AGENT_ROOT_ENV, "").strip()
+    if override:
+        p = Path(override).expanduser()
+        return p if (p / "src" / "robustness_agent" / "runtime" / "cli.py").is_file() else None
+    from .paths import PACKAGE_ROOT
+    candidate = PACKAGE_ROOT.parent / "robustness-agent"
+    cli_module = candidate / "src" / "robustness_agent" / "runtime" / "cli.py"
+    return candidate if cli_module.is_file() else None
+
+
+def _validate_robustness_agent_runtime(root: Path) -> None:
+    """Fail fast if ``python -m robustness_agent.runtime.cli --help`` doesn't work."""
+    src = str(root / "src")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = src + os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else src
+    cmd = [sys.executable, "-m", "robustness_agent.runtime.cli", "--help"]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        print(
+            f"ERROR: robustness-agent runtime sanity check failed: {exc!r}\n"
+            f"  cwd={root}\n"
+            f"  cmd={' '.join(cmd)}\n"
+            f"Either fix ROBUSTNESS_AGENT_ROOT, install robustness-agent at "
+            f"$REPO_ROOT/robustness-agent, or pass --robustness-mock to bypass.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if proc.returncode != 0:
+        print(
+            f"ERROR: robustness-agent runtime.cli --help exited rc={proc.returncode}\n"
+            f"  cwd={root}\n"
+            f"  stderr={proc.stderr.strip()[:500]}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
 def _autodetect_gpu_type() -> str | None:
     """Return mi300x|mi325x|mi355x or None if undetectable.
 
@@ -324,6 +388,9 @@ def _build_backends(
     session_dir: Path,
     critic_agent_root: Path | None = None,
     critic_kb_mode: str = "inmemory",
+    robustness_choice: str = "mock",
+    robustness_agent_root: Path | None = None,
+    robustness_options: dict[str, Any] | None = None,
     no_kernel: bool = False,
 ) -> dict[str, Any]:
     """Construct all per-role backends.
@@ -336,6 +403,14 @@ def _build_backends(
       ``review_constraints``-gated verdicts. Requires ``critic_agent_root``.
     * ``codex_bare`` — legacy direct :class:`CodexBackend` chat-completion
       path. Kept available for debugging the LLM layer in isolation.
+
+    ``robustness_choice`` ∈ {``"mock"``, ``"agent"``}:
+
+    * ``mock`` — heartbeat-only :class:`MockRobustnessBackend` (default;
+      keeps optimizer self-contained).
+    * ``agent`` — :class:`RobustnessAgentBackend` driving
+      ``python -m robustness_agent.runtime.cli`` in a subprocess. Mirrors
+      the critic-agent transport. Requires ``robustness_agent_root``.
     """
     if critic_choice not in ("mock", "agent", "codex_bare"):
         raise ValueError(
@@ -359,10 +434,29 @@ def _build_backends(
             kb_mode=critic_kb_mode,
         )
 
+    if robustness_choice not in ("mock", "agent"):
+        raise ValueError(
+            f"_build_backends: robustness_choice={robustness_choice!r} not in "
+            "{'mock','agent'}"
+        )
+    if robustness_choice == "mock":
+        robustness_backend: Any = MockRobustnessBackend()
+    else:  # "agent"
+        if robustness_agent_root is None:
+            raise ValueError(
+                "_build_backends: robustness_choice='agent' requires "
+                "robustness_agent_root"
+            )
+        robustness_backend = RobustnessAgentBackend(
+            robustness_agent_root=robustness_agent_root,
+            session_dir=session_dir,
+            options=robustness_options,
+        )
+
     backends: dict[str, Any] = {
         "orchestration": ClaudeBackend(model=claude_model, max_turns_default=4),
         "critic":        critic_backend,
-        "robustness":    MockRobustnessBackend(),
+        "robustness":    robustness_backend,
     }
     if not no_kernel:
         if kernel_codex:
@@ -1375,6 +1469,54 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     return chosen
 
 
+# Default robustness backend. Stays on "mock" because the agent isn't
+# pip-installed by default and operators must explicitly opt into the
+# subprocess transport via --robustness-agent (or the env override below).
+DEFAULT_ROBUSTNESS_BACKEND = os.environ.get(
+    "INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND", "mock",
+)
+_VALID_ROBUSTNESS_BACKENDS = ("mock", "agent")
+
+
+def _resolve_robustness_choice(args: argparse.Namespace) -> str:
+    """Resolve the active robustness backend choice.
+
+    Mirrors :func:`_resolve_critic_choice`. Operator picks via
+    ``--robustness-mock`` / ``--robustness-agent`` (sets
+    ``args.robustness_backend``); ``None`` falls back to
+    :data:`DEFAULT_ROBUSTNESS_BACKEND`. Hard-fails on an invalid value.
+    """
+    chosen = getattr(args, "robustness_backend", None)
+    if chosen is None:
+        chosen = DEFAULT_ROBUSTNESS_BACKEND
+    if chosen not in _VALID_ROBUSTNESS_BACKENDS:
+        print(
+            f"ERROR: robustness backend {chosen!r} not in "
+            f"{_VALID_ROBUSTNESS_BACKENDS!r} (set by --robustness-mock / "
+            f"--robustness-agent or "
+            f"INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return chosen
+
+
+def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
+    """Collect non-default ``request.options`` overrides from CLI flags.
+
+    Only emits keys the operator actually passed so the runtime CLI
+    falls back to its own defaults / env-discovery for the rest.
+    """
+    options: dict[str, Any] = {}
+    server_url = getattr(args, "robustness_server_url", None)
+    if server_url is not None:
+        options["robustness_server_url"] = server_url
+    llm_rca = getattr(args, "robustness_llm_rca", None)
+    if llm_rca is not None:
+        options["llm_rca_enabled"] = bool(llm_rca)
+    return options
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     proxy_urls = _preflight()
 
@@ -1582,6 +1724,25 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # operator hasn't already pinned it.
         os.environ.setdefault("WORKSPACE_PATH", str(Path(__file__).resolve().parents[1]))
 
+    # Resolve robustness backend choice + runtime root, mirroring critic.
+    robustness_choice = _resolve_robustness_choice(args)
+    robustness_agent_root: Path | None = None
+    robustness_options = _build_robustness_options(args)
+    if robustness_choice == "agent":
+        robustness_agent_root = _resolve_robustness_agent_root()
+        if robustness_agent_root is None:
+            print(
+                f"ERROR: --robustness-agent selected but robustness-agent "
+                f"runtime not found.\n"
+                f"  Set ${_ROBUSTNESS_AGENT_ROOT_ENV} to the directory "
+                f"containing src/robustness_agent/runtime/cli.py, or install "
+                f"robustness-agent at $REPO_ROOT/robustness-agent/.\n"
+                f"  Bypass with --robustness-mock.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        _validate_robustness_agent_runtime(robustness_agent_root)
+
     backends = _build_backends(
         claude_model=args.claude_model,
         codex_model=args.codex_model,
@@ -1590,6 +1751,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir=session_dir,
         critic_agent_root=critic_agent_root,
         critic_kb_mode=critic_kb_mode,
+        robustness_choice=robustness_choice,
+        robustness_agent_root=robustness_agent_root,
+        robustness_options=robustness_options,
         no_kernel=no_kernel,
     )
     # Bug A fix: expose the active session_dir to in-process executors
@@ -1647,11 +1811,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             f"critic-agent(kb={critic_kb_mode}, codex={args.codex_model}, "
             f"root={critic_agent_root})"
         )
+    if robustness_choice == "mock":
+        robustness_str = "mock"
+    else:
+        robustness_str = f"robustness-agent(root={robustness_agent_root})"
+        if robustness_options:
+            kvs = ",".join(f"{k}={v!r}" for k, v in sorted(robustness_options.items()))
+            robustness_str += f"[{kvs}]"
     print(f"Backends        : "
           f"orchestration=Claude({args.claude_model}), "
           f"kernel={kernel_str}, "
           f"critic={critic_str}, "
-          f"robustness=mock")
+          f"robustness={robustness_str}")
     print(f"Max ticks       : {args.max_ticks or 'unlimited'} "
           f"(budget = {args.max_hours}h)")
     print(f"Tick interval   : {args.tick_interval_sec}s")
@@ -1796,6 +1967,48 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_const",
         const="codex_bare",
         help=argparse.SUPPRESS,
+    )
+    # ----- Robustness backend selection (mirrors critic) ------------------
+    opt.add_argument(
+        "--robustness-mock",
+        dest="robustness_backend",
+        action="store_const",
+        const="mock",
+        default=None,
+        help="Force the heartbeat-only mock Robustness backend (default).",
+    )
+    opt.add_argument(
+        "--robustness-agent",
+        dest="robustness_backend",
+        action="store_const",
+        const="agent",
+        help="Force the robustness-agent runtime backend (subprocess + JSON, "
+             "mirrors critic-agent transport). Requires ROBUSTNESS_AGENT_ROOT "
+             "or a sibling $REPO_ROOT/robustness-agent/ directory.",
+    )
+    opt.add_argument(
+        "--robustness-server-url",
+        dest="robustness_server_url",
+        type=str,
+        default=None,
+        help="Override the robustness-server base URL forwarded into "
+             "request.options. Honoured only when --robustness-agent is "
+             "selected.",
+    )
+    opt.add_argument(
+        "--robustness-llm-rca",
+        dest="robustness_llm_rca",
+        action="store_true",
+        default=None,
+        help="Forward llm_rca_enabled=true into request.options. The agent "
+             "still falls back to NoopRcaEngine when LLM credentials aren't "
+             "set in the runtime env.",
+    )
+    opt.add_argument(
+        "--no-robustness-llm-rca",
+        dest="robustness_llm_rca",
+        action="store_false",
+        help="Forward llm_rca_enabled=false into request.options.",
     )
     opt.add_argument("--orch-prompt", type=str, default=None,
                       help="Override Orchestration system prompt (file path or inline)")
