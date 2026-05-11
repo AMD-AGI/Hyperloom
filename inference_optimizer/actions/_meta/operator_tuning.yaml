@@ -24,5 +24,8 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 25
 lease_ttl_sec: 4500
+description: "Parameterised tuning of a single operator family (GEMM / attention) when the bottleneck is op-level rather than kernel-level."
+pipeline_phase: deep
+typical_runtime_min: 30.0
 applicable_when:
   - "operator_bottleneck_identified"
