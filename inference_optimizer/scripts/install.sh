@@ -25,6 +25,10 @@ set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace}"
+INFERENCE_OPTIMIZER_SESSION_DIR="${INFERENCE_OPTIMIZER_SESSION_DIR:-/workspace/hyperloom}"
+HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${INFERENCE_OPTIMIZER_SESSION_DIR}/runtime}"
+KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
+HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/kernel-agent}"
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 MAGPIE_DIR="${MAGPIE_DIR:-${WORKSPACE_ROOT}/Magpie}"
@@ -52,7 +56,8 @@ Options:
 
 Env overrides:
   REPO_ROOT, WORKSPACE_ROOT, KERNEL_AGENT_ROOT, MAGPIE_REPO, MAGPIE_DIR,
-  INFERENCEX_PATH, PYTHON, TRACELENS_ROOT
+  INFERENCEX_PATH, PYTHON, TRACELENS_ROOT, INFERENCE_OPTIMIZER_SESSION_DIR,
+  HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV, HYPERLOOM_ROOT
 EOF
 }
 
@@ -102,7 +107,11 @@ resolve_python
 log "PYTHON=${PYTHON}"
 log "REPO_ROOT=${REPO_ROOT}"
 log "WORKSPACE_ROOT=${WORKSPACE_ROOT}"
+log "HYPERLOOM_ROOT=${HYPERLOOM_ROOT}"
 log "KERNEL_AGENT_ROOT=${KERNEL_AGENT_ROOT}"
+log "KERNEL_AGENT_ENV=${KERNEL_AGENT_ENV}"
+export INFERENCE_OPTIMIZER_SESSION_DIR HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
+export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
 
 # pip --break-system-packages when PYTHON is the system interpreter
 # (e.g. bare ubuntu/debian image without a venv). Detect by comparing
@@ -195,6 +204,10 @@ chain_kernel_agent() {
     return 0
   fi
   log "delegating ray + TraceLens + GEAK + OOB + auth-proxy to ${script}"
+  export REPO_ROOT WORKSPACE_ROOT KERNEL_AGENT_ROOT MAGPIE_DIR HYPERLOOM_ROOT
+  export INFERENCE_OPTIMIZER_SESSION_DIR HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
+  export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
+  [ -n "${INFERENCEX_PATH:-}" ] && export INFERENCEX_PATH
   local args=()
   [ "$CHECK_ONLY" -eq 1 ] && args+=(--check-only)
   [ "$DRY_RUN" -eq 1 ] && args+=(--dry-run)
@@ -211,4 +224,4 @@ ensure_inferencex
 chain_kernel_agent
 
 log "install complete"
-log "next: source ${KERNEL_AGENT_ROOT}/env.sh, then run inference_optimizer.cli"
+log "next: source ${KERNEL_AGENT_ENV}, then run inference_optimizer.cli"
