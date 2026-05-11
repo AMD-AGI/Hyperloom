@@ -8,7 +8,7 @@ Full ISL/OSL/CONC sweep with the optimized version to map the Pareto frontier.
 
 ## Procedure
 
-**Remote mode:** Run sweeps inside the existing RayJob via `exec_on_gpu`, which uses Ray Dashboard REST (`POST /api/jobs/`) under the hood. Do not create extra SaFE workloads for sweep. See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Sweep" section for all options.
+**Remote mode:** Run sweeps inside the existing RayJob via Ray Dashboard REST (`POST /api/jobs/`). Do not create extra SaFE workloads for sweep. See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Sweep" section for all options.
 
 ### Using the sweep script
 

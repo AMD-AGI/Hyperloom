@@ -12,7 +12,7 @@ python3 $SKILL_ROOT/kb/kb_query.py --category server_params --compact
 
 ## Procedure
 
-**Remote mode:** All server kill/restart + benchmark commands must be submitted to the RayJob via `exec_on_gpu`, which uses Ray Dashboard REST (`POST /api/jobs/`) under the hood. See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Server Params" section for wrapper syntax.
+**Remote mode:** All server kill/restart + benchmark commands must be submitted to the RayJob via Ray Dashboard REST (`POST /api/jobs/`). See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Server Params" section for wrapper syntax.
 
 ### SGLang parameter grid
 

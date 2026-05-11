@@ -14,7 +14,7 @@ python3 $SKILL_ROOT/kb/kb_query.py --category pitfall --tags TraceLens --compact
 
 ## Procedure
 
-**Remote mode:** All profiling and filesystem commands must be submitted to the RayJob via `exec_on_gpu`, which uses Ray Dashboard REST (`POST /api/jobs/`) under the hood. See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Profile" section for wrapper syntax.
+**Remote mode:** All profiling and filesystem commands must be submitted to the RayJob via Ray Dashboard REST (`POST /api/jobs/`). See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Profile" section for wrapper syntax.
 
 ### PD / MoRI profiling topology
 
@@ -25,6 +25,15 @@ For PD disaggregation / MoRI, keep the profiling topology aligned:
 - Do not profile the router unless intentionally measuring router overhead.
 - Do not benchmark prefill/decode backends directly when evaluating the full PD path.
 - Record the actual prefill/decode/router ports from the launch commands or run context; do not hardcode ports such as `30000` or `8888`.
+- In remote mode, the trace output path used by the profiled RayJob server MUST
+  be a RayJob-writable `/wekafs/...` path. Set `TRACE_DIR` and
+  `SGLANG_TORCH_PROFILER_DIR` before launching the profiled backend, and if the
+  implementation calls `/start_profile` directly, pass the same path as
+  `output_dir` in the request body. Do not use sandbox-only
+  `/workspace/hyperloom/...` paths for RayJob trace output.
+- Sandbox-side TraceLens summaries, manifests, and the final report must be
+  written under `/workspace/hyperloom/` after reading the RayJob-produced
+  `/wekafs/...` trace/result paths.
 
 A profiling attempt is valid for TraceLens if TraceLens can read the raw trace and produce GPU timeline / kernel summary outputs. Prefer `/stop_profile` returning `200 OK`, but do not reject the trace solely because `/stop_profile` returned 500: SGLang can still write a complete trace after reporting an internal error. If `/stop_profile` times out, the gzip trace is invalid, or TraceLens reports `No GPU events found in the trace`, treat the profiling attempt as invalid. Do not conclude that the workload has no GPU events from an invalid trace.
 

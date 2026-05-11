@@ -31,16 +31,17 @@ WORKSPACE_ROOT="${WORKSPACE_ROOT:-/wekafs/inference-optimization}"
 
 ### IR-8: Use Ray Dashboard REST for ALL GPU-side commands
 
-After `source scripts/executor.sh`, ALL commands that run on the Ray cluster MUST go
-through `exec_on_gpu()` or `exec_on_gpu_bg()`, which submit work through Ray Dashboard
-REST (`POST /api/jobs/`). **NEVER** drive the cluster from the sandbox with Ray Client
-or a manual submit wrapper.
+ALL commands that run on the Ray cluster MUST be submitted through Ray Dashboard
+REST (`POST /api/jobs/`). **NEVER** drive the cluster from the sandbox with Ray Client,
+`ray://<head>:10001`, or any custom Ray client submit wrapper.
 
 ```bash
 # CORRECT
-exec_on_gpu "export MODEL='$MODEL' ... && bash $SCRIPTS_DIR/run_baseline.sh"
+curl -sS -X POST "$RAY_DASHBOARD_URL/api/jobs/" \
+  -H "Content-Type: application/json" \
+  -d '{"entrypoint":"bash -lc '\''source /etc/profile.d/hyperloom-env.sh && bash $SCRIPTS_DIR/run_baseline.sh'\''"}'
 
-# WRONG — bypassing executor.sh with a sandbox-side Ray client or custom submit wrapper
+# WRONG — sandbox-side Ray client or custom Ray submit wrapper
 ```
 
 ### IR-9: Main inference workload MUST use `kind: "RayJob"`
@@ -116,7 +117,7 @@ Remote Client --> Skill (SKILL.md)
                  |     |-> Exposes Ray Dashboard REST port (8265)
                  |     \-> env.RAY_JOB_ENTRYPOINT = "tail -f /dev/null" (keeps cluster alive)
                  |
-                 |-> exec_on_gpu (scripts/executor.sh)
+                 |-> Ray Dashboard REST
                  |     \-> POST http://<head>:8265/api/jobs/ -> run inside RayJob image
                  |
                  |-> oob_ray_submit.py run -a {claude,codex} -p "..." -f kernel.py -o <work_dir>
@@ -229,11 +230,31 @@ TIMESTAMP=$(date +%Y-%m-%d-%H-%M)
 export RESULT_DIR="/wekafs/inference-optimization/results/${TIMESTAMP}"
 export TRACE_DIR="/wekafs/inference-optimization/traces/${TIMESTAMP}"
 
-source "$SCRIPTS_DIR/executor.sh"
-
-# Verify Ray cluster
-exec_on_gpu "python3 -c \"import ray; ray.init(); print(f'Nodes: {len(ray.nodes())}'); print(ray.cluster_resources()); ray.shutdown()\""
+# Verify Ray cluster by submitting a short Ray Dashboard REST job.
+curl -sS -X POST "$RAY_DASHBOARD_URL/api/jobs/" \
+  -H "Content-Type: application/json" \
+  -d '{"entrypoint":"bash -lc '\''source /etc/profile.d/hyperloom-env.sh && python3 - <<\"PY\"\nimport ray\nray.init()\nprint(f\"Nodes: {len(ray.nodes())}\")\nprint(ray.cluster_resources())\nray.shutdown()\nPY'\''"}'
 ```
+
+### Remote Path Contract
+
+Remote mode uses two distinct filesystems with different ownership:
+
+- **RayJob-side runtime outputs MUST use `/wekafs/...` paths.** This includes
+  `$RESULT_DIR`, `$TRACE_DIR`, TraceLens output generated inside the RayJob,
+  OOB input/output workspaces, kernel candidate files, re-baseline artifacts,
+  and sweep outputs. These paths must be pod-visible and shared across the
+  RayJob head/worker pods.
+- **Sandbox-side generated files MUST use `/workspace/hyperloom/...` paths.**
+  The Claw sandbox may read `/wekafs` as input, but it must not write there.
+  Any sandbox-created summaries, manifests, temporary prompts, copied metadata,
+  or final user-facing artifacts must be written under `/workspace/hyperloom/`.
+- **Final deliverables MUST be present under `/workspace/hyperloom/`.** After
+  RayJob work finishes, copy or summarize the relevant `/wekafs` RayJob
+  artifacts into `/workspace/hyperloom/optimization_report.md`,
+  `/workspace/hyperloom/ci_metrics.json` if used, and any supporting result
+  summaries/manifests. Claw uploads `/workspace/hyperloom/` to S3 when the
+  session ends.
 
 ### Bootstrap / CLI preflight inside RayJob
 
@@ -244,7 +265,7 @@ This installs or verifies OOB, TraceLens, Ray/click compatibility, and the
 force `MODE=remote` again after sourcing it.
 
 ```bash
-exec_on_gpu "
+# Ray Dashboard REST job entrypoint:
 export PATH='/opt/venv/bin:'\"\$PATH\"
 export MODE=remote
 export SKILL_ROOT='$SKILL_ROOT'
@@ -410,10 +431,10 @@ TraceLens pitfalls seen in RayJob validation:
 
 ### Baseline (`actions/baseline.md`)
 
-All commands must be wrapped with `exec_on_gpu`:
+All commands must be submitted as Ray Dashboard REST jobs:
 
 ```bash
-exec_on_gpu "export MODEL='$MODEL' TP=$TP CONC=$CONC FRAMEWORK=sglang \
+POST /api/jobs entrypoint: "export MODEL='$MODEL' TP=$TP CONC=$CONC FRAMEWORK=sglang \
   SGLANG_EXTRA_ARGS='--enable-torch-compile --mem-fraction-static 0.6' \
   RESULT_DIR='$RESULT_DIR' TRACE_DIR='$TRACE_DIR' INFERENCEX_PATH='$INFERENCEX_PATH' && \
   bash $SCRIPTS_DIR/run_baseline.sh"
@@ -424,37 +445,37 @@ Ray cluster.
 
 ### Profile (`actions/profile.md`)
 
-Profiling commands run via `exec_on_gpu`:
+Profiling commands run as Ray Dashboard REST jobs:
 
 ```bash
-exec_on_gpu "export RUN_CONTEXT_FILE='$RESULT_DIR/run_context.env' && \
+POST /api/jobs entrypoint: "export RUN_CONTEXT_FILE='$RESULT_DIR/run_context.env' && \
   bash $SCRIPTS_DIR/run_profile.sh"
 ```
 
 After profiling, unset profiler env vars inside the Ray cluster:
 
 ```bash
-exec_on_gpu "unset PROFILE SGLANG_TORCH_PROFILER_DIR VLLM_TORCH_PROFILER_DIR"
+POST /api/jobs entrypoint: "unset PROFILE SGLANG_TORCH_PROFILER_DIR VLLM_TORCH_PROFILER_DIR"
 ```
 
 Trace files on shared NFS — accessible from both remote client and TraceLens CLI.
 
-Filesystem searches for kernel source must also go through `exec_on_gpu`:
+Filesystem searches for kernel source must also run as Ray Dashboard REST jobs:
 
 ```bash
-exec_on_gpu "find /sgl-workspace /opt/venv /tmp/torchinductor_root -name '*.py' \
+POST /api/jobs entrypoint: "find /sgl-workspace /opt/venv /tmp/torchinductor_root -maxdepth 4 -name '*.py' \
   -exec grep -l 'KERNEL_NAME' {} \\; 2>/dev/null"
-exec_on_gpu "cat /path/to/standalone_kernel.py"
+POST /api/jobs entrypoint: "python3 - <<'PY'\nfrom pathlib import Path\nprint(Path('/path/to/standalone_kernel.py').read_text())\nPY"
 ```
 
 Trace parsing can be done on the remote client side (traces are on shared NFS).
 
 ### Backends (`actions/backends.md`)
 
-`ServerArgs` inspection and all backend test commands run via `exec_on_gpu`:
+`ServerArgs` inspection and all backend test commands run as Ray Dashboard REST jobs:
 
 ```bash
-exec_on_gpu "python3 -c \"
+POST /api/jobs entrypoint: "python3 -c \"
 from sglang.srt.server_args import ServerArgs
 import inspect
 src = inspect.getsource(ServerArgs.__init__)
@@ -467,7 +488,7 @@ for line in src.split('\\\\n'):
 Full backend test loop per switch:
 
 ```bash
-exec_on_gpu "
+POST /api/jobs entrypoint: "
 # Kill server (safe pattern)
 ps aux | grep 'python3 -m sglang' | grep -v grep | grep -v bash | awk '{print \$2}' | xargs -r kill -9 2>/dev/null
 sleep $SERVER_KILL_WAIT_S
@@ -481,14 +502,14 @@ bash $SCRIPTS_DIR/run_baseline.sh
 ```
 
 After killing, verify Ray cluster is alive:
-`exec_on_gpu "curl -s http://localhost:8265/api/cluster_status"`
+submit `curl -s http://localhost:8265/api/cluster_status` as a Ray Dashboard REST job.
 
 ### Server Params (`actions/params.md`)
 
-All server kill/restart + benchmark commands use `exec_on_gpu`:
+All server kill/restart + benchmark commands run as Ray Dashboard REST jobs:
 
 ```bash
-exec_on_gpu "
+POST /api/jobs entrypoint: "
 # Kill server (safe pattern — do NOT pkill -f sglang)
 ps aux | grep 'python3 -m sglang' | grep -v grep | grep -v bash | awk '{print \$2}' | xargs -r kill -9 2>/dev/null
 sleep $SERVER_KILL_WAIT_S
@@ -502,15 +523,15 @@ bash $SCRIPTS_DIR/run_baseline.sh
 "
 ```
 
-After killing, verify Ray cluster: `exec_on_gpu "curl -s http://localhost:8265/api/cluster_status"`
+After killing, verify Ray cluster by submitting `curl -s http://localhost:8265/api/cluster_status` as a Ray Dashboard REST job.
 
 ### Kernel Optimization (`actions/kernel-opt.md`)
 
-Kernel source lives on the RayJob. Use `exec_on_gpu` for all find/cat commands:
+Kernel source lives on the RayJob. Use Ray Dashboard REST jobs for all find/cat commands:
 
 ```bash
-exec_on_gpu "find /tmp/torchinductor_root -name '*.py' | while read f; do ..."
-exec_on_gpu "cat /path/to/standalone_kernel.py"
+POST /api/jobs entrypoint: "find /tmp/torchinductor_root -maxdepth 4 -name '*.py'"
+POST /api/jobs entrypoint: "python3 - <<'PY'\nfrom pathlib import Path\nprint(Path('/path/to/standalone_kernel.py').read_text())\nPY"
 ```
 
 Image selection: use `KERNEL_OPT_IMAGE` (provided by CI or user).
@@ -526,10 +547,10 @@ $OOB_RAY_CLI run -a codex -p "$PROMPT" -f "$WORK_DIR/kernel.py" \
 
 ### Integrate (`actions/integrate.md`)
 
-All patch commands go through `exec_on_gpu`:
+All patch commands run as Ray Dashboard REST jobs:
 
 ```bash
-exec_on_gpu "python3 $SCRIPTS_DIR/patch_inductor.py patch \
+POST /api/jobs entrypoint: "python3 $SCRIPTS_DIR/patch_inductor.py patch \
     --kernel-name $KERNEL_NAME \
     --optimized-file $OOB_OUTPUT_PATH \
     --target-file $STANDALONE_FILE_PATH \
@@ -542,7 +563,7 @@ JSON `.workspace` field from `oob_ray_submit.py run --json`.
 **Re-Baseline:**
 
 ```bash
-exec_on_gpu "
+POST /api/jobs entrypoint: "
 export HEALTH_TIMEOUT=1800
 export MODEL='$MODEL' TP=$TP CONC=$CONC FRAMEWORK=$FRAMEWORK
 export SGLANG_EXTRA_ARGS='$TUNED_SERVER_ARGS'
@@ -554,7 +575,7 @@ bash $SCRIPTS_DIR/run_baseline.sh
 **Revert on Ray cluster:**
 
 ```bash
-exec_on_gpu "
+POST /api/jobs entrypoint: "
 # Strategy A (Inductor cache): restore .bak files
 find /tmp/torchinductor_root -name '*.bak' -exec sh -c 'cp \"\$1\" \"\${1%.bak}\"' _ {} \\;
 
@@ -593,10 +614,10 @@ For multi-node RayJob, revert on ALL nodes using the same `patch_on_node` patter
 
 ### Sweep (`actions/sweep.md`)
 
-**Option A: Serial sweep on RayJob via `exec_on_gpu`:**
+**Option A: Serial sweep on RayJob via Ray Dashboard REST:**
 
 ```bash
-exec_on_gpu "export MODEL='$MODEL' TP=$TP INFERENCEX_PATH='$INFERENCEX_PATH' \
+POST /api/jobs entrypoint: "export MODEL='$MODEL' TP=$TP INFERENCEX_PATH='$INFERENCEX_PATH' \
   CONC_VALUES='4 16 64' \
   ISL_OSL_CONFIGS='1024:1024 8192:1024 1024:8192' \
   RESULT_DIR='$RESULT_DIR/sweep' \
@@ -611,7 +632,7 @@ exec_on_gpu "export MODEL='$MODEL' TP=$TP INFERENCEX_PATH='$INFERENCEX_PATH' \
 
 **Option B: Parallel sweep via Ray tasks inside the RayJob:**
 
-Submit a Python driver through `exec_on_gpu` / Ray Dashboard REST. Inside the RayJob
+Submit a Python driver through Ray Dashboard REST. Inside the RayJob
 image, the driver can use in-cluster `ray.init()` (no `address=`) to schedule tasks on the
 existing cluster:
 
@@ -645,7 +666,11 @@ RayJob (8 GPU), configs run sequentially.
 
 ### Report (`actions/report.md`)
 
-After the report is generated, stop the RayJob (see "Cleanup" above).
+Generate or copy the final report and result summaries into
+`/workspace/hyperloom/` before stopping the RayJob. The RayJob may keep full raw
+artifacts under `/wekafs`, but the user-facing final bundle must be in
+`/workspace/hyperloom/` so Claw persists it to S3. After this is complete, stop
+the RayJob (see "Cleanup" above).
 
 ---
 

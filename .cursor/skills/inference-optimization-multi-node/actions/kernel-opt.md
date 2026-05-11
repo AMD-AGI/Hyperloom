@@ -50,7 +50,7 @@ find /opt/venv -path "*/sglang/srt/layers/*.py" -exec grep -l "@triton.jit" {} \
 find /sgl-workspace/aiter -name "*.py" -exec grep -l "@triton.jit" {} \;
 ```
 
-**Remote mode:** Kernel source lives on the RayJob. Use `exec_on_gpu` for all find/cat commands; it submits work through Ray Dashboard REST (`POST /api/jobs/`). See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Kernel Optimization" section.
+**Remote mode:** Kernel source lives on the RayJob. Use Ray Dashboard REST (`POST /api/jobs/`) for all source inspection commands. See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Kernel Optimization" section.
 
 ### Step 2: Submit candidates to OOB backends in parallel
 

@@ -57,9 +57,6 @@ WORKSPACE_ROOT="${WORKSPACE_ROOT:-/shared_nfs/inference-optimization}"
 OOB_RAY_CLI="python3 $SCRIPTS_DIR/oob_ray_submit.py"
 OOB_CLI="${OOB_CLI:-/opt/venv/bin/oob}"
 
-# Enables exec_on_gpu for Ray Dashboard REST dispatch.
-source "$SCRIPTS_DIR/executor.sh"
-
 export MODE="$MODE"
 export WORKSPACE_ROOT="$WORKSPACE_ROOT"
 export MODEL="$MODEL"
@@ -88,20 +85,9 @@ After the RayJob is running and `HEAD_IP` or `RAY_DASHBOARD_URL` is set, run the
 and CLI preflight inside the RayJob before benchmark/profile/kernel-opt:
 
 ```bash
-exec_on_gpu "
-export PATH='/opt/venv/bin:'\"\$PATH\"
-export MODE=remote
-export SKILL_ROOT='$SKILL_ROOT'
-export HYPERLOOM_BUNDLE='\${HYPERLOOM_BUNDLE:-/wekafs/fully-local}'
-if [ ! -f /opt/hyperloom/.bootstrap_done ] && [ -d \"\$HYPERLOOM_BUNDLE\" ]; then
-  bash '$SCRIPTS_DIR/bootstrap.sh'
-fi
-[ -f /etc/profile.d/hyperloom-env.sh ] && . /etc/profile.d/hyperloom-env.sh
-export MODE=remote
-command -v oob || echo 'WARN: oob CLI missing'
-command -v codex || command -v claude || echo 'WARN: codex/claude CLI missing'
-command -v TraceLens_generate_perf_report_pytorch_inference || echo 'WARN: TraceLens CLI missing'
-"
+curl -sS -X POST "$RAY_DASHBOARD_URL/api/jobs/" \
+  -H "Content-Type: application/json" \
+  -d '{"entrypoint":"bash -lc '\''export PATH=/opt/venv/bin:$PATH; export MODE=remote; export SKILL_ROOT='"$SKILL_ROOT"'; export HYPERLOOM_BUNDLE=${HYPERLOOM_BUNDLE:-/wekafs/fully-local}; if [ ! -f /opt/hyperloom/.bootstrap_done ] && [ -d \"$HYPERLOOM_BUNDLE\" ]; then bash $SKILL_ROOT/scripts/bootstrap.sh; fi; source /etc/profile.d/hyperloom-env.sh; command -v oob; command -v codex || command -v claude; command -v TraceLens_generate_perf_report_pytorch_inference'\''"}'
 ```
 
 

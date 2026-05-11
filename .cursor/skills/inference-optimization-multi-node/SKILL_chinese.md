@@ -27,7 +27,7 @@ globs:
 ## 执行模式
 
 这个 skill 支持一种执行模式。**开始前必须先阅读对应模式的文档：**
-- **远程模式**（SaFE RayJob，`exec_on_gpu`）：见 [`modes/REMOTE.md`](modes/REMOTE.md)
+- **远程模式**（SaFE RayJob + Ray Dashboard REST）：见 [`modes/REMOTE.md`](modes/REMOTE.md)
 
 ## 铁律（不可协商）
 

@@ -9,7 +9,7 @@ Per-kernel integration phase. Called by `kernel-opt.md` for each OOB result.
 
 ## Procedure
 
-**Remote mode:** All patch, re-baseline, and revert commands must be submitted to the RayJob via `exec_on_gpu`, which uses Ray Dashboard REST (`POST /api/jobs/`) under the hood. See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Integrate" section for wrapper syntax and multi-node patching.
+**Remote mode:** All patch, re-baseline, and revert commands must be submitted to the RayJob via Ray Dashboard REST (`POST /api/jobs/`). See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Integrate" section for wrapper syntax and multi-node patching.
 
 ### Choose patching strategy
 

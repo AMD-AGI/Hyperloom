@@ -28,13 +28,15 @@ WORKSPACE_ROOT="${WORKSPACE_ROOT:-/wekafs/inference-optimization}"
 
 ### IR-8：所有 GPU 侧命令都使用 Ray Dashboard REST
 
-执行 `source scripts/executor.sh` 后，所有运行在 Ray 集群上的命令都必须通过 `exec_on_gpu()` 或 `exec_on_gpu_bg()`。这些 helper 会通过 Ray Dashboard REST（`POST /api/jobs/`）提交工作。**绝不要**从 sandbox 用 Ray Client 或手写 submit wrapper 驱动集群。
+所有运行在 Ray 集群上的命令都必须通过 Ray Dashboard REST（`POST /api/jobs/`）提交。**绝不要**从 sandbox 用 Ray Client、`ray://<head>:10001` 或手写 Ray client submit wrapper 驱动集群。
 
 ```bash
 # 正确
-exec_on_gpu "export MODEL='$MODEL' ... && bash $SCRIPTS_DIR/run_baseline.sh"
+curl -sS -X POST "$RAY_DASHBOARD_URL/api/jobs/" \
+  -H "Content-Type: application/json" \
+  -d '{"entrypoint":"bash -lc '\''source /etc/profile.d/hyperloom-env.sh && bash $SCRIPTS_DIR/run_baseline.sh'\''"}'
 
-# 错误：绕过 executor.sh，使用 sandbox 侧 Ray client 或自定义 submit wrapper
+# 错误：使用 sandbox 侧 Ray client 或自定义 Ray submit wrapper
 ```
 
 ### IR-9：主推理 workload 必须使用 `kind: "RayJob"`
@@ -99,7 +101,7 @@ Remote Client --> Skill (SKILL.md)
                  |     |-> 暴露 Ray Dashboard REST 端口（8265）
                  |     \-> env.RAY_JOB_ENTRYPOINT = "tail -f /dev/null"（保持集群存活）
                  |
-                 |-> exec_on_gpu (scripts/executor.sh)
+                 |-> Ray Dashboard REST
                  |     \-> POST http://<head>:8265/api/jobs/ -> 在 RayJob 镜像内运行
                  |
                  |-> oob_ray_submit.py run -a {claude,codex} -p "..." -f kernel.py -o <work_dir>
@@ -209,10 +211,10 @@ TIMESTAMP=$(date +%Y-%m-%d-%H-%M)
 export RESULT_DIR="/wekafs/inference-optimization/results/${TIMESTAMP}"
 export TRACE_DIR="/wekafs/inference-optimization/traces/${TIMESTAMP}"
 
-source "$SCRIPTS_DIR/executor.sh"
-
 # 验证 Ray 集群
-exec_on_gpu "python3 -c \"import ray; ray.init(); print(f'Nodes: {len(ray.nodes())}'); print(ray.cluster_resources()); ray.shutdown()\""
+curl -sS -X POST "$RAY_DASHBOARD_URL/api/jobs/" \
+  -H "Content-Type: application/json" \
+  -d '{"entrypoint":"bash -lc '\''source /etc/profile.d/hyperloom-env.sh && python3 -c \"import ray; ray.init(); print(ray.cluster_resources()); ray.shutdown()\"'\''"}'
 ```
 
 ### RayJob 内 bootstrap / CLI 预检查
@@ -220,7 +222,7 @@ exec_on_gpu "python3 -c \"import ray; ray.init(); print(f'Nodes: {len(ray.nodes(
 RayJob 进入 Running 后，复用 `scripts/bootstrap.sh` 中的 BYOI bootstrap 逻辑，确保 CLI 依赖存在于 RayJob 镜像内。它会安装或验证 OOB、TraceLens、Ray/click 兼容性，以及 `codex` / `claude` CLI。生成的环境文件可复用，但 source 后要再次强制 `MODE=remote`。
 
 ```bash
-exec_on_gpu "
+Ray Dashboard REST job entrypoint:
 export PATH='/opt/venv/bin:'\"\$PATH\"
 export MODE=remote
 export SKILL_ROOT='$SKILL_ROOT'
@@ -361,10 +363,10 @@ RayJob 验证中见过的 TraceLens 陷阱：
 
 ### Baseline（`actions/baseline.md`）
 
-所有命令都必须用 `exec_on_gpu` 包裹：
+所有命令都必须通过 Ray Dashboard REST 提交：
 
 ```bash
-exec_on_gpu "export MODEL='$MODEL' TP=$TP CONC=$CONC FRAMEWORK=sglang \
+POST /api/jobs entrypoint: "export MODEL='$MODEL' TP=$TP CONC=$CONC FRAMEWORK=sglang \
   SGLANG_EXTRA_ARGS='--enable-torch-compile --mem-fraction-static 0.6' \
   RESULT_DIR='$RESULT_DIR' TRACE_DIR='$TRACE_DIR' INFERENCEX_PATH='$INFERENCEX_PATH' && \
   bash $SCRIPTS_DIR/run_baseline.sh"
@@ -374,37 +376,37 @@ Trace 文件和结果会写入共享 NFS，远程客户端和 Ray 集群都能�
 
 ### Profile（`actions/profile.md`）
 
-profiling 命令通过 `exec_on_gpu` 运行：
+profiling 命令通过 Ray Dashboard REST 运行：
 
 ```bash
-exec_on_gpu "export RUN_CONTEXT_FILE='$RESULT_DIR/run_context.env' && \
+POST /api/jobs entrypoint: "export RUN_CONTEXT_FILE='$RESULT_DIR/run_context.env' && \
   bash $SCRIPTS_DIR/run_profile.sh"
 ```
 
 profiling 后，在 Ray 集群内 unset profiler 环境变量：
 
 ```bash
-exec_on_gpu "unset PROFILE SGLANG_TORCH_PROFILER_DIR VLLM_TORCH_PROFILER_DIR"
+POST /api/jobs entrypoint: "unset PROFILE SGLANG_TORCH_PROFILER_DIR VLLM_TORCH_PROFILER_DIR"
 ```
 
 共享 NFS 上的 trace 文件可被远程客户端和 TraceLens CLI 访问。
 
-用于查找内核源码的文件系统搜索也必须通过 `exec_on_gpu`：
+用于查找内核源码的文件系统搜索也必须通过 Ray Dashboard REST：
 
 ```bash
-exec_on_gpu "find /sgl-workspace /opt/venv /tmp/torchinductor_root -name '*.py' \
+POST /api/jobs entrypoint: "find /sgl-workspace /opt/venv /tmp/torchinductor_root -maxdepth 4 -name '*.py' \
   -exec grep -l 'KERNEL_NAME' {} \\; 2>/dev/null"
-exec_on_gpu "cat /path/to/standalone_kernel.py"
+POST /api/jobs entrypoint: "python3 - <<'PY'\nfrom pathlib import Path\nprint(Path('/path/to/standalone_kernel.py').read_text())\nPY"
 ```
 
 trace 解析可以在远程客户端侧完成（trace 在共享 NFS 上）。
 
 ### Backends（`actions/backends.md`）
 
-`ServerArgs` 检查和所有 backend test 命令都通过 `exec_on_gpu` 运行：
+`ServerArgs` 检查和所有 backend test 命令都通过 Ray Dashboard REST 运行：
 
 ```bash
-exec_on_gpu "python3 -c \"
+POST /api/jobs entrypoint: "python3 -c \"
 from sglang.srt.server_args import ServerArgs
 import inspect
 src = inspect.getsource(ServerArgs.__init__)
@@ -417,7 +419,7 @@ for line in src.split('\\\\n'):
 每个 backend switch 的完整测试循环：
 
 ```bash
-exec_on_gpu "
+POST /api/jobs entrypoint: "
 # Kill server (safe pattern)
 ps aux | grep 'python3 -m sglang' | grep -v grep | grep -v bash | awk '{print \$2}' | xargs -r kill -9 2>/dev/null
 sleep $SERVER_KILL_WAIT_S
@@ -431,14 +433,14 @@ bash $SCRIPTS_DIR/run_baseline.sh
 ```
 
 kill 后验证 Ray cluster 仍存活：
-`exec_on_gpu "curl -s http://localhost:8265/api/cluster_status"`
+通过 Ray Dashboard REST 提交 `curl -s http://localhost:8265/api/cluster_status`
 
 ### Server Params（`actions/params.md`）
 
-所有 server kill/restart + benchmark 命令都使用 `exec_on_gpu`：
+所有 server kill/restart + benchmark 命令都使用 Ray Dashboard REST：
 
 ```bash
-exec_on_gpu "
+POST /api/jobs entrypoint: "
 # Kill server (safe pattern — do NOT pkill -f sglang)
 ps aux | grep 'python3 -m sglang' | grep -v grep | grep -v bash | awk '{print \$2}' | xargs -r kill -9 2>/dev/null
 sleep $SERVER_KILL_WAIT_S
@@ -452,15 +454,15 @@ bash $SCRIPTS_DIR/run_baseline.sh
 "
 ```
 
-kill 后验证 Ray cluster：`exec_on_gpu "curl -s http://localhost:8265/api/cluster_status"`
+kill 后通过 Ray Dashboard REST 提交 `curl -s http://localhost:8265/api/cluster_status` 验证 Ray cluster。
 
 ### Kernel Optimization（`actions/kernel-opt.md`）
 
-内核源码位于 RayJob 上。所有 find/cat 命令都使用 `exec_on_gpu`：
+内核源码位于 RayJob 上。所有 find/cat 命令都使用 Ray Dashboard REST：
 
 ```bash
-exec_on_gpu "find /tmp/torchinductor_root -name '*.py' | while read f; do ..."
-exec_on_gpu "cat /path/to/standalone_kernel.py"
+POST /api/jobs entrypoint: "find /tmp/torchinductor_root -maxdepth 4 -name '*.py'"
+POST /api/jobs entrypoint: "python3 - <<'PY'\nfrom pathlib import Path\nprint(Path('/path/to/standalone_kernel.py').read_text())\nPY"
 ```
 
 镜像选择：使用 `KERNEL_OPT_IMAGE`（由 CI 或用户提供）。
@@ -476,10 +478,10 @@ $OOB_RAY_CLI run -a codex -p "$PROMPT" -f "$WORK_DIR/kernel.py" \
 
 ### Integrate（`actions/integrate.md`）
 
-所有 patch 命令都通过 `exec_on_gpu`：
+所有 patch 命令都通过 Ray Dashboard REST：
 
 ```bash
-exec_on_gpu "python3 $SCRIPTS_DIR/patch_inductor.py patch \
+POST /api/jobs entrypoint: "python3 $SCRIPTS_DIR/patch_inductor.py patch \
     --kernel-name $KERNEL_NAME \
     --optimized-file $OOB_OUTPUT_PATH \
     --target-file $STANDALONE_FILE_PATH \
@@ -491,7 +493,7 @@ OOB 输出位于共享 NFS 或 CLI 报告的 workspace 路径。使用 `oob_ray_
 **Re-Baseline：**
 
 ```bash
-exec_on_gpu "
+POST /api/jobs entrypoint: "
 export HEALTH_TIMEOUT=1800
 export MODEL='$MODEL' TP=$TP CONC=$CONC FRAMEWORK=$FRAMEWORK
 export SGLANG_EXTRA_ARGS='$TUNED_SERVER_ARGS'
@@ -503,7 +505,7 @@ bash $SCRIPTS_DIR/run_baseline.sh
 **在 Ray cluster 上回滚：**
 
 ```bash
-exec_on_gpu "
+POST /api/jobs entrypoint: "
 # Strategy A (Inductor cache): restore .bak files
 find /tmp/torchinductor_root -name '*.bak' -exec sh -c 'cp \"\$1\" \"\${1%.bak}\"' _ {} \\;
 
@@ -540,10 +542,10 @@ results = ray.get(futures)
 
 ### Sweep（`actions/sweep.md`）
 
-**Option A：通过 `exec_on_gpu` 在 RayJob 上串行 sweep：**
+**Option A：通过 Ray Dashboard REST 在 RayJob 上串行 sweep：**
 
 ```bash
-exec_on_gpu "export MODEL='$MODEL' TP=$TP INFERENCEX_PATH='$INFERENCEX_PATH' \
+POST /api/jobs entrypoint: "export MODEL='$MODEL' TP=$TP INFERENCEX_PATH='$INFERENCEX_PATH' \
   CONC_VALUES='4 16 64' \
   ISL_OSL_CONFIGS='1024:1024 8192:1024 1024:8192' \
   RESULT_DIR='$RESULT_DIR/sweep' \
@@ -558,7 +560,7 @@ exec_on_gpu "export MODEL='$MODEL' TP=$TP INFERENCEX_PATH='$INFERENCEX_PATH' \
 
 **Option B：通过 RayJob 内部 Ray tasks 并行 sweep：**
 
-通过 `exec_on_gpu` / Ray Dashboard REST 提交一个 Python driver。该 driver 在 RayJob
+通过 Ray Dashboard REST 提交一个 Python driver。该 driver 在 RayJob
 镜像内部执行，可以使用集群内 `ray.init()`（不带 `address=`）在现有集群上调度任务：
 
 ```python

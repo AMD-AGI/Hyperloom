@@ -13,7 +13,7 @@ python3 $SKILL_ROOT/kb/kb_query.py --category backend_exploration --model "$MODE
 
 ## Procedure
 
-**Remote mode:** `ServerArgs` inspection and all backend test commands must be submitted to the RayJob via `exec_on_gpu`, which uses Ray Dashboard REST (`POST /api/jobs/`) under the hood. See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Backends" section for wrapper syntax.
+**Remote mode:** `ServerArgs` inspection and all backend test commands must be submitted to the RayJob via Ray Dashboard REST (`POST /api/jobs/`). See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Backends" section for wrapper syntax.
 
 ### Step 1: Discover all backend and scheduling flags
 

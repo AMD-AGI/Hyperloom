@@ -11,7 +11,7 @@ python3 $SKILL_ROOT/kb/kb_query.py "$MODEL_NAME torch.compile baseline" --top-k 
 
 ## Procedure
 
-**Remote mode:** Submit commands to the RayJob with `exec_on_gpu`, which uses Ray Dashboard REST (`POST /api/jobs/`) under the hood. See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Baseline" section for the exact wrapper syntax.
+**Remote mode:** Submit commands to the RayJob with Ray Dashboard REST (`POST /api/jobs/`). See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Baseline" section for the exact wrapper syntax.
 
 **Try torch.compile first, then fall back if incompatible.**
 
