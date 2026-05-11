@@ -359,11 +359,11 @@ source /tmp/baseline_config.sh
 |---------|--------------|------------|
 | **Concurrency mismatch** | GEAK benchmark omitted `--max-concurrency`, sending 128 requests at once vs baseline's 64 | Always include `--max-concurrency $CONC` |
 | **Server param drift** | GEAK server used decode-steps=8 while baseline used 4 | Save baseline config to file, source it for all re-tests |
-| **GEAK output path confusion** | GEAK agent wrote output to input file path instead of output dir | Always inspect the GEAK CLI output directory / Ray task workspace and copy the correct file from shared storage |
+| **GEAK output path confusion** | GEAK agent wrote output to input file path instead of output dir | Always check `geak_get_outputs` and download from the correct path |
 | **benchmark_serving.py args** | Used `--output-file` (wrong) instead of `--save-result --result-dir --result-filename` | Check InferenceX script's `--help` first |
 | **InferenceX path wrong** | Used `/shared_nfs/limou/InferenceX/` instead of user's path | Always use `$INFERENCEX_PATH` from Phase 1 setup |
 | **Trace file too large** | Raw trace 349MB, 97% python_function events | Always filter before TraceLens (see Trace Size and Filtering in SKILL.md) |
-| **TraceLens not called** | Said "called TraceLens" but didn't actually run analysis | Must run `TraceLens_generate_perf_report_pytorch_inference` CLI + `orchestrator_prepare.py` when `ops_summary.csv` exists (see `actions/profile.md`) |
+| **TraceLens not called** | Said "called TraceLens" but didn't actually run analysis | Must run `TraceLens_generate_perf_report_pytorch` CLI + `orchestrator_prepare.py` (see `actions/profile.md`) |
 | **GEAK input: comments not code** | Submitted `.cu` with only comments/path references, GEAK had no source to optimize | Always embed full source in `files[].content` |
 | **GEAK: wrong image** | Default ROCm image lacks framework code and headers; paths in GEAK prompt don't exist | Pass framework image (`KERNEL_OPT_IMAGE`) for all kernel types |
 | **GEAK HIP: `find /` on NFS** | GEAK agent ran `find \| grep` to locate source, hung ~35 min on NFS | Prompt must specify exact source dir and say "Do NOT search filesystem with find / or grep -r /" |

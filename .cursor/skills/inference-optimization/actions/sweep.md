@@ -8,7 +8,7 @@ Full ISL/OSL/CONC sweep with the optimized version to map the Pareto frontier.
 
 ## Procedure
 
-**Remote mode:** Multiple sweep execution options (serial via `exec_on_gpu`, SaFE parallel, Ray submit). See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Sweep" section for all options.
+**Claw mode:** Multiple sweep execution options (serial via `exec_on_gpu`, SaFE parallel, Ray submit). See [`../modes/CLAW.md`](../modes/CLAW.md) "Sweep" section for all options.
 
 ### Using the sweep script
 

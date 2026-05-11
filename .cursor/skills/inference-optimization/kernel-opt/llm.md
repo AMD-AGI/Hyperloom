@@ -11,8 +11,8 @@ This document provides detailed reference material for LLM-based kernel optimiza
 
 | | GEAK | LLM (this skill) |
 |---|---|---|
-| **Backend** | GEAK CLI via `geak_ray_submit.py` | PRISM SAFE LLM proxy → Claude / GPT |
-| **Latency** | 3–10 min typical agent execution | 1–30s (direct API call) |
+| **Backend** | GEAK MCP → remote GPU pod with AI agent | PRISM SAFE LLM proxy → Claude / GPT |
+| **Latency** | 10–30 min (pod scheduling + agent) | 1–30s (direct API call) |
 | **GPU access** | Yes — hardware-in-loop micro-benchmark | No — LLM writes code, you benchmark in your serving env |
 | **Output** | Verified kernel (compiled + benchmarked on pod) | Unverified kernel (must compile + benchmark locally) |
 | **Best for** | Complex HIP kernels, final polish, high-confidence | Fast iteration, Triton rewrites, GEAK pods overloaded |
@@ -23,6 +23,11 @@ This document provides detailed reference material for LLM-based kernel optimiza
 **Where each backend shines** (both still run; this explains which tends to win):
 - **LLM wins more often on**: Triton structural rewrites (dual-loop → single-pass), simple block-size tuning, kernels where multi-model diversity finds creative solutions
 - **GEAK wins more often on**: Complex HIP/C++ kernels, cases needing compile → test → fix iteration on real hardware, kernels with subtle correctness constraints
+
+**Fallback behavior:**
+- If GEAK fails (pod timeout, all 3 retries exhausted) → use best LLM result
+- If all LLM models fail (compilation errors after 3 reflection rounds) → use GEAK result
+- If both fail → skip kernel, move to next candidate
 
 ## Prerequisites
 

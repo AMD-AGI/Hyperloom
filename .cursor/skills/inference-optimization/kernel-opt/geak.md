@@ -1,7 +1,7 @@
 ---
 
 ## name: geak-inference-kernel-reference
-description: Deep reference for GEAK kernel optimization in inference serving. Covers CLI invocation, kernel extraction methods, integration paths, edge cases, and troubleshooting. Referenced by SKILL.md Phase 5 (identify candidates), Phase 7 (GEAK optimization loop), and Phase 8 (integrate + benchmark).
+description: Deep reference for GEAK kernel optimization in inference serving. Covers MCP tool details, kernel extraction methods, integration paths, edge cases, and troubleshooting. Referenced by SKILL.md Phase 5 (identify candidates), Phase 7 (GEAK optimization loop), and Phase 8 (integrate + benchmark).
 
 # GEAK Inference Kernel Optimization — Deep Reference
 
@@ -65,8 +65,12 @@ ls "$AITER_PATH/ops/"    # Python dispatch wrappers
 configuration files, server settings, workspace configs, test data, or results files.
 Modifying GEAK config is an Iron Rule violation and invalidates the entire run.
 
-Use the rendered `$GEAK_CONFIG` from bootstrap / container startup. Do not edit
-GEAK config files at runtime.
+**Do NOT call `geak_set_model_config` to change the model backend.** The GEAK LLM
+model configuration is pre-set by the administrator. Calling it to change
+`model_class`, `model_name`, or `api_base` violates IR-7.
+
+**Exception — Tracing headers:** You MUST call `geak_set_model_config` once to
+inject observability headers. See "Tracing Setup" section below.
 
 ## Tracing Setup
 
@@ -78,13 +82,26 @@ At the **start** of the kernel-opt action, record timestamps for cost correlatio
 python3 $SCRIPTS_DIR/trace_action.py --component geak --action start
 ```
 
-The script writes local timing state for cost correlation.
+The script outputs `extra_headers` JSON and writes state to `/workspace/.trace_action_geak.json`.
 
-### Step B: Use rendered CLI config
+### Step B: Inject tracing headers (claw only)
 
-GEAK runs as a CLI tool with config rendered by `bootstrap.sh` / container
-startup. Do not modify GEAK config at runtime. If tracing metadata is needed,
-record start/end with `trace_action.py`; do not inject headers through a service.
+> **This step applies to claw mode ONLY.** In local mode, GEAK runs as a CLI
+> tool with config rendered by `entrypoint.sh` — there is no MCP server and no
+> `geak_get_model_config` / `geak_set_model_config` tools available. Skip this step.
+
+1. Call `geak_get_model_config` to read current config.
+2. Call `geak_set_model_config` with:
+  - Keep ALL existing fields (`model_class`, `model_name`, `api_base`, `api_key`, etc.)
+  - `model_name` MUST have `openai/` prefix (e.g. `openai/claude-opus-4-6`).
+  Without it, litellm uses Anthropic `/v1/messages` route and tags are NOT parsed.
+  - Add `extra_headers` to `model_kwargs` using the values from the script output:
+    ```json
+    "extra_headers": {
+      "x-litellm-tags": "product:primus-claw,component:geak",
+      "x-litellm-spend-logs-metadata": "{\"session_id\":\"<SESSION_ID>\",\"component\":\"geak\"}"
+    }
+    ```
 
 ### Step C: Record end timestamp (after all tasks)
 
@@ -101,13 +118,13 @@ by querying `LiteLLM_SpendLogs` with time ranges.
 
 - Run tracing setup exactly ONCE per kernel-opt action (not per task).
 - Do NOT change `model_class`, `api_base`, or `api_key`.
-- If tracing metadata cannot be correlated, skip it (do not block kernel optimization).
+- If `geak_get_model_config` returns empty/error, skip tracing (do not block).
 
 ## GEAK Tool Reference
 
 GEAK invocation differs by mode. **Check your mode before proceeding.**
 
-### Ray-scheduled CLI (Local and Remote)
+### Local Mode (Ray-scheduled CLI)
 
 No MCP tools, no REST API. GEAK runs as the `geak` CLI, scheduled by Ray.
 
@@ -127,13 +144,41 @@ using `GEAK_MODEL_NAME` (default `claude-opus-4-7`), `GEAK_API_KEY`/`LLM_API_KEY
 and `GEAK_BASE_URL`/`LLM_API_BASE`. `geak_ray_submit.py` auto-injects `--config $GEAK_CONFIG`,
 so users do not need to pass it manually.
 
-### Task file details
+### MCP Mode (claw)
 
-GEAK is invoked via `$GEAK_CLI run -t task.md` or `$GEAK_CLI batch ...`.
-Put all instructions, source snippets, paths, and constraints in the task
-markdown file. Use `GEAK_STEP_LIMIT=100` or equivalent CLI configuration for
-kernel optimization where GEAK needs room to analyze, write, compile, fix errors,
-benchmark, and iterate.
+Requires GEAK MCP server running. Uses MCP tools:
+
+
+**Authentication (MCP mode):**
+- `GEAK_AUTH_KEY` — Bearer token for GEAK endpoint (set in `.env`)
+- `LITELLM_API_KEY` — Used internally by GEAK to call its LLM backend
+
+**FORBIDDEN:** `geak_set_model_config` — NEVER call this tool. Use existing config.
+
+| Step | Tool                                                    | Purpose                                  |
+| ---- | ------------------------------------------------------- | ---------------------------------------- |
+| 0a   | `bash: trace_action.py --component geak --action start` | Record start timestamp + generate config |
+| 0b   | `geak_get_model_config` → `geak_set_model_config`       | Inject tracing headers (once)            |
+| 1    | `geak_create_task`                                      | Create task with source + instructions   |
+| 2    | `geak_submit_task`                                      | Start optimization                       |
+| 3    | `geak_get_task`                                         | Poll status (every 30s)                  |
+| 4    | `geak_get_outputs`                                      | List output files                        |
+| 5    | `geak_download_file`                                    | Download optimized code                  |
+| 6    | `bash: trace_action.py --component geak --action end`   | Record end timestamp                     |
+| -    | `geak_list_tasks`                                       | Debug: list all tasks                    |
+
+### geak_create_task — critical details (claw MCP only)
+
+> **Claw mode only.** In local mode, GEAK is invoked via `$GEAK_CLI run -t task.md`
+> (see "Local Mode" table above). The parameters below map to fields in the task
+> `.md` file instead of MCP arguments.
+
+- `input_type` is **required** — use `"file"`
+- The instruction field is `prompt`, NOT `instructions`
+- `step_limit` controls agent iterations (**use 100** for kernel optimization — GEAK needs room to analyze, write, compile, fix errors, benchmark, and iterate. 20 is often not enough for a verified result; 5 is completely insufficient)
+- `gpu_count` defaults to 1
+- `**workspace_id`**: Always specify `KERNEL_OPT_WORKSPACE` (constant from `SKILL.md`; default `"control-plane-moe"`) for reliable scheduling. Default workspace is often resource-constrained.
+- Include ALL dependent files in the `files` array (GEAK needs self-contained code)
 
 ### Prompt template for inference kernels
 
@@ -164,7 +209,7 @@ OPTIMIZATION TARGETS (prioritized):
 Write the COMPLETE file (imports, decorator, function) to the output directory.
 ```
 
-**GEAK prompt rules — apply to ALL kernel types (MANDATORY for every GEAK CLI task):**
+**GEAK prompt rules — apply to ALL kernel types (MANDATORY for every geak_create_task):**
 
 1. **Kernel path — conditional on image availability:**
   - If the kernel source file **exists in the Docker image** (e.g., `/sgl-workspace/aiter/...`, `/opt/venv/...`), **MUST include** the kernel's absolute file path and repo path in the prompt. Example: `"The kernel source file is at /sgl-workspace/aiter/jit/core/compile.py"`, `"The kernel repo is at /sgl-workspace/aiter/"`.
@@ -180,24 +225,25 @@ Additional rules:
 
 ### Image and Workspace
 
-Use `KERNEL_OPT_IMAGE` (provided by CI or user prompt) for GEAK CLI tasks. This is the same framework image used by all kernel-opt backends.
+Use `KERNEL_OPT_IMAGE` (provided by CI or user prompt) for all `geak_create_task` calls. This is the same framework image used by all kernel-opt backends.
 
-Use the RayJob / platform workspace selected for the run. User can override.
+**Always pass `workspace_id: KERNEL_OPT_WORKSPACE` (default `"control-plane-moe"`) in `geak_create_task`.** User can override.
 
 ### GEAK latency breakdown
 
 **Local mode:** GEAK runs in-container via Ray — no pod scheduling or image pull.
 Typical latency: 3–10 min per task (agent execution only).
 
-**Remote mode (RayJob):**
+**Claw mode (SaFE pods):**
 
 | Phase             | Duration      | Notes                                     |
 | ----------------- | ------------- | ----------------------------------------- |
+| Pod scheduling    | 2-15 min      | Depends on cluster load, GPU availability |
+| Docker image pull | 1-5 min       | ROCm image is ~15GB                       |
 | Agent execution   | 3-10 min      | Depends on step_limit                     |
-| **Total**         | **3-10 min**  | Ray schedules CLI task                    |
+| **Total**         | **10-30 min** | Poll every 30s                            |
 
-If the CLI task is stuck, cancel the Ray task / process and retry after checking
-Ray available resources.
+The `updated_at` timestamp stays frozen until the pod starts. Once it changes, the agent has started. If stuck >30 min with no update, the cluster may be overloaded — cancel and retry.
 
 ## Kernel Integration Paths
 
@@ -378,11 +424,10 @@ Before patching any GEAK output into the serving environment:
 - Revert to backup: `cp "$WORK_DIR/kernels/xxx.bak" "$SGLANG_PATH/..."`
 - Clear Python cache: `find "$SGLANG_PATH" -name "__pycache__" -exec rm -rf {} +`
 
-### GEAK CLI task stuck
+### GEAK task stuck in pending (claw only)
 
-- Check `$GEAK_CLI status` for Ray cluster health and free GPUs.
-- Confirm `command -v geak || command -v mini || command -v geak-gaagent` works
-  inside the runtime.
-- If the Ray task hangs, cancel the process and retry after verifying task files
-  and GEAK config.
+- Pod scheduling can take 15+ min if cluster is loaded
+- Check with `geak_get_task` — if `updated_at` hasn't changed in 30 min, cancel and retry
+- Always use `workspace_id: KERNEL_OPT_WORKSPACE` for reliable scheduling (default `"control-plane-moe"` from `SKILL.md`; default workspace is resource-constrained)
+- In local mode, tasks run in-container via Ray — no pod scheduling. If a task hangs, check `$GEAK_CLI status` for Ray cluster health.
 

@@ -293,7 +293,7 @@ def seed():
          "Server param drift (decode-steps, mem-fraction) invalidates comparisons.",
          ["benchmark-fairness", "config-drift"]),
         ("GEAK agent may write output to input file path instead of output dir. "
-         "Always inspect the GEAK CLI output directory / Ray task workspace and copy the correct file from shared storage.",
+         "Always check geak_get_outputs and download from correct path.",
          ["GEAK", "output-path"]),
         ("Always filter traces before TraceLens. Raw traces are 349MB (97% python_function). "
          "Filtered traces are ~5MB.",

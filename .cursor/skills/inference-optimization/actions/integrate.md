@@ -9,7 +9,7 @@ Per-kernel integration phase. Called by `kernel-opt.md` for each GEAK result.
 
 ## Procedure
 
-**Remote mode:** All patch, re-baseline, and revert commands go through `exec_on_gpu`. See [`../modes/REMOTE.md`](../modes/REMOTE.md) "Integrate" section for wrapper syntax and multi-node patching.
+**Claw mode:** All patch, re-baseline, and revert commands go through `exec_on_gpu`. See [`../modes/CLAW.md`](../modes/CLAW.md) "Integrate" section for wrapper syntax and multi-node patching.
 
 ### Choose patching strategy
 

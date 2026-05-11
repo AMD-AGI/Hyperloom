@@ -5,7 +5,7 @@ Usage:
     python ray_submit.py --ray-address ray://<head>:10001 --command "bash run_baseline.sh"
     python ray_submit.py --ray-address ray://<head>:10001 --command "curl -X POST http://localhost:8888/start_profile"
 
-Used by executor.sh in Remote mode to dispatch operations to the RayJob cluster
+Used by executor.sh in Claw mode to dispatch operations to the RayJob cluster
 instead of running them locally.
 """
 

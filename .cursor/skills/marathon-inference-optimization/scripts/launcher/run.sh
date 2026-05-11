@@ -6,7 +6,7 @@
 #   bash $SKILL_ROOT/scripts/launcher/run.sh
 #
 # Auto-detects two modes:
-#   * sandbox — remote GPU sandbox (claude CLI, tmux, jq pre-installed via /app/*)
+#   * sandbox — Claw GPU sandbox (claude CLI, tmux, jq pre-installed via /app/*)
 #   * local   — any GPU host with an SGLang/vLLM image; missing deps installed on the fly
 #
 # =====================================================================
@@ -794,7 +794,7 @@ done
 # ========== STEP 6 — FINALIZE ==========
 log "marathon complete"
 
-# SESSION_REPORT.md must exist before `[run.sh] Done`. In the remote sandbox the
+# SESSION_REPORT.md must exist before `[run.sh] Done`. In the Claw sandbox the
 # polling agent stops as soon as it sees Done, often triggering container
 # snapshot/teardown before the EXIT trap has time to write the fallback report.
 if [[ ! -f "$SESSION_DIR/SESSION_REPORT.md" ]]; then

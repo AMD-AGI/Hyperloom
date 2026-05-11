@@ -18,9 +18,6 @@ SKILL_ROOT="${SKILL_ROOT:-.cursor/skills/inference-optimization}"
 BOOTSTRAP_SCRIPT="$SKILL_ROOT/scripts/bootstrap.sh"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
 
-# Direct bootstrap applies when the agent is already running inside the
-# Hyperloom/Ray container. In remote mode, run the same bootstrap inside the
-# RayJob after it is created (see "Remote mode" below).
 if [ "$MODE" = "local" ] \
    && [ ! -f /opt/entrypoint.sh ] \
    && [ ! -f /opt/hyperloom/.bootstrap_done ] \
@@ -67,14 +64,10 @@ User-specified values override auto-detected ones. **NEVER override user-specifi
 SKILL_ROOT="${SKILL_ROOT:-.cursor/skills/inference-optimization}"
 SCRIPTS_DIR="$SKILL_ROOT/scripts"
 
-# Mode detection (local = Hyperloom container, Ray CLIs; remote = SaFE RayJob +
-# exec_on_gpu, but GEAK/OOB/TraceLens still use CLI wrappers)
-if [ "${MODE:-}" = "remote" ]; then
-    MODE="remote"
+# Mode detection (local = Hyperloom container, Ray CLIs; claw = SaFE + exec_on_gpu)
+if [ "${MODE:-}" = "claw" ]; then
+    MODE="claw"
     WORKSPACE_ROOT="${WORKSPACE_ROOT:-/shared_nfs/inference-optimization}"
-    GEAK_CLI="python3 $SCRIPTS_DIR/geak_ray_submit.py"
-    OOB_RAY_CLI="python3 $SCRIPTS_DIR/oob_ray_submit.py"
-    OOB_CLI="${OOB_CLI:-/opt/venv/bin/oob}"
 else
     MODE="local"
     WORKSPACE_ROOT="${WORKSPACE_ROOT:-/opt/hyperloom}"
@@ -88,7 +81,7 @@ if [ "$MODE" = "local" ]; then
     source "$SCRIPTS_DIR/common.sh"
     WORKSPACE_ROOT="/opt/hyperloom"
 else
-    # Enables exec_on_gpu for remote dispatch.
+    # Enables exec_on_gpu for claw dispatch.
     source "$SCRIPTS_DIR/executor.sh"
 fi
 
@@ -113,31 +106,9 @@ export INFERENCEX_PATH="$INFERENCEX_PATH"
 - `$SKILL_ROOT`, `$SCRIPTS_DIR` paths validated
 - `$RESULT_DIR` created
 
-**Remote mode:** After environment setup, create the RayJob before proceeding. See
-[`../modes/REMOTE.md`](../modes/REMOTE.md) "RayJob Lifecycle" for the full `workload_create`
-payloads, wait logic, and remote execution environment setup.
-
-After the RayJob is running and `RAY_HEAD_ADDRESS` is set, run the BYOI bootstrap
-and CLI preflight inside the RayJob before benchmark/profile/kernel-opt:
-
-```bash
-exec_on_gpu "
-export PATH='/opt/venv/bin:'\"\$PATH\"
-export MODE=remote
-export SKILL_ROOT='$SKILL_ROOT'
-export HYPERLOOM_BUNDLE='\${HYPERLOOM_BUNDLE:-/wekafs/fully-local}'
-if [ ! -f /opt/hyperloom/.bootstrap_done ] && [ -d \"\$HYPERLOOM_BUNDLE\" ]; then
-  bash '$SCRIPTS_DIR/bootstrap.sh'
-fi
-[ -f /etc/profile.d/hyperloom-env.sh ] && . /etc/profile.d/hyperloom-env.sh
-export MODE=remote
-command -v geak || command -v mini || command -v geak-gaagent || echo 'WARN: geak CLI missing'
-command -v oob || echo 'WARN: oob CLI missing'
-command -v codex || command -v claude || echo 'WARN: codex/claude CLI missing'
-command -v TraceLens_generate_perf_report_pytorch_inference || echo 'WARN: TraceLens CLI missing'
-"
-```
-
+**Claw mode:** After environment setup, create the RayJob before proceeding. See
+[`../modes/CLAW.md`](../modes/CLAW.md) "RayJob Lifecycle" for the full `workload_create`
+payloads, wait logic, and claw execution environment setup.
 
 ## Failure Handling
 - If no model found: ask user for MODEL path

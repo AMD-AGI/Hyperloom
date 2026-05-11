@@ -1,16 +1,15 @@
 ---
 name: codex-inference-kernel-reference
-description: Codex backend for kernel optimization via `oob_ray_submit.py run` (Ray-scheduled CLI). Code generation with optional GPU — verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
+description: Codex backend for kernel optimization. In claw mode uses the OOB GPU Optimizer MCP; in local mode uses `oob_ray_submit.py run` (Ray-scheduled CLI). Code generation with optional GPU — verification done by the calling skill. Referenced by actions/kernel-opt.md Step 2.
 ---
 
 # Codex — Kernel Optimization Backend
 
-Codex backend for kernel optimization. Local and Remote/RayJob modes use the same
-Ray-scheduled CLI transport:
+Codex backend for kernel optimization. Two transport modes:
 
 | Mode | How Codex is invoked |
 |------|----------------------|
-| `remote` | `oob_ray_submit.py run -a codex ...` CLI (single blocking subprocess per iteration) |
+| `claw` | OOB GPU Optimizer MCP (`agent_create_task` etc.) |
 | `local` | `oob_ray_submit.py run -a codex ...` CLI (single blocking subprocess per iteration) |
 
 Tool surface and prompt template are identical across modes; only the call
@@ -35,7 +34,7 @@ good for Triton structural rewrites (dual-loop to single-pass, block-size tuning
 
 | | Codex (this) | GEAK | Claude | LLM Proxy |
 |---|---|---|---|---|
-| **Invocation** | `oob_ray_submit.py run -a codex` | `geak_ray_submit.py` | `oob_ray_submit.py run -a claude` | Direct API |
+| **MCP** | OOB GPU Optimizer | GEAK | OOB GPU Optimizer | Direct API |
 | **Latency (per iter)** | 30–120s | N/A | 1–5 min | 1–30s |
 | **Latency (full round)** | 2–6 min | 10–30 min | 3–15 min | 1–30s |
 | **GPU on pod** | No | Yes | No | No |
@@ -45,7 +44,7 @@ good for Triton structural rewrites (dual-loop to single-pass, block-size tuning
 
 ## Tracing Setup
 
-At the **start** of OOB Codex usage (before the first `oob_ray_submit.py run`), record
+At the **start** of OOB Codex usage (before the first `agent_create_task`), record
 the start timestamp for message-level cost correlation:
 
 ```bash
@@ -63,15 +62,78 @@ is handled automatically by `auth_proxy.py` inside the OOB workload pod — no m
 header configuration needed (unlike GEAK). The timestamps allow correlating OOB's
 LLM spend to specific messages by querying `LiteLLM_SpendLogs` with time ranges.
 
-## CLI Sequence
+## Tool Sequence (claw MCP only)
 
-| Step | Command | Purpose |
-|------|---------|---------|
-| 0 | `python3 $SCRIPTS_DIR/trace_action.py --component oob --action start --agent codex` | Record start timestamp (once) |
-| 1 | `$OOB_RAY_CLI run -a codex -p "$PROMPT" -f kernel.py -o "$OUT_DIR" --max-turns 20 --timeout 300 --no-live --json` | Create, submit, poll, and return result |
-| 2 | `jq -r .workspace` | Locate task workspace |
-| 3 | `cp "$WORKSPACE/optimized_kernel.py" ...` | Collect optimized code |
-| 4 | `python3 $SCRIPTS_DIR/trace_action.py --component oob --action end` | Record end timestamp |
+> **Local mode:** Skip this MCP sequence entirely. Use `oob_ray_submit.py run`
+> instead — see "Local Execution" section below.
+
+| Step | Tool | Purpose |
+|------|------|---------|
+| 0 | `bash: trace_action.py --component oob --action start --agent codex` | Record start timestamp (once) |
+| 1 | `agent_create_task` | Create task with kernel source + prompt |
+| 2 | `agent_submit_task` | Start execution |
+| 3 | `agent_get_task` | Poll status (every `CODEX_POLL_INTERVAL_S`) |
+| 4 | `agent_get_outputs` | List output files |
+| 5 | `agent_download_file` | Download optimized kernel |
+| 6 | `bash: trace_action.py --component oob --action end` | Record end timestamp (once, after all iterations) |
+| - | `agent_cancel_task` | Cancel if stuck past `CODEX_POLL_TIMEOUT_MIN` |
+
+## agent_create_task — Critical Details (claw MCP only)
+
+> **Claw mode only.** In local mode, these MCP tools are not available.
+> Use `oob_ray_submit.py run` CLI instead (see "Local Execution" below).
+
+- `agent`: `"codex"` (required)
+- `prompt`: kernel optimization instructions (see Prompt Template below)
+- `files`: array of `{filename, content}` — full kernel source embedded here
+- `max_turns`: use `CODEX_MAX_TURNS` (default 20)
+- `system_prompt`: optional — GPU-expert persona can improve output quality
+- `image`: optional — use `KERNEL_OPT_IMAGE` (shared with GEAK)
+- `workspace_id`: optional — use `KERNEL_OPT_WORKSPACE` (shared with GEAK, default `"control-plane-moe"`)
+
+### Example
+
+```
+Tool: agent_create_task
+Args: {
+    "agent": "codex",
+    "prompt": "<optimization instructions — see template below>",
+    "files": [
+        {"filename": "kernel.py", "content": "<full kernel source>"}
+    ],
+    "max_turns": 20,
+    "image": "KERNEL_OPT_IMAGE",
+    "workspace_id": "KERNEL_OPT_WORKSPACE"
+}
+```
+
+Then:
+```
+Tool: agent_submit_task
+Args: { "task_id": "<task_id from create>" }
+```
+
+### Polling
+
+```python
+for attempt in range(CODEX_POLL_TIMEOUT_MIN * 60 // CODEX_POLL_INTERVAL_S):
+    result = agent_get_task(task_id=TASK_ID)
+    if result["status"] == "completed":
+        break
+    elif result["status"] == "failed":
+        raise RuntimeError(f"Codex task failed: {result.get('error')}")
+    time.sleep(CODEX_POLL_INTERVAL_S)
+```
+
+### Downloading Results
+
+```python
+outputs = agent_get_outputs(task_id=TASK_ID)
+for f in outputs["files"]:
+    if f["path"].endswith(".py") and "optimized" in f["path"]:
+        result = agent_download_file(task_id=TASK_ID, file_path=f["path"])
+        optimized_code = result["content"]
+```
 
 ## Prompt Template
 
@@ -79,7 +141,7 @@ The core optimization prompt is shared with GEAK (see `actions/kernel-opt.md` fo
 the shared prompt rules). Codex-specific differences:
 
 - **No `mode` or `max_rounds`** — Codex has no concept of optimization modes
-- **No `image` in prompt text** — image/environment is provided by the RayJob/CLI environment, not mentioned in the prompt body
+- **No `image` in prompt text** — image is passed as MCP parameter (`image`), not mentioned in the prompt body
 - **Explicit output filename** — must tell Codex where to write
 
 ```
@@ -126,7 +188,8 @@ Return the COMPLETE optimized file — do not return partial snippets.
 
 - Codex writes the optimized kernel to `optimized_kernel.py` in its workspace
 - The prompt MUST instruct Codex to use this filename
-- Read directly from `<output-dir>/tasks/<user>/<task_id>/workspace/optimized_kernel.py`. The `oob_ray_submit.py run --json` result already exposes this via `.workspace`; use `$WORKSPACE/optimized_kernel.py` directly. There is **no** `output/` subdir.
+- **MCP (claw):** Use `agent_get_outputs` to list files, then `agent_download_file` to retrieve
+- **Local mode:** Read directly from `<output-dir>/tasks/<user>/<task_id>/workspace/optimized_kernel.py`. The `oob_ray_submit.py run --json` result already exposes this via `.workspace`; use `$WORKSPACE/optimized_kernel.py` directly. There is **no** `output/` subdir.
 
 ## Local Execution
 
@@ -160,13 +223,24 @@ if [ "$STATUS" = "completed" ]; then
 fi
 ```
 
-### Things that do NOT apply to CLI mode
+### CLI ↔ MCP mapping
+
+| MCP tool | CLI equivalent |
+|----------|----------------|
+| `agent_create_task(agent="codex", prompt, files, max_turns, ...)` | `oob_ray_submit.py run -a codex -p ... -f ... --max-turns ...` (single call) |
+| `agent_submit_task` | (folded into `oob_ray_submit.py run`) |
+| `agent_get_task` (poll) | (folded into `oob_ray_submit.py run`, polls internally) |
+| `agent_get_outputs` | `ls <workspace>/` (the `oob_ray_submit.py run --json` result's `.workspace` field already points at the live dir) |
+| `agent_download_file` | `cp <workspace>/<file>` (file is already on local disk) |
+| `agent_cancel_task` | `kill -INT <oob-pid>` (graceful) |
+
+### Things that do NOT apply to local mode
 
 - `image` and `workspace_id` — no SaFE workload is created; the agent CLI runs in-container.
   These args (and the `KERNEL_OPT_IMAGE` / `KERNEL_OPT_WORKSPACE` env vars) are silently ignored.
 - `gpu_count`, `cpu`, `memory`, `ephemeral_storage`, `replicas`, `rdma` — these are
   K8s-workload knobs; in local mode the subprocess uses whatever the container has.
-- Service-side cancellation tools — use process signals instead.
+- `agent_cancel_task` MCP tool — use process signals instead.
 
 ## Iterative Refinement Loop
 
@@ -189,8 +263,9 @@ After all iterations: pick the result with the best verified speedup.
 
 ### Iteration Flow (pseudocode)
 
-The same outer loop runs in all modes. `submit_and_wait()` is a single
-`oob_ray_submit.py run` subprocess.
+The same outer loop runs in all modes; only `submit_and_wait()` differs.
+For local mode, `submit_and_wait()` is a single `oob_ray_submit.py run` subprocess.
+For claw (MCP), it is the `agent_create_task` + `agent_submit_task` + poll sequence.
 
 ```python
 best_result = None
@@ -203,15 +278,28 @@ for i in range(OOB_ROUND_ITERATIONS):
         prompt += f"\n\n--- PREVIOUS ITERATION RESULTS ---\n{feedback_context}"
         prompt += "\nUse these results to improve your optimization. Avoid repeating failed approaches."
 
-    # 2. Submit + wait. Single blocking CLI call writes results to <workspace>.
-    result = oob_run_blocking(
-        agent="codex",  # or "claude"
-        prompt=prompt,
-        input_file=("kernel.py", original_kernel_source),
-        max_turns=CODEX_MAX_TURNS,
-        output_dir=f"{WORK_DIR}/oob_codex_iter{i+1}",
-        timeout=CODEX_POLL_TIMEOUT_MIN * 60,
-    )
+    # 2. Submit + wait (mode-specific)
+    if MODE == "local":
+        # Single blocking CLI call writes results to <workspace> (== task workspace dir)
+        result = oob_run_blocking(
+            agent="codex",  # or "claude"
+            prompt=prompt,
+            input_file=("kernel.py", original_kernel_source),
+            max_turns=CODEX_MAX_TURNS,
+            output_dir=f"{WORK_DIR}/oob_codex_iter{i+1}",
+            timeout=CODEX_POLL_TIMEOUT_MIN * 60,
+        )
+    else:
+        task = agent_create_task(
+            agent="codex",  # or "claude"
+            prompt=prompt,
+            files=[{"filename": "kernel.py", "content": original_kernel_source}],
+            max_turns=CODEX_MAX_TURNS,
+            image=KERNEL_OPT_IMAGE,
+            workspace_id=KERNEL_OPT_WORKSPACE,
+        )
+        agent_submit_task(task_id=task["task_id"])
+        result = poll_until_complete(task["task_id"])
 
     if result["status"] == "failed":
         # When the user passes --timeout to `oob run`, the agent subprocess is
@@ -281,10 +369,11 @@ This gives the agent visibility into what worked and what failed, enabling it to
 1. **Always use the ORIGINAL kernel source** in `files[].content` (or `-f` in
    local mode) — never pass a previous iteration's output as the source. The
    agent should generate each attempt from scratch based on the original + feedback.
-2. **Each iteration is a NEW task** — a fresh `oob_ray_submit.py run` invocation.
-   Do not try to resume or modify a previous task.
+2. **Each iteration is a NEW task** — `agent_create_task` + `agent_submit_task` in
+   claw (MCP) modes, a fresh `oob_ray_submit.py run` invocation in local mode. Do not try to resume
+   or modify a previous task.
 3. **Verification runs locally** (on the machine with GPU access — the inference
-   server in local mode, or the RayJob in remote mode).
+   server in local mode, or the RayJob in claw mode).
 4. **Stop early** if `speedup >= 2.0x` — no need to exhaust all iterations.
 5. **Stop early** if all iterations produce compilation errors — likely
    a fundamental issue with the kernel type for this backend.
@@ -310,11 +399,13 @@ This gives the agent visibility into what worked and what failed, enabling it to
 ## Troubleshooting
 
 ### Task completes but no optimized_kernel.py in outputs
-- `ls <workspace>/` (the `oob_ray_submit.py run --json` result's `.workspace`) to see what Codex actually wrote
+- **MCP (claw):** Check `agent_get_outputs` — file may have a different name
+- **Local:** `ls <workspace>/` (the `oob_ray_submit.py run --json` result's `.workspace`) to see what Codex actually wrote
 - Next iteration prompt will include this failure, prompting explicit file output
 
 ### Task fails immediately
-- Inspect `<output-dir>/<task_id>/execution.log` and the JSON `error_message`
+- **MCP (claw):** Check `agent_get_task` `error` field
+- **Local:** Inspect `<output-dir>/<task_id>/execution.log` and the JSON `error_message`
 - Verify prompt is not empty and the input file (`-f`) is non-empty / readable
 
 ### All iterations produce compilation errors

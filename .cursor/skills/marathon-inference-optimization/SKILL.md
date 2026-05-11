@@ -112,7 +112,7 @@ The user prompt must supply:
 
 ## Sandbox-injected env (agent need not set)
 
-These are pre-populated by the remote GPU sandbox. For local / non-sandbox runs, the
+These are pre-populated by the Claw GPU sandbox. For local / non-sandbox runs, the
 user must export them before invoking the skill.
 
 | Var | Source |
@@ -179,7 +179,7 @@ bash $SKILL_ROOT/scripts/launcher/run.sh > /tmp/marathon.log 2>&1 &
 echo "marathon_pid=$!"
 ```
 
-### Remote sandbox
+### Claw sandbox
 
 Same body, plus one sandbox header:
 
@@ -200,9 +200,9 @@ the final SESSION_REPORT when `[run.sh] Done` appears.
 
 ### Sandbox vs local — what differs
 
-| Field | Cursor (local GPU) | Remote (sandbox) |
+| Field | Cursor (local GPU) | Claw (sandbox) |
 |-------|--------------------|-----------------|
-| Skill trigger mechanism | `@marathon-inference-optimization` or glob match — SKILL.md auto-loaded into agent context | Sandbox agent reads SKILL.md explicitly; include `SandboxImage:` header so the remote platform provisions the right pod |
+| Skill trigger mechanism | `@marathon-inference-optimization` or glob match — SKILL.md auto-loaded into agent context | Sandbox agent reads SKILL.md explicitly; include `SandboxImage:` header so Claw provisions the right pod |
 | `BASE_DIR` | any path the GPU host can write | `/workspace/hyperloom/...` to get S3 sync |
 | `MODEL_PATH` / `INFERENCEX_PATH` | NFS paths (same as sandbox, e.g. `/hyperloom/...`) | same |
 | `claude` CLI / `tmux` / `jq` | `run.sh` auto-installs if missing | preinstalled in sandbox image |
@@ -242,7 +242,7 @@ every pane's in-flight claude call finishes within ~60s and the final
 ## What NOT to do
 
 - Do NOT `exec_on_gpu`-wrap any command. The panes run natively on GPU hosts
-  (sandbox or local); `modes/REMOTE.md` is legacy for this launcher and the pane prompts explicitly
+  (sandbox or local); `modes/CLAW.md` is legacy and the pane prompts explicitly
   override it.
 - Do NOT write to `/shared_nfs/.../state.json` directly from your monitoring
   code. The orchestrator pane owns it.
@@ -273,7 +273,7 @@ upstream bug fixes and KB updates flow through without a skill republish, and
 The three pane launcher prompts (`scripts/launcher/pane_*.md`) tell their
 `claude` CLI to `Load and follow $SPEC_ROOT/SKILL.md` (and
 `$SPEC_ROOT/kernel-manager/SKILL.md` / `$SPEC_ROOT/watchdog/SKILL.md`
-respectively), and explicitly IGNORE `$SPEC_ROOT/modes/REMOTE.md` since the
+respectively), and explicitly IGNORE `$SPEC_ROOT/modes/CLAW.md` since the
 pane IS on the GPU host natively.
 
 ## Deeper reading (for when the user asks "what is marathon doing now")

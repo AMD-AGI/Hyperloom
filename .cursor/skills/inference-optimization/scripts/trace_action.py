@@ -18,8 +18,8 @@ Writes to:
         (backend auto-attaches message_id for per-message correlation)
     $WORKSPACE_PATH/.trace_action_<component>.json — local state for duration calc
 
-For GEAK/OOB: records timing metadata for CLI invocations. OOB handles headers
-via auth_proxy automatically when configured by bootstrap.
+For GEAK: also outputs extra_headers JSON for the agent to inject via
+geak_set_model_config (OOB handles headers via auth_proxy automatically).
 """
 
 import argparse
@@ -121,7 +121,7 @@ def record_start(component: str, agent: str = "", task_id: str = ""):
 
     if component == "geak":
         print()
-        print("GEAK extra_headers metadata recorded locally for correlation:")
+        print("Add these extra_headers to model_kwargs when calling geak_set_model_config:")
         print(json.dumps(extra_headers, indent=2))
 
 

@@ -31,19 +31,6 @@ if [ "${MODE:-}" = "local" ]; then
 fi
 ```
 
-Before running benchmark/profile/kernel-opt, source the bootstrap-generated env
-and verify all required CLIs:
-
-```bash
-[ -f /etc/profile.d/hyperloom-env.sh ] && . /etc/profile.d/hyperloom-env.sh
-export MODE=local
-
-command -v geak || command -v mini || command -v geak-gaagent
-command -v oob
-command -v codex || command -v claude
-command -v TraceLens_generate_perf_report_pytorch_inference
-```
-
 ---
 
 ## Local Iron Rules
@@ -123,7 +110,7 @@ Cursor IDE (SSH) --> Skill (SKILL.md)
 
 ## Key Differences from Other Modes
 
-| Aspect | Local | Remote (REMOTE.md) |
+| Aspect | Local | Claw (CLAW.md) |
 |--------|-------|----------------|
 | GEAK invocation | `geak_ray_submit.py` (Ray + geak CLI) | `geak_client.py` (REST API) |
 | GEAK service | None (CLI per-task) | Remote REST API |
@@ -298,24 +285,9 @@ TraceLens is a CLI tool with no persistent service. Use directly:
 
 ```bash
 # Generate performance report
-mkdir -p "$RESULT_DIR/tracelens/perf_report_csvs"
 TraceLens_generate_perf_report_pytorch_inference \
-  --profile_json_path "$TRACE_DIR/$FILTERED_TRACE_NAME" \
-  --output_xlsx_path "$RESULT_DIR/tracelens/perf_report.xlsx" \
-  --output_csvs_dir "$RESULT_DIR/tracelens/perf_report_csvs" \
-  --gpu_arch_json_path "$TRACELENS_ROOT/TraceLens/AgenticMode/Standalone/utils/arch/$GPU_TYPE.json" \
-  --enable_pseudo_ops \
-  --group_by_num_kernels \
-  --enable_kernel_summary
-
-if [ -f "$RESULT_DIR/tracelens/perf_report_csvs/ops_summary.csv" ]; then
-  python3 "$TRACELENS_ROOT/TraceLens/AgenticMode/Standalone/orchestrator_prepare.py" \
-    --trace-path "$TRACE_DIR/$FILTERED_TRACE_NAME" \
-    --platform "$GPU_TYPE" \
-    --output-dir "$RESULT_DIR/tracelens"
-else
-  echo "TraceLens produced GPU-only output; use kernel_summary.csv as fallback"
-fi
+  --trace-file "$TRACE_DIR/$FILTERED_TRACE_NAME" \
+  --output-dir "$RESULT_DIR/tracelens"
 
 # Other TraceLens CLI commands available via pip install
 ```
@@ -337,7 +309,6 @@ export SCRIPTS_DIR="$SKILL_ROOT/scripts"
 export GEAK_CLI="python3 $SCRIPTS_DIR/geak_ray_submit.py"
 export OOB_RAY_CLI="python3 $SCRIPTS_DIR/oob_ray_submit.py"
 export OOB_CLI="${OOB_CLI:-oob}"
-export TRACELENS_ROOT="${TRACELENS_ROOT:-/opt/hyperloom/TraceLens}"
 
 TIMESTAMP=$(date +%Y-%m-%d-%H-%M)
 export RESULT_DIR="/tmp/inference-optimization/results/${TIMESTAMP}"
@@ -364,24 +335,9 @@ bash "$SCRIPTS_DIR/run_profile.sh"
 Trace files written to `$TRACE_DIR`. TraceLens analyzes locally:
 
 ```bash
-mkdir -p "$RESULT_DIR/tracelens/perf_report_csvs"
 TraceLens_generate_perf_report_pytorch_inference \
-  --profile_json_path "$TRACE_DIR/$FILTERED_TRACE_NAME" \
-  --output_xlsx_path "$RESULT_DIR/tracelens/perf_report.xlsx" \
-  --output_csvs_dir "$RESULT_DIR/tracelens/perf_report_csvs" \
-  --gpu_arch_json_path "$TRACELENS_ROOT/TraceLens/AgenticMode/Standalone/utils/arch/$GPU_TYPE.json" \
-  --enable_pseudo_ops \
-  --group_by_num_kernels \
-  --enable_kernel_summary
-
-if [ -f "$RESULT_DIR/tracelens/perf_report_csvs/ops_summary.csv" ]; then
-  python3 "$TRACELENS_ROOT/TraceLens/AgenticMode/Standalone/orchestrator_prepare.py" \
-    --trace-path "$TRACE_DIR/$FILTERED_TRACE_NAME" \
-    --platform "$GPU_TYPE" \
-    --output-dir "$RESULT_DIR/tracelens"
-else
-  echo "TraceLens produced GPU-only output; use kernel_summary.csv as fallback"
-fi
+  --trace-file "$TRACE_DIR/$FILTERED_TRACE_NAME" \
+  --output-dir "$RESULT_DIR/tracelens"
 ```
 
 ### Kernel Optimization (`actions/kernel-opt.md`)

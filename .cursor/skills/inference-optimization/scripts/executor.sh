@@ -4,11 +4,11 @@
 #
 # Dispatches GPU-side commands to the correct backend:
 #   - local: execute directly (eval)
-#   - remote: submit to RayJob cluster via ray_submit.py
+#   - claw:  submit to Ray cluster via ray_submit.py
 #
 # Required env:
-#   MODE             — "local" or "remote"
-#   RAY_HEAD_ADDRESS — Ray client address (remote mode only), e.g. ray://<head>:10001
+#   MODE             — "local" or "claw"
+#   RAY_HEAD_ADDRESS — Ray client address (claw mode only), e.g. ray://<head>:10001
 #
 # Usage:
 #   source executor.sh
@@ -24,9 +24,9 @@ exec_on_gpu() {
 
     if [ "$MODE" = "local" ]; then
         eval "$cmd"
-    elif [ "$MODE" = "remote" ]; then
+    elif [ "$MODE" = "claw" ]; then
         if [ -z "$RAY_HEAD_ADDRESS" ]; then
-            echo "ERROR: RAY_HEAD_ADDRESS not set (required in remote mode)" >&2
+            echo "ERROR: RAY_HEAD_ADDRESS not set (required in claw mode)" >&2
             return 1
         fi
         python3 "$SCRIPTS_DIR/ray_submit.py" \
@@ -34,7 +34,7 @@ exec_on_gpu() {
             --command "$cmd" \
             --timeout "$timeout"
     else
-        echo "ERROR: Unknown MODE='$MODE'. Expected 'local' or 'remote'." >&2
+        echo "ERROR: Unknown MODE='$MODE'. Expected 'local' or 'claw'." >&2
         return 1
     fi
 }
@@ -45,9 +45,9 @@ exec_on_gpu_bg() {
     if [ "$MODE" = "local" ]; then
         eval "$cmd" &
         echo $!
-    elif [ "$MODE" = "remote" ]; then
+    elif [ "$MODE" = "claw" ]; then
         if [ -z "$RAY_HEAD_ADDRESS" ]; then
-            echo "ERROR: RAY_HEAD_ADDRESS not set (required in remote mode)" >&2
+            echo "ERROR: RAY_HEAD_ADDRESS not set (required in claw mode)" >&2
             return 1
         fi
         python3 "$SCRIPTS_DIR/ray_submit.py" \
@@ -55,7 +55,7 @@ exec_on_gpu_bg() {
             --command "nohup $cmd > /dev/null 2>&1 & echo \$!" \
             --timeout 30
     else
-        echo "ERROR: Unknown MODE='$MODE'. Expected 'local' or 'remote'." >&2
+        echo "ERROR: Unknown MODE='$MODE'. Expected 'local' or 'claw'." >&2
         return 1
     fi
 }
