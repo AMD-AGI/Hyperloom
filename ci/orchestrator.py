@@ -346,7 +346,9 @@ def run_model(
 def main():
     parser = argparse.ArgumentParser(description="Hyperloom CI/CD Orchestrator")
     parser.add_argument("--config", default=None, help="Path to ci-config.yaml")
-    parser.add_argument("--models", default=None, help="Comma-separated model subset (inferenceX_key)")
+    parser.add_argument("--models", default=None,
+                        help="Comma-separated model subset (matches per-entry `key` field, "
+                             "fallback `inferenceX_key`)")
     parser.add_argument("--trigger", default="manual", help="Trigger type: scheduled/manual/inferenceX")
     parser.add_argument("--tools", default=None, help="Comma-separated Claw tool IDs (overrides ci-config)")
     parser.add_argument("--dry-run", action="store_true", help="Print prompts without executing")
@@ -375,15 +377,23 @@ def main():
             m["model_path_override"] = resolve_var(m["model_path_override"])
 
     # Resolve which models to run
+    # Each ci-config entry has either an explicit `key` (matrix display id) or
+    # falls back to `inferenceX_key`. We filter by the effective key so multiple
+    # entries can share the same `inferenceX_key` (e.g. single-node + multi-node
+    # DSR1 both look up `dsr1-fp8-mi300x-sglang` in amd-master.yaml but expose
+    # distinct keys to the matrix).
+    def _entry_key(m: dict) -> str:
+        return m.get("key") or m["inferenceX_key"]
+
     model_list = config.get("models", [])
     if args.models:
         selected = set(args.models.split(","))
-        model_list = [m for m in model_list if m["inferenceX_key"] in selected]
+        model_list = [m for m in model_list if _entry_key(m) in selected]
         if not model_list:
             log.error("No models matched: %s", args.models)
             sys.exit(1)
 
-    log.info("Models to process: %s", [m["inferenceX_key"] for m in model_list])
+    log.info("Models to process: %s", [_entry_key(m) for m in model_list])
 
     # Fetch InferenceX config + benchmark scripts in a single shallow clone
     log.info("Fetching InferenceX config from main...")
