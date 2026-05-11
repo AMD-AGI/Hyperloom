@@ -29,7 +29,9 @@ The CLI starts a Python Coordinator that coordinates:
   `review_constraints`-gated verdicts). `--critic-mock` for offline /
   smoke tests; `--critic-codex-bare` for debugging the LLM layer
   without the runtime layer.
-- Robustness: mock robustness monitor in this branch.
+- Robustness: default `--robustness-agent` — drives the `robustness-agent/`
+  subprocess runtime for health monitoring, RCA, and scheduling-police
+  intents. `--robustness-mock` for offline / smoke tests.
 
 State lives in **one fixed session directory** — `/workspace/hyperloom`
 by default. v0.6.1 collapses the previous `<root>/<session_id>/` layout
@@ -495,6 +497,11 @@ verdicts). Pass `--critic-mock` to fall back to the always-approve
 adapter for offline / smoke runs, or `--critic-codex-bare` to run the
 legacy direct-Codex path with no runtime layer (for debugging the LLM
 in isolation). See [Critic Backend Selection](#critic-backend-selection).
+
+Robustness defaults to `--robustness-agent` (the real robustness-agent
+runtime). Pass `--robustness-mock` only for offline / smoke runs, or set
+`INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND=mock` as a pod-level
+override.
 
 After launching, do a short health check:
 
