@@ -60,14 +60,14 @@ class ProfileExecutor(BaselineExecutor):
         *,
         magpie_python: str | None = None,
         default_config_path: Path | str | None = None,
-        default_output_root: Path | str | None = None,
+        session_dir: Path | str | None = None,
         default_timeout_sec: int = PROFILE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
     ):
         super().__init__(
             magpie_python=magpie_python,
             default_config_path=default_config_path,
-            default_output_root=default_output_root,
+            session_dir=session_dir,
             default_timeout_sec=default_timeout_sec,
             cwd=cwd,
         )
@@ -77,6 +77,18 @@ class ProfileExecutor(BaselineExecutor):
         return _default_profile_config()
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        # Override action label so per-task output lands under runs/profile/
+        # rather than runs/baseline/ when the runner derives the path.
+        params = ctx.task.params or {}
+        extra = getattr(ctx, "extra", None) or {}
+        if not (params.get("output_dir") or extra.get("workspace")):
+            output_dir = self._resolve_workspace(ctx, "profile")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            # Stash so BaselineExecutor.__call__ picks it up via extra.
+            if extra is None:
+                ctx.extra = {"workspace": str(output_dir)}
+            else:
+                extra["workspace"] = str(output_dir)
         result = await super().__call__(ctx)
         # Augment with trace_dir if the workspace produced one.
         workspace_str = result.get("workspace")
