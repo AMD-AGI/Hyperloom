@@ -1,12 +1,14 @@
 """Robustness reactor role layer.
 
-Bridges the Coordinator's Backend protocol (or a multi-cli inbox/outbox
-transport in later milestones) to the agent's symptom -> decision pipeline.
+Hosts drive the reactor through the subprocess CLI in
+:mod:`robustness_agent.runtime.cli`, which converts ``request.json`` ->
+``ReactorContext`` (via :func:`from_coordinator_prompt`) and serialises
+emitted intents through :func:`build_envelope_dict`.
 
 Only the wire-format primitives (envelope + prompt_inputs) are
-re-exported at package level. Higher-level pieces (:class:`Reactor`,
-:class:`RobustnessAgentBackend`) live in submodules to avoid circular
-imports between ``role`` and ``decision``.
+re-exported at package level. The reactor itself lives in
+``role.reactor`` to keep this module import-light for hosts that just
+need the JSON-IO surface.
 """
 
 from .envelope import (
