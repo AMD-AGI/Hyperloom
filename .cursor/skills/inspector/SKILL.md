@@ -5,28 +5,34 @@ description: |
   phase of a target skill (e.g. inference-optimization, training-optimization) ends,
   the inspector reads that target skill's action `.md` files at runtime, derives an
   expectation manifest of mandatory tool calls / output files / state assertions,
-  audits the agent transcript JSONL plus on-disk artifacts, and emits a structured
-  audit_report.json with verdict in {PASS, WARN, BLOCK, FATAL}. The user prompt
-  binds the main agent to remediate every BLOCK / FATAL violation before advancing
-  to the next phase. The inspector itself is read-only and same-agent; it does not
-  modify the audited skill. Use this skill whenever a long, multi-phase skill is
-  being executed and you want to detect skipped or incomplete steps.
+  audits the agent transcript JSONL plus on-disk artifacts, and writes a structured
+  audit_report.json to `$RESULT_DIR/.audit/<PHASE>_<ts>.json` with verdict in
+  {PASS, WARN, BLOCK, FATAL}. The chat itself shows only a single-line
+  acknowledgement; the full report lives on disk. The user prompt binds the main
+  agent to remediate every BLOCK / FATAL violation before advancing to the next
+  phase by reading the on-disk report. The inspector itself is read-only and
+  same-agent; it does not modify the audited skill. Use this skill whenever a
+  long, multi-phase skill is being executed and you want to detect skipped or
+  incomplete steps without flooding the chat with audit machinery.
 disable-model-invocation: true
 ---
 
 # Inspector — Generic Phase-Level Execution Audit Skill
 
 This skill audits another skill's execution. You (the agent) invoke it after a
-phase of a target skill ends, follow the 5 steps below verbatim, and emit an
-`audit_report.json` per [audit-report-schema.md](audit-report-schema.md). The
-user prompt that started the run defines what you do with the verdict; obey it.
+phase of a target skill ends, follow the 5 steps below verbatim, and write an
+`audit_report.json` to disk per [audit-report-schema.md](audit-report-schema.md).
+**The chat itself shows only a single-line acknowledgement.** The full report
+is on disk at `$RESULT_DIR/.audit/<PHASE>_<ts>.json`; the user prompt that
+started the run defines what you do with the verdict (typically: read the
+on-disk report, run any required remediations, advance).
 
 The companion documents are normative:
 
 - [extraction-protocol.md](extraction-protocol.md) — how to derive the
   expectation manifest from the target action `.md`.
-- [audit-report-schema.md](audit-report-schema.md) — exact JSON schema and
-  marker format you must emit.
+- [audit-report-schema.md](audit-report-schema.md) — exact JSON schema for
+  the on-disk `audit_report.json` and the one-line chat ack format.
 - [remediation-protocol.md](remediation-protocol.md) — severity ladder and the
   main-agent obligations per verdict.
 - [user-prompt-template.md](user-prompt-template.md) — the binding contract
@@ -53,14 +59,12 @@ The companion documents are normative:
 4. **You do not modify the audited skill.** Even if you notice a bug in the
    target action `.md`, do not fix it. Report it as an `info` if relevant; the
    user updates the source.
-5. **Versions are pinned.** This SKILL.md targets `inspector_version=1.1` and
-   `manifest_version=1.1`. Both are recorded in your `audit_report.json`.
-6. **Verdict computation is mechanical, not LLM-judged.** As of v1.1, the
-   `verdict` field MUST come from `scripts/compute_verdict.py` (S5b below).
-   You may NOT hand-write the verdict from prose, MAY NOT post-edit the
-   script's JSON output, and MAY NOT add justification fields like
-   `because`, `deferred`, or `acceptable` next to it. If a verdict is wrong,
-   the only legitimate fix is to update `scripts/semantic_rules.json` or the
+5. **Verdict computation is mechanical, not LLM-judged.** The `verdict`
+   field MUST come from `scripts/compute_verdict.py` (S5b below). You may
+   NOT hand-write the verdict from prose, MAY NOT post-edit the script's
+   JSON output, and MAY NOT add justification fields like `because`,
+   `deferred`, or `acceptable` next to it. If a verdict is wrong, the only
+   legitimate fix is to update `scripts/semantic_rules.json` or the
    extraction protocol BEFORE the next inspector invocation. See
    [semantic-rules.md](semantic-rules.md) and
    [remediation-protocol.md §6 anti-pattern 7](remediation-protocol.md).
@@ -76,7 +80,7 @@ prompt copied them in via the binding contract template):
 |---|---|---|---|
 | `TARGET_SKILL_DIR` | absolute or workspace-relative path | yes | `.cursor/skills/inference-optimization` |
 | `PHASE_NAME` | uppercase symbol matching `[A-Z][A-Z0-9_]*` | yes | `BASELINE` |
-| `PHASE_ACTION_FILES` | list of paths inside `TARGET_SKILL_DIR` (single string also accepted for backward compat) | optional | `[actions/kernel-opt.md, actions/integrate.md]` |
+| `PHASE_ACTION_FILES` | list of paths inside `TARGET_SKILL_DIR` | optional | `[actions/kernel-opt.md, actions/integrate.md]` |
 | `PHASE_INDEX` | integer | optional | `5` |
 | `RUN_ENV` | mapping of env var -> string | yes | `{"RESULT_DIR": "...", "MODEL": "..."}` |
 | `MARKER_SENTENCE` | a sentence from the original user prompt | optional | `Run inference-optimization for Qwen3-14B...` |
@@ -91,9 +95,6 @@ skill makes integration mandatory after every kernel-opt round, and auditing
 only `kernel-opt.md` was the structural gap that hid the 2026-04-21 Qwen3
 failure.
 
-For backward compatibility, the legacy `PHASE_ACTION_FILE` (singular) is
-still accepted; treat it as a single-element `PHASE_ACTION_FILES`.
-
 ---
 
 ## The 5-Step Audit Procedure
@@ -104,27 +105,29 @@ produced; the recap is for the human reader and is not parsed.
 
 ### S1 — Bind context
 
-1. Echo, on a single line, the resolved inputs:
-   `inspector S1: target=<TARGET_SKILL_DIR> phase=<PHASE_NAME> action_file=<PHASE_ACTION_FILE>`
-2. Verify `TARGET_SKILL_DIR` exists with `Read` on its `SKILL.md`. If the file
+You do **not** echo per-step status lines into the chat. Run the steps below
+silently; the only chat output for the entire audit is the single-line ack
+at S5c.
+
+1. Verify `TARGET_SKILL_DIR` exists with `Read` on its `SKILL.md`. If the file
    does not exist, emit the self-failure `audit_report.json` per
    [remediation-protocol.md §7](remediation-protocol.md) and stop.
-3. Resolve `PHASE_ACTION_FILE`:
-   - If provided, attempt `Read` on `<TARGET_SKILL_DIR>/<PHASE_ACTION_FILE>`.
-     On error, fall through to derivation.
+2. Resolve `PHASE_ACTION_FILES`:
+   - If provided, attempt `Read` on each entry under `<TARGET_SKILL_DIR>/`.
+     On error for any entry, fall through to derivation.
    - Else read the target `SKILL.md` and locate an "Action Dispatch" table
      or an "Orchestrator Loop" section that maps phase names to action files.
-   - Final fallback: `actions/<phase_name_lower>.md`.
+   - Final fallback: `[actions/<phase_name_lower>.md]`.
    - If still not found, emit a `manifest_extraction_failed` `info` violation
      (NOT block) and proceed to S5 with an empty manifest.
-4. Cross-verify the keys of `RUN_ENV` against the most recent `export VAR=`
+3. Cross-verify the keys of `RUN_ENV` against the most recent `export VAR=`
    shell commands in the audit window (you will compute the audit window in
    S3; for S1 it is sufficient to flag any obvious mismatches). Do not error
    on mismatch; record in `run_env_unresolved` for any var you cannot
    confirm.
 
-Recap: you now have `target_skill_dir`, `phase_action_file`, `run_env`, and
-have confirmed the action file is readable.
+Recap: you now have `target_skill_dir`, `phase_action_files`, `run_env`, and
+have confirmed the action files are readable.
 
 ### S2 — Build expectation manifest
 
@@ -165,25 +168,29 @@ classification pass is your job.
 5. Compute `regex_anchors_diff` by counting how many regex candidates were
    dropped or down-modalitied by your classification. Record in
    `extraction_diagnostics`.
-6. Emit the manifest as a fenced JSON block in your reply with title
-   `## Expectation manifest for <PHASE_NAME>`. This makes the manifest
-   round-trip into the transcript so future inspector runs can re-read it.
+6. Write the manifest to `/tmp/inspector_manifest_<PHASE_NAME>.json`
+   (so `compute_verdict.py` and `emit_audit_report.py` can read it in S5).
+   You do **not** print the manifest into the chat; the on-disk
+   audit_report.json (S5c) embeds the manifest's diagnostics.
 
 Recap: you now have `manifest = {expected_tool_calls, expected_artifacts,
-expected_state_assertions}` plus `extraction_diagnostics`. Hold this in
-context for S4.
+expected_state_assertions}` plus `extraction_diagnostics` written to
+`/tmp/inspector_manifest_<PHASE_NAME>.json`.
 
 ### S3 — Locate the current conversation transcript and check its health
 
 1. Run:
    ```bash
    python3 .cursor/skills/inspector/scripts/find_transcript.py \
+       --result-dir "$RESULT_DIR" \
        ${MARKER_SENTENCE:+--marker-sentence "$MARKER_SENTENCE"}
    ```
    The script returns JSON with `transcript_path`, `audit_from_line`, and
-   `previous_inspector_end_line`.
-2. **Transcript health gate (v1.1).** Two independent failure modes both
-   block the audit:
+   `window_source` (`sentinel` if `$RESULT_DIR/.audit/_state.json` from a
+   previous audit was readable and matched the chosen transcript;
+   `start_of_file` otherwise — typically the first audit of a run).
+2. **Transcript health gate.** Two independent failure modes both block
+   the audit:
    - If the script returns `error: no_transcripts_found`, emit a
      `transcript_unreadable` violation (`block`) per
      [remediation-protocol.md §2](remediation-protocol.md) and stop here.
@@ -204,11 +211,13 @@ context for S4.
      with `reason="transcript_too_short"`.
 3. Compute `to_line = max(audit_from_line, lines_in_file)`. The audit window
    is `[audit_from_line, to_line]`. Inspector's own tool calls in this
-   invocation may appear inside this window; that is fine because S5 wraps
-   the report in `INSPECTOR_BEGIN/END` markers and future runs will skip
-   past them.
-4. Echo, on a single line:
-   `inspector S3: transcript=<path> window=<from>..<to> lines=<wc-l>`.
+   invocation may appear inside this window; that is fine because S5c
+   updates the on-disk sentinel with `last_audit_to_line = to_line`, so the
+   next inspector run starts at `to_line + 1` and never re-audits this
+   inspector's own calls.
+4. Do **not** echo the resolved transcript / window into the chat. The
+   window is recorded in the on-disk audit_report.json's `audit_window`
+   block.
 
 Recap: you now have an absolute transcript path and a numeric audit window.
 
@@ -280,11 +289,11 @@ Recap: you now have three populated arrays — `passes`, `violations`,
 
 ### S5 — Observe → Compute → Emit (3 sub-steps, must be in order)
 
-S5 is split into three sub-steps as of v1.1. Earlier inspectors composed a
-free-form verdict in a single step, which let prose like "WARN because
-deferred per skill allowance" silently downgrade BLOCK findings. The split
-keeps observation (LLM's strength) separate from verdict computation
-(deterministic).
+S5 is split into three sub-steps. The split keeps observation (LLM's
+strength) separate from verdict computation (deterministic) and from
+emission (file write + one-line ack). Composing them in a single free-form
+step lets prose like "WARN because deferred per skill allowance" silently
+downgrade BLOCK findings; the split is the structural defense.
 
 #### S5a — Dump pure observations
 
@@ -335,10 +344,10 @@ python3 .cursor/skills/inspector/scripts/compute_verdict.py \
     > /tmp/inspector_verdict_<PHASE_NAME>.json
 ```
 
-The script's stdout is the canonical `audit_report.json` payload (verdict,
-violations, passes, unverified, observations, verdict_source). Its
-`verdict_source` field is `compute_verdict.py@<sha1>` — proof that the
-verdict came from the script and not from prose.
+The script's stdout is the canonical verdict payload (verdict,
+violations, passes, unverified, verdict_source). Its `verdict_source`
+field is `compute_verdict.py` — proof that the verdict came from the
+script and not from prose.
 
 > **S5 Rule (binding):** Agent MUST NOT hand-edit the JSON produced by
 > `compute_verdict.py`. If you believe a verdict is wrong, the only
@@ -353,58 +362,85 @@ If `compute_verdict.py` exits non-zero, treat as a self-failure per
 
 #### S5c — Emit the report
 
-Determine `next_checkpoint.should_invoke_inspector_after` by looking up
-the position of `<PHASE_NAME>` in the target `SKILL.md`'s ordered phase
-list. If `<PHASE_NAME>` is the last phase (e.g. `REPORT`), set
-`should_invoke_inspector_after` to `null` and `reminder_text` to
-`Run complete. No further inspector audits required.`.
+Determine the next phase symbolic name by looking up the position of
+`<PHASE_NAME>` in the target `SKILL.md`'s ordered phase list. If
+`<PHASE_NAME>` is the last phase (e.g. `REPORT`), pass `--next-phase ""`
+to `emit_audit_report.py` (it will write a terminal `next_checkpoint`).
 
-Augment `/tmp/inspector_verdict_<PHASE_NAME>.json` with the
-`next_checkpoint` block and the manifest sha1 (from
-`parse_action_outputs.py`'s `action_md_sha1`). Do NOT touch any field
-already produced by the script.
+Then run the emitter:
 
-Emit the reply in this exact format:
-
-```
-=== INSPECTOR_BEGIN phase=<PHASE_NAME> ts=<ISO-8601> ===
-
-## Audit verdict: <VERDICT>
-
-- <verdict_summary one-liner copied verbatim from compute_verdict.py>
-- <up to 5 most severe violations as bullets>
-
-```json
-{<full audit_report.json — verdict block is the script's output, untouched>}
+```bash
+python3 .cursor/skills/inspector/scripts/emit_audit_report.py \
+    --verdict-json /tmp/inspector_verdict_<PHASE_NAME>.json \
+    --observations /tmp/inspector_obs_<PHASE_NAME>.json \
+    --manifest /tmp/inspector_manifest_<PHASE_NAME>.json \
+    --result-dir "$RESULT_DIR" \
+    --transcript-path "<from S3 find_transcript.py>" \
+    --audit-from-line <from S3> \
+    --audit-to-line <from S3> \
+    --target-skill-dir <TARGET_SKILL_DIR> \
+    --phase-action-files "<comma,separated,relative,paths>" \
+    --next-phase "<NEXT_PHASE_NAME or empty if terminal>"
 ```
 
-## Required remediations  (omit this section if verdict is PASS or WARN)
+The emitter does three things and **only** three things:
 
-1. <remediation field of violation 1, copied verbatim>
-2. <remediation field of violation 2, copied verbatim>
-...
+1. Writes the full `audit_report.json` to
+   `$RESULT_DIR/.audit/<PHASE_NAME>_<utc-ts>.json`. This is the canonical
+   audit artifact.
+2. Updates the sentinel `$RESULT_DIR/.audit/_state.json` with this audit's
+   `last_audit_to_line`, `last_phase`, `last_verdict`, and an appended
+   `history` entry. The next inspector run reads this sentinel via
+   `find_transcript.py --result-dir` to know where to start its window.
+3. Prints exactly **one line** to stdout in the format:
+   ```
+   [Inspection] phase=<PHASE> verdict=<V> passes=<N> fatal=<n> block=<n> warn=<n> info=<n> unverified=<n> [top=<id>] -> <report_path>
+   ```
 
-=== INSPECTOR_END phase=<PHASE_NAME> ts=<ISO-8601> verdict=<VERDICT> ===
+Your reply for the entire audit must contain that one line and **nothing
+else** about the audit. Specifically:
+
+- Do **not** print the full `audit_report.json` into the chat as a fenced
+  block. It lives on disk; the main agent reads it from
+  `$RESULT_DIR/.audit/<PHASE>_*.json` only when the verdict requires
+  action (BLOCK / FATAL).
+- Do **not** print a "## Required remediations" section. The main agent
+  reads the on-disk report's `violations[*].remediation` and executes them
+  as natural next steps; the chat does not narrate them as "inspector said
+  to fix X".
+- Do **not** add prose like "## Audit verdict: BLOCK" before or after the
+  one-liner. The one-liner is the entire chat footprint of the audit.
+
+Allowed: at most one extra line of natural-language continuation **after**
+the ack, only when verdict is FATAL and the run must stop. Example:
 ```
+[Inspection] phase=BASELINE verdict=FATAL passes=2 fatal=1 ... -> /shared/.audit/BASELINE_2026-04-21T10-34-00Z.json
+Stopping run: GSM8K accuracy regressed below the 0.65 floor (see report above).
+```
+For PASS / WARN / BLOCK, the one-liner stands alone.
 
-Markers: see [audit-report-schema.md §4](audit-report-schema.md) for exact
-format constraints. The two `ts=` values must be identical (the BEGIN
-timestamp). Markers are on their own lines with no leading whitespace.
+> **S5c Rule (binding):** Do not hand-edit any field in the on-disk
+> `audit_report.json` after `emit_audit_report.py` writes it. Do not
+> manufacture a different ack line; copy the script's stdout verbatim.
+> If you believe a verdict is wrong, the only legitimate remedy is to
+> update `scripts/semantic_rules.json` or the extraction protocol BEFORE
+> the next inspector invocation. Anti-pattern 7 in
+> [remediation-protocol.md §6](remediation-protocol.md) makes this
+> normative.
 
-Allowed prose in the markdown above the JSON block: a one-line restate of
-`verdict_summary` and a bulletized list of violations. **Forbidden prose:**
-the words "acceptable", "per skill allowance", "can be deferred", "okay
-to skip", "not a real violation". If you find yourself wanting to add such
-a phrase, the right action is to file a new semantic rule in
-`scripts/semantic_rules.json`, not to soften this audit.
+If `emit_audit_report.py` exits non-zero (e.g. `$RESULT_DIR` not writable),
+treat as a self-failure per
+[remediation-protocol.md §7](remediation-protocol.md): print a single line
+`[Inspection] phase=<PHASE> verdict=BLOCK self_failure=<short error>` and stop.
 
-After emitting: STOP. Do not perform any remediation yourself. The main
-agent reads the report and follows
-[remediation-protocol.md §3](remediation-protocol.md) per its verdict.
+After printing the ack: STOP. Do not perform any remediation yourself. The
+main agent follows [remediation-protocol.md §3](remediation-protocol.md)
+per the verdict (PASS/WARN: silently advance; BLOCK: read the on-disk
+report, run remediations, re-invoke; FATAL: rollback + stop with one
+business-language sentence).
 
-Recap: a single reply was emitted, wrapped in `INSPECTOR_BEGIN/END` markers,
-containing the script-computed verdict block (untouched) plus optional
-remediation list.
+Recap: a single one-line ack was printed; the full report and the sentinel
+are on disk under `$RESULT_DIR/.audit/`.
 
 ---
 
@@ -437,23 +473,19 @@ emitting an `info` note and continuing only with the in-scope work:
 
 ---
 
-## Pinned Versions and Cross-References
+## Cross-References
 
-- `inspector_version`: `1.1` — defined here.
-- `manifest_version`: `1.1` — defined in
-  [extraction-protocol.md §6](extraction-protocol.md).
-- `audit_report.schema_version`: `1.1` — defined in
-  [audit-report-schema.md §6](audit-report-schema.md).
 - Severity ladder: [remediation-protocol.md §1](remediation-protocol.md).
-- Marker format: [audit-report-schema.md §4](audit-report-schema.md).
+- On-disk report layout & ack format: [audit-report-schema.md §4](audit-report-schema.md).
 - Semantic rule pack: [semantic-rules.md](semantic-rules.md) and
   [scripts/semantic_rules.json](scripts/semantic_rules.json).
 - Helper scripts:
-  - [scripts/find_transcript.py](scripts/find_transcript.py)
-  - [scripts/grep_transcript.py](scripts/grep_transcript.py)
-  - [scripts/parse_action_outputs.py](scripts/parse_action_outputs.py)
-  - [scripts/parse_iron_rules.py](scripts/parse_iron_rules.py) — new in v1.1
-  - [scripts/compute_verdict.py](scripts/compute_verdict.py) — new in v1.1
+  - [scripts/find_transcript.py](scripts/find_transcript.py) — locate transcript and read sentinel for next audit window
+  - [scripts/grep_transcript.py](scripts/grep_transcript.py) — Channel A probes
+  - [scripts/parse_action_outputs.py](scripts/parse_action_outputs.py) — mechanical extraction of expected items
+  - [scripts/parse_iron_rules.py](scripts/parse_iron_rules.py) — Iron Rule intake from target SKILL.md
+  - [scripts/compute_verdict.py](scripts/compute_verdict.py) — deterministic verdict computation
+  - [scripts/emit_audit_report.py](scripts/emit_audit_report.py) — write on-disk report + sentinel + print one-line ack
 - Test fixtures: [tests/](tests/) — see
   [tests/RUN_TESTS.md](tests/RUN_TESTS.md) and
   [tests/INTEGRATION.md](tests/INTEGRATION.md).

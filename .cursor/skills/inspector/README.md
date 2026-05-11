@@ -4,10 +4,13 @@ Generic, phase-level execution auditor for any other Cursor skill. After a
 phase of a target skill ends, the inspector reads that skill's action
 markdown files at runtime, derives an expectation manifest of mandatory tool
 calls / output files / state assertions, audits the agent transcript JSONL
-plus on-disk artifacts, and emits a structured `audit_report.json` with a
-verdict in `{PASS, WARN, BLOCK, FATAL}`. The user prompt that started the
-run binds the main agent to remediate every `block` / `fatal` violation
-before advancing.
+plus on-disk artifacts, and **writes** a structured `audit_report.json` to
+`$RESULT_DIR/.audit/<PHASE>_<utc-ts>.json` with a verdict in
+`{PASS, WARN, BLOCK, FATAL}`. The chat shows only a single
+`[Inspection] phase=<P> verdict=<V> ... -> <path>` line per audit; the
+on-disk JSON is the canonical artifact. The user prompt that started the
+run binds the main agent to read the on-disk report and remediate every
+`block` / `fatal` violation as a natural next step before advancing.
 
 The inspector is read-only and same-agent. It does not modify the audited
 skill, does not spawn subagents, and does not run as a hook.
@@ -55,22 +58,24 @@ run the 5-step audit.
 
 ```mermaid
 flowchart LR
-  prompt[User prompt with INSPECTOR BINDING CONTRACT] --> agent
+  prompt[User prompt with Audit conventions] --> agent
   agent[Main agent] -->|runs phase X| target[Target skill: SETUP, CLASSIFY, BASELINE, ...]
   target -->|phase X done| inspect[Read inspector SKILL.md]
   inspect --> S1[S1 bind context]
   S1 --> S2[S2 build expectation manifest from actions/X.md]
-  S2 --> S3[S3 locate transcript JSONL]
+  S2 --> S3[S3 locate transcript via $RESULT_DIR/.audit/_state.json]
   S3 --> S4A[S4A grep transcript for required tool calls]
   S3 --> S4B[S4B Read/Glob expected files]
   S3 --> S4C[S4C check state assertions]
-  S4A --> verdict
-  S4B --> verdict
-  S4C --> verdict
-  verdict{verdict?}
+  S4A --> S5[S5 compute_verdict.py]
+  S4B --> S5
+  S4C --> S5
+  S5 --> emit[emit_audit_report.py: write $RESULT_DIR/.audit/X_ts.json + update _state.json]
+  emit --> ack["[Inspection] phase=X verdict=V ... -> path"]
+  ack --> verdict{verdict?}
   verdict -->|PASS or WARN| advance[Phase X+1]
-  verdict -->|BLOCK| remediate[Run violation.remediation, re-invoke inspector]
-  verdict -->|FATAL| rollback[Rollback X, jump to REPORT]
+  verdict -->|BLOCK| remediate[Read on-disk report; run violation.remediation as next step; re-invoke]
+  verdict -->|FATAL| rollback[Rollback X, jump to REPORT, one stop sentence]
   remediate --> S1
   advance --> target
 ```
@@ -83,43 +88,51 @@ flowchart LR
 |---|---|
 | [SKILL.md](SKILL.md) | The 5-step audit procedure (S1-S5). What the inspector does on every invocation. |
 | [extraction-protocol.md](extraction-protocol.md) | Deterministic 4-pass extraction of `{expected_tool_calls, expected_artifacts, expected_state_assertions}` from any action `.md`. |
-| [audit-report-schema.md](audit-report-schema.md) | JSON schema for `audit_report.json` and the `INSPECTOR_BEGIN/END` marker format. |
+| [audit-report-schema.md](audit-report-schema.md) | JSON schema for `audit_report.json`, the on-disk `$RESULT_DIR/.audit/` layout, the sentinel `_state.json` schema, and the one-line chat ack format. |
 | [remediation-protocol.md](remediation-protocol.md) | Severity ladder, modality -> severity mapping, main-agent obligations per verdict. |
-| [user-prompt-template.md](user-prompt-template.md) | The binding-contract user prompt (blank template + filled examples). |
-| [scripts/find_transcript.py](scripts/find_transcript.py) | Locate the current conversation's transcript JSONL and the last `INSPECTOR_END` line. |
+| [user-prompt-template.md](user-prompt-template.md) | The user prompt (blank template + filled examples + cheat sheet). |
+| [scripts/find_transcript.py](scripts/find_transcript.py) | Locate the current conversation's transcript JSONL and compute the next audit window from `$RESULT_DIR/.audit/_state.json`. |
 | [scripts/grep_transcript.py](scripts/grep_transcript.py) | Stream-grep a transcript for tool_use blocks matching `(tool_name_pattern, arg_regex)`. |
 | [scripts/parse_action_outputs.py](scripts/parse_action_outputs.py) | Mechanical regex extraction from an action `.md`; produces the candidate proposal that the LLM classifies in S2 pass 3. |
+| [scripts/parse_iron_rules.py](scripts/parse_iron_rules.py) | Pass-0 Iron Rules intake from the target SKILL.md. |
+| [scripts/compute_verdict.py](scripts/compute_verdict.py) | Deterministic verdict computation from manifest + observations + semantic_rules.json. Output is frozen. |
+| [scripts/emit_audit_report.py](scripts/emit_audit_report.py) | Writes `$RESULT_DIR/.audit/<PHASE>_<ts>.json`, updates `_state.json` sentinel, and prints the single `[Inspection] ...` chat line. |
 | [tests/](tests/) | Hand-written fixtures and run-by-hand checklists. See [tests/RUN_TESTS.md](tests/RUN_TESTS.md) and [tests/INTEGRATION.md](tests/INTEGRATION.md). |
 
 ---
 
 ## Reading an `audit_report.json`
 
-The inspector emits exactly one JSON blob per invocation, wrapped in
-markers:
+The inspector's chat output for an audit is exactly one line:
 
 ```
-=== INSPECTOR_BEGIN phase=BASELINE ts=2026-04-21T10:34:00Z ===
-
-## Audit verdict: BLOCK
-
-- 1 block, 0 fatal, 2 warn, 6 pass, 1 unverified
-- BLOCK missing_eval_summary_baseline: $RESULT_DIR/eval_gsm8k_baseline/eval_summary_gsm8k.json not found
-
-```json
-{ ...full audit_report.json... }
+[Inspection] phase=BASELINE verdict=BLOCK passes=6 fatal=0 block=1 warn=0 info=0 unverified=2 top=missing_eval_summary_baseline -> /shared_nfs/.../qwen3-14b-2026-04-21/.audit/BASELINE_2026-04-21T10-34-00Z.json
 ```
 
-## Required remediations
+The full `audit_report.json` is on disk at the path printed after `->`. To
+inspect it:
 
-1. EVAL_TASK=gsm8k NUM_FEWSHOT=5 PORT=$PORT MODEL=$MODEL RESULTS_DIR="$RESULT_DIR/eval_gsm8k_baseline" bash $SKILL_ROOT/scripts/eval_accuracy.sh
+```bash
+RUN_DIR=/shared_nfs/inference-optimization/results/qwen3-14b-2026-04-21
+ls "$RUN_DIR/.audit/"
+# _state.json
+# SETUP_2026-04-21T10-12-00Z.json
+# BASELINE_2026-04-21T10-34-00Z.json
 
-=== INSPECTOR_END phase=BASELINE ts=2026-04-21T10:34:00Z verdict=BLOCK ===
+jq '.verdict, .verdict_summary, .violations[].id' \
+  "$RUN_DIR/.audit/BASELINE_2026-04-21T10-34-00Z.json"
+# "BLOCK"
+# "passes=6 fatal=0 block=1 warn=0 info=0 unverified=2"
+# "missing_eval_summary_baseline"
+
+jq '.history' "$RUN_DIR/.audit/_state.json"
+# [{"phase":"SETUP","verdict":"PASS",...},
+#  {"phase":"BASELINE","verdict":"BLOCK",...}]
 ```
 
-The fenced JSON block is the machine-readable artifact. Its top-level fields
-are documented in [audit-report-schema.md](audit-report-schema.md). The
-short bulleted summary above the JSON is for human readers.
+The on-disk JSON's top-level fields are documented in
+[audit-report-schema.md](audit-report-schema.md). The sentinel
+`_state.json` schema is in §4 of the same document.
 
 ### Interpreting `unverified` vs `miss`
 
@@ -143,15 +156,20 @@ failure visible without falsely blocking the run.
 ### 1. The agent might forget to invoke inspector (residual risk)
 
 This is the **fundamental limit of the same-agent design**. After 50+ tool
-calls in a long run, the agent can drift past the binding contract and
-just keep going. Mitigations baked into the design:
+calls in a long run, the agent can drift past the convention and just keep
+going. The implicit-mode chat surface is intentionally minimal (good for
+users, but offers fewer self-reminders to the agent). Mitigations:
 
-- The `next_checkpoint.reminder_text` field in every
-  `audit_report.json` echoes back what the next inspector invocation
-  should look like; the agent re-reads its own recent reply.
-- The user prompt includes Rule 5 ("Self-check before advancing") which
-  asks the agent to grep for the most recent `INSPECTOR_END` before reading
-  the next action `.md`.
+- The single `[Inspection] phase=<X> verdict=<V> -> <path>` ack line is
+  still in the chat for every audit, so the agent can grep it. It is
+  concise but not invisible.
+- The `_state.json` sentinel is the canonical "did we audit this phase?"
+  signal. Before reading the next phase's action `.md`, the agent should
+  `Read` `$RESULT_DIR/.audit/_state.json` and confirm `last_phase` equals
+  the phase that just ended and `last_verdict ∈ {PASS, WARN}`.
+- The on-disk per-phase report at `$RESULT_DIR/.audit/<PHASE>_*.json`
+  carries `next_checkpoint.reminder_text` for cases where the agent does
+  open the report.
 - The README documents this risk explicitly so users do not over-trust the
   audit.
 
@@ -159,8 +177,9 @@ If your run is long enough that this risk is unacceptable, escalate to a
 hook-based architecture (see "Upgrading" below). The contract files
 ([extraction-protocol.md](extraction-protocol.md),
 [audit-report-schema.md](audit-report-schema.md),
-[remediation-protocol.md](remediation-protocol.md)) are reusable as-is by
-a hook; only the trigger mechanism changes.
+[remediation-protocol.md](remediation-protocol.md)) and the on-disk
+artifacts are reusable as-is by a hook; only the trigger mechanism
+changes.
 
 ### 2. Tool returns are not in the transcript JSONL
 
@@ -213,8 +232,9 @@ adding more structure to the action `.md`.
 
 ### "Inspector returned BLOCK and I think it's wrong"
 
-1. Open the relevant `audit_report.json` (it's in your transcript inside
-   the `INSPECTOR_END` markers).
+1. Open the relevant `audit_report.json` at
+   `$RESULT_DIR/.audit/<PHASE>_*.json` (the inspector's one-line ack
+   prints the exact path).
 2. Find the violation. Read the `source_lines` and `source_quote` fields:
    they cite the exact location in the target `actions/<X>.md` that drove
    the expectation.
@@ -279,17 +299,3 @@ path is:
 The user prompt template is unchanged in the hook architecture; the
 difference is that the hook *also* enforces invocation, so even if the
 agent forgets, the audit still happens.
-
----
-
-## Versioning
-
-- `inspector_version`: `1.0` (defined in [SKILL.md](SKILL.md)).
-- `manifest_version`: `1.0` (defined in
-  [extraction-protocol.md §6](extraction-protocol.md)).
-- Schema bumps are documented in
-  [audit-report-schema.md §6](audit-report-schema.md).
-
-When auditing a transcript that contains an older `audit_report.json`,
-read the embedded `inspector_version` field and apply backward
-compatibility rules from the relevant schema doc.
