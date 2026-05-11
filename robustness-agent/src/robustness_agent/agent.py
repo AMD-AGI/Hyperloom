@@ -1,13 +1,14 @@
 """Core Robustness Agent — legacy event-driven daemon (pre-M1).
 
 This loop wires monitors -> checks -> RCA -> ``IntentEmitter`` directly
-against the Coordinator's SQLite database.  M1 introduces a Backend-
-based pipeline (see :mod:`robustness_agent.role.reactor`) that emits
-intents to the Coordinator over the standard Backend protocol; this
-file is kept so the ``--mode legacy`` CLI flag still works while the
-MULTI_CLI transport (M3) is in flight.
+against the Coordinator's SQLite database.  M1 introduces a reactor
+pipeline (see :mod:`robustness_agent.role.reactor`) driven through the
+subprocess CLI in :mod:`robustness_agent.runtime.cli`; this file is
+kept so the ``--mode legacy`` CLI flag still works for environments
+that haven't migrated yet.
 
-Prefer :class:`~robustness_agent.role.backend_adapter.RobustnessAgentBackend`
+Prefer ``python -m robustness_agent.runtime.cli tick`` (or its host-
+side wrapper :class:`inference_optimizer.orchestrator.backends.RobustnessAgentBackend`)
 for new deployments.
 """
 
