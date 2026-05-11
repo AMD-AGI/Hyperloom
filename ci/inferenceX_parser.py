@@ -25,7 +25,11 @@ def resolve_var(value: Any, env: dict | None = None) -> Any:
     env = env or os.environ
 
     def _replace(m: re.Match) -> str:
-        return env.get(m.group(1), m.group(0))
+        v = env.get(m.group(1), m.group(0))
+        # Git bash on Windows converts /wekafs → C:/.../Git/wekafs; undo that.
+        if isinstance(v, str) and re.search(r"[A-Za-z]:[/\\].*[/\\]wekafs", v):
+            v = re.sub(r"[A-Za-z]:[/\\].*[/\\](wekafs.*)", r"/\1", v).replace("\\", "/")
+        return v
 
     return re.sub(r"\$\{(\w+)}", _replace, value)
 
@@ -281,7 +285,7 @@ def merge_model_config(
         "min_kernels": min_k,
         "target_gpu": model_cfg.get("target_gpu", "mi300x"),
         "mode": model_cfg.get("mode", defaults.get("mode", "claw")),
-        "gpu_type": parsed["runner"].upper(),
+        "gpu_type": model_cfg.get("target_gpu", parsed["runner"]).upper(),
         "inferencex_path": defaults.get("inferencex_path") or (os.environ.get("NFS_ROOT", "/wekafs") + "/InferenceX"),
         "result_dir": defaults.get("result_dir", "/workspace/hyperloom"),
         "inferenceX_benchmarks": ifx_benchmarks,
