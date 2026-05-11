@@ -8,8 +8,23 @@ import sys
 import yaml
 
 
+def _entry_key(m: dict) -> str:
+    """Effective matrix/filter key: explicit `key` field overrides `inferenceX_key`.
+
+    Lets multiple ci-config entries share the same `inferenceX_key` (e.g.
+    amd-master.yaml lookup) while keeping unique matrix display names.
+    Example: single-node DSR1 + multi-node DSR1 both look up
+    `dsr1-fp8-mi300x-sglang` in amd-master, but only multi-node sets
+    `key: dsr1-multinode-fp8-mi300x-sglang` so the matrix doesn't dedupe them.
+    """
+    return m.get("key") or m["inferenceX_key"]
+
+
 def generate_matrix(config_path: str = "ci-config.yaml", selected_models: str = "") -> dict:
-    with open(config_path) as f:
+    # Force UTF-8 — ci-config.yaml uses box-drawing chars (──) in section
+    # comments. Linux runners default to UTF-8, but Windows defaults to
+    # cp1252 which raises UnicodeDecodeError on byte 0x9d.
+    with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     models = config.get("models", [])
@@ -17,9 +32,9 @@ def generate_matrix(config_path: str = "ci-config.yaml", selected_models: str = 
     selected = selected_models.strip()
     if selected:
         keys = set(selected.split(","))
-        models = [m for m in models if m["inferenceX_key"] in keys]
+        models = [m for m in models if _entry_key(m) in keys]
 
-    matrix = [{"key": m["inferenceX_key"]} for m in models]
+    matrix = [{"key": _entry_key(m)} for m in models]
     return {"include": matrix}
 
 
