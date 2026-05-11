@@ -16,23 +16,33 @@ Used by:
 
 v0.6 schema (DESIGN §16.2)::
 
-    name:               str  (required, must equal the filename stem)
-    family:             one of {prep, analysis, shallow, deep_kernel,
-                                long, creative, resilience}
-    cost_minutes_p50:   float
-    cost_minutes_p75:   float
-    expected_gain_pct:  [low, high]   # 2-element list of floats
-    accuracy_risk:      float   # 0..1
-    crash_risk:         float   # 0..1
-    prerequisites:      list[str]
-    requires_lanes:     list[str]
-    allowed_tools:      list[str]
-    side_effects:       list[str]
-    preferred_backend:  "claude" | "codex"
-    preferred_model:    str
-    max_turns:          int
-    lease_ttl_sec:      int
-    applicable_when:    list[str]    # free-form predicates
+    name:                str  (required, must equal the filename stem)
+    family:              one of {prep, analysis, shallow, deep_kernel,
+                                 long, creative, resilience}
+    cost_minutes_p50:    float
+    cost_minutes_p75:    float
+    expected_gain_pct:   [low, high]   # 2-element list of floats
+    accuracy_risk:       float   # 0..1
+    crash_risk:          float   # 0..1
+    prerequisites:       list[str]
+    requires_lanes:      list[str]
+    allowed_tools:       list[str]
+    side_effects:        list[str]
+    preferred_backend:   "claude" | "codex"
+    preferred_model:     str
+    max_turns:           int
+    lease_ttl_sec:       int
+    applicable_when:     list[str]    # free-form predicates
+    # v0.6.2 (Phase 1) prompt-builder additions:
+    description:         str          # 1-line action brief consumed by
+                                      # prompt_builder; defaults to name
+                                      # when missing.
+    pipeline_phase:      str          # one of VALID_PIPELINE_PHASES; used
+                                      # by prompt_builder to group actions.
+                                      # Defaults to "explore".
+    typical_runtime_min: float        # display-only typical wallclock for
+                                      # the action; defaults to
+                                      # cost_minutes_p50.
 
 v0.6 vs v0.5 schema:
 
@@ -55,6 +65,22 @@ VALID_FAMILIES: frozenset[str] = frozenset({
 })
 
 VALID_BACKENDS: frozenset[str] = frozenset({"claude", "codex"})
+
+# Phase 1 (prompt_builder) — coarse-grained pipeline phase used to group
+# actions inside the Orchestration system prompt (e.g. "Run prep actions
+# first, then move to explore..."). Kept intentionally small; map onto the
+# DESIGN §11 timeline rather than the family taxonomy because family is
+# scheduler-oriented (prep/analysis/...) while phases are LLM-oriented.
+VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
+    "prep",        # setup / classify / target_analysis / baseline
+    "measure",     # baseline (gates explore)
+    "explore",     # backends / params / sweep
+    "analysis",    # profile / pmc_roofline / deep_kernel_analysis
+    "deep",        # kernel_opt / integrate / operator_tuning / vendor_kernel_config
+    "validate",    # validate_stack — apply optimization_stack + rebench
+    "finalize",    # report
+    "support",     # dream / re_explore / recover / comm_optimization / compiler_tuning
+})
 
 _REQUIRED_FIELDS: tuple[str, ...] = (
     "name", "family", "cost_minutes_p50", "cost_minutes_p75",
@@ -86,6 +112,10 @@ class ActionMetadata:
     max_turns: int = 30
     lease_ttl_sec: int = 1800
     applicable_when: tuple[str, ...] = ()
+    # Phase 1 prompt-builder fields — see module docstring.
+    description: str = ""
+    pipeline_phase: str = "explore"
+    typical_runtime_min: float = 0.0
 
     @classmethod
     def from_yaml_dict(cls, data: dict[str, Any], expected_name: str) -> "ActionMetadata":
@@ -121,10 +151,38 @@ class ActionMetadata:
                 f"action {expected_name!r}: preferred_backend={backend!r} not in "
                 f"{sorted(VALID_BACKENDS)!r}"
             )
+        # Phase 1 prompt-builder fields. All optional; missing values fall back
+        # to safe defaults so old yaml files keep parsing while new ones can
+        # opt into richer prompts.
+        cost_p50 = float(data["cost_minutes_p50"])
+        description = str(data.get("description", "")).strip()
+        pipeline_phase = str(data.get("pipeline_phase", "explore")).strip() or "explore"
+        if pipeline_phase not in VALID_PIPELINE_PHASES:
+            raise ActionRegistryError(
+                f"action {expected_name!r}: pipeline_phase={pipeline_phase!r} not in "
+                f"{sorted(VALID_PIPELINE_PHASES)!r}"
+            )
+        typical_runtime_min_raw = data.get("typical_runtime_min")
+        try:
+            typical_runtime_min = (
+                float(typical_runtime_min_raw)
+                if typical_runtime_min_raw is not None
+                else cost_p50
+            )
+        except (TypeError, ValueError) as exc:
+            raise ActionRegistryError(
+                f"action {expected_name!r}: typical_runtime_min must be a "
+                f"number, got {typical_runtime_min_raw!r}"
+            ) from exc
+        if typical_runtime_min < 0:
+            raise ActionRegistryError(
+                f"action {expected_name!r}: typical_runtime_min must be >= 0, "
+                f"got {typical_runtime_min}"
+            )
         return cls(
             name=str(data["name"]),
             family=str(data["family"]),
-            cost_minutes_p50=float(data["cost_minutes_p50"]),
+            cost_minutes_p50=cost_p50,
             cost_minutes_p75=float(data["cost_minutes_p75"]),
             expected_gain_pct=(float(gain[0]), float(gain[1])),
             accuracy_risk=float(data["accuracy_risk"]),
@@ -138,6 +196,9 @@ class ActionMetadata:
             max_turns=int(data.get("max_turns", 30)),
             lease_ttl_sec=int(data.get("lease_ttl_sec", 1800)),
             applicable_when=tuple(data.get("applicable_when") or ()),
+            description=description or str(data["name"]),
+            pipeline_phase=pipeline_phase,
+            typical_runtime_min=typical_runtime_min,
         )
 
 
@@ -209,4 +270,5 @@ __all__ = [
     "ActionRegistryError",
     "VALID_BACKENDS",
     "VALID_FAMILIES",
+    "VALID_PIPELINE_PHASES",
 ]
