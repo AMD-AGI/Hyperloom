@@ -27,6 +27,9 @@ baseline_cleanup() {
 trap baseline_cleanup EXIT INT TERM
 
 : "${MODEL:?MODEL env var required}"
+if [ -z "${TP:-}" ] && [ -n "${PREFILL_TP:-}" ]; then
+    TP="$PREFILL_TP"
+fi
 : "${TP:?TP env var required}"
 : "${CONC:?CONC env var required}"
 : "${ISL:?ISL env var required}"
@@ -67,6 +70,27 @@ EOF
 }
 
 write_run_context
+
+is_mori_1p1d() {
+    [ "${FRAMEWORK}" = "sglang" ] || return 1
+    if [ "${MORI_1P1D:-0}" = "1" ] || [ "${IS_MULTINODE:-false}" = "true" ]; then
+        return 0
+    fi
+    [ -n "${PREFILL_TP:-}" ] && [ -n "${DECODE_TP:-}" ]
+}
+
+if is_mori_1p1d; then
+    echo "============================================================"
+    echo "Baseline + Profile (SGLang MoRI 1P1D)"
+    echo "Model: $MODEL | PREFILL_TP=${PREFILL_TP:-$TP} DECODE_TP=${DECODE_TP:-$TP}"
+    echo "CONC=$CONC ISL=$ISL OSL=$OSL"
+    echo "Results: $RESULT_DIR"
+    echo "Traces:  $TRACE_DIR"
+    echo "============================================================"
+    check_benchmark_lib "$INFERENCEX_PATH"
+    python3 "$SCRIPT_DIR/mori_1p1d_driver.py" --mode baseline
+    exit $?
+fi
 
 check_benchmark_lib "$INFERENCEX_PATH"
 cd "$INFERENCEX_PATH"
@@ -161,9 +185,18 @@ print(f'Completed: {d[\"completed\"]}/{d[\"num_prompts\"]}')
 # --- Phase 3: Profiling (activate via HTTP, same server, no restart) ---
 echo ""
 echo "[3/4] Activating profiler via /start_profile..."
-curl -s -X POST "http://0.0.0.0:$PORT/start_profile" 2>/dev/null \
-    || curl -s "http://0.0.0.0:$PORT/start_profile" 2>/dev/null \
-    || echo "WARNING: start_profile failed"
+if [ "$FRAMEWORK" = "sglang" ]; then
+    PROFILE_PAYLOAD=$(printf '{"output_dir":"%s","activities":["CPU","GPU"],"with_stack":true,"record_shapes":true,"profile_prefix":"prefill"}' "$TRACE_DIR")
+    curl -s -X POST "http://0.0.0.0:$PORT/start_profile" \
+        -H "Content-Type: application/json" -d "$PROFILE_PAYLOAD" 2>/dev/null \
+        || curl -s -X POST "http://0.0.0.0:$PORT/start_profile" 2>/dev/null \
+        || curl -s "http://0.0.0.0:$PORT/start_profile" 2>/dev/null \
+        || echo "WARNING: start_profile failed"
+else
+    curl -s -X POST "http://0.0.0.0:$PORT/start_profile" 2>/dev/null \
+        || curl -s "http://0.0.0.0:$PORT/start_profile" 2>/dev/null \
+        || echo "WARNING: start_profile failed"
+fi
 
 PROFILE_PROMPTS=$((CONC < 16 ? CONC : 16))
 echo "Running profiling benchmark ($PROFILE_PROMPTS prompts, reduced for trace size)..."

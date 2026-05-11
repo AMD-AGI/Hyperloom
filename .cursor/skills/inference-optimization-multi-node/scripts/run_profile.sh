@@ -65,6 +65,21 @@ if [ -z "$TRACE_DIR" ]; then
     exit 1
 fi
 
+is_mori_1p1d() {
+    [ "${FRAMEWORK}" = "sglang" ] || return 1
+    if [ "${MORI_1P1D:-0}" = "1" ] || [ "${IS_MULTINODE:-false}" = "true" ]; then
+        return 0
+    fi
+    [ -n "${PREFILL_TP:-}" ] && [ -n "${DECODE_TP:-}" ]
+}
+
+if is_mori_1p1d; then
+    echo "Detected SGLang MoRI 1P1D profile mode."
+    echo "Profile traffic will use the router; profile control will use the prefill backend."
+    python3 "$SCRIPT_DIR/mori_1p1d_driver.py" --mode profile
+    exit $?
+fi
+
 profile_cleanup() {
     curl -s -X POST "http://0.0.0.0:${PORT}/stop_profile" 2>/dev/null \
         || curl -s "http://0.0.0.0:${PORT}/stop_profile" 2>/dev/null \
@@ -99,8 +114,16 @@ echo "Traces will be saved to: $TRACE_DIR"
 echo "============================================================"
 
 echo "[1/5] Starting profiler via /start_profile endpoint..."
-PROFILE_START=$(curl -s -X POST "http://0.0.0.0:$PORT/start_profile" 2>&1 \
-    || curl -s "http://0.0.0.0:$PORT/start_profile" 2>&1)
+if [ "$FRAMEWORK" = "sglang" ]; then
+    PROFILE_PAYLOAD=$(printf '{"output_dir":"%s","activities":["CPU","GPU"],"with_stack":true,"record_shapes":true,"profile_prefix":"prefill"}' "$TRACE_DIR")
+    PROFILE_START=$(curl -s -X POST "http://0.0.0.0:$PORT/start_profile" \
+        -H "Content-Type: application/json" -d "$PROFILE_PAYLOAD" 2>&1 \
+        || curl -s -X POST "http://0.0.0.0:$PORT/start_profile" 2>&1 \
+        || curl -s "http://0.0.0.0:$PORT/start_profile" 2>&1)
+else
+    PROFILE_START=$(curl -s -X POST "http://0.0.0.0:$PORT/start_profile" 2>&1 \
+        || curl -s "http://0.0.0.0:$PORT/start_profile" 2>&1)
+fi
 if echo "$PROFILE_START" | grep -qi "error\|not supported\|not in progress"; then
     if [ "$FRAMEWORK" = "vllm" ]; then
         echo "WARNING: Server may not have VLLM_TORCH_PROFILER_DIR set."
