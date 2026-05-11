@@ -142,19 +142,21 @@ inspector. Used to decide whether to upgrade to a hook (see
 **How to measure:**
 
 1. Run scenario 2 (clean inference-opt) end to end.
-2. After completion, read the conversation transcript JSONL at
-   `~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl`.
-3. Count occurrences of:
+2. After completion, inspect the on-disk audit history at
+   `$RESULT_DIR/.audit/`.
+3. Count:
    - `expected_invocations` = number of expected phase boundaries (for
      inference-opt: 8 base phases + N DFS LOOP iterations + 1 SWEEP +
      1 REPORT). Compute from the run's ACTION_TRACE log or from the
      orchestrator state.
-   - `actual_invocations` = number of `=== INSPECTOR_END phase=` lines in
-     the transcript. Use:
+   - `actual_invocations` = number of entries in
+     `$RESULT_DIR/.audit/_state.json::history`, which equals the number
+     of audit report files in `$RESULT_DIR/.audit/*.json` minus the
+     sentinel itself. Use:
      ```bash
-     rg '^=== INSPECTOR_END phase=' \
-       ~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl \
-       --no-line-number | wc -l
+     jq '.history | length' "$RESULT_DIR/.audit/_state.json"
+     # or, equivalently
+     ls "$RESULT_DIR/.audit/" | grep -v '^_state.json$' | wc -l
      ```
 4. `trigger_rate = actual_invocations / expected_invocations`.
 
@@ -172,11 +174,11 @@ on the relevant inspector PR. Multiple runs over time should be averaged.
 
 ---
 
-## Scenario 5 — Recursion-prevention via INSPECTOR markers
+## Scenario 5 — Recursion-prevention via sentinel
 
 **Goal:** confirm the inspector's audit window correctly excludes its own
-prior emissions, so a phase's audit does not include the preceding
-phases' audit reports as part of its scanned content.
+prior emissions, so a phase's audit does not re-scan the preceding
+phases' inspector activity.
 
 **Setup:** any conversation in which inspector has been invoked at least
 twice (e.g. after BASELINE, then after PROFILE). Scenario 2 produces such
@@ -185,46 +187,50 @@ a transcript naturally.
 **Test commands (run from repo root):**
 
 ```bash
-# 1. Locate the transcript and the prior INSPECTOR_END line.
+# 1. Locate the transcript and read the sentinel.
 python3 .cursor/skills/inspector/scripts/find_transcript.py \
-    --marker-sentence "Run the inference-optimization skill at .cursor/skills/inference-optimization."
-
-# Save the transcript path; suppose it printed
+    --marker-sentence "Run the inference-optimization skill at .cursor/skills/inference-optimization." \
+    --result-dir "$RESULT_DIR"
+# Suppose it printed
 #   {"transcript_path": "/root/.cursor/projects/.../<uuid>.jsonl",
 #    "audit_from_line": 1542,
-#    "previous_inspector_end_line": 1541, ...}
+#    "window_source": "sentinel", ...}
 
-# 2. Re-run find_transcript.py multiple times. previous_inspector_end_line
-#    should advance monotonically as the conversation grows; it should
-#    NEVER decrease.
+# 2. Confirm the sentinel's last_audit_to_line == audit_from_line - 1.
+jq '.last_audit_to_line, .last_phase, .last_verdict' \
+    "$RESULT_DIR/.audit/_state.json"
 
-# 3. For the audit window [audit_from_line, EOF], confirm there is no
-#    `=== INSPECTOR_END` line inside the window:
-TS=/root/.cursor/projects/.../<uuid>.jsonl
-FROM=1542
-tail -n +"$FROM" "$TS" | rg -c '^=== INSPECTOR_END' || echo "0 (good)"
+# 3. Confirm history is monotonically increasing in to_line.
+jq '[.history[].to_line] | . == sort' "$RESULT_DIR/.audit/_state.json"
+# expected: true
+
+# 4. Re-run find_transcript.py multiple times. audit_from_line must NOT
+#    decrease and (if conversation has not grown) must stay the same.
 ```
 
 **Expected result:**
 
-- `previous_inspector_end_line` increases monotonically.
-- The grep in step 3 returns `0` (no embedded `INSPECTOR_END` markers
-  inside the audit window).
+- `_state.json::last_audit_to_line + 1` equals `audit_from_line` returned
+  by `find_transcript.py`.
+- `history[*].to_line` is monotonically non-decreasing.
+- Re-runs of `find_transcript.py` produce the same `audit_from_line` if
+  no new audit has been emitted in between.
 
-**Pass condition:** both expectations hold for every inspector
+**Pass condition:** all three expectations hold for every inspector
 invocation in the run.
 
-**If step 3 returns >0:** the marker-aware windowing has a bug. Most
-likely cause: `find_transcript.py` is reading the wrong transcript file
-(parallel session in same project). Run with `--marker-sentence "<your
-prompt's first sentence>"` to disambiguate.
+**If the windowing regresses:** most likely cause is `find_transcript.py`
+selecting the wrong transcript file (parallel session in same project) so
+the sentinel's `transcript_path` no longer matches and it falls through
+to `start_of_file`. Pass `--marker-sentence "<your prompt's first
+sentence>"` to disambiguate.
 
 ---
 
 ## Scenario completeness checklist
 
-Before tagging a new `inspector_version`, confirm all five scenarios
-have been executed at least once with results captured:
+Before merging structural changes to the inspector, confirm all five
+scenarios have been executed at least once with results captured:
 
 - [ ] Scenario 1: BLOCK observed and remediated; agent reached PASS on
       retry.
@@ -233,10 +239,10 @@ have been executed at least once with results captured:
 - [ ] Scenario 3: parseable audit_report.json for every phase of a
       non-inference target.
 - [ ] Scenario 4: `trigger_rate` measured and recorded.
-- [ ] Scenario 5: monotonic `previous_inspector_end_line`, zero embedded
-      markers in audit windows.
+- [ ] Scenario 5: monotonic `_state.json::history[*].to_line`, sentinel
+      drives `audit_from_line` without regression.
 
-If any checkbox is unchecked, do not tag the release.
+If any checkbox is unchecked, do not merge.
 
 ---
 
@@ -251,4 +257,4 @@ If any checkbox is unchecked, do not tag the release.
 - Catastrophic Cursor changes (transcript JSONL schema bumps). If
   Cursor changes the schema, [find_transcript.py](../scripts/find_transcript.py)
   and [grep_transcript.py](../scripts/grep_transcript.py) must be
-  re-validated; bump `inspector_version` accordingly.
+  re-validated.
