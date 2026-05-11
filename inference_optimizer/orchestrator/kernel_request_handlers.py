@@ -216,12 +216,17 @@ def _maybe_apply_kernel_patch(
             "status": "skipped",
             "reason": "missing patch_path or target_file/source_file",
         }
+    from ..session_paths import patches_dir
+    kid = str(kernel_id or payload.get("kernel_id") or "")
+    backup_root = payload.get("backup_root") or (
+        patches_dir(session_dir, kid or "anon") / "backup"
+    )
     tool = _load_apply_tool()
     return tool.apply_kernel_patch(
         patch_path=patch_path,
         target_file=target_file,
-        backup_root=payload.get("backup_root") or session_dir / "kernel_patch_backups",
-        kernel_id=str(kernel_id or payload.get("kernel_id") or ""),
+        backup_root=backup_root,
+        kernel_id=kid,
         artifact_paths=_artifact_paths_from_payload(payload),
         rebuild_command=payload.get("rebuild_command"),
         rebuild_timeout_sec=int(payload.get("rebuild_timeout_sec", 1800)),
@@ -772,6 +777,7 @@ async def integrate_handler(
         }
     """
     from .action_executors.baseline import BaselineExecutor
+    from .action_executors.benchmark_result import is_valid_measurement
     from .sub_agent_runner import RunnerContext
     from .task_registry import Task
 
@@ -822,10 +828,12 @@ async def integrate_handler(
     # RunnerContext with a Task in it). The "extra_sglang_args" hand-
     # off goes via the task params even though baseline_executor doesn't
     # use them yet — kept for forward compat (P3 will inject EXTRA_SGLANG_ARGS).
-    workspace = session_dir / "integrate" / (kernel_id or "anon")
+    from ..session_paths import runs_dir
+    fake_task_id = f"integrate-{kernel_id or 'anon'}"
+    workspace = runs_dir(session_dir, "integrate", fake_task_id)
     workspace.mkdir(parents=True, exist_ok=True)
     fake_task = Task(
-        task_id=f"integrate-{kernel_id or 'anon'}",
+        task_id=fake_task_id,
         kind="baseline",
         state="running",
         params={
@@ -834,12 +842,12 @@ async def integrate_handler(
             "timeout_sec": int(payload.get("budget_minutes", 20)) * 60,
             "extra_sglang_args": extra_args,
         },
-        idempotency_key=f"integrate-{kernel_id or 'anon'}-rebaseline",
+        idempotency_key=f"{fake_task_id}-rebaseline",
     )
     ctx = RunnerContext(task=fake_task, lease=None)
 
     try:
-        bench_result = await BaselineExecutor()(ctx)
+        bench_result = await BaselineExecutor(session_dir=session_dir)(ctx)
     except Exception as exc:  # noqa: BLE001
         revert_result = _maybe_revert_kernel_patch(apply_result)
         return {
@@ -852,7 +860,7 @@ async def integrate_handler(
             "revert_result": revert_result,
         }
 
-    if bench_result.get("status") != "succeeded":
+    if not is_valid_measurement(bench_result):
         revert_result = _maybe_revert_kernel_patch(apply_result)
         return {
             "status": "failed",
