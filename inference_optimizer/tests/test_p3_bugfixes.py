@@ -19,8 +19,9 @@ Locks the three P3 fixes uncovered by the resume3 1h validation
   REQUESTs because SharedState never exposed the trace path produced by
   ``ProfileExecutor``. Fix: ``Coordinator._promote_to_shared_state`` writes
   ``main_trace_path`` to ``shared_state.last_profile_trace`` on profile
-  succeeded; ``to_prompt_summary`` shows it; cli.py's _DEFAULT_ORCH_PROMPT
-  tells Orch to use it verbatim.
+  succeeded; ``to_prompt_summary`` shows it;
+  ``orchestrator/system_prompts/orchestration.md`` (loaded by
+  ``cli._load_orchestration_prompt``) tells Orch to use it verbatim.
 """
 
 from __future__ import annotations
