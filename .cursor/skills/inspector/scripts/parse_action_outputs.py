@@ -386,12 +386,6 @@ def main() -> int:
         "expected_state_assertions_candidates": _dedupe(all_states),
     }
 
-    # Backward-compat fields for callers that only expect the single-action
-    # shape (extraction-protocol.md Pass 4 readers and tests).
-    if len(per_action_meta) == 1:
-        out["action_md_path"] = per_action_meta[0]["path"]
-        out["section_map"] = per_action_meta[0]["section_map"]
-
     if args.env_json:
         try:
             with open(args.env_json, "r", encoding="utf-8") as f:
