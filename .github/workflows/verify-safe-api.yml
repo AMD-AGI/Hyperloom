@@ -5,12 +5,9 @@ name: Verify SaFE Artifacts API
 # revert the Claw bypass. Will be deleted after verification.
 
 on:
-  workflow_dispatch:
-    inputs:
-      task_ids:
-        description: 'Space-separated task_ids to probe'
-        required: false
-        default: 'opt-9a2bd79d-0bd6-4210-ae7e-d1f37082b136 opt-6b715236-5334-4f56-9dbd-40f83aecae48 opt-0c5f4582-55b2-4e15-92df-c8e1477cd9a7'
+  push:
+    branches: [feature/ci-remote-mode-glm5]
+    paths: ['.github/workflows/verify-safe-api.yml']
 
 jobs:
   probe:
@@ -27,7 +24,7 @@ jobs:
           BASE="${SAFE_BASE_URL:-https://core42.primus-safe.amd.com}"
           BASE="${BASE%/}"
           echo "BASE=$BASE"
-          for tid in ${{ inputs.task_ids }}; do
+          for tid in opt-9a2bd79d-0bd6-4210-ae7e-d1f37082b136 opt-6b715236-5334-4f56-9dbd-40f83aecae48 opt-0c5f4582-55b2-4e15-92df-c8e1477cd9a7; do
             echo ""
             echo "===================================================="
             echo "task_id = $tid"
