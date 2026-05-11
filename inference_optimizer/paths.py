@@ -1,18 +1,29 @@
-"""Filesystem path resolver (DESIGN v0.6 §23).
+"""Filesystem path resolver (DESIGN v0.6 §23 — flattened in v0.6.1).
 
 Two distinct path concepts:
 
 1. **Session paths** — per-run mutable artifacts (SQLite DB, state.json,
-   personas, results, findings). Production NFS layout::
+   personas, results, kernel-agent workspace, patches, logs). v0.6.1
+   collapses the previous ``<root>/<session_id>/`` layout to a single
+   fixed directory::
 
-        /hyperloom/inference_optimizer-sessions/<session_id>/
-            storage/coordinator.db
+        /workspace/hyperloom/
+            manifest.json
             state.json
-            personas/  checkpoints/  kb/  results/  findings/
+            storage/coordinator.db
+            agents/{orchestration,kernel,critic,robustness}/...
+            personas/  checkpoints/  findings/  kb/
+            runs/{baseline,profile,backends,params,sweep,
+                  integrate,kernel_opt}/<task_id>/...
+            kernel-agent-workspace/<kernel_id>/
+            patches/<kernel_id>/
+            reports/  logs/
 
-   Override for local dev / tests: ``INFERENCE_OPTIMIZER_SESSION_ROOT``.
-   Override DB location only: ``INFERENCE_OPTIMIZER_DB_PATH`` (lets prod
-   keep DB on local sandbox disk while session_dir lives on NFS).
+   Each sandbox is short-lived and dedicated to a single optimizer run,
+   so there is no need for a session_id subdirectory.
+
+   Override for unit tests / sandboxed dev: ``INFERENCE_OPTIMIZER_SESSION_DIR``
+   (single env var, not a "root + sub-dir" pair).
 
 2. **Runtime asset paths** — read-only files shipped with the package
    (shell scripts, kernel-opt prompt templates, action metadata, agent
@@ -23,26 +34,39 @@ Two distinct path concepts:
 from __future__ import annotations
 
 import os
-import uuid
 from pathlib import Path
 
-DEFAULT_PROD_ROOT = Path(
-    os.environ.get("USER_DATA_PATH", "").strip() or "/workspace/hyperloom"
-) / "inference_optimizer-sessions"
-ENV_OVERRIDE_ROOT = "INFERENCE_OPTIMIZER_SESSION_ROOT"
-ENV_OVERRIDE_DB_PATH = "INFERENCE_OPTIMIZER_DB_PATH"
+DEFAULT_SESSION_DIR = Path("/workspace/hyperloom")
+ENV_OVERRIDE_SESSION_DIR = "INFERENCE_OPTIMIZER_SESSION_DIR"
 ENV_OVERRIDE_ASSET_ROOT = "INFERENCE_OPTIMIZER_ASSET_ROOT"
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 
-_SESSION_SUBDIRS = (
+# Directory skeleton mkdir-ed on `make_session_dir()`. Order is irrelevant
+# (each dir is created with `parents=True, exist_ok=True`), but the listing
+# below is the canonical layout — keep it in sync with the docstring above
+# and SKILL.md "Session Layout".
+_SESSION_SKELETON: tuple[str, ...] = (
     "storage",
     "personas",
     "checkpoints",
     "kb",
-    "results",
     "findings",
-    "agents",
+    "reports",
+    "logs",
+    "agents/orchestration",
+    "agents/kernel",
+    "agents/critic",
+    "agents/robustness",
+    "runs/baseline",
+    "runs/profile",
+    "runs/backends",
+    "runs/params",
+    "runs/sweep",
+    "runs/integrate",
+    "runs/kernel_opt",
+    "kernel-agent-workspace",
+    "patches",
 )
 
 
@@ -50,31 +74,40 @@ class AssetRootNotFound(RuntimeError):
     """Raised when an explicit asset root override points at a missing dir."""
 
 
-def session_root() -> Path:
-    override = os.environ.get(ENV_OVERRIDE_ROOT)
+def session_dir() -> Path:
+    """Return the absolute session directory for the current run.
+
+    Resolution order:
+
+    1. ``$INFERENCE_OPTIMIZER_SESSION_DIR`` env var (used by unit tests
+       to pin the session under ``tmp_path``).
+    2. ``DEFAULT_SESSION_DIR`` (``/workspace/hyperloom``).
+    """
+    override = os.environ.get(ENV_OVERRIDE_SESSION_DIR)
     if override:
         return Path(override)
-    return DEFAULT_PROD_ROOT
+    return DEFAULT_SESSION_DIR
 
 
-def make_session_dir(session_id: str | None = None) -> Path:
-    """Create ``<session_root>/<session_id>/`` with all standard subdirs."""
-    sid = session_id or uuid.uuid4().hex[:12]
-    session_dir = session_root() / sid
-    for sub in _SESSION_SUBDIRS:
-        (session_dir / sub).mkdir(parents=True, exist_ok=True)
-    return session_dir
+def make_session_dir() -> Path:
+    """Create the session directory + full subdirectory skeleton.
+
+    Idempotent (``mkdir -p`` semantics). Returns the absolute path.
+
+    The CLI calls this exactly once at startup, before the Coordinator
+    is instantiated. Tests call it after pinning
+    ``INFERENCE_OPTIMIZER_SESSION_DIR`` to ``tmp_path``.
+    """
+    sd = session_dir()
+    sd.mkdir(parents=True, exist_ok=True)
+    for sub in _SESSION_SKELETON:
+        (sd / sub).mkdir(parents=True, exist_ok=True)
+    return sd
 
 
 def db_path_for(session_dir: Path) -> Path:
-    explicit = os.environ.get(ENV_OVERRIDE_DB_PATH)
-    if explicit:
-        return Path(explicit)
-    path = session_dir / "storage" / "coordinator.db"
-    legacy_path = session_dir / "storage" / "conductor.db"
-    if legacy_path.exists() and not path.exists():
-        return legacy_path
-    return path
+    """Canonical SQLite location for a session: ``<sd>/storage/coordinator.db``."""
+    return Path(session_dir) / "storage" / "coordinator.db"
 
 
 def asset_root() -> Path:
@@ -109,20 +142,18 @@ def asset_kernel_opt_dir() -> Path:
 def agent_session_dir(session_dir: Path, agent_name: str) -> Path:
     """Per-agent inbox/outbox directory under the session.
 
-    Used by Multi-CLI runtime; SINGLE_PROC mode also writes here for
-    debugging parity with multi-cli (DESIGN §20).
+    Created up-front by ``make_session_dir()``; this helper only computes
+    the path. Used by Multi-CLI runtime; SINGLE_PROC mode also writes
+    here for debugging parity with multi-cli (DESIGN §20).
     """
-    d = session_dir / "agents" / agent_name
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    return Path(session_dir) / "agents" / agent_name
 
 
 __all__ = [
     "AssetRootNotFound",
-    "DEFAULT_PROD_ROOT",
+    "DEFAULT_SESSION_DIR",
     "ENV_OVERRIDE_ASSET_ROOT",
-    "ENV_OVERRIDE_DB_PATH",
-    "ENV_OVERRIDE_ROOT",
+    "ENV_OVERRIDE_SESSION_DIR",
     "PACKAGE_ROOT",
     "agent_session_dir",
     "asset_actions_dir",
@@ -132,5 +163,5 @@ __all__ = [
     "asset_system_prompts_dir",
     "db_path_for",
     "make_session_dir",
-    "session_root",
+    "session_dir",
 ]

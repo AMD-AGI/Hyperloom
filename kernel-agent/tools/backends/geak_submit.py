@@ -138,25 +138,27 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
 def run_via_cli(prompt_file: Path, output_dir: Path, kernel_path: str,
                 cost_limit: float | None, timeout_s: int,
                 kernel_repo: str = "", test_command: str = "") -> dict:
-    # Same ROCR→logical 0..N-1 mirror as run_via_ray._task above.
-    rocr_raw = os.environ.get("ROCR_VISIBLE_DEVICES", "")
+    # Build a child env with ROCR→logical GPU mapping instead of
+    # mutating os.environ (avoids leaking GPU vars to later steps).
+    child_env = os.environ.copy()
+    rocr_raw = child_env.get("ROCR_VISIBLE_DEVICES", "")
     if rocr_raw:
         n_visible = len([x for x in rocr_raw.split(",") if x.strip()])
         logical_ids = ",".join(str(i) for i in range(n_visible))
-        os.environ["HIP_VISIBLE_DEVICES"] = logical_ids
-        os.environ["CUDA_VISIBLE_DEVICES"] = logical_ids
+        child_env["HIP_VISIBLE_DEVICES"] = logical_ids
+        child_env["CUDA_VISIBLE_DEVICES"] = logical_ids
         gpu_ids = logical_ids
     else:
-        cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-        if cuda_vis and not os.environ.get("HIP_VISIBLE_DEVICES"):
-            os.environ["HIP_VISIBLE_DEVICES"] = cuda_vis
+        cuda_vis = child_env.get("CUDA_VISIBLE_DEVICES", "")
+        if cuda_vis and not child_env.get("HIP_VISIBLE_DEVICES"):
+            child_env["HIP_VISIBLE_DEVICES"] = cuda_vis
         gpu_ids = cuda_vis or "0"
     cmd = _build_cmd(prompt_file, output_dir, kernel_path, gpu_ids, cost_limit,
                      kernel_repo=kernel_repo, test_command=test_command)
     started = time.time()
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout_s)
+                              timeout=timeout_s, env=child_env)
         return {
             "returncode": proc.returncode,
             "stdout_tail": (proc.stdout or "")[-4000:],
