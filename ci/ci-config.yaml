@@ -58,6 +58,23 @@ models:
     kernel_opt_backends: claude
     target_gpu: mi300x
 
+  # ── DeepSeek R1 (FP8, MoRI 1P1D multi-node — TP=8 + TP=8 across 2 nodes) ──
+  # Same amd-master lookup as single-node DSR1 (image / framework / precision
+  # come from `inferenceX_key: dsr1-fp8-mi300x-sglang`), but `key` is unique so
+  # the matrix doesn't dedupe with the single-node entry above. `mode: remote`
+  # triggers orchestrator.py's prompt_template_remote.md path (multi-node MoRI
+  # 1P1D, RayJob via SaFE MCP). yunkai validated this prompt path manually.
+  - key: dsr1-multinode-fp8-mi300x-sglang
+    inferenceX_key: dsr1-fp8-mi300x-sglang
+    inferenceX_api_name: DeepSeek-R1-0528
+    model_path_override: ${NFS_ROOT}/models/DeepSeek-R1-0528
+    optimization_depth: full
+    kernel_opt_backends: claude
+    target_gpu: mi300x
+    tp: 16
+    mode: remote
+    rayjob_image: harbor.core42.example-internal-host.invalid/custom/sync/sglang:202604290707
+
   # ── gpt-oss 120B (FP4, TP=8, vLLM) ──
   - inferenceX_key: gptoss-fp4-mi300x-vllm
     inferenceX_api_name: gpt-oss-120b
@@ -82,14 +99,23 @@ models:
     kernel_opt_backends: claude
     target_gpu: mi300x
 
-  # ── GLM 5 (FP8) — requires multi-node (TP=16), pending RayJob support ──
+  # ── GLM 5 (FP8) — DISABLED 2026-05-11 ──
+  # Reason: InferenceX has no MI300X baseline for GLM-5; the ifx key resolves
+  # to glm5_fp8_mi355x.sh (MI355X 288GB script). Copying that script's
+  # --mem-fraction-static 0.85 + TP=16 single-instance breaks on MI300X
+  # (192GB HBM, MoRI 1P1D TP=8/8). Re-enable when either:
+  #   (a) InferenceX adds a glm5-fp8-mi300x-* entry in amd-master.yaml, or
+  #   (b) we patch ci to inject MI300X memory adjustment + MoRI launch flags
+  #       before the benchmark_script_section reaches the agent.
   # - inferenceX_key: glm5-fp8-mi355x-sglang
   #   inferenceX_api_name: GLM-5
-  #   model_path_override: /wekafs/models/zai-org-GLM-5
+  #   model_path_override: ${NFS_ROOT}/models/zai-org-GLM-5
   #   optimization_depth: full
   #   kernel_opt_backends: claude
   #   target_gpu: mi300x
   #   tp: 16
+  #   mode: remote
+  #   rayjob_image: harbor.core42.example-internal-host.invalid/custom/sync/sglang:202604290707
 
   # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
   - inferenceX_key: qwen3.5-bf16-mi300x-sglang
