@@ -82,14 +82,23 @@ models:
     kernel_opt_backends: claude
     target_gpu: mi300x
 
-  # ── GLM 5 (FP8) — requires multi-node (TP=16), pending RayJob support ──
+  # ── GLM 5 (FP8) — DISABLED 2026-05-11 ──
+  # Reason: InferenceX has no MI300X baseline for GLM-5; the ifx key resolves
+  # to glm5_fp8_mi355x.sh (MI355X 288GB script). Copying that script's
+  # --mem-fraction-static 0.85 + TP=16 single-instance breaks on MI300X
+  # (192GB HBM, MoRI 1P1D TP=8/8). Re-enable when either:
+  #   (a) InferenceX adds a glm5-fp8-mi300x-* entry in amd-master.yaml, or
+  #   (b) we patch ci to inject MI300X memory adjustment + MoRI launch flags
+  #       before the benchmark_script_section reaches the agent.
   # - inferenceX_key: glm5-fp8-mi355x-sglang
   #   inferenceX_api_name: GLM-5
-  #   model_path_override: /wekafs/models/zai-org-GLM-5
+  #   model_path_override: ${NFS_ROOT}/models/zai-org-GLM-5
   #   optimization_depth: full
   #   kernel_opt_backends: claude
   #   target_gpu: mi300x
   #   tp: 16
+  #   mode: remote
+  #   rayjob_image: harbor.core42.primus-safe.amd.com/custom/sync/sglang:202604290707
 
   # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
   - inferenceX_key: qwen3.5-bf16-mi300x-sglang
