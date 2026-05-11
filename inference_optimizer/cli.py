@@ -76,7 +76,6 @@ from .paths import (
 )
 from .session_paths import (
     agent_prompt_snapshot,
-    manifest_path,
 )
 
 
@@ -1615,7 +1614,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print(f"Session dir     : {session_dir}")
         print(f"Session id      : {manifest['session_id']}  (manifest label only)")
         _print_session_skeleton(session_dir)
-        state = _seed_shared_state(
+        _seed_shared_state(
             session_dir, args, session_id=manifest["session_id"],
         )
 
