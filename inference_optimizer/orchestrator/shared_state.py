@@ -440,6 +440,8 @@ class SharedState:
             try:
                 max_partial = max(1, int(env_v))
             except (TypeError, ValueError):
+                # Invalid env override; keep _DEFAULT_KERNEL_OPT_MAX_PARTIAL
+                # (already assigned above) instead of failing.
                 pass
 
         should_reject = (
