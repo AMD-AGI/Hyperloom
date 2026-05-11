@@ -604,34 +604,39 @@ class SafeOptimizeClient:
                 break
             time.sleep(5)
 
+        sse_used = False
         if sid:
+            sse_used = True
             log.info("[task %s] using SSE on clawSessionId=%s", task_id, sid[:8])
             sse_reason = self._sse_wait_until_done(sid, deadline)
             log.info("[task %s] SSE finished: reason=%s", task_id, sse_reason)
-            # SSE done → grab the latest SaFE task detail (status may still be
-            # 'Running' if the SaFE controller is lagging; we trust SSE here).
             try:
                 last_task = self.get_task(task_id)
             except Exception:
                 last_task = {}
             sf_status = last_task.get("status", "") if last_task else ""
+            # If SaFE already shows terminal, trust it.
             if sf_status in self.TERMINAL_TASK_STATUSES:
                 return sf_status, last_task
+            # ResultMessage = agent's stop_reason event, conclusive.
             if sse_reason == "ResultMessage":
                 return "Succeeded", last_task
-            if sse_reason == "stream_error":
-                # Fall through to polling
-                pass
-            elif sse_reason == "deadline":
+            # deadline = we've burned the per-task wall clock.
+            if sse_reason == "deadline":
                 return "Timeout", last_task
-            else:
-                # idle_timeout / Stopped phase / etc. — agent's chat ended but
-                # we didn't see ResultMessage; trust SaFE's view if it's terminal,
-                # otherwise return Succeeded (best-effort, agent likely finished).
-                return sf_status if sf_status else "Succeeded", last_task
+            # Anything else (idle_timeout, stream_error, Stopped) is *inconclusive*:
+            # Claw's `/chat/sessions/.../messages` stream sometimes goes quiet
+            # (only `: keepalive` heartbeats) for many minutes while the agent
+            # is busy in tool calls, and we can't tell that apart from the agent
+            # having actually finished. Don't trust SSE alone — fall through to
+            # SaFE polling and wait for a real terminal status.
+            log.info("[task %s] SSE inconclusive (reason=%s, sf_status=%s) — "
+                     "falling back to SaFE polling for terminal status",
+                     task_id, sse_reason, sf_status or "?")
 
-        # Step 2 (fallback): SaFE optimization-API polling.
-        log.info("[task %s] no clawSessionId — falling back to SaFE polling", task_id)
+        # Step 2 (fallback / continuation): SaFE optimization-API polling.
+        if not sse_used:
+            log.info("[task %s] no clawSessionId yet — using SaFE polling", task_id)
         last_status = ""
         last_phase = -1
         last_task: dict = {}
