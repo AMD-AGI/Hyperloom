@@ -71,7 +71,7 @@ def _check_env() -> None:
 
 
 async def _run(ticks: int, model: str | None) -> int:
-    session_dir = make_session_dir("p1-6-real-" + os.urandom(3).hex())
+    session_dir = make_session_dir()
     print(f"Session dir: {session_dir}")
 
     # Seed SharedState so Orchestration has a goal on first tick.
