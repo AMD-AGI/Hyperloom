@@ -264,16 +264,22 @@ def run_model(
         try:
             is_remote = merged.get("mode") == "remote"
             msg_tools = [] if is_remote else claw.default_tools
-            # Local mode: request GPU resources so the sandbox has access to the right GPU count.
-            # Remote mode: CPU sandbox only — the RayJob handles GPU allocation.
-            sandbox_resource = (
-                None if is_remote
-                else {"gpu": str(gpu_count), "amd.com/gpu": str(gpu_count)}
-            )
+            if is_remote:
+                sandbox_resource = None
+            else:
+                cpu = {1: 32, 2: 64, 4: 96, 8: 128}.get(tp, 32)
+                mem = {1: 128, 2: 256, 4: 512, 8: 1024}.get(tp, 128)
+                sandbox_resource = {
+                    "gpu": str(gpu_count),
+                    "amd.com/gpu": str(gpu_count),
+                    "cpu": str(cpu),
+                    "memory": f"{mem}Gi",
+                }
             claw.send_message(session_id, prompt, plugin_id=4, tools=msg_tools,
                               resource=sandbox_resource)
-            log.info("Prompt sent to session %s (gpu_count=%s, remote=%s)",
-                     session_id, gpu_count, is_remote)
+            log.info("Prompt sent to session %s (gpu=%s, cpu=%s, mem=%sGi, remote=%s)",
+                     session_id, gpu_count, cpu if not is_remote else "-",
+                     mem if not is_remote else "-", is_remote)
         except Exception as e:
             log.error("Failed to send message to %s: %s", session_id, e)
             status_holder["status"] = "failed"
