@@ -77,6 +77,51 @@ async def test_high_crash_emits_alert_plus_escalate():
     assert escalate.payload["next_action_hint"] == "revert"
 
 
+async def test_high_cluster_fault_emits_alert_plus_escalate():
+    ladder = ActionLadder()
+    out = await ladder.decide(
+        [
+            _sym(
+                "cluster_fault",
+                SymptomSeverity.HIGH,
+                summary="cluster fault on g53",
+                subject={"node": "g53", "fault": "g53-gpu_ecc"},
+                suggestion="drain g53",
+            )
+        ],
+        tick_index=0,
+        now_unix=1.0,
+    )
+    types = [i.type for i in out.intents]
+    assert IntentType.ALERT in types
+    assert IntentType.ESCALATE_STRATEGY_CHANGE in types
+    escalate = next(
+        i for i in out.intents if i.type is IntentType.ESCALATE_STRATEGY_CHANGE
+    )
+    assert escalate.payload["reason"] == "cluster_fault_high"
+    assert escalate.payload["next_action_hint"] == "drain g53"
+    assert escalate.payload["severity"] == "high"
+
+
+async def test_medium_cluster_fault_emits_alert_only():
+    ladder = ActionLadder()
+    out = await ladder.decide(
+        [
+            _sym(
+                "cluster_fault",
+                SymptomSeverity.MEDIUM,
+                summary="cluster fault on g53",
+                subject={"node": "g53", "fault": "g53-gpu_ecc"},
+            )
+        ],
+        tick_index=0,
+        now_unix=1.0,
+    )
+    types = [i.type for i in out.intents]
+    assert types == [IntentType.ALERT]
+    assert out.intents[0].payload["severity"] == "medium"
+
+
 async def test_high_agent_stall_emits_escalate_with_default_hint():
     ladder = ActionLadder()
     out = await ladder.decide(
