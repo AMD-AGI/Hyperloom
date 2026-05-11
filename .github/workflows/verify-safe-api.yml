@@ -11,7 +11,7 @@ on:
 
 jobs:
   probe:
-    runs-on: hyperloom-mh826
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
