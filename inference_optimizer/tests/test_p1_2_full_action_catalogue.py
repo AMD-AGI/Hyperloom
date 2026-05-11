@@ -11,17 +11,21 @@ import pytest
 from inference_optimizer.orchestrator.action_registry import (
     ActionRegistry,
     VALID_FAMILIES,
+    VALID_PIPELINE_PHASES,
 )
 from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
 
 
-# DESIGN §16.1 plus isolated PMC roofline analysis action.
+# DESIGN §16.1 plus isolated PMC roofline analysis action and the Phase 3
+# ``validate_stack`` action introduced for cumulative-gain validation.
 EXPECTED_ACTIONS_V06: dict[str, str] = {
-    # prep (4)
+    # prep (5 — incl. validate_stack which lives in `prep` family because
+    # it's a measurement action that doesn't introduce new modifications)
     "setup":                "prep",
     "classify":             "prep",
     "target_analysis":      "prep",
     "baseline":             "prep",
+    "validate_stack":       "prep",
     # analysis (2)
     "profile":              "analysis",
     "pmc_roofline":         "analysis",
@@ -137,3 +141,69 @@ def test_lease_ttl_sec_consistent_with_cost(registry):
             f"{m.name}: lease_ttl_sec={m.lease_ttl_sec} too low for "
             f"cost_minutes_p75={m.cost_minutes_p75}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 prompt-builder fields — see ActionMetadata docstring
+# ---------------------------------------------------------------------------
+def test_every_action_has_non_empty_description(registry):
+    for m in registry.all():
+        assert m.description, f"{m.name}: description must be non-empty"
+        # Sanity: descriptions are 1-line and reasonably brief so the
+        # builder doesn't blow up the prompt size.
+        assert "\n" not in m.description, (
+            f"{m.name}: description must be a single line, got "
+            f"{m.description!r}"
+        )
+        assert len(m.description) <= 200, (
+            f"{m.name}: description too long ({len(m.description)} chars); "
+            f"keep it under ~200 chars to avoid bloating the system prompt"
+        )
+
+
+def test_every_action_has_valid_pipeline_phase(registry):
+    for m in registry.all():
+        assert m.pipeline_phase in VALID_PIPELINE_PHASES, (
+            f"{m.name}: pipeline_phase={m.pipeline_phase!r} not in "
+            f"{sorted(VALID_PIPELINE_PHASES)!r}"
+        )
+
+
+def test_typical_runtime_min_positive_for_active_actions(registry):
+    """Every action with a non-zero cost must declare a typical runtime."""
+    for m in registry.all():
+        if m.cost_minutes_p50 == 0:
+            continue
+        assert m.typical_runtime_min > 0, (
+            f"{m.name}: typical_runtime_min must be > 0 when cost > 0"
+        )
+
+
+def test_validate_stack_action_metadata(registry):
+    """The Phase 3 ``validate_stack`` action must be present and shaped right."""
+    m = registry.get("validate_stack")
+    assert m is not None, "validate_stack action missing from registry"
+    assert m.family == "prep"
+    assert m.pipeline_phase == "validate"
+    assert "baseline" in m.prerequisites
+    assert "server_lifecycle" in m.requires_lanes
+    assert "benchmark_lane" in m.requires_lanes
+    # Risk-free measurement action — never introduces a new modification
+    assert m.expected_gain_pct == (0.0, 0.0)
+    assert m.accuracy_risk == 0.0
+
+
+def test_kernel_owned_actions_in_deep_pipeline_phase(registry):
+    """Kernel-owned actions must declare pipeline_phase=='deep' so the
+    builder groups them under the kernel section."""
+    for name in KERNEL_OWNED_ACTIONS:
+        m = registry.get(name)
+        assert m is not None
+        if name == "deep_kernel_analysis":
+            # Analysis-only step that PRECEDES kernel_opt — phase=analysis
+            # is the right slot.
+            assert m.pipeline_phase == "analysis"
+        else:
+            assert m.pipeline_phase == "deep", (
+                f"{name}: expected pipeline_phase='deep', got {m.pipeline_phase!r}"
+            )
