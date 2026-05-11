@@ -14,6 +14,7 @@ from typing import Callable
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
+from .cluster_fault import ClusterFaultConfig, evaluate_cluster_fault_signals
 from .crash import CrashConfig, evaluate_crash_signals
 from .event import EventConfig, evaluate_event_signals
 from .health import HealthConfig, evaluate_health_signals
@@ -34,6 +35,9 @@ class Classifier:
     event_config: EventConfig = field(default_factory=EventConfig)
     health_config: HealthConfig = field(default_factory=HealthConfig)
     local_health_config: LocalHealthConfig = field(default_factory=LocalHealthConfig)
+    cluster_fault_config: ClusterFaultConfig = field(
+        default_factory=ClusterFaultConfig
+    )
     extra_evaluators: list[SignalEvaluator] = field(default_factory=list)
 
     def classify(self, data: SourceData, ctx: ReactorContext) -> list[Symptom]:
@@ -52,6 +56,11 @@ class Classifier:
         )
         symptoms.extend(
             evaluate_local_health_signals(ctx, data, config=self.local_health_config)
+        )
+        symptoms.extend(
+            evaluate_cluster_fault_signals(
+                ctx, data, config=self.cluster_fault_config
+            )
         )
         for fn in self.extra_evaluators:
             symptoms.extend(fn(ctx, data))
