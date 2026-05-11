@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from robustness_agent.config import Config
-from robustness_agent.factory import build_backend, build_reactor_components
+from robustness_agent.factory import build_reactor_components
 from robustness_agent.role.envelope import IntentType
 from robustness_agent.role.prompt_inputs import (
     ReactorContext,
@@ -33,24 +33,6 @@ async def test_build_reactor_components_local_only_mode_runs_a_tick(tmp_path: Pa
         assert any(i.type is IntentType.ALERT for i in intents)
         # No server URL means primary source degrades after fail_threshold.
         assert bundle.server_client is None
-    finally:
-        await bundle.aclose()
-
-
-@pytest.mark.asyncio
-async def test_build_backend_returns_working_backend(tmp_path: Path):
-    config = Config(session_dir=tmp_path, robustness_server_url="")
-    backend, bundle = build_backend(config)
-    try:
-        result = await backend.run(
-            "=== Shared session state ===\n"
-            "session_id=sess-1\n"
-            "crash_count=0\n"
-            "=== Inbox for robustness ===\n"
-            "(no new messages)\n"
-        )
-        assert result.metadata["tick_index"] == 1
-        assert any(i.type is IntentType.SEND_MESSAGE for i in result.intents)
     finally:
         await bundle.aclose()
 
