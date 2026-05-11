@@ -1,18 +1,21 @@
 """High-level builders that turn a :class:`Config` into a running reactor.
 
-Two entry points:
+Single entry point:
 
-* :func:`build_reactor_components` returns the M1
-  :class:`~robustness_agent.role.reactor.ReactorComponents` plus the
-  underlying :class:`~robustness_agent.findings.sink.FindingSink` and
+* :func:`build_reactor_components` returns a :class:`ReactorBundle` that
+  bundles the reactor, the :class:`~robustness_agent.role.reactor.ReactorComponents`,
+  the underlying :class:`~robustness_agent.findings.sink.FindingSink` and
   :class:`~robustness_agent.sources.server_client.RobustnessServerClient`
-  so callers can manage their lifecycles (e.g. ``await client.aclose()``
+  so callers can manage their lifecycles (e.g. ``await bundle.aclose()``
   on shutdown).
-* :func:`build_backend` wraps :func:`build_reactor_components` and
-  hands back a ready-to-register
-  :class:`~robustness_agent.role.backend_adapter.RobustnessAgentBackend`.
 
-The factories never block on remote services — :class:`Config.discover`
+Hosts (the Coordinator, the standalone ``main.py`` reactor loop, the
+``robustness_agent.runtime.cli`` subprocess transport) all build a
+bundle directly and drive ``bundle.reactor.tick(ctx)`` per tick. There
+is no in-process Backend adapter anymore — the architecturally-blessed
+transport is the subprocess CLI, mirroring the critic-agent layout.
+
+The factory never blocks on remote services — :class:`Config.discover`
 already probed reachability and recorded the URLs.
 """
 
@@ -38,7 +41,6 @@ from .decision.rca_engine import (
     RcaThrottleConfig,
 )
 from .findings.sink import FindingSink, FindingSinkConfig
-from .role.backend_adapter import RobustnessAgentBackend
 from .role.reactor import Reactor, ReactorComponents
 from .signals import Classifier, SymptomSeverity
 from .signals.crash import CrashConfig
@@ -167,18 +169,6 @@ def build_reactor_components(
     )
 
 
-def build_backend(
-    config: Config,
-    *,
-    rca: RcaEngine | None = None,
-    session_id: str | None = None,
-) -> tuple[RobustnessAgentBackend, ReactorBundle]:
-    """Return a Backend instance + the bundle to manage its lifecycle."""
-    bundle = build_reactor_components(config, rca=rca, session_id=session_id)
-    backend = RobustnessAgentBackend(reactor=bundle.reactor)
-    return backend, bundle
-
-
 def _build_rca_engine(config: Config) -> RcaEngine:
     """Choose between Noop and Llm based on config + env override."""
     if os.environ.get("ROBUSTNESS_LLM_RCA_DISABLED", "").lower() in {"1", "true", "yes"}:
@@ -242,6 +232,5 @@ class _NoServerSource:
 
 __all__ = [
     "ReactorBundle",
-    "build_backend",
     "build_reactor_components",
 ]
