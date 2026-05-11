@@ -120,7 +120,7 @@ All values below are the **single source of truth**. All actions reference these
 | `OOB_MAX_RETRIES` | 3 | Max OOB submission retries per kernel |
 | `OOB_TOP_CANDIDATES` | 5 | Number of top kernel/code candidates to submit |
 | `OOB_CONSECUTIVE_DISCARDS` | 5 | Stop after this many consecutive discards |
-| `OOB_WALL_CLOCK_MIN` | 30 | Max wall-clock minutes for kernel-opt action |
+| `OOB_WALL_CLOCK_MIN` | 120 | Max wall-clock minutes for kernel-opt action |
 | `OOB_POLL_INTERVAL_S` | 60 | Seconds between OOB task status polls when external polling is needed |
 | `OOB_POLL_TIMEOUT_MIN` | 15 | Max minutes to poll a single OOB task when external polling is needed |
 | `MIN_GPU_PCT` | 3 | Minimum GPU time % to consider a kernel/code path as an OOB candidate |

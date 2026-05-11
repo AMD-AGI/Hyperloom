@@ -337,7 +337,7 @@ $OOB_RAY_CLI run \
   -f $WORK_DIR/kernel.py \
   -o $WORK_DIR/oob_codex_${KERNEL_NAME} \
   --max-turns 20 \
-  --timeout 1200 \
+  --timeout 1800 \
   --no-live --json
 ```
 
@@ -581,7 +581,7 @@ Submit kernel candidates through OOB only:
 ```bash
 # OOB Codex / Claude
 $OOB_RAY_CLI run -a codex -p "$PROMPT" -f "$WORK_DIR/kernel.py" \
-  -o "$WORK_DIR/oob_codex_${KERNEL_NAME}" --max-turns 20 --timeout 1200 \
+  -o "$WORK_DIR/oob_codex_${KERNEL_NAME}" --max-turns 20 --timeout 1800 \
   --no-live --json
 ```
 
