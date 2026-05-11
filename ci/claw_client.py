@@ -96,8 +96,13 @@ class ClawClient:
             "attachments": [],
             "tools": tools if tools is not None else self.default_tools,
             "workspaceId": self.sandbox_workspace or os.environ.get("SANDBOX_WORKSPACE", ""),
-            "pluginId": plugin_id,
         }
+        # pluginId is optional. Omit entirely when caller passes None so the
+        # Claw backend uses whatever default the agent_id implies (matches
+        # the GUI behavior for remote-mode multi-node sessions, where no
+        # plugin is selected by the user).
+        if plugin_id is not None:
+            body["pluginId"] = plugin_id
         if resource:
             body["resource"] = resource
         resp = self._session.post(
