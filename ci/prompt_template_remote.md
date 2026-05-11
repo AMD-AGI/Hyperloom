@@ -1,5 +1,4 @@
-Read /wekafs/yunkai/Hyperloom/.cursor/skills/inference-optimization-multi-node/addendum.md carefully.
-Use the /wekafs/yunkai/Hyperloom/.cursor/skills/inference-optimization-multi-node to optimize {model_hf} inference performance.
+Use /wekafs/yunkai/Hyperloom/.cursor/skills/inference-optimization-multi-node skill to optimize {model_hf} inference performance.
 mode: remote
 
 Configuration:
@@ -70,10 +69,10 @@ Submit the top 5 valid OOB optimization candidates if available. If fewer than 5
 Must optimize at least {min_kernels} kernels
 
 Requirements:
-Save all results and the optimization report to {result_dir}
+Save all results and the optimization report to /workspace/hyperloom/
 You MUST execute the full skill pipeline (Phase 0-10), including parameter sweep.
 Even if the baseline already exceeds the InferenceX target, still run the sweep and write the report.
-After writing optimization_report.md, also write {result_dir}/ci_metrics.json:
+After writing optimization_report.md, also write /workspace/hyperloom/ci_metrics.json:
 ```json
 {{"baseline_throughput": 8053.90, "optimized_throughput": 8850.12, "gain_pct": 9.88, "tok_per_gpu_baseline": 4026.95, "tok_per_gpu_optimized": 4425.06, "actions_taken": ["params_max_num_seqs_512", "kernel_fused_moe_kept"]}}
 ```
@@ -86,7 +85,7 @@ Rules:
 
 CRITICAL — Result Directory:
 export NFS_ROOT={nfs_root}
-export RESULT_DIR={result_dir}
+export RESULT_DIR=/workspace/hyperloom/
 
 Use this MCP to create RayJob:
 ```json
