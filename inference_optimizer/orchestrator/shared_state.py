@@ -82,6 +82,19 @@ class SharedState:
     # the materialized full args/env for execution.
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
     cumulative_gain: float = 0.0
+    # Cumulative gain measured by the `validate_stack` action — i.e. by
+    # actually re-baselining a fresh server with EVERY KEEP'd entry of
+    # ``optimization_stack`` applied. The plain ``cumulative_gain`` field
+    # only sums per-round gains (which do not compose linearly), so the
+    # validated number is what the final report quotes. Stays 0.0 until the
+    # first successful validate_stack run.
+    cumulative_gain_validated: float = 0.0
+    cumulative_gain_validated_ts: str = ""
+    # Length of ``optimization_stack`` at the time of the last successful
+    # validate_stack run; used by the Coordinator to decide whether the
+    # current stack still matches the validated number, or whether a
+    # re-validation is required after new KEEPs landed.
+    cumulative_gain_validated_stack_len: int = 0
     stop_reason: str = ""
     current_action: str = ""
     crash_count: int = 0
@@ -597,6 +610,95 @@ class SharedState:
             "source": "seeded_from_current_best",
         }]
 
+    # ------------------------------------------------------------------
+    # Time-budget helpers (Phase 2 — consumed by Coordinator._compose_prompt)
+    # ------------------------------------------------------------------
+    def elapsed_minutes(self, *, now: datetime | None = None) -> float:
+        """Wall-clock minutes since ``start_ts``.
+
+        Returns 0.0 when ``start_ts`` is empty / unparseable so callers can
+        treat the value as "no time consumed yet" without a try/except.
+        """
+        if not self.start_ts:
+            return 0.0
+        try:
+            start = datetime.fromisoformat(self.start_ts)
+        except ValueError:
+            return 0.0
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        now_dt = now or datetime.now(timezone.utc)
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+        delta = (now_dt - start).total_seconds() / 60.0
+        return max(0.0, delta)
+
+    def remaining_minutes(self, *, now: datetime | None = None) -> float | None:
+        """Minutes left in the wall-clock budget.
+
+        Returns ``None`` when ``max_minutes`` is 0 / unset — i.e. the run
+        has no upper bound. Otherwise the result is clamped at 0 so the
+        prompt never advertises negative time.
+        """
+        if not self.max_minutes:
+            return None
+        return max(0.0, float(self.max_minutes) - self.elapsed_minutes(now=now))
+
+    def optimization_stack_has_unvalidated_keeps(self) -> bool:
+        """True iff a new KEEP has landed since the last validate_stack.
+
+        Used by Coordinator to surface the ``validate_stack required`` TODO
+        in the per-tick checklist. The check is purely on stack *length*:
+        every successful validate_stack records ``cumulative_gain_validated_stack_len``,
+        so a longer stack means at least one new KEEP came in.
+        """
+        return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len)
+
+    def to_mission_summary(self, *, now: datetime | None = None) -> str:
+        """Mission-progress block printed at the very top of every tick.
+
+        Distinct from :meth:`to_prompt_summary` because we want the LLM to
+        see the *outcome-shaped* state (raw gain, validated gain, time
+        spent vs budget, validated-stack staleness) before drowning in
+        verbose execution detail.
+        """
+        elapsed = self.elapsed_minutes(now=now)
+        remaining = self.remaining_minutes(now=now)
+        budget_line = (
+            f"time      : elapsed={elapsed:.1f}min "
+            f"remaining={remaining:.1f}min "
+            f"budget={self.max_minutes}min"
+        ) if remaining is not None else (
+            f"time      : elapsed={elapsed:.1f}min budget=unlimited"
+        )
+        validated_age = ""
+        if self.cumulative_gain_validated_ts:
+            validated_age = f" (ts={self.cumulative_gain_validated_ts})"
+        unvalidated = self.optimization_stack_has_unvalidated_keeps()
+        unvalidated_tag = (
+            " ⚠ stack changed since last validate_stack — RUN validate_stack"
+            if unvalidated else ""
+        )
+        return (
+            f"baseline  : {self.baseline_tput} tok/s/GPU\n"
+            f"current   : {self._format_current_best_for_mission()}\n"
+            f"gain      : per-round-sum={self.cumulative_gain:.2f}% "
+            f"validated={self.cumulative_gain_validated:.2f}%{validated_age}\n"
+            f"stack     : {len(self.optimization_stack)} entries "
+            f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
+            f"{unvalidated_tag}\n"
+            f"{budget_line}"
+        )
+
+    def _format_current_best_for_mission(self) -> str:
+        if not isinstance(self.current_best, dict) or not self.current_best:
+            return "(none)"
+        return (
+            f"action={self.current_best.get('action','?')} "
+            f"tput={self.current_best.get('tput','?')} "
+            f"variant={self.current_best.get('variant_name','?')}"
+        )
+
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection (DESIGN §8.3)."""
         lines = [
@@ -607,6 +709,11 @@ class SharedState:
             f"current_best={self.current_best or '(none)'}",
             f"optimization_stack={self._format_optimization_stack()}",
             f"cumulative_gain={self.cumulative_gain}%",
+            (
+                f"cumulative_gain_validated={self.cumulative_gain_validated}% "
+                f"(stack_len_at_validation={self.cumulative_gain_validated_stack_len}, "
+                f"ts={self.cumulative_gain_validated_ts or '(never)'})"
+            ),
             f"last_sweep={self._format_last_sweep()}",
             f"current_action={self.current_action or '(idle)'}",
             f"crash_count={self.crash_count}",
