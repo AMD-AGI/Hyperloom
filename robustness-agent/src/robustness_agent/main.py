@@ -5,8 +5,9 @@ Two run modes:
 * ``--mode reactor`` (default, M1): runs the new symptom -> intent
   pipeline in standalone form, polling sources every
   ``standalone_tick_interval_s`` seconds and writing findings to disk.
-  This is mainly used for dev / smoke testing; production uses the
-  SINGLE_PROC backend invoked by the Coordinator.
+  This is mainly used for dev / smoke testing; production hosts (the
+  Coordinator) drive the reactor via :mod:`robustness_agent.runtime.cli`
+  in a subprocess instead.
 * ``--mode legacy``: keeps the previous RobustnessAgent loop available
   for environments that still depend on direct conductor.db writes.
 """
@@ -22,7 +23,7 @@ import time
 from pathlib import Path
 
 from .config import Config
-from .factory import build_backend
+from .factory import build_reactor_components
 from .role.prompt_inputs import ReactorContext, SharedStateSnapshot
 
 
@@ -39,11 +40,12 @@ async def _run_reactor_mode(config: Config) -> None:
     """Standalone reactor loop for dev / debugging.
 
     Polls the configured sources at ``standalone_tick_interval_s`` and
-    writes findings to disk. Coordinator integration uses the same
-    Backend instance through SINGLE_PROC instead.
+    writes findings to disk. Coordinator integration drives the same
+    reactor through ``robustness_agent.runtime.cli tick`` in a
+    subprocess (mirroring critic-agent's transport).
     """
     log = logging.getLogger("robustness_agent")
-    backend, bundle = build_backend(config)
+    bundle = build_reactor_components(config)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
