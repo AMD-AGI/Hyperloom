@@ -322,8 +322,13 @@ def run_model(
                     "cpu": str(cpu),
                     "memory": f"{mem}Gi",
                 }
-            claw.send_message(session_id, prompt, plugin_id=4, tools=msg_tools,
-                              resource=sandbox_resource)
+            # Remote-mode sessions talk to SaFE MCP + Ray Dashboard REST.
+            # They don't need pluginId — the Claw GUI doesn't set one for the
+            # multi-node yunkai-validated path either. Local-mode keeps the
+            # existing pluginId=4 (base tools) so the agent has Bash/Read/etc.
+            msg_plugin = None if is_remote else 4
+            claw.send_message(session_id, prompt, plugin_id=msg_plugin,
+                              tools=msg_tools, resource=sandbox_resource)
             log.info("Prompt sent to session %s (gpu=%s, cpu=%s, mem=%sGi, remote=%s)",
                      session_id, gpu_count, cpu if not is_remote else "-",
                      mem if not is_remote else "-", is_remote)
