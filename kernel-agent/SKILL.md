@@ -190,6 +190,17 @@ found", re-run `install.sh` instead of cloning the open-source TraceLens
 repo from chat — the open-source clone does NOT contain the standalone
 skills required by `tools/tracelens_analysis.py`.
 
+When `$TRACELENS_ROOT` is on a read-only mount (the WekaFS default at
+`/wekafs/hyperloom/TraceLens-internal`), `ensure_tracelens` automatically
+mirrors the source tree to `${HYPERLOOM_ROOT}/TraceLens-internal` (parallel
+to `${HYPERLOOM_ROOT}/geak` / `${HYPERLOOM_ROOT}/OOB/oob_cli`) via `cp -r`,
+runs `pip install -e` against the writable mirror, and `write_env_file`
+re-exports `TRACELENS_ROOT` pointing at the mirror so subsequent CLI
+subprocesses inherit it. This prevents the `select_kernels` failure loop
+caused by `tools/tracelens_analysis.py` re-running `pip install -e .`
+inside `cwd=$TRACELENS_ROOT` on every request. No manual `rsync` is
+needed for the single-node read-only case.
+
 If `install.sh` did not finish or the CLI is unexpectedly missing, run a
 manual editable install + smoke test before analysis:
 
@@ -264,6 +275,9 @@ attempt but mark `geak_without_benchmark: true`.
 - **Default budget**:
   - claude / codex: **60 minutes** per attempt (`--backend-budget-min 60`)
   - GEAK: **90 minutes** per attempt (`--geak-budget-min 90`)
+- **GEAK task parameters** (prompt-injected, align with GEAK team defaults):
+  - `max_rounds`: **5** (multi-round heterogeneous optimization)
+  - `step_limit`: **200** (GEAK recommended; 100 limits multi-round runs)
   
   Agents are instructed to **early-exit** as soon as they hit `>=1.50x` with
   passing correctness; otherwise they iterate up to ~85% of the budget and the
