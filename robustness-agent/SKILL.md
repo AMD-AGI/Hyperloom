@@ -32,11 +32,13 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[test]"
 
 ```
 robustness_agent/
+├── runtime/
+│   ├── __init__.py         # subprocess transport package
+│   └── cli.py              # `python -m robustness_agent.runtime.cli tick` entry point
 ├── role/
 │   ├── envelope.py         # IntentType / Intent / build_* helpers (mirror upstream)
 │   ├── prompt_inputs.py    # Coordinator prompt -> ReactorContext
-│   ├── reactor.py          # Reactor.tick() pipeline driver
-│   └── backend_adapter.py  # SINGLE_PROC adapter implementing Backend
+│   └── reactor.py          # Reactor.tick() pipeline driver
 ├── decision/
 │   ├── policy_aware.py     # local PolicyGate-equivalent payload guard
 │   ├── action_ladder.py    # symptom -> intent (+ Finding) translation (async)
@@ -49,7 +51,7 @@ robustness_agent/
 │   ├── server_client.py    # robustness-server REST + Source adapter
 │   └── local_probe.py      # local fallback (conductor.db, ps, df, parsed rocm-smi, http probes, log error patterns)
 ├── findings/sink.py        # JSONL append sink for Findings
-├── factory.py              # Config -> Reactor / Backend bundle
+├── factory.py              # Config -> ReactorBundle (build_reactor_components)
 ├── config.py               # discovery + tunables
 ├── main.py                 # CLI: --mode reactor (default) | legacy
 └── (legacy) agent.py / conductor.py / monitors / checks / providers
@@ -57,30 +59,59 @@ robustness_agent/
 
 The legacy loop is preserved behind `--mode legacy` and emits a
 `DeprecationWarning` when constructed. Migration target is the
-SINGLE_PROC backend below.
+subprocess transport below.
 
-## Coordinator integration (SINGLE_PROC)
+## Coordinator integration (subprocess transport)
 
-```python
-from robustness_agent.config import Config
-from robustness_agent.factory import build_backend
+The architectural blueprint follows `critic-agent`: hosts (the
+Coordinator, smoke harnesses, operator tooling) shell out to a CLI
+that reads a JSON request and writes a JSON envelope. There is no
+in-process Backend adapter — the agent runs in a child Python process
+so its dependency tree (httpx, openai SDK, sqlite3) stays isolated
+from the host.
 
-config = await Config.discover()
-backend, bundle = build_backend(config)
-# Register backend with the Coordinator's BackendRegistry under name
-# "robustness". The Coordinator then drives backend.run(prompt) per tick.
-
-try:
-    await coordinator.run_until_stop()
-finally:
-    await bundle.aclose()  # closes the httpx client + flushes the sink
+```bash
+python -m robustness_agent.runtime.cli tick \
+    --request request.json \
+    --out emit.json
 ```
 
-The backend's wire shape is identical to
-`inference_optimizer.orchestrator.backends.base.Backend`. A contract
-test (`tests/test_role_contract.py`) and an end-to-end integration
-test (`tests/test_inference_optimizer_integration.py`) validate every
-emitted intent against the upstream `PolicyGate`.
+`request.json` (host-built):
+```json
+{
+  "kind": "coordinator_inbox",
+  "session_id": "sess-1",
+  "raw_prompt": "=== Shared session state ===\n...",
+  "context": {"tick_index": 0, "now_unix": 1700000000.0},
+  "options": {"session_dir": "/tmp/sess-1",
+              "robustness_server_url": "http://...",
+              "llm_rca_enabled": false,
+              "metrics_window_s": 300}
+}
+```
+
+`emit.json` (CLI-emitted):
+```json
+{
+  "intent_envelope": {"intents": [{"intent_type": "alert", "payload": {...}}, ...]},
+  "session_id":   "sess-1",
+  "tick_index":   1,
+  "parse_warnings": []
+}
+```
+
+`intent_envelope` follows the same schema as `critic-agent`'s
+`commit-review` output, validated host-side by
+`inference_optimizer.orchestrator.intent_parser.validate_envelope`.
+Exit code `0` = logical success (zero or more intents); `2` = adapter /
+configuration bug.
+
+The host-side wrapper that drives this subprocess lives in
+`inference_optimizer/orchestrator/backends/robustness_agent.py:RobustnessAgentBackend`,
+mirroring the layout of `CriticAgentBackend`. End-to-end tests in
+`inference_optimizer/tests/test_p2_robustness_agent_e2e.py` and
+`robustness-agent/tests/test_runtime_cli.py` together cover the full
+host -> subprocess -> envelope -> upstream PolicyGate path.
 
 ## Environment variables
 
