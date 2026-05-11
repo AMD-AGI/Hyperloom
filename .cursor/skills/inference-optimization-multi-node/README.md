@@ -28,7 +28,7 @@ Runtime outputs live on the shared filesystem mounted by the RayJob:
 
 ```text
 /wekafs/inference-optimization/
-├── results/<timestamp>/     # Benchmark JSON, server logs, eval output, final report
+├── results/<timestamp>/     # Benchmark JSON, server logs, eval output, raw RayJob artifacts
 ├── traces/<timestamp>/      # Profiler traces for TraceLens / offline analysis
 ```
 
@@ -39,6 +39,19 @@ $RESULT_DIR/oob_<agent>_<kernel_name>/tasks/<user>/<task_id>/workspace/
 ```
 
 Use the `.workspace` field from `oob_ray_submit.py run --json` instead of guessing paths.
+
+Final user-facing artifacts live in the sandbox workspace:
+
+```text
+/workspace/hyperloom/
+├── optimization_report.md   # Final report uploaded by Claw at session end
+├── ci_metrics.json          # Optional CI metrics
+├── MANIFEST.txt             # Index of result files and raw /wekafs artifacts
+```
+
+Do not write sandbox-generated files to `/wekafs`. The sandbox may read
+`/wekafs` paths as input only; any file it creates must go under
+`/workspace/hyperloom/`.
 
 ## What It Does
 

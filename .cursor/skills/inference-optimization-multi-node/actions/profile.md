@@ -22,6 +22,10 @@ For PD disaggregation / MoRI, keep the profiling topology aligned:
 
 - Send benchmark traffic to the public serving endpoint, usually the router.
 - Send `/start_profile` and `/stop_profile` to the SGLang backend that owns the stage being profiled, usually the prefill server.
+- `/start_profile` and `/stop_profile` MUST be the built-in HTTP endpoints of
+  the already-running SGLang server process. Do not create, patch, monkeypatch,
+  wrap, or simulate a custom `start_profile` / `stop_profile` implementation,
+  and do not add a sidecar service with those routes.
 - Do not profile the router unless intentionally measuring router overhead.
 - Do not benchmark prefill/decode backends directly when evaluating the full PD path.
 - Record the actual prefill/decode/router ports from the launch commands or run context; do not hardcode ports such as `30000` or `8888`.
@@ -31,13 +35,41 @@ For PD disaggregation / MoRI, keep the profiling topology aligned:
   implementation calls `/start_profile` directly, pass the same path as
   `output_dir` in the request body. Do not use sandbox-only
   `/workspace/hyperloom/...` paths for RayJob trace output.
+- For PD/MoRI, the default `/start_profile` request MUST start profiling
+  immediately. Do not pass `start_step` / `num_steps` by default; short profile
+  traffic can miss the requested window and make `/stop_profile` report
+  `Profiling is not in progress`.
 - Sandbox-side TraceLens summaries, manifests, and the final report must be
   written under `/workspace/hyperloom/` after reading the RayJob-produced
   `/wekafs/...` trace/result paths.
 
 A profiling attempt is valid for TraceLens if TraceLens can read the raw trace and produce GPU timeline / kernel summary outputs. Prefer `/stop_profile` returning `200 OK`, but do not reject the trace solely because `/stop_profile` returned 500: SGLang can still write a complete trace after reporting an internal error. If `/stop_profile` times out, the gzip trace is invalid, or TraceLens reports `No GPU events found in the trace`, treat the profiling attempt as invalid. Do not conclude that the workload has no GPU events from an invalid trace.
 
-For invalid PD/MoRI profiling attempts, rerun profiling with a smaller profiling window. If supported, pass `start_step` and `num_steps` in the `/start_profile` request to capture only a short engine-step window. The validated default for MoRI 1P1D profiling is `{"start_step": 80, "num_steps": 20, "with_stack": true, "record_shapes": true}`; this produced complete traces with GPU events on `CONC=64, ISL=1024, OSL=1024` while keeping `/stop_profile` around a few minutes. Otherwise reduce output length, prompt count, and concurrency before increasing timeout. Use a larger `/stop_profile` timeout for distributed serving as a fallback (for example, `6000s`), while keeping the benchmark endpoint and profile endpoint aligned with the topology above.
+For PD/MoRI profiling, use this default `/start_profile` payload:
+
+```json
+{
+  "output_dir": "$TRACE_DIR",
+  "activities": ["CPU", "GPU"],
+  "with_stack": true,
+  "record_shapes": true,
+  "profile_prefix": "prefill"
+}
+```
+
+Only use `start_step` / `num_steps` after a successful immediate profile proves
+the trace is too large, and only when profile traffic is long enough to cover
+the requested engine-step window. Otherwise reduce output length, prompt count,
+and concurrency before increasing timeout. Use a larger `/stop_profile` timeout
+for distributed serving as a fallback (for example, `6000s`), while keeping the
+benchmark endpoint and profile endpoint aligned with the topology above.
+
+After `/stop_profile`, do not decide based on a single fixed sleep. Poll
+`$TRACE_DIR` until trace count and total size are stable. If `$TRACE_DIR` is
+empty, inspect the profiled server log for `Traces are saved to:` before
+declaring failure. If the trace was written to an unexpected path, record that
+path and move/copy the summary artifacts into the final `/workspace/hyperloom/`
+bundle.
 
 Do not manually parse large raw trace files in the normal path. The normal path is:
 
@@ -56,6 +88,17 @@ If running separately:
 RUN_CONTEXT_FILE="$RESULT_DIR/run_context.env" bash "$SCRIPTS_DIR/run_profile.sh"
 ```
 
+**PD/MoRI exception:** If the official scripts cannot express the required
+prefill/decode/router topology, use a documented Ray Dashboard REST Python
+driver instead. The driver may launch prefill/decode/router processes and call
+the built-in SGLang `/start_profile` and `/stop_profile` endpoints, but it must
+follow the topology and path rules above, set `SGLANG_TORCH_PROFILER_DIR` before
+launching the profiled backend, pass the `output_dir` payload to
+`/start_profile`, validate that the produced trace has GPU/kernel events, invoke
+TraceLens on the produced trace, and save final summaries under
+`/workspace/hyperloom/`. This exception does not allow custom profiling
+endpoints or a sidecar `stop_profile` service.
+
 **vLLM V1 caveat:** `multiprocessing.spawn` workers — main process profiler gets empty traces. Use `/start_profile` + `/stop_profile` HTTP endpoints instead.
 
 **vLLM v0.17+ `--profiler-config` format:**
@@ -65,12 +108,12 @@ vLLM v0.17 changed the profiling interface. The `/start_profile` endpoint requir
 ```bash
 # CORRECT — JSON format (vLLM v0.17+)
 python3 -m vllm.entrypoints.openai.api_server \
-    --profiler-config '{"profiler": "torch", "trace_dir": "/workspace/traces"}' \
+    --profiler-config '{"profiler": "torch", "trace_dir": "/wekafs/inference-optimization/traces/<run_id>"}' \
     ...
 
 # WRONG — key=value format (will fail with "invalid JSON")
 python3 -m vllm.entrypoints.openai.api_server \
-    --profiler-config 'profiler=torch,trace_dir=/workspace/traces' \
+    --profiler-config 'profiler=torch,trace_dir=/wekafs/inference-optimization/traces/<run_id>' \
     ...
 ```
 
@@ -83,7 +126,8 @@ Record tracing start before calling TraceLens:
 python3 $SCRIPTS_DIR/trace_action.py --component tracelens --action start
 ```
 
-Use **filtered** TP-0 trace (generated by `run_baseline.sh`).
+Use **filtered** TP-0 trace (generated by `run_baseline.sh`, `run_profile.sh`,
+or the documented PD/MoRI profile driver).
 
 **Ensure TraceLens CLI is installed:**
 ```bash
@@ -229,7 +273,7 @@ source-backed kernels as "vendor" merely because their runtime names look compil
 - **Strategy C**: Selective `torch.compile` on norm/activation submodules → converts `vectorized_elementwise_kernel` to Inductor Triton → T1 optimization applies.
 - **Env flags**: `SGLANG_ROCM_FUSED_DECODE_MLA`, `ROCM_QUICK_REDUCE_QUANTIZATION`, `AITER_ENABLE_VSKIP`.
 
-**Architecture-based fallback** (when profiling fails or trace is unavailable):
+**Architecture-based fallback** (only after live profiling is explicitly unavailable):
 ```python
 import json
 config = json.load(open(f'{MODEL}/config.json'))
@@ -286,5 +330,6 @@ For each candidate found, score by tier:
 ## Failure Handling
 - TraceLens CLI not installed: copy to `/tmp` and install (`cp -r /hyperloom/TraceLens-internal /tmp/ && pip install -e /tmp/TraceLens-internal`)
 - TraceLens CLI fails: fall back to direct trace parsing with error recovery (Step 3)
-- Trace too large: use filtered trace; if still too large, use architecture-based estimation
+- No trace after `/stop_profile`: poll `$TRACE_DIR` until stable, inspect server logs for the actual `Traces are saved to:` path, then rerun profiling with the canonical immediate `output_dir` payload if no valid trace exists
+- Trace too large: use filtered trace; if still too large, reduce profile traffic or use `kernel_summary.csv` / lightweight candidate extraction before using architecture-based estimation
 - vLLM profiling empty: use `/start_profile` HTTP endpoints or skip to architecture-based

@@ -58,6 +58,10 @@ curl -sS -X POST "$RAY_DASHBOARD_URL/api/jobs/" \
 
 违规 = 立即判定本次运行无效。
 
+### IR-10a：创建新 RayJob，不使用已有 RayJob
+
+每次 skill 执行开始时，都必须通过 `workload_create` 创建一个新的 RayJob。不要连接、恢复或复用之前运行留下的已有 RayJob，即使它看起来是健康的；陈旧状态会使优化结果无效。
+
 ### IR-11：OOB 仅 CLI 使用，不使用 service API
 
 与 `SKILL.md` 中 IR-7 相同：绝不要修改 OOB 的配置、认证文件、测试数据或设置。只允许使用批准的 CLI 工具：
@@ -217,6 +221,24 @@ curl -sS -X POST "$RAY_DASHBOARD_URL/api/jobs/" \
   -d '{"entrypoint":"bash -lc '\''source /etc/profile.d/hyperloom-env.sh && python3 -c \"import ray; ray.init(); print(ray.cluster_resources()); ray.shutdown()\"'\''"}'
 ```
 
+### 远程路径约定
+
+远程模式区分两个文件系统写入域：
+
+- **RayJob 侧运行产物必须使用 `/wekafs/...` 路径。** 这包括 `$RESULT_DIR`、
+  `$TRACE_DIR`、RayJob 内生成的 TraceLens 输出、OOB 输入/输出 workspace、
+  kernel candidate、re-baseline 产物和 sweep 输出。这些路径必须对 RayJob
+  head/worker pod 可见。
+- **sandbox 侧生成的文件必须使用 `/workspace/hyperloom/...` 路径。** Claw
+  sandbox 可以读取 `/wekafs` 作为输入，但不能写入。sandbox 创建的摘要、
+  manifest、临时 prompt、复制的 metadata 或最终用户可见产物，都必须写到
+  `/workspace/hyperloom/`。
+- **最终交付物必须出现在 `/workspace/hyperloom/` 下。** RayJob 工作结束后，
+  将相关 `/wekafs` RayJob 产物复制或汇总到
+  `/workspace/hyperloom/optimization_report.md`、可选的
+  `/workspace/hyperloom/ci_metrics.json`，以及必要的结果摘要/manifest。
+  Claw 会在 session 结束时上传 `/workspace/hyperloom/`。
+
 ### RayJob 内 bootstrap / CLI 预检查
 
 RayJob 进入 Running 后，复用 `scripts/bootstrap.sh` 中的 BYOI bootstrap 逻辑，确保 CLI 依赖存在于 RayJob 镜像内。它会安装或验证 OOB、TraceLens、Ray/click 兼容性，以及 `codex` / `claude` CLI。生成的环境文件可复用，但 source 后要再次强制 `MODE=remote`。
@@ -307,25 +329,33 @@ RayJob 镜像必须在 `PATH` 中包含 `/opt/venv/bin/oob` 和所选后端 CLI�
 - 后端 CLI 必须安装并完成认证。Codex 可能需要 `/root/.codex/auth.json` 或等效 `--api-key` 路径；仅 API key env 可能不够。
 - `OPENAI_BASE_URL` 应指向 Core42 proxy：
   `https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1`。
+- `ANTHROPIC_BASE_URL` 必须指向 Core42 Anthropic-compatible direct gateway，
+  不能指向本地 OOB auth proxy：
+  `https://core42.primus-safe.amd.com/api/v1/llm-proxy`。
+- `ANTHROPIC_CUSTOM_HEADERS` 必须包含 bearer header：
+  `Authorization: Bearer ${ANTHROPIC_API_KEY}`。
+- 在 Core42 上不要让 Claude/OOB 使用
+  `ANTHROPIC_BASE_URL=http://127.0.0.1:4002/...`。该 auth-proxy 路径已知会对有效 Claude model 返回 `404`。
 - **Core42 Claude/OOB 认证 smoke test：** 如果 `oob run -a claude` 或 `claude --print`
   对已知有效模型（如 `claude-opus-4-6` 或 `claude-opus-4-7`）报 model-not-found/access，
   只用下面这个一次性请求验证 Core42 Anthropic-compatible endpoint、key、headers 和模型名是否有效：
   ```bash
-  curl -sS "$ANTHROPIC_BASE_URL/messages" \
+  curl -sS "${ANTHROPIC_BASE_URL}/v1/messages" \
     -H "x-api-key: $ANTHROPIC_API_KEY" \
     -H "anthropic-version: 2023-06-01" \
     -H "content-type: application/json" \
     -d '{"model":"claude-opus-4-6","max_tokens":8,"messages":[{"role":"user","content":"Reply OK only."}]}'
   ```
   这个请求**不是**内核优化路径，绝不能替代 OOB。如果它成功，应该修复 OOB/Claude 环境，然后重新运行 `oob_ray_submit.py run`。
-  在 Core42 上，Claude Code 可能因 bootstrap auth proxy 的 path/header 适配返回 `404`，即使上游模型有效。仅对 Claude CLI smoke test，可使用不带 `/v1` 的 Core42 Anthropic 风格 base path，并注入 Bearer header：
+  在 Core42 上，Claude Code 可能因 bootstrap auth proxy 的 path/header 适配返回 `404`，即使上游模型有效。修复 RayJob 环境时，应使用不带 `/v1` 的 Core42 Anthropic 风格 base path，并注入 Bearer header：
   ```bash
   export ANTHROPIC_BASE_URL="https://core42.primus-safe.amd.com/api/v1/llm-proxy"
   export ANTHROPIC_CUSTOM_HEADERS="Authorization: Bearer ${ANTHROPIC_API_KEY}"
 
   claude --bare --print --model claude-opus-4-6 "Reply with OK only."
   ```
-  通过 `oob_ray_submit.py` 调用 Claude 时，确保 `ANTHROPIC_CUSTOM_HEADERS` 被转发到 Ray workers。如果该 env 没有转发，可作为 fallback 在 RayJob 内直接运行 `oob run -a claude ...`。
+  通过 `oob_ray_submit.py` 调用 Claude 时，确保 `ANTHROPIC_BASE_URL` 和
+  `ANTHROPIC_CUSTOM_HEADERS` 被转发到 Ray workers。`oob_ray_submit.py` 已经会转发这些变量；如果 smoke test 仍显示 `127.0.0.1:4002`，必须带 Core42 direct gateway env 重新运行 `bootstrap.sh --force`，再提交 OOB 任务。
 - 成功的 OOB smoke 应返回 `status: completed`，并在 `<output-dir>/tasks/cli/<task_id>/workspace/` 下产生 workspace。
 
 ### 远程模式中的 TraceLens
@@ -377,6 +407,31 @@ Trace 文件和结果会写入共享 NFS，远程客户端和 Ray 集群都能�
 ### Profile（`actions/profile.md`）
 
 profiling 命令通过 Ray Dashboard REST 运行：
+
+profile 控制必须遵循 `actions/profile.md`：如果使用 `/start_profile` 或
+`/stop_profile`，它必须是被 profile 的 SGLang backend 进程（PD/MoRI 通常是
+prefill）内建暴露的 endpoint。不要实现、启动或模拟任何名为
+`start_profile` / `stop_profile` 的自定义 endpoint 或 sidecar 服务。
+当 `run_profile.sh` 无法表达 PD/MoRI 的 prefill/decode/router 拓扑时，
+应提交 `actions/profile.md` 中记录的 Ray Dashboard REST Python driver，
+而不是强行套用单 server 脚本路径。
+
+PD/MoRI 的标准远程 profile 流程是：
+
+1. 启动被 profile 的 backend 前，环境里必须已经有
+   `SGLANG_TORCH_PROFILER_DIR="$TRACE_DIR"`。
+2. benchmark traffic 打 router / public endpoint。
+3. `/start_profile` 和 `/stop_profile` 只打被 profile 的 backend
+   （通常是 prefill），不要打 router。
+4. 默认使用立即开始的 `/start_profile` payload：
+   ```json
+   {"output_dir":"$TRACE_DIR","activities":["CPU","GPU"],"with_stack":true,"record_shapes":true,"profile_prefix":"prefill"}
+   ```
+   默认不要传 `start_step` / `num_steps`；只有 immediate profile 已经成功、
+   且需要降低 trace 大小时，才使用有界 step window。
+5. `/stop_profile` 后轮询 `$TRACE_DIR`，直到 trace 数量和总大小稳定。
+   如果目录为空，先检查 backend server log 里的 `Traces are saved to:`，
+   再判定失败。
 
 ```bash
 POST /api/jobs entrypoint: "export RUN_CONTEXT_FILE='$RESULT_DIR/run_context.env' && \

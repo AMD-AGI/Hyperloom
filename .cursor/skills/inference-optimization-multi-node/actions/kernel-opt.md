@@ -29,8 +29,12 @@ Use `trace_action.py` to record start/end for each external component:
 1. `python3 $SCRIPTS_DIR/trace_action.py --component oob --action start --agent <codex|claude>`
 2. After ALL OOB iterations: `python3 $SCRIPTS_DIR/trace_action.py --component oob --action end`
 
-See each backend's skill doc for details. OOB header injection is automatic via
-`auth_proxy.py` / the bootstrap auth proxy when configured.
+See each backend's skill doc for details. On Core42, OOB/Claude must use the
+direct Anthropic-compatible gateway from `/etc/profile.d/hyperloom-env.sh`:
+`ANTHROPIC_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy` plus
+`ANTHROPIC_CUSTOM_HEADERS="Authorization: Bearer ${ANTHROPIC_API_KEY}"`. Do not
+use the local `127.0.0.1:4002` auth proxy for Claude/OOB; it can return 404 for
+valid Claude models.
 
 ### Step 1: Locate kernel source
 

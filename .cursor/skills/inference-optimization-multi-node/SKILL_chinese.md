@@ -29,6 +29,8 @@ globs:
 这个 skill 支持一种执行模式。**开始前必须先阅读对应模式的文档：**
 - **远程模式**（SaFE RayJob + Ray Dashboard REST）：见 [`modes/REMOTE.md`](modes/REMOTE.md)
 
+不存在 local mode。所有 GPU 侧工作都必须运行在本次 skill 执行新创建的 RayJob 中；不要连接或复用已有 RayJob。
+
 ## 铁律（不可协商）
 
 这些规则适用于所有模式。违反任意一条都会使本次优化运行无效。
@@ -117,6 +119,18 @@ kill 与重新启动之间等待 `SERVER_KILL_WAIT_S` 秒。profiling 结束后�
 
 **远程模式常量位于 [`modes/REMOTE.md`](modes/REMOTE.md)。**
 
+## 路径归属不变量
+
+远程模式有两个写入域：
+
+- **RayJob 写入：** RayJob 内产生的 benchmark 结果、trace、TraceLens 原始输出、
+  OOB workspace、kernel candidates、re-baseline 产物和 sweep 输出，都必须使用
+  pod 可见的 `/wekafs/...` 路径。
+- **sandbox 写入：** Claw sandbox 必须把 `/wekafs/...` 当作只读输入。sandbox
+  创建的任何文件都必须写到 `/workspace/hyperloom/`。
+- **最终交付物：** 最终优化报告、CI metrics、manifest 和结果摘要必须出现在
+  `/workspace/hyperloom/` 下，即使其中引用的原始 RayJob 产物保存在 `/wekafs/...`。
+
 ## 架构
 
 ```
@@ -160,6 +174,13 @@ KNOWLEDGE-BASE.md              — 旧版 KB（已归档，并作为种子写入
    组件完成后运行 `--action end`。这支持按消息归因成本。如果特定后端 skill
    已包含 tracing 步骤，按其步骤执行。否则，将此规则作为 fallback 使用。
    tracing 失败不阻塞执行；如果脚本不可用，则跳过。
+
+7. **PD/MoRI profiling 默认立即采集，并显式指定输出目录。** 启动被 profile
+   的 backend 前，先设置 `SGLANG_TORCH_PROFILER_DIR=$TRACE_DIR`；调用
+   `/start_profile` 时传入等于 `$TRACE_DIR` 的 `output_dir`；默认不要传
+   `start_step` / `num_steps`。`/stop_profile` 后轮询 `$TRACE_DIR`，直到
+   trace 数量和总大小稳定；如果目录为空，先检查 backend 日志中的
+   `Traces are saved to:`，再重跑 profile flow。
 
 ## DFS 搜索树
 

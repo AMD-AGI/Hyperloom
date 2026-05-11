@@ -67,6 +67,12 @@ In Remote mode, the skill may use SaFE MCP **only** for:
 
 Violation = immediate run invalidation.
 
+### IR-10a: Create a new RayJob; do not use an existing RayJob
+
+At the start of each skill execution, create a fresh RayJob with `workload_create`.
+Do NOT attach to, resume, or reuse an existing RayJob from a previous run, even if it
+appears healthy; stale state invalidates optimization results.
+
 ### IR-11: OOB is CLI-only — no service API
 
 Same as IR-7 in `SKILL.md` — NEVER modify OOB configuration, auth files, test data,
@@ -361,12 +367,19 @@ Additional DSR1 RayJob pitfalls:
   may not be enough.
 - `OPENAI_BASE_URL` should point at the Core42 proxy:
   `https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1`.
+- `ANTHROPIC_BASE_URL` must point at the Core42 Anthropic-compatible direct
+  gateway, not the local OOB auth proxy:
+  `https://core42.primus-safe.amd.com/api/v1/llm-proxy`.
+- `ANTHROPIC_CUSTOM_HEADERS` must include the bearer header:
+  `Authorization: Bearer ${ANTHROPIC_API_KEY}`.
+- Do not use `ANTHROPIC_BASE_URL=http://127.0.0.1:4002/...` for Claude/OOB on
+  Core42. That auth-proxy path is known to return `404` for valid Claude models.
 - **Core42 Claude/OOB auth smoke test:** If `oob run -a claude` or `claude --print`
   fails with a model-not-found/access message for a known-valid model such as
   `claude-opus-4-6` or `claude-opus-4-7`, use this one-shot request only to verify
   that the Core42 Anthropic-compatible endpoint, key, headers, and model name are valid:
   ```bash
-  curl -sS "$ANTHROPIC_BASE_URL/messages" \
+  curl -sS "${ANTHROPIC_BASE_URL}/v1/messages" \
     -H "x-api-key: $ANTHROPIC_API_KEY" \
     -H "anthropic-version: 2023-06-01" \
     -H "content-type: application/json" \
@@ -376,8 +389,8 @@ Additional DSR1 RayJob pitfalls:
   If it succeeds, repair the OOB/Claude environment and rerun `oob_ray_submit.py run`.
   On Core42, Claude Code may fail through the bootstrap auth proxy because the proxy
   path/header adaptation can return `404` even when the upstream model is valid.
-  For the Claude CLI smoke test only, use the Core42 Anthropic-style base path
-  without `/v1` and inject the Bearer header:
+  Repair the RayJob environment by using the Core42 Anthropic-style base path
+  without `/v1` and injecting the Bearer header:
   ```bash
   export ANTHROPIC_BASE_URL="https://core42.primus-safe.amd.com/api/v1/llm-proxy"
   export ANTHROPIC_CUSTOM_HEADERS="Authorization: Bearer ${ANTHROPIC_API_KEY}"
@@ -385,8 +398,10 @@ Additional DSR1 RayJob pitfalls:
   claude --bare --print --model claude-opus-4-6 "Reply with OK only."
   ```
   When invoking Claude through `oob_ray_submit.py`, ensure
-  `ANTHROPIC_CUSTOM_HEADERS` is forwarded to Ray workers. If this env is not
-  forwarded, run `oob run -a claude ...` directly inside the RayJob as a fallback.
+  `ANTHROPIC_BASE_URL` and `ANTHROPIC_CUSTOM_HEADERS` are forwarded to Ray workers.
+  `oob_ray_submit.py` already forwards these variables; if a smoke test still shows
+  `127.0.0.1:4002`, rerun `bootstrap.sh --force` with the Core42 direct gateway env
+  before submitting OOB work.
 - A successful OOB smoke should return `status: completed` and produce a
   workspace under `<output-dir>/tasks/cli/<task_id>/workspace/`.
 
@@ -446,6 +461,31 @@ Ray cluster.
 ### Profile (`actions/profile.md`)
 
 Profiling commands run as Ray Dashboard REST jobs:
+
+Profile control must follow `actions/profile.md`: if `/start_profile` or
+`/stop_profile` is used, it must be the built-in endpoint of the profiled
+SGLang backend process (usually prefill for PD/MoRI). Do not implement or
+launch any custom endpoint/service named `start_profile` or `stop_profile`.
+When `run_profile.sh` cannot express a PD/MoRI prefill/decode/router topology,
+submit the documented Ray Dashboard REST Python driver described in
+`actions/profile.md` instead of forcing the single-server script path.
+
+For PD/MoRI, the canonical remote profile flow is:
+
+1. Launch the profiled backend with `SGLANG_TORCH_PROFILER_DIR="$TRACE_DIR"`
+   already present in its environment.
+2. Send benchmark traffic to the router/public endpoint.
+3. Send `/start_profile` and `/stop_profile` only to the profiled backend
+   (usually prefill), not to the router.
+4. Use an immediate `/start_profile` payload by default:
+   ```json
+   {"output_dir":"$TRACE_DIR","activities":["CPU","GPU"],"with_stack":true,"record_shapes":true,"profile_prefix":"prefill"}
+   ```
+   Do not pass `start_step` / `num_steps` by default; use a bounded step window
+   only after an immediate profile works and trace size needs reduction.
+5. After `/stop_profile`, poll `$TRACE_DIR` until trace count and total size are
+   stable. If the directory is empty, inspect the backend server log for
+   `Traces are saved to:` before declaring failure.
 
 ```bash
 POST /api/jobs entrypoint: "export RUN_CONTEXT_FILE='$RESULT_DIR/run_context.env' && \

@@ -9,7 +9,7 @@ Usage:
 
 Environment:
     SESSION_ID      — injected by executor, used for session correlation
-    WORKSPACE_PATH  — defaults to /workspace
+    WORKSPACE_PATH  — optional explicit telemetry root
 
 Writes to:
     $WORKSPACE_PATH/telemetry.jsonl — polled by telemetry-watcher → backend → DB
@@ -27,7 +27,31 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-WORKSPACE = Path(os.environ.get("WORKSPACE_PATH", "/workspace"))
+
+def default_workspace() -> Path:
+    """Choose a write root that matches the remote-mode path contract.
+
+    RayJob-side invocations should write runtime telemetry to /wekafs. Sandbox
+    invocations cannot write /wekafs, so they fall back to /workspace/hyperloom.
+    WORKSPACE_PATH remains the explicit override for both cases.
+    """
+
+    override = os.environ.get("WORKSPACE_PATH")
+    if override:
+        return Path(override)
+
+    rayjob_root = Path("/wekafs/inference-optimization/telemetry")
+    try:
+        rayjob_root.mkdir(parents=True, exist_ok=True)
+        test_file = rayjob_root / ".write_test"
+        test_file.write_text("")
+        test_file.unlink(missing_ok=True)
+        return rayjob_root
+    except OSError:
+        return Path("/workspace/hyperloom")
+
+
+WORKSPACE = default_workspace()
 TELEMETRY_FILE = WORKSPACE / "telemetry.jsonl"
 
 

@@ -164,17 +164,26 @@ Required pattern:
 
 ---
 
-## ADDENDUM-06: Treat /wekafs as read-only from the Claw sandbox; do not probe unknown SaFE endpoints
+## ADDENDUM-06: Separate RayJob output paths from sandbox artifact paths; do not probe unknown SaFE endpoints
 
 From the Claw sandbox side:
 
 - `/wekafs/...` is **read-only**. Do not attempt `mkdir`, `touch`, `cp` into
   `/wekafs`. As soon as a write attempt to `/wekafs/...` returns
-  `Read-only file system`, switch to `/workspace/...` for any sandbox-side
-  scratch / generated files. `/workspace/` is writable and Claw persists it
-  (e.g. to S3) across the session.
-- The RayJob pods can read AND write `/wekafs`, so use `/wekafs` only for
-  files produced inside the RayJob, and read-only references from the sandbox.
+  `Read-only file system`, switch to `/workspace/hyperloom/...` for any
+  sandbox-side scratch / generated files. `/workspace/hyperloom/` is writable
+  from the Claw sandbox and is persisted/uploaded with the session.
+- The RayJob pods can read AND write `/wekafs`. All RayJob-produced runtime
+  outputs (benchmarks, traces, TraceLens CSVs, OOB workspaces, intermediate
+  JSON, kernel candidates) MUST use pod-visible `/wekafs/...` paths, not
+  sandbox-only `/workspace/...` paths.
+- The sandbox may read `/wekafs` paths only as inputs. Any file the sandbox
+  creates, edits, aggregates, or exposes to the user MUST be under
+  `/workspace/hyperloom/`.
+- The final user-facing bundle MUST be written under `/workspace/hyperloom/`
+  (for example `optimization_report.md`, `ci_metrics.json`, result summaries,
+  manifests, and links back to `/wekafs` RayJob artifacts). This keeps final
+  results in the location Claw uploads to S3 at session end.
 - There is no public REST endpoint for SSH-key upload exposed by SaFE. Do not
   iterate over guessed paths (`/api/v1/users/.../ssh-keys`, etc.); they all
   404 and waste turns. The SSH gateway is not a supported execution path for
@@ -231,11 +240,16 @@ Required pattern:
 3. Every later REST job that needs the Hyperloom toolchain must
    `source /etc/profile.d/hyperloom-env.sh` first, so it picks up the
    bootstrap-written values for `PATH`, `OOB_RAY_CLI`, `OOB_CLI`
-   (`/opt/venv/bin/oob`), `ANTHROPIC_BASE_URL` (auth-proxy on
-   `127.0.0.1:4002`), `OPENAI_BASE_URL`, `AMD_LLM_API_KEY`, `SKILL_ROOT`,
-   `SCRIPTS_DIR`, `KERNEL_OPT_BACKENDS`, `INFERENCEX_PATH`, `TRACELENS_ROOT`.
+   (`/opt/venv/bin/oob`), `ANTHROPIC_BASE_URL`,
+   `ANTHROPIC_CUSTOM_HEADERS`, `OPENAI_BASE_URL`, `AMD_LLM_API_KEY`,
+   `SKILL_ROOT`, `SCRIPTS_DIR`, `KERNEL_OPT_BACKENDS`, `INFERENCEX_PATH`,
+   `TRACELENS_ROOT`.
    Do not redefine these by hand; the env file is the single source of
    truth that matches the bootstrap that actually ran.
+   On Core42, `ANTHROPIC_BASE_URL` MUST be the direct Anthropic-compatible
+   gateway `https://core42.primus-safe.amd.com/api/v1/llm-proxy`, not the
+   local auth proxy `http://127.0.0.1:4002/...`. The local proxy is known to
+   return 404 for valid Claude models.
 4. OOB / claude / codex are installed inside the **RayJob pods**, not
    the Claw sandbox. Do not try to install or invoke `oob` / `claude` /
    `codex` from sandbox bash. All such calls go via Ray Dashboard REST so
@@ -252,7 +266,7 @@ Required pattern:
 The skill ships official tools under `$SKILL_ROOT/scripts/` and `actions/*`,
 and the agent has structured MCP tools (e.g. `workload_create`,
 `workload_get`, `workload_pod_logs`) plus the Ray Dashboard REST API. Do
-not write parallel re-implementations in `/workspace/` (such as
+not write parallel re-implementations in `/workspace/hyperloom/` (such as
 `mcp_call.js`, `ray_submit.js`, `ray_poll.js`, ad-hoc provider-call scripts,
 `sweep.py`, `launch_pd_servers.py`, `parse_profile.py`, etc.).
 Re-implementations fragment the workflow, drift from the skill (versioning
@@ -260,7 +274,7 @@ as `*_v2.py` / `*_v3.py`), and break inspector / IR-2 / IR-3 traceability.
 
 Required pattern:
 
-1. Before writing any helper into `/workspace/`, check whether the same
+1. Before writing any helper into `/workspace/hyperloom/`, check whether the same
    thing is already covered by:
    - A script under `$SKILL_ROOT/scripts/` (e.g. `run_baseline.sh`,
      `run_profile.sh`, `run_sweep.sh`, `oob_ray_submit.py`,
@@ -269,14 +283,15 @@ Required pattern:
    - A structured MCP tool (`workload_*`, `opsjob_*`, `node_*`,
      `cluster_*`).
    - The Ray Dashboard REST API (`POST/GET :8265/api/jobs/...`).
-   If so, use that. Do not duplicate it in `/workspace/`.
-2. Sandbox-side `/workspace/` is for genuinely new artefacts (kernel
-   files, prompts, intermediate results, the final report). It is not for
-   shadow copies of `oob_ray_submit.py`, `mcp_call.js`, `ray_submit.js`,
-   etc.
+   If so, use that. Do not duplicate it in `/workspace/hyperloom/`.
+2. Sandbox-side `/workspace/hyperloom/` is for genuinely new artefacts
+   (kernel files, prompts, intermediate summaries, the final report). It is not
+   for shadow copies of `oob_ray_submit.py`, `mcp_call.js`, `ray_submit.js`,
+   etc. Do not create sandbox-generated files elsewhere under `/workspace/`
+   unless the user explicitly asks for a different output location.
 3. If a needed helper truly does not exist in the skill, add it under
    `$SKILL_ROOT/scripts/` (or extend the action doc) instead of dropping a
-   one-off in `/workspace/`. Otherwise the next session will not see it.
+   one-off in `/workspace/hyperloom/`. Otherwise the next session will not see it.
 4. Never call out to provider gateways from sandbox bash. All OOB-backed kernel
    work goes through the configured
    `KERNEL_OPT_BACKENDS` (OOB Codex / Claude CLI) inside the
@@ -321,19 +336,41 @@ attribution. Hand-rolled `urllib.request` calls to
 bash are not a substitute — they skip TraceLens, skip the candidate
 extraction format, and skip tracing.
 
+When `/start_profile` or `/stop_profile` is used by the profile flow, it MUST
+be the built-in endpoint exposed by the profiled SGLang backend process. The
+agent MUST NOT implement, patch, monkeypatch, wrap, or simulate a custom
+`start_profile` / `stop_profile`, and MUST NOT launch a sidecar or helper
+service with those route names.
+
 Required pattern:
 
 1. Trigger profiling exactly as `actions/profile.md` (and the
-   mode-specific `modes/REMOTE.md` "Profile" section) describe — usually
-   by submitting a Ray Job that runs `bash $SCRIPTS_DIR/run_profile.sh`
-   (or relying on `run_baseline.sh`'s built-in profile phase).
-2. Wrap the external call with
+   mode-specific `modes/REMOTE.md` "Profile" section) describe. Prefer
+   submitting a Ray Job that runs `bash $SCRIPTS_DIR/run_profile.sh`, or rely on
+   `run_baseline.sh`'s built-in profile phase. If PD/MoRI topology cannot be
+   represented by those scripts, use the documented Ray Dashboard REST Python
+   driver exception in `actions/profile.md`; it must still call only SGLang's
+   built-in `/start_profile` and `/stop_profile` endpoints and must run
+   TraceLens on the produced trace.
+2. For PD/MoRI, profiling must start immediately by default and must pass an
+   explicit `output_dir` under the RayJob `TRACE_DIR`:
+   `{"output_dir":"$TRACE_DIR","activities":["CPU","GPU"],"with_stack":true,"record_shapes":true,"profile_prefix":"prefill"}`.
+   Do not use `start_step` / `num_steps` as the default; short profile traffic
+   can miss the requested window and leave `/stop_profile` with no active
+   profile to export. Use step windows only after an immediate profile succeeds
+   and trace size needs reduction.
+3. After `/stop_profile`, poll `$TRACE_DIR` until trace count and total size are
+   stable. If `$TRACE_DIR` is empty, inspect the profiled server log for
+   `Traces are saved to:` before declaring failure. If no valid gzip JSON with
+   GPU/kernel events exists, rerun the profile flow; do not silently downgrade
+   to architecture-only analysis.
+4. Wrap the external call with
    `python3 $SCRIPTS_DIR/trace_action.py --component tracelens --action start`
    before and `--action end` after, per SKILL.md "Common Pitfalls" #6.
-3. Run TraceLens on the produced trace (or use the kernel_summary fallback
+5. Run TraceLens on the produced trace (or use the kernel_summary fallback
    path documented in the skill). Do not parse `*.json.gz` traces by hand
-   in `/workspace/parse_profile*.py`.
-4. The kernel candidate list passed to `kernel-opt` MUST come from this
+   in `/workspace/hyperloom/parse_profile*.py`.
+6. The kernel candidate list passed to `kernel-opt` MUST come from this
    pipeline (per IR-1, "submit ALL kernel candidates"). Do not invent
    candidates from a custom inline profile.
 
@@ -421,6 +458,8 @@ Required pattern:
    - `ANTHROPIC_API_KEY` = current sandbox `SAFE_API_KEY` unless explicitly provided
    - `OPENAI_API_KEY` = current sandbox `SAFE_API_KEY` unless explicitly provided
    - `OOB_BASE_URL` = `https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1`
+   - `ANTHROPIC_BASE_URL` = `https://core42.primus-safe.amd.com/api/v1/llm-proxy`
+   - `ANTHROPIC_CUSTOM_HEADERS` = `Authorization: Bearer <same key>`
 
 2. After RayJob is `Running` and bootstrap has run, verify inside the RayJob:
 
@@ -430,6 +469,8 @@ Required pattern:
    test -n "$OPENAI_API_KEY"
    test -n "$AMD_LLM_API_KEY"
    test -n "$ANTHROPIC_BASE_URL"
+   test "$ANTHROPIC_BASE_URL" = "https://core42.primus-safe.amd.com/api/v1/llm-proxy"
+   test -n "$ANTHROPIC_CUSTOM_HEADERS"
    ```
 
    Also verify `claude -p "Reply OK only" --model claude-opus-4-7 --print`
@@ -444,7 +485,7 @@ Required pattern:
    SAFE_KEY="<current sandbox SAFE_API_KEY>"
    POST http://<head_ip>:8265/api/jobs/
    {
-     "entrypoint": "bash -lc 'export SAFE_API_KEY=\"$SAFE_KEY\" OOB_API_KEY=\"$SAFE_KEY\" AMD_LLM_API_KEY=\"$SAFE_KEY\" LLM_API_KEY=\"$SAFE_KEY\" ANTHROPIC_API_KEY=\"$SAFE_KEY\" OPENAI_API_KEY=\"$SAFE_KEY\" OOB_BASE_URL=\"https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1\"; bash /wekafs/yunkai/Hyperloom/.cursor/skills/inference-optimization/scripts/bootstrap.sh --force'"
+     "entrypoint": "bash -lc 'export SAFE_API_KEY=\"$SAFE_KEY\" OOB_API_KEY=\"$SAFE_KEY\" AMD_LLM_API_KEY=\"$SAFE_KEY\" LLM_API_KEY=\"$SAFE_KEY\" ANTHROPIC_API_KEY=\"$SAFE_KEY\" OPENAI_API_KEY=\"$SAFE_KEY\" OOB_BASE_URL=\"https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1\" ANTHROPIC_BASE_URL=\"https://core42.primus-safe.amd.com/api/v1/llm-proxy\" ANTHROPIC_CUSTOM_HEADERS=\"Authorization: Bearer $SAFE_KEY\"; bash /wekafs/yunkai/Hyperloom/.cursor/skills/inference-optimization-multi-node/scripts/bootstrap.sh --force'"
    }
    ```
 

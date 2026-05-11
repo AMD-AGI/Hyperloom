@@ -11,7 +11,20 @@ Generate the final optimization report and contribute new knowledge to the KB.
 
 ## Procedure
 
-### Write optimization report to `$WORK_DIR/optimization_report.md`
+### Write optimization report to `/workspace/hyperloom/optimization_report.md`
+
+Remote-mode path ownership is strict:
+
+- Full RayJob runtime artifacts may remain under `/wekafs/...` (`$RESULT_DIR`,
+  `$TRACE_DIR`, OOB workspaces, sweep directories, TraceLens CSVs).
+- The final user-facing report bundle MUST be written under
+  `/workspace/hyperloom/`, because Claw persists/uploads this directory to S3 at
+  session end.
+- If report generation runs inside the RayJob, first write the detailed raw
+  artifacts to `/wekafs/...`, then copy or summarize the final report,
+  `ci_metrics.json`, result index, and manifest into `/workspace/hyperloom/`.
+- If report generation runs in the sandbox, treat `/wekafs/...` as read-only
+  input and write all generated files only under `/workspace/hyperloom/`.
 
 ```markdown
 # Inference Optimization Report — {Model Name}
@@ -72,7 +85,10 @@ python3 $SKILL_ROOT/kb/kb_ingest.py \
 ```
 
 ## Outputs
-- `$WORK_DIR/optimization_report.md`
+- `/workspace/hyperloom/optimization_report.md`
+- `/workspace/hyperloom/ci_metrics.json` if CI metrics are requested
+- `/workspace/hyperloom/MANIFEST.txt` or equivalent index pointing to raw
+  `/wekafs/...` RayJob artifacts
 - New KB entries for key findings
 - Conflict resolutions (if any) logged to `kb/conflicts.jsonl`
 

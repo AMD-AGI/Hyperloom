@@ -292,7 +292,19 @@ else
     log "  Ray already running, skipping"
 fi
 
-# OOB auth-proxy (Bearer-rewriting reverse proxy on :4002 for AMD LLM gateway)
+# Core42 direct gateway settings.
+#
+# Claude Code fails through the local OOB auth-proxy on Core42 because the
+# proxy path/header adaptation can return 404 for valid Claude models. Keep the
+# proxy available for debugging, but never write it into ANTHROPIC_BASE_URL.
+CORE42_LLM_PROXY_V1="${OOB_BASE_URL:-https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1}"
+CORE42_LLM_PROXY_BASE="${CORE42_LLM_PROXY_V1%/v1}"
+if [ "$CORE42_LLM_PROXY_BASE" = "$CORE42_LLM_PROXY_V1" ]; then
+    CORE42_LLM_PROXY_BASE="${CORE42_LLM_PROXY_BASE%/}"
+fi
+
+# Optional OOB auth-proxy (Bearer-rewriting reverse proxy on :4002 for AMD LLM gateway).
+# Do not export it as ANTHROPIC_BASE_URL; Claude/OOB must use the direct gateway.
 PROXY_ANTHROPIC_URL=""
 PROXY_OPENAI_URL=""
 if [ -n "${OOB_BASE_URL:-}" ]; then
@@ -349,13 +361,10 @@ log "  writing $ENV_FILE"
     echo "export AMD_LLM_API_KEY='${AMD_LLM_API_KEY:-${LLM_API_KEY:-${LLM_GATEWAY_KEY:-}}}'"
     echo "export ANTHROPIC_API_KEY='${OOB_API_KEY_VAL}'"
     echo "export OPENAI_API_KEY='${OOB_API_KEY_VAL}'"
-    if [ -n "$PROXY_ANTHROPIC_URL" ]; then
-        echo "export ANTHROPIC_BASE_URL='${PROXY_ANTHROPIC_URL}'"
-        echo "export OPENAI_BASE_URL='${PROXY_OPENAI_URL}'"
-    elif [ -n "${OOB_BASE_URL:-}" ]; then
-        echo "export ANTHROPIC_BASE_URL='${OOB_BASE_URL}'"
-        echo "export OPENAI_BASE_URL='${OOB_BASE_URL}'"
-    fi
+    echo "export OOB_BASE_URL='${CORE42_LLM_PROXY_V1}'"
+    echo "export ANTHROPIC_BASE_URL='${CORE42_LLM_PROXY_BASE}'"
+    echo 'export ANTHROPIC_CUSTOM_HEADERS="Authorization: Bearer ${ANTHROPIC_API_KEY}"'
+    echo "export OPENAI_BASE_URL='${CORE42_LLM_PROXY_V1}'"
     [ -n "${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}" ] && \
         echo "export SSL_CERT_FILE='${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}'"
     echo "export NODE_EXTRA_CA_CERTS='${NODE_EXTRA_CA_CERTS:-/etc/ssl/certs/ca-certificates.crt}'"

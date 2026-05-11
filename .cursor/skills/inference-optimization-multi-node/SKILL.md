@@ -31,7 +31,7 @@ This skill supports one execution mode. **Read the remote-mode document before s
 
 - **Remote mode only** (SaFE RayJob + Ray Dashboard REST/MCP control plane): see [`modes/REMOTE.md`](modes/REMOTE.md)
 
-There is no local-mode path in this skill. All GPU-side work runs inside the RayJob.
+There is no local-mode path in this skill. All GPU-side work runs inside a newly created RayJob for this skill execution; never attach to or reuse an existing RayJob.
 
 ## Iron Rules (non-negotiable)
 
@@ -131,6 +131,19 @@ All values below are the **single source of truth**. All actions reference these
 
 **Remote-mode constants are in [`modes/REMOTE.md`](modes/REMOTE.md).**
 
+## Path Ownership Invariant
+
+Remote mode has two write domains:
+
+- **RayJob writes:** all benchmark results, traces, TraceLens raw outputs, OOB
+  workspaces, kernel candidates, re-baseline artifacts, and sweep outputs
+  produced inside the RayJob MUST use pod-visible `/wekafs/...` paths.
+- **Sandbox writes:** the Claw sandbox must treat `/wekafs/...` as read-only
+  input. Any sandbox-created file must be under `/workspace/hyperloom/`.
+- **Final deliverables:** the final optimization report, CI metrics, manifest,
+  and result summaries MUST be present under `/workspace/hyperloom/`, even if
+  they point back to raw RayJob artifacts stored under `/wekafs/...`.
+
 ## Architecture
 
 ```
@@ -176,6 +189,13 @@ These are recurring errors observed in production CI runs. **Read before executi
    attribution. If the specific backend skill already includes tracing steps, follow
    those. If not, apply this rule as a fallback. Failure to trace does NOT block
    execution — skip if the script is unavailable.
+
+7. **PD/MoRI profiling defaults to immediate capture with explicit output.** Set
+   `SGLANG_TORCH_PROFILER_DIR=$TRACE_DIR` before launching the profiled backend,
+   pass `/start_profile` an `output_dir` equal to `$TRACE_DIR`, and do not pass
+   `start_step` / `num_steps` by default. After `/stop_profile`, poll `$TRACE_DIR`
+   until trace count and total size are stable; if empty, inspect the backend log
+   for `Traces are saved to:` before rerunning the profile flow.
 
 ## DFS Search Tree
 
