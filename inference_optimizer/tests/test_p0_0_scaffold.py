@@ -38,25 +38,17 @@ def test_package_version_is_v06():
 # paths
 # ---------------------------------------------------------------------------
 def test_make_session_dir_creates_all_subdirs(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.ENV_OVERRIDE_ROOT, str(tmp_path))
-    sd = paths.make_session_dir("test-session-001")
-    assert sd == tmp_path / "test-session-001"
-    for sub in ("storage", "personas", "checkpoints", "kb", "results", "findings", "agents"):
+    monkeypatch.setenv(paths.ENV_OVERRIDE_SESSION_DIR, str(tmp_path))
+    sd = paths.make_session_dir()
+    assert sd == tmp_path
+    for sub in paths._SESSION_SKELETON:
         assert (sd / sub).is_dir(), f"missing subdir: {sub}"
 
 
 def test_db_path_for_default_under_session(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.ENV_OVERRIDE_ROOT, str(tmp_path))
-    monkeypatch.delenv(paths.ENV_OVERRIDE_DB_PATH, raising=False)
-    sd = paths.make_session_dir("dbtest")
+    monkeypatch.setenv(paths.ENV_OVERRIDE_SESSION_DIR, str(tmp_path))
+    sd = paths.make_session_dir()
     assert paths.db_path_for(sd) == sd / "storage" / "coordinator.db"
-
-
-def test_db_path_for_env_override_wins(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.ENV_OVERRIDE_ROOT, str(tmp_path))
-    monkeypatch.setenv(paths.ENV_OVERRIDE_DB_PATH, "/tmp/explicit.db")
-    sd = paths.make_session_dir("dbtest2")
-    assert paths.db_path_for(sd) == Path("/tmp/explicit.db")
 
 
 def test_asset_root_defaults_to_package(monkeypatch):
@@ -71,11 +63,12 @@ def test_asset_root_override_missing_raises(tmp_path, monkeypatch):
         paths.asset_root()
 
 
-def test_agent_session_dir_creates(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.ENV_OVERRIDE_ROOT, str(tmp_path))
-    sd = paths.make_session_dir("agentcreate")
-    ad = paths.agent_session_dir(sd, "Orchestration")
-    assert ad == sd / "agents" / "Orchestration"
+def test_agent_session_dir_returns_path(tmp_path, monkeypatch):
+    monkeypatch.setenv(paths.ENV_OVERRIDE_SESSION_DIR, str(tmp_path))
+    sd = paths.make_session_dir()
+    ad = paths.agent_session_dir(sd, "orchestration")
+    assert ad == sd / "agents" / "orchestration"
+    # make_session_dir() pre-creates the lower-cased role subdirs.
     assert ad.is_dir()
 
 

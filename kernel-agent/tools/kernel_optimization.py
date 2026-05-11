@@ -17,6 +17,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Sibling import: kernel name → multi-GPU collective detection. Used by
+# `invoke_backend` to decide between `torchrun --nproc=N` and plain
+# `python` for the GEAK test-command, and to keep the
+# `parallel_e2e_runner` decision consistent here.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _collective_names import kernel_name_implies_multigpu  # noqa: E402
+sys.path.pop(0)
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -328,6 +336,9 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         f"GPU percent: {candidate.get('gpu_pct', 'unknown')}",
         f"Shapes: {json.dumps(candidate.get('shapes', []), sort_keys=True)}",
         "",
+        "GEAK configuration (ignored by non-GEAK backends):",
+        "- Use homogeneous mode. Set max_rounds to 5.",
+        "",
         "Hardware notes (DO NOT use gfx950/MI355X-only features):",
         "- 304 CUs, MFMA bf16 instructions, 256 VGPRs/CU",
         "- HBM3 (~5.3 TB/s peak), 256 MB Infinity Cache",
@@ -537,7 +548,11 @@ def invoke_backend(
             # candidate.benchmark_files, prefixing with `torchrun` for the
             # multi-GPU path so collective init_process_group succeeds.
             test_command = ""
-            is_multigpu = bool((candidate or {}).get("is_multigpu"))
+            cand_name = str((candidate or {}).get("name") or "")
+            is_multigpu = (
+                bool((candidate or {}).get("is_multigpu"))
+                or kernel_name_implies_multigpu(cand_name)
+            )
             if is_multigpu and num_gpus >= 2:
                 for bf in bench_files:
                     if bf.endswith(".py") and Path(bf).exists() and (
@@ -790,11 +805,30 @@ def run_attempt(
             # Promote any timed-out / failed attempt that left artifacts on
             # disk to "partial" so build_verification + make_proposal can
             # distinguish "killed but useful" from "truly empty failure".
+            #
+            # EXCEPTION: refuse promotion when stdout shows persistent
+            # inner-LLM auth failure (>= _AUTH_RETRY_THRESHOLD 401-style
+            # markers). An auth-loop typically leaves an empty
+            # optimized_versions/ that fools the evidence check; without
+            # this guard we ship PARTIAL and the orchestrator never
+            # retires the kernel. See _AUTH_FAILURE_PATTERNS comment.
             partial_evidence_keys = (
                 "partial_latest_optimized", "partial_report",
                 "geak_final_report", "geak_latest_patch",
             )
-            if status in {"timeout", "failed"} and any(
+            auth_loop_hits = _count_auth_failures(full_stdout)
+            if auth_loop_hits >= _AUTH_RETRY_THRESHOLD:
+                backend_paths["auth_failure_count"] = str(auth_loop_hits)
+                backend_paths["auth_failure_marker"] = (
+                    "persistent_inner_llm_401_loop_no_partial_promotion"
+                )
+                # Force status to a non-partial terminal state so
+                # build_verification's `usable` filter excludes this
+                # attempt and make_proposal returns REVERT.
+                if status == "timeout":
+                    status = "failed"
+                # else: status is already "failed"; leave it alone.
+            elif status in {"timeout", "failed"} and any(
                 k in backend_paths for k in partial_evidence_keys
             ):
                 status = "partial"
@@ -821,6 +855,43 @@ _SPEEDUP_PATTERNS = [
     re.compile(r"(?i)\bavg(?:erage)?\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)\s*[xX]\s+(?:speedup|across)"),
     re.compile(r"(?i)\b([0-9]+(?:\.[0-9]+)?)\s*[xX]\s+(?:speedup|faster)"),
 ]
+
+
+# Persistent inner-LLM auth failure markers. When a backend's stdout
+# contains >= AUTH_RETRY_THRESHOLD distinct matches we treat the run as
+# a credential dead-end and refuse to promote `timeout`/`failed` to
+# `partial`. Without this guard, GEAK's mini-swe-agent SelectPatchAgent
+# can loop on a wrong-issuer gateway (observed: the inner agent hit
+# `https://llm-api.amd.com/Anthropic` which expects a different
+# `AMD_LLM_API_KEY` than the SAFE_API_KEY the outer GEAK CLI uses), leave
+# an empty `optimized_versions/` on disk, trigger the partial-evidence
+# path below, and ship back PARTIAL — which the orchestrator never
+# retired (see inference_optimizer.shared_state.record_kernel_opt for
+# the matching reject-on-partial change).
+_AUTH_FAILURE_PATTERNS = [
+    re.compile(r"\b401\b[^\n]{0,80}(unauthor|forbidden|client\s*error)", re.IGNORECASE),
+    re.compile(r"HTTP/\d\.\d\s+401\b"),
+    re.compile(r"Authentication\s*Error|Invalid\s*API\s*Key|invalid[._]api[._]key", re.IGNORECASE),
+    re.compile(r"Subscription[- ]Key[^\n]{0,80}(missing|invalid|not\s*present)", re.IGNORECASE),
+    re.compile(r"Primus\.00009\s+token\s+not\s+present", re.IGNORECASE),
+]
+_AUTH_RETRY_THRESHOLD = 3
+
+
+def _count_auth_failures(text: str) -> int:
+    """Count distinct inner-LLM auth-failure markers in *text*.
+
+    The threshold-based gate in :func:`run_attempt` uses this to
+    distinguish "a single transient 401 that retried successfully" from
+    "every single retry hit 401 because the wrong gateway is being
+    talked to and there is no recoverable path".
+    """
+    if not text:
+        return 0
+    total = 0
+    for pat in _AUTH_FAILURE_PATTERNS:
+        total += sum(1 for _ in pat.finditer(text))
+    return total
 
 
 def _extract_speedup_from_report(report_path: str | Path) -> float | None:
