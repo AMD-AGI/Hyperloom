@@ -41,8 +41,8 @@ from inference_optimizer.storage import SqliteConnection
 # ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_ROOT", str(tmp_path))
-    return make_session_dir("p2-4-test")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    return make_session_dir()
 
 
 def _heartbeat() -> Intent:
@@ -143,6 +143,42 @@ async def test_integrate_handler_keep_decision(session_dir, tmp_path):
     assert res["gain_pct"] == pytest.approx((900 - 800) / 800 * 100)
     assert "report_path" in res
     assert "workspace" in res
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_accepts_valid_rebaseline_with_wrapper_warning(session_dir, tmp_path):
+    """Valid throughput should drive KEEP even if Magpie reports success=false."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        workspace = _fake_workspace(slot, tput=900.0)
+        report_path = workspace / "benchmark_report.json"
+        data = json.loads(report_path.read_text())
+        data["success"] = False
+        report_path.write_text(json.dumps(data))
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=1, stdout="", stderr="cleanup failed",
+        )
+
+    payload = {
+        "base_tput": 800.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k_warn",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+    }
+    with patch("subprocess.run", side_effect=_fake_run):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert res["status"] == "ok"
+    assert res["decision"] == "KEEP"
+    assert res["new_tput"] == 900.0
 
 
 @pytest.mark.asyncio
@@ -656,7 +692,10 @@ async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path,
     the runner reports a structured failure (not a crash). Note the
     SubAgentRunner state stays "succeeded" because the runner returned
     a dict (didn't raise) — the failure signal is inside result['status']."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_SESSION_ROOT", raising=False)
+    # Pin INFERENCE_OPTIMIZER_SESSION_DIR at a path with no state.json so
+    # ReportExecutor's resolution returns None (canonical default would
+    # also work, but we use tmp_path to keep the test hermetic).
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path / "noses"))
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
