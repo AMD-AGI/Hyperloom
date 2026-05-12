@@ -32,12 +32,9 @@ Inputs (all JSON files):
   --phase-action-files  Comma-separated list, used only for echoing into output.
   --target-skill-dir    Path, used only for echoing into output.
 
-Output (stdout, single JSON object) matches audit-report-schema.md v1.1:
+Output (stdout, single JSON object):
   {
-    "schema_version": "1.1",
-    "inspector_version": "1.1",
-    "manifest_version": "1.1",
-    "verdict_source": "compute_verdict.py@<sha1>",
+    "verdict_source": "compute_verdict.py",
     "phase": "...",
     "verdict": "PASS|WARN|BLOCK|FATAL",
     "verdict_summary": "...",
@@ -46,22 +43,21 @@ Output (stdout, single JSON object) matches audit-report-schema.md v1.1:
     "unverified": [...]
   }
 
+`verdict_source` is the agent's structural promise that the verdict came
+from this script and not from prose; if it is missing or hand-edited, the
+audit is malformed.
+
 Stdlib only.
 """
 from __future__ import annotations
 
 import argparse
 import fnmatch
-import hashlib
 import json
 import re
 import sys
 from pathlib import Path
 from typing import Any
-
-SCHEMA_VERSION = "1.1"
-INSPECTOR_VERSION = "1.1"
-MANIFEST_VERSION = "1.1"
 
 # Severity ladder — must match remediation-protocol.md §1.
 SEVERITY_RANK = {"info": 0, "warn": 1, "block": 2, "fatal": 3}
@@ -459,13 +455,6 @@ def _verdict_summary(passes, violations, unverified) -> str:
             f"info={by_sev['info']} unverified={len(unverified)}")
 
 
-def _self_sha1() -> str:
-    try:
-        return hashlib.sha1(Path(__file__).read_bytes()).hexdigest()[:12]
-    except OSError:
-        return "unknown"
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--manifest", required=True)
@@ -519,10 +508,7 @@ def main() -> int:
     verdict = _aggregate_verdict(violations)
 
     out = {
-        "schema_version": SCHEMA_VERSION,
-        "inspector_version": INSPECTOR_VERSION,
-        "manifest_version": MANIFEST_VERSION,
-        "verdict_source": f"compute_verdict.py@{_self_sha1()}",
+        "verdict_source": "compute_verdict.py",
         "phase": args.phase,
         "target_skill": args.target_skill_dir,
         "phase_action_files": [s for s in args.phase_action_files.split(",") if s],

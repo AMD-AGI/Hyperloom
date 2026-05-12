@@ -548,6 +548,17 @@ class Coordinator:
         # with PolicyGate's path-containment guard.
         sections.append(f"SESSION_DIR={self.session_dir}")
 
+        # 0a. Mission progress (Orchestration only). Phase 2 — this is the
+        # *outcome-shaped* projection of SharedState (raw vs validated
+        # gain, time spent vs budget, validate_stack staleness) that the
+        # decision framework in the system prompt expects to see at the
+        # very top of every tick. Crucially, it surfaces the
+        # ``validate_stack required`` signal *before* the verbose
+        # SharedState dump so the LLM doesn't miss it.
+        if agent_name == "orchestration":
+            sections.append("=== Mission progress ===")
+            sections.append(self.shared_state.to_mission_summary())
+
         # 1. Shared session state — gives the agent goal + progress context
         # even on tick 1 when the inbox is empty.
         sections.append("=== Shared session state ===")
@@ -609,34 +620,68 @@ class Coordinator:
         The Orchestration prompt says baseline → profile → select_kernels,
         but the LLM can still skip to backends/params. This guard makes that
         sequence deterministic and visible in the prompt every tick.
+
+        Phase 2 addition — once at least one KEEP'd entry has been added to
+        ``optimization_stack`` since the last successful ``validate_stack``,
+        the validate_stack TODO takes precedence over every other
+        non-prep step. Skipping it would let the LLM keep stacking
+        per-round gains that don't compose linearly and therefore over-
+        report ``cumulative_gain`` in the final report.
         """
         if self.shared_state.stop_reason:
             return ""
         if self.shared_state.baseline_tput <= 0:
             return (
-                "TODO 1/3: baseline is required now. Propose/delegate only "
+                "TODO 1/4: baseline is required now. Propose/delegate only "
                 "`baseline` until baseline_tput > 0."
             )
-        if not self.shared_state.last_profile_trace:
+        # Profile/select_kernels guards only apply when kernel agent is
+        # alive in the role registry — no-kernel runs don't have a way to
+        # service the request and the mandate would be meaningless.
+        if "kernel" in self.role_registry:
+            if not self.shared_state.last_profile_trace:
+                return (
+                    "TODO 2/4: profile is required now. Baseline exists but "
+                    "last_profile_trace is empty; propose/delegate only `profile`. "
+                    "Do not run backends/params/sweep yet."
+                )
+            select = self.shared_state.last_select_kernels or {}
+            if select.get("trace_input") != self.shared_state.last_profile_trace:
+                return (
+                    "TODO 3/4: select_kernels is required now. Emit "
+                    "request{target_agent='kernel', kind='select_kernels', "
+                    "params={trace_input: last_profile_trace, top_k: 10}} before "
+                    "backends/params/sweep."
+                )
+        if self.shared_state.optimization_stack_has_unvalidated_keeps():
             return (
-                "TODO 2/3: profile is required now. Baseline exists but "
-                "last_profile_trace is empty; propose/delegate only `profile`. "
-                "Do not run backends/params/sweep yet."
-            )
-        select = self.shared_state.last_select_kernels or {}
-        if select.get("trace_input") != self.shared_state.last_profile_trace:
-            return (
-                "TODO 3/3: select_kernels is required now. Emit "
-                "request{target_agent='kernel', kind='select_kernels', "
-                "params={trace_input: last_profile_trace, top_k: 10}} before "
-                "backends/params/sweep."
+                "TODO 4/4: validate_stack required. New KEEP'd entries have "
+                "landed on optimization_stack since the last validate_stack run "
+                f"(stack_len={len(self.shared_state.optimization_stack)}, "
+                f"validated_at_len="
+                f"{self.shared_state.cumulative_gain_validated_stack_len}). "
+                "Propose/delegate only `validate_stack` until "
+                "cumulative_gain_validated reflects the current stack. "
+                "Per-round gains do NOT compose linearly — the final report "
+                "quotes the validated number, so this is the only honest gain."
             )
         return ""
 
     def _sequence_denial_for_action(self, action_name: str) -> PolicyDenied | None:
-        """Reject orchestration action/delegate attempts that skip required steps."""
+        """Reject orchestration action/delegate attempts that skip required steps.
+
+        Phase 2 addition: once optimization_stack has unvalidated KEEPs,
+        the only allowed actions are ``validate_stack`` itself, ``recover``,
+        and ``report`` (the last only when stop_reason is set, which we
+        already short-circuit above). Everything else is denied with a
+        ``validate_stack_required`` rule so Orchestration sees the
+        ``policy_denied`` and self-corrects on the next tick.
+        """
         action = str(action_name or "").strip()
-        sequence_actions = {"baseline", "profile", "backends", "params", "sweep", "report"}
+        sequence_actions = {
+            "baseline", "profile", "backends", "params", "sweep", "report",
+            "validate_stack",
+        }
         if action not in sequence_actions:
             return None
         if self.shared_state.stop_reason:
@@ -647,25 +692,49 @@ class Coordinator:
                 rule="execution_order",
                 hint="propose/delegate `baseline` until baseline_tput > 0",
             )
-        if self.shared_state.baseline_tput > 0 and not self.shared_state.last_profile_trace:
-            if action != "profile":
+        # Profile/select_kernels guards only apply when kernel agent is in
+        # the role registry — no-kernel mode skips them.
+        if "kernel" in self.role_registry:
+            if (
+                self.shared_state.baseline_tput > 0
+                and not self.shared_state.last_profile_trace
+                and action not in {"profile", "validate_stack"}
+            ):
                 return PolicyDenied(
                     f"action={action!r} denied: profile must run before {action!r}",
                     rule="execution_order",
                     hint="propose/delegate `profile`; last_profile_trace is empty",
                 )
-        select = self.shared_state.last_select_kernels or {}
-        needs_select = (
-            bool(self.shared_state.last_profile_trace)
-            and select.get("trace_input") != self.shared_state.last_profile_trace
-        )
-        if needs_select and action in {"backends", "params", "sweep", "report"}:
+            select = self.shared_state.last_select_kernels or {}
+            needs_select = (
+                bool(self.shared_state.last_profile_trace)
+                and select.get("trace_input") != self.shared_state.last_profile_trace
+            )
+            if needs_select and action in {"backends", "params", "sweep", "report"}:
+                return PolicyDenied(
+                    f"action={action!r} denied: select_kernels must run first",
+                    rule="execution_order",
+                    hint=(
+                        "emit request{target_agent='kernel', kind='select_kernels', "
+                        "params={trace_input: last_profile_trace, top_k: 10}}"
+                    ),
+                )
+        # validate_stack precedence — once new KEEPs are stacked we must
+        # rebench before any further explore / report. We allow:
+        #   - validate_stack itself
+        #   - baseline (ad-hoc re-baseline is still okay; rare)
+        # and deny the rest.
+        if (
+            self.shared_state.optimization_stack_has_unvalidated_keeps()
+            and action not in {"validate_stack", "baseline"}
+        ):
             return PolicyDenied(
-                f"action={action!r} denied: select_kernels must run first",
-                rule="execution_order",
+                f"action={action!r} denied: validate_stack required first",
+                rule="validate_stack_required",
                 hint=(
-                    "emit request{target_agent='kernel', kind='select_kernels', "
-                    "params={trace_input: last_profile_trace, top_k: 10}}"
+                    "optimization_stack has KEEPs that have not been "
+                    "validated end-to-end; propose/delegate `validate_stack` "
+                    "before any further explore or report"
                 ),
             )
         return None
@@ -1240,7 +1309,7 @@ class Coordinator:
     def _is_promotable_result(self, task_kind: str, result: dict[str, Any]) -> bool:
         if not isinstance(result, dict):
             return False
-        if task_kind in ("baseline", "profile"):
+        if task_kind in ("baseline", "profile", "validate_stack"):
             return is_valid_measurement(result)
         if task_kind in ("backends", "params", "sweep"):
             return result.get("status") == "succeeded"
@@ -1473,6 +1542,49 @@ class Coordinator:
             if result.get("kernel_breakdown_path"):
                 self.shared_state.last_profile_kernel_breakdown = str(result["kernel_breakdown_path"])
                 changed = True
+        elif task_kind == "validate_stack":
+            # Phase 3 — apply the rebenched throughput from the
+            # ValidateStackExecutor as the *only* source of truth for
+            # ``cumulative_gain_validated`` (CORE_STATE_FIELDS member).
+            # We deliberately DO NOT touch ``current_best`` /
+            # ``cumulative_gain`` / ``optimization_stack`` here because
+            # validate_stack is a measurement of an already-applied
+            # configuration, not a new modification.
+            tput = result.get("output_throughput")
+            stack_len_at_run = result.get("validated_stack_len")
+            if isinstance(tput, (int, float)) and tput > 0 and self.shared_state.baseline_tput > 0:
+                gain = (
+                    (float(tput) - self.shared_state.baseline_tput)
+                    / self.shared_state.baseline_tput * 100.0
+                )
+                self.shared_state.cumulative_gain_validated = float(gain)
+                self.shared_state.cumulative_gain_validated_ts = (
+                    datetime.now(timezone.utc).isoformat()
+                )
+                # Pin the validation to the stack length the executor
+                # actually re-bench'd against. Falling back to the
+                # current stack length is dangerous: if a new KEEP
+                # sneaks in between the executor reading state.json and
+                # the Coordinator processing the result, the fallback
+                # would silently mark the new KEEP as validated. The
+                # executor surfaces validated_stack_len explicitly to
+                # avoid this race; if missing (defensive fallback for
+                # tests), we use the current length.
+                if isinstance(stack_len_at_run, int) and stack_len_at_run >= 0:
+                    self.shared_state.cumulative_gain_validated_stack_len = (
+                        stack_len_at_run
+                    )
+                else:
+                    self.shared_state.cumulative_gain_validated_stack_len = (
+                        len(self.shared_state.optimization_stack)
+                    )
+                changed = True
+                log.info(
+                    "validate_stack promoted: validated_gain=%.2f%% "
+                    "(tput=%.2f vs baseline=%.2f) at stack_len=%d",
+                    gain, float(tput), self.shared_state.baseline_tput,
+                    self.shared_state.cumulative_gain_validated_stack_len,
+                )
         elif task_kind in ("backends", "params", "sweep"):
             if task_kind == "sweep":
                 self.shared_state.record_sweep(result)

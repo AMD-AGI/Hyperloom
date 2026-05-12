@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from ..session_paths import _RUNS_ACTIONS, runs_dir
+from ..session_paths import _runs_actions, runs_dir
 from .resource_lock import Lease, ResourceLockManager
 from .task_registry import Task, TaskRegistry
 
@@ -81,7 +81,7 @@ class SubAgentRunner:
         if self.session_dir is None:
             return None
         kind = str(task.kind or "").strip()
-        if kind not in _RUNS_ACTIONS:
+        if kind not in _runs_actions():
             return None
         ws = runs_dir(self.session_dir, kind, task.task_id)
         ws.mkdir(parents=True, exist_ok=True)
