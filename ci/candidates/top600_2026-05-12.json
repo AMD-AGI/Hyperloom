@@ -1,0 +1,1190 @@
+{
+  "_meta": {
+    "generated_at": "2026-05-12T08:07:01.841371Z",
+    "hf_top": 600,
+    "min_params_b": 7.0,
+    "max_weight_gb": 600.0,
+    "already_done_file": "C:\\Users\\chenyyan\\.ssh\\Hyperloom\\ci\\candidates\\already_done.json",
+    "accepted_count": 130,
+    "rejected": {
+      "duplicate": 0,
+      "already_done": 20,
+      "blocklisted_format": 93,
+      "non_lm_task": 18,
+      "family_blocklist": 8,
+      "classify_filter": 288
+    }
+  },
+  "candidates": [
+    {
+      "repo_id": "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 14.77,
+      "precision": "INT4",
+      "weight_gb": 7.4,
+      "downloads": 1368091
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-Coder-14B-Instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 14.77,
+      "precision": "BF16",
+      "weight_gb": 29.5,
+      "downloads": 1294764
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 32.76,
+      "precision": "INT4",
+      "weight_gb": 16.4,
+      "downloads": 1208920
+    },
+    {
+      "repo_id": "Qwen/Qwen3-14B-AWQ",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3ForCausalLM",
+      "params_b": 14.77,
+      "precision": "INT4",
+      "weight_gb": 7.4,
+      "downloads": 1190786
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV2ForCausalLM",
+      "params_b": 15.71,
+      "precision": "BF16",
+      "weight_gb": 31.4,
+      "downloads": 1182790
+    },
+    {
+      "repo_id": "Qwen/Qwen3-Coder-Next",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3NextForCausalLM",
+      "params_b": 79.67,
+      "precision": "BF16",
+      "weight_gb": 159.3,
+      "downloads": 1104074
+    },
+    {
+      "repo_id": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "pipeline_tag": "text-generation",
+      "arch": "NemotronHForCausalLM",
+      "params_b": 31.58,
+      "precision": "BF16",
+      "weight_gb": 63.2,
+      "downloads": 1103807
+    },
+    {
+      "repo_id": "mistralai/Mistral-7B-v0.1",
+      "pipeline_tag": "text-generation",
+      "arch": "MistralForCausalLM",
+      "params_b": 7.24,
+      "precision": "BF16",
+      "weight_gb": 14.5,
+      "downloads": 1046267
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-Coder-32B-Instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 32.76,
+      "precision": "BF16",
+      "weight_gb": 65.5,
+      "downloads": 1006595
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-V2-Lite-Chat",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV2ForCausalLM",
+      "params_b": 15.71,
+      "precision": "BF16",
+      "weight_gb": 31.4,
+      "downloads": 990451
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 32.76,
+      "precision": "BF16",
+      "weight_gb": 65.5,
+      "downloads": 916893
+    },
+    {
+      "repo_id": "cyankiwi/GLM-4.7-Flash-AWQ-4bit",
+      "pipeline_tag": "text-generation",
+      "arch": "Glm4MoeLiteForCausalLM",
+      "params_b": 32.14,
+      "precision": "BF16",
+      "weight_gb": 64.3,
+      "downloads": 889773
+    },
+    {
+      "repo_id": "MiniMaxAI/MiniMax-M2.5",
+      "pipeline_tag": "text-generation",
+      "arch": "MiniMaxM2ForCausalLM",
+      "params_b": 228.7,
+      "precision": "FP8",
+      "weight_gb": 228.7,
+      "downloads": 877396
+    },
+    {
+      "repo_id": "Qwen/Qwen3-32B-AWQ",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3ForCausalLM",
+      "params_b": 32.76,
+      "precision": "INT4",
+      "weight_gb": 16.4,
+      "downloads": 871576
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-72B-Instruct-AWQ",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 72.96,
+      "precision": "INT4",
+      "weight_gb": 36.5,
+      "downloads": 863876
+    },
+    {
+      "repo_id": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "NemotronHForCausalLM",
+      "params_b": 31.58,
+      "precision": "BF16",
+      "weight_gb": 63.2,
+      "downloads": 854914
+    },
+    {
+      "repo_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3MoeForCausalLM",
+      "params_b": 30.53,
+      "precision": "FP8",
+      "weight_gb": 30.5,
+      "downloads": 721764
+    },
+    {
+      "repo_id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+      "pipeline_tag": "text-generation",
+      "arch": "NemotronHForCausalLM",
+      "params_b": 123.61,
+      "precision": "BF16",
+      "weight_gb": 247.2,
+      "downloads": 714543
+    },
+    {
+      "repo_id": "MiniMaxAI/MiniMax-M2.7",
+      "pipeline_tag": "text-generation",
+      "arch": "MiniMaxM2ForCausalLM",
+      "params_b": 228.7,
+      "precision": "FP8",
+      "weight_gb": 228.7,
+      "downloads": 708125
+    },
+    {
+      "repo_id": "zerofata/L3.3-GeneticLemonade-Final-v2-70B",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 70.55,
+      "precision": "BF16",
+      "weight_gb": 141.1,
+      "downloads": 697387
+    },
+    {
+      "repo_id": "Qwen/Qwen2-7B-Instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 7.62,
+      "precision": "BF16",
+      "weight_gb": 15.2,
+      "downloads": 679439
+    },
+    {
+      "repo_id": "nvidia/Llama-3.1-8B-Instruct-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 8.03,
+      "precision": "BF16",
+      "weight_gb": 16.1,
+      "downloads": 628465
+    },
+    {
+      "repo_id": "bineric/lynx-instruct-30b",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3MoeForCausalLM",
+      "params_b": 30.53,
+      "precision": "BF16",
+      "weight_gb": 61.1,
+      "downloads": 627385
+    },
+    {
+      "repo_id": "zai-org/GLM-4.7-Flash",
+      "pipeline_tag": "text-generation",
+      "arch": "Glm4MoeLiteForCausalLM",
+      "params_b": 31.22,
+      "precision": "BF16",
+      "weight_gb": 62.4,
+      "downloads": 616889
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-Math-7B",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 7.62,
+      "precision": "BF16",
+      "weight_gb": 15.2,
+      "downloads": 616385
+    },
+    {
+      "repo_id": "unsloth/Llama-3.1-8B-Instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 8.03,
+      "precision": "BF16",
+      "weight_gb": 16.1,
+      "downloads": 608261
+    },
+    {
+      "repo_id": "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3MoeForCausalLM",
+      "params_b": 30.53,
+      "precision": "INT4",
+      "weight_gb": 15.3,
+      "downloads": 595410
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 7.62,
+      "precision": "BF16",
+      "weight_gb": 15.2,
+      "downloads": 567034
+    },
+    {
+      "repo_id": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 8.03,
+      "precision": "BF16",
+      "weight_gb": 16.1,
+      "downloads": 541677
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 32.76,
+      "precision": "INT4",
+      "weight_gb": 16.4,
+      "downloads": 540991
+    },
+    {
+      "repo_id": "TechxGenus/DeepSeek-Coder-V2-Lite-Instruct-AWQ",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV2ForCausalLM",
+      "params_b": 15.71,
+      "precision": "INT4",
+      "weight_gb": 7.9,
+      "downloads": 540882
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GPTQ-Int4",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 7.62,
+      "precision": "INT4",
+      "weight_gb": 3.8,
+      "downloads": 534682
+    },
+    {
+      "repo_id": "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
+      "pipeline_tag": "text-generation",
+      "arch": "NemotronHForCausalLM",
+      "params_b": 8.89,
+      "precision": "BF16",
+      "weight_gb": 17.8,
+      "downloads": 534666
+    },
+    {
+      "repo_id": "Qwen/Qwen3-235B-A22B",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3MoeForCausalLM",
+      "params_b": 235.09,
+      "precision": "BF16",
+      "weight_gb": 470.2,
+      "downloads": 526850
+    },
+    {
+      "repo_id": "kosbu/Llama-3.3-70B-Instruct-AWQ",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 70.55,
+      "precision": "INT4",
+      "weight_gb": 35.3,
+      "downloads": 514903
+    },
+    {
+      "repo_id": "unsloth/GLM-4.7-Flash",
+      "pipeline_tag": "text-generation",
+      "arch": "Glm4MoeLiteForCausalLM",
+      "params_b": 31.22,
+      "precision": "BF16",
+      "weight_gb": 62.4,
+      "downloads": 513678
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-V2-Lite",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV2ForCausalLM",
+      "params_b": 15.71,
+      "precision": "BF16",
+      "weight_gb": 31.4,
+      "downloads": 496306
+    },
+    {
+      "repo_id": "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3MoeForCausalLM",
+      "params_b": 235.11,
+      "precision": "FP8",
+      "weight_gb": 235.1,
+      "downloads": 484634
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 14.77,
+      "precision": "BF16",
+      "weight_gb": 29.5,
+      "downloads": 473080
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-72B-Instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 72.71,
+      "precision": "BF16",
+      "weight_gb": 145.4,
+      "downloads": 472907
+    },
+    {
+      "repo_id": "huihui-ai/Qwen2.5-72B-Instruct-abliterated",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 72.71,
+      "precision": "BF16",
+      "weight_gb": 145.4,
+      "downloads": 460334
+    },
+    {
+      "repo_id": "unsloth/Qwen2.5-7B-Instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 7.62,
+      "precision": "BF16",
+      "weight_gb": 15.2,
+      "downloads": 457193
+    },
+    {
+      "repo_id": "Qwen/Qwen3-8B-Base",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3ForCausalLM",
+      "params_b": 8.19,
+      "precision": "BF16",
+      "weight_gb": 16.4,
+      "downloads": 444651
+    },
+    {
+      "repo_id": "NexVeridian/Qwen3-Coder-Next-8bit",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3NextForCausalLM",
+      "params_b": 79.67,
+      "precision": "BF16",
+      "weight_gb": 159.3,
+      "downloads": 443754
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 7.62,
+      "precision": "INT4",
+      "weight_gb": 3.8,
+      "downloads": 408389
+    },
+    {
+      "repo_id": "cyankiwi/Qwen3-Next-80B-A3B-Instruct-AWQ-4bit",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3NextForCausalLM",
+      "params_b": 83.79,
+      "precision": "BF16",
+      "weight_gb": 167.6,
+      "downloads": 406700
+    },
+    {
+      "repo_id": "IlyaGusev/saiga_llama3_8b",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 8.03,
+      "precision": "BF16",
+      "weight_gb": 16.1,
+      "downloads": 403843
+    },
+    {
+      "repo_id": "unsloth/mistral-7b-v0.3-bnb-4bit",
+      "pipeline_tag": "text-generation",
+      "arch": "MistralForCausalLM",
+      "params_b": 7.47,
+      "precision": "BF16",
+      "weight_gb": 14.9,
+      "downloads": 397114
+    },
+    {
+      "repo_id": "zai-org/GLM-4.5-Air",
+      "pipeline_tag": "text-generation",
+      "arch": "Glm4MoeForCausalLM",
+      "params_b": 110.47,
+      "precision": "BF16",
+      "weight_gb": 220.9,
+      "downloads": 389715
+    },
+    {
+      "repo_id": "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ",
+      "pipeline_tag": "text-generation",
+      "arch": "MistralForCausalLM",
+      "params_b": 23.57,
+      "precision": "INT4",
+      "weight_gb": 11.8,
+      "downloads": 378065
+    },
+    {
+      "repo_id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "NemotronHForCausalLM",
+      "params_b": 123.61,
+      "precision": "FP8",
+      "weight_gb": 123.6,
+      "downloads": 372274
+    },
+    {
+      "repo_id": "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 8.25,
+      "precision": "BF16",
+      "weight_gb": 16.5,
+      "downloads": 352493
+    },
+    {
+      "repo_id": "tiiuae/falcon-7b",
+      "pipeline_tag": "text-generation",
+      "arch": "FalconForCausalLM",
+      "params_b": 7.22,
+      "precision": "BF16",
+      "weight_gb": 14.4,
+      "downloads": 339938
+    },
+    {
+      "repo_id": "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 70.55,
+      "precision": "INT4",
+      "weight_gb": 35.3,
+      "downloads": 337115
+    },
+    {
+      "repo_id": "Qwen/Qwen3-Coder-Next-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3NextForCausalLM",
+      "params_b": 79.68,
+      "precision": "FP8",
+      "weight_gb": 79.7,
+      "downloads": 331693
+    },
+    {
+      "repo_id": "QuantTrio/DeepSeek-V3.2-AWQ",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV32ForCausalLM",
+      "params_b": 685.01,
+      "precision": "INT4",
+      "weight_gb": 342.5,
+      "downloads": 317649
+    },
+    {
+      "repo_id": "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3MoeForCausalLM",
+      "params_b": 30.53,
+      "precision": "FP8",
+      "weight_gb": 30.5,
+      "downloads": 313988
+    },
+    {
+      "repo_id": "Qwen/Qwen3-8B-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3ForCausalLM",
+      "params_b": 8.19,
+      "precision": "FP8",
+      "weight_gb": 8.2,
+      "downloads": 310097
+    },
+    {
+      "repo_id": "unsloth/Meta-Llama-3.1-8B-Instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 8.03,
+      "precision": "BF16",
+      "weight_gb": 16.1,
+      "downloads": 309975
+    },
+    {
+      "repo_id": "LGAI-EXAONE/EXAONE-Deep-7.8B",
+      "pipeline_tag": "text-generation",
+      "arch": "ExaoneForCausalLM",
+      "params_b": 7.82,
+      "precision": "BF16",
+      "weight_gb": 15.6,
+      "downloads": 285706
+    },
+    {
+      "repo_id": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3NextForCausalLM",
+      "params_b": 81.32,
+      "precision": "BF16",
+      "weight_gb": 162.6,
+      "downloads": 284391
+    },
+    {
+      "repo_id": "List-cloud/List-3.0-Ultra-Coder-Brain",
+      "pipeline_tag": "text-generation",
+      "arch": "MiniMaxM2ForCausalLM",
+      "params_b": 228.7,
+      "precision": "FP8",
+      "weight_gb": 228.7,
+      "downloads": 279859
+    },
+    {
+      "repo_id": "cyankiwi/MiniMax-M2.7-AWQ-4bit",
+      "pipeline_tag": "text-generation",
+      "arch": "MiniMaxM2ForCausalLM",
+      "params_b": 36.81,
+      "precision": "BF16",
+      "weight_gb": 73.6,
+      "downloads": 251379
+    },
+    {
+      "repo_id": "unsloth/Qwen2.5-7B-Instruct-bnb-4bit",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 7.82,
+      "precision": "BF16",
+      "weight_gb": 15.6,
+      "downloads": 233006
+    },
+    {
+      "repo_id": "stepfun-ai/Step-3.5-Flash",
+      "pipeline_tag": "text-generation",
+      "arch": "Step3p5ForCausalLM",
+      "params_b": 199.38,
+      "precision": "BF16",
+      "weight_gb": 398.8,
+      "downloads": 230053
+    },
+    {
+      "repo_id": "RedHatAI/Meta-Llama-3.1-8B-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 8.03,
+      "precision": "BF16",
+      "weight_gb": 16.1,
+      "downloads": 227396
+    },
+    {
+      "repo_id": "cckevinn/SeeClick",
+      "pipeline_tag": "text-generation",
+      "arch": "QWenLMHeadModel",
+      "params_b": 9.66,
+      "precision": "BF16",
+      "weight_gb": 19.3,
+      "downloads": 227148
+    },
+    {
+      "repo_id": "NousResearch/Hermes-3-Llama-3.1-8B",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 8.03,
+      "precision": "BF16",
+      "weight_gb": 16.1,
+      "downloads": 220756
+    },
+    {
+      "repo_id": "OBLITERATUS/gemma-4-E4B-it-OBLITERATED",
+      "pipeline_tag": "text-generation",
+      "arch": "Gemma4ForConditionalGeneration",
+      "params_b": 8.0,
+      "precision": "BF16",
+      "weight_gb": 16.0,
+      "downloads": 213911
+    },
+    {
+      "repo_id": "naver-hyperclovax/HyperCLOVAX-SEED-Omni-8B",
+      "pipeline_tag": "text-generation",
+      "arch": "HCXVisionV2ForCausalLM",
+      "params_b": 10.74,
+      "precision": "BF16",
+      "weight_gb": 21.5,
+      "downloads": 207019
+    },
+    {
+      "repo_id": "Qwen/Qwen3-235B-A22B-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3MoeForCausalLM",
+      "params_b": 235.11,
+      "precision": "FP8",
+      "weight_gb": 235.1,
+      "downloads": 203014
+    },
+    {
+      "repo_id": "allenai/Olmo-3-1025-7B",
+      "pipeline_tag": "text-generation",
+      "arch": "Olmo3ForCausalLM",
+      "params_b": 7.3,
+      "precision": "BF16",
+      "weight_gb": 14.6,
+      "downloads": 196802
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-14B-Instruct-GPTQ-Int4",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 14.77,
+      "precision": "INT4",
+      "weight_gb": 7.4,
+      "downloads": 193284
+    },
+    {
+      "repo_id": "unsloth/gpt-oss-120b-BF16",
+      "pipeline_tag": "text-generation",
+      "arch": "GptOssForCausalLM",
+      "params_b": 116.83,
+      "precision": "BF16",
+      "weight_gb": 233.7,
+      "downloads": 187886
+    },
+    {
+      "repo_id": "K-Compression/HyperCLOVAX-SEED-Think-14B-GPTQ",
+      "pipeline_tag": "text-generation",
+      "arch": "HyperCLOVAXForCausalLM",
+      "params_b": 14.75,
+      "precision": "INT4",
+      "weight_gb": 7.4,
+      "downloads": 186344
+    },
+    {
+      "repo_id": "BSC-LT/salamandra-7b-instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 7.77,
+      "precision": "BF16",
+      "weight_gb": 15.5,
+      "downloads": 181673
+    },
+    {
+      "repo_id": "Qwen/Qwen1.5-MoE-A2.7B",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2MoeForCausalLM",
+      "params_b": 14.32,
+      "precision": "BF16",
+      "weight_gb": 28.6,
+      "downloads": 178752
+    },
+    {
+      "repo_id": "lordx64/Qwen3.6-35B-A3B-Claude-4.7-Opus-Reasoning-Distilled",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3_5MoeForConditionalGeneration",
+      "params_b": 35.95,
+      "precision": "BF16",
+      "weight_gb": 71.9,
+      "downloads": 178233
+    },
+    {
+      "repo_id": "microsoft/Phi-mini-MoE-instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "PhiMoEForCausalLM",
+      "params_b": 7.65,
+      "precision": "BF16",
+      "weight_gb": 15.3,
+      "downloads": 175863
+    },
+    {
+      "repo_id": "casperhansen/llama-3.3-70b-instruct-awq",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 70.55,
+      "precision": "INT4",
+      "weight_gb": 35.3,
+      "downloads": 175048
+    },
+    {
+      "repo_id": "unsloth/Qwen2.5-Coder-7B-Instruct-bnb-4bit",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 7.82,
+      "precision": "BF16",
+      "weight_gb": 15.6,
+      "downloads": 174906
+    },
+    {
+      "repo_id": "huihui-ai/DeepSeek-R1-Distill-Qwen-32B-abliterated",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 32.76,
+      "precision": "BF16",
+      "weight_gb": 65.5,
+      "downloads": 170566
+    },
+    {
+      "repo_id": "Qwen/Qwen3-30B-A3B-GPTQ-Int4",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3MoeForCausalLM",
+      "params_b": 30.53,
+      "precision": "INT4",
+      "weight_gb": 15.3,
+      "downloads": 169334
+    },
+    {
+      "repo_id": "unsloth/gpt-oss-20b-unsloth-bnb-4bit",
+      "pipeline_tag": "text-generation",
+      "arch": "GptOssForCausalLM",
+      "params_b": 20.91,
+      "precision": "BF16",
+      "weight_gb": 41.8,
+      "downloads": 163755
+    },
+    {
+      "repo_id": "HuggingFaceH4/zephyr-7b-beta",
+      "pipeline_tag": "text-generation",
+      "arch": "MistralForCausalLM",
+      "params_b": 7.24,
+      "precision": "BF16",
+      "weight_gb": 14.5,
+      "downloads": 162494
+    },
+    {
+      "repo_id": "cais/HarmBench-Llama-2-13b-cls",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 13.02,
+      "precision": "BF16",
+      "weight_gb": 26.0,
+      "downloads": 157180
+    },
+    {
+      "repo_id": "swiss-ai/Apertus-8B-Instruct-2509",
+      "pipeline_tag": "text-generation",
+      "arch": "ApertusForCausalLM",
+      "params_b": 8.05,
+      "precision": "BF16",
+      "weight_gb": 16.1,
+      "downloads": 156441
+    },
+    {
+      "repo_id": "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3NextForCausalLM",
+      "params_b": 81.33,
+      "precision": "FP8",
+      "weight_gb": 81.3,
+      "downloads": 152048
+    },
+    {
+      "repo_id": "SanjiWatsuki/Kunoichi-DPO-v2-7B",
+      "pipeline_tag": "text-generation",
+      "arch": "MistralForCausalLM",
+      "params_b": 7.24,
+      "precision": "BF16",
+      "weight_gb": 14.5,
+      "downloads": 150327
+    },
+    {
+      "repo_id": "ArliAI/gpt-oss-20b-Derestricted",
+      "pipeline_tag": "text-generation",
+      "arch": "GptOssForCausalLM",
+      "params_b": 20.91,
+      "precision": "BF16",
+      "weight_gb": 41.8,
+      "downloads": 145258
+    },
+    {
+      "repo_id": "TheBloke/Mistral-7B-Instruct-v0.2-GPTQ",
+      "pipeline_tag": "text-generation",
+      "arch": "MistralForCausalLM",
+      "params_b": 7.24,
+      "precision": "INT4",
+      "weight_gb": 3.6,
+      "downloads": 143661
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-14B",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 14.77,
+      "precision": "BF16",
+      "weight_gb": 29.5,
+      "downloads": 141357
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3ForCausalLM",
+      "params_b": 8.19,
+      "precision": "BF16",
+      "weight_gb": 16.4,
+      "downloads": 139712
+    },
+    {
+      "repo_id": "cyankiwi/Qwen3-Next-80B-A3B-Thinking-AWQ-4bit",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3NextForCausalLM",
+      "params_b": 83.79,
+      "precision": "BF16",
+      "weight_gb": 167.6,
+      "downloads": 136747
+    },
+    {
+      "repo_id": "unsloth/Qwen2.5-7B-Instruct-unsloth-bnb-4bit",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 7.79,
+      "precision": "BF16",
+      "weight_gb": 15.6,
+      "downloads": 135462
+    },
+    {
+      "repo_id": "casperhansen/deepseek-coder-v2-instruct-awq",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV2ForCausalLM",
+      "params_b": 235.74,
+      "precision": "INT4",
+      "weight_gb": 117.9,
+      "downloads": 134052
+    },
+    {
+      "repo_id": "NousResearch/Meta-Llama-3-8B",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 8.03,
+      "precision": "BF16",
+      "weight_gb": 16.1,
+      "downloads": 132419
+    },
+    {
+      "repo_id": "RedHatAI/DeepSeek-Coder-V2-Lite-Instruct-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV2ForCausalLM",
+      "params_b": 15.71,
+      "precision": "FP8",
+      "weight_gb": 15.7,
+      "downloads": 127337
+    },
+    {
+      "repo_id": "stelterlab/Qwen3-14B-AWQ",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3ForCausalLM",
+      "params_b": 14.77,
+      "precision": "INT4",
+      "weight_gb": 7.4,
+      "downloads": 125843
+    },
+    {
+      "repo_id": "OpenPipe/Qwen3-14B-Instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3ForCausalLM",
+      "params_b": 14.77,
+      "precision": "BF16",
+      "weight_gb": 29.5,
+      "downloads": 124334
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 70.55,
+      "precision": "BF16",
+      "weight_gb": 141.1,
+      "downloads": 123906
+    },
+    {
+      "repo_id": "cyankiwi/MiniMax-M2.5-REAP-139B-A10B-AWQ-4bit",
+      "pipeline_tag": "text-generation",
+      "arch": "MiniMaxM2ForCausalLM",
+      "params_b": 22.8,
+      "precision": "BF16",
+      "weight_gb": 45.6,
+      "downloads": 123819
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-32B",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 32.76,
+      "precision": "BF16",
+      "weight_gb": 65.5,
+      "downloads": 122638
+    },
+    {
+      "repo_id": "TrevorJS/gemma-4-26B-A4B-it-uncensored",
+      "pipeline_tag": "text-generation",
+      "arch": "Gemma4ForConditionalGeneration",
+      "params_b": 25.81,
+      "precision": "BF16",
+      "weight_gb": 51.6,
+      "downloads": 121967
+    },
+    {
+      "repo_id": "Qwen/QwQ-32B-AWQ",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 32.76,
+      "precision": "INT4",
+      "weight_gb": 16.4,
+      "downloads": 120158
+    },
+    {
+      "repo_id": "Qwen/Qwen3-30B-A3B-Thinking-2507",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3MoeForCausalLM",
+      "params_b": 30.53,
+      "precision": "BF16",
+      "weight_gb": 61.1,
+      "downloads": 119712
+    },
+    {
+      "repo_id": "JunHowie/Qwen3-14B-GPTQ-Int4",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3ForCausalLM",
+      "params_b": 14.77,
+      "precision": "INT4",
+      "weight_gb": 7.4,
+      "downloads": 119480
+    },
+    {
+      "repo_id": "ansulev/Darwin-9B-NEG",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3_5ForConditionalGeneration",
+      "params_b": 9.65,
+      "precision": "BF16",
+      "weight_gb": 19.3,
+      "downloads": 118336
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-Coder-V2-Instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV2ForCausalLM",
+      "params_b": 235.74,
+      "precision": "BF16",
+      "weight_gb": 471.5,
+      "downloads": 117990
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int8",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 32.76,
+      "precision": "INT4",
+      "weight_gb": 16.4,
+      "downloads": 116929
+    },
+    {
+      "repo_id": "thesven/Mistral-7B-Instruct-v0.3-GPTQ",
+      "pipeline_tag": "text-generation",
+      "arch": "MistralForCausalLM",
+      "params_b": 7.25,
+      "precision": "INT4",
+      "weight_gb": 3.6,
+      "downloads": 111665
+    },
+    {
+      "repo_id": "unsloth/llama-3-8b-Instruct-bnb-4bit",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 8.25,
+      "precision": "BF16",
+      "weight_gb": 16.5,
+      "downloads": 110945
+    },
+    {
+      "repo_id": "NousResearch/Meta-Llama-3.1-8B-Instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 8.03,
+      "precision": "BF16",
+      "weight_gb": 16.1,
+      "downloads": 108047
+    },
+    {
+      "repo_id": "TheBloke/Mistral-7B-Instruct-v0.2-AWQ",
+      "pipeline_tag": "text-generation",
+      "arch": "MistralForCausalLM",
+      "params_b": 7.24,
+      "precision": "INT4",
+      "weight_gb": 3.6,
+      "downloads": 107852
+    },
+    {
+      "repo_id": "XiaomiMiMo/MiMo-7B-Base",
+      "pipeline_tag": "text-generation",
+      "arch": "MiMoForCausalLM",
+      "params_b": 7.83,
+      "precision": "BF16",
+      "weight_gb": 15.7,
+      "downloads": 106592
+    },
+    {
+      "repo_id": "lmms-lab/llava-onevision-qwen2-7b-ov",
+      "pipeline_tag": "text-generation",
+      "arch": "LlavaQwenForCausalLM",
+      "params_b": 8.03,
+      "precision": "BF16",
+      "weight_gb": 16.1,
+      "downloads": 104651
+    },
+    {
+      "repo_id": "XiaomiMiMo/MiMo-V2-Flash",
+      "pipeline_tag": "text-generation",
+      "arch": "MiMoV2FlashForCausalLM",
+      "params_b": 309.79,
+      "precision": "FP8",
+      "weight_gb": 309.8,
+      "downloads": 104340
+    },
+    {
+      "repo_id": "LiquidAI/LFM2-8B-A1B",
+      "pipeline_tag": "text-generation",
+      "arch": "Lfm2MoeForCausalLM",
+      "params_b": 8.34,
+      "precision": "BF16",
+      "weight_gb": 16.7,
+      "downloads": 103408
+    },
+    {
+      "repo_id": "kmhf/hf-moshiko",
+      "pipeline_tag": "text-generation",
+      "arch": "MoshiForConditionalGeneration",
+      "params_b": 7.78,
+      "precision": "BF16",
+      "weight_gb": 15.6,
+      "downloads": 102010
+    },
+    {
+      "repo_id": "Doradus-AI/RnJ-1-Instruct-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "Gemma3ForCausalLM",
+      "params_b": 8.84,
+      "precision": "BF16",
+      "weight_gb": 17.7,
+      "downloads": 101965
+    },
+    {
+      "repo_id": "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
+      "pipeline_tag": "text-generation",
+      "arch": "HCXVisionV2ForCausalLM",
+      "params_b": 33.31,
+      "precision": "BF16",
+      "weight_gb": 66.6,
+      "downloads": 99709
+    },
+    {
+      "repo_id": "Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3MoeForCausalLM",
+      "params_b": 30.53,
+      "precision": "BF16",
+      "weight_gb": 61.1,
+      "downloads": 99166
+    },
+    {
+      "repo_id": "cyankiwi/Qwen3-Coder-Next-AWQ-4bit",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3NextForCausalLM",
+      "params_b": 14.44,
+      "precision": "BF16",
+      "weight_gb": 28.9,
+      "downloads": 96879
+    },
+    {
+      "repo_id": "stepfun-ai/Step-3.5-Flash-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "Step3p5ForCausalLM",
+      "params_b": 199.4,
+      "precision": "FP8",
+      "weight_gb": 199.4,
+      "downloads": 95217
+    },
+    {
+      "repo_id": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5-FP8",
+      "pipeline_tag": "text-generation",
+      "arch": "DeciLMForCausalLM",
+      "params_b": 49.87,
+      "precision": "BF16",
+      "weight_gb": 99.7,
+      "downloads": 94461
+    },
+    {
+      "repo_id": "MiniMaxAI/MiniMax-M2",
+      "pipeline_tag": "text-generation",
+      "arch": "MiniMaxM2ForCausalLM",
+      "params_b": 228.7,
+      "precision": "FP8",
+      "weight_gb": 228.7,
+      "downloads": 93228
+    },
+    {
+      "repo_id": "LGAI-EXAONE/EXAONE-4.0-32B-AWQ",
+      "pipeline_tag": "text-generation",
+      "arch": "Exaone4ForCausalLM",
+      "params_b": 32.0,
+      "precision": "INT4",
+      "weight_gb": 16.0,
+      "downloads": 92055
+    },
+    {
+      "repo_id": "Qwen/Qwen1.5-7B",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen2ForCausalLM",
+      "params_b": 7.72,
+      "precision": "BF16",
+      "weight_gb": 15.4,
+      "downloads": 91520
+    },
+    {
+      "repo_id": "Qwen/Qwen-7B-Chat",
+      "pipeline_tag": "text-generation",
+      "arch": "QWenLMHeadModel",
+      "params_b": 7.72,
+      "precision": "BF16",
+      "weight_gb": 15.4,
+      "downloads": 90444
+    },
+    {
+      "repo_id": "unsloth/mistral-7b-instruct-v0.3-bnb-4bit",
+      "pipeline_tag": "text-generation",
+      "arch": "MistralForCausalLM",
+      "params_b": 7.47,
+      "precision": "BF16",
+      "weight_gb": 14.9,
+      "downloads": 84130
+    }
+  ]
+}
