@@ -231,6 +231,23 @@ jobs:
             --osl           "${INPUT_OSL:-1024}" \
             --out-dir       "${{ github.workspace }}/summary-out"
 
+      - name: Publish results to hyperloom-results-service
+        # POST normalized_results.json to {HYPERLOOM_RESULTS_SERVICE_URL}/api/import.
+        # publish_results.py exits 0 with a log line if the URL env is unset,
+        # so this step is a no-op for runs that don't have the secret configured.
+        if: always()
+        working-directory: ci
+        env:
+          HYPERLOOM_RESULTS_SERVICE_URL:   ${{ secrets.HYPERLOOM_RESULTS_SERVICE_URL }}
+          HYPERLOOM_RESULTS_SERVICE_TOKEN: ${{ secrets.HYPERLOOM_RESULTS_SERVICE_TOKEN }}
+        run: |
+          INPUT="${{ github.workspace }}/summary-out/normalized_results.json"
+          if [ ! -f "$INPUT" ]; then
+            echo "normalized_results.json not produced — skipping publish"
+            exit 0
+          fi
+          python3 publish_results.py --input "$INPUT"
+
       - name: Render summary to job summary
         if: always()
         run: |
@@ -249,119 +266,54 @@ jobs:
           retention-days: 180
           if-no-files-found: warn
 
-      - name: Send webhook (Teams Adaptive Card)
+      - name: Send webhook (completion notification, no table)
+        # Detailed sort + render now lives in hyperloom-results-service's UI;
+        # the webhook just announces the batch is done and points to GHA run
+        # + the results dashboard (set via HYPERLOOM_DASHBOARD_URL).
         if: always() && env.WEBHOOK_URL != ''
         env:
-          BATCH_INDEX: ${{ github.event.inputs.batch_index }}
-          BATCH_SIZE:  ${{ github.event.inputs.batch_size }}
-          CANDIDATES:  ${{ github.event.inputs.candidates_file }}
+          BATCH_INDEX:   ${{ github.event.inputs.batch_index }}
+          BATCH_SIZE:    ${{ github.event.inputs.batch_size }}
+          DASHBOARD_URL: ${{ secrets.HYPERLOOM_DASHBOARD_URL }}
         run: |
           python3 - <<'PYEOF'
-          import json, os, sys
+          import json, os
           import requests, urllib3
           urllib3.disable_warnings()
 
-          webhook_url = os.environ["WEBHOOK_URL"]
-          batch_idx   = os.environ.get("BATCH_INDEX", "?")
-          batch_size  = os.environ.get("BATCH_SIZE",  "?")
-          cands_file  = os.environ.get("CANDIDATES",  "?")
+          webhook_url   = os.environ["WEBHOOK_URL"]
+          batch_idx     = os.environ.get("BATCH_INDEX", "?")
+          batch_size    = os.environ.get("BATCH_SIZE", "?")
+          dashboard_url = os.environ.get("DASHBOARD_URL", "")
 
           json_path = "${{ github.workspace }}/summary-out/ci_summary.json"
-          if not os.path.exists(json_path):
-              print("no ci_summary.json — skipping webhook"); sys.exit(0)
-          summary = json.loads(open(json_path).read())
-          rows = summary.get("rows") or summary.get("models") or []
-
-          n = len(rows)
-          succeeded = sum(1 for r in rows if r.get("final_status") == "Succeeded")
-          with_data = sum(1 for r in rows if r.get("gain_pct") is not None)
-          gains = [r for r in rows if r.get("gain_pct") is not None]
-          gains.sort(key=lambda r: -r["gain_pct"])
-          top5 = gains[:5]
-          beat_ifx = [r for r in rows
-                      if r.get("vs_inferenceX_pct") is not None
-                      and r["vs_inferenceX_pct"] > 0]
-
-          def cell(text, **kw):
-              return {"type": "TableCell",
-                      "items": [{"type": "TextBlock", "text": str(text), **kw}]}
-
-          def row(cells):
-              return {"type": "TableRow", "cells": cells}
-
-          def header_row(texts):
-              return {"type": "TableRow", "style": "accent",
-                      "cells": [cell(t, weight="Bolder") for t in texts]}
-
-          top_rows = [header_row(["#", "Model", "Gain", "Optimized", "vs InfX"])]
-          for i, r in enumerate(top5, 1):
-              model = r.get("model", "?").split("/")[-1]
-              gain = r.get("gain_pct")
-              opt = r.get("optimized_tok_per_gpu")
-              vs_infx = r.get("vs_inferenceX_pct")
-              gain_str = f"+{gain:.2f}%" if gain is not None else "—"
-              opt_str = f"{opt:.0f}" if opt is not None else "—"
-              vs_str = f"+{vs_infx:.0f}%" if vs_infx is not None and vs_infx > 0 \
-                       else (f"{vs_infx:.0f}%" if vs_infx is not None else "n/a")
-              top_rows.append(row([
-                  cell(str(i)),
-                  cell(model, weight="Bolder"),
-                  cell(gain_str, color="Good" if (gain or 0) > 0 else "Default",
-                       weight="Bolder"),
-                  cell(opt_str),
-                  cell(vs_str,
-                       color="Good" if (vs_infx or 0) > 0 else "Default",
-                       weight="Bolder" if (vs_infx or 0) > 0 else "Default"),
-              ]))
-
-          body = [
-              {"type": "TextBlock", "weight": "Bolder", "size": "Large",
-               "text": f"Hyperloom batch-{batch_idx} done — {n} models"},
-              {"type": "TextBlock", "isSubtle": True, "spacing": "None",
-               "text": f"Candidates: {cands_file} | batch_size: {batch_size}"},
-
-              {"type": "TextBlock", "weight": "Bolder", "size": "Medium",
-               "spacing": "Medium", "text": "Stats"},
-              {"type": "TextBlock", "wrap": True,
-               "text": (f"- **Succeeded**: {succeeded}/{n}\n"
-                        f"- **With baseline+optimized**: {with_data}/{n}\n"
-                        f"- **Beat InferenceX**: {len(beat_ifx)}")},
-          ]
-
-          if top5:
-              body.append({"type": "TextBlock", "weight": "Bolder",
-                           "size": "Medium", "spacing": "Medium",
-                           "text": "Top 5 by Gain%"})
-              body.append({"type": "Table", "columns": [
-                  {"width": 1}, {"width": 5}, {"width": 2},
-                  {"width": 2}, {"width": 2}], "rows": top_rows})
+          n = succeeded = with_data = beat_ifx = 0
+          if os.path.exists(json_path):
+              summary = json.loads(open(json_path).read())
+              rows = summary.get("rows") or summary.get("models") or []
+              n = len(rows)
+              succeeded = sum(1 for r in rows if r.get("final_status") == "Succeeded")
+              with_data = sum(1 for r in rows if r.get("gain_pct") is not None)
+              beat_ifx = sum(1 for r in rows
+                             if (r.get("vs_inferenceX_pct") or 0) > 0)
 
           run_url = (f"https://github.com/{os.environ.get('GITHUB_REPOSITORY','?')}"
                      f"/actions/runs/{os.environ.get('GITHUB_RUN_ID','?')}")
-          body.append({"type": "TextBlock", "spacing": "Medium",
-                       "isSubtle": True,
-                       "text": f"[View run]({run_url})"})
 
-          card = {"type": "message", "attachments": [{
-              "contentType": "application/vnd.microsoft.card.adaptive",
-              "content": {
-                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                  "type": "AdaptiveCard", "version": "1.4", "body": body,
-              }}]}
+          text = (f"Hyperloom batch-{batch_idx} done "
+                  f"({succeeded}/{n} succeeded, "
+                  f"{with_data} with gain, "
+                  f"{beat_ifx} compare against the baseline). "
+                  f"GHA run: {run_url}")
+          if dashboard_url:
+              text += f" | Dashboard: {dashboard_url}"
 
           try:
-              resp = requests.post(webhook_url, json=card, timeout=15, verify=False)
-              print(f"Webhook status: {resp.status_code}")
+              resp = requests.post(
+                  webhook_url, json={"text": text}, timeout=10, verify=False)
+              print(f"Webhook: HTTP {resp.status_code}")
               if resp.status_code >= 300:
                   print(f"Response: {resp.text[:300]}")
-                  resp = requests.post(webhook_url, json={
-                      "text": (f"Hyperloom batch-{batch_idx} done: "
-                               f"{succeeded}/{n} succeeded, "
-                               f"{with_data} with data, "
-                               f"{len(beat_ifx)} compare against the baseline. "
-                               f"Run: {run_url}")
-                  }, timeout=10, verify=False)
-                  print(f"Fallback status: {resp.status_code}")
           except Exception as e:
-              print(f"Webhook failed: {e}", file=sys.stderr)
+              print(f"Webhook failed: {e}")
           PYEOF
