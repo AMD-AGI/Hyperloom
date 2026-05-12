@@ -39,7 +39,6 @@ log = logging.getLogger("ci-orchestrator")
 
 CI_DIR = Path(__file__).resolve().parent
 PROMPT_TEMPLATE = (CI_DIR / "prompt_template.md").read_text()
-PROMPT_TEMPLATE_REMOTE = (CI_DIR / "prompt_template_remote.md").read_text()
 
 # Load skill files from repo — embedded in prompt to bypass tool-mounting failures
 _SKILL_ROOT = CI_DIR.parent / ".cursor" / "skills" / "inference-optimization"
@@ -64,30 +63,6 @@ def load_config(config_path: str | None = None) -> dict:
         return yaml.safe_load(f)
 
 
-def _build_bss(merged: dict, isl: int, osl: int) -> str:
-    script = merged.get("benchmark_script")
-    script_content = merged.get("benchmark_script_content", "")
-    if script and script_content:
-        return (
-            f"MANDATORY: Replicate the server config from this InferenceX benchmark script "
-            f"({script}).\n"
-            f"Key env vars: MODEL={merged['model_path']} TP={merged['tp']} "
-            f"EP_SIZE={merged['ep']} CONC={merged['conc']} ISL={isl} OSL={osl} "
-            f"MAX_MODEL_LEN=4096 RANDOM_RANGE_RATIO=0.8 NUM_PROMPTS_MULTIPLIER=10\n"
-            f"DO NOT run the script directly. Extract server launch command and env vars, "
-            f"then reproduce them yourself.\n\n"
-            f"<benchmark_script>\n{script_content}\n</benchmark_script>"
-        )
-    elif script:
-        return (
-            f"MANDATORY: Read the InferenceX benchmark script and replicate its server config:\n"
-            f"  {merged['inferencex_path']}/{script}\n"
-            f"Key env vars: MODEL={merged['model_path']} TP={merged['tp']} "
-            f"CONC={merged['conc']} ISL={isl} OSL={osl}"
-        )
-    return "No InferenceX benchmark script found. Construct server launch manually."
-
-
 def render_prompt(merged: dict) -> str:
     isl, osl = merged["isl_osl_configs"][0]
     ifx_text = format_benchmark_for_prompt(
@@ -97,38 +72,31 @@ def render_prompt(merged: dict) -> str:
         tp=merged.get("tp"),
         conc=merged.get("conc"),
     )
-    bss = _build_bss(merged, isl, osl)
-    safe_api_key = os.environ.get("CLAW_API_KEY", "")
-    safe_base_url = os.environ.get("SAFE_BASE_URL", "")
-    nfs_root = os.environ.get("NFS_ROOT", "/workspace")
-
-    if merged.get("mode") == "remote":
-        return PROMPT_TEMPLATE_REMOTE.format(
-            model_hf=merged["model_hf"],
-            model_path=merged["model_path"],
-            framework=merged["framework"],
-            precision=merged["precision"],
-            isl=isl,
-            osl=osl,
-            conc=merged["conc"],
-            tp=merged["tp"],
-            ep=merged["ep"],
-            gpu_type=merged["gpu_type"],
-            inferencex_path=merged["inferencex_path"],
-            rayjob_image=merged.get("rayjob_image", ""),
-            kernel_opt_backends=merged["kernel_opt_backends"],
-            kernel_opt_image=merged["kernel_opt_image"],
-            min_kernels=merged["min_kernels"],
-            result_dir=merged["result_dir"],
-            target_gpu=merged["target_gpu"],
-            inferenceX_data=ifx_text,
-            benchmark_script_section=bss,
-            safe_api_key=safe_api_key,
-            safe_base_url=safe_base_url,
-            nfs_root=nfs_root,
+    script = merged.get("benchmark_script")
+    script_content = merged.get("benchmark_script_content", "")
+    if script and script_content:
+        bss = (
+            f"MANDATORY: Replicate the server config from this InferenceX benchmark script "
+            f"({script}).\n"
+            f"Key env vars for this run: MODEL={merged['model_path']} TP={merged['tp']} "
+            f"EP_SIZE={merged['ep']} CONC={merged['conc']} ISL={isl} OSL={osl} "
+            f"MAX_MODEL_LEN=4096 RANDOM_RANGE_RATIO=0.8 "
+            f"NUM_PROMPTS_MULTIPLIER=10 RESULT_FILENAME=baseline\n"
+            f"DO NOT run the script directly. Extract server launch command and env vars, "
+            f"then reproduce them yourself.\n\n"
+            f"<benchmark_script>\n{script_content}\n</benchmark_script>"
         )
+    elif script:
+        bss = (
+            f"MANDATORY: Read the InferenceX benchmark script and replicate its server config:\n"
+            f"  {merged['inferencex_path']}/{script}\n"
+            f"Key env vars: MODEL={merged['model_path']} TP={merged['tp']} "
+            f"CONC={merged['conc']} ISL={isl} OSL={osl}"
+        )
+    else:
+        bss = "No InferenceX benchmark script found. Construct server launch manually."
 
-    # Local mode: embed skill files so agent doesn't depend on tool mounting
+    # Embed skill files so agent doesn't depend on tool mounting
     skill_section = ""
     if SKILL_MD:
         skill_section += f"\n<skill_md>\n{SKILL_MD}\n</skill_md>\n"
@@ -142,6 +110,11 @@ def render_prompt(merged: dict) -> str:
         skill_section += f"\n<executor_sh>\n{EXECUTOR_SH}\n</executor_sh>\n"
     if COMMON_SH:
         skill_section += f"\n<common_sh>\n{COMMON_SH}\n</common_sh>\n"
+
+    safe_api_key = os.environ.get("CLAW_API_KEY", "")
+    safe_base_url = os.environ.get("SAFE_BASE_URL", "")
+    sandbox_workspace = os.environ.get("SANDBOX_WORKSPACE", "")
+    nfs_root = os.environ.get("NFS_ROOT", "/workspace")
 
     return PROMPT_TEMPLATE.format(
         model_hf=merged["model_hf"],
@@ -170,7 +143,7 @@ def render_prompt(merged: dict) -> str:
         skill_section=skill_section,
         safe_api_key=safe_api_key,
         safe_base_url=safe_base_url,
-        sandbox_workspace=os.environ.get("SANDBOX_WORKSPACE", ""),
+        sandbox_workspace=sandbox_workspace,
         nfs_root=nfs_root,
     )
 
@@ -247,10 +220,6 @@ def run_model(
     status = "failed"
     session_id = None
 
-    tp = merged.get("tp", 1) or 1
-    ep = merged.get("ep", 1) or 1
-    gpu_count = max(tp * ep, 1)
-
     last_failure_reason: str | None = None  # "overloaded" | "truncated" | None
     for attempt in range(1, _MAX_RETRY_ATTEMPTS + 1):
         if attempt > 1:
@@ -271,12 +240,13 @@ def run_model(
             time.sleep(wait_s)
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
 
-        # Step 1: Create session (image/resource go into the message, not the session)
+        # Step 1: Create session — pass sandbox_image to get GPU sandbox
         session_name = f"ci-{model_name}-{timestamp}"
         if attempt > 1:
             session_name = f"ci-{model_name}-{timestamp}-retry{attempt - 1}"
+        sandbox_image = merged.get("sandbox_image", "")
         try:
-            session = claw.create_session(session_name)
+            session = claw.create_session(session_name, sandbox_image=sandbox_image or None)
             session_id = session["session_id"]
         except Exception as e:
             log.error("Failed to create session for %s: %s", model_name, e)
@@ -309,29 +279,8 @@ def run_model(
         time.sleep(1)
 
         try:
-            is_remote = merged.get("mode") == "remote"
-            msg_tools = [] if is_remote else claw.default_tools
-            if is_remote:
-                sandbox_resource = None
-            else:
-                cpu = {1: 32, 2: 64, 4: 96, 8: 128}.get(tp, 32)
-                mem = {1: 128, 2: 256, 4: 512, 8: 1024}.get(tp, 128)
-                sandbox_resource = {
-                    "gpu": str(gpu_count),
-                    "amd.com/gpu": str(gpu_count),
-                    "cpu": str(cpu),
-                    "memory": f"{mem}Gi",
-                }
-            # Remote-mode sessions talk to SaFE MCP + Ray Dashboard REST.
-            # They don't need pluginId — the Claw GUI doesn't set one for the
-            # multi-node yunkai-validated path either. Local-mode keeps the
-            # existing pluginId=4 (base tools) so the agent has Bash/Read/etc.
-            msg_plugin = None if is_remote else 4
-            claw.send_message(session_id, prompt, plugin_id=msg_plugin,
-                              tools=msg_tools, resource=sandbox_resource)
-            log.info("Prompt sent to session %s (gpu=%s, cpu=%s, mem=%sGi, remote=%s)",
-                     session_id, gpu_count, cpu if not is_remote else "-",
-                     mem if not is_remote else "-", is_remote)
+            claw.send_message(session_id, prompt)
+            log.info("Prompt sent to session %s", session_id)
         except Exception as e:
             log.error("Failed to send message to %s: %s", session_id, e)
             status_holder["status"] = "failed"
