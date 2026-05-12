@@ -34,6 +34,7 @@ Implementation notes:
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -65,16 +66,20 @@ BASELINE_DEFAULT_TIMEOUT_SEC = 2400           # WARM-start cap, 40 min (aiter ji
 BASELINE_COLD_START_TIMEOUT_SEC = 3600        # COLD-start cap, 60 min (aiter jit cache empty/sparse)
 COLD_START_KERNEL_THRESHOLD = 20              # < N .so files under aiter jit/build/ ⇒ COLD
 
-# Probe order for aiter's JIT cache root. First path that exists wins.
-# Override via env `INFERENCE_OPTIMIZER_AITER_JIT_DIR=/abs/path` (single path,
-# tried before this list).
+# Legacy fallback probe order for aiter's JIT cache dir. Used only when
+# `importlib.util.find_spec("aiter")` cannot resolve aiter dynamically
+# (e.g. probe invoked from a venv where aiter isn't importable). First
+# path that exists wins. Override via env
+# `INFERENCE_OPTIMIZER_AITER_JIT_DIR=/abs/path` (tried before this list).
 AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
+    "/sgl-workspace/aiter/aiter/jit",
     "/sgl-workspace/aiter/aiter/jit/build",
-    "/usr/local/lib/python3.10/site-packages/aiter/jit/build",
-    "/usr/local/lib/python3.12/dist-packages/aiter/jit/build",
-    "/usr/local/lib/python3.12/site-packages/aiter/jit/build",
-    "/opt/venv/lib/python3.10/site-packages/aiter/jit/build",
-    "/opt/venv/lib/python3.12/site-packages/aiter/jit/build",
+    "/usr/local/lib/python3.10/dist-packages/aiter/jit",
+    "/usr/local/lib/python3.12/dist-packages/aiter/jit",
+    "/usr/local/lib/python3.10/site-packages/aiter/jit",
+    "/usr/local/lib/python3.12/site-packages/aiter/jit",
+    "/opt/venv/lib/python3.10/site-packages/aiter/jit",
+    "/opt/venv/lib/python3.12/site-packages/aiter/jit",
 )
 
 
@@ -85,12 +90,44 @@ _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
 
 
-def _probe_aiter_jit_cache() -> dict[str, Any]:
-    """Inspect aiter's JIT cache root to decide cold vs warm start.
+def _resolve_aiter_jit_dir_dynamic() -> list[str]:
+    """Locate aiter's ``jit/`` dir via Python's import machinery.
 
-    Pure read-only filesystem probe — no subprocess, no GPU touch. The
-    first path under `AITER_JIT_PROBE_PATHS` (or `$INFERENCE_OPTIMIZER_AITER_JIT_DIR`
-    if set) that exists wins; we count `.so` files recursively and sum
+    Wheel-packaged aiter ships ~80 pre-built ``.so`` directly under
+    ``<aiter>/jit/``; only runtime-JIT staging (a handful of patched
+    kernels) lives under ``<aiter>/jit/build/<module>/build/``. Counting
+    at ``<aiter>/jit/`` therefore correctly reflects a warm install,
+    while the legacy fixed list (precise to ``jit/build``) mis-reports
+    every wheel install as COLD.
+
+    Returns an ordered candidate list (``jit`` preferred over
+    ``jit/build``). Empty if aiter cannot be located.
+    """
+    try:
+        spec = importlib.util.find_spec("aiter")
+    except (ImportError, ValueError):  # noqa: BLE001 — aiter not importable
+        return []
+    if spec is None or not spec.origin:
+        return []
+    aiter_root = Path(spec.origin).parent
+    return [
+        str(aiter_root / "jit"),
+        str(aiter_root / "jit" / "build"),
+    ]
+
+
+def _probe_aiter_jit_cache() -> dict[str, Any]:
+    """Inspect aiter's ``jit/`` dir to decide cold vs warm start.
+
+    Pure read-only filesystem probe — no subprocess, no GPU touch.
+    Resolution order:
+
+      1. ``$INFERENCE_OPTIMIZER_AITER_JIT_DIR`` env override
+      2. Dynamic ``<aiter>/jit`` then ``<aiter>/jit/build`` resolved via
+         ``importlib.util.find_spec("aiter")``
+      3. Legacy ``AITER_JIT_PROBE_PATHS`` fallback
+
+    First existing dir wins; we count ``.so`` files recursively and sum
     their byte sizes. Any IO error degrades to ``probe_status="error"``
     so callers (and unit tests on hosts with no aiter install) fall back
     to the default WARM timeout instead of crashing.
@@ -114,6 +151,7 @@ def _probe_aiter_jit_cache() -> dict[str, Any]:
     override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
     if override:
         candidates.append(override)
+    candidates.extend(_resolve_aiter_jit_dir_dynamic())
     candidates.extend(AITER_JIT_PROBE_PATHS)
 
     try:
