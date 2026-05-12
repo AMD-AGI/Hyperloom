@@ -18,45 +18,38 @@ jobs:
       CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
       SAFE_BASE_URL: ${{ secrets.SAFE_BASE_URL }}
     steps:
-      - name: Probe 16 historical tasks for ci_metrics.json availability
+      - name: Probe 19 historical tasks (5/10 run 25633076431) for ci_metrics.json
         shell: bash
         run: |
           set -u
           BASE="${SAFE_BASE_URL:-https://core42.primus-safe.amd.com}"
           BASE="${BASE%/}"
-          # (task_id, model) — the 20-model run from 2026-05-08 (run 25570644944),
-          # nvidia excluded (NVFP4 incompatible w/ MI300X).
+          # (task_id, model) — the 20-model run from 5/10 (run 25633076431),
+          # nvidia excluded.
           declare -a TASKS=(
-            "opt-c2c90039-a9f1-45f0-a2c7-8c4a1183b6a8|Qwen2.5-14B-Instruct-AWQ"
-            "opt-104d2d29-3288-413a-8ff2-db7b51832dc6|Qwen2.5-7B"
-            "opt-2a607346-7761-4579-8dc4-064130cd5119|Qwen2.5-7B-Instruct"
-            "opt-ef1a51d7-078e-44b3-bcf4-1a079bd7a448|Qwen2.5-Coder-7B"
-            "opt-a82bd200-98fb-4e79-933e-c971cd31ad70|Qwen2.5-Coder-7B-Instruct"
-            "opt-3c14ea91-cae8-49fb-9874-29196305216e|Qwen3-8B"
-            "opt-af0501fc-4afb-4dc1-9349-e9fd3c527dc6|Qwen3-8B-AWQ"
-            "opt-dc6faa7c-2847-4660-b725-2da77ccc8bce|Qwen3-Coder-30B-A3B-Instruct"
-            "opt-af4dc673-221a-4e6d-b77f-aee0eb0c3c25|DeepSeek-R1-0528"
-            "opt-2effa6ac-10f0-4b33-a84e-88afc789dcac|DeepSeek-R1-Distill-Llama-8B"
-            "opt-dd4a0d8d-88c2-4a52-b5f9-5d48227e31ec|DeepSeek-V3.2"
-            "opt-6e35b44d-db18-48db-aae8-b8721ee942f8|dolphin-2.9.1-yi-1.5-34b"
-            "opt-a35850b2-c2e0-461f-9022-604196b2d98f|Llama-3.1-8B-Instruct"
-            "opt-a1739a8f-083e-463f-b8a1-6bc285328d5d|Mistral-7B-Instruct-v0.2"
-            "opt-d21e5b0d-8ef4-4921-8ed8-b8a78bfe4741|gpt-oss-120b"
-            "opt-82915ed5-1874-4895-a8d3-bca2c86021c7|gpt-oss-20b"
+            "opt-fac77b9a-3708-4f7f-93c9-d8f1d2ffcd87|Qwen2.5-14B-Instruct-AWQ"
+            "opt-c18a2a1e-56ce-4cfa-8341-031f676e0e9d|Qwen2.5-32B-Instruct-AWQ"
+            "opt-b5c6110c-399b-4016-bd1d-81bfc067492d|Qwen2.5-7B"
+            "opt-318634aa-0063-440f-bc7a-0f68527d843b|Qwen2.5-7B-Instruct"
+            "opt-d3f63f53-f6bd-4a42-be39-53a61a3e7614|Qwen2.5-Coder-7B"
+            "opt-d05845af-b117-4cd8-943d-352d8671c968|Qwen2.5-Coder-7B-Instruct"
+            "opt-34f08cee-e1e1-4831-be96-4cceb4a04229|Qwen3-8B"
+            "opt-86a80579-6637-4661-a0e4-62156ba1d935|Qwen3-8B-AWQ"
+            "opt-6c163df3-b597-4613-bb6d-39115de1122f|Qwen3-Coder-30B-A3B-Instruct"
+            "opt-3493f27f-92f3-4e51-baf0-b0e0d7b256d4|DeepSeek-R1"
+            "opt-e1f7ef4a-aad6-4ff1-a3dc-c5c99af3c22c|DeepSeek-R1-0528"
+            "opt-81fb461f-aab9-4244-84ca-7d37fd5ea142|DeepSeek-R1-Distill-Llama-8B"
+            "opt-dc7c23ba-8d1e-4921-83bf-01db59a60f44|DeepSeek-V3.2"
+            "opt-6cf0f903-bfa7-449d-990d-0686495fe361|dolphin-2.9.1-yi-1.5-34b"
+            "opt-7e8c850f-a074-4c5d-ad84-26d51fff9e2c|Llama-3.1-8B"
+            "opt-188ccf9c-8e9a-422a-8832-429d85bb0c68|Llama-3.1-8B-Instruct"
+            "opt-38ea7ce3-3eff-44f4-b818-29170df4710c|Mistral-7B-Instruct-v0.2"
+            "opt-0c5f4582-55b2-4e15-92df-c8e1477cd9a7|gpt-oss-120b"
+            "opt-2e24b109-6192-4d69-aa44-c9b620ceddd1|gpt-oss-20b"
           )
           printf "\n%-42s %-32s %-6s %s\n" "TASK_ID" "MODEL" "FILES" "ci_metrics.json size"
           printf "%-42s %-32s %-6s %s\n" "$(printf '=%.0s' {1..42})" "$(printf '=%.0s' {1..32})" "======" "===================="
           set +e
-          # First, dump full file list for 2 representative old tasks to see WHAT
-          # the lone file is (was it just claw-*.jsonl? or something else?)
-          for tid in opt-d21e5b0d-8ef4-4921-8ed8-b8a78bfe4741 opt-3c14ea91-cae8-49fb-9874-29196305216e; do
-            echo ""
-            echo "=== full list for $tid ==="
-            curl -sS -H "Authorization: Bearer $CLAW_API_KEY" "$BASE/api/v1/optimization/tasks/$tid/artifacts" \
-              | jq '.'
-          done
-          echo ""
-          # Then the summary table
           for entry in "${TASKS[@]}"; do
             tid="${entry%%|*}"
             model="${entry##*|}"
