@@ -530,38 +530,70 @@ def _default_target_summary(args: argparse.Namespace) -> str:
     return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
 
 
+# --- Executor wiring tables ------------------------------------------------
+# Declarative mappings of action_kind → ExecutorFn so tests can introspect
+# what's actually wired without re-parsing the imperative body of
+# ``_register_executors``. Adding a new action with a real executor MUST
+# update these tables; the regression test in
+# ``tests/test_p1_2_full_action_catalogue.py`` enforces consistency between
+# these tables and ``session_paths._runs_actions()``.
+
+# Real executors enabled in every run mode (kernel + no-kernel).
+_REAL_EXECUTORS_FULL: dict[str, Any] = {
+    "baseline":       baseline_executor,
+    "backends":       backends_executor,
+    "params":         params_executor,
+    "sweep":          sweep_executor,
+    "report":         report_executor,
+    "validate_stack": validate_stack_executor,
+}
+
+# Real executors enabled only when kernel-mode is on (profile/pmc_roofline
+# only feed kernel-opt and would burn lanes for nothing in --no-kernel).
+_REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {
+    "profile":      profile_executor,
+    "pmc_roofline": pmc_roofline_executor,
+}
+
+# Prep / orchestration-only / agent-owned action kinds that the
+# Orchestration loop still needs to dispatch but whose bodies are no-ops
+# (the orchestration agent does the actual work via emit_intent). Kept
+# split so --no-kernel can exclude kernel-owned kinds.
+_NOOP_KINDS_COMMON: tuple[str, ...] = (
+    "setup", "classify", "target_analysis",
+    "dream", "re_explore", "recover",
+    "comm_optimization", "compiler_tuning",
+)
+_NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = (
+    "kernel_opt", "integrate", "deep_kernel_analysis",
+    "operator_tuning", "vendor_kernel_config",
+)
+
+
 def _register_executors(coordinator: Coordinator, *, no_kernel: bool = False) -> None:
     """Wire all currently-available action executors.
 
-    P2-1 ships only `baseline` (real Magpie). Stubs for prep + kernel-owned
-    actions keep the Orchestration loop from stalling while later phases
-    fill in the real ones.
+    Real executors are pulled from ``_REAL_EXECUTORS_FULL`` (always) and
+    ``_REAL_EXECUTORS_KERNEL_ONLY`` (when kernel-mode is on). Kinds that
+    the Orchestration loop dispatches but whose bodies are no-ops (prep
+    stubs + kernel-owned actions whose work happens in handlers) get
+    ``_noop_prep`` so SubAgentRunner doesn't fail with "no_executor".
 
     When ``no_kernel`` is True, kernel-owned action stubs are skipped and
     ``profile`` is also skipped (profiling only feeds kernel-opt).
     """
-    coordinator.sub.register_executor("baseline",       baseline_executor)
-    coordinator.sub.register_executor("backends",       backends_executor)
-    coordinator.sub.register_executor("params",         params_executor)
-    coordinator.sub.register_executor("sweep",          sweep_executor)
-    coordinator.sub.register_executor("report",         report_executor)
-    coordinator.sub.register_executor("validate_stack", validate_stack_executor)
+    for kind, fn in _REAL_EXECUTORS_FULL.items():
+        coordinator.sub.register_executor(kind, fn)
 
     if no_kernel:
-        # No profile (it only feeds kernel-opt), no kernel-owned actions.
-        for kind in ("setup", "classify", "target_analysis",
-                      "dream", "re_explore", "recover",
-                      "comm_optimization", "compiler_tuning"):
-            coordinator.sub.register_executor(kind, _noop_prep)
+        noop_kinds = _NOOP_KINDS_COMMON
     else:
-        coordinator.sub.register_executor("profile", profile_executor)
-        coordinator.sub.register_executor("pmc_roofline", pmc_roofline_executor)
-        for kind in ("setup", "classify", "target_analysis",
-                      "kernel_opt", "integrate", "deep_kernel_analysis",
-                      "operator_tuning", "vendor_kernel_config",
-                      "dream", "re_explore", "recover",
-                      "comm_optimization", "compiler_tuning"):
-            coordinator.sub.register_executor(kind, _noop_prep)
+        for kind, fn in _REAL_EXECUTORS_KERNEL_ONLY.items():
+            coordinator.sub.register_executor(kind, fn)
+        noop_kinds = _NOOP_KINDS_COMMON + _NOOP_KINDS_KERNEL_ONLY
+
+    for kind in noop_kinds:
+        coordinator.sub.register_executor(kind, _noop_prep)
 
 
 def _print_final_summary(state: SharedState, stop_reason: str) -> None:
