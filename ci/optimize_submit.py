@@ -503,7 +503,7 @@ class SafeOptimizeClient:
         return result.get("id", "")
 
     def wait_ready(
-        self, model_id: str, timeout_min: int = 120, poll_s: int = 30,
+        self, model_id: str, timeout_min: int = 480, poll_s: int = 30,
     ) -> bool:
         log.info("waiting for model %s to be Ready (timeout=%dm)", model_id, timeout_min)
         deadline = time.time() + timeout_min * 60
@@ -618,8 +618,34 @@ class SafeOptimizeClient:
             # If SaFE already shows terminal, trust it.
             if sf_status in self.TERMINAL_TASK_STATUSES:
                 return sf_status, last_task
-            # ResultMessage = agent's stop_reason event, conclusive.
+            # ResultMessage = agent's message thread ended. But this is NOT
+            # necessarily a clean success: when the brain force-terminates a
+            # session (e.g. sandbox max-runtime, Vertex quota), the jsonl
+            # archive header gets `failed: true error: "terminated"` and SaFE
+            # subsequently flips the task to Failed with message="optimization
+            # report not found; skill may have exited early". The SaFE
+            # controller lags the SSE stream by 10-90s in this case, so we
+            # short-poll for up to 120s before optimistically returning
+            # "Succeeded".
             if sse_reason == "ResultMessage":
+                log.info("[task %s] SSE returned ResultMessage — short-polling "
+                         "SaFE for terminal status (up to 120s)", task_id)
+                for _ in range(12):
+                    time.sleep(10)
+                    if time.time() > deadline:
+                        break
+                    try:
+                        last_task = self.get_task(task_id)
+                    except Exception:
+                        continue
+                    sf_status = last_task.get("status", "") if last_task else ""
+                    if sf_status in self.TERMINAL_TASK_STATUSES:
+                        log.info("[task %s] SaFE settled on %s after ResultMessage",
+                                 task_id, sf_status)
+                        return sf_status, last_task
+                log.info("[task %s] SaFE never settled within 120s after "
+                         "ResultMessage — falling back to optimistic Succeeded",
+                         task_id)
                 return "Succeeded", last_task
             # deadline = we've burned the per-task wall clock.
             if sse_reason == "deadline":
