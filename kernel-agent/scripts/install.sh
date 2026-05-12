@@ -3,6 +3,7 @@
 #
 # Base install is intentionally small and deterministic:
 #   - ray[default]==2.44.1 + click<8.3.0
+#   - Node.js/npm for claude/codex CLIs
 #   - TraceLens editable install + CLI verification
 #
 # The installer prepares all kernel-agent backends in one pass.
@@ -88,8 +89,9 @@ Usage: install.sh [options]
 
 Always installs (no --with-* selectivity any more):
   ray[default]==2.44.1, click<8.3.0, TraceLens CLI,
-  GEAK CLI/config, OOB + claude/codex CLI auth, LLM proxy env/auth,
-  and the OOB auth-proxy on :4002 (via ensure_auth_proxy.sh).
+  Node.js/npm, GEAK CLI/config, OOB + claude/codex CLI auth,
+  LLM proxy env/auth, and the OOB auth-proxy on :4002
+  (via ensure_auth_proxy.sh).
 
 Options:
   --check-only       Verify current environment, do not install
@@ -143,6 +145,46 @@ run() {
 ensure_python() {
   python3 --version >/dev/null || die "python3 is required"
   python3 -m pip --version >/dev/null || die "pip is required"
+}
+
+ensure_node() {
+  log "ensuring Node.js/npm for claude/codex CLIs"
+  if command -v node >/dev/null 2>&1 && npm --version >/dev/null 2>&1; then
+    log "node: $(command -v node) ($(node --version 2>/dev/null || echo unknown))"
+    log "npm: $(command -v npm) ($(npm --version 2>/dev/null || echo unknown))"
+    return 0
+  fi
+
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "node/npm missing; claude/codex CLI install would be skipped"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would install Node.js 20 from NodeSource because node/npm is missing"
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    verify_die "node/npm missing and apt-get is unavailable; install Node.js 20 manually"
+    return 0
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    log "curl missing; installing curl/ca-certificates before NodeSource setup"
+    apt-get update >/dev/null
+    apt-get -y install ca-certificates curl gnupg >/dev/null
+  fi
+
+  log "installing Node.js 20 from NodeSource"
+  apt-get -y purge libnode-dev libnode72 nodejs nodejs-doc npm >/dev/null 2>&1 || true
+  if ! curl -fsSL https://deb.nodesource.com/setup_20.x 2>/dev/null | bash - >/dev/null 2>&1; then
+    verify_die "NodeSource setup failed; cannot install Node.js/npm for claude/codex CLIs"
+    return 0
+  fi
+  if ! apt-get -y install nodejs >/dev/null; then
+    verify_die "nodejs install failed; claude/codex CLI install cannot proceed"
+    return 0
+  fi
+  command -v node >/dev/null 2>&1 || verify_die "node CLI not found after nodejs install"
+  npm --version >/dev/null 2>&1 || verify_die "npm not usable after nodejs install"
 }
 
 ensure_ray() {
@@ -353,26 +395,22 @@ ensure_oob() {
     log "oob already installed: $(command -v oob)"
   fi
 
-  if command -v node >/dev/null 2>&1; then
-    if ! npm --version >/dev/null 2>&1; then
-      log "system npm broken; reinstalling nodejs 20 from nodesource"
-      if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-        apt-get -y purge libnode-dev libnode72 nodejs nodejs-doc npm >/dev/null 2>&1 || true
-        curl -fsSL https://deb.nodesource.com/setup_20.x 2>/dev/null | bash - >/dev/null 2>&1 \
-          || warn "nodesource setup failed"
-        apt-get -y install nodejs >/dev/null 2>&1 || warn "nodejs install failed"
-      fi
+  if ! command -v npm >/dev/null 2>&1; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      log "would install claude/codex npm CLIs after Node.js/npm is installed"
+      ensure_llm_auth_files
+      return 0
     fi
-    if command -v npm >/dev/null 2>&1 && ! command -v claude >/dev/null 2>&1; then
-      run npm config set prefix /usr/local
-      run npm install -g @anthropic-ai/claude-code
-    fi
-    if command -v npm >/dev/null 2>&1 && ! command -v codex >/dev/null 2>&1; then
-      run npm config set prefix /usr/local
-      run npm install -g @openai/codex@0.100.0
-    fi
-  else
-    warn "node not found; skipping claude/codex npm CLI install"
+    verify_die "npm not found; ensure_node must run before ensure_oob"
+    return 0
+  fi
+  if ! command -v claude >/dev/null 2>&1; then
+    run npm config set prefix /usr/local
+    run npm install -g @anthropic-ai/claude-code
+  fi
+  if ! command -v codex >/dev/null 2>&1; then
+    run npm config set prefix /usr/local
+    run npm install -g @openai/codex@0.100.0
   fi
 
   ensure_llm_auth_files
@@ -563,6 +601,7 @@ main() {
     mkdir -p "${KERNEL_AGENT_ROOT}/runs"
   fi
   ensure_python
+  ensure_node
   ensure_ray
   ensure_ray_started
   ensure_tracelens
