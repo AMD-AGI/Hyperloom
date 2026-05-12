@@ -620,6 +620,7 @@ async def _run_optimization_single(
         budget_minutes:  default 60
         source_file:     path to original kernel source (for context)
         candidates_path: path to JSON describing candidates (optional)
+        extra_sglang_args: SGLang runtime flags for GEAK metadata (optional)
         enable_rag:      default True; false disables GEAK RAG tools
         enable_xs_memory: default True; false disables GEAK cross-session memory
         dry_run:         default False (testing)
@@ -650,6 +651,8 @@ async def _run_optimization_single(
         cmd += ["--backends", str(payload["backends"])]
     if payload.get("source_file"):
         cmd += ["--source-file", str(payload["source_file"])]
+    if payload.get("extra_sglang_args"):
+        cmd += ["--extra-sglang-args", str(payload["extra_sglang_args"])]
     if payload.get("candidates_path"):
         cmd += ["--candidates-path", str(payload["candidates_path"])]
     if payload.get("benchmark_file"):
