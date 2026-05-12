@@ -157,6 +157,26 @@ class SharedState:
     # run_optimization REVERTs and exhausted integrate attempts.
     rejected_kernel_ids: list[str] = field(default_factory=list)
 
+    # T1+T2 (search-space expansion) — see SKILL.md "Search-space expansion".
+    # Populated once per session by BackendsExecutor / ParamsExecutor on the
+    # first run after they AST-parse the live framework's server_args.py.
+    # Schema: {framework: {"backend_flags": [...], "param_flags": [...],
+    #                       "ts": iso, "source_path": str}}.
+    # The Orchestration prompt surfaces this so the LLM knows the full
+    # framework-version-correct flag namespace it can synthesize variants
+    # from (instead of being limited to the shipped DEFAULT_*_GRID).
+    discovered_flags: dict[str, Any] = field(default_factory=dict)
+    # Rolling per-action winners log used for IR-26 dynamic idea generation.
+    # Each entry: {action, round_id, base_tput, winners: [{name, tput,
+    # gain_pct, extra_sglang_args, extra_envs}], best: {...}, ts}.
+    # Capped at 20 rows to keep prompt context bounded.
+    backend_winners_history: list[dict[str, Any]] = field(default_factory=list)
+    # Set of synergy combo keys ("name1+name2+...") that have already been
+    # tested this session, so the IR-26 re-explore loop doesn't re-run the
+    # same combination after each new round of explore. Populated by
+    # BackendsExecutor when phase-2 combos run.
+    synergy_attempted: list[str] = field(default_factory=list)
+
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
@@ -592,6 +612,121 @@ class SharedState:
             return
         self.params_search = dict(update)
 
+    # ------------------------------------------------------------------
+    # T1/T2 — search-space expansion bookkeeping
+    # ------------------------------------------------------------------
+    def record_discovered_flags(
+        self,
+        *,
+        framework: str,
+        backend_flags: list[str] | None = None,
+        param_flags: list[str] | None = None,
+        source_path: str = "",
+    ) -> None:
+        """Persist the AST-discovered flag list for a framework.
+
+        Called by BackendsExecutor / ParamsExecutor when they first run
+        ``discover_*_flags()`` on a fresh session. The Orchestration prompt
+        surfaces the union so the LLM can synthesize new GridVariant
+        candidates that the shipped DEFAULT_*_GRID may not cover.
+
+        Idempotent: re-recording overwrites the per-framework entry but
+        leaves other frameworks untouched.
+        """
+        fw = (framework or "").strip().lower() or "unknown"
+        entry = dict(self.discovered_flags.get(fw) or {})
+        if backend_flags is not None:
+            entry["backend_flags"] = sorted(set(str(f) for f in backend_flags))
+        if param_flags is not None:
+            entry["param_flags"] = sorted(set(str(f) for f in param_flags))
+        if source_path:
+            entry["source_path"] = str(source_path)
+        entry["ts"] = _now_iso()
+        self.discovered_flags[fw] = entry
+
+    def push_backend_winners_round(
+        self,
+        *,
+        action: str,
+        base_tput: float,
+        base_extra_args: str,
+        winners: list[dict[str, Any]],
+        best: dict[str, Any] | None,
+        max_history: int = 20,
+    ) -> None:
+        """Append one explore round's winners (≥+1% over base) to history.
+
+        IR-26 (dynamic idea generation) reads this so the LLM, before
+        proposing the next backends/params round, can compose new combos /
+        retries / sibling-flag variants from what previously won. Marathon
+        equivalent: orchestrator pane's per-tick "follow-on actions"
+        synthesis (marathon/skills/SKILL.md §"Dynamic Idea Generation").
+        """
+        round_id = f"{action}-{len(self.backend_winners_history) + 1:03d}"
+        entry = {
+            "action": str(action),
+            "round_id": round_id,
+            "base_tput": float(base_tput) if base_tput is not None else 0.0,
+            "base_extra_args": str(base_extra_args or ""),
+            "winners": [
+                {
+                    "name": str(w.get("name", "")),
+                    "tput": w.get("output_throughput") or w.get("tput"),
+                    "gain_pct": w.get("gain_pct"),
+                    "extra_sglang_args": str(
+                        w.get("candidate_extra_sglang_args")
+                        or w.get("extra_sglang_args") or ""
+                    ),
+                    "extra_envs": dict(w.get("extra_envs") or {}),
+                    "note": str(w.get("note") or ""),
+                }
+                for w in (winners or [])
+                if isinstance(w, dict)
+            ],
+            "best": (
+                {
+                    "name": str(best.get("name", "")),
+                    "tput": best.get("output_throughput") or best.get("tput"),
+                    "extra_sglang_args": str(
+                        best.get("candidate_extra_sglang_args")
+                        or best.get("extra_sglang_args") or ""
+                    ),
+                    "extra_envs": dict(best.get("extra_envs") or {}),
+                }
+                if isinstance(best, dict) else None
+            ),
+            "ts": _now_iso(),
+        }
+        self.backend_winners_history.append(entry)
+        if len(self.backend_winners_history) > max_history:
+            self.backend_winners_history = (
+                self.backend_winners_history[-max_history:]
+            )
+
+    def mark_synergy_attempted(self, combo_names: list[str]) -> None:
+        """Record one synergy combo as already tested.
+
+        ``combo_names`` is a list of GridVariant.name members ordered by
+        the synergy group; the canonical key is ``"+".join(sorted(names))``
+        so the same set isn't double-counted regardless of input order.
+        """
+        if not combo_names:
+            return
+        key = "+".join(sorted(str(n) for n in combo_names if n))
+        if not key:
+            return
+        if key in self.synergy_attempted:
+            return
+        self.synergy_attempted.append(key)
+        if len(self.synergy_attempted) > 100:
+            self.synergy_attempted = self.synergy_attempted[-100:]
+
+    def is_synergy_attempted(self, combo_names: list[str]) -> bool:
+        if not combo_names:
+            return False
+        key = "+".join(sorted(str(n) for n in combo_names if n))
+        return bool(key) and key in self.synergy_attempted
+
     def seed_stack_from_current_best(self) -> None:
         """Backfill stack for old sessions that only had current_best."""
         if self.optimization_stack or not isinstance(self.current_best, dict):
@@ -725,6 +860,9 @@ class SharedState:
             f"last_select_kernels={self._format_last_select_kernels()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"params_search={self._format_params_search()}",
+            f"discovered_flags={self._format_discovered_flags()}",
+            f"backend_winners_history={self._format_backend_winners_history()}",
+            f"synergy_attempted={len(self.synergy_attempted)} combos",
             f"last_kernel_opt={self._format_last_kernel_opt()}",
             f"rejected_kernel_patches={self._format_rejected_kernel_patches()}",
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
@@ -743,6 +881,42 @@ class SharedState:
             for r in self.rejected_kernel_patches[-5:]
             if isinstance(r, dict)
         ] or "(none)"
+
+    def _format_discovered_flags(self) -> str:
+        if not self.discovered_flags:
+            return "(none — first backends/params round will populate)"
+        parts: list[str] = []
+        for fw, entry in sorted(self.discovered_flags.items()):
+            if not isinstance(entry, dict):
+                continue
+            n_b = len(entry.get("backend_flags") or [])
+            n_p = len(entry.get("param_flags") or [])
+            parts.append(f"{fw}:backend={n_b}/param={n_p}")
+        return ", ".join(parts) or "(none)"
+
+    def _format_backend_winners_history(self) -> str:
+        if not self.backend_winners_history:
+            return "(no explore rounds completed)"
+        last = self.backend_winners_history[-3:]
+        parts: list[str] = []
+        for r in last:
+            if not isinstance(r, dict):
+                continue
+            wn = [w.get("name") for w in (r.get("winners") or [])
+                  if isinstance(w, dict)]
+            best = r.get("best") or {}
+            best_name = (
+                best.get("name") if isinstance(best, dict) else None
+            )
+            parts.append(
+                f"{r.get('round_id','?')}({r.get('action','?')}): "
+                f"winners={wn or []} best={best_name or '(none)'}"
+            )
+        suffix = (
+            f" [+{len(self.backend_winners_history) - 3} earlier rounds]"
+            if len(self.backend_winners_history) > 3 else ""
+        )
+        return " | ".join(parts) + suffix
 
     def _format_params_search(self) -> str:
         if not self.params_search:
