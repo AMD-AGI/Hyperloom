@@ -616,8 +616,8 @@ in `baseline.py:AITER_JIT_PROBE_PATHS` wins; override via
 |---|---|
 | `task.params['timeout_sec']` set | task value (always wins) |
 | Probe `found` + COLD | `BASELINE_COLD_START_TIMEOUT_SEC` (3600s; override `INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC=N`) |
-| Probe `found` + WARM | `BASELINE_DEFAULT_TIMEOUT_SEC` (1500s) |
-| Probe `not_found` / `error` | 1500s + WARN |
+| Probe `found` + WARM | `BASELINE_DEFAULT_TIMEOUT_SEC` (2400s) |
+| Probe `not_found` / `error` | 2400s + WARN |
 
 Every launch logs one `baseline_executor: ...` marker (COLD_START / WARM /
 explicit / not located); grep `optimizer_runs/run_*.log` to verify. Resolved

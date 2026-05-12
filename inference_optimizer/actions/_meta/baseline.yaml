@@ -22,7 +22,7 @@ side_effects:
 preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 25
-lease_ttl_sec: 1200
+lease_ttl_sec: 4200
 description: "Launch a fresh server with NO accepted modifications, run Magpie benchmark, and set baseline_tput."
 pipeline_phase: measure
 typical_runtime_min: 5.0
