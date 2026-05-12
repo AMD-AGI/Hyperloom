@@ -87,15 +87,55 @@ on:
       prompt_prefix:
         # Prepended verbatim to the SaFE-generated Hyperloom prompt
         # (PromptPrefix field on CreateTaskRequest, added in
-        # apiserver/pkg/handlers/optimization/types.go). Default points
-        # the skill at the alternate SKILL.md that the batch lives in,
-        # so the agent picks up the per-batch fixes without us having to
-        # re-bake an image. Leave empty to use the SaFE built-in skill
-        # resolution.
-        description: 'Free-form prompt prefix prepended to the SaFE-generated Hyperloom prompt. Default points the agent at /wekafs/HyperloomV2/inference_optimizer/SKILL.md.'
+        # apiserver/pkg/handlers/optimization/types.go).
+        #
+        # Default carries the entire "always do / never do" preamble we
+        # want the agent to see *before* the auto-generated Configuration
+        # block. The contents mirror the preventive instructions in
+        # /wekafs/HyperloomV2/ci/prompt_template.md, which we
+        # cannot inline directly because that file lives in a peer repo
+        # the SaFE backend does not read. Keeping the rules here means
+        # one place to update when a new failure mode shows up in the
+        # batch reports.
+        #
+        # Critical rules below address the failure modes we hit in
+        # batch=10 (2026-05-12) — partial-report-on-abort, vLLM
+        # forbidden flags, RESULT_DIR-not-exported writes-silently,
+        # find / hangs.
+        description: 'Free-form prompt prefix prepended to the SaFE-generated Hyperloom prompt. Default carries HyperloomV2 skill pointer + partial-report-on-abort + vLLM forbidden flags + safety rules.'
         required: false
         default: |
-          Use the skill at /wekafs/HyperloomV2/inference_optimizer/SKILL.md to optimize this model. Working directory: cd /wekafs/HyperloomV2.
+          Use the skill at /wekafs/HyperloomV2/inference_optimizer/SKILL.md to optimize this model.
+          Working directory: cd /wekafs/HyperloomV2 before running any skill commands.
+
+          CRITICAL — Required Artifacts (the canonical SaFE success contract):
+          At the end of the run, ALWAYS write both files to $RESULT_DIR (defaults to /workspace/hyperloom/).
+          If these files are missing, SaFE marks the task Failed regardless of whether the skill made real progress.
+
+            $RESULT_DIR/optimization_report.md
+            $RESULT_DIR/ci_metrics.json
+              {"baseline_throughput": <float>, "optimized_throughput": <float>, "gain_pct": <float>, "tok_per_gpu_baseline": <float>, "tok_per_gpu_optimized": <float>, "actions_taken": ["..."]}
+
+          If the pipeline aborts (kernel apply failed / server failed to start / optimization tooling crash):
+          - Set optimized_throughput = baseline_throughput, gain_pct = 0.0.
+          - Set actions_taken = ["aborted: <one-line reason>"].
+          - Still emit BOTH files. A partial report with baseline-only numbers is far more useful than no report at all.
+
+          CRITICAL — vLLM Forbidden Flags (server will crash with "unrecognized arguments"):
+          - --num-scheduler-steps   (removed in vLLM v0.4.0)
+          - --chunked-prefill-size  (SGLang-only, NOT vLLM)
+          - --enable-chunked-prefill (only safe on vLLM >= 0.6.0; check version first)
+
+          CRITICAL — Result Directory:
+          Before running any skill script (run_baseline.sh, run_sweep.sh, etc.), export:
+            export NFS_ROOT=/wekafs
+            export RESULT_DIR=/workspace/hyperloom/
+          Otherwise baseline/sweep writes fail silently and the job will hang.
+
+          SAFETY:
+          - NEVER `find /` or `find /wekafs` without `-maxdepth 4`. Prefer which/ls/$PATH lookups.
+          - NEVER run `kill -9 $(ps aux | grep ...)` — this kills the sandbox executor itself.
+          - Per-bash timeouts must be <= 120s; use short polling loops rather than one long blocking call.
       target_gpu:
         description: 'Reference GPU for InferenceX comparison in the summary table'
         required: false
