@@ -1,12 +1,17 @@
 # Audit Report Schema
 
-Defines the JSON structure that the inspector emits at the end of every audit
-(SKILL.md Step S5), and the surrounding markers that bracket the report in the
-agent transcript.
+Defines the JSON structure that the inspector writes at the end of every
+audit (SKILL.md Step S5) to disk, the sentinel state file the inspector
+maintains alongside it, and the one-line acknowledgement the inspector
+prints into the chat.
 
-The report is the **only** machine-readable artifact the inspector produces.
-The user prompt parses it to decide whether to advance, remediate, or rollback.
-Future inspector invocations grep the markers to set the next audit window.
+The report is **on disk only**: the canonical artifact lives at
+`$RESULT_DIR/.audit/<PHASE>_<utc-ts>.json`. The chat shows only a single
+`[Inspection] ...` line so the user knows an audit ran but is not flooded
+with audit machinery. The user prompt and the main agent read the on-disk
+JSON to decide whether to advance, remediate, or rollback. Future
+inspector invocations read the sentinel `$RESULT_DIR/.audit/_state.json`
+to set the next audit window.
 
 ---
 
@@ -14,22 +19,17 @@ Future inspector invocations grep the markers to set the next audit window.
 
 ```json
 {
-  "schema_version": "1.1",
-  "inspector_version": "1.1",
-  "manifest_version": "1.1",
-  "verdict_source": "compute_verdict.py@a1b2c3d4e5f6",
+  "verdict_source": "compute_verdict.py",
   "phase": "BASELINE",
   "phase_index": 5,
   "target_skill": ".cursor/skills/inference-optimization",
-  "phase_action_file": "actions/baseline.md",
   "phase_action_files": ["actions/baseline.md"],
   "audited_at_utc": "2026-04-21T10:34:00Z",
 
   "audit_window": {
     "transcript": "/root/.cursor/projects/root-Hyperloom/agent-transcripts/<uuid>/<uuid>.jsonl",
     "from_line": 412,
-    "to_line": 1037,
-    "previous_inspector_end_line": 411
+    "to_line": 1037
   },
 
   "run_env_resolved": {
@@ -121,26 +121,22 @@ Future inspector invocations grep the markers to set the next audit window.
 
 | field | type | required | meaning |
 |---|---|---|---|
-| `schema_version` | string | yes (v1.1+) | Version of this report schema. Currently `"1.1"`. |
-| `inspector_version` | string | yes | Version of the audit logic. Pin via SKILL.md S5. Bump on schema change. |
-| `manifest_version` | string | yes | Version of the extraction protocol used to build the manifest. From [extraction-protocol.md](extraction-protocol.md). |
-| `verdict_source` | string | yes (v1.1+) | Identifier of the program that produced the `verdict`/`violations`/`passes` block. Format: `compute_verdict.py@<sha1>` for normal audits, or `compute_verdict.py@<sha1>|self_failure` for inspector self-failure reports. The presence of this field is the agent's promise that the verdict block was not hand-edited; see [remediation-protocol.md §6 anti-pattern 7](remediation-protocol.md). |
+| `verdict_source` | string | yes | Identifier of the program that produced the `verdict`/`violations`/`passes` block. Always the literal string `"compute_verdict.py"`. The presence of this field is the agent's promise that the verdict block was not hand-edited; see [remediation-protocol.md §6 anti-pattern 7](remediation-protocol.md). For inspector self-failure reports this becomes `"compute_verdict.py|self_failure"`. |
 | `phase` | string | yes | Symbolic phase name passed in S1. Uppercase by convention. |
 | `phase_index` | integer | no | Optional integer index into the target skill's phase list (1-based). Helps with ordering when phases repeat (e.g. DFS LOOP iterations). |
 | `target_skill` | string (path) | yes | Path to the audited skill, relative to repo root or absolute. |
-| `phase_action_file` | string (path) | yes | Relative path inside `target_skill` of the **first** action `.md` audited. Kept for backward compatibility. |
-| `phase_action_files` | string[] (paths) | yes (v1.1+) | All action `.md` files audited for this phase. For a single-action phase this is `[phase_action_file]`. For a DFS_LOOP that ran kernel-opt this MUST contain both `actions/kernel-opt.md` and `actions/integrate.md` per IR-3. |
+| `phase_action_files` | string[] (paths) | yes | All action `.md` files audited for this phase, relative to `target_skill`. For a DFS_LOOP that ran kernel-opt this MUST contain both `actions/kernel-opt.md` and `actions/integrate.md` per IR-3. |
 | `audited_at_utc` | string (ISO-8601) | yes | UTC timestamp of S5 emission. |
 | `audit_window` | object | yes | Transcript and line range. See below. |
 | `run_env_resolved` | object | yes | Env vars actually used for path substitution. Cross-checked against transcript exports in S1. |
 | `run_env_unresolved` | string[] | yes | Env vars referenced in the action `.md` that could not be resolved. |
-| `verdict` | enum | yes | One of `PASS`, `WARN`, `BLOCK`, `FATAL`. Aggregated per S3 below. |
+| `verdict` | enum | yes | One of `PASS`, `WARN`, `BLOCK`, `FATAL`. Aggregated per §3 below. |
 | `verdict_summary` | string | yes | Human-readable count, e.g. `"passes=8 fatal=0 block=1 warn=2 info=0 unverified=3"`. |
 | `violations` | object[] | yes | Entries with `severity in {warn, block, fatal}`. Empty array if none. |
 | `passes` | object[] | yes | Entries that passed audit. May be summarised when long. |
 | `unverified` | object[] | yes | Entries the inspector could not evaluate. |
 | `extraction_diagnostics` | object | yes | Metadata about the manifest, see below. |
-| `observations` | object | yes (v1.1+) | The pure-fact observations dumped in S5a — `tool_call_observations`, `artifact_observations`, `state_observations`, `transcript`. See SKILL.md §S5a for schema and forbidden keys. Stored alongside the verdict so a re-audit (or a human review) can re-derive verdict by re-running `compute_verdict.py` against this block plus `semantic_rules.json`. |
+| `observations` | object | yes | The pure-fact observations dumped in S5a — `tool_call_observations`, `artifact_observations`, `state_observations`, `transcript`. See SKILL.md §S5a for schema and forbidden keys. Stored alongside the verdict so a re-audit (or a human review) can re-derive verdict by re-running `compute_verdict.py` against this block plus `semantic_rules.json`. |
 | `next_checkpoint` | object | yes | Reminder to the main agent about when to invoke inspector next. |
 
 ### `audit_window`
@@ -148,9 +144,8 @@ Future inspector invocations grep the markers to set the next audit window.
 | field | type | meaning |
 |---|---|---|
 | `transcript` | absolute path | The JSONL file inspector grepped. |
-| `from_line` | int | First line considered (inclusive). Equals `previous_inspector_end_line + 1` if a prior INSPECTOR_END marker exists; otherwise the line of the original user prompt for this run. |
-| `to_line` | int | Last line considered (inclusive). Typically the line just before the inspector's own first tool call this invocation. |
-| `previous_inspector_end_line` | int or null | Line number of the most recent `=== INSPECTOR_END ... ===` before this audit; null if first invocation. |
+| `from_line` | int | First line considered (inclusive). Equals `_state.json::last_audit_to_line + 1` if a sentinel from a previous audit was readable and matched the chosen transcript; otherwise `1` (first audit of the run). |
+| `to_line` | int | Last line considered (inclusive). Typically the line just before the inspector's own first tool call this invocation; written into `_state.json::last_audit_to_line` so the next audit starts at `to_line + 1`. |
 
 ### `violations[]` and `passes[]` and `unverified[]`
 
@@ -182,7 +177,7 @@ All three arrays use the same envelope (subset of fields per array):
 | `modality_demotions` | int | Pass 3 downgrades over pass 2 default. |
 | `regex_anchors_diff_summary` | string | Human-readable narrative of the diff. Used in `WARN`-tier diagnostics if extraction is uncertain. |
 
-### `observations` (v1.1+)
+### `observations`
 
 | field | type | meaning |
 |---|---|---|
@@ -228,75 +223,104 @@ the verdict from PASS to WARN. This makes silent extraction failure visible.
 
 ---
 
-## 4. Markers (transcript-level wrapping)
+## 4. On-disk layout
 
-Inspector's textual reply at S5 emission MUST start and end with these exact
-single-line markers:
+After each audit, `scripts/emit_audit_report.py` writes:
 
 ```
-=== INSPECTOR_BEGIN phase=<PHASE_NAME> ts=<ISO-8601> ===
-... markdown summary, then a fenced ```json block with the audit_report.json ...
-=== INSPECTOR_END phase=<PHASE_NAME> ts=<ISO-8601> verdict=<VERDICT> ===
+$RESULT_DIR/.audit/
+├── _state.json                     # sentinel; consumed by find_transcript.py
+└── <PHASE>_<utc-ts>.json           # full audit_report.json (this schema)
+```
+
+Filename convention for the report file:
+
+- `<PHASE>` matches `[A-Z][A-Z0-9_]*` (e.g. `BASELINE`, `DFS_LOOP_3`).
+- `<utc-ts>` is ISO-8601 UTC with `:` replaced by `-` and the `Z` suffix
+  preserved (e.g. `2026-04-21T10-34-00Z`). This makes the path
+  filesystem-safe across all common OSes.
+- One file per audit invocation. Re-audits after BLOCK remediation produce
+  a new file with a later timestamp; older files are kept for the run
+  history.
+
+### `_state.json` (sentinel)
+
+```json
+{
+  "transcript_path": "/root/.cursor/projects/.../uuid.jsonl",
+  "last_audit_to_line": 1037,
+  "last_phase": "BASELINE",
+  "last_verdict": "PASS",
+  "last_ts": "2026-04-21T10:34:00Z",
+  "next_phase_hint": "PROFILE",
+  "history": [
+    {"phase": "SETUP",    "ts": "...", "verdict": "PASS", "to_line":  412,
+     "report_file": "SETUP_2026-04-21T10-12-00Z.json"},
+    {"phase": "BASELINE", "ts": "...", "verdict": "PASS", "to_line": 1037,
+     "report_file": "BASELINE_2026-04-21T10-34-00Z.json"}
+  ]
+}
+```
+
+| field | meaning |
+|---|---|
+| `transcript_path` | The transcript JSONL the last audit was scoped to. `find_transcript.py` only trusts the sentinel if its own resolved transcript path equals this value (cross-session safety). |
+| `last_audit_to_line` | The next inspector run uses `last_audit_to_line + 1` as `audit_from_line`. |
+| `last_phase` / `last_verdict` / `last_ts` | Mirrors the head of `history` for cheap lookup. |
+| `next_phase_hint` | Symbolic name passed via `--next-phase`. Used by `find_transcript.py` reporting only; not authoritative. |
+| `history` | Append-only list of every audit, capped at the last 50. Removed entries cannot be reconstructed; the per-phase report files (which are not capped) are the long-term record. |
+
+The sentinel is rewritten atomically on every audit (write-to-tmp,
+`os.replace`). The full per-phase reports under `$RESULT_DIR/.audit/` are
+the authoritative history.
+
+### One-line chat acknowledgement
+
+The inspector's entire chat output for an audit is a single line printed
+by `emit_audit_report.py`:
+
+```
+[Inspection] phase=<PHASE> verdict=<V> passes=<N> fatal=<n> block=<n> warn=<n> info=<n> unverified=<n> [top=<id>] -> <report_path>
 ```
 
 Format constraints:
 
-- `<PHASE_NAME>` matches `[A-Z][A-Z0-9_]*` (e.g. `BASELINE`, `DFS_LOOP_3`).
-- `<ISO-8601>` is the same value in both BEGIN and END markers (the BEGIN ts).
-- `<VERDICT>` is one of `PASS`, `WARN`, `BLOCK`, `FATAL`.
-- The markers are on their own lines, no leading whitespace, exactly three
-  equals signs each side, single space inside.
-
-These markers are how `find_transcript.py` locates the previous
-`INSPECTOR_END` line for the next audit window, and how integration tests
-verify the inspector ran. They MUST NOT appear inside the audit_report.json
-itself (the JSON should not include `=== ... ===` lines).
-
----
-
-## 5. Embedding the JSON in the reply
-
-The reply structure between markers should be:
-
-1. A short markdown header: `## Audit verdict: <VERDICT>`
-2. A short bulleted summary mirroring `verdict_summary` plus the top
-   violations (max 5 lines).
-3. A fenced JSON code block with the full `audit_report.json`. Use language
-   tag `json`.
-4. (If verdict is BLOCK or FATAL) A second markdown section
-   `## Required remediations` listing the `remediation` field of each
-   violation as a numbered list.
-
-The main agent parses item 3 (the fenced JSON) for machine action and reads
-items 1-2 and 4 for human readability. Keeping the JSON inside a fenced code
-block is necessary for it to round-trip through the transcript without
-escaping issues.
+- Stable prefix `[Inspection] ` (square brackets + literal `Inspection` +
+  single space) so the line is greppable by tooling.
+- Key-value pairs separated by single spaces. The `verdict_summary`
+  produced by `compute_verdict.py` (e.g. `passes=8 fatal=0 block=0 warn=0
+  info=0 unverified=2`) is appended verbatim.
+- `top=<id>` is included only when `verdict ∈ {BLOCK, FATAL}`; it names
+  the highest-severity violation so the user can recognise the issue
+  without opening the report.
+- The arrow `-> <report_path>` ends the line; `<report_path>` may be
+  truncated to its trailing 80 chars (with `...` prefix) by the emitter.
+- The agent prints this line **verbatim** from `emit_audit_report.py`'s
+  stdout. No surrounding markdown headers, no extra prose, no JSON. Only
+  for FATAL verdicts may the agent append exactly one extra natural-language
+  line explaining the stop reason (e.g. `Stopping run: GSM8K accuracy
+  regressed below the 0.65 floor (see report above).`).
 
 ---
 
-## 6. Schema Versioning and Backward Compatibility
+## 5. Reading the report
 
-- `schema_version` (top-level) tracks the audit_report schema itself.
-  Currently `1.1`.
-- `inspector_version` and `manifest_version` are independent. Inspector logic
-  may evolve without changing the manifest format and vice versa.
-- Adding new optional fields is a non-breaking change.
-- Removing or renaming a required field, or changing the type of a field, is
-  a breaking change and must bump the major version.
-- Verdict enum is closed; adding a new verdict value is a breaking change.
+The on-disk `audit_report.json` is the canonical artifact. The main agent
+reads it via `Read`/`Grep`/`Glob` from
+`$RESULT_DIR/.audit/<PHASE>_<utc-ts>.json` (latest file per phase) only when
+the verdict requires action:
 
-### Changes from 1.0 → 1.1
+- `PASS` / `WARN`: agent does not need to read the report. The one-line ack
+  carries enough information to continue.
+- `BLOCK`: agent reads `violations[*].remediation` and executes them as
+  natural next steps in the run, then re-invokes the inspector.
+- `FATAL`: agent reads `violations[*]` once for the rollback narrative,
+  then performs rollback per [remediation-protocol.md §3](remediation-protocol.md).
 
-- New top-level required fields: `schema_version`, `verdict_source`,
-  `phase_action_files`, `observations`.
-- `phase_action_file` is retained for backward compatibility but should
-  always equal `phase_action_files[0]`.
-- The `verdict`, `verdict_summary`, `passes`, `violations`, `unverified`
-  fields are now produced by `scripts/compute_verdict.py` and MUST NOT be
-  hand-edited by the agent. The `verdict_source` field documents which
-  build of the script ran.
-- A v1.0 reader can ignore the new fields and still parse the rest of the
-  report.
+The chat **never** contains a fenced `audit_report.json` block. Reasons:
 
-The README documents how to interpret an older `audit_report.json` blob found
-in a transcript when reading historical conversations.
+1. Long reports would dominate the chat for users only doing PASS runs.
+2. The agent's parser doesn't need the JSON in the transcript — it can
+   `Read` it from disk on demand.
+3. Future inspector runs locate the audit window via the sentinel; the
+   round-trip via chat is unnecessary.

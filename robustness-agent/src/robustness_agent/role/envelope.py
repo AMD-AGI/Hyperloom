@@ -5,15 +5,13 @@ This module mirrors the wire shape defined by
 robustness reactor can construct intents that the Coordinator's
 ``PolicyGate`` accepts without change.
 
-Two integration surfaces are supported:
-
-* SINGLE_PROC: the Coordinator imports :class:`RobustnessAgentBackend`
-  and calls ``backend.run(...)`` per tick. The backend returns
-  :class:`BackendTurnResult` carrying a list of :class:`Intent`.
-
-* MULTI_CLI (later milestone): the long-running CLI writes one envelope
-  dict per line into ``$SESSION_DIR/agents/robustness/outbox.jsonl``.
-  :func:`build_envelope_dict` produces that JSON-serialisable shape.
+Hosts drive the reactor through the subprocess CLI in
+:mod:`robustness_agent.runtime.cli`, which writes the resulting
+intents through :func:`build_envelope_dict` into ``emit.json`` —
+identical to how ``critic-agent`` ships its commit-review output.
+This file is *transport-agnostic*: same shape works for the Coordinator
+subprocess bridge today and for a long-running CLI writing JSONL rows
+to ``$SESSION_DIR/agents/robustness/outbox.jsonl`` in the future.
 
 The class layout intentionally avoids importing from inference_optimizer
 to keep this package independent. A contract test cross-checks the
@@ -358,8 +356,9 @@ def build_update_state(changes: Mapping[str, Any]) -> Intent:
 def build_envelope_dict(intents: list[Intent]) -> dict[str, Any]:
     """Serialise a list of intents into a single envelope dict.
 
-    Matches upstream ``INTENT_ENVELOPE_SCHEMA``. Used by the multi-cli
-    transport's outbox writer; the SINGLE_PROC backend uses the
-    :class:`BackendTurnResult` form instead.
+    Matches upstream ``INTENT_ENVELOPE_SCHEMA``. Used by the runtime
+    CLI's ``tick`` command to populate ``emit.json.intent_envelope`` —
+    identical to ``critic-agent``'s ``commit-review`` output, so the
+    same ``validate_envelope`` host-side check accepts both.
     """
     return {"intents": [i.to_envelope_item() for i in intents]}

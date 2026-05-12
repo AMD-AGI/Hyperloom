@@ -18,5 +18,8 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 8
 lease_ttl_sec: 300
+description: "Initialise session_id and persist run-level config (model, framework, gpu_type, paths)."
+pipeline_phase: prep
+typical_runtime_min: 2.0
 applicable_when:
   - "session_id == ''"
