@@ -17,5 +17,8 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 15
 lease_ttl_sec: 600
+description: "Brainstorm novel hypotheses (read-only) when normal search has plateaued; produces candidate ad-hoc actions."
+pipeline_phase: support
+typical_runtime_min: 5.0
 applicable_when:
   - "cumulative_gain_plateau"
