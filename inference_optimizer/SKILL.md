@@ -140,14 +140,11 @@ inference_optimizer optimize \
   --max-hours 2
 ```
 
-Install or validate the optimizer + downstream stack with the bundled
-installer. It is idempotent and chains to `kernel-agent/scripts/install.sh`,
-so a single call covers: inference_optimizer + `claude_agent_sdk` extras,
-Magpie, InferenceX detection, Ray (with a live ray head started), Node.js/npm,
-TraceLens CLI, GEAK + OOB CLI, the OOB auth-proxy on `:4002`, and
-`kernel-agent/env.sh`.
-A user request to optimize a model is approval to run this on a fresh node;
-do not stop for an extra confirmation:
+The bundled installer is idempotent and chains to
+`kernel-agent/scripts/install.sh`, covering: optimizer + `claude_agent_sdk`
+extras, Magpie, InferenceX, Ray head, Node/npm, TraceLens CLI, GEAK + OOB CLI,
+auth-proxy on `:4002`, `env.sh`. A user request to optimize a model is
+approval to run this on a fresh node:
 
 ```bash
 export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
@@ -163,17 +160,11 @@ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 "$PYTHON" -m inference_optimizer.cli --help
 ```
 
-Do not collapse dependent exports into a single command when `set -u` is active.
-Bash expands every right-hand side before assigning the left-hand sides, so
-`export HYPERLOOM_KERNEL_AGENT_ROOT=... KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"`
-can fail with `unbound variable` on a clean environment. Assign and export
-dependent variables on separate lines as shown above.
-
-The installer leaves a live Ray head running; `ray status` should succeed.
-`select_kernels` and downstream kernel agents need this — they submit Ray
-tasks with `num_gpus>=1`. Do not pass `--num-gpus=0` if you ever restart Ray
-manually; that leaves kernel optimization pending forever even when ROCm
-sees idle GPUs.
+Notes: with `set -u` active, assign dependent vars on separate lines (Bash
+expands RHS before assigning, so chained `export A=... B=$A` can fail with
+`unbound variable` on a clean environment). The installer leaves a live Ray
+head; `ray status` must succeed because `select_kernels` submits Ray tasks
+with `num_gpus>=1` — never restart Ray with `--num-gpus=0`.
 
 The CLI runs `_preflight()` on every launch as a safety net for `install.sh`.
 Steps 1–9 run before `_preflight()` returns; 10–12 run before Coordinator
@@ -194,13 +185,10 @@ boots. Cite the linked section for fixes:
 | 11 | Codex smoke-test (WARN-only): `--codex-model` checked when codex actually used (`--critic-agent` / `--critic-codex-bare` / `--kernel-codex`) | — |
 | 12 | Critic-agent runtime probe (when `--critic-agent` active): resolve `CRITIC_AGENT_ROOT` (env > sibling `$REPO_ROOT/critic-agent/` > abort), `python -m runtime.cli --help` (5s timeout); abort rc=2 if it fails. Default-sets `WORKSPACE_PATH` / `CRITIC_SESSION_MEMORY_DIR` / `CRITIC_KB_CLIENT_MODE`. | `## Critic Backend Selection` |
 
-The `install.sh`-based bring-up is the canonical entry point; `_preflight()`
-only catches drift mid-run. See `kernel-agent/SKILL.md` for the chained
-installer truth.
-
-Do NOT manually `pip install claude-agent-sdk`, copy `auth_proxy.py`, export
-`ANTHROPIC_*`, start ray, pip install Magpie, source `.env`, edit
-`~/.claude/config.json`, or `curl /v1/models` — `_preflight()` owns all of these. Unless anything is missing. 
+`install.sh` is the canonical bring-up; `_preflight()` catches drift mid-run.
+Don't manually pip-install SDKs, edit `~/.claude/config.json`, start Ray, or
+`curl /v1/models` — `_preflight()` owns all of these. See `kernel-agent/SKILL.md`
+for the chained installer truth.
 
 ### Recovery
 
@@ -295,27 +283,18 @@ Before a new model run, verify these fields match the environment:
 
 ### Workload-contract reuse (baseline → params/backends/sweep)
 
-The `baseline` executor materializes its YAML once with the operator's
-process env (`CONC` / `ISL` / `OSL` / `TP` / `MAX_MODEL_LEN` / `PRECISION`
-/ `RUN_EVAL` / `ROCR_VISIBLE_DEVICES` plus adaptive `NUM_PROMPTS` /
-`NUM_WARMUPS`) and writes it as `baseline_config.with_envs.yaml` next to
-the baseline workspace. The Coordinator stashes that path on
-`SharedState.baseline_config_path` and plumbs it forward as
-`task.params["config_path"]` for every subsequent `params`, `backends`,
-and `sweep` task.
-
-This means downstream variants benchmark the **same workload baseline
-ran**. Without this reuse the grid runner used to render variants from
-the shipped YAML's smoke defaults (`TP=1` / `CONC=8` / `ISL=256` /
-`OSL=256`) and produced ~10x lower throughput than baseline — the
-"baseline 4367 tok/s vs variants ~360 tok/s" benchmark fairness bug.
-
-`params` / `backends` / `sweep` also re-run materialization on top of
-whatever `config_path` they receive, so the contract still holds for
-direct test invocations or operators who delegate one of these actions
-before `baseline`. Sweep variants' explicit `CONC` / `ISL` / `OSL`
-overrides still win because `_grid_runner._build_variant_yaml` applies
-per-variant `extra_envs` last.
+`baseline` materializes its YAML once with the operator's process env (`CONC` /
+`ISL` / `OSL` / `TP` / `MAX_MODEL_LEN` / `PRECISION` / `RUN_EVAL` /
+`ROCR_VISIBLE_DEVICES` plus adaptive `NUM_PROMPTS` / `NUM_WARMUPS`), saves it
+as `baseline_config.with_envs.yaml`, and forwards the path on
+`SharedState.baseline_config_path` as `task.params["config_path"]` to every
+`params` / `backends` / `sweep` task. Variants thus benchmark the **same
+workload baseline ran**; without this contract they would render from the
+YAML's smoke defaults (`TP=1` / `CONC=8` / `ISL=256` / `OSL=256`) and produce
+~10x lower throughput (the historical fairness bug). Downstream actions
+re-materialize on top of `config_path`; per-variant `extra_envs` (e.g. sweep's
+explicit `CONC`/`ISL`/`OSL`) still win because `_grid_runner._build_variant_yaml`
+applies them last.
 
 ## Critic Backend Selection
 
@@ -422,33 +401,28 @@ it can make `torch.cuda.is_available()` return false. Use
 
 ## SGLang Parameter Search
 
-This project should first validate SGLang improvements, then add vLLM once the
-SGLang path is stable. `params` writes candidates through `EXTRA_SGLANG_ARGS`
-and `benchmark.envs`; do not hard-code a flag as default unless A/B results keep
-it across the target workload.
+Validate SGLang first, add vLLM once SGLang is stable. `params` writes
+candidates through `EXTRA_SGLANG_ARGS` and `benchmark.envs`; don't hard-code
+a flag as default unless A/B keeps it across the target workload.
 
-The default SGLang search already covers cuda graph batch caps, continuous
-decode steps, memory fraction, scheduling conservativeness, chunked prefill, and
-max prefill tokens. It should also test the InferenceX-derived candidates:
+Default grid covers cuda graph batch caps, continuous decode steps, memory
+fraction, scheduling conservativeness, chunked prefill, and max prefill tokens.
+Also test the InferenceX-derived candidates:
 
 - Cache/scheduler: `--disable-radix-cache`, `--max-running-requests 128/256`.
 - Tokenization/streaming: `--tokenizer-worker-num 8/16`, `--stream-interval 30/50`.
 - ROCm/TileLang envs: `SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=1`,
-  `SGLANG_HACK_FLASHMLA_BACKEND=tilelang`,
-  `SGLANG_OPT_USE_TILELANG_INDEXER=true`.
+  `SGLANG_HACK_FLASHMLA_BACKEND=tilelang`, `SGLANG_OPT_USE_TILELANG_INDEXER=true`.
 
-Treat speculative decoding as model-specific until validated. For MTP/EAGLE,
-use a custom grid with `SGLANG_ENABLE_SPEC_V2=1` and the appropriate
-`--speculative-*` flags only when the model has the required draft path or MTP
-support. Benchmark with chat-formatted prompts (`--dsv4` for DeepSeek-V4 style
-runs) because raw random prompts can make acceptance-rate results misleading.
+Speculative decoding is model-specific — only enable `SGLANG_ENABLE_SPEC_V2=1` /
+`--speculative-*` when the model has the required draft path or MTP support,
+and benchmark with chat-formatted prompts (`--dsv4` for DeepSeek-V4 style)
+because random prompts skew acceptance-rate results.
 
-When judging a SGLang candidate, compare at least `1k/1k` and `8k/1k`, and
-include both low and high concurrency if the model fits. Keep parameters only
-when throughput improves without unacceptable TTFT/E2E or correctness regressions.
-Coordinator-managed long runs test params incrementally with
-`max_candidates_per_round=5` by default; direct runner calls may pass `0` to run
-the full grid.
+Judge candidates over **{1k/1k, 8k/1k} × {low CONC, high CONC}** (high-CONC
+only when the model fits); KEEP only when throughput improves without
+unacceptable TTFT/E2E or correctness regression. Coordinator long runs default
+`max_candidates_per_round=5`; direct runner calls may pass `0` for the full grid.
 
 ### Per-Run Asset Override (advanced)
 
@@ -463,18 +437,13 @@ only when `_workload_envs.materialize_config_with_envs` defaults don't fit
 
 ## Launch a New Optimization
 
-Single command — assumes Step 1 (install) already ran in this pod.
-There is no `--session-name`; the session lives at the canonical
-`/workspace/hyperloom` (override with `$INFERENCE_OPTIMIZER_SESSION_DIR`):
-
-If the shell that runs these commands does not persist `export`s
-between invocations (Cursor agent sandboxes and similar), copy
-`inference_optimizer/scripts/setup_env.sh.example` to
-`optimizer_runs/setup_env.sh`, fill in the workload block, and `.` it
-at the start of every shell call. After `setsid nohup ... &`, locate
-the spawned optimizer with
-`pgrep -af 'inference_optimizer.*optimize'` instead of trusting `$!` —
-some shell wrappers expose their own PID, not the optimizer's.
+Assumes Step 1 (install) already ran. Session lives at `/workspace/hyperloom`
+(override `$INFERENCE_OPTIMIZER_SESSION_DIR`); there is no `--session-name`.
+For sandboxes that don't persist `export`s across shell calls (Cursor agents),
+copy `inference_optimizer/scripts/setup_env.sh.example` to
+`optimizer_runs/setup_env.sh`, fill in the workload block, and `.` it each call.
+After `setsid nohup ... &`, locate the optimizer via
+`pgrep -af 'inference_optimizer.*optimize'` — `$!` may be a wrapper PID.
 
 ```bash
 cd "$REPO_ROOT"
@@ -496,20 +465,14 @@ setsid nohup inference_optimizer --verbose optimize \
 echo $! > "$PID_FILE"
 ```
 
-`setsid nohup ... &` is required for runs > 5 min. Cursor's background
-shell alone is not enough; it can die on SSH disconnect.
+`setsid nohup ... &` is required for runs > 5 min — Cursor's background
+shell can die on SSH disconnect.
 
-The Critic now defaults to `--critic-agent` (the real critic-agent
-runtime — KB priors / session memory / `review_constraints`-gated
-verdicts). Pass `--critic-mock` to fall back to the always-approve
-adapter for offline / smoke runs, or `--critic-codex-bare` to run the
-legacy direct-Codex path with no runtime layer (for debugging the LLM
-in isolation). See [Critic Backend Selection](#critic-backend-selection).
-
-Robustness defaults to `--robustness-agent` (the real robustness-agent
-runtime). Pass `--robustness-mock` only for offline / smoke runs, or set
-`INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND=mock` as a pod-level
-override.
+Critic defaults to `--critic-agent`; Robustness defaults to `--robustness-agent`.
+See [Critic Backend Selection](#critic-backend-selection) for `--critic-mock` /
+`--critic-codex-bare` overrides; pod-level overrides via
+`INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` /
+`INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND`.
 
 After launching, do a short health check:
 
@@ -540,42 +503,22 @@ artifacts; the CLI clears stale `stop_reason` and `crash_count` before retrying.
 ## Robustness Monitor for Long Runs
 
 For runs > 5 min, start a monitor in its own `setsid nohup` process. It polls
-at most every 5 min, exits on terminal `stop_reason` (`target_reached` /
-`no_more_leverage` / `time_exhausted` / `max_ticks`), and re-launches via the
-Resume diff above when the optimizer dies unexpectedly.
+`state.json` every 5 min, exits on terminal `stop_reason` (`target_reached` /
+`no_more_leverage` / `time_exhausted` / `max_ticks`), and resumes via
+`--resume` when the optimizer dies unexpectedly.
 
 ```bash
-export ROBUSTNESS_MONITOR_SCRIPT="$REPO_ROOT/optimizer_runs/robustness_monitor.sh"
-export ROBUSTNESS_MONITOR_LOG="$REPO_ROOT/optimizer_runs/robustness_monitor_$(date +%Y%m%d_%H%M%S).log"
-
-cat > "$ROBUSTNESS_MONITOR_SCRIPT" <<'SH'
-#!/usr/bin/env bash
-set -u
-session_dir="${INFERENCE_OPTIMIZER_SESSION_DIR:-/workspace/hyperloom}"
-deadline=$(( $(date +%s) + (${MAX_HOURS:-5} + 1) * 3600 ))
-read_stop() { python3 -c "import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); print((json.loads(p.read_text()).get('stop_reason') or '').strip() if p.exists() else '')" "$session_dir/state.json"; }
-while [ "$(date +%s)" -lt "$deadline" ]; do
-  pid=""; [ -f "$PID_FILE" ] && read -r pid < "$PID_FILE" || true
-  case "$(read_stop)" in
-    target_reached|no_more_leverage|time_exhausted|max_ticks)
-      echo "[robustness] terminal $(date -Is)"; exit 0 ;;
-  esac
-  if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then sleep 300; continue; fi
-  echo "[robustness] optimizer stopped; resuming $(date -Is)"
-  resume_log="$REPO_ROOT/optimizer_runs/resume_$(date +%Y%m%d_%H%M%S).log"
-  setsid nohup inference_optimizer --verbose optimize --resume \
-    --target-gain "${TARGET_GAIN:-10}" --max-hours "${MAX_HOURS:-5}" \
-    --tick-interval-sec 30 --kernel-claude \
-    > "$resume_log" 2>&1 < /dev/null &
-  echo $! > "$PID_FILE"
-  sleep 300
-done
-SH
-chmod +x "$ROBUSTNESS_MONITOR_SCRIPT"
-setsid nohup bash "$ROBUSTNESS_MONITOR_SCRIPT" > "$ROBUSTNESS_MONITOR_LOG" 2>&1 < /dev/null &
+cp "$REPO_ROOT/optimizer_runs/robustness_monitor.sh.example" \
+   "$REPO_ROOT/optimizer_runs/robustness_monitor.sh"
+chmod +x "$REPO_ROOT/optimizer_runs/robustness_monitor.sh"
+setsid nohup bash "$REPO_ROOT/optimizer_runs/robustness_monitor.sh" \
+  > "$REPO_ROOT/optimizer_runs/robustness_monitor_$(date +%Y%m%d_%H%M%S).log" \
+  2>&1 < /dev/null &
 ```
 
-`stop_reason` interpretation matches the `## Monitoring` Python reader.
+Reads `$REPO_ROOT`, `$PID_FILE`, and (optional) `$INFERENCE_OPTIMIZER_SESSION_DIR`
+/ `$MAX_HOURS` / `$TARGET_GAIN`. Edit the example before copying if defaults
+need to change. `stop_reason` interpretation matches the `## Monitoring` reader.
 
 ## Monitoring
 
@@ -593,32 +536,10 @@ print("params_search_last_round:", s.get("params_search", {}).get("last_round"))
 PY
 ```
 
-Recent action counts from SQLite:
+Recent action counts from SQLite (last 500 events grouped by category):
 
 ```bash
-python3 - <<'PY'
-import json, os, pathlib, sqlite3
-from collections import Counter
-db = pathlib.Path(os.environ["SESSION"]) / "storage" / "coordinator.db"
-con = sqlite3.connect(db)
-c = Counter()
-for fa, ta, topic, payload in con.execute(
-    "select from_agent,to_agent,topic,payload from events order by seq desc limit 500"
-):
-    try:
-        p = json.loads(payload)
-    except Exception:
-        continue
-    if topic == "proposal":
-        c["proposal:" + str(p.get("action_name"))] += 1
-    if topic == "delegated_result":
-        c["delegated:" + str(p.get("kind")) + ":" + str(p.get("state"))] += 1
-    if topic == "request" and ta == "kernel":
-        c["kernel_request:" + str(p.get("kind"))] += 1
-    if topic == "response" and fa == "kernel":
-        c["kernel_response:" + str(p.get("kind")) + ":" + str(p.get("status"))] += 1
-print(dict(c))
-PY
+python3 "$REPO_ROOT/inference_optimizer/scripts/event_counts.py" "$SESSION"
 ```
 
 ## Expected Flow
@@ -639,132 +560,50 @@ The optimizer should:
 8. Use `sweep` to understand workload-specific results beyond the smoke
   workload.
 
-## Cache Topology
+## Cache Topology & Cold-start Discipline
 
-Why this matters: SGLang/vLLM on ROCm route hot fused kernels (RMSNorm,
-attention, fused MoE, a8w8 blockscale GEMM, RoPE, ...) through `aiter`,
-which JIT-compiles per-shape variants the first time it sees them and
-caches the resulting `.so` on disk. The first `vllm serve` / `sglang
-launch_server` against a fresh combination of (model, dtype, TP,
-`max_model_len`, `max_num_seqs`, `gpu_memory_utilization`) can spend
-30+ minutes inside `hipcc` on a 671B FP8 MoE class workload (e.g.
-DeepSeek-R1-0528). Subsequent launches reuse the cached `.so` in
-seconds. The optimizer needs to know where these caches live so it
-can (a) interpret long-running cold starts correctly instead of
-treating them as hangs, and (b) auto-bump the baseline timeout when
-the cache is empty.
+SGLang/vLLM on ROCm route hot fused kernels (RMSNorm / attention / MoE / GEMM /
+RoPE) through `aiter`, which JIT-compiles per-shape variants on first sight
+and caches `.so` on disk. First launch of a fresh (model, dtype, TP,
+`max_model_len`, `max_num_seqs`, `gpu_memory_utilization`) signature can spend
+30+ min in `hipcc` for 671B FP8 MoE; later launches reuse the cache in seconds.
 
-### aiter — JIT cache (primary cold-start cost)
+### Cache locations
 
-```text
-Source:     /sgl-workspace/aiter/aiter/
-Git repo:   /sgl-workspace/aiter/
+| Cache | Path | Clear |
+|---|---|---|
+| aiter JIT (primary cold-start cost) | `/sgl-workspace/aiter/aiter/jit/build/` (also `site-packages/aiter/jit/build/`) | `rm -rf /sgl-workspace/aiter/aiter/jit/build/` |
+| Triton | `~/.triton/cache/` (resolves via `$HOME`) | `rm -rf ~/.triton/cache` |
+| torch.compile / Inductor | `/tmp/torchinductor_<user>/` (override `$TORCHINDUCTOR_CACHE_DIR`) | `rm -rf /tmp/torchinductor_root` |
 
-JIT cache:  /sgl-workspace/aiter/aiter/jit/build/
-            (also: /usr/local/lib/python3.{10,12}/site-packages/aiter/jit/build/
-                   /opt/venv/lib/python3.{10,12}/site-packages/aiter/jit/build/)
-            Each kernel has its own build/<kernel_name>/build/<kernel_name>.so
+`sgl_kernel` (`site-packages/sgl_kernel/common_ops.*.so`) is build-time only;
+only `kernel_opt` / `integrate` may rebuild it.
 
-Tuned configs:  aiter/configs/a8w8_blockscale_tuned_gemm.csv
-                aiter/configs/tuned_fmoe.csv
-RoPE source:    aiter/rotary_embedding.py
-GEMM dispatch:  aiter/ops/gemm.py
-MoE dispatch:   aiter/fused_moe.py
+### Cold-start triggers
 
-Clear (specific kernel): rm -rf /sgl-workspace/aiter/aiter/jit/build/<kernel>/
-Clear (all):             rm -rf /sgl-workspace/aiter/aiter/jit/build/
-```
+First launch on this pod; change to `--max-model-len` / `--max-num-seqs` /
+`--gpu-memory-utilization` / `--cuda-graph-max-bs` / `--quantization` /
+`--enable-torch-compile`; pod rebuild; manual cache `rm`; aiter source patch.
 
-### Triton cache
+### Auto-detection + timeout
 
-```text
-Path:   ~/.triton/cache/    (resolves via $HOME, NOT $TRITON_CACHE_DIR
-                             unless explicitly exported)
-Clear: rm -rf ~/.triton/cache
-```
+`BaselineExecutor` (and `ProfileExecutor`, which subclasses it) counts `.so`
+files under `aiter/jit/build/`. Threshold: **< 20 = COLD**. First existing path
+in `baseline.py:AITER_JIT_PROBE_PATHS` wins; override via
+`INFERENCE_OPTIMIZER_AITER_JIT_DIR`.
 
-### torch.compile / Inductor cache
-
-```text
-Path:   /tmp/torchinductor_<user>/    (default; override via
-                                        $TORCHINDUCTOR_CACHE_DIR)
-Clear: rm -rf /tmp/torchinductor_root
-```
-
-### sgl_kernel pre-compiled .so (not cold-start, build-time only)
-
-```text
-Location: /opt/venv/lib/python3.{10,12}/site-packages/sgl_kernel/
-Compiled: common_ops.cpython-3{10,12}-*-linux-gnu.so  (built with image)
-Source:   /sgl-workspace/sglang/sgl-kernel/
-Build:    cd /sgl-workspace/sglang/sgl-kernel && python setup_rocm.py install
-```
-
-This one is informational. The optimizer never rebuilds `sgl_kernel`
-during a baseline / params / sweep run; only `kernel_opt` / `integrate`
-may touch it via the kernel-agent path.
-
-## Cold-start Discipline
-
-Cold-start triggers (any one of these makes the next baseline a cold
-run):
-
-- First launch of a (model, dtype, TP) combination on this pod.
-- Any change to `--max-model-len`, `--max-num-seqs`,
-  `--gpu-memory-utilization`, `--cuda-graph-max-bs`, or `--quantization`
-  vs. the previous live server (changes the shape signature aiter
-  hashes against).
-- `--enable-torch-compile` toggled on or off.
-- Container / pod rebuild that wiped `aiter/jit/build/`.
-- Manual `rm -rf` of any of the cache trees above.
-- aiter source-level patch (kernel_opt / integrate just landed on a
-  kernel under `/sgl-workspace/aiter/aiter/`).
-
-`BaselineExecutor` auto-detects cold start by counting `.so` files
-under `aiter/jit/build/`. Threshold: **`< 20` files = COLD**, otherwise
-WARM. The first existing path under the probe list (see
-`baseline.py:AITER_JIT_PROBE_PATHS`) wins. Override paths by exporting
-`INFERENCE_OPTIMIZER_AITER_JIT_DIR=/abs/path/to/jit/build`.
-
-The same probe runs once at boot inside `_emit_preflight_diagnostics()`
-so the resolved cache state appears in the canonical preflight block:
-
-```
-Preflight diagnostics:
-  ...
-  aiter jit cache     = 98 .so / 887 MB (WARM) at /sgl-workspace/aiter/aiter/jit/build
-  cold_start_timeout  = 3600s
-  warm_timeout        = 1500s
-  proxy URLs          = http://127.0.0.1:4002/api/v1/llm-proxy (auth-proxy alive)
-```
-
-Launchers should read this block instead of grepping `cli.py` /
-`baseline.py` for env var names. The `cold_start_timeout` line reflects
-any active `INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC` override.
-
-Timeout selection (one-shot, per baseline `__call__`):
-
-| Condition | Resulting `subprocess.run(timeout=...)` |
-| --- | --- |
+| Condition | `subprocess.run(timeout=...)` |
+|---|---|
 | `task.params['timeout_sec']` set | task value (always wins) |
-| Cache probe `found` AND `kernel_count < 20` | `BASELINE_COLD_START_TIMEOUT_SEC` (default 3600s; override via `INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC=N`) |
-| Cache probe `found` AND `kernel_count >= 20` | `BASELINE_DEFAULT_TIMEOUT_SEC` (1500s) |
-| Cache probe `not_found` / `error` | `BASELINE_DEFAULT_TIMEOUT_SEC` (1500s) + WARN log |
+| Probe `found` + COLD | `BASELINE_COLD_START_TIMEOUT_SEC` (3600s; override `INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC=N`) |
+| Probe `found` + WARM | `BASELINE_DEFAULT_TIMEOUT_SEC` (1500s) |
+| Probe `not_found` / `error` | 1500s + WARN |
 
-Every baseline launch logs exactly one of these markers — grep
-`optimizer_runs/run_*.log` to verify which path fired:
-
-- `baseline_executor: COLD_START detected — aiter jit/build/ at <path> has N .so (< 20 threshold), M MB. Bumping timeout 1500s -> 3600s. ...`
-- `baseline_executor: WARM start — aiter jit/build/ at <path> has N .so, M MB. Using default timeout=1500s.`
-- `baseline_executor: timeout=Ns (explicit task param)`
-- `baseline_executor: aiter jit cache not located (probe_status=...). Using default timeout=1500s. Cold-start auto-bump disabled for this run.`
-
-If you see repeated COLD_START markers across baseline retries, the
-JIT was likely killed mid-`hipcc` by the previous timeout (leaving
-`.so` half-written) — extend the cold cap further via
-`INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC=5400` rather than relaunching.
-`ProfileExecutor` inherits the same logic (it subclasses
-`BaselineExecutor`), so `profile` actions get the same auto-bump.
+Every launch logs one `baseline_executor: ...` marker (COLD_START / WARM /
+explicit / not located); grep `optimizer_runs/run_*.log` to verify. Resolved
+cache state also lands in the boot `Preflight diagnostics:` block. If
+COLD_START repeats across retries, JIT was killed mid-`hipcc`; bump
+`INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC=5400` instead of relaunching.
 
 ## Kernel Apply Safety
 
@@ -802,87 +641,44 @@ budget on untested params/backend candidates or the next kernel.
 
 ## Failure Handling
 
-- `ERROR: --claude-model=... is not allowed`: the static gate rejected
-  the chosen model. Orchestration must use `claude-opus-4-7` (preferred)
-  or `claude-opus-4-6` (fallback). Drop or change `--claude-model` /
-  `$CLAUDE_MODEL` and re-run. This is **intentional** — opus-4-5 / haiku
-  silently degraded prior runs and the operator pinned the allowlist.
-- `ERROR: gateway catalog unreachable after retries`: the
-  `GET <base_url>/models` probe failed all 4 attempts (initial + 3
-  exponential-backoff retries at 1s/3s/5s). Reproduce manually with the
-  command in `terminals/6.txt`:
-  ```bash
-  curl -k -H "Authorization: Bearer $SAFE_API_KEY" \
-       "$OPENAI_BASE_URL/models" | jq '.data[].id' | sort
-  ```
-  If the gateway answers, the proxy / SSL path is the problem; if it
-  doesn't, the gateway itself is down. We deliberately fail-fast here
-  rather than launch a baseline that will 401 ~5 minutes in.
-- `ERROR: neither claude-opus-4-7 nor claude-opus-4-6 present in gateway catalog`:
-  catalog reachable but neither allowed model is listed. Either the
-  gateway dropped them (escalate to operator) or this is a wrong
-  endpoint. Don't bypass the gate — change the catalog or update the
-  allowlist constant `_CLAUDE_ALLOWED_MODELS` in `cli.py` if a successor
-  model has been blessed.
-- `WARNING — claude-opus-4-7 not in gateway catalog; falling back to claude-opus-4-6`:
-  expected when 4-7 is rotated out of the gateway. The run continues on
-  4-6; performance characteristics are nearly identical.
-- `Claude SDK exit code 1` / `Primus.00009 token not present`: auth-proxy
-  is dead. Run `bash $REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh`
-  and retry the CLI. If the supervisor warns that `auth_proxy.py`
-  is missing, set `OOB_SRC` to a directory that contains it (or land
-  one of `/wekafs/fully-local/OOB`, `/wekafs/fully-local/inference_optimization/OOB`)
-  so `_ensure_oob_proxy_source()` can bootstrap it next run.
-- `ERROR: --critic-agent selected but critic-agent runtime not found`:
-  resolution order is `$CRITIC_AGENT_ROOT` env > sibling
-  `$REPO_ROOT/critic-agent/`. Fix one of:
-  ```bash
-  export CRITIC_AGENT_ROOT=/path/to/critic-agent
-  # or:
-  test -f "$REPO_ROOT/critic-agent/runtime/cli.py" || \
-    git -C "$REPO_ROOT" submodule update --init critic-agent
-  ```
-  Bypass with `--critic-mock` (offline / smoke) or `--critic-codex-bare`
-  (legacy direct Codex path) if a fix isn't available immediately.
-- All critic verdicts come back as `('needs_review', 'critic_unavailable')`
-  with `kb_skipped=missing_critical_context`: `CriticAgentBackend` failed to
-  load static context. Check `manifest.json` for non-empty `model_name` and
-  `framework` (`build_manifest()` writes them) and grep `logs/cli.log` for
-  `critic_agent_backend static_context source=... keys=[...]`. Bypass with
-  `--critic-mock` while debugging.
-- `BackendError: critic-agent runtime.cli prepare-review/commit-review
-  exited rc=2`: the critic-agent runtime aborted with an adapter bug —
-  per `critic-agent/AGENTS.md` §Exit codes, rc=2 means schema or
-  validation failure inside the runtime. Inspect
-  `$SESSION_DIR/critic-workdir/<latest>/{request,judge_bundle,review,emit}.json`
-  for the offending payload, then either fix the upstream issue or
-  retry with `--critic-mock` so the run can keep moving while the
-  runtime bug is debugged.
-- `BackendError: critic-agent runtime.cli ... timed out after 30s`:
-  prepare-review / commit-review usually return in <1s. A timeout
-  indicates a stuck KB call or a heavy KB write fan-out. If
-  `CRITIC_KB_CLIENT_MODE=live`, drop to `inmemory` for the rest of the
-  run (no kill switch needed; the next process inherits the lower mode).
-  If the timeout reproduces in `inmemory` mode, capture the runtime
-  logs and file a bug — that path should not block on I/O.
-- `BackendError: claude-agent-sdk not installed`: should not happen
-  after `_ensure_python_sdks()` lands, but if it does (frozen pip, no
-  network) install manually:
-  `python -m pip install claude-agent-sdk>=0.1.65 openai>=1.50 httpx>=0.27`.
-- `ANTHROPIC_AUTH_TOKEN not set`: re-source `$REPO_ROOT/kernel-agent/env.sh`.
-- `Fatal error in message reader`: retry/resume; transient Claude CLI failures
-  are tolerated up to the Coordinator emergency threshold.
-- `No accelerator`: ensure Magpie subprocess `PATH` leads with the launcher
-  Python's bin dir (`$(dirname "$PYTHON")`, or set `MAGPIE_PYTHON` to the
-  correct interpreter) and use `ROCR_VISIBLE_DEVICES`, not
-  `HIP_VISIBLE_DEVICES`.
-- Repeated `select_kernels`: check `last_select_kernels`; if trace/config did
-  not change, this is a bug. Reuse cached candidates and run optimization.
-- `correctness_passed=false`: do not integrate. Inspect the kernel-agent report;
-  the report must contain explicit correctness evidence.
-- `no_more_leverage`: stop the run and report results; do not resume the same
-  session unless the user changes workload, search space, model, or strategy.
-- `time_exhausted`: resume the same session id; do not start from scratch.
+Auth / SDK drift (`Claude SDK exit code 1`, `Primus.00009 token not present`,
+`ANTHROPIC_AUTH_TOKEN not set`, `BackendError: claude-agent-sdk not installed`,
+`Fatal error in message reader`) is owned by `_preflight()`; see
+`## Setup → Recovery` for the supervisor + install rerun loop. Manual SDK
+fallback if frozen pip blocks `_ensure_python_sdks()`:
+`python -m pip install 'claude-agent-sdk>=0.1.65' 'openai>=1.50' 'httpx>=0.27'`.
+Transient SDK errors retry/resume up to the Coordinator emergency threshold.
+
+### Model-gate errors (preflight #10)
+
+Allowlist: `claude-opus-4-7` (preferred) → `claude-opus-4-6` (fallback). The
+gate is intentional — opus-4-5 / haiku silently degraded prior runs.
+
+| Symptom | Fix |
+|---|---|
+| `--claude-model=... is not allowed` | Drop `--claude-model` / `$CLAUDE_MODEL`. Update `_CLAUDE_ALLOWED_MODELS` in `cli.py` only when a successor is blessed. |
+| `gateway catalog unreachable after retries` (4 probes at 0/1/3/5s) | Reproduce: `curl -k -H "Authorization: Bearer $SAFE_API_KEY" "$OPENAI_BASE_URL/models" \| jq '.data[].id'`. Gateway answers → proxy/SSL is wrong; gateway down → fix gateway. Fail-fast is intentional vs. 401 mid-baseline. |
+
+### Critic-agent runtime errors
+
+Inspect `$SESSION_DIR/critic-workdir/<latest>/{request,judge_bundle,review,emit}.json`.
+Bypass with `--critic-mock` (offline / smoke) or `--critic-codex-bare` (legacy
+direct Codex). See `## Critic Backend Selection`.
+
+| Symptom | Fix |
+|---|---|
+| `--critic-agent selected but critic-agent runtime not found` | `export CRITIC_AGENT_ROOT=/path/to/critic-agent`, or `git -C "$REPO_ROOT" submodule update --init critic-agent`. |
+| `runtime.cli prepare-review/commit-review exited rc=2` | Schema/validation bug (per `critic-agent/AGENTS.md` §Exit codes). Inspect workdir payload; retry with `--critic-mock` while fixing. |
+| `runtime.cli ... timed out after 30s` | KB stuck. If `CRITIC_KB_CLIENT_MODE=live`, drop to `inmemory`. Reproducing in `inmemory` is a bug — that path must not block on I/O. |
+| All verdicts `('needs_review','critic_unavailable')` + `kb_skipped=missing_critical_context` | Static context load failed. Check `manifest.json` has non-empty `model_name`/`framework`; grep `logs/cli.log` for `critic_agent_backend static_context`. |
+
+### Run-time signals
+
+- `No accelerator` (Magpie): subprocess `PATH` must lead with `$(dirname "$PYTHON")` (or set `MAGPIE_PYTHON`); use `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
+- Repeated `select_kernels` with unchanged trace/config: bug — reuse `last_select_kernels`.
+- `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
+- `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
+- `stop_reason=time_exhausted`: resume same session (`--resume`); do not start fresh.
 
 ## Report Back To User
 
