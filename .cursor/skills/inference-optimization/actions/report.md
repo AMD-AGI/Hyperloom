@@ -99,3 +99,44 @@ How to compute:
 - `gain_pct` = `(optimized - baseline) / baseline * 100`
 
 The CI parser requires these exact six field names. Missing or renamed fields → N/A.
+
+### Auto-publish normalized results
+
+After `optimization_report.md` and any available `ci_metrics.json` are written,
+always attempt to normalize and publish the result directory. This is non-fatal:
+if the results service is not reachable, keep the normalized files and continue
+the final report normally.
+
+```bash
+HYPERLOOM_REPO="${HYPERLOOM_REPO:-}"
+if [ -z "$HYPERLOOM_REPO" ]; then
+  for candidate in \
+    /workspace/Hyperloom \
+    /wekafs/hyperloom/Hyperloom \
+    /wekafs/zgong/Hyperloom \
+    /opt/hyperloom; do
+    if [ -f "$candidate/ci/publish_artifacts.py" ]; then
+      HYPERLOOM_REPO="$candidate"
+      break
+    fi
+  done
+fi
+
+if [ -n "$HYPERLOOM_REPO" ]; then
+  python3 "$HYPERLOOM_REPO/ci/publish_artifacts.py" \
+    --task-dir "${WORK_DIR:-/workspace/hyperloom}" \
+    --out-dir "${WORK_DIR:-/workspace/hyperloom}/normalized" \
+    --model "${MODEL_NAME:-${MODEL:-unknown}}" \
+    --display-name "${DISPLAY_NAME:-hyperloom-auto-publish}" || true
+else
+  echo "Hyperloom publish_artifacts.py not found; skipping result publish"
+fi
+```
+
+Default publish target:
+
+```text
+http://hyperloom-results-service.primus-claw-dev.svc.cluster.local
+```
+
+Override with `HYPERLOOM_RESULTS_SERVICE_URL` if needed.
