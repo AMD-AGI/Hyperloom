@@ -27,29 +27,27 @@ jobs:
           # (task_id, model) — the 20-model run from 5/10 (run 25633076431),
           # nvidia excluded.
           declare -a TASKS=(
-            "opt-fac77b9a-3708-4f7f-93c9-d8f1d2ffcd87|Qwen2.5-14B-Instruct-AWQ"
-            "opt-c18a2a1e-56ce-4cfa-8341-031f676e0e9d|Qwen2.5-32B-Instruct-AWQ"
-            "opt-b5c6110c-399b-4016-bd1d-81bfc067492d|Qwen2.5-7B"
-            "opt-318634aa-0063-440f-bc7a-0f68527d843b|Qwen2.5-7B-Instruct"
-            "opt-d3f63f53-f6bd-4a42-be39-53a61a3e7614|Qwen2.5-Coder-7B"
-            "opt-d05845af-b117-4cd8-943d-352d8671c968|Qwen2.5-Coder-7B-Instruct"
-            "opt-34f08cee-e1e1-4831-be96-4cceb4a04229|Qwen3-8B"
-            "opt-86a80579-6637-4661-a0e4-62156ba1d935|Qwen3-8B-AWQ"
-            "opt-6c163df3-b597-4613-bb6d-39115de1122f|Qwen3-Coder-30B-A3B-Instruct"
-            "opt-3493f27f-92f3-4e51-baf0-b0e0d7b256d4|DeepSeek-R1"
-            "opt-e1f7ef4a-aad6-4ff1-a3dc-c5c99af3c22c|DeepSeek-R1-0528"
-            "opt-81fb461f-aab9-4244-84ca-7d37fd5ea142|DeepSeek-R1-Distill-Llama-8B"
-            "opt-dc7c23ba-8d1e-4921-83bf-01db59a60f44|DeepSeek-V3.2"
-            "opt-6cf0f903-bfa7-449d-990d-0686495fe361|dolphin-2.9.1-yi-1.5-34b"
-            "opt-7e8c850f-a074-4c5d-ad84-26d51fff9e2c|Llama-3.1-8B"
-            "opt-188ccf9c-8e9a-422a-8832-429d85bb0c68|Llama-3.1-8B-Instruct"
-            "opt-38ea7ce3-3eff-44f4-b818-29170df4710c|Mistral-7B-Instruct-v0.2"
-            "opt-0c5f4582-55b2-4e15-92df-c8e1477cd9a7|gpt-oss-120b"
-            "opt-2e24b109-6192-4d69-aa44-c9b620ceddd1|gpt-oss-20b"
+            "opt-9a2bd79d-0bd6-4210-ae7e-d1f37082b136|Qwen2.5-32B-AWQ-5/11-NEW"
+            "opt-6b715236-5334-4f56-9dbd-40f83aecae48|DSR1-5/11-NEW"
+            "opt-0c5f4582-55b2-4e15-92df-c8e1477cd9a7|gpt-oss-120b-5/10-OLD"
+            "opt-c18a2a1e-56ce-4cfa-8341-031f676e0e9d|Qwen2.5-32B-AWQ-5/10-OLD"
+            "opt-3c14ea91-cae8-49fb-9874-29196305216e|Qwen3-8B-5/8-OLDER"
           )
           printf "\n%-42s %-32s %-6s %s\n" "TASK_ID" "MODEL" "FILES" "ci_metrics.json size"
           printf "%-42s %-32s %-6s %s\n" "$(printf '=%.0s' {1..42})" "$(printf '=%.0s' {1..32})" "======" "===================="
           set +e
+          # Detail dump for each task: file list with timestamps to detect retention pattern
+          for entry in "${TASKS[@]}"; do
+            tid="${entry%%|*}"
+            label="${entry##*|}"
+            echo ""
+            echo "=== $label ($tid) ==="
+            curl -sS -H "Authorization: Bearer $CLAW_API_KEY" \
+              "$BASE/api/v1/optimization/tasks/$tid/artifacts" \
+              | jq -r '(.data // .)[] | "  \(.size)\t\(.lastModified)\t\(.path)"' | head -30
+          done
+          echo ""
+          echo "=== summary ==="
           for entry in "${TASKS[@]}"; do
             tid="${entry%%|*}"
             model="${entry##*|}"
