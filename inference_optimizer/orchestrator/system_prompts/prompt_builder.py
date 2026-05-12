@@ -80,6 +80,17 @@ KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
     "operator_tuning", "vendor_kernel_config",
 })
 
+# Actions that accept LLM-injected grid candidates via ``params.grid``
+# (see backends.py / params.py / sweep.py for the schema). The catalogue
+# section appends a grid-override hint for these so the LLM knows it can
+# expand the search space beyond the shipped DEFAULT_*_GRID — this is the
+# T1/T2 "search-space expansion" hook (see SKILL.md). Without this, the
+# LLM only sees the action name and may never realize it can synthesize
+# new variants from the discovered_flags surface.
+GRID_INJECTABLE_ACTIONS: frozenset[str] = frozenset({
+    "backends", "params", "sweep",
+})
+
 # Phase ordering for the catalogue section. Any action whose pipeline_phase
 # is not in this tuple is appended at the end (defensive; current registry
 # fully covers the set).
@@ -244,6 +255,37 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
     )
 
 
+def _format_grid_injection_hint(name: str) -> str | None:
+    """Return a per-action one-liner showing the LLM how to override grid."""
+    if name == "backends":
+        return (
+            "GRID OVERRIDE (T1/T2): emit "
+            "`delegate{action_name='backends', params={grid: [{name, "
+            "extra_sglang_args, extra_envs, note}, ...], "
+            "synergy_groups?: [[name1,name2], ...] | synergy_mode?: 'auto'}}` "
+            "to add candidates beyond the shipped DEFAULT_BACKENDS_GRID. "
+            "See SharedState.discovered_flags for the live framework's "
+            "full flag namespace and SharedState.backend_winners_history "
+            "for prior-round winners worth combining."
+        )
+    if name == "params":
+        return (
+            "GRID OVERRIDE (T1/T2): emit "
+            "`delegate{action_name='params', params={grid: [{name, "
+            "extra_sglang_args, extra_envs, note}, ...]}}` to add value-"
+            "filled parameter candidates. SharedState.discovered_flags "
+            "lists the param flag namespace (--max-num-seqs, "
+            "--cuda-graph-max-bs, etc.) you can fill in."
+        )
+    if name == "sweep":
+        return (
+            "GRID OVERRIDE: emit `delegate{action_name='sweep', params={grid: "
+            "[{conc, isl, osl}, ...]}}` (or params.conc_values / "
+            "params.isl_osl_values) to override the workload frontier."
+        )
+    return None
+
+
 def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
     lines: list[str] = [
         "## 4. ACTIONS YOU MAY USE",
@@ -272,6 +314,9 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
                 f"family={meta.family}"
             )
             lines.append(f"    EMIT: {_format_emit_hint(meta)}")
+            grid_hint = _format_grid_injection_hint(name)
+            if grid_hint:
+                lines.append(f"    {grid_hint}")
         lines.append("")
     return lines
 
@@ -315,6 +360,35 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "If you cannot move forward (everything pruned / KB empty / new failures), emit",
         "`send_message{topic='heartbeat', body_md='blocked: <reason>'}` and let",
         "Robustness escalate. NEVER stay silent.",
+        "",
+        "### IDEA GENERATION (T2 / marathon IR-26 — apply after EVERY explore round)",
+        "",
+        "When a `backends` / `params` / `sweep` round completes, use",
+        "`SharedState.backend_winners_history` and `SharedState.discovered_flags`",
+        "to compose the next round's grid before re-proposing the same action.",
+        "Walk through these stages in order; push each new idea via",
+        "`params.grid` (and optionally `params.synergy_groups` /",
+        "`params.synergy_mode='auto'`) on the next `delegate`:",
+        "",
+        "1. **Sub-actions** — sibling flags. If `--max-num-seqs 256` won, also",
+        "   try `--max-num-seqs 128` / `512` / `1024`; if `VLLM_ROCM_USE_AITER=1`",
+        "   won, sweep the related `VLLM_ROCM_USE_AITER_*` boolean family.",
+        "2. **Follow-ons (success → deepen)** — new combos of last round's",
+        "   winners (use `synergy_mode='auto'` or list the group explicitly in",
+        "   `synergy_groups`); the executor de-duplicates against",
+        "   `SharedState.synergy_attempted` so you can re-emit safely.",
+        "3. **Retry-with-alternate-strategy (failure)** — for each variant",
+        "   listed in `params_search.rejected`, propose the same flag with a",
+        "   different value or pair it with a complementary winner.",
+        "4. **Synthetic fallback** — when `backend_winners_history` is empty for",
+        "   the last 2 rounds, mine `discovered_flags.<framework>.backend_flags`",
+        "   for boolean toggles not yet in any GridVariant and propose them.",
+        "5. **Self-reflection** — if stages 1-4 produced fewer than 2 new",
+        "   variants, consult the dynamic KB hints for cross-model lessons",
+        "   that fit the current model_class / framework, and add them.",
+        "",
+        "An explore round that produces zero new ideas is a bug — heartbeat",
+        "with body_md='idea-pipeline-empty' so Robustness can intervene.",
     ])
     return lines
 
@@ -469,6 +543,7 @@ def default_enabled_actions(*, no_kernel: bool) -> tuple[str, ...]:
 
 __all__ = [
     "FULL_ENABLED_ACTIONS",
+    "GRID_INJECTABLE_ACTIONS",
     "KERNEL_OWNED_ACTIONS",
     "NO_KERNEL_ENABLED_ACTIONS",
     "VALID_PIPELINE_PHASES",
