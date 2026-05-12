@@ -9,10 +9,12 @@ local validation without requiring TraceLens to be installed.
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import gzip
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -791,6 +793,283 @@ def parse_tracelens_kernel_summary(
     return _finalize_candidates(top, total_dur=total_dur)
 
 
+def _safe_literal(value: Any) -> Any:
+    if value in (None, ""):
+        return None
+    try:
+        return ast.literal_eval(str(value))
+    except (SyntaxError, ValueError):
+        return None
+
+
+def _shape_to_jsonable(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_shape_to_jsonable(v) for v in value]
+    if isinstance(value, list):
+        return [_shape_to_jsonable(v) for v in value]
+    return value
+
+
+def _non_scalar_shapes(input_dims: Any) -> list[Any]:
+    parsed = _safe_literal(input_dims)
+    if parsed is None:
+        return []
+    if not isinstance(parsed, (list, tuple)):
+        parsed = (parsed,)
+    shapes: list[Any] = []
+    for dim in parsed:
+        if dim in (None, "", (), []):
+            continue
+        shape = _shape_to_jsonable(dim)
+        if shape not in shapes:
+            shapes.append(shape)
+    return shapes
+
+
+def _non_scalar_dtypes(input_types: Any) -> list[str]:
+    parsed = _safe_literal(input_types)
+    if parsed is None:
+        return []
+    if not isinstance(parsed, (list, tuple)):
+        parsed = (parsed,)
+    dtypes: list[str] = []
+    for dtype in parsed:
+        text = str(dtype or "").strip()
+        if not text or text.lower() == "scalar":
+            continue
+        if text not in dtypes:
+            dtypes.append(text)
+    return dtypes
+
+
+def _append_unique_list(target: list[Any], values: list[Any]) -> None:
+    for value in values:
+        if value not in target:
+            target.append(value)
+
+
+def _coerce_count(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if text.startswith("np.float64(") and text.endswith(")"):
+        text = text[len("np.float64("):-1]
+    try:
+        count = int(float(text))
+    except (TypeError, ValueError):
+        return None
+    return count if count > 0 else None
+
+
+def _kernel_detail_call_count(details: Any, kernel_name: str) -> int | None:
+    parsed = _safe_literal(details)
+    if isinstance(parsed, list):
+        total = 0
+        for entry in parsed:
+            if not isinstance(entry, dict) or entry.get("name") != kernel_name:
+                continue
+            count = _coerce_count(entry.get("count") or entry.get("call_count"))
+            if count:
+                total += count
+        return total or None
+
+    text = str(details or "")
+    if kernel_name not in text:
+        return None
+    pattern = re.compile(
+        r"\{[^{}]*['\"]name['\"]\s*:\s*['\"]"
+        + re.escape(kernel_name)
+        + r"['\"][^{}]*['\"]count['\"]\s*:\s*([^,}]+)"
+    )
+    total = 0
+    for match in pattern.finditer(text):
+        count = _coerce_count(match.group(1))
+        if count:
+            total += count
+    return total or None
+
+
+def _row_call_count(row: dict[str, Any], details_col: str, name: str,
+                    operation_count_col: str | None) -> int:
+    detail_count = _kernel_detail_call_count(row.get(details_col), name)
+    if detail_count:
+        return detail_count
+    if operation_count_col:
+        op_count = _coerce_count(row.get(operation_count_col))
+        if op_count:
+            return op_count
+    return 1
+
+
+def _merge_shape_call(target: list[Any], shape: Any, call_num: int) -> None:
+    for entry in target:
+        if isinstance(entry, dict) and entry.get("shape") == shape:
+            entry["call_num"] = int(entry.get("call_num") or 0) + call_num
+            return
+    target.append({"call_num": call_num, "shape": shape})
+
+
+def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any]]:
+    if not isinstance(shapes, list):
+        return []
+    count = _coerce_count(call_num) or 1
+    entries: list[dict[str, Any]] = []
+    for shape in shapes:
+        if isinstance(shape, dict):
+            value = shape.get("shape")
+            shape_count = _coerce_count(shape.get("call_num")) or count
+        else:
+            value = shape
+            shape_count = count
+        if value in (None, "", [], ()):
+            continue
+        _merge_shape_call(entries, value, shape_count)
+    return entries
+
+
+def _materialized_output_stride(perf_params: dict[str, Any]) -> bool:
+    stride = perf_params.get("stride_output")
+    return stride not in (None, "", (), [])
+
+
+def _output_shapes_from_perf_params(perf_params: Any) -> list[Any]:
+    parsed = _safe_literal(perf_params)
+    if not isinstance(parsed, dict):
+        return []
+
+    shapes: list[Any] = []
+
+    def add_shape(value: Any) -> None:
+        if value in (None, "", (), []):
+            return
+        shape = _shape_to_jsonable(value)
+        if shape in (None, "", [], ()):
+            return
+        if shape not in shapes:
+            shapes.append(shape)
+
+    for key in ("shape_out", "output_shape"):
+        add_shape(parsed.get(key))
+
+    output_shapes = parsed.get("output_shapes")
+    if isinstance(output_shapes, (list, tuple)):
+        jsonable_output_shapes = _shape_to_jsonable(output_shapes)
+        if (
+            isinstance(jsonable_output_shapes, list)
+            and jsonable_output_shapes
+            and all(isinstance(shape, list) for shape in jsonable_output_shapes)
+        ):
+            for shape in output_shapes:
+                add_shape(shape)
+        else:
+            add_shape(output_shapes)
+
+    if _materialized_output_stride(parsed):
+        add_shape(parsed.get("op_shape"))
+
+    return shapes
+
+
+def _output_dtypes_from_perf_params(perf_params: Any) -> list[str]:
+    parsed = _safe_literal(perf_params)
+    if not isinstance(parsed, dict):
+        return []
+
+    dtypes: list[str] = []
+
+    def add_dtype(value: Any) -> None:
+        text = str(value or "").strip()
+        if not text or text.lower() in {"none", "scalar"}:
+            return
+        if text not in dtypes:
+            dtypes.append(text)
+
+    for key in ("dtype_out", "output_dtype", "output_type"):
+        add_dtype(parsed.get(key))
+
+    for key in ("dtype_in_out", "dtype_in1_in2_out"):
+        value = parsed.get(key)
+        if isinstance(value, (list, tuple)) and value:
+            add_dtype(value[-1])
+
+    return dtypes
+
+
+def augment_csv_candidates_with_unified_perf_summary(
+    candidates: list[dict[str, Any]], csv_path: Path,
+) -> None:
+    """Backfill TraceLens shapes/dtypes from unified_perf_summary.csv."""
+    import csv as _csv
+    if not candidates or not csv_path.exists():
+        return
+    by_name = {str(c.get("name") or ""): c for c in candidates if c.get("name")}
+    if not by_name:
+        return
+    try:
+        with csv_path.open(encoding="utf-8") as f:
+            rdr = _csv.DictReader(f)
+            field_lookup = {h.lower(): h for h in (rdr.fieldnames or [])}
+            details_col = field_lookup.get("kernel_details_summary")
+            dims_col = field_lookup.get("input dims")
+            type_col = field_lookup.get("input type")
+            perf_params_col = field_lookup.get("perf_params")
+            operation_count_col = field_lookup.get("operation_count")
+            op_col = field_lookup.get("name")
+            if not details_col or not dims_col or not type_col:
+                return
+            for row in rdr:
+                details = str(row.get(details_col) or "")
+                if not details:
+                    continue
+                for name, candidate in by_name.items():
+                    if name not in details:
+                        continue
+                    shapes = _non_scalar_shapes(row.get(dims_col))
+                    dtypes = _non_scalar_dtypes(row.get(type_col))
+                    output_shapes = _output_shapes_from_perf_params(
+                        row.get(perf_params_col) if perf_params_col else None
+                    )
+                    output_dtypes = _output_dtypes_from_perf_params(
+                        row.get(perf_params_col) if perf_params_col else None
+                    )
+                    if shapes:
+                        input_shapes = candidate.setdefault("input_shapes", [])
+                        if isinstance(input_shapes, list):
+                            call_count = _row_call_count(
+                                row, details_col, name, operation_count_col,
+                            )
+                            for shape in shapes:
+                                _merge_shape_call(input_shapes, shape, call_count)
+                        legacy_shapes = candidate.setdefault("shapes", [])
+                        if isinstance(legacy_shapes, list):
+                            _append_unique_list(legacy_shapes, shapes)
+                    if dtypes:
+                        existing_dtypes = candidate.setdefault("input_dtypes", [])
+                        if isinstance(existing_dtypes, list):
+                            _append_unique_list(existing_dtypes, dtypes)
+                    if output_shapes:
+                        existing_output_shapes = candidate.setdefault("output_shapes", [])
+                        if isinstance(existing_output_shapes, list):
+                            _append_unique_list(existing_output_shapes, output_shapes)
+                    if output_dtypes:
+                        existing_output_dtypes = candidate.setdefault("output_dtypes", [])
+                        if isinstance(existing_output_dtypes, list):
+                            _append_unique_list(existing_output_dtypes, output_dtypes)
+                    runtime_args = candidate.setdefault("runtime_args", {})
+                    if isinstance(runtime_args, dict):
+                        args_rows = runtime_args.setdefault("tracelens_args", [])
+                        if isinstance(args_rows, list):
+                            item = {
+                                "op": str(row.get(op_col) or ""),
+                                "input_dims": row.get(dims_col) or "",
+                                "input_types": row.get(type_col) or "",
+                            }
+                            if item not in args_rows:
+                                args_rows.append(item)
+    except Exception:
+        return
+
+
 # ---------------------------------------------------------------------------
 # #125: TraceLens orchestrator structured outputs (category_data/*.json)
 # ---------------------------------------------------------------------------
@@ -1283,6 +1562,109 @@ def merge_roofline_into_candidates(
             item.setdefault("recommended_actions", [])
 
 
+def _candidate_model_config_paths(model_name: str) -> list[Path]:
+    text = str(model_name or "").strip()
+    if not text:
+        return []
+    raw = Path(text).expanduser()
+    candidates: list[Path] = []
+    if raw.suffix == ".json":
+        candidates.append(raw)
+    candidates.append(raw / "config.json")
+    models_root = Path(os.environ.get("HYPERLOOM_MODELS_ROOT", "/wekafs/models"))
+    candidates.append(models_root / text / "config.json")
+    candidates.append(models_root / raw.name / "config.json")
+    out: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
+
+
+def load_model_kernel_params(model_name: str) -> dict[str, Any]:
+    """Read HF config.json and return attention parameters relevant to GEAK."""
+    for config_path in _candidate_model_config_paths(model_name):
+        if not config_path.is_file():
+            continue
+        try:
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        params: dict[str, Any] = {
+            "MODEL_CONFIG_PATH": str(config_path),
+        }
+        has_mla_dims = any(
+            cfg.get(key) is not None
+            for key in ("qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim")
+        )
+        if cfg.get("head_dim") is not None:
+            params["HEAD_SIZE"] = cfg.get("head_dim")
+        elif not has_mla_dims:
+            hidden = cfg.get("hidden_size")
+            heads = cfg.get("num_attention_heads")
+            if isinstance(hidden, int) and isinstance(heads, int) and heads > 0 and hidden % heads == 0:
+                params["HEAD_SIZE"] = hidden // heads
+        for src, dst in (
+            ("qk_nope_head_dim", "QK_NOPE_HEAD_DIM"),
+            ("qk_rope_head_dim", "QK_ROPE_HEAD_DIM"),
+            ("v_head_dim", "V_HEAD_DIM"),
+            ("kv_lora_rank", "KV_LORA_RANK"),
+            ("num_attention_heads", "NUM_ATTENTION_HEADS"),
+            ("num_key_value_heads", "NUM_KEY_VALUE_HEADS"),
+            ("hidden_size", "HIDDEN_SIZE"),
+        ):
+            if cfg.get(src) is not None:
+                params[dst] = cfg[src]
+        return params
+    return {}
+
+
+def enrich_candidates_with_runtime_metadata(
+    candidates: list[dict[str, Any]], args: argparse.Namespace,
+) -> None:
+    """Attach stable runtime metadata fields before GEAK prompt generation."""
+    framework = str(getattr(args, "framework", "") or "").strip()
+    model_params = load_model_kernel_params(str(getattr(args, "model_name", "") or ""))
+    runtime_flags = {
+        "analysis_mode": getattr(args, "analysis_mode", ""),
+        "runtime_env": getattr(args, "runtime_env", ""),
+        "target_platform": getattr(args, "target_platform", ""),
+    }
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        if framework:
+            item.setdefault("framework", framework)
+            item.setdefault("backend", framework)
+        if "input_shapes" not in item:
+            item["input_shapes"] = _shape_call_entries(
+                item.get("shapes", []) or [], item.get("call_count"),
+            )
+        item.setdefault("output_shapes", [])
+        item.setdefault("input_dtypes", item.get("dtypes", []) or [])
+        item.setdefault("output_dtypes", [])
+        item.setdefault("runtime_args", {})
+        item.setdefault("env_vars", {})
+        item.setdefault("kernel_params", {})
+        if model_params:
+            params = item["kernel_params"]
+            if isinstance(params, dict):
+                for key, value in model_params.items():
+                    params.setdefault(key, value)
+        flags = item.get("runtime_flags")
+        if not isinstance(flags, dict):
+            flags = {}
+            item["runtime_flags"] = flags
+        for key, value in runtime_flags.items():
+            if value not in (None, ""):
+                flags.setdefault(key, value)
+        flags.setdefault("is_multigpu", bool(item.get("is_multigpu")))
+        flags.setdefault("num_gpus_recommended", item.get("num_gpus_recommended"))
+
+
 def write_reports(
     run_dir: Path,
     *,
@@ -1295,6 +1677,7 @@ def write_reports(
     tracelens_dir = run_dir / "tracelens"
     (tracelens_dir / "system_findings").mkdir(parents=True, exist_ok=True)
     (tracelens_dir / "category_findings").mkdir(parents=True, exist_ok=True)
+    enrich_candidates_with_runtime_metadata(candidates, args)
 
     manifest = {
         "trace_input": str(Path(args.trace_input).resolve()),
@@ -1758,6 +2141,10 @@ def main() -> int:
             tl_csv = Path(tl_csv_dir_local) / "kernel_summary.csv"
             candidates = parse_tracelens_kernel_summary(tl_csv, args.top_k)
             if candidates:
+                augment_csv_candidates_with_unified_perf_summary(
+                    candidates,
+                    Path(tl_csv_dir_local) / "unified_perf_summary.csv",
+                )
                 # #125: csv has no shape info; mine raw trace as best-effort.
                 augment_csv_candidates_with_raw_shapes(candidates, trace_files)
                 append_log(log_path,
