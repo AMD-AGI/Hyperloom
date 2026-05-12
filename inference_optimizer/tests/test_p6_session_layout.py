@@ -159,7 +159,7 @@ async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
-    """`setup` is not in _RUNS_ACTIONS — runner shouldn't fabricate a path."""
+    """`setup` is not in _runs_actions() — runner shouldn't fabricate a path."""
     monkeypatch.setenv(paths.ENV_OVERRIDE_SESSION_DIR, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "x.db")

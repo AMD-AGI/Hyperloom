@@ -29,8 +29,8 @@ benchmark:
   run_mode: local
 
   envs:
-    TP: 1
-    CONC: 8
+    TP: 8
+    CONC: 64
     ISL: 256
     OSL: 256
     RANDOM_RANGE_RATIO: 1
