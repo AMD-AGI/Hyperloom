@@ -19,6 +19,8 @@ KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
 MAGPIE_DIR="${MAGPIE_DIR:-${WORKSPACE_ROOT}/Magpie}"
+MAGPIE_PYTHON="${MAGPIE_PYTHON:-${MAGPIE_DIR}/venv/bin/python}"
+PYTHONPATH="${MAGPIE_DIR}:${PYTHONPATH:-}"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 # Writable mirror for TraceLens when $TRACELENS_ROOT is on a read-only mount
@@ -269,8 +271,8 @@ ensure_geak() {
     log "GEAK checkout already present: ${HYPERLOOM_ROOT}/geak"
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install -q --no-cache-dir -e "${HYPERLOOM_ROOT}/geak"
-    run python3 -m pip install -q --no-cache-dir -e "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"
+    run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"
+    run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"
   else
     log "check-only: skipping GEAK and rag-mcp installation"
   fi
@@ -343,7 +345,7 @@ ensure_oob() {
       if [ -f "${HYPERLOOM_ROOT}/OOB/oob_cli/requirements.txt" ]; then
         run python3 -m pip install -q --no-cache-dir -r "${HYPERLOOM_ROOT}/OOB/oob_cli/requirements.txt"
       fi
-      run python3 -m pip install -q --no-cache-dir -e "${HYPERLOOM_ROOT}/OOB/oob_cli"
+      run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/OOB/oob_cli"
     else
       warn "OOB source not found: $OOB_SRC"
     fi
@@ -473,6 +475,8 @@ write_env_file() {
     [ -n "${WORKSPACE_ROOT:-}" ] && echo "export WORKSPACE_ROOT='${WORKSPACE_ROOT}'"
     [ -n "${WORKSPACE_PATH:-}" ] && echo "export WORKSPACE_PATH='${WORKSPACE_PATH}'"
     [ -n "${MAGPIE_DIR:-}" ] && echo "export MAGPIE_DIR='${MAGPIE_DIR}'"
+    [ -n "${MAGPIE_PYTHON:-}" ] && echo "export MAGPIE_PYTHON='${MAGPIE_PYTHON}'"
+    [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
     [ -n "${PROXY_ANTHROPIC_BASE_URL:-}" ] && echo "export ANTHROPIC_BASE_URL='${PROXY_ANTHROPIC_BASE_URL}'"
     [ -n "${PROXY_OPENAI_BASE_URL:-}" ] && echo "export OPENAI_BASE_URL='${PROXY_OPENAI_BASE_URL}'"
