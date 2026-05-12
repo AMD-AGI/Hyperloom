@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import subprocess
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +44,13 @@ def _build_summary_dict(state: SharedState, ev_counts: dict[str, int],
         "baseline_accuracy": state.baseline_accuracy,
         "current_best":     state.current_best,
         "cumulative_gain":  state.cumulative_gain,
+        # Phase 3 — separate the per-round-sum gain (kept as
+        # ``cumulative_gain`` for back-compat) from the validated
+        # cumulative gain, which is what the run actually delivered.
+        "cumulative_gain_validated":          state.cumulative_gain_validated,
+        "cumulative_gain_validated_ts":       state.cumulative_gain_validated_ts,
+        "cumulative_gain_validated_stack_len": state.cumulative_gain_validated_stack_len,
+        "optimization_stack_len":             len(state.optimization_stack or []),
         "crash_count":      state.crash_count,
         "pruned_families":  state.pruned_families,
         "max_minutes":      state.max_minutes,
@@ -64,11 +73,33 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Throughput")
     lines.append("")
-    lines.append(f"- baseline_tput   : `{summary['baseline_tput']:.1f}` tok/s/GPU")
+    lines.append(f"- baseline_tput        : `{summary['baseline_tput']:.1f}` tok/s/GPU")
     if cb_tput is not None:
-        lines.append(f"- current_best   : `{cb_tput:.1f}` tok/s/GPU "
+        lines.append(f"- current_best        : `{cb_tput:.1f}` tok/s/GPU "
                       f"(action=`{cb.get('action','?')}`)")
-    lines.append(f"- cumulative_gain: `{summary['cumulative_gain']:.2f}%`")
+    # Per-round sum — useful for *seeing* what each step contributed,
+    # but doesn't reflect what's actually deliverable end-to-end.
+    lines.append(
+        f"- cumulative_gain     : `{summary['cumulative_gain']:.2f}%`"
+        f"  *(per-round sum — informational only)*"
+    )
+    # Validated gain — the only honest number. We always print it so
+    # the report can never silently quote the (often inflated) raw sum.
+    val_gain = summary.get("cumulative_gain_validated", 0.0) or 0.0
+    val_ts = summary.get("cumulative_gain_validated_ts") or ""
+    val_len = summary.get("cumulative_gain_validated_stack_len", 0) or 0
+    stack_len = summary.get("optimization_stack_len", 0) or 0
+    if val_ts:
+        stale = " ⚠ stack changed since validation" if stack_len > val_len else ""
+        lines.append(
+            f"- cumulative_gain_val : `{val_gain:.2f}%` "
+            f"(validated_at_stack_len={val_len}, ts={val_ts}){stale}"
+        )
+    else:
+        lines.append(
+            f"- cumulative_gain_val : `0.00%` "
+            f"⚠ never validated — no `validate_stack` action ran in this session"
+        )
     if cb.get("ttft_mean_ms") is not None:
         lines.append(f"- ttft_mean      : `{cb.get('ttft_mean_ms'):.1f}` ms")
     if cb.get("e2el_mean_ms") is not None:
@@ -198,15 +229,19 @@ class ReportExecutor:
         md_path.write_text(_format_md(summary), encoding="utf-8")
 
         log.info(
-            "report_executor: wrote %s and %s (cumulative_gain=%.2f%%)",
-            md_path, json_path, state.cumulative_gain,
+            "report_executor: wrote %s and %s "
+            "(cumulative_gain=%.2f%% per_round_sum / %.2f%% validated)",
+            md_path, json_path,
+            state.cumulative_gain, state.cumulative_gain_validated,
         )
+        publish_result = self._maybe_publish_results(session_dir, state)
         return {
             "status":      "succeeded",
             "session_id":  state.session_id,
             "json_path":   str(json_path),
             "md_path":     str(md_path),
             "summary":     summary,
+            "publish_result": publish_result,
         }
 
     def _resolve_session_dir(self, ctx) -> Path | None:
@@ -232,6 +267,56 @@ class ReportExecutor:
         if candidate.exists() and (candidate / "state.json").exists():
             return candidate
         return None
+
+    def _maybe_publish_results(self, session_dir: Path, state: SharedState) -> dict[str, Any]:
+        """Best-effort publish hook for code-driven optimizer runs.
+
+        Prompt/skill-driven Web runs use actions/report.md directly. This hook
+        covers runs that execute the Python ReportExecutor. It is opt-in unless
+        the results service URL is explicitly configured.
+        """
+        service_url = os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", "")
+        auto_publish = os.environ.get("HYPERLOOM_RESULTS_AUTO_PUBLISH", "").lower()
+        if not service_url and auto_publish not in {"1", "true", "yes"}:
+            return {"enabled": False, "reason": "HYPERLOOM_RESULTS_SERVICE_URL not set"}
+
+        repo_root = Path(__file__).resolve().parents[3]
+        helper = repo_root / "ci" / "publish_artifacts.py"
+        if not helper.exists():
+            return {"enabled": False, "reason": f"{helper} not found"}
+
+        cmd = [
+            "python3",
+            str(helper),
+            "--task-dir",
+            str(session_dir),
+            "--out-dir",
+            str(session_dir / "normalized"),
+            "--model",
+            state.model_name or "unknown",
+            "--display-name",
+            state.session_id or "hyperloom-report",
+        ]
+        if service_url:
+            cmd.extend(["--url", service_url])
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            return {
+                "enabled": True,
+                "returncode": proc.returncode,
+                "stdout": proc.stdout[-4000:],
+                "stderr": proc.stderr[-4000:],
+            }
+        except Exception as e:
+            log.warning("report_executor: result publish failed: %s", e)
+            return {"enabled": True, "error": str(e)}
 
 
 report_executor = ReportExecutor()
