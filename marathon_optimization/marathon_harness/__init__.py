@@ -1,1 +1,0 @@
-"""Marathon Inference Optimization Harness."""
