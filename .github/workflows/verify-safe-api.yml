@@ -18,7 +18,27 @@ jobs:
       CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
       SAFE_BASE_URL: ${{ secrets.SAFE_BASE_URL }}
     steps:
-      - name: Hit each artifacts endpoint
+      - name: Dump ci_metrics.json for already-completed tasks
+        shell: bash
+        run: |
+          set -u
+          BASE="${SAFE_BASE_URL:-https://core42.example-internal-host.invalid}"
+          BASE="${BASE%/}"
+          for tid in opt-9a2bd79d-0bd6-4210-ae7e-d1f37082b136 opt-6b715236-5334-4f56-9dbd-40f83aecae48; do
+            echo ""
+            echo "=== ci_metrics.json for $tid ==="
+            curl -sS -H "Authorization: Bearer $CLAW_API_KEY" \
+              "$BASE/api/v1/optimization/tasks/$tid/artifacts/download?path=hyperloom%2Fci_metrics.json"
+            echo ""
+            echo "=== optimization_report.md for $tid (first 3000 chars) ==="
+            curl -sS -H "Authorization: Bearer $CLAW_API_KEY" \
+              "$BASE/api/v1/optimization/tasks/$tid/artifacts/download?path=hyperloom%2Foptimization_report.md" \
+              | head -c 3000
+            echo ""
+          done
+
+      - name: (kept) Hit each artifacts endpoint
+        if: false
         shell: bash
         run: |
           set -u
