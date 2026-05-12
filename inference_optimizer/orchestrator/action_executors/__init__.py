@@ -41,6 +41,11 @@ from .sweep import (
     SweepExecutor,
     sweep_executor,
 )
+from .validate_stack import (
+    ValidateStackExecutor,
+    combine_optimization_stack,
+    validate_stack_executor,
+)
 
 __all__ = [
     "BASELINE_DEFAULT_CONFIG",
@@ -57,12 +62,15 @@ __all__ = [
     "ProfileExecutor",
     "ReportExecutor",
     "SweepExecutor",
+    "ValidateStackExecutor",
     "backends_executor",
     "baseline_executor",
+    "combine_optimization_stack",
     "discover_backend_flags",
     "params_executor",
     "pmc_roofline_executor",
     "profile_executor",
     "report_executor",
     "sweep_executor",
+    "validate_stack_executor",
 ]

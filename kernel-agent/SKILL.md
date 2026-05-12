@@ -48,6 +48,8 @@ bash $WORKSPACE_PATH/kernel-agent/scripts/install.sh
 are accepted as no-ops for backwards compat):
 
 - `ray==2.44.1` + `click<8.3.0`
+- Node.js 20 + npm when they are missing (required for the `claude` /
+  `codex` npm CLIs)
 - TraceLens editable install from `/wekafs/hyperloom/TraceLens-internal` and
   verifies `TraceLens_generate_perf_report_pytorch --help`
 - GEAK CLI from `GEAK_REF` (default `v3.1.0`) +
