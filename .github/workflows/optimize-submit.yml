@@ -5,26 +5,63 @@ name: SaFE Optimize Submit
 # Independent of inference-optimization-ci.yml — no shared state.
 #
 # Three-stage pipeline:
-#   1. prepare    (ubuntu-latest)  — HF top-N or explicit list -> matrix JSON
-#   2. optimize   (matrix, hyperloom-mh826) — one model per parallel job
-#   3. summarize  (ubuntu-latest)  — collect ci_metrics.json + InferenceX ref
-#                                    -> ci_summary.{md,json}
+#   1. prepare    (ubuntu-latest)  — pick model source by priority:
+#                                    models > candidates_file (+ batch slice)
+#                                    > hf_top (live HF API).
+#                                    Emits matrix JSON for stage 2.
+#   2. optimize   (matrix, hyperloom-mh826) — one model per parallel job.
+#                                    Each job pre-pulls its own repo to
+#                                    /wekafs/models BEFORE calling SaFE
+#                                    register, so download is overlapped
+#                                    with the rest of the batch (no serial
+#                                    prewarm stage that blocks optimize).
+#                                    max-parallel capped by `max_parallel`
+#                                    input (sandbox has 128 GPU available).
+#   3. summarize  (hyperloom-mh826) — aggregate per-task artifacts into a
+#                                    ranked ci_summary.{md,json} (sorted by
+#                                    Gain% desc, with medals), publish the
+#                                    normalized results to the Hyperloom
+#                                    results service, and post the full
+#                                    table to the Teams webhook.
+#
+# How to dispatch:
+#   • Single/few models      : `-f models='Qwen/Qwen2.5-7B-Instruct ...'`
+#   • Reproducible batch run : `-f candidates_file=ci/candidates/top600_2026-05-12.json
+#                              -f batch_index=0 -f batch_size=130`
+#   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
   workflow_dispatch:
     inputs:
+      # ── Model source (priority: models > candidates_file > hf_top) ──────
+      models:
+        description: 'Explicit HF repo IDs (space-separated). HIGHEST priority.'
+        required: false
+        default: ''
+      candidates_file:
+        description: 'Path to a build_candidates.py JSON (e.g. ci/candidates/top600_2026-05-12.json). Used when models is empty.'
+        required: false
+        default: ''
+      batch_index:
+        description: 'Batch index (0-based) into candidates_file. Ignored if batch_size is 0.'
+        required: false
+        default: '0'
+      batch_size:
+        description: 'Slice size for candidates_file. 0 = take all rows.'
+        required: false
+        default: '0'
       hf_top:
-        description: 'HuggingFace top-N (leave empty if specifying "models" below)'
+        description: 'Live HuggingFace top-N (LEGACY fallback; used only if models AND candidates_file are empty)'
         required: false
         default: '20'
       min_params:
         description: 'Min parameter count in Billions (e.g. 7 for >=7B). 0 to skip filter.'
         required: false
         default: '7'
-      models:
-        description: 'Explicit HF repo IDs, space-separated. Overrides hf_top when set.'
+      max_parallel:
+        description: 'Max parallel optimize jobs (sandbox has 128 GPU; safe ceiling is ~128)'
         required: false
-        default: ''
+        default: '20'
       isl:
         description: 'Input sequence length'
         required: false
@@ -88,10 +125,13 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       count:  ${{ steps.matrix.outputs.count }}
     env:
-      HF_TOKEN:        ${{ secrets.HF_TOKEN }}
-      INPUT_HF_TOP:    ${{ github.event.inputs.hf_top }}
-      INPUT_MIN_PARAMS: ${{ github.event.inputs.min_params }}
-      INPUT_MODELS:    ${{ github.event.inputs.models }}
+      HF_TOKEN:              ${{ secrets.HF_TOKEN }}
+      INPUT_MODELS:          ${{ github.event.inputs.models }}
+      INPUT_CANDIDATES_FILE: ${{ github.event.inputs.candidates_file }}
+      INPUT_BATCH_INDEX:     ${{ github.event.inputs.batch_index }}
+      INPUT_BATCH_SIZE:      ${{ github.event.inputs.batch_size }}
+      INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
+      INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -114,7 +154,7 @@ jobs:
     timeout-minutes: 600
     strategy:
       fail-fast: false
-      max-parallel: 20
+      max-parallel: ${{ fromJson(github.event.inputs.max_parallel || '20') }}
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     env:
       CLAW_API_KEY:                     ${{ secrets.CLAW_API_KEY }}
