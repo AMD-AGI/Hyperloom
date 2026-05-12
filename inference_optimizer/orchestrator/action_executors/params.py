@@ -311,7 +311,7 @@ class ParamsExecutor:
         default_nccl_grid: list[GridVariant] | None = None,
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
-        variant_timeout_sec: int = 900,
+        variant_timeout_sec: int = 2400,
         include_nccl: bool = False,
         default_max_candidates_per_round: int = 0,
         keep_threshold_pct: float = 0.5,
