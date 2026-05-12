@@ -10,6 +10,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Public ingress URL for the hyperloom-results-service (deployed in the
+# primus-claw-dev namespace on the core42 data-plane cluster). Higress rewrites
+# /hyperloom-results/* -> backend /*, so /api/import becomes
+# /hyperloom-results/api/import here. We default to the ingress URL (not the
+# cluster-internal service DNS the helm chart exposes) so callers running on
+# any GHA runner — public ubuntu-latest or the hyperloom-mh826 self-hosted
+# pod — can reach the service without extra config. Override via
+# HYPERLOOM_RESULTS_SERVICE_URL when targeting a different deployment.
+DEFAULT_SERVICE_URL = "http://core42.primus-safe.amd.com/hyperloom-results"
+
 
 def load_results(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
@@ -56,8 +66,8 @@ def main() -> int:
     parser.add_argument("--input", required=True, help="normalized_results.json or .ndjson")
     parser.add_argument(
         "--url",
-        default=os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", ""),
-        help="Results service base URL, e.g. http://hyperloom-results-service",
+        default=os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", DEFAULT_SERVICE_URL),
+        help="Results service base URL (defaults to the core42 ingress)",
     )
     parser.add_argument(
         "--token",
