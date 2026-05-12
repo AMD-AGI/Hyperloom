@@ -3,6 +3,7 @@ name: Verify SaFE Artifacts API
 # One-shot probe: hit SaFE /api/v1/optimization/tasks/<id>/artifacts with the
 # CLAW_API_KEY secret and dump the JSON response so we can decide whether to
 # revert the Claw bypass. Will be deleted after verification.
+# (re-trigger 2026-05-12 — earlier run sat queued overnight)
 
 on:
   push:
