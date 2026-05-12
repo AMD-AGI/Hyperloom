@@ -13,9 +13,14 @@ Executors shipped:
 
 from .backends import (
     DEFAULT_BACKENDS_GRID,
+    DEFAULT_SGLANG_SERVER_ARGS,
+    DEFAULT_VLLM_ARG_UTILS,
+    DEFAULT_VLLM_BACKENDS_GRID,
+    SYNERGY_GROUPS,
     BackendsExecutor,
     backends_executor,
     discover_backend_flags,
+    discover_vllm_backend_flags,
 )
 from .baseline import (
     BASELINE_DEFAULT_CONFIG,
@@ -26,6 +31,7 @@ from .params import (
     DEFAULT_NCCL_GRID,
     DEFAULT_PARAMS_GRID,
     ParamsExecutor,
+    discover_param_flags,
     params_executor,
 )
 from .profile import (
@@ -57,11 +63,15 @@ __all__ = [
     "DEFAULT_ISL_OSL",
     "DEFAULT_NCCL_GRID",
     "DEFAULT_PARAMS_GRID",
+    "DEFAULT_SGLANG_SERVER_ARGS",
+    "DEFAULT_VLLM_ARG_UTILS",
+    "DEFAULT_VLLM_BACKENDS_GRID",
     "PROFILE_DEFAULT_CONFIG",
     "ParamsExecutor",
     "PMCRooflineExecutor",
     "ProfileExecutor",
     "ReportExecutor",
+    "SYNERGY_GROUPS",
     "SweepExecutor",
     "TargetAnalysisExecutor",
     "ValidateStackExecutor",
@@ -69,6 +79,8 @@ __all__ = [
     "baseline_executor",
     "combine_optimization_stack",
     "discover_backend_flags",
+    "discover_param_flags",
+    "discover_vllm_backend_flags",
     "params_executor",
     "pmc_roofline_executor",
     "profile_executor",
