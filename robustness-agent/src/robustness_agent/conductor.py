@@ -121,12 +121,12 @@ class ConductorReader:
 class IntentEmitter:
     """Write robustness intents back to Conductor (legacy MVP path).
 
-    Deprecated as of M1: the canonical integration is the
-    :class:`~robustness_agent.role.backend_adapter.RobustnessAgentBackend`
-    which returns intents to the Coordinator instead of writing them
-    into the SQLite DB. The class is retained so the legacy
-    :class:`RobustnessAgent` loop keeps functioning while M3 finishes
-    multi-cli transport.
+    Deprecated as of M1: the canonical integration runs the reactor
+    behind the subprocess CLI in :mod:`robustness_agent.runtime.cli`
+    and emits a validated ``intent_envelope`` for the host instead of
+    writing into the SQLite DB. The class is retained so the legacy
+    :class:`RobustnessAgent` loop keeps functioning for environments
+    that haven't migrated yet.
     """
 
     def __init__(self, db_path: Path):
@@ -134,8 +134,8 @@ class IntentEmitter:
 
         warnings.warn(
             "IntentEmitter writes intents directly into conductor.db, which is "
-            "deprecated. Migrate to RobustnessAgentBackend (SINGLE_PROC) or the "
-            "MULTI_CLI inbox/outbox transport.",
+            "deprecated. Migrate to `python -m robustness_agent.runtime.cli tick` "
+            "(subprocess transport, mirrors critic-agent).",
             DeprecationWarning,
             stacklevel=2,
         )

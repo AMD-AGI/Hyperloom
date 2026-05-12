@@ -120,52 +120,63 @@ above. Note that `lines_scanned` should equal the number of lines in
 
 ---
 
-## Test 4 — Marker-aware audit window
+## Test 4 — Sentinel-aware audit window
 
 **What it covers:** [scripts/find_transcript.py](../scripts/find_transcript.py)
-incremental window via `INSPECTOR_END` marker.
+incremental window via the on-disk sentinel
+`$RESULT_DIR/.audit/_state.json` written by
+[scripts/emit_audit_report.py](../scripts/emit_audit_report.py).
 
-**Setup:** none — uses fixture_transcript.jsonl plus a synthetic prior-end
-marker line you append temporarily. To avoid mutating the fixture, copy it
-first:
-
-```bash
-cp .cursor/skills/inspector/tests/fixture_transcript.jsonl /tmp/fx.jsonl
-echo '=== INSPECTOR_END phase=PREV ts=2026-04-21T10:00:00Z verdict=PASS ===' >> /tmp/fx.jsonl
-echo '{"role":"assistant","message":{"content":[{"type":"text","text":"Now in next phase"},{"type":"tool_use","name":"Read","input":{"path":"after_marker.md"}}]}}' >> /tmp/fx.jsonl
-```
-
-**Command:**
+**Negative case (no transcripts dir):**
 
 ```bash
 python3 .cursor/skills/inspector/scripts/find_transcript.py \
     --projects-root /tmp \
-    --slug inspector_test_fake_slug \
-  ; echo "(falls back; expected 'no_transcripts_found' for this fake slug)"
+    --slug inspector_test_fake_slug
+# expected: {"error": "no_transcripts_found", ...}
 ```
 
-(That is the negative case to confirm error reporting; the positive case
-is below.)
-
-To exercise the marker logic positively, simulate a project layout:
+**Positive case (sentinel match):**
 
 ```bash
-mkdir -p /tmp/fake_proj/inspector_test/agent-transcripts/uuid-A
-cp /tmp/fx.jsonl /tmp/fake_proj/inspector_test/agent-transcripts/uuid-A/uuid-A.jsonl
+RD=/tmp/inspector_test_run
+PR=/tmp/fake_proj
+mkdir -p "$PR/inspector_test/agent-transcripts/uuid-A" "$RD/.audit"
+TS="$PR/inspector_test/agent-transcripts/uuid-A/uuid-A.jsonl"
+cp .cursor/skills/inspector/tests/fixture_transcript.jsonl "$TS"
+TS_ABS="$(realpath "$TS")"
+
+# Pretend a prior audit ended at line 6 of the transcript.
+cat > "$RD/.audit/_state.json" <<EOF
+{
+  "transcript_path": "$TS_ABS",
+  "last_audit_to_line": 6,
+  "last_phase": "PREV",
+  "last_verdict": "PASS",
+  "last_ts": "2026-04-21T10:00:00Z",
+  "history": [{"phase":"PREV","ts":"2026-04-21T10:00:00Z","verdict":"PASS",
+               "to_line":6,"report_file":"PREV_2026-04-21T10-00-00Z.json"}]
+}
+EOF
+
 python3 .cursor/skills/inspector/scripts/find_transcript.py \
-    --projects-root /tmp/fake_proj \
-    --slug inspector_test
+    --projects-root "$PR" \
+    --slug inspector_test \
+    --result-dir "$RD"
 ```
 
 **Expected:**
 
 - `selection_method`: `mtime` (only one candidate).
-- `previous_inspector_end_line`: `7` (the line of the appended marker).
-- `audit_from_line`: `8` (next line to scan).
+- `window_source`: `sentinel`.
+- `audit_from_line`: `7` (= `last_audit_to_line + 1`).
 - `transcript_path`: ends with `uuid-A.jsonl`.
 
-**Pass condition:** JSON output contains the four fields above with the
-expected values.
+**Cross-session safety:** if you change `transcript_path` inside
+`_state.json` to point at a different file, `find_transcript.py` falls
+through to `window_source: start_of_file` with `audit_from_line: 1`.
+
+**Cleanup:** `rm -rf /tmp/inspector_test_run /tmp/fake_proj`.
 
 ---
 
@@ -183,7 +194,7 @@ human, against the fixture (no agent involved).
    ```
    TARGET_SKILL_DIR=.cursor/skills/inspector/tests/        (treat fixture as the target)
    PHASE_NAME=FAKE_BASELINE
-   PHASE_ACTION_FILE=fixture_action.md
+   PHASE_ACTION_FILES=[fixture_action.md]
    RUN_ENV={"RESULT_DIR":"/tmp/inspector_test/results",
             "SKILL_ROOT":"/tmp/inspector_test/skill",
             "SCRIPTS_DIR":"/tmp/inspector_test/skill/scripts",
@@ -224,7 +235,6 @@ violation IDs you can reproduce by running the commands in Tests 1 and 3.
   `parse_action_outputs.py`).
 - After editing [extraction-protocol.md](../extraction-protocol.md) or
   [audit-report-schema.md](../audit-report-schema.md).
-- Before tagging a new `inspector_version`.
 
 If you change [fixture_action.md](fixture_action.md) or
 [fixture_transcript.jsonl](fixture_transcript.jsonl), update the line
