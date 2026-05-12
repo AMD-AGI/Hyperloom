@@ -25,6 +25,8 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
     GridVariant,
     VariantResult,
     _build_variant_yaml,
+    _resolve_magpie_python,
+    _run_magpie,
     pick_winners,
     run_grid,
 )
@@ -180,6 +182,70 @@ def test_pick_winners_default_threshold():
 # ===========================================================================
 # run_grid — exercised with a stubbed subprocess.run
 # ===========================================================================
+def test_resolve_magpie_python_skips_interpreter_without_magpie(monkeypatch):
+    """Do not pick system python just because it is first on PATH.
+
+    Magpie may only be importable from the install Python/venv or via
+    PYTHONPATH=$MAGPIE_DIR; selecting /usr/bin/python3 breaks baseline.
+    """
+    monkeypatch.delenv("MAGPIE_PYTHON", raising=False)
+    monkeypatch.delenv("PYTHON", raising=False)
+
+    def fake_which(name):
+        return "/usr/bin/python3" if name == "python3" else None
+
+    def fake_exists(self):
+        return str(self) == "/opt/venv/bin/python"
+
+    def fake_run(cmd, *args, **kwargs):
+        assert cmd[-1] == "import Magpie"
+        rc = 0 if cmd[0] == "/opt/venv/bin/python" else 1
+        return subprocess.CompletedProcess(cmd, rc, "", "")
+
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr(Path, "exists", fake_exists)
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+        fake_run,
+    )
+
+    assert _resolve_magpie_python() == "/opt/venv/bin/python"
+
+
+def test_run_magpie_prepends_magpie_dir_to_pythonpath(tmp_path, monkeypatch):
+    """Magpie source checkout must be visible from any cwd."""
+    monkeypatch.setenv("MAGPIE_DIR", "/workspace/Magpie")
+    monkeypatch.setenv("PYTHONPATH", "/existing")
+    seen: dict[str, object] = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        seen["cmd"] = cmd
+        seen["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+        fake_run,
+    )
+
+    rc, stdout, stderr = _run_magpie(
+        magpie_python="/opt/venv/bin/python",
+        config_path=tmp_path / "config.yaml",
+        output_dir=tmp_path / "out",
+        timeout_sec=5,
+        cwd=str(tmp_path),
+    )
+
+    assert rc == 0
+    assert stdout == "ok"
+    assert stderr == ""
+    env = seen["env"]
+    assert env["PYTHONPATH"].split(":")[:2] == ["/workspace/Magpie", "/existing"]
+
+
 @pytest.mark.asyncio
 async def test_run_grid_writes_per_variant_yaml_and_parses_report(tmp_path):
     base = tmp_path / "base.yaml"
