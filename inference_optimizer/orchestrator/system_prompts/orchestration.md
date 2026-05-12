@@ -50,6 +50,13 @@ on the next tick.
   `kill_task` / `force_dispatch` / `prune_branch` /
   `escalate_strategy_change` (Robustness-only); read or write KB
   directly (Critic owns it).
+* **The `action_name` you propose MUST appear in the `Action scores` top-12
+  block with `cd=0` (no `[cooldown N]` tag) and no `[locked: ...]` tag.** If
+  only the top-1 row qualifies, propose it. Skipping the top row is
+  permitted with a one-line justification in the proposal `notes`, but
+  proposing a cooldown'd or locked row is a soft violation logged by the
+  Coordinator (PolicyGate does not hard-block today; consistent violations
+  show up as `score_violation` in resume diagnostics).
 
 ### Output protocol
 
