@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import subprocess
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -337,12 +339,14 @@ class ReportExecutor:
             md_path, json_path,
             state.cumulative_gain, state.cumulative_gain_validated,
         )
+        publish_result = self._maybe_publish_results(session_dir, state)
         return {
             "status":      "succeeded",
             "session_id":  state.session_id,
             "json_path":   str(json_path),
             "md_path":     str(md_path),
             "summary":     summary,
+            "publish_result": publish_result,
         }
 
     def _resolve_session_dir(self, ctx) -> Path | None:
@@ -368,6 +372,56 @@ class ReportExecutor:
         if candidate.exists() and (candidate / "state.json").exists():
             return candidate
         return None
+
+    def _maybe_publish_results(self, session_dir: Path, state: SharedState) -> dict[str, Any]:
+        """Best-effort publish hook for code-driven optimizer runs.
+
+        Prompt/skill-driven Web runs use actions/report.md directly. This hook
+        covers runs that execute the Python ReportExecutor. It is opt-in unless
+        the results service URL is explicitly configured.
+        """
+        service_url = os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", "")
+        auto_publish = os.environ.get("HYPERLOOM_RESULTS_AUTO_PUBLISH", "").lower()
+        if not service_url and auto_publish not in {"1", "true", "yes"}:
+            return {"enabled": False, "reason": "HYPERLOOM_RESULTS_SERVICE_URL not set"}
+
+        repo_root = Path(__file__).resolve().parents[3]
+        helper = repo_root / "ci" / "publish_artifacts.py"
+        if not helper.exists():
+            return {"enabled": False, "reason": f"{helper} not found"}
+
+        cmd = [
+            "python3",
+            str(helper),
+            "--task-dir",
+            str(session_dir),
+            "--out-dir",
+            str(session_dir / "normalized"),
+            "--model",
+            state.model_name or "unknown",
+            "--display-name",
+            state.session_id or "hyperloom-report",
+        ]
+        if service_url:
+            cmd.extend(["--url", service_url])
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            return {
+                "enabled": True,
+                "returncode": proc.returncode,
+                "stdout": proc.stdout[-4000:],
+                "stderr": proc.stderr[-4000:],
+            }
+        except Exception as e:
+            log.warning("report_executor: result publish failed: %s", e)
+            return {"enabled": True, "error": str(e)}
 
 
 report_executor = ReportExecutor()

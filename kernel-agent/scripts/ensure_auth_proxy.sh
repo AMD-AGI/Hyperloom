@@ -157,7 +157,7 @@ main() {
   if proxy_responds; then
     log "auth-proxy already healthy on :${PROXY_PORT}"
     # Always emit PROXY_*_BASE_URL on the healthy-noop path too — install.sh
-    # parses our stdout to populate kernel-agent/env.sh. Without this, env.sh
+    # parses our stdout to populate the pod-local kernel-agent env. Without this, that env
     # silently lacks ANTHROPIC_BASE_URL/OPENAI_BASE_URL whenever the proxy
     # was already healthy at install time, and externally-preset upstream
     # URLs leak into Claude/Codex CLIs.

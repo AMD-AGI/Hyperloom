@@ -15,6 +15,7 @@ import copy
 import json
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -32,14 +33,31 @@ log = logging.getLogger(__name__)
 def _resolve_magpie_python() -> str:
     """Resolve the Python interpreter for Magpie subprocesses.
 
-    Order: $MAGPIE_PYTHON env > `which python3` > /opt/venv/bin/python.
+    Order: $MAGPIE_PYTHON env > first `python3` on PATH that can
+    ``import Magpie`` > /opt/venv/bin/python (if it exists).
     """
-    import shutil
-    return (
-        os.environ.get("MAGPIE_PYTHON", "").strip()
-        or shutil.which("python3")
-        or "/opt/venv/bin/python"
-    )
+    env_val = os.environ.get("MAGPIE_PYTHON", "").strip()
+    if env_val:
+        return env_val
+
+    def _can_import_magpie(py: str) -> bool:
+        try:
+            return subprocess.run(
+                [py, "-c", "import Magpie"],
+                capture_output=True, timeout=10,
+            ).returncode == 0
+        except Exception:
+            return False
+
+    candidate = shutil.which("python3")
+    if candidate and _can_import_magpie(candidate):
+        return candidate
+
+    fallback = Path("/opt/venv/bin/python")
+    if fallback.exists():
+        return str(fallback)
+
+    return candidate or "/opt/venv/bin/python"
 
 
 def _resolve_session_dir() -> Path:
@@ -318,6 +336,9 @@ def _run_magpie(
 
     env = os.environ.copy()
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+    magpie_dir = os.environ.get("MAGPIE_DIR", "")
+    if magpie_dir:
+        env["PYTHONPATH"] = f"{magpie_dir}:{env.get('PYTHONPATH', '')}"
     cmd = [
         magpie_python, "-m", "Magpie", "-v", "benchmark",
         "--benchmark-config", str(config_path),
