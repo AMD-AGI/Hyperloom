@@ -61,8 +61,8 @@ log = logging.getLogger(__name__)
 BASELINE_DEFAULT_CONFIG = (
     asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
 )
-BASELINE_DEFAULT_TIMEOUT_SEC = 1500           # WARM-start cap (aiter jit cache populated)
-BASELINE_COLD_START_TIMEOUT_SEC = 3600        # COLD-start cap (aiter jit cache empty/sparse)
+BASELINE_DEFAULT_TIMEOUT_SEC = 2400           # WARM-start cap, 40 min (aiter jit cache populated)
+BASELINE_COLD_START_TIMEOUT_SEC = 3600        # COLD-start cap, 60 min (aiter jit cache empty/sparse)
 COLD_START_KERNEL_THRESHOLD = 20              # < N .so files under aiter jit/build/ ⇒ COLD
 
 # Probe order for aiter's JIT cache root. First path that exists wins.
