@@ -25,6 +25,9 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 30
 lease_ttl_sec: 7200
+description: "REQUEST kernel: parallel-submit GEAK / OOB candidates for one reusable native kernel id picked from the latest profile."
+pipeline_phase: deep
+typical_runtime_min: 60.0
 applicable_when:
   - "kernel_dispatch_shows_aiter_dominance"
   - "cumulative_gain_plateau"

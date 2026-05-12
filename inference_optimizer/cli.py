@@ -55,6 +55,7 @@ from .orchestrator.action_executors import (
     profile_executor,
     report_executor,
     sweep_executor,
+    validate_stack_executor,
 )
 from .orchestrator.backends import (
     ClaudeBackend,
@@ -62,161 +63,95 @@ from .orchestrator.backends import (
     CriticAgentBackend,
     MockCriticBackend,
     MockRobustnessBackend,
+    RobustnessAgentBackend,
 )
 from .manifest import load_manifest, write_manifest
+from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
-from .orchestrator.objective import build_objective
+from .orchestrator.objective import Objective, build_objective
 from .orchestrator.shared_state import SharedState
+from .orchestrator.system_prompts.prompt_builder import (
+    build_orchestration_prompt,
+    default_enabled_actions,
+)
 from .paths import (
     DEFAULT_SESSION_DIR,
     ENV_OVERRIDE_SESSION_DIR,
     _SESSION_SKELETON,
+    asset_system_prompts_dir,
     make_session_dir,
     session_dir as _session_dir_resolve,
 )
 from .session_paths import (
     agent_prompt_snapshot,
-    manifest_path,
 )
 
 
 log = logging.getLogger("inference_optimizer.cli")
 
 
-_DEFAULT_ORCH_PROMPT = (
-    "You are the Orchestration agent for an inference-optimization run.\n"
-    "Read the Shared session state below to see progress against the goal.\n\n"
-    "===== DECISION FRAMEWORK (follow EVERY tick) =====\n"
-    "Before proposing anything, evaluate Shared state to pick the next\n"
-    "highest-value action:\n"
-    "  if `cumulative_gain >= target_gain_pct`:\n"
-    "      → propose `report` (one shot). Then emit a single\n"
-    "        send_message{topic='heartbeat', body_md='goal-reached'}\n"
-    "        every following tick.\n"
-    "  if `stop_reason` is set:\n"
-    "      → emit one heartbeat 'goal-reached' and stop emitting actions.\n"
-    "  if `baseline_tput == 0`:\n"
-    "      → propose `baseline` only when no baseline task is already pending\n"
-    "        and stop_reason is empty. If a delegated_result contains positive\n"
-    "        output_throughput + completed_requests but warning/status noise,\n"
-    "        wait for Coordinator promotion; do NOT re-baseline.\n"
-    "  if `last_profile_trace` is empty:\n"
-    "      → propose `profile` (writes torch_trace; SharedState then has\n"
-    "        last_profile_trace = real path you'll use for select_kernels).\n"
-    "  if `last_profile_trace` is set AND `last_profile_args` already\n"
-    "  matches the active server config (current_best.extra_sglang_args,\n"
-    "  or empty when current_best.tput == baseline_tput):\n"
-    "      → DO NOT propose `profile` again. Profile is deterministic for\n"
-    "        the same server config + workload, so re-running it cannot\n"
-    "        change the hot-kernel list.\n"
-    "  if `last_select_kernels.reusable_native_kernel_ids` is empty AND\n"
-    "  `last_profile_trace` is set:\n"
-    "      → kernel-opt has no eligible target. DO NOT propose `profile`,\n"
-    "        DO NOT emit select_kernels/run_optimization. Fall back to\n"
-    "        params/sweep/heartbeat instead.\n"
-    "  if `params_no_promote_streak >= 5`:\n"
-    "      → params has plateaued (5+ rounds didn't promote). Switch to\n"
-    "        kernel-opt path (REQUEST select_kernels → run_optimization →\n"
-    "        integrate). Do NOT re-propose params/backends/sweep until\n"
-    "        kernel-opt produces a result.\n"
-    "  if backends/params haven't been tried this session (count proposals\n"
-    "  in your inbox):\n"
-    "      → propose backends first, then params. One round each.\n"
-    "  otherwise:\n"
-    "      → kernel-opt path (see Pipeline below). It's the most expensive\n"
-    "        but also the highest-ceiling lever once params plateaued.\n\n"
-    "===== KERNEL-OPT PIPELINE (sequential, no backtracking) =====\n"
-    "step K1 (skip when cached): emit\n"
-    "  request{target_agent: 'kernel', kind: 'select_kernels',\n"
-    "          params: {trace_input: <verbatim last_profile_trace value>,\n"
-    "                   top_k: 10}}\n"
-    "  STRICT: if `last_select_kernels.trace_input` already equals\n"
-    "  `last_profile_trace`, the candidate list is cached and you MUST\n"
-    "  skip K1. Go directly to K2 using `last_select_kernels.candidates_path`\n"
-    "  and the kernel_id list under `last_select_kernels.top5`. Re-emit\n"
-    "  `select_kernels` only when `last_profile_trace` changes (i.e. after\n"
-    "  a fresh `profile`).\n\n"
-    "step K2: pick the next reusable native kernel from\n"
-    "  `last_select_kernels.reusable_native_kernel_ids` in order, skipping\n"
-    "  any whose kernel_id already appears in last_kernel_opt.kernel_id.\n"
-    "  HARD RULES:\n"
-    "    - kernel_id MUST appear in `reusable_native_kernel_ids`. Do NOT\n"
-    "      pick from raw `hot_kernels_top15` if the entry is not in that\n"
-    "      list — top hot kernels are often Tensile/CK/vendor binaries\n"
-    "      and will be rejected with `non_reusable_kernel`.\n"
-    "    - If `reusable_native_kernel_ids` is empty, do NOT keep emitting\n"
-    "      run_optimization. Heartbeat instead and consider re-profiling.\n"
-    "  Then emit\n"
-    "  request{target_agent: 'kernel', kind: 'run_optimization',\n"
-    "          params: {kernel_id: <picked kernel_id>,\n"
-    "                   source_file: <from hot_kernels[i].source_file>,\n"
-    "                   candidates_path: <select_kernels_done.candidates_path>,\n"
-    "                   backends: 'claude',\n"
-    "                   budget_minutes: 60}}\n\n"
-    "step K3: when `run_optimization_done` arrives, look at\n"
-    "  result.proposal.decision and result.verification:\n"
-    "    KEEP        → emit request{kind: 'integrate', params:\n"
-    "                               {kernel_id: <result.kernel_id>,\n"
-    "                                patch_path: <result.best_artifact_path OR result.verification.best_artifact_path>,\n"
-    "                                target_file: <result.source_file>,\n"
-    "                                base_tput: <current_best.tput>,\n"
-    "                                extra_sglang_args: <current_best.extra_sglang_args>,\n"
-    "                                config_path: <baseline yaml absolute path>}}\n"
-    "    PARTIAL/REVERT → don't integrate; pick the NEXT hot kernel\n"
-    "                     (skip kernels with kernel_id == last_kernel_opt.kernel_id)\n"
-    "                     and re-issue step K2 with that one.\n\n"
-    "===== KERNEL TARGETING (native vs torch.compile) =====\n"
-    "First decide the final serving mode as a framework/params choice:\n"
-    "SGLang may run with or without `--enable-torch-compile`; vLLM commonly\n"
-    "runs with compile/CUDAGraph optimizations by default unless eager/-O0 is\n"
-    "explicitly requested. `select_kernels` should profile that final serving\n"
-    "mode, BUT kernel-opt may only rewrite reusable native sources that still\n"
-    "appear in that trace. Never optimize `/tmp/torchinductor*`, Inductor cache,\n"
-    "or `triton_poi_*`/`triton_red_*` runtime-generated kernels — they are tied\n"
-    "to one compile graph/cache and the patch is not reusable. If compile-on\n"
-    "leaves no high-share reusable native kernels, stop kernel-opt and continue\n"
-    "with framework/params/compile configuration tuning instead.\n\n"
-    "===== SESSION_DIR contract =====\n"
-    "SESSION_DIR is injected per tick as the absolute path of the session\n"
-    "root (a flat directory; no user_id / session_id suffix). NEVER\n"
-    "concatenate it yourself; reference SESSION_DIR-rooted artefacts ONLY\n"
-    "via field values you find in SharedState (e.g. last_profile_trace,\n"
-    "last_select_kernels.candidates_path, current_best fields). Any path\n"
-    "you emit MUST be one of:\n"
-    "  (a) verbatim from SharedState, OR\n"
-    "  (b) prefixed by SESSION_DIR, OR\n"
-    "  (c) under one of the framework source allowlists\n"
-    "      (`/sgl-workspace/aiter/`, `/sgl-workspace/sglang/`,\n"
-    "      `/sgl-workspace/vllm/`) for `source_file` references.\n"
-    "PolicyGate will REJECT intents whose path fields fall outside this\n"
-    "set; the rejection lands in your inbox as `policy_denied`.\n\n"
-    "===== HARD RULES =====\n"
-    "* `kind` MUST be EXACTLY one of: 'select_kernels' / 'run_optimization' /\n"
-    "  'integrate' / 'apply_patch' (these have programmatic handlers).\n"
-    "  `kernel_opt` is NOT a recognised kind — never use it.\n"
-    "* Never invent a trace_input path. ONLY use SharedState.last_profile_trace.\n"
-    "* InferenceX serving benchmarks use `--max-concurrency`; do NOT diagnose\n"
-    "  failures as `--concurrent-requests` unless that literal flag appears in\n"
-    "  the executed command or stderr.\n"
-    "* If your last action was a propose_action, do NOT re-propose the same\n"
-    "  action in the next 3 ticks (give the dispatcher time to run it).\n"
-    "* Every turn MUST emit at least one `emit_intent` tool call.\n"
-    "  Free-text replies are dropped.\n"
-)
+def _orchestration_rules_fragment_path() -> Path:
+    """Path to the rules-only fragment consumed by ``prompt_builder``.
 
-_DEFAULT_CRITIC_PROMPT = (
-    "You are the Critic agent. Your only job: review proposals from\n"
-    "Orchestration and emit one `review_verdict` per un-reviewed proposal.\n\n"
-    "Decision rule (smoke-grade — keep it simple):\n"
-    "  * baseline / profile / classify / setup / target_analysis / report /\n"
-    "    backends / params / sweep / dream  → approve\n"
-    "  * kernel_opt / integrate / operator_tuning / vendor_kernel_config /\n"
-    "    deep_kernel_analysis  → approve (Orchestration sends them via\n"
-    "    REQUEST anyway, you just OK the proposal flow)\n"
-    "  * Reject only if action_name is unknown or accuracy_risk > 0.3\n"
-    "    without obvious justification.\n\n"
-    "Required payload: target_proposal_msg_id, verdict, reasoning."
-)
+    Phase 1 collapsed ``orchestration.md`` to a small "rules + output protocol"
+    fragment; the full system prompt is composed at runtime from
+    :class:`ActionMetadata` and run-level parameters by
+    :func:`build_orchestration_prompt`. The legacy
+    ``orchestration.no_kernel.md`` was deleted — kernel-vs-no-kernel is now
+    a builder parameter, not a separate file.
+    """
+    return asset_system_prompts_dir() / "orchestration.md"
+
+
+def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | str | None]:
+    """Return ``(kind, value)`` strings consumed by the prompt builder."""
+    kind = objective.kind()
+    value: float | str | None = None
+    if hasattr(objective, "target_gain_pct"):
+        value = float(getattr(objective, "target_gain_pct"))
+    elif hasattr(objective, "target_tput_per_gpu"):
+        value = float(getattr(objective, "target_tput_per_gpu"))
+    elif hasattr(objective, "baseline_dir"):
+        value = str(getattr(objective, "baseline_dir"))
+    return kind, value
+
+
+def _build_orchestration_prompt(
+    *,
+    no_kernel: bool,
+    framework: str,
+    objective: Objective,
+    max_minutes: int,
+    action_registry: ActionRegistry | None = None,
+) -> str:
+    """Compose the Orchestration system prompt for this run.
+
+    The legacy ``_load_orchestration_prompt(no_kernel)`` returned a
+    hand-maintained markdown file; this replacement assembles the prompt
+    from typed inputs so kernel-enabled / no-kernel split is just a
+    parameter and every enabled action carries a 1-line description.
+
+    Callers may still pass ``--orch-prompt`` to fully override the result.
+    """
+    registry = action_registry or ActionRegistry().load()
+    enabled = default_enabled_actions(no_kernel=no_kernel)
+    kind, value = _objective_summary_for_prompt(objective)
+    return build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=enabled,
+        framework=framework,
+        kernel_enabled=not no_kernel,
+        objective_kind=kind,
+        objective_value=value,
+        max_minutes=int(max_minutes),
+        rules_fragment_path=_orchestration_rules_fragment_path(),
+    )
+
+
+def _load_critic_prompt() -> str:
+    """Return the Critic system prompt sourced from ``system_prompts/critic.md``."""
+    return (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
+
 
 _DEFAULT_KERNEL_PROMPT = (
     "You are the Kernel agent — responder-only. You receive `request`\n"
@@ -241,48 +176,6 @@ _DEFAULT_KERNEL_PROMPT = (
     "PolicyGate rejects responses whose path fields escape this set.\n\n"
     "If your inbox has no requests, emit one send_message{topic='heartbeat',\n"
     "body_md='ok'}. You may NOT propose, delegate, or initiate REQUESTs."
-)
-
-
-_DEFAULT_ORCH_PROMPT_NO_KERNEL = (
-    "You are the Orchestration agent for an inference-optimization run.\n"
-    "Read the Shared session state below to see progress against the goal.\n\n"
-    "IMPORTANT: The Kernel agent is DISABLED for this session. DO NOT\n"
-    "propose `profile`, `kernel_opt`, `integrate`, `select_kernels`,\n"
-    "`run_optimization`, `deep_kernel_analysis`, `operator_tuning`, or\n"
-    "`vendor_kernel_config`. Only params / backends / sweep / report are\n"
-    "available for driving throughput improvements.\n\n"
-    "===== DECISION FRAMEWORK =====\n"
-    "  if `cumulative_gain >= target_gain_pct`:\n"
-    "      → propose `report` (one shot). Then heartbeat 'goal-reached'.\n"
-    "  if `stop_reason` is set:\n"
-    "      → emit one heartbeat 'goal-reached' and stop emitting actions.\n"
-    "  if `baseline_tput == 0`:\n"
-    "      → propose `baseline` only when no baseline task is already pending\n"
-    "        and stop_reason is empty. If delegated_result shows positive\n"
-    "        output_throughput + completed_requests, wait for Coordinator\n"
-    "        promotion instead of re-baselining.\n"
-    "  if backends haven't been tried (no backends result in shared state):\n"
-    "      → propose backends first.\n"
-    "  otherwise:\n"
-    "      → propose params or sweep (alternate each round).\n\n"
-    "===== SESSION_DIR contract =====\n"
-    "SESSION_DIR is injected per tick as the absolute path of the session\n"
-    "root (a flat directory; no user_id / session_id suffix). NEVER\n"
-    "concatenate it yourself; reference SESSION_DIR-rooted artefacts ONLY\n"
-    "via field values you find in SharedState. Any path you emit MUST be\n"
-    "either verbatim from SharedState or prefixed by SESSION_DIR.\n"
-    "PolicyGate will REJECT intents whose path fields fall outside this\n"
-    "set; the rejection lands in your inbox as `policy_denied`.\n\n"
-    "===== HARD RULES =====\n"
-    "* Do NOT emit REQUEST to any agent — kernel agent is disabled.\n"
-    "* InferenceX serving benchmarks use `--max-concurrency`; do NOT diagnose\n"
-    "  failures as `--concurrent-requests` unless that literal flag appears in\n"
-    "  the executed command or stderr.\n"
-    "* If your last action was a propose_action, do NOT re-propose the same\n"
-    "  action in the next 3 ticks (give the dispatcher time to run it).\n"
-    "* Every turn MUST emit at least one `emit_intent` tool call.\n"
-    "  Free-text replies are dropped.\n"
 )
 
 
@@ -391,6 +284,69 @@ def _validate_critic_agent_runtime(root: Path) -> None:
         sys.exit(2)
 
 
+# ---------------------------------------------------------------------------
+# Robustness-agent runtime location resolution. Mirrors the critic-agent
+# helpers above: hosts pick a backend through --robustness-mock /
+# --robustness-agent (env override INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND),
+# and when "agent" is selected we shell out to
+# ``python -m robustness_agent.runtime.cli`` with cwd=<root> and
+# PYTHONPATH=<root>/src.
+_ROBUSTNESS_AGENT_ROOT_ENV = "ROBUSTNESS_AGENT_ROOT"
+
+
+def _resolve_robustness_agent_root() -> Path | None:
+    """Return the robustness-agent skill root, or ``None`` if not found.
+
+    Order:
+    1. ``$ROBUSTNESS_AGENT_ROOT`` env var (operator override).
+    2. Sibling ``robustness-agent/`` next to the inference_optimizer package
+       (i.e. ``$REPO_ROOT/robustness-agent``).
+    """
+    override = os.environ.get(_ROBUSTNESS_AGENT_ROOT_ENV, "").strip()
+    if override:
+        p = Path(override).expanduser()
+        return p if (p / "src" / "robustness_agent" / "runtime" / "cli.py").is_file() else None
+    from .paths import PACKAGE_ROOT
+    candidate = PACKAGE_ROOT.parent / "robustness-agent"
+    cli_module = candidate / "src" / "robustness_agent" / "runtime" / "cli.py"
+    return candidate if cli_module.is_file() else None
+
+
+def _validate_robustness_agent_runtime(root: Path) -> None:
+    """Fail fast if ``python -m robustness_agent.runtime.cli --help`` doesn't work."""
+    src = str(root / "src")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = src + os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else src
+    cmd = [sys.executable, "-m", "robustness_agent.runtime.cli", "--help"]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        print(
+            f"ERROR: robustness-agent runtime sanity check failed: {exc!r}\n"
+            f"  cwd={root}\n"
+            f"  cmd={' '.join(cmd)}\n"
+            f"Either fix ROBUSTNESS_AGENT_ROOT, install robustness-agent at "
+            f"$REPO_ROOT/robustness-agent, or pass --robustness-mock to bypass.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if proc.returncode != 0:
+        print(
+            f"ERROR: robustness-agent runtime.cli --help exited rc={proc.returncode}\n"
+            f"  cwd={root}\n"
+            f"  stderr={proc.stderr.strip()[:500]}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
 def _autodetect_gpu_type() -> str | None:
     """Return mi300x|mi325x|mi355x or None if undetectable.
 
@@ -432,6 +388,9 @@ def _build_backends(
     session_dir: Path,
     critic_agent_root: Path | None = None,
     critic_kb_mode: str = "inmemory",
+    robustness_choice: str = "mock",
+    robustness_agent_root: Path | None = None,
+    robustness_options: dict[str, Any] | None = None,
     no_kernel: bool = False,
 ) -> dict[str, Any]:
     """Construct all per-role backends.
@@ -444,6 +403,14 @@ def _build_backends(
       ``review_constraints``-gated verdicts. Requires ``critic_agent_root``.
     * ``codex_bare`` — legacy direct :class:`CodexBackend` chat-completion
       path. Kept available for debugging the LLM layer in isolation.
+
+    ``robustness_choice`` ∈ {``"mock"``, ``"agent"``}:
+
+    * ``mock`` — heartbeat-only :class:`MockRobustnessBackend` (default;
+      keeps optimizer self-contained).
+    * ``agent`` — :class:`RobustnessAgentBackend` driving
+      ``python -m robustness_agent.runtime.cli`` in a subprocess. Mirrors
+      the critic-agent transport. Requires ``robustness_agent_root``.
     """
     if critic_choice not in ("mock", "agent", "codex_bare"):
         raise ValueError(
@@ -467,10 +434,29 @@ def _build_backends(
             kb_mode=critic_kb_mode,
         )
 
+    if robustness_choice not in ("mock", "agent"):
+        raise ValueError(
+            f"_build_backends: robustness_choice={robustness_choice!r} not in "
+            "{'mock','agent'}"
+        )
+    if robustness_choice == "mock":
+        robustness_backend: Any = MockRobustnessBackend()
+    else:  # "agent"
+        if robustness_agent_root is None:
+            raise ValueError(
+                "_build_backends: robustness_choice='agent' requires "
+                "robustness_agent_root"
+            )
+        robustness_backend = RobustnessAgentBackend(
+            robustness_agent_root=robustness_agent_root,
+            session_dir=session_dir,
+            options=robustness_options,
+        )
+
     backends: dict[str, Any] = {
         "orchestration": ClaudeBackend(model=claude_model, max_turns_default=4),
         "critic":        critic_backend,
-        "robustness":    MockRobustnessBackend(),
+        "robustness":    robustness_backend,
     }
     if not no_kernel:
         if kernel_codex:
@@ -544,50 +530,102 @@ def _default_target_summary(args: argparse.Namespace) -> str:
     return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
 
 
+# --- Executor wiring tables ------------------------------------------------
+# Declarative mappings of action_kind → ExecutorFn so tests can introspect
+# what's actually wired without re-parsing the imperative body of
+# ``_register_executors``. Adding a new action with a real executor MUST
+# update these tables; the regression test in
+# ``tests/test_p1_2_full_action_catalogue.py`` enforces consistency between
+# these tables and ``session_paths._runs_actions()``.
+
+# Real executors enabled in every run mode (kernel + no-kernel).
+_REAL_EXECUTORS_FULL: dict[str, Any] = {
+    "baseline":       baseline_executor,
+    "backends":       backends_executor,
+    "params":         params_executor,
+    "sweep":          sweep_executor,
+    "report":         report_executor,
+    "validate_stack": validate_stack_executor,
+}
+
+# Real executors enabled only when kernel-mode is on (profile/pmc_roofline
+# only feed kernel-opt and would burn lanes for nothing in --no-kernel).
+_REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {
+    "profile":      profile_executor,
+    "pmc_roofline": pmc_roofline_executor,
+}
+
+# Prep / orchestration-only / agent-owned action kinds that the
+# Orchestration loop still needs to dispatch but whose bodies are no-ops
+# (the orchestration agent does the actual work via emit_intent). Kept
+# split so --no-kernel can exclude kernel-owned kinds.
+_NOOP_KINDS_COMMON: tuple[str, ...] = (
+    "setup", "classify", "target_analysis",
+    "dream", "re_explore", "recover",
+    "comm_optimization", "compiler_tuning",
+)
+_NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = (
+    "kernel_opt", "integrate", "deep_kernel_analysis",
+    "operator_tuning", "vendor_kernel_config",
+)
+
+
 def _register_executors(coordinator: Coordinator, *, no_kernel: bool = False) -> None:
     """Wire all currently-available action executors.
 
-    P2-1 ships only `baseline` (real Magpie). Stubs for prep + kernel-owned
-    actions keep the Orchestration loop from stalling while later phases
-    fill in the real ones.
+    Real executors are pulled from ``_REAL_EXECUTORS_FULL`` (always) and
+    ``_REAL_EXECUTORS_KERNEL_ONLY`` (when kernel-mode is on). Kinds that
+    the Orchestration loop dispatches but whose bodies are no-ops (prep
+    stubs + kernel-owned actions whose work happens in handlers) get
+    ``_noop_prep`` so SubAgentRunner doesn't fail with "no_executor".
 
     When ``no_kernel`` is True, kernel-owned action stubs are skipped and
     ``profile`` is also skipped (profiling only feeds kernel-opt).
     """
-    coordinator.sub.register_executor("baseline", baseline_executor)
-    coordinator.sub.register_executor("backends", backends_executor)
-    coordinator.sub.register_executor("params",   params_executor)
-    coordinator.sub.register_executor("sweep",    sweep_executor)
-    coordinator.sub.register_executor("report",   report_executor)
+    for kind, fn in _REAL_EXECUTORS_FULL.items():
+        coordinator.sub.register_executor(kind, fn)
 
     if no_kernel:
-        # No profile (it only feeds kernel-opt), no kernel-owned actions.
-        for kind in ("setup", "classify", "target_analysis",
-                      "dream", "re_explore", "recover",
-                      "comm_optimization", "compiler_tuning"):
-            coordinator.sub.register_executor(kind, _noop_prep)
+        noop_kinds = _NOOP_KINDS_COMMON
     else:
-        coordinator.sub.register_executor("profile", profile_executor)
-        coordinator.sub.register_executor("pmc_roofline", pmc_roofline_executor)
-        for kind in ("setup", "classify", "target_analysis",
-                      "kernel_opt", "integrate", "deep_kernel_analysis",
-                      "operator_tuning", "vendor_kernel_config",
-                      "dream", "re_explore", "recover",
-                      "comm_optimization", "compiler_tuning"):
-            coordinator.sub.register_executor(kind, _noop_prep)
+        for kind, fn in _REAL_EXECUTORS_KERNEL_ONLY.items():
+            coordinator.sub.register_executor(kind, fn)
+        noop_kinds = _NOOP_KINDS_COMMON + _NOOP_KINDS_KERNEL_ONLY
+
+    for kind in noop_kinds:
+        coordinator.sub.register_executor(kind, _noop_prep)
 
 
 def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     print()
     print("================ Final summary ================")
-    print(f"  stop_reason     : {stop_reason}")
-    print(f"  session_id      : {state.session_id}")
-    print(f"  model           : {state.model_name}")
-    print(f"  baseline_tput   : {state.baseline_tput:.1f} tok/s/GPU")
-    print(f"  cumulative_gain : {state.cumulative_gain:.2f}%")
-    print(f"  current_best    : {state.current_best}")
-    print(f"  pruned_families : {state.pruned_families}")
-    print(f"  crash_count     : {state.crash_count}")
+    print(f"  stop_reason          : {stop_reason}")
+    print(f"  session_id           : {state.session_id}")
+    print(f"  model                : {state.model_name}")
+    print(f"  baseline_tput        : {state.baseline_tput:.1f} tok/s/GPU")
+    print(
+        f"  cumulative_gain      : {state.cumulative_gain:.2f}% "
+        f"(per-round sum — informational)"
+    )
+    if state.cumulative_gain_validated_ts:
+        stale = (
+            " ⚠ stack changed since validation"
+            if len(state.optimization_stack) > state.cumulative_gain_validated_stack_len
+            else ""
+        )
+        print(
+            f"  cumulative_gain_val  : {state.cumulative_gain_validated:.2f}% "
+            f"(validated_at_stack_len={state.cumulative_gain_validated_stack_len}, "
+            f"ts={state.cumulative_gain_validated_ts}){stale}"
+        )
+    else:
+        print(
+            f"  cumulative_gain_val  : 0.00% "
+            f"⚠ never validated — no `validate_stack` action ran"
+        )
+    print(f"  current_best         : {state.current_best}")
+    print(f"  pruned_families      : {state.pruned_families}")
+    print(f"  crash_count          : {state.crash_count}")
     print("===============================================")
 
 
@@ -1463,6 +1501,54 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     return chosen
 
 
+# Default robustness backend. Production runs use the real subprocess
+# transport; operators can still force the heartbeat-only mock with
+# --robustness-mock or the env override below.
+DEFAULT_ROBUSTNESS_BACKEND = os.environ.get(
+    "INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND", "agent",
+)
+_VALID_ROBUSTNESS_BACKENDS = ("mock", "agent")
+
+
+def _resolve_robustness_choice(args: argparse.Namespace) -> str:
+    """Resolve the active robustness backend choice.
+
+    Mirrors :func:`_resolve_critic_choice`. Operator picks via
+    ``--robustness-mock`` / ``--robustness-agent`` (sets
+    ``args.robustness_backend``); ``None`` falls back to
+    :data:`DEFAULT_ROBUSTNESS_BACKEND`. Hard-fails on an invalid value.
+    """
+    chosen = getattr(args, "robustness_backend", None)
+    if chosen is None:
+        chosen = DEFAULT_ROBUSTNESS_BACKEND
+    if chosen not in _VALID_ROBUSTNESS_BACKENDS:
+        print(
+            f"ERROR: robustness backend {chosen!r} not in "
+            f"{_VALID_ROBUSTNESS_BACKENDS!r} (set by --robustness-mock / "
+            f"--robustness-agent or "
+            f"INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return chosen
+
+
+def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
+    """Collect non-default ``request.options`` overrides from CLI flags.
+
+    Only emits keys the operator actually passed so the runtime CLI
+    falls back to its own defaults / env-discovery for the rest.
+    """
+    options: dict[str, Any] = {}
+    server_url = getattr(args, "robustness_server_url", None)
+    if server_url is not None:
+        options["robustness_server_url"] = server_url
+    llm_rca = getattr(args, "robustness_llm_rca", None)
+    if llm_rca is not None:
+        options["llm_rca_enabled"] = bool(llm_rca)
+    return options
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     proxy_urls = _preflight()
 
@@ -1615,7 +1701,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print(f"Session dir     : {session_dir}")
         print(f"Session id      : {manifest['session_id']}  (manifest label only)")
         _print_session_skeleton(session_dir)
-        state = _seed_shared_state(
+        _seed_shared_state(
             session_dir, args, session_id=manifest["session_id"],
         )
 
@@ -1670,6 +1756,25 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # operator hasn't already pinned it.
         os.environ.setdefault("WORKSPACE_PATH", str(Path(__file__).resolve().parents[1]))
 
+    # Resolve robustness backend choice + runtime root, mirroring critic.
+    robustness_choice = _resolve_robustness_choice(args)
+    robustness_agent_root: Path | None = None
+    robustness_options = _build_robustness_options(args)
+    if robustness_choice == "agent":
+        robustness_agent_root = _resolve_robustness_agent_root()
+        if robustness_agent_root is None:
+            print(
+                f"ERROR: --robustness-agent selected but robustness-agent "
+                f"runtime not found.\n"
+                f"  Set ${_ROBUSTNESS_AGENT_ROOT_ENV} to the directory "
+                f"containing src/robustness_agent/runtime/cli.py, or install "
+                f"robustness-agent at $REPO_ROOT/robustness-agent/.\n"
+                f"  Bypass with --robustness-mock.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        _validate_robustness_agent_runtime(robustness_agent_root)
+
     backends = _build_backends(
         claude_model=args.claude_model,
         codex_model=args.codex_model,
@@ -1678,6 +1783,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir=session_dir,
         critic_agent_root=critic_agent_root,
         critic_kb_mode=critic_kb_mode,
+        robustness_choice=robustness_choice,
+        robustness_agent_root=robustness_agent_root,
+        robustness_options=robustness_options,
         no_kernel=no_kernel,
     )
     # Bug A fix: expose the active session_dir to in-process executors
@@ -1703,12 +1811,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     coordinator = Coordinator(
         session_dir, backends=backends, role_registry=role_registry,
     )
+    framework_for_prompt = (
+        os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
+    )
+    max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
     prompts: dict[str, str] = {
-        "orchestration": args.orch_prompt or (
-            _DEFAULT_ORCH_PROMPT if not no_kernel
-            else _DEFAULT_ORCH_PROMPT_NO_KERNEL
+        "orchestration": args.orch_prompt or _build_orchestration_prompt(
+            no_kernel=no_kernel,
+            framework=framework_for_prompt,
+            objective=objective,
+            max_minutes=max_minutes_for_prompt,
         ),
-        "critic": args.critic_prompt or _DEFAULT_CRITIC_PROMPT,
+        "critic":        args.critic_prompt or _load_critic_prompt(),
     }
     if not no_kernel:
         prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
@@ -1729,11 +1843,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             f"critic-agent(kb={critic_kb_mode}, codex={args.codex_model}, "
             f"root={critic_agent_root})"
         )
+    if robustness_choice == "mock":
+        robustness_str = "mock"
+    else:
+        robustness_str = f"robustness-agent(root={robustness_agent_root})"
+        if robustness_options:
+            kvs = ",".join(f"{k}={v!r}" for k, v in sorted(robustness_options.items()))
+            robustness_str += f"[{kvs}]"
     print(f"Backends        : "
           f"orchestration=Claude({args.claude_model}), "
           f"kernel={kernel_str}, "
           f"critic={critic_str}, "
-          f"robustness=mock")
+          f"robustness={robustness_str}")
     print(f"Max ticks       : {args.max_ticks or 'unlimited'} "
           f"(budget = {args.max_hours}h)")
     print(f"Tick interval   : {args.tick_interval_sec}s")
@@ -1878,6 +1999,48 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_const",
         const="codex_bare",
         help=argparse.SUPPRESS,
+    )
+    # ----- Robustness backend selection (mirrors critic) ------------------
+    opt.add_argument(
+        "--robustness-mock",
+        dest="robustness_backend",
+        action="store_const",
+        const="mock",
+        default=None,
+        help="Force the heartbeat-only mock Robustness backend.",
+    )
+    opt.add_argument(
+        "--robustness-agent",
+        dest="robustness_backend",
+        action="store_const",
+        const="agent",
+        help="Force the robustness-agent runtime backend (subprocess + JSON, "
+             "mirrors critic-agent transport). Requires ROBUSTNESS_AGENT_ROOT "
+             "or a sibling $REPO_ROOT/robustness-agent/ directory.",
+    )
+    opt.add_argument(
+        "--robustness-server-url",
+        dest="robustness_server_url",
+        type=str,
+        default=None,
+        help="Override the robustness-server base URL forwarded into "
+             "request.options. Honoured only when --robustness-agent is "
+             "selected.",
+    )
+    opt.add_argument(
+        "--robustness-llm-rca",
+        dest="robustness_llm_rca",
+        action="store_true",
+        default=None,
+        help="Forward llm_rca_enabled=true into request.options. The agent "
+             "still falls back to NoopRcaEngine when LLM credentials aren't "
+             "set in the runtime env.",
+    )
+    opt.add_argument(
+        "--no-robustness-llm-rca",
+        dest="robustness_llm_rca",
+        action="store_false",
+        help="Forward llm_rca_enabled=false into request.options.",
     )
     opt.add_argument("--orch-prompt", type=str, default=None,
                       help="Override Orchestration system prompt (file path or inline)")

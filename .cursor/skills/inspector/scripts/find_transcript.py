@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """find_transcript.py
 
-Locate the current Cursor agent conversation's transcript JSONL file and find
-the line number of the most recent INSPECTOR_END marker so the next audit can
-scope its grep window incrementally.
+Locate the current Cursor agent conversation's transcript JSONL file and
+compute the starting line for the next inspector audit window.
 
 Layout assumed (per Cursor 2026-04 builds):
     ~/.cursor/projects/<project-slug>/agent-transcripts/<uuid>/<uuid>.jsonl
@@ -11,7 +10,15 @@ Layout assumed (per Cursor 2026-04 builds):
 Project slug = absolute cwd with leading "/" removed and remaining "/" replaced
 with "-". Example: cwd=/root/Hyperloom -> slug=root-Hyperloom.
 
-Selection rule:
+Audit-window discovery:
+  The on-disk sentinel `<RESULT_DIR>/.audit/_state.json` (written by
+  `emit_audit_report.py`) records `last_audit_to_line` and the
+  `transcript_path` it was produced against. If the sentinel exists AND its
+  `transcript_path` matches the chosen transcript, the next audit starts at
+  `last_audit_to_line + 1`. Otherwise (first audit of the run, or sentinel
+  was produced for a different transcript) the audit starts at line 1.
+
+Selection rule (which transcript file):
   1. Optional --marker-sentence: prefer the JSONL whose content contains the
      given sentence (matches the user prompt that started this run). If exactly
      one match -> pick it. If multiple -> fall through to mtime. If zero ->
@@ -20,8 +27,11 @@ Selection rule:
 
 Output: a single JSON object on stdout, e.g.
   {"transcript_path": "...", "audit_from_line": 412,
-   "previous_inspector_end_line": 411, "selection_method": "mtime",
+   "selection_method": "mtime", "window_source": "sentinel",
    "ts": "2026-04-21T10:34:00Z"}
+
+`window_source` is one of `sentinel` or `start_of_file` and documents which
+mechanism produced `audit_from_line`.
 
 Read-only. Stdlib only. Exits non-zero on hard errors (no transcripts dir).
 """
@@ -31,11 +41,8 @@ import argparse
 import datetime as _dt
 import json
 import os
-import re
 import sys
 from pathlib import Path
-
-INSPECTOR_END_RE = re.compile(r"^=== INSPECTOR_END phase=\S+ ts=\S+ verdict=\S+ ===\s*$")
 
 
 def _slug_from_cwd() -> str:
@@ -63,16 +70,17 @@ def _file_contains(path: Path, sentence: str, max_bytes: int = 4_000_000) -> boo
         return False
 
 
-def _last_inspector_end_line(path: Path) -> int | None:
-    last: int | None = None
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as f:
-            for i, line in enumerate(f, start=1):
-                if INSPECTOR_END_RE.search(line):
-                    last = i
-    except OSError:
+def _read_sentinel(result_dir: Path) -> dict | None:
+    sentinel = result_dir / ".audit" / "_state.json"
+    if not sentinel.is_file():
         return None
-    return last
+    try:
+        data = json.loads(sentinel.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
 
 
 def main() -> int:
@@ -83,6 +91,10 @@ def main() -> int:
                    help="Override project slug (default: derived from cwd).")
     p.add_argument("--marker-sentence", default=None,
                    help="Sentence to grep inside JSONL to disambiguate parallel sessions.")
+    p.add_argument("--result-dir", default=os.environ.get("RESULT_DIR"),
+                   help="$RESULT_DIR for the run. The on-disk sentinel "
+                        "<result-dir>/.audit/_state.json supplies the next "
+                        "audit's from-line.")
     args = p.parse_args()
 
     slug = args.slug or _slug_from_cwd()
@@ -107,13 +119,34 @@ def main() -> int:
     if chosen is None:
         chosen = max(candidates, key=lambda c: c.stat().st_mtime)
 
-    last_end = _last_inspector_end_line(chosen)
-    audit_from_line = (last_end + 1) if last_end is not None else 1
+    audit_from_line = 1
+    window_source = "start_of_file"
+
+    if args.result_dir:
+        sentinel = _read_sentinel(Path(args.result_dir))
+        if sentinel:
+            sent_path = sentinel.get("transcript_path")
+            sent_line = sentinel.get("last_audit_to_line")
+            # Only trust the sentinel if it was written for the same transcript;
+            # otherwise we are likely in a different session and the line
+            # numbers do not correspond. Normalise both sides to absolute paths
+            # so a sentinel written with an absolute path still matches a
+            # transcript resolved from a relative --projects-root.
+            chosen_abs = str(chosen.resolve()) if chosen else ""
+            try:
+                sent_abs = str(Path(sent_path).resolve()) if sent_path else ""
+            except OSError:
+                sent_abs = sent_path or ""
+            if (isinstance(sent_line, int)
+                    and (not sent_abs or sent_abs == chosen_abs)):
+                audit_from_line = sent_line + 1
+                window_source = "sentinel"
+
     out = {
         "transcript_path": str(chosen),
         "audit_from_line": audit_from_line,
-        "previous_inspector_end_line": last_end,
         "selection_method": selection_method,
+        "window_source": window_source,
         "candidates_considered": len(candidates),
         "slug": slug,
         "ts": _dt.datetime.now(tz=_dt.timezone.utc).isoformat(timespec="seconds"),

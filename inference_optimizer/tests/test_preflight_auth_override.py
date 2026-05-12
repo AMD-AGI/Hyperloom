@@ -18,6 +18,7 @@ on both the success and the fallback paths.
 from __future__ import annotations
 
 import argparse
+import importlib
 import subprocess
 import sys
 from typing import Any
@@ -508,6 +509,37 @@ def _make_args(**overrides) -> argparse.Namespace:
         base["critic_backend"] = "mock" if overrides.pop("critic_mock") else "codex_bare"
     base.update(overrides)
     return argparse.Namespace(**base)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_robustness_choice — default backend
+# ---------------------------------------------------------------------------
+def test_resolve_robustness_choice_defaults_to_agent():
+    args = _make_args(robustness_backend=None)
+
+    assert cli.DEFAULT_ROBUSTNESS_BACKEND == "agent"
+    assert cli._resolve_robustness_choice(args) == "agent"
+
+
+def test_resolve_robustness_choice_explicit_mock_wins():
+    args = _make_args(robustness_backend="mock")
+
+    assert cli._resolve_robustness_choice(args) == "mock"
+
+
+def test_resolve_robustness_choice_env_override_still_works(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND", "mock")
+    reloaded_cli = importlib.reload(cli)
+    try:
+        args = _make_args(robustness_backend=None)
+        assert reloaded_cli.DEFAULT_ROBUSTNESS_BACKEND == "mock"
+        assert reloaded_cli._resolve_robustness_choice(args) == "mock"
+    finally:
+        monkeypatch.delenv(
+            "INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND",
+            raising=False,
+        )
+        importlib.reload(cli)
 
 
 def test_validate_claude_model_rejects_unsupported_arg(monkeypatch, capsys):
