@@ -1,8 +1,8 @@
 # ROCm Hyperloom
 
-An agentic system that autonomously optimizes LLM inference and training on AMD GPUs. Hyperloom treats optimization as a **search problem**: given a workload, it builds a tree of candidate optimizations — backend swaps, server parameters, GEMM tuning, kernel rewrites, parallelism configs — scores each by expected gain and cost, then explores depth-first, always measuring against the real workload. Simply provide your workload and the agent delivers a fully optimized codebase — profiling against peak hardware potential, identifying bottlenecks, and iteratively rewriting code to maximize throughput on AMD GPUs, so the team gets production-ready optimized code.
+An agentic system that autonomously optimizes LLM inference on AMD GPUs. Hyperloom treats optimization as a **search problem**: given a workload, it builds a tree of candidate optimizations — backend swaps, server parameters, GEMM tuning, kernel rewrites, parallelism configs — scores each by expected gain and cost, then explores depth-first, always measuring against the real workload. Simply provide your workload and the agent delivers a fully optimized codebase — profiling against peak hardware potential, identifying bottlenecks, and iteratively rewriting code to maximize throughput on AMD GPUs, so the team gets production-ready optimized code.
 
-<p align="center"><img width="500" height="400" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" /></p>
+<p align="center"><img width="600" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" /></p>
 
 Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens-internal/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets.
 
@@ -50,9 +50,9 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 
 ## Quickstart — Local Mode (Cursor)
 
-### Inference Optimization (v2 — Multi-Agent System)
+### Inference Optimization
 
-v2 uses a multi-agent architecture with a Python Coordinator orchestrating four agent roles: Orchestration, Kernel, Critic, and Robustness. All optimization tools (GEAK, OOB, TraceLens) are scheduled via a local Ray cluster — no MCP remote services required.
+`inference_optimizer/` is the single, canonical skill in this repo. It uses a multi-agent architecture with a Python Coordinator orchestrating four agent roles: Orchestration, Kernel, Critic, and Robustness. All optimization tools (GEAK, OOB, TraceLens) are scheduled via a local Ray cluster — no MCP remote services required.
 
 #### Step 1 — Prepare GPU Environment
 
@@ -91,7 +91,7 @@ Ensure the following environment variables are set on the GPU node:
 |----------|-------------|
 | `NODE_TLS_REJECT_UNAUTHORIZED=0` | Required for internal network TLS certificate issues |
 
-> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.example-internal-host.invalid/api/v1/llm-proxy/v1). GEAK and OOB API Key / Base URL are automatically inherited from `SAFE_API_KEY` / `OPENAI_BASE_URL` — no separate configuration needed.
+> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.example-internal-host.invalid/litellm-gateway). GEAK and OOB API Key / Base URL are automatically inherited from `SAFE_API_KEY` / `OPENAI_BASE_URL` — no separate configuration needed.
 
 #### Step 3 — Connect via Cursor Remote SSH
 
@@ -115,16 +115,15 @@ Optimize /wekafs/models/Qwen3-30B-A3B inference on MI300X.
 
 ```
 @/wekafs/HyperloomV2/inference_optimizer/SKILL.md
-Optimize /wekafs/models/Qwen3-32B inference on MI300X.
+Optimize /wekafs/models/Qwen3-30B-A3B inference on MI300X.
 
 Environment:
 - FRAMEWORK=sglang
 - GPU_TYPE=MI300X
 - TP=8, CONC=64, ISL=1024, OSL=1024
 - PRECISION=bf16
-- --target-gain 30
+- --target-gain 10
 - --max-hours 24
-- --no-kernel
 - Run in background: setsid nohup
 
 OOB_PATH: /wekafs/hyperloom/OOB
@@ -153,33 +152,7 @@ The agent automatically:
 | `--no-kernel` | Param tuning only, skip kernel optimization | disabled |
 | `--gpu-type` | GPU model (MI300X / MI355X) | auto-detect |
 
-### Training Optimization
-
-```
-@.cursor/skills/training-optimization/SKILL.md
-Optimize GPT-OSS 20B training on 8x MI355X.
-Config: examples/megatron/configs/MI355X/gpt_oss_20B-BF16-pretrain.yaml
-```
-
-### MLPerf Training (GPT-OSS-20B)
-
-> **Image:** `harbor.core42.example-internal-host.invalid/custom/tasimage/primus:202604070309`
->
-> Before running, configure two API keys:
-> 1. `training_optimization/mlperf/config_MI355X_1x8x1_fp8.sh` line 29 — set `HF_TOKEN` to your HuggingFace token
-> 2. `.cursor/mcp.json` — replace all `<SAFE_API_KEY>ak-xxxxx` with your SAFE API key
->
-> See the [MLPerf skill Readme](.cursor/skills/mlperf-optimization/Readme.MD) for full setup instructions.
-
-```
-@.cursor/skills/mlperf-optimization/SKILL.md
-Use the mlperf-optimization skill to optimize GPT-OSS-20B MLPerf training performance.
-Benchmark: gpt-oss-20b (MLPerf Training 5.1.0)
-Quality target: validation log perplexity = 3.34
-MLPERF_DIR: /root/Hyperloom-plus-mlperf/training_optimization/mlperf
-Config script: config_MI355X_1x8x1_fp8.sh
-GPU: 8x MI355X, 1 node
-```
+> Training and MLPerf-training skills have been retired from this repo. Only inference optimization is supported here.
 
 ---
 
@@ -199,27 +172,15 @@ Hyperloom optimized 4 flagship models for the [InferenceX](https://github.com/Se
 
 All benchmarks: ISL=1024, OSL=1024 on MI355X (gfx950). "vs B200" shows best concurrency point. Full concurrency/ISL/OSL sweeps, patches, configs, and reproduction scripts: **[Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX)**.
 
-### Training Optimization
-
-| Workload | GPUs | Baseline | Optimized | Speedup | Attempts |
-|----------|------|----------|-----------|---------|----------|
-| GPT-OSS 20B (MoE, BF16) | 8x MI355X | 13,708 ms/iter | 13,060 ms/iter | **+4.7%** | 57 (4hr) |
-| GPT-OSS 20B (MoE, BF16) | 8x MI355X | 13,265 ms/iter | 13,042 ms/iter | **+1.7%** | 9 (1hr) |
-| Qwen3 8B (full finetune) | 8x MI355X | 863 tok/s/gpu | 18,860 tok/s/gpu | **+2,085%** | 19 |
-| Qwen3 32B (LoRA) | 8x MI355X | 467 tok/s/gpu | 4,984 tok/s/gpu | **+967%** | 19 |
-| Llama 4 Scout 17B-16E (MoE) | 8x MI355X | 20 tok/s/gpu | 170 tok/s/gpu | **+750%** | 18 |
-
 ## Detailed Skill Documentation
 
-Each domain has a comprehensive skill file with the full optimization protocol, examples, and a knowledge base of lessons learned from prior runs:
+The repo ships a single skill — `inference_optimizer/` — with the full optimization protocol, examples, and a knowledge base of lessons learned from prior runs:
 
 | Domain | Skill | Description |
 |--------|-------|-------------|
-| **Inference (v2)** | [SKILL.md](inference_optimizer/SKILL.md) | Multi-agent system, CLI-driven, fully automated |
-| **Training** | [SKILL.md](.cursor/skills/training-optimization/SKILL.md) | Skill-driven, Cursor Agent step-by-step |
-| **MLPerf Training** | [SKILL.md](.cursor/skills/mlperf-optimization/SKILL.md) | Skill-driven, MLPerf benchmark specific |
+| **Inference** | [SKILL.md](inference_optimizer/SKILL.md) | Multi-agent system, CLI-driven, fully automated |
 
-The skill files are the agent's instructions. They encode the full optimization methodology — setup, profiling protocol, what to try, how to measure, when to stop, and how to report. The knowledge base sections are updated live during runs with new pitfalls and validated results.
+The skill file is the agent's instructions. It encodes the full optimization methodology — setup, profiling protocol, what to try, how to measure, when to stop, and how to report. The knowledge base sections are updated live during runs with new pitfalls and validated results.
 
 ---
 
@@ -227,28 +188,23 @@ The skill files are the agent's instructions. They encode the full optimization 
 
 ```
 Hyperloom/
-├── inference_optimizer/                   # v2 inference optimization multi-agent system
-│   ├── SKILL.md                          # v2 inference skill (Cursor/Claw entry point)
+├── inference_optimizer/                  # Inference optimization skill (sole entry point)
+│   ├── SKILL.md                          # Skill spec (Cursor/Claw entry point)
 │   ├── cli.py                            # CLI entry: inference_optimizer optimize
 │   ├── orchestrator/                     # Coordinator + agent roles + action executors
 │   └── scripts/                          # Install scripts, baseline configs
-├── kernel-agent/                          # v2 Kernel Agent toolkit
+├── kernel-agent/                         # Kernel Agent toolkit (TraceLens/GEAK/OOB tools)
 │   ├── SKILL.md                          # Kernel Agent operation spec
 │   ├── tools/                            # TraceLens analysis, kernel optimization, patch apply
 │   │   └── backends/                     # GEAK/OOB submission (Ray-scheduled)
 │   └── scripts/                          # One-click installer (install.sh)
-├── .cursor/
-│   ├── mcp.json                          # MCP server config
-│   └── skills/
-│       ├── training-optimization/        # Training optimization skill + knowledge base
-│       └── mlperf-optimization/          # MLPerf training optimization skill
-├── training_optimization/
-│   ├── turboquant/                       # Quantization evaluation library
-│   └── mlperf/                           # MLPerf GPT-OSS-20B benchmark code
-├── deploy/
-│   └── local/                            # Local mode: containerized deployment for user-owned infra
-├── dashboards/                            # Interactive optimization dashboard (HTML)
+├── critic-agent/                         # Critic-agent subprocess runtime (proposal review)
+├── robustness-agent/                     # Robustness-agent subprocess runtime (health/RCA)
+├── ci/                                   # CI orchestration (PR submitter, AB test)
+├── docs/                                 # Architecture docs, case studies
 ├── slides/                               # Architecture diagrams
+├── scripts/                              # Repo-level helper scripts
+├── .cursor/mcp.json                      # Cursor MCP config (currently empty)
 ├── .env.template                         # Environment variables
 └── README.md
 ```

@@ -21,6 +21,7 @@ for any sub-path under ``session_dir``. No string concatenation like
 
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -40,21 +41,68 @@ def state_path(session_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 # Per-task workspaces under runs/<action>/<task_id>/
 # ---------------------------------------------------------------------------
-# Action names that get a stable home under ``runs/``. Listed here so a
-# typo in a caller's `kind` argument fails loudly via _validate_action()
-# rather than silently mkdir-ing ``runs/<typo>/``.
-_RUNS_ACTIONS: frozenset[str] = frozenset({
-    "baseline", "profile", "backends", "params", "sweep",
-    "integrate", "kernel_opt",
+# Single source of truth for "which actions own a runs/<kind>/<task_id>/
+# workspace": derived from the ActionRegistry via the ``pipeline_phase``
+# yaml field. Phases listed here are exactly the ones whose executors
+# write per-task artefacts under ``runs/``.
+#
+# History: this used to be a hand-maintained ``_RUNS_ACTIONS`` frozenset;
+# adding a new action (e.g. ``validate_stack``) required updating four
+# independent locations (yaml, cli register_executor, prompt builder
+# enabled-set, and this whitelist). Forgetting the last one made the
+# orchestrator loop forever proposing the action — every dispatch raised
+# ``ValueError: runs_dir: unknown action ...`` from inside the executor,
+# but mission TODOs never cleared. Driving the set from ``pipeline_phase``
+# keeps the four sources aligned automatically.
+_RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
+    "measure", "analysis", "explore", "deep", "validate",
 })
+
+# Hardcoded fallback used only when ActionRegistry can't be loaded
+# (broken yaml / partial install / very early bootstrap). MUST stay in
+# sync with the union of actions whose pipeline_phase is in
+# ``_RUNS_WORKSPACE_PHASES``; the regression test in
+# ``tests/test_p1_2_full_action_catalogue.py`` enforces this.
+_RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
+    "baseline", "profile", "pmc_roofline",
+    "backends", "params", "sweep",
+    "integrate", "kernel_opt", "deep_kernel_analysis",
+    "operator_tuning", "vendor_kernel_config",
+    "validate_stack",
+})
+
+
+@lru_cache(maxsize=1)
+def _runs_actions() -> frozenset[str]:
+    """Return the set of action names that own a ``runs/<kind>/<task_id>/``
+    workspace, derived from action metadata.
+
+    Lazy + cached so importing :mod:`session_paths` stays cheap (no
+    PyYAML load at import time) and so repeated calls in hot paths
+    (per-task ``_pre_mkdir_workspace`` / ``runs_dir``) are O(1).
+
+    Falls back to ``_RUNS_ACTIONS_FALLBACK`` if the action registry
+    can't be loaded — preferable to crashing at first use, since the
+    fallback covers every action that production code currently dispatches.
+    """
+    try:
+        from .orchestrator.action_registry import ActionRegistry  # local: avoid import-time cycle
+        registry = ActionRegistry().load()
+    except Exception:
+        return _RUNS_ACTIONS_FALLBACK
+    return frozenset(
+        a.name for a in registry.all()
+        if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
+    )
 
 
 def _validate_action(action: str) -> str:
     a = str(action or "").strip()
-    if a not in _RUNS_ACTIONS:
+    valid = _runs_actions()
+    if a not in valid:
         raise ValueError(
             f"runs_dir: unknown action {action!r}; expected one of "
-            f"{sorted(_RUNS_ACTIONS)!r}"
+            f"{sorted(valid)!r}"
         )
     return a
 

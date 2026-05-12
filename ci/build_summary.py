@@ -9,12 +9,14 @@ Inputs:
   --out-dir DIR         Where to write ci_summary.{json,md}
 
 Outputs:
-  ci_summary.md   — markdown table for $GITHUB_STEP_SUMMARY
-  ci_summary.json — structured rows for downstream tooling
+  ci_summary.md          — markdown table for $GITHUB_STEP_SUMMARY
+  ci_summary.json        — compact structured rows for downstream tooling
+  normalized_results.json / .ndjson
+                         — one normalized record per Hyperloom task
 
-Schema we accept from agent's ci_metrics.json (per skill report.md):
-  baseline_throughput, optimized_throughput, gain_pct,
-  tok_per_gpu_baseline, tok_per_gpu_optimized, actions_taken
+Main inputs parsed per task:
+  ci_metrics.json, baseline_summary.json, sweep_results.csv,
+  kernel_candidates.json, kernel_results.json, run_context.env
 """
 
 from __future__ import annotations
@@ -22,36 +24,16 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from inferenceX_parser import fetch_benchmarks, find_benchmark   # noqa: E402
+from artifact_normalizer import collect_normalized_results       # noqa: E402
 
 log = logging.getLogger("build-summary")
-
-
-# ── ci_metrics.json parser ──────────────────────────────────────────────────────
-
-def parse_ci_metrics(metrics_path: Path) -> dict | None:
-    """Parse the agent-written ci_metrics.json. Returns the 6 documented fields
-    mapped to our column names, or None if the file is missing/malformed.
-    """
-    if not metrics_path.exists():
-        return None
-    try:
-        d = json.loads(metrics_path.read_text())
-    except Exception as e:
-        log.warning("failed to parse %s: %s", metrics_path, e)
-        return None
-    return {
-        "baseline_tok_per_gpu":  d.get("tok_per_gpu_baseline"),
-        "optimized_tok_per_gpu": d.get("tok_per_gpu_optimized"),
-        "gain_pct":              d.get("gain_pct"),
-        "actions":               d.get("actions_taken") or [],
-    }
 
 
 # ── InferenceX reference lookup ─────────────────────────────────────────────────
@@ -60,7 +42,7 @@ def load_hf_to_ifx_map(yaml_path: Path) -> dict[str, str]:
     """Read inferenceX_models.yaml → {hf_model: api_name}."""
     if not yaml_path.exists():
         return {}
-    cfg = yaml.safe_load(yaml_path.read_text()) or {}
+    cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
     return {
         m["hf_model"]: m["api_name"]
         for m in cfg.get("models", [])
@@ -86,6 +68,7 @@ def fetch_inferenceX_ref(
         log.info("[%s] no InferenceX api_name mapping; skipping ref lookup", repo_id)
         return None
     try:
+        from inferenceX_parser import fetch_benchmarks, find_benchmark
         benchmarks = fetch_benchmarks(api_name)
     except Exception as e:
         log.warning("[%s] InferenceX API failed: %s", api_name, e)
@@ -108,61 +91,68 @@ def collect_rows(
     target_gpu: str,
     isl: int,
     osl: int,
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     rows: list[dict] = []
-    # Each matrix job uploaded its own submission-manifest-* artifact, so we
-    # walk all submission_manifest.json files we can find.
-    manifest_files = sorted(manifests_dir.rglob("submission_manifest.json"))
-    if not manifest_files:
-        log.warning("no submission_manifest.json under %s", manifests_dir)
-        return rows
-    log.info("found %d manifest file(s)", len(manifest_files))
+    normalized_results = collect_normalized_results(
+        artifacts_dir, manifests_dir, build_run_metadata())
 
-    for mfile in manifest_files:
-        try:
-            manifest = json.loads(mfile.read_text())
-        except Exception as e:
-            log.warning("skipping %s: %s", mfile, e)
-            continue
+    for item in normalized_results:
+        task = item.get("task") or {}
+        metrics = item.get("metrics") or {}
+        detected = task.get("detected") or {}
+        model = task.get("model")
+        row = {
+            "model": model,
+            "task_id": task.get("task_id"),
+            "display_name": task.get("display_name"),
+            "submit_status": task.get("submit_status"),
+            "final_status": task.get("final_status"),
+            "framework": metrics.get("framework") or detected.get("framework"),
+            "precision": detected.get("precision"),
+            "gpu_type": metrics.get("gpu_type"),
+            "baseline_tok_per_gpu": (
+                metrics.get("tok_per_gpu_baseline")
+                or metrics.get("baseline_throughput")
+            ),
+            "optimized_tok_per_gpu": (
+                metrics.get("tok_per_gpu_optimized")
+                or metrics.get("optimized_throughput")
+            ),
+            "gain_pct": metrics.get("gain_pct"),
+            "peak_throughput": metrics.get("peak_throughput"),
+            "peak_throughput_conc": metrics.get("peak_throughput_conc"),
+            "inferenceX_tok_per_gpu": None,
+            "vs_inferenceX_pct": None,
+            "actions": metrics.get("actions") or [],
+            "sweep_points": len(item.get("sweep_points") or []),
+            "kernel_candidates": len(item.get("kernel_candidates") or []),
+            "kernel_optimizations": len(item.get("kernel_optimizations") or []),
+            "artifacts": len(item.get("artifacts") or []),
+            "warnings": item.get("warnings") or [],
+        }
 
-        for rec in manifest.get("records", []):
-            detected = rec.get("detected") or {}
-            row = {
-                "model":                rec.get("model"),
-                "task_id":              rec.get("task_id"),
-                "display_name":         rec.get("display_name"),
-                "submit_status":        rec.get("status"),
-                "final_status":         rec.get("final_status"),
-                "framework":            detected.get("framework"),
-                "precision":            detected.get("precision"),
-                "tp":                   detected.get("tp"),
-                "concurrency":          detected.get("concurrency"),
-                "params_b":             detected.get("params_b"),
-                "image":                detected.get("image"),
-                "baseline_tok_per_gpu":  None,
-                "optimized_tok_per_gpu": None,
-                "gain_pct":              None,
-                "inferenceX_tok_per_gpu": None,
-                "vs_inferenceX_pct":     None,
-                "actions":               [],
-            }
-            # ci_metrics.json lives at task-artifacts/<task_id>/ci_metrics.json
-            if row["task_id"]:
-                metrics_path = artifacts_dir / row["task_id"] / "ci_metrics.json"
-                m = parse_ci_metrics(metrics_path)
-                if m:
-                    row.update(m)
+        ref = fetch_inferenceX_ref(model, hf_to_ifx, target_gpu, isl, osl) if model else None
+        row["inferenceX_tok_per_gpu"] = ref
+        opt = row["optimized_tok_per_gpu"]
+        if ref and opt:
+            row["vs_inferenceX_pct"] = (opt - ref) / ref * 100.0
 
-            ref = fetch_inferenceX_ref(
-                row["model"], hf_to_ifx, target_gpu, isl, osl)
-            row["inferenceX_tok_per_gpu"] = ref
-            opt = row["optimized_tok_per_gpu"]
-            if ref and opt:
-                row["vs_inferenceX_pct"] = (opt - ref) / ref * 100.0
+        rows.append(row)
 
-            rows.append(row)
+    return rows, normalized_results
 
-    return rows
+
+def build_run_metadata() -> dict:
+    """Capture GitHub Actions context when present; harmless for local runs."""
+    return {
+        "source": "hyperloom-ci",
+        "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+        "github_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+        "github_workflow": os.environ.get("GITHUB_WORKFLOW"),
+        "github_repository": os.environ.get("GITHUB_REPOSITORY"),
+        "github_sha": os.environ.get("GITHUB_SHA"),
+        "github_ref": os.environ.get("GITHUB_REF"),
+    }
 
 
 # ── Markdown rendering ──────────────────────────────────────────────────────────
@@ -185,116 +175,42 @@ def fmt_pct(v) -> str:
         return str(v)
 
 
-def _short_name(model: str) -> str:
-    """Drop org prefix for compactness (e.g. `Qwen/Qwen2.5-7B` -> `Qwen2.5-7B`)."""
-    return model.split("/")[-1] if model else "—"
-
-
-def _gain_medal(gain_pct) -> str:
-    """Decorate gain% with medal emoji per the manual RESULTS_FINAL.md convention."""
-    if gain_pct is None:
-        return "—"
-    if gain_pct > 50:
-        return f"🥇🥇🥇🥇 **{gain_pct:+.2f}%**"
-    if gain_pct > 20:
-        return f"🥇🥇🥇 **{gain_pct:+.2f}%**"
-    if gain_pct > 10:
-        return f"🥇🥇 **{gain_pct:+.2f}%**"
-    if gain_pct > 1:
-        return f"🥇 **{gain_pct:+.2f}%**"
-    if gain_pct > 0.1:
-        return f"🟢 {gain_pct:+.2f}%"
-    return f"{gain_pct:+.2f}%"
-
-
-def _sort_key(r: dict) -> tuple:
-    """Sort: tasks with optimized data first (by gain desc), then partial-data, then failed."""
-    gain = r.get("gain_pct")
-    opt = r.get("optimized_tok_per_gpu")
-    has_data = gain is not None and opt is not None
-    has_partial = opt is not None
-    fail = r.get("final_status") not in ("Succeeded", "Running", None)
-    rank = 0 if has_data else (1 if has_partial else (3 if fail else 2))
-    return (rank, -(gain or 0), -(opt or 0))
-
-
 def render_markdown(rows: list[dict], target_gpu: str, isl: int, osl: int) -> str:
-    rows_sorted = sorted(rows, key=_sort_key)
-    n = len(rows)
     succeeded = sum(1 for r in rows if r.get("final_status") == "Succeeded")
-    with_data = sum(1 for r in rows if r.get("gain_pct") is not None)
-    beat_ifx = [r for r in rows
-                if r.get("vs_inferenceX_pct") is not None and r["vs_inferenceX_pct"] > 0]
-    top_gains = sorted(
-        [r for r in rows if r.get("gain_pct") is not None and r["gain_pct"] > 1],
-        key=lambda r: -r["gain_pct"],
-    )[:5]
-
+    n = len(rows)
     lines = [
-        "# Hyperloom CI Summary — sorted by Optimization Gain",
+        "# Hyperloom CI Summary",
+        f"- Models: {n} (final_status=Succeeded: {succeeded})",
+        f"- ISL/OSL: {isl} / {osl}",
+        f"- InferenceX reference GPU: `{target_gpu}`",
         "",
-        f"- **Models submitted**: {n}",
-        f"- **Succeeded (final_status)**: {succeeded}",
-        f"- **With baseline+optimized data**: {with_data}",
-        f"- **Compare against the baseline (`{target_gpu}`)**: {len(beat_ifx)}",
-        f"- **ISL/OSL**: {isl} / {osl}",
-        "",
-        "| # | Model | Frm | Prec | TP | Params (B) | "
-        "Baseline tok/s/GPU | **Optimized tok/s/GPU** | **Gain** | "
-        f"InferenceX ({target_gpu}) | vs InfX | Actions |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Model | Baseline tok/s/GPU | Optimized tok/s/GPU | Gain % | Peak | "
+        f"InferenceX ({target_gpu}) tok/s/GPU | vs InferenceX % | Data | Actions |",
+        "|---|---:|---:|---:|---:|---:|---:|---|---|",
     ]
-    for i, r in enumerate(rows_sorted, 1):
+    for r in rows:
         actions = ", ".join(r.get("actions") or []) or "—"
+        # Markdown-escape pipe chars in actions list
         actions = actions.replace("|", "\\|")[:200]
-        opt = r.get("optimized_tok_per_gpu")
-        opt_str = f"**{fmt_num(opt)}**" if opt is not None else "—"
-        params_b = r.get("params_b")
-        params_str = f"{params_b:.1f}" if params_b else "—"
-        vs_ifx = r.get("vs_inferenceX_pct")
-        vs_ifx_str = "—" if vs_ifx is None else (
-            f"**{vs_ifx:+.0f}%** ✅" if vs_ifx > 0 else f"{vs_ifx:+.0f}% ❌"
+        peak = fmt_num(r.get("peak_throughput"))
+        if r.get("peak_throughput_conc"):
+            peak = f"{peak} @ c{r['peak_throughput_conc']}"
+        data = (
+            f"sweep={r.get('sweep_points', 0)}, "
+            f"kernels={r.get('kernel_optimizations', 0)}, "
+            f"files={r.get('artifacts', 0)}"
         )
         lines.append(
-            f"| {i} | `{_short_name(r['model'])}` "
-            f"| {r.get('framework') or '—'} "
-            f"| {r.get('precision') or '—'} "
-            f"| {r.get('tp') or '—'} "
-            f"| {params_str} "
+            f"| `{r['model']}` "
             f"| {fmt_num(r['baseline_tok_per_gpu'])} "
-            f"| {opt_str} "
-            f"| {_gain_medal(r['gain_pct'])} "
+            f"| {fmt_num(r['optimized_tok_per_gpu'])} "
+            f"| {fmt_pct(r['gain_pct'])} "
+            f"| {peak} "
             f"| {fmt_num(r['inferenceX_tok_per_gpu'])} "
-            f"| {vs_ifx_str} "
+            f"| {fmt_pct(r['vs_inferenceX_pct'])} "
+            f"| {data} "
             f"| {actions} |"
         )
-
-    if top_gains:
-        lines += ["", "## Top Optimization Gains", ""]
-        lines.append("| Rank | Model | Baseline → Optimized | Gain |")
-        lines.append("|---:|---|---|---:|")
-        for i, r in enumerate(top_gains, 1):
-            base = r.get("baseline_tok_per_gpu")
-            opt = r.get("optimized_tok_per_gpu")
-            lines.append(
-                f"| {i} | `{_short_name(r['model'])}` "
-                f"| {fmt_num(base)} → {fmt_num(opt)} tok/s/GPU "
-                f"| {_gain_medal(r['gain_pct'])} |"
-            )
-
-    if beat_ifx:
-        lines += ["", f"## vs InferenceX `{target_gpu}` (apples-to-apples wins)", ""]
-        lines.append(f"| Model | InferenceX ({target_gpu}) | Ours | Δ |")
-        lines.append("|---|---:|---:|---:|")
-        for r in sorted(beat_ifx, key=lambda r: -r["vs_inferenceX_pct"]):
-            opt = r.get("optimized_tok_per_gpu")
-            ref = r.get("inferenceX_tok_per_gpu")
-            lines.append(
-                f"| `{_short_name(r['model'])}` "
-                f"| {fmt_num(ref)} | **{fmt_num(opt)}** "
-                f"| **{r['vs_inferenceX_pct']:+.0f}%** ✅ |"
-            )
-
     return "\n".join(lines) + "\n"
 
 
@@ -328,7 +244,7 @@ def main() -> int:
     hf_to_ifx = load_hf_to_ifx_map(yaml_path)
     log.info("HF→InferenceX mappings loaded: %d", len(hf_to_ifx))
 
-    rows = collect_rows(
+    rows, normalized_results = collect_rows(
         Path(args.artifacts_dir),
         Path(args.manifests_dir),
         hf_to_ifx,
@@ -350,8 +266,20 @@ def main() -> int:
         }, indent=2),
         encoding="utf-8",
     )
-    log.info("wrote %s and %s",
-             out / "ci_summary.md", out / "ci_summary.json")
+    (out / "normalized_results.json").write_text(
+        json.dumps({
+            "target_gpu": args.target_gpu,
+            "isl": args.isl,
+            "osl": args.osl,
+            "results": normalized_results,
+        }, indent=2),
+        encoding="utf-8",
+    )
+    (out / "normalized_results.ndjson").write_text(
+        "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in normalized_results),
+        encoding="utf-8",
+    )
+    log.info("wrote summary and normalized results under %s", out)
 
     # Print the table to stdout too, so the GitHub Actions log shows it
     # without having to download the artifact.
