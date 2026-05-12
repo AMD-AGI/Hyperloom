@@ -122,7 +122,8 @@ class KernelAgentToolTests(unittest.TestCase):
 
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"', install_text)
         self.assertIn('GEAK_REF="${GEAK_REF:-v3.1.0}"', install_text)
-        self.assertIn('python3 -m pip install -q --no-cache-dir -e "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"', install_text)
+        self.assertIn('python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"', install_text)
+        self.assertIn('python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"', install_text)
         self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cuda}"', install_text)
         self.assertIn("python3 scripts/build_index.py --force --device", install_text)
         self.assertIn("ensure_node()", install_text)
@@ -156,6 +157,10 @@ class KernelAgentToolTests(unittest.TestCase):
             "echo \"export TRACELENS_ROOT='${TRACELENS_ROOT}'\"",
             install_text,
         )
+        self.assertIn("MAGPIE_PYTHON", install_text)
+        self.assertIn("PYTHONPATH", install_text)
+        self.assertIn("echo \"export MAGPIE_PYTHON='${MAGPIE_PYTHON}'\"", install_text)
+        self.assertIn("echo \"export PYTHONPATH='${PYTHONPATH}'\"", install_text)
 
     def test_trace_file_analysis_writes_report_logs_and_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
