@@ -11,7 +11,7 @@
 #   2. Magpie (benchmark engine) into $WORKSPACE_ROOT/Magpie
 #   3. InferenceX checkout detection (sets INFERENCEX_PATH for runtime)
 #   4. Delegates to kernel-agent/scripts/install.sh for ray, ray-head
-#      bring-up, TraceLens, GEAK, OOB and the auth-proxy. kernel-agent
+#      bring-up, Node/npm, TraceLens, GEAK, OOB and the auth-proxy. kernel-agent
 #      itself is the canonical owner of those — we just chain to it
 #      so users have a single entry point.
 #
@@ -42,7 +42,7 @@ Installs:
   - Magpie (cloned to $WORKSPACE_ROOT/Magpie)
   - Detects/exports INFERENCEX_PATH
   - Chains to kernel-agent/scripts/install.sh for Ray + ray-head start,
-    TraceLens, GEAK, OOB CLI, and the OOB auth-proxy.
+    Node/npm, TraceLens, GEAK, OOB CLI, and the OOB auth-proxy.
 
 Options:
   --check-only          Verify only, do not install
