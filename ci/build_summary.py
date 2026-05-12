@@ -25,6 +25,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -109,6 +110,7 @@ def collect_rows(
             "final_status": task.get("final_status"),
             "framework": metrics.get("framework") or detected.get("framework"),
             "precision": detected.get("precision"),
+            "tp": metrics.get("tp") or detected.get("tp"),
             "gpu_type": metrics.get("gpu_type"),
             "baseline_tok_per_gpu": (
                 metrics.get("tok_per_gpu_baseline")
@@ -157,7 +159,7 @@ def build_run_metadata() -> dict:
 
 # ── Markdown rendering ──────────────────────────────────────────────────────────
 
-def fmt_num(v, fmt: str = ".0f") -> str:
+def fmt_num(v, fmt: str = ".1f") -> str:
     if v is None:
         return "—"
     try:
@@ -175,41 +177,136 @@ def fmt_pct(v) -> str:
         return str(v)
 
 
+def gain_medal(pct: float | None) -> str:
+    """Award medals based on gain percentage (sample-table convention)."""
+    if pct is None:
+        return ""
+    if pct >= 50:
+        return "🥇🥇🥇🥇"
+    if pct >= 20:
+        return "🥇🥇🥇"
+    if pct >= 10:
+        return "🥇🥇"
+    if pct >= 1:
+        return "🥇"
+    if pct > 0:
+        return "🟢"
+    if pct == 0:
+        return "➖"
+    return ""
+
+
+def vs_infx_decoration(pct: float | None) -> str:
+    if pct is None:
+        return ""
+    if pct >= 50:
+        return "✅✅"
+    if pct > 0:
+        return "✅"
+    return ""
+
+
+def status_icon(row: dict) -> str:
+    final = row.get("final_status")
+    baseline = row.get("baseline_tok_per_gpu")
+    optimized = row.get("optimized_tok_per_gpu")
+    if final and final not in ("Succeeded", "Completed"):
+        return "❌"
+    if baseline and optimized:
+        return "✅"
+    if baseline or optimized:
+        return "🟡"
+    return "❌"
+
+
+_PARAMS_RX = re.compile(r"(\d+(?:\.\d+)?)\s*[Bb](?:\b|[-_])")
+
+
+def derive_params(repo_id: str | None) -> str | None:
+    """Best-effort: pull '14B', '70B', '1.5B' out of an HF repo_id."""
+    if not repo_id:
+        return None
+    m = _PARAMS_RX.search(repo_id)
+    if not m:
+        return None
+    raw = m.group(1)
+    try:
+        v = float(raw)
+        return f"{v:.1f}B" if "." in raw else f"{int(v)}B"
+    except ValueError:
+        return None
+
+
+def short_model_name(repo_id: str | None) -> str:
+    """Strip 'owner/' prefix for compact display."""
+    if not repo_id:
+        return "—"
+    return repo_id.split("/", 1)[-1]
+
+
+def gain_sort_key(row: dict) -> tuple[int, float]:
+    """Sort key: rows with a numeric gain first (desc), failures last."""
+    pct = row.get("gain_pct")
+    if pct is None:
+        return (1, 0.0)
+    try:
+        return (0, -float(pct))
+    except (TypeError, ValueError):
+        return (1, 0.0)
+
+
 def render_markdown(rows: list[dict], target_gpu: str, isl: int, osl: int) -> str:
-    succeeded = sum(1 for r in rows if r.get("final_status") == "Succeeded")
+    """Render the ranked summary in the format used for executive reporting."""
+    sorted_rows = sorted(rows, key=gain_sort_key)
     n = len(rows)
+    succeeded = sum(1 for r in rows if r.get("final_status") == "Succeeded")
+    with_gain = sum(1 for r in rows
+                    if (r.get("gain_pct") or 0) > 0
+                    and r.get("baseline_tok_per_gpu")
+                    and r.get("optimized_tok_per_gpu"))
+    beat_infx = sum(1 for r in rows if (r.get("vs_inferenceX_pct") or 0) > 0)
+
     lines = [
         "# Hyperloom CI Summary",
-        f"- Models: {n} (final_status=Succeeded: {succeeded})",
+        f"- Models: {n} (Succeeded: {succeeded}, with gain: {with_gain}, beat InferenceX: {beat_infx})",
         f"- ISL/OSL: {isl} / {osl}",
         f"- InferenceX reference GPU: `{target_gpu}`",
+        f"- Sort: by Gain% (desc); failures last",
         "",
-        "| Model | Baseline tok/s/GPU | Optimized tok/s/GPU | Gain % | Peak | "
-        f"InferenceX ({target_gpu}) tok/s/GPU | vs InferenceX % | Data | Actions |",
-        "|---|---:|---:|---:|---:|---:|---:|---|---|",
+        "| # | Model | Frm | Prec | TP | Params | Baseline tok/s/GPU | "
+        "Optimized tok/s/GPU | Gain | InfX | vs InfX |",
+        "|---:|---|---|---|---:|---|---:|---:|---|---:|---|",
     ]
-    for r in rows:
-        actions = ", ".join(r.get("actions") or []) or "—"
-        # Markdown-escape pipe chars in actions list
-        actions = actions.replace("|", "\\|")[:200]
-        peak = fmt_num(r.get("peak_throughput"))
-        if r.get("peak_throughput_conc"):
-            peak = f"{peak} @ c{r['peak_throughput_conc']}"
-        data = (
-            f"sweep={r.get('sweep_points', 0)}, "
-            f"kernels={r.get('kernel_optimizations', 0)}, "
-            f"files={r.get('artifacts', 0)}"
-        )
+    for idx, r in enumerate(sorted_rows, start=1):
+        name = short_model_name(r.get("model"))
+        icon = status_icon(r)
+        frm = r.get("framework") or "—"
+        prec = r.get("precision") or "—"
+        tp = r.get("tp") or "—"
+        params = derive_params(r.get("model")) or "—"
+        baseline = fmt_num(r.get("baseline_tok_per_gpu"))
+        optimized = fmt_num(r.get("optimized_tok_per_gpu"))
+        gain = r.get("gain_pct")
+        medal = gain_medal(gain)
+        if gain is None:
+            gain_text = "—"
+        elif gain == 0:
+            gain_text = f"{medal} 0%".strip()
+        else:
+            gain_text = f"{medal} {fmt_pct(gain)}".strip()
+        infx = fmt_num(r.get("inferenceX_tok_per_gpu"))
+        vs_pct = r.get("vs_inferenceX_pct")
+        vs_decor = vs_infx_decoration(vs_pct)
+        vs_text = "—"
+        if vs_pct is not None:
+            vs_medal = "🥇 " if vs_pct > 0 else ""
+            vs_text = f"{vs_medal}{vs_pct:+.0f}%"
+            if vs_decor:
+                vs_text = f"{vs_text} {vs_decor}"
+
         lines.append(
-            f"| `{r['model']}` "
-            f"| {fmt_num(r['baseline_tok_per_gpu'])} "
-            f"| {fmt_num(r['optimized_tok_per_gpu'])} "
-            f"| {fmt_pct(r['gain_pct'])} "
-            f"| {peak} "
-            f"| {fmt_num(r['inferenceX_tok_per_gpu'])} "
-            f"| {fmt_pct(r['vs_inferenceX_pct'])} "
-            f"| {data} "
-            f"| {actions} |"
+            f"| {idx} | `{name}` {icon} | {frm} | {prec} | {tp} | {params} "
+            f"| {baseline} | {optimized} | {gain_text} | {infx} | {vs_text} |"
         )
     return "\n".join(lines) + "\n"
 

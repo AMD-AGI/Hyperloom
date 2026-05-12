@@ -335,8 +335,10 @@ jobs:
           if-no-files-found: warn
 
       - name: Send webhook (completion notification)
-        # Brief Teams notification with per-model counts + GHA + dashboard
-        # links. Detailed sort/render lives in the results service UI.
+        # Push the full ranked ci_summary.md (sorted by Gain% desc, with medal
+        # decorations) into the Teams webhook. The same data lives in the
+        # results service for long-term querying; this notification is for
+        # the executive group chat to glance at without clicking through.
         if: always() && env.WEBHOOK_URL != ''
         env:
           WEBHOOK_URL:    ${{ secrets.WEBHOOK_URL }}
@@ -349,6 +351,7 @@ jobs:
           import requests, urllib3
           urllib3.disable_warnings()
 
+          WORKSPACE = os.environ.get("GITHUB_WORKSPACE", ".")
           webhook_url   = os.environ["WEBHOOK_URL"]
           dashboard_url = os.environ.get("DASHBOARD_URL", "")
           models_input  = os.environ.get("INPUT_MODELS", "").strip()
@@ -356,31 +359,59 @@ jobs:
           batch_tag = (models_input.replace(" ", ",")
                        if models_input else f"hf-top-{hf_top or '?'}")
 
-          json_path = "${{ github.workspace }}/summary-out/ci_summary.json"
-          n = succeeded = with_data = beat_ifx = 0
+          md_path   = os.path.join(WORKSPACE, "summary-out", "ci_summary.md")
+          json_path = os.path.join(WORKSPACE, "summary-out", "ci_summary.json")
+
+          n = succeeded = with_gain = beat_ifx = 0
           if os.path.exists(json_path):
               summary = json.loads(open(json_path).read())
               rows = summary.get("rows") or summary.get("models") or []
               n = len(rows)
               succeeded = sum(1 for r in rows if r.get("final_status") == "Succeeded")
-              with_data = sum(1 for r in rows if r.get("gain_pct") is not None)
+              with_gain = sum(1 for r in rows
+                              if (r.get("gain_pct") or 0) > 0
+                              and r.get("baseline_tok_per_gpu")
+                              and r.get("optimized_tok_per_gpu"))
               beat_ifx = sum(1 for r in rows
                              if (r.get("vs_inferenceX_pct") or 0) > 0)
 
           run_url = (f"https://github.com/{os.environ.get('GITHUB_REPOSITORY','?')}"
                      f"/actions/runs/{os.environ.get('GITHUB_RUN_ID','?')}")
 
-          text = (f"Hyperloom optimize-submit [{batch_tag}] done: "
-                  f"{succeeded}/{n} succeeded, "
-                  f"{with_data} with gain, "
-                  f"{beat_ifx} beat InferenceX. "
-                  f"GHA: {run_url}")
+          # Header lines + the rendered markdown table (sorted by Gain%).
+          # Teams incoming webhooks render markdown tables in a monospace
+          # block, so we send the body as-is. Length budget is ~28KB; 130
+          # rows ≈ 16KB so we are safely inside the limit.
+          header = (
+              f"**Hyperloom optimize-submit [{batch_tag}] done**  \n"
+              f"{succeeded}/{n} succeeded · {with_gain} with gain · "
+              f"{beat_ifx} beat InferenceX  \n"
+              f"GHA: {run_url}"
+          )
           if dashboard_url:
-              text += f" | Dashboard: {dashboard_url}"
+              header += f"  \nDashboard: {dashboard_url}"
+
+          body_md = ""
+          if os.path.exists(md_path):
+              body_md = open(md_path, encoding="utf-8").read()
+          else:
+              body_md = "_(no ci_summary.md produced)_"
+
+          # 24KB safety cap (Teams trims silently around 28KB for the whole
+          # payload). If we ever blow the cap, fall back to header + counts
+          # and let the recipient click through to GHA / dashboard.
+          MAX_BYTES = 24_000
+          payload_md = f"{header}\n\n{body_md}"
+          if len(payload_md.encode("utf-8")) > MAX_BYTES:
+              payload_md = (
+                  header
+                  + "\n\n_Table too large to embed; see GHA / Dashboard._"
+              )
 
           try:
               resp = requests.post(
-                  webhook_url, json={"text": text}, timeout=10, verify=False)
+                  webhook_url, json={"text": payload_md},
+                  timeout=10, verify=False)
               print(f"Webhook: HTTP {resp.status_code}")
               if resp.status_code >= 300:
                   print(f"Response: {resp.text[:300]}")
