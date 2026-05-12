@@ -23,5 +23,8 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 30
 lease_ttl_sec: 5400
+description: "Tune torch.compile / Inductor knobs (cache, max-autotune, cudagraph) when the active server runs with compile enabled."
+pipeline_phase: support
+typical_runtime_min: 45.0
 applicable_when:
   - "torch_compile_enabled"

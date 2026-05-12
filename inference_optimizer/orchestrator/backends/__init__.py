@@ -26,6 +26,7 @@ from .mcp_emit_intent import (
     validate_emit_intent_input,
 )
 from .mock_backend import MockBackend, MockTurn, ScriptedPlan
+from .robustness_agent import RobustnessAgentBackend
 from .robustness_mock import MockRobustnessBackend
 
 __all__ = [
@@ -43,6 +44,7 @@ __all__ = [
     "MockKernelBackend",
     "MockRobustnessBackend",
     "MockTurn",
+    "RobustnessAgentBackend",
     "RuntimeCall",
     "RuntimeCaller",
     "ScriptedPlan",

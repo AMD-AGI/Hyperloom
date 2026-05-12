@@ -20,5 +20,8 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 25
 lease_ttl_sec: 1800
+description: "From the trace, infer kernel bottlenecks and propose fusion / tiling / dispatch candidates for kernel_opt."
+pipeline_phase: analysis
+typical_runtime_min: 10.0
 applicable_when:
   - "trace_path != ''"

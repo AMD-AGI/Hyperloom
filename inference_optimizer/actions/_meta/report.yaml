@@ -16,5 +16,8 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 10
 lease_ttl_sec: 300
+description: "Write final.md / final.json under reports/. Only run when stop_reason is set OR the run is wrapping up."
+pipeline_phase: finalize
+typical_runtime_min: 2.0
 applicable_when:
   - "stop_reason != ''"
