@@ -803,6 +803,13 @@ def process_model(
 DEFAULT_ARTIFACT_PATTERNS = (
     "optimization_report",   # matches optimization_report.md / *-optimization_report.md / etc.
     "ci_metrics.json",
+    "baseline_summary.json",
+    "sweep_results.csv",
+    "sweep_results.txt",
+    "kernel_candidates.json",
+    "kernel_results.json",
+    "run_context.env",
+    "gpu_timeline.csv",
     "ci_summary.json",
     "ci_report.md",
 )
