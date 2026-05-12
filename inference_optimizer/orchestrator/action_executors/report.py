@@ -30,9 +30,14 @@ from ...storage.connection import SqliteConnection
 log = logging.getLogger(__name__)
 
 
-def _build_summary_dict(state: SharedState, ev_counts: dict[str, int],
-                        highlights: list[dict]) -> dict[str, Any]:
-    return {
+def _build_summary_dict(
+    state: SharedState,
+    ev_counts: dict[str, int],
+    highlights: list[dict],
+    *,
+    external_baseline: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
         "session_id":       state.session_id,
         "model_name":       state.model_name,
         "model_path":       state.model_path,
@@ -56,6 +61,9 @@ def _build_summary_dict(state: SharedState, ev_counts: dict[str, int],
         "event_counts_by_topic": ev_counts,
         "highlights": highlights,
     }
+    if external_baseline:
+        summary["external_baseline"] = external_baseline
+    return summary
 
 
 def _format_md(summary: dict[str, Any]) -> str:
@@ -128,7 +136,98 @@ def _format_md(summary: dict[str, Any]) -> str:
                 f"{h.get('summary','')}"
             )
     lines.append("")
+
+    ext = summary.get("external_baseline")
+    if ext:
+        lines.extend(_format_external_baseline_section(ext))
+
     return "\n".join(lines)
+
+
+def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
+    """Render the advisory external-baseline section (report-only).
+
+    ``ext`` is the dict materialised by
+    :func:`_load_external_baseline` from
+    ``$SESSION_DIR/target_analysis/target_baseline.json``. We render
+    facts only — no derived gap percentage, no "should reach" wording —
+    so this section never reads as an implicit KPI the next run is
+    expected to hit. The whole feature is opt-in via
+    ``--compare-against-gpu``.
+    """
+    lines: list[str] = []
+    lines.append("## External baseline (InferenceX, advisory)")
+    lines.append("")
+    status = str(ext.get("status") or "unknown")
+    q = ext.get("query") or {}
+    lines.append(
+        "- Query: "
+        f"model=`{q.get('model') or '(unset)'}`  "
+        f"gpu=`{q.get('gpu') or '(unset)'}`  "
+        f"framework=`{q.get('framework') or '(any)'}`  "
+        f"precision=`{q.get('precision') or '(any)'}`  "
+        f"ISL/OSL=`{q.get('isl') or '(any)'}/{q.get('osl') or '(any)'}`"
+    )
+    lines.append(f"- Fetched at: {ext.get('fetched_at') or '(unknown)'}")
+    lines.append(f"- Status: `{status}` (rows matched: {ext.get('row_count', 0)})")
+    warning = ext.get("warning") or ""
+    if warning:
+        lines.append(f"- Warning: {warning}")
+
+    best = ext.get("best")
+    if status == "ok" and isinstance(best, dict):
+        lines.append("")
+        lines.append(
+            f"- Reference best per-GPU throughput: "
+            f"**{float(best.get('tput_per_gpu', 0.0)):.1f}** tok/s/GPU "
+            f"at concurrency {best.get('conc')}, decode TP {best.get('decode_tp')}"
+        )
+        ttft = float(best.get("mean_ttft_ms") or 0.0)
+        tpot = float(best.get("mean_tpot_ms") or 0.0)
+        e2el = float(best.get("mean_e2el_ms") or 0.0)
+        if ttft:
+            lines.append(f"- Reference mean TTFT: {ttft:.1f} ms")
+        if tpot:
+            lines.append(f"- Reference mean TPOT: {tpot:.3f} ms")
+        if e2el:
+            lines.append(f"- Reference mean E2E latency: {e2el:.1f} ms")
+        if best.get("date"):
+            lines.append(f"- Reference run date: {best.get('date')}")
+    else:
+        lines.append("")
+        lines.append(
+            "- No reference best available — orchestrator was not affected by "
+            "this section."
+        )
+
+    lines.append("")
+    lines.append(
+        "> Advisory only. This block does not feed Objective, scoring, or any "
+        "agent prompt; it is shown here purely for post-mortem comparison."
+    )
+    lines.append("")
+    return lines
+
+
+def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
+    """Best-effort load of ``target_analysis/target_baseline.json``.
+
+    Returns the parsed dict on success or ``None`` if the file does not
+    exist / is unreadable. Errors are swallowed: a corrupt baseline JSON
+    must never break report generation.
+    """
+    try:
+        from ...session_paths import target_baseline_json
+        path = target_baseline_json(session_dir)
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "report_executor: failed to load external baseline from %s: %s",
+            session_dir, exc,
+        )
+        return None
 
 
 def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
@@ -218,7 +317,13 @@ class ReportExecutor:
             db.close()
 
         highlights = highlights[:max_highlights]
-        summary = _build_summary_dict(state, dict(ev_counts), highlights)
+        external_baseline = _load_external_baseline(session_dir)
+        summary = _build_summary_dict(
+            state,
+            dict(ev_counts),
+            highlights,
+            external_baseline=external_baseline,
+        )
 
         json_path = output_dir / "final.json"
         md_path = output_dir / "final.md"
