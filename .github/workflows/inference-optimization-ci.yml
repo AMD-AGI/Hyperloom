@@ -107,7 +107,7 @@ jobs:
   submit-inferenceX-pr:
     name: Submit InferenceX PR
     needs: optimize
-    runs-on: ubuntu-latest
+    runs-on: hyperloom-mh826
     if: always() && !cancelled()
     steps:
       - uses: actions/checkout@v4
