@@ -250,6 +250,25 @@ jobs:
             --osl           "${INPUT_OSL:-1024}" \
             --out-dir       "${{ github.workspace }}/summary-out"
 
+      - name: Publish results to hyperloom-results-service
+        # POST normalized_results.json to {HYPERLOOM_RESULTS_SERVICE_URL}/api/import.
+        # publish_results.py exits 0 with a log line if the URL env is unset,
+        # so this step is a no-op for runs that don't have the secret configured.
+        # Mirrors the same step in optimize-batch.yml so both workflows feed the
+        # results dashboard the same way.
+        if: always()
+        working-directory: ci
+        env:
+          HYPERLOOM_RESULTS_SERVICE_URL:   ${{ secrets.HYPERLOOM_RESULTS_SERVICE_URL }}
+          HYPERLOOM_RESULTS_SERVICE_TOKEN: ${{ secrets.HYPERLOOM_RESULTS_SERVICE_TOKEN }}
+        run: |
+          INPUT="${{ github.workspace }}/summary-out/normalized_results.json"
+          if [ ! -f "$INPUT" ]; then
+            echo "normalized_results.json not produced — skipping publish"
+            exit 0
+          fi
+          python3 publish_results.py --input "$INPUT"
+
       - name: Render summary to job summary
         if: always()
         run: |
