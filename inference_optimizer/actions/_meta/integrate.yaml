@@ -24,5 +24,8 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 25
 lease_ttl_sec: 3600
+description: "REQUEST kernel: apply a KEEP'd kernel patch, re-baseline E2E, and emit KEEP / REVERT / NEEDS_REVIEW."
+pipeline_phase: deep
+typical_runtime_min: 25.0
 applicable_when:
   - "kernel_opt_keep_pending"
