@@ -2,7 +2,7 @@
 
 An agentic system that autonomously optimizes LLM inference on AMD GPUs. Hyperloom treats optimization as a **search problem**: given a workload, it builds a tree of candidate optimizations — backend swaps, server parameters, GEMM tuning, kernel rewrites, parallelism configs — scores each by expected gain and cost, then explores depth-first, always measuring against the real workload. Simply provide your workload and the agent delivers a fully optimized codebase — profiling against peak hardware potential, identifying bottlenecks, and iteratively rewriting code to maximize throughput on AMD GPUs, so the team gets production-ready optimized code.
 
-<p align="center"><img width="500" height="400" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" /></p>
+<p align="center"><img width="600" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" /></p>
 
 Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens-internal/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets.
 
@@ -91,7 +91,7 @@ Ensure the following environment variables are set on the GPU node:
 |----------|-------------|
 | `NODE_TLS_REJECT_UNAUTHORIZED=0` | Required for internal network TLS certificate issues |
 
-> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1). GEAK and OOB API Key / Base URL are automatically inherited from `SAFE_API_KEY` / `OPENAI_BASE_URL` — no separate configuration needed.
+> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway). GEAK and OOB API Key / Base URL are automatically inherited from `SAFE_API_KEY` / `OPENAI_BASE_URL` — no separate configuration needed.
 
 #### Step 3 — Connect via Cursor Remote SSH
 
@@ -115,16 +115,15 @@ Optimize /wekafs/models/Qwen3-30B-A3B inference on MI300X.
 
 ```
 @/wekafs/HyperloomV2/inference_optimizer/SKILL.md
-Optimize /wekafs/models/Qwen3-32B inference on MI300X.
+Optimize /wekafs/models/Qwen3-30B-A3B inference on MI300X.
 
 Environment:
 - FRAMEWORK=sglang
 - GPU_TYPE=MI300X
 - TP=8, CONC=64, ISL=1024, OSL=1024
 - PRECISION=bf16
-- --target-gain 30
+- --target-gain 10
 - --max-hours 24
-- --no-kernel
 - Run in background: setsid nohup
 
 OOB_PATH: /wekafs/hyperloom/OOB
