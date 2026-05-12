@@ -129,7 +129,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: ci
-        run: pip install --quiet --break-system-packages requests 'huggingface_hub>=0.24'
+        run: pip install --quiet requests 'huggingface_hub>=0.24'
 
       - name: Prewarm /wekafs/models for this repo
         # Pre-pull the HF repo directly into /wekafs/models/<owner>-<repo>/
@@ -262,9 +262,10 @@ jobs:
 
       - name: Install dependencies
         # No setup-python on the self-hosted runner — it has system python3
-        # already (we use it for the optimize stage too). PEP 668 means
-        # --break-system-packages is needed for pip on Ubuntu 24.04 images.
-        run: pip install --quiet --break-system-packages requests pyyaml
+        # already (we use it for the optimize stage too); the pip on this
+        # runner image is older and doesn't accept --break-system-packages,
+        # but it has no PEP 668 marker either so a plain install works.
+        run: pip install --quiet requests pyyaml
 
       - name: Download all submission manifests
         uses: actions/download-artifact@v4
