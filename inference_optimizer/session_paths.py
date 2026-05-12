@@ -197,6 +197,38 @@ def agent_prompt_snapshot(session_dir: Path, role: str) -> Path:
     return agent_dir(session_dir, role) / "system_prompt.snapshot.md"
 
 
+# ---------------------------------------------------------------------------
+# External baseline comparison artefacts (DESIGN: target_analysis is report-only)
+# ---------------------------------------------------------------------------
+# These paths sit under a dedicated top-level subdir rather than
+# ``runs/target_analysis/<task_id>/`` because ``target_analysis`` is a
+# ``prep``-phase action and ``prep`` is NOT in ``_RUNS_WORKSPACE_PHASES``.
+# Putting the artefacts under ``runs/`` would trip ``_validate_action``
+# and reduce coupling clarity — the comparison data is intentionally
+# decoupled from any per-task data plane.
+def target_analysis_dir(session_dir: Path) -> Path:
+    """``<sd>/target_analysis/`` — host dir for external baseline artefacts.
+
+    Owner: :class:`inference_optimizer.orchestrator.action_executors.TargetAnalysisExecutor`.
+    Reader: :class:`inference_optimizer.orchestrator.action_executors.ReportExecutor`.
+    Nothing else under ``inference_optimizer/`` should reach into this dir.
+    """
+    return Path(session_dir) / "target_analysis"
+
+
+def target_baseline_json(session_dir: Path) -> Path:
+    """``<sd>/target_analysis/target_baseline.json`` — machine-readable
+    ``BaselineSummary`` written by ``target_analysis`` and read by
+    ``report`` to render an advisory section in ``final.md``."""
+    return target_analysis_dir(session_dir) / "target_baseline.json"
+
+
+def target_analysis_report_md(session_dir: Path) -> Path:
+    """``<sd>/target_analysis/target_analysis_report.md`` — short human
+    note suitable for inclusion / linking from the final report."""
+    return target_analysis_dir(session_dir) / "target_analysis_report.md"
+
+
 __all__ = [
     "agent_dir",
     "agent_inbox",
@@ -213,4 +245,7 @@ __all__ = [
     "runs_dir",
     "runs_root",
     "state_path",
+    "target_analysis_dir",
+    "target_analysis_report_md",
+    "target_baseline_json",
 ]

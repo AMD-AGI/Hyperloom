@@ -41,6 +41,7 @@ from .sweep import (
     SweepExecutor,
     sweep_executor,
 )
+from .target_analysis import TargetAnalysisExecutor
 from .validate_stack import (
     ValidateStackExecutor,
     combine_optimization_stack,
@@ -62,6 +63,7 @@ __all__ = [
     "ProfileExecutor",
     "ReportExecutor",
     "SweepExecutor",
+    "TargetAnalysisExecutor",
     "ValidateStackExecutor",
     "backends_executor",
     "baseline_executor",
