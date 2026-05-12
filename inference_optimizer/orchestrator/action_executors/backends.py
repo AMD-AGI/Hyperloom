@@ -275,7 +275,7 @@ def _auto_synergy_combos(
     winner_names: set[str],
     *,
     max_combo_size: int = 3,
-    max_combos: int = 8,
+    max_combos: int = 4,
 ) -> list[GridVariant]:
     """T2 — generate combos as Cartesian products over phase-1 winners.
 
@@ -473,6 +473,8 @@ class BackendsExecutor:
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
         variant_timeout_sec: int = 900,
+        default_max_candidates_per_round: int = 5,
+        default_max_synergy_combos: int = 4,
     ):
         self.default_grid = list(default_grid or DEFAULT_BACKENDS_GRID)
         self.default_vllm_grid = list(default_vllm_grid or DEFAULT_VLLM_BACKENDS_GRID)
@@ -482,6 +484,17 @@ class BackendsExecutor:
         )
         self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
         self.variant_timeout_sec = variant_timeout_sec
+        # Per-round caps mirror ParamsExecutor's incremental-DFS model so a
+        # single `backends` call doesn't burn the whole wall-clock budget on
+        # ~30+ vLLM variants. With cap=5 and ~10min/variant, one round is
+        # ~50min (phase 1) + 4×10min (phase 2 combos) ≈ ~90min. The
+        # Coordinator's IR-26 idea-generation loop then re-proposes a new
+        # `backends` round with a fresh grid (LLM picks the next candidates
+        # based on `backend_winners_history` / `discovered_flags`) instead
+        # of doing one giant exhaustive search. Both can be overridden via
+        # task.params (set to 0 to disable a cap entirely).
+        self.default_max_candidates_per_round = int(default_max_candidates_per_round)
+        self.default_max_synergy_combos = int(default_max_synergy_combos)
 
     async def __call__(self, ctx) -> dict[str, Any]:
         params = ctx.task.params or {}
@@ -535,7 +548,12 @@ class BackendsExecutor:
             (_cfg.get("benchmark") or {}).get("framework") or ""
         ).lower()
         is_vllm = "vllm" in framework
-        if grid_override:
+        # ``llm_specified_grid`` is True iff the LLM explicitly passed
+        # ``params.grid=[...]``. In that case we run EXACTLY what was asked
+        # (LLM owns the search-space decision via IR-26 idea generation);
+        # the per-round cap below applies only to the default-grid path.
+        llm_specified_grid = bool(grid_override)
+        if llm_specified_grid:
             grid = [
                 GridVariant(name=v["name"],
                             extra_sglang_args=v.get("extra_sglang_args", ""),
@@ -589,10 +607,44 @@ class BackendsExecutor:
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
 
+        # --- Per-round candidate cap (default 5) ---
+        # Only applies when the LLM did NOT explicitly inject a grid via
+        # params.grid: an LLM grid is treated as "I picked these exact
+        # candidates", so cropping it would be wrong. With the default
+        # grid path, we crop to ``max_candidates_per_round`` to keep one
+        # round to a manageable wall-clock; the LLM's IR-26 loop then
+        # picks up next round's candidates from `backend_winners_history`.
+        # Set ``max_candidates_per_round=0`` to disable (full grid run).
+        full_grid_size = len(grid)
+        cap = int(params.get(
+            "max_candidates_per_round",
+            self.default_max_candidates_per_round,
+        ))
+        if not llm_specified_grid and cap > 0:
+            # `tested_variant_names` lets the Coordinator pass a set of
+            # variant names already run in previous rounds so we deepen
+            # the search instead of re-running the same first-N every
+            # tick. Falls back to the original grid order (Tier 1 first,
+            # then Tier 2, then AST-discovered) when not provided.
+            tested = set(params.get("tested_variant_names") or [])
+            if tested:
+                remaining = [v for v in grid if v.name not in tested]
+                # If we've exhausted the static + discovered pool, fall
+                # back to retesting from the head — the LLM can still
+                # short-circuit by passing its own grid_override.
+                grid = (remaining or list(grid))[:cap]
+            else:
+                grid = grid[:cap]
+        capped_grid_size = len(grid)
+
         # `resolved_model` / `resolved_gpu` were resolved above for the
         # materialization step; reuse them here so each variant's YAML
         # overrides the legacy hardcoded model + benchmark_script fields.
         # --- Phase 1: single-variable grid ---
+        log.info(
+            "backends phase 1: running %d/%d variants (cap=%d, llm_grid=%s)",
+            capped_grid_size, full_grid_size, cap, llm_specified_grid,
+        )
         results = await run_grid(
             base_yaml_path=config_path,
             base_extra_args=base_extra_args,
@@ -636,20 +688,30 @@ class BackendsExecutor:
         def _combo_key(names: list[str]) -> str:
             return "+".join(sorted(str(n) for n in names if n))
 
+        # Per-round synergy cap (default 4). LLM-injected synergy_groups
+        # are treated like an LLM grid override and NOT cropped.
+        synergy_cap = int(params.get(
+            "max_synergy_combos", self.default_max_synergy_combos,
+        ))
         new_attempts: list[list[str]] = []
         if len(winners) >= 1:
             if override_groups is not None:
                 combos = _build_synergy_combos_from_groups(
                     grid, override_groups,
                 )
+                llm_specified_synergy = True
             elif synergy_mode == "auto":
                 combos = _auto_synergy_combos(
                     grid, winner_names,
                     max_combo_size=int(params.get("max_combo_size", 3)),
-                    max_combos=int(params.get("max_combos", 8)),
+                    max_combos=synergy_cap if synergy_cap > 0 else int(
+                        params.get("max_combos", 4),
+                    ),
                 )
+                llm_specified_synergy = False
             else:
                 combos = _build_synergy_combos(grid, winner_names)
+                llm_specified_synergy = False
 
             if already_attempted:
                 combos = [
@@ -657,6 +719,15 @@ class BackendsExecutor:
                     if _combo_key(c.name.removeprefix("combo_").split("+"))
                     not in already_attempted
                 ]
+            # Apply the default-path cap. `_auto_synergy_combos` already
+            # honored synergy_cap when building, but `_build_synergy_combos`
+            # / `_build_synergy_combos_from_groups` did not.
+            if (
+                not llm_specified_synergy
+                and synergy_cap > 0
+                and len(combos) > synergy_cap
+            ):
+                combos = combos[:synergy_cap]
             if combos:
                 log.info("backends phase 2: testing %d synergy combos "
                          "(mode=%s skipped_attempted=%d)",
