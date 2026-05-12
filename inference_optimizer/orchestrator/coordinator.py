@@ -911,12 +911,33 @@ class Coordinator:
                     "config_path", self.shared_state.baseline_config_path
                 )
             # T2 — pass the cumulative synergy_attempted set so backends
-            # phase-2 doesn't re-test the same combo across rounds.
+            # phase-2 doesn't re-test the same combo across rounds, and
+            # cap each round at 5 phase-1 variants (parity with `params`).
+            # We also feed prior-round phase-1 variant names so each new
+            # round deepens the search instead of replaying the first 5.
             if pending.action_name == "backends":
                 params.setdefault(
                     "synergy_attempted",
                     list(self.shared_state.synergy_attempted),
                 )
+                params.setdefault("max_candidates_per_round", 5)
+                params.setdefault("max_synergy_combos", 4)
+                # Flatten every variant name observed in past
+                # backend_winners_history rounds; the executor uses this
+                # to skip already-tested entries when cap > 0.
+                tested_names: list[str] = []
+                for round_entry in self.shared_state.backend_winners_history:
+                    if not isinstance(round_entry, dict):
+                        continue
+                    if round_entry.get("action") != "backends":
+                        continue
+                    for w in round_entry.get("winners") or []:
+                        if isinstance(w, dict) and w.get("name"):
+                            tested_names.append(str(w["name"]))
+                if tested_names:
+                    params.setdefault(
+                        "tested_variant_names", tested_names,
+                    )
             if pending.action_name == "params":
                 params.setdefault("params_search", self.shared_state.params_search)
                 # Long runs should advance the search incrementally while
@@ -958,12 +979,28 @@ class Coordinator:
             params.setdefault(
                 "config_path", self.shared_state.baseline_config_path
             )
-        # T2 — same synergy-dedup plumbing as the proposal-review path.
+        # T2 — same synergy-dedup + per-round cap plumbing as the
+        # proposal-review path.
         if action_name == "backends":
             params.setdefault(
                 "synergy_attempted",
                 list(self.shared_state.synergy_attempted),
             )
+            params.setdefault("max_candidates_per_round", 5)
+            params.setdefault("max_synergy_combos", 4)
+            tested_names: list[str] = []
+            for round_entry in self.shared_state.backend_winners_history:
+                if not isinstance(round_entry, dict):
+                    continue
+                if round_entry.get("action") != "backends":
+                    continue
+                for w in round_entry.get("winners") or []:
+                    if isinstance(w, dict) and w.get("name"):
+                        tested_names.append(str(w["name"]))
+            if tested_names:
+                params.setdefault(
+                    "tested_variant_names", tested_names,
+                )
         idempotency_key = intent.payload.get("idempotency_key") or f"{source}:{action_name}:{len(self.state.pending_proposals)}"
         task = await self.tasks.create(
             kind=action_name,
