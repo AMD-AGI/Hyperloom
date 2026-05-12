@@ -1,4 +1,4 @@
-name: Weekly GitHub Issues Report
+name: github-weekly-report
 
 on:
   workflow_dispatch:
