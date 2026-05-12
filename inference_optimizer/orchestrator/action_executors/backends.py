@@ -213,23 +213,45 @@ def _build_synergy_combos(
     winner_names: set[str],
 ) -> list[GridVariant]:
     """Generate combo variants from synergy groups where at least one member won."""
+    return _build_synergy_combos_from_groups(
+        grid, list(SYNERGY_GROUPS), require_one_winner=winner_names,
+    )
+
+
+def _build_synergy_combos_from_groups(
+    grid: list[GridVariant],
+    groups: list[list[str]],
+    *,
+    require_one_winner: set[str] | None = None,
+) -> list[GridVariant]:
+    """Materialize combo variants from a list of name-groups.
+
+    Used both by the static SYNERGY_GROUPS path and the LLM-injected
+    ``params.synergy_groups`` path. When ``require_one_winner`` is set,
+    a group is only kept if at least one of its members appears in the
+    set (the original "at least one member won in phase 1" gate). Pass
+    ``None`` (LLM-injected case) to skip that gate entirely — the LLM is
+    explicit about what to test.
+    """
     grid_by_name = {v.name: v for v in grid}
     combos: list[GridVariant] = []
     seen_combo_names: set[str] = set()
 
-    for group in SYNERGY_GROUPS:
-        # All members must exist in the grid
+    for group in groups:
+        if not group:
+            continue
         if not all(name in grid_by_name for name in group):
             continue
-        # At least one must have won in phase 1
-        if not any(name in winner_names for name in group):
+        if (
+            require_one_winner is not None
+            and not any(name in require_one_winner for name in group)
+        ):
             continue
         combo_name = "combo_" + "+".join(group)
         if combo_name in seen_combo_names:
             continue
         seen_combo_names.add(combo_name)
 
-        # Merge args and envs from all group members
         combined_args_parts: list[str] = []
         combined_envs: dict[str, str] = {}
         for name in group:
@@ -248,14 +270,66 @@ def _build_synergy_combos(
     return combos
 
 
+def _auto_synergy_combos(
+    grid: list[GridVariant],
+    winner_names: set[str],
+    *,
+    max_combo_size: int = 3,
+    max_combos: int = 8,
+) -> list[GridVariant]:
+    """T2 — generate combos as Cartesian products over phase-1 winners.
+
+    Used when ``params.synergy_mode == "auto"``: the LLM doesn't have to
+    enumerate group lists, the executor pairs every winner with every
+    other winner up to ``max_combo_size`` members, capped at
+    ``max_combos`` total to bound runtime.
+
+    Mirrors marathon's "test combinations of all winners" step
+    (marathon/skills/actions/backends.md §5).
+    """
+    import itertools
+    if not winner_names:
+        return []
+    grid_by_name = {v.name: v for v in grid}
+    candidates = sorted(n for n in winner_names if n in grid_by_name)
+    if len(candidates) < 2:
+        return []
+    groups: list[list[str]] = []
+    for size in range(2, max(2, min(max_combo_size, len(candidates))) + 1):
+        for combo in itertools.combinations(candidates, size):
+            groups.append(list(combo))
+            if len(groups) >= max_combos:
+                break
+        if len(groups) >= max_combos:
+            break
+    return _build_synergy_combos_from_groups(grid, groups,
+                                              require_one_winner=None)
+
+
 _BACKEND_KEYWORDS = (
     "backend", "enable_", "disable_", "fused", "mixed", "overlap",
     "schedule", "allreduce", "fusion",
 )
 
+# Default search paths for AST-based flag discovery. Override via env so
+# operators with non-standard installs (custom forks, pip-editable in a
+# different prefix) can still get dynamic discovery without code changes.
+DEFAULT_SGLANG_SERVER_ARGS = Path(
+    os.environ.get(
+        "INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS",
+        "/sgl-workspace/sglang/python/sglang/srt/server_args.py",
+    )
+)
+DEFAULT_VLLM_ARG_UTILS = Path(
+    os.environ.get(
+        "INFERENCE_OPTIMIZER_VLLM_ARG_UTILS",
+        "/sgl-workspace/vllm/vllm/engine/arg_utils.py",
+    )
+)
+
 
 def discover_backend_flags(
-    server_args_path: Path = Path("/sgl-workspace/sglang/python/sglang/srt/server_args.py"),
+    server_args_path: Path = DEFAULT_SGLANG_SERVER_ARGS,
 ) -> list[str]:
     """AST-parse sglang's server_args.py and return discovered flag names.
 
@@ -282,6 +356,109 @@ def discover_backend_flags(
             # e.g. self.enable_overlap_scheduler → --enable-overlap-scheduler
             flags.add("--" + node.attr.replace("_", "-"))
     return sorted(flags)
+
+
+# vLLM exposes its CLI through `EngineArgs` / `AsyncEngineArgs` add_cli_args
+# helpers. AST-walking those for argparse-style add_argument calls would be
+# more accurate but heavy; instead we mine attribute names that match the
+# same keyword set used for SGLang. The fallback is intentionally permissive
+# because vLLM versions reshuffle their classes frequently.
+_VLLM_BACKEND_KEYWORDS = (
+    "backend", "enable_", "disable_", "fused", "mixed",
+    "compilation", "cudagraph", "kv_cache", "attention", "rocm",
+    "aiter", "moe", "scheduler",
+)
+
+
+def discover_vllm_backend_flags(
+    arg_utils_path: Path = DEFAULT_VLLM_ARG_UTILS,
+) -> list[str]:
+    """AST-parse vLLM's arg_utils.py and return likely backend flag names.
+
+    Mirrors :func:`discover_backend_flags` for the vLLM stack. Returns a
+    sorted list of CLI-style flags (``--kv-cache-dtype``, ``--max-num-seqs``).
+    Empty when the file is missing — keeps the executor working on hosts
+    that ship only one of {sglang, vllm}.
+    """
+    if not arg_utils_path.exists():
+        log.info("discover_vllm_backend_flags: %s not found, returning empty",
+                  arg_utils_path)
+        return []
+    try:
+        source = arg_utils_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError) as exc:
+        log.warning("discover_vllm_backend_flags: parse failed: %s", exc)
+        return []
+    flags: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and any(
+            kw in node.attr for kw in _VLLM_BACKEND_KEYWORDS
+        ):
+            flags.add("--" + node.attr.replace("_", "-"))
+        elif isinstance(node, ast.keyword) and node.arg and any(
+            kw in node.arg for kw in _VLLM_BACKEND_KEYWORDS
+        ):
+            flags.add("--" + node.arg.replace("_", "-"))
+    return sorted(flags)
+
+
+def _augment_grid_with_discovered_flags(
+    base_grid: list[GridVariant],
+    discovered: list[str],
+    *,
+    framework: str,
+) -> list[GridVariant]:
+    """Append GridVariant stubs for AST-discovered flags not in the base grid.
+
+    For every discovered flag whose name doesn't already appear in any
+    existing variant's args, we synthesize a single boolean-style probe
+    (just the flag, no value) so the grid runner can A/B test it. Flags
+    that look like enum/integer parameters (containing keywords like
+    ``backend`` / ``size`` / ``num`` / ``ratio``) are skipped here because
+    a bare flag is meaningless for those — the LLM is expected to inject
+    explicit values via ``params.grid``. This keeps the auto-augmentation
+    safe (no malformed CLI) while still expanding the search by ~5-15
+    boolean toggles per session.
+    """
+    if not discovered:
+        return list(base_grid)
+    fw = (framework or "").strip().lower()
+    existing_args = " ".join(v.extra_sglang_args for v in base_grid).lower()
+    existing_envs = {k.lower() for v in base_grid for k in v.extra_envs}
+    out: list[GridVariant] = list(base_grid)
+    # Heuristic: skip flags that obviously want a value, not a bare presence.
+    _NEEDS_VALUE = (
+        "backend", "size", "num", "ratio", "fraction", "policy",
+        "dtype", "tokens", "len", "level", "interval", "config",
+        "batch", "graph", "step", "round",
+    )
+    appended = 0
+    for flag in discovered:
+        # ``flag`` is always ``--foo-bar``; convert back to attr name.
+        attr = flag.lstrip("-").replace("-", "_")
+        if any(kw in attr for kw in _NEEDS_VALUE):
+            continue
+        if flag.lower() in existing_args:
+            continue
+        # Avoid env-shadowed toggles (rare, but guards against duplicate
+        # work when DEFAULT_VLLM_BACKENDS_GRID already exposes the same
+        # behavior through extra_envs).
+        if attr.upper() in existing_envs:
+            continue
+        out.append(GridVariant(
+            name=f"{fw or 'auto'}_discovered_{attr}",
+            extra_sglang_args=flag,
+            note="discovered_ast",
+        ))
+        appended += 1
+    if appended:
+        log.info(
+            "augmented %s grid with %d AST-discovered boolean variants "
+            "(base=%d total=%d)",
+            fw or "auto", appended, len(base_grid), len(out),
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +526,15 @@ class BackendsExecutor:
         base_extra_args = params.get("base_extra_args", "")
         base_tput = float(params.get("base_tput", 0.0))
         grid_override = params.get("grid")
+        # Resolve framework once — needed for both grid selection and the
+        # AST-discovery augmentation path below.
+        import yaml
+        with config_path.open(encoding="utf-8") as _f:
+            _cfg = yaml.safe_load(_f) or {}
+        framework = str(
+            (_cfg.get("benchmark") or {}).get("framework") or ""
+        ).lower()
+        is_vllm = "vllm" in framework
         if grid_override:
             grid = [
                 GridVariant(name=v["name"],
@@ -360,15 +546,46 @@ class BackendsExecutor:
         else:
             # Pick the framework-appropriate grid; SGLang flags (--attention-
             # backend, --schedule-policy) are rejected by vLLM and vice versa.
-            import yaml
-            with config_path.open(encoding="utf-8") as _f:
-                _cfg = yaml.safe_load(_f) or {}
-            _fw = str((_cfg.get("benchmark") or {}).get("framework") or "").lower()
             grid = (
                 list(self.default_vllm_grid)
-                if "vllm" in _fw
+                if is_vllm
                 else list(self.default_grid)
             )
+            # T1: AST-discover boolean flags from the live framework's
+            # server_args / arg_utils and append them as auto-probes. The
+            # heuristic in `_augment_grid_with_discovered_flags` skips
+            # value-typed flags (where a bare presence is meaningless),
+            # so the appended set is intentionally conservative — the LLM
+            # remains the source of truth for value-typed combinations
+            # via ``params.grid``.
+            disable_discovery = bool(params.get("disable_discovery", False))
+            if not disable_discovery:
+                # Resolve the discovery path through the module globals so
+                # tests / operators can monkeypatch DEFAULT_*_PATH at
+                # runtime without re-importing this module. (Function
+                # default args bind at def-time; module attrs don't.)
+                import sys as _sys
+                _self_mod = _sys.modules[__name__]
+                if is_vllm:
+                    src_path = _self_mod.DEFAULT_VLLM_ARG_UTILS
+                    discovered = discover_vllm_backend_flags(
+                        arg_utils_path=src_path,
+                    )
+                else:
+                    src_path = _self_mod.DEFAULT_SGLANG_SERVER_ARGS
+                    discovered = discover_backend_flags(
+                        server_args_path=src_path,
+                    )
+                src_path = str(src_path)
+                if discovered:
+                    grid = _augment_grid_with_discovered_flags(
+                        grid, discovered, framework=framework or "auto",
+                    )
+                    self._record_discovered(
+                        framework=framework or ("vllm" if is_vllm else "sglang"),
+                        backend_flags=discovered,
+                        source_path=src_path,
+                    )
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
 
@@ -393,12 +610,59 @@ class BackendsExecutor:
         # FP8BMM needs KV fp8, aiter_linear needs aiter base). After
         # phase 1, we generate combo variants from known synergy groups
         # and test them. This avoids underestimating stacked configs.
+        #
+        # Three sources of synergy groups (T2):
+        #   1. ``params.synergy_groups`` — LLM-injected list of name lists
+        #   2. ``params.synergy_mode == "auto"`` — Cartesian over winners
+        #      (capped to small N to bound runtime)
+        #   3. ``SYNERGY_GROUPS`` module constant (default fallback)
+        # The Coordinator-side SharedState ``synergy_attempted`` set is
+        # consulted to skip combos already tested in earlier rounds.
         combo_results: list[VariantResult] = []
+        groups_override = params.get("synergy_groups")
+        synergy_mode = str(params.get("synergy_mode") or "").strip().lower()
+        if isinstance(groups_override, list) and groups_override:
+            override_groups = [
+                [str(x) for x in g if isinstance(x, str)]
+                for g in groups_override
+                if isinstance(g, list) and g
+            ]
+        else:
+            override_groups = None
+        already_attempted: set[str] = set(
+            params.get("synergy_attempted") or []
+        )
+
+        def _combo_key(names: list[str]) -> str:
+            return "+".join(sorted(str(n) for n in names if n))
+
+        new_attempts: list[list[str]] = []
         if len(winners) >= 1:
-            combos = _build_synergy_combos(grid, winner_names)
+            if override_groups is not None:
+                combos = _build_synergy_combos_from_groups(
+                    grid, override_groups,
+                )
+            elif synergy_mode == "auto":
+                combos = _auto_synergy_combos(
+                    grid, winner_names,
+                    max_combo_size=int(params.get("max_combo_size", 3)),
+                    max_combos=int(params.get("max_combos", 8)),
+                )
+            else:
+                combos = _build_synergy_combos(grid, winner_names)
+
+            if already_attempted:
+                combos = [
+                    c for c in combos
+                    if _combo_key(c.name.removeprefix("combo_").split("+"))
+                    not in already_attempted
+                ]
             if combos:
-                log.info("backends phase 2: testing %d synergy combos",
-                         len(combos))
+                log.info("backends phase 2: testing %d synergy combos "
+                         "(mode=%s skipped_attempted=%d)",
+                         len(combos),
+                         synergy_mode or ("override" if override_groups else "auto-default"),
+                         len(already_attempted))
                 combo_results = await run_grid(
                     base_yaml_path=config_path,
                     base_extra_args=base_extra_args,
@@ -408,6 +672,13 @@ class BackendsExecutor:
                     model_path=resolved_model,
                     gpu_type=resolved_gpu,
                 )
+                # Track which combos were actually tested so the next
+                # round won't replay them. Coordinator persists this
+                # back into SharedState via the result-dict field below.
+                for c in combos:
+                    new_attempts.append(
+                        c.name.removeprefix("combo_").split("+")
+                    )
 
         all_results = results + combo_results
         all_winners = pick_winners(all_results, baseline_tput=base_tput)
@@ -436,7 +707,38 @@ class BackendsExecutor:
             "output_throughput": best.output_throughput if best else None,
             "workspace": output_root.as_posix(),
             "phase2_combos_tested": len(combo_results),
+            # T1/T2 — Coordinator picks these up to update SharedState.
+            "discovered_flags_update": self._pop_discovered_update(),
+            "synergy_attempted_new": new_attempts,
         }
+
+    # ------------------------------------------------------------------
+    # T1/T2 — discovery-cache + SharedState plumbing
+    # ------------------------------------------------------------------
+    def _record_discovered(
+        self,
+        *,
+        framework: str,
+        backend_flags: list[str],
+        source_path: str,
+    ) -> None:
+        """Stage one framework's discovered flags for the next result dict.
+
+        The executor is stateless across invocations w.r.t. SharedState
+        (the Coordinator owns state.json). We stash the latest discovery
+        on a per-instance buffer that gets drained into the result dict
+        by ``_pop_discovered_update``.
+        """
+        self._pending_discovered = {
+            "framework": framework,
+            "backend_flags": list(backend_flags),
+            "source_path": source_path,
+        }
+
+    def _pop_discovered_update(self) -> dict[str, Any] | None:
+        out = getattr(self, "_pending_discovered", None)
+        self._pending_discovered = None
+        return out
 
 
 backends_executor = BackendsExecutor()
@@ -444,7 +746,12 @@ backends_executor = BackendsExecutor()
 
 __all__ = [
     "DEFAULT_BACKENDS_GRID",
+    "DEFAULT_SGLANG_SERVER_ARGS",
+    "DEFAULT_VLLM_ARG_UTILS",
+    "DEFAULT_VLLM_BACKENDS_GRID",
+    "SYNERGY_GROUPS",
     "BackendsExecutor",
     "backends_executor",
     "discover_backend_flags",
+    "discover_vllm_backend_flags",
 ]
