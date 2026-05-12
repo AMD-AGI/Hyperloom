@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -32,14 +33,25 @@ def _find_geak_bin() -> str:
     return "geak"
 
 
+def _resolve_geak_config() -> Path:
+    geak_config = os.environ.get("GEAK_CONFIG", "").strip()
+    if not geak_config:
+        raise ValueError("GEAK_CONFIG is required; run inference_optimizer/scripts/install.sh and source /workspace/hyperloom/runtime/kernel-agent.env.sh")
+    path = Path(geak_config)
+    if not path.is_file():
+        raise ValueError(f"GEAK_CONFIG does not exist: {path}")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if not re.search(r"(?m)^\s*model_class\s*:\s*litellm\s*$", text):
+        raise ValueError(f"GEAK_CONFIG must set model.model_class: litellm: {path}")
+    return path
+
+
 def _build_cmd(prompt_file: Path, output_dir: Path, kernel_path: str, gpu_ids: str,
                cost_limit: float | None, kernel_repo: str = "",
                test_command: str = "") -> list[str]:
     cmd = [_find_geak_bin(), "-t", str(prompt_file), "--yolo",
            "--output", str(output_dir), "--gpu-ids", gpu_ids]
-    geak_config = os.environ.get("GEAK_CONFIG", "")
-    if geak_config and Path(geak_config).is_file():
-        cmd.extend(["--config", geak_config])
+    cmd.extend(["--config", str(_resolve_geak_config())])
     if kernel_path:
         cmd.extend(["--kernel-path", kernel_path])
     if kernel_repo:
@@ -63,6 +75,7 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
         # Self-contained: do NOT import kernel-agent modules here, Ray workers
         # don't share the driver's sys.path patches.
         import os as _os, shutil as _shutil, subprocess as _sp, time as _t
+        import re as _re
         from pathlib import Path as _Path
         # GPU visibility on AMD/ROCm + Ray:
         #   * Ray sets ROCR_VISIBLE_DEVICES (NOT CUDA_VISIBLE_DEVICES) to a
@@ -93,9 +106,40 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
         geak_bin = _shutil.which("geak") or _shutil.which("mini") or "geak"
         cmd = [geak_bin, "-t", prompt_file_str, "--yolo",
                "--output", output_dir_str, "--gpu-ids", gpu_ids]
-        geak_config = _os.environ.get("GEAK_CONFIG", "")
-        if geak_config and _Path(geak_config).is_file():
-            cmd.extend(["--config", geak_config])
+        geak_config = _os.environ.get("GEAK_CONFIG", "").strip()
+        if not geak_config:
+            return {
+                "returncode": 2,
+                "stdout_tail": "",
+                "stderr_tail": "GEAK_CONFIG is required; run inference_optimizer/scripts/install.sh and source /workspace/hyperloom/runtime/kernel-agent.env.sh",
+                "stdout": "",
+                "gpu_ids": gpu_ids,
+                "elapsed_s": 0.0,
+                "cmd": cmd,
+            }
+        geak_config_path = _Path(geak_config)
+        if not geak_config_path.is_file():
+            return {
+                "returncode": 2,
+                "stdout_tail": "",
+                "stderr_tail": f"GEAK_CONFIG does not exist: {geak_config_path}",
+                "stdout": "",
+                "gpu_ids": gpu_ids,
+                "elapsed_s": 0.0,
+                "cmd": cmd,
+            }
+        geak_config_text = geak_config_path.read_text(encoding="utf-8", errors="replace")
+        if not _re.search(r"(?m)^\s*model_class\s*:\s*litellm\s*$", geak_config_text):
+            return {
+                "returncode": 2,
+                "stdout_tail": "",
+                "stderr_tail": f"GEAK_CONFIG must set model.model_class: litellm: {geak_config_path}",
+                "stdout": "",
+                "gpu_ids": gpu_ids,
+                "elapsed_s": 0.0,
+                "cmd": cmd,
+            }
+        cmd.extend(["--config", str(geak_config_path)])
         if kernel_path:
             cmd.extend(["--kernel-path", kernel_path])
         if kernel_repo:
@@ -153,10 +197,10 @@ def run_via_cli(prompt_file: Path, output_dir: Path, kernel_path: str,
         if cuda_vis and not child_env.get("HIP_VISIBLE_DEVICES"):
             child_env["HIP_VISIBLE_DEVICES"] = cuda_vis
         gpu_ids = cuda_vis or "0"
-    cmd = _build_cmd(prompt_file, output_dir, kernel_path, gpu_ids, cost_limit,
-                     kernel_repo=kernel_repo, test_command=test_command)
     started = time.time()
     try:
+        cmd = _build_cmd(prompt_file, output_dir, kernel_path, gpu_ids, cost_limit,
+                         kernel_repo=kernel_repo, test_command=test_command)
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=timeout_s, env=child_env)
         return {
@@ -166,6 +210,15 @@ def run_via_cli(prompt_file: Path, output_dir: Path, kernel_path: str,
             "gpu_ids": gpu_ids,
             "elapsed_s": round(time.time() - started, 2),
             "cmd": cmd,
+        }
+    except ValueError as exc:
+        return {
+            "returncode": 2,
+            "stdout_tail": "",
+            "stderr_tail": str(exc),
+            "gpu_ids": gpu_ids,
+            "elapsed_s": round(time.time() - started, 2),
+            "cmd": [],
         }
     except subprocess.TimeoutExpired as exc:
         return {

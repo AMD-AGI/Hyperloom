@@ -48,12 +48,13 @@ from typing import Any, Awaitable, Callable
 log = logging.getLogger(__name__)
 
 
-# Where Hyperloom/kernel-agent's shell tools live. Override-able for tests.
-HYPERLOOM_KERNEL_AGENT_ROOT = Path(
-    os.environ.get(
-        "HYPERLOOM_KERNEL_AGENT_ROOT",
-        "/wekafs/xiaofei/Hyperloom/kernel-agent",
-    )
+# Where Hyperloom/kernel-agent's shell tools live. Env is set by
+# inference_optimizer/scripts/install.sh -> pod-local kernel-agent env.
+_KERNEL_AGENT_ROOT_ENV = "HYPERLOOM_KERNEL_AGENT_ROOT"
+HYPERLOOM_KERNEL_AGENT_ROOT = (
+    Path(os.environ[_KERNEL_AGENT_ROOT_ENV])
+    if os.environ.get(_KERNEL_AGENT_ROOT_ENV)
+    else None
 )
 
 
@@ -85,6 +86,28 @@ _REUSABLE_SOURCE_ROOTS = (
 _APPLY_TOOL_MODULE: Any | None = None
 _DEFAULT_KERNEL_BACKEND_ORDER = ("claude", "codex", "geak")
 _DEFAULT_KERNEL_BATCH_PARALLEL = 3
+
+
+def _kernel_agent_root_error() -> str | None:
+    if HYPERLOOM_KERNEL_AGENT_ROOT is None:
+        return (
+            f"{_KERNEL_AGENT_ROOT_ENV} is not set; run "
+            "inference_optimizer/scripts/install.sh and source /workspace/hyperloom/runtime/kernel-agent.env.sh"
+        )
+    if not HYPERLOOM_KERNEL_AGENT_ROOT.is_dir():
+        return f"{_KERNEL_AGENT_ROOT_ENV} does not exist: {HYPERLOOM_KERNEL_AGENT_ROOT}"
+    return None
+
+
+def _kernel_agent_tool_path(tool_name: str) -> Path:
+    err = _kernel_agent_root_error()
+    if err:
+        raise RuntimeError(err)
+    assert HYPERLOOM_KERNEL_AGENT_ROOT is not None
+    path = HYPERLOOM_KERNEL_AGENT_ROOT / "tools" / tool_name
+    if not path.is_file():
+        raise RuntimeError(f"kernel-agent tool not found: {path}")
+    return path
 
 
 def _is_runtime_generated_kernel(name: str, source_file: str) -> bool:
@@ -180,7 +203,7 @@ def _load_apply_tool() -> Any:
     global _APPLY_TOOL_MODULE
     if _APPLY_TOOL_MODULE is not None:
         return _APPLY_TOOL_MODULE
-    path = HYPERLOOM_KERNEL_AGENT_ROOT / "tools" / "apply_kernel_patch.py"
+    path = _kernel_agent_tool_path("apply_kernel_patch.py")
     spec = importlib.util.spec_from_file_location("hyperloom_apply_kernel_patch", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load apply_kernel_patch.py from {path}")
@@ -376,6 +399,9 @@ async def select_kernels_handler(
     trace_input = payload.get("trace_input") or payload.get("trace_dir")
     if not trace_input:
         return {"status": "failed", "error": "missing 'trace_input' in payload"}
+    root_err = _kernel_agent_root_error()
+    if root_err:
+        return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
     workspace_path = (
         payload.get("workspace_path")
@@ -406,7 +432,7 @@ async def select_kernels_handler(
 
     cmd = [
         "python3",
-        str(HYPERLOOM_KERNEL_AGENT_ROOT / "tools" / "tracelens_analysis.py"),
+        str(_kernel_agent_tool_path("tracelens_analysis.py")),
         "--trace-input", str(trace_input),
         "--session-id", str(payload.get("session_id") or session_dir.name),
         "--top-k", str(payload.get("top_k", 10)),
@@ -632,6 +658,9 @@ async def _run_optimization_single(
     guard = _validate_reusable_native_kernel(payload)
     if guard is not None:
         return guard
+    root_err = _kernel_agent_root_error()
+    if root_err:
+        return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
     workspace_path = (
         payload.get("workspace_path")
@@ -641,7 +670,7 @@ async def _run_optimization_single(
 
     cmd = [
         "python3",
-        str(HYPERLOOM_KERNEL_AGENT_ROOT / "tools" / "kernel_optimization.py"),
+        str(_kernel_agent_tool_path("kernel_optimization.py")),
         "--kernel-id", str(kernel_id),
         "--session-id", str(payload.get("session_id") or session_dir.name),
         "--workspace-path", workspace_path,
