@@ -46,15 +46,19 @@ jobs:
           )
           printf "\n%-42s %-32s %-6s %s\n" "TASK_ID" "MODEL" "FILES" "ci_metrics.json size"
           printf "%-42s %-32s %-6s %s\n" "$(printf '=%.0s' {1..42})" "$(printf '=%.0s' {1..32})" "======" "===================="
+          set +e
           for entry in "${TASKS[@]}"; do
             tid="${entry%%|*}"
             model="${entry##*|}"
             url="$BASE/api/v1/optimization/tasks/$tid/artifacts"
-            resp=$(curl -sS -H "Authorization: Bearer $CLAW_API_KEY" "$url")
-            n_files=$(echo "$resp" | jq '(.data // .) | length' 2>/dev/null || echo "ERR")
-            ci_size=$(echo "$resp" | jq '(.data // .)[] | select(.path | endswith("ci_metrics.json")) | .size' 2>/dev/null | head -1)
+            resp=$(curl -sS -H "Authorization: Bearer $CLAW_API_KEY" "$url" 2>/dev/null)
+            n_files=$(echo "$resp" | jq '(.data // .) | length' 2>/dev/null)
+            n_files="${n_files:-0}"
+            ci_size=$(echo "$resp" | jq -r '[(.data // .)[] | select(.path | endswith("ci_metrics.json")) | .size] | first // "MISSING"' 2>/dev/null)
             ci_size="${ci_size:-MISSING}"
-            printf "%-42s %-32s %-6s %s\n" "$tid" "$model" "$n_files" "$ci_size"
+            report_size=$(echo "$resp" | jq -r '[(.data // .)[] | select(.path | endswith("optimization_report.md")) | .size] | first // "MISSING"' 2>/dev/null)
+            report_size="${report_size:-MISSING}"
+            printf "%-42s %-32s %6s  ci_metrics=%-10s report=%s\n" "$tid" "$model" "$n_files" "$ci_size" "$report_size"
           done
 
       - name: (kept) Hit each artifacts endpoint
