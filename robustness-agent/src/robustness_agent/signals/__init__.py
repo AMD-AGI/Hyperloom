@@ -17,6 +17,7 @@ The full GPU / disk / log rule set lands in M2.
 """
 
 from .classifier import Classifier
+from .cluster_fault import evaluate_cluster_fault_signals
 from .crash import evaluate_crash_signals
 from .event import evaluate_event_signals
 from .health import evaluate_health_signals
@@ -28,6 +29,7 @@ __all__ = [
     "Classifier",
     "Symptom",
     "SymptomSeverity",
+    "evaluate_cluster_fault_signals",
     "evaluate_crash_signals",
     "evaluate_event_signals",
     "evaluate_health_signals",
