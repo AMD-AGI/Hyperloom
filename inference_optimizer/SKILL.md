@@ -93,17 +93,19 @@ Path helpers (don't string-concat):
 This skill is **two commands**. Do NOT replicate setup steps inside chat —
 both commands are idempotent, do auto-detection, and re-run safely.
 
-### Credentials (env > .env, env always wins)
+### Credentials (env only)
 
 `SAFE_API_KEY` and `OPENAI_BASE_URL` are the only credentials this skill
-needs. Resolution order, applied by both `install.sh` and the CLI's
-`_preflight()`:
+needs and must be exported in the calling shell before running install
+or the CLI (typically by sourcing `$HYPERLOOM_KERNEL_AGENT_ROOT/env.sh`
+after Step 1). `install.sh` and the CLI's `_preflight()` read them from
+`os.environ` only — no `.env` files are loaded.
 
 
 ### Step 1 — Install (one-time per pod / venv rebuild)
 
 ```bash
-export REPO_ROOT="$(pwd)"   # repo root containing kernel-agent/ + inference_optimizer/ + .env
+export REPO_ROOT="$(pwd)"   # repo root containing kernel-agent/ + inference_optimizer/
 bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
 . "$REPO_ROOT/kernel-agent/env.sh"   # exports SAFE_API_KEY/OPENAI_BASE_URL + auth aliases
 ```
@@ -153,10 +155,8 @@ export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 
-# Prefer the launcher Python's bin dir, then standard system paths. Do NOT
-# hardcode /opt/venv/bin: in bare images that path may not exist.
-PYTHON_BIN_DIR="$(dirname "$PYTHON")"
-export PATH="${PYTHON_BIN_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+export PYTHON="${PYTHON:-$(command -v python3)}"
+export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
 bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 . "$HYPERLOOM_KERNEL_AGENT_ROOT/env.sh"
@@ -291,8 +291,7 @@ Before a new model run, verify these fields match the environment:
 - `benchmark.envs.CONC`, `ISL`, `OSL`: workload.
 - `benchmark.envs.ROCR_VISIBLE_DEVICES`: GPU pinning.
 - `benchmark.envs.PATH`: must lead with the launcher Python's bin dir
-  (`$(dirname "$PYTHON")` — typically `/opt/venv/bin` in hyperloom containers,
-  fall back to `$(dirname $(which python3))` on bare images).
+  (`$(dirname "$PYTHON")`).
 
 ### Workload-contract reuse (baseline → params/backends/sweep)
 
@@ -468,9 +467,17 @@ Single command — assumes Step 1 (install) already ran in this pod.
 There is no `--session-name`; the session lives at the canonical
 `/workspace/hyperloom` (override with `$INFERENCE_OPTIMIZER_SESSION_DIR`):
 
+If the shell that runs these commands does not persist `export`s
+between invocations (Cursor agent sandboxes and similar), copy
+`inference_optimizer/scripts/setup_env.sh.example` to
+`optimizer_runs/setup_env.sh`, fill in the workload block, and `.` it
+at the start of every shell call. After `setsid nohup ... &`, locate
+the spawned optimizer with
+`pgrep -af 'inference_optimizer.*optimize'` instead of trusting `$!` —
+some shell wrappers expose their own PID, not the optimizer's.
+
 ```bash
 cd "$REPO_ROOT"
-if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
 . "$HYPERLOOM_KERNEL_AGENT_ROOT/env.sh"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
