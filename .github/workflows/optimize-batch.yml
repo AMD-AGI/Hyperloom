@@ -1,0 +1,367 @@
+name: SaFE Optimize Batch (candidates-file driven)
+
+# Batch-driven optimization runner for the "1000 model"  plan. Each dispatch
+# takes a pre-built candidates JSON (ci/candidates/topN_<date>.json from
+# ci/build_candidates.py) and runs the requested slice via SaFE.
+#
+# Difference from optimize-submit.yml (legacy): that one builds the matrix
+# live from HF top-N each run. This one uses a committed, deterministic
+# candidates list so re-runs are reproducible and we can split a large pool
+# (130 / 500 / 2000) into time-bounded batches.
+#
+# Three-stage pipeline (same as optimize-submit.yml):
+#   1. prepare    (ubuntu-latest)  — read candidates file, take batch slice
+#   2. optimize   (matrix, hyperloom-mh826) — one model per parallel job
+#   3. summarize  (ubuntu-latest)  — aggregate ci_metrics.json + InferenceX
+#                                    -> ci_summary.{md,json}
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidates_file:
+        description: 'Path to candidates JSON (built by ci/build_candidates.py)'
+        required: true
+        default: 'ci/candidates/top600_2026-05-12.json'
+      batch_index:
+        description: 'Batch slice index (0-based)'
+        required: true
+        default: '0'
+      batch_size:
+        description: 'Models per batch (default 45; set to 0 = run all)'
+        required: true
+        default: '45'
+      isl:
+        description: 'Input sequence length'
+        required: false
+        default: '1024'
+      osl:
+        description: 'Output sequence length'
+        required: false
+        default: '1024'
+      mode:
+        description: 'Execution mode forwarded to SaFE'
+        required: false
+        default: 'local'
+        type: choice
+        options: [local, claw]
+      target_gpu:
+        description: 'Reference GPU for InferenceX comparison in the summary table'
+        required: false
+        default: 'mi300x'
+        type: choice
+        options: [mi300x, b200, h100, mi355x, mi325x]
+      task_timeout_min:
+        description: 'Per-task wait timeout in minutes (default 360 = 6h)'
+        required: false
+        default: '360'
+      max_parallel:
+        description: 'Max parallel optimize jobs (default 32, can push to 64)'
+        required: false
+        default: '32'
+      dry_run:
+        description: 'Dry run (auto-detect and print plan only, do not submit)'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  # ── Stage 1: build matrix from candidates slice ──────────────────────────────
+  prepare:
+    name: Build matrix (batch ${{ github.event.inputs.batch_index }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count:  ${{ steps.matrix.outputs.count }}
+    env:
+      HF_TOKEN:                ${{ secrets.HF_TOKEN }}
+      INPUT_CANDIDATES_FILE:   ${{ github.event.inputs.candidates_file }}
+      INPUT_BATCH_INDEX:       ${{ github.event.inputs.batch_index }}
+      INPUT_BATCH_SIZE:        ${{ github.event.inputs.batch_size }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install requests
+        run: pip install --quiet requests
+      - name: Generate matrix
+        id: matrix
+        working-directory: ci
+        run: python3 generate_hf_matrix.py
+      - name: Show selected models
+        run: |
+          echo "## Batch ${{ github.event.inputs.batch_index }} (size=${{ github.event.inputs.batch_size }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "Candidates file: \`${{ github.event.inputs.candidates_file }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Selected: **${{ steps.matrix.outputs.count }}** models" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          echo '${{ steps.matrix.outputs.matrix }}' | python3 -m json.tool >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Stage 2: per-model optimization (parallel) ──────────────────────────────
+  optimize:
+    name: optimize-${{ matrix.key }}
+    needs: prepare
+    if: needs.prepare.outputs.count != '0'
+    runs-on: hyperloom-mh826
+    # 6h per-task SaFE timeout + buffer for register/wait/collect.
+    timeout-minutes: 480
+    strategy:
+      fail-fast: false
+      # max-parallel is a templated string at parse time; GHA requires a
+      # literal integer here, so we use fromJson on the workflow_dispatch
+      # input. Default = 32, can push to 64 once we verify SaFE sandbox
+      # quota holds (16 nodes x 8 GPU = 128 GPU; TP=1 dominant for 7-70B).
+      max-parallel: ${{ fromJson(github.event.inputs.max_parallel || '32') }}
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    env:
+      CLAW_API_KEY:                     ${{ secrets.CLAW_API_KEY }}
+      SAFE_BASE_URL:                    ${{ secrets.SAFE_BASE_URL }}
+      HARBOR_PREFIX:                    ${{ secrets.HARBOR_PREFIX }}
+      HF_TOKEN:                         ${{ secrets.HF_TOKEN }}
+      SAFE_OPTIMIZE_REGISTER_WORKSPACE: ${{ secrets.SAFE_OPTIMIZE_REGISTER_WORKSPACE }}
+      SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
+      SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        working-directory: ci
+        run: pip install --quiet requests
+
+      - name: Submit + wait + collect (single model)
+        working-directory: ci
+        env:
+          MODEL_REPO:             ${{ matrix.model }}
+          INPUT_ISL:              ${{ github.event.inputs.isl }}
+          INPUT_OSL:              ${{ github.event.inputs.osl }}
+          INPUT_MODE:             ${{ github.event.inputs.mode }}
+          INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
+          INPUT_DRY_RUN:          ${{ github.event.inputs.dry_run }}
+          OUTPUT_DIR:             ${{ github.workspace }}/submit-output
+          ARTIFACTS_DIR:          ${{ github.workspace }}/task-artifacts
+        run: |
+          set -euo pipefail
+          ARGS=(--model "${MODEL_REPO}")
+          ARGS+=(--isl "${INPUT_ISL:-1024}" --osl "${INPUT_OSL:-1024}")
+          ARGS+=(--mode "${INPUT_MODE:-local}")
+          if [ "${INPUT_DRY_RUN:-false}" = "true" ]; then
+            ARGS+=(--dry-run)
+          fi
+          ARGS+=(--task-timeout-min "${INPUT_TASK_TIMEOUT_MIN:-360}")
+          ARGS+=(--output-dir "${OUTPUT_DIR}")
+          ARGS+=(--artifacts-dir "${ARTIFACTS_DIR}")
+          python3 optimize_submit.py "${ARGS[@]}"
+
+      - name: Render per-model manifest to job summary
+        if: always()
+        run: |
+          if [ -f "${{ github.workspace }}/submit-output/submission_manifest.md" ]; then
+            cat "${{ github.workspace }}/submit-output/submission_manifest.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No manifest produced for ${{ matrix.model }}._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload per-model manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: submission-manifest-${{ matrix.key }}
+          path: submit-output/
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload per-model task artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-artifacts-${{ matrix.key }}
+          path: task-artifacts/
+          retention-days: 90
+          if-no-files-found: ignore
+
+  # ── Stage 3: aggregate summary ───────────────────────────────────────────────
+  summarize:
+    name: Build batch summary
+    needs: optimize
+    if: always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install --quiet requests pyyaml
+
+      - name: Download all submission manifests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ github.workspace }}/manifests
+          pattern: submission-manifest-*
+          merge-multiple: false
+
+      - name: Download all task artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ github.workspace }}/task-artifacts-merged
+          pattern: task-artifacts-*
+          # merge-multiple flattens all <task_id>/ subdirs into one root,
+          # which is exactly what build_summary.py expects.
+          merge-multiple: true
+
+      - name: Build summary table
+        working-directory: ci
+        env:
+          INPUT_TARGET_GPU: ${{ github.event.inputs.target_gpu }}
+          INPUT_ISL:        ${{ github.event.inputs.isl }}
+          INPUT_OSL:        ${{ github.event.inputs.osl }}
+        run: |
+          python3 build_summary.py \
+            --artifacts-dir "${{ github.workspace }}/task-artifacts-merged" \
+            --manifests-dir "${{ github.workspace }}/manifests" \
+            --target-gpu    "${INPUT_TARGET_GPU:-mi300x}" \
+            --isl           "${INPUT_ISL:-1024}" \
+            --osl           "${INPUT_OSL:-1024}" \
+            --out-dir       "${{ github.workspace }}/summary-out"
+
+      - name: Render summary to job summary
+        if: always()
+        run: |
+          if [ -f "${{ github.workspace }}/summary-out/ci_summary.md" ]; then
+            cat "${{ github.workspace }}/summary-out/ci_summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No summary produced._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload final summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-summary-batch-${{ github.event.inputs.batch_index }}
+          path: summary-out/
+          retention-days: 180
+          if-no-files-found: warn
+
+      - name: Send webhook (Teams Adaptive Card)
+        if: always() && env.WEBHOOK_URL != ''
+        env:
+          BATCH_INDEX: ${{ github.event.inputs.batch_index }}
+          BATCH_SIZE:  ${{ github.event.inputs.batch_size }}
+          CANDIDATES:  ${{ github.event.inputs.candidates_file }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, sys
+          import requests, urllib3
+          urllib3.disable_warnings()
+
+          webhook_url = os.environ["WEBHOOK_URL"]
+          batch_idx   = os.environ.get("BATCH_INDEX", "?")
+          batch_size  = os.environ.get("BATCH_SIZE",  "?")
+          cands_file  = os.environ.get("CANDIDATES",  "?")
+
+          json_path = "${{ github.workspace }}/summary-out/ci_summary.json"
+          if not os.path.exists(json_path):
+              print("no ci_summary.json — skipping webhook"); sys.exit(0)
+          summary = json.loads(open(json_path).read())
+          rows = summary.get("rows") or summary.get("models") or []
+
+          n = len(rows)
+          succeeded = sum(1 for r in rows if r.get("final_status") == "Succeeded")
+          with_data = sum(1 for r in rows if r.get("gain_pct") is not None)
+          gains = [r for r in rows if r.get("gain_pct") is not None]
+          gains.sort(key=lambda r: -r["gain_pct"])
+          top5 = gains[:5]
+          beat_ifx = [r for r in rows
+                      if r.get("vs_inferenceX_pct") is not None
+                      and r["vs_inferenceX_pct"] > 0]
+
+          def cell(text, **kw):
+              return {"type": "TableCell",
+                      "items": [{"type": "TextBlock", "text": str(text), **kw}]}
+
+          def row(cells):
+              return {"type": "TableRow", "cells": cells}
+
+          def header_row(texts):
+              return {"type": "TableRow", "style": "accent",
+                      "cells": [cell(t, weight="Bolder") for t in texts]}
+
+          top_rows = [header_row(["#", "Model", "Gain", "Optimized", "vs InfX"])]
+          for i, r in enumerate(top5, 1):
+              model = r.get("model", "?").split("/")[-1]
+              gain = r.get("gain_pct")
+              opt = r.get("optimized_tok_per_gpu")
+              vs_infx = r.get("vs_inferenceX_pct")
+              gain_str = f"+{gain:.2f}%" if gain is not None else "—"
+              opt_str = f"{opt:.0f}" if opt is not None else "—"
+              vs_str = f"+{vs_infx:.0f}%" if vs_infx is not None and vs_infx > 0 \
+                       else (f"{vs_infx:.0f}%" if vs_infx is not None else "n/a")
+              top_rows.append(row([
+                  cell(str(i)),
+                  cell(model, weight="Bolder"),
+                  cell(gain_str, color="Good" if (gain or 0) > 0 else "Default",
+                       weight="Bolder"),
+                  cell(opt_str),
+                  cell(vs_str,
+                       color="Good" if (vs_infx or 0) > 0 else "Default",
+                       weight="Bolder" if (vs_infx or 0) > 0 else "Default"),
+              ]))
+
+          body = [
+              {"type": "TextBlock", "weight": "Bolder", "size": "Large",
+               "text": f"Hyperloom batch-{batch_idx} done — {n} models"},
+              {"type": "TextBlock", "isSubtle": True, "spacing": "None",
+               "text": f"Candidates: {cands_file} | batch_size: {batch_size}"},
+
+              {"type": "TextBlock", "weight": "Bolder", "size": "Medium",
+               "spacing": "Medium", "text": "Stats"},
+              {"type": "TextBlock", "wrap": True,
+               "text": (f"- **Succeeded**: {succeeded}/{n}\n"
+                        f"- **With baseline+optimized**: {with_data}/{n}\n"
+                        f"- **Beat InferenceX**: {len(beat_ifx)}")},
+          ]
+
+          if top5:
+              body.append({"type": "TextBlock", "weight": "Bolder",
+                           "size": "Medium", "spacing": "Medium",
+                           "text": "Top 5 by Gain%"})
+              body.append({"type": "Table", "columns": [
+                  {"width": 1}, {"width": 5}, {"width": 2},
+                  {"width": 2}, {"width": 2}], "rows": top_rows})
+
+          run_url = (f"https://github.com/{os.environ.get('GITHUB_REPOSITORY','?')}"
+                     f"/actions/runs/{os.environ.get('GITHUB_RUN_ID','?')}")
+          body.append({"type": "TextBlock", "spacing": "Medium",
+                       "isSubtle": True,
+                       "text": f"[View run]({run_url})"})
+
+          card = {"type": "message", "attachments": [{
+              "contentType": "application/vnd.microsoft.card.adaptive",
+              "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard", "version": "1.4", "body": body,
+              }}]}
+
+          try:
+              resp = requests.post(webhook_url, json=card, timeout=15, verify=False)
+              print(f"Webhook status: {resp.status_code}")
+              if resp.status_code >= 300:
+                  print(f"Response: {resp.text[:300]}")
+                  resp = requests.post(webhook_url, json={
+                      "text": (f"Hyperloom batch-{batch_idx} done: "
+                               f"{succeeded}/{n} succeeded, "
+                               f"{with_data} with data, "
+                               f"{len(beat_ifx)} compare against the baseline. "
+                               f"Run: {run_url}")
+                  }, timeout=10, verify=False)
+                  print(f"Fallback status: {resp.status_code}")
+          except Exception as e:
+              print(f"Webhook failed: {e}", file=sys.stderr)
+          PYEOF
