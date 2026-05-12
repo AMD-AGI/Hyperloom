@@ -727,12 +727,9 @@ class SafeOptimizeClient:
         # Stream closed cleanly without ResultMessage — treat as idle.
         return "idle_timeout"
 
-    # WORKAROUND: SaFE's /api/v1/optimization/tasks/<id>/artifacts has a bug
-    # where it returns only 1 file even when the underlying Claw session has
-    # 11-31 files. Bypass the SaFE optimization API and hit Claw API directly
-    # via the task's clawSessionId. Same auth (Bearer ak-...) works for both.
-    # When SaFE backend ListSessionFiles is fixed, this can revert to the
-    # SaFE optimization API (one less GET per task).
+    # _claw_session_id_for() is kept because _sse_wait_until_done() still needs
+    # the Claw session id to subscribe to the SSE stream for real-time completion
+    # detection. It is no longer used by list_artifacts / download_artifact.
 
     def _claw_session_id_for(self, task_id: str) -> str | None:
         """Resolve clawSessionId for a task, with a small per-instance cache.
@@ -756,56 +753,63 @@ class SafeOptimizeClient:
         return sid or None
 
     def list_artifacts(self, task_id: str) -> list[dict]:
-        """List session files via Claw API directly (workaround for SaFE bug).
+        """List task artifacts via the SaFE standard endpoint.
 
-        Claw API returns the full file tree (incl. subdirectories like
-        ``hyperloom/ci_metrics.json``). Items shape mirrors what SaFE
-        ArtifactInfo would have produced: ``{"path": "...", "size": ..., ...}``.
+        The bug that returned only 1 file ("ListSessionFiles") was fixed in
+        SaFE backend (2026-05-12); the endpoint now returns the full artifact
+        tree, including files under sandbox subdirectories like
+        ``hyperloom/ci_metrics.json``. Verified by
+        .github/workflows/verify-safe-api.yml (run 25709271562).
+
+        Returned items shape:
+          ``{"path": "...", "size": ..., "lastModified": "...", "downloadPath": "..."}``
+        ``downloadPath`` is server-relative; download_artifact() uses it
+        directly when present, otherwise falls back to constructing the
+        ``/artifacts/download?path=`` URL from ``path``.
         """
-        session_id = self._claw_session_id_for(task_id)
-        if not session_id:
-            log.warning("[task %s] no clawSessionId — empty artifact list", task_id)
-            return []
-        url = f"{self.base_url}/claw-api/v1/sessions/{session_id}/files"
         try:
-            resp = self._sess.get(url, timeout=self.timeout)
+            data = self._request(
+                "GET", f"api/v1/optimization/tasks/{task_id}/artifacts")
         except Exception as e:
-            log.warning("[task %s] claw list files request failed: %s", task_id, e)
+            log.warning("[task %s] list_artifacts failed: %s", task_id, e)
             return []
-        if resp.status_code >= 400:
-            log.warning("[task %s] claw list files HTTP %d: %s",
-                        task_id, resp.status_code, resp.text[:200])
+        items = data.get("data") if isinstance(data, dict) else data
+        if not isinstance(items, list):
             return []
-        try:
-            payload = resp.json()
-        except Exception as e:
-            log.warning("[task %s] claw list files JSON parse failed: %s", task_id, e)
-            return []
-        # Claw returns {"data": [...]} envelope; tolerate other shapes too.
-        if isinstance(payload, dict):
-            items = payload.get("data") or payload.get("items") or []
-        else:
-            items = payload
-        return items if isinstance(items, list) else []
+        return items
 
-    def download_artifact(self, task_id: str, path: str) -> bytes:
-        """Download a single session artifact via Claw API stream endpoint."""
-        session_id = self._claw_session_id_for(task_id)
-        if not session_id:
-            raise RuntimeError(f"no clawSessionId for task {task_id}; cannot download")
-        # Claw expects path components to be URL-encoded, but '/' is left as-is
-        # (the endpoint matches the path under /sessions/<id>/files/<path>/stream).
-        encoded = requests.utils.quote(path, safe="/")
-        url = (f"{self.base_url}/claw-api/v1/sessions/{session_id}"
-               f"/files/{encoded}/stream")
+    def download_artifact(self, task_id: str, path_or_item: "str | dict") -> bytes:
+        """Download a single task artifact via the SaFE standard endpoint.
+
+        Accepts either a string path (e.g. ``"hyperloom/ci_metrics.json"``) or
+        an item dict returned by list_artifacts. When given an item dict and
+        the dict has a ``downloadPath`` field, that URL is used directly
+        (preferred — SaFE may change query-string format).
+        """
+        if isinstance(path_or_item, dict):
+            download_path = (path_or_item.get("downloadPath") or "").strip()
+            if download_path:
+                url = f"{self.base_url}/{download_path.lstrip('/')}"
+            else:
+                path = path_or_item.get("path", "")
+                encoded = requests.utils.quote(path, safe="")
+                url = (f"{self.base_url}/api/v1/optimization/tasks/{task_id}"
+                       f"/artifacts/download?path={encoded}")
+        else:
+            encoded = requests.utils.quote(path_or_item, safe="")
+            url = (f"{self.base_url}/api/v1/optimization/tasks/{task_id}"
+                   f"/artifacts/download?path={encoded}")
         resp = self._sess.get(url, timeout=120)
         if resp.status_code >= 400:
             raise RuntimeError(
-                f"claw download {path} -> HTTP {resp.status_code}: {resp.text[:200]}")
+                f"SaFE artifact download -> HTTP {resp.status_code}: "
+                f"{resp.text[:200]}")
         return resp.content
 
-    def download_artifact_to(self, task_id: str, path: str, local_path: str) -> int:
-        data = self.download_artifact(task_id, path)
+    def download_artifact_to(
+        self, task_id: str, path_or_item: "str | dict", local_path: str,
+    ) -> int:
+        data = self.download_artifact(task_id, path_or_item)
         os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
         with open(local_path, "wb") as f:
             f.write(data)
@@ -1033,8 +1037,8 @@ def wait_and_collect_one(
 ) -> SubmissionRecord:
     """Wait for one task to finish, then optionally download its artifacts.
 
-    Two-stage collection (mirrors orchestrator.py):
-      1. Claw API: list_artifacts(task_id) -> download each via Claw stream
+    Two-stage collection:
+      1. SaFE API: list_artifacts(task_id) -> download each via /artifacts/download
       2. NFS fallback: if we still don't have ci_metrics.json + optimization_report.md,
          walk the canonical NFS result directories for a matching model dir
     """
@@ -1050,14 +1054,14 @@ def wait_and_collect_one(
     if not collect:
         return rec
 
-    # Stage 1: Claw API
+    # Stage 1: SaFE artifacts API
     try:
         items = safe.list_artifacts(rec.task_id)
     except Exception as e:
         log.warning("[task %s] list_artifacts failed: %s", rec.task_id, e)
         items = []
     wanted = [it for it in items if _is_wanted_artifact(it.get("path", ""), all_artifacts)]
-    log.info("[task %s] claw artifacts: %d total, %d to download",
+    log.info("[task %s] safe artifacts: %d total, %d to download",
              rec.task_id, len(items), len(wanted))
 
     task_dir = artifacts_dir / rec.task_id
@@ -1068,7 +1072,7 @@ def wait_and_collect_one(
             continue
         local = _safe_local_path(artifacts_dir, rec.task_id, path)
         try:
-            n = safe.download_artifact_to(rec.task_id, path, str(local))
+            n = safe.download_artifact_to(rec.task_id, it, str(local))
             rec.artifact_files.append(str(local))
             rec.artifact_count += 1
             log.info("[task %s] saved %s (%d bytes)", rec.task_id, path, n)
