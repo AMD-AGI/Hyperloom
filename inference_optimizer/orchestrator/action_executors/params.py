@@ -22,6 +22,7 @@ The runner now follows a round-based incremental search:
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
 from pathlib import Path
@@ -35,9 +36,78 @@ from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
 )
+from .backends import (
+    DEFAULT_SGLANG_SERVER_ARGS,
+    DEFAULT_VLLM_ARG_UTILS,
+)
 
 
 log = logging.getLogger(__name__)
+
+
+# T1 — keywords identifying server-parameter-style attrs in framework
+# server_args.py / arg_utils.py. These are intentionally narrower than
+# backends._BACKEND_KEYWORDS: backends toggles dispatch paths (boolean
+# flags), params tune scheduling / memory / batching values (typed args
+# the LLM should fill in via params.grid). The set below was distilled
+# from marathon/skills/actions/params.md PARAM_GRID + KNOWLEDGE-BASE
+# server-parameter reference.
+_PARAM_KEYWORDS = (
+    "max_num", "max_running", "max_prefill", "max_seq",
+    "cuda_graph", "cudagraph",
+    "decode_steps", "continuous_decode",
+    "mem_fraction", "memory_utilization", "gpu_memory",
+    "chunked_prefill", "schedule_conservativeness", "schedule_policy",
+    "tokenizer_worker", "stream_interval",
+    "block_size", "kv_cache_dtype",
+    "max_cudagraph", "compilation_config",
+    "radix_cache", "prefix_cach",
+)
+
+
+def discover_param_flags(
+    *,
+    framework: str = "sglang",
+    server_args_path: Path | None = None,
+) -> list[str]:
+    """AST-discover server-parameter flags from the live framework source.
+
+    Mirrors :func:`backends.discover_backend_flags` for parameter-tuning
+    attrs. Returns CLI-style flag names (``--cuda-graph-max-bs``,
+    ``--max-num-seqs``, ...) — values are NOT inferred; the caller / LLM
+    fills them in via ``params.grid`` injection. Returns ``[]`` when the
+    source file is missing.
+
+    ``framework`` accepts ``"sglang"`` (default) or ``"vllm"``; pass
+    ``server_args_path`` to override the default search path entirely.
+    """
+    if server_args_path is None:
+        fw = (framework or "sglang").strip().lower()
+        server_args_path = (
+            DEFAULT_VLLM_ARG_UTILS if "vllm" in fw
+            else DEFAULT_SGLANG_SERVER_ARGS
+        )
+    if not server_args_path.exists():
+        log.info("discover_param_flags: %s not found, returning empty",
+                  server_args_path)
+        return []
+    try:
+        source = server_args_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError) as exc:
+        log.warning("discover_param_flags: parse failed: %s", exc)
+        return []
+    flags: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and any(
+            kw in node.attr for kw in _PARAM_KEYWORDS
+        ):
+            flags.add("--" + node.attr.replace("_", "-"))
+        elif isinstance(node, ast.keyword) and node.arg and any(
+            kw in node.arg for kw in _PARAM_KEYWORDS
+        ):
+            flags.add("--" + node.arg.replace("_", "-"))
+    return sorted(flags)
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +389,7 @@ class ParamsExecutor:
 
         # Compose grid: flags first, then optional NCCL.
         grid_override = params.get("grid")
+        framework = _config_framework(config_path)
         if grid_override:
             grid = [
                 GridVariant(name=v["name"],
@@ -328,7 +399,6 @@ class ParamsExecutor:
                 for v in grid_override
             ]
         else:
-            framework = _config_framework(config_path)
             grid = (
                 list(self.default_vllm_grid)
                 if "vllm" in framework
@@ -336,6 +406,28 @@ class ParamsExecutor:
             )
             if self.include_nccl or params.get("include_nccl"):
                 grid += list(self.default_nccl_grid)
+
+        # T1 — AST-discover parameter flag names from the live framework
+        # so the Orchestration prompt sees the full namespace and can
+        # synthesize value-filled candidates via params.grid. We do NOT
+        # auto-augment the grid here (most param flags need a value, not
+        # a bare presence — see backends._augment_grid_with_discovered_flags
+        # rationale). Discovered flags are surfaced to SharedState only.
+        # We resolve the discovery path through this module's globals so
+        # tests / operators can monkeypatch DEFAULT_*_PATH at runtime.
+        discovered_param_flags: list[str] = []
+        discovered_source = ""
+        if not bool(params.get("disable_discovery", False)):
+            import sys as _sys
+            _self_mod = _sys.modules[__name__]
+            src_path = (
+                _self_mod.DEFAULT_VLLM_ARG_UTILS if "vllm" in framework
+                else _self_mod.DEFAULT_SGLANG_SERVER_ARGS
+            )
+            discovered_param_flags = discover_param_flags(
+                framework=framework, server_args_path=src_path,
+            )
+            discovered_source = str(src_path)
 
         search = dict(params.get("params_search") or _initial_search_state())
         search.setdefault("schema_version", 1)
@@ -400,6 +492,14 @@ class ParamsExecutor:
                 "workspace": output_root.as_posix(),
                 "params_search_update": search,
                 "params_search_exhausted": True,
+                "discovered_flags_update": (
+                    {
+                        "framework": framework or "sglang",
+                        "param_flags": discovered_param_flags,
+                        "source_path": discovered_source,
+                    }
+                    if discovered_param_flags else None
+                ),
             }
 
         # Reuse the resolved model/gpu from the materialization step above
@@ -548,6 +648,14 @@ class ParamsExecutor:
             "workspace": output_root.as_posix(),
             "params_search_update": search_update,
             "params_search_exhausted": len(search_update["tested"]) >= len(grid),
+            "discovered_flags_update": (
+                {
+                    "framework": framework or "sglang",
+                    "param_flags": discovered_param_flags,
+                    "source_path": discovered_source,
+                }
+                if discovered_param_flags else None
+            ),
         }
 
 
@@ -559,5 +667,6 @@ __all__ = [
     "DEFAULT_PARAMS_GRID",
     "DEFAULT_VLLM_PARAMS_GRID",
     "ParamsExecutor",
+    "discover_param_flags",
     "params_executor",
 ]
