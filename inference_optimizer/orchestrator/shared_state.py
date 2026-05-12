@@ -40,6 +40,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .scoring import (
+    ActionScore,
+    rank_top_k as _rank_top_k,
+    target_gap_multiplier as _target_gap_multiplier,
+)
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -157,6 +163,44 @@ class SharedState:
     # run_optimization REVERTs and exhausted integrate attempts.
     rejected_kernel_ids: list[str] = field(default_factory=list)
 
+    # T1+T2 (search-space expansion) — see SKILL.md "Search-space expansion".
+    # Populated once per session by BackendsExecutor / ParamsExecutor on the
+    # first run after they AST-parse the live framework's server_args.py.
+    # Schema: {framework: {"backend_flags": [...], "param_flags": [...],
+    #                       "ts": iso, "source_path": str}}.
+    # The Orchestration prompt surfaces this so the LLM knows the full
+    # framework-version-correct flag namespace it can synthesize variants
+    # from (instead of being limited to the shipped DEFAULT_*_GRID).
+    discovered_flags: dict[str, Any] = field(default_factory=dict)
+    # Rolling per-action winners log used for IR-26 dynamic idea generation.
+    # Each entry: {action, round_id, base_tput, winners: [{name, tput,
+    # gain_pct, extra_sglang_args, extra_envs}], best: {...}, ts}.
+    # Capped at 20 rows to keep prompt context bounded.
+    backend_winners_history: list[dict[str, Any]] = field(default_factory=list)
+    # Set of synergy combo keys ("name1+name2+...") that have already been
+    # tested this session, so the IR-26 re-explore loop doesn't re-run the
+    # same combination after each new round of explore. Populated by
+    # BackendsExecutor when phase-2 combos run.
+    synergy_attempted: list[str] = field(default_factory=list)
+
+    # ---------------------------------------------------------------
+    # Action scoring (see orchestrator/scoring.py + plan
+    # action-scoring-in-shared-state). Coordinator seeds ``action_scores``
+    # once at session start from ActionRegistry + marathon priors and
+    # mutates it after every task completion. Each value is the raw dict
+    # returned by ``ActionScore.to_dict()`` so JSON serialization is
+    # transparent. Use :meth:`get_action_score` / :meth:`put_action_score`
+    # to round-trip via the typed dataclass.
+    action_scores: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Monotonic Coordinator tick counter. Drives cooldown + aging math in
+    # scoring.py. Bumped once per Coordinator.run() / Coordinator.tick(n)
+    # iteration.
+    tick: int = 0
+    # Remaining gain-pct target gap (0.0 means "no target"). Coordinator
+    # refreshes this each prompt build when the run objective is
+    # ``gain_pct=N``. Drives ``scoring.target_gap_multiplier``.
+    target_gap_pct: float = 0.0
+
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
@@ -179,7 +223,20 @@ class SharedState:
         # Filter to known fields so older / newer state.json shapes don't
         # crash. Unknown keys are dropped; missing keys fall back to defaults.
         known = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in raw.items() if k in known})
+        filtered = {k: v for k, v in raw.items() if k in known}
+        # Defensive: ``action_scores`` is supposed to be a dict-of-dict. If a
+        # corrupted state.json carries a non-dict entry, drop it instead of
+        # failing the whole load — the missing rows will be re-seeded on the
+        # next Coordinator.start().
+        if "action_scores" in filtered:
+            scores = filtered["action_scores"]
+            if isinstance(scores, dict):
+                filtered["action_scores"] = {
+                    str(k): v for k, v in scores.items() if isinstance(v, dict)
+                }
+            else:
+                filtered["action_scores"] = {}
+        return cls(**filtered)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -592,6 +649,214 @@ class SharedState:
             return
         self.params_search = dict(update)
 
+    # ------------------------------------------------------------------
+    # T1/T2 — search-space expansion bookkeeping
+    # ------------------------------------------------------------------
+    def record_discovered_flags(
+        self,
+        *,
+        framework: str,
+        backend_flags: list[str] | None = None,
+        param_flags: list[str] | None = None,
+        source_path: str = "",
+    ) -> None:
+        """Persist the AST-discovered flag list for a framework.
+
+        Called by BackendsExecutor / ParamsExecutor when they first run
+        ``discover_*_flags()`` on a fresh session. The Orchestration prompt
+        surfaces the union so the LLM can synthesize new GridVariant
+        candidates that the shipped DEFAULT_*_GRID may not cover.
+
+        Idempotent: re-recording overwrites the per-framework entry but
+        leaves other frameworks untouched.
+        """
+        fw = (framework or "").strip().lower() or "unknown"
+        entry = dict(self.discovered_flags.get(fw) or {})
+        if backend_flags is not None:
+            entry["backend_flags"] = sorted(set(str(f) for f in backend_flags))
+        if param_flags is not None:
+            entry["param_flags"] = sorted(set(str(f) for f in param_flags))
+        if source_path:
+            entry["source_path"] = str(source_path)
+        entry["ts"] = _now_iso()
+        self.discovered_flags[fw] = entry
+
+    def push_backend_winners_round(
+        self,
+        *,
+        action: str,
+        base_tput: float,
+        base_extra_args: str,
+        winners: list[dict[str, Any]],
+        best: dict[str, Any] | None,
+        max_history: int = 20,
+    ) -> None:
+        """Append one explore round's winners (≥+1% over base) to history.
+
+        IR-26 (dynamic idea generation) reads this so the LLM, before
+        proposing the next backends/params round, can compose new combos /
+        retries / sibling-flag variants from what previously won. Marathon
+        equivalent: orchestrator pane's per-tick "follow-on actions"
+        synthesis (marathon/skills/SKILL.md §"Dynamic Idea Generation").
+        """
+        round_id = f"{action}-{len(self.backend_winners_history) + 1:03d}"
+        entry = {
+            "action": str(action),
+            "round_id": round_id,
+            "base_tput": float(base_tput) if base_tput is not None else 0.0,
+            "base_extra_args": str(base_extra_args or ""),
+            "winners": [
+                {
+                    "name": str(w.get("name", "")),
+                    "tput": w.get("output_throughput") or w.get("tput"),
+                    "gain_pct": w.get("gain_pct"),
+                    "extra_sglang_args": str(
+                        w.get("candidate_extra_sglang_args")
+                        or w.get("extra_sglang_args") or ""
+                    ),
+                    "extra_envs": dict(w.get("extra_envs") or {}),
+                    "note": str(w.get("note") or ""),
+                }
+                for w in (winners or [])
+                if isinstance(w, dict)
+            ],
+            "best": (
+                {
+                    "name": str(best.get("name", "")),
+                    "tput": best.get("output_throughput") or best.get("tput"),
+                    "extra_sglang_args": str(
+                        best.get("candidate_extra_sglang_args")
+                        or best.get("extra_sglang_args") or ""
+                    ),
+                    "extra_envs": dict(best.get("extra_envs") or {}),
+                }
+                if isinstance(best, dict) else None
+            ),
+            "ts": _now_iso(),
+        }
+        self.backend_winners_history.append(entry)
+        if len(self.backend_winners_history) > max_history:
+            self.backend_winners_history = (
+                self.backend_winners_history[-max_history:]
+            )
+
+    def mark_synergy_attempted(self, combo_names: list[str]) -> None:
+        """Record one synergy combo as already tested.
+
+        ``combo_names`` is a list of GridVariant.name members ordered by
+        the synergy group; the canonical key is ``"+".join(sorted(names))``
+        so the same set isn't double-counted regardless of input order.
+        """
+        if not combo_names:
+            return
+        key = "+".join(sorted(str(n) for n in combo_names if n))
+        if not key:
+            return
+        if key in self.synergy_attempted:
+            return
+        self.synergy_attempted.append(key)
+        if len(self.synergy_attempted) > 100:
+            self.synergy_attempted = self.synergy_attempted[-100:]
+
+    def is_synergy_attempted(self, combo_names: list[str]) -> bool:
+        if not combo_names:
+            return False
+        key = "+".join(sorted(str(n) for n in combo_names if n))
+        return bool(key) and key in self.synergy_attempted
+
+    # ------------------------------------------------------------------
+    # Action scoring (see orchestrator/scoring.py)
+    # ------------------------------------------------------------------
+    def get_action_score(self, name: str) -> ActionScore | None:
+        raw = self.action_scores.get(name)
+        if not isinstance(raw, dict):
+            return None
+        return ActionScore.from_dict(raw)
+
+    def put_action_score(self, name: str, score: ActionScore) -> None:
+        """Persist an ``ActionScore`` instance back into the raw dict map."""
+        if not name:
+            return
+        self.action_scores[name] = score.to_dict()
+
+    def all_action_scores(self) -> dict[str, ActionScore]:
+        out: dict[str, ActionScore] = {}
+        for name, raw in self.action_scores.items():
+            if isinstance(raw, dict):
+                out[name] = ActionScore.from_dict(raw)
+        return out
+
+    def increment_tick(self) -> int:
+        """Bump the Coordinator tick counter and return the new value."""
+        self.tick = int(self.tick or 0) + 1
+        return self.tick
+
+    def to_action_scores_summary(
+        self,
+        *,
+        registry: Any,
+        top_k: int = 12,
+    ) -> str:
+        """Render the per-tick `Action scores` block consumed by the
+        Orchestration prompt.
+
+        The block is a header + one row per action (sorted by eff_score desc),
+        followed by a single ``locked: ...`` summary row listing any
+        cooldown / locked rows present in the registry but pushed below
+        positive scores. The renderer is deliberately compact — the LLM only
+        needs name + eff_score + a few diagnostics to pick a next action.
+
+        ``registry`` is an ``ActionRegistry`` (kept untyped here to avoid a
+        circular import: shared_state already imports scoring which itself
+        imports ActionRegistry / ActionMetadata).
+        """
+        if not self.action_scores:
+            return (
+                f"=== Action scores (top 0 by eff_score, tick={self.tick}) ===\n"
+                "(no scores seeded)"
+            )
+        target_mult = _target_gap_multiplier(
+            target_gap_pct=float(self.target_gap_pct or 0.0),
+            cumulative_gain=float(self.cumulative_gain or 0.0),
+        )
+        rows = _rank_top_k(
+            self.action_scores,
+            registry,
+            tick=int(self.tick or 0),
+            target_gap_mult=target_mult,
+            k=int(top_k),
+        )
+        lines: list[str] = [
+            f"=== Action scores (top {len(rows)} by eff_score, tick={self.tick}) ==="
+        ]
+        locked_rows: list[tuple[str, str]] = []
+        for name, eff, a in rows:
+            cd_remaining = max(0, int(a.cooldown_until_tick) - int(self.tick or 0))
+            age = (
+                (int(self.tick or 0) - int(a.last_run_tick))
+                if int(a.last_run_tick) >= 0
+                else int(self.tick or 0) + 1
+            )
+            tag = ""
+            if a.locked_reason:
+                tag = f"   [locked: {a.locked_reason}]"
+                locked_rows.append((name, a.locked_reason))
+            elif cd_remaining > 0:
+                tag = f"   [cooldown {cd_remaining}]"
+            eff_display = "  N/A" if eff < 0 else f"{eff:.2f}"
+            lines.append(
+                f"  eff={eff_display:>5} base={a.base_score:.2f} "
+                f"mult={a.score_mult:.2f} "
+                f"runs={a.runs} keeps={a.keeps} disc={a.discards} "
+                f"cd={cd_remaining} age={age}   {name}{tag}"
+            )
+        if locked_rows:
+            lines.append(
+                "locked: "
+                + ", ".join(f"{n}({r})" for n, r in sorted(locked_rows))
+            )
+        return "\n".join(lines)
+
     def seed_stack_from_current_best(self) -> None:
         """Backfill stack for old sessions that only had current_best."""
         if self.optimization_stack or not isinstance(self.current_best, dict):
@@ -725,9 +990,14 @@ class SharedState:
             f"last_select_kernels={self._format_last_select_kernels()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"params_search={self._format_params_search()}",
+            f"discovered_flags={self._format_discovered_flags()}",
+            f"backend_winners_history={self._format_backend_winners_history()}",
+            f"synergy_attempted={len(self.synergy_attempted)} combos",
             f"last_kernel_opt={self._format_last_kernel_opt()}",
             f"rejected_kernel_patches={self._format_rejected_kernel_patches()}",
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
+            f"tick={int(self.tick or 0)}  "
+            f"target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
             f"stop_reason={self.stop_reason or '(none)'}",
         ]
         return "\n".join(lines)
@@ -743,6 +1013,42 @@ class SharedState:
             for r in self.rejected_kernel_patches[-5:]
             if isinstance(r, dict)
         ] or "(none)"
+
+    def _format_discovered_flags(self) -> str:
+        if not self.discovered_flags:
+            return "(none — first backends/params round will populate)"
+        parts: list[str] = []
+        for fw, entry in sorted(self.discovered_flags.items()):
+            if not isinstance(entry, dict):
+                continue
+            n_b = len(entry.get("backend_flags") or [])
+            n_p = len(entry.get("param_flags") or [])
+            parts.append(f"{fw}:backend={n_b}/param={n_p}")
+        return ", ".join(parts) or "(none)"
+
+    def _format_backend_winners_history(self) -> str:
+        if not self.backend_winners_history:
+            return "(no explore rounds completed)"
+        last = self.backend_winners_history[-3:]
+        parts: list[str] = []
+        for r in last:
+            if not isinstance(r, dict):
+                continue
+            wn = [w.get("name") for w in (r.get("winners") or [])
+                  if isinstance(w, dict)]
+            best = r.get("best") or {}
+            best_name = (
+                best.get("name") if isinstance(best, dict) else None
+            )
+            parts.append(
+                f"{r.get('round_id','?')}({r.get('action','?')}): "
+                f"winners={wn or []} best={best_name or '(none)'}"
+            )
+        suffix = (
+            f" [+{len(self.backend_winners_history) - 3} earlier rounds]"
+            if len(self.backend_winners_history) > 3 else ""
+        )
+        return " | ".join(parts) + suffix
 
     def _format_params_search(self) -> str:
         if not self.params_search:
