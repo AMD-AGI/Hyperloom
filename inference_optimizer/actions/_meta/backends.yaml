@@ -23,6 +23,9 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 30
 lease_ttl_sec: 1800
+description: "A/B test attention / moe / sampling backends (e.g. aiter vs triton vs flash); writes one EXTRA_*_ARGS variant per result."
+pipeline_phase: explore
+typical_runtime_min: 8.0
 applicable_when:
   - "baseline_tput > 0"
   - "current_best.action != 'backends'"
