@@ -129,7 +129,38 @@ jobs:
 
       - name: Install dependencies
         working-directory: ci
-        run: pip install --quiet requests
+        run: pip install --quiet --break-system-packages requests 'huggingface_hub>=0.24'
+
+      - name: Prewarm /wekafs/models for this repo
+        # Pre-pull the HF repo directly into /wekafs/models/<owner>-<repo>/
+        # BEFORE invoking SaFE register, bypassing SaFE playground's slow
+        # K8s-job-based download path. Same logic as optimize-batch.yml.
+        # continue-on-error: any failure here (missing /wekafs mount, HF rate
+        # limit, gated repo) just lets SaFE register handle the download
+        # itself, slower but still correct.
+        if: always()
+        continue-on-error: true
+        env:
+          HF_TOKEN:   ${{ secrets.HF_TOKEN }}
+          MODEL_REPO: ${{ matrix.model }}
+        run: |
+          set -euo pipefail
+          if [ ! -d /wekafs/models ]; then
+            echo "WARN: /wekafs/models not visible on this runner, skipping prewarm"
+            echo "      (SaFE register will handle the download on its own)"
+            exit 0
+          fi
+          if [ ! -w /wekafs/models ]; then
+            echo "WARN: /wekafs/models not writable, skipping prewarm"
+            ls -ld /wekafs/models || true
+            exit 0
+          fi
+          python3 ci/prewarm_models.py \
+            --repos        "${MODEL_REPO}" \
+            --target-root  /wekafs/models \
+            --concurrency  1 \
+            --inner-workers 8 \
+            --log          "${{ github.workspace }}/prewarm.log"
 
       - name: Submit + wait + collect (single model)
         working-directory: ci
@@ -202,22 +233,38 @@ jobs:
           retention-days: 45
           if-no-files-found: ignore
 
+      - name: Upload prewarm log
+        # Per-model prewarm log lets us diagnose "why was this model slow on
+        # first encounter" reports.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prewarm-log-${{ matrix.key }}
+          path: prewarm.log
+          retention-days: 30
+          if-no-files-found: ignore
+
   # ── Stage 3: aggregate summary ───────────────────────────────────────────────
   summarize:
     name: Build summary
     needs: optimize
     if: always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true'
-    runs-on: ubuntu-latest
+    # Run on the self-hosted hyperloom-mh826 runner (a K8s pod in the
+    # core42-sandbox namespace) so the Publish step can reach the
+    # hyperloom-results-service ingress at core42.example-internal-host.invalid.
+    # ubuntu-latest works for ingress URL too (it's public), but using the
+    # self-hosted runner future-proofs against the URL being moved internal-only
+    # and keeps every stage on the same runner pool.
+    runs-on: hyperloom-mh826
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       - name: Install dependencies
-        run: pip install --quiet requests pyyaml
+        # No setup-python on the self-hosted runner — it has system python3
+        # already (we use it for the optimize stage too). PEP 668 means
+        # --break-system-packages is needed for pip on Ubuntu 24.04 images.
+        run: pip install --quiet --break-system-packages requests pyyaml
 
       - name: Download all submission manifests
         uses: actions/download-artifact@v4
@@ -286,3 +333,57 @@ jobs:
           path: summary-out/
           retention-days: 45
           if-no-files-found: warn
+
+      - name: Send webhook (completion notification)
+        # Brief Teams notification with per-model counts + GHA + dashboard
+        # links. Detailed sort/render lives in the results service UI.
+        if: always() && env.WEBHOOK_URL != ''
+        env:
+          WEBHOOK_URL:    ${{ secrets.WEBHOOK_URL }}
+          DASHBOARD_URL:  ${{ secrets.HYPERLOOM_DASHBOARD_URL }}
+          INPUT_MODELS:   ${{ github.event.inputs.models }}
+          INPUT_HF_TOP:   ${{ github.event.inputs.hf_top }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os
+          import requests, urllib3
+          urllib3.disable_warnings()
+
+          webhook_url   = os.environ["WEBHOOK_URL"]
+          dashboard_url = os.environ.get("DASHBOARD_URL", "")
+          models_input  = os.environ.get("INPUT_MODELS", "").strip()
+          hf_top        = os.environ.get("INPUT_HF_TOP", "").strip()
+          batch_tag = (models_input.replace(" ", ",")
+                       if models_input else f"hf-top-{hf_top or '?'}")
+
+          json_path = "${{ github.workspace }}/summary-out/ci_summary.json"
+          n = succeeded = with_data = beat_ifx = 0
+          if os.path.exists(json_path):
+              summary = json.loads(open(json_path).read())
+              rows = summary.get("rows") or summary.get("models") or []
+              n = len(rows)
+              succeeded = sum(1 for r in rows if r.get("final_status") == "Succeeded")
+              with_data = sum(1 for r in rows if r.get("gain_pct") is not None)
+              beat_ifx = sum(1 for r in rows
+                             if (r.get("vs_inferenceX_pct") or 0) > 0)
+
+          run_url = (f"https://github.com/{os.environ.get('GITHUB_REPOSITORY','?')}"
+                     f"/actions/runs/{os.environ.get('GITHUB_RUN_ID','?')}")
+
+          text = (f"Hyperloom optimize-submit [{batch_tag}] done: "
+                  f"{succeeded}/{n} succeeded, "
+                  f"{with_data} with gain, "
+                  f"{beat_ifx} compare against the baseline. "
+                  f"GHA: {run_url}")
+          if dashboard_url:
+              text += f" | Dashboard: {dashboard_url}"
+
+          try:
+              resp = requests.post(
+                  webhook_url, json={"text": text}, timeout=10, verify=False)
+              print(f"Webhook: HTTP {resp.status_code}")
+              if resp.status_code >= 300:
+                  print(f"Response: {resp.text[:300]}")
+          except Exception as e:
+              print(f"Webhook failed: {e}")
+          PYEOF
