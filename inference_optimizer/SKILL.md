@@ -592,7 +592,7 @@ and caches `.so` on disk. First launch of a fresh (model, dtype, TP,
 
 | Cache | Path | Clear |
 |---|---|---|
-| aiter JIT (primary cold-start cost) | `/sgl-workspace/aiter/aiter/jit/build/` (also `site-packages/aiter/jit/build/`) | `rm -rf /sgl-workspace/aiter/aiter/jit/build/` |
+| aiter JIT (primary cold-start cost) | `<aiter pkg root>/jit/` (resolved via `import aiter`; wheel installs hold ~80 pre-built `.so` here, plus runtime-JIT staging under `jit/build/<module>/build/`) | `rm -rf <aiter pkg root>/jit/build/` (clears JIT staging only; do NOT delete `jit/*.so` — those are wheel-bundled) |
 | Triton | `~/.triton/cache/` (resolves via `$HOME`) | `rm -rf ~/.triton/cache` |
 | torch.compile / Inductor | `/tmp/torchinductor_<user>/` (override `$TORCHINDUCTOR_CACHE_DIR`) | `rm -rf /tmp/torchinductor_root` |
 
@@ -608,9 +608,10 @@ First launch on this pod; change to `--max-model-len` / `--max-num-seqs` /
 ### Auto-detection + timeout
 
 `BaselineExecutor` (and `ProfileExecutor`, which subclasses it) counts `.so`
-files under `aiter/jit/build/`. Threshold: **< 20 = COLD**. First existing path
-in `baseline.py:AITER_JIT_PROBE_PATHS` wins; override via
-`INFERENCE_OPTIMIZER_AITER_JIT_DIR`.
+files recursively under aiter's `jit/` dir, resolved via
+`importlib.util.find_spec("aiter")` (with `jit/build/` as secondary
+candidate and `baseline.py:AITER_JIT_PROBE_PATHS` as legacy fallback).
+Threshold: **< 20 = COLD**. Override via `INFERENCE_OPTIMIZER_AITER_JIT_DIR`.
 
 | Condition | `subprocess.run(timeout=...)` |
 |---|---|
