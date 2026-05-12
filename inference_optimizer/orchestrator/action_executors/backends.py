@@ -472,7 +472,7 @@ class BackendsExecutor:
         default_vllm_grid: list[GridVariant] | None = None,
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
-        variant_timeout_sec: int = 900,
+        variant_timeout_sec: int = 2400,
         default_max_candidates_per_round: int = 5,
         default_max_synergy_combos: int = 4,
     ):
