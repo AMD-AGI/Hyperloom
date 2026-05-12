@@ -45,6 +45,8 @@ from inference_optimizer.storage import SqliteConnection
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
+    monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", kernel_agent_root)
     return make_session_dir()
 
 
@@ -600,6 +602,18 @@ async def test_select_kernels_handler_missing_trace_input(session_dir):
     res = await krh.select_kernels_handler({}, session_dir=session_dir)
     assert res["status"] == "failed"
     assert "trace_input" in res["error"]
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_requires_kernel_agent_root(session_dir, monkeypatch):
+    monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", None)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir)},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "failed"
+    assert res["error_class"] == "kernel_agent_root_missing"
+    assert "HYPERLOOM_KERNEL_AGENT_ROOT is not set" in res["error"]
 
 
 @pytest.mark.asyncio
