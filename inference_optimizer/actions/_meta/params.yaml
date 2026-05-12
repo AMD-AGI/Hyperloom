@@ -22,7 +22,7 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 25
 lease_ttl_sec: 1500
-description: "Grid-search server scheduling / cache params (cuda-graph caps, mem-fraction, chunked-prefill, ...); incremental, <=5 candidates per round."
+description: "Grid-search server scheduling/cache params (cuda-graph, mem-fraction, chunked-prefill); <=5/round. Override via params.grid; AST-discovered names live in SharedState.discovered_flags."
 pipeline_phase: explore
 typical_runtime_min: 5.0
 applicable_when:

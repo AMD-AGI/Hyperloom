@@ -21,7 +21,7 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 25
 lease_ttl_sec: 2400
-description: "Workload-frontier sweep over (CONC, ISL, OSL) on top of the current best to validate gains beyond the smoke workload."
+description: "Workload sweep over (CONC,ISL,OSL) on top of current best to validate gains beyond smoke workload. Override via params.grid=[{conc,isl,osl},...] or params.conc_values/isl_osl_values."
 pipeline_phase: explore
 typical_runtime_min: 15.0
 applicable_when:

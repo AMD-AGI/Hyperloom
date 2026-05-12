@@ -910,6 +910,13 @@ class Coordinator:
                 params.setdefault(
                     "config_path", self.shared_state.baseline_config_path
                 )
+            # T2 — pass the cumulative synergy_attempted set so backends
+            # phase-2 doesn't re-test the same combo across rounds.
+            if pending.action_name == "backends":
+                params.setdefault(
+                    "synergy_attempted",
+                    list(self.shared_state.synergy_attempted),
+                )
             if pending.action_name == "params":
                 params.setdefault("params_search", self.shared_state.params_search)
                 # Long runs should advance the search incrementally while
@@ -950,6 +957,12 @@ class Coordinator:
         ):
             params.setdefault(
                 "config_path", self.shared_state.baseline_config_path
+            )
+        # T2 — same synergy-dedup plumbing as the proposal-review path.
+        if action_name == "backends":
+            params.setdefault(
+                "synergy_attempted",
+                list(self.shared_state.synergy_attempted),
             )
         idempotency_key = intent.payload.get("idempotency_key") or f"{source}:{action_name}:{len(self.state.pending_proposals)}"
         task = await self.tasks.create(
@@ -1586,6 +1599,40 @@ class Coordinator:
                     self.shared_state.cumulative_gain_validated_stack_len,
                 )
         elif task_kind in ("backends", "params", "sweep"):
+            # T1/T2 — persist discovered_flags + synergy_attempted +
+            # winners_history so the next Orchestration tick (and IR-26
+            # idea-generation prompt section) sees the full search-space
+            # context. These are independent of the promotion path below
+            # so they always run, even when no winner crossed the gate.
+            disc_update = result.get("discovered_flags_update")
+            if isinstance(disc_update, dict):
+                self.shared_state.record_discovered_flags(
+                    framework=str(disc_update.get("framework") or ""),
+                    backend_flags=disc_update.get("backend_flags"),
+                    param_flags=disc_update.get("param_flags"),
+                    source_path=str(disc_update.get("source_path") or ""),
+                )
+                changed = True
+            new_attempts = result.get("synergy_attempted_new") or []
+            for combo in new_attempts:
+                if isinstance(combo, list):
+                    self.shared_state.mark_synergy_attempted(
+                        [str(x) for x in combo],
+                    )
+                    changed = True
+            winners_for_history = result.get("winners") or []
+            if winners_for_history and task_kind != "sweep":
+                self.shared_state.push_backend_winners_round(
+                    action=task_kind,
+                    base_tput=float(result.get("base_tput") or 0.0),
+                    base_extra_args=str(
+                        (task.params or {}).get("base_extra_args", "")
+                        if task is not None else ""
+                    ),
+                    winners=winners_for_history,
+                    best=result.get("best_variant"),
+                )
+                changed = True
             if task_kind == "sweep":
                 self.shared_state.record_sweep(result)
                 changed = True
