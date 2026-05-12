@@ -202,9 +202,6 @@ Hyperloom/
 ├── critic-agent/                         # Critic-agent subprocess runtime (proposal review)
 ├── robustness-agent/                     # Robustness-agent subprocess runtime (health/RCA)
 ├── ci/                                   # CI orchestration (PR submitter, AB test)
-├── deploy/
-│   └── local/                            # Local mode: containerized deployment for user-owned infra
-├── dashboards/                           # Interactive optimization dashboards (HTML)
 ├── docs/                                 # Architecture docs, case studies
 ├── slides/                               # Architecture diagrams
 ├── scripts/                              # Repo-level helper scripts
