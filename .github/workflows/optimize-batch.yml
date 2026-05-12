@@ -9,11 +9,17 @@ name: SaFE Optimize Batch (candidates-file driven)
 # candidates list so re-runs are reproducible and we can split a large pool
 # (130 / 500 / 2000) into time-bounded batches.
 #
-# Three-stage pipeline (same as optimize-submit.yml):
+# Three-stage pipeline:
 #   1. prepare    (ubuntu-latest)  — read candidates file, take batch slice
-#   2. optimize   (matrix, hyperloom-mh826) — one model per parallel job
+#   2. optimize   (matrix, hyperloom-mh826) — one model per parallel job.
+#                                    Each job pre-pulls its own repo to
+#                                    /wekafs/models BEFORE calling SaFE
+#                                    register, so download is overlapped
+#                                    with the rest of the batch (no serial
+#                                    prewarm stage that blocks optimize).
 #   3. summarize  (ubuntu-latest)  — aggregate ci_metrics.json + InferenceX
-#                                    -> ci_summary.{md,json}
+#                                    -> ci_summary.{md,json} + publish to
+#                                       hyperloom-results-service
 
 on:
   workflow_dispatch:
@@ -58,6 +64,11 @@ on:
         description: 'Max parallel optimize jobs (default 32, can push to 64)'
         required: false
         default: '32'
+      skip_prewarm:
+        description: 'Skip per-model HF prewarm (fall back to SaFE register only — slower)'
+        type: boolean
+        required: false
+        default: false
       dry_run:
         description: 'Dry run (auto-detect and print plan only, do not submit)'
         type: boolean
@@ -99,7 +110,7 @@ jobs:
           echo '${{ steps.matrix.outputs.matrix }}' | python3 -m json.tool >> "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
-  # ── Stage 2: per-model optimization (parallel) ──────────────────────────────
+  # ── Stage 2: per-model optimization (parallel, with inline prewarm) ────────
   optimize:
     name: optimize-${{ matrix.key }}
     needs: prepare
@@ -128,7 +139,46 @@ jobs:
 
       - name: Install dependencies
         working-directory: ci
-        run: pip install --quiet requests
+        run: pip install --quiet requests 'huggingface_hub>=0.24'
+
+      - name: Prewarm /wekafs/models for this repo
+        # Pre-pull the HF repo directly into /wekafs/models/<owner>-<repo>/
+        # BEFORE invoking SaFE register, bypassing SaFE's slow playground
+        # download path. By doing this per-job (not as a separate serial
+        # stage), download is overlapped with optimize work happening in
+        # other matrix jobs — no batch-wide blocking phase.
+        #
+        # Failure modes that must NOT abort the job (continue-on-error):
+        #   - /wekafs mount missing on this runner -> fall back to SaFE register
+        #   - HF rate-limit / transient 5xx        -> SaFE register will retry
+        #   - gated repo without proper HF_TOKEN   -> SaFE register may have its own auth
+        # In all of those, SaFE register downloads (slowly) and the optimize
+        # task still runs correctly, just minutes slower.
+        if: github.event.inputs.skip_prewarm != 'true'
+        continue-on-error: true
+        env:
+          HF_TOKEN:   ${{ secrets.HF_TOKEN }}
+          MODEL_REPO: ${{ matrix.model }}
+        run: |
+          set -euo pipefail
+          if [ ! -d /wekafs/models ]; then
+            echo "WARN: /wekafs/models not visible on this runner, skipping prewarm"
+            echo "      (SaFE register will handle the download on its own)"
+            exit 0
+          fi
+          if [ ! -w /wekafs/models ]; then
+            echo "WARN: /wekafs/models not writable, skipping prewarm"
+            ls -ld /wekafs/models || true
+            exit 0
+          fi
+          # concurrency=1 (only one repo); inner-workers=8 boosts intra-repo
+          # parallelism so per-file fetches saturate available bandwidth.
+          python3 ci/prewarm_models.py \
+            --repos        "${MODEL_REPO}" \
+            --target-root  /wekafs/models \
+            --concurrency  1 \
+            --inner-workers 8 \
+            --log          "${{ github.workspace }}/prewarm.log"
 
       - name: Submit + wait + collect (single model)
         working-directory: ci
@@ -179,6 +229,17 @@ jobs:
           name: task-artifacts-${{ matrix.key }}
           path: task-artifacts/
           retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Upload prewarm log
+        # Per-model prewarm log helps diagnose "slow first run" reports
+        # (showed the HF download took N minutes / failed for $REASON).
+        if: always() && github.event.inputs.skip_prewarm != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: prewarm-log-${{ matrix.key }}
+          path: prewarm.log
+          retention-days: 30
           if-no-files-found: ignore
 
   # ── Stage 3: aggregate summary ───────────────────────────────────────────────
