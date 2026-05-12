@@ -91,7 +91,7 @@ Ensure the following environment variables are set on the GPU node:
 |----------|-------------|
 | `NODE_TLS_REJECT_UNAUTHORIZED=0` | Required for internal network TLS certificate issues |
 
-> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.example-internal-host.invalid/api/v1/llm-proxy/v1). GEAK and OOB API Key / Base URL are automatically inherited from `SAFE_API_KEY` / `OPENAI_BASE_URL` — no separate configuration needed.
+> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.example-internal-host.invalid/litellm-gateway). GEAK and OOB API Key / Base URL are automatically inherited from `SAFE_API_KEY` / `OPENAI_BASE_URL` — no separate configuration needed.
 
 #### Step 3 — Connect via Cursor Remote SSH
 
@@ -115,16 +115,15 @@ Optimize /wekafs/models/Qwen3-30B-A3B inference on MI300X.
 
 ```
 @/wekafs/HyperloomV2/inference_optimizer/SKILL.md
-Optimize /wekafs/models/Qwen3-32B inference on MI300X.
+Optimize /wekafs/models/Qwen3-30B-A3B inference on MI300X.
 
 Environment:
 - FRAMEWORK=sglang
 - GPU_TYPE=MI300X
 - TP=8, CONC=64, ISL=1024, OSL=1024
 - PRECISION=bf16
-- --target-gain 30
+- --target-gain 10
 - --max-hours 24
-- --no-kernel
 - Run in background: setsid nohup
 
 OOB_PATH: /wekafs/hyperloom/OOB
