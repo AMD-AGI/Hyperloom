@@ -18,6 +18,9 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 10
 lease_ttl_sec: 300
+description: "Summarise the run target (gain / tput / external baseline) into target_summary used by all subsequent prompts."
+pipeline_phase: prep
+typical_runtime_min: 2.0
 applicable_when:
   - "model_class != ''"
   - "target_summary == ''"
