@@ -540,6 +540,8 @@ class SafeOptimizeClient:
         mode: str = "local",
         gpu_type: str | None = None,
         inferencex_path: str | None = None,
+        prompt_prefix: str | None = None,
+        prompt_suffix: str | None = None,
     ) -> dict:
         body = {
             "displayName": display_name,
@@ -563,6 +565,14 @@ class SafeOptimizeClient:
             body["gpuType"] = gpu_type
         if inferencex_path:
             body["inferencexPath"] = inferencex_path
+        # Optional prefix/suffix forwarded to BuildHyperloomPrompt on the
+        # SaFE side. We use this to point the skill at the alternate
+        # inference_optimizer SKILL.md the batch lives in, before the
+        # auto-generated body kicks in.
+        if prompt_prefix:
+            body["promptPrefix"] = prompt_prefix
+        if prompt_suffix:
+            body["promptSuffix"] = prompt_suffix
         return self._request("POST", "api/v1/optimization/tasks", body)
 
     # ── Task lifecycle ──
@@ -877,6 +887,8 @@ def process_model(
     mode: str,
     gpu_type: str | None = None,
     inferencex_path: str | None = None,
+    prompt_prefix: str | None = None,
+    prompt_suffix: str | None = None,
 ) -> SubmissionRecord:
     rec = SubmissionRecord(
         model=repo_id,
@@ -940,7 +952,8 @@ def process_model(
     try:
         result = safe.submit_task(
             model_id, display_name, framework, precision, tp, conc, isl, osl, image,
-            mode=mode, gpu_type=gpu_type, inferencex_path=inferencex_path)
+            mode=mode, gpu_type=gpu_type, inferencex_path=inferencex_path,
+            prompt_prefix=prompt_prefix, prompt_suffix=prompt_suffix)
     except Exception as e:
         rec.status = "failed"
         rec.error = f"submit_task: {e}"
@@ -1282,6 +1295,16 @@ def _build_parser() -> argparse.ArgumentParser:
                              f"(defaults to $SAFE_OPTIMIZE_INFERENCEX_PATH then "
                              f"'{DEFAULT_INFERENCEX_PATH}'). SaFE backend default is "
                              f"/hyperloom/InferenceX which doesn't exist on core42.")
+    parser.add_argument("--prompt-prefix",
+                        default=os.environ.get("SAFE_OPTIMIZE_PROMPT_PREFIX", ""),
+                        help="Optional free-form prefix prepended to the SaFE-generated "
+                             "Hyperloom prompt. The CI batch uses this to point the skill "
+                             "at /wekafs/HyperloomV2/inference_optimizer/SKILL.md before "
+                             "the auto-generated body. (env: $SAFE_OPTIMIZE_PROMPT_PREFIX)")
+    parser.add_argument("--prompt-suffix",
+                        default=os.environ.get("SAFE_OPTIMIZE_PROMPT_SUFFIX", ""),
+                        help="Optional free-form suffix appended to the SaFE-generated "
+                             "Hyperloom prompt. (env: $SAFE_OPTIMIZE_PROMPT_SUFFIX)")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""),
                         help="HuggingFace token (or set $HF_TOKEN)")
 
@@ -1421,6 +1444,8 @@ def main() -> int:
             mode=args.mode,
             gpu_type=gpu_type,
             inferencex_path=inferencex_path,
+            prompt_prefix=args.prompt_prefix or None,
+            prompt_suffix=args.prompt_suffix or None,
         )
         records.append(rec)
 
