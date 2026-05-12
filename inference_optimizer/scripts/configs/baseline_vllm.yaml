@@ -24,7 +24,7 @@ benchmark:
   gpu_selection:
     auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime
 
-  timeout_seconds: 900
+  timeout_seconds: 2400        # 40 min hard cap
 
   profiler:
     torch_profiler:
