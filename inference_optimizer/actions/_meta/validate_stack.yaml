@@ -21,7 +21,7 @@ side_effects:
 preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 20
-lease_ttl_sec: 1500
+lease_ttl_sec: 4200
 description: "Apply ALL KEEP'd entries in optimization_stack on a fresh server, rebench, and write cumulative_gain_validated."
 pipeline_phase: validate
 typical_runtime_min: 8.0
