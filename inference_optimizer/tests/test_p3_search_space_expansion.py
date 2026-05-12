@@ -475,6 +475,193 @@ def test_prompt_section_count_unchanged(registry, rules_path):
 
 
 # ---------------------------------------------------------------------------
+# Per-round caps — backends.py max_candidates_per_round + max_synergy_combos
+# ---------------------------------------------------------------------------
+def _make_backends_yaml(tmp_path: Path) -> Path:
+    p = tmp_path / "base.yaml"
+    p.write_text(
+        "benchmark:\n"
+        "  framework: sglang\n"
+        "  envs:\n"
+        "    TP: 1\n    CONC: 8\n    ISL: 256\n    OSL: 256\n"
+    )
+    return p
+
+
+def _wire_be_module(monkeypatch, tmp_path, captured):
+    """Replace run_grid + AST source paths with deterministic stubs."""
+    from inference_optimizer.orchestrator.action_executors import backends as be_mod
+
+    fake_args = tmp_path / "server_args.py"
+    fake_args.write_text(
+        "class ServerArgs:\n"
+        "    def __init__(self):\n"
+        "        self.enable_overlap_schedule = False\n"
+    )
+    monkeypatch.setattr(be_mod, "DEFAULT_SGLANG_SERVER_ARGS", fake_args)
+
+    async def _fake_run_grid(*, base_yaml_path, base_extra_args, grid,
+                              output_root, **_kw):
+        captured.append([v.name for v in grid])
+        return [VariantResult(
+            name=v.name, extra_sglang_args=v.extra_sglang_args,
+            extra_envs=dict(v.extra_envs),
+            status="succeeded", output_throughput=1100.0,
+        ) for v in grid]
+
+    monkeypatch.setattr(be_mod, "run_grid", _fake_run_grid)
+    return be_mod
+
+
+@pytest.mark.asyncio
+async def test_backends_default_cap_5_in_phase1(tmp_path, monkeypatch):
+    captured: list[list[str]] = []
+    _wire_be_module(monkeypatch, tmp_path, captured)
+
+    synth_grid = [GridVariant(f"v{i}", f"--flag-{i}") for i in range(12)]
+    exec_ = BackendsExecutor(
+        default_grid=synth_grid,
+        default_vllm_grid=[],
+        default_config_path=_make_backends_yaml(tmp_path),
+        session_dir=tmp_path,
+    )
+
+    class _Task:
+        # Disable discovery so the cap-of-5 assertion is deterministic
+        # (AST scan would otherwise append a few boolean variants).
+        params = {"disable_discovery": True}
+        task_id = "t-cap-default"
+
+    class _Ctx:
+        task = _Task()
+        extra: dict = {}
+
+    await exec_(_Ctx())
+    # Phase 1 should run exactly 5 variants (the cap), in original order.
+    assert captured[0] == [f"v{i}" for i in range(5)]
+
+
+@pytest.mark.asyncio
+async def test_backends_cap_0_disables_cap(tmp_path, monkeypatch):
+    captured: list[list[str]] = []
+    _wire_be_module(monkeypatch, tmp_path, captured)
+
+    synth_grid = [GridVariant(f"v{i}", f"--flag-{i}") for i in range(12)]
+    exec_ = BackendsExecutor(
+        default_grid=synth_grid,
+        default_vllm_grid=[],
+        default_config_path=_make_backends_yaml(tmp_path),
+        session_dir=tmp_path,
+    )
+
+    class _Task:
+        params = {"max_candidates_per_round": 0, "disable_discovery": True}
+        task_id = "t-cap-off"
+
+    class _Ctx:
+        task = _Task()
+        extra: dict = {}
+
+    await exec_(_Ctx())
+    # Phase 1 must run the WHOLE grid (12 variants).
+    assert len(captured[0]) == 12
+
+
+@pytest.mark.asyncio
+async def test_backends_llm_grid_override_bypasses_cap(tmp_path, monkeypatch):
+    captured: list[list[str]] = []
+    _wire_be_module(monkeypatch, tmp_path, captured)
+
+    exec_ = BackendsExecutor(
+        default_grid=[],
+        default_vllm_grid=[],
+        default_config_path=_make_backends_yaml(tmp_path),
+        session_dir=tmp_path,
+        default_max_candidates_per_round=5,
+    )
+
+    llm_grid = [
+        {"name": f"llm_v{i}", "extra_sglang_args": f"--llm-{i}"}
+        for i in range(9)
+    ]
+
+    class _Task:
+        params = {"grid": llm_grid}
+        task_id = "t-llm-grid"
+
+    class _Ctx:
+        task = _Task()
+        extra: dict = {}
+
+    await exec_(_Ctx())
+    # All 9 LLM-specified variants must run despite default cap=5.
+    assert len(captured[0]) == 9
+
+
+@pytest.mark.asyncio
+async def test_backends_skips_already_tested_when_capped(tmp_path, monkeypatch):
+    captured: list[list[str]] = []
+    _wire_be_module(monkeypatch, tmp_path, captured)
+
+    synth_grid = [GridVariant(f"v{i}", f"--flag-{i}") for i in range(12)]
+    exec_ = BackendsExecutor(
+        default_grid=synth_grid,
+        default_vllm_grid=[],
+        default_config_path=_make_backends_yaml(tmp_path),
+        session_dir=tmp_path,
+    )
+
+    class _Task:
+        params = {
+            "tested_variant_names": ["v0", "v1", "v2", "v3", "v4"],
+            "disable_discovery": True,
+        }
+        task_id = "t-tested"
+
+    class _Ctx:
+        task = _Task()
+        extra: dict = {}
+
+    await exec_(_Ctx())
+    # First 5 are tested → next round must take v5..v9 instead.
+    assert captured[0] == ["v5", "v6", "v7", "v8", "v9"]
+
+
+@pytest.mark.asyncio
+async def test_backends_synergy_cap_default_4(tmp_path, monkeypatch):
+    captured: list[list[str]] = []
+    _wire_be_module(monkeypatch, tmp_path, captured)
+
+    # Tiny grid + many synergy groups so the cap matters.
+    synth_grid = [GridVariant(f"v{i}", f"--flag-{i}") for i in range(6)]
+    exec_ = BackendsExecutor(
+        default_grid=synth_grid,
+        default_vllm_grid=[],
+        default_config_path=_make_backends_yaml(tmp_path),
+        session_dir=tmp_path,
+        default_max_candidates_per_round=6,  # let all 6 run as phase-1
+    )
+
+    class _Task:
+        params = {
+            "synergy_mode": "auto",
+            "max_combo_size": 2,
+            "disable_discovery": True,
+            # Without an explicit cap, default_max_synergy_combos=4 wins.
+        }
+        task_id = "t-synergy-default"
+
+    class _Ctx:
+        task = _Task()
+        extra: dict = {}
+
+    await exec_(_Ctx())
+    # captured[0] = phase-1 (6 variants), captured[1] = phase-2 (combos).
+    assert len(captured) == 2
+    assert len(captured[1]) <= 4, captured[1]
+
+
+# ---------------------------------------------------------------------------
 # Coordinator integration — promotion writes new SharedState fields
 # ---------------------------------------------------------------------------
 def test_promote_to_shared_state_propagates_discovered_and_synergy(tmp_path):
