@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from .orchestrator.action_executors import (
+    TargetAnalysisExecutor,
     backends_executor,
     baseline_executor,
     params_executor,
@@ -570,7 +571,13 @@ _NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = (
 )
 
 
-def _register_executors(coordinator: Coordinator, *, no_kernel: bool = False) -> None:
+def _register_executors(
+    coordinator: Coordinator,
+    *,
+    no_kernel: bool = False,
+    compare_against_gpu: str | None = None,
+    session_dir: Path | None = None,
+) -> None:
     """Wire all currently-available action executors.
 
     Real executors are pulled from ``_REAL_EXECUTORS_FULL`` (always) and
@@ -581,6 +588,13 @@ def _register_executors(coordinator: Coordinator, *, no_kernel: bool = False) ->
 
     When ``no_kernel`` is True, kernel-owned action stubs are skipped and
     ``profile`` is also skipped (profiling only feeds kernel-opt).
+
+    When ``compare_against_gpu`` is a non-empty string, ``target_analysis``
+    is registered with the real :class:`TargetAnalysisExecutor` instead of
+    the default ``_noop_prep`` stub; the runner pulls the rest of the
+    reference query (model / framework / precision / ISL / OSL) from
+    process env at call time. Empty / None falls back to the no-op so
+    existing runs are byte-identical.
     """
     for kind, fn in _REAL_EXECUTORS_FULL.items():
         coordinator.sub.register_executor(kind, fn)
@@ -592,7 +606,17 @@ def _register_executors(coordinator: Coordinator, *, no_kernel: bool = False) ->
             coordinator.sub.register_executor(kind, fn)
         noop_kinds = _NOOP_KINDS_COMMON + _NOOP_KINDS_KERNEL_ONLY
 
+    compare_gpu = (compare_against_gpu or "").strip()
     for kind in noop_kinds:
+        if kind == "target_analysis" and compare_gpu:
+            coordinator.sub.register_executor(
+                "target_analysis",
+                TargetAnalysisExecutor(
+                    compare_against_gpu=compare_gpu,
+                    session_dir=session_dir,
+                ),
+            )
+            continue
         coordinator.sub.register_executor(kind, _noop_prep)
 
 
@@ -1827,7 +1851,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if not no_kernel:
         prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
     coordinator.system_prompt_overrides = prompts
-    _register_executors(coordinator, no_kernel=no_kernel)
+    _register_executors(
+        coordinator,
+        no_kernel=no_kernel,
+        compare_against_gpu=getattr(args, "compare_against_gpu", None),
+        session_dir=session_dir,
+    )
     # Persist effective system prompts for resume / drift inspection.
     _snapshot_system_prompts(session_dir, prompts=prompts)
 
@@ -1938,6 +1967,21 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Optional model class hint (dense_8B / moe_mla / ...)")
     opt.add_argument("--target-summary", type=str, default=None,
                       help="Free-text goal summary surfaced in prompts")
+    opt.add_argument(
+        "--compare-against-gpu", type=str, default=None,
+        help=(
+            "Reference GPU hardware key for external baseline comparison "
+            "(e.g. b300 / mi355x / h200). When set, the target_analysis "
+            "action fetches the matching reference data point from "
+            "InferenceX (https://inferencex.semianalysis.com) and writes "
+            "$SESSION_DIR/target_analysis/target_baseline.json + a short "
+            "MD report. The data is REPORT-ONLY: it does not influence "
+            "Objective, scoring, or any agent prompt. Other dimensions "
+            "(model / framework / precision / ISL / OSL) are derived "
+            "from --model and the standard FRAMEWORK / PRECISION / ISL / "
+            "OSL env vars. Unset = keep target_analysis as a no-op stub."
+        ),
+    )
     opt.add_argument("--max-ticks", type=int, default=None,
                       help="Hard tick cap (None = unlimited; mostly for tests)")
     opt.add_argument("--tick-interval-sec", type=float, default=0.0,
