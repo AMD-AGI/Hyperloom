@@ -18,23 +18,43 @@ jobs:
       CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
       SAFE_BASE_URL: ${{ secrets.SAFE_BASE_URL }}
     steps:
-      - name: Dump ci_metrics.json for already-completed tasks
+      - name: Probe 16 historical tasks for ci_metrics.json availability
         shell: bash
         run: |
           set -u
           BASE="${SAFE_BASE_URL:-https://core42.example-internal-host.invalid}"
           BASE="${BASE%/}"
-          for tid in opt-9a2bd79d-0bd6-4210-ae7e-d1f37082b136 opt-6b715236-5334-4f56-9dbd-40f83aecae48; do
-            echo ""
-            echo "=== ci_metrics.json for $tid ==="
-            curl -sS -H "Authorization: Bearer $CLAW_API_KEY" \
-              "$BASE/api/v1/optimization/tasks/$tid/artifacts/download?path=hyperloom%2Fci_metrics.json"
-            echo ""
-            echo "=== optimization_report.md for $tid (first 3000 chars) ==="
-            curl -sS -H "Authorization: Bearer $CLAW_API_KEY" \
-              "$BASE/api/v1/optimization/tasks/$tid/artifacts/download?path=hyperloom%2Foptimization_report.md" \
-              | head -c 3000
-            echo ""
+          # (task_id, model) — the 20-model run from 2026-05-08 (run 25570644944),
+          # nvidia excluded (NVFP4 incompatible w/ MI300X).
+          declare -a TASKS=(
+            "opt-c2c90039-a9f1-45f0-a2c7-8c4a1183b6a8|Qwen2.5-14B-Instruct-AWQ"
+            "opt-104d2d29-3288-413a-8ff2-db7b51832dc6|Qwen2.5-7B"
+            "opt-2a607346-7761-4579-8dc4-064130cd5119|Qwen2.5-7B-Instruct"
+            "opt-ef1a51d7-078e-44b3-bcf4-1a079bd7a448|Qwen2.5-Coder-7B"
+            "opt-a82bd200-98fb-4e79-933e-c971cd31ad70|Qwen2.5-Coder-7B-Instruct"
+            "opt-3c14ea91-cae8-49fb-9874-29196305216e|Qwen3-8B"
+            "opt-af0501fc-4afb-4dc1-9349-e9fd3c527dc6|Qwen3-8B-AWQ"
+            "opt-dc6faa7c-2847-4660-b725-2da77ccc8bce|Qwen3-Coder-30B-A3B-Instruct"
+            "opt-af4dc673-221a-4e6d-b77f-aee0eb0c3c25|DeepSeek-R1-0528"
+            "opt-2effa6ac-10f0-4b33-a84e-88afc789dcac|DeepSeek-R1-Distill-Llama-8B"
+            "opt-dd4a0d8d-88c2-4a52-b5f9-5d48227e31ec|DeepSeek-V3.2"
+            "opt-6e35b44d-db18-48db-aae8-b8721ee942f8|dolphin-2.9.1-yi-1.5-34b"
+            "opt-a35850b2-c2e0-461f-9022-604196b2d98f|Llama-3.1-8B-Instruct"
+            "opt-a1739a8f-083e-463f-b8a1-6bc285328d5d|Mistral-7B-Instruct-v0.2"
+            "opt-d21e5b0d-8ef4-4921-8ed8-b8a78bfe4741|gpt-oss-120b"
+            "opt-82915ed5-1874-4895-a8d3-bca2c86021c7|gpt-oss-20b"
+          )
+          printf "\n%-42s %-32s %-6s %s\n" "TASK_ID" "MODEL" "FILES" "ci_metrics.json size"
+          printf "%-42s %-32s %-6s %s\n" "$(printf '=%.0s' {1..42})" "$(printf '=%.0s' {1..32})" "======" "===================="
+          for entry in "${TASKS[@]}"; do
+            tid="${entry%%|*}"
+            model="${entry##*|}"
+            url="$BASE/api/v1/optimization/tasks/$tid/artifacts"
+            resp=$(curl -sS -H "Authorization: Bearer $CLAW_API_KEY" "$url")
+            n_files=$(echo "$resp" | jq '(.data // .) | length' 2>/dev/null || echo "ERR")
+            ci_size=$(echo "$resp" | jq '(.data // .)[] | select(.path | endswith("ci_metrics.json")) | .size' 2>/dev/null | head -1)
+            ci_size="${ci_size:-MISSING}"
+            printf "%-42s %-32s %-6s %s\n" "$tid" "$model" "$n_files" "$ci_size"
           done
 
       - name: (kept) Hit each artifacts endpoint
