@@ -132,7 +132,7 @@ class SweepExecutor:
         default_conc_values: list[int] | None = None,
         default_isl_osl_configs: list[str] | None = None,
         default_num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
-        variant_timeout_sec: int = 1200,
+        variant_timeout_sec: int = 2400,
     ):
         # None = resolve at call time from $FRAMEWORK (sglang/vllm). Tests
         # that pass an explicit fixture path keep their override.
