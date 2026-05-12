@@ -1,0 +1,34 @@
+{
+  "_meta": {
+    "source": ".harvest/RESULTS_FINAL.md FINAL v3 (5/12/2026), merging R1+R2+R3 runs",
+    "run_urls": [
+      "https://github.com/AMD-AGI/Hyperloom/actions/runs/25570644944",
+      "https://github.com/AMD-AGI/Hyperloom/actions/runs/25633076431",
+      "https://github.com/AMD-AGI/Hyperloom/actions/runs/25658189615"
+    ],
+    "count": 20,
+    "purpose": "Skip these in batch matrix generation so we don't re-run models that already have data. Both completed and permanent-failed are included; only re-add to candidates if user explicitly asks for re-run."
+  },
+  "models": [
+    {"repo_id": "Qwen/Qwen2.5-14B-Instruct-AWQ", "status": "completed", "phase": 9, "framework": "vllm", "precision": "INT4", "tp": 1, "params_b": 14.8, "gain_pct": 55.13},
+    {"repo_id": "deepseek-ai/DeepSeek-R1-0528", "status": "completed", "phase": 7, "framework": "sglang", "precision": "FP8", "tp": 8, "params_b": 684.5, "gain_pct": 44.42, "vs_infx_pct": 78},
+    {"repo_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct", "status": "completed", "phase": 10, "framework": "sglang", "precision": "FP8", "tp": 1, "params_b": 30.5, "gain_pct": 26.00},
+    {"repo_id": "openai/gpt-oss-120b", "status": "completed", "phase": 11, "framework": "vllm", "precision": "FP4", "tp": 1, "params_b": 120.4, "gain_pct": 23.28, "vs_infx_pct": 24},
+    {"repo_id": "Qwen/Qwen2.5-7B-Instruct", "status": "completed", "phase": 11, "framework": "sglang", "precision": "FP8", "tp": 1, "params_b": 7.6, "gain_pct": 22.47},
+    {"repo_id": "Qwen/Qwen2.5-7B", "status": "completed", "phase": 6, "framework": "sglang", "precision": "FP8", "tp": 1, "params_b": 7.6, "gain_pct": 11.72},
+    {"repo_id": "Qwen/Qwen2.5-32B-Instruct-AWQ", "status": "completed", "phase": 11, "framework": "vllm", "precision": "INT4", "tp": 1, "params_b": 32.8, "gain_pct": 6.05},
+    {"repo_id": "Qwen/Qwen3-8B", "status": "completed", "phase": 11, "framework": "sglang", "precision": "FP8", "tp": 1, "params_b": 8.2, "gain_pct": 1.77},
+    {"repo_id": "mistralai/Mistral-7B-Instruct-v0.2", "status": "completed", "phase": 7, "framework": "sglang", "precision": "FP8", "tp": 1, "params_b": 7.2, "gain_pct": 1.55},
+    {"repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct", "status": "completed", "phase": 11, "framework": "sglang", "precision": "FP8", "tp": 1, "params_b": 7.6, "gain_pct": 1.01},
+    {"repo_id": "meta-llama/Llama-3.1-8B", "status": "completed", "phase": 11, "framework": "sglang", "precision": "FP8", "tp": 1, "params_b": 8.0, "gain_pct": 0.70},
+    {"repo_id": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "status": "completed", "phase": 11, "framework": "sglang", "precision": "FP8", "tp": 1, "params_b": 8.0, "gain_pct": 0.59},
+    {"repo_id": "dphn/dolphin-2.9.1-yi-1.5-34b", "status": "completed", "phase": 11, "framework": "sglang", "precision": "FP8", "tp": 1, "params_b": 34.4, "gain_pct": 0.44},
+    {"repo_id": "meta-llama/Llama-3.1-8B-Instruct", "status": "completed", "phase": 11, "framework": "sglang", "precision": "FP8", "tp": 1, "params_b": 8.0, "gain_pct": 0.0},
+    {"repo_id": "Qwen/Qwen2.5-Coder-7B", "status": "partial", "phase": 8, "framework": "sglang", "precision": "FP8", "tp": 1, "params_b": 7.6, "note": "single best only, no baseline"},
+    {"repo_id": "openai/gpt-oss-20b", "status": "partial", "phase": 5, "framework": "vllm", "precision": "FP4", "tp": 1, "params_b": 21.5, "note": "baseline only"},
+    {"repo_id": "Qwen/Qwen3-8B-AWQ", "status": "partial", "phase": 9, "framework": "vllm", "precision": "INT4", "tp": 1, "params_b": 8.2, "note": "single best only"},
+    {"repo_id": "deepseek-ai/DeepSeek-V3.2", "status": "partial", "phase": 5, "framework": "sglang", "precision": "FP8", "tp": 8, "params_b": 685.4, "note": "baseline only"},
+    {"repo_id": "deepseek-ai/DeepSeek-R1", "status": "failed", "reason": "register fail R1 / sandbox fail R2", "framework": "sglang", "precision": "FP8", "tp": 8, "params_b": 684.5},
+    {"repo_id": "nvidia/Gemma-4-31B-IT-NVFP4", "status": "failed", "reason": "NVFP4 = NVIDIA-only kernels, AMD ROCm not supported", "framework": "vllm", "precision": "FP4", "tp": 1, "params_b": 20.9}
+  ]
+}
