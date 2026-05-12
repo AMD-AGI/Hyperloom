@@ -45,16 +45,15 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Callable, Literal
 
 from ..intent_parser import (
-    Intent,
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
 )
 from ...session_paths import manifest_path
-from .base import Backend, BackendError, BackendTurnResult
+from .base import BackendError, BackendTurnResult
 
 
 log = logging.getLogger(__name__)
@@ -548,6 +547,8 @@ class CriticAgentBackend:
                         try:
                             child.rmdir()
                         except OSError:
+                            # Best-effort: dir may still contain files or be
+                            # concurrently modified; skip and continue pruning.
                             pass
                 stale.rmdir()
             except OSError:

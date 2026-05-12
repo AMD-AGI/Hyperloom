@@ -24,5 +24,8 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 25
 lease_ttl_sec: 1800
+description: "Configure vendor backends (aiter / alter) — env vars, tuned-config CSVs, dispatch toggles — without modifying source."
+pipeline_phase: deep
+typical_runtime_min: 8.0
 applicable_when:
   - "vendor_backend_active"
