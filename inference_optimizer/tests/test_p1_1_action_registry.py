@@ -125,7 +125,7 @@ def test_registry_baseline_metadata(registry):
     assert "benchmark_lane" in baseline.requires_lanes
     assert "Bash" in baseline.allowed_tools
     assert baseline.accuracy_risk == 0.0
-    assert baseline.lease_ttl_sec == 1200
+    assert baseline.lease_ttl_sec == 4200
 
 
 def test_registry_profile_uses_profile_lane(registry):

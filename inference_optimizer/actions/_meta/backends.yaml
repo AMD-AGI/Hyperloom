@@ -22,10 +22,9 @@ side_effects:
 preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 30
-lease_ttl_sec: 1800
-description: "A/B test attention / moe / sampling backends (e.g. aiter vs triton vs flash); writes one EXTRA_*_ARGS variant per result."
+lease_ttl_sec: 7200
+description: "A/B test attention/moe/sampling backends (aiter/triton/flash); <=5 variants + <=4 combos per round (IR-26 picks next). Override via params.grid / synergy_groups / max_candidates_per_round=0."
 pipeline_phase: explore
 typical_runtime_min: 8.0
 applicable_when:
   - "baseline_tput > 0"
-  - "current_best.action != 'backends'"

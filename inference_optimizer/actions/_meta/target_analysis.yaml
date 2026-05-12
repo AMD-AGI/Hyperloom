@@ -1,7 +1,7 @@
 name: target_analysis
 family: prep
-cost_minutes_p50: 2.0
-cost_minutes_p75: 4.0
+cost_minutes_p50: 0.1
+cost_minutes_p75: 0.3
 expected_gain_pct: [0.0, 0.0]
 accuracy_risk: 0.0
 crash_risk: 0.0
@@ -17,10 +17,10 @@ side_effects:
 preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 10
-lease_ttl_sec: 300
-description: "Summarise the run target (gain / tput / external baseline) into target_summary used by all subsequent prompts."
+lease_ttl_sec: 60
+description: "Fetch InferenceX reference (advisory only — does not influence Objective/scoring/prompts) when --compare-against-gpu is set; persists under $SESSION_DIR/target_analysis/ for the final report."
 pipeline_phase: prep
-typical_runtime_min: 2.0
+typical_runtime_min: 0.1
 applicable_when:
   - "model_class != ''"
   - "target_summary == ''"
