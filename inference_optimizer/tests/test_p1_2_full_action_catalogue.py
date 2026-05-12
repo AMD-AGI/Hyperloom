@@ -144,6 +144,114 @@ def test_lease_ttl_sec_consistent_with_cost(registry):
 
 
 # ---------------------------------------------------------------------------
+# Drift guards: keep the four "is this a real action?" sources of truth
+# consistent with each other.
+#
+# Background: ``session_paths._runs_actions()`` (the whitelist for actions
+# that get a per-task ``runs/<kind>/<task_id>/`` workspace) used to be a
+# hand-maintained ``_RUNS_ACTIONS`` frozenset. Adding a new action
+# (``validate_stack``) without updating it caused the orchestrator to loop
+# forever proposing the action — every dispatch raised ``ValueError`` from
+# inside the executor's ``runs_dir()`` fallback, but mission TODOs never
+# cleared. The fix derives the whitelist from ``pipeline_phase`` in the
+# ActionRegistry; these tests lock the alignment in place.
+# ---------------------------------------------------------------------------
+def test_runs_actions_match_pipeline_phases(registry):
+    """``_runs_actions()`` must equal {a.name for a in registry
+    if a.pipeline_phase ∈ _RUNS_WORKSPACE_PHASES}.
+
+    This is the primary registry ↔ session_paths drift guard.
+    """
+    from inference_optimizer.session_paths import (
+        _RUNS_WORKSPACE_PHASES,
+        _runs_actions,
+    )
+
+    expected = frozenset(
+        a.name for a in registry.all()
+        if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
+    )
+    actual = _runs_actions()
+    assert actual == expected, (
+        f"runs_actions drift: actual={sorted(actual)!r} expected={sorted(expected)!r}; "
+        f"if a yaml's pipeline_phase changed, fix it; if a new phase was added "
+        f"to _RUNS_WORKSPACE_PHASES, this test pins the change."
+    )
+
+
+def test_validate_stack_in_runs_actions():
+    """Explicit regression: ``validate_stack`` was the action that
+    triggered the historical drift bug. Lock it as a runs/<kind>/ owner.
+    """
+    from inference_optimizer.session_paths import _runs_actions
+
+    assert "validate_stack" in _runs_actions()
+
+
+def test_runs_actions_fallback_matches_registry(registry):
+    """The hardcoded ``_RUNS_ACTIONS_FALLBACK`` (used only when the
+    registry can't be loaded) must stay aligned with the registry-derived
+    set. Otherwise a degraded boot path could silently produce a different
+    whitelist than production.
+    """
+    from inference_optimizer.session_paths import (
+        _RUNS_ACTIONS_FALLBACK,
+        _RUNS_WORKSPACE_PHASES,
+    )
+
+    expected = frozenset(
+        a.name for a in registry.all()
+        if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
+    )
+    assert _RUNS_ACTIONS_FALLBACK == expected, (
+        f"_RUNS_ACTIONS_FALLBACK drift: fallback={sorted(_RUNS_ACTIONS_FALLBACK)!r} "
+        f"registry-derived={sorted(expected)!r}; update _RUNS_ACTIONS_FALLBACK "
+        f"in session_paths.py to match."
+    )
+
+
+def test_cli_real_executors_consistent_with_runs_actions():
+    """Every action wired with a real executor in
+    ``cli._register_executors`` must either be in ``_runs_actions()``
+    (writes per-task artefacts under ``runs/<kind>/<task_id>/``) or be the
+    special ``report`` action (writes to ``reports/`` instead).
+
+    This is the primary cli ↔ session_paths drift guard: if someone adds
+    a real executor without giving its yaml a ``pipeline_phase`` that
+    falls in ``_RUNS_WORKSPACE_PHASES``, this test fires.
+    """
+    from inference_optimizer.cli import (
+        _REAL_EXECUTORS_FULL,
+        _REAL_EXECUTORS_KERNEL_ONLY,
+    )
+    from inference_optimizer.session_paths import _runs_actions
+
+    REPORTS_ONLY = {"report"}
+    runs = _runs_actions()
+    real_kinds = (
+        set(_REAL_EXECUTORS_FULL.keys())
+        | set(_REAL_EXECUTORS_KERNEL_ONLY.keys())
+    )
+
+    missing_from_runs = (real_kinds - REPORTS_ONLY) - runs
+    assert not missing_from_runs, (
+        f"actions {sorted(missing_from_runs)!r} have a real executor in "
+        f"cli._REAL_EXECUTORS_* but are not in _runs_actions(); "
+        f"SubAgentRunner will not pre-mkdir the workspace and the "
+        f"executor's runs_dir() fallback will raise. Either give the "
+        f"action a yaml pipeline_phase in _RUNS_WORKSPACE_PHASES, or "
+        f"document why it should be exempt (cf. report → reports/)."
+    )
+
+    overclaim = REPORTS_ONLY & runs
+    assert not overclaim, (
+        f"actions {sorted(overclaim)!r} are listed in REPORTS_ONLY but "
+        f"are also in _runs_actions(); pick one (write either to runs/ "
+        f"or to reports/, not both)."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Phase 1 prompt-builder fields — see ActionMetadata docstring
 # ---------------------------------------------------------------------------
 def test_every_action_has_non_empty_description(registry):
