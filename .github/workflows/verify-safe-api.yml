@@ -47,6 +47,16 @@ jobs:
           printf "\n%-42s %-32s %-6s %s\n" "TASK_ID" "MODEL" "FILES" "ci_metrics.json size"
           printf "%-42s %-32s %-6s %s\n" "$(printf '=%.0s' {1..42})" "$(printf '=%.0s' {1..32})" "======" "===================="
           set +e
+          # First, dump full file list for 2 representative old tasks to see WHAT
+          # the lone file is (was it just claw-*.jsonl? or something else?)
+          for tid in opt-d21e5b0d-8ef4-4921-8ed8-b8a78bfe4741 opt-3c14ea91-cae8-49fb-9874-29196305216e; do
+            echo ""
+            echo "=== full list for $tid ==="
+            curl -sS -H "Authorization: Bearer $CLAW_API_KEY" "$BASE/api/v1/optimization/tasks/$tid/artifacts" \
+              | jq '.'
+          done
+          echo ""
+          # Then the summary table
           for entry in "${TASKS[@]}"; do
             tid="${entry%%|*}"
             model="${entry##*|}"
