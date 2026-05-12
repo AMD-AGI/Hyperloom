@@ -111,6 +111,7 @@ class KernelAgentToolTests(unittest.TestCase):
         )
         self.assertEqual(dry_proc.returncode, 0)
         self.assertIn("TraceLens root not found", dry_proc.stderr)
+        self.assertIn("ensuring Node.js/npm for claude/codex CLIs", dry_proc.stdout)
         self.assertIn("ensuring ray[default]==2.44.1", dry_proc.stdout)
 
     def test_new_environment_defaults_are_documented_in_tools(self) -> None:
@@ -125,6 +126,9 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"', install_text)
         self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cuda}"', install_text)
         self.assertIn("python3 scripts/build_index.py --force --device", install_text)
+        self.assertIn("ensure_node()", install_text)
+        self.assertIn("installing Node.js 20 from NodeSource", install_text)
+        self.assertIn("ensure_node", install_text)
         self.assertIn("GEAK_RAG_INDEX_DEVICE=cuda", skill_text)
         self.assertIn("tools:", install_text)
         self.assertIn("  rag: true", install_text)

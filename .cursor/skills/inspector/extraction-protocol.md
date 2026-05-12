@@ -19,7 +19,7 @@ The output of this protocol is the manifest consumed by SKILL.md Step S4
   that ran kernel-opt and therefore must also be audited against
   integrate.md per IR-3 — pass every relevant file)
 - `target_skill_md_path` (absolute path to the target skill's `SKILL.md`,
-  used by Pass 0 to extract Iron Rules; new in v1.1)
+  used by Pass 0 to extract Iron Rules)
 - `RUN_ENV` (mapping of env var names to current values, e.g.
   `{"RESULT_DIR": "/shared_nfs/.../results/2026-04-21T..."}`)
 - Optional `phase_name` (used by Pass 0 to filter Iron-Rule candidates whose
@@ -29,7 +29,6 @@ The output of this protocol is the manifest consumed by SKILL.md Step S4
 
 ```json
 {
-  "manifest_version": "1.1",
   "source_action_md": "actions/baseline.md",
   "source_action_md_sha1": "<first 12 hex chars of sha1>",
   "source_action_mds": ["actions/baseline.md"],
@@ -88,19 +87,17 @@ inspector's S5 step uses this to bias `unverified` vs `miss`).
 
 ---
 
-## 1. The 5-Pass Procedure (Pass 0 added in v1.1)
+## 1. The 5-Pass Procedure
 
-### Pass 0 - Iron Rules Intake (mechanical, new in v1.1)
+### Pass 0 - Iron Rules Intake (mechanical)
 
-The 4-Pass procedure prior to v1.1 read only phase-action `.md` files. As a
-result, Iron Rules declared in the target's SKILL.md (e.g. IR-3
-"Integration is MANDATORY" in `inference-optimization/SKILL.md`) were never
-expressed as expectation entries — they had no anchor in the action `.md`
-the inspector was auditing. The 2026-04-21 Qwen3-30B-A3B run failed exactly
-this way: kernel-opt finished, integration was skipped, and the inspector
-audited only `kernel-opt.md`, so IR-3 never appeared in the manifest.
-
-Pass 0 closes that gap.
+Iron Rules declared in the target's SKILL.md (e.g. IR-3 "Integration is
+MANDATORY" in `inference-optimization/SKILL.md`) need to be surfaced as
+expectation entries even when the corresponding action `.md` (e.g.
+`kernel-opt.md`) does not anchor them locally. The 2026-04-21 Qwen3-30B-A3B
+run failed exactly this way: kernel-opt finished, integration was skipped,
+and an inspector that read only `kernel-opt.md` had no manifest entry for
+IR-3. Pass 0 closes that gap by reading the target SKILL.md directly.
 
 1. Run `python3 scripts/parse_iron_rules.py --skill-md
    <TARGET_SKILL_DIR>/SKILL.md` (helpfully invoked transparently by
@@ -271,13 +268,13 @@ spuriously block a healthy run:
    does not try to infer "baseline must run before profile, therefore profile
    expects baseline outputs"; that is the orchestrator loop's responsibility.
 
-   *Exception (one-way only, new in v1.1):* the target's `SKILL.md`
-   `### IR-N` Iron Rules MAY inject expectations into action-level
-   manifests via Pass 0 (Iron Rules Intake). This injection is one-way
-   (SKILL.md → action manifest, never the reverse) and is gated by the
-   IR-N's `applies_to_phases` glob. This is what lets IR-3
-   "Integration is MANDATORY" attach a `run_baseline.sh` MUST expectation
-   to every DFS_LOOP_<N> audit even when the agent only passed
+   *Exception (one-way only):* the target's `SKILL.md` `### IR-N` Iron
+   Rules MAY inject expectations into action-level manifests via Pass 0
+   (Iron Rules Intake). This injection is one-way (SKILL.md → action
+   manifest, never the reverse) and is gated by the IR-N's
+   `applies_to_phases` glob. This is what lets IR-3 "Integration is
+   MANDATORY" attach a `run_baseline.sh` MUST expectation to every
+   DFS_LOOP_<N> audit even when the agent only passed
    `--action actions/kernel-opt.md`.
 4. **Do NOT classify uncertain candidates as `MAY`.** If unsure, classify as
    `UNVERIFIED`. `MAY` requires explicit weakening keywords ("optional",
@@ -331,24 +328,3 @@ to be explicit.
 | `RUN_ENV` not provided | Inspector still extracts the manifest with unresolved templates; all artifact checks become `unverified`. The user prompt should always provide `RUN_ENV`; absence is a configuration bug, not a target-skill bug. |
 | Action `.md` is gigantic (>2k lines) | Pass 1 still works (single Read call). Pass 2 regex is O(n). Pass 3 LLM classification cost is proportional to number of regex matches, not file size, so cost stays bounded. |
 
----
-
-## 6. Versioning
-
-This protocol is `manifest_version: 1.1` as of the v1.1 hardening pass.
-Changes from 1.0:
-- New Pass 0 (Iron Rules Intake) injects SKILL.md `### IR-N` Iron-Rule
-  candidates into the per-action manifest with `iron_rule=true`,
-  `modality=MUST`, and an `applies_to_phases` glob.
-- `parse_action_outputs.py` accepts repeated `--action` and a new
-  `--skill-md` flag.
-- `Pass 4 normalisation` documents cross-file `source_quote` (e.g.
-  `SKILL.md::IR-3 | actions/integrate.md:42`) and `source_files` lists.
-- Non-Goal §3.3 explicitly authorises the SKILL.md → action one-way
-  injection.
-
-Future changes that alter the manifest schema or modality semantics must
-bump the version. The inspector's SKILL.md S2 step pins the protocol
-version, and `audit_report.json` records it via `inspector_version`. The
-README documents how to handle a target skill that was audited under an
-older manifest version.
