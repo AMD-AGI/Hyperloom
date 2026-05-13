@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Awaitable, Callable
 
+from ..session_paths import _runs_actions, runs_dir
 from .resource_lock import Lease, ResourceLockManager
 from .task_registry import Task, TaskRegistry
 
@@ -58,13 +60,32 @@ class SubAgentRunner:
         tasks: TaskRegistry,
         *,
         executor_registry: dict[str, ExecutorFn] | None = None,
+        session_dir: Path | None = None,
     ):
         self.locks = locks
         self.tasks = tasks
         self.executor_registry: dict[str, ExecutorFn] = dict(executor_registry or {})
+        self.session_dir = Path(session_dir) if session_dir else None
 
     def register_executor(self, kind: str, fn: ExecutorFn) -> None:
         self.executor_registry[kind] = fn
+
+    def _pre_mkdir_workspace(self, task: Task) -> Path | None:
+        """Pre-create ``runs/<action>/<task_id>/`` for actions that have one.
+
+        Returns the path so the caller can stash it on ``RunnerContext.extra``.
+        Returns None when the task kind is not one of the known runs/
+        actions (e.g. setup / classify / kernel-owned actions which use
+        their own kernel-agent-workspace tree).
+        """
+        if self.session_dir is None:
+            return None
+        kind = str(task.kind or "").strip()
+        if kind not in _runs_actions():
+            return None
+        ws = runs_dir(self.session_dir, kind, task.task_id)
+        ws.mkdir(parents=True, exist_ok=True)
+        return ws
 
     async def run_task(self, task: Task) -> SubAgentResult:
         """Acquire required lanes, transition queued→running, execute, transition out.
@@ -98,7 +119,13 @@ class SubAgentRunner:
                 ttl_sec=task.lease_ttl_sec or 60,
             )
         try:
-            ctx = RunnerContext(task=task, lease=lease)
+            workspace = self._pre_mkdir_workspace(task)
+            extra: dict = {}
+            if workspace is not None:
+                extra["workspace"] = str(workspace)
+            if self.session_dir is not None:
+                extra["session_dir"] = str(self.session_dir)
+            ctx = RunnerContext(task=task, lease=lease, extra=extra)
             try:
                 result_payload = await runner(ctx)
             except Exception as exc:  # noqa: BLE001 — surface to task.history

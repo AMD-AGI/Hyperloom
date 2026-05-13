@@ -25,14 +25,12 @@ works unchanged.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from pathlib import Path
 from typing import Any
 
 from ...paths import asset_root
-from ..roofline_integration import collect_profile_roofline, server_profiling_env
 from .baseline import BaselineExecutor
 
 
@@ -44,7 +42,7 @@ log = logging.getLogger(__name__)
 PROFILE_DEFAULT_CONFIG = (
     asset_root() / "scripts" / "configs" / "profile_sglang.yaml"
 )
-PROFILE_DEFAULT_TIMEOUT_SEC = 1500     # Magpie + sglang profile is heavier
+PROFILE_DEFAULT_TIMEOUT_SEC = 2400     # Magpie + sglang profile is heavier, 40 min wall cap
 
 
 def _default_profile_config() -> Path:
@@ -62,14 +60,14 @@ class ProfileExecutor(BaselineExecutor):
         *,
         magpie_python: str | None = None,
         default_config_path: Path | str | None = None,
-        default_output_root: Path | str | None = None,
+        session_dir: Path | str | None = None,
         default_timeout_sec: int = PROFILE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
     ):
         super().__init__(
             magpie_python=magpie_python,
             default_config_path=default_config_path,
-            default_output_root=default_output_root,
+            session_dir=session_dir,
             default_timeout_sec=default_timeout_sec,
             cwd=cwd,
         )
@@ -79,14 +77,18 @@ class ProfileExecutor(BaselineExecutor):
         return _default_profile_config()
 
     async def __call__(self, ctx) -> dict[str, Any]:
-        preload_env = server_profiling_env()
-        if preload_env:
-            params = dict(ctx.task.params or {})
-            extra_envs = dict(params.get("extra_envs") or {})
-            extra_envs.update(preload_env)
-            params["extra_envs"] = extra_envs
-            ctx.task.params = params
-
+        # Override action label so per-task output lands under runs/profile/
+        # rather than runs/baseline/ when the runner derives the path.
+        params = ctx.task.params or {}
+        extra = getattr(ctx, "extra", None) or {}
+        if not (params.get("output_dir") or extra.get("workspace")):
+            output_dir = self._resolve_workspace(ctx, "profile")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            # Stash so BaselineExecutor.__call__ picks it up via extra.
+            if extra is None:
+                ctx.extra = {"workspace": str(output_dir)}
+            else:
+                extra["workspace"] = str(output_dir)
         result = await super().__call__(ctx)
         # Augment with trace_dir if the workspace produced one.
         workspace_str = result.get("workspace")
@@ -112,21 +114,6 @@ class ProfileExecutor(BaselineExecutor):
                     "profile_executor: workspace=%s has no torch_trace dir",
                     workspace_str,
                 )
-
-            if os.environ.get("ENABLE_PMC_ROOFLINE", "1").strip().lower() not in {
-                "0", "false", "no",
-            }:
-                pmc = await asyncio.to_thread(
-                    collect_profile_roofline,
-                    session_dir=Path(workspace_str),
-                    duration_ms=int(os.environ.get("PMC_PROFILE_DURATION_MS", "15000")),
-                    precision=os.environ.get("PRECISION", "fp16").strip() or "fp16",
-                )
-                result["pmc_roofline"] = pmc
-                if pmc.get("pmc_summary_path"):
-                    result["pmc_summary_path"] = pmc["pmc_summary_path"]
-                if pmc.get("roofline_path"):
-                    result["roofline_path"] = pmc["roofline_path"]
         return result
 
 

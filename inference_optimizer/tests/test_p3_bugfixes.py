@@ -19,8 +19,9 @@ Locks the three P3 fixes uncovered by the resume3 1h validation
   REQUESTs because SharedState never exposed the trace path produced by
   ``ProfileExecutor``. Fix: ``Coordinator._promote_to_shared_state`` writes
   ``main_trace_path`` to ``shared_state.last_profile_trace`` on profile
-  succeeded; ``to_prompt_summary`` shows it; cli.py's _DEFAULT_ORCH_PROMPT
-  tells Orch to use it verbatim.
+  succeeded; ``to_prompt_summary`` shows it;
+  ``orchestrator/system_prompts/orchestration.md`` (loaded by
+  ``cli._load_orchestration_prompt``) tells Orch to use it verbatim.
 """
 
 from __future__ import annotations
@@ -63,8 +64,8 @@ def _silent_backends() -> dict[str, object]:
 
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_ROOT", str(tmp_path))
-    return make_session_dir("p3-test")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    return make_session_dir()
 
 
 # ===========================================================================
@@ -87,7 +88,6 @@ async def test_report_resolves_session_dir_from_env(tmp_path, monkeypatch):
     SqliteConnection(storage_dir / "coordinator.db").close()
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(sd))
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_SESSION_ROOT", raising=False)
 
     class _Ctx:
         task = Task(task_id="t-1", kind="report", params={},
@@ -267,18 +267,13 @@ async def test_profile_promotion_records_args_and_clears_select_cache(session_di
             "main_trace_path": "/new/trace.json.gz",
             "trace_files": ["/new/trace.json.gz"],
             "trace_dir": "/new/torch_trace",
-            "pmc_summary_path": "/new/profiles/pmc_summary.json",
-            "roofline_path": "/new/profiles/roofline.json",
         }
         await c._promote_to_shared_state("profile", result, task=task)
         assert c.shared_state.last_profile_trace == "/new/trace.json.gz"
         assert c.shared_state.last_profile_args == "--cuda-graph-max-bs 8"
-        assert c.shared_state.last_profile_pmc_summary == "/new/profiles/pmc_summary.json"
-        assert c.shared_state.last_profile_roofline == "/new/profiles/roofline.json"
         assert c.shared_state.last_select_kernels == {}
         summary = c.shared_state.to_prompt_summary()
         assert "last_profile_args='--cuda-graph-max-bs 8'" in summary
-        assert "last_profile_roofline=/new/profiles/roofline.json" in summary
     finally:
         await c.stop()
 

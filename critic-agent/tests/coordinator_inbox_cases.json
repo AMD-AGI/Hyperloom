@@ -1,0 +1,51 @@
+[
+  {
+    "id": "inbox-001-two-proposals-mixed-verdicts",
+    "description": "Coordinator forwards two proposals: a baseline and a kernel rewrite. Critic should approve the baseline (if benchmark exists) and reject the kernel rewrite if active dispatch path is unproven.",
+    "input_packet": {
+      "request_type": "coordinator_inbox",
+      "session_id": "sess-inbox-001",
+      "raw_prompt": "=== Shared session state ===\nsession_id=sess-inbox-001 model=qwen3-14b framework=sglang workload=decode precision=fp8 baseline_tput=1200\n=== Inbox for critic (newest last) ===\n  seq=12 msg_id=aaa1 from=orchestration topic=proposal payload={'action_name': 'baseline', 'predicted_gain_pct': 0}\n  seq=13 msg_id=bbb2 from=orchestration topic=proposal payload={'action_name': 'kernel_opt', 'predicted_gain_pct': 4.2}\n"
+    },
+    "expected": {
+      "kind": "intent_envelope",
+      "intent_count": 2,
+      "intent_types_any_of": ["review_verdict"],
+      "verdicts_per_proposal": [
+        {"target_proposal_msg_id": "aaa1", "verdict": "approve"},
+        {"target_proposal_msg_id": "bbb2", "verdict": "reject"}
+      ]
+    }
+  },
+  {
+    "id": "inbox-002-empty-inbox-emits-heartbeat",
+    "description": "Coordinator inbox is empty. Critic must emit a single send_message heartbeat so the Coordinator never times out.",
+    "input_packet": {
+      "request_type": "coordinator_inbox",
+      "session_id": "sess-inbox-002",
+      "raw_prompt": "=== Shared session state ===\nmodel=qwen3-14b framework=sglang\n=== Inbox for critic ===\n(no new messages)\n"
+    },
+    "expected": {
+      "kind": "intent_envelope",
+      "intent_count": 1,
+      "intent_types_any_of": ["send_message"]
+    }
+  },
+  {
+    "id": "inbox-003-needs-review-when-context-missing",
+    "description": "Inbox carries a proposal but the shared session header is missing model/framework. Critic must emit needs_review and not invent context.",
+    "input_packet": {
+      "request_type": "coordinator_inbox",
+      "session_id": "sess-inbox-003",
+      "raw_prompt": "=== Shared session state ===\nsession_id=sess-inbox-003\n=== Inbox for critic ===\n  seq=1 msg_id=ccc3 from=orchestration topic=proposal payload={'action_name': 'mystery'}\n"
+    },
+    "expected": {
+      "kind": "intent_envelope",
+      "intent_count": 1,
+      "intent_types_any_of": ["review_verdict"],
+      "verdicts_per_proposal": [
+        {"target_proposal_msg_id": "ccc3", "verdict": "needs_review"}
+      ]
+    }
+  }
+]

@@ -48,12 +48,13 @@ from typing import Any, Awaitable, Callable
 log = logging.getLogger(__name__)
 
 
-# Where Hyperloom/kernel-agent's shell tools live. Override-able for tests.
-HYPERLOOM_KERNEL_AGENT_ROOT = Path(
-    os.environ.get(
-        "HYPERLOOM_KERNEL_AGENT_ROOT",
-        "/wekafs/xiaofei/Hyperloom/kernel-agent",
-    )
+# Where Hyperloom/kernel-agent's shell tools live. Env is set by
+# inference_optimizer/scripts/install.sh -> pod-local kernel-agent env.
+_KERNEL_AGENT_ROOT_ENV = "HYPERLOOM_KERNEL_AGENT_ROOT"
+HYPERLOOM_KERNEL_AGENT_ROOT = (
+    Path(os.environ[_KERNEL_AGENT_ROOT_ENV])
+    if os.environ.get(_KERNEL_AGENT_ROOT_ENV)
+    else None
 )
 
 
@@ -85,6 +86,28 @@ _REUSABLE_SOURCE_ROOTS = (
 _APPLY_TOOL_MODULE: Any | None = None
 _DEFAULT_KERNEL_BACKEND_ORDER = ("claude", "codex", "geak")
 _DEFAULT_KERNEL_BATCH_PARALLEL = 3
+
+
+def _kernel_agent_root_error() -> str | None:
+    if HYPERLOOM_KERNEL_AGENT_ROOT is None:
+        return (
+            f"{_KERNEL_AGENT_ROOT_ENV} is not set; run "
+            "inference_optimizer/scripts/install.sh and source /workspace/hyperloom/runtime/kernel-agent.env.sh"
+        )
+    if not HYPERLOOM_KERNEL_AGENT_ROOT.is_dir():
+        return f"{_KERNEL_AGENT_ROOT_ENV} does not exist: {HYPERLOOM_KERNEL_AGENT_ROOT}"
+    return None
+
+
+def _kernel_agent_tool_path(tool_name: str) -> Path:
+    err = _kernel_agent_root_error()
+    if err:
+        raise RuntimeError(err)
+    assert HYPERLOOM_KERNEL_AGENT_ROOT is not None
+    path = HYPERLOOM_KERNEL_AGENT_ROOT / "tools" / tool_name
+    if not path.is_file():
+        raise RuntimeError(f"kernel-agent tool not found: {path}")
+    return path
 
 
 def _is_runtime_generated_kernel(name: str, source_file: str) -> bool:
@@ -180,7 +203,7 @@ def _load_apply_tool() -> Any:
     global _APPLY_TOOL_MODULE
     if _APPLY_TOOL_MODULE is not None:
         return _APPLY_TOOL_MODULE
-    path = HYPERLOOM_KERNEL_AGENT_ROOT / "tools" / "apply_kernel_patch.py"
+    path = _kernel_agent_tool_path("apply_kernel_patch.py")
     spec = importlib.util.spec_from_file_location("hyperloom_apply_kernel_patch", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load apply_kernel_patch.py from {path}")
@@ -216,12 +239,17 @@ def _maybe_apply_kernel_patch(
             "status": "skipped",
             "reason": "missing patch_path or target_file/source_file",
         }
+    from ..session_paths import patches_dir
+    kid = str(kernel_id or payload.get("kernel_id") or "")
+    backup_root = payload.get("backup_root") or (
+        patches_dir(session_dir, kid or "anon") / "backup"
+    )
     tool = _load_apply_tool()
     return tool.apply_kernel_patch(
         patch_path=patch_path,
         target_file=target_file,
-        backup_root=payload.get("backup_root") or session_dir / "kernel_patch_backups",
-        kernel_id=str(kernel_id or payload.get("kernel_id") or ""),
+        backup_root=backup_root,
+        kernel_id=kid,
         artifact_paths=_artifact_paths_from_payload(payload),
         rebuild_command=payload.get("rebuild_command"),
         rebuild_timeout_sec=int(payload.get("rebuild_timeout_sec", 1800)),
@@ -347,7 +375,7 @@ async def select_kernels_handler(
         model_name:      default ''
         framework:       default 'sglang'
         target_platform: default 'MI300X'
-        roofline_json:   optional path from profile_executor PMC/roofline pass
+        roofline_json:   optional path from a separate pmc_roofline action
         dry_run:         default False (testing)
         budget_minutes:  default 60
 
@@ -356,7 +384,14 @@ async def select_kernels_handler(
         {
           "status": "ok" | "failed",
           "hot_kernels": [...],
-          "trace_report_path": "...",
+          "trace_report_path": "...",        # tracelens_report.json (structured)
+          "analysis_report_path": "...",      # analysis.md from TraceLens v0.3
+                                              #   orchestrator (markdown final
+                                              #   stakeholder report — pass to
+                                              #   GEAK so it can ground its
+                                              #   actions on the same Detailed
+                                              #   Analysis prose Hyperloom
+                                              #   parsed for hot_kernels[]).
           "cli_log_path": "...",
           "details": {...},  # raw tool output
         }
@@ -364,6 +399,9 @@ async def select_kernels_handler(
     trace_input = payload.get("trace_input") or payload.get("trace_dir")
     if not trace_input:
         return {"status": "failed", "error": "missing 'trace_input' in payload"}
+    root_err = _kernel_agent_root_error()
+    if root_err:
+        return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
     workspace_path = (
         payload.get("workspace_path")
@@ -371,20 +409,50 @@ async def select_kernels_handler(
     )
     Path(workspace_path).mkdir(parents=True, exist_ok=True)
 
+    # Backfill workload context from SharedState so downstream
+    # tracelens_analysis.py / TraceLens skill receive the correct
+    # framework / platform / model / analysis_mode instead of defaulting to
+    # "" / MI355X / "default" when Orchestration omits them in the payload.
+    from .shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    framework = (payload.get("framework") or state.framework or "").strip()
+    target_platform = (
+        payload.get("target_platform") or state.gpu_type or ""
+    ).strip()
+    model_name = (
+        payload.get("model_name")
+        or state.model_name
+        or state.model_path
+        or ""
+    ).strip()
+    analysis_mode = (payload.get("analysis_mode") or "").strip()
+    if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
+        analysis_mode = "inference"
+
     cmd = [
         "python3",
-        str(HYPERLOOM_KERNEL_AGENT_ROOT / "tools" / "tracelens_analysis.py"),
+        str(_kernel_agent_tool_path("tracelens_analysis.py")),
         "--trace-input", str(trace_input),
         "--session-id", str(payload.get("session_id") or session_dir.name),
         "--top-k", str(payload.get("top_k", 10)),
         "--workspace-path", workspace_path,
     ]
-    if payload.get("model_name"):
-        cmd += ["--model-name", str(payload["model_name"])]
-    if payload.get("framework"):
-        cmd += ["--framework", str(payload["framework"])]
-    if payload.get("target_platform"):
-        cmd += ["--target-platform", str(payload["target_platform"])]
+    if model_name:
+        cmd += ["--model-name", str(model_name)]
+    if framework:
+        cmd += ["--framework", str(framework)]
+    if target_platform:
+        cmd += ["--target-platform", str(target_platform)]
+    if analysis_mode:
+        cmd += ["--analysis-mode", str(analysis_mode)]
+    capture_folder = (
+        payload.get("capture_folder")
+        or payload.get("graph_capture_path")
+        or payload.get("capture_folder_path")
+    )
+    if capture_folder:
+        cmd += ["--capture-folder", str(capture_folder)]
     if payload.get("roofline_json"):
         cmd += ["--roofline-json", str(payload["roofline_json"])]
     if payload.get("dry_run"):
@@ -396,6 +464,17 @@ async def select_kernels_handler(
     artifacts = result.get("artifact_paths") if isinstance(result, dict) else None
     if isinstance(artifacts, dict) and artifacts.get("kernel_candidates"):
         result["candidates_path"] = artifacts["kernel_candidates"]
+    # Surface analysis.md path at the handler boundary so the Coordinator can
+    # forward it to GEAK without having to dig through artifact_paths.
+    if isinstance(result, dict):
+        report_path = result.get("analysis_report_path")
+        if not report_path and isinstance(artifacts, dict):
+            report_path = (
+                artifacts.get("tracelens_agent_report")
+                or artifacts.get("trace_report_path")
+            )
+        if report_path:
+            result["analysis_report_path"] = str(report_path)
     return result
 
 
@@ -567,6 +646,9 @@ async def _run_optimization_single(
         budget_minutes:  default 60
         source_file:     path to original kernel source (for context)
         candidates_path: path to JSON describing candidates (optional)
+        extra_sglang_args: SGLang runtime flags for GEAK metadata (optional)
+        enable_rag:      default True; false disables GEAK RAG tools
+        enable_xs_memory: default True; false disables GEAK cross-session memory
         dry_run:         default False (testing)
 
     Returns the tool's JSON output verbatim under ``result``.
@@ -577,6 +659,9 @@ async def _run_optimization_single(
     guard = _validate_reusable_native_kernel(payload)
     if guard is not None:
         return guard
+    root_err = _kernel_agent_root_error()
+    if root_err:
+        return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
     workspace_path = (
         payload.get("workspace_path")
@@ -586,7 +671,7 @@ async def _run_optimization_single(
 
     cmd = [
         "python3",
-        str(HYPERLOOM_KERNEL_AGENT_ROOT / "tools" / "kernel_optimization.py"),
+        str(_kernel_agent_tool_path("kernel_optimization.py")),
         "--kernel-id", str(kernel_id),
         "--session-id", str(payload.get("session_id") or session_dir.name),
         "--workspace-path", workspace_path,
@@ -595,6 +680,8 @@ async def _run_optimization_single(
         cmd += ["--backends", str(payload["backends"])]
     if payload.get("source_file"):
         cmd += ["--source-file", str(payload["source_file"])]
+    if payload.get("extra_sglang_args"):
+        cmd += ["--extra-sglang-args", str(payload["extra_sglang_args"])]
     if payload.get("candidates_path"):
         cmd += ["--candidates-path", str(payload["candidates_path"])]
     if payload.get("benchmark_file"):
@@ -615,6 +702,10 @@ async def _run_optimization_single(
             "--accuracy-passed",
             "true" if bool(payload["accuracy_passed"]) else "false",
         ]
+    if payload.get("enable_rag") is False:
+        cmd += ["--disable-rag"]
+    if payload.get("enable_xs_memory") is False:
+        cmd += ["--disable-xs-memory"]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     # Give kernel_optimization.py time to handle its own backend timeout and
@@ -718,6 +809,7 @@ async def integrate_handler(
         }
     """
     from .action_executors.baseline import BaselineExecutor
+    from .action_executors.benchmark_result import is_valid_measurement
     from .sub_agent_runner import RunnerContext
     from .task_registry import Task
 
@@ -768,10 +860,12 @@ async def integrate_handler(
     # RunnerContext with a Task in it). The "extra_sglang_args" hand-
     # off goes via the task params even though baseline_executor doesn't
     # use them yet — kept for forward compat (P3 will inject EXTRA_SGLANG_ARGS).
-    workspace = session_dir / "integrate" / (kernel_id or "anon")
+    from ..session_paths import runs_dir
+    fake_task_id = f"integrate-{kernel_id or 'anon'}"
+    workspace = runs_dir(session_dir, "integrate", fake_task_id)
     workspace.mkdir(parents=True, exist_ok=True)
     fake_task = Task(
-        task_id=f"integrate-{kernel_id or 'anon'}",
+        task_id=fake_task_id,
         kind="baseline",
         state="running",
         params={
@@ -780,12 +874,12 @@ async def integrate_handler(
             "timeout_sec": int(payload.get("budget_minutes", 20)) * 60,
             "extra_sglang_args": extra_args,
         },
-        idempotency_key=f"integrate-{kernel_id or 'anon'}-rebaseline",
+        idempotency_key=f"{fake_task_id}-rebaseline",
     )
     ctx = RunnerContext(task=fake_task, lease=None)
 
     try:
-        bench_result = await BaselineExecutor()(ctx)
+        bench_result = await BaselineExecutor(session_dir=session_dir)(ctx)
     except Exception as exc:  # noqa: BLE001
         revert_result = _maybe_revert_kernel_patch(apply_result)
         return {
@@ -798,7 +892,7 @@ async def integrate_handler(
             "revert_result": revert_result,
         }
 
-    if bench_result.get("status") != "succeeded":
+    if not is_valid_measurement(bench_result):
         revert_result = _maybe_revert_kernel_patch(apply_result)
         return {
             "status": "failed",
