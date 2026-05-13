@@ -534,12 +534,76 @@ def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
         return []
     reusable_ids = data.get("reusable_native_kernel_ids") or []
     reusable_id_set = {str(item) for item in reusable_ids if item}
+
+    # PR-B §1: collapse kernels that share a source function into a
+    # single dispatch via ``task_groups[]``. Each group emits exactly
+    # one GEAK / Codex / Claude request keyed off ``primary_kernel_id``,
+    # and the full row list lives on ``item["task_group"]`` so
+    # ``build_prompt`` can render multi-row benchmark cases. Kernels
+    # whose launcher path wasn't parseable (analysis.md with empty
+    # Kernel Path, raw-trace path, csv fallback) fall through to the
+    # legacy per-kernel path below — aggregation is purely additive,
+    # never lossy.
+    task_groups = data.get("task_groups") or []
+    if not isinstance(task_groups, list):
+        task_groups = []
+    kernel_by_id: dict[str, dict[str, Any]] = {
+        str(k.get("kernel_id") or ""): k
+        for k in kernels
+        if isinstance(k, dict) and k.get("kernel_id")
+    }
+    grouped_kernel_ids: set[str] = set()
     selected: list[dict[str, Any]] = []
+    for group in task_groups:
+        if not isinstance(group, dict):
+            continue
+        member_ids = [str(k) for k in (group.get("kernel_ids") or []) if k]
+        if not member_ids:
+            continue
+        # Only members marked reusable_native_kernel survive (vendor /
+        # aten:: / runtime-generated were filtered upstream by
+        # ``classify_patchability``); the group's primary may itself
+        # have been rejected, in which case we fall through to the
+        # legacy path for the surviving non-primary reusable members
+        # (no special-casing needed — they just won't be in
+        # ``grouped_kernel_ids`` and the loop below picks them up).
+        primary = str(group.get("primary_kernel_id") or "")
+        primary_cand = kernel_by_id.get(primary)
+        if primary_cand is None or primary_cand.get("reusable_native_kernel") is not True:
+            # Fall back to the first reusable member in priority order.
+            primary_cand = next(
+                (
+                    kernel_by_id[m]
+                    for m in member_ids
+                    if m in kernel_by_id
+                    and kernel_by_id[m].get("reusable_native_kernel") is True
+                    and kernel_by_id[m].get("source_file")
+                ),
+                None,
+            )
+            if primary_cand is None:
+                continue
+            primary = str(primary_cand.get("kernel_id") or "")
+        if not primary_cand.get("source_file"):
+            continue
+        # Shallow copy + attach group so the kernel_optimization.py
+        # subprocess sees ``candidate["task_group"]`` and can render
+        # benchmark cases. The non-primary member kernel_ids are
+        # marked seen so the legacy loop skips them.
+        item = dict(primary_cand)
+        item["task_group"] = group
+        selected.append(item)
+        grouped_kernel_ids.update(member_ids)
+
+    # Legacy per-kernel pass for any reusable kernel that wasn't
+    # absorbed into a task_group above (no parseable launcher path).
     for item in kernels:
         if not isinstance(item, dict):
             continue
         kernel_id = str(item.get("kernel_id") or "")
         if not kernel_id:
+            continue
+        if kernel_id in grouped_kernel_ids:
             continue
         if reusable_id_set and kernel_id not in reusable_id_set:
             continue

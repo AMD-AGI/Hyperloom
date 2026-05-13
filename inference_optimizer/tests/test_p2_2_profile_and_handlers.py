@@ -1132,6 +1132,130 @@ def test_handlers_dispatch_table():
 
 
 # ===========================================================================
+# PR-B §1: _batch_kernel_candidates collapses task_group members
+# ===========================================================================
+def _write_candidates_json(tmp_path, payload):
+    p = tmp_path / "kernel_candidates.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    return p
+
+
+def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
+    """Two reusable kernels in the same task_group must dispatch as ONE
+    candidate (the primary), with the full group attached for
+    build_prompt to render multi-row benchmark cases."""
+    candidates_path = _write_candidates_json(tmp_path, {
+        "hot_kernels": [
+            {
+                "kernel_id": "k001", "name": "rms_norm_prefill",
+                "source_file": "/sgl-workspace/aiter/rmsnorm.py",
+                "reusable_native_kernel": True,
+                "duration_us": 100.0,
+            },
+            {
+                "kernel_id": "k002", "name": "rms_norm_decode",
+                "source_file": "/sgl-workspace/aiter/rmsnorm.py",
+                "reusable_native_kernel": True,
+                "duration_us": 50.0,
+            },
+            {
+                "kernel_id": "k003", "name": "other_kernel",
+                "source_file": "/sgl-workspace/aiter/other.py",
+                "reusable_native_kernel": True,
+                "duration_us": 30.0,
+            },
+        ],
+        "task_groups": [
+            {
+                "task_group_id": "tg001",
+                "function_name": "rms_norm",
+                "source_path": "/sgl-workspace/aiter/rmsnorm.py",
+                "definition_line": 10,
+                "primary_kernel_id": "k001",
+                "kernel_ids": ["k001", "k002"],
+                "rows": [
+                    {"kernel_id": "k001", "name": "rms_norm_prefill"},
+                    {"kernel_id": "k002", "name": "rms_norm_decode"},
+                ],
+                "aggregate_duration_us": 150.0,
+            },
+        ],
+    })
+    selected = krh._batch_kernel_candidates({"candidates_path": str(candidates_path)})
+    # k001 (primary) + k003 (ungrouped) = 2 dispatches, not 3.
+    kernel_ids = [c.get("kernel_id") for c in selected]
+    assert kernel_ids == ["k001", "k003"]
+    # The primary carries the full group dict so build_prompt can render
+    # both rows as benchmark cases.
+    assert selected[0]["task_group"]["task_group_id"] == "tg001"
+    assert set(selected[0]["task_group"]["kernel_ids"]) == {"k001", "k002"}
+    # The ungrouped kernel has no task_group attached.
+    assert "task_group" not in selected[1]
+
+
+def test_batch_kernel_candidates_falls_back_when_primary_is_non_reusable(tmp_path):
+    """If the group's primary_kernel_id was rejected by classify_patchability
+    (e.g. vendor BLAS name marker landed on the heaviest row), dispatch
+    falls back to the first reusable member instead of dropping the
+    whole group."""
+    candidates_path = _write_candidates_json(tmp_path, {
+        "hot_kernels": [
+            {
+                "kernel_id": "k001", "name": "rocblas_sgemm_call",
+                "source_file": "/sgl-workspace/aiter/foo.py",
+                "reusable_native_kernel": False,  # primary rejected
+                "duration_us": 200.0,
+            },
+            {
+                "kernel_id": "k002", "name": "rms_norm_call",
+                "source_file": "/sgl-workspace/aiter/foo.py",
+                "reusable_native_kernel": True,
+                "duration_us": 50.0,
+            },
+        ],
+        "task_groups": [
+            {
+                "task_group_id": "tg001",
+                "function_name": "foo",
+                "primary_kernel_id": "k001",
+                "kernel_ids": ["k001", "k002"],
+                "rows": [
+                    {"kernel_id": "k001"},
+                    {"kernel_id": "k002"},
+                ],
+            },
+        ],
+    })
+    selected = krh._batch_kernel_candidates({"candidates_path": str(candidates_path)})
+    # k002 (the only reusable member) replaces the rejected primary.
+    assert [c["kernel_id"] for c in selected] == ["k002"]
+    assert selected[0]["task_group"]["task_group_id"] == "tg001"
+
+
+def test_batch_kernel_candidates_legacy_path_unchanged_without_task_groups(tmp_path):
+    """When kernel_candidates.json has no task_groups[] (older runs,
+    raw-trace fallback, LLama70B fixture path), the candidate list is
+    byte-identical to pre-PR-B behaviour."""
+    candidates_path = _write_candidates_json(tmp_path, {
+        "hot_kernels": [
+            {
+                "kernel_id": "k001", "name": "rms_norm",
+                "source_file": "/sgl-workspace/aiter/rmsnorm.py",
+                "reusable_native_kernel": True,
+            },
+            {
+                "kernel_id": "k002", "name": "vendor",
+                "source_file": "/sgl-workspace/aiter/vendor.py",
+                "reusable_native_kernel": False,
+            },
+        ],
+    })
+    selected = krh._batch_kernel_candidates({"candidates_path": str(candidates_path)})
+    assert [c["kernel_id"] for c in selected] == ["k001"]
+    assert "task_group" not in selected[0]
+
+
+# ===========================================================================
 # Coordinator — REQUEST programmatic handler integration
 # ===========================================================================
 @pytest.mark.asyncio
