@@ -62,6 +62,24 @@ on:
         description: 'Max parallel optimize jobs (sandbox has 128 GPU; safe ceiling is ~128)'
         required: false
         default: '20'
+      submit_workspaces:
+        # Comma-separated round-robin pool. Empty = use single
+        # SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret (current behavior =
+        # core42-sandbox only). 'core42-sandbox,core42-hyperloom' spreads
+        # the batch across both workspaces and roughly doubles the
+        # effective GPU pool for the optimization step.
+        description: 'Round-robin submit workspaces (comma-separated). Empty = use SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret only.'
+        required: false
+        default: ''
+      submit_workspaces:
+        # Comma-separated round-robin pool. Empty = use single
+        # SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret (current behavior =
+        # core42-sandbox only). 'core42-sandbox,core42-hyperloom' spreads
+        # the batch across both workspaces and roughly doubles the
+        # effective GPU pool for the optimization step.
+        description: 'Round-robin submit workspaces (comma-separated). Empty = use SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret only.'
+        required: false
+        default: ''
       isl:
         description: 'Input sequence length'
         required: false
@@ -132,18 +150,46 @@ on:
             export RESULT_DIR=/workspace/hyperloom/
           Otherwise baseline/sweep writes fail silently and the job will hang.
 
-          CRITICAL — POST-PIPELINE COPY (the most common reason a successful run shows up Failed):
-          The HyperloomV2 orchestrator writes its outputs under its own session
-          directory under /wekafs/users/<safe-user-uuid>/<session-name>/ — the
-          UUID is a 32-char hex (e.g. 697f4f8340e397169e72840c6ea51cc4), NOT
-          the numeric Unix uid. SaFE only inspects $RESULT_DIR (=/workspace/hyperloom/)
-          when deciding whether the task succeeded, and CI only collects $RESULT_DIR
-          contents. So after phase 10 finishes you MUST physically copy the canonical
-          artifacts. The snippet below finds the freshest ci_metrics.json across all
-          common layouts (root / phase10_report / results) and copies it + the
-          matching optimization_report.md without depending on the numeric uid:
+          CRITICAL — POST-PIPELINE PERSIST (the most common reason a successful run shows up Failed):
+          $RESULT_DIR (=/workspace/hyperloom/) lives inside the sandbox
+          container's ephemeral storage. When SaFE marks the task Failed
+          (or times out) the pod gets cleaned up and EVERYTHING under
+          /workspace is lost — including the ci_metrics.json and
+          optimization_report.md you just spent 2-3h producing. Even
+          when SaFE marks the task Succeeded it only collects /workspace
+          for a short window before deletion, and the CI side has no
+          kubectl-exec access to read it back.
+
+          To survive any of this you MUST copy the two artifacts to a
+          persistent location under /hyperloom/users/<your-safe-uuid>/
+          (which is the wekafs RW mount inside the sandbox — the
+          CI / NFS Stage B fallback scans this path). Run this AFTER
+          you have written the final ci_metrics.json + optimization_report.md:
 
             mkdir -p $RESULT_DIR
+            # Persist to wekafs so it survives sandbox shutdown and CI
+            # can collect via NFS fallback even when SaFE artifact upload
+            # fails (Failed status, timeout, etc.).
+            UID_HEX=$(ls /hyperloom/users 2>/dev/null | head -1)
+            if [ -n "$UID_HEX" ]; then
+              # Use a unique session name that won't collide with prior runs
+              # (display_name + task_id last 8 chars).
+              MODEL_TAG=$(echo "${DISPLAYNAME:-task}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/-*$//')
+              TASK_TAG="${SAFE_TASK_ID:-$(date +%Y%m%d%H%M%S)}"
+              PERSIST_DIR="/hyperloom/users/$UID_HEX/${MODEL_TAG}-${TASK_TAG##*-}-opt"
+              mkdir -p "$PERSIST_DIR"
+              cp -f "$RESULT_DIR/ci_metrics.json"          "$PERSIST_DIR/ci_metrics.json"         2>/dev/null && echo "[PERSIST] $PERSIST_DIR/ci_metrics.json"
+              cp -f "$RESULT_DIR/optimization_report.md"  "$PERSIST_DIR/optimization_report.md"  2>/dev/null && echo "[PERSIST] $PERSIST_DIR/optimization_report.md"
+              ls -la "$PERSIST_DIR/"
+            else
+              echo "[ERR] /hyperloom/users/<uid>/ not mounted — cannot persist to wekafs"
+            fi
+
+            # Legacy back-fill direction: when the V2 orchestrator writes
+            # into /wekafs/users/<uid>/<sess>/ (older skill versions did
+            # this), the snippet below pulls it into $RESULT_DIR so SaFE
+            # sees the canonical files. Kept for backward compat — when
+            # we already wrote $RESULT_DIR ourselves above this is a no-op.
             CI=$(ls -t /wekafs/users/*/*/ci_metrics.json \
                        /wekafs/users/*/*/phase10_report/ci_metrics.json \
                        /wekafs/users/*/*/results/ci_metrics.json \
@@ -152,25 +198,20 @@ on:
                            /wekafs/users/*/*/phase10_report/optimization_report.md \
                            /wekafs/users/*/*/reports/final.md \
                            2>/dev/null | head -1)
-            echo "[POST-COPY] ci_metrics src = $CI"
-            echo "[POST-COPY] report     src = $REPORT"
-            if [ -n "$CI" ]; then
+            if [ -n "$CI" ] && [ ! -s "$RESULT_DIR/ci_metrics.json" ]; then
               cp -f "$CI" $RESULT_DIR/ci_metrics.json
-            else
-              echo "[ERR] no ci_metrics.json under /wekafs/users/ — write one yourself before exiting"
+              echo "[BACKFILL] $CI -> $RESULT_DIR/ci_metrics.json"
             fi
-            if [ -n "$REPORT" ]; then
+            if [ -n "$REPORT" ] && [ ! -s "$RESULT_DIR/optimization_report.md" ]; then
               cp -f "$REPORT" $RESULT_DIR/optimization_report.md
-            else
-              echo "[ERR] no optimization_report.md under /wekafs/users/ — write one yourself before exiting"
+              echo "[BACKFILL] $REPORT -> $RESULT_DIR/optimization_report.md"
             fi
             ls -la $RESULT_DIR/
 
           The ci_metrics.json values you write here MUST match what the V2
           orchestrator actually measured (proper baseline from phase 1 / best
           from phase 6-8) — do NOT recompute gain_pct from a partial-run
-          eager-mode baseline that the orchestrator did not endorse. The two
-          numbers must agree with the source ci_metrics.json byte-for-byte.
+          eager-mode baseline that the orchestrator did not endorse.
 
           SAFETY:
           - NEVER `find /` or `find /wekafs` without `-maxdepth 4`. Prefer which/ls/$PATH lookups.
@@ -304,6 +345,8 @@ jobs:
           INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
           INPUT_INFERENCEX_PATH:  ${{ github.event.inputs.inferencex_path }}
           INPUT_PROMPT_PREFIX:    ${{ github.event.inputs.prompt_prefix }}
+          # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
+          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event.inputs.submit_workspaces }}
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
