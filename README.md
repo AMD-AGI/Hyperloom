@@ -65,6 +65,13 @@ docker run --rm -it --device=/dev/kfd --device=/dev/dri --group-add video \
   lmsysorg/sglang:v0.5.11-rocm720-mi30x
 ```
 
+Image examples:
+
+- SGLang MI300X: `lmsysorg/sglang:v0.5.11-rocm720-mi30x`
+- SGLang MI355X: `lmsysorg/sglang:v0.5.11-rocm720-mi35x`
+- vLLM MI300X: `vllm/vllm-openai-rocm:v0.18.0`
+- vLLM MI355X: `vllm/vllm-openai-rocm:v0.18.0`
+
 #### Step 2 — Prepare Source Trees and Configure Environment Variables
 
 Prepare Hyperloom and its dependency source trees on the GPU node, then set the path environment variables explicitly. Hyperloom does not pin these internal source repositories to fixed paths; runtime uses the repo paths you provide through the environment.
