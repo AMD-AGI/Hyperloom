@@ -383,10 +383,80 @@ _EFFICIENCY_RE = re.compile(
     r"([\d.]+)\s*%\s*of\s*([\d.]+)\s*([A-Za-z/]+)",
     re.IGNORECASE,
 )
+# TraceLens v0.3 Detailed Analysis blocks include three sibling labels:
+#   **Reasoning for Slowdown:** <prose>
+#   **Resolution:**             <prose>
+#   **Impact estimate:**        Low end ...: <ms> ms savings (<pct>% E2E)
+#                               High end ...: <ms> ms savings (<pct>% E2E)
+# Extracting these gives GEAK the same hypothesis a human reviewer reads in
+# the report; the prose is treated as a *hypothesis to validate*, never as
+# imperative guidance — see ``build_prompt`` for the framing.
+_REASONING_LABEL = "**Reasoning for Slowdown:**"
+_RESOLUTION_LABEL = "**Resolution:**"
+_IMPACT_LABEL = "**Impact estimate:**"
+_IMPACT_LOW_RE = re.compile(
+    r"Low end[^:\n]*:\s*([0-9.]+)\s*ms savings\s*\(([0-9.]+)%\s*E2E\)",
+    re.IGNORECASE,
+)
+_IMPACT_HIGH_RE = re.compile(
+    r"High end[^:\n]*:\s*([0-9.]+)\s*ms savings\s*\(([0-9.]+)%\s*E2E\)",
+    re.IGNORECASE,
+)
 
 
 def _parse_marker_attrs(blob: str) -> dict[str, str]:
     return dict(re.findall(r"(\w+)=([^\s>]+)", blob))
+
+
+def _extract_between(
+    text: str, start_marker: str, end_markers: tuple[str, ...],
+) -> str:
+    """Return the substring between ``start_marker`` and the earliest of
+    ``end_markers``. Empty string when ``start_marker`` is absent. When no
+    end marker is present, returns the tail of ``text`` after the start
+    marker (defensive: TraceLens occasionally truncates the trailing
+    section)."""
+    start = text.find(start_marker)
+    if start == -1:
+        return ""
+    start += len(start_marker)
+    end_positions = [text.find(m, start) for m in end_markers]
+    end_positions = [pos for pos in end_positions if pos != -1]
+    end = min(end_positions) if end_positions else len(text)
+    return text[start:end].strip()
+
+
+def _extract_pitem_prose(body: str) -> dict[str, Any]:
+    """Extract Reasoning / Resolution / Impact-estimate fields from a
+    Detailed Analysis P-item body. All fields default to empty / 0.0 so
+    the parser stays additive — callers that don't care for prose are
+    unaffected.
+
+    Returns::
+
+        {
+          "reasoning_for_slowdown": str,
+          "resolution":             str,
+          "impact_low_ms":          float,
+          "impact_low_e2e_pct":     float,
+          "impact_high_ms":         float,
+          "impact_high_e2e_pct":    float,
+        }
+    """
+    reasoning = _extract_between(
+        body, _REASONING_LABEL, (_RESOLUTION_LABEL, _IMPACT_LABEL),
+    )
+    resolution = _extract_between(body, _RESOLUTION_LABEL, (_IMPACT_LABEL,))
+    low_match = _IMPACT_LOW_RE.search(body)
+    high_match = _IMPACT_HIGH_RE.search(body)
+    return {
+        "reasoning_for_slowdown": reasoning,
+        "resolution":             resolution,
+        "impact_low_ms":          _safe_float(low_match.group(1)) if low_match else 0.0,
+        "impact_low_e2e_pct":     _safe_float(low_match.group(2)) if low_match else 0.0,
+        "impact_high_ms":         _safe_float(high_match.group(1)) if high_match else 0.0,
+        "impact_high_e2e_pct":    _safe_float(high_match.group(2)) if high_match else 0.0,
+    }
 
 
 def _extract_pitem_categories(text: str) -> list[dict[str, Any]]:
@@ -470,6 +540,7 @@ def _row_to_candidate(
     title: str,
     library: str,
     impact: dict[str, float],
+    prose: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if len(cells) != len(headers):
         return None
@@ -520,6 +591,22 @@ def _row_to_candidate(
         "impact_score_low": impact.get("impact_score_low", 0.0),
         "impact_score_high": impact.get("impact_score_high", 0.0),
     }
+    if prose:
+        # P-item prose is shared across every row in the same Detailed
+        # Analysis block; duplicating it onto each candidate keeps the
+        # candidate dict self-describing for downstream consumers
+        # (build_prompt / source-function aggregation) without forcing
+        # them to re-join against a rank-indexed sidecar.
+        for key in (
+            "reasoning_for_slowdown",
+            "resolution",
+            "impact_low_ms",
+            "impact_low_e2e_pct",
+            "impact_high_ms",
+            "impact_high_e2e_pct",
+        ):
+            if key in prose:
+                candidate[key] = prose[key]
     return candidate
 
 
@@ -584,6 +671,7 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
             "impact_score_low": pitem_meta.get("impact_score_low", 0.0),
             "impact_score_high": pitem_meta.get("impact_score_high", 0.0),
         }
+        prose = _extract_pitem_prose(body)
         for cells in rows[1:]:
             cand = _row_to_candidate(
                 header_row,
@@ -593,6 +681,7 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
                 title=title,
                 library=library,
                 impact=impact,
+                prose=prose,
             )
             if cand is None:
                 continue
@@ -660,6 +749,8 @@ def raw_candidates_from_priority_data(priority_data_path: Path, top_k: int) -> l
 __all__ = [
     "TraceLensSkillRunResult",
     "UPSTREAM_CATEGORY_TO_GEAK",
+    "_extract_between",
+    "_extract_pitem_prose",
     "build_orchestrator_prompt",
     "discover_capture_folder",
     "infer_analysis_mode",

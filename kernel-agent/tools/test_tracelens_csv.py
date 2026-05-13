@@ -1311,3 +1311,105 @@ def test_derive_kernel_category_falls_back_to_name_heuristic():
     assert tla.derive_kernel_category({"name": "fmha_fwd_kernel"}) == "SDPA"
     assert tla.derive_kernel_category({"name": "rmsnorm_fused"}) == "LayerNorm"
     assert tla.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
+
+# ===========================================================================
+# PR-A §1: _extract_pitem_prose extracts Reasoning / Resolution / Impact
+# ===========================================================================
+_SYNTHETIC_PITEM_BODY = """\
+#### 🔴 P1: RMSNorm fused with quantization (Triton)
+
+**Data:**
+
+| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| rmsnorm_quant | (8,4096) bf16 | aiter/ops/rmsnorm.py(76): rmsnorm | 123.4 | 4.2 | 64 | 0.5 | 30% of 5.3 TB/s | memory-bound |
+
+**Reasoning for Slowdown:**
+
+Memory-bound elementwise kernel; HBM bandwidth saturated by the bf16 load + fp8 quant store pair.
+
+**Resolution:**
+
+Fuse RMSNorm with the immediately-following GEMM to amortize global loads, or rewrite as a single-pass Triton kernel with `tl.store(..., mask=)`.
+
+**Impact estimate:**
+
+Low end (baseline shapes): 12.5 ms savings (3.2% E2E). High end (peak decode batch): 40.0 ms savings (10.4% E2E).
+"""
+
+
+def test_extract_pitem_prose_pulls_three_sections():
+    prose = tlr._extract_pitem_prose(_SYNTHETIC_PITEM_BODY)
+    assert "Memory-bound elementwise kernel" in prose["reasoning_for_slowdown"]
+    assert "HBM bandwidth saturated" in prose["reasoning_for_slowdown"]
+    assert "Fuse RMSNorm" in prose["resolution"]
+    assert "amortize global loads" in prose["resolution"]
+    assert prose["impact_low_ms"] == 12.5
+    assert prose["impact_low_e2e_pct"] == 3.2
+    assert prose["impact_high_ms"] == 40.0
+    assert prose["impact_high_e2e_pct"] == 10.4
+
+
+def test_extract_pitem_prose_returns_empty_strings_when_markers_absent():
+    """Bodies without the three labels must still return the full dict
+    shape so downstream consumers can rely on key presence."""
+    prose = tlr._extract_pitem_prose("**Data:**\n| ... | ... |\n")
+    assert prose["reasoning_for_slowdown"] == ""
+    assert prose["resolution"] == ""
+    assert prose["impact_low_ms"] == 0.0
+    assert prose["impact_low_e2e_pct"] == 0.0
+    assert prose["impact_high_ms"] == 0.0
+    assert prose["impact_high_e2e_pct"] == 0.0
+
+
+def test_extract_pitem_prose_reasoning_stops_at_resolution_marker():
+    """Reasoning should not leak into Resolution when both are present —
+    the end-marker ordering is what guarantees a clean split."""
+    body = (
+        "**Reasoning for Slowdown:**\nFirst paragraph.\n\n"
+        "**Resolution:**\nSecond paragraph.\n\n"
+        "**Impact estimate:**\nLow end: 1.0 ms savings (0.5% E2E).\n"
+        "High end: 2.0 ms savings (1.0% E2E).\n"
+    )
+    prose = tlr._extract_pitem_prose(body)
+    assert prose["reasoning_for_slowdown"] == "First paragraph."
+    assert prose["resolution"] == "Second paragraph."
+    assert prose["impact_low_ms"] == 1.0
+    assert prose["impact_high_ms"] == 2.0
+
+
+def test_extract_between_returns_empty_when_start_marker_missing():
+    """Defensive guard: missing start marker → empty, never raises."""
+    assert tlr._extract_between("body", "**Missing:**", ("**End:**",)) == ""
+
+
+def test_parse_analysis_md_attaches_prose_from_fixture():
+    """Round-trip the LLama70B fixture and verify every parsed candidate
+    carries the new prose fields populated from its parent P-item block.
+    The fixture has 4 Detailed Analysis blocks (P1 GEMM, P2 SDPA_fwd, etc.),
+    each with all three sections, so every candidate must end up with
+    non-empty reasoning / resolution / both impact halves."""
+    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
+    assert cands, "fixture must produce at least one candidate"
+    # All 21 fixture candidates share P-item prose with their group.
+    for c in cands:
+        assert "reasoning_for_slowdown" in c
+        assert "resolution" in c
+        assert "impact_low_ms" in c
+        assert "impact_high_ms" in c
+        # The fixture's P-items all have non-empty prose; require it.
+        assert c["reasoning_for_slowdown"], (
+            f"empty reasoning_for_slowdown on candidate {c.get('name')!r} "
+            f"(rank P{c.get('tracelens_pitem_rank')})"
+        )
+        assert c["resolution"], (
+            f"empty resolution on candidate {c.get('name')!r}"
+        )
+
+    # P1 prose mentions "Tile / wave-occupancy tuning" per the fixture.
+    p1_rows = [c for c in cands if c["tracelens_pitem_rank"] == 1]
+    assert any(
+        "wave-occupancy" in c["resolution"] for c in p1_rows
+    ), "P1 resolution should mention wave-occupancy tuning (from fixture)"
+
+
