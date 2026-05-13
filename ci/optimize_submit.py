@@ -930,8 +930,19 @@ def process_model(
         rec.status = "dry-run"
         return rec
 
+    # Model resolution: find existing SaFE record OR register fresh.
+    #
+    # Stale Failed records are the common foot-gun: a previous run's download
+    # job aborted (HF rate limit, transient NFS hang, etc.) and left a model
+    # in phase=Failed. Without intervention, wait_ready sees Failed and
+    # returns False instantly, so submit can never succeed even though our
+    # prewarm step has since written the real files into /wekafs/models/.
+    # When that happens we re-register: SaFE's POST /api/v1/playground/models
+    # either issues a new model_id (preferred) or resets the existing one to
+    # Pending and re-triggers the Download Job, which now sees prewarmed
+    # files on /wekafs and finishes in seconds.
     safe_model = safe.find_model(repo_id)
-    if safe_model:
+    if safe_model and safe_model.get("phase") != "Failed":
         model_id = safe_model["id"]
         phase = safe_model.get("phase", "")
         log.info("[%s] found in SaFE: id=%s phase=%s", repo_id, model_id, phase)
@@ -940,6 +951,10 @@ def process_model(
             rec.error = "model never reached Ready"
             return rec
     else:
+        if safe_model:
+            log.info("[%s] existing model %s is %s — re-registering "
+                     "(prewarm should have populated /wekafs/models/ already)",
+                     repo_id, safe_model.get("id"), safe_model.get("phase"))
         try:
             model_id = safe.register_model(repo_id, hf_token)
         except Exception as e:
@@ -950,6 +965,11 @@ def process_model(
             rec.status = "failed"
             rec.error = "register returned empty id"
             return rec
+        if safe_model and model_id == safe_model.get("id"):
+            log.warning("[%s] SaFE returned the same id %s as the existing "
+                        "Failed record — backend deduped by sourceURL and did "
+                        "not reset phase. DELETE the record manually and rerun.",
+                        repo_id, model_id)
         if not safe.wait_ready(model_id):
             rec.status = "failed"
             rec.error = "model never reached Ready"
