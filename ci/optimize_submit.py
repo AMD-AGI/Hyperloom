@@ -680,19 +680,15 @@ class SafeOptimizeClient:
             # If SaFE already shows terminal, trust it.
             if sf_status in self.TERMINAL_TASK_STATUSES:
                 return sf_status, last_task
-            # ResultMessage = agent's message thread ended. But this is NOT
-            # necessarily a clean success: when the brain force-terminates a
-            # session (e.g. sandbox max-runtime, Vertex quota), the jsonl
-            # archive header gets `failed: true error: "terminated"` and SaFE
-            # subsequently flips the task to Failed with message="optimization
-            # report not found; skill may have exited early". The SaFE
-            # controller lags the SSE stream by 10-90s in this case, so we
-            # short-poll for up to 120s before optimistically returning
-            # "Succeeded".
-            if sse_reason == "ResultMessage":
-                log.info("[task %s] SSE returned ResultMessage — short-polling "
-                         "SaFE for terminal status (up to 120s)", task_id)
-                for _ in range(12):
+            # Stopped = sandbox pod exited. That's our real end-of-task
+            # signal. SaFE's controller usually lags the sandbox shutdown
+            # by 10-180s before flipping the task to Succeeded/Failed
+            # (writes the optimization report check, etc.), so short-poll
+            # SaFE for up to 5 minutes to pick up its verdict.
+            if sse_reason == "Stopped":
+                log.info("[task %s] sandbox stopped — short-polling SaFE "
+                         "for terminal status (up to 5min)", task_id)
+                for _ in range(30):
                     time.sleep(10)
                     if time.time() > deadline:
                         break
@@ -702,17 +698,23 @@ class SafeOptimizeClient:
                         continue
                     sf_status = last_task.get("status", "") if last_task else ""
                     if sf_status in self.TERMINAL_TASK_STATUSES:
-                        log.info("[task %s] SaFE settled on %s after ResultMessage",
+                        log.info("[task %s] SaFE settled on %s after sandbox stop",
                                  task_id, sf_status)
                         return sf_status, last_task
-                log.info("[task %s] SaFE never settled within 120s after "
-                         "ResultMessage — falling back to optimistic Succeeded",
+                # Sandbox is gone but SaFE controller hasn't settled. Treat
+                # as Succeeded so build_summary still has a chance to read
+                # whatever ci_metrics.json the agent wrote — Stage A/B of
+                # collect_artifacts will pull from /wekafs/users/... and
+                # the actual gain numbers tell the real story.
+                log.info("[task %s] SaFE never settled within 5min after "
+                         "sandbox stop — returning Succeeded (collect "
+                         "step will read ci_metrics.json directly)",
                          task_id)
                 return "Succeeded", last_task
             # deadline = we've burned the per-task wall clock.
             if sse_reason == "deadline":
                 return "Timeout", last_task
-            # Anything else (idle_timeout, stream_error, Stopped) is *inconclusive*:
+            # Anything else (idle_timeout, stream_error) is *inconclusive*:
             # Claw's `/chat/sessions/.../messages` stream sometimes goes quiet
             # (only `: keepalive` heartbeats) for many minutes while the agent
             # is busy in tool calls, and we can't tell that apart from the agent
@@ -753,12 +755,21 @@ class SafeOptimizeClient:
           - Each event is `id:`/`event:`/`data:` lines + blank-line separator.
           - Historical events are replayed from the beginning, then the stream
             stays open with `: keepalive` heartbeats.
-          - When the agent ends a turn it emits `event: ResultMessage` carrying
-            the stop_reason. That's our signal.
+
+        End-of-task signal — IMPORTANT — we used to return on the first
+        ``ResultMessage``, but that's emitted at the end of EVERY agent
+        turn (V2 skill runs phase 0-10 over 1-3h with dozens of turns, and
+        each one fires a ResultMessage). The first turn's ResultMessage
+        was being mistaken for task completion, leaving phase=0 tasks
+        marked Succeeded with artifact_count=0.
+
+        The only reliable end-of-task signal is the sandbox lifecycle
+        event ``sandboxStatus phase=Stopped/Terminated/Failed`` — that
+        fires when the sandbox pod actually exits, well after phase 10
+        finishes (or when SaFE's controller kills it).
 
         Returns one of:
-          - "ResultMessage": agent emitted final ResultMessage event
-          - "Stopped":       sandboxStatus phase reached Stopped/Terminated
+          - "Stopped":       sandboxStatus phase reached Stopped/Terminated/Failed
           - "idle_timeout":  no events for >10min after replay finished
           - "deadline":      hit the per-task wall-clock deadline
           - "stream_error":  HTTP error or socket exception (caller will fall back)
@@ -798,8 +809,10 @@ class SafeOptimizeClient:
                         continue
                     last_evt = now
                     et = d.get("type") or current_event
-                    if et == "ResultMessage":
-                        return "ResultMessage"
+                    # NOTE: ResultMessage is intentionally not a return
+                    # signal — see _sse_wait_until_done docstring. It still
+                    # refreshes last_evt above so the idle-timeout window
+                    # only starts ticking when the agent goes silent.
                     if et == "sandboxStatus":
                         ph = (d.get("phase") or "").lower()
                         if ph in ("stopped", "terminated", "failed"):
