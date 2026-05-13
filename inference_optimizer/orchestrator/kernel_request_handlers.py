@@ -571,6 +571,9 @@ def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
         primary_cand = kernel_by_id.get(primary)
         if primary_cand is None or primary_cand.get("reusable_native_kernel") is not True:
             # Fall back to the first reusable member in priority order.
+            # ``primary`` itself is only read on the line above to look
+            # up ``primary_cand``; downstream code reads ``primary_cand``
+            # directly so we don't need to refresh ``primary`` here.
             primary_cand = next(
                 (
                     kernel_by_id[m]
@@ -583,7 +586,6 @@ def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
             )
             if primary_cand is None:
                 continue
-            primary = str(primary_cand.get("kernel_id") or "")
         if not primary_cand.get("source_file"):
             continue
         # Shallow copy + attach group so the kernel_optimization.py

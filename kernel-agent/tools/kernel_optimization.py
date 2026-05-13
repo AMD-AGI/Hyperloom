@@ -402,48 +402,82 @@ def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
 # Optimization directions section; ``compute`` flips the top two
 # entries, ``unknown`` falls back to the feature-branch default order.
 # Each entry is one already-formatted bullet line.
+# Each bullet is a SINGLE string broken across lines for readability —
+# wrap in ``( ... )`` so adjacent-literal concatenation is explicit and
+# a forgotten trailing comma can't silently merge two bullets together
+# (defensive against the github-code-quality "Implicit string
+# concatenation in a list" lint; byte-identical to the un-wrapped form
+# at parse time).
 _PRIORITY_BULLETS: dict[str, list[str]] = {
     "memory": [
-        "1. **Memory traffic reduction** (primary lever for memory-bound rows): "
-        "improve coalescing / vectorization, fuse with neighbouring ops to "
-        "amortize global loads, reduce intermediate writes, and avoid extra "
-        "global-memory round trips.",
-        "2. **Shape-aware tuning**: specialize block sizes and grid indexing "
-        "for the dominant TraceLens Args. Memory-bound kernels are especially "
-        "sensitive to load-coalescing alignment on the dominant shape.",
-        "3. **Launch amortization** for tiny high-count decode shapes: "
-        "persistent / batched handling or wrapper-level batching when source "
-        "and harness allow.",
-        "4. **Structural simplification**: hoist loop-invariant computations, "
-        "remove redundant address arithmetic, collapse dual-pass logic.",
-        "5. **Compute utilization** (rarely the bottleneck here, but check): "
-        "MFMA tile choice, occupancy, register / shared-memory balance.",
+        (
+            "1. **Memory traffic reduction** (primary lever for memory-bound rows): "
+            "improve coalescing / vectorization, fuse with neighbouring ops to "
+            "amortize global loads, reduce intermediate writes, and avoid extra "
+            "global-memory round trips."
+        ),
+        (
+            "2. **Shape-aware tuning**: specialize block sizes and grid indexing "
+            "for the dominant TraceLens Args. Memory-bound kernels are especially "
+            "sensitive to load-coalescing alignment on the dominant shape."
+        ),
+        (
+            "3. **Launch amortization** for tiny high-count decode shapes: "
+            "persistent / batched handling or wrapper-level batching when source "
+            "and harness allow."
+        ),
+        (
+            "4. **Structural simplification**: hoist loop-invariant computations, "
+            "remove redundant address arithmetic, collapse dual-pass logic."
+        ),
+        (
+            "5. **Compute utilization** (rarely the bottleneck here, but check): "
+            "MFMA tile choice, occupancy, register / shared-memory balance."
+        ),
     ],
     "compute": [
-        "1. **Compute utilization** (primary lever for compute-bound rows): "
-        "improve MFMA tile choice, occupancy, and register / shared-memory "
-        "balance so the same FLOPs issue under a better-utilized pipeline.",
-        "2. **Shape-aware tuning**: specialize block sizes and grid indexing "
-        "for the dominant TraceLens Args. Compute-bound kernels often hit "
-        "different efficiency ceilings on K-major vs N-major shapes.",
-        "3. **Structural simplification**: hoist loop-invariant computations, "
-        "remove redundant address arithmetic, collapse dual-pass logic.",
-        "4. **Memory traffic reduction** (secondary): coalescing / "
-        "vectorization, fewer intermediate writes — rarely the bottleneck "
-        "here but worth measuring after a compute-side change.",
-        "5. **Launch amortization** for tiny high-count decode shapes: "
-        "persistent / batched handling or wrapper-level batching.",
+        (
+            "1. **Compute utilization** (primary lever for compute-bound rows): "
+            "improve MFMA tile choice, occupancy, and register / shared-memory "
+            "balance so the same FLOPs issue under a better-utilized pipeline."
+        ),
+        (
+            "2. **Shape-aware tuning**: specialize block sizes and grid indexing "
+            "for the dominant TraceLens Args. Compute-bound kernels often hit "
+            "different efficiency ceilings on K-major vs N-major shapes."
+        ),
+        (
+            "3. **Structural simplification**: hoist loop-invariant computations, "
+            "remove redundant address arithmetic, collapse dual-pass logic."
+        ),
+        (
+            "4. **Memory traffic reduction** (secondary): coalescing / "
+            "vectorization, fewer intermediate writes — rarely the bottleneck "
+            "here but worth measuring after a compute-side change."
+        ),
+        (
+            "5. **Launch amortization** for tiny high-count decode shapes: "
+            "persistent / batched handling or wrapper-level batching."
+        ),
     ],
     "unknown": [
-        "1. **Structural simplification**: hoist loop-invariant computations, "
-        "remove redundant address arithmetic, collapse dual-pass logic.",
-        "2. **Shape-aware tuning**: specialize block sizes and grid indexing "
-        "for the dominant TraceLens Args.",
-        "3. **Memory traffic reduction**: improve coalescing / vectorization, "
-        "reduce intermediate writes, avoid extra global-memory round trips.",
+        (
+            "1. **Structural simplification**: hoist loop-invariant computations, "
+            "remove redundant address arithmetic, collapse dual-pass logic."
+        ),
+        (
+            "2. **Shape-aware tuning**: specialize block sizes and grid indexing "
+            "for the dominant TraceLens Args."
+        ),
+        (
+            "3. **Memory traffic reduction**: improve coalescing / vectorization, "
+            "reduce intermediate writes, avoid extra global-memory round trips."
+        ),
         "4. **Launch amortization** for tiny high-count decode shapes.",
-        "5. **Compute utilization**: improve MFMA tile choice, occupancy, "
-        "register / shared-memory balance.",
+        (
+            "5. **Compute utilization**: improve MFMA tile choice, occupancy, "
+            "register / shared-memory balance."
+        ),
     ],
 }
 
