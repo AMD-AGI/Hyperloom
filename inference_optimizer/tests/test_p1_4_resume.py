@@ -41,8 +41,8 @@ from inference_optimizer.paths import make_session_dir
 # ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_ROOT", str(tmp_path))
-    return make_session_dir("p1-4-test")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    return make_session_dir()
 
 
 def _heartbeat() -> Intent:
@@ -222,6 +222,14 @@ async def test_replay_mixed_pending_and_decided(session_dir):
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
+        # This test is about replay bookkeeping, not execution-order gating.
+        # Seed prerequisites so arbitrary proposals are accepted.
+        c1.shared_state.baseline_tput = 100.0
+        c1.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
+        c1.shared_state.last_select_kernels = {
+            "trace_input": "/tmp/profile.trace.json.gz",
+        }
+        c1.shared_state.save(session_dir)
         proposal_ids = []
         for action in ("baseline", "profile", "backends"):
             await c1._handle_intent("orchestration", Intent(
