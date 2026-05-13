@@ -225,8 +225,15 @@ def _apply_patch_atomic(src: Path) -> bool:
         log.warning("_inferencex_patcher: cannot write %s: %s", src, e)
         try:
             os.unlink(tmp_name)
-        except OSError:
-            pass
+        except OSError as cleanup_err:
+            # Best-effort temp cleanup; the main write already failed so
+            # we propagate that failure regardless. Log at debug so the
+            # ignored exception is grep-discoverable without spamming
+            # warning logs on the unhappy path.
+            log.debug(
+                "_inferencex_patcher: best-effort cleanup failed for temp "
+                "file %s: %s", tmp_name, cleanup_err,
+            )
         return False
 
     log.info(
@@ -361,8 +368,11 @@ def _apply_benchmark_serving_patch_atomic(src: Path) -> bool:
         log.warning("_inferencex_patcher: cannot write %s: %s", src, e)
         try:
             os.unlink(tmp_name)
-        except OSError:
-            pass
+        except OSError as cleanup_err:
+            log.debug(
+                "_inferencex_patcher: best-effort cleanup failed for temp "
+                "file %s: %s", tmp_name, cleanup_err,
+            )
         return False
 
     log.info(
