@@ -373,14 +373,19 @@ def test_sglang_rejects_unsupported_version(tmp_path, monkeypatch):
     )
 
 
-def test_sglang_rejects_non_editable_install_layout(tmp_path, monkeypatch):
-    """A pip-wheel install where `sglang/` sits directly in site-packages
-    (no `python/` parent) cannot use the `a/python/sglang/...` patches —
-    fail-soft so wheel users keep working."""
+def test_sglang_rejects_unknown_install_layout(tmp_path, monkeypatch):
+    """SGLang installed at neither ``python/sglang/`` (editable) nor
+    ``site-packages/sglang/`` (wheel) — e.g. someone renamed the
+    package or placed it under a custom dir — must fail-soft. Wheel
+    installs now go through the shim path (covered by the
+    ``test_sglang_wheel_install_uses_symlink_shim`` test); only
+    layouts the resolver doesn't recognise return None here."""
     tracelens_root = _make_fake_tracelens(tmp_path)
     _write_fake_sglang_patches(tracelens_root)
-    # Layout: site-packages/sglang/__init__.py (no `python/` dir).
-    install = tmp_path / "site_packages" / "sglang"
+    # Place the module under a parent dir named something other than
+    # ``sglang`` so the wheel-install check rejects it. (A real-world
+    # cause would be a namespace-package install or a fork rename.)
+    install = tmp_path / "weird_namespace" / "not_sglang"
     install.mkdir(parents=True)
     (install / "__init__.py").write_text(
         f'__version__ = "{_FAKE_SGLANG_VERSION}"\n',
@@ -645,3 +650,124 @@ def test_sglang_version_accepted_empty_version_rejected(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
     assert _server_patcher._sglang_version_accepted("") is False
     assert _server_patcher._sglang_version_accepted("   ") is False
+
+
+# ===========================================================================
+# PR-D §1: wheel-install SGLang patching via -p3 strip
+# ===========================================================================
+def _make_fake_wheel_sglang_install(tmp_path: Path) -> Path:
+    """Synthesise a pip-wheel SGLang layout: ``site-packages/sglang/...``
+    with no ``python/`` parent. Mirrors what
+    ``pip install sglang --no-build-isolation`` produces from a release
+    wheel, distinct from the editable repo layout the fixture above
+    builds."""
+    site_packages = tmp_path / "site-packages"
+    pkg = site_packages / "sglang" / "srt" / "utils"
+    pkg.mkdir(parents=True)
+    (site_packages / "sglang" / "__init__.py").write_text(
+        f'__version__ = "{_FAKE_SGLANG_VERSION}"\n',
+        encoding="utf-8",
+    )
+    (site_packages / "sglang" / "srt" / "__init__.py").write_text("")
+    (site_packages / "sglang" / "srt" / "utils" / "__init__.py").write_text("")
+    return site_packages
+
+
+@_REQUIRES_GIT
+def test_sglang_wheel_install_patches_via_p3_strip(tmp_path, monkeypatch):
+    """A wheel-layout SGLang install (``site-packages/sglang/...`` with
+    no ``python/`` parent) must apply patches with ``-p3`` from inside
+    the wheel sglang/ dir itself — no symlinks, no tmpdirs, real
+    wheel files modified in place. ``git apply``'s symlink-safety
+    check would refuse a symlink-shim approach (verified empirically
+    on git 2.40+); ``-p3`` sidesteps the issue entirely by stripping
+    the patch's ``a/python/sglang/`` prefix down to the wheel-relative
+    ``srt/...`` path."""
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
+    tracelens_root = _make_fake_tracelens(tmp_path)
+    site_packages = _make_fake_wheel_sglang_install(tmp_path)
+    _write_fake_sglang_patches(tracelens_root, count=1)
+
+    fake_mod = types.ModuleType("sglang")
+    fake_mod.__version__ = _FAKE_SGLANG_VERSION  # type: ignore[attr-defined]
+    fake_mod.__file__ = str(site_packages / "sglang" / "__init__.py")  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sglang", fake_mod)
+    monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
+
+    rc = ensure_sglang_patched_for_tracelens()
+    assert rc is True
+    # Patch landed on the real wheel install file.
+    sentinel_real = (
+        site_packages / "sglang" / "srt" / "utils" / "kernel_shape_profiler.py"
+    )
+    assert sentinel_real.exists(), (
+        "wheel install's sglang/srt/utils/kernel_shape_profiler.py must exist "
+        "after patching — the -p3 path should have modified the wheel directly"
+    )
+    assert "kernel_shape_profiler" in sentinel_real.read_text(encoding="utf-8")
+
+
+@_REQUIRES_GIT
+def test_sglang_wheel_install_is_idempotent(tmp_path, monkeypatch):
+    """Second invocation short-circuits via the sentinel check without
+    re-running git apply. Guards against the wheel-install path
+    racing on every call."""
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
+    tracelens_root = _make_fake_tracelens(tmp_path)
+    site_packages = _make_fake_wheel_sglang_install(tmp_path)
+    _write_fake_sglang_patches(tracelens_root, count=1)
+
+    fake_mod = types.ModuleType("sglang")
+    fake_mod.__version__ = _FAKE_SGLANG_VERSION  # type: ignore[attr-defined]
+    fake_mod.__file__ = str(site_packages / "sglang" / "__init__.py")  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sglang", fake_mod)
+    monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
+
+    assert ensure_sglang_patched_for_tracelens() is True
+    sentinel_real = (
+        site_packages / "sglang" / "srt" / "utils" / "kernel_shape_profiler.py"
+    )
+    snapshot = sentinel_real.read_text(encoding="utf-8")
+    assert ensure_sglang_patched_for_tracelens() is True
+    assert sentinel_real.read_text(encoding="utf-8") == snapshot
+
+
+def test_resolve_sglang_apply_root_editable_returns_p1(tmp_path):
+    """Editable install (``<repo>/python/sglang/__init__.py``) keeps
+    the historical ``-p1`` strip + repo-root apply path."""
+    repo = tmp_path / "sgl_repo"
+    pkg = repo / "python" / "sglang"
+    pkg.mkdir(parents=True)
+    sglang_module = pkg / "__init__.py"
+    sglang_module.write_text("__version__ = '0.5.9'", encoding="utf-8")
+    result = _server_patcher._resolve_sglang_apply_root(sglang_module)
+    assert result is not None
+    apply_root, strip = result
+    assert apply_root == repo
+    assert strip == 1
+
+
+def test_resolve_sglang_apply_root_wheel_returns_p3(tmp_path):
+    """Wheel install (``site-packages/sglang/__init__.py``) returns
+    ``(<sglang_dir>, 3)`` so the patch's ``a/python/sglang/`` prefix
+    is stripped down to the wheel layout's ``srt/...`` path."""
+    site_packages = _make_fake_wheel_sglang_install(tmp_path)
+    sglang_module = site_packages / "sglang" / "__init__.py"
+    result = _server_patcher._resolve_sglang_apply_root(sglang_module)
+    assert result is not None
+    apply_root, strip = result
+    assert apply_root == site_packages / "sglang"
+    assert strip == 3
+
+
+def test_resolve_sglang_apply_root_rejects_unexpected_layout(tmp_path):
+    """An sglang module that lives under neither ``python/sglang/`` nor
+    ``site-packages/sglang/`` (e.g. the user moved it under a custom
+    dir, or a fork renamed the package) must fail-soft."""
+    weird_root = tmp_path / "weird_namespace" / "not_sglang"
+    weird_root.mkdir(parents=True)
+    sglang_module = weird_root / "__init__.py"
+    sglang_module.write_text("__version__ = '0.5.9'", encoding="utf-8")
+    assert _server_patcher._resolve_sglang_apply_root(sglang_module) is None
