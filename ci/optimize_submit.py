@@ -436,6 +436,7 @@ class SafeOptimizeClient:
         submit_workspace: str,
         volume: str,
         timeout: int = 30,
+        submit_workspaces_pool: list[str] | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         # Where the model gets registered + downloaded (must allow RW writes
@@ -445,6 +446,15 @@ class SafeOptimizeClient:
         # Can equal register_workspace when both constraints are satisfied
         # by a single workspace (rare in practice on core42).
         self.submit_workspace = submit_workspace
+        # Optional round-robin pool: when set, each submit_task picks the
+        # next workspace from the list instead of always using
+        # self.submit_workspace. Lets a large batch span both
+        # core42-sandbox (128 GPU) and core42-hyperloom (256 GPU)
+        # without manually splitting the model list.
+        self.submit_workspaces_pool = [
+            w.strip() for w in (submit_workspaces_pool or []) if w and w.strip()
+        ] or None
+        self._submit_ws_counter = 0
         self.volume = volume
         self.timeout = timeout
         self._sess = requests.Session()
@@ -595,10 +605,28 @@ class SafeOptimizeClient:
         prompt_prefix: str | None = None,
         prompt_suffix: str | None = None,
     ) -> dict:
+        # Pick the workspace for this submit. Default = self.submit_workspace
+        # (single-workspace mode). When a round-robin pool is configured,
+        # cycle through it so a batch of N tasks spreads across the pool
+        # evenly. Counter is per-instance and not thread-safe — fine because
+        # process_model calls submit_task serially in the dispatch loop;
+        # only wait_and_collect is run in parallel and that's after
+        # submit_task already returned.
+        if self.submit_workspaces_pool:
+            chosen_ws = self.submit_workspaces_pool[
+                self._submit_ws_counter % len(self.submit_workspaces_pool)
+            ]
+            self._submit_ws_counter += 1
+            log.info("[submit] round-robin chose workspace=%s "
+                     "(pool=%s, idx=%d)",
+                     chosen_ws, ",".join(self.submit_workspaces_pool),
+                     self._submit_ws_counter - 1)
+        else:
+            chosen_ws = self.submit_workspace
         body = {
             "displayName": display_name,
             "modelId": model_id,
-            "workspace": self.submit_workspace,
+            "workspace": chosen_ws,
             "mode": mode,
             "framework": framework,
             "precision": precision,
@@ -1520,7 +1548,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--submit-workspace", default="",
                         help=f"Workspace where the optimization task runs "
                              f"(defaults to $SAFE_OPTIMIZE_SUBMIT_WORKSPACE "
-                             f"then '{DEFAULT_SUBMIT_WORKSPACE}')")
+                             f"then '{DEFAULT_SUBMIT_WORKSPACE}'). Used when "
+                             f"--submit-workspaces is empty.")
+    parser.add_argument("--submit-workspaces", default="",
+                        help="Comma-separated list of submit workspaces for "
+                             "round-robin task distribution (e.g. "
+                             "'core42-sandbox,core42-hyperloom'). When set, "
+                             "overrides --submit-workspace and spreads the "
+                             "batch evenly across the listed workspaces. "
+                             "Each must independently accept the same model "
+                             "(register_workspace stays single). Defaults to "
+                             "$SAFE_OPTIMIZE_SUBMIT_WORKSPACES.")
     parser.add_argument("--workspace", default="",
                         help="Shorthand: set both --register-workspace and "
                              "--submit-workspace to the same value (back-compat)")
@@ -1620,6 +1658,13 @@ def main() -> int:
                         or os.environ.get("SAFE_OPTIMIZE_SUBMIT_WORKSPACE")
                         or shared_ws
                         or DEFAULT_SUBMIT_WORKSPACE)
+    # Round-robin pool: --submit-workspaces overrides single submit_workspace.
+    # Empty -> single workspace mode (back-compat with existing dispatches).
+    submit_workspaces_raw = (args.submit_workspaces
+                             or os.environ.get("SAFE_OPTIMIZE_SUBMIT_WORKSPACES")
+                             or "")
+    submit_workspaces_pool = [w.strip() for w in submit_workspaces_raw.split(",")
+                              if w and w.strip()]
     volume = (args.volume
               or os.environ.get("SAFE_OPTIMIZE_VOLUME")
               or DEFAULT_VOLUME)
@@ -1638,7 +1683,10 @@ def main() -> int:
              base_url, register_workspace, submit_workspace, volume)
     log.info("Cluster prompt fields: gpu_type=%s inferencex_path=%s",
              gpu_type, inferencex_path)
-    if register_workspace != submit_workspace:
+    if submit_workspaces_pool:
+        log.info("submit round-robin pool: %s (overrides --submit-workspace)",
+                 ",".join(submit_workspaces_pool))
+    if register_workspace != submit_workspace and not submit_workspaces_pool:
         log.info("cross-workspace mode — needs SaFE selectLocalPath path-accessible "
                  "fallback to be deployed; will 400 on submit_task otherwise")
 
@@ -1649,6 +1697,7 @@ def main() -> int:
         register_workspace=register_workspace,
         submit_workspace=submit_workspace,
         volume=volume,
+        submit_workspaces_pool=submit_workspaces_pool or None,
     )
 
     if args.hf_top:
