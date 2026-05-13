@@ -186,8 +186,15 @@ _GFX_TO_RUNNER: dict[str, str] = {
     # Magpie subprocess output deep in the run.
     "gfx942":  "mi300x",
     "gfx950":  "mi355x",
-    "gfx1100": "mi325x",
 }
+
+
+def _gpu_runner_type(gpu_type: str) -> str:
+    """Return the Magpie runner label for a resolved real GPU type."""
+    normalized = str(gpu_type or "").strip().lower()
+    if normalized == "mi325x":
+        return "mi300x"
+    return normalized
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +486,7 @@ def _seed_shared_state(
         model_path=str(args.model),
         model_class=args.model_class or "",
         framework=os.environ.get("FRAMEWORK", "sglang"),
-        gpu_type=os.environ.get("GPU_TYPE", ""),
+        gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         kernel_enabled=not getattr(args, "no_kernel", False),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
@@ -1623,8 +1630,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             os.environ["FRAMEWORK"] = state.framework
             print(f"  re-exported FRAMEWORK : {state.framework}")
         if state.gpu_type:
-            os.environ["GPU_TYPE"] = state.gpu_type
+            runner_gpu_type = _gpu_runner_type(state.gpu_type)
+            os.environ["TARGET_GPU_TYPE"] = state.gpu_type
+            os.environ["GPU_TYPE"] = runner_gpu_type
             print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
+            if runner_gpu_type != state.gpu_type:
+                print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
         # Honour persisted kernel_enabled flag on resume; CLI --no-kernel
         # can still override on a previously-enabled session.
         if not state.kernel_enabled:
@@ -1684,28 +1695,31 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         os.environ["FRAMEWORK"] = framework
         print(f"Framework       : {framework}")
 
-        # Resolve GPU runner type: --gpu-type > $GPU_TYPE > rocm-smi probe.
-        # Result is the canonical Magpie label (mi300x / mi355x). MI325X has
-        # the same architecture as MI300X but Magpie does not yet ship
-        # sglang_mi325x.sh / vllm_mi325x.sh, so we map mi325x -> mi300x with
-        # a warning so the run actually succeeds.
+        # Resolve real target GPU: --gpu-type > $GPU_TYPE > rocm-smi probe.
+        # Keep the real type in args/SharedState so TraceLens and GEAK prompts
+        # see MI325X, while mapping only Magpie's runner env to mi300x.
         gpu_type = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
         if not gpu_type:
             gpu_type = _autodetect_gpu_type() or ""
             if gpu_type:
                 print(f"GPU type        : {gpu_type} (auto-detected)")
-        if gpu_type == "mi325x":
+        runner_gpu_type = _gpu_runner_type(gpu_type)
+        if gpu_type and runner_gpu_type != gpu_type:
             print(
-                "WARN: mi325x maps to mi300x (same arch; Magpie has no "
-                "sglang_mi325x.sh / vllm_mi325x.sh yet)",
+                "WARN: mi325x uses mi300x as Magpie runner_type (same arch; "
+                "Magpie has no sglang_mi325x.sh / vllm_mi325x.sh yet)",
                 file=sys.stderr,
             )
-            gpu_type = "mi300x"
-        if gpu_type:
-            os.environ["GPU_TYPE"] = gpu_type
-            print(f"GPU type        : {gpu_type} (will inject runner_type into Magpie YAML)")
+        args.gpu_type = gpu_type or None
+        if runner_gpu_type:
+            os.environ["TARGET_GPU_TYPE"] = gpu_type
+            os.environ["GPU_TYPE"] = runner_gpu_type
+            print(f"GPU type        : {gpu_type}")
+            print(f"Magpie runner   : {runner_gpu_type} (will inject runner_type into Magpie YAML)")
         else:
+            os.environ.pop("TARGET_GPU_TYPE", None)
             os.environ.pop("GPU_TYPE", None)
+            args.gpu_type = None
             print("GPU type        : <unset> (Magpie will auto-detect)")
 
         # Compute MAX_MODEL_LEN = ISL + OSL + 4096 headroom, export for yaml injection.
@@ -1926,11 +1940,10 @@ def _build_parser() -> argparse.ArgumentParser:
                            "state.json)")
     opt.add_argument(
         "--gpu-type", choices=["mi300x", "mi325x", "mi355x"], default=None,
-        help="Override GPU runner type passed to Magpie (sets benchmark."
-             "runner_type). When omitted, the optimizer auto-detects via "
-             "rocm-smi; falls back to Magpie's own auto-detection if rocm-smi "
-             "is unavailable. mi325x is treated as mi300x (same architecture; "
-             "Magpie does not yet ship sglang_mi325x.sh / vllm_mi325x.sh).",
+        help="Override the real target GPU for TraceLens/GEAK prompts. Magpie "
+             "runner_type is derived separately; mi325x currently runs with "
+             "mi300x runner scripts because Magpie does not yet ship "
+             "sglang_mi325x.sh / vllm_mi325x.sh.",
     )
     opt.add_argument(
         "--framework", choices=["sglang", "vllm"], default=None,
