@@ -71,15 +71,6 @@ on:
         description: 'Round-robin submit workspaces (comma-separated). Empty = use SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret only.'
         required: false
         default: ''
-      submit_workspaces:
-        # Comma-separated round-robin pool. Empty = use single
-        # SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret (current behavior =
-        # core42-sandbox only). 'core42-sandbox,core42-hyperloom' spreads
-        # the batch across both workspaces and roughly doubles the
-        # effective GPU pool for the optimization step.
-        description: 'Round-robin submit workspaces (comma-separated). Empty = use SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret only.'
-        required: false
-        default: ''
       isl:
         description: 'Input sequence length'
         required: false
@@ -667,7 +658,7 @@ jobs:
           # 6-column table — Model wide, Stack/Params/Baseline/Optimized/Gain
           # share the rest. Relative widths so Teams scales them to whatever
           # render width msteams.width=Full grants us (~1200px desktop).
-          columns = [
+          FULL_COLUMNS = [
               {"width": 6},  # Model
               {"width": 3},  # Stack
               {"width": 2},  # Params
@@ -675,18 +666,13 @@ jobs:
               {"width": 3},  # Optimized tok/s/GPU
               {"width": 3},  # Gain
           ]
-          table_rows = [{
-              "type": "TableRow", "style": "accent",
-              "cells": [cell("Model","Bolder"),
-                        cell("Stack","Bolder"),
-                        cell("Params","Bolder"),
-                        cell("Baseline tok/s/GPU","Bolder"),
-                        cell("Optimized tok/s/GPU","Bolder"),
-                        cell("Gain","Bolder")],
-          }]
-          MAX_ROWS = 50  # Power Automate Workflows soft limit on card size
-          truncated = False
-          for r in rows[:MAX_ROWS]:
+          COMPACT_COLUMNS = [
+              {"width": 5},  # Model
+              {"width": 2},  # Stack (frm prec tp combined)
+              {"width": 2},  # Gain
+          ]
+
+          def build_full_row(r):
               fs = r.get("final_status")
               bl = r.get("baseline_tok_per_gpu")
               op = r.get("optimized_tok_per_gpu")
@@ -702,7 +688,7 @@ jobs:
                   gain_text = f"{medal} 0%".strip()
               else:
                   gain_text = f"{medal} {fmt_pct(gp)}".strip()
-              table_rows.append({
+              return {
                   "type": "TableRow",
                   "cells": [
                       cell(f"{short_name(r.get('model'))} {icon}"),
@@ -712,42 +698,106 @@ jobs:
                       cell(fmt_num(op)),
                       cell(gain_text, color=gain_color(gp)),
                   ],
-              })
-          if len(rows) > MAX_ROWS:
-              truncated = True
+              }
 
-          card_body = list(header_blocks)
-          card_body.append({
-              "type": "Table",
-              "firstRowAsHeader": True,
-              "showGridLines": True,
-              "columns": columns,
-              "rows": table_rows,
-          })
-          if truncated:
-              card_body.append({
-                  "type": "TextBlock",
-                  "text": f"_Showing first {MAX_ROWS} of {len(rows)} rows; "
-                          f"see GHA / Dashboard for the full set._",
-                  "wrap": True, "isSubtle": True,
-              })
+          def build_compact_row(r):
+              fs = r.get("final_status")
+              bl = r.get("baseline_tok_per_gpu")
+              op = r.get("optimized_tok_per_gpu")
+              gp = r.get("gain_pct")
+              icon = status_icon(fs, bl, op)
+              stack_s = (f"{(r.get('framework') or '—')}/"
+                         f"{(r.get('precision') or '—')}/"
+                         f"TP{r.get('tp') or '?'}")
+              medal = gain_medal(gp)
+              if gp is None:
+                  gain_text = "—"
+              elif gp == 0:
+                  gain_text = f"{medal} 0%".strip()
+              else:
+                  gain_text = f"{medal} {fmt_pct(gp)}".strip()
+              return {
+                  "type": "TableRow",
+                  "cells": [
+                      cell(f"{short_name(r.get('model'))} {icon}"),
+                      cell(stack_s),
+                      cell(gain_text, color=gain_color(gp)),
+                  ],
+              }
 
-          payload = {
-              "type": "message",
-              "attachments": [{
-                  "contentType": "application/vnd.microsoft.card.adaptive",
-                  "content": {
-                      "type": "AdaptiveCard",
-                      "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                      "version": "1.5",
-                      "msteams": {"width": "Full"},
-                      "body": card_body,
-                  },
-              }],
+          # First pass: build full-format rows. Power Automate Workflows
+          # rejects payloads >256KB, and Teams renders ~200KB cleanly.
+          # If full-format exceeds that, fall back to compact (3 col / row)
+          # which is roughly 3x smaller per row.
+          MAX_ROWS = 200
+          MAX_PAYLOAD_BYTES = 200_000
+          full_header_row = {
+              "type": "TableRow", "style": "accent",
+              "cells": [cell("Model","Bolder"),
+                        cell("Stack","Bolder"),
+                        cell("Params","Bolder"),
+                        cell("Baseline tok/s/GPU","Bolder"),
+                        cell("Optimized tok/s/GPU","Bolder"),
+                        cell("Gain","Bolder")],
           }
+          compact_header_row = {
+              "type": "TableRow", "style": "accent",
+              "cells": [cell("Model","Bolder"),
+                        cell("Stack","Bolder"),
+                        cell("Gain","Bolder")],
+          }
+
+          def assemble_card(table_columns, table_rows, truncated, compact_mode):
+              body = list(header_blocks)
+              body.append({
+                  "type": "Table",
+                  "firstRowAsHeader": True,
+                  "showGridLines": True,
+                  "columns": table_columns,
+                  "rows": table_rows,
+              })
+              suffix = []
+              if truncated:
+                  suffix.append(f"Showing first {len(table_rows)-1} of "
+                                f"{len(rows)} rows")
+              if compact_mode:
+                  suffix.append("compact view (full table > 200 KB Teams cap)")
+              if suffix:
+                  body.append({
+                      "type": "TextBlock",
+                      "text": f"_{' · '.join(suffix)} — see GHA / Dashboard for "
+                              f"the full set._",
+                      "wrap": True, "isSubtle": True,
+                  })
+              return {
+                  "type": "message",
+                  "attachments": [{
+                      "contentType": "application/vnd.microsoft.card.adaptive",
+                      "content": {
+                          "type": "AdaptiveCard",
+                          "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                          "version": "1.5",
+                          "msteams": {"width": "Full"},
+                          "body": body,
+                      },
+                  }],
+              }
+
+          # Try full format first.
+          full_rows = [full_header_row] + [build_full_row(r) for r in rows[:MAX_ROWS]]
+          truncated = len(rows) > MAX_ROWS
+          payload = assemble_card(FULL_COLUMNS, full_rows, truncated, False)
           payload_bytes = json.dumps(payload).encode("utf-8")
+          compact_mode = False
+          if len(payload_bytes) > MAX_PAYLOAD_BYTES:
+              compact_rows = [compact_header_row] + [build_compact_row(r) for r in rows[:MAX_ROWS]]
+              payload = assemble_card(COMPACT_COLUMNS, compact_rows, truncated, True)
+              payload_bytes = json.dumps(payload).encode("utf-8")
+              compact_mode = True
           print(f"Webhook payload: {len(payload_bytes)} bytes, "
-                f"{len(table_rows)-1} data rows")
+                f"{len(rows[:MAX_ROWS])} data rows"
+                f"{' (compact mode)' if compact_mode else ''}"
+                f"{f' truncated from {len(rows)}' if truncated else ''}")
 
           try:
               resp = requests.post(
