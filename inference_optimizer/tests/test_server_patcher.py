@@ -344,14 +344,22 @@ def test_sglang_second_call_is_noop(fake_sglang_world):
 
 
 def test_sglang_rejects_unsupported_version(tmp_path, monkeypatch):
-    """SGLang versions outside `_SGLANG_SUPPORTED_VERSIONS` (today only
-    "0.5.9") must fail-soft — and crucially must NOT touch the
-    install tree on disk."""
+    """SGLang versions outside the configured minor allowlist (default
+    ``0.5.x``) must fail-soft — and crucially must NOT touch the
+    install tree on disk. PR-C widened the gate from an exact 0.5.9
+    pin to a 0.5.x prefix so freshly bumped point releases reach the
+    fuzzy patch fallback; bigger minor bumps (0.6.x, 0.4.x) still
+    fail-soft here so we don't risk applying a stale patch set against
+    an incompatible install."""
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
     tracelens_root = _make_fake_tracelens(tmp_path)
     apply_root = _make_fake_sglang_install(tmp_path)
     _write_fake_sglang_patches(tracelens_root)
     fake_mod = types.ModuleType("sglang")
-    fake_mod.__version__ = "0.5.10"  # current Hyperloom default — unsupported
+    # 0.6.0 — outside the 0.5.x allowlist; would need a real minor
+    # bump in TraceLens's patch set, not just fuzzy context drift.
+    fake_mod.__version__ = "0.6.0"  # type: ignore[attr-defined]
     fake_mod.__file__ = str(apply_root / "python" / "sglang" / "__init__.py")  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "sglang", fake_mod)
     monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
@@ -569,3 +577,71 @@ def test_patch_dry_run_returns_false_when_patch_binary_missing(tmp_path):
         "/nonexistent/patch", fake_diff, tmp_path,
     )
     assert rc is False
+
+
+# ===========================================================================
+# PR-C §2: SGLang minor-version allowlist (was: exact-version pin)
+# ===========================================================================
+def test_sglang_version_accepted_default_minor_covers_059(monkeypatch):
+    """Default allowlist must still accept the original exact pin so
+    pre-PR-C behaviour is preserved on the current deployment."""
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
+    assert _server_patcher._sglang_version_accepted("0.5.9") is True
+
+
+def test_sglang_version_accepted_default_minor_covers_0510(monkeypatch):
+    """Default allowlist accepts a freshly bumped point release —
+    the whole point of PR-C is to let 0.5.10 / 0.5.11 reach the
+    fuzzy fallback layer (which can still reject if the patch
+    fundamentally conflicts)."""
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
+    assert _server_patcher._sglang_version_accepted("0.5.10") is True
+    assert _server_patcher._sglang_version_accepted("0.5.11") is True
+
+
+def test_sglang_version_accepted_default_minor_rejects_different_minor(monkeypatch):
+    """0.5.x allowlist must NOT accept 0.6.x or 0.4.x — those are
+    minor-version bumps with bigger surface change than fuzzy patch
+    contextual drift can tolerate."""
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
+    assert _server_patcher._sglang_version_accepted("0.6.0") is False
+    assert _server_patcher._sglang_version_accepted("0.4.9") is False
+    # Edge case: 0.50.0 must not match the 0.5 prefix — guard against
+    # naive ``startswith``.
+    assert _server_patcher._sglang_version_accepted("0.50.0") is False
+
+
+def test_sglang_version_accepted_exact_pin_env_overrides_minor(monkeypatch):
+    """Operators who want to lock down to a known-good list can set
+    ``HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS`` — exact pins win over
+    the minor allowlist for the duration of the run."""
+    monkeypatch.setenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", "0.5.9")
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
+    assert _server_patcher._sglang_version_accepted("0.5.9") is True
+    # 0.5.10 IS in the default minor allowlist, but the exact-pin env
+    # narrows it back to just 0.5.9.
+    assert _server_patcher._sglang_version_accepted("0.5.10") is False
+
+
+def test_sglang_version_accepted_minor_env_extends_default(monkeypatch):
+    """``HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS=0.5,0.6`` lets operators
+    extend the default allowlist when TraceLens promises a coming
+    patch set for the next minor."""
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
+    monkeypatch.setenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", "0.5,0.6")
+    assert _server_patcher._sglang_version_accepted("0.5.9") is True
+    assert _server_patcher._sglang_version_accepted("0.6.0") is True
+    assert _server_patcher._sglang_version_accepted("0.7.0") is False
+
+
+def test_sglang_version_accepted_empty_version_rejected(monkeypatch):
+    """Empty / whitespace ``sglang.__version__`` must not silently
+    pass — the patcher needs a real version to pick the right patch
+    set."""
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
+    assert _server_patcher._sglang_version_accepted("") is False
+    assert _server_patcher._sglang_version_accepted("   ") is False
