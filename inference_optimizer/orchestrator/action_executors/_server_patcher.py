@@ -360,40 +360,136 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
             plan.framework,
         )
         return False
+    patch_bin = shutil.which("patch")  # may be ``None`` — fuzzy fallback then disabled
 
+    # PR-C §1: per-patch precheck. Each patch must EITHER pass
+    # ``git apply --check`` (the strict path, preferred) OR pass
+    # ``patch -p1 --fuzz=10 --dry-run`` (the fuzzy fallback for minor
+    # context drift when TraceLens patches haven't been rev'd against
+    # a slightly newer SGLang / vLLM point release). If neither
+    # accepts the patch the whole set is rejected and we fail-soft.
+    apply_modes: dict[Path, str] = {}
     for p in plan.patches:
-        if not _git(git, ("apply", "--check", str(p)), plan.apply_root):
+        if _git(git, ("apply", "--check", str(p)), plan.apply_root):
+            apply_modes[p] = "git"
+            continue
+        if patch_bin and _patch_dry_run(patch_bin, p, plan.apply_root):
             log.warning(
-                "_server_patcher: `git apply --check` failed for %s "
-                "(version %s, patch %s); fail-soft skip",
-                plan.framework, plan.version, p.name,
+                "_server_patcher: %s patch %s did not apply cleanly with "
+                "`git apply --check`; falling back to `patch -p1 --fuzz=10` "
+                "(TraceLens patch may lag deployed %s by a point release)",
+                plan.framework, p.name, plan.framework,
             )
-            return False
+            apply_modes[p] = "patch"
+            continue
+        log.warning(
+            "_server_patcher: `git apply --check` AND fuzzy `patch --dry-run` "
+            "both failed for %s (version %s, patch %s); fail-soft skip",
+            plan.framework, plan.version, p.name,
+        )
+        return False
 
-    applied: list[Path] = []
+    applied: list[tuple[Path, str]] = []
     for p in plan.patches:
-        if _git(git, ("apply", str(p)), plan.apply_root):
-            applied.append(p)
+        mode = apply_modes[p]
+        if mode == "git":
+            ok = _git(git, ("apply", str(p)), plan.apply_root)
+        else:
+            ok = _patch_apply(patch_bin, p, plan.apply_root)  # type: ignore[arg-type]
+        if ok:
+            applied.append((p, mode))
             continue
         log.error(
             "_server_patcher: %s patch %s failed during apply after "
-            "passing --check; rolling back %d previously-applied patches",
-            plan.framework, p.name, len(applied),
+            "passing precheck (mode=%s); rolling back %d previously-applied "
+            "patches",
+            plan.framework, p.name, mode, len(applied),
         )
-        for prev in reversed(applied):
-            if not _git(git, ("apply", "-R", str(prev)), plan.apply_root):
+        for prev, prev_mode in reversed(applied):
+            if prev_mode == "git":
+                rolled_back = _git(git, ("apply", "-R", str(prev)), plan.apply_root)
+            else:
+                rolled_back = (
+                    patch_bin is not None
+                    and _patch_apply(patch_bin, prev, plan.apply_root, reverse=True)
+                )
+            if not rolled_back:
                 log.error(
-                    "_server_patcher: rollback of %s also failed — "
+                    "_server_patcher: rollback of %s (mode=%s) also failed — "
                     "install may be in inconsistent state; manual review "
-                    "required", prev.name,
+                    "required", prev.name, prev_mode,
                 )
         return False
 
+    fuzzy_count = sum(1 for _, mode in applied if mode == "patch")
     log.info(
         "_server_patcher: applied %d TraceLens patch(es) for %s %s "
-        "(issue #194 §4/§5)",
-        len(plan.patches), plan.framework, plan.version,
+        "(strict=%d, fuzzy=%d) (issue #194 §4/§5)",
+        len(applied), plan.framework, plan.version,
+        len(applied) - fuzzy_count, fuzzy_count,
     )
+    return True
+
+
+def _patch_dry_run(patch_bin: str, patch_file: Path, cwd: Path) -> bool:
+    """Probe ``patch -p1 --fuzz=10 --dry-run`` for a single patch.
+
+    Used as a fuzzy fallback when ``git apply --check`` rejects a patch
+    due to minor context drift (whitespace / single-line edits in the
+    target that don't affect the diff's semantic intent). The dry-run
+    has zero filesystem side effects so it's safe to gate the actual
+    apply on this check.
+    """
+    try:
+        with patch_file.open("rb") as fh:
+            result = subprocess.run(
+                (patch_bin, "-p1", "--fuzz=10", "--dry-run", "--silent"),
+                cwd=str(cwd),
+                stdin=fh,
+                capture_output=True,
+                timeout=_GIT_TIMEOUT_SEC,
+            )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log.warning(
+            "_server_patcher: patch --dry-run in %s failed to spawn (%s)",
+            cwd, e,
+        )
+        return False
+    return result.returncode == 0
+
+
+def _patch_apply(
+    patch_bin: str, patch_file: Path, cwd: Path, *, reverse: bool = False,
+) -> bool:
+    """Real ``patch -p1 --fuzz=10`` apply (or reverse). Mirrors
+    :func:`_patch_dry_run` but actually mutates the working tree.
+    Returns True iff rc == 0."""
+    args = [patch_bin, "-p1", "--fuzz=10", "--silent"]
+    if reverse:
+        args.append("--reverse")
+    try:
+        with patch_file.open("rb") as fh:
+            result = subprocess.run(
+                args,
+                cwd=str(cwd),
+                stdin=fh,
+                capture_output=True,
+                timeout=_GIT_TIMEOUT_SEC,
+            )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log.warning(
+            "_server_patcher: patch%s in %s failed to spawn (%s)",
+            " --reverse" if reverse else "", cwd, e,
+        )
+        return False
+    if result.returncode != 0:
+        err = result.stderr.decode("utf-8", errors="replace")[:500] \
+            if result.stderr else ""
+        log.debug(
+            "_server_patcher: patch%s rc=%d stderr=%r",
+            " --reverse" if reverse else "", result.returncode, err,
+        )
+        return False
     return True
 
 
