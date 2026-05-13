@@ -31,7 +31,14 @@ from typing import Any
 import yaml
 
 from ...session_paths import runs_dir
-from ._grid_runner import GridVariant, VariantResult, run_grid, _resolve_session_dir
+from ._grid_runner import (
+    GridVariant,
+    VariantResult,
+    _resolve_session_dir,
+    run_grid,
+    sanitize_result_dir,
+    sanitize_script_name,
+)
 from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
@@ -369,11 +376,23 @@ class ParamsExecutor:
             str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower()
         )
+        # See backends.py for rationale. Same Orchestration-supplied
+        # override surface for benchmark_script / result_dir.
+        try:
+            override_script = sanitize_script_name(params.get("benchmark_script"))
+            override_result_dir = sanitize_result_dir(params.get("result_dir"))
+        except ValueError as exc:
+            return {
+                "status": "failed",
+                "error_class": "bad_param",
+                "error": str(exc),
+            }
         config_path = materialize_config_with_envs(
             config_path,
             output_root,
             model_path=resolved_model_for_render or None,
             gpu_type=resolved_gpu_for_render or None,
+            benchmark_script=override_script,
             out_name="params_base.with_envs.yaml",
         )
 
@@ -515,6 +534,8 @@ class ParamsExecutor:
             variant_timeout_sec=timeout_sec,
             model_path=resolved_model,
             gpu_type=resolved_gpu,
+            benchmark_script=override_script,
+            result_dir=override_result_dir,
         )
 
         candidate_by_name = {v.name: v for v in candidates}
@@ -548,6 +569,8 @@ class ParamsExecutor:
                     variant_timeout_sec=timeout_sec,
                     model_path=resolved_model,
                     gpu_type=resolved_gpu,
+                    benchmark_script=override_script,
+                    result_dir=override_result_dir,
                 )
 
         all_results = single_results + combo_results

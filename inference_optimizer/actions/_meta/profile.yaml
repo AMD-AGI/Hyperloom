@@ -26,3 +26,17 @@ typical_runtime_min: 3.0
 applicable_when:
   - "baseline_tput > 0"
   - "trace_path == ''"
+# Descriptive — see baseline.yaml. ProfileExecutor inherits BaselineExecutor
+# and consumes the same params surface, so the same script/result_dir
+# overrides apply when the profile invocation also lands on a leaky script.
+params_schema:
+  benchmark_script:
+    type: string
+    description: |
+      Bare *.sh file name. Same semantics as baseline.params_schema.
+      benchmark_script.
+  result_dir:
+    type: string
+    description: |
+      Absolute or workspace-relative path forwarded as $RESULT_DIR for
+      this profile subprocess.

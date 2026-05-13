@@ -61,6 +61,17 @@ def _backends_silent() -> dict[str, object]:
             for n in ("orchestration", "kernel", "critic", "robustness")}
 
 
+@pytest.fixture(autouse=True)
+def _isolate_leak_root(tmp_path_factory, monkeypatch):
+    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox so
+    Baseline/ProfileExecutor's always-on artifact harvest does not
+    pick up the host's real ``/workspace`` during the stubbed
+    subprocess runs exercised here.
+    """
+    sandbox = tmp_path_factory.mktemp("isolated_leak_root")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
+
+
 # ===========================================================================
 # ProfileExecutor
 # ===========================================================================

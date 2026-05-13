@@ -60,6 +60,42 @@ def _now_iso() -> str:
 # named in ``record_kernel_opt`` (1 disables the second-chance entirely).
 _DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
 
+# Per-action audit history cap. ``<action>_attempts`` lists keep the most
+# recent N entries (full audit trail — both successes and failures) so
+# the Orchestration prompt has a bounded but informative view of each
+# action's history. 20 is large enough to span a few rounds of a grid
+# action without unbounded growth.
+_DEFAULT_ATTEMPTS_HISTORY = 20
+
+# Global ``last_action_failures`` rolling-log cap. 10 entries covers the
+# typical "what blew up in the last few ticks" view without bloating the
+# prompt; older failures stay in the event log but drop from the prompt.
+_DEFAULT_LAST_FAILURES = 10
+
+# Set of action kinds that participate in the kernel-equivalent per-action
+# audit trail (Plan: SharedState audit-trail). Kernel-owned actions are
+# intentionally excluded — they already have richer dedicated structures
+# (last_kernel_opt / kernel_opt_attempts / kernel_integrate_attempts /
+# rejected_kernel_*). Membership is consulted by Coordinator and renderer
+# helpers so adding a new audit action is a one-line change.
+_AUDIT_ACTIONS: frozenset[str] = frozenset({
+    "baseline", "profile", "backends", "params", "sweep", "validate_stack",
+})
+
+# Mapping from audit-action name to (result-dict key, prompt-display label).
+# ``key`` is what we read out of the executor result dict; ``label`` is the
+# ``key_metric_kind`` written into each attempt entry so prompt readers
+# know how to interpret the number (e.g. ``output_throughput`` vs raw
+# ``gain_pct`` vs ``validated_gain_pct``).
+_KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
+    "baseline":       ("output_throughput", "output_throughput"),
+    "profile":        ("output_throughput", "output_throughput"),
+    "backends":       ("gain_pct",          "gain_pct"),
+    "params":         ("gain_pct",          "gain_pct"),
+    "sweep":          ("output_throughput", "output_throughput"),
+    "validate_stack": ("gain_pct",          "validated_gain_pct"),
+}
+
 
 @dataclass
 class SharedState:
@@ -126,6 +162,35 @@ class SharedState:
     # `run_optimization_done` so Orch sees what's been tried and doesn't
     # re-dispatch the same kernel_id every tick.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
+    # ---------------------------------------------------------------
+    # Per-action audit (kernel parity for non-kernel actions). Each
+    # ``last_<action>`` mirrors :attr:`last_kernel_opt`: a single snapshot
+    # dict of the most recent attempt (success or failure). The matching
+    # ``<action>_attempts`` is a flat capped list (newest last) with one
+    # entry per attempt — the uniform schema is documented on
+    # :meth:`record_action_attempt`. ``last_sweep`` already exists above
+    # and acts as sweep's snapshot; ``sweep_attempts`` is added here for
+    # symmetry.
+    last_baseline: dict[str, Any] = field(default_factory=dict)
+    last_profile: dict[str, Any] = field(default_factory=dict)
+    last_backends: dict[str, Any] = field(default_factory=dict)
+    last_params: dict[str, Any] = field(default_factory=dict)
+    last_validate_stack: dict[str, Any] = field(default_factory=dict)
+    baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
+    profile_attempts: list[dict[str, Any]] = field(default_factory=list)
+    backends_attempts: list[dict[str, Any]] = field(default_factory=list)
+    params_attempts: list[dict[str, Any]] = field(default_factory=list)
+    sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
+    validate_stack_attempts: list[dict[str, Any]] = field(default_factory=list)
+    # Global rolling log of unpromotable task results, capped at
+    # ``_DEFAULT_LAST_FAILURES``. Carries the rich failure context
+    # (error_class / error_excerpt / stderr_tail / workspace /
+    # raw_result_path / reported_success) so Orchestration sees enough
+    # context to self-correct even when the inbox has rotated past the
+    # original ``delegated_result`` event. Populated by
+    # :meth:`Coordinator._handle_unpromotable_result`. Covers every task
+    # kind (including kernel-owned actions), not just the audit set.
+    last_action_failures: list[dict[str, Any]] = field(default_factory=list)
     # Per-kernel run_optimization attempt history keyed by kernel_id.
     # Each entry: {"attempts": int, "partial_count": int, "last_decision": str,
     #              "last_ts": str, "history": [{"decision","ts"}...max 10],
@@ -528,6 +593,188 @@ class SharedState:
             )
 
         self.kernel_opt_attempts[kernel_id] = entry
+
+    # ------------------------------------------------------------------
+    # Per-action audit (kernel parity for non-kernel actions)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _truncate_excerpt(value: Any, *, limit: int = 800) -> str | None:
+        """Coerce ``value`` to str and trim to ``limit`` characters.
+
+        Returns None for falsy inputs so the prompt renderer can show
+        ``err=(none)`` instead of a quoted empty string.
+        """
+        if value is None:
+            return None
+        text = str(value)
+        if not text:
+            return None
+        if len(text) <= limit:
+            return text
+        return text[:limit]
+
+    @staticmethod
+    def _stderr_tail(value: Any, *, limit: int = 1000) -> str | None:
+        """Pull the last ``limit`` characters from a subprocess error blob.
+
+        Distinct helper from :meth:`_truncate_excerpt` because subprocess
+        stderr usually has the actionable signal at the *end* (traceback,
+        last log line), while a free-form error message is informative
+        from the start.
+        """
+        if value is None:
+            return None
+        text = str(value)
+        if not text:
+            return None
+        return text[-limit:] if len(text) > limit else text
+
+    def record_action_attempt(
+        self,
+        action: str,
+        *,
+        task_id: str,
+        status: str,
+        decision: str,
+        result: dict[str, Any] | None,
+        extras: dict[str, Any] | None = None,
+        max_history: int = _DEFAULT_ATTEMPTS_HISTORY,
+    ) -> dict[str, Any] | None:
+        """Append one attempt to ``<action>_attempts`` and refresh ``last_<action>``.
+
+        Uniform entry schema (see audit-trail plan):
+
+            {ts, task_id, status, decision, key_metric, key_metric_kind,
+             workspace, error_class, error_excerpt, raw_result_path,
+             reported_success, extras}
+
+        ``status`` is ``"succeeded"`` or ``"failed"``; ``decision`` is the
+        Coordinator's interpretation of what it did with the result
+        (``"promoted"`` / ``"discarded"`` / ``"salvaged"`` /
+        ``"no_promote"`` / ``"error"``). ``extras`` is appended verbatim
+        for action-specific context (round_id, trace_path, etc.).
+
+        Returns the new entry dict (so callers can attach it to the event
+        log if useful), or ``None`` when ``action`` is not in the audit
+        set — kernel-owned actions go through their own bespoke recorders
+        and intentionally skip this surface.
+
+        Pure persistence helper: does NOT call :meth:`save`. The
+        Coordinator batches a single ``save()`` per dispatcher pass.
+        """
+        if action not in _AUDIT_ACTIONS:
+            return None
+        attempts_attr = f"{action}_attempts"
+        last_attr = f"last_{action}"
+        if not hasattr(self, attempts_attr) or not hasattr(self, last_attr):
+            return None
+        result = result or {}
+        metric_key, metric_kind = _KEY_METRIC_MAP.get(
+            action, ("output_throughput", "output_throughput"),
+        )
+        raw_metric = result.get(metric_key)
+        try:
+            key_metric: float | None = (
+                float(raw_metric) if isinstance(raw_metric, (int, float))
+                else None
+            )
+        except (TypeError, ValueError):
+            key_metric = None
+        entry: dict[str, Any] = {
+            "ts": _now_iso(),
+            "task_id": str(task_id or ""),
+            "status": str(status or ""),
+            "decision": str(decision or ""),
+            "key_metric": key_metric,
+            "key_metric_kind": metric_kind,
+            "workspace": (
+                str(result.get("workspace"))
+                if result.get("workspace") else None
+            ),
+            "error_class": (
+                str(result.get("error_class"))
+                if result.get("error_class") else None
+            ),
+            "error_excerpt": self._truncate_excerpt(result.get("error")),
+            "raw_result_path": (
+                str(result.get("raw_result_path"))
+                if result.get("raw_result_path") else None
+            ),
+            "reported_success": result.get("reported_success"),
+            "extras": dict(extras or {}),
+        }
+        history: list[dict[str, Any]] = list(getattr(self, attempts_attr) or [])
+        history.append(entry)
+        if len(history) > max_history:
+            history = history[-max_history:]
+        setattr(self, attempts_attr, history)
+        setattr(self, last_attr, dict(entry))
+        return entry
+
+    def record_action_failure(
+        self,
+        *,
+        action: str,
+        task_id: str,
+        result: dict[str, Any] | None,
+        max_history: int = _DEFAULT_LAST_FAILURES,
+    ) -> dict[str, Any]:
+        """Append one rich failure record to :attr:`last_action_failures`.
+
+        Carries the failure context Orchestration needs to self-correct
+        even after the inbox has rotated past the matching
+        ``delegated_result`` event:
+
+        * ``error_class``        — short tag from the executor (e.g.
+          ``"no_report"`` / ``"invalid_measurement"`` /
+          ``"subprocess_nonzero"`` / ``"timeout"``).
+        * ``error_excerpt``      — first 800 chars of ``result['error']``.
+        * ``stderr_tail``        — last 1000 chars of ``result['error']``
+          when ``error_class`` looks like a subprocess failure
+          (``subprocess_nonzero`` / ``timeout``).
+        * ``workspace``          — per-task workspace path the executor
+          materialized (the place the operator would dig into next).
+        * ``raw_result_path``    — set by
+          :func:`extract_benchmark_measurement` when it salvaged a raw
+          inferencex_result.json (so Orchestration can see *where* the
+          rescue came from).
+        * ``reported_success``   — what the wrapper claimed
+          (``benchmark_report.json:success``).
+
+        Unlike :meth:`record_action_attempt` this is invoked for **every**
+        unpromotable task kind — kernel-owned actions land here too so
+        the global failure tail is comprehensive.
+        """
+        result = result or {}
+        error_class = result.get("error_class")
+        error_class_str = str(error_class) if error_class else None
+        entry: dict[str, Any] = {
+            "ts": _now_iso(),
+            "action": str(action or ""),
+            "task_id": str(task_id or ""),
+            "error_class": error_class_str,
+            "error_excerpt": self._truncate_excerpt(result.get("error")),
+            "stderr_tail": (
+                self._stderr_tail(result.get("error"))
+                if error_class_str in {"subprocess_nonzero", "timeout"}
+                else None
+            ),
+            "workspace": (
+                str(result.get("workspace"))
+                if result.get("workspace") else None
+            ),
+            "raw_result_path": (
+                str(result.get("raw_result_path"))
+                if result.get("raw_result_path") else None
+            ),
+            "reported_success": result.get("reported_success"),
+        }
+        history = list(self.last_action_failures or [])
+        history.append(entry)
+        if len(history) > max_history:
+            history = history[-max_history:]
+        self.last_action_failures = history
+        return entry
 
     def record_select_kernels(self, payload: dict[str, Any],
                               result: dict[str, Any]) -> None:
@@ -996,11 +1243,97 @@ class SharedState:
             f"last_kernel_opt={self._format_last_kernel_opt()}",
             f"rejected_kernel_patches={self._format_rejected_kernel_patches()}",
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
+            f"last_baseline={self._format_attempt(self.last_baseline)}",
+            f"last_profile={self._format_attempt(self.last_profile)}",
+            f"last_backends={self._format_attempt(self.last_backends)}",
+            f"last_params={self._format_attempt(self.last_params)}",
+            f"last_validate_stack={self._format_attempt(self.last_validate_stack)}",
+            f"attempts_history={self._format_attempts_history()}",
+            f"last_action_failures={self._format_last_action_failures()}",
             f"tick={int(self.tick or 0)}  "
             f"target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
             f"stop_reason={self.stop_reason or '(none)'}",
         ]
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Audit-trail renderers (kernel-parity per-action attempts + global
+    # failure log). Compact one-liners so the prompt stays readable.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _format_attempt(entry: dict[str, Any] | None) -> str:
+        """Render one ``last_<action>`` snapshot or attempts[-1] entry."""
+        if not isinstance(entry, dict) or not entry:
+            return "(none)"
+        metric = entry.get("key_metric")
+        metric_kind = entry.get("key_metric_kind") or "metric"
+        metric_str = (
+            f"{metric_kind}={metric:.2f}"
+            if isinstance(metric, (int, float)) else f"{metric_kind}=N/A"
+        )
+        err = entry.get("error_class") or "-"
+        ws = entry.get("workspace") or "-"
+        return (
+            f"status={entry.get('status','?')} "
+            f"decision={entry.get('decision','?')} "
+            f"{metric_str} err={err} ws={ws} "
+            f"task_id={entry.get('task_id','?')} ts={entry.get('ts','?')}"
+        )
+
+    def _format_attempts_history(self) -> str:
+        """One-line summary across the 6 audit actions.
+
+        Format: ``baseline:total(s<successes>,f<failures>) ...``. Helps
+        the LLM gauge per-action reliability without flooding the prompt
+        with up to 6x20 individual rows.
+        """
+        parts: list[str] = []
+        for action in sorted(_AUDIT_ACTIONS):
+            attempts_attr = f"{action}_attempts"
+            history = getattr(self, attempts_attr, None) or []
+            if not history:
+                continue
+            total = len(history)
+            succ = sum(
+                1 for e in history
+                if isinstance(e, dict) and e.get("status") == "succeeded"
+            )
+            fail = sum(
+                1 for e in history
+                if isinstance(e, dict) and e.get("status") == "failed"
+            )
+            parts.append(f"{action}:{total}(s{succ},f{fail})")
+        return " ".join(parts) if parts else "(no attempts recorded)"
+
+    def _format_last_action_failures(self) -> str:
+        """Render up to the 3 most-recent global failures.
+
+        ``last_action_failures`` is the rich-context companion to
+        ``crash_count`` / ``baseline_failure_streak``. We deliberately
+        truncate to 3 rows in the prompt so the LLM sees what blew up
+        most recently without re-reading 10 rows of stale subprocess
+        tails. The full list is still on disk in ``state.json``.
+        """
+        if not self.last_action_failures:
+            return "(none)"
+        rows: list[str] = []
+        for entry in self.last_action_failures[-3:]:
+            if not isinstance(entry, dict):
+                continue
+            action = entry.get("action") or "?"
+            error_class = entry.get("error_class") or "?"
+            ts = entry.get("ts") or "?"
+            excerpt = entry.get("error_excerpt") or ""
+            ws = entry.get("workspace") or "-"
+            excerpt_short = excerpt.splitlines()[0][:200] if excerpt else ""
+            rows.append(
+                f"[{action}/{error_class}@{ts}] err=\"{excerpt_short}\" ws={ws}"
+            )
+        suffix = (
+            f" [+{len(self.last_action_failures) - 3} earlier]"
+            if len(self.last_action_failures) > 3 else ""
+        )
+        return " | ".join(rows) + suffix if rows else "(none)"
 
     def _format_rejected_kernel_patches(self) -> str:
         if not self.rejected_kernel_patches:

@@ -66,6 +66,81 @@ from .system_prompts.prompt_builder import (
 log = logging.getLogger(__name__)
 
 
+# Audit-trail kinds (must match shared_state._AUDIT_ACTIONS). Coordinator
+# calls SharedState.record_action_attempt for these on both the
+# success and failure dispatcher branches so the prompt sees a full
+# audit log per non-kernel action. Kernel-owned actions intentionally
+# stay outside this set — they have richer bespoke recorders
+# (record_kernel_opt / record_kernel_integrate_result).
+_AUDIT_ACTIONS: frozenset[str] = frozenset({
+    "baseline", "profile", "backends", "params", "sweep", "validate_stack",
+})
+
+# ---------------------------------------------------------------------------
+# Baseline self-loop guard (failure-recovery surface).
+#
+# Orchestration can recover from a baseline failure by proposing a fresh
+# baseline with overrides (``params.benchmark_script`` /
+# ``params.result_dir`` / different ``extra_sglang_args`` / etc. — see
+# SKILL.md "Magpie leak-path salvage"). What it MUST NOT do is propose
+# the *same* params after the same failure mode has fired N times in a
+# row — the PolicyGate stop-loss below promotes that into a
+# ``policy_denied`` observation with a ``baseline_self_loop`` rule tag
+# so the prompt's FAILURE RECOVERY section sees the hint and proposes a
+# different override.
+#
+# The fingerprint covers the eight task.params fields that actually
+# change Magpie's behavior end-to-end (script choice / leak path /
+# config / model / GPU / accuracy gate). Two failed attempts with
+# identical fingerprints + the next proposal carrying the same
+# fingerprint → denial. Bumping the threshold via env override is
+# intentionally a single source of truth (tests rely on overriding
+# this constant rather than monkeypatching the helper).
+_BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
+    "benchmark_script",
+    "result_dir",
+    "extra_sglang_args",
+    "extra_envs",
+    "model_path",
+    "gpu_type",
+    "config_path",
+    "disable_run_eval",
+)
+_BASELINE_SELF_LOOP_THRESHOLD: int = 2
+
+
+def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any]:
+    """Project ``params`` to the keys that determine baseline behavior.
+
+    Used by :meth:`Coordinator._baseline_self_loop_denial` to compare
+    "is this proposal the same as the last two failed attempts?" and by
+    :meth:`Coordinator._promote_to_shared_state` /
+    :meth:`Coordinator._handle_unpromotable_result` to stamp every
+    audit-trail entry with a stable identifier the prompt can reason
+    about. Missing keys are recorded as ``None`` so absent vs explicit-
+    null are indistinguishable (matches what the prompt sees).
+
+    ``extra_envs`` is normalized into a sorted list of ``[key, value]``
+    pairs so dict ordering doesn't affect equality. All values are
+    stringified for the same reason.
+    """
+    params = params or {}
+    out: dict[str, Any] = {}
+    for key in _BASELINE_FINGERPRINT_KEYS:
+        if key == "extra_envs":
+            envs = params.get(key) or {}
+            if isinstance(envs, dict):
+                out[key] = sorted(
+                    [str(k), str(v)] for k, v in envs.items()
+                )
+            else:
+                out[key] = None
+            continue
+        value = params.get(key)
+        out[key] = None if value is None else str(value)
+    return out
+
+
 @dataclass
 class PendingProposal:
     """A propose_action intent waiting for Critic Review (§18)."""
@@ -887,7 +962,84 @@ class Coordinator:
             )
         return ""
 
-    def _sequence_denial_for_action(self, action_name: str) -> PolicyDenied | None:
+    def _baseline_self_loop_denial(
+        self, proposed_params: dict[str, Any] | None,
+    ) -> PolicyDenied | None:
+        """Reject a fresh baseline proposal that just replays the last failure.
+
+        The Orchestration prompt's FAILURE RECOVERY section instructs the
+        LLM to introduce a new ``benchmark_script`` / ``result_dir`` /
+        ``extra_sglang_args`` override after a baseline failure. This
+        method is the PolicyGate stop-loss that fires when the LLM
+        ignores that instruction.
+
+        Fires only when ALL of these hold:
+
+        * Two or more consecutive baseline failures have landed on
+          ``shared_state.baseline_attempts`` (any decision tail that
+          isn't ``status=succeeded`` counts).
+        * Those last two failures both carry a
+          ``fingerprint`` in their ``extras`` and the fingerprints
+          match each other.
+        * The current proposal's fingerprint matches the failed-streak
+          fingerprint.
+
+        When all three match, return :class:`PolicyDenied` with a
+        ``baseline_self_loop`` rule and a hint pointing at the next
+        override surface so the prompt sees a deterministic recovery
+        path. Returns ``None`` otherwise — the regular execution-order
+        rules still apply.
+        """
+        attempts = list(self.shared_state.baseline_attempts or [])
+        # Walk the tail backwards collecting *consecutive* failures.
+        tail_failures: list[dict[str, Any]] = []
+        for entry in reversed(attempts):
+            if not isinstance(entry, dict):
+                break
+            if entry.get("status") == "succeeded":
+                break
+            tail_failures.append(entry)
+        if len(tail_failures) < _BASELINE_SELF_LOOP_THRESHOLD:
+            return None
+        recent = tail_failures[: _BASELINE_SELF_LOOP_THRESHOLD]
+        prints: list[Any] = []
+        for entry in recent:
+            extras = entry.get("extras") or {}
+            if not isinstance(extras, dict):
+                return None
+            fp = extras.get("fingerprint")
+            if fp is None:
+                return None
+            prints.append(fp)
+        first = prints[0]
+        if any(p != first for p in prints[1:]):
+            return None
+        proposed_fp = _baseline_params_fingerprint(proposed_params)
+        if proposed_fp != first:
+            return None
+        error_class = recent[0].get("error_class") or "unknown"
+        hint = (
+            "the last "
+            f"{_BASELINE_SELF_LOOP_THRESHOLD} `baseline` attempts failed "
+            f"with the SAME params fingerprint (error_class={error_class!r}). "
+            "Re-proposing the same params will fail the same way. Change at "
+            "least one of: params.benchmark_script (sanitized *.sh name, "
+            "e.g. \"sglang_mi300x.sh\" to bypass dsr1_fp8_mi300x.sh's "
+            "hardcoded --result-dir), params.result_dir (sanitized path; "
+            "Coordinator already defaults RESULT_DIR=<workspace>), or "
+            "extra_sglang_args / extra_envs."
+        )
+        return PolicyDenied(
+            "action='baseline' denied: same-fingerprint failure streak",
+            rule="baseline_self_loop",
+            hint=hint,
+        )
+
+    def _sequence_denial_for_action(
+        self,
+        action_name: str,
+        proposed_params: dict[str, Any] | None = None,
+    ) -> PolicyDenied | None:
         """Reject orchestration action/delegate attempts that skip required steps.
 
         Phase 2 addition: once optimization_stack has unvalidated KEEPs,
@@ -896,6 +1048,12 @@ class Coordinator:
         already short-circuit above). Everything else is denied with a
         ``validate_stack_required`` rule so Orchestration sees the
         ``policy_denied`` and self-corrects on the next tick.
+
+        ``proposed_params`` is the ``intent.payload["params"]`` dict
+        (propose_action / delegate path). Currently only consumed by
+        the baseline self-loop guard above, but the kwarg signature is
+        kept open so other per-action stop-losses (e.g. params/backends
+        loop guards) can plug in without further call-site churn.
         """
         action = str(action_name or "").strip()
         sequence_actions = {
@@ -912,6 +1070,10 @@ class Coordinator:
                 rule="execution_order",
                 hint="propose/delegate `baseline` until baseline_tput > 0",
             )
+        if action == "baseline":
+            self_loop = self._baseline_self_loop_denial(proposed_params)
+            if self_loop is not None:
+                return self_loop
         # Profile/select_kernels guards only apply when kernel agent is in
         # the role registry — no-kernel mode skips them.
         if "kernel" in self.role_registry:
@@ -1053,7 +1215,10 @@ class Coordinator:
                 {"kind": "proposal_pruned", "from": source, "action": action_name},
             )
             return
-        denied = self._sequence_denial_for_action(action_name)
+        denied = self._sequence_denial_for_action(
+            action_name,
+            proposed_params=intent.payload.get("params"),
+        )
         if denied is not None:
             await self._record_policy_denied(source, intent, denied)
             return
@@ -1204,7 +1369,10 @@ class Coordinator:
     # ------------------------------------------------------------------
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
         action_name = intent.payload["action_name"]
-        denied = self._sequence_denial_for_action(action_name)
+        denied = self._sequence_denial_for_action(
+            action_name,
+            proposed_params=intent.payload.get("params"),
+        )
         if denied is not None:
             await self._record_policy_denied(source, intent, denied)
             return
@@ -1689,23 +1857,82 @@ class Coordinator:
     async def _handle_unpromotable_result(
         self, task: Task, result: dict[str, Any] | None,
     ) -> None:
-        if task.kind != "baseline" or self.shared_state.baseline_tput > 0:
-            return
-        self.shared_state.baseline_failure_streak += 1
-        if self.shared_state.baseline_failure_streak >= 3:
-            self.shared_state.stop_reason = "baseline_failed"
-        self.shared_state.save(self.session_dir)
-        await self.bus.append_and_seq(Message.new(
-            "coordinator", "*", "event",
-            {
+        """Record a failed / unpromotable task result into SharedState.
+
+        Previously this was a baseline-only branch. The audit-trail plan
+        broadens it to:
+
+        * Always (every task kind, including kernel-owned) append to
+          :attr:`SharedState.last_action_failures` via
+          :meth:`SharedState.record_action_failure` — that's the rich
+          rolling log Orchestration consults after the inbox rotates.
+        * For the 6 audit kinds (baseline/profile/backends/params/sweep/
+          validate_stack) also append a ``status="failed"`` entry to
+          ``<kind>_attempts`` via
+          :meth:`SharedState.record_action_attempt`, mirroring the
+          kernel-equivalent per-action history.
+        * Keep the existing baseline-specific
+          ``baseline_failure_streak`` / ``stop_reason`` /
+          ``baseline_not_promoted`` logic untouched (gated to
+          ``task.kind == "baseline"`` while ``baseline_tput == 0``).
+        """
+        result_payload = result or {}
+        any_changed = False
+        # Per-action audit (failed attempt) for the 6 in-scope kinds.
+        if task.kind in _AUDIT_ACTIONS:
+            audit_extras: dict[str, Any] = {}
+            # Stamp the baseline-params fingerprint so the prompt's
+            # FAILURE RECOVERY block + the self-loop denial helper can
+            # detect "same params failed twice; refuse a third
+            # attempt". Only baseline is fingerprinted today
+            # (validate_stack uses the same surface but its own audit
+            # branch sits in ``_promote_to_shared_state``); other
+            # actions would need their own per-action fingerprint key
+            # set before this stamp is meaningful.
+            if task.kind == "baseline":
+                audit_extras["fingerprint"] = _baseline_params_fingerprint(
+                    task.params
+                )
+            self.shared_state.record_action_attempt(
+                action=task.kind,
+                task_id=task.task_id,
+                status="failed",
+                decision="no_promote",
+                result=result_payload,
+                extras=audit_extras,
+            )
+            any_changed = True
+        # Global rolling failure log (every kind, including kernel-owned).
+        self.shared_state.record_action_failure(
+            action=task.kind,
+            task_id=task.task_id,
+            result=result_payload,
+        )
+        any_changed = True
+        # Legacy baseline-specific gates (streak counter +
+        # ``baseline_failed`` stop reason + ``baseline_not_promoted``
+        # event). Kept intact so existing run_optimization heuristics
+        # (e.g. abort-after-3-baselines) still apply.
+        baseline_event_payload: dict[str, Any] | None = None
+        if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
+            self.shared_state.baseline_failure_streak += 1
+            if self.shared_state.baseline_failure_streak >= 3:
+                self.shared_state.stop_reason = "baseline_failed"
+            baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
                 "failure_streak": self.shared_state.baseline_failure_streak,
                 "stop_reason": self.shared_state.stop_reason,
-                "result_status": (result or {}).get("status"),
-                "error_class": (result or {}).get("error_class"),
-            },
-        ))
+                "result_status": result_payload.get("status"),
+                "error_class": result_payload.get("error_class"),
+            }
+            any_changed = True
+        if any_changed:
+            self.shared_state.save(self.session_dir)
+        if baseline_event_payload is not None:
+            await self.bus.append_and_seq(Message.new(
+                "coordinator", "*", "event", baseline_event_payload,
+            ))
 
     async def _pump_dispatcher_once(self) -> None:
         queued = await self.tasks.queued()
@@ -1830,6 +2057,15 @@ class Coordinator:
         if not isinstance(result, dict):
             return
         changed = False
+        # Audit-trail bookkeeping for the 6 non-kernel actions. Each
+        # in-scope branch sets ``audit_decision`` (and optionally
+        # ``audit_extras``); after all branches we call
+        # ``record_action_attempt`` once so adding a new branch is a
+        # local change. ``audit_decision`` remaining ``None`` means
+        # either the kind is out of scope (kernel-owned, pmc_roofline)
+        # or the branch had nothing to record.
+        audit_decision: str | None = None
+        audit_extras: dict[str, Any] = {}
         if task_kind == "baseline":
             tput = result.get("output_throughput")
             if isinstance(tput, (int, float)) and tput > 0:
@@ -1856,7 +2092,35 @@ class Coordinator:
                 "workspace": result.get("workspace"),
             }
             changed = True
+            audit_decision = (
+                "promoted" if isinstance(tput, (int, float)) and tput > 0
+                else "discarded"
+            )
+            audit_extras = {
+                "materialized_config": result.get("materialized_config"),
+                "accuracy": result.get("accuracy"),
+                "baseline_tput": (
+                    float(tput) if isinstance(tput, (int, float)) else None
+                ),
+                # Stamp the canonical params fingerprint so the prompt's
+                # FAILURE RECOVERY block (and the self-loop denial helper)
+                # can compare what was actually run against what
+                # Orchestration is about to propose. See
+                # ``_baseline_params_fingerprint``.
+                "fingerprint": _baseline_params_fingerprint(
+                    task.params if task is not None else None
+                ),
+            }
         elif task_kind == "profile":
+            audit_decision = "promoted"
+            audit_extras = {
+                "trace_path": None,
+                "profile_args": None,
+                "pmc_summary_path": result.get("pmc_summary_path"),
+                "roofline_path": result.get("roofline_path"),
+                "kernel_breakdown_path": result.get("kernel_breakdown_path"),
+                "output_throughput": result.get("output_throughput"),
+            }
             # Bug C fix: surface the trace path produced by ProfileExecutor
             # to SharedState so Orch can pass a real path to the kernel
             # `select_kernels` REQUEST instead of fabricating one.
@@ -1878,6 +2142,8 @@ class Coordinator:
                 # Stale select_kernels cache no longer matches this trace.
                 self.shared_state.last_select_kernels = {}
                 changed = True
+                audit_extras["trace_path"] = str(trace_path)
+                audit_extras["profile_args"] = profile_args
             # profile result may also include a tput; promote into
             # current_best on the same +1% rule the grid path uses below.
             tput = result.get("output_throughput")
@@ -1975,6 +2241,28 @@ class Coordinator:
                     gain, float(tput), self.shared_state.baseline_tput,
                     self.shared_state.cumulative_gain_validated_stack_len,
                 )
+                audit_decision = "promoted" if gain > 0 else "discarded"
+                audit_extras = {
+                    "validated_stack_len": (
+                        self.shared_state.cumulative_gain_validated_stack_len
+                    ),
+                    "gain_pct": float(gain),
+                    "baseline_tput_ref": float(self.shared_state.baseline_tput),
+                    "validated_tput": float(tput),
+                }
+            else:
+                # Record the failed-to-measure case as a discard so the
+                # audit trail still captures *why* the validation didn't
+                # produce a number (NaN tput, baseline_tput == 0, etc.).
+                audit_decision = "discarded"
+                audit_extras = {
+                    "validated_stack_len": stack_len_at_run,
+                    "gain_pct": None,
+                    "baseline_tput_ref": float(self.shared_state.baseline_tput),
+                    "validated_tput": (
+                        float(tput) if isinstance(tput, (int, float)) else None
+                    ),
+                }
         elif task_kind in ("backends", "params", "sweep"):
             # T1/T2 — persist discovered_flags + synergy_attempted +
             # winners_history so the next Orchestration tick (and IR-26
@@ -2011,6 +2299,31 @@ class Coordinator:
                 )
                 changed = True
             if task_kind == "sweep":
+                # Audit trail (sweep is in _AUDIT_ACTIONS even though it
+                # never promotes a current_best — Orchestration still
+                # benefits from seeing what the sweep grid produced).
+                # Recorded FIRST so the subsequent ``record_sweep`` call
+                # gets the final word on ``last_sweep`` (which is a
+                # richer grid-summary payload than the uniform audit
+                # entry; see ``_format_last_sweep`` and
+                # test_p2_5_grid_promotion). ``sweep_attempts`` still
+                # captures the audit row.
+                pareto = result.get("pareto_front") or []
+                self.shared_state.record_action_attempt(
+                    action="sweep",
+                    task_id=getattr(task, "task_id", "") if task is not None else "",
+                    status="succeeded",
+                    decision="discarded",
+                    result=result,
+                    extras={
+                        "grid_size": result.get("grid_size"),
+                        "best_overall": result.get("best_overall"),
+                        "best_for_each_conc": result.get("best_for_each_conc"),
+                        "pareto_front_size": (
+                            len(pareto) if isinstance(pareto, list) else None
+                        ),
+                    },
+                )
                 self.shared_state.record_sweep(result)
                 changed = True
                 # Sweep maps the current stack across workloads; it is not
@@ -2152,6 +2465,35 @@ class Coordinator:
                 ),
             )
             changed = True
+            # Audit-trail for backends / params. Sweep already recorded
+            # above (it short-circuits with ``return``).
+            audit_decision = "promoted" if promoted else "discarded"
+            audit_extras = {
+                "round_id": (
+                    self.shared_state.backend_winners_history[-1].get("round_id")
+                    if self.shared_state.backend_winners_history
+                    and isinstance(
+                        self.shared_state.backend_winners_history[-1], dict,
+                    )
+                    else None
+                ),
+                "best_variant_name": (
+                    bv.get("name") if isinstance(bv, dict) else None
+                ),
+                "candidate_extra_sglang_args": (
+                    bv.get("extra_sglang_args")
+                    if isinstance(bv, dict) else None
+                ),
+                "extra_envs": (
+                    dict(bv.get("extra_envs") or {})
+                    if isinstance(bv, dict) else {}
+                ),
+                "best_gain_pct_vs_base": best_gain,
+                "gain_vs_cb": (
+                    float(gain_vs_cb)
+                    if isinstance(gain_vs_cb, (int, float)) else None
+                ),
+            }
         # Out-of-band score updates for the task_kinds that don't have a
         # promoted-vs-discard notion (profile / pmc_roofline / validate_stack
         # bump runs + cooldown; baseline is treated as a gate and skipped
@@ -2160,6 +2502,20 @@ class Coordinator:
         # measurement-style kinds here.
         if task_kind in {"profile", "pmc_roofline", "validate_stack"}:
             self._apply_action_score_update(task_kind, result)
+            changed = True
+        # Audit trail (kernel-parity) for the 6 non-kernel actions: one
+        # record per attempt with status="succeeded" + branch-supplied
+        # decision/extras. The sweep branch records its own attempt
+        # before the early ``return``; everything else lands here.
+        if audit_decision is not None and task_kind in _AUDIT_ACTIONS:
+            self.shared_state.record_action_attempt(
+                action=task_kind,
+                task_id=getattr(task, "task_id", "") if task is not None else "",
+                status="succeeded",
+                decision=audit_decision,
+                result=result,
+                extras=audit_extras,
+            )
             changed = True
         if changed:
             self.shared_state.save(self.session_dir)

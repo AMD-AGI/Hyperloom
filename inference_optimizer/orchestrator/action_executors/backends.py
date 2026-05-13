@@ -31,7 +31,15 @@ from pathlib import Path
 from typing import Any
 
 from ...session_paths import runs_dir
-from ._grid_runner import GridVariant, VariantResult, pick_winners, run_grid, _resolve_session_dir
+from ._grid_runner import (
+    GridVariant,
+    VariantResult,
+    _resolve_session_dir,
+    pick_winners,
+    run_grid,
+    sanitize_result_dir,
+    sanitize_script_name,
+)
 from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
@@ -528,11 +536,27 @@ class BackendsExecutor:
             str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower()
         )
+        # Orchestration-supplied script + result_dir overrides. Both let
+        # the LLM route variants around scripts that hardcode
+        # ``--result-dir /workspace/`` (see SKILL.md "Magpie leak-path
+        # salvage"). Sanitized once at the executor boundary; downstream
+        # ``run_grid`` / ``materialize_config_with_envs`` calls trust the
+        # values verbatim.
+        try:
+            override_script = sanitize_script_name(params.get("benchmark_script"))
+            override_result_dir = sanitize_result_dir(params.get("result_dir"))
+        except ValueError as exc:
+            return {
+                "status": "failed",
+                "error_class": "bad_param",
+                "error": str(exc),
+            }
         config_path = materialize_config_with_envs(
             config_path,
             output_root,
             model_path=resolved_model or None,
             gpu_type=resolved_gpu or None,
+            benchmark_script=override_script,
             out_name="backends_base.with_envs.yaml",
         )
 
@@ -653,6 +677,8 @@ class BackendsExecutor:
             variant_timeout_sec=timeout_sec,
             model_path=resolved_model,
             gpu_type=resolved_gpu,
+            benchmark_script=override_script,
+            result_dir=override_result_dir,
         )
         winners = pick_winners(results, baseline_tput=base_tput)
         winner_names = {w.name for w in winners}
@@ -742,6 +768,8 @@ class BackendsExecutor:
                     variant_timeout_sec=timeout_sec,
                     model_path=resolved_model,
                     gpu_type=resolved_gpu,
+                    benchmark_script=override_script,
+                    result_dir=override_result_dir,
                 )
                 # Track which combos were actually tested so the next
                 # round won't replay them. Coordinator persists this

@@ -15,16 +15,21 @@ import copy
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from .benchmark_result import extract_benchmark_measurement
+from .benchmark_result import (
+    extract_benchmark_measurement,
+    harvest_leaked_artifacts,
+)
 
 
 log = logging.getLogger(__name__)
@@ -135,6 +140,66 @@ class VariantResult:
 
 
 # ---------------------------------------------------------------------------
+# Shared sanitization for Orchestration-supplied overrides. Magpie picks the
+# benchmark script via ``cfg["benchmark"]["benchmark_script"]`` (a bare file
+# name; Magpie prepends its own scripts dir) and writes ``inferencex_result.
+# json`` into ``$RESULT_DIR``. Both knobs are surfaced as ``task.params``
+# fields so Orchestration can route around scripts that hardcode
+# ``--result-dir /workspace/`` (see SKILL.md "Magpie leak-path salvage"
+# and the failure-recovery section). Both must be sanitized before they
+# touch a YAML or an env var because they originate from an LLM proposal:
+# we reject anything that contains path separators or shell metacharacters.
+# The helpers raise ``ValueError`` so callers can surface ``error_class=
+# bad_param`` (Coordinator promotes that to a ``policy_denied`` observation
+# instead of running an unsafe subprocess).
+_SCRIPT_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+\.sh$")
+_RESULT_DIR_FORBID_RE = re.compile(r"[\s\"'`$;&|<>(){}\[\]\\*?!]")
+
+
+def sanitize_script_name(value: Any) -> str | None:
+    """Return ``value`` if it's a safe Magpie benchmark script file name.
+
+    Magpie prepends its own ``scripts/`` directory to the value, so the
+    value MUST be a bare ``*.sh`` file name (no slashes / no ``..``).
+    Empty / ``None`` returns ``None`` (caller should treat as "no
+    override"). Raises ``ValueError`` for anything that looks like a
+    shell injection attempt — Orchestration can then propose a corrected
+    value on the next tick.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if not _SCRIPT_NAME_RE.match(text):
+        raise ValueError(
+            f"benchmark_script={text!r} rejected: must be a bare *.sh "
+            "file name (no path separators, no shell metacharacters)"
+        )
+    return text
+
+
+def sanitize_result_dir(value: Any) -> str | None:
+    """Return ``value`` if it's a safe absolute (or workspace-relative) dir.
+
+    Magpie passes the value through to ``$RESULT_DIR``, which lands in a
+    shell ``cd`` / ``mkdir`` inside the benchmark script. We reject any
+    character class that would let an LLM-supplied override escape into
+    a different shell word. Empty / ``None`` returns ``None``.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if _RESULT_DIR_FORBID_RE.search(text):
+        raise ValueError(
+            f"result_dir={text!r} rejected: contains whitespace or shell "
+            "metacharacters; pass an absolute or workspace-relative path"
+        )
+    return text
+
+
 def server_args_env_name(framework: str | None) -> str:
     """Return the Magpie env var used to append backend server args."""
     name = str(framework or "").strip().lower()
@@ -161,6 +226,7 @@ def apply_runtime_benchmark_overrides(
     *,
     model_path: str | None = None,
     gpu_type: str | None = None,
+    benchmark_script: str | None = None,
 ) -> dict[str, Any]:
     """Apply runtime env/CLI overrides to a Magpie benchmark YAML.
 
@@ -169,6 +235,16 @@ def apply_runtime_benchmark_overrides(
     backends/params/sweep silently fell back to shipped YAML defaults like
     ``TP=1`` and ``ROCR_VISIBLE_DEVICES="1"``. Large models (DeepSeek-R1-0528)
     then OOM-failed even though the launch environment had ``TP=8``.
+
+    ``benchmark_script`` (when non-empty) lets the caller force-select a
+    specific Magpie script (e.g. ``sglang_mi300x.sh``) to route around
+    a model-default script that hardcodes a problematic ``--result-dir``
+    (see SKILL.md "Magpie leak-path salvage"). The value MUST already be
+    sanitized via :func:`sanitize_script_name` — callers at the executor
+    boundary do that so any ``ValueError`` surfaces as ``error_class=
+    bad_param`` instead of an unsafe subprocess invocation. The script
+    is written AFTER the ``gpu_type`` pop below so the operator-supplied
+    override wins over Magpie's runner_type → script auto-selection.
     """
     if model_path:
         bench["model"] = str(model_path)
@@ -181,8 +257,12 @@ def apply_runtime_benchmark_overrides(
         bench["runner_type"] = str(gpu_type)
         # Magpie priority: explicit benchmark_script > native script >
         # runner_type-derived generic script. Drop stale explicit scripts so
-        # runtime GPU selection actually wins.
+        # runtime GPU selection actually wins; the operator-supplied
+        # ``benchmark_script`` (next block) re-pins one if requested.
         bench.pop("benchmark_script", None)
+
+    if benchmark_script:
+        bench["benchmark_script"] = str(benchmark_script)
 
     envs = bench.setdefault("envs", {})
     for env_key in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC"):
@@ -215,6 +295,7 @@ def _build_variant_yaml(
     output_subdir: Path,
     model_path: str | None = None,
     gpu_type: str | None = None,
+    benchmark_script: str | None = None,
 ) -> Path:
     """Materialize a per-variant Magpie YAML on disk.
 
@@ -229,12 +310,21 @@ def _build_variant_yaml(
     ``gpu_type`` (when non-empty) injects ``benchmark.runner_type`` and
     pops any explicit ``benchmark.benchmark_script`` so Magpie's
     runner_type -> script logic actually fires for the requested GPU.
+
+    ``benchmark_script`` (when non-empty, must already be sanitized via
+    :func:`sanitize_script_name`) force-pins the Magpie script per
+    variant — used by Orchestration to route around model-default
+    scripts that hardcode ``--result-dir /workspace/`` (the leak path
+    that prompted SKILL.md's salvage section). The override is applied
+    AFTER the gpu_type pop so it wins over Magpie's runner_type-derived
+    script.
     """
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     bench = cfg.setdefault("benchmark", {})
     envs = apply_runtime_benchmark_overrides(
         bench, model_path=model_path, gpu_type=gpu_type,
+        benchmark_script=benchmark_script,
     )
     extra_args_env = server_args_env_name(bench.get("framework"))
 
@@ -326,8 +416,17 @@ def _run_magpie(
     output_dir: Path,
     timeout_sec: int,
     cwd: str,
+    result_dir: str | None = None,
 ) -> tuple[int, str, str]:
-    """Blocking subprocess wrapper. Returns (rc, stdout, stderr)."""
+    """Blocking subprocess wrapper. Returns (rc, stdout, stderr).
+
+    ``result_dir`` (when non-empty, must already be sanitized via
+    :func:`sanitize_result_dir`) overrides ``$RESULT_DIR`` for this
+    invocation. The env var is ALWAYS set (defaults to ``output_dir``
+    when caller doesn't override) so even a Magpie script that respects
+    ``$RESULT_DIR`` writes ``inferencex_result.json`` into the per-task
+    workspace rather than ``/workspace/``.
+    """
     # Pre-clean: kill lingering server processes + clear shared memory so the
     # next vLLM/SGLang startup doesn't collide with stale resources.
     # Skip in test environments to avoid 2s sleep per variant.
@@ -339,6 +438,12 @@ def _run_magpie(
     magpie_dir = os.environ.get("MAGPIE_DIR", "")
     if magpie_dir:
         env["PYTHONPATH"] = f"{magpie_dir}:{env.get('PYTHONPATH', '')}"
+    # Always-on RESULT_DIR default: covers Magpie scripts that respect
+    # the env var (and would otherwise fall back to a hardcoded path).
+    # Scripts that ignore RESULT_DIR (e.g. ``dsr1_fp8_mi300x.sh`` with its
+    # hardcoded ``--result-dir /workspace/``) still leak; the
+    # ``extract_benchmark_measurement`` salvage path picks those up.
+    env["RESULT_DIR"] = result_dir or str(output_dir)
     cmd = [
         magpie_python, "-m", "Magpie", "-v", "benchmark",
         "--benchmark-config", str(config_path),
@@ -365,6 +470,8 @@ async def run_grid(
     keep_going_on_failure: bool = True,
     model_path: str | None = None,
     gpu_type: str | None = None,
+    benchmark_script: str | None = None,
+    result_dir: str | None = None,
 ) -> list[VariantResult]:
     """Execute every variant in ``grid`` once, in order.
 
@@ -379,6 +486,16 @@ async def run_grid(
     $MODEL_PATH / $GPU_TYPE) so each Magpie invocation benchmarks the
     user's actual model on the user's actual GPU rather than the YAML's
     legacy default.
+
+    ``benchmark_script`` / ``result_dir`` (both must already be sanitized
+    via :func:`sanitize_script_name` / :func:`sanitize_result_dir`) let
+    the executor route around a model-default script that hardcodes
+    ``--result-dir /workspace/`` — see SKILL.md "Magpie leak-path
+    salvage". ``benchmark_script`` rewrites the variant YAML so Magpie
+    runs the operator-picked script; ``result_dir`` is forwarded as
+    ``$RESULT_DIR`` so scripts that respect the env var write into the
+    variant slot. The salvage path is still wired in (mtime-gated per
+    variant below) for scripts that ignore both knobs.
     """
     if not magpie_python:
         magpie_python = _resolve_magpie_python()
@@ -390,6 +507,7 @@ async def run_grid(
                 base_yaml_path, base_extra_args, variant, output_subdir=slot,
                 model_path=model_path,
                 gpu_type=gpu_type,
+                benchmark_script=benchmark_script,
             )
         except Exception as exc:  # noqa: BLE001
             results.append(VariantResult(
@@ -407,6 +525,13 @@ async def run_grid(
             i + 1, len(grid), variant.name, variant.extra_sglang_args,
         )
 
+        # Snapshot wall-clock immediately before launch so the salvage
+        # path can mtime-gate documented Magpie leak destinations
+        # per-variant. Without this gate a stale
+        # ``/workspace/inferencex_result.json`` from a prior run (or
+        # from an earlier variant in this same grid) silently
+        # masquerades as the current variant's result.
+        variant_started_unix = time.time()
         try:
             rc, stdout, stderr = await asyncio.to_thread(
                 _run_magpie,
@@ -415,12 +540,27 @@ async def run_grid(
                 output_dir=slot,
                 timeout_sec=variant_timeout_sec,
                 cwd=cwd,
+                result_dir=result_dir,
             )
         except subprocess.TimeoutExpired as exc:
+            # Harvest pre-timeout leaks (``server.log`` / GPU metrics /
+            # partial profile relay) so the NFS clone of the variant
+            # slot captures what the wrapper managed to write before
+            # the timer fired — usually the smoking gun.
+            to_candidates = sorted(slot.glob("benchmark_*"))
+            to_destination = to_candidates[-1] if to_candidates else slot
+            to_harvested = harvest_leaked_artifacts(
+                to_destination,
+                subprocess_started_unix=variant_started_unix,
+            )
             results.append(VariantResult(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed", error=f"timeout: {exc}", note=variant.note,
+                nonfatal_warnings=[
+                    f"harvested_leaked_artifact:{src}"
+                    for src, _ in to_harvested
+                ],
             ))
             if not keep_going_on_failure:
                 break
@@ -428,7 +568,28 @@ async def run_grid(
 
         # Locate workspace inside slot.
         candidates = sorted(slot.glob("benchmark_*"))
+        # Always-on artifact harvest (parity with BaselineExecutor —
+        # see ``harvest_leaked_artifacts``). Without this each variant
+        # in a backends / params / sweep grid leaks its own
+        # ``/workspace/server.log`` + ``gpu_metrics.csv`` + profile
+        # relay, which makes the NFS clone of
+        # ``<session>/runs/<action>/<task_id>/<variant>/`` empty of
+        # wrapper diagnostics — exactly the per-variant evidence
+        # Robustness needs to RCA a flaky variant.
+        harvest_destination = candidates[-1] if candidates else slot
+        harvested = harvest_leaked_artifacts(
+            harvest_destination,
+            subprocess_started_unix=variant_started_unix,
+        )
+        if harvested:
+            log.info(
+                "_grid_runner: variant=%s harvested %d leaked artifact(s): %s",
+                variant.name,
+                len(harvested),
+                ", ".join(src.name for src, _ in harvested),
+            )
         if not candidates:
+            harvest_tags = [f"harvested_leaked_artifact:{src}" for src, _ in harvested]
             results.append(VariantResult(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
@@ -438,6 +599,7 @@ async def run_grid(
                     (stderr or stdout)[-2000:]
                     if rc != 0 else "no benchmark_* workspace produced"
                 ),
+                nonfatal_warnings=harvest_tags,
                 note=variant.note,
             ))
             if rc != 0 and not keep_going_on_failure:
@@ -446,10 +608,16 @@ async def run_grid(
         workspace = candidates[-1]
         report = _parse_report(workspace)
         report_path = workspace / "benchmark_report.json"
-        measurement = extract_benchmark_measurement(report, workspace=workspace)
+        measurement = extract_benchmark_measurement(
+            report,
+            workspace=workspace,
+            subprocess_started_unix=variant_started_unix,
+        )
         warnings = list(measurement.pop("nonfatal_warnings", []) or [])
         if rc != 0:
             warnings.append("magpie_nonzero_after_valid_measurement")
+        for leak_src, _ in harvested:
+            warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
         if not measurement.get("valid_measurement"):
             if rc != 0:
@@ -527,7 +695,10 @@ def _safe(name: str) -> str:
 __all__ = [
     "GridVariant",
     "VariantResult",
+    "apply_runtime_benchmark_overrides",
     "pick_winners",
     "run_grid",
+    "sanitize_result_dir",
+    "sanitize_script_name",
     "server_args_env_name",
 ]

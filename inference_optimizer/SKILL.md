@@ -322,6 +322,108 @@ Before a new model run, verify these fields match the environment:
 - `benchmark.envs.PATH`: must lead with the launcher Python's bin dir
   (`$(dirname "$PYTHON")`).
 
+### Magpie leak-path salvage (`INFERENCE_OPTIMIZER_RESCUE_PATHS`)
+
+Magpie's framework-specific scripts (notably
+`dsr1_fp8_mi300x.sh`) hardcode `--result-dir /workspace/`, so when the
+optimizer launches a benchmark with a per-task workspace InferenceX
+writes its `inferencex_result.json` to `/workspace/` instead of into the
+workspace Magpie returned. The wrapper then reports `success: false`
+even though the numerical run completed. To stop this single bug from
+looping baselines forever, `extract_benchmark_measurement` runs a
+second-chance salvage pass over documented leak destinations whenever
+the in-workspace search produced no usable measurement:
+
+1. `$INFERENCE_OPTIMIZER_RESCUE_PATHS` — colon-separated list of files
+   and/or directories. Directories are scanned for
+   `inferencex_result*.json`.
+2. Default: `/workspace/inferencex_result.json`.
+
+Salvage is mtime-gated: only files written *after* the executor captured
+`subprocess_started_unix = time.time()` (right before `subprocess.run`)
+are eligible, so a stale leak from a prior run can never masquerade as
+the current run's result. Adopted leaks are tagged in the result's
+`nonfatal_warnings` as `rescued_from_leaked_path:<path>` so operators
+can audit which path the salvage picked. The fix for the underlying
+hardcoded `--result-dir` lives in the relevant Magpie script(s); this
+escape hatch is a safety net, not a substitute.
+
+When salvage adopts a leaked file, `_materialize_rescue_into_workspace`
+also `shutil.copy2`s it into the task workspace (preserving the
+basename — `inferencex_result.json`, `inferencex_result_eval.json`, etc.)
+so the canonical artifact lives alongside `benchmark_report.json` and
+the NFS clone of `<session>/runs/<action>/<task_id>/` is self-contained.
+`raw_result_path` advertises the in-workspace copy; the original leak
+location is preserved verbatim in the `rescued_from_leaked_path:<path>`
+warning. The copy is best-effort: on a permission / disk error the
+salvage falls back to the leak path and additionally emits
+`rescued_copy_into_workspace_failed:<path>` so operators see why the
+canonical layout is missing without losing the measurement itself.
+
+`inferencex_result.json` is only one of several artifacts Magpie's shell
+wrappers hardcode under `/workspace/`. The single_node `*.sh` scripts
+also redirect:
+
+* `SERVER_LOG=/workspace/server.log` — sglang/vllm server stdout+stderr
+  (the smoking gun for GPU OOM / checkpoint-load failures).
+* `GPU_METRICS_CSV=/workspace/gpu_metrics.csv` — per-second
+  power/temp/utilisation from `start_gpu_monitor`.
+* `/workspace/profile_*.trace.json.gz` — the PROFILE relay copy of
+  the torch profiler trace (`benchmark_lib.sh:540`).
+
+`harvest_leaked_artifacts` runs in `BaselineExecutor.__call__` and in
+`_grid_runner._run_magpie` **unconditionally** after the subprocess
+returns (including the timeout / no-workspace branches) and copies
+every fresh match (mtime-gated against `subprocess_started_unix`) into
+the task workspace alongside `benchmark_report.json`. The leak source
+files stay in place; each harvested artifact is tagged in
+`nonfatal_warnings` as `harvested_leaked_artifact:<source>`. The scan
+root list is `$INFERENCE_OPTIMIZER_LEAK_ROOTS` (colon-separated, with
+`/workspace` as the default); operators can extend it without touching
+code, and the test suite pins it to a sandbox via an autouse fixture
+so unit tests stay isolated from the host's real `/workspace`.
+
+The same mtime gate is now applied per variant in `_grid_runner.py`
+(`variant_started_unix = time.time()` is captured immediately before
+each `_run_magpie` call, and forwarded to `extract_benchmark_measurement
+(subprocess_started_unix=...)`). Without this, every variant in a
+`backends` / `params` / `sweep` grid would inherit the previous variant's
+or even the previous *baseline*'s `/workspace/inferencex_result.json` —
+silently producing fake winners. The same `extract_benchmark_measurement`
+salvage helpers apply to grid variants and to validate_stack runs.
+
+Orchestration can route around the leak proactively via two new
+`task.params` knobs (descriptive `params_schema` blocks live in each
+`actions/_meta/<action>.yaml`):
+
+* `params.benchmark_script` — bare `*.sh` file name (sanitized at every
+  executor boundary via `sanitize_script_name`; path separators / shell
+  metacharacters are rejected with `error_class=bad_param`). When set,
+  Magpie's `benchmark.benchmark_script` is rewritten in the materialized
+  YAML *after* the gpu_type → script auto-selection runs, so the
+  operator pick wins. Typical use: pin `sglang_mi300x.sh` when the
+  default model script (`dsr1_fp8_mi300x.sh`) hardcodes `--result-dir
+  /workspace/`. Honored by baseline / profile / validate_stack /
+  backends / params / sweep.
+* `params.result_dir` — absolute or workspace-relative path (sanitized
+  via `sanitize_result_dir`). Forwarded as `$RESULT_DIR` for that
+  subprocess. The executors ALWAYS set `$RESULT_DIR`, defaulting to the
+  per-task workspace (baseline) or the per-variant slot (grid_runner),
+  so Magpie scripts that respect the env var write into the optimizer's
+  workspace by default; operators only override when redirecting at a
+  known leak destination already on `$INFERENCE_OPTIMIZER_RESCUE_PATHS`.
+
+Coordinator stamps the canonical `_baseline_params_fingerprint` (a
+projection over `benchmark_script` / `result_dir` / `extra_sglang_args` /
+`extra_envs` / `model_path` / `gpu_type` / `config_path` /
+`disable_run_eval`) on every baseline audit entry (success path in
+`_promote_to_shared_state`, failure path in `_handle_unpromotable_result`).
+PolicyGate enforces a `baseline_self_loop` denial when two consecutive
+failed baseline attempts carry the same fingerprint AND Orchestration
+proposes a third attempt with that same fingerprint; the denial's
+`hint` points at the next override surface so the prompt's FAILURE
+RECOVERY block has a deterministic recovery path.
+
 ### Workload-contract reuse (baseline → params/backends/sweep)
 
 `baseline` materializes its YAML once with the operator's process env (`CONC` /
