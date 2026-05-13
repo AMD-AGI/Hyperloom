@@ -24,6 +24,9 @@ from inference_optimizer.orchestrator.action_executors import (
 from inference_optimizer.orchestrator.action_executors._grid_runner import (
     GridVariant,
     VariantResult,
+    _build_variant_yaml,
+    _resolve_magpie_python,
+    _run_magpie,
     pick_winners,
     run_grid,
 )
@@ -179,6 +182,70 @@ def test_pick_winners_default_threshold():
 # ===========================================================================
 # run_grid — exercised with a stubbed subprocess.run
 # ===========================================================================
+def test_resolve_magpie_python_skips_interpreter_without_magpie(monkeypatch):
+    """Do not pick system python just because it is first on PATH.
+
+    Magpie may only be importable from the install Python/venv or via
+    PYTHONPATH=$MAGPIE_DIR; selecting /usr/bin/python3 breaks baseline.
+    """
+    monkeypatch.delenv("MAGPIE_PYTHON", raising=False)
+    monkeypatch.delenv("PYTHON", raising=False)
+
+    def fake_which(name):
+        return "/usr/bin/python3" if name == "python3" else None
+
+    def fake_exists(self):
+        return str(self) == "/opt/venv/bin/python"
+
+    def fake_run(cmd, *args, **kwargs):
+        assert cmd[-1] == "import Magpie"
+        rc = 0 if cmd[0] == "/opt/venv/bin/python" else 1
+        return subprocess.CompletedProcess(cmd, rc, "", "")
+
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr(Path, "exists", fake_exists)
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+        fake_run,
+    )
+
+    assert _resolve_magpie_python() == "/opt/venv/bin/python"
+
+
+def test_run_magpie_prepends_magpie_dir_to_pythonpath(tmp_path, monkeypatch):
+    """Magpie source checkout must be visible from any cwd."""
+    monkeypatch.setenv("MAGPIE_DIR", "/workspace/Magpie")
+    monkeypatch.setenv("PYTHONPATH", "/existing")
+    seen: dict[str, object] = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        seen["cmd"] = cmd
+        seen["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+        fake_run,
+    )
+
+    rc, stdout, stderr = _run_magpie(
+        magpie_python="/opt/venv/bin/python",
+        config_path=tmp_path / "config.yaml",
+        output_dir=tmp_path / "out",
+        timeout_sec=5,
+        cwd=str(tmp_path),
+    )
+
+    assert rc == 0
+    assert stdout == "ok"
+    assert stderr == ""
+    env = seen["env"]
+    assert env["PYTHONPATH"].split(":")[:2] == ["/workspace/Magpie", "/existing"]
+
+
 @pytest.mark.asyncio
 async def test_run_grid_writes_per_variant_yaml_and_parses_report(tmp_path):
     base = tmp_path / "base.yaml"
@@ -219,6 +286,44 @@ async def test_run_grid_writes_per_variant_yaml_and_parses_report(tmp_path):
         envs = cfg["benchmark"]["envs"]
         assert "--mem-fraction-static 0.85" in envs["EXTRA_SGLANG_ARGS"]
         assert grid[i].extra_sglang_args in envs["EXTRA_SGLANG_ARGS"]
+
+
+@pytest.mark.asyncio
+async def test_run_grid_keeps_valid_measurement_with_report_failure_and_nonzero_rc(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_root = tmp_path / "out"
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=900.0, success=False)
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=1, stdout="", stderr="cleanup failed",
+        )
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+        side_effect=_fake_run,
+    ):
+        results = await run_grid(
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("valid_warning")],
+            output_root=output_root,
+            variant_timeout_sec=10,
+        )
+
+    assert len(results) == 1
+    assert results[0].status == "succeeded"
+    assert results[0].reported_success is False
+    assert results[0].returncode == 1
+    assert results[0].output_throughput == 900.0
+    assert results[0].completed_requests == 80
+    assert "benchmark_report_success_false" in results[0].nonfatal_warnings
+    assert "magpie_nonzero_after_valid_measurement" in results[0].nonfatal_warnings
+    winners = pick_winners(results, baseline_tput=800.0)
+    assert [w.name for w in winners] == ["valid_warning"]
 
 
 @pytest.mark.asyncio
@@ -337,6 +442,57 @@ def test_baseline_materialize_uses_vllm_extra_args_env(tmp_path):
     envs = cfg["benchmark"]["envs"]
     assert envs["EXTRA_VLLM_ARGS"] == "--block-size 256"
     assert "EXTRA_SGLANG_ARGS" not in envs
+
+
+def test_grid_variant_yaml_preserves_base_extra_args_and_env_overrides(
+    tmp_path, monkeypatch,
+):
+    """Backends/params grid materialization must match baseline env handling.
+
+    Regression: grid runner used to ignore TP/ISL/OSL env overrides and
+    overwrite base EXTRA_VLLM_ARGS, so DSR1 ran backend variants with TP=1 and
+    dropped the model-required `--block-size 1`.
+    """
+    base = tmp_path / "vllm.yaml"
+    _write_vllm_yaml(base)
+
+    # Simulate a model-specific asset yaml with a required global vLLM arg.
+    cfg = yaml.safe_load(base.read_text())
+    envs = cfg["benchmark"]["envs"]
+    envs["EXTRA_VLLM_ARGS"] = "--block-size 1"
+    base.write_text(yaml.safe_dump(cfg))
+
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("CONC", "64")
+    monkeypatch.setenv("ISL", "1024")
+    monkeypatch.setenv("OSL", "1024")
+    monkeypatch.setenv("MAX_MODEL_LEN", "6144")
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+
+    out = _build_variant_yaml(
+        base,
+        base_extra_args="--kv-cache-dtype fp8",
+        variant=GridVariant("vllm_max_seqs", "--max-num-seqs 512"),
+        output_subdir=tmp_path / "variant",
+        model_path="/wekafs/models/DeepSeek-R1-0528",
+        gpu_type="mi355x",
+    )
+    rendered = yaml.safe_load(out.read_text())
+    bench = rendered["benchmark"]
+    envs = bench["envs"]
+
+    assert bench["model"] == "/wekafs/models/DeepSeek-R1-0528"
+    assert bench["runner_type"] == "mi355x"
+    assert "benchmark_script" not in bench
+    assert envs["TP"] == 8
+    assert envs["CONC"] == 64
+    assert envs["ISL"] == 1024
+    assert envs["OSL"] == 1024
+    assert envs["MAX_MODEL_LEN"] == 6144
+    assert envs["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
+    assert envs["EXTRA_VLLM_ARGS"] == (
+        "--block-size 1 --kv-cache-dtype fp8 --max-num-seqs 512"
+    )
 
 
 # ===========================================================================

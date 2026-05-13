@@ -1,12 +1,9 @@
-"""Self-contained PMC and roofline integration for inference_optimizer.
+"""Self-contained PMC and roofline helpers for a dedicated profile run.
 
-This is adapted from TBO's ``marathon_v3.pmc_profiler`` and
-``marathon_v3.roofline`` but intentionally kept local to Hyperloom. The profile
-flow should not depend on a sibling TBO checkout existing in a developer
-workspace.
-
-The module is best-effort: ROCm/rocprofv3 failures return structured
-``status=skipped`` results so the existing torch-trace path remains usable.
+ROCm allows only one rocprofiler tool registration per process. Do not use
+these helpers in the normal torch-profiler server process. The caller must
+launch a separate server process with ``LD_PRELOAD`` and use that process only
+for PMC/roofline collection.
 """
 
 from __future__ import annotations
@@ -14,6 +11,8 @@ from __future__ import annotations
 import csv
 import json
 import os
+import signal
+import shlex
 import shutil
 import subprocess
 import time
@@ -21,6 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.request import urlopen
 
 
 PMC_COUNTER_GROUPS = [
@@ -45,7 +45,6 @@ def _to_int(value: Any) -> int:
 
 
 def _normalize_kernel_name(raw: str) -> str:
-    """Shorten rocprofv3 kernel names to stable categories."""
     lower = (raw or "").lower()
     if "cijk_" in lower:
         return "hipblaslt_gemm"
@@ -57,10 +56,6 @@ def _normalize_kernel_name(raw: str) -> str:
         return "moe_gemm"
     if "vectorized_layer_norm" in lower or "rms_norm" in lower:
         return "rms_norm"
-    if "distribution_elementwise" in lower:
-        return "random_init"
-    if "fillbuffer" in lower or "fillfunctor" in lower:
-        return "fill"
     if "topk" in lower:
         return "topk"
     if "rope" in lower or "rotary" in lower:
@@ -78,8 +73,6 @@ def _normalize_kernel_name(raw: str) -> str:
 
 @dataclass
 class PMCKernelResult:
-    """PMC counter results for one normalized kernel name."""
-
     name: str
     dispatches: int = 0
     SQ_INSTS_MFMA: float = 0.0
@@ -162,7 +155,6 @@ class PMCKernelResult:
             if ratio < 15:
                 return "memory_bound"
             return "mixed"
-
         lower = self.name.lower()
         if any(k in lower for k in ("gemm", "hipblaslt", "cijk", "matmul")):
             return "compute_bound"
@@ -174,34 +166,23 @@ class PMCKernelResult:
 
 
 class PMCProfiler:
-    """Collect PMC counters from live inference workers via rocprofv3."""
-
     def __init__(self, session_dir: str | Path):
         self.session_dir = Path(session_dir)
         self.profile_dir = self.session_dir / "profiles"
         self.profile_dir.mkdir(parents=True, exist_ok=True)
 
-    def _write_counter_file(self) -> Path:
-        path = self.profile_dir / "pmc_counters.txt"
-        path.write_text(
-            "".join(f"pmc: {group}\n" for group in PMC_COUNTER_GROUPS),
-            encoding="utf-8",
-        )
-        return path
-
     @staticmethod
-    def server_profiling_env() -> dict[str, str]:
+    def server_profiling_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
+        env = dict(base_env or os.environ)
         for candidate in (
             "/opt/rocm/lib/librocprofiler-register.so",
             "/opt/rocm-7.2.1/lib/librocprofiler-register.so",
         ):
             if os.path.exists(candidate):
-                existing = os.environ.get("LD_PRELOAD", "")
-                if candidate in existing:
-                    return {}
-                preload = f"{existing}:{candidate}" if existing else candidate
-                return {"LD_PRELOAD": preload}
-        return {}
+                existing = env.get("LD_PRELOAD", "")
+                env["LD_PRELOAD"] = f"{existing}:{candidate}" if existing else candidate
+                return env
+        return env
 
     def _find_rocprofv3(self) -> str:
         for candidate in ("rocprofv3", "/opt/rocm/bin/rocprofv3"):
@@ -210,112 +191,163 @@ class PMCProfiler:
                 return resolved
         raise FileNotFoundError("rocprofv3 not found")
 
-    def _find_worker_pid(self, pid_file: str = "/tmp/.marathon_server.pid") -> int | None:
-        patterns = (
-            "vllm.worker",
-            "vllm.entrypoints",
-            "sglang.launch_server",
-            "sglang.srt",
-        )
-        for pattern in patterns:
-            try:
-                result = subprocess.run(
-                    ["pgrep", "-f", pattern],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                continue
-            pids = [_to_int(p) for p in result.stdout.strip().split() if p]
-            pids = [p for p in pids if p > 0 and p != os.getpid()]
-            if pids:
-                return pids[0]
-
-        pid_path = Path(pid_file)
-        if pid_path.exists():
-            try:
-                server_pid = _to_int(pid_path.read_text(encoding="utf-8").strip())
-                result = subprocess.run(
-                    ["pgrep", "-P", str(server_pid)],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                children = [_to_int(p) for p in result.stdout.strip().split() if p]
-                children = [p for p in children if p > 0]
-                return children[0] if children else server_pid
-            except (OSError, subprocess.TimeoutExpired):
-                return None
-        return None
-
-    def profile_live_server(self, duration_ms: int = 15000) -> list[PMCKernelResult]:
-        worker_pid = self._find_worker_pid()
-        if not worker_pid:
-            raise RuntimeError("Cannot find vLLM/SGLang worker process")
-        return self.profile_attach(worker_pid=worker_pid, duration_ms=duration_ms)
+    def _write_counter_file(self) -> Path:
+        path = self.profile_dir / "pmc_counters.txt"
+        path.write_text("".join(f"pmc: {g}\n" for g in PMC_COUNTER_GROUPS), encoding="utf-8")
+        return path
 
     def profile_attach(
         self,
         worker_pid: int,
+        *,
         duration_ms: int = 15000,
+        benchmark_cmd: list[str] | None = None,
+        benchmark_env: dict[str, str] | None = None,
     ) -> list[PMCKernelResult]:
         rocprof = self._find_rocprofv3()
         run_tag = f"attach_{int(time.time())}"
         output_dir = self.profile_dir / "pmc_attach" / run_tag
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        counter_file = self._write_counter_file()
-        cmd_pmc = [
-            rocprof,
-            "--attach", str(worker_pid),
-            "--attach-duration-msec", str(duration_ms),
-            "-i", str(counter_file),
-            "-d", str(output_dir),
-            "-f", "csv",
-            "--kernel-trace",
-        ]
-        subprocess.run(
-            cmd_pmc,
-            capture_output=True,
-            text=True,
-            timeout=duration_ms / 1000.0 + 30,
-        )
+        bench_proc: subprocess.Popen | None = None
+        if benchmark_cmd:
+            bench_proc = subprocess.Popen(
+                benchmark_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=benchmark_env,
+            )
+            time.sleep(2)
 
-        counter_csvs = list(output_dir.rglob("*counter_collection*.csv"))
-        if counter_csvs:
-            return self._parse_counter_csvs(counter_csvs)
-
-        trace_csvs = list(output_dir.rglob("*kernel_trace*.csv"))
-        if not trace_csvs:
-            trace_dir = Path(f"{output_dir}_trace")
-            trace_dir.mkdir(parents=True, exist_ok=True)
-            cmd_trace = [
+        try:
+            counter_file = self._write_counter_file()
+            cmd_pmc = [
                 rocprof,
                 "--attach", str(worker_pid),
                 "--attach-duration-msec", str(duration_ms),
-                "-d", str(trace_dir),
+                "-i", str(counter_file),
+                "-d", str(output_dir),
                 "-f", "csv",
                 "--kernel-trace",
             ]
             subprocess.run(
-                cmd_trace,
+                cmd_pmc,
                 capture_output=True,
                 text=True,
                 timeout=duration_ms / 1000.0 + 30,
             )
-            trace_csvs = list(trace_dir.rglob("*kernel_trace*.csv"))
+            counter_csvs = list(output_dir.rglob("*counter_collection*.csv"))
+            if counter_csvs:
+                return self._parse_counter_csvs(counter_csvs)
+
+            trace_csvs = list(output_dir.rglob("*kernel_trace*.csv"))
+            if not trace_csvs:
+                trace_dir = Path(f"{output_dir}_trace")
+                trace_dir.mkdir(parents=True, exist_ok=True)
+                cmd_trace = [
+                    rocprof,
+                    "--attach", str(worker_pid),
+                    "--attach-duration-msec", str(duration_ms),
+                    "-d", str(trace_dir),
+                    "-f", "csv",
+                    "--kernel-trace",
+                ]
+                subprocess.run(
+                    cmd_trace,
+                    capture_output=True,
+                    text=True,
+                    timeout=duration_ms / 1000.0 + 30,
+                )
+                trace_csvs = list(trace_dir.rglob("*kernel_trace*.csv"))
+            return self._parse_trace_only(trace_csvs) if trace_csvs else []
+        finally:
+            if bench_proc and bench_proc.poll() is None:
+                bench_proc.terminate()
+
+    def profile_launch(
+        self,
+        *,
+        server_cmd: list[str],
+        health_url: str,
+        log_path: Path,
+        duration_ms: int = 15000,
+        benchmark_cmd: list[str] | None = None,
+        benchmark_env: dict[str, str] | None = None,
+        startup_timeout_s: int = 600,
+        server_env: dict[str, str] | None = None,
+    ) -> list[PMCKernelResult]:
+        """Launch the server under rocprofv3 instead of attaching by ptrace.
+
+        This avoids ``rocprofv3 --attach`` permissions such as CAP_SYS_PTRACE.
+        The server is still isolated from the normal torch-profiler trace run.
+        """
+        rocprof = self._find_rocprofv3()
+        run_tag = f"launch_{int(time.time())}"
+        output_dir = self.profile_dir / "pmc_launch" / run_tag
+        output_dir.mkdir(parents=True, exist_ok=True)
+        counter_file = self._write_counter_file()
+        cmd = [
+            rocprof,
+            "-i", str(counter_file),
+            "-d", str(output_dir),
+            "-f", "csv",
+            "--kernel-trace",
+            "--",
+            *server_cmd,
+        ]
+        with log_path.open("w", encoding="utf-8", errors="replace") as log:
+            log.write("$ " + " ".join(shlex.quote(part) for part in cmd) + "\n")
+            log.flush()
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=server_env,
+                **_process_group_kwargs(),
+            )
+            try:
+                if not _wait_for_health(health_url, proc, startup_timeout_s):
+                    return []
+
+                if benchmark_cmd:
+                    bench = subprocess.run(
+                        benchmark_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        env=benchmark_env,
+                        timeout=max(duration_ms / 1000.0 + 120, 180),
+                    )
+                    log.write("\n[benchmark output]\n")
+                    log.write(bench.stdout or "")
+                    log.write(f"\n[benchmark exit_code] {bench.returncode}\n")
+                    log.flush()
+                else:
+                    time.sleep(duration_ms / 1000.0)
+            finally:
+                _terminate_process_group(proc)
+                try:
+                    proc.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    _kill_process_group(proc)
+                    proc.wait(timeout=30)
+
+        counter_csvs = _wait_for_csvs(output_dir, "*counter_collection*.csv")
+        if counter_csvs:
+            return self._parse_counter_csvs(counter_csvs)
+        trace_csvs = _wait_for_csvs(output_dir, "*kernel_trace*.csv")
         return self._parse_trace_only(trace_csvs) if trace_csvs else []
 
     def save_results(self, results: list[PMCKernelResult], tag: str = "pmc") -> str:
-        summary = {result.name: result.to_summary_dict() for result in results}
         path = self.profile_dir / f"{tag}_summary.json"
         path.write_text(
             json.dumps({
                 "source": "rocprofv3",
                 "tag": tag,
                 "counters": [group.split() for group in PMC_COUNTER_GROUPS],
-                "kernels": summary,
+                "kernels": {r.name: r.to_summary_dict() for r in results},
             }, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
@@ -331,8 +363,7 @@ class PMCProfiler:
         }
         for csv_file in csv_files:
             with csv_file.open(newline="", encoding="utf-8", errors="replace") as handle:
-                reader = csv.DictReader(handle)
-                for row in reader:
+                for row in csv.DictReader(handle):
                     name = _normalize_kernel_name(row.get("Kernel_Name", ""))
                     if name in ("random_init", "fill", "unknown", ""):
                         continue
@@ -345,12 +376,10 @@ class PMCProfiler:
                         ),
                     )
                     counter = row.get("Counter_Name", "")
-                    value = _to_float(row.get("Counter_Value"))
                     if counter in counter_cols and hasattr(kernel, counter):
-                        setattr(kernel, counter, getattr(kernel, counter) + value)
+                        setattr(kernel, counter, getattr(kernel, counter) + _to_float(row.get("Counter_Value")))
                     if counter == "SQ_INSTS_MFMA":
                         kernel.dispatches += 1
-
                     start = _to_float(row.get("Start_Timestamp"))
                     end = _to_float(row.get("End_Timestamp"))
                     if end > start:
@@ -361,8 +390,7 @@ class PMCProfiler:
         kernels: dict[str, PMCKernelResult] = {}
         for csv_file in csv_files:
             with csv_file.open(newline="", encoding="utf-8", errors="replace") as handle:
-                reader = csv.DictReader(handle)
-                for row in reader:
+                for row in csv.DictReader(handle):
                     name = _normalize_kernel_name(row.get("Kernel_Name", ""))
                     if name in ("random_init", "fill", "unknown", ""):
                         continue
@@ -372,8 +400,7 @@ class PMCProfiler:
                     end = _to_float(row.get("End_Timestamp"))
                     if end > start:
                         kernel.duration_ns += end - start
-
-        total_ns = sum(kernel.duration_ns for kernel in kernels.values())
+        total_ns = sum(k.duration_ns for k in kernels.values())
         results = sorted(kernels.values(), key=lambda item: item.duration_ns, reverse=True)
         for kernel in results:
             kernel._gpu_time_pct = kernel.duration_ns / total_ns * 100.0 if total_ns else 0.0
@@ -408,18 +435,7 @@ class GPUSpec:
         self.ridge_point_fp8 = (self.peak_flops_fp8 * 1e12) / bandwidth
 
 
-MI355X_SPEC = GPUSpec(
-    name="MI355X (gfx950, CDNA4)",
-    peak_flops_fp16=1311.0,
-    peak_flops_fp8=2621.0,
-    peak_flops_fp4=5243.0,
-    peak_flops_fp32=163.9,
-    peak_bandwidth_tbps=8.0,
-    num_cus=304,
-    lds_per_cu_kb=128,
-    vgpr_per_simd=256,
-    waves_per_simd=4,
-)
+MI355X_SPEC = GPUSpec("MI355X", 1311.0, 2621.0, 5243.0, 163.9, 8.0, 304, 128, 256, 4)
 
 
 @dataclass
@@ -459,24 +475,14 @@ class KernelRooflineResult:
 
 
 class RooflineAnalyzer:
-    """Classify kernels against the MI355X roofline."""
-
     def __init__(self, gpu_spec: GPUSpec = MI355X_SPEC):
         self.spec = gpu_spec
 
-    def analyze_kernels(
-        self,
-        pmc_data: list[dict[str, Any]],
-        precision: str = "fp16",
-    ) -> list[KernelRooflineResult]:
+    def analyze_kernels(self, pmc_data: list[dict[str, Any]], precision: str = "fp16") -> list[KernelRooflineResult]:
         results = [self._analyze_single(kernel, precision) for kernel in pmc_data]
         return sorted(results, key=lambda result: result.gpu_pct, reverse=True)
 
-    def _analyze_single(
-        self,
-        kernel: dict[str, Any],
-        precision: str,
-    ) -> KernelRooflineResult:
+    def _analyze_single(self, kernel: dict[str, Any], precision: str) -> KernelRooflineResult:
         result = KernelRooflineResult(
             name=str(kernel.get("name", "unknown")),
             gpu_pct=_to_float(kernel.get("gpu_pct")),
@@ -484,18 +490,14 @@ class RooflineAnalyzer:
         )
         result.flops = self._estimate_flops(kernel)
         result.bytes_transferred = self._estimate_bytes(kernel)
-
         duration_s = result.duration_us * 1e-6 if result.duration_us > 0 else 1e-9
         peak_flops = self._peak_flops(precision)
         if result.flops and result.bytes_transferred and result.bytes_transferred > 0:
             result.arithmetic_intensity = result.flops / result.bytes_transferred
-            achieved_flops_per_s = result.flops / duration_s
-            achieved_bw = result.bytes_transferred / duration_s
-            result.compute_utilization_pct = achieved_flops_per_s / (peak_flops * 1e12) * 100.0
+            result.compute_utilization_pct = result.flops / duration_s / (peak_flops * 1e12) * 100.0
             result.bandwidth_utilization_pct = (
-                achieved_bw / (self.spec.peak_bandwidth_tbps * 1e12) * 100.0
+                result.bytes_transferred / duration_s / (self.spec.peak_bandwidth_tbps * 1e12) * 100.0
             )
-
         waves = _to_int(kernel.get("SQ_WAVES"))
         result.occupancy_waves = waves if waves else None
         result._raw_valu = _to_float(kernel.get("SQ_INSTS_VALU"))
@@ -528,17 +530,14 @@ class RooflineAnalyzer:
             return (rd_32b + wr_32b) * 32
         rd = _to_float(kernel.get("TCC_EA_RDREQ_sum"))
         wr = _to_float(kernel.get("TCC_EA_WRREQ_sum"))
-        if rd or wr:
-            return (rd + wr) * 64
-        return None
+        return (rd + wr) * 64 if rd or wr else None
 
     def _classify(self, result: KernelRooflineResult, precision: str) -> Bottleneck:
-        ai = result.arithmetic_intensity
-        if ai is not None:
+        if result.arithmetic_intensity is not None:
             ridge = self.spec.ridge_point_fp8 if precision in ("fp8", "fp4") else self.spec.ridge_point_fp16
-            if ai < ridge * 0.3:
+            if result.arithmetic_intensity < ridge * 0.3:
                 return Bottleneck.MEMORY_BOUND
-            if ai > ridge * 1.5:
+            if result.arithmetic_intensity > ridge * 1.5:
                 return Bottleneck.COMPUTE_BOUND
             if result.compute_utilization_pct < 10 and result.bandwidth_utilization_pct < 10:
                 return Bottleneck.LATENCY_BOUND
@@ -547,7 +546,6 @@ class RooflineAnalyzer:
                 if result.bandwidth_utilization_pct > result.compute_utilization_pct
                 else Bottleneck.COMPUTE_BOUND
             )
-
         if result.flops and result.flops > 0:
             mfma_insts = result.flops / 32768
             valu_insts = getattr(result, "_raw_valu", 0.0)
@@ -562,88 +560,225 @@ class RooflineAnalyzer:
 
     def _suggest(self, result: KernelRooflineResult) -> None:
         if result.bottleneck == Bottleneck.MEMORY_BOUND:
-            result.suggestion = (
-                "Memory-bound. Reduce HBM traffic with fusion, tiling for reuse, "
-                "layout cleanup, or intermediate quantization."
-            )
+            result.suggestion = "Memory-bound. Reduce HBM traffic with fusion, reuse, or layout cleanup."
             result.recommended_specialist = "fusion"
-            result.recommended_actions = [
-                "fusion-design",
-                "graph-optimization",
-                "inductor-optimization",
-            ]
-            result.constraints = {
-                "focus": "reduce_hbm_traffic",
-                "current_bandwidth_util_pct": result.bandwidth_utilization_pct,
-                "arithmetic_intensity": result.arithmetic_intensity,
-            }
+            result.recommended_actions = ["fusion-design", "graph-optimization", "inductor-optimization"]
+            result.constraints = {"focus": "reduce_hbm_traffic", "arithmetic_intensity": result.arithmetic_intensity}
         elif result.bottleneck == Bottleneck.COMPUTE_BOUND:
-            result.suggestion = (
-                "Compute-bound. Improve MFMA scheduling, operand reuse, instruction "
-                "mix, and occupancy."
-            )
+            result.suggestion = "Compute-bound. Improve MFMA scheduling, operand reuse, and occupancy."
             result.recommended_specialist = "kernel"
             result.recommended_actions = ["deep-kernel-analysis", "operator-tuning"]
-            result.constraints = {
-                "focus": "instruction_efficiency",
-                "current_compute_util_pct": result.compute_utilization_pct,
-                "arithmetic_intensity": result.arithmetic_intensity,
-                "target_vgprs": 64,
-            }
+            result.constraints = {"focus": "instruction_efficiency", "target_vgprs": 64}
         elif result.bottleneck == Bottleneck.LATENCY_BOUND:
-            result.suggestion = (
-                "Latency-bound. Increase parallelism, fuse adjacent kernels, or use "
-                "graph capture to amortize launch overhead."
-            )
+            result.suggestion = "Latency-bound. Increase parallelism or amortize launch overhead."
             result.recommended_specialist = "systems"
             result.recommended_actions = ["graph-optimization", "fusion-design"]
-            result.constraints = {
-                "focus": "increase_parallelism",
-                "occupancy_waves": result.occupancy_waves,
-            }
+            result.constraints = {"focus": "increase_parallelism", "occupancy_waves": result.occupancy_waves}
         else:
             result.suggestion = "Bottleneck unknown. Need PMC counters for classification."
-            result.recommended_specialist = "kernel"
             result.recommended_actions = ["deep-kernel-analysis"]
 
 
-def score_boost_from_roofline(
-    action_name: str,
+def _as_cmd(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    if isinstance(value, str):
+        return shlex.split(value)
+    return []
+
+
+def _wait_for_csvs(directory: Path, pattern: str, timeout_s: float = 10.0) -> list[Path]:
+    """Wait briefly for rocprofv3 CSV writers to flush after process exit."""
+    deadline = time.time() + timeout_s
+    while True:
+        files = list(directory.rglob(pattern))
+        if files or time.time() >= deadline:
+            return files
+        time.sleep(0.5)
+
+
+def _process_group_kwargs() -> dict[str, Any]:
+    if os.name == "posix":
+        return {"preexec_fn": os.setsid}
+    return {}
+
+
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except ProcessLookupError:
+        # Benign cleanup race: the process group may have already exited.
+        pass
+
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        # Benign cleanup race: the process group may have already exited.
+        pass
+
+
+def _classify_kernel_tier(name: str) -> str:
+    """Keep the legacy 5-tier optimization routing alongside roofline data."""
+    lower = name.lower()
+    if any(x in name for x in ("triton_", "_permute_kernel", "triton_poi_", "triton_red_", "triton_tem_")):
+        return "T1_TRITON"
+    if any(x in name for x in ("aiter::", "fmha_v3", "mha_fwd", "fused_moe", "moe_ck", "topkGating",
+                                "_gemm_a8w8", "_fused_rms")):
+        return "T2_AITER_CK"
+    if "vectorized_elementwise_kernel" in name:
+        return "T2_AITER_CK"
+    if any(x in lower for x in ("launch_server", "schedule", "batch", "token_dispatch",
+                                 "kv_cache", "radix", "prefix_match")):
+        return "T3_FRAMEWORK"
+    if any(x in lower for x in ("nccl", "rccl", "allreduce", "broadcast", "all_gather", "reduce_scatter")):
+        return "T4_COMM"
+    if any(x in name for x in ("Cijk_", "ck::kernel")) or "hipmodule" in lower:
+        return "T5_COMPILED"
+    # Normalized rocprof names still need useful routing.
+    if name in {"hipblaslt_gemm", "skinny_gemm", "aiter_asm_gemm", "moe_gemm"}:
+        return "T5_COMPILED" if name == "hipblaslt_gemm" else "T2_AITER_CK"
+    return "T2_AITER_CK"
+
+
+def _write_kernel_breakdown(
+    path: Path,
+    *,
+    pmc_results: list[PMCKernelResult],
     roofline_results: list[KernelRooflineResult],
-) -> float:
-    total_gpu_pct = sum(
-        result.gpu_pct
-        for result in roofline_results
-        if action_name in result.recommended_actions
-    )
-    if total_gpu_pct > 20:
-        return 2.0
-    if total_gpu_pct > 10:
-        return 1.5
-    if total_gpu_pct > 5:
-        return 1.2
-    return 1.0
+) -> None:
+    roofline_by_name = {result.name: result for result in roofline_results}
+    total_ns = sum(result.duration_ns for result in pmc_results)
+    rows: list[dict[str, Any]] = []
+    for result in sorted(pmc_results, key=lambda item: item.duration_ns, reverse=True):
+        roofline = roofline_by_name.get(result.name)
+        gpu_pct = getattr(result, "_gpu_time_pct", None)
+        if gpu_pct is None:
+            gpu_pct = result.duration_ns / total_ns * 100.0 if total_ns else 0.0
+        rows.append({
+            "name": result.name,
+            "gpu_pct": round(float(gpu_pct or 0.0), 3),
+            "count": result.dispatches,
+            "tier": _classify_kernel_tier(result.name),
+            "bottleneck": roofline.bottleneck.value if roofline else "unknown",
+            "arithmetic_intensity": roofline.arithmetic_intensity if roofline else None,
+            "compute_utilization_pct": roofline.compute_utilization_pct if roofline else 0.0,
+            "bandwidth_utilization_pct": roofline.bandwidth_utilization_pct if roofline else 0.0,
+            "recommended_actions": roofline.recommended_actions if roofline else [],
+            "suggestion": roofline.suggestion if roofline else "",
+            "duration_us": round(result.duration_ns / 1000.0, 3) if result.duration_ns else 0.0,
+            "dispatches": result.dispatches,
+        })
+    path.write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def server_profiling_env() -> dict[str, str]:
-    return PMCProfiler.server_profiling_env()
+def _wait_for_health(url: str, proc: subprocess.Popen, timeout_s: int) -> bool:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return False
+        try:
+            with urlopen(url, timeout=3) as response:
+                if 200 <= response.status < 500:
+                    return True
+        except (OSError, ValueError):
+            # The health endpoint may be temporarily unreachable while the
+            # server starts; keep polling until timeout or process exit.
+            pass
+        time.sleep(5)
+    return False
 
 
-def collect_profile_roofline(
+def run_isolated_pmc_roofline(
     *,
     session_dir: Path,
+    server_cmd: list[str],
+    health_url: str,
+    benchmark_cmd: list[str] | None = None,
     duration_ms: int = 15000,
     precision: str = "fp16",
+    startup_timeout_s: int = 600,
+    env_overrides: dict[str, str] | None = None,
+    profile_mode: str = "launch",
 ) -> dict[str, Any]:
-    """Collect PMC counters from a live server and write roofline artifacts."""
-    profile_dir = Path(session_dir) / "profiles"
-    profile_dir.mkdir(parents=True, exist_ok=True)
+    """Launch a dedicated server, collect PMC, then stop it.
+
+    This function deliberately owns a separate process so the normal
+    torch-profiler/TraceLens server never competes with rocprofiler-sdk.
+    """
+    session_dir.mkdir(parents=True, exist_ok=True)
+    log_path = session_dir / "pmc_roofline_server.log"
+    env = os.environ.copy()
+    preload_env = PMCProfiler.server_profiling_env(env)
+    if "librocprofiler-register.so" in preload_env.get("LD_PRELOAD", ""):
+        env = preload_env
+    env.update({str(k): str(v) for k, v in (env_overrides or {}).items()})
+    mode = (profile_mode or "launch").lower()
 
     try:
         profiler = PMCProfiler(session_dir)
-        pmc_results = profiler.profile_live_server(duration_ms=duration_ms)
+        if mode == "attach":
+            if "librocprofiler-register.so" not in env.get("LD_PRELOAD", ""):
+                return {"status": "skipped", "reason": "librocprofiler-register.so unavailable"}
+            with log_path.open("w", encoding="utf-8", errors="replace") as log:
+                proc = subprocess.Popen(
+                    server_cmd,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env=env,
+                    **_process_group_kwargs(),
+                )
+            try:
+                if not _wait_for_health(health_url, proc, startup_timeout_s):
+                    return {
+                        "status": "failed",
+                        "reason": "dedicated server did not become healthy",
+                        "profile_mode": mode,
+                        "server_log": str(log_path),
+                        "server_returncode": proc.poll(),
+                    }
+                pmc_results = profiler.profile_attach(
+                    proc.pid,
+                    duration_ms=duration_ms,
+                    benchmark_cmd=benchmark_cmd,
+                    benchmark_env=os.environ.copy(),
+                )
+            finally:
+                _terminate_process_group(proc)
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    _kill_process_group(proc)
+        else:
+            pmc_results = profiler.profile_launch(
+                server_cmd=server_cmd,
+                health_url=health_url,
+                log_path=log_path,
+                duration_ms=duration_ms,
+                benchmark_cmd=benchmark_cmd,
+                benchmark_env=os.environ.copy(),
+                startup_timeout_s=startup_timeout_s,
+                server_env=env,
+            )
         if not pmc_results:
-            return {"status": "skipped", "reason": "no PMC results produced"}
+            return {
+                "status": "skipped",
+                "reason": "no PMC or kernel trace results",
+                "profile_mode": mode,
+                "server_log": str(log_path),
+            }
 
         pmc_summary_path = profiler.save_results(pmc_results, tag="pmc")
         total_ns = sum(result.duration_ns for result in pmc_results)
@@ -654,26 +789,28 @@ def collect_profile_roofline(
                 gpu_pct = result.duration_ns / total_ns * 100.0 if total_ns else 0.0
             pmc_dicts.append(result.to_roofline_dict(gpu_pct=float(gpu_pct or 0.0)))
 
-        analyzer = RooflineAnalyzer(gpu_spec=MI355X_SPEC)
-        roofline_results = analyzer.analyze_kernels(pmc_dicts, precision=precision)
-        roofline_payload = [result.to_dict() for result in roofline_results]
-        roofline_path = profile_dir / "roofline.json"
+        roofline_results = RooflineAnalyzer().analyze_kernels(pmc_dicts, precision=precision)
+        roofline_path = session_dir / "profiles" / "roofline.json"
         roofline_path.write_text(
-            json.dumps(roofline_payload, indent=2, sort_keys=True) + "\n",
+            json.dumps([result.to_dict() for result in roofline_results], indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-
+        kernel_breakdown_path = session_dir / "profiles" / "kernel_breakdown.json"
+        _write_kernel_breakdown(
+            kernel_breakdown_path,
+            pmc_results=pmc_results,
+            roofline_results=roofline_results,
+        )
         return {
             "status": "ok",
+            "profile_mode": mode,
+            "server_log": str(log_path),
             "pmc_summary_path": str(pmc_summary_path),
             "roofline_path": str(roofline_path),
-            "roofline_kernel_count": len(roofline_payload),
+            "kernel_breakdown_path": str(kernel_breakdown_path),
+            "roofline_kernel_count": len(roofline_results),
         }
     except FileNotFoundError as exc:
-        return {"status": "skipped", "reason": "rocprofv3 unavailable", "error": str(exc)}
-    except RuntimeError as exc:
-        return {"status": "skipped", "reason": "live server unavailable", "error": str(exc)}
+        return {"status": "skipped", "reason": "rocprofv3 unavailable", "error": str(exc), "server_log": str(log_path)}
     except subprocess.TimeoutExpired as exc:
-        return {"status": "skipped", "reason": "rocprofv3 timed out", "error": str(exc)}
-    except Exception as exc:  # noqa: BLE001
-        return {"status": "failed", "error": repr(exc)}
+        return {"status": "skipped", "reason": "rocprofv3 timed out", "error": str(exc), "server_log": str(log_path)}
