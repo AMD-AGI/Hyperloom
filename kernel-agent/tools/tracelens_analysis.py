@@ -1820,6 +1820,21 @@ def main() -> int:
             "Maps to --OSL. Defaults to $OSL when set."
         ),
     )
+    parser.add_argument(
+        "--split-r",
+        default=(
+            os.environ.get("TRACELENS_SPLIT_R", "")
+            or os.environ.get("RANDOM_RANGE_RATIO", "")
+        ),
+        help=(
+            "OSL window ratio R for the splitter (#194 §3). Maps to "
+            "--R on TraceLens.TraceUtils.split_inference_trace_annotation. "
+            "Pairs with --CONC / --OSL so mixed-window selection uses the "
+            "benchmark-contract PD ratio instead of an empirical default. "
+            "Defaults to $RANDOM_RANGE_RATIO when set; leave empty to let "
+            "the splitter fall back to its built-in heuristic."
+        ),
+    )
     args = parser.parse_args()
 
     session_id = args.session_id or uuid.uuid4().hex[:12]
@@ -1918,10 +1933,15 @@ def main() -> int:
                 # TraceLens splitter CLI (real interface):
                 #   python -m TraceLens.TraceUtils.split_inference_trace_annotation
                 #     <trace_path> -o <output_dir> --find-steady-state
-                #     [--num-steps N] [--CONC C] [--OSL O]
+                #     [--num-steps N] [--CONC C] [--OSL O] [--R r]
                 # `--platform` does not exist; --find-steady-state writes
                 # mixed_steady_state_* / decode_only_steady_state_* /
                 # prefilldecode_steady_state_* into output_dir.
+                # --R (#194 §3) feeds mixed-window selection's analytic
+                # PD-ratio computation: per-request OSL is sampled from
+                # [R*OSL, OSL], so without --R the splitter has to guess
+                # the workload's prefill/decode mix from heuristics and
+                # may pick a sub-optimal steady-state window.
                 split_cmd = [
                     sys.executable, "-m",
                     "TraceLens.TraceUtils.split_inference_trace_annotation",
@@ -1936,6 +1956,24 @@ def main() -> int:
                 osl = args.split_osl or os.environ.get("OSL", "").strip()
                 if str(osl).strip():
                     split_cmd += ["--OSL", str(osl).strip()]
+                # --R is a float (splitter declares `type=float`); we
+                # only pass it through when the user / env provided one
+                # so the splitter's built-in default keeps working for
+                # legacy trace files that pre-date the #194 alignment.
+                r_raw = args.split_r or os.environ.get(
+                    "RANDOM_RANGE_RATIO", "",
+                )
+                r_str = str(r_raw).strip()
+                if r_str:
+                    try:
+                        float(r_str)
+                    except ValueError:
+                        append_log(
+                            log_path,
+                            f"split_trace: ignoring non-numeric --R={r_str!r}",
+                        )
+                    else:
+                        split_cmd += ["--R", r_str]
                 split_rc = run_command(
                     split_cmd,
                     cwd=tl_root,
