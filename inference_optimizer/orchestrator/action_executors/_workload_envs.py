@@ -45,8 +45,32 @@ import yaml
 
 from ...paths import asset_root
 from ._grid_runner import server_args_env_name
+from ._server_patcher import (
+    ensure_sglang_patched_for_tracelens,
+    ensure_vllm_patched_for_tracelens,
+)
 
 log = logging.getLogger(__name__)
+
+
+def _tracelens_patch_enabled() -> bool:
+    """Read the ``HYPERLOOM_ENABLE_PATCH`` kill switch (default on).
+
+    Set ``HYPERLOOM_ENABLE_PATCH=0`` to disable runtime patching of
+    vLLM / SGLang — Hyperloom then keeps today's safe behaviour
+    (no TraceLens-only profiler flags injected). Useful when:
+
+    * the user runs a custom vLLM/SGLang fork they don't want touched,
+    * the patcher itself ships a bug and the user needs an escape hatch
+      without a Hyperloom release,
+    * compliance / audit forbids modifying installed packages at runtime.
+
+    Default is ``"1"`` (patching on) because the patches are backward-
+    compatible and add no flags by themselves — they only enable
+    capabilities Hyperloom requests via ``EXTRA_VLLM_ARGS`` /
+    ``EXTRA_SGLANG_ARGS`` when patching succeeds.
+    """
+    return os.environ.get("HYPERLOOM_ENABLE_PATCH", "1").strip() != "0"
 
 
 def default_baseline_config() -> Path:
@@ -112,11 +136,17 @@ def materialize_config_with_envs(
         bench.pop("benchmark_script", None)
     envs = bench.setdefault("envs", {})
     for env_key in (
-        "CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "RANDOM_RANGE_RATIO",
+        "CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP",
     ):
         val = os.environ.get(env_key, "").strip()
         if val:
             envs[env_key] = int(val)
+    # RANDOM_RANGE_RATIO is a float (skill default 1.0; common values include
+    # 0.5). It feeds the steady-state delay/max formulas below; do not coerce
+    # to int or the prefill window estimate collapses for fractional ratios.
+    r_env = os.environ.get("RANDOM_RANGE_RATIO", "").strip()
+    if r_env:
+        envs["RANDOM_RANGE_RATIO"] = float(r_env)
     rocr_env = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
     if rocr_env:
         envs["ROCR_VISIBLE_DEVICES"] = rocr_env
@@ -138,31 +168,92 @@ def materialize_config_with_envs(
     osl_val = int(os.environ.get("OSL") or envs.get("OSL") or 256)
     conc_val = int(os.environ.get("CONC") or envs.get("CONC") or 8)
 
-    # TraceLens #126: compute steady-state window for profiling configs.
+    # TraceLens #194: compute steady-state window for profiling configs.
     # Only inject when this is a profile yaml — detected by PROFILE env or
     # `profiler.torch_profiler.enabled: true` in the YAML. The formulas
-    # match issue #126 §3.1.6.
+    # match the TraceLens magpie-benchmark-profiling skill (Option A:
+    # targeted steady-state window) so that Hyperloom-driven profiles
+    # capture the same decode-heavy slice as a manual TraceLens run.
+    #
+    # Skill formulas (RANDOM_RANGE_RATIO defaults to 1.0 if absent):
+    #   max_iters   = min(1024, max(256, OSL * 16 / CONC))
+    #   delay_iters = OSL * (R + 1) * 3 - max_iters / 2
+    #
+    # Example OSL=1024 / CONC=32 / R=1 → max=512, delay=5888 (vs. the
+    # previous 5*CONC / clamp(16*OSL/CONC,4,64) which gave 160 / 64 —
+    # roughly 1/8 of the steady-state window the skill recommends).
     is_profile = (
         str(envs.get("PROFILE", "")).strip() == "1"
         or (bench.get("profiler", {}).get("torch_profiler", {}).get("enabled") is True)
     )
+    profile_num_prompts: int | None = None
     if is_profile:
-        delay_iters = 5 * conc_val
-        max_iters = max(4, min(64, 16 * osl_val // max(conc_val, 1)))
+        try:
+            r_val = float(envs.get("RANDOM_RANGE_RATIO", 1.0))
+        except (TypeError, ValueError):
+            r_val = 1.0
+        safe_conc = max(conc_val, 1)
+        safe_osl = max(osl_val, 1)
+        max_iters = min(1024, max(256, (osl_val * 16) // safe_conc))
+        delay_iters = int(osl_val * (r_val + 1) * 3 - max_iters / 2)
+        # Guard against pathological inputs (tiny OSL / huge R producing a
+        # negative delay collapses to "profile from step 0", which still
+        # captures warmup). Clamp to >= 0.
+        if delay_iters < 0:
+            delay_iters = 0
+        # TraceLens #194 §2: NUM_PROMPTS must be large enough that the
+        # benchmark engine reaches `delay_iters + max_iters` decode steps
+        # before it runs out of prompts. With continuous batching at
+        # concurrency CONC and average output length OSL, processing N
+        # prompts costs roughly N * OSL / CONC engine iterations; invert
+        # to get the prompt floor, then apply a 2x safety buffer for
+        # prefill / scheduling drift. Hyperloom owns this — we ignore any
+        # NUM_PROMPTS the caller passes when PROFILE is on, otherwise an
+        # under-sized value silently empties the trace.
+        required_iters = delay_iters + max_iters
+        iters_to_prompts = max(
+            1, (required_iters * safe_conc + safe_osl - 1) // safe_osl,
+        )
+        profile_num_prompts = max(safe_conc, iters_to_prompts * 2)
         fw = str(bench.get("framework") or "").lower()
+        # Issue #194 §4 / §5: TraceLens-required profiler flags exist
+        # only in patched vLLM / SGLang builds. Try to apply the
+        # TraceLens patch set to the in-container install; on success
+        # we inject the extra flags below, on failure we silently fall
+        # back to today's safe set so vanilla images keep working.
+        # Default-on, disable via HYPERLOOM_ENABLE_PATCH=0.
+        tracelens_patch_ok = False
+        if _tracelens_patch_enabled():
+            if "vllm" in fw:
+                tracelens_patch_ok = ensure_vllm_patched_for_tracelens()
+            else:
+                tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
         if "vllm" in fw:
             existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
-            # Do not inject capture_torch_profiler_dir by default: the vLLM
-            # build on current MI355X validation nodes rejects that field in
-            # --profiler-config. Magpie's vllm_*.sh already injects the
-            # supported torch profiler fields and we add TraceLens' stable
-            # timing/annotation knobs here.
-            profiler_args = (
-                f"--profiler-config.delay_iterations {delay_iters} "
-                f"--profiler-config.max_iterations {max_iters}"
-            )
+            profiler_args_parts = [
+                f"--profiler-config.delay_iterations {delay_iters}",
+                f"--profiler-config.max_iterations {max_iters}",
+            ]
+            if tracelens_patch_ok:
+                # #194 §4: a TraceLens-patched vLLM exposes
+                # capture_torch_profiler_dir + detailed_trace_annotation
+                # on its ProfilerConfig. Both are new dataclass fields
+                # with safe defaults — unpatched vLLM rejects them as
+                # unknown JSON keys, which is why we gate on the
+                # patcher result.
+                capture_dir = output_dir / "capture_traces"
+                profiler_args_parts.append(
+                    "--profiler-config.capture_torch_profiler_dir "
+                    f"{capture_dir}"
+                )
+                profiler_args_parts.append(
+                    "--profiler-config.detailed_trace_annotation True"
+                )
+            profiler_args = " ".join(profiler_args_parts)
             if "delay_iterations" not in existing_vllm_args:
-                envs["EXTRA_VLLM_ARGS"] = f"{existing_vllm_args} {profiler_args}".strip()
+                envs["EXTRA_VLLM_ARGS"] = (
+                    f"{existing_vllm_args} {profiler_args}".strip()
+                )
         else:
             import json as _json
             try:
@@ -176,18 +267,36 @@ def materialize_config_with_envs(
             extra_body.setdefault("shape_discovery", True)
             extra_body.setdefault("roofline_annotations", True)
             envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
+            if tracelens_patch_ok:
+                # #194 §5: a TraceLens-patched SGLang exposes
+                # --enable-shape-discovery-for-cuda-graph-profile as a
+                # server CLI flag. Without the patch SGLang's argparse
+                # errors out on this flag — gate strictly on the
+                # patcher result.
+                existing_sglang = str(envs.get("EXTRA_SGLANG_ARGS", ""))
+                if "shape-discovery-for-cuda-graph-profile" not in existing_sglang:
+                    envs["EXTRA_SGLANG_ARGS"] = (
+                        f"{existing_sglang} "
+                        "--enable-shape-discovery-for-cuda-graph-profile"
+                    ).strip()
 
-    seq_cost = isl_val + osl_val
-    if seq_cost <= 1024:
-        factor = 10
-    elif seq_cost <= 4096:
-        factor = 5
-    elif seq_cost <= 16384:
-        factor = 3
+    if profile_num_prompts is not None:
+        # Profile mode: force-override caller/YAML NUM_PROMPTS — we need a
+        # specific minimum to reach the steady-state window, and an
+        # under-sized value silently empties the trace.
+        envs["NUM_PROMPTS"] = profile_num_prompts
     else:
-        factor = 2
-    if "NUM_PROMPTS" not in envs:
-        envs["NUM_PROMPTS"] = max(conc_val * factor, conc_val)
+        seq_cost = isl_val + osl_val
+        if seq_cost <= 1024:
+            factor = 10
+        elif seq_cost <= 4096:
+            factor = 5
+        elif seq_cost <= 16384:
+            factor = 3
+        else:
+            factor = 2
+        if "NUM_PROMPTS" not in envs:
+            envs["NUM_PROMPTS"] = max(conc_val * factor, conc_val)
     if "NUM_WARMUPS" not in envs:
         envs["NUM_WARMUPS"] = min(conc_val, 8)
     if server_args:
