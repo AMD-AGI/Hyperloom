@@ -560,10 +560,17 @@ _REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {
 # Orchestration loop still needs to dispatch but whose bodies are no-ops
 # (the orchestration agent does the actual work via emit_intent). Kept
 # split so --no-kernel can exclude kernel-owned kinds.
+#
+# `dream` / `re_explore` / `recover` / `comm_optimization` /
+# `compiler_tuning` were removed from this list alongside the
+# corresponding entries in `prompt_builder.{FULL,NO_KERNEL}_ENABLED_ACTIONS`.
+# Their executors were `_noop_prep` (silent success) which produced
+# misleading "succeeded" outcomes; with them gone, any stale state.json
+# resume that still references one of these kinds will surface as
+# `no_executor` instead of a fake KEEP. Re-add only when real
+# executors land (see remain_todo.md sections C, I, M).
 _NOOP_KINDS_COMMON: tuple[str, ...] = (
     "setup", "classify", "target_analysis",
-    "dream", "re_explore", "recover",
-    "comm_optimization", "compiler_tuning",
 )
 _NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = (
     "kernel_opt", "integrate", "deep_kernel_analysis",
