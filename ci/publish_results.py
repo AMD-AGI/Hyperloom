@@ -44,6 +44,41 @@ def load_results(path: Path) -> list[dict[str, Any]]:
     return []
 
 
+def _strip_luochen_workaround(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip fields that hit a known luochen results-service bug.
+
+    Current bug: handlers/storage/postgres_store._nullable_timestamp returns
+    ``str`` but asyncpg requires a ``datetime`` instance for the
+    ``timestamptz`` column. So sending ``run.submitted_at = "<ISO 8601>"``
+    deterministically returns HTTP 500 with::
+
+        invalid input for query argument $9:
+        '2026-05-13T10:11:28Z' (expected a datetime.date or
+        datetime.datetime instance, got 'str')
+
+    Workaround: replace ``run.submitted_at`` (string) with ``None`` and
+    move the original value to ``run.submitted_at_iso`` so the
+    information is preserved in the JSONB blob luochen stores under
+    ``raw_result``. Remove this once luochen patches
+    ``_nullable_timestamp`` to call ``datetime.fromisoformat`` (or
+    accepts the timestamp inside the larger ``metadata`` JSONB column).
+    """
+    cleaned: list[dict[str, Any]] = []
+    for r in results:
+        if not isinstance(r, dict):
+            cleaned.append(r)
+            continue
+        rr = dict(r)
+        run = dict(rr.get("run") or {})
+        sa = run.get("submitted_at")
+        if isinstance(sa, str) and sa.strip():
+            run["submitted_at_iso"] = sa
+            run["submitted_at"] = None
+        rr["run"] = run
+        cleaned.append(rr)
+    return cleaned
+
+
 def publish(
     results: list[dict[str, Any]],
     url: str,
@@ -70,7 +105,7 @@ def publish(
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    body = {"results": results}
+    body = {"results": _strip_luochen_workaround(results)}
 
     backoff = initial_backoff_s
     last_err: Exception | None = None
