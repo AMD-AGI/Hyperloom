@@ -561,3 +561,69 @@ def test_build_prompt_omits_benchmark_cases_for_legacy_candidates():
     assert "## Benchmark cases" not in prompt
 
 
+# ============================================================================
+# PR-B §3: bound-keyed optimization priority block in build_prompt
+# ============================================================================
+def test_build_priority_block_empty_when_no_bound_info():
+    block = ko._build_priority_block({"name": "kernel", "source_type": "triton"})
+    assert block == ""
+
+
+def test_build_priority_block_memory_bound_leads_with_memory_traffic():
+    block = ko._build_priority_block({
+        "name": "rms_norm",
+        "bound_type": "memory-bound",
+    })
+    assert "Optimization priorities" in block
+    assert "memory-bound" in block
+    # Lever 1 must be memory traffic; lever 2 must be shape-aware.
+    lev1 = block.index("1. **Memory traffic reduction**")
+    lev2 = block.index("2. **Shape-aware tuning**")
+    assert lev1 < lev2
+
+
+def test_build_priority_block_compute_bound_leads_with_compute_utilization():
+    block = ko._build_priority_block({
+        "name": "gemm_kernel",
+        "bound_type": "compute-bound",
+    })
+    assert "1. **Compute utilization**" in block
+    assert "primary lever for compute-bound" in block
+
+
+def test_build_priority_block_unknown_bound_uses_default_order():
+    block = ko._build_priority_block({
+        "name": "kernel",
+        "bound_type": "mixed",
+    })
+    # mixed → unknown bucket → structural simplification first.
+    assert "1. **Structural simplification**" in block
+
+
+def test_build_priority_block_reads_bound_from_task_group_primary_row():
+    """When candidate has no top-level bound_type, fall back to the
+    first task_group row's bound_type."""
+    block = ko._build_priority_block({
+        "name": "rms_norm",
+        "task_group": {
+            "rows": [{"name": "rms_norm", "bound_type": "memory-bound"}],
+        },
+    })
+    assert "1. **Memory traffic reduction**" in block
+
+
+def test_build_prompt_includes_priority_block_when_bound_present():
+    prompt = ko.build_prompt(
+        {"name": "gemm", "source_type": "triton", "bound_type": "compute-bound"},
+        _prompt_args("mi300x"),
+    )
+    assert "## Optimization priorities" in prompt
+    assert "1. **Compute utilization**" in prompt
+
+
+def test_build_prompt_omits_priority_block_for_legacy_candidates():
+    prompt = ko.build_prompt(
+        {"name": "legacy", "source_type": "triton"},
+        _prompt_args("mi300x"),
+    )
+    assert "## Optimization priorities" not in prompt

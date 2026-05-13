@@ -382,6 +382,111 @@ def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# PR-B §3: ordered optimization directions, keyed by bound type so the
+# agent's first lever matches the kernel's actual bottleneck. The order
+# below mirrors the feature branch's ``tracelens_geak_task_parser``
+# Optimization directions section; ``compute`` flips the top two
+# entries, ``unknown`` falls back to the feature-branch default order.
+# Each entry is one already-formatted bullet line.
+_PRIORITY_BULLETS: dict[str, list[str]] = {
+    "memory": [
+        "1. **Memory traffic reduction** (primary lever for memory-bound rows): "
+        "improve coalescing / vectorization, fuse with neighbouring ops to "
+        "amortize global loads, reduce intermediate writes, and avoid extra "
+        "global-memory round trips.",
+        "2. **Shape-aware tuning**: specialize block sizes and grid indexing "
+        "for the dominant TraceLens Args. Memory-bound kernels are especially "
+        "sensitive to load-coalescing alignment on the dominant shape.",
+        "3. **Launch amortization** for tiny high-count decode shapes: "
+        "persistent / batched handling or wrapper-level batching when source "
+        "and harness allow.",
+        "4. **Structural simplification**: hoist loop-invariant computations, "
+        "remove redundant address arithmetic, collapse dual-pass logic.",
+        "5. **Compute utilization** (rarely the bottleneck here, but check): "
+        "MFMA tile choice, occupancy, register / shared-memory balance.",
+    ],
+    "compute": [
+        "1. **Compute utilization** (primary lever for compute-bound rows): "
+        "improve MFMA tile choice, occupancy, and register / shared-memory "
+        "balance so the same FLOPs issue under a better-utilized pipeline.",
+        "2. **Shape-aware tuning**: specialize block sizes and grid indexing "
+        "for the dominant TraceLens Args. Compute-bound kernels often hit "
+        "different efficiency ceilings on K-major vs N-major shapes.",
+        "3. **Structural simplification**: hoist loop-invariant computations, "
+        "remove redundant address arithmetic, collapse dual-pass logic.",
+        "4. **Memory traffic reduction** (secondary): coalescing / "
+        "vectorization, fewer intermediate writes — rarely the bottleneck "
+        "here but worth measuring after a compute-side change.",
+        "5. **Launch amortization** for tiny high-count decode shapes: "
+        "persistent / batched handling or wrapper-level batching.",
+    ],
+    "unknown": [
+        "1. **Structural simplification**: hoist loop-invariant computations, "
+        "remove redundant address arithmetic, collapse dual-pass logic.",
+        "2. **Shape-aware tuning**: specialize block sizes and grid indexing "
+        "for the dominant TraceLens Args.",
+        "3. **Memory traffic reduction**: improve coalescing / vectorization, "
+        "reduce intermediate writes, avoid extra global-memory round trips.",
+        "4. **Launch amortization** for tiny high-count decode shapes.",
+        "5. **Compute utilization**: improve MFMA tile choice, occupancy, "
+        "register / shared-memory balance.",
+    ],
+}
+
+
+def _classify_bound(bound_type: str) -> str:
+    """Map TraceLens ``bound`` strings to one of the three priority keys.
+
+    TraceLens emits values like ``memory-bound`` / ``Memory-Bound`` /
+    ``compute-bound`` / ``mixed`` / ``-`` / empty. Normalise to one of
+    ``memory`` / ``compute`` / ``unknown`` so the priority block stays
+    deterministic.
+    """
+    text = (bound_type or "").lower()
+    if "memory" in text or "bandwidth" in text or "hbm" in text:
+        return "memory"
+    if "compute" in text or "arithmetic" in text or "flops" in text:
+        return "compute"
+    return "unknown"
+
+
+def _build_priority_block(candidate: dict[str, Any]) -> str:
+    """Render the bound-keyed optimization priority list.
+
+    Pulls ``bound_type`` from the candidate (set by ``_row_to_candidate``
+    when the TraceLens v0.3 report carries a ``Bound`` column).
+    Returns the empty string when ``bound_type`` is missing AND no
+    ``task_group`` is attached — the section is purely additive context;
+    skipping it on legacy candidates keeps the prompt body byte-identical
+    to PR-A.
+
+    When a ``task_group`` is present, the bound classification of the
+    *primary* row is used; non-primary rows are typically the same
+    Operation called from different shapes and share the same bound.
+    """
+    group = candidate.get("task_group")
+    bound_type = str(candidate.get("bound_type") or "").strip()
+    if not bound_type and isinstance(group, dict):
+        rows = group.get("rows") or []
+        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+            bound_type = str(rows[0].get("bound_type") or "").strip()
+    if not bound_type:
+        return ""
+    bucket = _classify_bound(bound_type)
+    label = bound_type or "unknown"
+    header_line = (
+        f"## Optimization priorities (TraceLens bound: `{label}`)"
+    )
+    intro = (
+        "The list below orders optimization levers by expected payoff for "
+        "this kernel's bottleneck. Try lever 1 first; only move to lever 2 "
+        "if profiling shows lever 1 is exhausted or not applicable."
+    )
+    lines = ["", header_line, "", intro, ""]
+    lines.extend(_PRIORITY_BULLETS[bucket])
+    return "\n".join(lines)
+
+
 def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
     """Render a TraceLens hypothesis section for the candidate, if any.
 
@@ -601,6 +706,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     platform_build_flag = _target_build_flag(target_platform)
     hypothesis_block = _build_hypothesis_block(candidate)
     benchmark_cases_block = _build_benchmark_cases_block(candidate)
+    priority_block = _build_priority_block(candidate)
     bench_block = ""
     if bench_files:
         bench_block = "\nKnown benchmark/test files (also copied into your workspace as -f):\n"
@@ -784,6 +890,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         hardware_notes,
         hypothesis_block,
         benchmark_cases_block,
+        priority_block,
         "",
         "Preserve function name, signature, decorators, and numerical behavior.",
         "Return complete optimized code plus explanation of correctness assumptions.",
