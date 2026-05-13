@@ -15,8 +15,9 @@ The patcher's contract:
   already-mutated file all return ``False`` instead of raising, so
   unrelated unit tests and dry-runs don't blow up.
 
-The fixtures here synthesize a fake ``InferenceX/benchmarks/`` tree in
-a tmp dir so we never touch the real ``/wekafs/InferenceX``.
+The fixtures here synthesize a fake ``InferenceX/benchmarks/`` tree
+inside ``tmp_path`` so we never touch the real InferenceX checkout
+pointed at by ``$INFERENCEX_PATH``.
 """
 
 from __future__ import annotations

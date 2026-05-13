@@ -14,7 +14,7 @@ version):
 
 The tests synthesize a fake vLLM / SGLang install tree + a fake
 TraceLens patch directory inside ``tmp_path`` so we never touch the
-real ``/wekafs/InferenceX`` or any real ``site-packages``.
+real ``$TRACELENS_ROOT`` or any real ``site-packages``.
 """
 
 from __future__ import annotations
