@@ -20,7 +20,33 @@ KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
 MAGPIE_DIR="${MAGPIE_DIR:-${WORKSPACE_ROOT}/Magpie}"
-MAGPIE_PYTHON="${MAGPIE_PYTHON:-${MAGPIE_DIR}/venv/bin/python}"
+# Resolve MAGPIE_PYTHON dynamically. The previous default
+# ${MAGPIE_DIR}/venv/bin/python assumed a Magpie-private venv, but
+# inference_optimizer/scripts/install.sh's ensure_magpie() does
+# `pip install -e $MAGPIE_DIR` into the driver Python's site-packages
+# (or the container image pre-installs it that way) — no venv is ever
+# created at $MAGPIE_DIR/venv. Mirrors _resolve_magpie_python() in
+# inference_optimizer/orchestrator/action_executors/_grid_runner.py:
+#   $MAGPIE_PYTHON env > python3 on PATH that can `import Magpie`
+#     > /opt/venv/bin/python (if it exists) > python3 on PATH.
+_resolve_magpie_python() {
+  if [ -n "${MAGPIE_PYTHON:-}" ]; then
+    printf '%s' "$MAGPIE_PYTHON"
+    return 0
+  fi
+  local candidate
+  candidate="$(command -v python3 2>/dev/null || true)"
+  if [ -n "$candidate" ] && "$candidate" -c "import Magpie" >/dev/null 2>&1; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  if [ -x /opt/venv/bin/python ]; then
+    printf '%s' /opt/venv/bin/python
+    return 0
+  fi
+  printf '%s' "${candidate:-/opt/venv/bin/python}"
+}
+MAGPIE_PYTHON="$(_resolve_magpie_python)"
 PYTHONPATH="${MAGPIE_DIR}:${PYTHONPATH:-}"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
