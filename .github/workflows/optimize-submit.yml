@@ -139,6 +139,29 @@ on:
           - Set actions_taken = ["aborted: <one-line reason>"].
           - Still emit BOTH files. A partial report with baseline-only numbers is far more useful than no report at all.
 
+          MANUAL FALLBACK (V2 orchestrator stuck in kernel-opt loop — observed pattern):
+          If the V2 orchestrator runs past 2.5h without producing
+          $RESULT_DIR/ci_metrics.json (it's spinning forever in the kernel-opt
+          phase, re-optimizing the same 1-2 kernels every 60min cycle), DO NOT
+          wait for it. Manually compose ci_metrics.json + optimization_report.md
+          from the measurements you already have on disk:
+            * baseline number: $SESSION_DIR/phase02_baseline/baseline_results.json
+              (output_throughput field — that's tok/s/GPU at TP=1, or total tok/s
+              divided by TP for higher TP)
+            * profile classification: $SESSION_DIR/phase03_profile/profile_results.json
+              + any TraceLens analysis already written
+            * kernel info: $SESSION_DIR/phase05_kernel_opt/*/optimization_summary.json
+            * sweep best: $SESSION_DIR/phase06_sweep/* or run a single
+              `--decode-attention-backend aiter` / `--max-num-batched-tokens N`
+              sweep with the same server config to test ONE param change
+            * If you cannot get an optimized number, set optimized_throughput =
+              baseline_throughput, gain_pct = 0.0 (honest "no headroom" report).
+
+          This is the path the Mistral-7B-v0.1 run on 2026-05-13 took
+          (run 25795816178) — it produced a clean +0.10% report after the
+          orchestrator stalled. Better an honest small-gain row than a missing
+          row for a 2-3h run.
+
           CRITICAL — vLLM Forbidden Flags (server will crash with "unrecognized arguments"):
           - --num-scheduler-steps   (removed in vLLM v0.4.0)
           - --chunked-prefill-size  (SGLang-only, NOT vLLM)
