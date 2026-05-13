@@ -475,6 +475,13 @@ async def select_kernels_handler(
             )
         if report_path:
             result["analysis_report_path"] = str(report_path)
+        # PR-A §3: surface tracelens/summary.json — the per-run audit
+        # sidecar listing reusable tasks vs skipped kernels with reasons.
+        # Coordinator / SharedState can show this in the prompt summary
+        # so operators see at a glance whether GEAK was offered the
+        # kernels they expected.
+        if isinstance(artifacts, dict) and artifacts.get("tracelens_summary"):
+            result["tracelens_summary_path"] = str(artifacts["tracelens_summary"])
     return result
 
 

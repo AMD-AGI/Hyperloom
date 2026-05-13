@@ -1739,6 +1739,64 @@ def enrich_candidates_with_runtime_metadata(
         flags.setdefault("num_gpus_recommended", item.get("num_gpus_recommended"))
 
 
+def build_audit_summary(
+    candidates: list[dict[str, Any]],
+    *,
+    trace_input: str,
+    framework: str = "",
+    target_platform: str = "",
+) -> dict[str, Any]:
+    """Build the ``tracelens/summary.json`` payload from finalized candidates.
+
+    Splits ``candidates`` into ``tasks`` (those that pass
+    :func:`classify_patchability` and are routable to a kernel-opt backend)
+    and ``skipped`` (those rejected, each carrying ``skip_reason`` so an
+    operator can see exactly why a TraceLens hot kernel was dropped from
+    routing). Both halves preserve the priority order of the input list.
+
+    The function is pure — it reads ``candidates`` and returns a dict — so
+    it is straightforward to test against fixture data without touching
+    the filesystem.
+    """
+    tasks: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        reusable = bool(cand.get("reusable_native_kernel"))
+        compact = {
+            "kernel_id":         cand.get("kernel_id"),
+            "name":              cand.get("name"),
+            "source_file":       cand.get("source_file") or "",
+            "source_type":       cand.get("source_type") or "",
+            "kernel_category":   cand.get("kernel_category") or "",
+            "gpu_pct":           cand.get("gpu_pct"),
+            "duration_us":       cand.get("duration_us"),
+            "call_count":        cand.get("call_count"),
+            "tracelens_pitem_rank":  cand.get("tracelens_pitem_rank"),
+            "tracelens_pitem_title": cand.get("tracelens_pitem_title"),
+            "bound_type":        cand.get("bound_type") or "",
+        }
+        if reusable:
+            compact["recommended_backends"] = list(
+                cand.get("recommended_backends") or []
+            )
+            tasks.append(compact)
+        else:
+            compact["skip_reason"] = cand.get("skip_reason") or "unknown"
+            skipped.append(compact)
+    return {
+        "generated_at":    utc_now(),
+        "trace_input":     trace_input,
+        "framework":       framework,
+        "target_platform": target_platform,
+        "task_count":      len(tasks),
+        "skipped_count":   len(skipped),
+        "tasks":           tasks,
+        "skipped":         skipped,
+    }
+
+
 def write_reports(
     run_dir: Path,
     *,
@@ -1773,6 +1831,22 @@ def write_reports(
     atomic_write_json(run_dir / "trace_input_manifest.json", manifest)
     atomic_write_json(tracelens_dir / "tracelens_report.json", report)
     atomic_write_json(run_dir / "kernel_candidates.json", {"hot_kernels": candidates, **report})
+
+    # PR-A §3: per-run audit sidecar listing which TraceLens hot kernels
+    # were routed to a kernel-opt backend (``tasks``) and which were
+    # dropped (``skipped``, each with ``skip_reason``). Mirrors the
+    # feature branch's ``tracelens_geak_task_parser.summary.json`` and is
+    # the primary debug surface when GEAK comes back with surprising
+    # results — operator can answer "did TraceLens see kernel X? did we
+    # send it to GEAK? if not, why not?" in one read.
+    summary = build_audit_summary(
+        candidates,
+        trace_input=str(Path(args.trace_input).resolve()),
+        framework=str(args.framework or ""),
+        target_platform=str(args.target_platform or ""),
+    )
+    summary_path = tracelens_dir / "summary.json"
+    atomic_write_json(summary_path, summary)
 
     md_path = tracelens_dir / "standalone_analysis.md"
     if existing_report_path and existing_report_path.exists():
@@ -1812,6 +1886,7 @@ def write_reports(
         "kernel_candidates": str(run_dir / "kernel_candidates.json"),
         "tracelens_report_json": str(tracelens_dir / "tracelens_report.json"),
         "trace_report_path": str(md_path),
+        "tracelens_summary": str(summary_path),
     }
 
 

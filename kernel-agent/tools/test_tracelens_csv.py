@@ -1514,3 +1514,72 @@ def test_is_reusable_native_kernel_delegates_to_classify():
     for cand in samples:
         assert tla.is_reusable_native_kernel(cand) == tla.classify_patchability(cand)[0]
 
+
+def test_build_audit_summary_splits_tasks_and_skipped():
+    """``build_audit_summary`` must surface kernel name + skip_reason for
+    every dropped candidate so operators can answer 'why didn't GEAK see
+    kernel X?' from the sidecar alone."""
+    finalized = [
+        {
+            "kernel_id": "k001",
+            "name": "good_triton_kernel",
+            "source_file": "/sgl-workspace/aiter/x.py",
+            "source_type": "triton",
+            "reusable_native_kernel": True,
+            "skip_reason": "",
+            "gpu_pct": 12.5,
+            "tracelens_pitem_rank": 1,
+            "recommended_backends": ["geak", "claude", "codex"],
+        },
+        {
+            "kernel_id": "k002",
+            "name": "rocblas_sgemm",
+            "source_file": "/sgl-workspace/aiter/x.py",
+            "source_type": "python",
+            "reusable_native_kernel": False,
+            "skip_reason": "non-patchable kernel name marker 'rocblas' in 'rocblas_sgemm'",
+            "gpu_pct": 5.2,
+        },
+        {
+            "kernel_id": "k003",
+            "name": "aten::mm",
+            "source_file": "",
+            "source_type": "tracelens_report",
+            "reusable_native_kernel": False,
+            "skip_reason": "source file not resolved",
+            "gpu_pct": 30.0,
+        },
+    ]
+    summary = tla.build_audit_summary(
+        finalized,
+        trace_input="/tmp/trace.json.gz",
+        framework="sglang",
+        target_platform="mi300x",
+    )
+    assert summary["task_count"] == 1
+    assert summary["skipped_count"] == 2
+    assert summary["trace_input"] == "/tmp/trace.json.gz"
+    assert summary["framework"] == "sglang"
+    assert summary["target_platform"] == "mi300x"
+
+    task_names = [t["name"] for t in summary["tasks"]]
+    skipped_names = [s["name"] for s in summary["skipped"]]
+    assert task_names == ["good_triton_kernel"]
+    assert set(skipped_names) == {"rocblas_sgemm", "aten::mm"}
+
+    rocblas_entry = next(s for s in summary["skipped"] if s["name"] == "rocblas_sgemm")
+    assert "rocblas" in rocblas_entry["skip_reason"]
+    aten_entry = next(s for s in summary["skipped"] if s["name"] == "aten::mm")
+    assert "source file" in aten_entry["skip_reason"]
+    # Reusable tasks must carry recommended_backends so an operator can
+    # see which backend each task is routed to without reloading
+    # kernel_candidates.json.
+    assert summary["tasks"][0]["recommended_backends"] == ["geak", "claude", "codex"]
+
+
+def test_build_audit_summary_handles_empty_input():
+    summary = tla.build_audit_summary([], trace_input="/tmp/x.json.gz")
+    assert summary["task_count"] == 0
+    assert summary["skipped_count"] == 0
+    assert summary["tasks"] == []
+    assert summary["skipped"] == []
