@@ -256,6 +256,26 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
 )
+# Kernel-name substrings that mark an operation as non-patchable regardless
+# of source-file resolution: vendor BLAS routines, RCCL/NCCL collectives,
+# raw memcpy/copy ops, and PyTorch native copy. Folded from the feature
+# branch's ``tracelens_geak_task_parser._NON_PATCHABLE_MARKERS`` so the
+# unified ``classify_patchability`` gate emits a clean rejection reason
+# for the same kernels that parser used to drop.
+_NON_PATCHABLE_NAME_MARKERS: tuple[str, ...] = (
+    "rocblas",
+    "hipblas",
+    "hipblaslt",
+    "rocblaslt",
+    "tensile",
+    "miopen",
+    "ck_kernels",
+    "nccl",
+    "rccl",
+    "hipmemcpy",
+    "__amd_rocclr_copybuffer",
+    "aten::copy",
+)
 
 
 def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
@@ -275,21 +295,70 @@ def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
     return False
 
 
-def is_reusable_native_kernel(candidate: dict[str, Any]) -> bool:
-    """Whether a candidate is safe to send to kernel optimization backends."""
+def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
+    """Return ``(reusable, skip_reason)`` for a hot-kernel candidate.
+
+    Single source of truth for the kernel-opt routing gate. ``skip_reason``
+    is empty when the candidate is reusable; otherwise it is a short
+    human-readable explanation suitable for the summary.json audit
+    sidecar. :func:`is_reusable_native_kernel` returns the boolean half
+    so existing callers keep working.
+
+    Compared to the legacy logic this also rejects:
+
+    * kernels whose name contains a vendor BLAS / collective / native-op
+      marker from :data:`_NON_PATCHABLE_NAME_MARKERS`, even when the
+      reported source file resolves to a reusable framework root;
+    * ``aten::*`` PyTorch native ops without a library hint (these
+      typically point at Tensile / vendor backends and have no rewritable
+      Python source).
+    """
     source_file = str(candidate.get("source_file") or "")
+    name = str(candidate.get("name") or "")
+    lower_name = name.lower()
     if not source_file:
-        return False
+        return False, "source file not resolved"
     if candidate.get("source_type") == "vendor_binary":
-        return False
+        return False, "vendor binary (no rewritable source)"
     if candidate.get("vendor_dispatch_wrapper"):
-        return False
-    if is_runtime_generated_kernel(str(candidate.get("name") or ""), source_file):
-        return False
+        return False, f"vendor dispatch wrapper at {source_file}"
+    for marker in _NON_PATCHABLE_NAME_MARKERS:
+        if marker in lower_name:
+            return False, (
+                f"non-patchable kernel name marker '{marker}' in {name!r}"
+            )
+    if name.startswith("aten::"):
+        library = str(candidate.get("library") or "").strip().lower()
+        if not library or library in {"tensile", "pytorch native"}:
+            return False, (
+                f"PyTorch native op {name!r} backed by "
+                f"{candidate.get('library') or 'unknown'} library "
+                "(typically Tensile / vendor backend)"
+            )
+    if is_runtime_generated_kernel(name, source_file):
+        return False, (
+            f"runtime-generated (torch.compile / Inductor cache): {source_file}"
+        )
     lower_file = source_file.lower()
     if not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS):
-        return False
-    return candidate.get("source_type") in {"hip_cpp", "triton", "python"}
+        return False, (
+            f"source not under a reusable framework root: {source_file}"
+        )
+    source_type = candidate.get("source_type")
+    if source_type not in {"hip_cpp", "triton", "python"}:
+        return False, (
+            f"source_type={source_type!r} not in {{hip_cpp, triton, python}}"
+        )
+    return True, ""
+
+
+def is_reusable_native_kernel(candidate: dict[str, Any]) -> bool:
+    """Whether a candidate is safe to send to kernel optimization backends.
+
+    Thin wrapper over :func:`classify_patchability` kept for backward
+    compatibility with downstream consumers that only need the bool.
+    """
+    return classify_patchability(candidate)[0]
 
 
 # Wrapper TUs that just dispatch to a precompiled .so / .co (no device body
@@ -1395,7 +1464,12 @@ def _finalize_candidates(
         item["runtime_generated_kernel"] = is_runtime_generated_kernel(
             item["name"], item.get("source_file", "")
         )
-        item["reusable_native_kernel"] = is_reusable_native_kernel(item)
+        # Single classify_patchability call covers both the boolean
+        # routing gate AND the human-readable rejection reason consumed
+        # by the summary.json audit sidecar (PR-A §3 of issue tbd).
+        reusable, skip_reason = classify_patchability(item)
+        item["reusable_native_kernel"] = reusable
+        item["skip_reason"] = skip_reason
         item["benchmark_files"] = find_benchmark_files(
             item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
         )

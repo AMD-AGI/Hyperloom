@@ -1413,3 +1413,104 @@ def test_parse_analysis_md_attaches_prose_from_fixture():
     ), "P1 resolution should mention wave-occupancy tuning (from fixture)"
 
 
+# ===========================================================================
+# PR-A §2: classify_patchability gate + skip_reason audit field
+# ===========================================================================
+def test_classify_patchability_accepts_stable_triton_source():
+    """Previously-reusable candidate stays reusable; skip_reason is empty."""
+    cand = {
+        "name": "triton_attention_decode_kernel",
+        "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/attn.py",
+        "source_type": "triton",
+    }
+    reusable, reason = tla.classify_patchability(cand)
+    assert reusable is True
+    assert reason == ""
+
+
+def test_classify_patchability_rejects_missing_source_file():
+    reusable, reason = tla.classify_patchability(
+        {"name": "rms_norm", "source_type": "triton"},
+    )
+    assert reusable is False
+    assert "source file not resolved" in reason
+
+
+def test_classify_patchability_rejects_vendor_blas_name_markers():
+    """Folded from feature branch _NON_PATCHABLE_MARKERS: rocblas/hipblas/etc.
+    rejected even when source_file resolves under a reusable framework root."""
+    for marker_name in (
+        "rocblas_sgemm_kernel",
+        "hipblas_gemm_strided",
+        "tensile_gemm_NN_bf16",
+        "rccl_AllReduce_sum",
+        "nccl_kernel",
+        "aten::copy_",
+    ):
+        reusable, reason = tla.classify_patchability({
+            "name": marker_name,
+            "source_file": "/sgl-workspace/aiter/foo.py",
+            "source_type": "python",
+        })
+        assert reusable is False, marker_name
+        assert "non-patchable" in reason or "PyTorch native" in reason, marker_name
+
+
+def test_classify_patchability_rejects_aten_without_library():
+    """aten::* without a library hint is treated as Tensile / native backend."""
+    reusable, reason = tla.classify_patchability({
+        "name": "aten::mm",
+        "source_file": "/sgl-workspace/aiter/foo.py",
+        "source_type": "python",
+        "library": "",
+    })
+    assert reusable is False
+    assert "Tensile" in reason or "vendor" in reason
+
+
+def test_classify_patchability_rejects_aten_tensile_library():
+    """Explicit library == 'Tensile' is the most common reject path."""
+    reusable, reason = tla.classify_patchability({
+        "name": "aten::mm",
+        "source_file": "/sgl-workspace/aiter/foo.py",
+        "source_type": "python",
+        "library": "Tensile",
+    })
+    assert reusable is False
+    assert "Tensile" in reason
+
+
+def test_classify_patchability_rejects_runtime_generated_kernel():
+    reusable, reason = tla.classify_patchability({
+        "name": "triton_poi_fused_add_0",
+        "source_file": "/tmp/torchinductor_root/ab/cdef.py",
+        "source_type": "runtime_generated",
+    })
+    assert reusable is False
+    assert "runtime-generated" in reason
+
+
+def test_classify_patchability_rejects_unreusable_source_root():
+    reusable, reason = tla.classify_patchability({
+        "name": "my_custom_kernel",
+        "source_file": "/tmp/random/my_custom_kernel.cu",
+        "source_type": "hip_cpp",
+    })
+    assert reusable is False
+    assert "reusable framework root" in reason
+
+
+def test_is_reusable_native_kernel_delegates_to_classify():
+    """The bool wrapper must stay in lockstep with classify_patchability."""
+    samples = [
+        {"name": "rms_norm", "source_file": "", "source_type": "triton"},
+        {"name": "rocblas_sgemm", "source_file": "/sgl-workspace/aiter/x.py", "source_type": "python"},
+        {
+            "name": "triton_attn",
+            "source_file": "/sgl-workspace/sglang/python/sglang/x.py",
+            "source_type": "triton",
+        },
+    ]
+    for cand in samples:
+        assert tla.is_reusable_native_kernel(cand) == tla.classify_patchability(cand)[0]
+
