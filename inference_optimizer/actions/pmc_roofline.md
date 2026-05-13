@@ -31,6 +31,27 @@ Use the GPU visibility assigned by Ray. Do not pass `ROCR_VISIBLE_DEVICES` or
 `CUDA_VISIBLE_DEVICES` in `extra_envs` unless `allow_device_override=true` is
 explicitly set.
 
+## Enabling Automatic Runs
+
+`pmc_roofline` is opt-in. By default, the main optimization flow does not run it
+and therefore pays no extra GPU/server cost.
+
+Set `HYPERLOOM_ENABLE_PMC_ROOFLINE=1` to have the Coordinator enqueue one
+`pmc_roofline` task after a successful `select_kernels` response. The auto task
+reuses the materialized Magpie workload YAML from `baseline_config_path` to build
+the dedicated server and benchmark commands, so the PMC run uses the same model,
+framework, precision, TP, ISL/OSL/CONC, and server args as the Magpie workload
+contract.
+
+Useful knobs:
+
+- `HYPERLOOM_ENABLE_PMC_ROOFLINE=1`: enable automatic enqueue.
+- `HYPERLOOM_PMC_ROOFLINE_FORCE=1`: enqueue even if a roofline artifact already
+  exists for the session.
+- `HYPERLOOM_PMC_ROOFLINE_MODE=launch|attach`: default `launch`.
+- `HYPERLOOM_PMC_ROOFLINE_PORT=30001`: dedicated server port.
+- `HYPERLOOM_PMC_ROOFLINE_DURATION_MS=15000`: rocprof collection window.
+
 ## Why This Is Separate
 
 ROCm only allows one rocprofiler tool registration per process. The standard
