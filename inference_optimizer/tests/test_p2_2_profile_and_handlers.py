@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from inference_optimizer import cli as optimizer_cli
 from inference_optimizer.orchestrator import kernel_request_handlers as krh
 from inference_optimizer.orchestrator.action_executors.baseline import (
     BaselineExecutor,
@@ -35,6 +38,7 @@ from inference_optimizer.orchestrator.resource_lock import (
 from inference_optimizer.orchestrator.sub_agent_runner import (
     RunnerContext, SubAgentRunner,
 )
+from inference_optimizer.manifest import build_manifest
 from inference_optimizer.paths import make_session_dir
 from inference_optimizer.storage import SqliteConnection
 
@@ -59,6 +63,34 @@ def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {n: MockBackend(silent, name=n)
             for n in ("orchestration", "kernel", "critic", "robustness")}
+
+
+def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch):
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.setenv("GPU_TYPE", "mi300x")
+    monkeypatch.setenv("TARGET_GPU_TYPE", "mi325x")
+    args = SimpleNamespace(
+        model="/models/Qwen3",
+        model_class="",
+        target_summary="",
+        max_hours=1,
+        no_kernel=False,
+        gpu_type="mi325x",
+        target_gain=None,
+        target_tput=None,
+    )
+
+    assert optimizer_cli._gpu_runner_type("mi325x") == "mi300x"
+    assert optimizer_cli._GFX_TO_RUNNER.get("gfx1100") is None
+    manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
+    state = optimizer_cli._seed_shared_state(
+        tmp_path, args, session_id="mi325x-session",
+    )
+
+    assert manifest["gpu_type"] == "mi325x"
+    assert state.gpu_type == "mi325x"
+    assert os.environ["TARGET_GPU_TYPE"] == "mi325x"
+    assert os.environ["GPU_TYPE"] == "mi300x"
 
 
 # ===========================================================================
@@ -660,6 +692,37 @@ async def test_run_optimization_handler_forwards_extra_sglang_args(session_dir):
     cmd = captured["cmd"]
     assert "--extra-sglang-args" in cmd
     assert cmd[cmd.index("--extra-sglang-args") + 1] == "--kv-cache-dtype fp8 --page-size 16"
+
+
+def test_run_optimization_handler_backfills_target_platform_from_state(session_dir):
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.gpu_type = "mi325x"
+    state.save(session_dir)
+    captured: dict[str, object] = {}
+
+    async def fake_run(cmd, *, timeout_sec):
+        captured["cmd"] = cmd
+        return 0, '{"status": "ok"}', ""
+
+    payload = {
+        "kernel_id": "fake_kernel_1",
+        "session_id": session_dir.name,
+        "source_file": "/sgl-workspace/sglang/python/sglang/fake.py",
+        "dry_run": True,
+        "_single_kernel": True,
+    }
+    with patch.object(krh, "_validate_reusable_native_kernel", return_value=None), \
+         patch.object(krh, "_run_subprocess", side_effect=fake_run):
+        res = asyncio.run(
+            krh.run_optimization_handler(payload, session_dir=session_dir),
+        )
+
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert "--target-platform" in cmd
+    assert cmd[cmd.index("--target-platform") + 1] == "mi325x"
 
 
 def test_handlers_dispatch_table():
