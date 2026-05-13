@@ -78,16 +78,29 @@ def _make_fake_vllm_install(tmp_path: Path) -> Path:
 
 
 def _write_fake_vllm_patch(
-    tracelens_root: Path, version: str, sentinel: str = "capture_torch_profiler_dir",
+    tracelens_root: Path, version: str,
+    sentinels: tuple[str, ...] = (
+        "capture_torch_profiler_dir", "detailed_trace_annotation",
+    ),
 ) -> Path:
-    """Generate a minimal unified diff that adds the sentinel string
+    """Generate a minimal unified diff that adds the sentinel strings
     to the fake profiler.py — `git apply` accepts it without needing
-    a real .git/ directory."""
+    a real .git/ directory.
+
+    PR-D §4: real TraceLens vLLM patches add BOTH
+    ``capture_torch_profiler_dir`` and ``detailed_trace_annotation`` as
+    new fields on ``ProfilerConfig``; the _server_patcher sentinel
+    requires BOTH to be present before declaring the install patched.
+    The fixture must follow suit so the synthetic patch leaves both
+    markers in the file, matching the real-world contract.
+    """
     patch_path = (
         tracelens_root
         / "examples" / "custom_workflows" / "inference_analysis"
         / "vllm_patches" / f"config_vllm_v{version}.patch"
     )
+    new_lines = "\n".join(f"+    {s}: str = \"\"" for s in sentinels)
+    added_count = len(sentinels)
     patch_path.write_text(
         textwrap.dedent(
             f"""\
@@ -95,11 +108,11 @@ def _write_fake_vllm_patch(
             index 0000001..0000002 100644
             --- a/vllm/config/profiler.py
             +++ b/vllm/config/profiler.py
-            @@ -1,4 +1,5 @@
+            @@ -1,4 +1,{4 + added_count} @@
              # Synthetic vLLM profiler config — used only by tests.
              class ProfilerConfig:
                  profiler: str = ""
-            +    {sentinel}: str = ""
+            {new_lines}
                  ignore_frontend: bool = False
             """
         ),
@@ -771,3 +784,96 @@ def test_resolve_sglang_apply_root_rejects_unexpected_layout(tmp_path):
     sglang_module = weird_root / "__init__.py"
     sglang_module.write_text("__version__ = '0.5.9'", encoding="utf-8")
     assert _server_patcher._resolve_sglang_apply_root(sglang_module) is None
+
+
+# ===========================================================================
+# PR-D §4: tuple-of-substrings sentinel for vLLM (false-positive guard)
+# ===========================================================================
+def test_is_patched_requires_all_substrings_in_tuple(tmp_path):
+    """``_is_patched`` must require EVERY substring in
+    ``plan.sentinel_text`` to be present. Drop one of the two vLLM
+    markers and the check must reject — that's the false-positive
+    guard if upstream ever merges one of the marker identifiers
+    without adopting the rest of the TraceLens patch."""
+    sentinel = tmp_path / "fake_sentinel.py"
+    # Has only the first marker, not the second.
+    sentinel.write_text(
+        "class ProfilerConfig:\n    capture_torch_profiler_dir: str = ''\n",
+        encoding="utf-8",
+    )
+    plan = _server_patcher._PatchPlan(
+        framework="vllm",
+        version="0.20.0",
+        apply_root=tmp_path,
+        patches=(),
+        sentinel_file=sentinel,
+        sentinel_text=("capture_torch_profiler_dir", "detailed_trace_annotation"),
+    )
+    assert _server_patcher._is_patched(plan) is False, (
+        "_is_patched must require BOTH markers; one alone is not enough"
+    )
+    # Add the second marker → now it counts as patched.
+    sentinel.write_text(
+        "class ProfilerConfig:\n"
+        "    capture_torch_profiler_dir: str = ''\n"
+        "    detailed_trace_annotation: bool = False\n",
+        encoding="utf-8",
+    )
+    assert _server_patcher._is_patched(plan) is True
+
+
+def test_is_patched_handles_single_element_tuple(tmp_path):
+    """Single-element tuple sentinel (the SGLang case) behaves
+    identically to the historical single-string sentinel: presence
+    of the lone marker counts as patched."""
+    sentinel = tmp_path / "fake_kernel_shape_profiler.py"
+    sentinel.write_text(
+        "# kernel_shape_profiler module stub\n", encoding="utf-8",
+    )
+    plan = _server_patcher._PatchPlan(
+        framework="sglang",
+        version="0.5.9",
+        apply_root=tmp_path,
+        patches=(),
+        sentinel_file=sentinel,
+        sentinel_text=("kernel_shape_profiler",),
+    )
+    assert _server_patcher._is_patched(plan) is True
+    # Wipe the marker → rejected.
+    sentinel.write_text("# unrelated file\n", encoding="utf-8")
+    assert _server_patcher._is_patched(plan) is False
+
+
+def test_vllm_plan_uses_two_marker_sentinel(tmp_path, monkeypatch):
+    """The vLLM plan must declare a 2-tuple sentinel
+    (``capture_torch_profiler_dir`` AND ``detailed_trace_annotation``).
+    This is the structural guarantee PR-D §4 makes: changing the plan
+    to a 1-tuple would silently revert to the false-positive-prone
+    historical behaviour, so we pin it explicitly."""
+    tracelens_root = _make_fake_tracelens(tmp_path)
+    install_root = _make_fake_vllm_install(tmp_path)
+    _write_fake_vllm_patch(tracelens_root, _FAKE_VLLM_VERSION)
+    fake_mod = types.ModuleType("vllm")
+    fake_mod.__version__ = _FAKE_VLLM_VERSION  # type: ignore[attr-defined]
+    fake_mod.__file__ = str(install_root / "vllm" / "__init__.py")  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "vllm", fake_mod)
+    monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
+
+    plan = _server_patcher._discover_vllm_plan(None)
+    assert plan is not None
+    assert isinstance(plan.sentinel_text, tuple)
+    assert set(plan.sentinel_text) == {
+        "capture_torch_profiler_dir", "detailed_trace_annotation",
+    }, plan.sentinel_text
+
+
+def test_sglang_plan_keeps_single_marker_sentinel(fake_sglang_world):
+    """SGLang's sentinel file is *created* by the patch — its presence
+    + a unique internal identifier is already false-positive-proof, so
+    we keep the historical single-substring sentinel wrapped in a
+    1-tuple for type uniformity with the vLLM plan (PR-D §4)."""
+    tracelens_root, _, _ = fake_sglang_world
+    plan = _server_patcher._discover_sglang_plan(tracelens_root)
+    assert plan is not None
+    assert isinstance(plan.sentinel_text, tuple)
+    assert plan.sentinel_text == ("kernel_shape_profiler",), plan.sentinel_text
