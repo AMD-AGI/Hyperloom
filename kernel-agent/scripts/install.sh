@@ -160,6 +160,62 @@ ensure_python() {
   python3 -m pip --version >/dev/null || die "pip is required"
 }
 
+# PR-D §3: pin `git` and `patch` so the TraceLens server patcher has the
+# binaries it expects on every deployment.
+#
+# Background: `inference_optimizer/orchestrator/action_executors/_server_patcher.py`
+# uses two binaries to apply TraceLens patches to vLLM/SGLang installs:
+#   * `git apply` — strict path, default; bails immediately on context drift.
+#   * `patch -p<N> --fuzz=10` — PR-C fuzzy fallback; tolerates whitespace /
+#     single-line drift between TraceLens-shipped patches and the deployed
+#     framework version (the common case on point-release bumps).
+#
+# Stripped runtime images (`lmsysorg/sglang:v0.5.9-rocm700-mi30x` and the
+# minimal vLLM serving images) sometimes ship without one or both binaries.
+# `_server_patcher` fail-softs in that case → `--enable-shape-discovery-
+# for-cuda-graph-profile` is silently never injected → graph-replayed
+# kernels stay opaque, exactly what #194 §5 was trying to fix.
+#
+# Apt-installing here is the cheap, framework-agnostic safety net: it's
+# the same install path the existing `ensure_node` helper takes for
+# Node.js, so it carries no new failure modes.
+ensure_patch_tools() {
+  log "ensuring git + patch (required by inference_optimizer/_server_patcher fuzzy-fallback path)"
+  local need_git=0 need_patch=0
+  command -v git >/dev/null 2>&1   || need_git=1
+  command -v patch >/dev/null 2>&1 || need_patch=1
+  if [ "$need_git" -eq 0 ] && [ "$need_patch" -eq 0 ]; then
+    log "git: $(command -v git) ($(git --version 2>/dev/null | head -1))"
+    log "patch: $(command -v patch) ($(patch --version 2>/dev/null | head -1))"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    [ "$need_git" -eq 1 ]   && warn "git missing; TraceLens server-patch strict path (\`git apply\`) will fail-soft"
+    [ "$need_patch" -eq 1 ] && warn "patch missing; TraceLens server-patch fuzzy fallback (\`patch --fuzz=10\`) will fail-soft"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would apt-get install git/patch because: git=$([ $need_git -eq 1 ] && echo missing || echo present), patch=$([ $need_patch -eq 1 ] && echo missing || echo present)"
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    [ "$need_git" -eq 1 ]   && warn "git missing and apt-get unavailable; install \`git\` manually for TraceLens server patching"
+    [ "$need_patch" -eq 1 ] && warn "patch missing and apt-get unavailable; install \`patch\` manually for TraceLens server patching fuzzy fallback"
+    return 0
+  fi
+  local pkgs=()
+  [ "$need_git" -eq 1 ]   && pkgs+=("git")
+  [ "$need_patch" -eq 1 ] && pkgs+=("patch")
+  log "apt-get installing: ${pkgs[*]}"
+  apt-get update >/dev/null 2>&1 || warn "apt-get update failed; install may pull stale package indices"
+  if ! apt-get -y install "${pkgs[@]}" >/dev/null; then
+    warn "apt-get install of ${pkgs[*]} failed; TraceLens server patching may fail-soft on this host"
+    return 0
+  fi
+  command -v git >/dev/null 2>&1   || warn "git still missing after apt-get install"
+  command -v patch >/dev/null 2>&1 || warn "patch still missing after apt-get install"
+}
+
 ensure_node() {
   log "ensuring Node.js/npm for claude/codex CLIs"
   if command -v node >/dev/null 2>&1 && npm --version >/dev/null 2>&1; then
@@ -592,6 +648,13 @@ PY
       warn "${tool} not found"
     fi
   done
+  for tool in git patch; do
+    if command -v "$tool" >/dev/null 2>&1; then
+      log "found ${tool}: $(command -v "$tool")"
+    else
+      warn "${tool} not found (TraceLens server patcher will fail-soft without it)"
+    fi
+  done
   if [ -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
     log "GEAK ref: $(git -C "${HYPERLOOM_ROOT}/geak" describe --tags --always 2>/dev/null || echo unknown)"
   else
@@ -622,6 +685,7 @@ main() {
   fi
   ensure_python
   ensure_node
+  ensure_patch_tools
   ensure_ray
   ensure_ray_started
   ensure_tracelens
