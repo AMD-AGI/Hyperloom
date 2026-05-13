@@ -378,6 +378,115 @@ def test_materialize_profile_window_clamps_to_skill_floor(
 
 
 # ===========================================================================
+# Regression #194 §2: NUM_PROMPTS must be sized to cover the steady-state
+# window. With the skill formulas, delay_iters reaches into the thousands
+# for non-trivial OSL — an under-sized NUM_PROMPTS makes the engine exit
+# before the profile window opens, yielding empty traces.
+#
+# The formula (from `_workload_envs`):
+#   required_iters    = delay_iters + max_iters
+#   iters_to_prompts  = ceil(required_iters * CONC / OSL)   # batch math
+#   NUM_PROMPTS       = max(CONC, iters_to_prompts * 2)     # 2x buffer
+#
+# Profile mode FORCE-overrides any caller-supplied NUM_PROMPTS — we own
+# the floor and an under-sized value silently kills the trace.
+# ===========================================================================
+def test_materialize_profile_num_prompts_covers_steady_state_window(
+    tmp_path, monkeypatch,
+):
+    """OSL=1024 / CONC=32 / R=1 → delay+max = 6400 iters ⇒ NUM_PROMPTS=400."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    # delay=5888, max=512 → required=6400; 6400*32/1024 = 200; *2 = 400.
+    assert envs["NUM_PROMPTS"] == 400, envs.get("NUM_PROMPTS")
+
+
+def test_materialize_profile_num_prompts_floors_at_conc_for_tiny_osl(
+    tmp_path, monkeypatch,
+):
+    """Tiny OSL with skill floor max_iters=256 still produces a sane
+    NUM_PROMPTS (covers the floor's delay+max window)."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 64, "OSL": 64})
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    # max=256, delay=64*2*3-128=256, required=512; 512*32/64=256; *2=512.
+    assert envs["NUM_PROMPTS"] == 512, envs.get("NUM_PROMPTS")
+
+
+def test_materialize_profile_force_overrides_user_num_prompts(
+    tmp_path, monkeypatch,
+):
+    """Profile mode must IGNORE caller-supplied NUM_PROMPTS — an
+    under-sized value (skill default `max_concurrency * 1`) would
+    silently empty the trace."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(
+        tmp_path, "vllm",
+        # Caller deliberately under-sizes to trip the regression.
+        {"CONC": 32, "ISL": 256, "OSL": 1024, "NUM_PROMPTS": 32},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    # Hyperloom-computed 400 must win over the caller's 32.
+    assert envs["NUM_PROMPTS"] == 400, envs.get("NUM_PROMPTS")
+
+
+def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
+    tmp_path, monkeypatch,
+):
+    """The §2 override is profile-only. Baseline / sweep paths must
+    still get the existing seq_cost-based NUM_PROMPTS (or honour a
+    caller-supplied value), so the §2 fix can't accidentally explode
+    baseline run lengths."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    src = tmp_path / "baseline.yaml"
+    src.write_text(yaml.safe_dump({
+        "benchmark": {
+            "framework": "vllm",
+            "model": "/m",
+            "envs": {"CONC": 32, "ISL": 256, "OSL": 1024},
+            # No profiler.torch_profiler.enabled, no PROFILE=1.
+        },
+    }))
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    # seq_cost=1280 → factor=5 → CONC*5 = 160 (legacy baseline path).
+    assert envs["NUM_PROMPTS"] == 160, envs.get("NUM_PROMPTS")
+
+
+def test_profile_executor_calls_benchmark_lib_patcher():
+    """ProfileExecutor must call ensure_benchmark_lib_patched before
+    launching Magpie, or the steady-state NUM_PROMPTS we just
+    computed gets stomped by upstream `benchmark_lib.sh` and the
+    trace is silently empty.
+
+    We don't run the full subprocess machinery — that's gated by
+    BaselineExecutor.__call__ which already has its own coverage.
+    Here we just lock down the seam: the symbol is imported by name
+    in profile.py and invoked unconditionally inside __call__.
+    """
+    import inference_optimizer.orchestrator.action_executors.profile as profile_mod
+    # The symbol must be re-exportable from the module (so monkey-
+    # patching in tests / integration sites is straightforward).
+    assert profile_mod.ensure_benchmark_lib_patched is not None
+    # And the source of __call__ must reference it; this is a cheap
+    # regression guard against silent removal during refactors.
+    import inspect
+    src = inspect.getsource(profile_mod.ProfileExecutor.__call__)
+    assert "ensure_benchmark_lib_patched" in src, (
+        "ProfileExecutor.__call__ must invoke ensure_benchmark_lib_patched "
+        "before super().__call__ — otherwise issue #194 §2 regresses."
+    )
+
+
+# ===========================================================================
 # Regression: $FRAMEWORK env switches the default yaml between sglang/vllm
 # without anyone passing config_path explicitly. Locks down the entry-layer
 # fix for vLLM support — the optimizer used to be sglang-only because all 5

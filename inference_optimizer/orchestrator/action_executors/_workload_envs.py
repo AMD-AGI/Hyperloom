@@ -162,12 +162,14 @@ def materialize_config_with_envs(
         str(envs.get("PROFILE", "")).strip() == "1"
         or (bench.get("profiler", {}).get("torch_profiler", {}).get("enabled") is True)
     )
+    profile_num_prompts: int | None = None
     if is_profile:
         try:
             r_val = float(envs.get("RANDOM_RANGE_RATIO", 1.0))
         except (TypeError, ValueError):
             r_val = 1.0
         safe_conc = max(conc_val, 1)
+        safe_osl = max(osl_val, 1)
         max_iters = min(1024, max(256, (osl_val * 16) // safe_conc))
         delay_iters = int(osl_val * (r_val + 1) * 3 - max_iters / 2)
         # Guard against pathological inputs (tiny OSL / huge R producing a
@@ -175,6 +177,20 @@ def materialize_config_with_envs(
         # captures warmup). Clamp to >= 0.
         if delay_iters < 0:
             delay_iters = 0
+        # TraceLens #194 §2: NUM_PROMPTS must be large enough that the
+        # benchmark engine reaches `delay_iters + max_iters` decode steps
+        # before it runs out of prompts. With continuous batching at
+        # concurrency CONC and average output length OSL, processing N
+        # prompts costs roughly N * OSL / CONC engine iterations; invert
+        # to get the prompt floor, then apply a 2x safety buffer for
+        # prefill / scheduling drift. Hyperloom owns this — we ignore any
+        # NUM_PROMPTS the caller passes when PROFILE is on, otherwise an
+        # under-sized value silently empties the trace.
+        required_iters = delay_iters + max_iters
+        iters_to_prompts = max(
+            1, (required_iters * safe_conc + safe_osl - 1) // safe_osl,
+        )
+        profile_num_prompts = max(safe_conc, iters_to_prompts * 2)
         fw = str(bench.get("framework") or "").lower()
         if "vllm" in fw:
             existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
@@ -203,17 +219,23 @@ def materialize_config_with_envs(
             extra_body.setdefault("roofline_annotations", True)
             envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
 
-    seq_cost = isl_val + osl_val
-    if seq_cost <= 1024:
-        factor = 10
-    elif seq_cost <= 4096:
-        factor = 5
-    elif seq_cost <= 16384:
-        factor = 3
+    if profile_num_prompts is not None:
+        # Profile mode: force-override caller/YAML NUM_PROMPTS — we need a
+        # specific minimum to reach the steady-state window, and an
+        # under-sized value silently empties the trace.
+        envs["NUM_PROMPTS"] = profile_num_prompts
     else:
-        factor = 2
-    if "NUM_PROMPTS" not in envs:
-        envs["NUM_PROMPTS"] = max(conc_val * factor, conc_val)
+        seq_cost = isl_val + osl_val
+        if seq_cost <= 1024:
+            factor = 10
+        elif seq_cost <= 4096:
+            factor = 5
+        elif seq_cost <= 16384:
+            factor = 3
+        else:
+            factor = 2
+        if "NUM_PROMPTS" not in envs:
+            envs["NUM_PROMPTS"] = max(conc_val * factor, conc_val)
     if "NUM_WARMUPS" not in envs:
         envs["NUM_WARMUPS"] = min(conc_val, 8)
     if server_args:
