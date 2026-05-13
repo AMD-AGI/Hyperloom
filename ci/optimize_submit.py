@@ -1095,26 +1095,22 @@ def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
     if not os.path.isdir(users_root):
         return copied
 
-    # Build a few candidate name keys for the JSON `model` field match
-    name_norms = set()
-    for raw in [model_basename, model_basename.split("-AWQ")[0],
-                model_basename.replace("-AWQ", ""),
-                model_basename.replace("-Instruct", ""),
-                model_basename.replace("-Chat", "")]:
-        norm = (raw or "").lower().replace("-", "").replace("_", "").replace(".", "").replace("/", "")
-        if norm:
-            name_norms.add(norm)
-    if not name_norms:
+    # Match strategy: exact equality after normalization. We tried fuzzy
+    # `substring-in-either-direction` first and it false-positived
+    # `Qwen2.5-Coder-14B-Instruct` onto `Qwen2.5-Coder-14B-Instruct-AWQ`
+    # (the suffix-stripped name is a substring of the AWQ one). Strict
+    # equality is safer; if the agent writes a slightly different model
+    # field we'd rather no-attribute than misattribute.
+    def _norm(s: str) -> str:
+        return (s or "").lower().replace("-", "").replace("_", "") \
+            .replace(".", "").replace("/", "")
+
+    target = _norm(model_basename)
+    if not target:
         return copied
 
     def _model_field_matches(model_field: str) -> bool:
-        m = (model_field or "").lower().replace("-", "").replace("_", "") \
-            .replace(".", "").replace("/", "")
-        if not m:
-            return False
-        # Strong match: any normalized variant of our target is a substring
-        # of the JSON.model. Conservative — we'd rather miss than mis-attribute.
-        return any(n in m or m in n for n in name_norms)
+        return _norm(model_field) == target
 
     # rglob with depth 4 is enough for the layouts we've seen:
     #   /wekafs/users/<uid>/<session>/ci_metrics.json                (depth 4)
