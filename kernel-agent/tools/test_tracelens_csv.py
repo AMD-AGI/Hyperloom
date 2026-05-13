@@ -1583,3 +1583,64 @@ def test_build_audit_summary_handles_empty_input():
     assert summary["skipped_count"] == 0
     assert summary["tasks"] == []
     assert summary["skipped"] == []
+# ===========================================================================
+# PR-B §1: source-function aggregation
+# ===========================================================================
+def test_parse_launcher_path_extracts_python_frame():
+    """``<path>(<line>): <fn>`` is the canonical TraceLens v0.3 shape."""
+    path, line, func = tlr._parse_launcher_path(
+        "aiter/ops/rmsnorm.py(76): rmsnorm",
+    )
+    assert path == "aiter/ops/rmsnorm.py"
+    assert line == 76
+    assert func == "rmsnorm"
+
+
+def test_parse_launcher_path_handles_hash_l_form():
+    """Bare file refs / ``<path>#L<line>`` are accepted as fallback shapes."""
+    path, line, func = tlr._parse_launcher_path(
+        "/sgl-workspace/aiter/csrc/foo.cu#L42",
+    )
+    assert path == "/sgl-workspace/aiter/csrc/foo.cu"
+    assert line == 42
+    assert func is None
+
+
+def test_parse_launcher_path_returns_none_for_empty_and_garbage():
+    """Empty / placeholder Kernel Path values must collapse to
+    ``("", None, None)`` so source-function aggregation skips the row
+    instead of grouping every placeholder under a bogus ``Path("—")``.
+    Real bare paths still pass through (caller may resolve them at the
+    AST layer)."""
+    assert tlr._parse_launcher_path("") == ("", None, None)
+    assert tlr._parse_launcher_path("—") == ("", None, None)
+    assert tlr._parse_launcher_path("-") == ("", None, None)
+    assert tlr._parse_launcher_path("N/A") == ("", None, None)
+    # Bare path with no line / fn: function_name resolution falls back
+    # to file stem at the _resolve_source_target layer, but the parser
+    # itself should leave both fields None.
+    path, line, func = tlr._parse_launcher_path("just/a/path.py")
+    assert path == "just/a/path.py"
+    assert line is None
+    assert func is None
+
+
+def test_function_line_from_ast_finds_def_lineno(tmp_path):
+    src = tmp_path / "kernel.py"
+    src.write_text(
+        "import torch\n\n\ndef other():\n    pass\n\n\ndef rms_norm(x):\n"
+        "    return x\n",
+        encoding="utf-8",
+    )
+    # The ``def rms_norm`` line is at line 8 (1-indexed).
+    assert tlr._function_line_from_ast(src, "rms_norm") == 8
+    assert tlr._function_line_from_ast(src, "missing") is None
+
+
+def test_function_line_from_ast_returns_none_on_invalid_source(tmp_path):
+    """Unreadable / non-Python files don't raise — caller falls back."""
+    src = tmp_path / "broken.py"
+    src.write_text("this is not valid python ::: !!!", encoding="utf-8")
+    assert tlr._function_line_from_ast(src, "anything") is None
+    assert tlr._function_line_from_ast(tmp_path / "does_not_exist.py", "x") is None
+

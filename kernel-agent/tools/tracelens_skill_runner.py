@@ -8,6 +8,7 @@ isolated and easy to test.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import shlex
@@ -575,6 +576,13 @@ def _row_to_candidate(
         "duration_us": time_ms * 1000.0,
         "call_count": int(count_val) if count_val else 0,
         "source_file": kernel_path,
+        # PR-B §1: preserve the raw Kernel Path string verbatim so
+        # ``aggregate_by_source_function`` can run AFTER
+        # ``_finalize_candidates`` (which overwrites ``source_file``
+        # with the locate_source_via_grep result). Without this the
+        # launcher string ``<path>(<line>): <fn>`` is lost and AST
+        # resolution falls back to ``None``.
+        "tracelens_launcher_path": kernel_path,
         "source_type": "tracelens_report",
         "shapes": shapes,
         "tracelens_category": category,
@@ -691,6 +699,153 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
     return candidates
 
 
+# ---------------------------------------------------------------------------
+# PR-B §1: source-function aggregation
+# ---------------------------------------------------------------------------
+# TraceLens reports each kernel launch site as one Operation row in the
+# 9-column Detailed Analysis table. Multiple rows commonly resolve to the
+# *same* Python source function (e.g. ``rmsnorm`` called from prefill,
+# decode, and capture paths), so dispatching one GEAK task per kernel_id
+# burns the LLM budget on the same function 3-5 times.
+#
+# The feature branch's ``tracelens_geak_task_parser`` solves this by
+# parsing the launcher path string (``path.py(76): function_name``),
+# resolving the function definition line via Python AST when the file
+# exists locally, and grouping every candidate that maps to the same
+# ``(source_path, definition_line, function_name)`` triple into a single
+# ``task_group``. We fold that logic in here so ``parse_analysis_md``
+# remains the single-source-of-truth report consumer, and a sibling
+# ``aggregate_by_source_function`` produces the additive ``task_groups[]``
+# structure that downstream callers (``kernel_optimization.py``,
+# ``kernel_request_handlers._batch_kernel_candidates``) opt into.
+#
+# The parser is conservative: kernels whose ``kernel_path`` is empty
+# (the LLama70B fixture) or malformed simply fall back to the legacy
+# per-kernel dispatch. Aggregation never *replaces* the hot_kernels[]
+# list — it adds a parallel view.
+
+# TraceLens emits the launcher path as ``<absolute or workspace-relative
+# path>(<line>): <function_name>`` for Python frames, and either a bare
+# file path or ``<path>#L<line>`` for HIP/.cu rows. Both shapes resolve
+# to ``(path, line, function_name | None)``; missing pieces are None.
+_LAUNCHER_PATH_RE = re.compile(
+    r"(?P<path>.+?)\((?P<line>\d+)\)\s*:\s*(?P<func>[A-Za-z_][A-Za-z0-9_]*)\s*$",
+)
+# TraceLens emits these for rows whose Kernel Path it cannot resolve
+# (Tensile-backed aten ops, vendor closed-source kernels, etc.). They
+# must not survive launcher parsing — otherwise aggregation groups
+# every placeholder row together under a bogus ``Path("—")``.
+_LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset({
+    "", "-", "—", "–", "n/a", "none", "null", "tbd", "unknown",
+})
+
+
+def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]:
+    """Parse a TraceLens kernel-path string.
+
+    Returns ``(path, line, function_name)`` where ``line`` and
+    ``function_name`` may be ``None``. The two accepted shapes are::
+
+        <path>(<line>): <function_name>      # Python frame, AST-resolvable
+        <path>#L<line>                        # generic file ref
+        <path>                                # bare file ref
+
+    Anything else falls back to ``(stripped_text, None, None)`` so the
+    caller can decide whether to skip the row or treat it as opaque.
+    TraceLens placeholders (``-``, ``—``, ``n/a``, etc.) collapse to
+    ``("", None, None)`` so source-function aggregation skips them.
+    """
+    if not kernel_path:
+        return "", None, None
+    text = kernel_path.strip()
+    if text.lower() in _LAUNCHER_PATH_PLACEHOLDERS:
+        return "", None, None
+    match = _LAUNCHER_PATH_RE.match(text)
+    if match:
+        return (
+            match.group("path").strip(),
+            int(match.group("line")),
+            match.group("func"),
+        )
+    path, _, fragment = text.partition("#L")
+    if fragment.isdigit():
+        return path.strip(), int(fragment), None
+    return text, None, None
+
+
+def _function_line_from_ast(path: Path, function_name: str) -> int | None:
+    """Walk ``path`` with :mod:`ast` and return the lineno of the first
+    ``FunctionDef`` / ``AsyncFunctionDef`` whose name matches.
+
+    Returns ``None`` when the file is unreadable, doesn't parse, or the
+    function is absent — the caller falls back to the launcher's
+    reported line. We accept either function flavor because Triton
+    kernels may be declared async in user code.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name:
+            return node.lineno
+    return None
+
+
+def _resolve_source_target(
+    candidate: dict[str, Any],
+    *,
+    source_root: Path | None,
+) -> dict[str, Any] | None:
+    """Resolve a candidate's launcher path to a stable
+    ``(source_path, definition_line, function_name)`` triple.
+
+    Returns ``None`` when the launcher path cannot be parsed at all
+    (empty / no path component) so the caller falls back to per-kernel
+    dispatch. When ``source_root`` is provided, relative paths are
+    resolved against it; when the resolved file exists on disk and the
+    function name is known, AST resolution overrides the reported line
+    number (TraceLens uses the call site's line, not the
+    ``def`` site).
+    """
+    # Prefer the verbatim ``tracelens_launcher_path`` (set by
+    # ``_row_to_candidate``) so AST resolution still works after
+    # ``_finalize_candidates`` overwrites ``source_file`` with the
+    # grep-located absolute path. Fall back to ``source_file`` /
+    # ``kernel_path`` for candidates from non-v0.3 sources (raw trace
+    # parser, priority_data.json fallback, csv) that never had a
+    # launcher-formatted Kernel Path field.
+    kernel_path = str(
+        candidate.get("tracelens_launcher_path")
+        or candidate.get("source_file")
+        or candidate.get("kernel_path")
+        or ""
+    )
+    raw_path, reported_line, reported_func = _parse_launcher_path(kernel_path)
+    if not raw_path:
+        return None
+    source_path = Path(raw_path)
+    if not source_path.is_absolute() and source_root is not None:
+        source_path = source_root / source_path
+    function_name = reported_func or source_path.stem
+    definition_line = reported_line or 1
+    if source_path.exists() and reported_func:
+        ast_line = _function_line_from_ast(source_path, reported_func)
+        if ast_line is not None:
+            definition_line = ast_line
+    return {
+        "source_path":      str(source_path),
+        "definition_line":  definition_line,
+        "function_name":    function_name,
+        "reported_path":    raw_path,
+        "reported_line":    reported_line,
+        "reported_func":    reported_func,
+        "ast_resolved":     bool(reported_func and source_path.exists()
+                                  and reported_func == function_name
+                                  and reported_line != definition_line),
+    }
+
+
 def raw_candidates_from_priority_data(priority_data_path: Path, top_k: int) -> list[dict[str, Any]]:
     """Convert TraceLens priority_data.json into hot-kernel candidate rows.
 
@@ -751,6 +906,8 @@ __all__ = [
     "UPSTREAM_CATEGORY_TO_GEAK",
     "_extract_between",
     "_extract_pitem_prose",
+    "_function_line_from_ast",
+    "_parse_launcher_path",
     "build_orchestrator_prompt",
     "discover_capture_folder",
     "infer_analysis_mode",
