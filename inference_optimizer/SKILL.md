@@ -88,6 +88,26 @@ Path helpers (don't string-concat):
 | `session_paths.agent_prompt_snapshot(sd, role)` | `<sd>/agents/<role>/system_prompt.snapshot.md` |
 | `manifest.write_manifest(sd, args)` / `load_manifest(sd)` | manifest.json read/write |
 
+## Iron Rules
+
+SKILL-level constraints the launcher MUST satisfy before `Coordinator`
+is allowed to boot. These IronRULEs are the gate
+that runs **before** `inference_optimizer optimize` is even spawned.
+
+### IR-1 — GPU MUST be unoccupied before every launch
+
+Before every `inference_optimizer optimize` invocation (fresh start OR
+`--resume`), verify that every visible GPU on this pod has **zero
+foreign serving PIDs and ≲ 500 MiB VRAM in use**. A leftover
+`sglang.launch_server` / `vllm.entrypoints` / `Magpie` from a previous
+run silently degrades the next `baseline` by 5–30 % (shares VRAM +
+schedules on the same XCD); neither `current_best` nor
+`validate_stack` can detect this pollution after the fact.
+> Inside a running session, the equivalent guard is Kernel-agent IR-4
+> (`kill_server` + `check_gpu_memory` before every server (re)start —
+> see `orchestrator/system_prompts/kernel.md`). IR-1 above is the
+> *outer* gate that fires before the optimizer process exists.
+
 ## Setup
 
 This skill is **two commands**. Do NOT replicate setup steps inside chat —
@@ -240,8 +260,10 @@ full subdirectory skeleton in place (idempotent — safe to re-run).
 
 ## Portable Preflight
 
-Before every new model run, verify the model path, GPU visibility, and duplicate
-processes. Never print tokens.
+Implements **IR-1**. Before every new model run, verify the model path,
+GPU visibility, and that no stale serving process holds VRAM. The
+script exits non-zero on any violation so the calling shell aborts
+before `inference_optimizer optimize` is spawned. Never print tokens.
 
 ```bash
 export MODEL_PATH=/path/to/model
