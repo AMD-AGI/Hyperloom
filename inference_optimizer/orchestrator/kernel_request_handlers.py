@@ -669,6 +669,13 @@ async def _run_optimization_single(
     )
     Path(workspace_path).mkdir(parents=True, exist_ok=True)
 
+    from .shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    target_platform = (
+        payload.get("target_platform") or state.gpu_type or ""
+    ).strip()
+
     cmd = [
         "python3",
         str(_kernel_agent_tool_path("kernel_optimization.py")),
@@ -680,6 +687,8 @@ async def _run_optimization_single(
         cmd += ["--backends", str(payload["backends"])]
     if payload.get("source_file"):
         cmd += ["--source-file", str(payload["source_file"])]
+    if target_platform:
+        cmd += ["--target-platform", str(target_platform)]
     if payload.get("extra_sglang_args"):
         cmd += ["--extra-sglang-args", str(payload["extra_sglang_args"])]
     if payload.get("candidates_path"):
