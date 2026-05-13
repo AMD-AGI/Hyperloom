@@ -547,10 +547,14 @@ jobs:
           if-no-files-found: warn
 
       - name: Send webhook (completion notification)
-        # Push the full ranked ci_summary.md (sorted by Gain% desc, with medal
-        # decorations) into the Teams webhook. The same data lives in the
-        # results service for long-term querying; this notification is for
-        # the executive group chat to glance at without clicking through.
+        # Push the ranked summary into the Teams webhook. Format MUST be a
+        # Power Automate Workflows Adaptive Card payload — the legacy Teams
+        # Incoming Webhook ``{"text": ...}`` schema was retired Jan 2025 and
+        # Workflows endpoints silently HTTP 202 those requests but the flow
+        # run fails with ``The message must include either an adaptive card
+        # or message card formatted payload``. See
+        # .harvest/_webhook_2026_05_13.py for the same builder we use for
+        # manual sends.
         if: always() && env.WEBHOOK_URL != ''
         env:
           WEBHOOK_URL:    ${{ secrets.WEBHOOK_URL }}
@@ -570,59 +574,184 @@ jobs:
           hf_top        = os.environ.get("INPUT_HF_TOP", "").strip()
           batch_tag = (models_input.replace(" ", ",")
                        if models_input else f"hf-top-{hf_top or '?'}")
+          if len(batch_tag) > 50:
+              batch_tag = batch_tag[:47] + "..."
 
-          md_path   = os.path.join(WORKSPACE, "summary-out", "ci_summary.md")
           json_path = os.path.join(WORKSPACE, "summary-out", "ci_summary.json")
 
-          n = succeeded = with_gain = beat_ifx = 0
+          rows = []
           if os.path.exists(json_path):
               summary = json.loads(open(json_path).read())
               rows = summary.get("rows") or summary.get("models") or []
-              n = len(rows)
-              succeeded = sum(1 for r in rows if r.get("final_status") == "Succeeded")
-              with_gain = sum(1 for r in rows
-                              if (r.get("gain_pct") or 0) > 0
-                              and r.get("baseline_tok_per_gpu")
-                              and r.get("optimized_tok_per_gpu"))
-              beat_ifx = sum(1 for r in rows
-                             if (r.get("vs_inferenceX_pct") or 0) > 0)
+          n = len(rows)
+          succeeded = sum(1 for r in rows if r.get("final_status") == "Succeeded")
+          with_gain = sum(1 for r in rows
+                          if (r.get("gain_pct") or 0) > 0
+                          and r.get("baseline_tok_per_gpu")
+                          and r.get("optimized_tok_per_gpu"))
+          beat_ifx = sum(1 for r in rows
+                         if (r.get("vs_inferenceX_pct") or 0) > 0)
 
           run_url = (f"https://github.com/{os.environ.get('GITHUB_REPOSITORY','?')}"
                      f"/actions/runs/{os.environ.get('GITHUB_RUN_ID','?')}")
 
-          # Header lines + the rendered markdown table (sorted by Gain%).
-          # Teams incoming webhooks render markdown tables in a monospace
-          # block, so we send the body as-is. Length budget is ~28KB; 130
-          # rows ≈ 16KB so we are safely inside the limit.
-          header = (
-              f"**Hyperloom optimize-submit [{batch_tag}] done**  \n"
-              f"{succeeded}/{n} succeeded · {with_gain} with gain · "
-              f"{beat_ifx} compare against the baseline  \n"
-              f"GHA: {run_url}"
-          )
-          if dashboard_url:
-              header += f"  \nDashboard: {dashboard_url}"
+          # Sort: rows with gain (desc) first, failures last.
+          def sort_key(r):
+              g = r.get("gain_pct")
+              return (0, -(g if g is not None else 0)) if g is not None else (1, 0.0)
+          rows = sorted(rows, key=sort_key)
 
-          body_md = ""
-          if os.path.exists(md_path):
-              body_md = open(md_path, encoding="utf-8").read()
-          else:
-              body_md = "_(no ci_summary.md produced)_"
+          def fmt_num(v):
+              if v is None:
+                  return "—"
+              return f"{v:.2f}" if isinstance(v, float) else str(v)
 
-          # 24KB safety cap (Teams trims silently around 28KB for the whole
-          # payload). If we ever blow the cap, fall back to header + counts
-          # and let the recipient click through to GHA / dashboard.
-          MAX_BYTES = 24_000
-          payload_md = f"{header}\n\n{body_md}"
-          if len(payload_md.encode("utf-8")) > MAX_BYTES:
-              payload_md = (
-                  header
-                  + "\n\n_Table too large to embed; see GHA / Dashboard._"
-              )
+          def fmt_pct(p):
+              return f"{p:+.2f}%" if p is not None else "—"
+
+          def gain_medal(g):
+              if g is None:
+                  return ""
+              if g >= 50:  return "🥇🥇🥇🥇"
+              if g >= 20:  return "🥇🥇🥇"
+              if g >= 5:   return "🥇🥇"
+              if g >= 1:   return "🥇"
+              if g > 0:    return "🟢"
+              if g == 0:   return "➖"
+              return ""
+
+          def gain_color(g):
+              if g is None: return "Default"
+              if g >= 5:    return "Good"
+              if g > 0:     return "Accent"
+              if g == 0:    return "Warning"
+              return "Attention"
+
+          def status_icon(fs, bl, op):
+              if fs == "Succeeded" and bl and op:
+                  return "✅"
+              if fs == "Failed":
+                  return "❌"
+              return "🟡"
+
+          def short_name(m):
+              return (m or "?").split("/")[-1]
+
+          def params_str(m):
+              # We don't carry params_b through ci_summary.json; leave a dash.
+              # build_summary.derive_params() returns a string like "14.8B"
+              # for HF-known repos — same logic re-implemented inline here.
+              # Skipped for now to keep this step self-contained.
+              return "—"
+
+          def cell(text, weight=None, color=None):
+              tb = {"type": "TextBlock", "text": str(text), "wrap": True}
+              if weight: tb["weight"] = weight
+              if color:  tb["color"]  = color
+              return {"type": "TableCell", "items": [tb]}
+
+          header_blocks = [
+              {"type": "TextBlock",
+               "text": f"**Hyperloom optimize-submit [{batch_tag}] done**",
+               "size": "Medium", "weight": "Bolder", "wrap": True},
+              {"type": "TextBlock",
+               "text": f"{succeeded}/{n} succeeded · {with_gain} with gain · "
+                       f"{beat_ifx} compare against the baseline",
+               "wrap": True, "isSubtle": True},
+              {"type": "TextBlock",
+               "text": (f"GHA: [{os.environ.get('GITHUB_RUN_ID','?')}]({run_url})"
+                        + (f"  ·  [Dashboard]({dashboard_url})" if dashboard_url else "")),
+               "wrap": True},
+          ]
+
+          # 6-column table — Model wide, Stack/Params/Baseline/Optimized/Gain
+          # share the rest. Relative widths so Teams scales them to whatever
+          # render width msteams.width=Full grants us (~1200px desktop).
+          columns = [
+              {"width": 6},  # Model
+              {"width": 3},  # Stack
+              {"width": 2},  # Params
+              {"width": 3},  # Baseline tok/s/GPU
+              {"width": 3},  # Optimized tok/s/GPU
+              {"width": 3},  # Gain
+          ]
+          table_rows = [{
+              "type": "TableRow", "style": "accent",
+              "cells": [cell("Model","Bolder"),
+                        cell("Stack","Bolder"),
+                        cell("Params","Bolder"),
+                        cell("Baseline tok/s/GPU","Bolder"),
+                        cell("Optimized tok/s/GPU","Bolder"),
+                        cell("Gain","Bolder")],
+          }]
+          MAX_ROWS = 50  # Power Automate Workflows soft limit on card size
+          truncated = False
+          for r in rows[:MAX_ROWS]:
+              fs = r.get("final_status")
+              bl = r.get("baseline_tok_per_gpu")
+              op = r.get("optimized_tok_per_gpu")
+              gp = r.get("gain_pct")
+              icon = status_icon(fs, bl, op)
+              stack_s = (f"{r.get('framework') or '—'} "
+                         f"{r.get('precision') or '—'} "
+                         f"TP={r.get('tp') or '—'}")
+              medal = gain_medal(gp)
+              if gp is None:
+                  gain_text = "—"
+              elif gp == 0:
+                  gain_text = f"{medal} 0%".strip()
+              else:
+                  gain_text = f"{medal} {fmt_pct(gp)}".strip()
+              table_rows.append({
+                  "type": "TableRow",
+                  "cells": [
+                      cell(f"{short_name(r.get('model'))} {icon}"),
+                      cell(stack_s),
+                      cell(params_str(r.get('model'))),
+                      cell(fmt_num(bl)),
+                      cell(fmt_num(op)),
+                      cell(gain_text, color=gain_color(gp)),
+                  ],
+              })
+          if len(rows) > MAX_ROWS:
+              truncated = True
+
+          card_body = list(header_blocks)
+          card_body.append({
+              "type": "Table",
+              "firstRowAsHeader": True,
+              "showGridLines": True,
+              "columns": columns,
+              "rows": table_rows,
+          })
+          if truncated:
+              card_body.append({
+                  "type": "TextBlock",
+                  "text": f"_Showing first {MAX_ROWS} of {len(rows)} rows; "
+                          f"see GHA / Dashboard for the full set._",
+                  "wrap": True, "isSubtle": True,
+              })
+
+          payload = {
+              "type": "message",
+              "attachments": [{
+                  "contentType": "application/vnd.microsoft.card.adaptive",
+                  "content": {
+                      "type": "AdaptiveCard",
+                      "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                      "version": "1.5",
+                      "msteams": {"width": "Full"},
+                      "body": card_body,
+                  },
+              }],
+          }
+          payload_bytes = json.dumps(payload).encode("utf-8")
+          print(f"Webhook payload: {len(payload_bytes)} bytes, "
+                f"{len(table_rows)-1} data rows")
 
           try:
               resp = requests.post(
-                  webhook_url, json={"text": payload_md},
+                  webhook_url, json=payload,
                   timeout=10, verify=False)
               print(f"Webhook: HTTP {resp.status_code}")
               if resp.status_code >= 300:
