@@ -357,3 +357,91 @@ def test_build_prompt_metadata_extracts_extra_sglang_args():
     assert metadata["runtime_flags"]["disable_cuda_graph"] is True
     assert metadata["kernel_params"]["KV_DTYPE"] == "fp8"
     assert metadata["kernel_params"]["BLOCK_SIZE"] == 16
+
+
+# ============================================================================
+# PR-A §4: TraceLens hypothesis block in build_prompt
+# ============================================================================
+def test_build_hypothesis_block_returns_empty_when_no_prose_fields():
+    """Candidates from non-TraceLens-v0.3 paths (raw trace, csv fallback,
+    legacy priority_data) lack the prose fields. The block must be a no-op
+    in that case so the prompt body is byte-identical to pre-PR."""
+    block = ko._build_hypothesis_block(
+        {"name": "kernel_no_prose", "source_type": "triton"},
+    )
+    assert block == ""
+
+
+def test_build_hypothesis_block_renders_reasoning_and_resolution():
+    block = ko._build_hypothesis_block({
+        "name": "rms_norm",
+        "reasoning_for_slowdown": "Memory-bound kernel saturating HBM bandwidth.",
+        "resolution": "Fuse RMSNorm with the following GEMM to amortize loads.",
+        "impact_low_ms": 0.0,
+        "impact_low_e2e_pct": 0.0,
+        "impact_high_ms": 0.0,
+        "impact_high_e2e_pct": 0.0,
+    })
+    assert "## TraceLens Hypothesis [validate before acting]" in block
+    assert "Memory-bound kernel saturating HBM bandwidth." in block
+    assert "Fuse RMSNorm with the following GEMM" in block
+    # Hypothesis framing must always be present so GEAK doesn't take
+    # TraceLens's guess as ground truth.
+    assert "verify the reasoning" in block
+    assert "(hypothesis)" in block
+    # Empty impact range must not be rendered.
+    assert "Estimated impact range" not in block
+
+
+def test_build_hypothesis_block_renders_impact_range_when_set():
+    block = ko._build_hypothesis_block({
+        "name": "fused_moe",
+        "reasoning_for_slowdown": "",
+        "resolution": "",
+        "impact_low_ms": 12.5,
+        "impact_low_e2e_pct": 3.2,
+        "impact_high_ms": 40.0,
+        "impact_high_e2e_pct": 10.4,
+    })
+    assert "Estimated impact range" in block
+    assert "12.50 ms" in block
+    assert "3.20% E2E" in block
+    assert "40.00 ms" in block
+    assert "10.40% E2E" in block
+    # Numbers are TraceLens roofline estimates — the framing must say so
+    # so GEAK doesn't treat them as measured speedups.
+    assert "roofline" in block
+    assert "Reasoning for slowdown" not in block
+    assert "Recommended direction" not in block
+
+
+def test_build_prompt_omits_hypothesis_block_when_no_prose():
+    """Backward compat: candidates without prose fields produce the same
+    prompt shape as before — no surprise section, no extra blank lines
+    that change downstream token counts."""
+    prompt = ko.build_prompt(
+        {"name": "legacy_kernel", "source_type": "triton"},
+        _prompt_args("mi300x"),
+    )
+    assert "TraceLens Hypothesis" not in prompt
+
+
+def test_build_prompt_includes_hypothesis_block_when_prose_present():
+    prompt = ko.build_prompt(
+        {
+            "name": "rms_norm",
+            "source_type": "triton",
+            "reasoning_for_slowdown": "Memory-bound; HBM bandwidth saturated.",
+            "resolution": "Fuse with subsequent GEMM to halve global loads.",
+            "impact_low_ms": 5.0,
+            "impact_low_e2e_pct": 1.2,
+            "impact_high_ms": 20.0,
+            "impact_high_e2e_pct": 5.0,
+        },
+        _prompt_args("mi300x"),
+    )
+    assert "## TraceLens Hypothesis [validate before acting]" in prompt
+    assert "Memory-bound; HBM bandwidth saturated." in prompt
+    assert "Fuse with subsequent GEMM" in prompt
+    assert "5.00 ms" in prompt
+    assert "20.00 ms" in prompt
