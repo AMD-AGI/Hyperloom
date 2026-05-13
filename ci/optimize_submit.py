@@ -487,18 +487,44 @@ class SafeOptimizeClient:
                 return m
         return None
 
-    def register_model(self, repo_id: str, hf_token: str = "") -> str:
-        body = {
-            "source": {
-                "url": repo_id,
-                "accessMode": "local",
-                **({"token": hf_token} if hf_token else {}),
-            },
-            "workspace": self.register_workspace,
-            "target": {"volume": self.volume},
-        }
-        log.info("[%s] register: workspace=%s volume=%s",
-                 repo_id, self.register_workspace, self.volume)
+    def register_model(
+        self, repo_id: str, hf_token: str = "", local_path: str = "",
+    ) -> str:
+        """Register a model record with SaFE so submit_task has a model_id.
+
+        Two flavors:
+          * ``local_path`` set → accessMode=local_path. SaFE skips its own
+            Download Job entirely (model_controller.go:97 sets phase=Ready
+            directly) because we promise the files are already on disk at
+            ``local_path``. This is the path the prewarm step writes to.
+          * ``local_path`` empty → accessMode=local. SaFE creates a K8s
+            Download Job and pulls from HuggingFace itself (slow / fragile
+            on big repos). Kept as a fallback when prewarm cannot run.
+        """
+        if local_path:
+            body = {
+                "source": {
+                    "url": repo_id,
+                    "accessMode": "local_path",
+                    "localPath": local_path,
+                },
+                "workspace": self.register_workspace,
+            }
+            log.info("[%s] register (local_path mode): workspace=%s localPath=%s",
+                     repo_id, self.register_workspace, local_path)
+        else:
+            body = {
+                "source": {
+                    "url": repo_id,
+                    "accessMode": "local",
+                    **({"token": hf_token} if hf_token else {}),
+                },
+                "workspace": self.register_workspace,
+                "target": {"volume": self.volume},
+            }
+            log.info("[%s] register (local mode — SaFE will download): "
+                     "workspace=%s volume=%s",
+                     repo_id, self.register_workspace, self.volume)
         result = self._request("POST", "api/v1/playground/models", body)
         return result.get("id", "")
 
@@ -930,6 +956,34 @@ def process_model(
         rec.status = "dry-run"
         return rec
 
+    # Detect whether the prewarm step has already populated /wekafs/models/<slug>/
+    # with the model files. When it has, we use SaFE's `local_path` accessMode
+    # which makes model_controller.go set phase=Ready immediately without
+    # creating any Download Job (no second-pass HF pull). This is the whole
+    # point of prewarm — without local_path mode, SaFE re-downloads on top of
+    # our files and we get nothing for the prewarm work.
+    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    target_slug = repo_id.replace("/", "-")
+    target_dir = f"{nfs_root}/models/{target_slug}"
+    use_local_path = False
+    try:
+        if os.path.isdir(target_dir):
+            # Heuristic: any HF repo has at least config.json + tokenizer.* +
+            # one weight shard. 5 files is well under that floor while
+            # tolerating sparse model layouts.
+            n_files = sum(1 for _ in os.scandir(target_dir))
+            if n_files >= 5:
+                use_local_path = True
+                log.info("[%s] prewarm complete (%d files at %s) — registering "
+                         "via local_path mode (skips SaFE Download Job)",
+                         repo_id, n_files, target_dir)
+            else:
+                log.info("[%s] %s has only %d entries — falling back to SaFE "
+                         "download via accessMode=local", repo_id, target_dir, n_files)
+    except OSError as e:
+        log.warning("[%s] could not probe %s: %s — falling back to SaFE download",
+                    repo_id, target_dir, e)
+
     # Model resolution: find existing SaFE record OR register fresh.
     #
     # Stale Failed records are the common foot-gun: a previous run's download
@@ -956,7 +1010,10 @@ def process_model(
                      "(prewarm should have populated /wekafs/models/ already)",
                      repo_id, safe_model.get("id"), safe_model.get("phase"))
         try:
-            model_id = safe.register_model(repo_id, hf_token)
+            model_id = safe.register_model(
+                repo_id, hf_token,
+                local_path=target_dir if use_local_path else "",
+            )
         except Exception as e:
             rec.status = "failed"
             rec.error = f"register: {e}"
