@@ -1,5 +1,5 @@
 # Magpie baseline benchmark config for vLLM.
-# Used as the single-node vLLM smoke config; the inference_optimizer
+# Used as the default vLLM benchmark config; the inference_optimizer
 # pipeline overrides `benchmark.model` and injects `benchmark.runner_type`
 # at runtime (see baseline_sglang.yaml header for the full rationale).
 
@@ -11,8 +11,8 @@ benchmark:
   run_mode: local
 
   envs:
-    TP: 1
-    CONC: 8
+    TP: 8
+    CONC: 64
     ISL: 256
     OSL: 256
     RANDOM_RANGE_RATIO: 1
@@ -24,7 +24,7 @@ benchmark:
   gpu_selection:
     auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime
 
-  timeout_seconds: 900
+  timeout_seconds: 2400        # 40 min hard cap
 
   profiler:
     torch_profiler:

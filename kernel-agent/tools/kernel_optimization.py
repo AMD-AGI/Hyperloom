@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,14 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# Sibling import: kernel name → multi-GPU collective detection. Used by
+# `invoke_backend` to decide between `torchrun --nproc=N` and plain
+# `python` for the GEAK test-command, and to keep the
+# `parallel_e2e_runner` decision consistent here.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _collective_names import kernel_name_implies_multigpu  # noqa: E402
+sys.path.pop(0)
 
 
 def utc_now() -> str:
@@ -83,7 +92,19 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, list):
         return payload
-    return list(payload.get("hot_kernels") or payload.get("kernel_candidates") or [])
+    candidates = list(payload.get("hot_kernels") or payload.get("kernel_candidates") or [])
+    artifact_paths = payload.get("artifact_paths")
+    if not isinstance(artifact_paths, dict):
+        artifact_paths = {}
+    report_path = (
+        payload.get("analysis_report_path")
+        or artifact_paths.get("tracelens_agent_report")
+    )
+    if report_path:
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                candidate.setdefault("tracelens_agent_report", str(report_path))
+    return candidates
 
 
 def find_candidate(candidates: list[dict[str, Any]], kernel_id: str) -> dict[str, Any]:
@@ -158,6 +179,142 @@ _GEAK_KERNEL_TYPE = {
 }
 
 
+def _coerce_cli_value(value: str | bool) -> Any:
+    if isinstance(value, bool):
+        return value
+    text = str(value)
+    if text.lower() in {"true", "false"}:
+        return text.lower() == "true"
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
+def parse_extra_sglang_args(extra_args: str) -> dict[str, Any]:
+    """Parse selected SGLang flags from an EXTRA_SGLANG_ARGS-style string."""
+    if not extra_args.strip():
+        return {}
+    try:
+        tokens = shlex.split(extra_args)
+    except ValueError:
+        return {"raw": extra_args}
+    parsed: dict[str, Any] = {"raw": extra_args}
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        if not token.startswith("--"):
+            idx += 1
+            continue
+        flag = token[2:].replace("-", "_")
+        value: str | bool = True
+        if idx + 1 < len(tokens) and not tokens[idx + 1].startswith("--"):
+            value = tokens[idx + 1]
+            idx += 1
+        parsed[flag] = _coerce_cli_value(value)
+        idx += 1
+    return parsed
+
+
+def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any]]:
+    if not isinstance(shapes, list):
+        return []
+    try:
+        count = int(float(call_num or 1))
+    except (TypeError, ValueError):
+        count = 1
+    entries: list[dict[str, Any]] = []
+    for shape in shapes:
+        if isinstance(shape, dict) and "shape" in shape:
+            entries.append({
+                "call_num": int(shape.get("call_num") or count),
+                "shape": shape["shape"],
+            })
+        elif shape not in (None, "", [], ()):
+            entries.append({"call_num": count, "shape": shape})
+    return entries
+
+
+def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    """Build structured runtime context for GEAK task prompts."""
+    source_file = getattr(args, "source_file", "") or candidate.get("source_file", "")
+    kernel_name = str(candidate.get("name") or getattr(args, "kernel_id", ""))
+    input_shapes = candidate.get("input_shapes")
+    if input_shapes is None:
+        input_shapes = _shape_call_entries(candidate.get("shapes", []), candidate.get("call_count"))
+    input_dtypes = candidate.get("input_dtypes")
+    if input_dtypes is None:
+        input_dtypes = candidate.get("dtypes", [])
+
+    runtime_flags: dict[str, Any] = {}
+    if isinstance(candidate.get("runtime_flags"), dict):
+        runtime_flags.update(candidate["runtime_flags"])
+    runtime_flags.setdefault("is_multigpu", bool(candidate.get("is_multigpu")))
+    runtime_flags.setdefault("num_gpus_recommended", candidate.get("num_gpus_recommended"))
+    extra_sglang_args = (
+        getattr(args, "extra_sglang_args", "")
+        or candidate.get("extra_sglang_args", "")
+        or candidate.get("candidate_extra_sglang_args", "")
+    )
+    parsed_sglang_args = parse_extra_sglang_args(str(extra_sglang_args))
+    for key in (
+        "attention_backend",
+        "decode_attention_backend",
+        "prefill_attention_backend",
+        "disable_cuda_graph",
+        "disable_radix_cache",
+        "enable_torch_compile",
+        "enable_dp_attention",
+    ):
+        if key in parsed_sglang_args:
+            runtime_flags.setdefault(key, parsed_sglang_args[key])
+
+    runtime_args = candidate.get("runtime_args") if isinstance(candidate.get("runtime_args"), dict) else {}
+    runtime_args = dict(runtime_args)
+    if parsed_sglang_args:
+        runtime_args.setdefault("extra_sglang_args", parsed_sglang_args.get("raw", str(extra_sglang_args)))
+    for key in (
+        "kv_cache_dtype",
+        "page_size",
+        "block_size",
+        "cuda_graph_max_bs",
+        "num_continuous_decode_steps",
+        "triton_attention_num_kv_splits",
+        "triton_attention_split_tile_size",
+    ):
+        if key in parsed_sglang_args:
+            runtime_args.setdefault(key, parsed_sglang_args[key])
+
+    raw_params = candidate.get("kernel_params") if isinstance(candidate.get("kernel_params"), dict) else {}
+    kernel_params = dict(raw_params)
+    if "kv_cache_dtype" in parsed_sglang_args:
+        kernel_params.setdefault("KV_DTYPE", parsed_sglang_args["kv_cache_dtype"])
+    if "page_size" in parsed_sglang_args:
+        kernel_params.setdefault("BLOCK_SIZE", parsed_sglang_args["page_size"])
+    if "block_size" in parsed_sglang_args:
+        kernel_params.setdefault("BLOCK_SIZE", parsed_sglang_args["block_size"])
+    for key in ("KV_DTYPE", "BLOCK_SIZE", "HEAD_SIZE"):
+        kernel_params.setdefault(key, candidate.get(key))
+
+    return {
+        "kernel_path": str(source_file or ""),
+        "kernel_name": kernel_name,
+        "input_shapes": input_shapes or [],
+        "output_shapes": candidate.get("output_shapes") or [],
+        "input_dtypes": input_dtypes or [],
+        "output_dtypes": candidate.get("output_dtypes") or [],
+        "backend": candidate.get("backend") or candidate.get("framework"),
+        "runtime_args": runtime_args,
+        "runtime_flags": runtime_flags,
+        "env_vars": candidate.get("env_vars") or {},
+        "kernel_params": kernel_params,
+    }
+
+
 def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     source_file = args.source_file or candidate.get("source_file", "")
     source_block = ""
@@ -177,6 +334,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     # can route to the right agent (hip / triton / other).
     geak_kernel_type = _GEAK_KERNEL_TYPE.get(str(candidate.get("source_type", "unknown")), "other")
     kernel_name = str(candidate.get("name", args.kernel_id))
+    kernel_metadata = build_kernel_metadata(candidate, args)
     budget_min = int(getattr(args, "budget_minutes", 60) or 60)
     bench_block = ""
     if bench_files:
@@ -311,6 +469,30 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
             "rank's slice of the algorithm (e.g. local reduce + memcpy) so you can "
             "still measure compute/IO improvements.\n"
         )
+    tracelens_context_block = ""
+    report_path_str = str(candidate.get("tracelens_agent_report") or "")
+    report_path = Path(report_path_str) if report_path_str else None
+    if report_path and report_path.exists():
+        try:
+            full_report = report_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            full_report = ""
+        if full_report:
+            rank = candidate.get("tracelens_pitem_rank")
+            title = candidate.get("tracelens_pitem_title", "")
+            if rank:
+                focus_line = (
+                    f"Focus on **P{rank}: {title}** in the report below. "
+                    "Other P-items are context only — do not optimize them.\n"
+                )
+            else:
+                focus_line = "Use the report below as full context for this kernel.\n"
+            tracelens_context_block = (
+                "\n## TraceLens Context\n\n"
+                + focus_line
+                + "\n"
+                + full_report
+            )
     # Use GEAK task_parser field names (kernel_name/kernel_url/kernel_type/repo)
     # so its LLM-based parser can extract them; OOB agents read the same body
     # as a normal natural-language prompt.
@@ -328,6 +510,14 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         f"GPU percent: {candidate.get('gpu_pct', 'unknown')}",
         f"Shapes: {json.dumps(candidate.get('shapes', []), sort_keys=True)}",
         "",
+        "Kernel runtime metadata (structured context for GEAK; unknown fields are null, empty arrays, or empty objects):",
+        "```json",
+        json.dumps(kernel_metadata, indent=2, sort_keys=True),
+        "```",
+        "",
+        "GEAK configuration (ignored by non-GEAK backends):",
+        "- Use homogeneous mode. Set max_rounds to 5.",
+        "",
         "Hardware notes (DO NOT use gfx950/MI355X-only features):",
         "- 304 CUs, MFMA bf16 instructions, 256 VGPRs/CU",
         "- HBM3 (~5.3 TB/s peak), 256 MB Infinity Cache",
@@ -339,6 +529,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         bench_block,
         safety,
         source_block,
+        tracelens_context_block,
     ])
 
 
@@ -375,6 +566,81 @@ def _geak_output_dir(session_id: str, prompt_file: Path) -> Path:
     out = _kernel_agent_root() / "geak" / session_id / prompt_file.stem
     out.mkdir(parents=True, exist_ok=True)
     return out
+
+
+def _set_yaml_tools_rag(text: str, enabled: bool) -> str:
+    """Return YAML text with tools.rag set without mutating the source config."""
+    value = "true" if enabled else "false"
+    lines = text.splitlines()
+    out: list[str] = []
+    in_tools = False
+    tools_indent = 0
+    saw_tools = False
+    wrote_rag = False
+
+    for line in lines:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        is_comment = line.lstrip().startswith("#")
+        if re.match(r"\s*tools\s*:\s*(?:#.*)?$", line) and not is_comment:
+            saw_tools = True
+            in_tools = True
+            tools_indent = indent
+            out.append(line)
+            continue
+        if in_tools:
+            if stripped and indent <= tools_indent and not is_comment:
+                if not wrote_rag:
+                    out.append(f"{' ' * (tools_indent + 2)}rag: {value}")
+                    wrote_rag = True
+                in_tools = False
+            elif re.match(r"\s*rag\s*:", line):
+                out.append(f"{' ' * indent}rag: {value}")
+                wrote_rag = True
+                continue
+        out.append(line)
+
+    if in_tools and not wrote_rag:
+        out.append(f"{' ' * (tools_indent + 2)}rag: {value}")
+    if not saw_tools:
+        if out and out[-1].strip():
+            out.append("")
+        out.extend(["tools:", f"  rag: {value}"])
+    return "\n".join(out) + "\n"
+
+
+def _geak_config_for_run(args: argparse.Namespace, prompt_file: Path) -> str:
+    """Create a per-run GEAK config only when runtime overrides need it."""
+    base_config = os.environ.get("GEAK_CONFIG", "")
+    if not getattr(args, "disable_rag", False):
+        return base_config
+    if not base_config or not Path(base_config).is_file():
+        return base_config
+    override = prompt_file.parent / f"{prompt_file.stem}.geak-config.yaml"
+    text = Path(base_config).read_text(encoding="utf-8", errors="replace")
+    override.write_text(_set_yaml_tools_rag(text, enabled=False), encoding="utf-8")
+    return str(override)
+
+
+def _apply_geak_env_overrides(args: argparse.Namespace, prompt_file: Path) -> dict[str, str | None]:
+    """Temporarily tune GEAK env for this attempt; caller must restore."""
+    keys = ("GEAK_CONFIG", "GEAK_USE_KNOWLEDGE_BASE", "GEAK_SAVE_TO_KNOWLEDGE_BASE")
+    previous = {key: os.environ.get(key) for key in keys}
+    config = _geak_config_for_run(args, prompt_file)
+    if config:
+        os.environ["GEAK_CONFIG"] = config
+    if getattr(args, "disable_xs_memory", False):
+        os.environ["GEAK_USE_KNOWLEDGE_BASE"] = "0"
+        os.environ["GEAK_SAVE_TO_KNOWLEDGE_BASE"] = "0"
+    return previous
+
+
+def _restore_env(previous: dict[str, str | None]) -> None:
+    for key, value in previous.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 def _oob_output_dir(session_id: str) -> Path:
@@ -462,7 +728,11 @@ def invoke_backend(
             # candidate.benchmark_files, prefixing with `torchrun` for the
             # multi-GPU path so collective init_process_group succeeds.
             test_command = ""
-            is_multigpu = bool((candidate or {}).get("is_multigpu"))
+            cand_name = str((candidate or {}).get("name") or "")
+            is_multigpu = (
+                bool((candidate or {}).get("is_multigpu"))
+                or kernel_name_implies_multigpu(cand_name)
+            )
             if is_multigpu and num_gpus >= 2:
                 for bf in bench_files:
                     if bf.endswith(".py") and Path(bf).exists() and (
@@ -477,17 +747,21 @@ def invoke_backend(
                     ):
                         test_command = f"python {bf}"
                         break
-            result = geak.submit(
-                prompt_file=prompt_file,
-                output_dir=out_dir,
-                kernel_path=source_file,
-                cost_limit=args.geak_cost_limit,
-                timeout_s=timeout_s,
-                num_gpus=num_gpus,
-                prefer_ray=prefer_ray,
-                kernel_repo=kernel_repo,
-                test_command=test_command,
-            )
+            previous_env = _apply_geak_env_overrides(args, prompt_file)
+            try:
+                result = geak.submit(
+                    prompt_file=prompt_file,
+                    output_dir=out_dir,
+                    kernel_path=source_file,
+                    cost_limit=args.geak_cost_limit,
+                    timeout_s=timeout_s,
+                    num_gpus=num_gpus,
+                    prefer_ray=prefer_ray,
+                    kernel_repo=kernel_repo,
+                    test_command=test_command,
+                )
+            finally:
+                _restore_env(previous_env)
             result["stdout"] = result.get("stdout_tail", "")
             result["output_dir"] = str(out_dir)
             # Surface GEAK partial outputs (final_report.json / results dir)
@@ -711,11 +985,30 @@ def run_attempt(
             # Promote any timed-out / failed attempt that left artifacts on
             # disk to "partial" so build_verification + make_proposal can
             # distinguish "killed but useful" from "truly empty failure".
+            #
+            # EXCEPTION: refuse promotion when stdout shows persistent
+            # inner-LLM auth failure (>= _AUTH_RETRY_THRESHOLD 401-style
+            # markers). An auth-loop typically leaves an empty
+            # optimized_versions/ that fools the evidence check; without
+            # this guard we ship PARTIAL and the orchestrator never
+            # retires the kernel. See _AUTH_FAILURE_PATTERNS comment.
             partial_evidence_keys = (
                 "partial_latest_optimized", "partial_report",
                 "geak_final_report", "geak_latest_patch",
             )
-            if status in {"timeout", "failed"} and any(
+            auth_loop_hits = _count_auth_failures(full_stdout)
+            if auth_loop_hits >= _AUTH_RETRY_THRESHOLD:
+                backend_paths["auth_failure_count"] = str(auth_loop_hits)
+                backend_paths["auth_failure_marker"] = (
+                    "persistent_inner_llm_401_loop_no_partial_promotion"
+                )
+                # Force status to a non-partial terminal state so
+                # build_verification's `usable` filter excludes this
+                # attempt and make_proposal returns REVERT.
+                if status == "timeout":
+                    status = "failed"
+                # else: status is already "failed"; leave it alone.
+            elif status in {"timeout", "failed"} and any(
                 k in backend_paths for k in partial_evidence_keys
             ):
                 status = "partial"
@@ -742,6 +1035,43 @@ _SPEEDUP_PATTERNS = [
     re.compile(r"(?i)\bavg(?:erage)?\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)\s*[xX]\s+(?:speedup|across)"),
     re.compile(r"(?i)\b([0-9]+(?:\.[0-9]+)?)\s*[xX]\s+(?:speedup|faster)"),
 ]
+
+
+# Persistent inner-LLM auth failure markers. When a backend's stdout
+# contains >= AUTH_RETRY_THRESHOLD distinct matches we treat the run as
+# a credential dead-end and refuse to promote `timeout`/`failed` to
+# `partial`. Without this guard, GEAK's mini-swe-agent SelectPatchAgent
+# can loop on a wrong-issuer gateway (observed: the inner agent hit
+# `https://llm-api.amd.com/Anthropic` which expects a different
+# `AMD_LLM_API_KEY` than the SAFE_API_KEY the outer GEAK CLI uses), leave
+# an empty `optimized_versions/` on disk, trigger the partial-evidence
+# path below, and ship back PARTIAL — which the orchestrator never
+# retired (see inference_optimizer.shared_state.record_kernel_opt for
+# the matching reject-on-partial change).
+_AUTH_FAILURE_PATTERNS = [
+    re.compile(r"\b401\b[^\n]{0,80}(unauthor|forbidden|client\s*error)", re.IGNORECASE),
+    re.compile(r"HTTP/\d\.\d\s+401\b"),
+    re.compile(r"Authentication\s*Error|Invalid\s*API\s*Key|invalid[._]api[._]key", re.IGNORECASE),
+    re.compile(r"Subscription[- ]Key[^\n]{0,80}(missing|invalid|not\s*present)", re.IGNORECASE),
+    re.compile(r"Primus\.00009\s+token\s+not\s+present", re.IGNORECASE),
+]
+_AUTH_RETRY_THRESHOLD = 3
+
+
+def _count_auth_failures(text: str) -> int:
+    """Count distinct inner-LLM auth-failure markers in *text*.
+
+    The threshold-based gate in :func:`run_attempt` uses this to
+    distinguish "a single transient 401 that retried successfully" from
+    "every single retry hit 401 because the wrong gateway is being
+    talked to and there is no recoverable path".
+    """
+    if not text:
+        return 0
+    total = 0
+    for pat in _AUTH_FAILURE_PATTERNS:
+        total += sum(1 for _ in pat.finditer(text))
+    return total
 
 
 def _extract_speedup_from_report(report_path: str | Path) -> float | None:
@@ -1190,6 +1520,7 @@ def main() -> int:
     parser.add_argument("--benchmark-file", default="")
     parser.add_argument("--test-harness-path", default="")
     parser.add_argument("--source-file", default="")
+    parser.add_argument("--extra-sglang-args", default="")
     parser.add_argument("--budget-minutes", type=float, default=60.0,
                         help="Per-attempt wall-clock budget for claude/codex "
                              "OOB backends. GEAK uses --geak-budget-min.")
@@ -1205,6 +1536,10 @@ def main() -> int:
     parser.add_argument("--accuracy-passed", choices=["true", "false", "unknown"], default="unknown")
     parser.add_argument("--oob-max-turns", type=int, default=int(os.environ.get("KERNEL_AGENT_OOB_MAX_TURNS", "100")))
     parser.add_argument("--geak-cost-limit", type=float, default=None)
+    parser.add_argument("--disable-rag", action="store_true",
+                        help="Run GEAK with tools.rag disabled for this request.")
+    parser.add_argument("--disable-xs-memory", action="store_true",
+                        help="Disable GEAK cross-session memory retrieval/write-back for this request.")
     parser.add_argument("--num-gpus", type=int,
                         default=int(os.environ.get("KERNEL_AGENT_NUM_GPUS", "0")),
                         help="Per-task GPU reservation; 0 means follow the "
@@ -1236,6 +1571,8 @@ def main() -> int:
                 "skipping backend dispatch (no fabricated source allowed)"
             )
         selected_backends, backend_notes = choose_backends(args, candidate)
+        backend_notes["rag_enabled"] = not args.disable_rag
+        backend_notes["xs_memory_enabled"] = not args.disable_xs_memory
         benchmark_available = bool(backend_notes["benchmark_available"])
         append_log(log_path, f"kernel_id={args.kernel_id}")
         append_log(log_path, f"resolved_source={resolved_source or 'NONE'}")
@@ -1275,6 +1612,8 @@ def main() -> int:
             "selected_backends": selected_backends,
             "backend_selection": backend_notes,
             "attempts": attempts,
+            "rag_hits": [],
+            "xs_memory_hits": [],
             "verification": verification,
             "proposal": proposal,
             "cli_log_path": str(log_path),

@@ -1,6 +1,0 @@
-{"role":"user","message":{"content":[{"type":"text","text":"Run the FAKE_BASELINE phase per fixture_action.md. RUN_ENV: RESULT_DIR=/tmp/inspector_test/results, SKILL_ROOT=/tmp/inspector_test/skill, SCRIPTS_DIR=/tmp/inspector_test/skill/scripts, MODEL_NAME=fake-model, PORT=9999"}]}}
-{"role":"assistant","message":{"content":[{"type":"text","text":"Reading the fixture action."},{"type":"tool_use","name":"Read","input":{"path":"/tmp/inspector_test/skill/actions/fake_baseline.md"}}]}}
-{"role":"assistant","message":{"content":[{"type":"text","text":"Warming up KB."},{"type":"tool_use","name":"Shell","input":{"command":"python3 $SKILL_ROOT/kb/kb_query.py --model \"$MODEL_NAME\" --top-k 5"}}]}}
-{"role":"assistant","message":{"content":[{"type":"text","text":"Running baseline."},{"type":"tool_use","name":"Shell","input":{"command":"bash \"$SCRIPTS_DIR/run_fake_baseline.sh\""}}]}}
-{"role":"assistant","message":{"content":[{"type":"text","text":"Skipping accuracy gate to save time."}]}}
-{"role":"assistant","message":{"content":[{"type":"text","text":"Phase complete. Time to invoke inspector."}]}}
