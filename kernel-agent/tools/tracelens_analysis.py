@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from tracelens_skill_runner import (
+    aggregate_by_source_function,
     discover_capture_folder,
     normalize_upstream_category,
     parse_analysis_md,
@@ -1739,12 +1740,41 @@ def enrich_candidates_with_runtime_metadata(
         flags.setdefault("num_gpus_recommended", item.get("num_gpus_recommended"))
 
 
+def build_task_groups(
+    candidates: list[dict[str, Any]],
+    *,
+    source_root: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Aggregate finalized candidates by AST-resolved source function.
+
+    Thin wrapper over
+    :func:`tracelens_skill_runner.aggregate_by_source_function` that:
+
+    * only considers candidates marked ``reusable_native_kernel`` so
+      vendor / aten:: / runtime-generated kernels are never grouped
+      (they were rejected upstream by ``classify_patchability``);
+    * filters each group's ``kernel_ids`` and ``primary_kernel_id`` to
+      the same reusable subset, so a group that mixes a reusable
+      Triton function with a non-reusable aten:: launcher in its row
+      list still dispatches only the reusable kernel_id.
+
+    Returns ``[]`` when no candidate carries a parseable launcher path
+    (the LLama70B fixture case — all rows have empty Kernel Path), so
+    callers fall through to per-kernel dispatch.
+    """
+    reusable = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel")]
+    if not reusable:
+        return []
+    return aggregate_by_source_function(reusable, source_root=source_root)
+
+
 def build_audit_summary(
     candidates: list[dict[str, Any]],
     *,
     trace_input: str,
     framework: str = "",
     target_platform: str = "",
+    task_groups: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the ``tracelens/summary.json`` payload from finalized candidates.
 
@@ -1785,6 +1815,29 @@ def build_audit_summary(
         else:
             compact["skip_reason"] = cand.get("skip_reason") or "unknown"
             skipped.append(compact)
+    # PR-B §1: summarize task_groups (source-function aggregation)
+    # alongside the per-kernel ``tasks`` view. Each group entry is a
+    # compact projection: the function identity + member kernel_ids +
+    # aggregate cost. The full per-row data lives inside the
+    # ``task_groups[]`` list on kernel_candidates.json — summary.json
+    # is the audit view, not the dispatch payload.
+    group_entries: list[dict[str, Any]] = []
+    for group in task_groups or []:
+        if not isinstance(group, dict):
+            continue
+        group_entries.append({
+            "task_group_id":        group.get("task_group_id"),
+            "source_path":          group.get("source_path"),
+            "definition_line":      group.get("definition_line"),
+            "function_name":        group.get("function_name"),
+            "ast_resolved":         bool(group.get("ast_resolved")),
+            "primary_kernel_id":    group.get("primary_kernel_id"),
+            "kernel_ids":           list(group.get("kernel_ids") or []),
+            "row_count":            len(group.get("rows") or []),
+            "aggregate_duration_us": group.get("aggregate_duration_us"),
+            "aggregate_call_count": group.get("aggregate_call_count"),
+            "aggregate_gpu_pct":    group.get("aggregate_gpu_pct"),
+        })
     return {
         "generated_at":    utc_now(),
         "trace_input":     trace_input,
@@ -1792,8 +1845,10 @@ def build_audit_summary(
         "target_platform": target_platform,
         "task_count":      len(tasks),
         "skipped_count":   len(skipped),
+        "task_group_count": len(group_entries),
         "tasks":           tasks,
         "skipped":         skipped,
+        "task_groups":     group_entries,
     }
 
 
@@ -1817,6 +1872,17 @@ def write_reports(
         "trace_files": [str(p) for p in trace_files],
         "created_at": utc_now(),
     }
+    # PR-B §1: aggregate reusable candidates into source-function task
+    # groups so downstream dispatch (run_optimization_handler) can submit
+    # one GEAK task per (path, line, fn) instead of one per kernel_id.
+    # Aggregation is additive: ``hot_kernels[]`` keeps its full per-row
+    # priority order, and groups reference candidates by kernel_id.
+    # Candidates whose ``tracelens_launcher_path`` cannot be parsed
+    # (LLama70B fixture, raw-trace path, csv fallback) produce zero
+    # groups and the caller falls through to the legacy per-kernel
+    # dispatch.
+    source_root_str = getattr(args, "source_root", None)
+    task_groups = build_task_groups(candidates, source_root=source_root_str)
     report = {
         "model_name": args.model_name,
         "framework": args.framework,
@@ -1825,12 +1891,16 @@ def write_reports(
         "runtime_env": args.runtime_env,
         "trace_input_type": trace_input_type,
         "hot_kernels": candidates,
+        "task_groups": task_groups,
         "source": "tracelens_analysis",
         "dry_run": args.dry_run,
     }
     atomic_write_json(run_dir / "trace_input_manifest.json", manifest)
     atomic_write_json(tracelens_dir / "tracelens_report.json", report)
-    atomic_write_json(run_dir / "kernel_candidates.json", {"hot_kernels": candidates, **report})
+    atomic_write_json(
+        run_dir / "kernel_candidates.json",
+        {"hot_kernels": candidates, "task_groups": task_groups, **report},
+    )
 
     # PR-A §3: per-run audit sidecar listing which TraceLens hot kernels
     # were routed to a kernel-opt backend (``tasks``) and which were
@@ -1838,12 +1908,15 @@ def write_reports(
     # feature branch's ``tracelens_geak_task_parser.summary.json`` and is
     # the primary debug surface when GEAK comes back with surprising
     # results — operator can answer "did TraceLens see kernel X? did we
-    # send it to GEAK? if not, why not?" in one read.
+    # send it to GEAK? if not, why not?" in one read. PR-B adds
+    # ``task_groups[]`` so an operator can also see which kernels
+    # collapsed into the same source function.
     summary = build_audit_summary(
         candidates,
         trace_input=str(Path(args.trace_input).resolve()),
         framework=str(args.framework or ""),
         target_platform=str(args.target_platform or ""),
+        task_groups=task_groups,
     )
     summary_path = tracelens_dir / "summary.json"
     atomic_write_json(summary_path, summary)
@@ -1900,6 +1973,18 @@ def main() -> int:
     parser.add_argument("--target-platform", default="MI355X")
     parser.add_argument("--analysis-mode", default="default")
     parser.add_argument("--runtime-env", default="local")
+    parser.add_argument(
+        "--source-root",
+        default=os.environ.get("TRACELENS_SOURCE_ROOT", "") or None,
+        help=(
+            "Optional root directory against which TraceLens launcher "
+            "paths (e.g. ``aiter/ops/rmsnorm.py(76): rmsnorm``) are "
+            "resolved for AST-based function-line lookup. Used only by "
+            "the PR-B source-function aggregation pass; absolute paths "
+            "in the report don't need this. Defaults to "
+            "$TRACELENS_SOURCE_ROOT when set."
+        ),
+    )
     parser.add_argument("--workspace-path", default=os.environ.get("WORKSPACE_PATH", "/workspace"))
     parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
     parser.add_argument("--roofline-json", default="")

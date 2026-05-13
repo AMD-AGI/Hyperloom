@@ -1732,3 +1732,52 @@ def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
     assert groups[0]["function_name"] == "rms_norm"
 
 
+# PR-B §1 + §2: build_task_groups (tracelens_analysis.py wrapper)
+# ===========================================================================
+def test_build_task_groups_filters_non_reusable():
+    """build_task_groups skips candidates with reusable_native_kernel=False
+    so vendor / aten:: / runtime-generated kernels never appear in a
+    group's kernel_ids."""
+    cands = [
+        {
+            "kernel_id": "k001", "name": "rms_norm",
+            "duration_us": 50.0, "call_count": 4,
+            "tracelens_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
+            "reusable_native_kernel": True,
+        },
+        {
+            "kernel_id": "k002", "name": "rocblas_sgemm",
+            "duration_us": 80.0, "call_count": 2,
+            "tracelens_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
+            "reusable_native_kernel": False,  # filtered out
+        },
+    ]
+    groups = tla.build_task_groups(cands)
+    assert len(groups) == 1
+    assert groups[0]["kernel_ids"] == ["k001"]
+    assert "k002" not in groups[0]["kernel_ids"]
+
+
+# ===========================================================================
+# PR-B §1: summary.json carries task_groups[] view
+# ===========================================================================
+def test_build_audit_summary_includes_task_groups():
+    summary = tla.build_audit_summary(
+        candidates=[],
+        trace_input="/tmp/x.json.gz",
+        task_groups=[
+            {
+                "task_group_id": "tg001",
+                "source_path": "/foo/x.py",
+                "definition_line": 10,
+                "function_name": "rms",
+                "primary_kernel_id": "k001",
+                "kernel_ids": ["k001", "k002"],
+                "rows": [{"_": "row1"}, {"_": "row2"}],
+                "aggregate_duration_us": 123.4,
+                "aggregate_call_count": 96,
+                "aggregate_gpu_pct": 7.5,
+            },
+        ],
+    )
+    assert summary["task_group_count"] == 1
