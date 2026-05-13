@@ -292,7 +292,77 @@ RECORDS_NEW_6: list[dict] = [
             claw_session_id="de3af835-c5de-4e4e-bd6a-a5acb150f3e6"),
 ]
 
-ALL_RECORDS = RECORDS_EXISTING_20 + RECORDS_NEW_6
+# ── 4 NEW from 2026-05-13 batch (run 25789927636 + 25795816178) ──────────────
+# Data pulled from SaFE artifact API
+# /api/v1/optimization/tasks/<id>/artifacts/download?path=hyperloom/ci_metrics.json
+# for the 3 Succeeded tasks. Mistral's data was extracted live from the
+# sandbox pod (now deleted) via kubectl exec; numbers match the
+# ci_metrics.json the agent wrote to /workspace/hyperloom/ at 14:04 UTC.
+SOURCE_RUN_2 = "https://github.com/AMD-AGI/Hyperloom/actions/runs/25789927636"
+RECORDS_2026_05_13: list[dict] = [
+    _record(rank=28, model="mistralai/Mistral-7B-v0.1", display_name="Mistral-7B-v0.1 (run 25795816178)",
+            framework="sglang", precision="FP8", tp=1, params_b=7.2,
+            baseline=4753.18, optimized=4758.11, gain_pct=0.10,
+            actions=[
+                "baseline: 4753.18 tok/s/GPU at TP=1 CONC=64 ISL=1024 OSL=1024 (sglang_mi300x.sh)",
+                "profile: 92.4% GPU time in vendor C++ kernels (Tensile GEMM 29.4%, CK paged_attention 29.3%)",
+                "kernel_opt k006 activation_kernels.cu: 1.10x micro speedup via exp2-based SiLU",
+                "kernel_opt k007 rmsnorm_quant_kernels.cu: timed out after 63 min, no E2E impact",
+                "param_sweep --decode-attention-backend aiter: +0.10% (within noise)",
+                "model is heavily vendor-kernel-bound — limited optimization headroom",
+            ],
+            note="extracted live from sandbox pod /workspace/hyperloom before pod GC; SaFE marked Failed (canonical-path detection bug); SaFE task_id opt-7984731a-d1a2-412e-b959-26204ea32972",
+            source_run="https://github.com/AMD-AGI/Hyperloom/actions/runs/25795816178",
+            task_id="opt-7984731a-d1a2-412e-b959-26204ea32972",
+            claw_session_id="33ffbfac",
+            final_status="Succeeded"),
+    _record(rank=29, model="Qwen/Qwen3-Coder-Next", display_name="Qwen3-Coder-Next",
+            framework="vllm", precision="FP8", tp=4, params_b=79.7,
+            baseline=4047.11, optimized=4178.16, gain_pct=3.24,
+            actions=[
+                "baseline: 4047.11 tok/s TP=4 CONC=64 BF16 torch.compile+CUDAGraph",
+                "profile: 16.1% compute / 46.9% communication / 36.2% idle — communication-bound",
+                "select_kernels: No actionable compute bottlenecks (GEMM 0.11%)",
+                "backends_sweep 28/28 variants tested; best=--max-num-batched-tokens 32768",
+                "variant_kv_fp8 -19.8% / variant_aiter_on -7.8% / variant_no_prefix_cache -7.6%",
+            ],
+            note="per-GPU baseline 1011.78, optimized 1044.54; SaFE task_id opt-457df9ae",
+            source_run=SOURCE_RUN_2,
+            task_id="opt-457df9ae-ddc3-45d2-a187-b187c655b56c",
+            claw_session_id="ffad2e62-3cf2-4551-80bd-9466f54a3cdf"),
+    _record(rank=30, model="Qwen/Qwen2.5-Coder-32B-Instruct", display_name="Qwen2.5-Coder-32B-Instruct (run 25789927636)",
+            framework="sglang", precision="FP8", tp=1, params_b=32.8,
+            baseline=2016.17, optimized=2035.69, gain_pct=0.97,
+            actions=[
+                "FP8 online dynamic quantization (--quantization fp8)",
+                "Memory fraction static increased to 0.90",
+                "Continuous decode steps set to 4 (--num-continuous-decode-steps 4)",
+                "5 Triton kernels optimized via Claude — 0% E2E impact (91.4% vendor)",
+                "Validated: KV cache FP8 (--kv-cache-dtype fp8_e4m3) is HARMFUL (-88%)",
+            ],
+            note="91.4% vendor-kernel-bound; SaFE task_id opt-6ec0eb01",
+            source_run=SOURCE_RUN_2,
+            task_id="opt-6ec0eb01-dba2-4e6f-bdbb-921fcc8329df",
+            claw_session_id="d15821fc-3821-40d2-9024-16ae8c0fdc0a"),
+    _record(rank=31, model="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            display_name="NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            framework="vllm", precision="FP8", tp=1, params_b=30.0,
+            baseline=None, optimized=None, gain_pct=None,
+            actions=[
+                "aborted: NemotronH (hybrid Mamba2 + Attention + MoE) cannot run on vLLM v0.19.0 + ROCm/MI300X",
+                "AMD Triton MLIR CanonicalizePointers assertion failure in ssd_chunk_scan.py during prefill with ISL>=128",
+                "VLLM_ROCM_USE_AITER_MOE must be 0 (RELU2_NO_MUL unsupported)",
+                "torch.compile/CUDA graphs trigger separate MLIR failures",
+                "Short prompts (<128 tokens) work but ISL=1024 fundamentally incompatible",
+            ],
+            note="partial-report-on-abort; model-stack incompatibility; SaFE task_id opt-26572b61",
+            source_run=SOURCE_RUN_2,
+            task_id="opt-26572b61-c277-4251-8094-7f45fe20ce84",
+            claw_session_id="0e721f40-a6a9-4a9f-a598-0e80955b17be",
+            final_status="Failed"),
+]
+
+ALL_RECORDS = RECORDS_EXISTING_20 + RECORDS_NEW_6 + RECORDS_2026_05_13
 
 
 def _post(records: list[dict], url: str, token: str, timeout: int = 60) -> dict:
@@ -373,7 +443,10 @@ def main() -> int:
 
     print(f"endpoint = {args.url.rstrip('/')}/api/import")
     print(f"token    = {'<set>' if args.token else '<unset>'}")
-    print(f"records  = {len(ALL_RECORDS)} total ({len(RECORDS_EXISTING_20)} existing + {len(RECORDS_NEW_6)} new)")
+    print(f"records  = {len(ALL_RECORDS)} total "
+          f"({len(RECORDS_EXISTING_20)} existing + "
+          f"{len(RECORDS_NEW_6)} batch1 (5/12) + "
+          f"{len(RECORDS_2026_05_13)} batch2 (5/13))")
     print()
     _print_table(ALL_RECORDS)
 
