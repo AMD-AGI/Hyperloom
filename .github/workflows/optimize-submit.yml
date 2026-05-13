@@ -134,27 +134,43 @@ on:
 
           CRITICAL — POST-PIPELINE COPY (the most common reason a successful run shows up Failed):
           The HyperloomV2 orchestrator writes its outputs under its own session
-          directory (typically /wekafs/users/<your-uid>/<some-name>/ — pick whatever
-          name the orchestrator chose, often `<model-short-name>-opt`), NOT to
-          $RESULT_DIR. SaFE only inspects $RESULT_DIR when deciding whether the task
-          succeeded, and CI only collects $RESULT_DIR contents. So after phase 10
-          finishes you MUST physically copy the canonical artifacts:
+          directory under /wekafs/users/<safe-user-uuid>/<session-name>/ — the
+          UUID is a 32-char hex (e.g. 697f4f8340e397169e72840c6ea51cc4), NOT
+          the numeric Unix uid. SaFE only inspects $RESULT_DIR (=/workspace/hyperloom/)
+          when deciding whether the task succeeded, and CI only collects $RESULT_DIR
+          contents. So after phase 10 finishes you MUST physically copy the canonical
+          artifacts. The snippet below finds the freshest ci_metrics.json across all
+          common layouts (root / phase10_report / results) and copies it + the
+          matching optimization_report.md without depending on the numeric uid:
 
             mkdir -p $RESULT_DIR
-            SESS=$(ls -td /wekafs/users/$(id -u)*/*-opt /wekafs/users/$(id -u)*/*-results /wekafs/users/$(id -u)*/* 2>/dev/null | head -1)
-            cp -f "$SESS/ci_metrics.json"          $RESULT_DIR/ci_metrics.json          2>/dev/null \
-              || cp -f "$SESS/phase10_report/ci_metrics.json" $RESULT_DIR/ci_metrics.json 2>/dev/null \
-              || echo "[ERR] no ci_metrics.json under $SESS"
-            cp -f "$SESS/optimization_report.md"  $RESULT_DIR/optimization_report.md  2>/dev/null \
-              || cp -f "$SESS/reports/final.md"   $RESULT_DIR/optimization_report.md  2>/dev/null \
-              || echo "[ERR] no optimization_report.md under $SESS"
+            CI=$(ls -t /wekafs/users/*/*/ci_metrics.json \
+                       /wekafs/users/*/*/phase10_report/ci_metrics.json \
+                       /wekafs/users/*/*/results/ci_metrics.json \
+                       2>/dev/null | head -1)
+            REPORT=$(ls -t /wekafs/users/*/*/optimization_report.md \
+                           /wekafs/users/*/*/phase10_report/optimization_report.md \
+                           /wekafs/users/*/*/reports/final.md \
+                           2>/dev/null | head -1)
+            echo "[POST-COPY] ci_metrics src = $CI"
+            echo "[POST-COPY] report     src = $REPORT"
+            if [ -n "$CI" ]; then
+              cp -f "$CI" $RESULT_DIR/ci_metrics.json
+            else
+              echo "[ERR] no ci_metrics.json under /wekafs/users/ — write one yourself before exiting"
+            fi
+            if [ -n "$REPORT" ]; then
+              cp -f "$REPORT" $RESULT_DIR/optimization_report.md
+            else
+              echo "[ERR] no optimization_report.md under /wekafs/users/ — write one yourself before exiting"
+            fi
             ls -la $RESULT_DIR/
 
           The ci_metrics.json values you write here MUST match what the V2
           orchestrator actually measured (proper baseline from phase 1 / best
           from phase 6-8) — do NOT recompute gain_pct from a partial-run
           eager-mode baseline that the orchestrator did not endorse. The two
-          numbers must agree with $SESS/ci_metrics.json byte-for-byte.
+          numbers must agree with the source ci_metrics.json byte-for-byte.
 
           SAFETY:
           - NEVER `find /` or `find /wekafs` without `-maxdepth 4`. Prefer which/ls/$PATH lookups.
