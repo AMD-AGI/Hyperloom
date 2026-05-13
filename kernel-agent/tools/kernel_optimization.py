@@ -179,6 +179,80 @@ _GEAK_KERNEL_TYPE = {
 }
 
 
+_GPU_HW: dict[str, dict[str, Any]] = {
+    "mi300x": {
+        "name": "MI300X",
+        "arch": "gfx942",
+        "uarch": "CDNA3",
+        "cus": 304,
+        "mem": "HBM3 (~5.3 TB/s peak), 256 MB Infinity Cache",
+        "build_flag": "--offload-arch=gfx942",
+    },
+    "mi325x": {
+        "name": "MI325X",
+        "arch": "gfx942",
+        "uarch": "CDNA3",
+        "cus": 304,
+        "mem": "HBM3E (~6.0 TB/s peak), 256 MB Infinity Cache",
+        "build_flag": "--offload-arch=gfx942",
+    },
+    "mi355x": {
+        "name": "MI355X",
+        "arch": "gfx950",
+        "uarch": "CDNA4",
+        "cus": 256,
+        "mem": "HBM3E (~8.0 TB/s peak)",
+        "build_flag": "--offload-arch=gfx950",
+    },
+}
+
+
+def _normalize_target_platform(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
+def _hardware_prompt_blocks(target_platform: str) -> tuple[str, str]:
+    platform = _normalize_target_platform(target_platform)
+    hw = _GPU_HW.get(platform)
+    if not hw:
+        intro = (
+            "Optimize this GPU kernel for the active AMD Instinct GPU "
+            "inference serving. Produce an actual edited kernel file with "
+            "measurable speedup; do NOT just analyze and submit unchanged."
+        )
+        notes = "\n".join([
+            "Hardware notes (target platform unknown):",
+            "- Before benchmarking, query the runtime environment for the ROCm arch "
+            "(hipDeviceGetName/rocminfo), visible GPU IDs (ROCR_VISIBLE_DEVICES), "
+            "and memory size/bandwidth.",
+            "- Record those values in the result and choose --offload-arch=<arch> "
+            "accordingly.",
+        ])
+        return intro, notes
+
+    intro = (
+        f"Optimize this GPU kernel for **AMD Instinct {hw['name']} "
+        f"({hw['arch']}, {hw['uarch']})** inference serving. Produce an actual "
+        "edited kernel file with measurable speedup; do NOT just analyze and "
+        "submit unchanged."
+    )
+    notes = "\n".join([
+        f"Hardware notes (target platform: `{platform}`):",
+        f"- {hw['cus']} CUs, {hw['uarch']}, ROCm arch `{hw['arch']}`",
+        f"- {hw['mem']}",
+        f"- Build flag: `{hw['build_flag']}`",
+        f"- Use optimizations compatible with `{hw['arch']}` and verify runtime "
+        "device properties before benchmarking.",
+    ])
+    return intro, notes
+
+
+def _target_build_flag(target_platform: str) -> str:
+    platform = _normalize_target_platform(target_platform)
+    hw = _GPU_HW.get(platform)
+    return str(hw["build_flag"]) if hw else "--offload-arch=<arch>"
+
+
 def _coerce_cli_value(value: str | bool) -> Any:
     if isinstance(value, bool):
         return value
@@ -336,6 +410,11 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     kernel_name = str(candidate.get("name", args.kernel_id))
     kernel_metadata = build_kernel_metadata(candidate, args)
     budget_min = int(getattr(args, "budget_minutes", 60) or 60)
+    target_platform = (
+        getattr(args, "target_platform", "") or os.environ.get("GPU_TYPE", "")
+    )
+    platform_intro, hardware_notes = _hardware_prompt_blocks(target_platform)
+    platform_build_flag = _target_build_flag(target_platform)
     bench_block = ""
     if bench_files:
         bench_block = "\nKnown benchmark/test files (also copied into your workspace as -f):\n"
@@ -425,7 +504,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         f"  `#include \"{kernel_repo}/csrc/include/<the_target>.cuh\"`) AND your\n"
         "  optimized .cuh from ./optimized_versions/, then build with:\n"
         f"  `hipcc -O3 -std=c++17 -DUSE_ROCM -I{kernel_repo or '/sgl-workspace/aiter'}/csrc/include "
-        "--offload-arch=gfx942 -o ./benchmarks/bench ./benchmarks/bench.hip`.\n"
+        f"{platform_build_flag} -o ./benchmarks/bench ./benchmarks/bench.hip`.\n"
         "  Run as a single-process program; for multi-GPU collectives simulate ranks\n"
         "  with `std::thread` + `std::barrier` (no MPI/torchrun needed).\n"
         "(option 3) PYTORCH cpp_extension.load(). Build a .so from your modified\n"
@@ -441,7 +520,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "        sources=[os.path.join(HERE, 'v1_my_kernel.cu')],\n"
         "        extra_include_paths=[AITER_INC],\n"
         "        extra_cuda_cflags=['-O3', '-std=c++17', '-DUSE_ROCM',\n"
-        "                           '--offload-arch=gfx942'],\n"
+        f"                           '{platform_build_flag}'],\n"
         "        verbose=False,\n"
         "    )\n"
         "    out_opt = opt.my_kernel(*args)            # YOUR optimized version\n"
@@ -499,9 +578,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     return "\n".join([
         f"# TASK: Optimize the `{kernel_name}` kernel",
         "",
-        "Optimize this GPU kernel for **AMD Instinct MI300X (gfx942, CDNA3)** "
-        "inference serving. Produce an actual edited kernel file with measurable "
-        "speedup; do NOT just analyze and submit unchanged.",
+        platform_intro,
         "",
         f"kernel_name: {kernel_name}",
         f"kernel_url: {source_file}",
@@ -518,10 +595,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "GEAK configuration (ignored by non-GEAK backends):",
         "- Use homogeneous mode. Set max_rounds to 5.",
         "",
-        "Hardware notes (DO NOT use gfx950/MI355X-only features):",
-        "- 304 CUs, MFMA bf16 instructions, 256 VGPRs/CU",
-        "- HBM3 (~5.3 TB/s peak), 256 MB Infinity Cache",
-        "- Build flag: `--offload-arch=gfx942`",
+        hardware_notes,
         "",
         "Preserve function name, signature, decorators, and numerical behavior.",
         "Return complete optimized code plus explanation of correctness assumptions.",
@@ -1520,6 +1594,7 @@ def main() -> int:
     parser.add_argument("--benchmark-file", default="")
     parser.add_argument("--test-harness-path", default="")
     parser.add_argument("--source-file", default="")
+    parser.add_argument("--target-platform", default=os.environ.get("GPU_TYPE", ""))
     parser.add_argument("--extra-sglang-args", default="")
     parser.add_argument("--budget-minutes", type=float, default=60.0,
                         help="Per-attempt wall-clock budget for claude/codex "
