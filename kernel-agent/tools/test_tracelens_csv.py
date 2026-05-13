@@ -1644,3 +1644,91 @@ def test_function_line_from_ast_returns_none_on_invalid_source(tmp_path):
     assert tlr._function_line_from_ast(src, "anything") is None
     assert tlr._function_line_from_ast(tmp_path / "does_not_exist.py", "x") is None
 
+def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
+    """Two candidates that resolve to the same function become one group;
+    a third candidate at a different function stays separate."""
+    # Create a real Python file so the AST resolver can run.
+    src = tmp_path / "rmsnorm.py"
+    src.write_text(
+        "def rms_norm(x):\n    return x\n\n\ndef other_fn(x):\n    return x\n",
+        encoding="utf-8",
+    )
+    cands = [
+        {
+            "kernel_id": "k001",
+            "name": "rms_norm_call_1",
+            "duration_us": 100.0,
+            "call_count": 64,
+            "gpu_pct": 5.0,
+            "tracelens_launcher_path": f"{src}(2): rms_norm",
+        },
+        {
+            "kernel_id": "k002",
+            "name": "rms_norm_call_2",
+            "duration_us": 50.0,
+            "call_count": 32,
+            "gpu_pct": 2.5,
+            "tracelens_launcher_path": f"{src}(2): rms_norm",
+        },
+        {
+            "kernel_id": "k003",
+            "name": "other_fn_call",
+            "duration_us": 30.0,
+            "call_count": 16,
+            "gpu_pct": 1.5,
+            "tracelens_launcher_path": f"{src}(5): other_fn",
+        },
+    ]
+    groups = tlr.aggregate_by_source_function(cands)
+    assert len(groups) == 2
+    # Heaviest group (rms_norm: 150 us aggregate) comes first.
+    g0, g1 = groups
+    assert g0["function_name"] == "rms_norm"
+    assert g0["task_group_id"] == "tg001"
+    assert set(g0["kernel_ids"]) == {"k001", "k002"}
+    assert g0["primary_kernel_id"] == "k001"  # highest duration_us
+    assert g0["aggregate_duration_us"] == 150.0
+    assert g0["aggregate_call_count"] == 96
+    assert g0["aggregate_gpu_pct"] == 7.5
+    # AST resolved the launcher line=2 → AST FunctionDef lineno=1.
+    assert g0["definition_line"] == 1
+    assert g0["ast_resolved"] is True
+
+    assert g1["function_name"] == "other_fn"
+    assert g1["task_group_id"] == "tg002"
+    assert g1["kernel_ids"] == ["k003"]
+    # Fixture: line 1 ``def rms_norm``, blank lines 3-4, ``def other_fn``
+    # on line 5; AST resolves the launcher's reported line=5 to itself.
+    assert g1["definition_line"] == 5
+
+
+def test_aggregate_by_source_function_skips_unparseable_launcher_paths():
+    """Candidates with empty / em-dash Kernel Path (LLama70B fixture
+    shape) produce zero groups — caller falls back to per-kernel."""
+    cands = [
+        {"kernel_id": "k001", "name": "x", "tracelens_launcher_path": ""},
+        {"kernel_id": "k002", "name": "y", "tracelens_launcher_path": "—"},
+        # No tracelens_launcher_path field AND no source_file: skipped.
+        {"kernel_id": "k003", "name": "z"},
+    ]
+    assert tlr.aggregate_by_source_function(cands) == []
+
+
+def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
+    """Candidates from raw-trace / csv fallback paths lack
+    ``tracelens_launcher_path`` but may carry a Python-shaped path in
+    ``source_file``; we still parse those when possible."""
+    cands = [
+        {
+            "kernel_id": "k001",
+            "name": "rms_norm",
+            "duration_us": 100.0,
+            "call_count": 10,
+            "source_file": "aiter/rmsnorm.py(42): rms_norm",
+        },
+    ]
+    groups = tlr.aggregate_by_source_function(cands)
+    assert len(groups) == 1
+    assert groups[0]["function_name"] == "rms_norm"
+
+

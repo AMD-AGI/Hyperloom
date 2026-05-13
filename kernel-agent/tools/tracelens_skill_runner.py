@@ -846,6 +846,110 @@ def _resolve_source_target(
     }
 
 
+def aggregate_by_source_function(
+    candidates: list[dict[str, Any]],
+    *,
+    source_root: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Group TraceLens candidates by AST-resolved ``(path, line, fn)``.
+
+    Returns a list of ``task_group`` dicts, sorted by aggregate kernel
+    time (descending). Each group carries:
+
+    * ``task_group_id`` — stable identifier ``tg<NN>``;
+    * ``source_path`` / ``definition_line`` / ``function_name`` — the
+      AST-resolved triple shared by every member candidate;
+    * ``kernel_ids`` — every member candidate's ``kernel_id``;
+    * ``primary_kernel_id`` — the highest-``duration_us`` member, used
+      as the representative for prompt assembly + GEAK dispatch;
+    * ``rows`` — the full candidate dict for every member (so
+      ``build_prompt`` can render the multi-row benchmark cases section
+      without re-joining against ``hot_kernels[]``);
+    * ``aggregate_duration_us`` / ``aggregate_call_count`` / ``aggregate_gpu_pct``
+      — sums across all members.
+
+    Candidates whose ``kernel_path`` cannot be parsed are *not* placed
+    in a group; the caller is expected to dispatch them via the legacy
+    per-kernel path. Aggregation is additive: callers can ignore
+    ``task_groups`` entirely without losing anything.
+    """
+    if not candidates:
+        return []
+    root: Path | None = None
+    if source_root:
+        root = Path(source_root).expanduser()
+        if not root.is_dir():
+            root = None
+
+    groups: dict[tuple[str, int, str], dict[str, Any]] = {}
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        target = _resolve_source_target(cand, source_root=root)
+        if target is None:
+            continue
+        key = (
+            target["source_path"],
+            int(target["definition_line"]),
+            str(target["function_name"]),
+        )
+        bucket = groups.get(key)
+        if bucket is None:
+            bucket = {
+                "task_group_id":          "",  # filled below after sorting
+                "source_path":            target["source_path"],
+                "definition_line":        target["definition_line"],
+                "function_name":          target["function_name"],
+                "ast_resolved":           bool(target.get("ast_resolved")),
+                "reported_path":          target["reported_path"],
+                "kernel_ids":             [],
+                "primary_kernel_id":      "",
+                "rows":                   [],
+                "aggregate_duration_us":  0.0,
+                "aggregate_call_count":   0,
+                "aggregate_gpu_pct":      0.0,
+            }
+            groups[key] = bucket
+        kid = str(cand.get("kernel_id") or "") or cand.get("name") or ""
+        if kid and kid not in bucket["kernel_ids"]:
+            bucket["kernel_ids"].append(kid)
+        bucket["rows"].append(cand)
+        try:
+            bucket["aggregate_duration_us"] += float(cand.get("duration_us") or 0.0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            bucket["aggregate_call_count"] += int(cand.get("call_count") or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            bucket["aggregate_gpu_pct"] += float(cand.get("gpu_pct") or 0.0)
+        except (TypeError, ValueError):
+            pass
+
+    ordered = sorted(
+        groups.values(),
+        key=lambda g: g["aggregate_duration_us"],
+        reverse=True,
+    )
+    for idx, group in enumerate(ordered, start=1):
+        group["task_group_id"] = f"tg{idx:03d}"
+        # Sort member rows by duration desc + pick the heaviest as
+        # primary; build_prompt renders the primary row's metadata
+        # and lists the rest as additional benchmark cases.
+        group["rows"].sort(
+            key=lambda r: float(r.get("duration_us") or 0.0), reverse=True,
+        )
+        if group["rows"]:
+            primary = group["rows"][0]
+            group["primary_kernel_id"] = str(
+                primary.get("kernel_id") or primary.get("name") or ""
+            )
+        group["aggregate_duration_us"] = round(group["aggregate_duration_us"], 3)
+        group["aggregate_gpu_pct"] = round(group["aggregate_gpu_pct"], 3)
+    return ordered
+
+
 def raw_candidates_from_priority_data(priority_data_path: Path, top_k: int) -> list[dict[str, Any]]:
     """Convert TraceLens priority_data.json into hot-kernel candidate rows.
 
@@ -908,6 +1012,7 @@ __all__ = [
     "_extract_pitem_prose",
     "_function_line_from_ast",
     "_parse_launcher_path",
+    "aggregate_by_source_function",
     "build_orchestrator_prompt",
     "discover_capture_folder",
     "infer_analysis_mode",
