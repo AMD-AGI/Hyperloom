@@ -859,6 +859,12 @@ class SubmissionRecord:
     model: str
     status: str = "pending"            # local stage: submitted/dry-run/skipped/failed
     task_id: str | None = None
+    # Claw session UUID (e.g. 1c11a036-9ef5-47d1-8f52-ca2398d05078) that
+    # SaFE creates when submit_task runs. Used by the dashboard to deep-link
+    # back to the chat transcript + by us to correlate ci_metrics.json on
+    # /wekafs/users/<uid>/<session>/ with the SaFE task. Populated from
+    # last_task.clawSessionId in wait_and_collect_one.
+    claw_session_id: str | None = None
     display_name: str | None = None
     detected: dict | None = None
     overrides: dict = field(default_factory=dict)
@@ -1212,6 +1218,9 @@ def wait_and_collect_one(
     rec.final_status = final_status
     rec.final_phase = last_task.get("currentPhase")
     rec.final_message = (last_task.get("message") or "")[:500] or None
+    rec.claw_session_id = (last_task.get("clawSessionId") or "").strip() or None
+    if rec.claw_session_id:
+        log.info("[task %s] clawSessionId=%s", rec.task_id, rec.claw_session_id)
 
     if not collect:
         return rec
