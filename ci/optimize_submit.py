@@ -507,7 +507,25 @@ class SafeOptimizeClient:
             # handlers/model-handlers/models.go::createModelFromLocalPath:380).
             # We mirror the convention SaFE uses for HF-downloaded models —
             # the trailing path segment of the repo ID (e.g. "Qwen3-Coder-Next").
-            display_name = repo_id.split("/")[-1] or repo_id
+            #
+            # Sanitization: SaFE feeds displayName straight into
+            # commonutils.GenerateName which becomes the K8s Model.amd.com
+            # metadata.name. That field must satisfy RFC 1123 (lowercase
+            # [a-z0-9-.], 1-63 chars, start/end alphanumeric). Without this
+            # sanitization the K8s API rejects displayName="Qwen3-Coder-Next"
+            # with HTTP 500 "Model.amd.com \"Qwen3-Coder-Next-xxxxx\" is
+            # invalid: metadata.name: Invalid value ...". SaFE should ideally
+            # sanitize on the backend, but for now we hand-deliver a clean
+            # name. Keep the original repo basename in the source.url field
+            # so the dashboard can still show pretty-cased text via metadata
+            # lookups.
+            import re
+            raw = repo_id.split("/")[-1] or repo_id
+            cleaned = re.sub(r"[^a-z0-9.-]+", "-",
+                             raw.lower()).strip(".-") or "model"
+            # Trim to 50 chars to leave headroom for the -xxxxx suffix
+            # GenerateName appends (K8s metadata.name max is 63).
+            display_name = cleaned[:50].rstrip(".-") or "model"
             body = {
                 "displayName": display_name,
                 "source": {
