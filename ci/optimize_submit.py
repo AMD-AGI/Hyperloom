@@ -502,7 +502,14 @@ class SafeOptimizeClient:
             on big repos). Kept as a fallback when prewarm cannot run.
         """
         if local_path:
+            # local_path mode bypasses SaFE's HF metadata fetch, so the
+            # caller MUST provide displayName (validated by
+            # handlers/model-handlers/models.go::createModelFromLocalPath:380).
+            # We mirror the convention SaFE uses for HF-downloaded models —
+            # the trailing path segment of the repo ID (e.g. "Qwen3-Coder-Next").
+            display_name = repo_id.split("/")[-1] or repo_id
             body = {
+                "displayName": display_name,
                 "source": {
                     "url": repo_id,
                     "accessMode": "local_path",
@@ -510,8 +517,9 @@ class SafeOptimizeClient:
                 },
                 "workspace": self.register_workspace,
             }
-            log.info("[%s] register (local_path mode): workspace=%s localPath=%s",
-                     repo_id, self.register_workspace, local_path)
+            log.info("[%s] register (local_path mode): workspace=%s "
+                     "displayName=%s localPath=%s",
+                     repo_id, self.register_workspace, display_name, local_path)
         else:
             body = {
                 "source": {
