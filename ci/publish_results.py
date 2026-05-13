@@ -44,24 +44,20 @@ def load_results(path: Path) -> list[dict[str, Any]]:
     return []
 
 
-def _strip_luochen_workaround(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Strip fields that hit a known luochen results-service bug.
+def _normalize_submitted_at(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Move ``run.submitted_at`` ISO strings into ``run.submitted_at_iso``
+    and set the original field to ``None``.
 
-    Current bug: handlers/storage/postgres_store._nullable_timestamp returns
-    ``str`` but asyncpg requires a ``datetime`` instance for the
-    ``timestamptz`` column. So sending ``run.submitted_at = "<ISO 8601>"``
-    deterministically returns HTTP 500 with::
+    Required because the hyperloom-results-service ingest path declares
+    ``submitted_at`` as a ``timestamptz`` column and binds the value via
+    a helper that returns ``str``; asyncpg rejects this and the POST
+    returns HTTP 500 ``invalid input for query argument $9 (expected a
+    datetime.date or datetime.datetime instance, got 'str')``.
 
-        invalid input for query argument $9:
-        '2026-05-13T10:11:28Z' (expected a datetime.date or
-        datetime.datetime instance, got 'str')
-
-    Workaround: replace ``run.submitted_at`` (string) with ``None`` and
-    move the original value to ``run.submitted_at_iso`` so the
-    information is preserved in the JSONB blob luochen stores under
-    ``raw_result``. Remove this once luochen patches
-    ``_nullable_timestamp`` to call ``datetime.fromisoformat`` (or
-    accepts the timestamp inside the larger ``metadata`` JSONB column).
+    Keeping the raw ISO value under a sibling key means the information
+    still lands in the row's ``raw_result`` JSONB blob, so consumers can
+    reconstruct the timestamp without a backend round-trip. Drop this
+    function once the ingest path accepts ISO strings directly.
     """
     cleaned: list[dict[str, Any]] = []
     for r in results:
@@ -105,7 +101,7 @@ def publish(
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    body = {"results": _strip_luochen_workaround(results)}
+    body = {"results": _normalize_submitted_at(results)}
 
     backoff = initial_backoff_s
     last_err: Exception | None = None
