@@ -51,6 +51,9 @@ Useful knobs:
 - `HYPERLOOM_PMC_ROOFLINE_MODE=launch|attach`: default `launch`.
 - `HYPERLOOM_PMC_ROOFLINE_PORT=30001`: dedicated server port.
 - `HYPERLOOM_PMC_ROOFLINE_DURATION_MS=15000`: rocprof collection window.
+- `HYPERLOOM_PMC_ROOFLINE_GPU_TYPE` or `GPU_TYPE`: roofline GPU model
+  override. If unset, the action probes `rocm-smi --showproductname` and then
+  falls back to the visible ROCm architecture reported by torch.
 
 ## Why This Is Separate
 
@@ -72,6 +75,8 @@ and uses that process only for `rocprofv3 --attach`.
 - `output_dir`: artifact directory.
 - `duration_ms`: attach duration, default `15000`.
 - `precision`: roofline precision, default `fp16`.
+- `gpu_type`: roofline GPU model (`mi300x`, `mi325x`, or `mi355x`). Overrides
+  environment-based detection.
 - `startup_timeout_s`: server health timeout, default `600`.
 - `extra_envs`: extra environment variables for the dedicated server.
 - `profile_mode`: `launch` (default) or `attach`. Use `attach` only when the

@@ -1005,6 +1005,11 @@ class Coordinator:
         max_model_len = str(envs.get("MAX_MODEL_LEN") or os.environ.get("MAX_MODEL_LEN") or "8192")
         extra_key = "EXTRA_VLLM_ARGS" if framework == "vllm" else "EXTRA_SGLANG_ARGS"
         extra_args = shlex.split(str(envs.get(extra_key) or ""))
+        gpu_type = (
+            os.environ.get("HYPERLOOM_PMC_ROOFLINE_GPU_TYPE")
+            or self.shared_state.gpu_type
+            or os.environ.get("GPU_TYPE", "")
+        ).strip().lower()
 
         if framework == "vllm":
             dtype = "bfloat16" if precision in {"bf16", "bfloat16"} else precision
@@ -1058,6 +1063,7 @@ class Coordinator:
             "output_dir": str(Path(self.session_dir) / "runs" / "pmc_roofline" / "auto"),
             "duration_ms": int(os.environ.get("HYPERLOOM_PMC_ROOFLINE_DURATION_MS", "15000")),
             "precision": precision,
+            "gpu_type": gpu_type,
             "startup_timeout_s": int(os.environ.get("HYPERLOOM_PMC_ROOFLINE_STARTUP_TIMEOUT_S", "600")),
         }
 

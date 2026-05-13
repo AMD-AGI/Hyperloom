@@ -94,6 +94,7 @@ class PMCRooflineExecutor:
             benchmark_cmd=benchmark_cmd,
             duration_ms=int(params.get("duration_ms") or 15000),
             precision=str(params.get("precision") or "fp16"),
+            gpu_type=str(params.get("gpu_type") or ""),
             startup_timeout_s=int(params.get("startup_timeout_s") or 600),
             env_overrides=env_overrides,
             profile_mode=str(params.get("profile_mode") or "launch"),

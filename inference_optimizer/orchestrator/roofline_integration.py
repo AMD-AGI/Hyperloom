@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.request import urlopen
 
 
@@ -435,7 +435,65 @@ class GPUSpec:
         self.ridge_point_fp8 = (self.peak_flops_fp8 * 1e12) / bandwidth
 
 
+MI300X_SPEC = GPUSpec("MI300X", 1307.0, 2614.0, 0.0, 163.4, 5.3, 304, 64, 256, 4)
+MI325X_SPEC = GPUSpec("MI325X", 1307.0, 2614.0, 0.0, 163.4, 6.0, 304, 64, 256, 4)
 MI355X_SPEC = GPUSpec("MI355X", 1311.0, 2621.0, 5243.0, 163.9, 8.0, 304, 128, 256, 4)
+_GPU_TYPE_ENV_KEYS = ("HYPERLOOM_PMC_ROOFLINE_GPU_TYPE", "GPU_TYPE")
+_GFX_TO_GPU_TYPE = {
+    "gfx942": "mi300x",
+    "gfx950": "mi355x",
+    "gfx1100": "mi325x",
+}
+
+
+def _autodetect_gpu_type() -> str:
+    """Best-effort ROCm GPU type probe for standalone PMC runs."""
+    try:
+        out = subprocess.run(
+            ["rocm-smi", "--showproductname"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.upper()
+        for tag in ("MI355X", "MI325X", "MI300X"):
+            if tag in out:
+                return tag.lower()
+    except (FileNotFoundError, PermissionError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    try:
+        import torch  # type: ignore[import-not-found]
+
+        arch = torch.cuda.get_device_properties(0).gcnArchName
+        return _GFX_TO_GPU_TYPE.get(arch.split(":", 1)[0].lower(), "")
+    except Exception:  # noqa: BLE001 - torch may be absent on coordinator hosts.
+        return ""
+
+
+def resolve_gpu_type(gpu_type: str | None = None, env: Mapping[str, str] | None = None) -> str:
+    """Resolve roofline GPU type from task params, env, then ROCm probing."""
+    explicit = str(gpu_type or "").strip().lower()
+    if explicit:
+        return explicit
+
+    merged_env = env or os.environ
+    for key in _GPU_TYPE_ENV_KEYS:
+        value = str(merged_env.get(key) or os.environ.get(key) or "").strip().lower()
+        if value:
+            return value
+
+    return _autodetect_gpu_type()
+
+
+def gpu_spec_from_name(name: str | None) -> GPUSpec:
+    normalized = (name or "").strip().lower().replace("_", "").replace("-", "")
+    if "mi355" in normalized or "gfx950" in normalized:
+        return MI355X_SPEC
+    if "mi325" in normalized:
+        return MI325X_SPEC
+    if "mi300" in normalized or "gfx942" in normalized:
+        return MI300X_SPEC
+    return MI300X_SPEC
 
 
 @dataclass
@@ -475,8 +533,8 @@ class KernelRooflineResult:
 
 
 class RooflineAnalyzer:
-    def __init__(self, gpu_spec: GPUSpec = MI355X_SPEC):
-        self.spec = gpu_spec
+    def __init__(self, gpu_spec: GPUSpec | None = None, *, gpu_type: str | None = None):
+        self.spec = gpu_spec or gpu_spec_from_name(resolve_gpu_type(gpu_type))
 
     def analyze_kernels(self, pmc_data: list[dict[str, Any]], precision: str = "fp16") -> list[KernelRooflineResult]:
         results = [self._analyze_single(kernel, precision) for kernel in pmc_data]
@@ -708,6 +766,7 @@ def run_isolated_pmc_roofline(
     benchmark_cmd: list[str] | None = None,
     duration_ms: int = 15000,
     precision: str = "fp16",
+    gpu_type: str = "",
     startup_timeout_s: int = 600,
     env_overrides: dict[str, str] | None = None,
     profile_mode: str = "launch",
@@ -789,7 +848,9 @@ def run_isolated_pmc_roofline(
                 gpu_pct = result.duration_ns / total_ns * 100.0 if total_ns else 0.0
             pmc_dicts.append(result.to_roofline_dict(gpu_pct=float(gpu_pct or 0.0)))
 
-        roofline_results = RooflineAnalyzer().analyze_kernels(pmc_dicts, precision=precision)
+        resolved_gpu_type = resolve_gpu_type(gpu_type, env)
+        gpu_spec = gpu_spec_from_name(resolved_gpu_type)
+        roofline_results = RooflineAnalyzer(gpu_spec).analyze_kernels(pmc_dicts, precision=precision)
         roofline_path = session_dir / "profiles" / "roofline.json"
         roofline_path.write_text(
             json.dumps([result.to_dict() for result in roofline_results], indent=2, sort_keys=True) + "\n",
@@ -804,6 +865,8 @@ def run_isolated_pmc_roofline(
         return {
             "status": "ok",
             "profile_mode": mode,
+            "gpu_type": resolved_gpu_type,
+            "gpu_spec": gpu_spec.name,
             "server_log": str(log_path),
             "pmc_summary_path": str(pmc_summary_path),
             "roofline_path": str(roofline_path),
