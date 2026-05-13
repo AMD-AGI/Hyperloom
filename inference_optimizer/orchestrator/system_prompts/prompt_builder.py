@@ -54,8 +54,12 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "validate_stack",
     # finalize
     "report",
-    # support
-    "dream", "re_explore", "recover", "comm_optimization", "compiler_tuning",
+    # support phase intentionally removed — comm_optimization /
+    # compiler_tuning / dream / re_explore / recover are all _noop_prep
+    # (cli._NOOP_KINDS_COMMON) and not in the Critic's default approve
+    # whitelist; surfacing them only produced silent "succeeded" spins
+    # and rejected proposals. Re-add when real executors land (see
+    # remain_todo.md sections C, I, M).
 )
 
 NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
@@ -67,8 +71,8 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     "validate_stack",
     # finalize
     "report",
-    # support (omit recover — server lifecycle is Robustness in this profile)
-    "dream", "re_explore",
+    # support phase (dream / re_explore) removed for the same reason
+    # as FULL_ENABLED_ACTIONS.
 )
 
 # Actions that the Kernel agent owns end-to-end (Plan A). Orchestration MUST
