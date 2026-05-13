@@ -92,9 +92,9 @@ _LOCK_PATH = "/tmp/hyperloom_server_patcher.lock"
 # hung NFS / weird filesystems.
 _GIT_TIMEOUT_SEC = 30
 
-# PR-C §2: SGLang version gate is now a *minor-version* allowlist
-# rather than an exact pin so the fuzzy patch fallback (PR-C §1) gets
-# a chance to apply TraceLens patches against a freshly bumped point
+# PR-C §2: SGLang version gate is a *minor-version* allowlist rather
+# than an exact pin so the fuzzy patch fallback (PR-C §1) gets a
+# chance to apply TraceLens patches against a freshly bumped point
 # release. ``0.5.x`` covers all of 0.5.9, 0.5.10, 0.5.11, … which is
 # the typical bump cadence between TraceLens patch revisions.
 #
@@ -112,20 +112,87 @@ _GIT_TIMEOUT_SEC = 30
 # wins over the minor allowlist.
 _SGLANG_DEFAULT_ALLOWED_MINORS: tuple[str, ...] = ("0.5",)
 
+# PR-D §5: TraceLens-shipped manifest filename(s). When present in the
+# SGLang patches dir, the manifest is the source of truth for which
+# SGLang versions the patches support — Hyperloom's hardcoded default
+# allowlist is bypassed entirely. The day TraceLens starts shipping
+# this file, the Hyperloom gate auto-adapts without a code change,
+# which is the decoupling intent of the #194 §5 follow-up
+# recommendation ("discover supported SGLang versions from the
+# TraceLens patches dir rather than from a hardcoded allowlist").
+# Format: plain text, one version per line, ``#`` starts comments,
+# blank lines ignored. Operator env-var pins still beat the manifest
+# so debugging escape hatches keep working.
+_SGLANG_SUPPORTED_VERSIONS_MANIFEST_NAMES: tuple[str, ...] = (
+    "SUPPORTED_VERSIONS.txt",
+    "SUPPORTED_VERSIONS",
+)
 
-def _sglang_version_accepted(version: str) -> bool:
+
+def _load_sglang_supported_versions_from_manifest(
+    patches_dir: Path,
+) -> frozenset[str] | None:
+    """Read the TraceLens-shipped ``SUPPORTED_VERSIONS`` manifest if
+    one exists in ``patches_dir``.
+
+    Format: one version per line; ``#`` comments and blank lines are
+    skipped. Returns ``None`` if no manifest file is present (the
+    common case today — TraceLens doesn't ship one yet, so this is a
+    forward-compatible hook that auto-activates when they do).
+    Returns an empty frozenset only if the file is explicitly empty
+    after comment/blank stripping — operators see that as "TraceLens
+    declares zero supported versions", which correctly rejects all.
+    """
+    for name in _SGLANG_SUPPORTED_VERSIONS_MANIFEST_NAMES:
+        manifest = patches_dir / name
+        if not manifest.is_file():
+            continue
+        try:
+            raw = manifest.read_text(encoding="utf-8")
+        except OSError as e:
+            log.warning(
+                "_server_patcher: cannot read SGLang version manifest %s (%s);"
+                " falling back to hardcoded allowlist", manifest, e,
+            )
+            return None
+        versions: set[str] = set()
+        for line in raw.splitlines():
+            stripped = line.split("#", 1)[0].strip()
+            if stripped:
+                versions.add(stripped)
+        log.info(
+            "_server_patcher: loaded %d SGLang version(s) from TraceLens "
+            "manifest %s (PR-D §5: decoupled from Hyperloom hardcoded "
+            "allowlist)", len(versions), manifest,
+        )
+        return frozenset(versions)
+    return None
+
+
+def _sglang_version_accepted(
+    version: str, *, patches_dir: Path | None = None,
+) -> bool:
     """Return True iff ``version`` is in the configured allowlist.
 
-    Resolution order:
+    Resolution order (highest precedence first):
 
-    1. ``$HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS`` (csv) — exact pins
-       win when set; this matches the pre-PR-C behaviour for callers
+    1. ``$HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS`` (csv) — exact pins.
+       Operator escape hatch; matches pre-PR-C behaviour for callers
        who want to lock down to known-good versions.
     2. ``$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS`` (csv) — minor-version
        allowlist (e.g. ``0.5,0.6``); a version is accepted iff it
-       startswith one of the listed prefixes followed by ``.`` (so
-       ``0.5`` matches ``0.5.9`` but not ``0.50.0``).
-    3. :data:`_SGLANG_DEFAULT_ALLOWED_MINORS` — the built-in default.
+       equals or startswith one of the listed prefixes followed by
+       ``.`` (so ``0.5`` matches ``0.5.9`` but not ``0.50.0``).
+    3. **TraceLens-shipped ``SUPPORTED_VERSIONS`` manifest** when
+       present in ``patches_dir`` (PR-D §5). The manifest fully
+       replaces the hardcoded default; if the manifest exists,
+       :data:`_SGLANG_DEFAULT_ALLOWED_MINORS` is not consulted.
+       TraceLens owns this list because TraceLens owns the patches;
+       Hyperloom learning the list from TraceLens decouples version
+       support bumps from Hyperloom code changes.
+    4. :data:`_SGLANG_DEFAULT_ALLOWED_MINORS` — the built-in default,
+       only consulted when no operator override AND no vendor
+       manifest is present.
     """
     text = (version or "").strip()
     if not text:
@@ -139,11 +206,24 @@ def _sglang_version_accepted(version: str) -> bool:
     ).strip()
     if minors_env:
         minors = tuple(v.strip() for v in minors_env.split(",") if v.strip())
-    else:
-        minors = _SGLANG_DEFAULT_ALLOWED_MINORS
+        return any(
+            text == minor or text.startswith(f"{minor}.")
+            for minor in minors
+        )
+    # PR-D §5: vendor manifest. When present, the manifest IS the
+    # allowlist — fully replaces the hardcoded default. When absent,
+    # the manifest helper returns None and we fall through to the
+    # default below (preserves PR-C.2 behaviour for today's TraceLens
+    # which doesn't ship the manifest).
+    if patches_dir is not None:
+        manifest_versions = _load_sglang_supported_versions_from_manifest(
+            patches_dir,
+        )
+        if manifest_versions is not None:
+            return text in manifest_versions
     return any(
         text == minor or text.startswith(f"{minor}.")
-        for minor in minors
+        for minor in _SGLANG_DEFAULT_ALLOWED_MINORS
     )
 
 # Path within the TraceLens checkout that hosts the patch sets.
@@ -305,20 +385,25 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         return None
 
     version = (getattr(sglang, "__version__", "") or "").strip()
-    if not _sglang_version_accepted(version):
-        log.info(
-            "_server_patcher: SGLang %s not in supported minor allowlist "
-            "(see HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS / "
-            "HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS to override); skip",
-            version,
-        )
-        return None
 
+    # Resolve the patches dir BEFORE the version check so the gate
+    # can consult the TraceLens-shipped manifest (PR-D §5). If the
+    # patches dir itself is missing, no point checking the version.
     patches_dir = _patch_tree(tracelens_root, "sglang_roofline_patches")
     if not patches_dir.is_dir():
         log.info(
             "_server_patcher: SGLang patches directory missing (%s); skip",
             patches_dir,
+        )
+        return None
+
+    if not _sglang_version_accepted(version, patches_dir=patches_dir):
+        log.info(
+            "_server_patcher: SGLang %s not in supported version list "
+            "(consulted: $HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS, "
+            "$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS, %s/SUPPORTED_VERSIONS, "
+            "then built-in minor allowlist %s); skip",
+            version, patches_dir, _SGLANG_DEFAULT_ALLOWED_MINORS,
         )
         return None
     patches = tuple(sorted(patches_dir.glob("*.patch")))
