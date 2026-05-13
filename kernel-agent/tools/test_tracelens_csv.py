@@ -217,6 +217,54 @@ def test_stable_framework_triton_source_is_reusable_native():
     assert tla.recommend_backends(candidate) == ["geak", "claude", "codex"]
 
 
+def test_recommend_backends_includes_geak_for_python_source():
+    """Policy: every kernel Claude/Codex can rewrite, GEAK can rewrite
+    too. Pre-fix, ``python`` source_type returned ``["claude", "codex"]``
+    and dropped GEAK — that excluded e.g. the hottest kernel on a
+    Qwen3-30B-A3B run (`fused_moe_kernel` mis-resolved to a Python
+    benchmark harness) from ever reaching GEAK. Post-fix GEAK is in
+    the ladder for python too; the AST resolver (PR-B.1) addresses
+    the underlying misclassification but the policy change is the
+    safety net for cases the resolver can't disambiguate."""
+    candidate = {
+        "name": "some_python_dispatcher",
+        "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/dispatcher.py",
+        "source_type": "python",
+        "reusable_native_kernel": True,
+    }
+    assert tla.recommend_backends(candidate) == ["geak", "claude", "codex"]
+
+
+def test_recommend_backends_includes_geak_for_unknown_source():
+    """Fallback / unknown source_type path: GEAK must still be in the
+    ladder. The capability differences are GEAK-side, not
+    Hyperloom-side — let GEAK decide what to handle rather than
+    pre-filtering by extension."""
+    candidate = {
+        "name": "some_unrecognised_kernel",
+        "source_file": "/some/path/kernel.xyz",
+        "source_type": "unknown",
+        "reusable_native_kernel": True,
+    }
+    assert tla.recommend_backends(candidate) == ["geak", "claude", "codex"]
+
+
+def test_recommend_backends_geak_is_first_in_ladder():
+    """Invariant: when GEAK is in the ladder, it is FIRST. High-priority
+    handoff means GEAK gets the swing before Claude/Codex; the
+    fallback order matters at runtime if GEAK times out or rejects."""
+    candidate = {
+        "name": "some_kernel",
+        "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/x.py",
+        "source_type": "triton",
+        "reusable_native_kernel": True,
+    }
+    ladder = tla.recommend_backends(candidate)
+    assert ladder and ladder[0] == "geak", (
+        f"GEAK must be first in the ladder, got {ladder}"
+    )
+
+
 def test_unknown_source_root_is_not_reusable_native():
     candidate = {
         "name": "my_custom_kernel",

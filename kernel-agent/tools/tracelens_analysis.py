@@ -1492,6 +1492,22 @@ def _finalize_candidates(
 
 
 def recommend_backends(candidate: dict[str, Any]) -> list[str]:
+    """Recommend a backend ladder for a reusable native kernel.
+
+    Policy (#144 last comment Layer 1, broadened): every kernel that
+    Claude/Codex can rewrite, GEAK can rewrite too. Include GEAK in
+    every default ladder so high-priority kernels reach GEAK FIRST;
+    Claude/Codex stay on as fallbacks if GEAK times out or rejects.
+
+    The kernel-agent's :func:`kernel_optimization.choose_backends` still
+    sets ``geak_without_benchmark=True`` when no harness is present so
+    operators / downstream KEEP gates can audit verification confidence
+    — but GEAK is no longer pre-filtered from the ladder upstream.
+
+    Only ``[]`` returns: unresolved source, non-reusable native (e.g.
+    Inductor cache), vendor binaries, and runtime-generated kernels
+    (where there's no stable source to rewrite).
+    """
     source_type = candidate.get("source_type")
     if not candidate.get("source_file"):
         return []
@@ -1501,13 +1517,7 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
         return []
     if source_type == "runtime_generated":
         return []
-    if source_type == "hip_cpp":
-        return ["geak", "claude", "codex"]
-    if source_type == "triton":
-        return ["geak", "claude", "codex"]
-    if source_type == "python":
-        return ["claude", "codex"]
-    return ["claude", "codex"]
+    return ["geak", "claude", "codex"]
 
 
 def build_notes(candidate: dict[str, Any]) -> str:

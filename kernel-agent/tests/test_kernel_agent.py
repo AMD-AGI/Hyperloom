@@ -213,7 +213,16 @@ class KernelAgentToolTests(unittest.TestCase):
             self.assertEqual(result["trace_input_type"], "capture_dir")
             self.assertGreaterEqual(len(result["hot_kernels"]), 2)
 
-    def test_default_backends_skip_geak_without_benchmark(self) -> None:
+    def test_default_backends_include_geak_without_benchmark(self) -> None:
+        """Policy change (#144 last comment Layer 1, broadened): every
+        kernel Claude/Codex can rewrite, GEAK can rewrite too. Auto-pick
+        MUST include GEAK in the ladder even when no benchmark is
+        present — the previous "skip GEAK" behaviour was over-conservative
+        and starved GEAK of high-priority kernels on runs that hadn't
+        registered a harness yet. ``geak_without_benchmark`` flags the
+        reduced verification confidence so downstream KEEP gates audit
+        appropriately; the decision is still ``NEEDS_REVIEW`` because
+        E2E evidence is missing."""
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             trace = workspace / "trace.json"
@@ -238,7 +247,17 @@ class KernelAgentToolTests(unittest.TestCase):
                 "--dry-run",
             ], workspace=workspace)
 
-            self.assertNotIn("geak", result["selected_backends"])
+            # GEAK is now in the ladder (FIRST, the high-priority handoff
+            # the policy intended).
+            self.assertIn("geak", result["selected_backends"])
+            self.assertEqual(result["selected_backends"][0], "geak")
+            # No bench → flagged for downstream verification gates.
+            self.assertTrue(
+                result["backend_selection"]["geak_without_benchmark"]
+            )
+            # Decision unchanged: E2E evidence still missing, still
+            # NEEDS_REVIEW. The change is that GEAK got a swing at the
+            # rewrite, not that we lowered the KEEP bar.
             self.assertEqual(result["proposal"]["decision"], "NEEDS_REVIEW")
             self.assertIn("E2E evidence missing", result["proposal"]["reasons"])
 

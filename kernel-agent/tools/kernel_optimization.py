@@ -145,6 +145,22 @@ def parse_backends(backends: str) -> list[str]:
 
 
 def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    """Select the backend ladder for a kernel-opt run.
+
+    Policy (#144 last comment Layer 1, broadened): every kernel
+    Claude/Codex can rewrite, GEAK can rewrite too. Include GEAK in
+    every default ladder, FIRST (high-priority handoff) — Claude/Codex
+    follow as fallbacks if GEAK times out or rejects.
+
+    When no benchmark/test harness is available, GEAK still attempts
+    the rewrite but ``geak_without_benchmark=True`` is flagged so
+    downstream KEEP gates / operators know verification confidence is
+    reduced. Aligns the auto-pick with the SKILL.md "allow the attempt
+    but mark" contract that previously only applied to user-specified
+    backends.
+
+    Only ``[]`` returns: vendor binaries (nothing rewritable upstream).
+    """
     user_backends = parse_backends(args.backends)
     benchmark_available = has_benchmark(args, candidate)
     source_type = str(candidate.get("source_type") or "unknown")
@@ -161,12 +177,10 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
 
     if source_type == "vendor_binary":
         return [], notes
-    if source_type == "hip_cpp":
-        return ["geak"] if benchmark_available else ["claude", "codex"]
 
-    selected = ["claude", "codex"]
-    if benchmark_available:
-        selected.insert(0, "geak")
+    selected = ["geak", "claude", "codex"]
+    if not benchmark_available:
+        notes["geak_without_benchmark"] = True
     return selected, notes
 
 

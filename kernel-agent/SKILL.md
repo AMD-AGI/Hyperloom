@@ -246,13 +246,18 @@ If Executor requests compatibility output, also write
 User-specified backends win, subject to feasibility checks. If user does not
 specify backends:
 
-- Triton / Inductor standalone: use `claude,codex`; add `geak` only when a
-  benchmark or test harness exists.
-- HIP/C++: use `geak` only when a benchmark or test harness exists; otherwise
-  use Claude/Codex for suggestions and return `NEEDS_REVIEW`.
-- Python dispatch/config fix: do not call backend by default; return patch
-  guidance and `NEEDS_REVIEW`.
-- Vendor binary / hipBLASLt: do not rewrite; return reason and `NEEDS_REVIEW`.
+- **Default ladder (all rewritable kernels)**: `geak,claude,codex` — GEAK
+  first because every kernel Claude/Codex can rewrite, GEAK can rewrite too.
+  Claude/Codex stay on as fallbacks if GEAK times out or rejects. The kernel
+  type (Triton / HIP-C++ / Python / unknown) does NOT change the ladder; the
+  capability differences are GEAK-side, not Hyperloom-side, so we let GEAK
+  decide what to handle.
+- **No-benchmark case**: still attempt GEAK but flag
+  `geak_without_benchmark: true` so the KEEP gate downstream knows
+  verification confidence is reduced (matches the existing user-specified
+  behaviour — the auto-pick now follows the same contract).
+- **Vendor binary / hipBLASLt**: do not rewrite; return reason and
+  `NEEDS_REVIEW`. Only case that yields an empty backend list upstream.
 
 Multi-GPU collective kernels (`is_multigpu: True`, e.g. all-reduce / all-gather):
 `parallel_e2e_runner` automatically drops `geak` from the backend list because
