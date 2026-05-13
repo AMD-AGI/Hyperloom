@@ -166,9 +166,12 @@ ensure_python() {
 # Background: `inference_optimizer/orchestrator/action_executors/_server_patcher.py`
 # uses two binaries to apply TraceLens patches to vLLM/SGLang installs:
 #   * `git apply` — strict path, default; bails immediately on context drift.
-#   * `patch -p<N> --fuzz=10` — PR-C fuzzy fallback; tolerates whitespace /
-#     single-line drift between TraceLens-shipped patches and the deployed
-#     framework version (the common case on point-release bumps).
+#   * `patch -p<N> --fuzz=2` — PR-C fuzzy fallback (tightened from
+#     PR-C's original `--fuzz=10` to GNU patch's default `--fuzz=2` in
+#     PR-D §6 to reject multi-line context drift that could mis-apply
+#     patch CHANGE lines to wrong-but-similar-looking call sites).
+#     Still tolerates whitespace and single-line drift, the common
+#     point-release case the fuzzy fallback was designed for.
 #
 # Stripped runtime images (`lmsysorg/sglang:v0.5.9-rocm700-mi30x` and the
 # minimal vLLM serving images) sometimes ship without one or both binaries.
@@ -191,7 +194,7 @@ ensure_patch_tools() {
   fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
     [ "$need_git" -eq 1 ]   && warn "git missing; TraceLens server-patch strict path (\`git apply\`) will fail-soft"
-    [ "$need_patch" -eq 1 ] && warn "patch missing; TraceLens server-patch fuzzy fallback (\`patch --fuzz=10\`) will fail-soft"
+    [ "$need_patch" -eq 1 ] && warn "patch missing; TraceLens server-patch fuzzy fallback (\`patch --fuzz=2\`) will fail-soft"
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
