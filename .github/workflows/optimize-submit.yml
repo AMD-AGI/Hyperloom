@@ -132,6 +132,30 @@ on:
             export RESULT_DIR=/workspace/hyperloom/
           Otherwise baseline/sweep writes fail silently and the job will hang.
 
+          CRITICAL — POST-PIPELINE COPY (the most common reason a successful run shows up Failed):
+          The HyperloomV2 orchestrator writes its outputs under its own session
+          directory (typically /wekafs/users/<your-uid>/<some-name>/ — pick whatever
+          name the orchestrator chose, often `<model-short-name>-opt`), NOT to
+          $RESULT_DIR. SaFE only inspects $RESULT_DIR when deciding whether the task
+          succeeded, and CI only collects $RESULT_DIR contents. So after phase 10
+          finishes you MUST physically copy the canonical artifacts:
+
+            mkdir -p $RESULT_DIR
+            SESS=$(ls -td /wekafs/users/$(id -u)*/*-opt /wekafs/users/$(id -u)*/*-results /wekafs/users/$(id -u)*/* 2>/dev/null | head -1)
+            cp -f "$SESS/ci_metrics.json"          $RESULT_DIR/ci_metrics.json          2>/dev/null \
+              || cp -f "$SESS/phase10_report/ci_metrics.json" $RESULT_DIR/ci_metrics.json 2>/dev/null \
+              || echo "[ERR] no ci_metrics.json under $SESS"
+            cp -f "$SESS/optimization_report.md"  $RESULT_DIR/optimization_report.md  2>/dev/null \
+              || cp -f "$SESS/reports/final.md"   $RESULT_DIR/optimization_report.md  2>/dev/null \
+              || echo "[ERR] no optimization_report.md under $SESS"
+            ls -la $RESULT_DIR/
+
+          The ci_metrics.json values you write here MUST match what the V2
+          orchestrator actually measured (proper baseline from phase 1 / best
+          from phase 6-8) — do NOT recompute gain_pct from a partial-run
+          eager-mode baseline that the orchestrator did not endorse. The two
+          numbers must agree with $SESS/ci_metrics.json byte-for-byte.
+
           SAFETY:
           - NEVER `find /` or `find /wekafs` without `-maxdepth 4`. Prefer which/ls/$PATH lookups.
           - NEVER run `kill -9 $(ps aux | grep ...)` — this kills the sandbox executor itself.
@@ -400,7 +424,15 @@ jobs:
         # so this step is a no-op for runs that don't have the secret configured.
         # Mirrors the same step in optimize-batch.yml so both workflows feed the
         # results dashboard the same way.
+        #
+        # continue-on-error: the publish endpoint has known intermittent 500s
+        # when its postgres pod crashloops (luochen has been pinged). Even
+        # with the in-script retry loop, persistent service downtime should
+        # not block the webhook from being sent — that is the user's main
+        # signal that a batch finished. The summary artifact + GHA logs still
+        # carry the full data for re-publish later.
         if: always()
+        continue-on-error: true
         working-directory: ci
         env:
           HYPERLOOM_RESULTS_SERVICE_URL:   ${{ secrets.HYPERLOOM_RESULTS_SERVICE_URL }}
