@@ -15,6 +15,7 @@ import copy
 import json
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -23,6 +24,8 @@ from typing import Any
 
 import yaml
 
+from .benchmark_result import extract_benchmark_measurement
+
 
 log = logging.getLogger(__name__)
 
@@ -30,26 +33,47 @@ log = logging.getLogger(__name__)
 def _resolve_magpie_python() -> str:
     """Resolve the Python interpreter for Magpie subprocesses.
 
-    Order: $MAGPIE_PYTHON env > `which python3` > /opt/venv/bin/python.
+    Order: $MAGPIE_PYTHON env > first `python3` on PATH that can
+    ``import Magpie`` > /opt/venv/bin/python (if it exists).
     """
-    import shutil
-    return (
-        os.environ.get("MAGPIE_PYTHON", "").strip()
-        or shutil.which("python3")
-        or "/opt/venv/bin/python"
-    )
+    env_val = os.environ.get("MAGPIE_PYTHON", "").strip()
+    if env_val:
+        return env_val
+
+    def _can_import_magpie(py: str) -> bool:
+        try:
+            return subprocess.run(
+                [py, "-c", "import Magpie"],
+                capture_output=True, timeout=10,
+            ).returncode == 0
+        except Exception:
+            return False
+
+    candidate = shutil.which("python3")
+    if candidate and _can_import_magpie(candidate):
+        return candidate
+
+    fallback = Path("/opt/venv/bin/python")
+    if fallback.exists():
+        return str(fallback)
+
+    return candidate or "/opt/venv/bin/python"
 
 
-def _resolve_output_root() -> str:
-    """Resolve output root for Magpie workspaces.
+def _resolve_session_dir() -> Path:
+    """Resolve the active session_dir for executors that need an output root.
 
-    Order: $INFERENCE_OPTIMIZER_OUTPUT_ROOT env > /workspace/hyperloom.
+    Reads :func:`inference_optimizer.paths.session_dir`; this honors
+    ``$INFERENCE_OPTIMIZER_SESSION_DIR`` and otherwise returns
+    ``/workspace/hyperloom``. Used by executor-class fallback paths when
+    ``ctx.extra["workspace"]`` was not pre-mkdir'd by SubAgentRunner.
     """
-    return os.environ.get("INFERENCE_OPTIMIZER_OUTPUT_ROOT", "").strip() or "/workspace/hyperloom"
+    from ...paths import session_dir as _sd
+    return _sd()
 
 
 _MAGPIE_CWD_DEFAULT = "/tmp"
-_VARIANT_TIMEOUT_SEC_DEFAULT = 900
+_VARIANT_TIMEOUT_SEC_DEFAULT = 2400
 
 
 @dataclass
@@ -72,9 +96,17 @@ class VariantResult:
     status: str
     output_throughput: float | None = None
     request_throughput: float | None = None
+    total_token_throughput: float | None = None
+    completed_requests: int | None = None
+    duration_seconds: float | None = None
     ttft_mean_ms: float | None = None
     e2el_mean_ms: float | None = None
     workspace: str | None = None
+    report_path: str | None = None
+    raw_result_path: str | None = None
+    reported_success: bool | None = None
+    returncode: int | None = None
+    nonfatal_warnings: list[str] = field(default_factory=list)
     error: str | None = None
     note: str = ""
 
@@ -86,9 +118,17 @@ class VariantResult:
             "status":             self.status,
             "output_throughput":  self.output_throughput,
             "request_throughput": self.request_throughput,
+            "total_token_throughput": self.total_token_throughput,
+            "completed_requests": self.completed_requests,
+            "duration_seconds":   self.duration_seconds,
             "ttft_mean_ms":       self.ttft_mean_ms,
             "e2el_mean_ms":       self.e2el_mean_ms,
             "workspace":          self.workspace,
+            "report_path":        self.report_path,
+            "raw_result_path":    self.raw_result_path,
+            "reported_success":   self.reported_success,
+            "returncode":         self.returncode,
+            "nonfatal_warnings":  self.nonfatal_warnings,
             "error":              self.error,
             "note":               self.note,
         }
@@ -101,6 +141,69 @@ def server_args_env_name(framework: str | None) -> str:
     if "vllm" in name:
         return "EXTRA_VLLM_ARGS"
     return "EXTRA_SGLANG_ARGS"
+
+
+def merge_server_args(*parts: str | None) -> str:
+    """Merge server arg strings preserving left-to-right override semantics.
+
+    vLLM/SGLang command lines are assembled by shell-appending
+    ``EXTRA_{VLLM,SGLANG}_ARGS`` after the default server args. Some flags are
+    intentionally repeated so later variants can override base args (e.g. a
+    model-specific ``--block-size 1`` plus a grid candidate ``--block-size
+    256``). Therefore this helper only removes empty chunks; it does not try to
+    de-duplicate option names.
+    """
+    return " ".join(str(p).strip() for p in parts if str(p or "").strip())
+
+
+def apply_runtime_benchmark_overrides(
+    bench: dict[str, Any],
+    *,
+    model_path: str | None = None,
+    gpu_type: str | None = None,
+) -> dict[str, Any]:
+    """Apply runtime env/CLI overrides to a Magpie benchmark YAML.
+
+    This is the single shared path used by baseline/profile and grid
+    executors. Historically only ``baseline.py`` applied these overrides, so
+    backends/params/sweep silently fell back to shipped YAML defaults like
+    ``TP=1`` and ``ROCR_VISIBLE_DEVICES="1"``. Large models (DeepSeek-R1-0528)
+    then OOM-failed even though the launch environment had ``TP=8``.
+    """
+    if model_path:
+        bench["model"] = str(model_path)
+
+    precision = os.environ.get("PRECISION", "").strip()
+    if precision:
+        bench["precision"] = precision
+
+    if gpu_type:
+        bench["runner_type"] = str(gpu_type)
+        # Magpie priority: explicit benchmark_script > native script >
+        # runner_type-derived generic script. Drop stale explicit scripts so
+        # runtime GPU selection actually wins.
+        bench.pop("benchmark_script", None)
+
+    envs = bench.setdefault("envs", {})
+    for env_key in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC"):
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            envs[env_key] = int(val)
+
+    explicit_rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
+    if explicit_rocr:
+        envs["ROCR_VISIBLE_DEVICES"] = explicit_rocr
+    else:
+        tp_val = int(envs.get("TP", 1) or 1)
+        existing_rocr = str(envs.get("ROCR_VISIBLE_DEVICES", "")).strip()
+        existing_count = (
+            len([x for x in existing_rocr.split(",") if x.strip()])
+            if existing_rocr else 0
+        )
+        if tp_val > 1 and existing_count < tp_val:
+            envs["ROCR_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(tp_val))
+
+    return envs
 
 
 # ---------------------------------------------------------------------------
@@ -130,16 +233,16 @@ def _build_variant_yaml(
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     bench = cfg.setdefault("benchmark", {})
-    if model_path:
-        bench["model"] = str(model_path)
-    if gpu_type:
-        bench["runner_type"] = str(gpu_type)
-        bench.pop("benchmark_script", None)
-    envs = bench.setdefault("envs", {})
+    envs = apply_runtime_benchmark_overrides(
+        bench, model_path=model_path, gpu_type=gpu_type,
+    )
     extra_args_env = server_args_env_name(bench.get("framework"))
 
-    combined = " ".join(part for part in (base_extra_args.strip(),
-                                            variant.extra_sglang_args.strip()) if part)
+    combined = merge_server_args(
+        str(envs.get(extra_args_env, "")),
+        base_extra_args,
+        variant.extra_sglang_args,
+    )
     if combined:
         envs[extra_args_env] = combined
     for k, v in variant.extra_envs.items():
@@ -156,8 +259,12 @@ def _parse_report(workspace: Path) -> dict[str, Any] | None:
     report = workspace / "benchmark_report.json"
     if not report.exists():
         return None
-    with report.open(encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with report.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _kill_stale_servers() -> None:
@@ -229,6 +336,9 @@ def _run_magpie(
 
     env = os.environ.copy()
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+    magpie_dir = os.environ.get("MAGPIE_DIR", "")
+    if magpie_dir:
+        env["PYTHONPATH"] = f"{magpie_dir}:{env.get('PYTHONPATH', '')}"
     cmd = [
         magpie_python, "-m", "Magpie", "-v", "benchmark",
         "--benchmark-config", str(config_path),
@@ -316,17 +426,6 @@ async def run_grid(
                 break
             continue
 
-        if rc != 0:
-            results.append(VariantResult(
-                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
-                extra_envs=dict(variant.extra_envs),
-                status="failed",
-                error=(stderr or stdout)[-2000:], note=variant.note,
-            ))
-            if not keep_going_on_failure:
-                break
-            continue
-
         # Locate workspace inside slot.
         candidates = sorted(slot.glob("benchmark_*"))
         if not candidates:
@@ -334,36 +433,66 @@ async def run_grid(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed",
-                error="no benchmark_* workspace produced",
+                returncode=rc,
+                error=(
+                    (stderr or stdout)[-2000:]
+                    if rc != 0 else "no benchmark_* workspace produced"
+                ),
                 note=variant.note,
             ))
+            if rc != 0 and not keep_going_on_failure:
+                break
             continue
         workspace = candidates[-1]
         report = _parse_report(workspace)
-        if not report or not report.get("success"):
+        report_path = workspace / "benchmark_report.json"
+        measurement = extract_benchmark_measurement(report, workspace=workspace)
+        warnings = list(measurement.pop("nonfatal_warnings", []) or [])
+        if rc != 0:
+            warnings.append("magpie_nonzero_after_valid_measurement")
+
+        if not measurement.get("valid_measurement"):
+            if rc != 0:
+                error = (stderr or stdout)[-2000:]
+            elif not report:
+                error = "benchmark_report missing"
+            else:
+                error = "benchmark_report missing valid throughput/completed requests"
             results.append(VariantResult(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed",
                 workspace=str(workspace),
-                error="benchmark_report missing or success=false",
+                report_path=str(report_path) if report_path.exists() else None,
+                raw_result_path=measurement.get("raw_result_path"),
+                reported_success=measurement.get("reported_success"),
+                returncode=rc,
+                nonfatal_warnings=warnings,
+                error=error,
                 note=variant.note,
             ))
+            if rc != 0 and not keep_going_on_failure:
+                break
             continue
 
-        tput = (report.get("throughput") or {})
-        latency = (report.get("latency") or {})
-        ttft = latency.get("ttft", {}) or {}
-        e2el = latency.get("e2el", {}) or {}
         results.append(VariantResult(
             name=variant.name, extra_sglang_args=variant.extra_sglang_args,
             extra_envs=dict(variant.extra_envs),
             status="succeeded",
-            output_throughput=tput.get("output_throughput"),
-            request_throughput=tput.get("request_throughput"),
-            ttft_mean_ms=ttft.get("mean_ms"),
-            e2el_mean_ms=e2el.get("mean_ms"),
+            output_throughput=measurement.get("output_throughput"),
+            request_throughput=measurement.get("request_throughput"),
+            total_token_throughput=measurement.get("total_token_throughput"),
+            completed_requests=measurement.get("completed_requests"),
+            duration_seconds=measurement.get("duration_seconds"),
+            ttft_mean_ms=measurement.get("ttft_mean_ms"),
+            e2el_mean_ms=measurement.get("e2el_mean_ms"),
             workspace=str(workspace),
+            report_path=str(report_path) if report_path.exists() else None,
+            raw_result_path=measurement.get("raw_result_path"),
+            reported_success=measurement.get("reported_success"),
+            returncode=rc,
+            nonfatal_warnings=warnings,
+            error=(stderr or stdout)[-2000:] if rc != 0 else None,
             note=variant.note,
         ))
         log.info(

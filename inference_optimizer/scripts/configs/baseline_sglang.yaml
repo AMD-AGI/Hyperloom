@@ -21,12 +21,12 @@ benchmark:
   framework: sglang
   # benchmark_script: sglang_mi300x.sh  # uncomment to force a specific Magpie script
   model: /wekafs/models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
-  precision: bf16              # 8B fits comfortably on a single MI300X
+  precision: bf16
   run_mode: local
 
   envs:
-    TP: 1                      # single GPU for the smoke run
-    CONC: 8                    # low concurrency to keep wall time short
+    TP: 8                      # full-node default; env can override
+    CONC: 64                   # production throughput default; env can override
     ISL: 256
     OSL: 256
     RANDOM_RANGE_RATIO: 1
@@ -47,7 +47,7 @@ benchmark:
   gpu_selection:
     auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime
 
-  timeout_seconds: 900         # 15 min hard cap
+  timeout_seconds: 2400        # 40 min hard cap
 
   profiler:
     torch_profiler:

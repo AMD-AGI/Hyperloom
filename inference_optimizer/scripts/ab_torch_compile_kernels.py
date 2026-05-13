@@ -199,7 +199,7 @@ async def main_async() -> int:
     ap.add_argument("--output-root", type=Path, default=None)
     ap.add_argument("--magpie-python", default="/opt/venv/bin/python")
     ap.add_argument("--cwd", default="/tmp")
-    ap.add_argument("--variant-timeout-sec", type=int, default=1500)
+    ap.add_argument("--variant-timeout-sec", type=int, default=2400)
     ap.add_argument("--top-k", type=int, default=30)
     ap.add_argument("--out-json", type=Path, default=None)
     args = ap.parse_args()

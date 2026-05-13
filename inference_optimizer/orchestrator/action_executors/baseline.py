@@ -34,6 +34,7 @@ Implementation notes:
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -42,11 +43,13 @@ from pathlib import Path
 from typing import Any
 
 from ...paths import asset_root
+from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
 from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
 )
+from .benchmark_result import extract_benchmark_measurement
 
 
 log = logging.getLogger(__name__)
@@ -59,20 +62,24 @@ log = logging.getLogger(__name__)
 BASELINE_DEFAULT_CONFIG = (
     asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
 )
-BASELINE_DEFAULT_TIMEOUT_SEC = 1500           # WARM-start cap (aiter jit cache populated)
-BASELINE_COLD_START_TIMEOUT_SEC = 3600        # COLD-start cap (aiter jit cache empty/sparse)
+BASELINE_DEFAULT_TIMEOUT_SEC = 2400           # WARM-start cap, 40 min (aiter jit cache populated)
+BASELINE_COLD_START_TIMEOUT_SEC = 3600        # COLD-start cap, 60 min (aiter jit cache empty/sparse)
 COLD_START_KERNEL_THRESHOLD = 20              # < N .so files under aiter jit/build/ ⇒ COLD
 
-# Probe order for aiter's JIT cache root. First path that exists wins.
-# Override via env `INFERENCE_OPTIMIZER_AITER_JIT_DIR=/abs/path` (single path,
-# tried before this list).
+# Legacy fallback probe order for aiter's JIT cache dir. Used only when
+# `importlib.util.find_spec("aiter")` cannot resolve aiter dynamically
+# (e.g. probe invoked from a venv where aiter isn't importable). First
+# path that exists wins. Override via env
+# `INFERENCE_OPTIMIZER_AITER_JIT_DIR=/abs/path` (tried before this list).
 AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
+    "/sgl-workspace/aiter/aiter/jit",
     "/sgl-workspace/aiter/aiter/jit/build",
-    "/usr/local/lib/python3.10/site-packages/aiter/jit/build",
-    "/usr/local/lib/python3.12/dist-packages/aiter/jit/build",
-    "/usr/local/lib/python3.12/site-packages/aiter/jit/build",
-    "/opt/venv/lib/python3.10/site-packages/aiter/jit/build",
-    "/opt/venv/lib/python3.12/site-packages/aiter/jit/build",
+    "/usr/local/lib/python3.10/dist-packages/aiter/jit",
+    "/usr/local/lib/python3.12/dist-packages/aiter/jit",
+    "/usr/local/lib/python3.10/site-packages/aiter/jit",
+    "/usr/local/lib/python3.12/site-packages/aiter/jit",
+    "/opt/venv/lib/python3.10/site-packages/aiter/jit",
+    "/opt/venv/lib/python3.12/site-packages/aiter/jit",
 )
 
 
@@ -83,12 +90,44 @@ _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
 
 
-def _probe_aiter_jit_cache() -> dict[str, Any]:
-    """Inspect aiter's JIT cache root to decide cold vs warm start.
+def _resolve_aiter_jit_dir_dynamic() -> list[str]:
+    """Locate aiter's ``jit/`` dir via Python's import machinery.
 
-    Pure read-only filesystem probe — no subprocess, no GPU touch. The
-    first path under `AITER_JIT_PROBE_PATHS` (or `$INFERENCE_OPTIMIZER_AITER_JIT_DIR`
-    if set) that exists wins; we count `.so` files recursively and sum
+    Wheel-packaged aiter ships ~80 pre-built ``.so`` directly under
+    ``<aiter>/jit/``; only runtime-JIT staging (a handful of patched
+    kernels) lives under ``<aiter>/jit/build/<module>/build/``. Counting
+    at ``<aiter>/jit/`` therefore correctly reflects a warm install,
+    while the legacy fixed list (precise to ``jit/build``) mis-reports
+    every wheel install as COLD.
+
+    Returns an ordered candidate list (``jit`` preferred over
+    ``jit/build``). Empty if aiter cannot be located.
+    """
+    try:
+        spec = importlib.util.find_spec("aiter")
+    except (ImportError, ValueError):  # noqa: BLE001 — aiter not importable
+        return []
+    if spec is None or not spec.origin:
+        return []
+    aiter_root = Path(spec.origin).parent
+    return [
+        str(aiter_root / "jit"),
+        str(aiter_root / "jit" / "build"),
+    ]
+
+
+def _probe_aiter_jit_cache() -> dict[str, Any]:
+    """Inspect aiter's ``jit/`` dir to decide cold vs warm start.
+
+    Pure read-only filesystem probe — no subprocess, no GPU touch.
+    Resolution order:
+
+      1. ``$INFERENCE_OPTIMIZER_AITER_JIT_DIR`` env override
+      2. Dynamic ``<aiter>/jit`` then ``<aiter>/jit/build`` resolved via
+         ``importlib.util.find_spec("aiter")``
+      3. Legacy ``AITER_JIT_PROBE_PATHS`` fallback
+
+    First existing dir wins; we count ``.so`` files recursively and sum
     their byte sizes. Any IO error degrades to ``probe_status="error"``
     so callers (and unit tests on hosts with no aiter install) fall back
     to the default WARM timeout instead of crashing.
@@ -112,6 +151,7 @@ def _probe_aiter_jit_cache() -> dict[str, Any]:
     override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
     if override:
         candidates.append(override)
+    candidates.extend(_resolve_aiter_jit_dir_dynamic())
     candidates.extend(AITER_JIT_PROBE_PATHS)
 
     try:
@@ -148,33 +188,58 @@ def _probe_aiter_jit_cache() -> dict[str, Any]:
 
 
 class BaselineExecutor:
-    """Class form for tests / DI; ``baseline_executor`` is the bare callable."""
+    """Class form for tests / DI; ``baseline_executor`` is the bare callable.
+
+    ``session_dir`` is the canonical session root the executor will derive
+    its per-task workspace under (``<sd>/runs/baseline/<task_id>/``).
+    When the SubAgentRunner pre-creates that workspace and injects it via
+    ``ctx.extra["workspace"]``, the executor uses the injected path
+    verbatim — ``session_dir`` is then only the fallback for direct
+    instantiation in tests.
+    """
 
     def __init__(
         self,
         *,
         magpie_python: str | None = None,
         default_config_path: Path | str | None = None,
-        default_output_root: Path | str | None = None,
+        session_dir: Path | str | None = None,
         default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
     ):
-        from ._grid_runner import _resolve_magpie_python, _resolve_output_root
+        from ._grid_runner import _resolve_magpie_python, _resolve_session_dir
         self.magpie_python = magpie_python or _resolve_magpie_python()
         # None = resolve from $FRAMEWORK at call time. Tests may pass an
         # explicit fixture path which then wins over the env-based resolver.
         self.default_config_path = (
             Path(default_config_path) if default_config_path else None
         )
-        self.default_output_root = Path(
-            default_output_root or _resolve_output_root()
-        )
+        self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
         self.default_timeout_sec = default_timeout_sec
         self.cwd = Path(cwd)
 
     def _resolve_default_config(self) -> Path:
         """Hook for subclasses (ProfileExecutor) to swap the resolver."""
         return _default_baseline_config()
+
+    def _resolve_workspace(self, ctx: RunnerContext, action: str) -> Path:
+        """Pick the per-task workspace dir for this executor invocation.
+
+        Resolution order (highest priority first):
+
+        1. ``task.params['output_dir']`` — explicit caller wins.
+        2. ``ctx.extra['workspace']``    — SubAgentRunner pre-mkdir'd path.
+        3. ``runs_dir(self.session_dir, action, ctx.task.task_id)``
+           — direct-instantiation fallback (tests / examples that don't
+           wire the Coordinator).
+        """
+        params = ctx.task.params or {}
+        if params.get("output_dir"):
+            return Path(params["output_dir"])
+        extra = getattr(ctx, "extra", None) or {}
+        if extra.get("workspace"):
+            return Path(extra["workspace"])
+        return runs_dir(self.session_dir, action, ctx.task.task_id)
 
     def _resolve_timeout(self, params: dict[str, Any]) -> int:
         """Pick the subprocess timeout for this baseline launch.
@@ -242,10 +307,7 @@ class BaselineExecutor:
         if not config_path.exists():
             raise FileNotFoundError(f"baseline config not found: {config_path}")
 
-        output_dir = Path(
-            params.get("output_dir")
-            or (self.default_output_root / f"baseline-{ctx.task.task_id[:8]}")
-        )
+        output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)
 
         timeout_sec = self._resolve_timeout(params)
@@ -310,19 +372,18 @@ class BaselineExecutor:
                 "output_dir": str(output_dir),
             }
 
-        if proc.returncode != 0:
-            tail_stderr = (proc.stderr or "")[-2000:]
-            return {
-                "status": "failed",
-                "error_class": "subprocess_nonzero",
-                "returncode": proc.returncode,
-                "error": tail_stderr,
-                "output_dir": str(output_dir),
-            }
-
         # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
         candidates = sorted(output_dir.glob("benchmark_*"))
         if not candidates:
+            if proc.returncode != 0:
+                tail = (proc.stderr or proc.stdout or "")[-2000:]
+                return {
+                    "status": "failed",
+                    "error_class": "subprocess_nonzero",
+                    "returncode": proc.returncode,
+                    "error": tail,
+                    "output_dir": str(output_dir),
+                }
             return {
                 "status": "failed",
                 "error_class": "no_workspace",
@@ -331,37 +392,49 @@ class BaselineExecutor:
             }
         workspace = candidates[-1]
         report_path = workspace / "benchmark_report.json"
-        if not report_path.exists():
+        report: dict[str, Any] | None = None
+        if report_path.exists():
+            try:
+                with report_path.open(encoding="utf-8") as f:
+                    loaded = json.load(f)
+                report = loaded if isinstance(loaded, dict) else None
+            except (OSError, json.JSONDecodeError):
+                report = None
+
+        measurement = extract_benchmark_measurement(report, workspace=workspace)
+        warnings = list(measurement.pop("nonfatal_warnings", []) or [])
+        if proc.returncode != 0:
+            warnings.append("magpie_nonzero_after_valid_measurement")
+
+        if not measurement.get("valid_measurement"):
+            if proc.returncode != 0:
+                tail = (proc.stderr or proc.stdout or "")[-2000:]
+                error_class = "subprocess_nonzero"
+                error = tail
+            elif not report_path.exists():
+                error_class = "no_report"
+                error = f"benchmark_report.json missing under {workspace}"
+            else:
+                error_class = "invalid_measurement"
+                error = "benchmark report did not contain positive throughput and completed requests"
             return {
                 "status": "failed",
-                "error_class": "no_report",
-                "error": f"benchmark_report.json missing under {workspace}",
+                "error_class": error_class,
+                "returncode": proc.returncode,
+                "error": error,
                 "output_dir": str(output_dir),
                 "workspace": str(workspace),
+                "report_path": str(report_path) if report_path.exists() else None,
+                "reported_success": measurement.get("reported_success"),
+                "nonfatal_warnings": warnings,
             }
 
-        with report_path.open(encoding="utf-8") as f:
-            report = json.load(f)
-
-        tput = report.get("throughput", {}) or {}
-        latency = report.get("latency", {}) or {}
-        ttft = latency.get("ttft", {}) or {}
-        e2el = latency.get("e2el", {}) or {}
-
         result = {
-            "status": "succeeded" if report.get("success") else "failed",
-            "framework": report.get("framework"),
-            "model": report.get("model"),
-            "request_throughput": tput.get("request_throughput"),
-            "output_throughput": tput.get("output_throughput"),
-            "total_token_throughput": tput.get("total_token_throughput"),
-            "completed_requests": tput.get("completed_requests"),
-            "duration_seconds": tput.get("duration_seconds"),
-            "ttft_mean_ms": ttft.get("mean_ms"),
-            "ttft_p99_ms": ttft.get("p99_ms"),
-            "e2el_mean_ms": e2el.get("mean_ms"),
-            "e2el_p99_ms": e2el.get("p99_ms"),
-            "report_path": str(report_path),
+            "status": "succeeded",
+            **measurement,
+            "nonfatal_warnings": warnings,
+            "returncode": proc.returncode,
+            "report_path": str(report_path) if report_path.exists() else None,
             "workspace": str(workspace),
             # Path to the materialized YAML used for THIS baseline. Coordinator
             # promotes this into SharedState.baseline_config_path so subsequent
@@ -389,7 +462,8 @@ class BaselineExecutor:
                         eval_data.get("error", "unknown"))
 
         log.info(
-            "baseline_executor: success tput=%.1f tok/s/gpu (output) e2el=%.1fms",
+            "baseline_executor: %s tput=%.1f tok/s/gpu (output) e2el=%.1fms",
+            "success_with_warning" if warnings else "success",
             result["output_throughput"] or 0.0,
             result["e2el_mean_ms"] or 0.0,
         )

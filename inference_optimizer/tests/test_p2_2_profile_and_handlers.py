@@ -44,8 +44,10 @@ from inference_optimizer.storage import SqliteConnection
 # ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_ROOT", str(tmp_path))
-    return make_session_dir("p2-2-test")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
+    monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", kernel_agent_root)
+    return make_session_dir()
 
 
 def _heartbeat() -> Intent:
@@ -173,6 +175,102 @@ def test_materialize_config_pops_legacy_benchmark_script(tmp_path):
 
 
 # ===========================================================================
+# Regression: TP / CONC env override yaml hardcode (DSR1-0528 verification
+# was deadlooping because TP=8 env was silently ignored, vllm ran with
+# yaml-hardcoded TP=1 and OOM-ed retry forever).
+# ===========================================================================
+def test_materialize_config_tp_env_overrides_yaml_hardcode(tmp_path, monkeypatch):
+    """TP env var must override yaml hardcode (was 1, becomes 8)."""
+    import yaml
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    assert envs["TP"] == 8, f"TP not overridden: {envs.get('TP')}"
+
+
+def test_materialize_config_conc_env_overrides_yaml_hardcode(tmp_path, monkeypatch):
+    """CONC env var must override yaml hardcode."""
+    import yaml
+    monkeypatch.setenv("CONC", "64")
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    assert envs["CONC"] == 64, f"CONC not overridden: {envs.get('CONC')}"
+
+
+def test_materialize_config_rocr_visible_devices_auto_expands_when_tp_overridden(
+    tmp_path, monkeypatch,
+):
+    """When TP=8 is set via env but ROCR_VISIBLE_DEVICES isn't explicit,
+    expand the GPU list to 0..TP-1 so vllm/sglang sees enough devices."""
+    import yaml
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    assert envs["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7", (
+        f"ROCR_VISIBLE_DEVICES not auto-expanded: {envs.get('ROCR_VISIBLE_DEVICES')}"
+    )
+
+
+def test_materialize_config_rocr_visible_devices_explicit_env_wins_when_enough(
+    tmp_path, monkeypatch,
+):
+    """Explicit ROCR_VISIBLE_DEVICES wins when it has at least TP devices."""
+    import yaml
+    monkeypatch.setenv("TP", "4")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    assert envs["ROCR_VISIBLE_DEVICES"] == "4,5,6,7"
+
+
+def test_materialize_config_rocr_visible_devices_expands_when_under_tp(
+    tmp_path, monkeypatch,
+):
+    """If explicit ROCR_VISIBLE_DEVICES has fewer devices than TP requires,
+    `_workload_envs` auto-expands to 0..TP-1 and logs a warning, so SGLang
+    actually sees enough GPUs to start."""
+    import yaml
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+    out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    assert envs["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
+
+
+def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
+    """When TP=1 (default), don't auto-touch ROCR_VISIBLE_DEVICES."""
+    import yaml
+    src_yaml = tmp_path / "src.yaml"
+    src_yaml.write_text(yaml.safe_dump({
+        "benchmark": {
+            "framework": "sglang",
+            "model": "/m",
+            "envs": {
+                "TP": 1,
+                "CONC": 8,
+                "ISL": 256,
+                "OSL": 256,
+                "ROCR_VISIBLE_DEVICES": "1",
+            },
+        },
+    }))
+    for k in ("TP", "ROCR_VISIBLE_DEVICES"):
+        monkeypatch.delenv(k, raising=False)
+    out = _materialize_config_with_envs(src_yaml, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    # yaml default is "1" — should be preserved as-is when TP not overridden upward
+    assert envs.get("ROCR_VISIBLE_DEVICES") == "1"
+
+
+# ===========================================================================
 # Regression: $FRAMEWORK env switches the default yaml between sglang/vllm
 # without anyone passing config_path explicitly. Locks down the entry-layer
 # fix for vLLM support — the optimizer used to be sglang-only because all 5
@@ -224,6 +322,73 @@ def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_baseline_executor_keeps_valid_measurement_with_wrapper_failure(tmp_path):
+    """A cleanup/profile wrapper failure must not discard completed requests."""
+    db = SqliteConnection(tmp_path / "baseline.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    output_dir = tmp_path / "out"
+    workspace = output_dir / "benchmark_sglang_20260501_001122"
+    workspace.mkdir(parents=True)
+    (workspace / "benchmark_report.json").write_text(json.dumps({
+        "success": False,
+        "framework": "sglang",
+        "model": "/wekafs/models/Qwen-Qwen3-8B",
+        "throughput": {
+            "request_throughput": 1.8,
+            "output_throughput": 1872.0,
+            "total_token_throughput": 3744.0,
+            "completed_requests": 320,
+            "duration_seconds": 177.0,
+        },
+        "latency": {"ttft": {"mean_ms": 140}, "e2el": {"mean_ms": 2500}},
+    }))
+
+    fake_completed = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="", stderr="cleanup failed",
+    )
+
+    task = await tr.create(
+        kind="baseline",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="baseline-valid-warning",
+    )
+    sub.register_executor("baseline", BaselineExecutor(session_dir=tmp_path))
+    with patch("subprocess.run", return_value=fake_completed):
+        res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    assert res.result["status"] == "succeeded"
+    assert res.result["reported_success"] is False
+    assert res.result["output_throughput"] == 1872.0
+    assert res.result["completed_requests"] == 320
+    assert "benchmark_report_success_false" in res.result["nonfatal_warnings"]
+    assert "magpie_nonzero_after_valid_measurement" in res.result["nonfatal_warnings"]
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_promotes_valid_baseline_even_with_failed_status(session_dir):
+    c = Coordinator(session_dir, backends=_backends_silent())
+    payload = {
+        "status": "failed",
+        "output_throughput": 1855.76,
+        "completed_requests": 320,
+        "workspace": "/tmp/baseline",
+        "materialized_config": "/tmp/baseline/config.yaml",
+    }
+    assert c._is_promotable_result("baseline", payload)
+
+    await c._promote_to_shared_state("baseline", payload)
+
+    assert c.shared_state.baseline_tput == pytest.approx(1855.76)
+    assert c.shared_state.current_best["tput"] == pytest.approx(1855.76)
+    assert c.shared_state.baseline_config_path == "/tmp/baseline/config.yaml"
+
+
+@pytest.mark.asyncio
 async def test_profile_executor_extracts_trace_dir(tmp_path):
     """When the workspace contains torch_trace/*.trace.json.gz, the
     runner surfaces them in the result so downstream consumers can
@@ -261,7 +426,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     def _fake_run(*args, **kwargs):
         return fake_completed
 
-    pe = ProfileExecutor(default_output_root=tmp_path / "ignored_root")
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
     task = await tr.create(
         kind="profile",
         params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
@@ -310,7 +475,7 @@ async def test_select_kernels_handler_surfaces_candidates_path(session_dir, monk
     captured: dict = {}
 
     async def fake_run_subprocess(cmd, *, timeout_sec):
-        captured["cmd"] = cmd
+        captured["cmd"] = list(cmd)
         payload = {
             "status": "ok",
             "hot_kernels": [],
@@ -326,12 +491,110 @@ async def test_select_kernels_handler_surfaces_candidates_path(session_dir, monk
             "trace_input": str(session_dir),
             "dry_run": True,
             "roofline_json": "/tmp/roofline.json",
+            "capture_folder": "/tmp/capture_traces",
         },
         session_dir=session_dir,
     )
     assert res["candidates_path"] == "/tmp/kernel_candidates.json"
     assert "--roofline-json" in captured["cmd"]
     assert "/tmp/roofline.json" in captured["cmd"]
+    assert "--capture-folder" in captured["cmd"]
+    assert "/tmp/capture_traces" in captured["cmd"]
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_backfills_workload_context_from_state(
+    session_dir, monkeypatch,
+):
+    """When the payload omits framework/gpu_type/model, the handler must
+    fall back to SharedState so tracelens_analysis.py receives the real
+    workload context (vllm/MI300X/Qwen3-30B-A3B/inference) instead of
+    the script defaults (""/MI355X/default)."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.framework = "vllm"
+    state.gpu_type = "mi300x"
+    state.model_path = "/wekafs/models/Qwen3-30B-A3B"
+    state.model_name = "Qwen3-30B-A3B"
+    state.save(session_dir)
+
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok"}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert "--framework" in cmd and "vllm" in cmd
+    assert "--target-platform" in cmd and "mi300x" in cmd
+    assert "--model-name" in cmd and "Qwen3-30B-A3B" in cmd
+    assert "--analysis-mode" in cmd and "inference" in cmd
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_surfaces_analysis_report_path(
+    session_dir, monkeypatch,
+):
+    """The handler must forward the TraceLens v0.3 ``analysis.md`` path so
+    GEAK / Coordinator can ground their actions on the same final stakeholder
+    report Hyperloom parsed for ``hot_kernels`` (PR #155 review, scheme C)."""
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        # Mimic both the explicit field set by tracelens_analysis.py and the
+        # backwards-compatible nested location, so a partial-rollout SDK still
+        # surfaces the path through the handler.
+        payload = {
+            "status": "ok",
+            "hot_kernels": [],
+            "analysis_report_path": "/tmp/runs/abc/tracelens/analysis.md",
+            "artifact_paths": {
+                "tracelens_agent_report": "/tmp/runs/abc/tracelens/analysis.md",
+                "kernel_candidates": "/tmp/runs/abc/kernel_candidates.json",
+            },
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["analysis_report_path"] == "/tmp/runs/abc/tracelens/analysis.md"
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_falls_back_to_artifact_paths_for_report(
+    session_dir, monkeypatch,
+):
+    """If the underlying tool only surfaces analysis.md inside artifact_paths
+    (e.g. an older tracelens_analysis.py build that wasn't updated yet), the
+    handler must still hoist it to the top-level ``analysis_report_path`` for
+    Coordinator/GEAK consumers."""
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "ok",
+            "hot_kernels": [],
+            "artifact_paths": {
+                "tracelens_agent_report": "/tmp/legacy/tracelens/analysis.md",
+            },
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["analysis_report_path"] == "/tmp/legacy/tracelens/analysis.md"
 
 
 @pytest.mark.asyncio
@@ -339,6 +602,18 @@ async def test_select_kernels_handler_missing_trace_input(session_dir):
     res = await krh.select_kernels_handler({}, session_dir=session_dir)
     assert res["status"] == "failed"
     assert "trace_input" in res["error"]
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_requires_kernel_agent_root(session_dir, monkeypatch):
+    monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", None)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir)},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "failed"
+    assert res["error_class"] == "kernel_agent_root_missing"
+    assert "HYPERLOOM_KERNEL_AGENT_ROOT is not set" in res["error"]
 
 
 @pytest.mark.asyncio
@@ -360,6 +635,33 @@ async def test_run_optimization_handler_dry_run(session_dir):
     assert res.get("status") in ("ok", "succeeded", "failed")  # dry-run may still fail validation
 
 
+@pytest.mark.asyncio
+async def test_run_optimization_handler_forwards_extra_sglang_args(session_dir):
+    captured: dict[str, object] = {}
+
+    async def fake_run(cmd, *, timeout_sec):
+        captured["cmd"] = cmd
+        captured["timeout_sec"] = timeout_sec
+        return 0, '{"status": "ok"}', ""
+
+    payload = {
+        "kernel_id": "fake_kernel_1",
+        "session_id": session_dir.name,
+        "source_file": "/sgl-workspace/sglang/python/sglang/fake.py",
+        "extra_sglang_args": "--kv-cache-dtype fp8 --page-size 16",
+        "dry_run": True,
+        "_single_kernel": True,
+    }
+    with patch.object(krh, "_validate_reusable_native_kernel", return_value=None), \
+         patch.object(krh, "_run_subprocess", side_effect=fake_run):
+        res = await krh.run_optimization_handler(payload, session_dir=session_dir)
+
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert "--extra-sglang-args" in cmd
+    assert cmd[cmd.index("--extra-sglang-args") + 1] == "--kv-cache-dtype fp8 --page-size 16"
+
+
 def test_handlers_dispatch_table():
     """P2-2 only registered select_kernels + run_optimization. P2-4
     added apply_patch + integrate (covered in test_p2_4_integrate_report)."""
@@ -377,7 +679,6 @@ async def test_coordinator_request_select_kernels_uses_handler(session_dir):
     should run the registered handler programmatically and emit RESPONSE
     on the bus *without* waiting for the Kernel LLM."""
     c = Coordinator(session_dir, backends=_backends_silent())
-    c.shared_state.last_profile_roofline = "/tmp/roofline.json"
 
     captured: dict = {}
 
@@ -413,7 +714,6 @@ async def test_coordinator_request_select_kernels_uses_handler(session_dir):
 
             # And the handler did receive merged payload (params flattened in).
             assert captured["payload"].get("trace_input") == "/tmp/fake-trace.json.gz"
-            assert captured["payload"].get("roofline_json") == "/tmp/roofline.json"
             assert captured["session_dir"] == session_dir
         finally:
             await c.stop()
