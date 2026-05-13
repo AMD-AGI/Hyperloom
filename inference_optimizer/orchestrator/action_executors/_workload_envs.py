@@ -45,8 +45,32 @@ import yaml
 
 from ...paths import asset_root
 from ._grid_runner import server_args_env_name
+from ._server_patcher import (
+    ensure_sglang_patched_for_tracelens,
+    ensure_vllm_patched_for_tracelens,
+)
 
 log = logging.getLogger(__name__)
+
+
+def _tracelens_patch_enabled() -> bool:
+    """Read the ``HYPERLOOM_ENABLE_PATCH`` kill switch (default on).
+
+    Set ``HYPERLOOM_ENABLE_PATCH=0`` to disable runtime patching of
+    vLLM / SGLang — Hyperloom then keeps today's safe behaviour
+    (no TraceLens-only profiler flags injected). Useful when:
+
+    * the user runs a custom vLLM/SGLang fork they don't want touched,
+    * the patcher itself ships a bug and the user needs an escape hatch
+      without a Hyperloom release,
+    * compliance / audit forbids modifying installed packages at runtime.
+
+    Default is ``"1"`` (patching on) because the patches are backward-
+    compatible and add no flags by themselves — they only enable
+    capabilities Hyperloom requests via ``EXTRA_VLLM_ARGS`` /
+    ``EXTRA_SGLANG_ARGS`` when patching succeeds.
+    """
+    return os.environ.get("HYPERLOOM_ENABLE_PATCH", "1").strip() != "0"
 
 
 def default_baseline_config() -> Path:
@@ -192,19 +216,44 @@ def materialize_config_with_envs(
         )
         profile_num_prompts = max(safe_conc, iters_to_prompts * 2)
         fw = str(bench.get("framework") or "").lower()
+        # Issue #194 §4 / §5: TraceLens-required profiler flags exist
+        # only in patched vLLM / SGLang builds. Try to apply the
+        # TraceLens patch set to the in-container install; on success
+        # we inject the extra flags below, on failure we silently fall
+        # back to today's safe set so vanilla images keep working.
+        # Default-on, disable via HYPERLOOM_ENABLE_PATCH=0.
+        tracelens_patch_ok = False
+        if _tracelens_patch_enabled():
+            if "vllm" in fw:
+                tracelens_patch_ok = ensure_vllm_patched_for_tracelens()
+            else:
+                tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
         if "vllm" in fw:
             existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
-            # Do not inject capture_torch_profiler_dir by default: the vLLM
-            # build on current MI355X validation nodes rejects that field in
-            # --profiler-config. Magpie's vllm_*.sh already injects the
-            # supported torch profiler fields and we add TraceLens' stable
-            # timing/annotation knobs here.
-            profiler_args = (
-                f"--profiler-config.delay_iterations {delay_iters} "
-                f"--profiler-config.max_iterations {max_iters}"
-            )
+            profiler_args_parts = [
+                f"--profiler-config.delay_iterations {delay_iters}",
+                f"--profiler-config.max_iterations {max_iters}",
+            ]
+            if tracelens_patch_ok:
+                # #194 §4: a TraceLens-patched vLLM exposes
+                # capture_torch_profiler_dir + detailed_trace_annotation
+                # on its ProfilerConfig. Both are new dataclass fields
+                # with safe defaults — unpatched vLLM rejects them as
+                # unknown JSON keys, which is why we gate on the
+                # patcher result.
+                capture_dir = output_dir / "capture_traces"
+                profiler_args_parts.append(
+                    "--profiler-config.capture_torch_profiler_dir "
+                    f"{capture_dir}"
+                )
+                profiler_args_parts.append(
+                    "--profiler-config.detailed_trace_annotation True"
+                )
+            profiler_args = " ".join(profiler_args_parts)
             if "delay_iterations" not in existing_vllm_args:
-                envs["EXTRA_VLLM_ARGS"] = f"{existing_vllm_args} {profiler_args}".strip()
+                envs["EXTRA_VLLM_ARGS"] = (
+                    f"{existing_vllm_args} {profiler_args}".strip()
+                )
         else:
             import json as _json
             try:
@@ -218,6 +267,18 @@ def materialize_config_with_envs(
             extra_body.setdefault("shape_discovery", True)
             extra_body.setdefault("roofline_annotations", True)
             envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
+            if tracelens_patch_ok:
+                # #194 §5: a TraceLens-patched SGLang exposes
+                # --enable-shape-discovery-for-cuda-graph-profile as a
+                # server CLI flag. Without the patch SGLang's argparse
+                # errors out on this flag — gate strictly on the
+                # patcher result.
+                existing_sglang = str(envs.get("EXTRA_SGLANG_ARGS", ""))
+                if "shape-discovery-for-cuda-graph-profile" not in existing_sglang:
+                    envs["EXTRA_SGLANG_ARGS"] = (
+                        f"{existing_sglang} "
+                        "--enable-shape-discovery-for-cuda-graph-profile"
+                    ).strip()
 
     if profile_num_prompts is not None:
         # Profile mode: force-override caller/YAML NUM_PROMPTS — we need a

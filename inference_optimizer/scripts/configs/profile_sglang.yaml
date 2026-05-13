@@ -11,12 +11,23 @@
 #   3. Steady-state windowing (PROFILE_EXTRA_BODY start_step/num_steps)
 # These are required for TraceLens fusion / roofline analysis.
 #
-# Note: upstream issue #126 also lists
-# `--enable-shape-discovery-for-cuda-graph-profile`, but the SGLang
-# build on the current validation nodes rejects it ("unrecognized
-# arguments"). It stays out of the default args until the deployed
-# SGLang accepts it; override via EXTRA_SGLANG_ARGS or the materialized
-# ASSET_ROOT yaml when running on a newer SGLang.
+# Issue #194 §5: `--enable-shape-discovery-for-cuda-graph-profile` is
+# *not* in upstream SGLang argparse — it comes from the TraceLens patch
+# set at TraceLens-internal/examples/custom_workflows/inference_analysis/
+# sglang_roofline_patches/. Hyperloom's runtime patcher
+# (HYPERLOOM_ENABLE_PATCH=1, default) tries to apply the 10-patch
+# atomic transaction to the in-container SGLang install at the start
+# of every profile, but only when the installed SGLang version matches
+# TraceLens's supported set (currently v0.5.9; bump in
+# `_server_patcher._SGLANG_SUPPORTED_VERSIONS` when TraceLens adds more).
+# If patching succeeds, materialize_config_with_envs auto-appends the
+# flag to EXTRA_SGLANG_ARGS; if it fails (version unsupported,
+# non-editable install layout, fs read-only, ...) we fall back to
+# today's safe behaviour: only --enable-profile-cuda-graph plus the
+# client-side PROFILE_EXTRA_BODY shape_discovery / roofline_annotations
+# settings (which go through SGLang's /start_profile API and don't need
+# a patched server). Set HYPERLOOM_ENABLE_PATCH=0 to disable runtime
+# patching entirely.
 
 benchmark:
   framework: sglang

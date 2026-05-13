@@ -461,6 +461,188 @@ def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
     assert envs["NUM_PROMPTS"] == 160, envs.get("NUM_PROMPTS")
 
 
+# ===========================================================================
+# Regression #194 §4 / §5: when the runtime patcher (server_patcher)
+# successfully applies TraceLens's patches to the in-container vLLM /
+# SGLang install, materialize must auto-append the flags that only
+# exist in the patched build:
+#
+#   * vLLM:   --profiler-config.capture_torch_profiler_dir <dir>
+#   * vLLM:   --profiler-config.detailed_trace_annotation True
+#   * SGLang: --enable-shape-discovery-for-cuda-graph-profile
+#
+# When the patcher fails-soft (returns False), materialize must NOT
+# inject any of those — otherwise unpatched vLLM rejects them as
+# unknown JSON keys and crashes the entire profile.
+#
+# The kill switch HYPERLOOM_ENABLE_PATCH=0 must short-circuit the
+# patcher entirely so users can disable runtime patching when their
+# image is a custom fork / read-only / under audit.
+# ===========================================================================
+def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
+    """Replace the two patcher symbols on `_workload_envs` with stubs
+    that record invocation counts so we can assert per-framework
+    dispatch (vLLM path must not invoke the SGLang patcher and vice
+    versa)."""
+    from inference_optimizer.orchestrator.action_executors import _workload_envs
+    counts = {"vllm": 0, "sglang": 0}
+
+    def _vllm_stub() -> bool:
+        counts["vllm"] += 1
+        return vllm
+
+    def _sglang_stub() -> bool:
+        counts["sglang"] += 1
+        return sglang
+
+    monkeypatch.setattr(
+        _workload_envs, "ensure_vllm_patched_for_tracelens", _vllm_stub,
+    )
+    monkeypatch.setattr(
+        _workload_envs, "ensure_sglang_patched_for_tracelens", _sglang_stub,
+    )
+    return counts
+
+
+def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
+    tmp_path, monkeypatch,
+):
+    """Patcher returns True for vLLM ⇒ EXTRA_VLLM_ARGS gains
+    capture_torch_profiler_dir + detailed_trace_annotation, on top of
+    the §1 delay/max iterations."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    counts = _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.delay_iterations 5888" in extra, extra
+    assert "--profiler-config.max_iterations 512" in extra, extra
+    assert "--profiler-config.capture_torch_profiler_dir " in extra, extra
+    assert "--profiler-config.detailed_trace_annotation True" in extra, extra
+    # Per-framework dispatch: the SGLang patcher must NOT be invoked
+    # when the YAML's framework is vLLM (saves an unnecessary file
+    # probe + lock acquisition).
+    assert counts == {"vllm": 1, "sglang": 0}, counts
+
+
+def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
+    tmp_path, monkeypatch,
+):
+    """Patcher returns False (unpatchable image) ⇒ EXTRA_VLLM_ARGS
+    keeps only the §1 safe set. Otherwise unpatched vLLM would
+    crash on `unknown JSON key`."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.delay_iterations 5888" in extra, extra
+    assert "capture_torch_profiler_dir" not in extra, extra
+    assert "detailed_trace_annotation" not in extra, extra
+
+
+def test_materialize_profile_sglang_injects_shape_discovery_when_patched(
+    tmp_path, monkeypatch,
+):
+    """Patcher returns True for SGLang ⇒ EXTRA_SGLANG_ARGS gains
+    --enable-shape-discovery-for-cuda-graph-profile."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    counts = _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
+        "EXTRA_SGLANG_ARGS", "",
+    )
+    assert "--enable-shape-discovery-for-cuda-graph-profile" in extra, extra
+    # Per-framework dispatch in reverse: the vLLM patcher must NOT be
+    # invoked when the YAML's framework is SGLang.
+    assert counts == {"vllm": 0, "sglang": 1}, counts
+
+
+def test_materialize_profile_sglang_omits_shape_discovery_when_patch_fails(
+    tmp_path, monkeypatch,
+):
+    """Patcher returns False ⇒ no shape-discovery flag (otherwise
+    SGLang argparse errors on the unknown flag)."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=False)
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
+        "EXTRA_SGLANG_ARGS", "",
+    )
+    assert "shape-discovery" not in extra, extra
+
+
+def test_materialize_profile_kill_switch_skips_patcher_entirely(
+    tmp_path, monkeypatch,
+):
+    """HYPERLOOM_ENABLE_PATCH=0 must short-circuit the patcher call
+    entirely — neither vLLM nor SGLang patcher should be touched, and
+    no TraceLens-only flags should land in the YAML. This is the
+    escape hatch for users with custom forks / read-only filesystems
+    / compliance requirements."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    counts = _mock_patchers(monkeypatch, vllm=True, sglang=True)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    # Safe §1 flags still present.
+    assert "--profiler-config.delay_iterations 5888" in extra, extra
+    # TraceLens-only flags absent.
+    assert "capture_torch_profiler_dir" not in extra, extra
+    assert "detailed_trace_annotation" not in extra, extra
+    # Patchers never invoked.
+    assert counts == {"vllm": 0, "sglang": 0}, counts
+
+
+def test_materialize_profile_kill_switch_default_is_on(
+    tmp_path, monkeypatch,
+):
+    """Unset HYPERLOOM_ENABLE_PATCH == default-on. The patcher must
+    be invoked so users on TraceLens-patched images get the enhanced
+    flags without any opt-in step. Symmetric to the kill-switch test
+    above."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_ENABLE_PATCH", raising=False)
+    counts = _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    _materialize_config_with_envs(src, tmp_path)
+    assert counts["vllm"] == 1, counts
+
+
+def test_materialize_profile_sglang_does_not_duplicate_shape_discovery(
+    tmp_path, monkeypatch,
+):
+    """If EXTRA_SGLANG_ARGS already mentions
+    --enable-shape-discovery-for-cuda-graph-profile (e.g. user
+    pre-populated it in the YAML or via env), the materializer must
+    NOT append a duplicate copy."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    src = _profile_yaml(
+        tmp_path, "sglang",
+        {
+            "CONC": 32, "ISL": 256, "OSL": 1024,
+            "EXTRA_SGLANG_ARGS": (
+                "--enable-profile-cuda-graph "
+                "--enable-shape-discovery-for-cuda-graph-profile"
+            ),
+        },
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+    assert extra.count("--enable-shape-discovery-for-cuda-graph-profile") == 1, extra
+
+
 def test_profile_executor_calls_benchmark_lib_patcher():
     """ProfileExecutor must call ensure_benchmark_lib_patched before
     launching Magpie, or the steady-state NUM_PROMPTS we just
