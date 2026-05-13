@@ -84,6 +84,35 @@ _PATCH_SENTINEL = '${NUM_PROMPTS:-$max_concurrency}'
 _LOCK_PATH = "/tmp/hyperloom_benchmark_lib_patcher.lock"
 
 
+# PR-D §2: ``benchmark_serving.py`` hardcodes
+# ``extra_body={"num_steps": 1, "merge_profiles": True, "profile_by_stage":
+# True}`` on the ``/start_profile`` request to SGLang. Hyperloom sets
+# ``PROFILE_EXTRA_BODY`` env var (with shape_discovery / roofline_annotations
+# + steady-state start_step/num_steps computed by ``_workload_envs``), but
+# upstream InferenceX never reads it. Without this patch the carefully-tuned
+# steady-state window collapses to the upstream default and TraceLens
+# loses the shape/roofline annotations the analysis depends on.
+#
+# Patch is a single-line replacement gated on the exact legacy text so we
+# never double-patch; sentinel is the ``PROFILE_EXTRA_BODY`` substring.
+_BENCH_SERVING_LEGACY = (
+    '                                         extra_body={"num_steps": 1, '
+    '"merge_profiles": True, "profile_by_stage": True},'
+)
+# JSON fallback uses lowercase ``true`` (the Python literal ``True``
+# would be a JSONDecodeError on the unset-env path, defeating the
+# backward-compat invariant). ``json.loads`` correctly maps ``true``
+# back to Python ``True`` so the resulting dict matches the upstream
+# literal byte-for-byte.
+_BENCH_SERVING_PATCHED = (
+    "                                         extra_body=__import__('json')."
+    "loads(__import__('os').environ.get('PROFILE_EXTRA_BODY') or "
+    '\'{"num_steps": 1, "merge_profiles": true, "profile_by_stage": true}\'),'
+)
+_BENCH_SERVING_SENTINEL = "PROFILE_EXTRA_BODY"
+_BENCH_SERVING_LOCK_PATH = "/tmp/hyperloom_benchmark_serving_patcher.lock"
+
+
 def _resolve_benchmark_lib_path(
     inferencex_path: Path | str | None,
 ) -> Path | None:
@@ -246,4 +275,140 @@ def ensure_benchmark_lib_patched(
         return _apply_patch_atomic(src)
 
 
-__all__ = ["ensure_benchmark_lib_patched"]
+# =====================================================================
+# PR-D §2: PROFILE_EXTRA_BODY consumer patch for benchmark_serving.py
+# =====================================================================
+def _resolve_benchmark_serving_path(
+    inferencex_path: Path | str | None,
+) -> Path | None:
+    """Resolve ``<inferencex_root>/utils/bench_serving/benchmark_serving.py``.
+
+    Returns ``None`` for the same reasons :func:`_resolve_benchmark_lib_path`
+    does (no INFERENCEX_PATH, or file missing). Independent of the
+    benchmark_lib.sh resolver because the two patches are independently
+    useful: shape-aware steady-state windows (this one) and
+    NUM_PROMPTS honouring (the other) sit on different files.
+    """
+    root: Path | None = None
+    if inferencex_path:
+        root = Path(inferencex_path)
+    else:
+        env = os.environ.get("INFERENCEX_PATH", "").strip()
+        if env:
+            root = Path(env)
+    if root is None:
+        return None
+    candidate = root / "utils" / "bench_serving" / "benchmark_serving.py"
+    return candidate if candidate.is_file() else None
+
+
+def _is_benchmark_serving_patched(src: Path) -> bool:
+    try:
+        return _BENCH_SERVING_SENTINEL in src.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
+        return False
+
+
+def _apply_benchmark_serving_patch_atomic(src: Path) -> bool:
+    """Rewrite the single hardcoded ``extra_body=`` line in
+    ``benchmark_serving.py`` to consult ``PROFILE_EXTRA_BODY`` first,
+    via temp-file + atomic rename so a crash mid-write cannot leave a
+    corrupt ``benchmark_serving.py``.
+    """
+    try:
+        original = src.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
+        return False
+
+    if _BENCH_SERVING_LEGACY not in original:
+        log.warning(
+            "_inferencex_patcher: expected legacy `extra_body=` line not "
+            "found in %s; InferenceX layout may have changed and Hyperloom "
+            "needs an updated patch. PROFILE_EXTRA_BODY env var will be "
+            "ignored — TraceLens shape_discovery / roofline_annotations / "
+            "steady-state start_step won't reach the server. Manual review "
+            "needed.", src,
+        )
+        return False
+
+    patched = original.replace(
+        _BENCH_SERVING_LEGACY, _BENCH_SERVING_PATCHED, 1,
+    )
+    if patched == original:
+        return False
+
+    tmp_dir = src.parent
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".benchmark_serving.py.hyperloom_",
+            dir=str(tmp_dir),
+        )
+    except OSError as e:
+        log.warning(
+            "_inferencex_patcher: cannot create temp file in %s: %s",
+            tmp_dir, e,
+        )
+        return False
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(patched)
+        os.chmod(tmp_name, src.stat().st_mode)
+        os.replace(tmp_name, src)
+    except OSError as e:
+        log.warning("_inferencex_patcher: cannot write %s: %s", src, e)
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        return False
+
+    log.info(
+        "_inferencex_patcher: patched %s to consume PROFILE_EXTRA_BODY env "
+        "var (PR-D §2: fixes silently-ignored shape_discovery / "
+        "roofline_annotations / steady-state start_step from "
+        "_workload_envs.py)", src,
+    )
+    return True
+
+
+def ensure_benchmark_serving_patched(
+    inferencex_path: Path | str | None = None,
+) -> bool:
+    """Ensure InferenceX ``benchmark_serving.py`` reads
+    ``PROFILE_EXTRA_BODY`` env var on ``/start_profile``.
+
+    Returns ``True`` when the file is in patched state at exit
+    (already-patched or freshly-patched both count); ``False`` when
+    the file could not be located or the expected legacy line is
+    missing. Non-fatal — callers are expected to log and continue
+    so that smoke / dry-run paths without a real InferenceX checkout
+    still work.
+
+    Safe to call concurrently — same flock + atomic-replace shape as
+    :func:`ensure_benchmark_lib_patched`. Independent lock file so
+    the two patches don't serialize on each other (typical workflow
+    calls both once per profile run).
+    """
+    src = _resolve_benchmark_serving_path(inferencex_path)
+    if src is None:
+        log.info(
+            "_inferencex_patcher: INFERENCEX_PATH unset or "
+            "benchmark_serving.py missing — skipping PROFILE_EXTRA_BODY "
+            "patch (this is fine for tests and dry-runs without a real "
+            "InferenceX tree)",
+        )
+        return False
+
+    if _is_benchmark_serving_patched(src):
+        return True
+
+    with _file_lock(_BENCH_SERVING_LOCK_PATH):
+        if _is_benchmark_serving_patched(src):
+            return True
+        return _apply_benchmark_serving_patch_atomic(src)
+
+
+__all__ = ["ensure_benchmark_lib_patched", "ensure_benchmark_serving_patched"]
