@@ -196,6 +196,12 @@ class _PatchPlan:
     patches: tuple[Path, ...]    # in apply order
     sentinel_file: Path          # file we grep to detect "already patched"
     sentinel_text: str           # substring expected in sentinel_file
+    # PR-D §1: per-plan ``-p<N>`` strip count. Editable SGLang layouts
+    # and the vLLM patch set both use ``-p1`` (default); wheel-install
+    # SGLang uses ``-p3`` so the ``a/python/sglang/`` prefix is
+    # stripped relative to the wheel install dir. Always passed to
+    # both ``git apply`` and ``patch``.
+    apply_strip: int = 1
 
 
 def _resolve_tracelens_root(arg: Path | str | None) -> Path | None:
@@ -304,28 +310,30 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         log.info("_server_patcher: SGLang patches directory empty; skip")
         return None
 
-    # The SGLang patches use ``a/python/sglang/...`` prefix — they
-    # assume an editable install where the repo's ``python/sglang/...``
-    # layout is preserved. For pip-wheel installs ``sglang/`` sits
-    # directly under site-packages with no ``python/`` parent, so the
-    # patches' ``-p1`` strip won't match.
+    # PR-D §1: support both layouts.
+    #
+    # * Editable install (``.../python/sglang/__init__.py``): apply
+    #   from the repo root with ``-p1`` so the patches' ``a/python/
+    #   sglang/...`` prefix matches the on-disk path verbatim. This is
+    #   the historical layout and the only one PR #200 supported.
+    # * Wheel install (``site-packages/sglang/__init__.py`` with no
+    #   ``python/`` parent): apply from inside the wheel sglang/ dir
+    #   itself with ``-p3`` so the prefix is stripped to ``srt/...``
+    #   (matching the wheel layout). The actual sglang/ files end up
+    #   modified in place — no symlinks, no tmpdirs, no copies, so
+    #   ``git apply``'s symlink-safety check never trips.
     sglang_module = Path(sglang.__file__).resolve()
-    if sglang_module.parent.parent.name != "python":
-        log.info(
-            "_server_patcher: SGLang install at %s is not an editable "
-            "`python/sglang/` layout — patches assume that layout, so "
-            "skip patching", sglang_module,
-        )
+    resolution = _resolve_sglang_apply_root(sglang_module)
+    if resolution is None:
         return None
-    apply_root = sglang_module.parent.parent.parent
+    apply_root, apply_strip = resolution
 
-    # Sentinel: the kernel_shape_profiler patch creates an entirely new
-    # file. Its presence + a unique content marker is a robust "already
-    # patched" signal.
-    sentinel = (
-        apply_root / "python" / "sglang" / "srt" / "utils"
-        / "kernel_shape_profiler.py"
-    )
+    # Sentinel: the kernel_shape_profiler patch creates an entirely
+    # new file. In both layouts it lands at the wheel-side path
+    # ``sglang/srt/utils/kernel_shape_profiler.py`` (relative to the
+    # parent of sglang/), so we resolve the absolute path off
+    # ``sglang_module`` itself to keep both branches symmetric.
+    sentinel = sglang_module.parent / "srt" / "utils" / "kernel_shape_profiler.py"
     return _PatchPlan(
         framework="sglang",
         version=version,
@@ -333,7 +341,34 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         patches=patches,
         sentinel_file=sentinel,
         sentinel_text="kernel_shape_profiler",
+        apply_strip=apply_strip,
     )
+
+
+def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
+    """Pick ``(apply_root, strip_count)`` for the active SGLang install.
+
+    * Editable layout (``<repo>/python/sglang/__init__.py``):
+      ``(repo_root, 1)``. Patches reference ``a/python/sglang/...``;
+      with ``-p1`` the prefix is stripped to ``python/sglang/...``
+      relative to ``<repo>``, which matches the on-disk path.
+    * Wheel layout (``site-packages/sglang/__init__.py`` with no
+      ``python/`` parent): ``(<site-packages>/sglang, 3)``. With
+      ``-p3`` the patch path is stripped to ``srt/...`` relative to
+      the wheel install dir, which matches the wheel layout. PR-D §1.
+    * Anything else: return ``None`` so the caller fail-softs.
+    """
+    if sglang_module.parent.parent.name == "python":
+        return sglang_module.parent.parent.parent, 1
+    sglang_dir = sglang_module.parent
+    if sglang_dir.name == "sglang":
+        return sglang_dir, 3
+    log.info(
+        "_server_patcher: SGLang install at %s has unexpected layout "
+        "(parent dir name=%r); skip patching",
+        sglang_module, sglang_dir.name,
+    )
+    return None
 
 
 # ---------------------------------------------------------------------
@@ -415,24 +450,26 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
     # context drift when TraceLens patches haven't been rev'd against
     # a slightly newer SGLang / vLLM point release). If neither
     # accepts the patch the whole set is rejected and we fail-soft.
+    strip_arg = f"-p{plan.apply_strip}"
+
     apply_modes: dict[Path, str] = {}
     for p in plan.patches:
-        if _git(git, ("apply", "--check", str(p)), plan.apply_root):
+        if _git(git, ("apply", "--check", strip_arg, str(p)), plan.apply_root):
             apply_modes[p] = "git"
             continue
-        if patch_bin and _patch_dry_run(patch_bin, p, plan.apply_root):
+        if patch_bin and _patch_dry_run(patch_bin, p, plan.apply_root, plan.apply_strip):
             log.warning(
                 "_server_patcher: %s patch %s did not apply cleanly with "
-                "`git apply --check`; falling back to `patch -p1 --fuzz=10` "
+                "`git apply --check %s`; falling back to `patch %s --fuzz=10` "
                 "(TraceLens patch may lag deployed %s by a point release)",
-                plan.framework, p.name, plan.framework,
+                plan.framework, p.name, strip_arg, strip_arg, plan.framework,
             )
             apply_modes[p] = "patch"
             continue
         log.warning(
-            "_server_patcher: `git apply --check` AND fuzzy `patch --dry-run` "
-            "both failed for %s (version %s, patch %s); fail-soft skip",
-            plan.framework, plan.version, p.name,
+            "_server_patcher: `git apply --check %s` AND fuzzy `patch %s "
+            "--dry-run` both failed for %s (version %s, patch %s); fail-soft "
+            "skip", strip_arg, strip_arg, plan.framework, plan.version, p.name,
         )
         return False
 
@@ -440,9 +477,11 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
     for p in plan.patches:
         mode = apply_modes[p]
         if mode == "git":
-            ok = _git(git, ("apply", str(p)), plan.apply_root)
+            ok = _git(git, ("apply", strip_arg, str(p)), plan.apply_root)
         else:
-            ok = _patch_apply(patch_bin, p, plan.apply_root)  # type: ignore[arg-type]
+            ok = _patch_apply(
+                patch_bin, p, plan.apply_root, plan.apply_strip,  # type: ignore[arg-type]
+            )
         if ok:
             applied.append((p, mode))
             continue
@@ -454,11 +493,16 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         )
         for prev, prev_mode in reversed(applied):
             if prev_mode == "git":
-                rolled_back = _git(git, ("apply", "-R", str(prev)), plan.apply_root)
+                rolled_back = _git(
+                    git, ("apply", "-R", strip_arg, str(prev)), plan.apply_root,
+                )
             else:
                 rolled_back = (
                     patch_bin is not None
-                    and _patch_apply(patch_bin, prev, plan.apply_root, reverse=True)
+                    and _patch_apply(
+                        patch_bin, prev, plan.apply_root, plan.apply_strip,
+                        reverse=True,
+                    )
                 )
             if not rolled_back:
                 log.error(
@@ -478,19 +522,23 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
     return True
 
 
-def _patch_dry_run(patch_bin: str, patch_file: Path, cwd: Path) -> bool:
-    """Probe ``patch -p1 --fuzz=10 --dry-run`` for a single patch.
+def _patch_dry_run(
+    patch_bin: str, patch_file: Path, cwd: Path, strip: int = 1,
+) -> bool:
+    """Probe ``patch -p<strip> --fuzz=10 --dry-run`` for a single patch.
 
     Used as a fuzzy fallback when ``git apply --check`` rejects a patch
     due to minor context drift (whitespace / single-line edits in the
     target that don't affect the diff's semantic intent). The dry-run
     has zero filesystem side effects so it's safe to gate the actual
-    apply on this check.
+    apply on this check. ``strip`` matches the ``-p<N>`` flag git apply
+    uses for the same patch — PR-D §1 may pass ``-p3`` for wheel
+    SGLang installs vs the default ``-p1`` for editable installs.
     """
     try:
         with patch_file.open("rb") as fh:
             result = subprocess.run(
-                (patch_bin, "-p1", "--fuzz=10", "--dry-run", "--silent"),
+                (patch_bin, f"-p{strip}", "--fuzz=10", "--dry-run", "--silent"),
                 cwd=str(cwd),
                 stdin=fh,
                 capture_output=True,
@@ -506,12 +554,13 @@ def _patch_dry_run(patch_bin: str, patch_file: Path, cwd: Path) -> bool:
 
 
 def _patch_apply(
-    patch_bin: str, patch_file: Path, cwd: Path, *, reverse: bool = False,
+    patch_bin: str, patch_file: Path, cwd: Path, strip: int = 1, *,
+    reverse: bool = False,
 ) -> bool:
-    """Real ``patch -p1 --fuzz=10`` apply (or reverse). Mirrors
+    """Real ``patch -p<strip> --fuzz=10`` apply (or reverse). Mirrors
     :func:`_patch_dry_run` but actually mutates the working tree.
     Returns True iff rc == 0."""
-    args = [patch_bin, "-p1", "--fuzz=10", "--silent"]
+    args = [patch_bin, f"-p{strip}", "--fuzz=10", "--silent"]
     if reverse:
         args.append("--reverse")
     try:
