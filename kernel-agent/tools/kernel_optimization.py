@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -91,7 +92,19 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, list):
         return payload
-    return list(payload.get("hot_kernels") or payload.get("kernel_candidates") or [])
+    candidates = list(payload.get("hot_kernels") or payload.get("kernel_candidates") or [])
+    artifact_paths = payload.get("artifact_paths")
+    if not isinstance(artifact_paths, dict):
+        artifact_paths = {}
+    report_path = (
+        payload.get("analysis_report_path")
+        or artifact_paths.get("tracelens_agent_report")
+    )
+    if report_path:
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                candidate.setdefault("tracelens_agent_report", str(report_path))
+    return candidates
 
 
 def find_candidate(candidates: list[dict[str, Any]], kernel_id: str) -> dict[str, Any]:
@@ -166,6 +179,142 @@ _GEAK_KERNEL_TYPE = {
 }
 
 
+def _coerce_cli_value(value: str | bool) -> Any:
+    if isinstance(value, bool):
+        return value
+    text = str(value)
+    if text.lower() in {"true", "false"}:
+        return text.lower() == "true"
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
+def parse_extra_sglang_args(extra_args: str) -> dict[str, Any]:
+    """Parse selected SGLang flags from an EXTRA_SGLANG_ARGS-style string."""
+    if not extra_args.strip():
+        return {}
+    try:
+        tokens = shlex.split(extra_args)
+    except ValueError:
+        return {"raw": extra_args}
+    parsed: dict[str, Any] = {"raw": extra_args}
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        if not token.startswith("--"):
+            idx += 1
+            continue
+        flag = token[2:].replace("-", "_")
+        value: str | bool = True
+        if idx + 1 < len(tokens) and not tokens[idx + 1].startswith("--"):
+            value = tokens[idx + 1]
+            idx += 1
+        parsed[flag] = _coerce_cli_value(value)
+        idx += 1
+    return parsed
+
+
+def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any]]:
+    if not isinstance(shapes, list):
+        return []
+    try:
+        count = int(float(call_num or 1))
+    except (TypeError, ValueError):
+        count = 1
+    entries: list[dict[str, Any]] = []
+    for shape in shapes:
+        if isinstance(shape, dict) and "shape" in shape:
+            entries.append({
+                "call_num": int(shape.get("call_num") or count),
+                "shape": shape["shape"],
+            })
+        elif shape not in (None, "", [], ()):
+            entries.append({"call_num": count, "shape": shape})
+    return entries
+
+
+def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    """Build structured runtime context for GEAK task prompts."""
+    source_file = getattr(args, "source_file", "") or candidate.get("source_file", "")
+    kernel_name = str(candidate.get("name") or getattr(args, "kernel_id", ""))
+    input_shapes = candidate.get("input_shapes")
+    if input_shapes is None:
+        input_shapes = _shape_call_entries(candidate.get("shapes", []), candidate.get("call_count"))
+    input_dtypes = candidate.get("input_dtypes")
+    if input_dtypes is None:
+        input_dtypes = candidate.get("dtypes", [])
+
+    runtime_flags: dict[str, Any] = {}
+    if isinstance(candidate.get("runtime_flags"), dict):
+        runtime_flags.update(candidate["runtime_flags"])
+    runtime_flags.setdefault("is_multigpu", bool(candidate.get("is_multigpu")))
+    runtime_flags.setdefault("num_gpus_recommended", candidate.get("num_gpus_recommended"))
+    extra_sglang_args = (
+        getattr(args, "extra_sglang_args", "")
+        or candidate.get("extra_sglang_args", "")
+        or candidate.get("candidate_extra_sglang_args", "")
+    )
+    parsed_sglang_args = parse_extra_sglang_args(str(extra_sglang_args))
+    for key in (
+        "attention_backend",
+        "decode_attention_backend",
+        "prefill_attention_backend",
+        "disable_cuda_graph",
+        "disable_radix_cache",
+        "enable_torch_compile",
+        "enable_dp_attention",
+    ):
+        if key in parsed_sglang_args:
+            runtime_flags.setdefault(key, parsed_sglang_args[key])
+
+    runtime_args = candidate.get("runtime_args") if isinstance(candidate.get("runtime_args"), dict) else {}
+    runtime_args = dict(runtime_args)
+    if parsed_sglang_args:
+        runtime_args.setdefault("extra_sglang_args", parsed_sglang_args.get("raw", str(extra_sglang_args)))
+    for key in (
+        "kv_cache_dtype",
+        "page_size",
+        "block_size",
+        "cuda_graph_max_bs",
+        "num_continuous_decode_steps",
+        "triton_attention_num_kv_splits",
+        "triton_attention_split_tile_size",
+    ):
+        if key in parsed_sglang_args:
+            runtime_args.setdefault(key, parsed_sglang_args[key])
+
+    raw_params = candidate.get("kernel_params") if isinstance(candidate.get("kernel_params"), dict) else {}
+    kernel_params = dict(raw_params)
+    if "kv_cache_dtype" in parsed_sglang_args:
+        kernel_params.setdefault("KV_DTYPE", parsed_sglang_args["kv_cache_dtype"])
+    if "page_size" in parsed_sglang_args:
+        kernel_params.setdefault("BLOCK_SIZE", parsed_sglang_args["page_size"])
+    if "block_size" in parsed_sglang_args:
+        kernel_params.setdefault("BLOCK_SIZE", parsed_sglang_args["block_size"])
+    for key in ("KV_DTYPE", "BLOCK_SIZE", "HEAD_SIZE"):
+        kernel_params.setdefault(key, candidate.get(key))
+
+    return {
+        "kernel_path": str(source_file or ""),
+        "kernel_name": kernel_name,
+        "input_shapes": input_shapes or [],
+        "output_shapes": candidate.get("output_shapes") or [],
+        "input_dtypes": input_dtypes or [],
+        "output_dtypes": candidate.get("output_dtypes") or [],
+        "backend": candidate.get("backend") or candidate.get("framework"),
+        "runtime_args": runtime_args,
+        "runtime_flags": runtime_flags,
+        "env_vars": candidate.get("env_vars") or {},
+        "kernel_params": kernel_params,
+    }
+
+
 def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     source_file = args.source_file or candidate.get("source_file", "")
     source_block = ""
@@ -185,6 +334,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     # can route to the right agent (hip / triton / other).
     geak_kernel_type = _GEAK_KERNEL_TYPE.get(str(candidate.get("source_type", "unknown")), "other")
     kernel_name = str(candidate.get("name", args.kernel_id))
+    kernel_metadata = build_kernel_metadata(candidate, args)
     budget_min = int(getattr(args, "budget_minutes", 60) or 60)
     bench_block = ""
     if bench_files:
@@ -319,6 +469,30 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
             "rank's slice of the algorithm (e.g. local reduce + memcpy) so you can "
             "still measure compute/IO improvements.\n"
         )
+    tracelens_context_block = ""
+    report_path_str = str(candidate.get("tracelens_agent_report") or "")
+    report_path = Path(report_path_str) if report_path_str else None
+    if report_path and report_path.exists():
+        try:
+            full_report = report_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            full_report = ""
+        if full_report:
+            rank = candidate.get("tracelens_pitem_rank")
+            title = candidate.get("tracelens_pitem_title", "")
+            if rank:
+                focus_line = (
+                    f"Focus on **P{rank}: {title}** in the report below. "
+                    "Other P-items are context only — do not optimize them.\n"
+                )
+            else:
+                focus_line = "Use the report below as full context for this kernel.\n"
+            tracelens_context_block = (
+                "\n## TraceLens Context\n\n"
+                + focus_line
+                + "\n"
+                + full_report
+            )
     # Use GEAK task_parser field names (kernel_name/kernel_url/kernel_type/repo)
     # so its LLM-based parser can extract them; OOB agents read the same body
     # as a normal natural-language prompt.
@@ -336,6 +510,11 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         f"GPU percent: {candidate.get('gpu_pct', 'unknown')}",
         f"Shapes: {json.dumps(candidate.get('shapes', []), sort_keys=True)}",
         "",
+        "Kernel runtime metadata (structured context for GEAK; unknown fields are null, empty arrays, or empty objects):",
+        "```json",
+        json.dumps(kernel_metadata, indent=2, sort_keys=True),
+        "```",
+        "",
         "GEAK configuration (ignored by non-GEAK backends):",
         "- Use homogeneous mode. Set max_rounds to 5.",
         "",
@@ -350,6 +529,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         bench_block,
         safety,
         source_block,
+        tracelens_context_block,
     ])
 
 
@@ -1340,6 +1520,7 @@ def main() -> int:
     parser.add_argument("--benchmark-file", default="")
     parser.add_argument("--test-harness-path", default="")
     parser.add_argument("--source-file", default="")
+    parser.add_argument("--extra-sglang-args", default="")
     parser.add_argument("--budget-minutes", type=float, default=60.0,
                         help="Per-attempt wall-clock budget for claude/codex "
                              "OOB backends. GEAK uses --geak-budget-min.")
