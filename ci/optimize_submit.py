@@ -1007,33 +1007,51 @@ _KEY_RESULT_SUFFIXES: tuple[str, ...] = ("optimization_report.md", "ci_metrics.j
 
 
 def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
-    """Scan canonical NFS result directories for files matching this model.
+    """Scan NFS result directories for files matching this model.
 
-    Used when Claw API list_artifacts returned nothing useful (sandbox died
-    before agent flushed files, OR the agent wrote results to an NFS-mounted
-    PyTorchJob/RayJob workdir that's not visible via Claw's /files endpoint).
+    Used when Claw API list_artifacts returned nothing useful (the very common
+    case where the HyperloomV2 orchestrator writes outputs under its own
+    session directory under /wekafs/users/<uid>/<arbitrary_dir>/, which SaFE's
+    artifact API doesn't know about). Two-stage scan:
 
-    Mirrors the fallback in ci/orchestrator.py (3a → 3b) so optimize_submit
-    is consistent with the main CI pipeline. Returns count of files copied.
+      A. Canonical CI dirs (legacy, kept for back-compat):
+            /wekafs/hyperloom-results, /wekafs/results/ci,
+            /wekafs/inference-optimization/results
+         Match by directory name containing the model basename.
+
+      B. Per-user session dirs (the one that actually matters for V2 today):
+            /wekafs/users/<uid>/<session_name>/{,phase10_report,results}/ci_metrics.json
+         Match by reading every ci_metrics.json under the tree and comparing
+         its `model` JSON field to rec.model basename — much more accurate
+         than directory-name fuzzy match (agent picks arbitrary names like
+         `qwen25-coder-14b-awq-opt` vs canonical `Qwen2.5-Coder-14B-Instruct-AWQ`).
+
+    Stage B is required for the 2026-05-12 batch onward where the runner now
+    mounts /wekafs RW. Mirrors the fallback in ci/orchestrator.py (3a → 3b)
+    so optimize_submit is consistent with the main CI pipeline.
+
+    Returns count of files copied.
     """
     nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
-    scan_dirs = [
-        f"{nfs_root}/hyperloom-results",
-        f"{nfs_root}/results/ci",
-        f"{nfs_root}/inference-optimization/results",
-    ]
     model_basename = (rec.model or "").split("/")[-1]
     model_short = model_basename.lower().replace("-", "").replace("_", "").replace(".", "")
     if not model_short or not rec.task_id:
         return 0
+
     task_dir = artifacts_dir / rec.task_id
     task_dir.mkdir(parents=True, exist_ok=True)
 
     copied = 0
-    for scan_dir in scan_dirs:
+
+    # ── Stage A: legacy canonical dirs (matched by entry name) ──────────────
+    legacy_scan_dirs = [
+        f"{nfs_root}/hyperloom-results",
+        f"{nfs_root}/results/ci",
+        f"{nfs_root}/inference-optimization/results",
+    ]
+    for scan_dir in legacy_scan_dirs:
         if not os.path.isdir(scan_dir):
             continue
-        # Sort newest-first so we get the most recent run if multiple exist.
         try:
             entries = sorted(os.listdir(scan_dir), reverse=True)
         except Exception:
@@ -1057,18 +1075,120 @@ def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
                         try:
                             shutil.copy2(src, dst)
                         except Exception as e:
-                            log.warning("[task %s] NFS fallback copy %s -> %s failed: %s",
+                            log.warning("[task %s] NFS legacy copy %s -> %s failed: %s",
                                         rec.task_id, src, dst, e)
                             continue
                         rec.artifact_files.append(str(dst))
                         rec.artifact_count += 1
                         copied += 1
-                        log.info("[task %s] NFS fallback: copied %s -> %s",
+                        log.info("[task %s] NFS legacy: copied %s -> %s",
                                  rec.task_id, src, dst)
             if copied:
-                break  # don't keep walking once we found this model's dir
+                break
         if copied:
             break
+    if copied:
+        return copied
+
+    # ── Stage B: /wekafs/users/<uid>/<session>/...  matched by model field ──
+    users_root = f"{nfs_root}/users"
+    if not os.path.isdir(users_root):
+        return copied
+
+    # Build a few candidate name keys for the JSON `model` field match
+    name_norms = set()
+    for raw in [model_basename, model_basename.split("-AWQ")[0],
+                model_basename.replace("-AWQ", ""),
+                model_basename.replace("-Instruct", ""),
+                model_basename.replace("-Chat", "")]:
+        norm = (raw or "").lower().replace("-", "").replace("_", "").replace(".", "").replace("/", "")
+        if norm:
+            name_norms.add(norm)
+    if not name_norms:
+        return copied
+
+    def _model_field_matches(model_field: str) -> bool:
+        m = (model_field or "").lower().replace("-", "").replace("_", "") \
+            .replace(".", "").replace("/", "")
+        if not m:
+            return False
+        # Strong match: any normalized variant of our target is a substring
+        # of the JSON.model. Conservative — we'd rather miss than mis-attribute.
+        return any(n in m or m in n for n in name_norms)
+
+    # rglob with depth 4 is enough for the layouts we've seen:
+    #   /wekafs/users/<uid>/<session>/ci_metrics.json                (depth 4)
+    #   /wekafs/users/<uid>/<session>/phase10_report/ci_metrics.json (depth 5)
+    #   /wekafs/users/<uid>/<session>/results/ci_metrics.json        (depth 5)
+    candidates: list[tuple[float, str, str]] = []  # (mtime, ci_path, session_dir)
+    for uid_dir in os.listdir(users_root):
+        uid_path = os.path.join(users_root, uid_dir)
+        if not os.path.isdir(uid_path):
+            continue
+        for sess in os.listdir(uid_path):
+            sess_path = os.path.join(uid_path, sess)
+            if not os.path.isdir(sess_path):
+                continue
+            for sub in ("", "phase10_report", "results"):
+                ci_path = os.path.join(sess_path, sub, "ci_metrics.json") \
+                    if sub else os.path.join(sess_path, "ci_metrics.json")
+                if not os.path.isfile(ci_path):
+                    continue
+                try:
+                    with open(ci_path, encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    continue
+                if not _model_field_matches(str(data.get("model") or "")):
+                    continue
+                try:
+                    mtime = os.path.getmtime(ci_path)
+                except OSError:
+                    continue
+                candidates.append((mtime, ci_path, sess_path))
+
+    if not candidates:
+        log.info("[task %s] no /wekafs/users/<uid>/* ci_metrics.json matched "
+                 "model=%s", rec.task_id, model_basename)
+        return copied
+
+    # Pick the freshest match — same model can be re-run several times.
+    candidates.sort(reverse=True)
+    _mtime, best_ci, best_sess = candidates[0]
+    log.info("[task %s] NFS user-session match: %s (from %d candidate(s), "
+             "session=%s)", rec.task_id, best_ci, len(candidates), best_sess)
+
+    # Copy the ci_metrics + any optimization_report.md sitting alongside or
+    # under phase10_report/. Everything lands flat under task_dir/, same shape
+    # build_summary.py expects.
+    targets = [best_ci]
+    for cand in [
+        os.path.join(best_sess, "optimization_report.md"),
+        os.path.join(best_sess, "phase10_report", "optimization_report.md"),
+        os.path.join(best_sess, "reports", "final.md"),
+    ]:
+        if os.path.isfile(cand):
+            targets.append(cand)
+            break
+
+    for src in targets:
+        dst_name = ("optimization_report.md"
+                    if src.endswith("final.md") else os.path.basename(src))
+        dst = task_dir / dst_name
+        if dst.exists():
+            continue
+        try:
+            shutil.copy2(src, dst)
+        except Exception as e:
+            log.warning("[task %s] NFS user-session copy %s -> %s failed: %s",
+                        rec.task_id, src, dst, e)
+            continue
+        rec.artifact_files.append(str(dst))
+        rec.artifact_count += 1
+        copied += 1
+        log.info("[task %s] NFS user-session: copied %s -> %s",
+                 rec.task_id, src, dst)
+
     return copied
 
 
