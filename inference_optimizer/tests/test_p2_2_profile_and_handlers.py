@@ -635,6 +635,33 @@ async def test_run_optimization_handler_dry_run(session_dir):
     assert res.get("status") in ("ok", "succeeded", "failed")  # dry-run may still fail validation
 
 
+@pytest.mark.asyncio
+async def test_run_optimization_handler_forwards_extra_sglang_args(session_dir):
+    captured: dict[str, object] = {}
+
+    async def fake_run(cmd, *, timeout_sec):
+        captured["cmd"] = cmd
+        captured["timeout_sec"] = timeout_sec
+        return 0, '{"status": "ok"}', ""
+
+    payload = {
+        "kernel_id": "fake_kernel_1",
+        "session_id": session_dir.name,
+        "source_file": "/sgl-workspace/sglang/python/sglang/fake.py",
+        "extra_sglang_args": "--kv-cache-dtype fp8 --page-size 16",
+        "dry_run": True,
+        "_single_kernel": True,
+    }
+    with patch.object(krh, "_validate_reusable_native_kernel", return_value=None), \
+         patch.object(krh, "_run_subprocess", side_effect=fake_run):
+        res = await krh.run_optimization_handler(payload, session_dir=session_dir)
+
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert "--extra-sglang-args" in cmd
+    assert cmd[cmd.index("--extra-sglang-args") + 1] == "--kv-cache-dtype fp8 --page-size 16"
+
+
 def test_handlers_dispatch_table():
     """P2-2 only registered select_kernels + run_optimization. P2-4
     added apply_patch + integrate (covered in test_p2_4_integrate_report)."""
