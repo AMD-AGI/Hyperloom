@@ -374,7 +374,7 @@ async def select_kernels_handler(
         top_k:           default 10
         model_name:      default ''
         framework:       default 'sglang'
-        target_platform: default 'MI300X'
+        target_platform: defaults to payload target_platform, then SharedState.gpu_type
         roofline_json:   optional path from a separate pmc_roofline action
         dry_run:         default False (testing)
         budget_minutes:  default 60
@@ -669,6 +669,15 @@ async def _run_optimization_single(
     )
     Path(workspace_path).mkdir(parents=True, exist_ok=True)
 
+    from .shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    target_platform = (
+        payload.get("target_platform") or state.gpu_type or ""
+    ).strip()
+    if target_platform:
+        os.environ["TARGET_GPU_TYPE"] = target_platform
+
     cmd = [
         "python3",
         str(_kernel_agent_tool_path("kernel_optimization.py")),
@@ -680,6 +689,8 @@ async def _run_optimization_single(
         cmd += ["--backends", str(payload["backends"])]
     if payload.get("source_file"):
         cmd += ["--source-file", str(payload["source_file"])]
+    if target_platform:
+        cmd += ["--target-platform", str(target_platform)]
     if payload.get("extra_sglang_args"):
         cmd += ["--extra-sglang-args", str(payload["extra_sglang_args"])]
     if payload.get("candidates_path"):
