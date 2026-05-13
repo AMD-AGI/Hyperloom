@@ -92,12 +92,59 @@ _LOCK_PATH = "/tmp/hyperloom_server_patcher.lock"
 # hung NFS / weird filesystems.
 _GIT_TIMEOUT_SEC = 30
 
-# TraceLens currently ships SGLang patches only for v0.5.9. Hyperloom's
-# default deployment uses v0.5.10 — version mismatch is the *common* case
-# and must fail-soft cleanly. Bump this string when TraceLens adds new
-# versions (or refactor to discover via a manifest file inside the
-# patches directory).
-_SGLANG_SUPPORTED_VERSIONS: frozenset[str] = frozenset({"0.5.9"})
+# PR-C §2: SGLang version gate is now a *minor-version* allowlist
+# rather than an exact pin so the fuzzy patch fallback (PR-C §1) gets
+# a chance to apply TraceLens patches against a freshly bumped point
+# release. ``0.5.x`` covers all of 0.5.9, 0.5.10, 0.5.11, … which is
+# the typical bump cadence between TraceLens patch revisions.
+#
+# Behaviour at the apply layer: if the fuzzy fallback also rejects
+# the patch (real context conflict, not just whitespace drift), the
+# whole patch set fail-softs anyway — so widening the version gate
+# here is safe; it just lets borderline-compatible versions reach
+# the fuzzy path that would otherwise be rejected upfront.
+#
+# Override via ``HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS=<csv>`` for
+# operators who want to either tighten (back to exact pins) or
+# extend (e.g. ``0.5,0.6``) the allowlist without a code change.
+# Tighten to a frozenset of exact versions via
+# ``HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS=<csv>``; when set this
+# wins over the minor allowlist.
+_SGLANG_DEFAULT_ALLOWED_MINORS: tuple[str, ...] = ("0.5",)
+
+
+def _sglang_version_accepted(version: str) -> bool:
+    """Return True iff ``version`` is in the configured allowlist.
+
+    Resolution order:
+
+    1. ``$HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS`` (csv) — exact pins
+       win when set; this matches the pre-PR-C behaviour for callers
+       who want to lock down to known-good versions.
+    2. ``$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS`` (csv) — minor-version
+       allowlist (e.g. ``0.5,0.6``); a version is accepted iff it
+       startswith one of the listed prefixes followed by ``.`` (so
+       ``0.5`` matches ``0.5.9`` but not ``0.50.0``).
+    3. :data:`_SGLANG_DEFAULT_ALLOWED_MINORS` — the built-in default.
+    """
+    text = (version or "").strip()
+    if not text:
+        return False
+    exact = os.environ.get("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", "").strip()
+    if exact:
+        allowed_exact = {v.strip() for v in exact.split(",") if v.strip()}
+        return text in allowed_exact
+    minors_env = os.environ.get(
+        "HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", "",
+    ).strip()
+    if minors_env:
+        minors = tuple(v.strip() for v in minors_env.split(",") if v.strip())
+    else:
+        minors = _SGLANG_DEFAULT_ALLOWED_MINORS
+    return any(
+        text == minor or text.startswith(f"{minor}.")
+        for minor in minors
+    )
 
 # Path within the TraceLens checkout that hosts the patch sets.
 _PATCH_TREE_REL = ("examples", "custom_workflows", "inference_analysis")
@@ -236,12 +283,12 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         return None
 
     version = (getattr(sglang, "__version__", "") or "").strip()
-    if version not in _SGLANG_SUPPORTED_VERSIONS:
+    if not _sglang_version_accepted(version):
         log.info(
-            "_server_patcher: SGLang %s not in supported set %s; skip "
-            "(TraceLens ships patches for these versions only — bump "
-            "_SGLANG_SUPPORTED_VERSIONS when TraceLens adds support)",
-            version, sorted(_SGLANG_SUPPORTED_VERSIONS),
+            "_server_patcher: SGLang %s not in supported minor allowlist "
+            "(see HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS / "
+            "HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS to override); skip",
+            version,
         )
         return None
 
