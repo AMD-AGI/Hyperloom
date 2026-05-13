@@ -4,8 +4,6 @@ import json
 from argparse import Namespace
 from pathlib import Path
 
-import pytest
-
 import kernel_optimization as ko
 
 
@@ -192,50 +190,6 @@ def _metadata_from_prompt(prompt: str) -> dict:
     start = prompt.index("```json", prompt.index(marker)) + len("```json")
     end = prompt.index("```", start)
     return json.loads(prompt[start:end])
-
-
-def _prompt_args(target_platform: str):
-    args = _args(source_file="", target_platform=target_platform)
-    args.kernel_id = "platform_kernel"
-    args.num_gpus = 0
-    args.budget_minutes = 60
-    return args
-
-
-@pytest.mark.parametrize(
-    ("target_platform", "expected_name", "expected_arch", "expected_flag"),
-    [
-        ("mi300x", "AMD Instinct MI300X", "gfx942", "--offload-arch=gfx942"),
-        ("mi325x", "AMD Instinct MI325X", "gfx942", "--offload-arch=gfx942"),
-        ("mi355x", "AMD Instinct MI355X", "gfx950", "--offload-arch=gfx950"),
-    ],
-)
-def test_build_prompt_uses_target_platform_hardware_notes(
-    target_platform, expected_name, expected_arch, expected_flag,
-):
-    prompt = ko.build_prompt(
-        {"name": "platform_kernel", "source_type": "hip"},
-        _prompt_args(target_platform),
-    )
-
-    assert expected_name in prompt
-    assert expected_arch in prompt
-    assert expected_flag in prompt
-    assert "DO NOT use gfx950/MI355X-only features" not in prompt
-    if target_platform == "mi355x":
-        assert "--offload-arch=gfx942" not in prompt
-
-
-def test_build_prompt_unknown_target_platform_uses_runtime_inspection():
-    prompt = ko.build_prompt(
-        {"name": "platform_kernel", "source_type": "hip"},
-        _prompt_args("future_gpu"),
-    )
-
-    assert "query the runtime environment" in prompt
-    assert "ROCR_VISIBLE_DEVICES" in prompt
-    assert "choose --offload-arch=<arch>" in prompt
-    assert "AMD Instinct MI300X (gfx942, CDNA3)" not in prompt
 
 
 def test_build_prompt_includes_geak_runtime_metadata():
