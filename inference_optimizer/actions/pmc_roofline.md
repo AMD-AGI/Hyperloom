@@ -5,6 +5,32 @@ for the normal torch-profiler trace path. By default this action launches the
 server under `rocprofv3` instead of using `rocprofv3 --attach`, so it can run in
 containers that do not grant `CAP_SYS_PTRACE`.
 
+## GPU Scheduling Contract
+
+All GPU work for this action must be scheduled through Ray. Do not launch the
+PMC vLLM/SGLang server directly from the Claw client or another process that did
+not receive a Ray GPU allocation. The expected production shape is:
+
+```text
+RayJob / Ray worker
+  -> pmc_roofline action
+     -> rocprofv3 ... -- <server_cmd>
+```
+
+The action enforces this by default. It must see one of:
+
+- `task.params.ray_worker=true` from the RayJob wrapper, or
+- a Ray context environment marker such as `RAY_JOB_ID`, `RAY_ADDRESS`, or
+  `RAY_RUNTIME_ENV_CREATE_WORKING_DIR`, or
+- `HYPERLOOM_PMC_ROOFLINE_IN_RAY=1`.
+
+Only local developer debugging should bypass this with
+`task.params.allow_direct_gpu=true` or `HYPERLOOM_ALLOW_DIRECT_PMC_ROOFLINE=1`.
+
+Use the GPU visibility assigned by Ray. Do not pass `ROCR_VISIBLE_DEVICES` or
+`CUDA_VISIBLE_DEVICES` in `extra_envs` unless `allow_device_override=true` is
+explicitly set.
+
 ## Why This Is Separate
 
 ROCm only allows one rocprofiler tool registration per process. The standard
@@ -29,6 +55,10 @@ and uses that process only for `rocprofv3 --attach`.
 - `extra_envs`: extra environment variables for the dedicated server.
 - `profile_mode`: `launch` (default) or `attach`. Use `attach` only when the
   container grants ptrace permissions.
+- `ray_worker`: set to `true` when the action is running inside the RayJob/Ray
+  worker that owns the GPU allocation.
+- `allow_direct_gpu`: escape hatch for local developer debugging only.
+- `allow_device_override`: escape hatch for explicit GPU visibility overrides.
 
 ## Outputs
 
