@@ -305,11 +305,37 @@ class Coordinator:
         self.shared_state.action_scores[action_name] = a.to_dict()
 
     def _score_action_discard(self, action_name: str) -> None:
+        """Deprecated thin wrapper — prefer :meth:`_score_action_failure` or
+        :meth:`_score_action_no_promote` so the streak counter for each
+        pathology evolves independently. Retained for archived call sites
+        that don't yet distinguish the two.
+        """
+        self._score_action_failure(action_name)
+
+    def _score_action_failure(self, action_name: str) -> None:
+        """Streak-aware penalty for a task that returned failed/error."""
         raw = self.shared_state.action_scores.get(action_name)
         if not isinstance(raw, dict):
             return
         a = _scoring.ActionScore.from_dict(raw)
-        _scoring.apply_discard(
+        _scoring.apply_failure(
+            a,
+            tick=int(self.shared_state.tick or 0),
+            action_name=action_name,
+        )
+        self.shared_state.action_scores[action_name] = a.to_dict()
+
+    def _score_action_no_promote(self, action_name: str) -> None:
+        """Streak-aware penalty for a task that succeeded but did not
+        promote ``current_best``. Tracked on a streak distinct from
+        :meth:`_score_action_failure` so diagnostics can distinguish a
+        crashing action from a stalled one.
+        """
+        raw = self.shared_state.action_scores.get(action_name)
+        if not isinstance(raw, dict):
+            return
+        a = _scoring.ActionScore.from_dict(raw)
+        _scoring.apply_no_promote(
             a,
             tick=int(self.shared_state.tick or 0),
             action_name=action_name,
@@ -351,29 +377,40 @@ class Coordinator:
             # Treated as a gate; do not score it. baseline_failure_streak
             # already tracks repeated failures.
             return
-        if task_kind in {"profile", "pmc_roofline"}:
-            self._score_action_keep(task_kind, gain_pct=0.0)
-            return
-        if task_kind == "validate_stack":
-            # Bumps runs + cooldown so we don't validate_stack spam.
-            self._score_action_keep("validate_stack", gain_pct=0.0)
+        status = ""
+        error_class = None
+        if isinstance(result, dict):
+            status = str(result.get("status") or "")
+            error_class = result.get("error_class")
+        failed = status in {"failed", "error"} or bool(error_class)
+        if task_kind in {"profile", "pmc_roofline", "validate_stack"}:
+            if failed:
+                self._score_action_failure(task_kind)
+            else:
+                self._score_action_keep(task_kind, gain_pct=0.0)
             return
         if task_kind in {"backends", "params", "sweep"}:
-            if promoted:
+            if failed:
+                self._score_action_failure(task_kind)
+            elif promoted:
                 self._score_action_keep(
                     task_kind, gain_pct=float(gain_vs_cb or 0.0),
                 )
             else:
-                self._score_action_discard(task_kind)
+                self._score_action_no_promote(task_kind)
             # Lock the grid when it is fully exhausted so the LLM sees
             # the row as unavailable. Only applies to params today
             # (the only family with a deterministic exhaustion check).
             if task_kind == "params" and self._params_grid_exhausted():
                 self._score_action_lock("params", "grid_exhausted")
             return
-        # Support actions (dream / re_explore / recover / etc.): just
-        # register the run so cooldown + aging math evolves.
-        self._score_action_keep(task_kind, gain_pct=0.0)
+        # Fallback for any future deep / support action that doesn't have
+        # explicit promote semantics — split on result.status so the
+        # failure streak still gets exercised.
+        if failed:
+            self._score_action_failure(task_kind)
+        else:
+            self._score_action_keep(task_kind, gain_pct=0.0)
 
     def _ensure_action_scores_seeded(self) -> None:
         """Populate ``shared_state.action_scores`` once per session.
@@ -1130,11 +1167,32 @@ class Coordinator:
                 params.setdefault("max_candidates_per_round", 5)
                 if isinstance(cb, dict) and cb.get("variant_name"):
                     params.setdefault("base_variant_name", str(cb["variant_name"]))
-        task = await self.tasks.create(
+        task, was_existing = await self.tasks.create_or_return_existing(
             kind=pending.action_name,
             params=params,
             idempotency_key=f"approved-{pending.proposal_msg_id}",
         )
+        if was_existing:
+            # Defensive path — `approved-{proposal_msg_id}` is unique per
+            # proposal so a normal flow never collides. The only realistic
+            # trigger is a resume / bus replay surfacing an old proposal
+            # whose task is already on disk. Skip emitting a fresh
+            # `approved_proposal` decision (which would mislead Orch into
+            # thinking new work was queued) and record an observation so
+            # the audit log still shows what happened.
+            await self._record_observation(
+                "coordinator", "observation",
+                {
+                    "kind": "proposal_materialize_skipped",
+                    "reason": "duplicate_idempotency_key",
+                    "proposal_msg_id": pending.proposal_msg_id,
+                    "task_id": task.task_id,
+                    "task_state": task.state,
+                    "action_name": pending.action_name,
+                    "from_agent": pending.from_agent,
+                },
+            )
+            return
         await self.bus.append_and_seq(Message.new(
             "coordinator", "*", "decision",
             {"kind": "approved_proposal", "task_id": task.task_id,
@@ -1185,11 +1243,40 @@ class Coordinator:
                     "tested_variant_names", tested_names,
                 )
         idempotency_key = intent.payload.get("idempotency_key") or f"{source}:{action_name}:{len(self.state.pending_proposals)}"
-        task = await self.tasks.create(
+        task, was_existing = await self.tasks.create_or_return_existing(
             kind=action_name,
             params=params,
             idempotency_key=idempotency_key,
         )
+        if was_existing:
+            # Surface the dedup as a policy_denied observation so the LLM
+            # sees the rule+hint next tick and can bump the suffix /
+            # change params instead of spinning on the same key. Without
+            # this feedback the LLM treats the silent return as "task
+            # queued" and waits forever for a delegated_result that will
+            # never arrive (the existing task is already terminal).
+            terminal_states = {"succeeded", "failed", "cancelled", "needs_manual_review"}
+            if task.state in terminal_states:
+                hint = (
+                    f"task {task.task_id} terminated as {task.state!r} and will "
+                    f"NOT be re-run. Bump the idempotency_key suffix (e.g. "
+                    f"backends-round-<N+1>) or change params to create a new task."
+                )
+            else:
+                hint = (
+                    f"task {task.task_id} is still {task.state!r}; wait for the "
+                    f"delegated_result event instead of re-emitting the same key."
+                )
+            await self._record_policy_denied(
+                source, intent,
+                PolicyDenied(
+                    f"delegate{{action_name={action_name!r}}} duplicate "
+                    f"idempotency_key={idempotency_key!r}",
+                    rule="duplicate_idempotency_key",
+                    hint=hint,
+                ),
+            )
+            return
         await self.bus.append_and_seq(Message.new(
             "coordinator", "*", "event",
             {"kind": "task_queued", "task_id": task.task_id, "source": source, "action": action_name},
@@ -1340,16 +1427,23 @@ class Coordinator:
                             gain = float(speedup - 1.0) * 100.0
                         self._score_action_keep("kernel_opt", gain_pct=gain)
                     elif decision in {"REVERT", "PARTIAL"}:
-                        self._score_action_discard("kernel_opt")
+                        # Ran but did not promote — count toward the
+                        # no-promote streak rather than the failure
+                        # streak (the optimization itself didn't crash).
+                        self._score_action_no_promote("kernel_opt")
                     else:
-                        # Unknown decision — treat as a measurement, bump
-                        # runs + cooldown without rewarding the action.
+                        # Unknown decision — treat as a measurement: bump
+                        # runs without rewarding or penalising the action.
                         self._score_action_keep("kernel_opt", gain_pct=0.0)
                     self.shared_state.save(self.session_dir)
                 if kind == "integrate":
                     if result.get("status") != "skipped":
                         self.shared_state.record_kernel_integrate_result(result)
                     decision = str(result.get("decision", "")).upper()
+                    int_status = str(result.get("status") or "")
+                    int_failed = int_status in {"failed", "error"} or bool(
+                        result.get("error_class")
+                    )
                     if decision == "KEEP":
                         self._record_integrate_keep(result)
                         gain = result.get("gain_pct")
@@ -1358,9 +1452,15 @@ class Coordinator:
                         )
                         self._score_action_keep("integrate", gain_pct=max(0.0, gain_f))
                     elif decision in {"REVERT", "NEEDS_REVIEW"}:
-                        self._score_action_discard("integrate")
-                    elif result.get("status") != "skipped":
-                        self._score_action_keep("integrate", gain_pct=0.0)
+                        if int_failed:
+                            self._score_action_failure("integrate")
+                        else:
+                            self._score_action_no_promote("integrate")
+                    elif int_status != "skipped":
+                        if int_failed:
+                            self._score_action_failure("integrate")
+                        else:
+                            self._score_action_keep("integrate", gain_pct=0.0)
                     self.shared_state.save(self.session_dir)
                 # Bug B fix: the request was just answered programmatically,
                 # so the LLM-backed kernel agent should NOT see the request
