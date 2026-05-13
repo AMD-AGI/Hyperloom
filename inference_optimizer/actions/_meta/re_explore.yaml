@@ -18,6 +18,9 @@ side_effects:
 preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 20
-lease_ttl_sec: 900
+lease_ttl_sec: 2700
+description: "Re-query KB and reconsider previously-skipped branches when the search has been stuck for several iterations."
+pipeline_phase: support
+typical_runtime_min: 8.0
 applicable_when:
   - "stuck_iterations >= 3"
