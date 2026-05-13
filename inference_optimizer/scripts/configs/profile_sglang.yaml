@@ -41,11 +41,15 @@ benchmark:
     # --- Profiler: graph capture (#126; shape-discovery flag dropped
     # because the deployed SGLang argparse rejects it) ---
     EXTRA_SGLANG_ARGS: "--enable-profile-cuda-graph"
-    # --- Profiler: steady-state window via extra_body (#126) ---
+    # --- Profiler: steady-state window via extra_body (#194) ---
     # PROFILE_EXTRA_BODY is consumed by InferenceX benchmark_lib.sh to inject
     # into the benchmark request body. start_step skips warmup, num_steps
     # limits trace size. Values are overridden at runtime by
-    # _materialize_config_with_envs based on ISL/OSL/CONC.
+    # _materialize_config_with_envs using the TraceLens magpie skill
+    # formulas (issue #194):
+    #   num_steps   (max_iters)   = min(1024, max(256, OSL * 16 / CONC))
+    #   start_step  (delay_iters) = OSL * (RANDOM_RANGE_RATIO + 1) * 3
+    #                                 - max_iters / 2
     PROFILE_EXTRA_BODY: '{"shape_discovery": true, "roofline_annotations": true, "start_step": 40, "num_steps": 16, "merge_profiles": false, "profile_by_stage": false}'
     # --- Profile mode: cap prompts to reduce trace size ---
     PROFILE: "1"

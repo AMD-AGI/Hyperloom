@@ -112,11 +112,17 @@ def materialize_config_with_envs(
         bench.pop("benchmark_script", None)
     envs = bench.setdefault("envs", {})
     for env_key in (
-        "CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "RANDOM_RANGE_RATIO",
+        "CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP",
     ):
         val = os.environ.get(env_key, "").strip()
         if val:
             envs[env_key] = int(val)
+    # RANDOM_RANGE_RATIO is a float (skill default 1.0; common values include
+    # 0.5). It feeds the steady-state delay/max formulas below; do not coerce
+    # to int or the prefill window estimate collapses for fractional ratios.
+    r_env = os.environ.get("RANDOM_RANGE_RATIO", "").strip()
+    if r_env:
+        envs["RANDOM_RANGE_RATIO"] = float(r_env)
     rocr_env = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
     if rocr_env:
         envs["ROCR_VISIBLE_DEVICES"] = rocr_env
@@ -138,17 +144,37 @@ def materialize_config_with_envs(
     osl_val = int(os.environ.get("OSL") or envs.get("OSL") or 256)
     conc_val = int(os.environ.get("CONC") or envs.get("CONC") or 8)
 
-    # TraceLens #126: compute steady-state window for profiling configs.
+    # TraceLens #194: compute steady-state window for profiling configs.
     # Only inject when this is a profile yaml — detected by PROFILE env or
     # `profiler.torch_profiler.enabled: true` in the YAML. The formulas
-    # match issue #126 §3.1.6.
+    # match the TraceLens magpie-benchmark-profiling skill (Option A:
+    # targeted steady-state window) so that Hyperloom-driven profiles
+    # capture the same decode-heavy slice as a manual TraceLens run.
+    #
+    # Skill formulas (RANDOM_RANGE_RATIO defaults to 1.0 if absent):
+    #   max_iters   = min(1024, max(256, OSL * 16 / CONC))
+    #   delay_iters = OSL * (R + 1) * 3 - max_iters / 2
+    #
+    # Example OSL=1024 / CONC=32 / R=1 → max=512, delay=5888 (vs. the
+    # previous 5*CONC / clamp(16*OSL/CONC,4,64) which gave 160 / 64 —
+    # roughly 1/8 of the steady-state window the skill recommends).
     is_profile = (
         str(envs.get("PROFILE", "")).strip() == "1"
         or (bench.get("profiler", {}).get("torch_profiler", {}).get("enabled") is True)
     )
     if is_profile:
-        delay_iters = 5 * conc_val
-        max_iters = max(4, min(64, 16 * osl_val // max(conc_val, 1)))
+        try:
+            r_val = float(envs.get("RANDOM_RANGE_RATIO", 1.0))
+        except (TypeError, ValueError):
+            r_val = 1.0
+        safe_conc = max(conc_val, 1)
+        max_iters = min(1024, max(256, (osl_val * 16) // safe_conc))
+        delay_iters = int(osl_val * (r_val + 1) * 3 - max_iters / 2)
+        # Guard against pathological inputs (tiny OSL / huge R producing a
+        # negative delay collapses to "profile from step 0", which still
+        # captures warmup). Clamp to >= 0.
+        if delay_iters < 0:
+            delay_iters = 0
         fw = str(bench.get("framework") or "").lower()
         if "vllm" in fw:
             existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))

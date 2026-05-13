@@ -271,6 +271,113 @@ def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
 
 
 # ===========================================================================
+# Regression #194: steady-state window must follow the TraceLens magpie
+# skill formulas, not the old `delay = 5*CONC; max = clamp(16*OSL/CONC,4,64)`
+# placeholders.
+#
+# Skill:
+#   max_iters   = min(1024, max(256, OSL * 16 / CONC))
+#   delay_iters = OSL * (RANDOM_RANGE_RATIO + 1) * 3 - max_iters / 2
+#
+# Worked example used in the issue: OSL=1024, CONC=32, R=1
+#   max_iters   = min(1024, max(256, 1024*16/32))   = max(256, 512) = 512
+#   delay_iters = 1024 * (1+1) * 3 - 512/2          = 6144 - 256    = 5888
+#
+# Previous Hyperloom code gave (160, 64) for the same inputs — roughly 1/8
+# of the skill window and ignored R entirely, so issue #194 §1 flagged
+# Optimizer-driven profiles as under-representing decode-heavy steady state.
+# ===========================================================================
+def _profile_yaml(tmp_path, framework: str, envs: dict) -> Path:
+    """Synthesize a minimal profile YAML the materializer recognises as
+    PROFILE=1 + torch_profiler.enabled=True.
+    """
+    import yaml as _yaml
+    src = tmp_path / f"src_{framework}.yaml"
+    src.write_text(_yaml.safe_dump({
+        "benchmark": {
+            "framework": framework,
+            "model": "/m",
+            "envs": {"PROFILE": "1", **envs},
+            "profiler": {"torch_profiler": {"enabled": True}},
+        },
+    }))
+    return src
+
+
+def _clear_workload_env(monkeypatch):
+    for k in (
+        "CONC", "ISL", "OSL", "TP", "MAX_MODEL_LEN",
+        "RANDOM_RANGE_RATIO", "ROCR_VISIBLE_DEVICES", "FRAMEWORK",
+    ):
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_materialize_profile_window_vllm_skill_formula_default_R(
+    tmp_path, monkeypatch,
+):
+    """vLLM: OSL=1024, CONC=32, R unset → max=512, delay=5888 per skill."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.delay_iterations 5888" in extra, extra
+    assert "--profiler-config.max_iterations 512" in extra, extra
+
+
+def test_materialize_profile_window_vllm_skill_formula_explicit_R(
+    tmp_path, monkeypatch,
+):
+    """vLLM: explicit R=0.5 must shrink delay (skill: 3*OSL*(R+1) term)."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("RANDOM_RANGE_RATIO", "0.5")
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    # R=0.5: delay = 1024 * 1.5 * 3 - 512/2 = 4608 - 256 = 4352; max=512.
+    extra = envs["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.delay_iterations 4352" in extra, extra
+    assert "--profiler-config.max_iterations 512" in extra, extra
+    # And R must round-trip into the YAML as a float, not stringified-int.
+    assert envs["RANDOM_RANGE_RATIO"] == 0.5
+
+
+def test_materialize_profile_window_sglang_skill_formula(
+    tmp_path, monkeypatch,
+):
+    """SGLang path writes the same window into PROFILE_EXTRA_BODY."""
+    import json
+    import yaml
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    body = json.loads(rendered["benchmark"]["envs"]["PROFILE_EXTRA_BODY"])
+    assert body["start_step"] == 5888
+    assert body["num_steps"] == 512
+
+
+def test_materialize_profile_window_clamps_to_skill_floor(
+    tmp_path, monkeypatch,
+):
+    """Skill: max_iters has a floor of 256 (not 4) and a ceiling of 1024.
+
+    OSL=256, CONC=64 ⇒ 16*OSL/CONC = 64, so the floor must kick in.
+    Old formula clamped to 64; new formula must clamp to 256.
+    """
+    import yaml
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 64, "ISL": 256, "OSL": 256})
+    out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.max_iterations 256" in extra, extra
+
+
+# ===========================================================================
 # Regression: $FRAMEWORK env switches the default yaml between sglang/vllm
 # without anyone passing config_path explicitly. Locks down the entry-layer
 # fix for vLLM support — the optimizer used to be sglang-only because all 5
