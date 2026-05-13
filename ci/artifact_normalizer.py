@@ -284,6 +284,10 @@ def normalize_task_result(
         "run": run or {},
         "task": {
             "task_id": manifest_record.get("task_id"),
+            # Claw session UUID — same value SaFE / Hyperloom-Web dashboards
+            # use to deep-link into the chat transcript. Populated by
+            # optimize_submit::wait_and_collect_one from SaFE task.clawSessionId.
+            "claw_session_id": manifest_record.get("claw_session_id"),
             "model": manifest_record.get("model"),
             "display_name": manifest_record.get("display_name"),
             "submit_status": manifest_record.get("status"),
