@@ -440,8 +440,19 @@ Then emit:
             params: {kernel_id: <picked kernel_id>,
                      source_file: <hot_kernels[i].source_file>,
                      candidates_path: <select_kernels_done.candidates_path>,
-                     backends: 'claude',
                      budget_minutes: 60}}
+
+  HARD RULE — backend selection: DO NOT add a `backends` field unless the
+  operator has explicitly asked you to pin a specific backend. The
+  kernel-agent's `choose_backends()` auto-picks per kernel from
+  `(source_type, benchmark_available)`:
+    - hip_cpp + bench → GEAK
+    - triton + bench → GEAK, then Claude/Codex as fallback
+    - python / unknown → Claude, Codex
+  Hard-coding `backends: 'claude'` here forces every kernel through Claude
+  even on hip_cpp+bench candidates that GEAK can rewrite, which is the
+  exact regression that closed #144's last comment Layer 2. Omit the field
+  and let auto-pick fire.
 
 Step **K3**. When `run_optimization_done` arrives, look at
 `result.proposal.decision`:

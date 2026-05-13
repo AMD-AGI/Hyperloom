@@ -314,3 +314,70 @@ def test_time_budget_section_lists_all_enabled_phases(registry, rules_path):
     # Mandatory rule about validate_stack must be in the budget section so
     # the LLM treats it as part of the schedule, not a side note.
     assert "validate_stack" in pipeline_block
+
+
+# ---------------------------------------------------------------------------
+# #144 last comment Layer 2: orchestrator must NOT pre-pin backends='claude'
+# ---------------------------------------------------------------------------
+def test_run_optimization_example_does_not_pin_backends_to_claude(
+    registry, rules_path,
+):
+    """The ``run_optimization`` example in the kernel-opt pipeline section
+    must NOT contain a literal ``backends: 'claude'`` (or any other backend
+    pin). When the example carried that literal, the LLM echoed it on
+    every kernel-opt request and ``kernel_optimization.choose_backends()``
+    short-circuited to Claude only — even on hip_cpp+benchmark kernels
+    that GEAK can rewrite (the exact regression closed in #144 last
+    comment Layer 2)."""
+    text = build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=FULL_ENABLED_ACTIONS,
+        framework="sglang",
+        objective_kind="time_only",
+        objective_value=None,
+        max_minutes=120,
+        rules_fragment_path=rules_path,
+    )
+    # The example block lives inside the kernel-opt pipeline section.
+    assert "## 6. KERNEL-OPT PIPELINE" in text or "KERNEL-OPT PIPELINE" in text
+    # Extract the K2 step block (where the run_optimization example lives).
+    # We don't want to test on the entire prompt because legitimate
+    # mentions of "claude" elsewhere (e.g. in the explanatory comment)
+    # are fine.
+    assert "kind: 'run_optimization'" in text
+    k2_section = text.split("kind: 'run_optimization'", 1)[1]
+    example_block = k2_section.split("budget_minutes")[0]
+    # The example's `params:` block must NOT carry a `backends: 'claude'`
+    # (or any other backend) literal.
+    assert "backends: 'claude'" not in example_block, (
+        "orchestrator example must not pin backends='claude' — that's the "
+        "#144 last comment Layer 2 regression"
+    )
+    assert "backends: 'codex'" not in example_block
+    assert "backends: 'geak'" not in example_block
+
+
+def test_run_optimization_section_documents_auto_pick_rule(registry, rules_path):
+    """The kernel-opt pipeline section must document that backends are
+    auto-picked by the kernel-agent — so a future contributor doesn't
+    re-add the literal pin "for clarity" and regress #144."""
+    text = build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=FULL_ENABLED_ACTIONS,
+        framework="sglang",
+        objective_kind="time_only",
+        objective_value=None,
+        max_minutes=120,
+        rules_fragment_path=rules_path,
+    )
+    # Look for the auto-pick guidance in the K2 step.
+    k2_section = text.split("kind: 'run_optimization'", 1)[1].split("Step **K3**")[0]
+    assert "auto-pick" in k2_section.lower() or "auto-picks" in k2_section.lower(), (
+        "K2 step must document that backends are auto-picked"
+    )
+    assert "choose_backends" in k2_section, (
+        "K2 step must reference the kernel-agent function that does the pick"
+    )
+    # And the historical regression must be called out so the rationale
+    # survives a casual prompt-template cleanup.
+    assert "#144" in k2_section
