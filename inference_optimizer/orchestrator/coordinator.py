@@ -1928,6 +1928,25 @@ class Coordinator:
                     (float(tput) - self.shared_state.baseline_tput)
                     / self.shared_state.baseline_tput * 100.0
                 )
+                # Validate-stack is a *measurement*, not a decision
+                # gate: even when the re-bench lands at or below the
+                # baseline we still record the number so the timeline /
+                # state.json reflects ground truth. The warning below
+                # flags the regression so an operator (or a future
+                # rollback policy) can react, but we deliberately leave
+                # ``optimization_stack`` / ``current_best`` /
+                # ``cumulative_gain`` untouched here.
+                VALIDATE_STACK_WARN_THRESHOLD_PCT = 0.0
+                if gain <= VALIDATE_STACK_WARN_THRESHOLD_PCT:
+                    log.warning(
+                        "validate_stack: cumulative_gain_validated=%.2f%% <= %.1f%% "
+                        "(tput=%.2f vs baseline=%.2f, stack_len=%d). Recording the "
+                        "measurement but NOT rolling back optimization_stack — "
+                        "validate_stack remains a measurement, not a decision gate.",
+                        gain, VALIDATE_STACK_WARN_THRESHOLD_PCT, float(tput),
+                        self.shared_state.baseline_tput,
+                        len(self.shared_state.optimization_stack),
+                    )
                 self.shared_state.cumulative_gain_validated = float(gain)
                 self.shared_state.cumulative_gain_validated_ts = (
                     datetime.now(timezone.utc).isoformat()
@@ -2006,15 +2025,19 @@ class Coordinator:
                 self.shared_state.save(self.session_dir)
                 return
             # Promote a grid-runner winner if it actually beat the
-            # current best by a meaningful margin. We use 0.5% as the
-            # 1-shot KEEP threshold (relaxed from marathon's original
-            # 1.0% per the resume5 9h finding: 35/38 winners landed in
-            # the 0.3–0.84% band but never promoted because each
-            # individual run sat under 1.0%) AND, as a separate path,
-            # promote ANY consistent winner that wins ≥ 2 of last 3
-            # rounds with average gain ≥ 0.3% — that's the cross-round
-            # signal-vs-noise check.
-            PROMOTE_THRESHOLD_PCT = 0.5
+            # current best by a meaningful margin. We use 0.1% as the
+            # 1-shot KEEP threshold — further relaxed from the prior
+            # 0.5% bar (which itself relaxed marathon's 1.0% per the
+            # resume5 9h finding). The 0.1% gate lets sub-noise winners
+            # enter optimization_stack early so they can compound with
+            # downstream KEEPs; the validate_stack rebench then acts as
+            # the final filter (see validate_stack handler — currently
+            # record-only with a 0.0% warning gate). AND, as a separate
+            # path, promote ANY consistent winner that wins ≥ 2 of last
+            # 3 rounds with average gain ≥ 0.3% — that's the cross-round
+            # signal-vs-noise check (now mostly redundant given the
+            # lower 1-shot bar, but harmless).
+            PROMOTE_THRESHOLD_PCT = 0.1
             CROSS_ROUND_LOOKBACK = 3
             CROSS_ROUND_MIN_APPEARANCES = 2
             CROSS_ROUND_MIN_AVG_GAIN_PCT = 0.3
