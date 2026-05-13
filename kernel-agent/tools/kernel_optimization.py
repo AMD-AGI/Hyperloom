@@ -222,7 +222,7 @@ def _hardware_prompt_blocks(target_platform: str) -> tuple[str, str]:
         )
         notes = "\n".join([
             "Hardware notes (target platform unknown):",
-            "- Before benchmarking, query the runtime environment for the ROCm arch "
+            "- Before benchmarking, query the runtime environment for the ROCm arch ",
             "(hipDeviceGetName/rocminfo), visible GPU IDs (ROCR_VISIBLE_DEVICES), "
             "and memory size/bandwidth.",
             "- Record those values in the result and choose --offload-arch=<arch> "
