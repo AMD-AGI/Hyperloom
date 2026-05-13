@@ -22,5 +22,8 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 20
 lease_ttl_sec: 1200
+description: "Restore the workspace from the last good checkpoint and relaunch the server after a crash or REVERT."
+pipeline_phase: support
+typical_runtime_min: 5.0
 applicable_when:
   - "needs_recovery == true"

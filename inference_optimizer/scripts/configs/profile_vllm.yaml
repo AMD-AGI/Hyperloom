@@ -4,6 +4,22 @@
 # TraceLens) can read. `benchmark.model` and `benchmark.runner_type` are
 # OVERRIDDEN at runtime — see baseline_sglang.yaml header for the full
 # rationale.
+#
+# TraceLens integration (#126): profiler is configured for:
+#   1. Steady-state windowing
+#      (--profiler-config.delay_iterations/max_iterations)
+#   2. Frontend filtering (--profiler-config.ignore_frontend) so the
+#      trace contains only the engine forward path
+#   3. Torch profiler shape/memory/flops/gzip fields injected by Magpie's
+#      vllm_*.sh when PROFILE=1.
+# These are required for TraceLens fusion / roofline analysis.
+#
+# Note: `--profiler-config.detailed_trace_annotation` was a transient
+# field on a fork of vLLM 0.15. It is NOT part of the upstream
+# ProfilerConfig schema (vLLM 0.19 rejects it as an unknown JSON key),
+# so we no longer inject it. capture_torch_profiler_dir is also not
+# in the upstream schema yet; re-enable both once they land in the
+# deployed vLLM build.
 
 benchmark:
   framework: vllm
@@ -13,8 +29,8 @@ benchmark:
   run_mode: local
 
   envs:
-    TP: 1
-    CONC: 8
+    TP: 8
+    CONC: 64
     ISL: 256
     OSL: 256
     RANDOM_RANGE_RATIO: 1
@@ -22,11 +38,24 @@ benchmark:
     # ROCR_VISIBLE_DEVICES injected at runtime by baseline.py
     # (`0..TP-1`); export `ROCR_VISIBLE_DEVICES=...` to override.
     PATH: "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    # --- Profiler: vLLM steady-state + annotations (#126) ---
+    # Appended to the vllm serve command via EXTRA_VLLM_ARGS. Magpie's
+    # vllm_*.sh wires the torch profiler core (profiler / dir /
+    # record_shapes / with_memory / with_flops / use_gzip); we add the
+    # TraceLens-relevant knobs that map to upstream ProfilerConfig in
+    # the validation vLLM build (0.19+). delay_iterations and
+    # max_iterations are overridden by _materialize_config_with_envs:
+    #   delay = 5 * CONC (skip warmup); max = clamp(16 * OSL / CONC, 4, 64)
+    EXTRA_VLLM_ARGS: "--profiler-config.ignore_frontend True"
+    # vLLM timeout must be extended during profiling (graph capture is slow)
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+    # --- Profile mode: cap prompts to reduce trace size ---
+    PROFILE: "1"
 
   gpu_selection:
     auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime
 
-  timeout_seconds: 900               # profile adds ~30-90s vs plain baseline
+  timeout_seconds: 2400              # 40 min hard cap (profile adds ~30-90s vs plain baseline)
 
   profiler:
     torch_profiler:
