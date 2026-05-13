@@ -192,10 +192,20 @@ class _PatchPlan:
     """All information needed to apply (or verify) a patch set."""
     framework: str
     version: str
-    apply_root: Path             # cwd for ``git apply``
-    patches: tuple[Path, ...]    # in apply order
-    sentinel_file: Path          # file we grep to detect "already patched"
-    sentinel_text: str           # substring expected in sentinel_file
+    apply_root: Path                       # cwd for ``git apply``
+    patches: tuple[Path, ...]              # in apply order
+    sentinel_file: Path                    # file we grep to detect "already patched"
+    # PR-D §4: list of substrings that MUST ALL be present in
+    # ``sentinel_file`` for the install to count as patched. A single
+    # substring (the historical case) goes in a 1-tuple; multi-element
+    # tuples raise the bar for accidental false positives if upstream
+    # ever happens to merge a field name we use as a marker (the
+    # combined probability of N marker strings ALL appearing
+    # un-coordinated is vanishingly small). The vLLM plan uses both
+    # ``capture_torch_profiler_dir`` and ``detailed_trace_annotation``,
+    # which the TraceLens patch always adds together but upstream has
+    # no reason to merge as a co-occurring pair.
+    sentinel_text: tuple[str, ...]
     # PR-D §1: per-plan ``-p<N>`` strip count. Editable SGLang layouts
     # and the vLLM patch set both use ``-p1`` (default); wheel-install
     # SGLang uses ``-p3`` so the ``a/python/sglang/`` prefix is
@@ -264,13 +274,19 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
         )
         return None
 
+    # PR-D §4: both substrings live in the same dataclass body that
+    # the TraceLens patch adds to ``profiler.py``. Requiring BOTH
+    # collapses the false-positive surface to ~zero: upstream vLLM
+    # has no reason to add a config field named both
+    # ``capture_torch_profiler_dir`` AND ``detailed_trace_annotation``
+    # without also adopting the TraceLens patch.
     return _PatchPlan(
         framework="vllm",
         version=version,
         apply_root=install_root,
         patches=(patch_file,),
         sentinel_file=sentinel,
-        sentinel_text="capture_torch_profiler_dir",
+        sentinel_text=("capture_torch_profiler_dir", "detailed_trace_annotation"),
     )
 
 
@@ -340,7 +356,11 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         apply_root=apply_root,
         patches=patches,
         sentinel_file=sentinel,
-        sentinel_text="kernel_shape_profiler",
+        # The SGLang sentinel file ``kernel_shape_profiler.py`` is
+        # *created* by the patch — its mere existence + a unique
+        # internal identifier is already a robust signal. Kept as a
+        # 1-tuple for type uniformity with vLLM (PR-D §4).
+        sentinel_text=("kernel_shape_profiler",),
         apply_strip=apply_strip,
     )
 
@@ -387,12 +407,19 @@ def _ensure_patched(plan: _PatchPlan) -> bool:
 
 
 def _is_patched(plan: _PatchPlan) -> bool:
+    """True iff the sentinel file exists AND every marker substring in
+    ``plan.sentinel_text`` is present. The all-of-N rule (PR-D §4)
+    raises the bar for false positives if upstream ever merges one of
+    our marker identifiers without also adopting the TraceLens patch
+    — the combined probability of all N markers co-occurring
+    un-coordinated is vanishingly small."""
     try:
         if not plan.sentinel_file.exists():
             return False
-        return plan.sentinel_text in plan.sentinel_file.read_text(
+        content = plan.sentinel_file.read_text(
             encoding="utf-8", errors="replace",
         )
+        return all(marker in content for marker in plan.sentinel_text)
     except OSError:
         return False
 
