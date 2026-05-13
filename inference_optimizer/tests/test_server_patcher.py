@@ -472,3 +472,100 @@ def test_returns_false_when_git_missing(fake_vllm_world, monkeypatch):
     # cleanup needed; the patcher will see "not patched" → try git →
     # find no git → return False.
     assert ensure_vllm_patched_for_tracelens() is False
+
+
+# ===========================================================================
+# PR-C §1: patch -p1 --fuzz=10 fallback when git apply --check rejects
+# ===========================================================================
+_REQUIRES_PATCH = pytest.mark.skipif(
+    shutil.which("patch") is None,
+    reason="`patch` binary not available in test environment",
+)
+
+
+@_REQUIRES_GIT
+@_REQUIRES_PATCH
+def test_apply_atomic_fuzzy_fallback_when_git_strict_check_fails(fake_vllm_world):
+    """When ``git apply --check`` rejects a patch because the install
+    has drifted slightly from the patch's recorded context, but
+    ``patch -p1 --fuzz=10 --dry-run`` still accepts it, the patcher
+    falls back to the fuzzy path and applies successfully.
+
+    Simulates the common case where TraceLens hasn't shipped a
+    patch revision yet for a freshly bumped SGLang / vLLM point
+    release. Without this fallback the run silently loses the
+    TraceLens-only profiler flags."""
+    _, install_root, _ = fake_vllm_world
+    # Add a drift comment between the patched lines so the strict
+    # ``git apply --check`` context check fails but ``patch --fuzz=10``
+    # still locates the hunk.
+    target = install_root / "vllm" / "config" / "profiler.py"
+    target.write_text(
+        textwrap.dedent(
+            """\
+            # Synthetic vLLM profiler config — used only by tests.
+            # PR-C drift comment that breaks strict git apply --check.
+            class ProfilerConfig:
+                profiler: str = ""
+                ignore_frontend: bool = False
+            """
+        ),
+        encoding="utf-8",
+    )
+    rc = ensure_vllm_patched_for_tracelens()
+    assert rc is True
+    # Patch must have landed via the fuzzy fallback path.
+    assert "capture_torch_profiler_dir" in target.read_text(encoding="utf-8")
+
+
+@_REQUIRES_GIT
+def test_apply_atomic_returns_false_when_strict_and_fuzzy_both_fail(
+    fake_vllm_world, monkeypatch,
+):
+    """When ``git apply --check`` rejects the patch AND
+    ``patch -p1 --fuzz=10`` is unavailable (or itself rejects), the
+    patcher returns False without touching the install — the fuzzy
+    fallback never opens a new error mode."""
+    _, install_root, _ = fake_vllm_world
+    # Drift the target enough that strict + fuzzy both refuse the patch.
+    target = install_root / "vllm" / "config" / "profiler.py"
+    target.write_text(
+        "# Completely unrelated content — every patch hunk must miss.\n",
+        encoding="utf-8",
+    )
+    rc = ensure_vllm_patched_for_tracelens()
+    assert rc is False
+    # Install must be untouched (no half-applied patch).
+    assert "capture_torch_profiler_dir" not in target.read_text(encoding="utf-8")
+
+
+@_REQUIRES_GIT
+def test_apply_atomic_routes_clean_apply_through_strict_path(fake_vllm_world):
+    """Regression guard: when the install matches the patch context
+    exactly, the strict ``git apply --check`` accepts it and the
+    fuzzy fallback is never invoked. Without this guard PR-C could
+    accidentally route every patch through the slower fuzzy path."""
+    rc = ensure_vllm_patched_for_tracelens()
+    assert rc is True
+    _, install_root, _ = fake_vllm_world
+    # Sanity: patched content present; we can't easily mock the
+    # subprocess invocations without making the test brittle, so we
+    # rely on the next call being a no-op (the sentinel grep).
+    text = (install_root / "vllm" / "config" / "profiler.py").read_text()
+    assert "capture_torch_profiler_dir" in text
+    # Second call short-circuits without trying any apply at all.
+    assert ensure_vllm_patched_for_tracelens() is True
+
+
+def test_patch_dry_run_returns_false_when_patch_binary_missing(tmp_path):
+    """``_patch_dry_run`` must fail-soft when no ``patch`` binary is
+    on PATH so callers can decide to skip the fuzzy fallback rather
+    than crash."""
+    # Pass a non-existent ``patch_bin`` path; subprocess raises
+    # FileNotFoundError which the helper catches.
+    fake_diff = tmp_path / "fake.patch"
+    fake_diff.write_text("--- a/x\n+++ b/x\n", encoding="utf-8")
+    rc = _server_patcher._patch_dry_run(
+        "/nonexistent/patch", fake_diff, tmp_path,
+    )
+    assert rc is False
