@@ -32,6 +32,14 @@ TRACE_TOOL = ROOT / "tools" / "tracelens_analysis.py"
 OPT_TOOL = ROOT / "tools" / "kernel_optimization.py"
 BASELINE_SCRIPT = REPO_ROOT / "marathon/skills/scripts/run_baseline.sh"
 
+# Local sibling import for the collective-name fallback. tools/ is on
+# sys.path when this file is run via `python -m` / direct subprocess from
+# the kernel_optimization handler; use a relative-style import via the
+# tools dir.
+sys.path.insert(0, str(ROOT / "tools"))
+from _collective_names import kernel_name_implies_multigpu  # noqa: E402
+sys.path.pop(0)
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -437,7 +445,19 @@ def main() -> int:
         # populated, which silently disabled patch_retest. Pick a multi-GPU
         # safe single test: prefer `bench`-style scripts, then `test_*` files.
         bench_files = list(selected.get("benchmark_files") or [])
-        is_multigpu = bool(selected.get("is_multigpu"))
+        # is_multigpu has two paths into True: TraceLens flagged it OR the
+        # leaf kernel name matches a known collective (all_reduce /
+        # all_gather / reduce_scatter / all_to_all / broadcast / nccl_* /
+        # rccl_*). The latter is a fallback for the r24 custom_allreduce
+        # case where TraceLens reported is_multigpu=False / num_gpus=1.
+        selected_name = str(selected.get("name") or "")
+        name_says_collective = kernel_name_implies_multigpu(selected_name)
+        is_multigpu = bool(selected.get("is_multigpu")) or name_says_collective
+        if name_says_collective and not bool(selected.get("is_multigpu")):
+            summary["multigpu_inferred_from_name"] = (
+                f"is_multigpu inferred from kernel name {selected_name!r} "
+                "(TraceLens did not flag is_multigpu=True)"
+            )
         harness_path = ""
         if bench_files:
             preferred = [b for b in bench_files if "bench" in Path(b).name.lower()]
@@ -451,9 +471,21 @@ def main() -> int:
 
         # GPU budgeting: communication kernels need >=2 GPUs; computation
         # kernels run on 1. Total concurrency is capped by total_gpus.
-        per_task_gpus = (args.num_gpus_override
-                         if args.num_gpus_override > 0
-                         else int(selected.get("num_gpus_recommended") or 1))
+        if args.num_gpus_override > 0:
+            per_task_gpus = args.num_gpus_override
+        else:
+            per_task_gpus = int(selected.get("num_gpus_recommended") or 1)
+            if is_multigpu and per_task_gpus < 2:
+                # The kernel is a collective (per is_multigpu) but
+                # TraceLens reported num_gpus_recommended < 2. Force-bump
+                # to args.tp (or 2 floor) so the GEAK drop below fires
+                # and so torchrun --nproc>=2 is required by the harness.
+                per_task_gpus = max(2, int(getattr(args, "tp", 0) or 2))
+                summary.setdefault(
+                    "per_task_gpus_inferred",
+                    f"raised to {per_task_gpus} from collective name "
+                    "pattern; TraceLens reported num_gpus_recommended<2",
+                )
         backends = [b.strip() for b in args.backends.split(",") if b.strip()]
         # GEAK is fundamentally a SINGLE-GPU patch evaluator (its sub-agent
         # framework spawns nested ray.remote(num_gpus=1) tasks for patch

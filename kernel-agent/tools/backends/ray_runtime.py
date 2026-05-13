@@ -67,14 +67,21 @@ def stop_ray_if_owned(started: bool, log_path: Optional[Path] = None) -> None:
 # `set_visible_accelerator_ids` IndexError on ROCm.
 SAFE_ENV_KEYS = (
     "PATH", "HOME", "LD_LIBRARY_PATH",
+    "HYPERLOOM_KERNEL_AGENT_ROOT", "KERNEL_AGENT_ROOT",
+    "INFERENCE_OPTIMIZER_SESSION_DIR", "HYPERLOOM_RUNTIME_DIR", "KERNEL_AGENT_ENV",
+    "WORKSPACE_ROOT", "WORKSPACE_PATH", "MAGPIE_DIR", "INFERENCEX_PATH",
     "SAFE_API_KEY",
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
     "OPENAI_API_KEY", "OPENAI_BASE_URL",
     "OOB_API_KEY", "OOB_BASE_URL", "OOB_LOCAL", "OOB_HOME",
-    "AMD_API_KEY", "AMD_LLM_API_KEY",
+    "AMD_API_KEY", "AMD_LLM_API_KEY", "LLM_GATEWAY_KEY",
     "LLM_API_KEY", "LLM_API_BASE", "LLM_PROXY_API_KEY", "LLM_PROXY_BASE_URL",
     "GEAK_CONFIG", "GEAK_MODEL_NAME", "GEAK_API_KEY", "GEAK_BASE_URL",
     "GEAK_WORK_DIR",
+    "GEAK_MEMORY_STORE_PATH", "GEAK_SAVE_TO_KNOWLEDGE_BASE",
+    "GEAK_MEMORY_MIN_SPEEDUP", "GEAK_CROSS_SESSION_MEMORY_URL",
+    "GEAK_MEMORY_API_KEY", "GEAK_USE_KNOWLEDGE_BASE",
+    "GEAK_MEMORY_DISABLE", "GEAK_MEMORY_NO_CROSS_SESSION",
     "MSWEA_MODEL_NAME",
     "AGENT_WORKSPACE_ROOT",
 )
@@ -90,6 +97,7 @@ def safe_runtime_env() -> dict:
         env.setdefault("GEAK_API_KEY", env["SAFE_API_KEY"])
         env.setdefault("LLM_API_KEY", env["SAFE_API_KEY"])
         env.setdefault("AMD_LLM_API_KEY", env["SAFE_API_KEY"])
+        env.setdefault("LLM_GATEWAY_KEY", env["SAFE_API_KEY"])
     if "OPENAI_BASE_URL" in env:
         env.setdefault("ANTHROPIC_BASE_URL", env["OPENAI_BASE_URL"])
         env.setdefault("OOB_BASE_URL", env["OPENAI_BASE_URL"])

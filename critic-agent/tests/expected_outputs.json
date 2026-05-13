@@ -268,5 +268,159 @@
       }
     ],
     "notes": []
+  },
+  "decision-001-adopt-with-session-evidence": {
+    "kind": "critic_decision_review",
+    "session_id": "sess-decision-001",
+    "decision_id": "dec-001",
+    "verdict": "adopt",
+    "confidence": "high",
+    "reason": "Patch X reproducer benchmark shows +4.2% tput at the active dispatch path, accuracy gate is green, and rollback is documented.",
+    "recommendation": "Proceed; clear compiled cache before final benchmark.",
+    "basis": "session",
+    "kb_evidence": [],
+    "session_evidence": [
+      "benchmark.after.gain_pct",
+      "accuracy_gate.status",
+      "dispatch_evidence.active_path_proven"
+    ],
+    "required_context": [],
+    "notes": []
+  },
+  "decision-002-needs-info-when-context-missing": {
+    "kind": "critic_decision_review",
+    "session_id": "sess-decision-002",
+    "decision_id": "dec-002",
+    "verdict": "needs_info",
+    "confidence": "low",
+    "reason": "Cannot decide: critical context (model, framework) is missing from the request and session memory.",
+    "recommendation": "Resend the decision with model and framework populated.",
+    "basis": "insufficient_context",
+    "kb_evidence": [],
+    "session_evidence": [],
+    "required_context": ["model", "framework"],
+    "notes": [
+      "needs_info follows the hard rule: do not invent missing context."
+    ]
+  },
+  "decision-003-revise-when-kb-flags-side-effect": {
+    "kind": "critic_decision_review",
+    "session_id": "sess-decision-003",
+    "decision_id": "dec-003",
+    "verdict": "revise",
+    "confidence": "medium",
+    "reason": "KB pitfall warns about cache clear after dispatch path changes, and the benchmark has not been rerun.",
+    "recommendation": "Rerun the benchmark after cache clear before adopting.",
+    "basis": "mixed",
+    "kb_evidence": [
+      {
+        "id": "kb_xxx",
+        "kind": "pitfall",
+        "slug": "cache-clear-required-after-dispatch-change"
+      }
+    ],
+    "session_evidence": [],
+    "required_context": [],
+    "notes": []
+  },
+  "inbox-001-two-proposals-mixed-verdicts": {
+    "kind": "intent_envelope",
+    "intents": [
+      {
+        "intent_type": "review_verdict",
+        "payload": {
+          "target_proposal_msg_id": "aaa1",
+          "verdict": "approve",
+          "source": "critic",
+          "reasoning": "Baseline carries comparable tput and rollback; approve.",
+          "predicted_gain_pct": 0,
+          "confidence": "high",
+          "kb_evidence": [],
+          "packet_evidence": [
+            "benchmark.after.gain_pct",
+            "accuracy_gate.status",
+            "rollback.available"
+          ],
+          "risks": [],
+          "required_evidence": [],
+          "alternative_action": null,
+          "advice_text": "",
+          "notes": []
+        }
+      },
+      {
+        "intent_type": "review_verdict",
+        "payload": {
+          "target_proposal_msg_id": "bbb2",
+          "verdict": "reject",
+          "source": "critic",
+          "reasoning": "Active dispatch path is unproven for the kernel rewrite; require dispatch evidence before retry.",
+          "predicted_gain_pct": null,
+          "confidence": "high",
+          "kb_evidence": [
+            "kb:qwen/qwen3-14b/active-path-unproven-pitfall"
+          ],
+          "packet_evidence": [],
+          "risks": [
+            {
+              "type": "active_path_unproven",
+              "severity": "blocker",
+              "reason": "No proof that the kernel rewrite is on the active dispatch path.",
+              "required_fix": "Provide dispatch_evidence.active_path_proven=true",
+              "evidence_ref": "dispatch_evidence"
+            }
+          ],
+          "required_evidence": [
+            "dispatch_evidence.active_path_proven"
+          ],
+          "alternative_action": null,
+          "advice_text": "",
+          "notes": []
+        }
+      }
+    ]
+  },
+  "inbox-002-empty-inbox-emits-heartbeat": {
+    "kind": "intent_envelope",
+    "intents": [
+      {
+        "intent_type": "send_message",
+        "payload": {
+          "topic": "heartbeat",
+          "body_md": "ok (critic)"
+        }
+      }
+    ]
+  },
+  "inbox-003-needs-review-when-context-missing": {
+    "kind": "intent_envelope",
+    "intents": [
+      {
+        "intent_type": "review_verdict",
+        "payload": {
+          "target_proposal_msg_id": "ccc3",
+          "verdict": "needs_review",
+          "source": "critic_unavailable",
+          "reasoning": "Model and framework missing from shared session state and session memory; cannot review.",
+          "predicted_gain_pct": null,
+          "confidence": "low",
+          "kb_evidence": [],
+          "packet_evidence": [],
+          "risks": [
+            {
+              "type": "insufficient_context",
+              "severity": "blocker",
+              "reason": "model and framework are required to evaluate the proposal.",
+              "required_fix": "Resend with shared session state populated.",
+              "evidence_ref": "shared_session_state"
+            }
+          ],
+          "required_evidence": ["shared_session_state.model", "shared_session_state.framework"],
+          "alternative_action": null,
+          "advice_text": "",
+          "notes": []
+        }
+      }
+    ]
   }
 }

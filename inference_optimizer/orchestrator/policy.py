@@ -29,6 +29,7 @@ v0.6 changes vs v0.5:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .intent_parser import Intent, IntentType
@@ -111,12 +112,60 @@ ROBUSTNESS_ONLY_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
 
 
 # ---------------------------------------------------------------------------
+# SESSION_DIR path containment (DESIGN v0.6.1 §23 / §14.5).
+#
+# Any payload field listed in _PATH_LIKE_FIELDS must point either
+# (a) inside the active session_dir, OR
+# (b) under one of the framework source allowlists below (so kernel-agent
+#     can reference aiter/sglang/vllm source trees without violation).
+#
+# The check is applied recursively to dict values; nested dicts (e.g.
+# request.params.trace_input) are walked.
+# ---------------------------------------------------------------------------
+PATH_LIKE_FIELDS: frozenset[str] = frozenset({
+    "trace_input",
+    "candidates_path",
+    "patch_path",
+    "target_file",
+    "config_path",
+    "output_dir",
+    "workspace",
+    "workspace_path",
+    "trace_dir",
+    "main_trace_path",
+    "report_path",
+    "json_path",
+    "md_path",
+    "session_dir",
+    "backup_root",
+    "manifest_path",
+})
+
+# `source_file` is a special case — kernel agents reference framework
+# source trees that legitimately live outside session_dir. We allowlist
+# the well-known parents here; anything else falls through to the
+# session_dir containment check.
+SOURCE_FILE_ALLOWLIST: tuple[str, ...] = (
+    "/sgl-workspace/aiter/",
+    "/sgl-workspace/sglang/",
+    "/sgl-workspace/vllm/",
+)
+
+# Field name-only allowlist: when the payload key is `source_file`, the
+# value may match SOURCE_FILE_ALLOWLIST instead of being session-rooted.
+SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file"})
+
+
+# ---------------------------------------------------------------------------
 # Core SharedState fields that only the Coordinator may mutate.
 # ---------------------------------------------------------------------------
 CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "current_best",
     "stop_reason",
     "cumulative_gain",
+    "cumulative_gain_validated",
+    "cumulative_gain_validated_ts",
+    "cumulative_gain_validated_stack_len",
     "baseline_tput",
     "baseline_accuracy",
     "session_id",
@@ -138,10 +187,31 @@ class PolicyGate:
         action_registry: optional name → ActionMetadata lookup; v0.6 fallback
                          accepts any action name not on KERNEL_OWNED_ACTIONS
                          (no mode gating; single full mode per ADR-34).
+        session_dir:     active session root for path-containment checks.
+                         When None, the path check is skipped.
+        strict_paths:    when True (production), payload field values that
+                         match :data:`PATH_LIKE_FIELDS` MUST resolve under
+                         ``session_dir`` (or the source-file allowlist for
+                         ``source_file``). Production CLI flips this on;
+                         legacy tests with ``/tmp/<fixture>.json`` fixtures
+                         keep it False. ``$INFERENCE_OPTIMIZER_STRICT_PATHS=1``
+                         in env also enables it for in-process callers.
     """
 
     role_registry: dict[str, "AgentRole"]
     action_registry: Any | None = None
+    session_dir: Path | None = None
+    strict_paths: bool = False
+
+    def __post_init__(self) -> None:  # noqa: D401 — dataclass hook
+        # Allow env to enable strict mode without threading a constructor
+        # arg through every Coordinator caller (tests use a monkeypatched
+        # env to opt in).
+        import os as _os
+        if not self.strict_paths and _os.environ.get(
+            "INFERENCE_OPTIMIZER_STRICT_PATHS", ""
+        ).strip() in ("1", "true", "yes"):
+            self.strict_paths = True
 
     # ------------------------------------------------------------------
     # Public API
@@ -190,6 +260,11 @@ class PolicyGate:
             self._validate_robustness_only(role, intent.type, payload)
         # ANSWER / ASK_QUESTION / UPDATE_PERSONA / ALERT carry no
         # extra side-effect checks beyond the role gate.
+
+        # Path-containment guard — every payload that travels through
+        # the bus is scanned for `_PATH_LIKE_FIELDS`; offending paths
+        # raise PolicyDenied(rule="path_outside_session_dir").
+        self._validate_payload_paths(role, intent.type, payload)
 
     def allowed_tools_for_agent(self, agent_name: str) -> list[str]:
         """Return the Claude tool list a reactor may use.
@@ -363,6 +438,76 @@ class PolicyGate:
                 rule="kill_scope",
             )
 
+    def _path_under_session(self, value: str) -> bool:
+        if self.session_dir is None:
+            return True
+        try:
+            sd = self.session_dir.resolve()
+            v = Path(str(value)).resolve()
+        except (OSError, RuntimeError):
+            return False
+        try:
+            return v == sd or v.is_relative_to(sd)
+        except AttributeError:  # pragma: no cover — Python <3.9
+            try:
+                v.relative_to(sd)
+                return True
+            except ValueError:
+                return False
+
+    def _path_in_source_allowlist(self, value: str) -> bool:
+        s = str(value)
+        return any(s.startswith(p) for p in SOURCE_FILE_ALLOWLIST)
+
+    def _validate_payload_paths(
+        self, role: "AgentRole", intent_type: IntentType, payload: dict[str, Any],
+    ) -> None:
+        """Walk payload dict; reject path-like values escaping session_dir.
+
+        Recursive: nested dicts (request.params, response.result, ...)
+        are scanned. Lists of strings are also scanned. The check is
+        a no-op when either ``self.session_dir`` is None OR
+        ``self.strict_paths`` is False (P0 / legacy paths).
+        """
+        if self.session_dir is None or not self.strict_paths:
+            return
+
+        def visit(node: Any, path_keys: tuple[str, ...]) -> None:
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    visit(v, path_keys + (str(k),))
+                return
+            if isinstance(node, (list, tuple)):
+                for item in node:
+                    visit(item, path_keys)
+                return
+            if not isinstance(node, str) or not node.strip():
+                return
+            key = path_keys[-1] if path_keys else ""
+            if key in SOURCE_LIKE_FIELDS:
+                if self._path_in_source_allowlist(node) or self._path_under_session(node):
+                    return
+                raise PolicyDenied(
+                    f"role={role.name!r} {intent_type.value} payload field "
+                    f"{key!r}={node!r} is not under session_dir or any of "
+                    f"{list(SOURCE_FILE_ALLOWLIST)!r}",
+                    rule="source_file_not_allowlisted",
+                    hint=("kernel-opt may only target framework source trees "
+                          "under aiter/sglang/vllm; reject the request"),
+                )
+            if key not in PATH_LIKE_FIELDS:
+                return
+            if not self._path_under_session(node):
+                raise PolicyDenied(
+                    f"role={role.name!r} {intent_type.value} payload field "
+                    f"{key!r}={node!r} escapes session_dir={self.session_dir!s}",
+                    rule="path_outside_session_dir",
+                    hint=("emit paths verbatim from SharedState (e.g. "
+                          "last_profile_trace) or under SESSION_DIR"),
+                )
+
+        visit(payload, ())
+
     def _validate_robustness_only(
         self, role: "AgentRole", intent_type: IntentType, payload: dict[str, Any]
     ) -> None:
@@ -383,6 +528,7 @@ __all__ = [
     "KERNEL_OWNED_ACTIONS",
     "KILL_TASK_ALLOWED_SCOPES",
     "KILL_TASK_SOURCE_ALLOWLIST",
+    "PATH_LIKE_FIELDS",
     "PolicyDenied",
     "PolicyGate",
     "REQUEST_ROUTING",
@@ -390,4 +536,6 @@ __all__ = [
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",
     "ROBUSTNESS_ONLY_INTENTS",
     "ROBUSTNESS_ONLY_SOURCE_ALLOWLIST",
+    "SOURCE_FILE_ALLOWLIST",
+    "SOURCE_LIKE_FIELDS",
 ]
