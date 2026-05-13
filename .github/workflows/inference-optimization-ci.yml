@@ -45,7 +45,7 @@ jobs:
   optimize:
     name: "${{ matrix.key }}"
     needs: prepare
-    runs-on: hyperloom-mh826
+    runs-on: hyperloom-4hhzn
     timeout-minutes: 510
     strategy:
       fail-fast: false
@@ -107,7 +107,7 @@ jobs:
   submit-inferenceX-pr:
     name: Submit InferenceX PR
     needs: optimize
-    runs-on: hyperloom-mh826
+    runs-on: hyperloom-4hhzn
     if: always() && !cancelled()
     steps:
       - uses: actions/checkout@v4
