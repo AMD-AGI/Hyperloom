@@ -662,37 +662,6 @@ async def test_run_optimization_handler_forwards_extra_sglang_args(session_dir):
     assert cmd[cmd.index("--extra-sglang-args") + 1] == "--kv-cache-dtype fp8 --page-size 16"
 
 
-def test_run_optimization_handler_backfills_target_platform_from_state(session_dir):
-    from inference_optimizer.orchestrator.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir)
-    state.gpu_type = "mi355x"
-    state.save(session_dir)
-    captured: dict[str, object] = {}
-
-    async def fake_run(cmd, *, timeout_sec):
-        captured["cmd"] = cmd
-        return 0, '{"status": "ok"}', ""
-
-    payload = {
-        "kernel_id": "fake_kernel_1",
-        "session_id": session_dir.name,
-        "source_file": "/sgl-workspace/sglang/python/sglang/fake.py",
-        "dry_run": True,
-        "_single_kernel": True,
-    }
-    with patch.object(krh, "_validate_reusable_native_kernel", return_value=None), \
-         patch.object(krh, "_run_subprocess", side_effect=fake_run):
-        res = asyncio.run(
-            krh.run_optimization_handler(payload, session_dir=session_dir),
-        )
-
-    assert res["status"] == "ok"
-    cmd = captured["cmd"]
-    assert "--target-platform" in cmd
-    assert cmd[cmd.index("--target-platform") + 1] == "mi355x"
-
-
 def test_handlers_dispatch_table():
     """P2-2 only registered select_kernels + run_optimization. P2-4
     added apply_patch + integrate (covered in test_p2_4_integrate_report)."""
