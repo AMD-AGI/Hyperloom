@@ -19,7 +19,10 @@ side_effects:
 preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 15
-lease_ttl_sec: 600
+lease_ttl_sec: 2700
+description: "Run torch_profiler against the running server to produce a hot-kernel trace; required before any kernel-opt action."
+pipeline_phase: analysis
+typical_runtime_min: 3.0
 applicable_when:
   - "baseline_tput > 0"
   - "trace_path == ''"

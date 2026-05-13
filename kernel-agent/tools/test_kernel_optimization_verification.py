@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from argparse import Namespace
 from pathlib import Path
 
@@ -182,3 +183,114 @@ def test_benchmark_files_list_counts_as_benchmark(tmp_path):
     args.benchmark_file = ""
     args.test_harness_path = ""
     assert ko.has_benchmark(args, {"benchmark_files": [str(bench)]}) is True
+
+
+def _metadata_from_prompt(prompt: str) -> dict:
+    marker = "Kernel runtime metadata"
+    start = prompt.index("```json", prompt.index(marker)) + len("```json")
+    end = prompt.index("```", start)
+    return json.loads(prompt[start:end])
+
+
+def test_build_prompt_includes_geak_runtime_metadata():
+    args = _args(source_file="")
+    args.kernel_id = "k001"
+    args.num_gpus = 0
+    args.budget_minutes = 60
+    candidate = {
+        "name": "paged_attention",
+        "source_file": "/tmp/paged_attention.py",
+        "source_type": "triton",
+        "kernel_repo": "/tmp/repo",
+        "gpu_pct": 12.5,
+        "input_shapes": [{"call_num": 5, "shape": [1, 32, 128]}],
+        "output_shapes": [[1, 32, 128]],
+        "input_dtypes": ["fp16"],
+        "output_dtypes": ["fp16"],
+        "framework": "sglang",
+        "runtime_args": {"batch_size": 1},
+        "runtime_flags": {"decode": True},
+        "env_vars": {"SGLANG_USE_TRITON": "1"},
+        "kernel_params": {
+            "KV_DTYPE": "fp8",
+            "BLOCK_SIZE": 16,
+            "HEAD_SIZE": 128,
+        },
+    }
+
+    metadata = _metadata_from_prompt(ko.build_prompt(candidate, args))
+
+    assert metadata["kernel_name"] == "paged_attention"
+    assert metadata["kernel_path"] == "/tmp/paged_attention.py"
+    assert metadata["backend"] == "sglang"
+    assert metadata["input_shapes"] == [{"call_num": 5, "shape": [1, 32, 128]}]
+    assert metadata["output_shapes"] == [[1, 32, 128]]
+    assert metadata["input_dtypes"] == ["fp16"]
+    assert metadata["output_dtypes"] == ["fp16"]
+    assert metadata["runtime_args"] == {"batch_size": 1}
+    assert metadata["runtime_flags"]["decode"] is True
+    assert metadata["env_vars"] == {"SGLANG_USE_TRITON": "1"}
+    assert metadata["kernel_params"]["KV_DTYPE"] == "fp8"
+    assert metadata["kernel_params"]["BLOCK_SIZE"] == 16
+    assert metadata["kernel_params"]["HEAD_SIZE"] == 128
+
+
+def test_build_prompt_metadata_is_backward_compatible():
+    args = _args(source_file="")
+    args.kernel_id = "legacy"
+    args.num_gpus = 0
+    args.budget_minutes = 60
+    candidate = {
+        "name": "legacy_kernel",
+        "source_file": "/tmp/legacy.py",
+        "source_type": "python",
+        "shapes": [[4, 8]],
+        "call_count": 3,
+    }
+
+    metadata = _metadata_from_prompt(ko.build_prompt(candidate, args))
+
+    assert metadata["kernel_name"] == "legacy_kernel"
+    assert metadata["kernel_path"] == "/tmp/legacy.py"
+    assert metadata["input_shapes"] == [{"call_num": 3, "shape": [4, 8]}]
+    assert metadata["output_shapes"] == []
+    assert metadata["input_dtypes"] == []
+    assert metadata["output_dtypes"] == []
+    assert metadata["runtime_args"] == {}
+    assert metadata["env_vars"] == {}
+    assert metadata["kernel_params"] == {
+        "BLOCK_SIZE": None,
+        "HEAD_SIZE": None,
+        "KV_DTYPE": None,
+    }
+
+
+def test_build_prompt_metadata_extracts_extra_sglang_args():
+    args = _args(
+        source_file="",
+        extra_sglang_args=(
+            "--kv-cache-dtype fp8 --page-size 16 --attention-backend aiter "
+            "--decode-attention-backend aiter --disable-cuda-graph "
+            "--cuda-graph-max-bs 128 --num-continuous-decode-steps 4"
+        ),
+    )
+    args.kernel_id = "paged"
+    args.num_gpus = 0
+    args.budget_minutes = 60
+    candidate = {
+        "name": "paged_attention",
+        "source_file": "/tmp/paged_attention.py",
+        "source_type": "triton",
+    }
+
+    metadata = _metadata_from_prompt(ko.build_prompt(candidate, args))
+
+    assert metadata["runtime_args"]["kv_cache_dtype"] == "fp8"
+    assert metadata["runtime_args"]["page_size"] == 16
+    assert metadata["runtime_args"]["cuda_graph_max_bs"] == 128
+    assert metadata["runtime_args"]["num_continuous_decode_steps"] == 4
+    assert metadata["runtime_flags"]["attention_backend"] == "aiter"
+    assert metadata["runtime_flags"]["decode_attention_backend"] == "aiter"
+    assert metadata["runtime_flags"]["disable_cuda_graph"] is True
+    assert metadata["kernel_params"]["KV_DTYPE"] == "fp8"
+    assert metadata["kernel_params"]["BLOCK_SIZE"] == 16

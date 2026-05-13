@@ -4,6 +4,19 @@
 # TraceLens) can read. `benchmark.model` and `benchmark.runner_type` are
 # OVERRIDDEN at runtime — see baseline_sglang.yaml header for the full
 # rationale.
+#
+# TraceLens integration (#126): profiler is configured for:
+#   1. Graph capture tracing (--enable-profile-cuda-graph)
+#   2. Shape + callstack annotations (SGLANG_PROFILE_* env vars)
+#   3. Steady-state windowing (PROFILE_EXTRA_BODY start_step/num_steps)
+# These are required for TraceLens fusion / roofline analysis.
+#
+# Note: upstream issue #126 also lists
+# `--enable-shape-discovery-for-cuda-graph-profile`, but the SGLang
+# build on the current validation nodes rejects it ("unrecognized
+# arguments"). It stays out of the default args until the deployed
+# SGLang accepts it; override via EXTRA_SGLANG_ARGS or the materialized
+# ASSET_ROOT yaml when running on a newer SGLang.
 
 benchmark:
   framework: sglang
@@ -13,8 +26,8 @@ benchmark:
   run_mode: local
 
   envs:
-    TP: 1
-    CONC: 8
+    TP: 8
+    CONC: 64
     ISL: 256
     OSL: 256
     RANDOM_RANGE_RATIO: 1
@@ -22,11 +35,25 @@ benchmark:
     # ROCR_VISIBLE_DEVICES injected at runtime by baseline.py
     # (`0..TP-1`); export `ROCR_VISIBLE_DEVICES=...` to override.
     PATH: "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    # --- Profiler: shape + callstack annotations (#126) ---
+    SGLANG_PROFILE_WITH_STACK: "true"
+    SGLANG_PROFILE_RECORD_SHAPE: "true"
+    # --- Profiler: graph capture (#126; shape-discovery flag dropped
+    # because the deployed SGLang argparse rejects it) ---
+    EXTRA_SGLANG_ARGS: "--enable-profile-cuda-graph"
+    # --- Profiler: steady-state window via extra_body (#126) ---
+    # PROFILE_EXTRA_BODY is consumed by InferenceX benchmark_lib.sh to inject
+    # into the benchmark request body. start_step skips warmup, num_steps
+    # limits trace size. Values are overridden at runtime by
+    # _materialize_config_with_envs based on ISL/OSL/CONC.
+    PROFILE_EXTRA_BODY: '{"shape_discovery": true, "roofline_annotations": true, "start_step": 40, "num_steps": 16, "merge_profiles": false, "profile_by_stage": false}'
+    # --- Profile mode: cap prompts to reduce trace size ---
+    PROFILE: "1"
 
   gpu_selection:
     auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime
 
-  timeout_seconds: 900               # profile adds ~30-90s vs plain baseline
+  timeout_seconds: 2400              # 40 min hard cap (profile adds ~30-90s vs plain baseline)
 
   profiler:
     torch_profiler:
