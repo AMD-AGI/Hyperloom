@@ -558,7 +558,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
 
     # PR-C §1: per-patch precheck. Each patch must EITHER pass
     # ``git apply --check`` (the strict path, preferred) OR pass
-    # ``patch -p1 --fuzz=10 --dry-run`` (the fuzzy fallback for minor
+    # ``patch -p1 --fuzz=2 --dry-run`` (the fuzzy fallback for minor
     # context drift when TraceLens patches haven't been rev'd against
     # a slightly newer SGLang / vLLM point release). If neither
     # accepts the patch the whole set is rejected and we fail-soft.
@@ -572,7 +572,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         if patch_bin and _patch_dry_run(patch_bin, p, plan.apply_root, plan.apply_strip):
             log.warning(
                 "_server_patcher: %s patch %s did not apply cleanly with "
-                "`git apply --check %s`; falling back to `patch %s --fuzz=10` "
+                "`git apply --check %s`; falling back to `patch %s --fuzz=2` "
                 "(TraceLens patch may lag deployed %s by a point release)",
                 plan.framework, p.name, strip_arg, strip_arg, plan.framework,
             )
@@ -634,10 +634,31 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
     return True
 
 
+# PR-D §6: fuzz value chosen deliberately at GNU patch's default (2)
+# rather than the maximum (10).
+#
+# Rationale: fuzz=10 (PR-C §1's original value) tolerates up to 10
+# context lines of mismatch per hunk — near GNU patch's practical
+# upper limit. That lets multi-line upstream refactors near a patch
+# site silently apply the patch's CHANGE lines to a similar-looking
+# but semantically wrong location: framework imports cleanly, profile
+# hooks attach to the wrong call site, profile data is silently
+# misleading rather than absent.
+#
+# fuzz=2 (the default) still tolerates whitespace and single-line
+# context drift (the common point-release case the fuzzy fallback was
+# designed for), but rejects multi-line drift hard so the patcher
+# fail-softs visibly (apply rejected → no shape_discovery flag, but
+# no wrong-place mutation). The flag is kept explicit (not omitted)
+# so the choice is grep-discoverable and survives any future GNU
+# patch default change.
+_FUZZ = 2
+
+
 def _patch_dry_run(
     patch_bin: str, patch_file: Path, cwd: Path, strip: int = 1,
 ) -> bool:
-    """Probe ``patch -p<strip> --fuzz=10 --dry-run`` for a single patch.
+    """Probe ``patch -p<strip> --fuzz=2 --dry-run`` for a single patch.
 
     Used as a fuzzy fallback when ``git apply --check`` rejects a patch
     due to minor context drift (whitespace / single-line edits in the
@@ -646,11 +667,14 @@ def _patch_dry_run(
     apply on this check. ``strip`` matches the ``-p<N>`` flag git apply
     uses for the same patch — PR-D §1 may pass ``-p3`` for wheel
     SGLang installs vs the default ``-p1`` for editable installs.
+
+    fuzz value: see :data:`_FUZZ` — defaults to 2 (whitespace +
+    single-line tolerance only; multi-line drift is rejected hard).
     """
     try:
         with patch_file.open("rb") as fh:
             result = subprocess.run(
-                (patch_bin, f"-p{strip}", "--fuzz=10", "--dry-run", "--silent"),
+                (patch_bin, f"-p{strip}", f"--fuzz={_FUZZ}", "--dry-run", "--silent"),
                 cwd=str(cwd),
                 stdin=fh,
                 capture_output=True,
@@ -669,10 +693,10 @@ def _patch_apply(
     patch_bin: str, patch_file: Path, cwd: Path, strip: int = 1, *,
     reverse: bool = False,
 ) -> bool:
-    """Real ``patch -p<strip> --fuzz=10`` apply (or reverse). Mirrors
+    """Real ``patch -p<strip> --fuzz=2`` apply (or reverse). Mirrors
     :func:`_patch_dry_run` but actually mutates the working tree.
     Returns True iff rc == 0."""
-    args = [patch_bin, f"-p{strip}", "--fuzz=10", "--silent"]
+    args = [patch_bin, f"-p{strip}", f"--fuzz={_FUZZ}", "--silent"]
     if reverse:
         args.append("--reverse")
     try:

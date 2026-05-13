@@ -501,7 +501,11 @@ def test_returns_false_when_git_missing(fake_vllm_world, monkeypatch):
 
 
 # ===========================================================================
-# PR-C §1: patch -p1 --fuzz=10 fallback when git apply --check rejects
+# PR-C §1 (tightened by PR-D §6): patch -p1 --fuzz=2 fallback when git
+# apply --check rejects. fuzz=2 is GNU patch's default; tolerates
+# whitespace + single-line context drift but rejects multi-line drift
+# so the patcher can't silently mis-apply CHANGE lines to a
+# similar-looking but semantically wrong call site.
 # ===========================================================================
 _REQUIRES_PATCH = pytest.mark.skipif(
     shutil.which("patch") is None,
@@ -514,7 +518,7 @@ _REQUIRES_PATCH = pytest.mark.skipif(
 def test_apply_atomic_fuzzy_fallback_when_git_strict_check_fails(fake_vllm_world):
     """When ``git apply --check`` rejects a patch because the install
     has drifted slightly from the patch's recorded context, but
-    ``patch -p1 --fuzz=10 --dry-run`` still accepts it, the patcher
+    ``patch -p1 --fuzz=2 --dry-run`` still accepts it, the patcher
     falls back to the fuzzy path and applies successfully.
 
     Simulates the common case where TraceLens hasn't shipped a
@@ -522,9 +526,11 @@ def test_apply_atomic_fuzzy_fallback_when_git_strict_check_fails(fake_vllm_world
     release. Without this fallback the run silently loses the
     TraceLens-only profiler flags."""
     _, install_root, _ = fake_vllm_world
-    # Add a drift comment between the patched lines so the strict
-    # ``git apply --check`` context check fails but ``patch --fuzz=10``
-    # still locates the hunk.
+    # Add a single drift comment between the patched lines so the
+    # strict ``git apply --check`` context check fails but
+    # ``patch --fuzz=2`` still locates the hunk. (PR-D §6: one
+    # drift line is within the default fuzz=2 tolerance; multi-line
+    # drift would be correctly rejected by this same path.)
     target = install_root / "vllm" / "config" / "profiler.py"
     target.write_text(
         textwrap.dedent(
@@ -549,7 +555,7 @@ def test_apply_atomic_returns_false_when_strict_and_fuzzy_both_fail(
     fake_vllm_world, monkeypatch,
 ):
     """When ``git apply --check`` rejects the patch AND
-    ``patch -p1 --fuzz=10`` is unavailable (or itself rejects), the
+    ``patch -p1 --fuzz=2`` is unavailable (or itself rejects), the
     patcher returns False without touching the install — the fuzzy
     fallback never opens a new error mode."""
     _, install_root, _ = fake_vllm_world
@@ -595,6 +601,131 @@ def test_patch_dry_run_returns_false_when_patch_binary_missing(tmp_path):
         "/nonexistent/patch", fake_diff, tmp_path,
     )
     assert rc is False
+
+
+# PR-D §6 safety guarantee: the fuzz value lives in the module-level
+# ``_FUZZ`` constant and is set to GNU patch's default (2). Pinning
+# this here means any future regression that bumps the value back to
+# ``--fuzz=10`` (or higher) fails this test, surfacing the safety
+# regression in CI before it lands.
+def test_fuzz_value_is_default_two_not_maximum_ten():
+    """PR-D §6: fuzz value MUST be the GNU patch default of 2.
+
+    PR-C §1 originally used ``--fuzz=10`` (near GNU patch's
+    practical maximum), which tolerates up to 10 mismatching context
+    lines per hunk. That made multi-line upstream refactors near a
+    patch site silently mis-apply the patch's CHANGE lines to a
+    similar-looking but semantically wrong location — framework
+    imports cleanly, profile hooks attach to the wrong call site,
+    profile data is silently misleading rather than absent.
+
+    fuzz=2 (this test's invariant) still tolerates whitespace and
+    single-line drift (the common point-release case the fuzzy
+    fallback was designed for) but rejects multi-line drift hard
+    so the patcher fail-softs visibly.
+    """
+    assert _server_patcher._FUZZ == 2, (
+        f"_FUZZ must be 2 (GNU patch default, PR-D §6 safety floor); "
+        f"found {_server_patcher._FUZZ}. Bumping it back up to 10 or "
+        f"higher re-opens the silent multi-line mis-apply risk this "
+        f"constant was introduced to close."
+    )
+
+
+@_REQUIRES_GIT
+@_REQUIRES_PATCH
+def test_fuzz_fallback_rejects_multi_line_context_mismatch(fake_vllm_world):
+    """PR-D §6 safety guarantee: when MORE THAN ``_FUZZ`` (=2) context
+    lines of the hunk are mutated, the fuzzy fallback must reject.
+    This is the exact scenario fuzz=10 would silently accept and
+    fuzz=2 must refuse.
+
+    The vLLM patch's hunk has 3 before-context lines + 1 after-context
+    line (verified by reading ``_write_fake_vllm_patch``). Mutating
+    all 3 before-context lines (every one of them: the header comment,
+    the class declaration, and the existing field annotation) exceeds
+    fuzz=2's 2-line tolerance, so the patcher must fail-soft. The
+    install stays untouched — no silent wrong-place mutation.
+
+    Without PR-D §6 (i.e. with PR-C's original ``--fuzz=10``), this
+    test would have FAILED — the patcher would have applied the
+    CHANGE lines to the mutated class with the renamed field,
+    silently producing a semantically-wrong patched install."""
+    _, install_root, _ = fake_vllm_world
+    target = install_root / "vllm" / "config" / "profiler.py"
+    # All 3 before-context lines mutated, change anchor's nearest
+    # neighbour included. (Trailing context kept identical so we know
+    # rejection is driven by leading-context fuzz, not by the anchor
+    # going missing entirely.)
+    target.write_text(
+        textwrap.dedent(
+            """\
+            # COMPLETELY different header — upstream renamed the file's purpose.
+            class ProfilerConfigRenamed:
+                profile_dir: str = "renamed_field"
+                ignore_frontend: bool = False
+            """
+        ),
+        encoding="utf-8",
+    )
+    rc = ensure_vllm_patched_for_tracelens()
+    assert rc is False, (
+        "fuzz=2 must reject when 3 of 4 context lines mismatch; "
+        "fuzz=10 would have silently applied here and inserted the "
+        "TraceLens fields into the renamed class — a semantically "
+        "wrong patched install"
+    )
+    # Install untouched — no half-applied patch, no markers landed
+    # in the renamed class.
+    text = target.read_text(encoding="utf-8")
+    assert "capture_torch_profiler_dir" not in text, (
+        "fuzz=2 must not have mutated the install when context "
+        "mismatch exceeded _FUZZ tolerance"
+    )
+    assert "detailed_trace_annotation" not in text
+
+
+@_REQUIRES_GIT
+@_REQUIRES_PATCH
+def test_fuzz_fallback_tolerates_offset_slippage(fake_vllm_world):
+    """Companion to the above: pure OFFSET slippage (extra lines
+    inserted between context anchors, but every context line still
+    matches the patch verbatim) should still apply under fuzz=2
+    because GNU patch's scanner finds anchors anywhere in the file
+    as long as the context lines themselves still match. This
+    distinguishes "harmless drift" (offset only, context preserved)
+    from "dangerous drift" (context mutated) — fuzz=2 admits the
+    former and rejects the latter."""
+    _, install_root, _ = fake_vllm_world
+    target = install_root / "vllm" / "config" / "profiler.py"
+    # 5 unrelated lines inserted between header comment and class
+    # — all original context lines still present verbatim, just
+    # shifted to higher line numbers.
+    target.write_text(
+        textwrap.dedent(
+            """\
+            # Synthetic vLLM profiler config — used only by tests.
+            # Drift line 1: upstream comment from a profiler refactor.
+            # Drift line 2: docstring fragment.
+            # Drift line 3: license header chunk.
+            # Drift line 4: deprecation note.
+            # Drift line 5: TODO marker.
+            class ProfilerConfig:
+                profiler: str = ""
+                ignore_frontend: bool = False
+            """
+        ),
+        encoding="utf-8",
+    )
+    rc = ensure_vllm_patched_for_tracelens()
+    assert rc is True, (
+        "fuzz=2 must accept offset slippage when every context line "
+        "is preserved verbatim — that's the legitimate point-release "
+        "drift case the fuzzy fallback was designed for"
+    )
+    text = target.read_text(encoding="utf-8")
+    assert "capture_torch_profiler_dir" in text
+    assert "detailed_trace_annotation" in text
 
 
 # ===========================================================================
