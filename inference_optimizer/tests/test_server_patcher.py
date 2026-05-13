@@ -877,3 +877,240 @@ def test_sglang_plan_keeps_single_marker_sentinel(fake_sglang_world):
     assert plan is not None
     assert isinstance(plan.sentinel_text, tuple)
     assert plan.sentinel_text == ("kernel_shape_profiler",), plan.sentinel_text
+
+
+# ===========================================================================
+# PR-D §5: TraceLens-shipped SUPPORTED_VERSIONS manifest takes precedence
+# over the hardcoded minor allowlist. The day TraceLens starts shipping
+# this file, Hyperloom's version gate auto-adapts without a code change —
+# the decoupling intent of the #194 §5 follow-up recommendation.
+# ===========================================================================
+def _write_sglang_versions_manifest(
+    tracelens_root: Path, body: str, *, filename: str = "SUPPORTED_VERSIONS.txt",
+) -> Path:
+    """Write a TraceLens-style version manifest into the SGLang patches
+    dir. Tests use this fixture to simulate TraceLens shipping the
+    decoupling manifest before it actually does."""
+    patches_dir = (
+        tracelens_root / "examples" / "custom_workflows"
+        / "inference_analysis" / "sglang_roofline_patches"
+    )
+    manifest = patches_dir / filename
+    manifest.write_text(body, encoding="utf-8")
+    return manifest
+
+
+def test_load_sglang_manifest_returns_none_when_absent(tmp_path):
+    """Today's TraceLens doesn't ship the manifest. The loader must
+    return None (not an empty frozenset) so the caller falls back to
+    the PR-C.2 minor allowlist — preserving today's behaviour
+    byte-for-byte until TraceLens decides to ship the file."""
+    patches_dir = tmp_path / "sglang_roofline_patches"
+    patches_dir.mkdir()
+    assert _server_patcher._load_sglang_supported_versions_from_manifest(
+        patches_dir,
+    ) is None
+
+
+def test_load_sglang_manifest_parses_versions_skipping_comments(tmp_path):
+    """Format contract: one version per line, ``#`` starts a comment,
+    blank lines ignored. Whitespace around versions is stripped."""
+    patches_dir = tmp_path / "sglang_roofline_patches"
+    patches_dir.mkdir()
+    (patches_dir / "SUPPORTED_VERSIONS.txt").write_text(
+        "# TraceLens-supported SGLang versions\n"
+        "0.5.9\n"
+        "   0.5.10   \n"
+        "\n"
+        "0.6.0  # post-bump\n"
+        "# 0.7.0  (planned, not yet shipped)\n",
+        encoding="utf-8",
+    )
+    versions = _server_patcher._load_sglang_supported_versions_from_manifest(
+        patches_dir,
+    )
+    assert versions == frozenset({"0.5.9", "0.5.10", "0.6.0"}), versions
+
+
+def test_load_sglang_manifest_empty_returns_empty_frozenset(tmp_path):
+    """If TraceLens explicitly ships an empty manifest (all entries
+    commented out, no versions listed), the loader returns an empty
+    frozenset — NOT None. Caller then rejects every version, which is
+    the operator's signal that TraceLens has declared no versions
+    are supported on this patch revision."""
+    patches_dir = tmp_path / "sglang_roofline_patches"
+    patches_dir.mkdir()
+    (patches_dir / "SUPPORTED_VERSIONS.txt").write_text(
+        "# Intentionally empty — no versions supported.\n"
+        "\n",
+        encoding="utf-8",
+    )
+    assert _server_patcher._load_sglang_supported_versions_from_manifest(
+        patches_dir,
+    ) == frozenset()
+
+
+def test_load_sglang_manifest_prefers_dot_txt_over_no_extension(tmp_path):
+    """Both ``SUPPORTED_VERSIONS.txt`` and ``SUPPORTED_VERSIONS`` are
+    valid filenames; precedence is ``.txt`` first (more discoverable
+    in IDEs / file-listing tooling). Both files present → ``.txt``
+    wins."""
+    patches_dir = tmp_path / "sglang_roofline_patches"
+    patches_dir.mkdir()
+    (patches_dir / "SUPPORTED_VERSIONS.txt").write_text(
+        "from_dot_txt\n", encoding="utf-8",
+    )
+    (patches_dir / "SUPPORTED_VERSIONS").write_text(
+        "from_no_extension\n", encoding="utf-8",
+    )
+    assert _server_patcher._load_sglang_supported_versions_from_manifest(
+        patches_dir,
+    ) == frozenset({"from_dot_txt"})
+
+
+def test_load_sglang_manifest_falls_back_to_no_extension(tmp_path):
+    """If only the no-extension variant exists, the loader picks it
+    up. Lets TraceLens use the LICENSE/README naming convention if
+    they prefer it."""
+    patches_dir = tmp_path / "sglang_roofline_patches"
+    patches_dir.mkdir()
+    (patches_dir / "SUPPORTED_VERSIONS").write_text(
+        "0.5.9\n", encoding="utf-8",
+    )
+    assert _server_patcher._load_sglang_supported_versions_from_manifest(
+        patches_dir,
+    ) == frozenset({"0.5.9"})
+
+
+def test_sglang_version_accepted_consults_manifest_when_present(
+    tmp_path, monkeypatch,
+):
+    """End-to-end gate semantics: when a manifest is shipped, IT is
+    the source of truth — bypasses the hardcoded ``0.5.x`` default.
+    A version that the default would accept but the manifest doesn't
+    list must be rejected; a version the manifest lists but the
+    default wouldn't accept must be accepted."""
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
+    patches_dir = tmp_path / "sglang_roofline_patches"
+    patches_dir.mkdir()
+    (patches_dir / "SUPPORTED_VERSIONS.txt").write_text(
+        "0.6.0\n0.7.0\n", encoding="utf-8",
+    )
+    # 0.5.9 — accepted by default allowlist, NOT listed in manifest
+    # → manifest must override and reject.
+    assert _server_patcher._sglang_version_accepted(
+        "0.5.9", patches_dir=patches_dir,
+    ) is False
+    # 0.7.0 — rejected by default allowlist (0.7.x not in 0.5.x), IS
+    # listed in manifest → manifest must override and accept.
+    assert _server_patcher._sglang_version_accepted(
+        "0.7.0", patches_dir=patches_dir,
+    ) is True
+
+
+def test_sglang_version_accepted_empty_manifest_rejects_all(
+    tmp_path, monkeypatch,
+):
+    """An explicit empty manifest means "TraceLens declares no
+    supported versions" — and that declaration beats the hardcoded
+    default. Operators see all versions rejected, prompting them to
+    investigate whether the patch set has been deprecated or split."""
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
+    patches_dir = tmp_path / "sglang_roofline_patches"
+    patches_dir.mkdir()
+    (patches_dir / "SUPPORTED_VERSIONS.txt").write_text(
+        "# all entries commented out → empty manifest\n", encoding="utf-8",
+    )
+    assert _server_patcher._sglang_version_accepted(
+        "0.5.9", patches_dir=patches_dir,
+    ) is False, (
+        "empty manifest must reject every version — not silently fall through "
+        "to the hardcoded default"
+    )
+
+
+def test_sglang_version_accepted_no_manifest_falls_back_to_default(
+    tmp_path, monkeypatch,
+):
+    """Today's behaviour: TraceLens doesn't ship the manifest, so the
+    helper falls back to ``_SGLANG_DEFAULT_ALLOWED_MINORS = ("0.5",)``.
+    This preserves PR-C.2 byte-for-byte and is the safety net that
+    prevents D.5 from regressing anyone who hasn't pulled the new
+    TraceLens release."""
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
+    patches_dir = tmp_path / "sglang_roofline_patches"
+    patches_dir.mkdir()  # No manifest written.
+    assert _server_patcher._sglang_version_accepted(
+        "0.5.9", patches_dir=patches_dir,
+    ) is True
+    assert _server_patcher._sglang_version_accepted(
+        "0.5.99", patches_dir=patches_dir,
+    ) is True  # 0.5.x covers all point releases.
+    assert _server_patcher._sglang_version_accepted(
+        "0.6.0", patches_dir=patches_dir,
+    ) is False  # 0.6 not in default allowlist; no manifest to override.
+
+
+def test_sglang_version_accepted_operator_env_vars_beat_manifest(
+    tmp_path, monkeypatch,
+):
+    """The operator escape hatch must still work even when TraceLens
+    ships a manifest — an operator pinning a specific version (e.g.
+    to roll back after a bad release) takes precedence over the
+    vendor's declared support list."""
+    patches_dir = tmp_path / "sglang_roofline_patches"
+    patches_dir.mkdir()
+    (patches_dir / "SUPPORTED_VERSIONS.txt").write_text(
+        "0.5.9\n", encoding="utf-8",
+    )
+    # Operator pins 0.7.0 exactly, even though manifest doesn't list it.
+    monkeypatch.setenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", "0.7.0")
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
+    assert _server_patcher._sglang_version_accepted(
+        "0.7.0", patches_dir=patches_dir,
+    ) is True
+    # And the manifest-listed 0.5.9 is now REJECTED because the
+    # operator's exact pinset takes over completely.
+    assert _server_patcher._sglang_version_accepted(
+        "0.5.9", patches_dir=patches_dir,
+    ) is False
+
+
+@_REQUIRES_GIT
+def test_sglang_e2e_manifest_admits_version_outside_default_allowlist(
+    tmp_path, monkeypatch,
+):
+    """Full integration: SGLang 0.7.0 (well outside the hardcoded
+    ``0.5.x`` default) gets patched because TraceLens has shipped a
+    manifest that explicitly lists it. This is the exact "TraceLens
+    bumps support without requiring a Hyperloom code change" workflow
+    the reviewer asked for."""
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
+    tracelens_root = _make_fake_tracelens(tmp_path)
+    apply_root = _make_fake_sglang_install(tmp_path)
+    # Replace the fake sglang's __version__ with 0.7.0 in both the
+    # injected module and the on-disk __init__.py.
+    sgl_init = apply_root / "python" / "sglang" / "__init__.py"
+    sgl_init.write_text('__version__ = "0.7.0"\n', encoding="utf-8")
+    _write_fake_sglang_patches(tracelens_root, count=1)
+    _write_sglang_versions_manifest(tracelens_root, "0.7.0\n")
+
+    fake_mod = types.ModuleType("sglang")
+    fake_mod.__version__ = "0.7.0"  # type: ignore[attr-defined]
+    fake_mod.__file__ = str(sgl_init)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sglang", fake_mod)
+    monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
+
+    assert ensure_sglang_patched_for_tracelens() is True
+    sentinel = (
+        apply_root / "python" / "sglang" / "srt" / "utils"
+        / "kernel_shape_profiler.py"
+    )
+    assert sentinel.exists(), (
+        "0.7.0 should have been patched because the manifest admits it — "
+        "the default 0.5.x allowlist alone would have rejected"
+    )
