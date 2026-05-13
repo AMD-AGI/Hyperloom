@@ -39,17 +39,22 @@ import json
 import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
 from ...paths import asset_root
 from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
+from ._grid_runner import sanitize_result_dir, sanitize_script_name
 from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
 )
-from .benchmark_result import extract_benchmark_measurement
+from .benchmark_result import (
+    extract_benchmark_measurement,
+    harvest_leaked_artifacts,
+)
 
 
 log = logging.getLogger(__name__)
@@ -324,6 +329,23 @@ class BaselineExecutor:
             str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower()
         )
+        # Orchestration-supplied script + result_dir overrides. Both are
+        # surfaced as ``task.params`` so the LLM can route around scripts
+        # that hardcode ``--result-dir /workspace/`` (see SKILL.md
+        # "Magpie leak-path salvage"). Sanitization at the executor
+        # boundary turns any malformed override into ``error_class=
+        # bad_param``; the Coordinator promotes that to a
+        # ``policy_denied`` observation rather than an unsafe subprocess.
+        try:
+            override_script = sanitize_script_name(params.get("benchmark_script"))
+            override_result_dir = sanitize_result_dir(params.get("result_dir"))
+        except ValueError as exc:
+            return {
+                "status": "failed",
+                "error_class": "bad_param",
+                "error": str(exc),
+                "output_dir": str(output_dir),
+            }
         config_path = materialize_config_with_envs(
             config_path,
             output_dir,
@@ -336,6 +358,7 @@ class BaselineExecutor:
             extra_envs=dict(params.get("extra_envs") or {}),
             model_path=resolved_model,
             gpu_type=resolved_gpu,
+            benchmark_script=override_script,
         )
         # Stash for the result so Coordinator can plumb it forward to
         # downstream params/backends/sweep tasks (workload-contract reuse).
@@ -352,12 +375,25 @@ class BaselineExecutor:
         # `python3` resolves to one with torch+rocm. Magpie YAML also sets
         # this but defending in depth costs nothing.
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+        # Always-on ``$RESULT_DIR`` default: covers Magpie scripts that
+        # respect the env var (and would otherwise fall back to a
+        # hardcoded path under ``/workspace/``). Scripts that ignore
+        # ``$RESULT_DIR`` still leak — the
+        # ``extract_benchmark_measurement`` salvage pass picks those
+        # up. Operators / Orchestration can override the destination
+        # via ``task.params['result_dir']``.
+        env["RESULT_DIR"] = override_result_dir or str(output_dir)
 
         log.info("baseline_executor: launching Magpie cmd=%s output_dir=%s",
                  cmd, output_dir)
 
         # subprocess.run is sync — wrap in asyncio.to_thread so we don't
-        # block the Coordinator reactor loop.
+        # block the Coordinator reactor loop. We snapshot the wall-clock
+        # immediately before launch so extract_benchmark_measurement can
+        # mtime-gate the documented Magpie leak destinations (e.g.
+        # ``/workspace/inferencex_result.json``) — only files written
+        # *after* this run started are valid salvage candidates.
+        subprocess_started_unix = time.time()
         try:
             proc = await asyncio.to_thread(
                 subprocess.run, cmd,
@@ -365,16 +401,61 @@ class BaselineExecutor:
                 env=env, cwd=str(self.cwd),
             )
         except subprocess.TimeoutExpired as exc:
+            # Harvest whatever the wrapper managed to write before the
+            # timer fired — particularly ``server.log`` (often the
+            # smoking gun: "failed to allocate memory" / "could not
+            # load checkpoint" etc.) and ``gpu_metrics.csv``.
+            timeout_candidates = sorted(output_dir.glob("benchmark_*"))
+            timeout_destination = (
+                timeout_candidates[-1] if timeout_candidates else output_dir
+            )
+            timeout_harvested = harvest_leaked_artifacts(
+                timeout_destination,
+                subprocess_started_unix=subprocess_started_unix,
+            )
             return {
                 "status": "failed",
                 "error_class": "timeout",
                 "error": f"baseline benchmark exceeded {timeout_sec}s: {exc}",
                 "output_dir": str(output_dir),
+                "harvested_artifacts": [str(dst) for _, dst in timeout_harvested],
+                "nonfatal_warnings": [
+                    f"harvested_leaked_artifact:{src}"
+                    for src, _ in timeout_harvested
+                ],
             }
 
         # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
         candidates = sorted(output_dir.glob("benchmark_*"))
+        # Always-on artifact harvest. Magpie's shell wrappers hardcode
+        # ``/workspace/server.log`` + ``/workspace/gpu_metrics.csv`` +
+        # ``/workspace/profile_*.trace.json.gz`` + ``/workspace/
+        # inferencex_result*.json`` (see ``harvest_leaked_artifacts``
+        # for the full list). Without this pass the NFS clone of
+        # ``<session>/runs/baseline/<task_id>/`` is missing the
+        # wrapper-side artifacts even on a fully successful run.
+        # Runs unconditionally (success / failure / no_workspace) so
+        # diagnostics for the failure paths survive too. Mtime gating
+        # rejects stale leaks from prior runs. Destination prefers the
+        # benchmark workspace dir; falls back to the task output_dir
+        # when Magpie never created one.
+        harvest_destination = candidates[-1] if candidates else output_dir
+        harvested = harvest_leaked_artifacts(
+            harvest_destination,
+            subprocess_started_unix=subprocess_started_unix,
+        )
+        if harvested:
+            log.info(
+                "baseline_executor: harvested %d leaked artifact(s) "
+                "into workspace: %s",
+                len(harvested),
+                ", ".join(str(src.name) for src, _ in harvested),
+            )
         if not candidates:
+            failure_extras = {
+                "output_dir": str(output_dir),
+                "harvested_artifacts": [str(dst) for _, dst in harvested],
+            }
             if proc.returncode != 0:
                 tail = (proc.stderr or proc.stdout or "")[-2000:]
                 return {
@@ -382,13 +463,13 @@ class BaselineExecutor:
                     "error_class": "subprocess_nonzero",
                     "returncode": proc.returncode,
                     "error": tail,
-                    "output_dir": str(output_dir),
+                    **failure_extras,
                 }
             return {
                 "status": "failed",
                 "error_class": "no_workspace",
                 "error": "Magpie completed but produced no benchmark_* workspace",
-                "output_dir": str(output_dir),
+                **failure_extras,
             }
         workspace = candidates[-1]
         report_path = workspace / "benchmark_report.json"
@@ -401,10 +482,16 @@ class BaselineExecutor:
             except (OSError, json.JSONDecodeError):
                 report = None
 
-        measurement = extract_benchmark_measurement(report, workspace=workspace)
+        measurement = extract_benchmark_measurement(
+            report,
+            workspace=workspace,
+            subprocess_started_unix=subprocess_started_unix,
+        )
         warnings = list(measurement.pop("nonfatal_warnings", []) or [])
         if proc.returncode != 0:
             warnings.append("magpie_nonzero_after_valid_measurement")
+        for leak_src, _ in harvested:
+            warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
         if not measurement.get("valid_measurement"):
             if proc.returncode != 0:
