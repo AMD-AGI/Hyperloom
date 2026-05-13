@@ -47,6 +47,17 @@ from inference_optimizer.storage import SqliteConnection
 # ===========================================================================
 # Shared fixtures
 # ===========================================================================
+@pytest.fixture(autouse=True)
+def _isolate_leak_root(tmp_path_factory, monkeypatch):
+    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox so
+    ``run_grid``'s always-on ``harvest_leaked_artifacts`` pass does
+    not pick up host ``/workspace`` artifacts during the stubbed
+    subprocess runs in this module.
+    """
+    sandbox = tmp_path_factory.mktemp("isolated_leak_root")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
+
+
 def _write_baseline_yaml(path: Path) -> None:
     """Minimal YAML in our repo's expected shape."""
     cfg = {
