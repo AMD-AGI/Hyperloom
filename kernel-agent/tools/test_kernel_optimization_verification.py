@@ -445,3 +445,119 @@ def test_build_prompt_includes_hypothesis_block_when_prose_present():
     assert "Fuse with subsequent GEMM" in prompt
     assert "5.00 ms" in prompt
     assert "20.00 ms" in prompt
+
+
+# ============================================================================
+# PR-B §2: benchmark-cases block in build_prompt
+# ============================================================================
+def test_build_benchmark_cases_block_returns_empty_without_task_group():
+    """Legacy per-kernel dispatch (no task_group attached) must produce
+    byte-identical output to PR-A."""
+    block = ko._build_benchmark_cases_block(
+        {"name": "rms_norm", "source_type": "triton"},
+    )
+    assert block == ""
+
+
+def test_build_benchmark_cases_block_renders_single_row():
+    block = ko._build_benchmark_cases_block({
+        "name": "rms_norm",
+        "task_group": {
+            "function_name": "rms_norm",
+            "source_path": "/sgl-workspace/aiter/rmsnorm.py",
+            "definition_line": 42,
+            "ast_resolved": True,
+            "rows": [{
+                "name": "rms_norm",
+                "shapes": ["(8,4096) bf16"],
+                "duration_us": 100_000.0,  # 100 ms aggregate
+                "call_count": 100,
+                "percent_of_total": 4.2,
+                "flops_per_byte": 0.5,
+                "bound_type": "memory-bound",
+                "efficiency_percent": 30.0,
+                "efficiency_peak_value": 5.3,
+                "efficiency_peak_unit": "TB/s",
+            }],
+        },
+    })
+    assert "## Benchmark cases" in block
+    assert "single TraceLens row" in block
+    assert "rms_norm" in block
+    assert "/sgl-workspace/aiter/rmsnorm.py:42" in block
+    assert "Case 1: operation=rms_norm" in block
+    # 100 ms / 100 calls = 1.000000 ms per call.
+    assert "per_call_ms=1.000000" in block
+    assert "bound=memory-bound" in block
+    assert "30.00% of 5.3 TB/s" in block
+
+
+def test_build_benchmark_cases_block_renders_multiple_rows_sorted_by_time():
+    """Multi-row groups must explicitly say 'optimize once, applies to all'
+    and render rows in aggregate-time-descending order from build_prompt's
+    perspective (the test_group_rows arrive pre-sorted from aggregate)."""
+    block = ko._build_benchmark_cases_block({
+        "name": "rms_norm",
+        "task_group": {
+            "function_name": "rms_norm",
+            "source_path": "/foo/x.py",
+            "definition_line": 10,
+            "rows": [
+                {
+                    "name": "rms_norm_prefill",
+                    "shapes": ["(64,4096) bf16"],
+                    "duration_us": 500_000.0,
+                    "call_count": 8,
+                    "bound_type": "compute-bound",
+                },
+                {
+                    "name": "rms_norm_decode",
+                    "shapes": ["(8,4096) bf16"],
+                    "duration_us": 50_000.0,
+                    "call_count": 100,
+                    "bound_type": "memory-bound",
+                },
+            ],
+        },
+    })
+    assert "across 2 TraceLens rows" in block
+    assert "Optimize the source function once" in block
+    case_1_idx = block.index("Case 1: operation=rms_norm_prefill")
+    case_2_idx = block.index("Case 2: operation=rms_norm_decode")
+    assert case_1_idx < case_2_idx
+
+
+def test_build_prompt_includes_benchmark_cases_when_task_group_present():
+    """End-to-end: build_prompt threads the new block in when the
+    candidate carries a task_group."""
+    prompt = ko.build_prompt(
+        {
+            "name": "rms_norm",
+            "source_type": "triton",
+            "task_group": {
+                "function_name": "rms_norm",
+                "source_path": "/foo/x.py",
+                "definition_line": 10,
+                "rows": [{
+                    "name": "rms_norm",
+                    "shapes": ["(8,4096) bf16"],
+                    "duration_us": 100_000.0,
+                    "call_count": 100,
+                    "bound_type": "memory-bound",
+                }],
+            },
+        },
+        _prompt_args("mi300x"),
+    )
+    assert "## Benchmark cases" in prompt
+    assert "operation=rms_norm" in prompt
+
+
+def test_build_prompt_omits_benchmark_cases_for_legacy_candidates():
+    prompt = ko.build_prompt(
+        {"name": "legacy_kernel", "source_type": "triton"},
+        _prompt_args("mi300x"),
+    )
+    assert "## Benchmark cases" not in prompt
+
+

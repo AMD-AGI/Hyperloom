@@ -257,6 +257,131 @@ def _env_target_platform() -> str:
     return os.environ.get("TARGET_GPU_TYPE", "") or os.environ.get("GPU_TYPE", "")
 
 
+def _format_shapes_for_case(shapes: Any) -> str:
+    """Render a candidate row's ``shapes`` field as one comma-joined line.
+
+    Rows in a ``task_group`` come straight from TraceLens's 9-column
+    Detailed Analysis Data table where ``Args`` is a ``<br>``-joined
+    list of ``(shape) dtype`` strings. The ``_row_to_candidate`` parser
+    has already split them into a Python list; here we collapse back
+    to one line so the case bullet stays single-line.
+    """
+    if not shapes:
+        return ""
+    if isinstance(shapes, str):
+        return shapes
+    if isinstance(shapes, (list, tuple)):
+        parts: list[str] = []
+        for entry in shapes:
+            if isinstance(entry, str):
+                parts.append(entry)
+            elif isinstance(entry, dict):
+                # Some rows carry {call_num, shape} dicts; render the
+                # shape verbatim and tag the call_num if present.
+                shape = entry.get("shape") or entry.get("Args") or ""
+                call_num = entry.get("call_num")
+                if shape:
+                    parts.append(f"{shape}" + (f" (x{call_num})" if call_num else ""))
+            else:
+                parts.append(str(entry))
+        return ", ".join(p for p in parts if p)
+    return str(shapes)
+
+
+def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
+    """Render the multi-row benchmark cases section for a task_group.
+
+    Returns the empty string when ``candidate["task_group"]`` is absent
+    so the prompt body stays byte-identical for legacy per-kernel
+    dispatch. When present, emits one bullet per TraceLens Operation
+    row sorted by aggregate time (descending). Each bullet carries
+    ``operation``, ``args``, ``aggregate_time_ms``, ``percent_e2e``,
+    ``count``, ``per_call_ms``, ``flops_per_byte``, ``efficiency``,
+    and ``bound``.
+
+    The two most useful fields for backend dispatch decisions are
+    ``bound`` (memory vs compute drives which optimization lens to
+    apply — see ``_build_priority_block``) and ``per_call_ms``
+    (separates "high-count tiny-shape decode launch overhead" from
+    "fat per-invocation prefill cost"). Both are surfaced verbatim
+    rather than buried inside the kernel_metadata JSON.
+    """
+    group = candidate.get("task_group")
+    if not isinstance(group, dict):
+        return ""
+    rows = group.get("rows") or []
+    if not isinstance(rows, list) or not rows:
+        return ""
+    function_name = str(group.get("function_name") or "")
+    source_path = str(group.get("source_path") or "")
+    definition_line = group.get("definition_line")
+    ast_resolved = bool(group.get("ast_resolved"))
+    location = f"{source_path}:{definition_line}" if source_path and definition_line else ""
+
+    lines: list[str] = [
+        "",
+        "## Benchmark cases (TraceLens, sorted by aggregate time)",
+        "",
+    ]
+    if len(rows) > 1:
+        lines.extend([
+            f"This kernel resolves to the same source function across "
+            f"{len(rows)} TraceLens rows ("
+            f"{function_name or '<unknown function>'}"
+            + (f" at {location}" if location else "")
+            + (", AST-resolved" if ast_resolved else "")
+            + "). Optimize the source function once; the patch applies "
+            f"to all rows below. Use the first row as the primary",
+            "benchmark case; treat the rest as supplementary shape coverage.",
+            "",
+        ])
+    else:
+        lines.extend([
+            f"This kernel maps to a single TraceLens row in "
+            f"{function_name or '<unknown function>'}"
+            + (f" at {location}" if location else "")
+            + ". The case below is the primary benchmark target.",
+            "",
+        ])
+
+    for idx, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            continue
+        op = str(row.get("name") or "").strip()
+        shapes = _format_shapes_for_case(row.get("shapes"))
+        try:
+            duration_us = float(row.get("duration_us") or 0.0)
+        except (TypeError, ValueError):
+            duration_us = 0.0
+        aggregate_time_ms = duration_us / 1000.0
+        try:
+            count = int(row.get("call_count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        per_call_ms = (aggregate_time_ms / count) if count else 0.0
+        percent_e2e = row.get("percent_of_total")
+        flops_per_byte = row.get("flops_per_byte")
+        bound = str(row.get("bound_type") or "").strip() or "unknown"
+        eff_pct = row.get("efficiency_percent")
+        eff_peak_val = row.get("efficiency_peak_value")
+        eff_peak_unit = str(row.get("efficiency_peak_unit") or "").strip()
+        if eff_pct and eff_peak_val and eff_peak_unit:
+            efficiency = f"{eff_pct:.2f}% of {eff_peak_val} {eff_peak_unit}"
+        elif eff_pct:
+            efficiency = f"{eff_pct:.2f}%"
+        else:
+            efficiency = "unknown"
+        lines.append(
+            f"- Case {idx}: operation={op}; args={shapes or '-'}; "
+            f"aggregate_time_ms={aggregate_time_ms:.3f}; "
+            f"percent_e2e={percent_e2e if percent_e2e is not None else '-'}; "
+            f"count={count}; per_call_ms={per_call_ms:.6f}; "
+            f"flops_per_byte={flops_per_byte if flops_per_byte is not None else '-'}; "
+            f"efficiency={efficiency}; bound={bound}"
+        )
+    return "\n".join(lines)
+
+
 def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
     """Render a TraceLens hypothesis section for the candidate, if any.
 
@@ -475,6 +600,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     platform_intro, hardware_notes = _hardware_prompt_blocks(target_platform)
     platform_build_flag = _target_build_flag(target_platform)
     hypothesis_block = _build_hypothesis_block(candidate)
+    benchmark_cases_block = _build_benchmark_cases_block(candidate)
     bench_block = ""
     if bench_files:
         bench_block = "\nKnown benchmark/test files (also copied into your workspace as -f):\n"
@@ -657,6 +783,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "",
         hardware_notes,
         hypothesis_block,
+        benchmark_cases_block,
         "",
         "Preserve function name, signature, decorators, and numerical behavior.",
         "Return complete optimized code plus explanation of correctness assumptions.",
