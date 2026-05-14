@@ -269,6 +269,20 @@ or real `torchrun --nproc=N`. The dropped backend is recorded under
 If the user explicitly requests GEAK without a benchmark/test harness, allow the
 attempt but mark `geak_without_benchmark: true`.
 
+**Cursor auto-skip when `CURSOR_API_KEY` is unset.** Cursor backend talks to
+Cursor's own gateway and requires `CURSOR_API_KEY` (separate Cursor account,
+prefix `crsr_...`; never inherited from `SAFE_API_KEY`). When the env var is
+empty, `kernel_optimization.choose_backends`,
+`tracelens_analysis.recommend_backends`,
+`kernel_request_handlers._backend_order`, and `parallel_e2e_runner`'s
+`--backends` default all drop `cursor` from the auto-derived list so
+Hyperloom doesn't waste attempt slots on guaranteed 401s. The selection
+`notes` carry `cursor_key_present: bool` for observability. Explicit user
+input (`--backends cursor`, payload `backends="cursor"` /
+`backend_order="...,cursor,..."`, or `KERNEL_OPT_BACKEND_ORDER`) is always
+honored; a missing key surfaces as a single failed cursor attempt rather
+than a silent skip.
+
 ## Optimization Goals & Time Budget
 
 - **Target speedup**: `>= 1.20x` on the dominant inference shape(s). Below this
