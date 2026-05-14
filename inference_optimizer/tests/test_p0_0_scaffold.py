@@ -38,7 +38,7 @@ def test_package_version_is_v06():
 # paths
 # ---------------------------------------------------------------------------
 def test_make_session_dir_creates_all_subdirs(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.ENV_OVERRIDE_SESSION_DIR, str(tmp_path))
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     assert sd == tmp_path
     for sub in paths._SESSION_SKELETON:
@@ -46,7 +46,7 @@ def test_make_session_dir_creates_all_subdirs(tmp_path, monkeypatch):
 
 
 def test_db_path_for_default_under_session(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.ENV_OVERRIDE_SESSION_DIR, str(tmp_path))
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     assert paths.db_path_for(sd) == sd / "storage" / "coordinator.db"
 
@@ -64,7 +64,7 @@ def test_asset_root_override_missing_raises(tmp_path, monkeypatch):
 
 
 def test_agent_session_dir_returns_path(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.ENV_OVERRIDE_SESSION_DIR, str(tmp_path))
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     ad = paths.agent_session_dir(sd, "orchestration")
     assert ad == sd / "agents" / "orchestration"

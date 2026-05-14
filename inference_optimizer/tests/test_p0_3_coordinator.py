@@ -50,8 +50,13 @@ from inference_optimizer.storage import SqliteConnection
 # ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
-    return make_session_dir()
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    sd = make_session_dir()
+    # Satisfy the unconditional target_analysis hard gate; these tests
+    # exercise downstream behaviour and don't care about the prep step.
+    from .conftest import seed_target_analysis_marker
+    seed_target_analysis_marker(sd)
+    return sd
 
 
 def _heartbeat() -> Intent:
@@ -194,6 +199,14 @@ async def test_coordinator_stops_when_no_more_leverage(session_dir):
             "tested": {f"v{i}": {} for i in range(29)},
             "accepted": [],
             "rejected": [],
+        }
+        # Phase 4 of the dedup-by-fingerprint plan: backends now has its
+        # own ledger and the no-leverage gate also requires it to be
+        # exhausted. Stamp the executor's exhaustion flag so this test
+        # reproduces the "everything explored" terminal state.
+        c.shared_state.backends_search = {
+            "backends_search_exhausted": True,
+            "tested": {},
         }
         c.shared_state.last_select_kernels = {
             "reusable_native_kernel_ids": ["k003", "k006", "k007"],
@@ -387,8 +400,14 @@ async def test_execution_order_denies_backends_before_profile(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_execution_order_denies_backends_before_select_kernels(session_dir):
-    """After profile, select_kernels is mandatory before backends/params/sweep."""
+async def test_execution_order_does_not_deny_backends_when_select_kernels_stale(
+    session_dir,
+):
+    """Reverse regression: the action-layer ``select_kernels`` hard-gate
+    has been removed. ``params`` / ``backends`` / ``sweep`` / ``report``
+    must NOT be denied when ``last_select_kernels`` is empty / stale.
+    The select_kernels prerequisite is now enforced ONLY at the REQUEST
+    layer for ``run_optimization`` (see test_required_step_gates.py)."""
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "params", "predicted_gain_pct": 3.0,
     })
@@ -397,19 +416,25 @@ async def test_execution_order_denies_backends_before_select_kernels(session_dir
     try:
         c.shared_state.baseline_tput = 100.0
         c.shared_state.last_profile_trace = "/tmp/trace-a.json.gz"
+        c.shared_state.last_profile_pmc_summary = "/tmp/pmc-a.json"
         c.shared_state.last_select_kernels = {}
         c.shared_state.save(session_dir)
 
         await c.tick(1)
 
-        assert not c.state.pending_proposals
+        # Proposal should now be accepted into pending_proposals (gate
+        # removed); no `policy_denied{select_kernels...}` observation
+        # should be emitted.
         obs = await c.bus.tail(to_agent="orchestration", topic="observation")
-        assert any(
-            m.payload.get("kind") == "policy_denied"
-            and m.payload.get("rule") == "execution_order"
-            and "select_kernels" in str(m.payload.get("hint"))
-            for m in obs
-        )
+        for m in obs:
+            if m.payload.get("kind") != "policy_denied":
+                continue
+            assert "select_kernels must run first" not in str(
+                m.payload.get("hint") or m.payload.get("reason") or ""
+            ), (
+                "select_kernels action-layer gate fired for params despite "
+                f"removal: {m.payload!r}"
+            )
     finally:
         await c.stop()
 
