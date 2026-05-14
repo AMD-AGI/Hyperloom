@@ -405,6 +405,7 @@ async def test_execution_order_denies_backends_before_select_kernels(session_dir
     try:
         c.shared_state.baseline_tput = 100.0
         c.shared_state.last_profile_trace = "/tmp/trace-a.json.gz"
+        c.shared_state.last_profile_pmc_summary = "/tmp/pmc-a.json"
         c.shared_state.last_select_kernels = {}
         c.shared_state.save(session_dir)
 
