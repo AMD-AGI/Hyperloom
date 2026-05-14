@@ -269,6 +269,7 @@ def test_analyze_happy_path_writes_files(mock_inferencex, tmp_path: Path):
     )
 
     assert summary.status == "ok"
+    assert summary.reason == "ok"
     assert summary.row_count == 4
     assert summary.best is not None
     assert summary.best.tput_per_gpu == 6624.1
@@ -281,6 +282,7 @@ def test_analyze_happy_path_writes_files(mock_inferencex, tmp_path: Path):
 
     on_disk = json.loads(json_path.read_text())
     assert on_disk["status"] == "ok"
+    assert on_disk["reason"] == "ok"
     assert on_disk["query"]["model"] == "MiniMax-M2.5"
     assert on_disk["query"]["gpu"] == "b300"
     assert on_disk["best"]["tput_per_gpu"] == 6624.1
@@ -308,6 +310,7 @@ def test_analyze_mapping_miss_writes_skipped_summary(mock_inferencex, tmp_path):
         osl=1024,
     )
     assert summary.status == "skipped"
+    assert summary.reason == "model_mapping_miss"
     assert summary.best is None
     assert "mapping miss" in summary.warning.lower()
 
@@ -315,6 +318,29 @@ def test_analyze_mapping_miss_writes_skipped_summary(mock_inferencex, tmp_path):
         (tmp_path / "target_analysis" / "target_baseline.json").read_text()
     )
     assert on_disk["status"] == "skipped"
+    assert on_disk["reason"] == "model_mapping_miss"
+
+
+def test_analyze_no_target_gpu_writes_marker(tmp_path):
+    """``compare_against_gpu=""`` short-circuits before any HTTP traffic
+    and persists a structured marker JSON. Mirrors the path used when
+    ``--compare-against-gpu`` is unset on the CLI."""
+    from inference_optimizer.baseline_comparison import analyze
+    summary = analyze(
+        session_dir=tmp_path,
+        model_path="/wekafs/models/MiniMaxAI-MiniMax-M2.5",
+        compare_against_gpu="",
+    )
+    assert summary.status == "skipped"
+    assert summary.reason == "no_target_gpu_configured"
+    assert summary.best is None
+    assert summary.query.gpu == ""
+
+    on_disk = json.loads(
+        (tmp_path / "target_analysis" / "target_baseline.json").read_text()
+    )
+    assert on_disk["status"] == "skipped"
+    assert on_disk["reason"] == "no_target_gpu_configured"
 
 
 def test_analyze_no_match_after_filter(mock_inferencex, tmp_path):
@@ -333,6 +359,7 @@ def test_analyze_no_match_after_filter(mock_inferencex, tmp_path):
         osl=1024,
     )
     assert summary.status == "no_match"
+    assert summary.reason == "no_match"
     assert summary.best is None
 
 
@@ -353,10 +380,83 @@ def test_analyze_fetch_error_does_not_raise(mock_inferencex, tmp_path):
         osl=1024,
     )
     assert summary.status == "fetch_error"
+    assert summary.reason == "fetch_error"
     assert summary.best is None
     # Even on failure the JSON is persisted so the report can show the
     # warning rather than "no info at all".
     assert (tmp_path / "target_analysis" / "target_baseline.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# report.py renderer — _format_external_baseline_section branches on reason
+# ---------------------------------------------------------------------------
+def _ext_payload(**overrides) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "query": {
+            "model": "MiniMax-M2.5", "gpu": "b300",
+            "framework": "vllm", "precision": "fp8",
+            "isl": 1024, "osl": 1024,
+        },
+        "fetched_at": "2026-05-12T07:00:34Z",
+        "row_count": 1,
+        "best": {
+            "tput_per_gpu": 2781.5, "output_tput_per_gpu": 1390.7,
+            "conc": 64, "decode_tp": 2,
+            "mean_ttft_ms": 94.0, "mean_tpot_ms": 22.0, "mean_e2el_ms": 20600.0,
+            "date": "2026-04-17",
+        },
+        "all_concurrencies": [],
+        "status": "ok",
+        "reason": "ok",
+        "warning": "",
+        "source": "https://inferencex.semianalysis.com/api/v1",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_report_section_renders_no_target_gpu_marker():
+    from inference_optimizer.orchestrator.action_executors.report import (
+        _format_external_baseline_section,
+    )
+    ext = _ext_payload(
+        status="skipped", reason="no_target_gpu_configured",
+        warning="compare_against_gpu is empty", best=None, row_count=0,
+    )
+    ext["query"]["gpu"] = ""
+    md = "\n".join(_format_external_baseline_section(ext))
+    assert "## External baseline (not requested)" in md
+    assert "no_target_gpu_configured" in md
+    assert "No `--compare-against-gpu`" in md
+    # Must NOT render a fake reference-best line.
+    assert "Reference best per-GPU throughput" not in md
+
+
+def test_report_section_renders_ok_with_reference_best():
+    from inference_optimizer.orchestrator.action_executors.report import (
+        _format_external_baseline_section,
+    )
+    md = "\n".join(_format_external_baseline_section(_ext_payload()))
+    assert "## External baseline (InferenceX, advisory)" in md
+    assert "Reference best per-GPU throughput" in md
+    assert "2781.5" in md
+    # Must NOT print a derived KPI.
+    assert "gap" not in md.lower()
+
+
+def test_report_section_renders_fetch_error_with_warning():
+    from inference_optimizer.orchestrator.action_executors.report import (
+        _format_external_baseline_section,
+    )
+    ext = _ext_payload(
+        status="fetch_error", reason="fetch_error",
+        warning="upstream timed out", best=None, row_count=0,
+    )
+    md = "\n".join(_format_external_baseline_section(ext))
+    assert "## External baseline (InferenceX, advisory)" in md
+    assert "fetch_error" in md
+    assert "upstream timed out" in md
+    assert "No reference best available" in md
 
 
 def test_session_paths_helpers_under_target_analysis(tmp_path):
