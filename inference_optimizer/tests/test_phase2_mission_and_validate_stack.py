@@ -8,6 +8,7 @@ a ``validate_stack`` requirement after each KEEP'd entry on
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from inference_optimizer.orchestrator.policy import (
 )
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
+from inference_optimizer.session_paths import target_baseline_json
 
 
 # ===========================================================================
@@ -37,6 +39,24 @@ from inference_optimizer.paths import make_session_dir
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     return make_session_dir()
+
+
+def _seed_target_analysis_marker(sd: Path) -> None:
+    """Write the marker JSON the target_analysis gate now demands.
+
+    The gate fires unconditionally on a missing
+    ``target_baseline.json`` (independent of ``--compare-against-gpu``).
+    Tests that focus on later gates / TODOs need to satisfy it first.
+    """
+    path = target_baseline_json(sd)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "status": "skipped",
+            "reason": "no_target_gpu_configured",
+        }),
+        encoding="utf-8",
+    )
 
 
 def _silent_intent() -> Intent:
@@ -229,6 +249,7 @@ async def test_compose_prompt_omits_mission_section_for_other_agents(session_dir
 # ===========================================================================
 def test_required_next_step_validate_stack_after_unvalidated_keep(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_target_analysis_marker(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
@@ -257,6 +278,7 @@ def test_required_next_step_no_kernel_skips_profile_select(tmp_path, monkeypatch
         backends=_backends_no_kernel(),
         role_registry=_no_kernel_role_registry(),
     )
+    _seed_target_analysis_marker(sd)
     s = coord.shared_state
     s.baseline_tput = 100.0
     # No-kernel mode: profile/select_kernels should not be required.
@@ -268,6 +290,7 @@ def test_required_next_step_no_kernel_skips_profile_select(tmp_path, monkeypatch
 
 def test_required_next_step_baseline_still_first(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_target_analysis_marker(session_dir)
     s = coord.shared_state
     s.optimization_stack = [{"action": "backends", "variant_name": "aiter"}]
     # baseline_tput == 0 — baseline TODO must take precedence
@@ -281,6 +304,7 @@ def test_required_next_step_baseline_still_first(session_dir):
 # ===========================================================================
 def test_sequence_denial_blocks_explore_after_unvalidated_keep(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_target_analysis_marker(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
@@ -304,6 +328,7 @@ def test_sequence_denial_blocks_explore_after_unvalidated_keep(session_dir):
 
 def test_sequence_denial_clears_after_validation(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_target_analysis_marker(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"

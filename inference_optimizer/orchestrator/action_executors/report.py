@@ -154,13 +154,47 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
     ``$SESSION_DIR/target_analysis/target_baseline.json``. We render
     facts only — no derived gap percentage, no "should reach" wording —
     so this section never reads as an implicit KPI the next run is
-    expected to hit. The whole feature is opt-in via
-    ``--compare-against-gpu``.
+    expected to hit.
+
+    The section heading varies by ``ext['reason']``:
+
+    * ``ok``                       — full reference-best block.
+    * ``no_target_gpu_configured`` — "(not requested)" heading; explains
+                                      no ``--compare-against-gpu`` was
+                                      supplied so only a marker JSON was
+                                      written.
+    * everything else              — "(InferenceX, advisory)" heading
+                                      with the warning text.
     """
     lines: list[str] = []
-    lines.append("## External baseline (InferenceX, advisory)")
-    lines.append("")
     status = str(ext.get("status") or "unknown")
+    reason = str(ext.get("reason") or "").strip()
+    if reason == "no_target_gpu_configured":
+        lines.append("## External baseline (not requested)")
+    else:
+        lines.append("## External baseline (InferenceX, advisory)")
+    lines.append("")
+    if reason == "no_target_gpu_configured":
+        lines.append(
+            "- No `--compare-against-gpu` was specified; only a marker JSON "
+            "was written. Re-run with `--compare-against-gpu <gpu>` (e.g. "
+            "`b300` / `mi355x` / `h200`) to fetch the matching InferenceX "
+            "reference data point."
+        )
+        lines.append(f"- Fetched at: {ext.get('fetched_at') or '(unknown)'}")
+        lines.append(
+            f"- Status: `{status}` reason=`{reason}` "
+            f"(rows matched: {ext.get('row_count', 0)})"
+        )
+        lines.append("")
+        lines.append(
+            "> Advisory only. This block does not feed Objective, scoring, or "
+            "any agent prompt; it is shown here purely for post-mortem "
+            "comparison."
+        )
+        lines.append("")
+        return lines
+
     q = ext.get("query") or {}
     lines.append(
         "- Query: "
@@ -171,7 +205,11 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
         f"ISL/OSL=`{q.get('isl') or '(any)'}/{q.get('osl') or '(any)'}`"
     )
     lines.append(f"- Fetched at: {ext.get('fetched_at') or '(unknown)'}")
-    lines.append(f"- Status: `{status}` (rows matched: {ext.get('row_count', 0)})")
+    reason_suffix = f" reason=`{reason}`" if reason else ""
+    lines.append(
+        f"- Status: `{status}`{reason_suffix} "
+        f"(rows matched: {ext.get('row_count', 0)})"
+    )
     warning = ext.get("warning") or ""
     if warning:
         lines.append(f"- Warning: {warning}")
