@@ -65,6 +65,60 @@ def test_full_enabled_actions_match_registry_minus_pmc_optional(registry):
         assert registry.get(name) is not None
 
 
+# The 5 noop-prep actions below were removed from the enabled sets so the
+# Orchestration LLM no longer proposes them (see remain_todo.md sections
+# C / I / M for the missing executor work). The metadata yamls still live
+# in actions/_meta so future executors don't need to re-introduce the
+# action names; pin both halves of the contract here.
+_REMOVED_NOOP_ACTIONS: tuple[str, ...] = (
+    "comm_optimization",
+    "compiler_tuning",
+    "dream",
+    "re_explore",
+    "recover",
+)
+
+
+@pytest.mark.parametrize("name", _REMOVED_NOOP_ACTIONS)
+def test_noop_actions_excluded_from_full_enabled(name: str):
+    assert name not in FULL_ENABLED_ACTIONS, (
+        f"{name!r} is a noop-prep action and must not be visible to the "
+        "Orchestration LLM until a real executor lands"
+    )
+
+
+@pytest.mark.parametrize("name", _REMOVED_NOOP_ACTIONS)
+def test_noop_actions_excluded_from_no_kernel_enabled(name: str):
+    assert name not in NO_KERNEL_ENABLED_ACTIONS
+
+
+@pytest.mark.parametrize("name", _REMOVED_NOOP_ACTIONS)
+def test_removed_noop_actions_still_have_registry_metadata(registry, name):
+    """We only suppressed the action from the enabled set; the yaml
+    metadata stays in the registry so re-enabling later is a one-line
+    revert in prompt_builder.py."""
+    assert registry.get(name) is not None, (
+        f"action metadata for {name!r} disappeared — re-enabling will be "
+        "harder than expected"
+    )
+
+
+def test_removed_noop_actions_absent_from_default_catalogue(registry, rules_path):
+    text = build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=FULL_ENABLED_ACTIONS,
+        framework="sglang",
+        objective_kind="time_only",
+        objective_value=None,
+        max_minutes=120,
+        rules_fragment_path=rules_path,
+    )
+    for name in _REMOVED_NOOP_ACTIONS:
+        assert f"**{name}**" not in text, (
+            f"{name!r} should not appear as an action bullet in the prompt"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Output structure
 # ---------------------------------------------------------------------------
@@ -92,7 +146,7 @@ def test_full_prompt_has_seven_sections(registry, rules_path):
         "## 3. PIPELINE & TIME BUDGET",
         "## 4. ACTIONS YOU MAY USE",
         "## 5. DECISION FRAMEWORK (apply EVERY tick BEFORE emitting)",
-        "## 6. KERNEL-OPT PIPELINE (sequential, no backtracking)",
+        "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
         "## 7. RULES & OUTPUT PROTOCOL",
     ]
     actual_top = [h for h in headers if h.startswith("## ")]
@@ -110,7 +164,7 @@ def test_no_kernel_prompt_drops_section_six(registry, rules_path):
         rules_fragment_path=rules_path,
     )
     headers = [h for h in _section_headers(text) if h.startswith("## ")]
-    assert "## 6. KERNEL-OPT PIPELINE (sequential, no backtracking)" not in headers
+    assert "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)" not in headers
     # Other sections still present
     assert "## 1. MISSION" in headers
     assert "## 4. ACTIONS YOU MAY USE" in headers
@@ -269,7 +323,7 @@ def test_explicit_kernel_enabled_override_wins(registry, rules_path):
         max_minutes=60,
         rules_fragment_path=rules_path,
     )
-    assert "## 6. KERNEL-OPT PIPELINE" not in text
+    assert "## 6. KERNEL-OPT REQUEST REFERENCE" not in text
 
 
 # ---------------------------------------------------------------------------

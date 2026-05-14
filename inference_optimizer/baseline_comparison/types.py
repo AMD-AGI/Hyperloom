@@ -99,6 +99,9 @@ class BaselineSummary:
           "best":          {tput_per_gpu, conc, decode_tp, ...} | null,
           "all_concurrencies": [{conc, tput_per_gpu, decode_tp, ...}],
           "status":        "ok" | "no_match" | "fetch_error" | "skipped",
+          "reason":        "ok" | "model_mapping_miss" |
+                           "no_target_gpu_configured" | "fetch_error" |
+                           "no_match",
           "warning":       "<human-readable note, empty when status=ok>",
           "source":        "https://inferencex.semianalysis.com/api/v1"
         }
@@ -106,6 +109,11 @@ class BaselineSummary:
     The ``status`` field is the single source of truth: ``ok`` means
     ``best`` is populated and the report should render it; any other
     value means the report can show a one-line note and move on.
+
+    The ``reason`` field is the structured machine-readable counterpart
+    to ``warning``: callers should branch on it instead of regex-matching
+    the human-readable warning string. The two are kept side-by-side so
+    existing log/UI consumers that only know ``warning`` still work.
     """
 
     query:      BaselineQuery
@@ -116,6 +124,7 @@ class BaselineSummary:
     status:     str = "ok"
     warning:    str = ""
     source:     str = ""
+    reason:     str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -125,6 +134,7 @@ class BaselineSummary:
             "best":              self.best.to_dict() if self.best else None,
             "all_concurrencies": [p.to_dict() for p in self.all_concurrencies],
             "status":            self.status,
+            "reason":            self.reason,
             "warning":           self.warning,
             "source":            self.source,
         }
@@ -152,6 +162,7 @@ class BaselineSummary:
             status=str(d.get("status", "ok")),
             warning=str(d.get("warning", "")),
             source=str(d.get("source", "")),
+            reason=str(d.get("reason", "")),
         )
 
 

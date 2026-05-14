@@ -16,7 +16,7 @@ export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 
 . "$HYPERLOOM_KERNEL_AGENT_ROOT/env.sh"
 
-export INFERENCE_OPTIMIZER_SESSION_DIR="${INFERENCE_OPTIMIZER_SESSION_DIR:-/workspace/hyperloom}"
+export USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
 
 # --- workload (override per run) ---
 export MODEL_PATH="${MODEL_PATH:?set MODEL_PATH before sourcing}"
