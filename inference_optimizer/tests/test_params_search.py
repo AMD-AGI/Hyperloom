@@ -14,11 +14,22 @@ from types import SimpleNamespace
 import pytest
 
 from inference_optimizer.orchestrator.action_executors import params as params_mod
-from inference_optimizer.orchestrator.action_executors._grid_runner import VariantResult
+from inference_optimizer.orchestrator.action_executors._grid_runner import (
+    VariantResult,
+    variant_fingerprint,
+)
 from inference_optimizer.orchestrator.action_executors.params import (
     GridVariant,
     ParamsExecutor,
 )
+
+
+def _tested_names(updated_search: dict) -> set[str]:
+    """Schema v2: ``tested`` is fingerprint-keyed; recover the display names."""
+    return {
+        entry["name"] for entry in (updated_search.get("tested") or {}).values()
+        if isinstance(entry, dict) and entry.get("name")
+    }
 
 
 def _ctx(tmp_path: Path, params: dict) -> SimpleNamespace:
@@ -65,9 +76,13 @@ async def test_params_search_single_then_combo(monkeypatch, tmp_path):
     assert result["best_variant"]["extra_sglang_args"] == "--A --B"
 
     search = result["params_search_update"]
+    assert search["schema_version"] == 2
     assert [v["name"] for v in search["accepted"]] == ["A", "B"]
     assert [v["name"] for v in search["rejected"]] == ["C"]
-    assert set(search["tested"]) == {"A", "B", "C"}
+    assert _tested_names(search) == {"A", "B", "C"}
+    # tested is keyed by content fingerprint (sha1 16-char prefix), not name.
+    assert variant_fingerprint("--A", {}) in search["tested"]
+    assert search["name_index"]["A"] == variant_fingerprint("--A", {})
     assert search["cursor"] == 3
 
 
@@ -125,7 +140,10 @@ async def test_params_search_resume_skips_tested_and_uses_current_combo(
     updated = result["params_search_update"]
     assert [v["name"] for v in updated["accepted"]] == ["A", "B", "D"]
     assert [v["name"] for v in updated["rejected"]] == ["C"]
-    assert set(updated["tested"]) == {"A", "B", "C", "D"}
+    # Legacy schema-v1 tested entries (keyed by name) coexist with the new
+    # fingerprint-keyed write for D — the migration is non-destructive.
+    assert _tested_names(updated) >= {"D"}
+    assert variant_fingerprint("--D", {}) in updated["tested"]
 
 
 @pytest.mark.asyncio
@@ -165,3 +183,49 @@ async def test_params_search_seeds_current_best_for_legacy_resume(
     assert seen == [("--A", ["B"])]
     updated = result["params_search_update"]
     assert [v["name"] for v in updated["accepted"]] == ["A", "B"]
+
+
+@pytest.mark.asyncio
+async def test_params_search_filters_renamed_variant(monkeypatch, tmp_path):
+    """A variant whose content matches an already-tested fingerprint is
+    dropped even when the LLM relabels it (``--A`` as ``A`` vs ``A_v2``)."""
+    seen: list[list[str]] = []
+
+    async def fake_run_grid(*, base_yaml_path, base_extra_args, grid, output_root,
+                            variant_timeout_sec, **kwargs):
+        seen.append([v.name for v in grid])
+        return [
+            VariantResult(
+                name=v.name,
+                extra_sglang_args=v.extra_sglang_args,
+                extra_envs=v.extra_envs,
+                status="succeeded",
+                output_throughput=120.0,
+            )
+            for v in grid
+        ]
+
+    monkeypatch.setattr(params_mod, "run_grid", fake_run_grid)
+    # LLM grid containing a rename of an already-tested ``--A`` plus a fresh B.
+    llm_grid = [
+        {"name": "A_renamed", "extra_sglang_args": "--A", "extra_envs": {}},
+        {"name": "B",         "extra_sglang_args": "--B", "extra_envs": {}},
+    ]
+    fp_a = variant_fingerprint("--A", {})
+    prior_search = {
+        "schema_version": 2,
+        "accepted": [],
+        "rejected": [],
+        "tested": {fp_a: {"name": "A", "extra_sglang_args": "--A", "extra_envs": {}}},
+        "name_index": {"A": fp_a},
+        "cursor": 1,
+    }
+    ex = ParamsExecutor(default_grid=[])
+    await ex(_ctx(tmp_path, {
+        "base_tput": 100.0,
+        "grid": llm_grid,
+        "params_search": prior_search,
+    }))
+    assert seen == [["B"]], (
+        "renamed --A should be filtered by fingerprint; only B may run"
+    )
