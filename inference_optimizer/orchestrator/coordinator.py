@@ -2155,6 +2155,19 @@ class Coordinator:
         }
         if key not in existing:
             self.shared_state.optimization_stack.append(entry)
+            # Per-entry incremental gain (current_best vs. baseline at the
+            # moment this integrate KEEP landed). Keeps
+            # ``gain_per_stack_entry`` index-aligned with
+            # ``optimization_stack`` for session_breakdown's
+            # capability_summary attribution.
+            gain_pct_entry: float | None = None
+            try:
+                bt = float(self.shared_state.baseline_tput or 0.0)
+                if bt > 0:
+                    gain_pct_entry = (float(new_tput) - bt) / bt * 100.0
+            except (TypeError, ValueError):
+                gain_pct_entry = None
+            self.shared_state.gain_per_stack_entry.append(gain_pct_entry)
 
         self.shared_state.current_best = {
             "action": "integrate",
@@ -2350,6 +2363,17 @@ class Coordinator:
                     ),
                     "ts": datetime.now(timezone.utc).isoformat(),
                 })
+                # Mirror append into ``gain_per_stack_entry`` so indexes
+                # stay aligned across the two parallel lists. See the
+                # SharedState docstring for the contract.
+                gain_pct_entry: float | None = None
+                try:
+                    bt = float(self.shared_state.baseline_tput or 0.0)
+                    if bt > 0:
+                        gain_pct_entry = (float(best_tput) - bt) / bt * 100.0
+                except (TypeError, ValueError):
+                    gain_pct_entry = None
+                self.shared_state.gain_per_stack_entry.append(gain_pct_entry)
 
         self.shared_state.current_best = {
             "action": task_kind,
