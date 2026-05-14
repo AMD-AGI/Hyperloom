@@ -47,7 +47,11 @@ from .action_registry import ActionMetadata, ActionRegistry
 KEEP_DECAY_RATE: float = 0.1
 KEEP_DECAY_FLOOR: float = 0.5
 
-# Discard multiplier — one DISCARD drops the action's mult by 30%.
+# Discard multiplier — kept as a deprecated constant for backward compat with
+# old state.json snapshots and the thin ``apply_discard`` wrapper below.
+# New code paths should use :func:`apply_failure` / :func:`apply_no_promote`
+# which only nudge ``score_mult`` after a streak of 3 consecutive bad
+# outcomes (see ``STREAK_*`` below).
 DISCARD_MULT: float = 0.7
 
 # Exploration constants. UCB_C controls how aggressively under-sampled actions
@@ -56,11 +60,24 @@ UCB_C: float = 0.6
 AGING_RATE: float = 0.05
 
 
-# Cooldown in Coordinator ticks per action. Default to 2 ticks. Actions whose
-# successful execution is essentially free / required (validate_stack, report,
-# baseline, recover) get 0 — they're not the kind of "behavior" we want to
-# alternate. Expensive long-run actions get longer cooldowns so they don't
-# steal back-to-back ticks while their feedback is still in flight.
+# Streak-based dampening. Replaces the mandatory per-action cooldown so the
+# Orchestration LLM can re-select an action immediately if it has good reason
+# to retry, while still discouraging an action that keeps failing or keeps
+# succeeding-without-promoting. Threshold 3 with a 0.85 multiplier and a 0.2
+# floor means a degenerate streak shaves the row to ~30% of its base over six
+# strikes — enough to bubble alternatives up without permanently burying the
+# action.
+STREAK_THRESHOLD: int = 3
+STREAK_PENALTY_MULT: float = 0.85
+STREAK_PENALTY_FLOOR: float = 0.2
+
+
+# Legacy cooldown table — preserved so old state.json snapshots that still
+# carry ``cooldown_until_tick`` values can round-trip and so we can revert
+# the streak-based design without resurrecting the table from git. The
+# active scheduler ignores this map: ``_cooldown_for`` returns 0 for every
+# action and ``apply_keep`` / ``apply_failure`` no longer set
+# ``cooldown_until_tick``.
 COOLDOWN_TICKS: dict[str, int] = {
     "backends": 2,
     "params": 2,
@@ -81,52 +98,69 @@ COOLDOWN_TICKS: dict[str, int] = {
     "validate_stack": 0,
     "baseline": 0,
     "report": 0,
-    "setup": 0,
-    "classify": 0,
     "target_analysis": 0,
 }
 
 
-# Marathon priors per model_class. Mirrors the table at
-# ``/wekafs/zgong/TBO/inference_optimization/marathon/skills/SKILL.md`` L832-839.
-# Only the six actions explicitly tabulated in marathon are listed; every
-# other action falls back to ``compute_initial_priors_from_metadata``.
+# Marathon priors per model_class. Originally mirrored the table at
+# ``/wekafs/zgong/TBO/inference_optimization/marathon/skills/SKILL.md`` L832-839
+# (the six deep/operator-family rows). Extended here with the three explore
+# actions (``backends`` / ``params`` / ``sweep``) so they share the same
+# 1-10 curated-prior scale instead of falling through to
+# ``compute_initial_priors_from_metadata`` (which produces ~0.4-1.0 numbers
+# in gain%/min units that don't compete with the 6-9 marathon rows).
+# ``backends`` and ``params`` are seeded at 10x their auto-computed value
+# (8.4 and 9.5 respectively) — empirical evidence from GLM-5 / DeepSeek-R1
+# shows these are first-class levers on MoE; ``sweep`` is a validation
+# action and stays low at 1.0 so it doesn't crowd out real exploration.
 #
 # Marathon names use kebab-case (deep-kernel-analysis); inference_optimizer
 # uses snake_case (deep_kernel_analysis). The mapping below uses the
 # snake_case names so seed_action_scores can look them up directly.
 MARATHON_PRIORS: dict[str, dict[str, float]] = {
     "dense": {
-        "deep_kernel_analysis": 9.0,
+        "deep_kernel_analysis": 2.0,
         "operator_tuning": 4.0,
         "kernel_opt": 8.0,
         "framework_rebuild": 3.0,
         "comm_optimization": 2.0,
         "compiler_tuning": 6.0,
+        "backends": 8.4,
+        "params": 9.5,
+        "sweep": 1.0,
     },
     "moe_mla": {
-        "deep_kernel_analysis": 8.0,
+        "deep_kernel_analysis": 2.0,
         "operator_tuning": 7.0,
         "kernel_opt": 6.0,
         "framework_rebuild": 4.0,
         "comm_optimization": 5.0,
         "compiler_tuning": 3.0,
+        "backends": 8.4,
+        "params": 9.5,
+        "sweep": 1.0,
     },
     "moe_swa": {
-        "deep_kernel_analysis": 8.0,
+        "deep_kernel_analysis": 2.0,
         "operator_tuning": 7.0,
         "kernel_opt": 6.0,
         "framework_rebuild": 4.0,
         "comm_optimization": 5.0,
         "compiler_tuning": 3.0,
+        "backends": 8.4,
+        "params": 9.5,
+        "sweep": 1.0,
     },
     "moe_mla_nsa": {
-        "deep_kernel_analysis": 8.0,
+        "deep_kernel_analysis": 2.0,
         "operator_tuning": 7.0,
         "kernel_opt": 6.0,
         "framework_rebuild": 4.0,
         "comm_optimization": 6.0,
         "compiler_tuning": 3.0,
+        "backends": 8.4,
+        "params": 9.5,
+        "sweep": 1.0,
     },
 }
 
@@ -157,8 +191,15 @@ class ActionScore:
     last_run_tick: int = -1
     last_gain_pct: float = 0.0
     ema_gain_pct: float = 0.0
+    # Retained for state.json backward-compat; the scheduler no longer
+    # writes to it on KEEP / DISCARD outcomes. Only ``apply_lock`` and
+    # similar explicit lockouts should touch this field going forward.
     cooldown_until_tick: int = 0
     locked_reason: str = ""
+    # Streak counters consumed by :func:`apply_failure` /
+    # :func:`apply_no_promote`. Both reset to 0 on every KEEP/promote.
+    consecutive_failures: int = 0
+    consecutive_no_promote: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -172,6 +213,8 @@ class ActionScore:
             "ema_gain_pct": float(self.ema_gain_pct),
             "cooldown_until_tick": int(self.cooldown_until_tick),
             "locked_reason": str(self.locked_reason or ""),
+            "consecutive_failures": int(self.consecutive_failures),
+            "consecutive_no_promote": int(self.consecutive_no_promote),
         }
 
     @classmethod
@@ -189,6 +232,8 @@ class ActionScore:
             ema_gain_pct=float(raw.get("ema_gain_pct", 0.0) or 0.0),
             cooldown_until_tick=int(raw.get("cooldown_until_tick", 0) or 0),
             locked_reason=str(raw.get("locked_reason", "") or ""),
+            consecutive_failures=int(raw.get("consecutive_failures", 0) or 0),
+            consecutive_no_promote=int(raw.get("consecutive_no_promote", 0) or 0),
         )
 
 
@@ -316,13 +361,14 @@ def effective_score(
 ) -> float:
     """Compute the effective sort key for one action at the current tick.
 
-    Returns :data:`_LOCKED_SCORE` (= -1.0) when the action is locked or its
-    cooldown has not elapsed. The renderer uses this sentinel to mark rows
-    as unavailable without reordering the (cooldown, age) presentation.
+    Returns :data:`_LOCKED_SCORE` (= -1.0) only when the action carries an
+    explicit ``locked_reason`` (e.g. ``params/grid_exhausted``). Mandatory
+    cooldowns were retired in favour of the streak-based penalty in
+    :func:`apply_failure` / :func:`apply_no_promote`, so a non-zero
+    ``cooldown_until_tick`` on a row no longer suppresses it — keep the
+    field intact for backward compat with archived state.json snapshots.
     """
     if a.locked_reason:
-        return _LOCKED_SCORE
-    if int(a.cooldown_until_tick) > int(tick):
         return _LOCKED_SCORE
     acc_risk = float(meta.accuracy_risk) if meta is not None else 0.0
     crash_risk = float(meta.crash_risk) if meta is not None else 0.0
@@ -342,7 +388,13 @@ def effective_score(
 # Mutators
 # ---------------------------------------------------------------------------
 def _cooldown_for(action_name: str) -> int:
-    return int(COOLDOWN_TICKS.get(action_name, 2))
+    """Return 0 — mandatory cooldowns are disabled.
+
+    Kept as a function (rather than inlined) so the COOLDOWN_TICKS table
+    above can still be inspected by diagnostics and so re-enabling
+    cooldowns later is a one-line revert.
+    """
+    return 0
 
 
 def apply_keep(
@@ -363,7 +415,69 @@ def apply_keep(
     # Exponential moving average — 0.4 weight on the newest observation keeps
     # the EMA responsive without flapping when one bad measurement lands.
     a.ema_gain_pct = 0.6 * float(a.ema_gain_pct) + 0.4 * gain
-    a.cooldown_until_tick = int(tick) + _cooldown_for(action_name)
+    # A genuine win resets both penalty streaks — even if the previous
+    # two runs were failures or no-promotes, a fresh promote means the
+    # action is paying off.
+    a.consecutive_failures = 0
+    a.consecutive_no_promote = 0
+    return a
+
+
+def apply_failure(
+    a: ActionScore,
+    *,
+    tick: int,
+    action_name: str,
+) -> ActionScore:
+    """Record a FAILED task outcome (``result.status == 'failed' / 'error'``).
+
+    Bumps ``consecutive_failures``. Only after three back-to-back failures
+    is ``score_mult`` shaved by :data:`STREAK_PENALTY_MULT` (floored at
+    :data:`STREAK_PENALTY_FLOOR`); the streak counter is reset on
+    application so the next penalty also requires another 3 strikes.
+    """
+    a.runs = int(a.runs) + 1
+    a.discards = int(a.discards) + 1
+    a.last_run_tick = int(tick)
+    a.last_gain_pct = 0.0
+    a.ema_gain_pct = 0.6 * float(a.ema_gain_pct)
+    a.consecutive_no_promote = 0
+    a.consecutive_failures = int(a.consecutive_failures) + 1
+    if a.consecutive_failures >= STREAK_THRESHOLD:
+        a.score_mult = max(
+            STREAK_PENALTY_FLOOR,
+            float(a.score_mult) * STREAK_PENALTY_MULT,
+        )
+        a.consecutive_failures = 0
+    return a
+
+
+def apply_no_promote(
+    a: ActionScore,
+    *,
+    tick: int,
+    action_name: str,
+) -> ActionScore:
+    """Record a successful task that did NOT promote ``current_best``.
+
+    This is the "we ran backends/params/sweep and nothing was better than
+    the existing baseline" case. Same shape as :func:`apply_failure` but
+    tracked on a separate streak so the diagnostics surface the two
+    pathologies independently.
+    """
+    a.runs = int(a.runs) + 1
+    a.discards = int(a.discards) + 1
+    a.last_run_tick = int(tick)
+    a.last_gain_pct = 0.0
+    a.ema_gain_pct = 0.6 * float(a.ema_gain_pct)
+    a.consecutive_failures = 0
+    a.consecutive_no_promote = int(a.consecutive_no_promote) + 1
+    if a.consecutive_no_promote >= STREAK_THRESHOLD:
+        a.score_mult = max(
+            STREAK_PENALTY_FLOOR,
+            float(a.score_mult) * STREAK_PENALTY_MULT,
+        )
+        a.consecutive_no_promote = 0
     return a
 
 
@@ -373,15 +487,14 @@ def apply_discard(
     tick: int,
     action_name: str,
 ) -> ActionScore:
-    """Record a DISCARD outcome (incl. failures / no-promote)."""
-    a.score_mult = float(a.score_mult) * DISCARD_MULT
-    a.runs = int(a.runs) + 1
-    a.discards = int(a.discards) + 1
-    a.last_run_tick = int(tick)
-    a.last_gain_pct = 0.0
-    a.ema_gain_pct = 0.6 * float(a.ema_gain_pct)
-    a.cooldown_until_tick = int(tick) + _cooldown_for(action_name)
-    return a
+    """Backward-compatible alias for :func:`apply_failure`.
+
+    Prefer :func:`apply_failure` (task returned failed/error) or
+    :func:`apply_no_promote` (task succeeded but didn't promote
+    current_best) in new code — they bucket the two pathologies into
+    distinct streaks for clearer diagnostics.
+    """
+    return apply_failure(a, tick=tick, action_name=action_name)
 
 
 def apply_lock(a: ActionScore, reason: str) -> ActionScore:
@@ -488,10 +601,15 @@ __all__ = [
     "KEEP_DECAY_FLOOR",
     "KEEP_DECAY_RATE",
     "MARATHON_PRIORS",
+    "STREAK_PENALTY_FLOOR",
+    "STREAK_PENALTY_MULT",
+    "STREAK_THRESHOLD",
     "UCB_C",
     "apply_discard",
+    "apply_failure",
     "apply_keep",
     "apply_lock",
+    "apply_no_promote",
     "apply_unlock",
     "boost_action",
     "compute_initial_priors_from_metadata",
