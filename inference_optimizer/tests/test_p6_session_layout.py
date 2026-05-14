@@ -1,9 +1,9 @@
-"""P6 — flattened session_dir layout regression tests.
+"""Flattened session_dir layout regression tests.
 
-Locks the v0.6.1 contract:
+Locks the contract:
 
 * ``paths.session_dir()`` returns ``/workspace/hyperloom`` by default;
-  ``$INFERENCE_OPTIMIZER_SESSION_DIR`` overrides for tests.
+  ``$USER_DATA_PATH`` overrides.
 * ``paths.make_session_dir()`` is idempotent and creates the full
   skeleton (storage / agents / runs / logs / patches / ...).
 * ``manifest.write_manifest()`` writes ``manifest.json`` atomically
@@ -56,17 +56,19 @@ from inference_optimizer.storage.connection import SqliteConnection
 # paths.session_dir + skeleton
 # ---------------------------------------------------------------------------
 def test_session_dir_default_is_workspace_hyperloom(monkeypatch):
-    monkeypatch.delenv(paths.ENV_OVERRIDE_SESSION_DIR, raising=False)
+    monkeypatch.delenv(paths.ENV_USER_DATA_PATH, raising=False)
     assert paths.session_dir() == Path("/workspace/hyperloom")
 
 
-def test_session_dir_env_override_wins(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.ENV_OVERRIDE_SESSION_DIR, str(tmp_path / "alt"))
-    assert paths.session_dir() == tmp_path / "alt"
+def test_session_dir_user_data_path_overrides_default(tmp_path, monkeypatch):
+    """USER_DATA_PATH is the override knob — when set, session_dir()
+    must honour it instead of falling back to /workspace/hyperloom."""
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "ud"))
+    assert paths.session_dir() == tmp_path / "ud"
 
 
 def test_make_session_dir_creates_full_skeleton(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.ENV_OVERRIDE_SESSION_DIR, str(tmp_path))
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     assert sd == tmp_path
     # Every entry in _SESSION_SKELETON must exist after the first call.
@@ -81,7 +83,7 @@ def test_make_session_dir_creates_full_skeleton(tmp_path, monkeypatch):
 # manifest
 # ---------------------------------------------------------------------------
 def test_write_manifest_writes_v1_schema(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.ENV_OVERRIDE_SESSION_DIR, str(tmp_path))
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     m = write_manifest(sd, args=None, session_id="explicit-id-123")
     assert m["schema_version"] == SCHEMA_VERSION
@@ -132,7 +134,7 @@ def test_agent_prompt_snapshot_path(tmp_path):
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.ENV_OVERRIDE_SESSION_DIR, str(tmp_path))
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
@@ -159,8 +161,8 @@ async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
-    """`setup` is not in _runs_actions() — runner shouldn't fabricate a path."""
-    monkeypatch.setenv(paths.ENV_OVERRIDE_SESSION_DIR, str(tmp_path))
+    """`target_analysis` is not in _runs_actions() — runner shouldn't fabricate a path."""
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
@@ -173,13 +175,13 @@ async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
         return {"status": "succeeded"}
 
     sub = SubAgentRunner(locks, tasks, session_dir=sd)
-    sub.register_executor("setup", runner)
+    sub.register_executor("target_analysis", runner)
     task = await tasks.create(
-        kind="setup", params={}, idempotency_key="setup-test-1",
+        kind="target_analysis", params={}, idempotency_key="target-analysis-test-1",
     )
     await sub.run_task(task)
     db.close()
-    # setup has no runs/ subtree — workspace stays unset, session_dir is plumbed.
+    # target_analysis has no runs/ subtree — workspace stays unset, session_dir is plumbed.
     assert captured["workspace"] is None
     assert captured["session_dir"] == str(sd)
 
