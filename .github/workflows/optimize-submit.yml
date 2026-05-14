@@ -316,7 +316,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: ci
-        run: pip install --quiet requests 'huggingface_hub>=0.24'
+        run: pip install --quiet requests PyYAML 'huggingface_hub>=0.24'
 
       - name: Prewarm /wekafs/models for this repo
         # Pre-pull the HF repo directly into /wekafs/models/<owner>-<repo>/
@@ -407,6 +407,40 @@ jobs:
           else
             echo "_No manifest produced for ${{ matrix.model }}._" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Publish per-model result to model-leaderboard
+        # Publish each matrix row as soon as it finishes so the leaderboard
+        # updates continuously instead of waiting for the whole 60-model batch.
+        # The final summary job still publishes the full batch as an idempotent
+        # upsert by run_id/task_id, so this does not create duplicate rows.
+        if: always() && github.event.inputs.dry_run != 'true'
+        continue-on-error: true
+        working-directory: ci
+        env:
+          HYPERLOOM_RESULTS_SERVICE_URL:   ${{ secrets.HYPERLOOM_RESULTS_SERVICE_URL }}
+          HYPERLOOM_RESULTS_SERVICE_TOKEN: ${{ secrets.HYPERLOOM_RESULTS_SERVICE_TOKEN }}
+          INPUT_TARGET_GPU: ${{ github.event.inputs.target_gpu }}
+          INPUT_ISL:        ${{ github.event.inputs.isl }}
+          INPUT_OSL:        ${{ github.event.inputs.osl }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "${{ github.workspace }}/submit-output/submission_manifest.json" ]; then
+            echo "No submission_manifest.json for ${{ matrix.model }}; skipping per-model publish"
+            exit 0
+          fi
+          mkdir -p "${{ github.workspace }}/single-summary"
+          python3 build_summary.py \
+            --artifacts-dir "${{ github.workspace }}/task-artifacts" \
+            --manifests-dir "${{ github.workspace }}/submit-output" \
+            --target-gpu    "${INPUT_TARGET_GPU:-mi300x}" \
+            --isl           "${INPUT_ISL:-1024}" \
+            --osl           "${INPUT_OSL:-1024}" \
+            --out-dir       "${{ github.workspace }}/single-summary"
+          if [ ! -f "${{ github.workspace }}/single-summary/normalized_results.json" ]; then
+            echo "normalized_results.json not produced for ${{ matrix.model }}; skipping publish"
+            exit 0
+          fi
+          python3 publish_results.py --input "${{ github.workspace }}/single-summary/normalized_results.json"
 
       - name: Upload per-model manifest
         if: always()
