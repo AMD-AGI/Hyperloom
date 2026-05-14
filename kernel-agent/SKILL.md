@@ -234,12 +234,16 @@ subagent must write findings under `system_findings/` or `category_findings/`.
 Do not fabricate results. All findings must come from Python script output,
 TraceLens CLI output, or artifacts written by subagents.
 
-The final report is written to:
+The final report is the TraceLens v0.3 SDK orchestrator's `analysis.md`,
+written by the upstream skill to:
 
-`$WORKSPACE_PATH/kernel-agent/runs/<session_id>/tracelens/standalone_analysis.md`
+`$WORKSPACE_PATH/kernel-agent/runs/<session_id>/tracelens/analysis.md`
 
-If Executor requests compatibility output, also write
-`/workspace/hyperloom/standalone_analysis.md`.
+Hyperloom does not alias, copy, or wrap this file (#203 removed the
+legacy `standalone_analysis.md` / `tracelens_report.md` copies and the
+`--compat-report-path` argument). Downstream consumers read the canonical
+upstream path returned in `analysis_report_path` from
+`select_kernels_handler`.
 
 ## Backend Selection
 
@@ -303,7 +307,7 @@ Each request creates a `run_id` and writes:
 - `runs/<session_id>/session_state.json`
 - `runs/<session_id>/trace_input_manifest.json`
 - `runs/<session_id>/kernel_candidates.json`
-- `runs/<session_id>/tracelens/standalone_analysis.md`
+- `runs/<session_id>/tracelens/analysis.md` (TraceLens v0.3 final report; owned by upstream, not copied by Hyperloom)
 - `runs/<session_id>/tracelens/tracelens_report.json`
 - `runs/<session_id>/tracelens/system_findings/`
 - `runs/<session_id>/tracelens/category_findings/`
