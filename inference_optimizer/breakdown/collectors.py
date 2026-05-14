@@ -93,6 +93,58 @@ def _rel(path: Path | None, session_dir: Path) -> str | None:
         return str(path)
 
 
+def _benchmark_report_metrics(
+    report: dict[str, Any] | None,
+) -> tuple[float | None, float | None, float | None, float | None]:
+    """Extract (output_throughput, ttft_mean_ms, tpot_mean_ms, e2el_mean_ms) from
+    a benchmark_report.json regardless of schema generation.
+
+    Supported shapes (in priority order):
+
+    * V2 (current): top-level ``throughput.output_throughput`` +
+      ``latency.<metric>.mean_ms`` (e.g. ``latency.ttft.mean_ms``).
+    * Pre-V2 flat: ``output_throughput_tok_s`` / ``mean_ttft_ms`` at the
+      top level.
+    * Legacy nested-under-result: ``result.<flat>``.
+    """
+    if not isinstance(report, dict):
+        return (None, None, None, None)
+    tput_section = report.get("throughput") if isinstance(report.get("throughput"), dict) else None
+    lat_section = report.get("latency") if isinstance(report.get("latency"), dict) else None
+    result_section = report.get("result") if isinstance(report.get("result"), dict) else None
+
+    def _from_lat(metric: str) -> Any:
+        if isinstance(lat_section, dict):
+            sub = lat_section.get(metric)
+            if isinstance(sub, dict):
+                return sub.get("mean_ms")
+        return None
+
+    out_tput = _to_float(
+        (tput_section or {}).get("output_throughput")
+        or (tput_section or {}).get("output_throughput_tok_s")
+        or report.get("output_throughput_tok_s")
+        or report.get("output_throughput")
+        or (result_section or {}).get("output_throughput_tok_s")
+    )
+    ttft = _to_float(
+        _from_lat("ttft")
+        or report.get("mean_ttft_ms")
+        or (result_section or {}).get("mean_ttft_ms")
+    )
+    tpot = _to_float(
+        _from_lat("tpot")
+        or report.get("mean_tpot_ms")
+        or (result_section or {}).get("mean_tpot_ms")
+    )
+    e2el = _to_float(
+        _from_lat("e2el")
+        or report.get("mean_e2el_ms")
+        or (result_section or {}).get("mean_e2el_ms")
+    )
+    return (out_tput, ttft, tpot, e2el)
+
+
 def _find_benchmark_report(workspace: Path | None) -> Path | None:
     """Locate the ``benchmark_*/benchmark_report.json`` under a task workspace.
 
@@ -197,11 +249,7 @@ def collect_baseline(
     report_path = _find_benchmark_report(workspace) if workspace else None
     report = _load_json_safe(report_path, warnings) if report_path else None
 
-    ttft: float | None = None
-    e2el: float | None = None
-    if isinstance(report, dict):
-        ttft = _to_float(_safe_get(report, "mean_ttft_ms") or _safe_get(report, "result", "mean_ttft_ms"))
-        e2el = _to_float(_safe_get(report, "mean_e2el_ms") or _safe_get(report, "result", "mean_e2el_ms"))
+    _, ttft, _tpot, e2el = _benchmark_report_metrics(report if isinstance(report, dict) else None)
 
     attempts = state.get("baseline_attempts") or []
     history: list[dict[str, Any]] = []
@@ -355,12 +403,44 @@ def collect_phase_timeline(
 def _capability_for_action(
     state: dict[str, Any], action: str,
 ) -> dict[str, Any]:
+    """Per-action capability tally.
+
+    Primary source is the rich ``<action>_attempts`` audit list added in
+    HL V2 (each entry has ``decision`` in
+    ``{promoted, salvaged, rejected, failed, ...}``). On older V1 sessions
+    or partial state.json snapshots those lists are missing or empty even
+    when the action actually ran successfully, so we also walk
+    ``optimization_stack`` as a fallback: every stack entry whose
+    ``action`` matches counts as a KEEP (the stack only collects
+    successfully promoted entries by construction). Without this fallback
+    sessions that had a clear ``backends:vllm_kv_fp8`` final.action_path
+    would still report ``backends: not_attempted`` in capability_summary.
+    """
     attempts_list = state.get(f"{action}_attempts") or []
     n_attempts = len(attempts_list) if isinstance(attempts_list, list) else 0
     n_keeps = sum(
         1 for a in attempts_list
         if isinstance(a, dict) and a.get("decision") in ("promoted", "salvaged")
     ) if isinstance(attempts_list, list) else 0
+
+    # Fallback / augmentation from optimization_stack — only adopted
+    # entries land here. Counts an entry once per action; the kernel
+    # integrate path uses ``action="integrate"`` so it does not collide
+    # with backends/params/sweep here.
+    stack = state.get("optimization_stack") or []
+    if isinstance(stack, list):
+        stack_keeps = sum(
+            1 for e in stack
+            if isinstance(e, dict) and str(e.get("action") or "") == action
+        )
+    else:
+        stack_keeps = 0
+    if stack_keeps > n_keeps:
+        n_keeps = stack_keeps
+        # Stack-derived keeps imply at least as many attempts.
+        if n_attempts < stack_keeps:
+            n_attempts = stack_keeps
+
     status = (
         "kept"      if n_keeps > 0 else
         "tried"     if n_attempts > 0 else
@@ -1014,23 +1094,7 @@ def _shape_sweep_point(
     status = "ok"
     out_tput = ttft = tpot = e2el = None
     if isinstance(report_data, dict):
-        out_tput = _to_float(
-            _safe_get(report_data, "output_throughput_tok_s")
-            or _safe_get(report_data, "result", "output_throughput_tok_s")
-            or _safe_get(report_data, "output_throughput")
-        )
-        ttft = _to_float(
-            _safe_get(report_data, "mean_ttft_ms")
-            or _safe_get(report_data, "result", "mean_ttft_ms")
-        )
-        tpot = _to_float(
-            _safe_get(report_data, "mean_tpot_ms")
-            or _safe_get(report_data, "result", "mean_tpot_ms")
-        )
-        e2el = _to_float(
-            _safe_get(report_data, "mean_e2el_ms")
-            or _safe_get(report_data, "result", "mean_e2el_ms")
-        )
+        out_tput, ttft, tpot, e2el = _benchmark_report_metrics(report_data)
         if report_data.get("success") is False:
             status = "failed"
     elif report is None:
