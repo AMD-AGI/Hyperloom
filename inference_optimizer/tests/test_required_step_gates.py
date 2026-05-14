@@ -1,19 +1,22 @@
 """Coordinator hard-gate regression tests for the post-classify pipeline.
 
-After the deletion of the in-loop ``setup`` / ``classify`` actions, three
-extra Coordinator-enforced gates were introduced (see plan
-``prep-actions-hard-gates``):
+After the deletion of the in-loop ``setup`` / ``classify`` actions, two
+Coordinator-enforced gates remain (see plan ``prep-actions-hard-gates``
+and the follow-up ``remove-pmc-hard-gate``):
 
 * ``target_analysis`` — fires whenever
   ``$SESSION_DIR/target_analysis/target_baseline.json`` is missing
   (independent of ``--compare-against-gpu``; with the flag unset the
   executor still runs and writes a structured
   ``reason='no_target_gpu_configured'`` marker JSON to satisfy the gate).
-* ``pmc_roofline`` — fires when ``last_profile_trace`` exists but
-  ``last_profile_pmc_summary`` is empty.
 * ``integrate`` — fires when ``last_kernel_opt.decision == "KEEP"`` and
   the kernel_id has not yet been integrated into ``optimization_stack``
   (and is not on ``rejected_kernel_ids``).
+
+The ``pmc_roofline`` hard-gate was removed: PMC is now opt-in advisory
+enrichment for ``kernel_opt`` only and never blocks any other action.
+The ``pmc_roofline gate`` section below contains the reverse regression
+asserting the gate stays off.
 
 These tests exercise each gate's open / closed transitions plus the
 matching ``_sequence_denial_for_action`` deny / allow pairs.
@@ -100,7 +103,7 @@ def test_target_analysis_gate_fires_when_compare_unset_and_json_missing(session_
     writes a 'no_target_gpu_configured' marker JSON."""
     coord = Coordinator(session_dir, backends=_backends_full())
     todo = coord._required_next_step()
-    assert "TODO 0/6" in todo
+    assert "TODO 0/5" in todo
     assert "target_analysis is required now" in todo
     assert "no_target_gpu_configured" in todo
     assert "baseline is required now" not in todo
@@ -112,7 +115,7 @@ def test_target_analysis_gate_fires_when_compare_set_and_json_missing(session_di
         compare_against_gpu="b300",
     )
     todo = coord._required_next_step()
-    assert "TODO 0/6" in todo
+    assert "TODO 0/5" in todo
     assert "target_analysis is required now" in todo
     assert "b300" in todo
 
@@ -190,63 +193,68 @@ def test_target_analysis_denial_clears_after_baseline_json_written(session_dir):
 
 
 # ===========================================================================
-# pmc_roofline gate
+# pmc_roofline gate — REMOVED. PMC is now opt-in advisory enrichment for
+# `kernel_opt` and never gates any other action. The tests below are
+# reverse regressions guarding against the gate ever coming back.
 # ===========================================================================
-def test_pmc_roofline_gate_inactive_without_profile_trace(session_dir):
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    coord.shared_state.baseline_tput = 100.0
-    todo = coord._required_next_step()
-    # profile is the next required step, not pmc_roofline.
-    assert "TODO 2/6" in todo
-    assert "profile is required now" in todo
-
-
-def test_pmc_roofline_gate_fires_when_trace_set_pmc_missing(session_dir):
+def test_pmc_roofline_gate_does_not_fire_when_pmc_missing(session_dir):
+    """With ``last_profile_trace`` set and ``last_profile_pmc_summary``
+    empty, the next required step must be ``select_kernels`` (TODO 3/5),
+    NOT ``pmc_roofline``. The PMC hard-gate has been removed."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     todo = coord._required_next_step()
-    assert "TODO 3/6" in todo
-    assert "pmc_roofline is required now" in todo
-
-
-def test_pmc_roofline_gate_clears_when_pmc_summary_set(session_dir):
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_profile_pmc_summary = "/tmp/pmc.json"
-    todo = coord._required_next_step()
-    # pmc gate cleared; select_kernels is now the next required step.
     assert "pmc_roofline" not in todo
-    assert "TODO 4/6" in todo
+    assert "TODO 3/5" in todo
     assert "select_kernels is required now" in todo
 
 
-def test_pmc_roofline_denial_blocks_explore_actions(session_dir):
+def test_pmc_roofline_gate_does_not_block_explore_actions(session_dir):
+    """``_sequence_denial_for_action`` must not deny any action with the
+    reason ``pmc_roofline must run before ...``. Explore actions may
+    still hit the ``select_kernels must run first`` denial — that is a
+    separate (still-active) gate and not the subject of this test."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
-    for action in ("backends", "params", "sweep", "report", "profile"):
+    for action in ("backends", "params", "sweep", "report", "profile",
+                   "pmc_roofline", "validate_stack"):
         denied = coord._sequence_denial_for_action(action)
-        assert isinstance(denied, PolicyDenied), (
-            f"{action!r} should be denied while pmc_roofline is required"
+        if denied is None:
+            continue
+        assert "pmc_roofline must run before" not in str(denied), (
+            f"{action!r} hit the removed PMC hard-gate: {denied!s}"
         )
-        assert denied.rule == "execution_order"
-        assert "pmc_roofline must run before" in str(denied)
-    # pmc_roofline + validate_stack always allowed.
-    assert coord._sequence_denial_for_action("pmc_roofline") is None
-    assert coord._sequence_denial_for_action("validate_stack") is None
+
+
+def test_pmc_summary_present_does_not_change_required_next_step(session_dir):
+    """Sanity: setting ``last_profile_pmc_summary`` to a value must NOT
+    change ``_required_next_step()`` because PMC is no longer part of
+    the TODO chain."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.last_profile_trace = "/tmp/profile.tar.gz"
+    todo_without_pmc = coord._required_next_step()
+    s.last_profile_pmc_summary = "/tmp/pmc.json"
+    todo_with_pmc = coord._required_next_step()
+    assert todo_without_pmc == todo_with_pmc
+    assert "TODO 3/5" in todo_with_pmc
+    assert "select_kernels is required now" in todo_with_pmc
 
 
 def test_pmc_roofline_gate_skipped_in_no_kernel_mode(session_dir):
-    """When the kernel role is absent, the pmc gate must be inactive."""
+    """In no-kernel mode the entire kernel-pipeline section of TODOs is
+    skipped, so ``_required_next_step`` is empty and explore actions
+    pass through ``_sequence_denial_for_action`` with no PMC mention.
+    This is a regression that should hold both before and after the
+    PMC hard-gate removal."""
     from inference_optimizer.orchestrator.agent_role import default_role_registry
     role_registry = {
         k: v for k, v in default_role_registry().items() if k != "kernel"
@@ -264,7 +272,6 @@ def test_pmc_roofline_gate_skipped_in_no_kernel_mode(session_dir):
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
-    # pmc_roofline gate is kernel-only; without kernel role, no TODO.
     assert coord._required_next_step() == ""
     assert coord._sequence_denial_for_action("backends") is None
 
@@ -297,7 +304,7 @@ def test_integrate_gate_fires_when_keep_pending(session_dir):
     }
     assert coord._kernel_opt_keep_pending() == "k-rmsnorm"
     todo = coord._required_next_step()
-    assert "TODO 5/6" in todo
+    assert "TODO 4/5" in todo
     assert "integrate is required now" in todo
     assert "k-rmsnorm" in todo
 
