@@ -71,7 +71,7 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
 
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     return make_session_dir()
 
 
