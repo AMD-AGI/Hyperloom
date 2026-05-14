@@ -137,14 +137,25 @@ def test_seed_action_scores_uses_marathon_prior_when_available(registry):
     seeded = seed_action_scores(
         registry,
         model_class="moe_mla",
-        enabled=["backends", "operator_tuning", "deep_kernel_analysis", "params"],
+        enabled=[
+            "backends", "params", "sweep",
+            "operator_tuning", "deep_kernel_analysis",
+            "vendor_kernel_config",
+        ],
     )
     # marathon moe_mla: operator_tuning=7.0, deep_kernel_analysis=8.0
     assert seeded["operator_tuning"]["base_score"] == pytest.approx(7.0)
     assert seeded["deep_kernel_analysis"]["base_score"] == pytest.approx(8.0)
-    # backends has no marathon entry — falls back to auto
-    auto_backends = compute_initial_priors_from_metadata(registry.get("backends"))
-    assert seeded["backends"]["base_score"] == pytest.approx(auto_backends)
+    # backends / params / sweep are now seeded from the marathon table too
+    # (10x of their auto value for backends/params; flat 1.0 for sweep).
+    assert seeded["backends"]["base_score"] == pytest.approx(8.4)
+    assert seeded["params"]["base_score"] == pytest.approx(9.5)
+    assert seeded["sweep"]["base_score"] == pytest.approx(1.0)
+    # vendor_kernel_config still has no marathon entry — falls back to auto.
+    auto_vendor = compute_initial_priors_from_metadata(
+        registry.get("vendor_kernel_config")
+    )
+    assert seeded["vendor_kernel_config"]["base_score"] == pytest.approx(auto_vendor)
 
 
 def test_seed_action_scores_auto_for_unknown_model_class(registry):
@@ -263,9 +274,12 @@ def test_rank_top_k_orders_by_effective_score(registry):
     )
     rows = rank_top_k(seeded, registry, tick=1, k=4)
     names = [r[0] for r in rows]
-    # operator_tuning prior=7.0 vs kernel_opt prior=6.0 — operator wins
-    assert names[0] == "operator_tuning"
-    assert names[1] == "kernel_opt"
+    # marathon moe_mla after the explore-family additions:
+    # params=9.5 > backends=8.4 > operator_tuning=7.0 > kernel_opt=6.0
+    assert names[0] == "params"
+    assert names[1] == "backends"
+    assert names[2] == "operator_tuning"
+    assert names[3] == "kernel_opt"
 
 
 # ===========================================================================

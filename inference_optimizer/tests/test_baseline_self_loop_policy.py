@@ -10,6 +10,7 @@ instantiating a third doomed task.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from inference_optimizer.orchestrator.coordinator import (
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.task_registry import Task
 from inference_optimizer.paths import make_session_dir
+from inference_optimizer.session_paths import target_baseline_json
 
 
 def _heartbeat() -> Intent:
@@ -53,6 +55,19 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 
 def _mute_action_scoring(coordinator: Coordinator) -> None:
     coordinator.shared_state.action_scores = {}
+
+
+def _seed_target_analysis_marker(sd: Path) -> None:
+    """Satisfy the unconditional ``target_analysis`` gate for tests that
+    target a downstream rule (self-loop / baseline) and must reach it.
+    """
+    path = target_baseline_json(sd)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"status": "skipped",
+                    "reason": "no_target_gpu_configured"}),
+        encoding="utf-8",
+    )
 
 
 def _record_failed_attempt(c: Coordinator, params: dict[str, Any]) -> None:
@@ -204,6 +219,7 @@ async def test_baseline_self_loop_short_circuits_under_threshold(session_dir):
 @pytest.mark.asyncio
 async def test_sequence_denial_returns_self_loop_for_baseline(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
+    _seed_target_analysis_marker(session_dir)
     _mute_action_scoring(c)
     try:
         # Make baseline_tput > 0 so the "baseline must run first" rule
@@ -237,6 +253,7 @@ async def test_sequence_denial_no_self_loop_for_other_actions(session_dir):
     which is baseline-only, so a backends proposal must pass cleanly.
     """
     c = Coordinator(session_dir, backends=_silent_backends())
+    _seed_target_analysis_marker(session_dir)
     _mute_action_scoring(c)
     try:
         c.shared_state.baseline_tput = 1500.0

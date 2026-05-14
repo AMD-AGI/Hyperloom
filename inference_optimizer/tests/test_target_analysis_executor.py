@@ -1,10 +1,11 @@
 """Integration tests for :class:`TargetAnalysisExecutor`.
 
-Covers the four scenarios called out in the design chat:
+Covers the scenarios called out in the design chat:
 
-* ``test_no_flag_keeps_noop`` — without ``--compare-against-gpu`` the
-  executor must not be registered; the registered stub is the existing
-  ``_noop_prep`` and produces no on-disk artefacts.
+* ``test_no_flag_writes_skipped_marker`` — without ``--compare-against-gpu``
+  the executor still runs (it is wired unconditionally in
+  ``cli._register_executors``) and writes a structured
+  ``reason='no_target_gpu_configured'`` marker JSON.
 * ``test_fetch_timeout_graceful`` — when the upstream is unreachable the
   task still returns ``status=succeeded`` and ``baseline_status=fetch_error``.
 * ``test_model_mapping_miss`` — unknown model name skips the HTTP call
@@ -127,25 +128,26 @@ def session_dir(tmp_path: Path) -> Path:
 # Tests
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_no_flag_keeps_noop_when_executor_not_registered(session_dir):
-    """When CLI does not pass --compare-against-gpu, cli._register_executors
-    keeps the existing _noop_prep stub. We simulate that by NOT instantiating
-    TargetAnalysisExecutor; the registry path stays unchanged.
-
-    This test guards the conditional in ``_register_executors``: it asserts
-    the executor module is importable and the public class exists, and that
-    instantiating with an empty gpu yields a graceful skip — i.e. there is
-    no scenario where importing the new code accidentally activates HTTP
-    calls."""
+async def test_no_flag_writes_skipped_marker(session_dir):
+    """Without --compare-against-gpu, ``cli._register_executors`` still
+    wires the real :class:`TargetAnalysisExecutor` (the `_noop_prep`
+    fallback was removed). The executor must run end-to-end and persist
+    a structured ``reason='no_target_gpu_configured'`` marker JSON so the
+    coordinator gate opens and the report has a deterministic External
+    baseline section to render.
+    """
     executor = TargetAnalysisExecutor(compare_against_gpu="",
                                        session_dir=session_dir)
     result = await executor(_ctx(session_dir, {"model_path": "MiniMax-M2.5"}))
     assert result["status"] == "succeeded"
     assert result["baseline_status"] == "skipped"
-    # The skipped summary IS persisted by design — same shape as a real
-    # run so the report can show "we tried and skipped" rather than "no
-    # info at all".
-    assert (session_dir / "target_analysis" / "target_baseline.json").exists()
+    assert result["reason"] == "no_target_gpu_configured"
+    json_path = session_dir / "target_analysis" / "target_baseline.json"
+    assert json_path.exists()
+    on_disk = json.loads(json_path.read_text())
+    assert on_disk["status"] == "skipped"
+    assert on_disk["reason"] == "no_target_gpu_configured"
+    assert on_disk["query"]["gpu"] == ""
 
 
 @pytest.mark.asyncio
@@ -169,6 +171,7 @@ async def test_fetch_timeout_graceful(session_dir, monkeypatch):
     result = await executor(_ctx(session_dir, params))
     assert result["status"] == "succeeded"
     assert result["baseline_status"] == "fetch_error"
+    assert result["reason"] == "fetch_error"
     assert "warning" in result and result["warning"]
     assert (session_dir / "target_analysis" / "target_baseline.json").exists()
 
@@ -195,6 +198,7 @@ async def test_model_mapping_miss_writes_skipped(session_dir, monkeypatch):
     }))
     assert result["status"] == "succeeded"
     assert result["baseline_status"] == "skipped"
+    assert result["reason"] == "model_mapping_miss"
 
 
 @pytest.mark.asyncio
@@ -217,6 +221,7 @@ async def test_happy_path_writes_files(session_dir, monkeypatch):
         }))
         assert result["status"] == "succeeded"
         assert result["baseline_status"] == "ok"
+        assert result["reason"] == "ok"
         assert result["row_count"] == 1
         assert result["best_tput_per_gpu"] == pytest.approx(2781.5)
         assert result["best_conc"] == 64
@@ -228,6 +233,7 @@ async def test_happy_path_writes_files(session_dir, monkeypatch):
 
         on_disk = json.loads(json_path.read_text())
         assert on_disk["status"] == "ok"
+        assert on_disk["reason"] == "ok"
         assert on_disk["best"]["tput_per_gpu"] == pytest.approx(2781.5)
         assert on_disk["query"]["model"] == "MiniMax-M2.5"
         assert on_disk["query"]["gpu"] == "b300"

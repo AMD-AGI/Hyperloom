@@ -189,10 +189,14 @@ class Coordinator:
         # External-SKILL-driven configuration. Both replace the deleted
         # `setup` / `classify` orchestration actions: the SKILL caller is
         # expected to supply --model-class (or MODEL_CLASS env) and
-        # --compare-against-gpu so the coordinator can (a) seed marathon
-        # priors against the right model_class and (b) hard-gate
-        # `target_analysis` only when an external reference GPU was
-        # requested. Both default to "" so legacy callers keep working.
+        # --compare-against-gpu so the coordinator can seed marathon
+        # priors against the right model_class. ``target_analysis`` is
+        # *always* hard-gated as TODO 0 (independent of this field) so a
+        # marker JSON is written even when no external reference GPU was
+        # requested; the field is still threaded through to the executor
+        # so it knows whether to fetch real InferenceX rows or write a
+        # ``reason='no_target_gpu_configured'`` marker. Both default to
+        # "" so legacy callers keep working.
         self._compare_against_gpu: str = (compare_against_gpu or "").strip()
         self._model_class_override: str = (model_class or "").strip()
 
@@ -1048,16 +1052,23 @@ class Coordinator:
         """
         if self.shared_state.stop_reason:
             return ""
-        if (
-            self._compare_against_gpu
-            and not self._target_analysis_baseline_exists()
-        ):
+        if not self._target_analysis_baseline_exists():
+            if self._compare_against_gpu:
+                return (
+                    f"TODO 0/6: target_analysis is required now. "
+                    f"--compare-against-gpu="
+                    f"{self._compare_against_gpu!r} was set but "
+                    "$SESSION_DIR/target_analysis/target_baseline.json is "
+                    "missing; propose/delegate only `target_analysis` until "
+                    "the external InferenceX reference has been fetched."
+                )
             return (
-                f"TODO 0/6: target_analysis is required now. "
-                f"--compare-against-gpu={self._compare_against_gpu!r} was set "
-                "but $SESSION_DIR/target_analysis/target_baseline.json is "
-                "missing; propose/delegate only `target_analysis` until the "
-                "external InferenceX reference has been fetched."
+                "TODO 0/6: target_analysis is required now. "
+                "$SESSION_DIR/target_analysis/target_baseline.json is "
+                "missing; propose/delegate only `target_analysis` so a "
+                "reason='no_target_gpu_configured' marker JSON is written "
+                "(no --compare-against-gpu was supplied, so this writes a "
+                "skipped marker rather than fetching InferenceX data)."
             )
         if self.shared_state.baseline_tput <= 0:
             return (
@@ -1219,25 +1230,36 @@ class Coordinator:
             return None
         if self.shared_state.stop_reason:
             return None
-        # target_analysis hard gate: when the operator passed
-        # --compare-against-gpu, the InferenceX reference must be on disk
-        # before any other sequence action runs. The executor never
-        # raises (failures land as `status=fetch_error`) so this gate
-        # always opens after a single attempt.
+        # target_analysis hard gate: target_baseline.json must be on disk
+        # before any other sequence action runs. The executor never raises
+        # (failures land as `status=fetch_error`, missing GPU lands as
+        # `reason=no_target_gpu_configured`) so this gate always opens
+        # after a single attempt regardless of whether
+        # --compare-against-gpu was supplied.
         if (
-            self._compare_against_gpu
-            and not self._target_analysis_baseline_exists()
+            not self._target_analysis_baseline_exists()
             and action != "target_analysis"
         ):
-            return PolicyDenied(
-                f"action={action!r} denied: target_analysis must run first",
-                rule="execution_order",
-                hint=(
+            if self._compare_against_gpu:
+                hint = (
                     "propose/delegate `target_analysis` so InferenceX "
                     f"reference for --compare-against-gpu="
                     f"{self._compare_against_gpu!r} is fetched into "
                     "$SESSION_DIR/target_analysis/target_baseline.json"
-                ),
+                )
+            else:
+                hint = (
+                    "propose/delegate `target_analysis` so a "
+                    "reason='no_target_gpu_configured' marker JSON is "
+                    "written to $SESSION_DIR/target_analysis/"
+                    "target_baseline.json (no --compare-against-gpu was "
+                    "supplied; the marker is what unblocks the rest of "
+                    "the pipeline)"
+                )
+            return PolicyDenied(
+                f"action={action!r} denied: target_analysis must run first",
+                rule="execution_order",
+                hint=hint,
             )
         if (
             self.shared_state.baseline_tput <= 0

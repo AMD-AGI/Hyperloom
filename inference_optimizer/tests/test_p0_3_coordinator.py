@@ -51,7 +51,12 @@ from inference_optimizer.storage import SqliteConnection
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    return make_session_dir()
+    sd = make_session_dir()
+    # Satisfy the unconditional target_analysis hard gate; these tests
+    # exercise downstream behaviour and don't care about the prep step.
+    from .conftest import seed_target_analysis_marker
+    seed_target_analysis_marker(sd)
+    return sd
 
 
 def _heartbeat() -> Intent:

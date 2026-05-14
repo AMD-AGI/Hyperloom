@@ -4,8 +4,11 @@ After the deletion of the in-loop ``setup`` / ``classify`` actions, three
 extra Coordinator-enforced gates were introduced (see plan
 ``prep-actions-hard-gates``):
 
-* ``target_analysis`` — fires only when ``--compare-against-gpu`` is set
-  and ``$SESSION_DIR/target_analysis/target_baseline.json`` is missing.
+* ``target_analysis`` — fires whenever
+  ``$SESSION_DIR/target_analysis/target_baseline.json`` is missing
+  (independent of ``--compare-against-gpu``; with the flag unset the
+  executor still runs and writes a structured
+  ``reason='no_target_gpu_configured'`` marker JSON to satisfy the gate).
 * ``pmc_roofline`` — fires when ``last_profile_trace`` exists but
   ``last_profile_pmc_summary`` is empty.
 * ``integrate`` — fires when ``last_kernel_opt.decision == "KEEP"`` and
@@ -63,8 +66,21 @@ def _backends_full() -> dict[str, object]:
     }
 
 
+def _write_baseline_json(session_dir: Path) -> Path:
+    path = target_baseline_json(session_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+    return path
+
+
 def _seed_post_baseline(coord: Coordinator) -> None:
-    """Open every earlier gate so the test can isolate the gate under test."""
+    """Open every earlier gate so the test can isolate the gate under test.
+
+    Includes writing the target_baseline.json marker — the
+    ``target_analysis`` gate now fires unconditionally and would otherwise
+    mask the downstream gates these tests target.
+    """
+    _write_baseline_json(coord.session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
@@ -75,22 +91,19 @@ def _seed_post_baseline(coord: Coordinator) -> None:
     }
 
 
-def _write_baseline_json(session_dir: Path) -> Path:
-    path = target_baseline_json(session_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"status": "ok"}), encoding="utf-8")
-    return path
-
-
 # ===========================================================================
 # target_analysis gate
 # ===========================================================================
-def test_target_analysis_gate_inactive_when_compare_unset(session_dir):
+def test_target_analysis_gate_fires_when_compare_unset_and_json_missing(session_dir):
+    """Gate fires unconditionally on missing target_baseline.json — even
+    without --compare-against-gpu — because the executor still runs and
+    writes a 'no_target_gpu_configured' marker JSON."""
     coord = Coordinator(session_dir, backends=_backends_full())
-    # No --compare-against-gpu -> gate is dormant; baseline is still TODO 1
     todo = coord._required_next_step()
-    assert "target_analysis" not in todo
-    assert "baseline is required now" in todo
+    assert "TODO 0/6" in todo
+    assert "target_analysis is required now" in todo
+    assert "no_target_gpu_configured" in todo
+    assert "baseline is required now" not in todo
 
 
 def test_target_analysis_gate_fires_when_compare_set_and_json_missing(session_dir):
@@ -116,6 +129,24 @@ def test_target_analysis_gate_clears_after_baseline_json_written(session_dir):
     assert "baseline is required now" in todo
 
 
+def test_target_analysis_gate_clears_after_marker_json_written_unset(session_dir):
+    """A 'no_target_gpu_configured' marker JSON is enough to satisfy the
+    gate; the executor writes one even without --compare-against-gpu."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    path = target_baseline_json(session_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "status": "skipped",
+            "reason": "no_target_gpu_configured",
+        }),
+        encoding="utf-8",
+    )
+    todo = coord._required_next_step()
+    assert "target_analysis is required now" not in todo
+    assert "baseline is required now" in todo
+
+
 def test_target_analysis_denial_blocks_baseline_when_gate_open(session_dir):
     coord = Coordinator(
         session_dir, backends=_backends_full(),
@@ -125,6 +156,19 @@ def test_target_analysis_denial_blocks_baseline_when_gate_open(session_dir):
     assert isinstance(denied, PolicyDenied)
     assert denied.rule == "execution_order"
     assert "target_analysis must run first" in str(denied)
+    # target_analysis itself is allowed through.
+    assert coord._sequence_denial_for_action("target_analysis") is None
+
+
+def test_target_analysis_denial_blocks_baseline_when_compare_unset(session_dir):
+    """Without --compare-against-gpu the denial still fires; the hint
+    just changes to mention the marker JSON."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    denied = coord._sequence_denial_for_action("baseline")
+    assert isinstance(denied, PolicyDenied)
+    assert denied.rule == "execution_order"
+    assert "target_analysis must run first" in str(denied)
+    assert "no_target_gpu_configured" in (denied.hint or "")
     # target_analysis itself is allowed through.
     assert coord._sequence_denial_for_action("target_analysis") is None
 
@@ -140,9 +184,8 @@ def test_target_analysis_denial_clears_after_baseline_json_written(session_dir):
     denied = coord._sequence_denial_for_action("backends")
     assert isinstance(denied, PolicyDenied)
     assert "baseline must run first" in str(denied)
-    # target_analysis -> not in sequence_actions if compare is unset, but
-    # here it IS in the set; the gate has just been satisfied so it
-    # should also pass through cleanly.
+    # target_analysis -> the gate has just been satisfied so it should
+    # also pass through cleanly.
     assert coord._sequence_denial_for_action("baseline") is None
 
 
@@ -151,6 +194,7 @@ def test_target_analysis_denial_clears_after_baseline_json_written(session_dir):
 # ===========================================================================
 def test_pmc_roofline_gate_inactive_without_profile_trace(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(session_dir)
     coord.shared_state.baseline_tput = 100.0
     todo = coord._required_next_step()
     # profile is the next required step, not pmc_roofline.
@@ -160,6 +204,7 @@ def test_pmc_roofline_gate_inactive_without_profile_trace(session_dir):
 
 def test_pmc_roofline_gate_fires_when_trace_set_pmc_missing(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
@@ -170,6 +215,7 @@ def test_pmc_roofline_gate_fires_when_trace_set_pmc_missing(session_dir):
 
 def test_pmc_roofline_gate_clears_when_pmc_summary_set(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
@@ -183,6 +229,7 @@ def test_pmc_roofline_gate_clears_when_pmc_summary_set(session_dir):
 
 def test_pmc_roofline_denial_blocks_explore_actions(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
@@ -213,6 +260,7 @@ def test_pmc_roofline_gate_skipped_in_no_kernel_mode(session_dir):
     coord = Coordinator(
         session_dir, backends=backends, role_registry=role_registry,
     )
+    _write_baseline_json(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"

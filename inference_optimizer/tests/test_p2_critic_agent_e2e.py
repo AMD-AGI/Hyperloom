@@ -122,7 +122,10 @@ class _DeterministicClient:
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    return make_session_dir()
+    sd = make_session_dir()
+    from .conftest import seed_target_analysis_marker
+    seed_target_analysis_marker(sd)
+    return sd
 
 
 @pytest.fixture
