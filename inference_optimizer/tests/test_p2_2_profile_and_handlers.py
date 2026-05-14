@@ -873,6 +873,59 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     db.close()
 
 
+@pytest.mark.asyncio
+async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
+    """TraceLens-patched vLLM writes graph-capture traces next to the
+    benchmark workspace, under the profile task's ``capture_traces`` dir."""
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    output_dir = tmp_path / "out"
+    workspace = output_dir / "benchmark_vllm_20260501_001122"
+    workspace.mkdir(parents=True)
+    (workspace / "benchmark_report.json").write_text(json.dumps({
+        "success": True,
+        "framework": "vllm",
+        "model": "/wekafs/models/Qwen-Qwen3-8B",
+        "throughput": {
+            "request_throughput": 3.2, "output_throughput": 800.0,
+            "total_token_throughput": 1600.0, "completed_requests": 80,
+            "duration_seconds": 25.0,
+        },
+        "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158},
+                    "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
+    }))
+    capture_dir = output_dir / "capture_traces"
+    capture_dir.mkdir()
+    (capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz").write_bytes(b"fake-trace")
+    (capture_dir / "graph_capture_rank_0.2.pt.trace.json.gz").write_bytes(b"fake-trace")
+
+    fake_completed = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="ok", stderr="",
+    )
+
+    def _fake_run(*args, **kwargs):
+        return fake_completed
+
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-capture",
+    )
+    sub.register_executor("profile", pe)
+    with patch("subprocess.run", side_effect=_fake_run):
+        res = await sub.run_task(task)
+    assert res.state == "succeeded"
+    assert res.result["framework"] == "vllm"
+    assert res.result["trace_dir"] == str(capture_dir)
+    assert len(res.result["trace_files"]) == 2
+    assert res.result["main_trace_path"].startswith(str(capture_dir))
+    db.close()
+
+
 # ===========================================================================
 # kernel_request_handlers — direct unit
 # ===========================================================================
