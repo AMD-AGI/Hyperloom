@@ -239,7 +239,7 @@ The final report is written to:
 `$WORKSPACE_PATH/kernel-agent/runs/<session_id>/tracelens/standalone_analysis.md`
 
 If Executor requests compatibility output, also write
-`/workspace/hyperloom/standalone_analysis.md`.
+`${USER_DATA_PATH:-/workspace/hyperloom}/standalone_analysis.md`.
 
 ## Backend Selection
 
