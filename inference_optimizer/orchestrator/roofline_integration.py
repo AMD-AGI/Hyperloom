@@ -459,6 +459,7 @@ def _autodetect_gpu_type() -> str:
             if tag in out:
                 return tag.lower()
     except (FileNotFoundError, PermissionError, subprocess.TimeoutExpired, OSError):
+        # rocm-smi is a best-effort probe; fall back to torch device metadata.
         pass
 
     try:
