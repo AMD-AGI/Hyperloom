@@ -100,6 +100,14 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 @dataclass
 class SharedState:
     session_id: str = ""
+    # Primus-Claw session UUID (when Hyperloom runs inside the claw
+    # sandbox); empty when running standalone. Wired into the manifest +
+    # session_breakdown.json so downstream dashboards can join Hyperloom
+    # sessions back to claw sessions without an env-var lookup.
+    claw_session_id: str = ""
+    # Primus-Claw sandbox user id (string). Same provenance as
+    # ``claw_session_id``; empty when running standalone.
+    sandbox_user_id: str = ""
     model_name: str = ""
     model_path: str = ""
     model_class: str = ""
@@ -123,6 +131,16 @@ class SharedState:
     # records the incremental candidate that was accepted; current_best keeps
     # the materialized full args/env for execution.
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
+    # Parallel to ``optimization_stack``: per-entry incremental gain in
+    # percent (current_best vs. baseline at the moment that stack entry
+    # was promoted). Index ``i`` here aligns with index ``i`` in
+    # ``optimization_stack``. session_breakdown's capability_summary uses
+    # this to attribute "how much of the validated cumulative gain came
+    # from this action / capability" without re-walking the event log.
+    # Coordinator appends to this list at the same time it appends to
+    # ``optimization_stack`` (see ``_lift_to_current_best``); missing
+    # entries (e.g. on resumed sessions) are treated as ``None``.
+    gain_per_stack_entry: list[float | None] = field(default_factory=list)
     cumulative_gain: float = 0.0
     # Cumulative gain measured by the `validate_stack` action — i.e. by
     # actually re-baselining a fresh server with EVERY KEEP'd entry of
@@ -1339,6 +1357,12 @@ class SharedState:
             "workspace": self.current_best.get("workspace"),
             "source": "seeded_from_current_best",
         }]
+        # Keep ``gain_per_stack_entry`` aligned with ``optimization_stack``
+        # (None == we don't know the per-entry gain for seeded entries).
+        if len(self.gain_per_stack_entry) < len(self.optimization_stack):
+            self.gain_per_stack_entry.extend(
+                [None] * (len(self.optimization_stack) - len(self.gain_per_stack_entry))
+            )
 
     # ------------------------------------------------------------------
     # Time-budget helpers (Phase 2 — consumed by Coordinator._compose_prompt)
