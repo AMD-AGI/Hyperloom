@@ -31,7 +31,10 @@ from pathlib import Path
 from typing import Any
 
 from ...paths import asset_root
-from ._inferencex_patcher import ensure_benchmark_lib_patched
+from ._inferencex_patcher import (
+    ensure_benchmark_lib_patched,
+    ensure_benchmark_serving_patched,
+)
 from .baseline import BaselineExecutor
 
 
@@ -99,6 +102,14 @@ class ProfileExecutor(BaselineExecutor):
         # this on every profile launch costs ~1 file read after the
         # first success.
         ensure_benchmark_lib_patched()
+        # PR-D §2: ensure InferenceX `benchmark_serving.py` reads our
+        # `PROFILE_EXTRA_BODY` env var. Without this patch the
+        # `/start_profile` request bakes in upstream's hardcoded
+        # `extra_body={"num_steps": 1, ...}` and silently drops
+        # shape_discovery / roofline_annotations / the steady-state
+        # start_step computed by `_workload_envs.py`. Same idempotent
+        # atomic-replace shape as `ensure_benchmark_lib_patched`.
+        ensure_benchmark_serving_patched()
         result = await super().__call__(ctx)
         # Augment with trace_dir if the workspace produced one.
         workspace_str = result.get("workspace")
