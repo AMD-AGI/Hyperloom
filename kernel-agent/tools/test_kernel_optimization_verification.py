@@ -357,3 +357,43 @@ def test_build_prompt_metadata_extracts_extra_sglang_args():
     assert metadata["runtime_flags"]["disable_cuda_graph"] is True
     assert metadata["kernel_params"]["KV_DTYPE"] == "fp8"
     assert metadata["kernel_params"]["BLOCK_SIZE"] == 16
+
+
+def test_load_candidates_backfills_current_tracelens_report_path(tmp_path):
+    report = tmp_path / "analysis.md"
+    report.write_text("# TraceLens Analysis\n", encoding="utf-8")
+    candidates_path = tmp_path / "kernel_candidates.json"
+    candidates_path.write_text(
+        json.dumps({
+            "trace_report_path": str(report),
+            "hot_kernels": [{"kernel_id": "k1", "name": "paged_attention"}],
+        }),
+        encoding="utf-8",
+    )
+
+    candidate = ko.load_candidates(candidates_path)[0]
+
+    assert candidate["trace_report_path"] == str(report)
+
+
+def test_build_prompt_includes_tracelens_context_from_trace_report_path(tmp_path):
+    report = tmp_path / "analysis.md"
+    report.write_text(
+        "# TraceLens Analysis\n\n## Detailed Analysis\nP1: paged attention\n",
+        encoding="utf-8",
+    )
+    args = _args(source_file="")
+    args.kernel_id = "paged"
+    args.num_gpus = 0
+    args.budget_minutes = 60
+    candidate = {
+        "name": "paged_attention",
+        "source_file": "/tmp/paged_attention.py",
+        "source_type": "triton",
+        "trace_report_path": str(report),
+    }
+
+    prompt = ko.build_prompt(candidate, args)
+
+    assert "## TraceLens Context" in prompt
+    assert "P1: paged attention" in prompt

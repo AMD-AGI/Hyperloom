@@ -97,13 +97,13 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
     if not isinstance(artifact_paths, dict):
         artifact_paths = {}
     report_path = (
-        payload.get("analysis_report_path")
-        or artifact_paths.get("tracelens_agent_report")
+        payload.get("trace_report_path")
+        or artifact_paths.get("trace_report_path")
     )
     if report_path:
         for candidate in candidates:
             if isinstance(candidate, dict):
-                candidate.setdefault("tracelens_agent_report", str(report_path))
+                candidate.setdefault("trace_report_path", str(report_path))
     return candidates
 
 
@@ -553,7 +553,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
             "still measure compute/IO improvements.\n"
         )
     tracelens_context_block = ""
-    report_path_str = str(candidate.get("tracelens_agent_report") or "")
+    report_path_str = str(candidate.get("trace_report_path") or "")
     report_path = Path(report_path_str) if report_path_str else None
     if report_path and report_path.exists():
         try:

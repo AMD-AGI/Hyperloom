@@ -272,19 +272,19 @@ def _enrich_candidate_runtime_metadata(
                 item_args.setdefault(key, value)
 
 
-def _enrich_candidate_tracelens_report(candidates: Any, report_path: str) -> None:
+def _enrich_candidate_trace_report(candidates: Any, report_path: str) -> None:
     if not isinstance(candidates, list) or not report_path:
         return
     for item in candidates:
         if isinstance(item, dict):
-            item.setdefault("tracelens_agent_report", report_path)
+            item.setdefault("trace_report_path", report_path)
 
 
 def _enrich_candidates_artifact(
     candidates_path: str,
     metadata: dict[str, Any],
     *,
-    analysis_report_path: str = "",
+    trace_report_path: str = "",
 ) -> None:
     if not candidates_path:
         return
@@ -301,14 +301,14 @@ def _enrich_candidates_artifact(
     if metadata:
         _enrich_candidate_runtime_metadata(data.get("hot_kernels"), metadata)
         _enrich_candidate_runtime_metadata(data.get("hot_kernels_top15"), metadata)
-    if analysis_report_path:
-        data.setdefault("analysis_report_path", analysis_report_path)
+    if trace_report_path:
+        data.setdefault("trace_report_path", trace_report_path)
         artifact_paths = data.setdefault("artifact_paths", {})
         if isinstance(artifact_paths, dict):
-            artifact_paths.setdefault("tracelens_agent_report", analysis_report_path)
-        _enrich_candidate_tracelens_report(data.get("hot_kernels"), analysis_report_path)
-        _enrich_candidate_tracelens_report(
-            data.get("hot_kernels_top15"), analysis_report_path,
+            artifact_paths.setdefault("trace_report_path", trace_report_path)
+        _enrich_candidate_trace_report(data.get("hot_kernels"), trace_report_path)
+        _enrich_candidate_trace_report(
+            data.get("hot_kernels_top15"), trace_report_path,
         )
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -554,8 +554,7 @@ async def select_kernels_handler(
         {
           "status": "ok" | "failed",
           "hot_kernels": [...],
-          "trace_report_path": "...",        # tracelens_report.json (structured)
-          "analysis_report_path": "...",      # analysis.md from TraceLens v0.3
+          "trace_report_path": "...",        # analysis.md from TraceLens v0.3
                                               #   orchestrator (markdown final
                                               #   stakeholder report — pass to
                                               #   GEAK so it can ground its
@@ -637,15 +636,12 @@ async def select_kernels_handler(
     # Surface analysis.md path at the handler boundary so the Coordinator can
     # forward it to GEAK without having to dig through artifact_paths.
     if isinstance(result, dict):
-        report_path = result.get("analysis_report_path")
+        report_path = result.get("trace_report_path")
         if not report_path and isinstance(artifacts, dict):
-            report_path = (
-                artifacts.get("tracelens_agent_report")
-                or artifacts.get("trace_report_path")
-            )
+            report_path = artifacts.get("trace_report_path")
         if report_path:
-            result["analysis_report_path"] = str(report_path)
-            _enrich_candidate_tracelens_report(
+            result["trace_report_path"] = str(report_path)
+            _enrich_candidate_trace_report(
                 result.get("hot_kernels"), str(report_path),
             )
         metadata = _load_materialized_workload_metadata(state.baseline_config_path)
@@ -655,7 +651,7 @@ async def select_kernels_handler(
             _enrich_candidates_artifact(
                 candidates_path,
                 metadata,
-                analysis_report_path=str(report_path or ""),
+                trace_report_path=str(report_path or ""),
             )
     return result
 

@@ -1010,25 +1010,20 @@ async def test_select_kernels_handler_backfills_workload_context_from_state(
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_surfaces_analysis_report_path(
+async def test_select_kernels_handler_surfaces_trace_report_path(
     session_dir, monkeypatch,
 ):
-    """The handler must forward the TraceLens v0.3 ``analysis.md`` path so
-    GEAK / Coordinator can ground their actions on the same final stakeholder
-    report Hyperloom parsed for ``hot_kernels`` (PR #155 review, scheme C)."""
+    """The handler must forward the TraceLens v0.3 analysis.md path."""
     captured: dict = {}
 
     async def fake_run_subprocess(cmd, *, timeout_sec):
         captured["cmd"] = list(cmd)
-        # Mimic both the explicit field set by tracelens_analysis.py and the
-        # backwards-compatible nested location, so a partial-rollout SDK still
-        # surfaces the path through the handler.
         payload = {
             "status": "ok",
             "hot_kernels": [],
-            "analysis_report_path": "/tmp/runs/abc/tracelens/analysis.md",
+            "trace_report_path": "/tmp/runs/abc/tracelens/analysis.md",
             "artifact_paths": {
-                "tracelens_agent_report": "/tmp/runs/abc/tracelens/analysis.md",
+                "trace_report_path": "/tmp/runs/abc/tracelens/analysis.md",
                 "kernel_candidates": "/tmp/runs/abc/kernel_candidates.json",
             },
         }
@@ -1039,10 +1034,11 @@ async def test_select_kernels_handler_surfaces_analysis_report_path(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
-    assert res["analysis_report_path"] == "/tmp/runs/abc/tracelens/analysis.md"
+    assert res["trace_report_path"] == "/tmp/runs/abc/tracelens/analysis.md"
 
 
-def test_select_kernels_handler_persists_analysis_report_to_candidates(
+@pytest.mark.asyncio
+async def test_select_kernels_handler_persists_trace_report_to_candidates(
     session_dir, tmp_path, monkeypatch,
 ):
     """Disk candidates must carry the TraceLens report path for GEAK prompts."""
@@ -1065,28 +1061,30 @@ def test_select_kernels_handler_persists_analysis_report_to_candidates(
         return 0, json.dumps({
             "status": "ok",
             "hot_kernels": json.loads(candidates_path.read_text(encoding="utf-8"))["hot_kernels"],
-            "analysis_report_path": str(report_path),
-            "artifact_paths": {"kernel_candidates": str(candidates_path)},
+            "trace_report_path": str(report_path),
+            "artifact_paths": {
+                "kernel_candidates": str(candidates_path),
+                "trace_report_path": str(report_path),
+            },
         }), ""
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
 
-    res = asyncio.run(
-        krh.select_kernels_handler(
-            {"trace_input": str(session_dir), "dry_run": True},
-            session_dir=session_dir,
-        )
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
     )
 
     persisted = json.loads(candidates_path.read_text(encoding="utf-8"))
     candidate = persisted["hot_kernels"][0]
-    assert res["hot_kernels"][0]["tracelens_agent_report"] == str(report_path)
-    assert persisted["analysis_report_path"] == str(report_path)
-    assert persisted["artifact_paths"]["tracelens_agent_report"] == str(report_path)
-    assert candidate["tracelens_agent_report"] == str(report_path)
+    assert res["hot_kernels"][0]["trace_report_path"] == str(report_path)
+    assert persisted["trace_report_path"] == str(report_path)
+    assert persisted["artifact_paths"]["trace_report_path"] == str(report_path)
+    assert candidate["trace_report_path"] == str(report_path)
 
 
-def test_select_kernels_handler_backfills_runtime_metadata_from_config(
+@pytest.mark.asyncio
+async def test_select_kernels_handler_backfills_runtime_metadata_from_config(
     session_dir, tmp_path, monkeypatch,
 ):
     """GEAK candidates must inherit the materialized Magpie workload config."""
@@ -1139,11 +1137,9 @@ benchmark:
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
 
-    res = asyncio.run(
-        krh.select_kernels_handler(
-            {"trace_input": str(session_dir), "dry_run": True},
-            session_dir=session_dir,
-        )
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
     )
 
     enriched = json.loads(candidates_path.read_text(encoding="utf-8"))["hot_kernels"][0]
@@ -1204,19 +1200,16 @@ benchmark:
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_falls_back_to_artifact_paths_for_report(
+async def test_select_kernels_handler_uses_artifact_trace_report_path(
     session_dir, monkeypatch,
 ):
-    """If the underlying tool only surfaces analysis.md inside artifact_paths
-    (e.g. an older tracelens_analysis.py build that wasn't updated yet), the
-    handler must still hoist it to the top-level ``analysis_report_path`` for
-    Coordinator/GEAK consumers."""
+    """TraceLens now surfaces the upstream analysis.md as trace_report_path."""
     async def fake_run_subprocess(cmd, *, timeout_sec):
         payload = {
             "status": "ok",
             "hot_kernels": [],
             "artifact_paths": {
-                "tracelens_agent_report": "/tmp/legacy/tracelens/analysis.md",
+                "trace_report_path": "/tmp/tracelens/analysis.md",
             },
         }
         return 0, json.dumps(payload), ""
@@ -1226,7 +1219,7 @@ async def test_select_kernels_handler_falls_back_to_artifact_paths_for_report(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
-    assert res["analysis_report_path"] == "/tmp/legacy/tracelens/analysis.md"
+    assert res["trace_report_path"] == "/tmp/tracelens/analysis.md"
 
 
 @pytest.mark.asyncio
