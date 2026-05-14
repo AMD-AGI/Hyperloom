@@ -437,7 +437,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "",
         "    propose_action{action_name='baseline',",
         "        params={benchmark_script: 'sglang_mi300x.sh',",
-        "                result_dir: '/workspace/hyperloom/runs/baseline/<task>/leak'},",
+        "                result_dir: '<session_dir>/runs/baseline/<task>/leak'},",
         "        predicted_gain_pct: 0,",
         "        notes: 'recover from no_report streak — sglang_mi300x.sh honors",
         "                $RESULT_DIR; the default model script hardcodes /workspace/'}",

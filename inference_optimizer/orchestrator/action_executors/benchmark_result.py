@@ -292,9 +292,9 @@ def harvest_leaked_artifacts(
     under ``/workspace/`` (server log, GPU monitor CSV, profile relay
     trace, InferenceX result JSON). When the optimizer launches a
     benchmark inside a per-task workspace under
-    ``/workspace/hyperloom/<session>/runs/.../`` those artifacts end
-    up outside the session tree — the NFS clone of the task therefore
-    misses them entirely.
+    ``<session_dir>/runs/.../`` those artifacts end up outside the
+    session tree — the NFS clone of the task therefore misses them
+    entirely.
 
     For every glob in :data:`_DEFAULT_LEAK_ARTIFACT_GLOBS` (extensible
     via ``extra_globs``) this helper scans each leak root resolved by

@@ -83,10 +83,10 @@ def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
 def build_session_id(model_name: str = "") -> str:
     """Derive an internal session_id label.
 
-    The label is **not** used for any path computation (paths are fixed
-    at ``/workspace/hyperloom``); it only goes into manifest.json,
-    SharedState.session_id, and log/report metadata so multiple
-    archived sessions are distinguishable.
+    The label is **not** used for any path computation (paths are
+    computed from :func:`paths.session_dir`); it only goes into
+    manifest.json, SharedState.session_id, and log/report metadata so
+    multiple archived sessions are distinguishable.
     """
     stem = (model_name or "session").strip().replace("/", "_") or "session"
     return f"{stem}_{_utc_now_compact()}_{uuid.uuid4().hex[:8]}"
