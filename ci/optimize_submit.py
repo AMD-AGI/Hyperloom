@@ -902,7 +902,9 @@ class SafeOptimizeClient:
         except Exception as e:
             log.warning("[task %s] list_artifacts failed: %s", task_id, e)
             return []
-        items = data.get("data") if isinstance(data, dict) else data
+        items = (data.get("items") or data.get("data")) if isinstance(data, dict) else data
+        if isinstance(items, dict) and isinstance(items.get("items"), list):
+            items = items["items"]
         if not isinstance(items, list):
             return []
         return items
@@ -1156,6 +1158,103 @@ def _safe_local_path(artifacts_dir: Path, task_id: str, remote_path: str) -> Pat
 _KEY_RESULT_SUFFIXES: tuple[str, ...] = ("optimization_report.md", "ci_metrics.json")
 
 
+def _norm_token(s: str) -> str:
+    return (s or "").lower().replace("-", "").replace("_", "") \
+        .replace(".", "").replace("/", "").replace(" ", "")
+
+
+def _slug_token(s: str) -> str:
+    out = []
+    prev_dash = False
+    for ch in (s or "").lower():
+        if ch.isalnum():
+            out.append(ch)
+            prev_dash = False
+        elif not prev_dash:
+            out.append("-")
+            prev_dash = True
+    return "".join(out).strip("-")
+
+
+def _metrics_have_positive_throughput(path: str) -> bool:
+    """True when ``ci_metrics.json`` carries real, non-zero throughput."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return False
+    baseline = data.get("baseline_throughput") or data.get("tok_per_gpu_baseline")
+    optimized = data.get("optimized_throughput") or data.get("tok_per_gpu_optimized")
+    try:
+        return float(baseline) > 0 and float(optimized) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
+    """Add task metadata to ci_metrics.json when the agent omitted it.
+
+    Missing ``model`` was the reason Run 25813519878 could not be correlated
+    from /wekafs/users even though the metrics existed. The summary pipeline
+    does not require this field, but publishing/debugging does, and adding it
+    here makes downstream artifacts self-describing.
+    """
+    if path.name != "ci_metrics.json" or not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    changed = False
+    for key, value in {
+        "model": rec.model,
+        "task_id": rec.task_id,
+        "claw_session_id": rec.claw_session_id,
+    }.items():
+        if value and not data.get(key):
+            data[key] = value
+            changed = True
+    detected = rec.detected or {}
+    for key in ("framework", "tp"):
+        if detected.get(key) is not None and data.get(key) is None:
+            data[key] = detected.get(key)
+            changed = True
+    if changed:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _record_matches_session_dir(rec: SubmissionRecord, sess_name: str) -> bool:
+    """Conservative directory-name match for /wekafs/users fallback.
+
+    Prefer exact displayName slug because SaFE constructs it from model +
+    precision + framework + gpu. Fall back to basename only with hard guards
+    to avoid cross-wiring adjacent repos (Qwen2.5 vs Qwen2.5-AWQ, Nano vs
+    Super, bnb vs non-bnb, etc.).
+    """
+    sess_slug = _slug_token(sess_name)
+    sess_norm = _norm_token(sess_name)
+    display = rec.display_name or ""
+    if display and _norm_token(display) in sess_norm:
+        return True
+
+    model = rec.model or ""
+    base = model.split("/")[-1]
+    base_norm = _norm_token(base)
+    if not base_norm or base_norm not in sess_norm:
+        return False
+
+    identity = f"{model} {display}".lower()
+    lower_dir = sess_name.lower()
+    strict_terms = ("awq", "gptq", "bnb", "4bit", "abliterated",
+                    "geneticlemonade", "nano", "super")
+    for term in strict_terms:
+        in_identity = term in identity
+        in_dir = term in lower_dir
+        if in_identity != in_dir:
+            return False
+    return True
+
+
 def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
     """Scan NFS result directories for files matching this model.
 
@@ -1224,6 +1323,7 @@ def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
                             continue
                         try:
                             shutil.copy2(src, dst)
+                            _backfill_ci_metrics_file(dst, rec)
                         except Exception as e:
                             log.warning("[task %s] NFS legacy copy %s -> %s failed: %s",
                                         rec.task_id, src, dst, e)
@@ -1245,28 +1345,23 @@ def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
     if not os.path.isdir(users_root):
         return copied
 
-    # Match strategy: exact equality after normalization. We tried fuzzy
-    # `substring-in-either-direction` first and it false-positived
-    # `Qwen2.5-Coder-14B-Instruct` onto `Qwen2.5-Coder-14B-Instruct-AWQ`
-    # (the suffix-stripped name is a substring of the AWQ one). Strict
-    # equality is safer; if the agent writes a slightly different model
-    # field we'd rather no-attribute than misattribute.
-    def _norm(s: str) -> str:
-        return (s or "").lower().replace("-", "").replace("_", "") \
-            .replace(".", "").replace("/", "")
-
-    target = _norm(model_basename)
+    # Primary match: exact equality via the JSON `model` field when the agent
+    # wrote it. Secondary match: conservative session-dir match. The secondary
+    # path is needed for HyperloomV2 runs that persist
+    # /wekafs/users/<uid>/<display-ish-dir>/ci_metrics.json without a `model`
+    # field in the JSON (observed in Run 25813519878).
+    target = _norm_token(model_basename)
     if not target:
         return copied
 
     def _model_field_matches(model_field: str) -> bool:
-        return _norm(model_field) == target
+        return _norm_token(model_field) == target
 
     # rglob with depth 4 is enough for the layouts we've seen:
     #   /wekafs/users/<uid>/<session>/ci_metrics.json                (depth 4)
     #   /wekafs/users/<uid>/<session>/phase10_report/ci_metrics.json (depth 5)
     #   /wekafs/users/<uid>/<session>/results/ci_metrics.json        (depth 5)
-    candidates: list[tuple[float, str, str]] = []  # (mtime, ci_path, session_dir)
+    candidates: list[tuple[int, float, str, str]] = []  # (score, mtime, ci_path, session_dir)
     for uid_dir in os.listdir(users_root):
         uid_path = os.path.join(users_root, uid_dir)
         if not os.path.isdir(uid_path):
@@ -1285,22 +1380,36 @@ def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
                         data = json.load(f)
                 except Exception:
                     continue
-                if not _model_field_matches(str(data.get("model") or "")):
-                    continue
+                model_field = str(data.get("model") or "")
+                if model_field:
+                    if not _model_field_matches(model_field):
+                        continue
+                    score = 100
+                else:
+                    if not _record_matches_session_dir(rec, sess):
+                        continue
+                    score = 60
+                if _metrics_have_positive_throughput(ci_path):
+                    score += 10
+                else:
+                    log.info("[task %s] candidate %s matched but has no positive "
+                             "throughput (will use only if no better match)",
+                             rec.task_id, ci_path)
                 try:
                     mtime = os.path.getmtime(ci_path)
                 except OSError:
                     continue
-                candidates.append((mtime, ci_path, sess_path))
+                candidates.append((score, mtime, ci_path, sess_path))
 
     if not candidates:
         log.info("[task %s] no /wekafs/users/<uid>/* ci_metrics.json matched "
                  "model=%s", rec.task_id, model_basename)
         return copied
 
-    # Pick the freshest match — same model can be re-run several times.
+    # Pick highest-confidence, then freshest match — same model can be re-run
+    # several times.
     candidates.sort(reverse=True)
-    _mtime, best_ci, best_sess = candidates[0]
+    _score, _mtime, best_ci, best_sess = candidates[0]
     log.info("[task %s] NFS user-session match: %s (from %d candidate(s), "
              "session=%s)", rec.task_id, best_ci, len(candidates), best_sess)
 
@@ -1325,6 +1434,7 @@ def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
             continue
         try:
             shutil.copy2(src, dst)
+            _backfill_ci_metrics_file(dst, rec)
         except Exception as e:
             log.warning("[task %s] NFS user-session copy %s -> %s failed: %s",
                         rec.task_id, src, dst, e)
@@ -1369,13 +1479,32 @@ def wait_and_collect_one(
     if not collect:
         return rec
 
-    # Stage 1: SaFE artifacts API
-    try:
-        items = safe.list_artifacts(rec.task_id)
-    except Exception as e:
-        log.warning("[task %s] list_artifacts failed: %s", rec.task_id, e)
-        items = []
-    wanted = [it for it in items if _is_wanted_artifact(it.get("path", ""), all_artifacts)]
+    # Stage 1: SaFE artifacts API. This is the most reliable path when the
+    # agent copied final files to /workspace/hyperloom (SaFE exposes them as
+    # hyperloom/ci_metrics.json and hyperloom/optimization_report.md). Retry a
+    # few times because task terminal status can beat Claw's file index by
+    # seconds.
+    items = []
+    wanted = []
+    for attempt in range(3):
+        try:
+            items = safe.list_artifacts(rec.task_id)
+        except Exception as e:
+            log.warning("[task %s] list_artifacts attempt %d failed: %s",
+                        rec.task_id, attempt + 1, e)
+            items = []
+        wanted = [it for it in items
+                  if _is_wanted_artifact(it.get("path", ""), all_artifacts)]
+        wanted_paths = [it.get("path", "").lower() for it in wanted]
+        has_safe_metrics = any(p.endswith("ci_metrics.json") for p in wanted_paths)
+        has_safe_report = any(p.endswith("optimization_report.md") for p in wanted_paths)
+        if has_safe_metrics and has_safe_report:
+            break
+        if attempt < 2:
+            log.info("[task %s] safe artifacts missing key files on attempt %d "
+                     "(metrics=%s report=%s); retrying",
+                     rec.task_id, attempt + 1, has_safe_metrics, has_safe_report)
+            time.sleep(15)
     log.info("[task %s] safe artifacts: %d total, %d to download",
              rec.task_id, len(items), len(wanted))
 
@@ -1388,6 +1517,7 @@ def wait_and_collect_one(
         local = _safe_local_path(artifacts_dir, rec.task_id, path)
         try:
             n = safe.download_artifact_to(rec.task_id, it, str(local))
+            _backfill_ci_metrics_file(local, rec)
             rec.artifact_files.append(str(local))
             rec.artifact_count += 1
             log.info("[task %s] saved %s (%d bytes)", rec.task_id, path, n)
