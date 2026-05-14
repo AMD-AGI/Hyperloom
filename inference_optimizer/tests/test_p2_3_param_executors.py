@@ -47,6 +47,17 @@ from inference_optimizer.storage import SqliteConnection
 # ===========================================================================
 # Shared fixtures
 # ===========================================================================
+@pytest.fixture(autouse=True)
+def _isolate_leak_root(tmp_path_factory, monkeypatch):
+    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox so
+    ``run_grid``'s always-on ``harvest_leaked_artifacts`` pass does
+    not pick up host ``/workspace`` artifacts during the stubbed
+    subprocess runs in this module.
+    """
+    sandbox = tmp_path_factory.mktemp("isolated_leak_root")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
+
+
 def _write_baseline_yaml(path: Path) -> None:
     """Minimal YAML in our repo's expected shape."""
     cfg = {
@@ -483,7 +494,10 @@ def test_grid_variant_yaml_preserves_base_extra_args_and_env_overrides(
 
     assert bench["model"] == "/wekafs/models/DeepSeek-R1-0528"
     assert bench["runner_type"] == "mi355x"
-    assert "benchmark_script" not in bench
+    # gpu_type now force-pins the generic {framework}_{gpu_type}.sh so
+    # Magpie's resolver doesn't fall through to InferenceX native
+    # scripts. Source YAML's framework here is "vllm".
+    assert bench["benchmark_script"] == "vllm_mi355x.sh"
     assert envs["TP"] == 8
     assert envs["CONC"] == 64
     assert envs["ISL"] == 1024

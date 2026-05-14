@@ -68,6 +68,81 @@ from .system_prompts.prompt_builder import (
 log = logging.getLogger(__name__)
 
 
+# Audit-trail kinds (must match shared_state._AUDIT_ACTIONS). Coordinator
+# calls SharedState.record_action_attempt for these on both the
+# success and failure dispatcher branches so the prompt sees a full
+# audit log per non-kernel action. Kernel-owned actions intentionally
+# stay outside this set — they have richer bespoke recorders
+# (record_kernel_opt / record_kernel_integrate_result).
+_AUDIT_ACTIONS: frozenset[str] = frozenset({
+    "baseline", "profile", "backends", "params", "sweep", "validate_stack",
+})
+
+# ---------------------------------------------------------------------------
+# Baseline self-loop guard (failure-recovery surface).
+#
+# Orchestration can recover from a baseline failure by proposing a fresh
+# baseline with overrides (``params.benchmark_script`` /
+# ``params.result_dir`` / different ``extra_sglang_args`` / etc. — see
+# SKILL.md "Magpie leak-path salvage"). What it MUST NOT do is propose
+# the *same* params after the same failure mode has fired N times in a
+# row — the PolicyGate stop-loss below promotes that into a
+# ``policy_denied`` observation with a ``baseline_self_loop`` rule tag
+# so the prompt's FAILURE RECOVERY section sees the hint and proposes a
+# different override.
+#
+# The fingerprint covers the eight task.params fields that actually
+# change Magpie's behavior end-to-end (script choice / leak path /
+# config / model / GPU / accuracy gate). Two failed attempts with
+# identical fingerprints + the next proposal carrying the same
+# fingerprint → denial. Bumping the threshold via env override is
+# intentionally a single source of truth (tests rely on overriding
+# this constant rather than monkeypatching the helper).
+_BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
+    "benchmark_script",
+    "result_dir",
+    "extra_sglang_args",
+    "extra_envs",
+    "model_path",
+    "gpu_type",
+    "config_path",
+    "disable_run_eval",
+)
+_BASELINE_SELF_LOOP_THRESHOLD: int = 2
+
+
+def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any]:
+    """Project ``params`` to the keys that determine baseline behavior.
+
+    Used by :meth:`Coordinator._baseline_self_loop_denial` to compare
+    "is this proposal the same as the last two failed attempts?" and by
+    :meth:`Coordinator._promote_to_shared_state` /
+    :meth:`Coordinator._handle_unpromotable_result` to stamp every
+    audit-trail entry with a stable identifier the prompt can reason
+    about. Missing keys are recorded as ``None`` so absent vs explicit-
+    null are indistinguishable (matches what the prompt sees).
+
+    ``extra_envs`` is normalized into a sorted list of ``[key, value]``
+    pairs so dict ordering doesn't affect equality. All values are
+    stringified for the same reason.
+    """
+    params = params or {}
+    out: dict[str, Any] = {}
+    for key in _BASELINE_FINGERPRINT_KEYS:
+        if key == "extra_envs":
+            envs = params.get(key) or {}
+            if isinstance(envs, dict):
+                out[key] = sorted(
+                    [str(k), str(v)] for k, v in envs.items()
+                )
+            else:
+                out[key] = None
+            continue
+        value = params.get(key)
+        out[key] = None if value is None else str(value)
+    return out
+
+
 @dataclass
 class PendingProposal:
     """A propose_action intent waiting for Critic Review (§18)."""
@@ -108,9 +183,24 @@ class Coordinator:
         role_registry: dict[str, AgentRole] | None = None,
         sub_agent_runner: SubAgentRunner | None = None,
         bus_class: type[MessageBus] = MessageBus,
+        compare_against_gpu: str | None = None,
+        model_class: str | None = None,
     ):
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
+        # External-SKILL-driven configuration. Both replace the deleted
+        # `setup` / `classify` orchestration actions: the SKILL caller is
+        # expected to supply --model-class (or MODEL_CLASS env) and
+        # --compare-against-gpu so the coordinator can seed marathon
+        # priors against the right model_class. ``target_analysis`` is
+        # *always* hard-gated as TODO 0 (independent of this field) so a
+        # marker JSON is written even when no external reference GPU was
+        # requested; the field is still threaded through to the executor
+        # so it knows whether to fetch real InferenceX rows or write a
+        # ``reason='no_target_gpu_configured'`` marker. Both default to
+        # "" so legacy callers keep working.
+        self._compare_against_gpu: str = (compare_against_gpu or "").strip()
+        self._model_class_override: str = (model_class or "").strip()
 
         # Validate every reactor we expect actually has a backend wired.
         for name in self.role_registry:
@@ -143,6 +233,19 @@ class Coordinator:
         # Persistent session state (state.json) — load existing for resume;
         # save() is called whenever the Coordinator mutates a persistent field.
         self.shared_state = SharedState.load_or_init(self.session_dir)
+        # External SKILL fills `model_class` via --model-class / MODEL_CLASS
+        # (the deleted `classify` action used to do this from inside the loop).
+        # Only overwrite a blank value so a resumed session keeps whatever was
+        # previously persisted; explicit overrides require a fresh session.
+        if self._model_class_override and not (self.shared_state.model_class or "").strip():
+            self.shared_state.model_class = self._model_class_override
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — best effort; not worth aborting boot.
+                log.exception(
+                    "Coordinator: failed to persist model_class=%r at boot",
+                    self._model_class_override,
+                )
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
@@ -307,11 +410,37 @@ class Coordinator:
         self.shared_state.action_scores[action_name] = a.to_dict()
 
     def _score_action_discard(self, action_name: str) -> None:
+        """Deprecated thin wrapper — prefer :meth:`_score_action_failure` or
+        :meth:`_score_action_no_promote` so the streak counter for each
+        pathology evolves independently. Retained for archived call sites
+        that don't yet distinguish the two.
+        """
+        self._score_action_failure(action_name)
+
+    def _score_action_failure(self, action_name: str) -> None:
+        """Streak-aware penalty for a task that returned failed/error."""
         raw = self.shared_state.action_scores.get(action_name)
         if not isinstance(raw, dict):
             return
         a = _scoring.ActionScore.from_dict(raw)
-        _scoring.apply_discard(
+        _scoring.apply_failure(
+            a,
+            tick=int(self.shared_state.tick or 0),
+            action_name=action_name,
+        )
+        self.shared_state.action_scores[action_name] = a.to_dict()
+
+    def _score_action_no_promote(self, action_name: str) -> None:
+        """Streak-aware penalty for a task that succeeded but did not
+        promote ``current_best``. Tracked on a streak distinct from
+        :meth:`_score_action_failure` so diagnostics can distinguish a
+        crashing action from a stalled one.
+        """
+        raw = self.shared_state.action_scores.get(action_name)
+        if not isinstance(raw, dict):
+            return
+        a = _scoring.ActionScore.from_dict(raw)
+        _scoring.apply_no_promote(
             a,
             tick=int(self.shared_state.tick or 0),
             action_name=action_name,
@@ -353,29 +482,40 @@ class Coordinator:
             # Treated as a gate; do not score it. baseline_failure_streak
             # already tracks repeated failures.
             return
-        if task_kind in {"profile", "pmc_roofline"}:
-            self._score_action_keep(task_kind, gain_pct=0.0)
-            return
-        if task_kind == "validate_stack":
-            # Bumps runs + cooldown so we don't validate_stack spam.
-            self._score_action_keep("validate_stack", gain_pct=0.0)
+        status = ""
+        error_class = None
+        if isinstance(result, dict):
+            status = str(result.get("status") or "")
+            error_class = result.get("error_class")
+        failed = status in {"failed", "error"} or bool(error_class)
+        if task_kind in {"profile", "pmc_roofline", "validate_stack"}:
+            if failed:
+                self._score_action_failure(task_kind)
+            else:
+                self._score_action_keep(task_kind, gain_pct=0.0)
             return
         if task_kind in {"backends", "params", "sweep"}:
-            if promoted:
+            if failed:
+                self._score_action_failure(task_kind)
+            elif promoted:
                 self._score_action_keep(
                     task_kind, gain_pct=float(gain_vs_cb or 0.0),
                 )
             else:
-                self._score_action_discard(task_kind)
+                self._score_action_no_promote(task_kind)
             # Lock the grid when it is fully exhausted so the LLM sees
             # the row as unavailable. Only applies to params today
             # (the only family with a deterministic exhaustion check).
             if task_kind == "params" and self._params_grid_exhausted():
                 self._score_action_lock("params", "grid_exhausted")
             return
-        # Support actions (dream / re_explore / recover / etc.): just
-        # register the run so cooldown + aging math evolves.
-        self._score_action_keep(task_kind, gain_pct=0.0)
+        # Fallback for any future deep / support action that doesn't have
+        # explicit promote semantics — split on result.status so the
+        # failure streak still gets exercised.
+        if failed:
+            self._score_action_failure(task_kind)
+        else:
+            self._score_action_keep(task_kind, gain_pct=0.0)
 
     def _ensure_action_scores_seeded(self) -> None:
         """Populate ``shared_state.action_scores`` once per session.
@@ -595,6 +735,13 @@ class Coordinator:
             return False
         if not self._params_grid_exhausted():
             return False
+        # Phase 4 of the dedup-by-fingerprint plan: backends has parity
+        # with params here. Don't switch off explore until BOTH ledgers
+        # have run out of fresh fingerprints — otherwise a brief params
+        # plateau prematurely shuts down the (still productive)
+        # backends search.
+        if not self._backends_grid_exhausted():
+            return False
         return self._all_reusable_kernels_rejected()
 
     def _params_grid_exhausted(self) -> bool:
@@ -612,6 +759,39 @@ class Coordinator:
         rejected_count = len(search.get("rejected") or [])
         if grid_size <= 0:
             return bool(search.get("params_search_exhausted"))
+        return (
+            tested_count >= grid_size
+            or cursor >= grid_size
+            or rejected_count >= grid_size
+        )
+
+    def _backends_grid_exhausted(self) -> bool:
+        """Backends-side parity of :meth:`_params_grid_exhausted`.
+
+        Returns True when ``backends_search.tested`` has covered the
+        default seed grid (either by count or by the executor's own
+        ``backends_search_exhausted`` flag from the last round). An
+        unseeded ledger returns False — Orch hasn't run backends yet,
+        so it isn't "exhausted", it's simply unexplored.
+        """
+        search = self.shared_state.backends_search or {}
+        if not isinstance(search, dict) or not search:
+            return False
+        # The executor stamps this on its last round when no fresh
+        # fingerprint survived dedup — trust it when present.
+        if search.get("backends_search_exhausted"):
+            return True
+        try:
+            from .action_executors.backends import DEFAULT_BACKENDS_GRID
+            grid_size = len(DEFAULT_BACKENDS_GRID)
+        except Exception:  # noqa: BLE001
+            grid_size = 0
+        tested = search.get("tested") or {}
+        tested_count = len(tested) if isinstance(tested, dict) else 0
+        cursor = int(search.get("cursor") or 0)
+        rejected_count = len(search.get("rejected") or [])
+        if grid_size <= 0:
+            return False
         return (
             tested_count >= grid_size
             or cursor >= grid_size
@@ -799,30 +979,117 @@ class Coordinator:
     # ==================================================================
     # Execution order guard
     # ==================================================================
+    def _target_analysis_baseline_exists(self) -> bool:
+        """True iff target_analysis has produced ``target_baseline.json``.
+
+        The TargetAnalysisExecutor's failure policy is "never fail": even if
+        InferenceX is unreachable, it still writes a JSON with
+        ``status=fetch_error``. So existence of the file is a sufficient
+        "this gate has been satisfied" signal — we never expect this gate
+        to loop more than once per session.
+        """
+        try:
+            from ..session_paths import target_baseline_json
+            return target_baseline_json(self.session_dir).exists()
+        except Exception:  # noqa: BLE001 — defensive; missing helper -> treat as done.
+            return True
+
+    def _kernel_opt_keep_pending(self) -> str:
+        """Return the kernel_id awaiting integrate, or "" if none.
+
+        Detects the "kernel_opt produced a KEEP whose patch has not yet
+        been integrated into the optimization_stack" state. Returns the
+        kernel_id so the gate text can name it; empty string means the
+        gate is closed.
+
+        Closed when ANY of these hold:
+          * ``last_kernel_opt`` is empty (no recent kernel_opt call).
+          * Last decision is not ``KEEP``.
+          * The kernel_id is already retired (``rejected_kernel_ids``).
+          * An ``integrate`` entry with the same kernel_id is already on
+            ``optimization_stack`` (i.e. integrate already ran for this
+            patch and stuck).
+        """
+        last = self.shared_state.last_kernel_opt or {}
+        decision = str(last.get("decision") or "").upper()
+        if decision != "KEEP":
+            return ""
+        kernel_id = str(last.get("kernel_id") or "").strip()
+        if not kernel_id:
+            return ""
+        if kernel_id in (self.shared_state.rejected_kernel_ids or []):
+            return ""
+        for entry in self.shared_state.optimization_stack or []:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("action") != "integrate":
+                continue
+            if str(entry.get("kernel_id") or "") == kernel_id:
+                return ""
+        return kernel_id
+
     def _required_next_step(self) -> str:
         """Return the coordinator-enforced next step, or empty if flexible.
 
-        The Orchestration prompt says baseline → profile → select_kernels,
+        The Orchestration prompt says baseline -> profile -> select_kernels,
         but the LLM can still skip to backends/params. This guard makes that
         sequence deterministic and visible in the prompt every tick.
 
-        Phase 2 addition — once at least one KEEP'd entry has been added to
-        ``optimization_stack`` since the last successful ``validate_stack``,
-        the validate_stack TODO takes precedence over every other
-        non-prep step. Skipping it would let the LLM keep stacking
+        Pipeline (after the deletion of the in-loop ``setup`` / ``classify``
+        actions, the deletion of the PMC hard-gate, and the deletion of
+        the action-layer ``select_kernels`` hard-gate — ``select_kernels``
+        is now only enforced as a prerequisite for ``run_optimization``
+        REQUESTs at the request layer, never for explore actions like
+        ``params`` / ``backends`` / ``sweep`` / ``report``):
+
+            TODO 0  target_analysis  (only when --compare-against-gpu set)
+            TODO 1  baseline
+            TODO 2  profile          (kernel mode only)
+            TODO 3  integrate        (kernel mode only, after kernel_opt KEEP)
+            TODO 4  validate_stack   (when unvalidated KEEPs landed)
+
+        ``validate_stack`` precedence is critical: once at least one KEEP
+        has been added to ``optimization_stack`` since the last successful
+        ``validate_stack``, skipping it would let the LLM keep stacking
         per-round gains that don't compose linearly and therefore over-
         report ``cumulative_gain`` in the final report.
         """
         if self.shared_state.stop_reason:
             return ""
+        if not self._target_analysis_baseline_exists():
+            if self._compare_against_gpu:
+                return (
+                    f"TODO 0/4: target_analysis is required now. "
+                    f"--compare-against-gpu="
+                    f"{self._compare_against_gpu!r} was set but "
+                    "$SESSION_DIR/target_analysis/target_baseline.json is "
+                    "missing; propose/delegate only `target_analysis` until "
+                    "the external InferenceX reference has been fetched."
+                )
+            return (
+                "TODO 0/4: target_analysis is required now. "
+                "$SESSION_DIR/target_analysis/target_baseline.json is "
+                "missing; propose/delegate only `target_analysis` so a "
+                "reason='no_target_gpu_configured' marker JSON is written "
+                "(no --compare-against-gpu was supplied, so this writes a "
+                "skipped marker rather than fetching InferenceX data)."
+            )
         if self.shared_state.baseline_tput <= 0:
             return (
                 "TODO 1/4: baseline is required now. Propose/delegate only "
                 "`baseline` until baseline_tput > 0."
             )
-        # Profile/select_kernels guards only apply when kernel agent is
-        # alive in the role registry — no-kernel runs don't have a way to
-        # service the request and the mandate would be meaningless.
+        # Profile / integrate guards only apply when the kernel agent is
+        # alive — no-kernel runs have no way to service the request and
+        # the mandate would be meaningless. Two related gates are NOT
+        # surfaced here:
+        # * ``pmc_roofline`` is opt-in advisory enrichment for
+        #   ``kernel_opt`` via ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1`` and
+        #   never a prerequisite for any other action.
+        # * ``select_kernels`` is a prerequisite ONLY for ``run_optimization``
+        #   REQUESTs (enforced in ``_sequence_denial_for_request``); it is
+        #   NOT a prerequisite for ``params`` / ``backends`` / ``sweep`` /
+        #   ``report``.
         if "kernel" in self.role_registry:
             if not self.shared_state.last_profile_trace:
                 return (
@@ -830,13 +1097,17 @@ class Coordinator:
                     "last_profile_trace is empty; propose/delegate only `profile`. "
                     "Do not run backends/params/sweep yet."
                 )
-            select = self.shared_state.last_select_kernels or {}
-            if select.get("trace_input") != self.shared_state.last_profile_trace:
+            pending_kid = self._kernel_opt_keep_pending()
+            if pending_kid:
                 return (
-                    "TODO 3/4: select_kernels is required now. Emit "
-                    "request{target_agent='kernel', kind='select_kernels', "
-                    "params={trace_input: last_profile_trace, top_k: 10}} before "
-                    "backends/params/sweep."
+                    f"TODO 3/4: integrate is required now. kernel_opt "
+                    f"returned KEEP for kernel_id={pending_kid!r} but the "
+                    "patch has not been integrated into optimization_stack. "
+                    "Emit request{target_agent='kernel', kind='integrate', "
+                    f"params={{kernel_id: {pending_kid!r}}} (or "
+                    "propose/delegate `integrate` / `recover` / "
+                    "`validate_stack` / `report`) before any further "
+                    "explore."
                 )
         if self.shared_state.optimization_stack_has_unvalidated_keeps():
             return (
@@ -852,7 +1123,84 @@ class Coordinator:
             )
         return ""
 
-    def _sequence_denial_for_action(self, action_name: str) -> PolicyDenied | None:
+    def _baseline_self_loop_denial(
+        self, proposed_params: dict[str, Any] | None,
+    ) -> PolicyDenied | None:
+        """Reject a fresh baseline proposal that just replays the last failure.
+
+        The Orchestration prompt's FAILURE RECOVERY section instructs the
+        LLM to introduce a new ``benchmark_script`` / ``result_dir`` /
+        ``extra_sglang_args`` override after a baseline failure. This
+        method is the PolicyGate stop-loss that fires when the LLM
+        ignores that instruction.
+
+        Fires only when ALL of these hold:
+
+        * Two or more consecutive baseline failures have landed on
+          ``shared_state.baseline_attempts`` (any decision tail that
+          isn't ``status=succeeded`` counts).
+        * Those last two failures both carry a
+          ``fingerprint`` in their ``extras`` and the fingerprints
+          match each other.
+        * The current proposal's fingerprint matches the failed-streak
+          fingerprint.
+
+        When all three match, return :class:`PolicyDenied` with a
+        ``baseline_self_loop`` rule and a hint pointing at the next
+        override surface so the prompt sees a deterministic recovery
+        path. Returns ``None`` otherwise — the regular execution-order
+        rules still apply.
+        """
+        attempts = list(self.shared_state.baseline_attempts or [])
+        # Walk the tail backwards collecting *consecutive* failures.
+        tail_failures: list[dict[str, Any]] = []
+        for entry in reversed(attempts):
+            if not isinstance(entry, dict):
+                break
+            if entry.get("status") == "succeeded":
+                break
+            tail_failures.append(entry)
+        if len(tail_failures) < _BASELINE_SELF_LOOP_THRESHOLD:
+            return None
+        recent = tail_failures[: _BASELINE_SELF_LOOP_THRESHOLD]
+        prints: list[Any] = []
+        for entry in recent:
+            extras = entry.get("extras") or {}
+            if not isinstance(extras, dict):
+                return None
+            fp = extras.get("fingerprint")
+            if fp is None:
+                return None
+            prints.append(fp)
+        first = prints[0]
+        if any(p != first for p in prints[1:]):
+            return None
+        proposed_fp = _baseline_params_fingerprint(proposed_params)
+        if proposed_fp != first:
+            return None
+        error_class = recent[0].get("error_class") or "unknown"
+        hint = (
+            "the last "
+            f"{_BASELINE_SELF_LOOP_THRESHOLD} `baseline` attempts failed "
+            f"with the SAME params fingerprint (error_class={error_class!r}). "
+            "Re-proposing the same params will fail the same way. Change at "
+            "least one of: params.benchmark_script (sanitized *.sh name, "
+            "e.g. \"sglang_mi300x.sh\" to bypass dsr1_fp8_mi300x.sh's "
+            "hardcoded --result-dir), params.result_dir (sanitized path; "
+            "Coordinator already defaults RESULT_DIR=<workspace>), or "
+            "extra_sglang_args / extra_envs."
+        )
+        return PolicyDenied(
+            "action='baseline' denied: same-fingerprint failure streak",
+            rule="baseline_self_loop",
+            hint=hint,
+        )
+
+    def _sequence_denial_for_action(
+        self,
+        action_name: str,
+        proposed_params: dict[str, Any] | None = None,
+    ) -> PolicyDenied | None:
         """Reject orchestration action/delegate attempts that skip required steps.
 
         Phase 2 addition: once optimization_stack has unvalidated KEEPs,
@@ -861,24 +1209,80 @@ class Coordinator:
         already short-circuit above). Everything else is denied with a
         ``validate_stack_required`` rule so Orchestration sees the
         ``policy_denied`` and self-corrects on the next tick.
+
+        ``proposed_params`` is the ``intent.payload["params"]`` dict
+        (propose_action / delegate path). Currently only consumed by
+        the baseline self-loop guard above, but the kwarg signature is
+        kept open so other per-action stop-losses (e.g. params/backends
+        loop guards) can plug in without further call-site churn.
         """
         action = str(action_name or "").strip()
         sequence_actions = {
-            "baseline", "profile", "backends", "params", "sweep", "report",
-            "validate_stack",
+            "target_analysis",
+            "baseline", "profile", "pmc_roofline",
+            "backends", "params", "sweep", "report",
+            "integrate", "validate_stack",
         }
         if action not in sequence_actions:
             return None
         if self.shared_state.stop_reason:
             return None
-        if self.shared_state.baseline_tput <= 0 and action != "baseline":
+        # target_analysis hard gate: target_baseline.json must be on disk
+        # before any other sequence action runs. The executor never raises
+        # (failures land as `status=fetch_error`, missing GPU lands as
+        # `reason=no_target_gpu_configured`) so this gate always opens
+        # after a single attempt regardless of whether
+        # --compare-against-gpu was supplied.
+        if (
+            not self._target_analysis_baseline_exists()
+            and action != "target_analysis"
+        ):
+            if self._compare_against_gpu:
+                hint = (
+                    "propose/delegate `target_analysis` so InferenceX "
+                    f"reference for --compare-against-gpu="
+                    f"{self._compare_against_gpu!r} is fetched into "
+                    "$SESSION_DIR/target_analysis/target_baseline.json"
+                )
+            else:
+                hint = (
+                    "propose/delegate `target_analysis` so a "
+                    "reason='no_target_gpu_configured' marker JSON is "
+                    "written to $SESSION_DIR/target_analysis/"
+                    "target_baseline.json (no --compare-against-gpu was "
+                    "supplied; the marker is what unblocks the rest of "
+                    "the pipeline)"
+                )
+            return PolicyDenied(
+                f"action={action!r} denied: target_analysis must run first",
+                rule="execution_order",
+                hint=hint,
+            )
+        if (
+            self.shared_state.baseline_tput <= 0
+            and action not in {"baseline", "target_analysis"}
+        ):
             return PolicyDenied(
                 f"action={action!r} denied: baseline must run first",
                 rule="execution_order",
                 hint="propose/delegate `baseline` until baseline_tput > 0",
             )
-        # Profile/select_kernels guards only apply when kernel agent is in
-        # the role registry — no-kernel mode skips them.
+        if action == "baseline":
+            self_loop = self._baseline_self_loop_denial(proposed_params)
+            if self_loop is not None:
+                return self_loop
+        # Profile / integrate guards only apply when kernel agent is in
+        # the role registry — no-kernel mode skips them. Two related gates
+        # are intentionally NOT enforced at the action layer:
+        # * ``pmc_roofline`` is opt-in advisory enrichment for
+        #   ``kernel_opt`` via ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1`` and
+        #   never blocks any other action. A platform that cannot run
+        #   rocprof must not deadlock the explore / kernel pipeline.
+        # * ``select_kernels`` is enforced at the REQUEST layer
+        #   (``_sequence_denial_for_request``) for ``run_optimization``
+        #   only. ``params`` / ``backends`` / ``sweep`` / ``report`` are
+        #   never gated on a fresh ``last_select_kernels`` cache — those
+        #   actions don't need kernel candidates to make progress.
         if "kernel" in self.role_registry:
             if (
                 self.shared_state.baseline_tput > 0
@@ -890,18 +1294,22 @@ class Coordinator:
                     rule="execution_order",
                     hint="propose/delegate `profile`; last_profile_trace is empty",
                 )
-            select = self.shared_state.last_select_kernels or {}
-            needs_select = (
-                bool(self.shared_state.last_profile_trace)
-                and select.get("trace_input") != self.shared_state.last_profile_trace
-            )
-            if needs_select and action in {"backends", "params", "sweep", "report"}:
+            # integrate gate: kernel_opt KEEP awaiting integrate. Allow
+            # integrate / validate_stack / report through; recover is not
+            # in `sequence_actions` and therefore already bypasses this
+            # function (no-op early return).
+            pending_kid = self._kernel_opt_keep_pending()
+            if pending_kid and action not in {
+                "integrate", "validate_stack", "report",
+            }:
                 return PolicyDenied(
-                    f"action={action!r} denied: select_kernels must run first",
+                    f"action={action!r} denied: integrate must run first",
                     rule="execution_order",
                     hint=(
-                        "emit request{target_agent='kernel', kind='select_kernels', "
-                        "params={trace_input: last_profile_trace, top_k: 10}}"
+                        f"kernel_opt returned KEEP for kernel_id="
+                        f"{pending_kid!r}; emit request{{target_agent="
+                        "'kernel', kind='integrate', params={kernel_id: "
+                        f"{pending_kid!r}}}}} before any further explore"
                     ),
                 )
         # validate_stack precedence — once new KEEPs are stacked we must
@@ -1154,7 +1562,10 @@ class Coordinator:
                 {"kind": "proposal_pruned", "from": source, "action": action_name},
             )
             return
-        denied = self._sequence_denial_for_action(action_name)
+        denied = self._sequence_denial_for_action(
+            action_name,
+            proposed_params=intent.payload.get("params"),
+        )
         if denied is not None:
             await self._record_policy_denied(source, intent, denied)
             return
@@ -1234,8 +1645,11 @@ class Coordinator:
             # T2 — pass the cumulative synergy_attempted set so backends
             # phase-2 doesn't re-test the same combo across rounds, and
             # cap each round at 5 phase-1 variants (parity with `params`).
-            # We also feed prior-round phase-1 variant names so each new
-            # round deepens the search instead of replaying the first 5.
+            # The ``backends_search`` ledger (Phase 2 of the dedup-by-
+            # fingerprint plan) covers everything ``tested_variant_names``
+            # used to provide and more: it records ALL tested variants
+            # (not just winners), and is consulted for both the default
+            # grid and LLM-supplied ``params.grid``.
             if pending.action_name == "backends":
                 params.setdefault(
                     "synergy_attempted",
@@ -1243,22 +1657,9 @@ class Coordinator:
                 )
                 params.setdefault("max_candidates_per_round", 5)
                 params.setdefault("max_synergy_combos", 4)
-                # Flatten every variant name observed in past
-                # backend_winners_history rounds; the executor uses this
-                # to skip already-tested entries when cap > 0.
-                tested_names: list[str] = []
-                for round_entry in self.shared_state.backend_winners_history:
-                    if not isinstance(round_entry, dict):
-                        continue
-                    if round_entry.get("action") != "backends":
-                        continue
-                    for w in round_entry.get("winners") or []:
-                        if isinstance(w, dict) and w.get("name"):
-                            tested_names.append(str(w["name"]))
-                if tested_names:
-                    params.setdefault(
-                        "tested_variant_names", tested_names,
-                    )
+                params.setdefault(
+                    "backends_search", self.shared_state.backends_search,
+                )
             if pending.action_name == "params":
                 params.setdefault("params_search", self.shared_state.params_search)
                 # Long runs should advance the search incrementally while
@@ -1268,11 +1669,32 @@ class Coordinator:
                 params.setdefault("max_candidates_per_round", 5)
                 if isinstance(cb, dict) and cb.get("variant_name"):
                     params.setdefault("base_variant_name", str(cb["variant_name"]))
-        task = await self.tasks.create(
+        task, was_existing = await self.tasks.create_or_return_existing(
             kind=pending.action_name,
             params=params,
             idempotency_key=f"approved-{pending.proposal_msg_id}",
         )
+        if was_existing:
+            # Defensive path — `approved-{proposal_msg_id}` is unique per
+            # proposal so a normal flow never collides. The only realistic
+            # trigger is a resume / bus replay surfacing an old proposal
+            # whose task is already on disk. Skip emitting a fresh
+            # `approved_proposal` decision (which would mislead Orch into
+            # thinking new work was queued) and record an observation so
+            # the audit log still shows what happened.
+            await self._record_observation(
+                "coordinator", "observation",
+                {
+                    "kind": "proposal_materialize_skipped",
+                    "reason": "duplicate_idempotency_key",
+                    "proposal_msg_id": pending.proposal_msg_id,
+                    "task_id": task.task_id,
+                    "task_state": task.state,
+                    "action_name": pending.action_name,
+                    "from_agent": pending.from_agent,
+                },
+            )
+            return
         await self.bus.append_and_seq(Message.new(
             "coordinator", "*", "decision",
             {"kind": "approved_proposal", "task_id": task.task_id,
@@ -1284,7 +1706,10 @@ class Coordinator:
     # ------------------------------------------------------------------
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
         action_name = intent.payload["action_name"]
-        denied = self._sequence_denial_for_action(action_name)
+        denied = self._sequence_denial_for_action(
+            action_name,
+            proposed_params=intent.payload.get("params"),
+        )
         if denied is not None:
             await self._record_policy_denied(source, intent, denied)
             return
@@ -1301,7 +1726,9 @@ class Coordinator:
                 "config_path", self.shared_state.baseline_config_path
             )
         # T2 — same synergy-dedup + per-round cap plumbing as the
-        # proposal-review path.
+        # proposal-review path. Dedup against previously-tested variants
+        # rides on the shared ``backends_search`` ledger (Phase 2 of the
+        # dedup-by-fingerprint plan).
         if action_name == "backends":
             params.setdefault(
                 "synergy_attempted",
@@ -1309,25 +1736,44 @@ class Coordinator:
             )
             params.setdefault("max_candidates_per_round", 5)
             params.setdefault("max_synergy_combos", 4)
-            tested_names: list[str] = []
-            for round_entry in self.shared_state.backend_winners_history:
-                if not isinstance(round_entry, dict):
-                    continue
-                if round_entry.get("action") != "backends":
-                    continue
-                for w in round_entry.get("winners") or []:
-                    if isinstance(w, dict) and w.get("name"):
-                        tested_names.append(str(w["name"]))
-            if tested_names:
-                params.setdefault(
-                    "tested_variant_names", tested_names,
-                )
+            params.setdefault(
+                "backends_search", self.shared_state.backends_search,
+            )
         idempotency_key = intent.payload.get("idempotency_key") or f"{source}:{action_name}:{len(self.state.pending_proposals)}"
-        task = await self.tasks.create(
+        task, was_existing = await self.tasks.create_or_return_existing(
             kind=action_name,
             params=params,
             idempotency_key=idempotency_key,
         )
+        if was_existing:
+            # Surface the dedup as a policy_denied observation so the LLM
+            # sees the rule+hint next tick and can bump the suffix /
+            # change params instead of spinning on the same key. Without
+            # this feedback the LLM treats the silent return as "task
+            # queued" and waits forever for a delegated_result that will
+            # never arrive (the existing task is already terminal).
+            terminal_states = {"succeeded", "failed", "cancelled", "needs_manual_review"}
+            if task.state in terminal_states:
+                hint = (
+                    f"task {task.task_id} terminated as {task.state!r} and will "
+                    f"NOT be re-run. Bump the idempotency_key suffix (e.g. "
+                    f"backends-round-<N+1>) or change params to create a new task."
+                )
+            else:
+                hint = (
+                    f"task {task.task_id} is still {task.state!r}; wait for the "
+                    f"delegated_result event instead of re-emitting the same key."
+                )
+            await self._record_policy_denied(
+                source, intent,
+                PolicyDenied(
+                    f"delegate{{action_name={action_name!r}}} duplicate "
+                    f"idempotency_key={idempotency_key!r}",
+                    rule="duplicate_idempotency_key",
+                    hint=hint,
+                ),
+            )
+            return
         await self.bus.append_and_seq(Message.new(
             "coordinator", "*", "event",
             {"kind": "task_queued", "task_id": task.task_id, "source": source, "action": action_name},
@@ -1479,16 +1925,23 @@ class Coordinator:
                             gain = float(speedup - 1.0) * 100.0
                         self._score_action_keep("kernel_opt", gain_pct=gain)
                     elif decision in {"REVERT", "PARTIAL"}:
-                        self._score_action_discard("kernel_opt")
+                        # Ran but did not promote — count toward the
+                        # no-promote streak rather than the failure
+                        # streak (the optimization itself didn't crash).
+                        self._score_action_no_promote("kernel_opt")
                     else:
-                        # Unknown decision — treat as a measurement, bump
-                        # runs + cooldown without rewarding the action.
+                        # Unknown decision — treat as a measurement: bump
+                        # runs without rewarding or penalising the action.
                         self._score_action_keep("kernel_opt", gain_pct=0.0)
                     self.shared_state.save(self.session_dir)
                 if kind == "integrate":
                     if result.get("status") != "skipped":
                         self.shared_state.record_kernel_integrate_result(result)
                     decision = str(result.get("decision", "")).upper()
+                    int_status = str(result.get("status") or "")
+                    int_failed = int_status in {"failed", "error"} or bool(
+                        result.get("error_class")
+                    )
                     if decision == "KEEP":
                         self._record_integrate_keep(result)
                         gain = result.get("gain_pct")
@@ -1497,9 +1950,15 @@ class Coordinator:
                         )
                         self._score_action_keep("integrate", gain_pct=max(0.0, gain_f))
                     elif decision in {"REVERT", "NEEDS_REVIEW"}:
-                        self._score_action_discard("integrate")
-                    elif result.get("status") != "skipped":
-                        self._score_action_keep("integrate", gain_pct=0.0)
+                        if int_failed:
+                            self._score_action_failure("integrate")
+                        else:
+                            self._score_action_no_promote("integrate")
+                    elif int_status != "skipped":
+                        if int_failed:
+                            self._score_action_failure("integrate")
+                        else:
+                            self._score_action_keep("integrate", gain_pct=0.0)
                     self.shared_state.save(self.session_dir)
                 # Bug B fix: the request was just answered programmatically,
                 # so the LLM-backed kernel agent should NOT see the request
@@ -1696,6 +2155,19 @@ class Coordinator:
         }
         if key not in existing:
             self.shared_state.optimization_stack.append(entry)
+            # Per-entry incremental gain (current_best vs. baseline at the
+            # moment this integrate KEEP landed). Keeps
+            # ``gain_per_stack_entry`` index-aligned with
+            # ``optimization_stack`` for session_breakdown's
+            # capability_summary attribution.
+            gain_pct_entry: float | None = None
+            try:
+                bt = float(self.shared_state.baseline_tput or 0.0)
+                if bt > 0:
+                    gain_pct_entry = (float(new_tput) - bt) / bt * 100.0
+            except (TypeError, ValueError):
+                gain_pct_entry = None
+            self.shared_state.gain_per_stack_entry.append(gain_pct_entry)
 
         self.shared_state.current_best = {
             "action": "integrate",
@@ -1728,23 +2200,82 @@ class Coordinator:
     async def _handle_unpromotable_result(
         self, task: Task, result: dict[str, Any] | None,
     ) -> None:
-        if task.kind != "baseline" or self.shared_state.baseline_tput > 0:
-            return
-        self.shared_state.baseline_failure_streak += 1
-        if self.shared_state.baseline_failure_streak >= 3:
-            self.shared_state.stop_reason = "baseline_failed"
-        self.shared_state.save(self.session_dir)
-        await self.bus.append_and_seq(Message.new(
-            "coordinator", "*", "event",
-            {
+        """Record a failed / unpromotable task result into SharedState.
+
+        Previously this was a baseline-only branch. The audit-trail plan
+        broadens it to:
+
+        * Always (every task kind, including kernel-owned) append to
+          :attr:`SharedState.last_action_failures` via
+          :meth:`SharedState.record_action_failure` — that's the rich
+          rolling log Orchestration consults after the inbox rotates.
+        * For the 6 audit kinds (baseline/profile/backends/params/sweep/
+          validate_stack) also append a ``status="failed"`` entry to
+          ``<kind>_attempts`` via
+          :meth:`SharedState.record_action_attempt`, mirroring the
+          kernel-equivalent per-action history.
+        * Keep the existing baseline-specific
+          ``baseline_failure_streak`` / ``stop_reason`` /
+          ``baseline_not_promoted`` logic untouched (gated to
+          ``task.kind == "baseline"`` while ``baseline_tput == 0``).
+        """
+        result_payload = result or {}
+        any_changed = False
+        # Per-action audit (failed attempt) for the 6 in-scope kinds.
+        if task.kind in _AUDIT_ACTIONS:
+            audit_extras: dict[str, Any] = {}
+            # Stamp the baseline-params fingerprint so the prompt's
+            # FAILURE RECOVERY block + the self-loop denial helper can
+            # detect "same params failed twice; refuse a third
+            # attempt". Only baseline is fingerprinted today
+            # (validate_stack uses the same surface but its own audit
+            # branch sits in ``_promote_to_shared_state``); other
+            # actions would need their own per-action fingerprint key
+            # set before this stamp is meaningful.
+            if task.kind == "baseline":
+                audit_extras["fingerprint"] = _baseline_params_fingerprint(
+                    task.params
+                )
+            self.shared_state.record_action_attempt(
+                action=task.kind,
+                task_id=task.task_id,
+                status="failed",
+                decision="no_promote",
+                result=result_payload,
+                extras=audit_extras,
+            )
+            any_changed = True
+        # Global rolling failure log (every kind, including kernel-owned).
+        self.shared_state.record_action_failure(
+            action=task.kind,
+            task_id=task.task_id,
+            result=result_payload,
+        )
+        any_changed = True
+        # Legacy baseline-specific gates (streak counter +
+        # ``baseline_failed`` stop reason + ``baseline_not_promoted``
+        # event). Kept intact so existing run_optimization heuristics
+        # (e.g. abort-after-3-baselines) still apply.
+        baseline_event_payload: dict[str, Any] | None = None
+        if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
+            self.shared_state.baseline_failure_streak += 1
+            if self.shared_state.baseline_failure_streak >= 3:
+                self.shared_state.stop_reason = "baseline_failed"
+            baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
                 "failure_streak": self.shared_state.baseline_failure_streak,
                 "stop_reason": self.shared_state.stop_reason,
-                "result_status": (result or {}).get("status"),
-                "error_class": (result or {}).get("error_class"),
-            },
-        ))
+                "result_status": result_payload.get("status"),
+                "error_class": result_payload.get("error_class"),
+            }
+            any_changed = True
+        if any_changed:
+            self.shared_state.save(self.session_dir)
+        if baseline_event_payload is not None:
+            await self.bus.append_and_seq(Message.new(
+                "coordinator", "*", "event", baseline_event_payload,
+            ))
 
     async def _pump_dispatcher_once(self) -> None:
         queued = await self.tasks.queued()
@@ -1832,6 +2363,17 @@ class Coordinator:
                     ),
                     "ts": datetime.now(timezone.utc).isoformat(),
                 })
+                # Mirror append into ``gain_per_stack_entry`` so indexes
+                # stay aligned across the two parallel lists. See the
+                # SharedState docstring for the contract.
+                gain_pct_entry: float | None = None
+                try:
+                    bt = float(self.shared_state.baseline_tput or 0.0)
+                    if bt > 0:
+                        gain_pct_entry = (float(best_tput) - bt) / bt * 100.0
+                except (TypeError, ValueError):
+                    gain_pct_entry = None
+                self.shared_state.gain_per_stack_entry.append(gain_pct_entry)
 
         self.shared_state.current_best = {
             "action": task_kind,
@@ -1869,6 +2411,15 @@ class Coordinator:
         if not isinstance(result, dict):
             return
         changed = False
+        # Audit-trail bookkeeping for the 6 non-kernel actions. Each
+        # in-scope branch sets ``audit_decision`` (and optionally
+        # ``audit_extras``); after all branches we call
+        # ``record_action_attempt`` once so adding a new branch is a
+        # local change. ``audit_decision`` remaining ``None`` means
+        # either the kind is out of scope (kernel-owned, pmc_roofline)
+        # or the branch had nothing to record.
+        audit_decision: str | None = None
+        audit_extras: dict[str, Any] = {}
         if task_kind == "baseline":
             tput = result.get("output_throughput")
             if isinstance(tput, (int, float)) and tput > 0:
@@ -1895,7 +2446,35 @@ class Coordinator:
                 "workspace": result.get("workspace"),
             }
             changed = True
+            audit_decision = (
+                "promoted" if isinstance(tput, (int, float)) and tput > 0
+                else "discarded"
+            )
+            audit_extras = {
+                "materialized_config": result.get("materialized_config"),
+                "accuracy": result.get("accuracy"),
+                "baseline_tput": (
+                    float(tput) if isinstance(tput, (int, float)) else None
+                ),
+                # Stamp the canonical params fingerprint so the prompt's
+                # FAILURE RECOVERY block (and the self-loop denial helper)
+                # can compare what was actually run against what
+                # Orchestration is about to propose. See
+                # ``_baseline_params_fingerprint``.
+                "fingerprint": _baseline_params_fingerprint(
+                    task.params if task is not None else None
+                ),
+            }
         elif task_kind == "profile":
+            audit_decision = "promoted"
+            audit_extras = {
+                "trace_path": None,
+                "profile_args": None,
+                "pmc_summary_path": result.get("pmc_summary_path"),
+                "roofline_path": result.get("roofline_path"),
+                "kernel_breakdown_path": result.get("kernel_breakdown_path"),
+                "output_throughput": result.get("output_throughput"),
+            }
             # Bug C fix: surface the trace path produced by ProfileExecutor
             # to SharedState so Orch can pass a real path to the kernel
             # `select_kernels` REQUEST instead of fabricating one.
@@ -1917,6 +2496,8 @@ class Coordinator:
                 # Stale select_kernels cache no longer matches this trace.
                 self.shared_state.last_select_kernels = {}
                 changed = True
+                audit_extras["trace_path"] = str(trace_path)
+                audit_extras["profile_args"] = profile_args
             # profile result may also include a tput; promote into
             # current_best on the same +1% rule the grid path uses below.
             tput = result.get("output_throughput")
@@ -1967,6 +2548,25 @@ class Coordinator:
                     (float(tput) - self.shared_state.baseline_tput)
                     / self.shared_state.baseline_tput * 100.0
                 )
+                # Validate-stack is a *measurement*, not a decision
+                # gate: even when the re-bench lands at or below the
+                # baseline we still record the number so the timeline /
+                # state.json reflects ground truth. The warning below
+                # flags the regression so an operator (or a future
+                # rollback policy) can react, but we deliberately leave
+                # ``optimization_stack`` / ``current_best`` /
+                # ``cumulative_gain`` untouched here.
+                VALIDATE_STACK_WARN_THRESHOLD_PCT = 0.0
+                if gain <= VALIDATE_STACK_WARN_THRESHOLD_PCT:
+                    log.warning(
+                        "validate_stack: cumulative_gain_validated=%.2f%% <= %.1f%% "
+                        "(tput=%.2f vs baseline=%.2f, stack_len=%d). Recording the "
+                        "measurement but NOT rolling back optimization_stack — "
+                        "validate_stack remains a measurement, not a decision gate.",
+                        gain, VALIDATE_STACK_WARN_THRESHOLD_PCT, float(tput),
+                        self.shared_state.baseline_tput,
+                        len(self.shared_state.optimization_stack),
+                    )
                 self.shared_state.cumulative_gain_validated = float(gain)
                 self.shared_state.cumulative_gain_validated_ts = (
                     datetime.now(timezone.utc).isoformat()
@@ -1995,7 +2595,43 @@ class Coordinator:
                     gain, float(tput), self.shared_state.baseline_tput,
                     self.shared_state.cumulative_gain_validated_stack_len,
                 )
+                audit_decision = "promoted" if gain > 0 else "discarded"
+                audit_extras = {
+                    "validated_stack_len": (
+                        self.shared_state.cumulative_gain_validated_stack_len
+                    ),
+                    "gain_pct": float(gain),
+                    "baseline_tput_ref": float(self.shared_state.baseline_tput),
+                    "validated_tput": float(tput),
+                }
+            else:
+                # Record the failed-to-measure case as a discard so the
+                # audit trail still captures *why* the validation didn't
+                # produce a number (NaN tput, baseline_tput == 0, etc.).
+                audit_decision = "discarded"
+                audit_extras = {
+                    "validated_stack_len": stack_len_at_run,
+                    "gain_pct": None,
+                    "baseline_tput_ref": float(self.shared_state.baseline_tput),
+                    "validated_tput": (
+                        float(tput) if isinstance(tput, (int, float)) else None
+                    ),
+                }
         elif task_kind in ("backends", "params", "sweep"):
+            # backends/params content-fingerprint ledgers (Phase 4 of the
+            # dedup-by-fingerprint plan). Persist BEFORE the promotion
+            # logic below so a winner appended to ``accepted`` further
+            # down sees the latest ``tested`` / ``rejected`` already in
+            # place. ``apply_*_search_update`` preserves the existing
+            # ``accepted`` list (the executor never writes it) so the
+            # Coordinator remains the sole writer for promotion history.
+            if task_kind == "backends" and isinstance(
+                result.get("backends_search_update"), dict
+            ):
+                self.shared_state.apply_backends_search_update(
+                    result["backends_search_update"],
+                )
+                changed = True
             # T1/T2 — persist discovered_flags + synergy_attempted +
             # winners_history so the next Orchestration tick (and IR-26
             # idea-generation prompt section) sees the full search-space
@@ -2031,6 +2667,31 @@ class Coordinator:
                 )
                 changed = True
             if task_kind == "sweep":
+                # Audit trail (sweep is in _AUDIT_ACTIONS even though it
+                # never promotes a current_best — Orchestration still
+                # benefits from seeing what the sweep grid produced).
+                # Recorded FIRST so the subsequent ``record_sweep`` call
+                # gets the final word on ``last_sweep`` (which is a
+                # richer grid-summary payload than the uniform audit
+                # entry; see ``_format_last_sweep`` and
+                # test_p2_5_grid_promotion). ``sweep_attempts`` still
+                # captures the audit row.
+                pareto = result.get("pareto_front") or []
+                self.shared_state.record_action_attempt(
+                    action="sweep",
+                    task_id=getattr(task, "task_id", "") if task is not None else "",
+                    status="succeeded",
+                    decision="discarded",
+                    result=result,
+                    extras={
+                        "grid_size": result.get("grid_size"),
+                        "best_overall": result.get("best_overall"),
+                        "best_for_each_conc": result.get("best_for_each_conc"),
+                        "pareto_front_size": (
+                            len(pareto) if isinstance(pareto, list) else None
+                        ),
+                    },
+                )
                 self.shared_state.record_sweep(result)
                 changed = True
                 # Sweep maps the current stack across workloads; it is not
@@ -2045,15 +2706,19 @@ class Coordinator:
                 self.shared_state.save(self.session_dir)
                 return
             # Promote a grid-runner winner if it actually beat the
-            # current best by a meaningful margin. We use 0.5% as the
-            # 1-shot KEEP threshold (relaxed from marathon's original
-            # 1.0% per the resume5 9h finding: 35/38 winners landed in
-            # the 0.3–0.84% band but never promoted because each
-            # individual run sat under 1.0%) AND, as a separate path,
-            # promote ANY consistent winner that wins ≥ 2 of last 3
-            # rounds with average gain ≥ 0.3% — that's the cross-round
-            # signal-vs-noise check.
-            PROMOTE_THRESHOLD_PCT = 0.5
+            # current best by a meaningful margin. We use 0.1% as the
+            # 1-shot KEEP threshold — further relaxed from the prior
+            # 0.5% bar (which itself relaxed marathon's 1.0% per the
+            # resume5 9h finding). The 0.1% gate lets sub-noise winners
+            # enter optimization_stack early so they can compound with
+            # downstream KEEPs; the validate_stack rebench then acts as
+            # the final filter (see validate_stack handler — currently
+            # record-only with a 0.0% warning gate). AND, as a separate
+            # path, promote ANY consistent winner that wins ≥ 2 of last
+            # 3 rounds with average gain ≥ 0.3% — that's the cross-round
+            # signal-vs-noise check (now mostly redundant given the
+            # lower 1-shot bar, but harmless).
+            PROMOTE_THRESHOLD_PCT = 0.1
             CROSS_ROUND_LOOKBACK = 3
             CROSS_ROUND_MIN_APPEARANCES = 2
             CROSS_ROUND_MIN_AVG_GAIN_PCT = 0.3
@@ -2084,6 +2749,11 @@ class Coordinator:
                     variant_name=bv.get("name"),
                     tput=best_tput,
                     gain_pct=gain_vs_cb,
+                    extra_sglang_args=str(
+                        bv.get("candidate_extra_sglang_args")
+                        or bv.get("extra_sglang_args") or ""
+                    ),
+                    extra_envs=dict(bv.get("extra_envs") or {}),
                 )
             promoted = False
             if gain_vs_cb is not None and gain_vs_cb >= PROMOTE_THRESHOLD_PCT:
@@ -2148,6 +2818,19 @@ class Coordinator:
                     promoted = True
             if promoted:
                 self.shared_state.params_no_promote_streak = 0
+                # Phase 4 of the dedup-by-fingerprint plan: Coordinator
+                # is the sole writer to ``backends_search.accepted``. On
+                # a backends promote, stamp the winner so the next round
+                # filter treats this variant as accepted, not rejected.
+                if task_kind == "backends" and isinstance(bv, dict) and bv:
+                    promote_entry = dict(bv)
+                    promote_entry.setdefault(
+                        "gain_pct",
+                        float(gain_vs_cb) if isinstance(
+                            gain_vs_cb, (int, float)
+                        ) else None,
+                    )
+                    self.shared_state.record_backends_accepted(promote_entry)
                 changed = True
             else:
                 # Plateau detection: count consecutive grid runs that
@@ -2168,6 +2851,35 @@ class Coordinator:
                 ),
             )
             changed = True
+            # Audit-trail for backends / params. Sweep already recorded
+            # above (it short-circuits with ``return``).
+            audit_decision = "promoted" if promoted else "discarded"
+            audit_extras = {
+                "round_id": (
+                    self.shared_state.backend_winners_history[-1].get("round_id")
+                    if self.shared_state.backend_winners_history
+                    and isinstance(
+                        self.shared_state.backend_winners_history[-1], dict,
+                    )
+                    else None
+                ),
+                "best_variant_name": (
+                    bv.get("name") if isinstance(bv, dict) else None
+                ),
+                "candidate_extra_sglang_args": (
+                    bv.get("extra_sglang_args")
+                    if isinstance(bv, dict) else None
+                ),
+                "extra_envs": (
+                    dict(bv.get("extra_envs") or {})
+                    if isinstance(bv, dict) else {}
+                ),
+                "best_gain_pct_vs_base": best_gain,
+                "gain_vs_cb": (
+                    float(gain_vs_cb)
+                    if isinstance(gain_vs_cb, (int, float)) else None
+                ),
+            }
         # Out-of-band score updates for the task_kinds that don't have a
         # promoted-vs-discard notion (profile / pmc_roofline / validate_stack
         # bump runs + cooldown; baseline is treated as a gate and skipped
@@ -2176,6 +2888,20 @@ class Coordinator:
         # measurement-style kinds here.
         if task_kind in {"profile", "pmc_roofline", "validate_stack"}:
             self._apply_action_score_update(task_kind, result)
+            changed = True
+        # Audit trail (kernel-parity) for the 6 non-kernel actions: one
+        # record per attempt with status="succeeded" + branch-supplied
+        # decision/extras. The sweep branch records its own attempt
+        # before the early ``return``; everything else lands here.
+        if audit_decision is not None and task_kind in _AUDIT_ACTIONS:
+            self.shared_state.record_action_attempt(
+                action=task_kind,
+                task_id=getattr(task, "task_id", "") if task is not None else "",
+                status="succeeded",
+                decision=audit_decision,
+                result=result,
+                extras=audit_extras,
+            )
             changed = True
         if changed:
             self.shared_state.save(self.session_dir)

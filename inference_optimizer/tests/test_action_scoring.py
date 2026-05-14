@@ -34,9 +34,14 @@ from inference_optimizer.orchestrator.scoring import (
     ActionScore,
     DISCARD_MULT,
     KEEP_DECAY_FLOOR,
+    STREAK_PENALTY_FLOOR,
+    STREAK_PENALTY_MULT,
+    STREAK_THRESHOLD,
     apply_discard,
+    apply_failure,
     apply_keep,
     apply_lock,
+    apply_no_promote,
     apply_unlock,
     compute_initial_priors_from_metadata,
     effective_score,
@@ -58,7 +63,7 @@ def registry() -> ActionRegistry:
 
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     return make_session_dir()
 
 
@@ -132,14 +137,25 @@ def test_seed_action_scores_uses_marathon_prior_when_available(registry):
     seeded = seed_action_scores(
         registry,
         model_class="moe_mla",
-        enabled=["backends", "operator_tuning", "deep_kernel_analysis", "params"],
+        enabled=[
+            "backends", "params", "sweep",
+            "operator_tuning", "deep_kernel_analysis",
+            "vendor_kernel_config",
+        ],
     )
     # marathon moe_mla: operator_tuning=7.0, deep_kernel_analysis=8.0
     assert seeded["operator_tuning"]["base_score"] == pytest.approx(7.0)
     assert seeded["deep_kernel_analysis"]["base_score"] == pytest.approx(8.0)
-    # backends has no marathon entry — falls back to auto
-    auto_backends = compute_initial_priors_from_metadata(registry.get("backends"))
-    assert seeded["backends"]["base_score"] == pytest.approx(auto_backends)
+    # backends / params / sweep are now seeded from the marathon table too
+    # (10x of their auto value for backends/params; flat 1.0 for sweep).
+    assert seeded["backends"]["base_score"] == pytest.approx(8.4)
+    assert seeded["params"]["base_score"] == pytest.approx(9.5)
+    assert seeded["sweep"]["base_score"] == pytest.approx(1.0)
+    # vendor_kernel_config still has no marathon entry — falls back to auto.
+    auto_vendor = compute_initial_priors_from_metadata(
+        registry.get("vendor_kernel_config")
+    )
+    assert seeded["vendor_kernel_config"]["base_score"] == pytest.approx(auto_vendor)
 
 
 def test_seed_action_scores_auto_for_unknown_model_class(registry):
@@ -165,13 +181,23 @@ def test_effective_score_locked_returns_sentinel():
     assert effective_score(a, meta=m, tick=10, total_runs=5) == -1.0
 
 
-def test_effective_score_cooldown_returns_sentinel():
+def test_effective_score_ignores_cooldown_until_tick():
+    """Mandatory cooldowns were retired; ``cooldown_until_tick`` survives as
+    a backward-compat field in state.json but must NOT lock the row.
+
+    The streak-based penalty in :func:`apply_failure` /
+    :func:`apply_no_promote` plus the linear aging bonus already
+    discourage spamming an action; an additional cooldown produced a
+    degenerate idempotency-loop signature (see
+    ``orch_idempotency_and_scoring_fix`` plan)."""
     a = ActionScore(base_score=5.0, cooldown_until_tick=20)
     m = _meta("backends")
-    # Cooldown active when tick < cooldown_until_tick
-    assert effective_score(a, meta=m, tick=10, total_runs=5) == -1.0
-    # Once tick catches up, the row scores normally
-    assert effective_score(a, meta=m, tick=20, total_runs=5) > 0.0
+    # Even with cooldown_until_tick > tick, the row scores normally now.
+    eff_during_cooldown = effective_score(a, meta=m, tick=10, total_runs=5)
+    eff_after_cooldown = effective_score(a, meta=m, tick=25, total_runs=5)
+    assert eff_during_cooldown > 0.0
+    # Aging keeps growing past the (now-cosmetic) cooldown boundary.
+    assert eff_after_cooldown >= eff_during_cooldown
 
 
 def test_effective_score_includes_aging_bonus():
@@ -189,7 +215,8 @@ def test_apply_keep_decays_score_mult_with_floor():
     assert a.score_mult == pytest.approx(KEEP_DECAY_FLOOR)
     assert a.runs == 1
     assert a.keeps == 1
-    assert a.cooldown_until_tick > 5
+    # apply_keep no longer sets cooldown_until_tick (cooldowns retired).
+    assert a.cooldown_until_tick == 0
 
 
 def test_apply_keep_small_gain_minor_decay():
@@ -199,12 +226,24 @@ def test_apply_keep_small_gain_minor_decay():
     assert a.score_mult == pytest.approx(0.8)
 
 
-def test_apply_discard_drops_mult():
+def test_apply_discard_aliases_apply_failure():
+    """`apply_discard` is retained as a backward-compat alias that funnels
+    into the failure streak. A single call must NOT immediately knock
+    `score_mult` (only the 3-strike threshold does); but it must bump
+    `consecutive_failures` and the `discards` KPI counter."""
     a = ActionScore(base_score=3.0, score_mult=1.0)
     apply_discard(a, tick=5, action_name="backends")
-    assert a.score_mult == pytest.approx(DISCARD_MULT)
+    # No immediate score_mult drop — DISCARD_MULT is kept as a legacy
+    # constant but the active code path is now streak-based.
+    assert a.score_mult == pytest.approx(1.0)
     assert a.discards == 1
+    assert a.consecutive_failures == 1
+    assert a.consecutive_no_promote == 0
     assert a.last_gain_pct == 0.0
+    # Cooldown stays untouched.
+    assert a.cooldown_until_tick == 0
+    # DISCARD_MULT is still exported as a documented legacy constant.
+    assert 0.0 < DISCARD_MULT < 1.0
 
 
 def test_apply_lock_unlock():
@@ -235,49 +274,125 @@ def test_rank_top_k_orders_by_effective_score(registry):
     )
     rows = rank_top_k(seeded, registry, tick=1, k=4)
     names = [r[0] for r in rows]
-    # operator_tuning prior=7.0 vs kernel_opt prior=6.0 — operator wins
-    assert names[0] == "operator_tuning"
-    assert names[1] == "kernel_opt"
+    # marathon moe_mla after the explore-family additions:
+    # params=9.5 > backends=8.4 > operator_tuning=7.0 > kernel_opt=6.0
+    assert names[0] == "params"
+    assert names[1] == "backends"
+    assert names[2] == "operator_tuning"
+    assert names[3] == "kernel_opt"
 
 
 # ===========================================================================
-# Group 2 — anti-loop: three consecutive backends KEEPs
+# Group 2 — anti-loop: three consecutive backends KEEPs decay the mult
+# (cooldown gating removed in favour of streak-based dampening)
 # ===========================================================================
-def test_consecutive_keeps_trigger_cooldown_and_decay(registry):
+def test_consecutive_keeps_decay_score_mult_only(registry):
+    """Three back-to-back KEEPs at +2% should compound the diminishing-
+    returns decay to (0.8)^3 = 0.512, but the row must remain selectable
+    at every intermediate tick — mandatory cooldowns were retired."""
     seeded = seed_action_scores(
         registry, model_class="moe_mla",
         enabled=["backends", "params"],
     )
 
-    # Run 1: backends KEEP +2%
+    # Run 1
     b = ActionScore.from_dict(seeded["backends"])
     apply_keep(b, gain_pct=2.0, tick=1, action_name="backends")
     seeded["backends"] = b.to_dict()
-    # At tick 1, backends is on cooldown (apply_keep set
-    # cooldown_until_tick = 1 + COOLDOWN["backends"] = 3). Params has no
-    # cooldown, so when we rank at tick 2 backends should score -1 and
-    # params should be in the top.
+    assert b.cooldown_until_tick == 0  # cooldown no longer written
     rows = rank_top_k(seeded, registry, tick=2, k=2)
     name_to_eff = {r[0]: r[1] for r in rows}
-    assert name_to_eff["backends"] == -1.0
+    # Both rows must remain scorable (no -1.0 sentinel from cooldown).
+    assert name_to_eff["backends"] > 0.0
     assert name_to_eff["params"] > 0.0
 
-    # Advance past cooldown and apply another KEEP +2% (run 2).
+    # Run 2 — score_mult = 0.8 * 0.8 = 0.64
     b = ActionScore.from_dict(seeded["backends"])
-    assert b.cooldown_until_tick == 3
-    apply_keep(b, gain_pct=2.0, tick=3, action_name="backends")
+    apply_keep(b, gain_pct=2.0, tick=2, action_name="backends")
     seeded["backends"] = b.to_dict()
-    # score_mult = 0.8 * 0.8 = 0.64 (< 0.7) but above the 0.5 floor
     assert b.score_mult == pytest.approx(0.64)
-    assert b.score_mult <= 0.7
     assert b.score_mult >= KEEP_DECAY_FLOOR
 
-    # Run 3 (after another cooldown) pushes mult to 0.512, still above floor
+    # Run 3 — score_mult = 0.64 * 0.8 = 0.512, still above floor
     b = ActionScore.from_dict(seeded["backends"])
-    apply_keep(b, gain_pct=2.0, tick=5, action_name="backends")
+    apply_keep(b, gain_pct=2.0, tick=3, action_name="backends")
     seeded["backends"] = b.to_dict()
     assert b.score_mult == pytest.approx(0.512)
     assert b.score_mult >= KEEP_DECAY_FLOOR
+
+
+# ---------------------------------------------------------------------------
+# Group 2b — streak-based penalty (replaces mandatory cooldown)
+# ---------------------------------------------------------------------------
+def test_apply_failure_bumps_streak_and_penalizes_at_threshold():
+    """Three consecutive failures should shave ``score_mult`` by exactly
+    one :data:`STREAK_PENALTY_MULT` factor and reset the streak."""
+    a = ActionScore(base_score=4.0, score_mult=1.0)
+    apply_failure(a, tick=1, action_name="backends")
+    assert a.consecutive_failures == 1
+    assert a.score_mult == pytest.approx(1.0)  # no penalty yet
+
+    apply_failure(a, tick=2, action_name="backends")
+    assert a.consecutive_failures == 2
+    assert a.score_mult == pytest.approx(1.0)  # still no penalty
+
+    apply_failure(a, tick=3, action_name="backends")
+    # Threshold crossed — exactly one STREAK_PENALTY_MULT applied, streak reset.
+    assert a.score_mult == pytest.approx(STREAK_PENALTY_MULT)
+    assert a.consecutive_failures == 0
+    assert a.runs == 3
+    assert a.discards == 3
+    # No-promote streak untouched.
+    assert a.consecutive_no_promote == 0
+    # Cooldown remains 0 — explicit goal of the streak-only design.
+    assert a.cooldown_until_tick == 0
+
+
+def test_apply_no_promote_bumps_streak_and_penalizes_at_threshold():
+    """Same shape as failure but on a separate streak counter so the two
+    pathologies surface independently in diagnostics."""
+    a = ActionScore(base_score=4.0, score_mult=1.0)
+    for tick in range(STREAK_THRESHOLD - 1):
+        apply_no_promote(a, tick=tick, action_name="backends")
+        assert a.score_mult == pytest.approx(1.0)
+    apply_no_promote(a, tick=STREAK_THRESHOLD, action_name="backends")
+    assert a.score_mult == pytest.approx(STREAK_PENALTY_MULT)
+    assert a.consecutive_no_promote == 0
+    # Failure streak untouched throughout.
+    assert a.consecutive_failures == 0
+
+
+def test_keep_resets_both_streaks():
+    """A successful promote must clear BOTH penalty streaks so we don't
+    carry an old streak into a new productive phase.
+
+    apply_failure / apply_no_promote zero the *other* streak on each
+    call (they're mutually exclusive paths), so to exercise the
+    keep-resets-both semantic we seed both counters directly and verify
+    apply_keep zeroes them in one shot.
+    """
+    a = ActionScore(base_score=4.0, score_mult=1.0)
+    a.consecutive_failures = 2
+    a.consecutive_no_promote = 2
+    apply_keep(a, gain_pct=1.0, tick=3, action_name="backends")
+    assert a.consecutive_failures == 0
+    assert a.consecutive_no_promote == 0
+
+
+def test_streak_penalty_respects_floor():
+    """Repeatedly tripping the streak penalty must never push
+    ``score_mult`` below :data:`STREAK_PENALTY_FLOOR`."""
+    a = ActionScore(base_score=4.0, score_mult=1.0)
+    # Trip the failure streak many times — each cycle of 3 failures
+    # multiplies by STREAK_PENALTY_MULT = 0.85, so without the floor we'd
+    # converge to 0.0.
+    for cycle in range(40):  # 40 * 3 = 120 failures
+        for k in range(STREAK_THRESHOLD):
+            apply_failure(a, tick=cycle * STREAK_THRESHOLD + k, action_name="backends")
+    assert a.score_mult >= STREAK_PENALTY_FLOOR
+    # Sanity: the floor must actually be the binding constraint after this
+    # many cycles, not an artefact of arithmetic.
+    assert a.score_mult == pytest.approx(STREAK_PENALTY_FLOOR)
 
 
 # ===========================================================================
@@ -385,7 +500,11 @@ def test_shared_state_action_scores_round_trip(tmp_path, registry):
     assert b.keeps == 1
     assert b.last_gain_pct == pytest.approx(2.5)
     assert b.score_mult == pytest.approx(0.75)  # 1 - 0.1*2.5
-    assert b.cooldown_until_tick == 5  # 3 + COOLDOWN["backends"]=2
+    # Mandatory cooldowns retired; apply_keep no longer touches the field.
+    assert b.cooldown_until_tick == 0
+    # New streak fields round-trip through JSON.
+    assert b.consecutive_failures == 0
+    assert b.consecutive_no_promote == 0
 
 
 def test_old_state_json_loads_with_defaults(tmp_path):
@@ -423,10 +542,12 @@ def test_corrupted_action_scores_entry_dropped(tmp_path):
 # Group 6 — Coordinator integration
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_coordinator_scores_keep_then_discard(session_dir):
+async def test_coordinator_scores_keep_then_no_promote(session_dir):
     """Drive Coordinator._promote_to_shared_state with one KEEP-tier and
-    one DISCARD-tier backends result; verify the action_scores row evolves
-    as expected (runs=2, keeps=1, discards=1, cooldown set, tick bumped)."""
+    one NO-PROMOTE backends result; verify the action_scores row evolves
+    deterministically (runs=2, keeps=1, discards=1) and that the
+    no-promote streak is being tracked. Cooldown is intentionally NOT
+    asserted any more — mandatory cooldowns were retired."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.baseline_tput = 800.0
@@ -443,7 +564,7 @@ async def test_coordinator_scores_keep_then_discard(session_dir):
                 "extra_sglang_args": "--attention-backend triton",
             },
         }
-        await c.tick(1)  # bump tick once so cooldown math has a positive tick
+        await c.tick(1)
         await c._promote_to_shared_state("backends", keep_result)
 
         backends_after_keep = ActionScore.from_dict(
@@ -452,10 +573,14 @@ async def test_coordinator_scores_keep_then_discard(session_dir):
         assert backends_after_keep.runs == 1
         assert backends_after_keep.keeps == 1
         assert backends_after_keep.discards == 0
-        assert backends_after_keep.cooldown_until_tick > c.shared_state.tick
+        # Both streaks reset by the successful promote.
+        assert backends_after_keep.consecutive_failures == 0
+        assert backends_after_keep.consecutive_no_promote == 0
+        # Cooldowns disabled — field stays at 0.
+        assert backends_after_keep.cooldown_until_tick == 0
 
-        # DISCARD-tier: +0.05% — below threshold, no promote.
-        discard_result = {
+        # NO-PROMOTE: +0.05% — below threshold, succeeded but no promote.
+        no_promote_result = {
             "status": "succeeded",
             "output_throughput": 880.5,
             "best_variant": {
@@ -463,13 +588,16 @@ async def test_coordinator_scores_keep_then_discard(session_dir):
             },
         }
         await c.tick(1)
-        await c._promote_to_shared_state("backends", discard_result)
+        await c._promote_to_shared_state("backends", no_promote_result)
 
         b = ActionScore.from_dict(c.shared_state.action_scores["backends"])
         assert b.runs == 2
         assert b.keeps == 1
         assert b.discards == 1
-        assert b.cooldown_until_tick > c.shared_state.tick
+        # First no-promote — streak counter incremented, no penalty yet.
+        assert b.consecutive_no_promote == 1
+        assert b.consecutive_failures == 0
+        assert b.cooldown_until_tick == 0
 
         # tick advanced twice via Coordinator.tick(1) calls.
         assert c.shared_state.tick >= 2

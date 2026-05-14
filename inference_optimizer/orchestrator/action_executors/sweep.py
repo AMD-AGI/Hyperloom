@@ -34,7 +34,14 @@ from pathlib import Path
 from typing import Any
 
 from ...session_paths import runs_dir
-from ._grid_runner import GridVariant, VariantResult, run_grid, _resolve_session_dir
+from ._grid_runner import (
+    GridVariant,
+    VariantResult,
+    _resolve_session_dir,
+    run_grid,
+    sanitize_result_dir,
+    sanitize_script_name,
+)
 from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
@@ -182,11 +189,22 @@ class SweepExecutor:
             str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower()
         )
+        # See backends.py for rationale.
+        try:
+            override_script = sanitize_script_name(params.get("benchmark_script"))
+            override_result_dir = sanitize_result_dir(params.get("result_dir"))
+        except ValueError as exc:
+            return {
+                "status": "failed",
+                "error_class": "bad_param",
+                "error": str(exc),
+            }
         config_path = materialize_config_with_envs(
             config_path,
             output_root,
             model_path=resolved_model or None,
             gpu_type=resolved_gpu or None,
+            benchmark_script=override_script,
             out_name="sweep_base.with_envs.yaml",
         )
 
@@ -219,6 +237,8 @@ class SweepExecutor:
             variant_timeout_sec=timeout_sec,
             model_path=resolved_model,
             gpu_type=resolved_gpu,
+            benchmark_script=override_script,
+            result_dir=override_result_dir,
         )
 
         entries = [_result_dict(v) for v in results]

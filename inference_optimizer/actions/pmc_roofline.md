@@ -31,6 +31,17 @@ Use the GPU visibility assigned by Ray. Do not pass `ROCR_VISIBLE_DEVICES` or
 `CUDA_VISIBLE_DEVICES` in `extra_envs` unless `allow_device_override=true` is
 explicitly set.
 
+## Scope (read this first)
+
+PMC roofline is purely advisory enrichment for `kernel_opt` and is NEVER a
+hard prerequisite for `params` / `backends` / `sweep` / `report` / any other
+explore action. Even with a kernel agent in the role registry, a missing
+`last_profile_pmc_summary` does not block any other action — the Coordinator's
+`_required_next_step()` and `_sequence_denial_for_action()` intentionally do
+not gate on it. A platform that cannot run rocprof (no Ray context, no
+`CAP_SYS_PTRACE`, missing `librocprofiler-register.so`) must remain able to
+run the rest of the pipeline.
+
 ## Enabling Automatic Runs
 
 `pmc_roofline` is opt-in. By default, the main optimization flow does not run it

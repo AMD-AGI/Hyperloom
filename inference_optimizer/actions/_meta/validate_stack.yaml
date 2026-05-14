@@ -28,3 +28,16 @@ typical_runtime_min: 8.0
 applicable_when:
   - "baseline_tput > 0"
   - "optimization_stack_has_unvalidated_keeps"
+# Descriptive — see baseline.yaml. validate_stack re-enters BaselineExecutor
+# after pre-rendering its own YAML; both render passes honor these knobs.
+params_schema:
+  benchmark_script:
+    type: string
+    description: |
+      Bare *.sh file name. Force-pin Magpie script for the re-baseline
+      run, same semantics as baseline.params_schema.benchmark_script.
+  result_dir:
+    type: string
+    description: |
+      Absolute or workspace-relative path forwarded as $RESULT_DIR for
+      the validate_stack subprocess.
