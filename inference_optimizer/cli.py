@@ -570,7 +570,7 @@ _REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {
 # `no_executor` instead of a fake KEEP. Re-add only when real
 # executors land (see remain_todo.md sections C, I, M).
 _NOOP_KINDS_COMMON: tuple[str, ...] = (
-    "setup", "classify", "target_analysis",
+    "target_analysis",
 )
 _NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = (
     "kernel_opt", "integrate", "deep_kernel_analysis",
@@ -1841,6 +1841,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     coordinator = Coordinator(
         session_dir, backends=backends, role_registry=role_registry,
+        compare_against_gpu=getattr(args, "compare_against_gpu", None),
+        model_class=(
+            getattr(args, "model_class", None)
+            or os.environ.get("MODEL_CLASS")
+            or ""
+        ),
     )
     framework_for_prompt = (
         os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
@@ -1970,8 +1976,20 @@ def _build_parser() -> argparse.ArgumentParser:
                            "Coordinator replay the prior event log + "
                            "state.json. Refuses to start if manifest.json or "
                            "state.json is missing.")
-    opt.add_argument("--model-class", type=str, default=None,
-                      help="Optional model class hint (dense_8B / moe_mla / ...)")
+    opt.add_argument(
+        "--model-class", type=str,
+        default=os.environ.get("MODEL_CLASS", None),
+        help=(
+            "Model class hint consumed by orchestrator/scoring marathon "
+            "priors. Recognised values (case-insensitive, with -/+/space "
+            "tolerated): dense / moe_mla / moe_swa / moe_mla_nsa. The "
+            "deleted `classify` action used to discover this from the "
+            "model files; the external SKILL caller is now expected to "
+            "supply it via this flag (or the MODEL_CLASS env var). "
+            "Unset / unknown values fall back to the `moe_mla` marathon "
+            "priors so DeepSeek-shaped sessions keep working."
+        ),
+    )
     opt.add_argument("--target-summary", type=str, default=None,
                       help="Free-text goal summary surfaced in prompts")
     opt.add_argument(
