@@ -76,12 +76,28 @@ Image examples:
 
 Prepare Hyperloom and its dependency source trees on the GPU node, then set the path environment variables explicitly. Hyperloom does not pin these internal source repositories to fixed paths; runtime uses the repo paths you provide through the environment.
 
-**Required:**
+**Required credentials:**
+
+Hyperloom can read credentials from `$REPO_ROOT/.env`. The recommended setup is to copy the template and fill in your key:
+
+```bash
+cd "$REPO_ROOT"
+cp .env.template .env
+```
+
+Edit `.env`:
+
+```env
+SAFE_API_KEY=ak-your-safe-apikey
+OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
+```
 
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `SAFE_API_KEY` | LLM gateway auth key | `ak-your-safe-apikey` |
 | `OPENAI_BASE_URL` | LLM gateway endpoint | `https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1` |
+
+Shell environment variables take precedence over values in `.env`, so advanced users can still export these variables directly.
 
 **Path configuration:**
 
@@ -92,6 +108,15 @@ Prepare Hyperloom and its dependency source trees on the GPU node, then set the 
 | `INFERENCEX_PATH` | InferenceX repo root | `/workspace/InferenceX` |
 | `TRACELENS_ROOT` | TraceLens-internal repo root | `/workspace/TraceLens-internal` |
 
+These paths are used by the agent and installer to wire together the local Hyperloom stack:
+
+| Path | Why it is needed |
+|------|------------------|
+| `REPO_ROOT` | Locates this Hyperloom repo, including `inference_optimizer/`, `kernel-agent/`, skills, scripts, and runtime assets. |
+| `OOB_SRC` | Provides the OOB CLI and auth-proxy used by kernel optimization backends. |
+| `INFERENCEX_PATH` | Provides InferenceX benchmark/evaluation code and reference data used during baseline and target analysis. |
+| `TRACELENS_ROOT` | Provides TraceLens profiling tooling for bottleneck analysis and kernel selection. |
+
 Prepare the source trees from the corresponding repositories:
 
 - Hyperloom: this repository; clone it and point `REPO_ROOT` at the repo root.
@@ -99,7 +124,7 @@ Prepare the source trees from the corresponding repositories:
 - InferenceX: [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX); point `INFERENCEX_PATH` at the local repo root.
 - TraceLens-internal: [AMD-AGI/TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal/); checkout `release/hyperloom_integration_v0.3` and point `TRACELENS_ROOT` at that checkout.
 
-> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway). GEAK and OOB API Key / Base URL are automatically inherited from `SAFE_API_KEY` / `OPENAI_BASE_URL` — no separate configuration needed.
+> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway). GEAK and OOB API Key / Base URL are automatically inherited from `SAFE_API_KEY` / `OPENAI_BASE_URL`. You can place these values in `$REPO_ROOT/.env`; no separate GEAK or OOB configuration is needed.
 
 #### Step 3 — Connect via Cursor Remote SSH
 
@@ -109,57 +134,89 @@ Prepare the source trees from the corresponding repositories:
 
 #### Step 4 — Launch Inference Optimization in Cursor Chat
 
-Reference `inference_optimizer/SKILL.md` and describe the task in natural language.
+Reference `inference_optimizer/SKILL.md` in Cursor chat and describe the workload. The agent reads the skill, installs dependencies automatically, translates your workload into the appropriate CLI/environment settings, launches `inference_optimizer optimize`, and reports progress.
 
-**Basic usage:**
+**Minimal launch:**
 
-```
+```text
 @$REPO_ROOT/inference_optimizer/SKILL.md
-Optimize /path/to/your/model inference on MI300X.
---framework sglang --max-hours 2
+
+Optimize this model:
+- Model: /path/to/your/model
+- GPU: MI300X
+- Framework: sglang
+- Budget: 2 hours
 ```
 
-**Full parameter example (long-running):**
+**Typical long-running launch:**
 
-```
+```text
 @$REPO_ROOT/inference_optimizer/SKILL.md
-Optimize /path/to/your/model inference on MI300X.
 
-Environment:
-- FRAMEWORK=sglang
-- GPU_TYPE=MI300X
-- TP=8, CONC=64, ISL=1024, OSL=1024
-- PRECISION=bf16
-- --target-gain 10
-- --max-hours 24
-- Run in background: setsid nohup
+Optimize inference for this workload:
+- Model: /path/to/your/model
+- Framework: sglang
+- GPU: MI300X
+- TP: 8
+- CONC: 64
+- ISL: 1024
+- OSL: 1024
+- Precision: bf16
+- Goal: improve throughput by at least 10%
+- Budget: 24 hours
 
-REPO_ROOT: /workspace/Hyperloom
-OOB_SRC: /workspace/OOB
-INFERENCEX_PATH: /workspace/InferenceX
-TRACELENS_ROOT: /workspace/TraceLens-internal
+Paths:
+- Hyperloom repo: /workspace/Hyperloom
+- OOB source: /workspace/OOB
+- InferenceX repo: /workspace/InferenceX
+- TraceLens repo: /workspace/TraceLens-internal
 
 Requirements:
-1. Report the session ID, log path, PID, and initial health check result.
-2. Monitor the process every 300s until done.
+1. Use a writable session directory: /workspace/hyperloom.
+2. Report the session ID, log path, PID, and initial health check result.
+3. Monitor the process every 300s until the optimization is complete or failed.
+```
+
+**Resume an existing session:**
+
+```text
+@$REPO_ROOT/inference_optimizer/SKILL.md
+
+Resume the previous optimization session.
 ```
 
 The agent automatically:
 
 1. Installs all dependencies (Ray, TraceLens CLI, GEAK v3.1.0 CLI, OOB CLI + auth-proxy)
-2. Launches the `inference_optimizer optimize` CLI
-3. Multi-agent system autonomously executes: baseline → profile → param tuning → kernel optimization → E2E validation
-4. Reports progress periodically (cumulative gain, current phase, best config)
+2. Launches `inference_optimizer optimize` with the resolved workload settings
+3. Executes baseline → profile → param tuning → kernel optimization → E2E validation
+4. Reports the session directory, log path, PID, initial health check, current phase, cumulative gain, and best config until the run completes or fails
 
-#### Parameter Reference
+For first-launch errors, see `inference_optimizer/SKILL.md` §"Failure Handling".
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `--framework` | Inference framework (sglang / vllm) | sglang |
-| `--max-hours` | Maximum run time (hours) | 2 |
-| `--target-gain` | Target throughput improvement % | 10 |
-| `--no-kernel` | Param tuning only, skip kernel optimization | disabled |
-| `--gpu-type` | GPU model (MI300X / MI355X) | auto-detect |
+#### Workload Fields and Internal Mapping
+
+The chat examples use user-facing field names. The agent maps them to the optimizer's CLI flags and environment variables:
+
+| User-facing field | Maps to | Description | Default |
+|-------------------|---------|-------------|---------|
+| Model | `--model`, `MODEL_PATH` | Model path. Required for a new run; ignored when resuming. | required |
+| Framework | `--framework`, `FRAMEWORK` | Inference framework: `sglang` or `vllm`. A session cannot mix frameworks. | `sglang` |
+| GPU | `--gpu-type`, `GPU_TYPE` | Target GPU type: `mi300x`, `mi325x`, or `mi355x`; can also be auto-detected. | auto-detect |
+| TP | `TP` | Tensor parallel size used by Magpie benchmark configs. | `1` |
+| CONC | `CONC` | Benchmark concurrency. | YAML default, commonly `8` |
+| ISL | `--isl`, `ISL` | Input sequence length. | `256` |
+| OSL | `--osl`, `OSL` | Output sequence length. | `256` |
+| Precision | `--precision`, `PRECISION` | Model precision, for example `bf16`. | `bf16` |
+| Goal | `--target-gain`, `--target-tput`, `--target-baseline-dir` | Optional stop condition. If omitted, the run continues until the time budget or no-more-leverage stop reason. | unset |
+| Budget | `--max-hours` | Wall-clock optimization budget in hours. | `2.0` |
+| Kernel optimization | `--no-kernel` | By default kernel optimization is enabled. Ask to skip kernel optimization for parameter/backend search only. | enabled |
+| Hyperloom repo | `REPO_ROOT` | Hyperloom repository root. | set in Step 2 |
+| OOB source | `OOB_SRC` | OOB source root. | set in Step 2 |
+| InferenceX repo | `INFERENCEX_PATH` | InferenceX repository root. | set in Step 2 |
+| TraceLens repo | `TRACELENS_ROOT` | TraceLens-internal repository root. | set in Step 2 |
+| Session directory | `INFERENCE_OPTIMIZER_SESSION_DIR` | Session directory for state, logs, runs, reports, and resume. | `/workspace/hyperloom` |
+| Resume | `--resume` | Resume the existing session from the session directory; requires `manifest.json` and `state.json`. | disabled |
 
 > Training and MLPerf-training skills have been retired from this repo. Only inference optimization is supported here.
 
