@@ -36,8 +36,9 @@ The CLI starts a Python Coordinator that coordinates:
 State lives in **one fixed session directory** — `/workspace/hyperloom`
 by default. v0.6.1 collapses the previous `<root>/<session_id>/` layout
 to a flat directory because every sandbox is single-use; there is no
-session_id in the path. Override only for tests via
-`$INFERENCE_OPTIMIZER_SESSION_DIR`.
+session_id in the path. The user-facing override is `$USER_DATA_PATH`
+(documented in `.env.template`); `$INFERENCE_OPTIMIZER_SESSION_DIR`
+is kept for tests / forced overrides and wins over both.
 
 ```text
 /workspace/hyperloom/                     # session_dir (fixed)
@@ -71,8 +72,11 @@ Always prefer `manifest.json` / `state.json` / `coordinator.db` over
 guessing from terminal logs.
 
 Session dir resolution order (`inference_optimizer/paths.py`):
-1. `$INFERENCE_OPTIMIZER_SESSION_DIR` env → use as-is.
-2. Default `/workspace/hyperloom`.
+1. `$INFERENCE_OPTIMIZER_SESSION_DIR` env → use as-is (developer /
+   unit-test override; kept verbatim from v0.6.1).
+2. `$USER_DATA_PATH` env → use as-is (the user-facing knob; production
+   launchers and the SDK should set this).
+3. Default `/workspace/hyperloom`.
 
 Path helpers (don't string-concat):
 
@@ -248,9 +252,17 @@ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 ```
 
 In sandboxes where `/workspace/hyperloom` is unwritable, override the
-session location with a single env var:
+session location. Production launchers and the SDK should use
+`USER_DATA_PATH`; tests / one-off forced overrides use the legacy
+`INFERENCE_OPTIMIZER_SESSION_DIR` (which still wins over
+`USER_DATA_PATH` so existing fixtures don't break):
 
 ```bash
+# Production knob — documented in .env.template
+export USER_DATA_PATH="$RUN_ROOT/optimizer-session"
+mkdir -p "$USER_DATA_PATH"
+
+# Test / forced override (wins over USER_DATA_PATH)
 export INFERENCE_OPTIMIZER_SESSION_DIR="$RUN_ROOT/optimizer-session"
 mkdir -p "$INFERENCE_OPTIMIZER_SESSION_DIR"
 ```
@@ -308,10 +320,16 @@ them at runtime:
 - `benchmark.runner_type` <- `--gpu-type` / `$GPU_TYPE` / rocm-smi auto-detect
 
 `benchmark.benchmark_script` is deliberately NOT set in the shipped
-YAMLs. With `runner_type` injected at run time, Magpie picks
-`{framework}_{runner_type}.sh` itself (e.g. `sglang_mi300x.sh` /
-`sglang_mi355x.sh`). Each YAML has a commented `# benchmark_script: ...`
-template right under `framework:` for manual debug overrides.
+YAMLs. At materialize time Hyperloom **explicitly pins it to**
+`{framework}_{runner_type}.sh` (e.g. `sglang_mi300x.sh` /
+`sglang_mi355x.sh`) so Magpie's resolver hits priority 1 (explicit
+user override) and never silently falls through to an InferenceX
+native script (e.g. `dsr1_fp8_mi300x.sh`) that hardcodes
+`--result-dir /workspace/` and ignores `EXTRA_*_ARGS`. See
+`design/magpie-generic-script-and-user-data-path.md` §3. Each shipped
+YAML has a commented `# benchmark_script: ...` template right under
+`framework:` for manual debug overrides; Orchestration can also route
+around the default per-task via `params.benchmark_script` (sanitized).
 
 Before a new model run, verify these fields match the environment:
 
@@ -323,6 +341,14 @@ Before a new model run, verify these fields match the environment:
   (`$(dirname "$PYTHON")`).
 
 ### Magpie leak-path salvage (`INFERENCE_OPTIMIZER_RESCUE_PATHS`)
+
+> **Note (post-`design/magpie-generic-script-and-user-data-path.md` §3):**
+> The default benchmark path now force-pins `{framework}_{runner_type}.sh`
+> at materialize time (`_workload_envs.py` and `_grid_runner.py`), so
+> InferenceX native scripts that hardcode `--result-dir /workspace/`
+> are no longer reached on the default path. The salvage logic below
+> is kept as **defense-in-depth** — it primarily fires when an operator
+> explicitly opts into a leaky script via `params.benchmark_script`.
 
 Magpie's framework-specific scripts (notably
 `dsr1_fp8_mi300x.sh`) hardcode `--result-dir /workspace/`, so when the

@@ -22,8 +22,14 @@ Two distinct path concepts:
    Each sandbox is short-lived and dedicated to a single optimizer run,
    so there is no need for a session_id subdirectory.
 
-   Override for unit tests / sandboxed dev: ``INFERENCE_OPTIMIZER_SESSION_DIR``
-   (single env var, not a "root + sub-dir" pair).
+   Resolution order (see :func:`session_dir`):
+
+   1. ``INFERENCE_OPTIMIZER_SESSION_DIR`` — developer / unit-test override
+      (kept verbatim from v0.6.1; tests already monkeypatch this).
+   2. ``USER_DATA_PATH`` — user-facing env. This is the canonical knob
+      production launchers and the SDK should set; it is documented in
+      ``.env.template`` and ``SKILL.md``.
+   3. ``DEFAULT_SESSION_DIR`` (``/workspace/hyperloom``).
 
 2. **Runtime asset paths** — read-only files shipped with the package
    (shell scripts, kernel-opt prompt templates, action metadata, agent
@@ -38,6 +44,7 @@ from pathlib import Path
 
 DEFAULT_SESSION_DIR = Path("/workspace/hyperloom")
 ENV_OVERRIDE_SESSION_DIR = "INFERENCE_OPTIMIZER_SESSION_DIR"
+ENV_USER_DATA_PATH = "USER_DATA_PATH"
 ENV_OVERRIDE_ASSET_ROOT = "INFERENCE_OPTIMIZER_ASSET_ROOT"
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -79,13 +86,20 @@ def session_dir() -> Path:
 
     Resolution order:
 
-    1. ``$INFERENCE_OPTIMIZER_SESSION_DIR`` env var (used by unit tests
-       to pin the session under ``tmp_path``).
-    2. ``DEFAULT_SESSION_DIR`` (``/workspace/hyperloom``).
+    1. ``$INFERENCE_OPTIMIZER_SESSION_DIR`` env var (developer /
+       unit-test override; kept verbatim from v0.6.1 so existing tests
+       that monkeypatch this env var keep working).
+    2. ``$USER_DATA_PATH`` env var (the user-facing knob, documented in
+       ``.env.template`` and ``SKILL.md``; this is what production
+       launchers and the SDK should set).
+    3. ``DEFAULT_SESSION_DIR`` (``/workspace/hyperloom``).
     """
     override = os.environ.get(ENV_OVERRIDE_SESSION_DIR)
     if override:
         return Path(override)
+    user_data = os.environ.get(ENV_USER_DATA_PATH)
+    if user_data:
+        return Path(user_data)
     return DEFAULT_SESSION_DIR
 
 
@@ -154,6 +168,7 @@ __all__ = [
     "DEFAULT_SESSION_DIR",
     "ENV_OVERRIDE_ASSET_ROOT",
     "ENV_OVERRIDE_SESSION_DIR",
+    "ENV_USER_DATA_PATH",
     "PACKAGE_ROOT",
     "agent_session_dir",
     "asset_actions_dir",
