@@ -55,6 +55,7 @@ from .orchestrator.action_executors import (
     pmc_roofline_executor,
     profile_executor,
     report_executor,
+    session_breakdown_executor,
     sweep_executor,
     validate_stack_executor,
 )
@@ -482,6 +483,8 @@ def _seed_shared_state(
 ) -> SharedState:
     state = SharedState(
         session_id=session_id,
+        claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
+        sandbox_user_id=(os.environ.get("SANDBOX_USER_ID") or "").strip(),
         model_name=Path(args.model).name,
         model_path=str(args.model),
         model_class=args.model_class or "",
@@ -552,8 +555,9 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "backends":       backends_executor,
     "params":         params_executor,
     "sweep":          sweep_executor,
-    "report":         report_executor,
-    "validate_stack": validate_stack_executor,
+    "report":            report_executor,
+    "session_breakdown": session_breakdown_executor,
+    "validate_stack":    validate_stack_executor,
 }
 
 # Real executors enabled only when kernel-mode is on (profile/pmc_roofline
@@ -1943,6 +1947,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     finally:
         await coordinator.stop()
+        # End-of-session safety net: always materialize session_breakdown.json
+        # for downstream consumers (claw-stats-service / hyperloom-results-
+        # service / offline analysis). Best-effort — a failure here MUST NOT
+        # mask the actual stop_reason, so we swallow exceptions and log.
+        try:
+            from .breakdown import write_breakdown_json
+            breakdown_path = write_breakdown_json(session_dir)
+            print(f"Session breakdown : {breakdown_path}")
+        except Exception:  # noqa: BLE001
+            log.exception("session_breakdown finalize failed (non-fatal)")
 
     _print_final_summary(coordinator.shared_state, stop_reason)
     return 0 if stop_reason in (
