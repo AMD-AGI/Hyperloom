@@ -114,7 +114,8 @@ def _kernel_agent_root_error() -> str | None:
     if HYPERLOOM_KERNEL_AGENT_ROOT is None:
         return (
             f"{_KERNEL_AGENT_ROOT_ENV} is not set; run "
-            "inference_optimizer/scripts/install.sh and source /workspace/hyperloom/runtime/kernel-agent.env.sh"
+            "inference_optimizer/scripts/install.sh and source $KERNEL_AGENT_ENV "
+            "(default: $USER_DATA_PATH/runtime/kernel-agent.env.sh)"
         )
     if not HYPERLOOM_KERNEL_AGENT_ROOT.is_dir():
         return f"{_KERNEL_AGENT_ROOT_ENV} does not exist: {HYPERLOOM_KERNEL_AGENT_ROOT}"
