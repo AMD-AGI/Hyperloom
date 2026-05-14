@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from artifact_normalizer import normalize_task_result, write_single_result  # noqa: E402
 from publish_results import publish  # noqa: E402
 
-DEFAULT_SERVICE_URL = "http://hyperloom-results-service.primus-claw-dev.svc.cluster.local"
+DEFAULT_SERVICE_URL = "http://model-leaderboard.primus-claw-dev.svc.cluster.local"
 
 
 def _default_model(task_dir: Path) -> str:
