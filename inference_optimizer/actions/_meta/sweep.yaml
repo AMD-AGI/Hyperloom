@@ -26,3 +26,15 @@ pipeline_phase: explore
 typical_runtime_min: 15.0
 applicable_when:
   - "baseline_tput > 0"
+# Descriptive — see backends.yaml.
+params_schema:
+  benchmark_script:
+    type: string
+    description: |
+      Bare *.sh file name. Force-pin Magpie script for every sweep
+      variant (each (CONC, ISL, OSL) combo).
+  result_dir:
+    type: string
+    description: |
+      Absolute or workspace-relative path forwarded as $RESULT_DIR for
+      every variant.
