@@ -469,7 +469,7 @@ def test_prompt_section_count_unchanged(registry, rules_path):
         "## 3. PIPELINE & TIME BUDGET",
         "## 4. ACTIONS YOU MAY USE",
         "## 5. DECISION FRAMEWORK (apply EVERY tick BEFORE emitting)",
-        "## 6. KERNEL-OPT PIPELINE (sequential, no backtracking)",
+        "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
         "## 7. RULES & OUTPUT PROTOCOL",
     ]
 
