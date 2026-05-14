@@ -1292,11 +1292,15 @@ class Coordinator:
                 )
             # pmc_roofline gate: trace exists but PMC summary missing. We
             # allow `validate_stack` through so an in-flight KEEP can still
-            # be rebenched without first re-running rocprof.
+            # be rebenched without first re-running rocprof. We also allow
+            # `target_analysis` because it is TODO 0/6 and `_required_next_step`
+            # surfaces it before the pmc gate would ever fire — denying it
+            # here creates a deadlock on resume when --compare-against-gpu
+            # was set but target_analysis never ran in the prior session.
             if (
                 self.shared_state.last_profile_trace
                 and not self.shared_state.last_profile_pmc_summary
-                and action not in {"pmc_roofline", "validate_stack"}
+                and action not in {"pmc_roofline", "validate_stack", "target_analysis"}
             ):
                 return PolicyDenied(
                     f"action={action!r} denied: pmc_roofline must run before {action!r}",
