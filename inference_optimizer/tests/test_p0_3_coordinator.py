@@ -400,8 +400,14 @@ async def test_execution_order_denies_backends_before_profile(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_execution_order_denies_backends_before_select_kernels(session_dir):
-    """After profile, select_kernels is mandatory before backends/params/sweep."""
+async def test_execution_order_does_not_deny_backends_when_select_kernels_stale(
+    session_dir,
+):
+    """Reverse regression: the action-layer ``select_kernels`` hard-gate
+    has been removed. ``params`` / ``backends`` / ``sweep`` / ``report``
+    must NOT be denied when ``last_select_kernels`` is empty / stale.
+    The select_kernels prerequisite is now enforced ONLY at the REQUEST
+    layer for ``run_optimization`` (see test_required_step_gates.py)."""
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "params", "predicted_gain_pct": 3.0,
     })
@@ -416,14 +422,19 @@ async def test_execution_order_denies_backends_before_select_kernels(session_dir
 
         await c.tick(1)
 
-        assert not c.state.pending_proposals
+        # Proposal should now be accepted into pending_proposals (gate
+        # removed); no `policy_denied{select_kernels...}` observation
+        # should be emitted.
         obs = await c.bus.tail(to_agent="orchestration", topic="observation")
-        assert any(
-            m.payload.get("kind") == "policy_denied"
-            and m.payload.get("rule") == "execution_order"
-            and "select_kernels" in str(m.payload.get("hint"))
-            for m in obs
-        )
+        for m in obs:
+            if m.payload.get("kind") != "policy_denied":
+                continue
+            assert "select_kernels must run first" not in str(
+                m.payload.get("hint") or m.payload.get("reason") or ""
+            ), (
+                "select_kernels action-layer gate fired for params despite "
+                f"removal: {m.payload!r}"
+            )
     finally:
         await c.stop()
 
