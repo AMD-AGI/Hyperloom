@@ -27,7 +27,7 @@ Env vars consumed (besides the standard backend creds):
   ROCR_VISIBLE_DEVICES                         — pin the GPU
   CLAUDE_MODEL                                 — default claude-opus-4-7
   CODEX_MODEL                                  — default gpt-5.4
-  INFERENCE_OPTIMIZER_SESSION_DIR              — override session dir for tests
+  USER_DATA_PATH                               — override session dir
                                                  (default: /workspace/hyperloom).
   INFERENCE_OPTIMIZER_KB_ROOT                  — marathon KB dir (kb_query.py +
                                                  entries.jsonl); default:
@@ -77,7 +77,7 @@ from .orchestrator.system_prompts.prompt_builder import (
 )
 from .paths import (
     DEFAULT_SESSION_DIR,
-    ENV_OVERRIDE_SESSION_DIR,
+    ENV_USER_DATA_PATH,
     _SESSION_SKELETON,
     asset_system_prompts_dir,
     make_session_dir,
@@ -1098,8 +1098,8 @@ def _emit_preflight_diagnostics(
     print(f"  asset_root          = {asset_root()}")
     print(
         f"  session_dir         = {_session_dir_resolve()}  "
-        f"({ENV_OVERRIDE_SESSION_DIR}="
-        f"{os.environ.get(ENV_OVERRIDE_SESSION_DIR, '<unset>')}, "
+        f"({ENV_USER_DATA_PATH}="
+        f"{os.environ.get(ENV_USER_DATA_PATH, '<unset>')}, "
         f"default={DEFAULT_SESSION_DIR})"
     )
     print(f"  magpie_python       = {magpie_python}")
@@ -1591,9 +1591,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     if args.resume:
         # Resume mode: session_dir is fixed at /workspace/hyperloom (or
-        # $INFERENCE_OPTIMIZER_SESSION_DIR for tests). We re-mkdir the
-        # skeleton (idempotent) so a partially-initialised previous run
-        # is healed before we touch state.
+        # $USER_DATA_PATH). We re-mkdir the skeleton (idempotent) so a
+        # partially-initialised previous run is healed before we touch
+        # state.
         session_dir = make_session_dir()
         try:
             manifest = load_manifest(session_dir)
@@ -1725,8 +1725,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
               f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision}")
 
         # session_dir is fixed at /workspace/hyperloom (override:
-        # $INFERENCE_OPTIMIZER_SESSION_DIR). Each sandbox is single-use,
-        # so collision detection is unnecessary; mkdir -p is enough.
+        # $USER_DATA_PATH). Each sandbox is single-use, so collision
+        # detection is unnecessary; mkdir -p is enough.
         session_dir = make_session_dir()
         manifest = write_manifest(session_dir, args=args)
         print(f"Session dir     : {session_dir}")
@@ -1822,7 +1822,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Bug A fix: expose the active session_dir to in-process executors
     # (e.g. ReportExecutor) that don't get session_dir threaded through
     # task.params. This is read in report.py::_resolve_session_dir.
-    os.environ["INFERENCE_OPTIMIZER_SESSION_DIR"] = str(session_dir)
+    os.environ["USER_DATA_PATH"] = str(session_dir)
     # Production: enable strict path-containment checks in PolicyGate so
     # any LLM-emitted intent whose path field escapes session_dir lands
     # as `policy_denied` in its inbox. Tests omit this and keep the
@@ -1965,7 +1965,7 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--resume", action="store_true", default=False,
                       help="Resume the session at the canonical session_dir "
                            "(/workspace/hyperloom by default, or "
-                           "$INFERENCE_OPTIMIZER_SESSION_DIR for tests). "
+                           "$USER_DATA_PATH). "
                            "Skips the SharedState seed and lets the "
                            "Coordinator replay the prior event log + "
                            "state.json. Refuses to start if manifest.json or "
