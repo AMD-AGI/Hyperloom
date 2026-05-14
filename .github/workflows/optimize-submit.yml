@@ -492,7 +492,7 @@ jobs:
             --osl           "${INPUT_OSL:-1024}" \
             --out-dir       "${{ github.workspace }}/summary-out"
 
-      - name: Publish results to hyperloom-results-service
+      - name: Publish results to model-leaderboard
         # POST normalized_results.json to {HYPERLOOM_RESULTS_SERVICE_URL}/api/import.
         # publish_results.py exits 0 with a log line if the URL env is unset,
         # so this step is a no-op for runs that don't have the secret configured.
@@ -553,6 +553,14 @@ jobs:
           INPUT_MODELS:   ${{ github.event.inputs.models }}
           INPUT_HF_TOP:   ${{ github.event.inputs.hf_top }}
         run: |
+          # Power Automate / Teams reliably renders Adaptive Card Table when
+          # each card is small. send_webhook.py splits the summary into
+          # 10-model chunks (bordered 6-column table, msteams.width=Full).
+          python3 ci/send_webhook.py \
+            --summary "${{ github.workspace }}/summary-out/ci_summary.json" \
+            --rows-per-card 10
+          exit 0
+
           python3 - <<'PYEOF'
           import json, os
           import requests, urllib3
