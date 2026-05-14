@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from ...paths import asset_root
+from ._inferencex_patcher import ensure_benchmark_lib_patched
 from .baseline import BaselineExecutor
 
 
@@ -89,6 +90,15 @@ class ProfileExecutor(BaselineExecutor):
                 ctx.extra = {"workspace": str(output_dir)}
             else:
                 extra["workspace"] = str(output_dir)
+        # Issue #194 §2: ensure InferenceX's benchmark_lib.sh honours
+        # $NUM_PROMPTS. _workload_envs computes a NUM_PROMPTS large
+        # enough to reach the steady-state window, but unpatched
+        # upstream stomps it on every PROFILE=1 run — silently
+        # producing empty traces. The patch is backward-compatible
+        # (no-op when NUM_PROMPTS is unset) and idempotent, so calling
+        # this on every profile launch costs ~1 file read after the
+        # first success.
+        ensure_benchmark_lib_patched()
         result = await super().__call__(ctx)
         # Augment with trace_dir if the workspace produced one.
         workspace_str = result.get("workspace")
