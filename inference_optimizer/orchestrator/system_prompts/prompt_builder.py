@@ -43,7 +43,7 @@ from ..action_registry import (
 # ---------------------------------------------------------------------------
 FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
-    "setup", "classify", "target_analysis", "baseline",
+    "target_analysis", "baseline",
     # analysis
     "profile", "pmc_roofline", "deep_kernel_analysis",
     # explore
@@ -64,7 +64,7 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
 
 NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
-    "setup", "classify", "target_analysis", "baseline",
+    "target_analysis", "baseline",
     # explore (no profile — it only feeds kernel-opt)
     "backends", "params", "sweep",
     # validate (still useful — bench the stacked backends/params)

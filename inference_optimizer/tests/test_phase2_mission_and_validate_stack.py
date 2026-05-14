@@ -232,6 +232,7 @@ def test_required_next_step_validate_stack_after_unvalidated_keep(session_dir):
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_profile_pmc_summary = "/tmp/pmc.json"
     s.last_select_kernels = {
         "trace_input": "/tmp/profile.tar.gz", "candidates_path": "/tmp/x.json",
     }
@@ -283,6 +284,7 @@ def test_sequence_denial_blocks_explore_after_unvalidated_keep(session_dir):
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_profile_pmc_summary = "/tmp/pmc.json"
     s.last_select_kernels = {
         "trace_input": "/tmp/profile.tar.gz", "candidates_path": "/tmp/x.json",
     }
@@ -305,6 +307,7 @@ def test_sequence_denial_clears_after_validation(session_dir):
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_profile_pmc_summary = "/tmp/pmc.json"
     s.last_select_kernels = {
         "trace_input": "/tmp/profile.tar.gz", "candidates_path": "/tmp/x.json",
     }

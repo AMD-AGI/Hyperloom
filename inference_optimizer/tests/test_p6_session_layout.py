@@ -161,7 +161,7 @@ async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
-    """`setup` is not in _runs_actions() — runner shouldn't fabricate a path."""
+    """`target_analysis` is not in _runs_actions() — runner shouldn't fabricate a path."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "x.db")
@@ -175,13 +175,13 @@ async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
         return {"status": "succeeded"}
 
     sub = SubAgentRunner(locks, tasks, session_dir=sd)
-    sub.register_executor("setup", runner)
+    sub.register_executor("target_analysis", runner)
     task = await tasks.create(
-        kind="setup", params={}, idempotency_key="setup-test-1",
+        kind="target_analysis", params={}, idempotency_key="target-analysis-test-1",
     )
     await sub.run_task(task)
     db.close()
-    # setup has no runs/ subtree — workspace stays unset, session_dir is plumbed.
+    # target_analysis has no runs/ subtree — workspace stays unset, session_dir is plumbed.
     assert captured["workspace"] is None
     assert captured["session_dir"] == str(sd)
 

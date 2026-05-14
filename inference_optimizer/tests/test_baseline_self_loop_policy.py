@@ -241,6 +241,7 @@ async def test_sequence_denial_no_self_loop_for_other_actions(session_dir):
     try:
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.last_profile_trace = "/tmp/fake-trace"
+        c.shared_state.last_profile_pmc_summary = "/tmp/fake-pmc.json"
         c.shared_state.last_select_kernels = {
             "trace_input": "/tmp/fake-trace",
         }

@@ -98,8 +98,6 @@ COOLDOWN_TICKS: dict[str, int] = {
     "validate_stack": 0,
     "baseline": 0,
     "report": 0,
-    "setup": 0,
-    "classify": 0,
     "target_analysis": 0,
 }
 

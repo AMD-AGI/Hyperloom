@@ -172,8 +172,22 @@ inference_optimizer optimize \
   --model "$MODEL_PATH" \
   --framework vllm \           # or sglang (default)
   --gpu-type MI300X \          # or omit for rocm-smi auto-detect
-  --max-hours 2
+  --model-class moe_mla \      # dense / moe_mla / moe_swa / moe_mla_nsa; biases marathon priors
+  --max-hours 2 \
+  --compare-against-gpu B200   # optional — fetches InferenceX reference data
 ```
+
+**Caller responsibility (post-classify-removal)**: the in-loop `setup` /
+`classify` actions were deleted; the SKILL caller is now expected to
+supply session metadata directly via CLI flags / env vars:
+
+| Surface | CLI flag | Env var | Notes |
+|---|---|---|---|
+| Model path | `--model` | — | required |
+| Framework | `--framework` | `FRAMEWORK` | `vllm` / `sglang` |
+| GPU type | `--gpu-type` | `GPU_TYPE` | rocm-smi auto-detect when unset |
+| Model class | `--model-class` | `MODEL_CLASS` | drives `orchestrator/scoring.py` marathon priors; defaults to `moe_mla` when unset |
+| External reference GPU | `--compare-against-gpu` | — | when set, Coordinator hard-gates `target_analysis` so the InferenceX baseline is fetched into `$SESSION_DIR/target_analysis/target_baseline.json` *before* `baseline` runs; the report renders an "External baseline (advisory)" section automatically when the JSON is on disk |
 
 Install or validate the optimizer + downstream stack with the bundled
 installer. It is idempotent and chains to `kernel-agent/scripts/install.sh`,

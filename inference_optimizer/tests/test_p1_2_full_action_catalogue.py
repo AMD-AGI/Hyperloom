@@ -19,10 +19,10 @@ from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
 # DESIGN §16.1 plus isolated PMC roofline analysis action and the Phase 3
 # ``validate_stack`` action introduced for cumulative-gain validation.
 EXPECTED_ACTIONS_V06: dict[str, str] = {
-    # prep (5 — incl. validate_stack which lives in `prep` family because
-    # it's a measurement action that doesn't introduce new modifications)
-    "setup":                "prep",
-    "classify":             "prep",
+    # prep (3 — incl. validate_stack which lives in `prep` family because
+    # it's a measurement action that doesn't introduce new modifications;
+    # `setup` / `classify` are owned by the external SKILL caller, not
+    # the optimizer's action loop)
     "target_analysis":      "prep",
     "baseline":             "prep",
     "validate_stack":       "prep",

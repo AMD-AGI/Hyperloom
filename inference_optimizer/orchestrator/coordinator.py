@@ -181,9 +181,20 @@ class Coordinator:
         role_registry: dict[str, AgentRole] | None = None,
         sub_agent_runner: SubAgentRunner | None = None,
         bus_class: type[MessageBus] = MessageBus,
+        compare_against_gpu: str | None = None,
+        model_class: str | None = None,
     ):
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
+        # External-SKILL-driven configuration. Both replace the deleted
+        # `setup` / `classify` orchestration actions: the SKILL caller is
+        # expected to supply --model-class (or MODEL_CLASS env) and
+        # --compare-against-gpu so the coordinator can (a) seed marathon
+        # priors against the right model_class and (b) hard-gate
+        # `target_analysis` only when an external reference GPU was
+        # requested. Both default to "" so legacy callers keep working.
+        self._compare_against_gpu: str = (compare_against_gpu or "").strip()
+        self._model_class_override: str = (model_class or "").strip()
 
         # Validate every reactor we expect actually has a backend wired.
         for name in self.role_registry:
@@ -216,6 +227,19 @@ class Coordinator:
         # Persistent session state (state.json) — load existing for resume;
         # save() is called whenever the Coordinator mutates a persistent field.
         self.shared_state = SharedState.load_or_init(self.session_dir)
+        # External SKILL fills `model_class` via --model-class / MODEL_CLASS
+        # (the deleted `classify` action used to do this from inside the loop).
+        # Only overwrite a blank value so a resumed session keeps whatever was
+        # previously persisted; explicit overrides require a fresh session.
+        if self._model_class_override and not (self.shared_state.model_class or "").strip():
+            self.shared_state.model_class = self._model_class_override
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — best effort; not worth aborting boot.
+                log.exception(
+                    "Coordinator: failed to persist model_class=%r at boot",
+                    self._model_class_override,
+                )
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
@@ -949,48 +973,137 @@ class Coordinator:
     # ==================================================================
     # Execution order guard
     # ==================================================================
+    def _target_analysis_baseline_exists(self) -> bool:
+        """True iff target_analysis has produced ``target_baseline.json``.
+
+        The TargetAnalysisExecutor's failure policy is "never fail": even if
+        InferenceX is unreachable, it still writes a JSON with
+        ``status=fetch_error``. So existence of the file is a sufficient
+        "this gate has been satisfied" signal — we never expect this gate
+        to loop more than once per session.
+        """
+        try:
+            from ..session_paths import target_baseline_json
+            return target_baseline_json(self.session_dir).exists()
+        except Exception:  # noqa: BLE001 — defensive; missing helper -> treat as done.
+            return True
+
+    def _kernel_opt_keep_pending(self) -> str:
+        """Return the kernel_id awaiting integrate, or "" if none.
+
+        Detects the "kernel_opt produced a KEEP whose patch has not yet
+        been integrated into the optimization_stack" state. Returns the
+        kernel_id so the gate text can name it; empty string means the
+        gate is closed.
+
+        Closed when ANY of these hold:
+          * ``last_kernel_opt`` is empty (no recent kernel_opt call).
+          * Last decision is not ``KEEP``.
+          * The kernel_id is already retired (``rejected_kernel_ids``).
+          * An ``integrate`` entry with the same kernel_id is already on
+            ``optimization_stack`` (i.e. integrate already ran for this
+            patch and stuck).
+        """
+        last = self.shared_state.last_kernel_opt or {}
+        decision = str(last.get("decision") or "").upper()
+        if decision != "KEEP":
+            return ""
+        kernel_id = str(last.get("kernel_id") or "").strip()
+        if not kernel_id:
+            return ""
+        if kernel_id in (self.shared_state.rejected_kernel_ids or []):
+            return ""
+        for entry in self.shared_state.optimization_stack or []:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("action") != "integrate":
+                continue
+            if str(entry.get("kernel_id") or "") == kernel_id:
+                return ""
+        return kernel_id
+
     def _required_next_step(self) -> str:
         """Return the coordinator-enforced next step, or empty if flexible.
 
-        The Orchestration prompt says baseline → profile → select_kernels,
+        The Orchestration prompt says baseline -> profile -> select_kernels,
         but the LLM can still skip to backends/params. This guard makes that
         sequence deterministic and visible in the prompt every tick.
 
-        Phase 2 addition — once at least one KEEP'd entry has been added to
-        ``optimization_stack`` since the last successful ``validate_stack``,
-        the validate_stack TODO takes precedence over every other
-        non-prep step. Skipping it would let the LLM keep stacking
+        Pipeline (after the deletion of the in-loop ``setup`` / ``classify``
+        actions, which are now external-SKILL responsibilities):
+
+            TODO 0  target_analysis  (only when --compare-against-gpu set)
+            TODO 1  baseline
+            TODO 2  profile          (kernel mode only)
+            TODO 3  pmc_roofline     (kernel mode only, after profile)
+            TODO 4  select_kernels   (kernel mode only, after pmc_roofline)
+            TODO 5  integrate        (kernel mode only, after kernel_opt KEEP)
+            TODO 6  validate_stack   (when unvalidated KEEPs landed)
+
+        ``validate_stack`` precedence is critical: once at least one KEEP
+        has been added to ``optimization_stack`` since the last successful
+        ``validate_stack``, skipping it would let the LLM keep stacking
         per-round gains that don't compose linearly and therefore over-
         report ``cumulative_gain`` in the final report.
         """
         if self.shared_state.stop_reason:
             return ""
+        if (
+            self._compare_against_gpu
+            and not self._target_analysis_baseline_exists()
+        ):
+            return (
+                f"TODO 0/6: target_analysis is required now. "
+                f"--compare-against-gpu={self._compare_against_gpu!r} was set "
+                "but $SESSION_DIR/target_analysis/target_baseline.json is "
+                "missing; propose/delegate only `target_analysis` until the "
+                "external InferenceX reference has been fetched."
+            )
         if self.shared_state.baseline_tput <= 0:
             return (
-                "TODO 1/4: baseline is required now. Propose/delegate only "
+                "TODO 1/6: baseline is required now. Propose/delegate only "
                 "`baseline` until baseline_tput > 0."
             )
-        # Profile/select_kernels guards only apply when kernel agent is
-        # alive in the role registry — no-kernel runs don't have a way to
-        # service the request and the mandate would be meaningless.
+        # Profile / pmc_roofline / select_kernels guards only apply when the
+        # kernel agent is alive — no-kernel runs have no way to service the
+        # request and the mandate would be meaningless.
         if "kernel" in self.role_registry:
             if not self.shared_state.last_profile_trace:
                 return (
-                    "TODO 2/4: profile is required now. Baseline exists but "
+                    "TODO 2/6: profile is required now. Baseline exists but "
                     "last_profile_trace is empty; propose/delegate only `profile`. "
                     "Do not run backends/params/sweep yet."
+                )
+            if not self.shared_state.last_profile_pmc_summary:
+                return (
+                    "TODO 3/6: pmc_roofline is required now. profile produced "
+                    "a trace but last_profile_pmc_summary is empty; "
+                    "propose/delegate only `pmc_roofline` so rocprof PMC + "
+                    "roofline analysis is captured before kernel selection."
                 )
             select = self.shared_state.last_select_kernels or {}
             if select.get("trace_input") != self.shared_state.last_profile_trace:
                 return (
-                    "TODO 3/4: select_kernels is required now. Emit "
+                    "TODO 4/6: select_kernels is required now. Emit "
                     "request{target_agent='kernel', kind='select_kernels', "
                     "params={trace_input: last_profile_trace, top_k: 10}} before "
                     "backends/params/sweep."
                 )
+            pending_kid = self._kernel_opt_keep_pending()
+            if pending_kid:
+                return (
+                    f"TODO 5/6: integrate is required now. kernel_opt "
+                    f"returned KEEP for kernel_id={pending_kid!r} but the "
+                    "patch has not been integrated into optimization_stack. "
+                    "Emit request{target_agent='kernel', kind='integrate', "
+                    f"params={{kernel_id: {pending_kid!r}}} (or "
+                    "propose/delegate `integrate` / `recover` / "
+                    "`validate_stack` / `report`) before any further "
+                    "explore."
+                )
         if self.shared_state.optimization_stack_has_unvalidated_keeps():
             return (
-                "TODO 4/4: validate_stack required. New KEEP'd entries have "
+                "TODO 6/6: validate_stack required. New KEEP'd entries have "
                 "landed on optimization_stack since the last validate_stack run "
                 f"(stack_len={len(self.shared_state.optimization_stack)}, "
                 f"validated_at_len="
@@ -1097,14 +1210,39 @@ class Coordinator:
         """
         action = str(action_name or "").strip()
         sequence_actions = {
-            "baseline", "profile", "backends", "params", "sweep", "report",
-            "validate_stack",
+            "target_analysis",
+            "baseline", "profile", "pmc_roofline",
+            "backends", "params", "sweep", "report",
+            "integrate", "validate_stack",
         }
         if action not in sequence_actions:
             return None
         if self.shared_state.stop_reason:
             return None
-        if self.shared_state.baseline_tput <= 0 and action != "baseline":
+        # target_analysis hard gate: when the operator passed
+        # --compare-against-gpu, the InferenceX reference must be on disk
+        # before any other sequence action runs. The executor never
+        # raises (failures land as `status=fetch_error`) so this gate
+        # always opens after a single attempt.
+        if (
+            self._compare_against_gpu
+            and not self._target_analysis_baseline_exists()
+            and action != "target_analysis"
+        ):
+            return PolicyDenied(
+                f"action={action!r} denied: target_analysis must run first",
+                rule="execution_order",
+                hint=(
+                    "propose/delegate `target_analysis` so InferenceX "
+                    f"reference for --compare-against-gpu="
+                    f"{self._compare_against_gpu!r} is fetched into "
+                    "$SESSION_DIR/target_analysis/target_baseline.json"
+                ),
+            )
+        if (
+            self.shared_state.baseline_tput <= 0
+            and action not in {"baseline", "target_analysis"}
+        ):
             return PolicyDenied(
                 f"action={action!r} denied: baseline must run first",
                 rule="execution_order",
@@ -1114,8 +1252,9 @@ class Coordinator:
             self_loop = self._baseline_self_loop_denial(proposed_params)
             if self_loop is not None:
                 return self_loop
-        # Profile/select_kernels guards only apply when kernel agent is in
-        # the role registry — no-kernel mode skips them.
+        # Profile / pmc_roofline / select_kernels / integrate guards only
+        # apply when kernel agent is in the role registry — no-kernel mode
+        # skips them.
         if "kernel" in self.role_registry:
             if (
                 self.shared_state.baseline_tput > 0
@@ -1126,6 +1265,22 @@ class Coordinator:
                     f"action={action!r} denied: profile must run before {action!r}",
                     rule="execution_order",
                     hint="propose/delegate `profile`; last_profile_trace is empty",
+                )
+            # pmc_roofline gate: trace exists but PMC summary missing. We
+            # allow `validate_stack` through so an in-flight KEEP can still
+            # be rebenched without first re-running rocprof.
+            if (
+                self.shared_state.last_profile_trace
+                and not self.shared_state.last_profile_pmc_summary
+                and action not in {"pmc_roofline", "validate_stack"}
+            ):
+                return PolicyDenied(
+                    f"action={action!r} denied: pmc_roofline must run before {action!r}",
+                    rule="execution_order",
+                    hint=(
+                        "propose/delegate `pmc_roofline`; "
+                        "last_profile_pmc_summary is empty"
+                    ),
                 )
             select = self.shared_state.last_select_kernels or {}
             needs_select = (
@@ -1139,6 +1294,24 @@ class Coordinator:
                     hint=(
                         "emit request{target_agent='kernel', kind='select_kernels', "
                         "params={trace_input: last_profile_trace, top_k: 10}}"
+                    ),
+                )
+            # integrate gate: kernel_opt KEEP awaiting integrate. Allow
+            # integrate / validate_stack / report through; recover is not
+            # in `sequence_actions` and therefore already bypasses this
+            # function (no-op early return).
+            pending_kid = self._kernel_opt_keep_pending()
+            if pending_kid and action not in {
+                "integrate", "validate_stack", "report",
+            }:
+                return PolicyDenied(
+                    f"action={action!r} denied: integrate must run first",
+                    rule="execution_order",
+                    hint=(
+                        f"kernel_opt returned KEEP for kernel_id="
+                        f"{pending_kid!r}; emit request{{target_agent="
+                        "'kernel', kind='integrate', params={kernel_id: "
+                        f"{pending_kid!r}}}}} before any further explore"
                     ),
                 )
         # validate_stack precedence — once new KEEPs are stacked we must
