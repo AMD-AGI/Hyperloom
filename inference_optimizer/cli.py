@@ -1660,11 +1660,20 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             # tripped into "emergency" by accumulated failures from prior runs
             # (e.g. authentication errors before .env was loaded).
             state.crash_count = 0
+            # Reset start_ts to "now" so the elapsed_minutes value the
+            # orchestration agent sees in its prompt reflects this resume's
+            # budget rather than the original session start; otherwise an
+            # old session that exhausted its budget will look "already
+            # over budget" on resume and the LLM will refuse to propose
+            # any work.
+            from datetime import datetime, timezone
+            state.start_ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
             state.save(session_dir)
             print(
                 f"  → cleared stop_reason and reset crash_count "
                 f"(was {prior_crash}) for fresh resume"
             )
+            print(f"  → reset start_ts to {state.start_ts} (resume budget)")
     else:
         # Resolve model path from --model first, then $MODEL_PATH env. Without
         # either, fail fast: silently falling back to the YAML's hardcoded
