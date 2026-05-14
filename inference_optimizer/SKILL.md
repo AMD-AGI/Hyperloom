@@ -677,6 +677,7 @@ for k in ("stop_reason", "baseline_tput", "cumulative_gain", "current_best",
           "last_kernel_opt", "last_select_kernels", "last_sweep"):
     print(f"{k}: {s.get(k)}")
 print("params_search_last_round:", s.get("params_search", {}).get("last_round"))
+print("backends_search_last_round:", s.get("backends_search", {}).get("last_round"))
 PY
 ```
 
@@ -697,8 +698,12 @@ The optimizer should:
   `last_select_kernels`.
 4. Pick only `reusable_native_kernel_ids` for `run_optimization`.
 5. Require compile + correctness + microbench/E2E evidence before KEEP.
-6. Use `params_search` to test parameters incrementally and remember rejected
-  candidates across resume.
+6. Use `params_search` / `backends_search` to test parameters incrementally
+  and remember rejected candidates across resume. Both ledgers key entries
+  by **content fingerprint** (a sha1 hash of sorted `extra_sglang_args` +
+  sorted `extra_envs`), so renaming an already-tested variant does not
+  bypass dedup — LLM-supplied `params.grid` is filtered through the same
+  ledger as the default seed grid.
 7. Use `optimization_stack` so backend + params + kernel changes do not
   overwrite each other.
 8. Use `sweep` to understand workload-specific results beyond the smoke
