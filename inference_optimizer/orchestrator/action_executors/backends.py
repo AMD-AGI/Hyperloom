@@ -27,8 +27,14 @@ from __future__ import annotations
 import ast
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+def _now_iso() -> str:
+    """UTC ISO-8601 timestamp used by the backends_search ledger."""
+    return datetime.now(timezone.utc).isoformat()
 
 from ...session_paths import runs_dir
 from ._grid_runner import (
@@ -39,6 +45,7 @@ from ._grid_runner import (
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
+    variant_fingerprint,
 )
 from ._workload_envs import (
     default_baseline_config,
@@ -47,6 +54,26 @@ from ._workload_envs import (
 
 
 log = logging.getLogger(__name__)
+
+
+def _initial_backends_search_state() -> dict[str, Any]:
+    """Empty :attr:`SharedState.backends_search` ledger.
+
+    Schema mirrors :func:`params._initial_search_state` but at
+    ``schema_version=1`` for backends (params is at v2 after the
+    fingerprint migration). Both ledgers key ``tested`` / ``rejected``
+    on the variant **content fingerprint** so LLM renames of an
+    already-tested config collapse to the same row.
+    """
+    return {
+        "schema_version": 1,
+        "accepted": [],
+        "rejected": [],
+        "tested": {},
+        "name_index": {},
+        "cursor": 0,
+        "last_round": {},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -573,9 +600,11 @@ class BackendsExecutor:
         ).lower()
         is_vllm = "vllm" in framework
         # ``llm_specified_grid`` is True iff the LLM explicitly passed
-        # ``params.grid=[...]``. In that case we run EXACTLY what was asked
-        # (LLM owns the search-space decision via IR-26 idea generation);
-        # the per-round cap below applies only to the default-grid path.
+        # ``params.grid=[...]``. The LLM still owns the *search-space
+        # decision* (no cap is applied to LLM grids), but the
+        # ``backends_search`` ledger filters BOTH default and LLM grids
+        # uniformly so an LLM-supplied variant that's content-identical
+        # to a previously-tested one is dropped before launch.
         llm_specified_grid = bool(grid_override)
         if llm_specified_grid:
             grid = [
@@ -631,34 +660,82 @@ class BackendsExecutor:
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
 
+        # --- Backends search ledger (content fingerprint dedup) ---
+        # The ledger has the same shape as ``params_search``; the
+        # Coordinator injects it from SharedState. Filtering is applied
+        # UNIFORMLY across default and LLM-supplied grids so an LLM
+        # rename of an already-tested variant collapses to the same
+        # fingerprint and gets dropped. ``name_index`` carries old
+        # state-file rows where the fingerprint wasn't yet stamped, so
+        # name-only matches still rescue dedup on resume.
+        search = dict(
+            params.get("backends_search") or _initial_backends_search_state()
+        )
+        search.setdefault("schema_version", 1)
+        search.setdefault("accepted", [])
+        search.setdefault("rejected", [])
+        search.setdefault("tested", {})
+        search.setdefault("name_index", {})
+        search.setdefault("cursor", 0)
+
+        def _entry_fp(entry: Any) -> str:
+            if not isinstance(entry, dict):
+                return ""
+            fp = entry.get("fingerprint")
+            if fp:
+                return str(fp)
+            return variant_fingerprint(
+                str(entry.get("extra_sglang_args") or ""),
+                dict(entry.get("extra_envs") or {}),
+            )
+
+        accepted_fps = {_entry_fp(v) for v in search.get("accepted", [])}
+        rejected_fps = {_entry_fp(v) for v in search.get("rejected", [])}
+        accepted_fps.discard("")
+        rejected_fps.discard("")
+        tested_dict = search.get("tested") or {}
+        tested_fps = set(tested_dict.keys())
+        # Legacy rows whose tested dict was keyed by name pre-migration:
+        # re-derive fingerprints from the stored args/envs so they still
+        # block re-runs even when the resume-side migration hasn't fired.
+        for v in tested_dict.values():
+            if isinstance(v, dict):
+                tested_fps.add(_entry_fp(v))
+        tested_fps.discard("")
+        name_index = dict(search.get("name_index") or {})
+
+        def _is_dup(variant: GridVariant) -> bool:
+            fp = variant.fingerprint
+            if fp in accepted_fps or fp in rejected_fps or fp in tested_fps:
+                return True
+            legacy = name_index.get(variant.name)
+            if legacy and legacy in (accepted_fps | rejected_fps | tested_fps):
+                return True
+            return False
+
+        full_grid_size = len(grid)
+        pre_dedup = list(grid)
+        deduped_grid = [v for v in pre_dedup if not _is_dup(v)]
+        log.info(
+            "backends dedup: grid=%d → %d (filtered=%d) llm_grid=%s",
+            full_grid_size, len(deduped_grid),
+            full_grid_size - len(deduped_grid), llm_specified_grid,
+        )
+
         # --- Per-round candidate cap (default 5) ---
         # Only applies when the LLM did NOT explicitly inject a grid via
-        # params.grid: an LLM grid is treated as "I picked these exact
-        # candidates", so cropping it would be wrong. With the default
-        # grid path, we crop to ``max_candidates_per_round`` to keep one
-        # round to a manageable wall-clock; the LLM's IR-26 loop then
-        # picks up next round's candidates from `backend_winners_history`.
-        # Set ``max_candidates_per_round=0`` to disable (full grid run).
-        full_grid_size = len(grid)
+        # ``params.grid``: an LLM grid is treated as "I picked these
+        # exact candidates" so cropping it would be wrong. The dedup
+        # filter above still ran on the LLM grid — what's NOT cropped
+        # is the post-dedup remainder.
         cap = int(params.get(
             "max_candidates_per_round",
             self.default_max_candidates_per_round,
         ))
         if not llm_specified_grid and cap > 0:
-            # `tested_variant_names` lets the Coordinator pass a set of
-            # variant names already run in previous rounds so we deepen
-            # the search instead of re-running the same first-N every
-            # tick. Falls back to the original grid order (Tier 1 first,
-            # then Tier 2, then AST-discovered) when not provided.
-            tested = set(params.get("tested_variant_names") or [])
-            if tested:
-                remaining = [v for v in grid if v.name not in tested]
-                # If we've exhausted the static + discovered pool, fall
-                # back to retesting from the head — the LLM can still
-                # short-circuit by passing its own grid_override.
-                grid = (remaining or list(grid))[:cap]
-            else:
-                grid = grid[:cap]
+            grid = deduped_grid[:cap]
+        else:
+            grid = deduped_grid
         capped_grid_size = len(grid)
 
         # `resolved_model` / `resolved_gpu` were resolved above for the
@@ -795,6 +872,89 @@ class BackendsExecutor:
 
         successful_runs = [r for r in all_results if r.status == "succeeded"]
 
+        # --- backends_search update -------------------------------------
+        # Mirror of params: append every tested fingerprint to ``tested``,
+        # the non-winners to ``rejected``. ``accepted`` is intentionally
+        # NOT touched here — the Coordinator owns promote semantics and
+        # writes accepted via :meth:`SharedState.record_backends_accepted`
+        # when the round's best beats current_best by the promote gate.
+        winner_fps = {w.fingerprint for w in all_winners}
+        tested_update = dict(search.get("tested") or {})
+        rejected_update = list(search.get("rejected") or [])
+        round_id = f"backends-{int(search.get('cursor') or 0) + 1:03d}"
+        ts = _now_iso()
+        for r in all_results:
+            fp = r.fingerprint
+            gain = (
+                ((r.output_throughput - base_tput) / base_tput * 100.0)
+                if (
+                    isinstance(r.output_throughput, (int, float))
+                    and r.output_throughput > 0
+                    and base_tput > 0
+                )
+                else None
+            )
+            tested_update[fp] = {
+                "name": r.name,
+                "extra_sglang_args": r.extra_sglang_args,
+                "extra_envs": dict(r.extra_envs or {}),
+                "note": r.note,
+                "status": r.status,
+                "tput": r.output_throughput,
+                "gain_pct": gain,
+                "base_tput": base_tput,
+                "round_id": round_id,
+                "ts": ts,
+            }
+            name_index[r.name] = fp
+            if r.status != "succeeded" or fp not in winner_fps:
+                rejected_update.append({
+                    "name": r.name,
+                    "extra_sglang_args": r.extra_sglang_args,
+                    "extra_envs": dict(r.extra_envs or {}),
+                    "note": r.note,
+                    "fingerprint": fp,
+                    "reason": (
+                        "failed" if r.status != "succeeded" else "not_keep"
+                    ),
+                    "gain_pct": gain,
+                    "tput": r.output_throughput,
+                })
+
+        # Dedup rejected by fingerprint, keep the latest reason; also drop
+        # anything that already lives in ``accepted`` (a previously-rejected
+        # variant that later won shouldn't appear in both buckets).
+        accepted_fps_now = {_entry_fp(v) for v in (search.get("accepted") or [])}
+        rejected_dedup: dict[str, dict[str, Any]] = {}
+        for entry in rejected_update:
+            fp = str(entry.get("fingerprint") or "")
+            if not fp or fp in accepted_fps_now:
+                continue
+            rejected_dedup[fp] = entry
+
+        search_update = {
+            "schema_version": 1,
+            "accepted": list(search.get("accepted") or []),
+            "rejected": list(rejected_dedup.values()),
+            "tested": tested_update,
+            "name_index": name_index,
+            "cursor": len(tested_update),
+            "last_round": {
+                "round_id": round_id,
+                "action": "backends",
+                "base_tput": base_tput,
+                "base_extra_args": base_extra_args,
+                "tested": [r.fingerprint for r in all_results],
+                "round_winners": [w.fingerprint for w in all_winners],
+                "combos": [c.fingerprint for c in combo_results],
+                "ts": ts,
+            },
+        }
+        # ``backends_search_exhausted`` means "no new fingerprints made it
+        # past dedup this round" — Coordinator uses it (alongside the
+        # params-grid check) to decide whether to switch to kernel work.
+        backends_search_exhausted = len(deduped_grid) == 0
+
         return {
             "status": "succeeded" if successful_runs else "failed",
             "base_tput": base_tput,
@@ -809,6 +969,9 @@ class BackendsExecutor:
             # T1/T2 — Coordinator picks these up to update SharedState.
             "discovered_flags_update": self._pop_discovered_update(),
             "synergy_attempted_new": new_attempts,
+            # backends_search ledger update (parity with params_search).
+            "backends_search_update": search_update,
+            "backends_search_exhausted": backends_search_exhausted,
         }
 
     # ------------------------------------------------------------------
