@@ -553,6 +553,7 @@ def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
       pure roofline arithmetic and is safer to surface directly; the
       agent still needs a real measurement before declaring success.
     """
+    identification = str(candidate.get("identification") or "").strip()
     reasoning = str(candidate.get("reasoning_for_slowdown") or "").strip()
     resolution = str(candidate.get("resolution") or "").strip()
     try:
@@ -562,7 +563,7 @@ def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
         high_e2e = float(candidate.get("impact_high_e2e_pct") or 0.0)
     except (TypeError, ValueError):
         low_ms = low_e2e = high_ms = high_e2e = 0.0
-    if not (reasoning or resolution or low_ms or high_ms):
+    if not (identification or reasoning or resolution or low_ms or high_ms):
         return ""
     lines: list[str] = [
         "",
@@ -576,6 +577,12 @@ def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
         "document the discrepancy in `optimization_report.md`.",
         "",
     ]
+    if identification:
+        # Identification carries the per-rank context + the source-file
+        # reference (e.g. ``gemm_metrics.json → operations[].efficiency...``)
+        # so GEAK can trace any hypothesis back to the raw TraceLens
+        # metrics when it needs to disagree.
+        lines.extend(["**Identification (TraceLens context):**", identification, ""])
     if reasoning:
         lines.extend(["**Reasoning for slowdown (hypothesis):**", reasoning, ""])
     if resolution:

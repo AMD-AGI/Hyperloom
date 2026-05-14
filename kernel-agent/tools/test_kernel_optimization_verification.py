@@ -415,6 +415,44 @@ def test_build_hypothesis_block_renders_impact_range_when_set():
     assert "Recommended direction" not in block
 
 
+def test_build_hypothesis_block_renders_identification_when_present():
+    """The Identification line carries per-rank context + the source
+    metrics-file reference (e.g. ``gemm_metrics.json → operations[].
+    efficiency.efficiency_percent``). Surfacing it lets GEAK trace any
+    hypothesis back to the raw TraceLens data when it needs to
+    disagree. Must be labelled distinctly from Reasoning so the agent
+    doesn't conflate "what was flagged" with "why it's slow"."""
+    block = ko._build_hypothesis_block({
+        "name": "rms_norm",
+        "identification": (
+            "Four `aiter::rmsnorm_quant` operations flagged as memory-bound. "
+            "(source: rmsnorm_metrics.json -> operations[].efficiency.efficiency_percent)"
+        ),
+        "reasoning_for_slowdown": "Memory-bound kernel saturating HBM bandwidth.",
+        "resolution": "Fuse RMSNorm with the following GEMM.",
+    })
+    assert "Identification (TraceLens context):" in block
+    assert "Four `aiter::rmsnorm_quant`" in block
+    assert "rmsnorm_metrics.json" in block
+    # Identification appears BEFORE Reasoning so the agent reads the
+    # "what" before the "why" — matches the template's section order.
+    id_pos = block.index("Identification (TraceLens context):")
+    reason_pos = block.index("Reasoning for slowdown (hypothesis):")
+    assert id_pos < reason_pos
+
+
+def test_build_hypothesis_block_renders_when_only_identification_present():
+    """A P-item with only Identification (no Reasoning/Resolution/Impact)
+    must still produce a block — GEAK needs the source pointer even
+    when the analysis-orchestrator didn't synthesise downstream prose."""
+    block = ko._build_hypothesis_block({
+        "name": "kernel",
+        "identification": "Three ops flagged. (source: gemm_metrics.json)",
+    })
+    assert block != ""
+    assert "Identification (TraceLens context):" in block
+
+
 def test_build_prompt_omits_hypothesis_block_when_no_prose():
     """Backward compat: candidates without prose fields produce the same
     prompt shape as before — no surprise section, no extra blank lines

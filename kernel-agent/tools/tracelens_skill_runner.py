@@ -392,6 +392,8 @@ _EFFICIENCY_RE = re.compile(
 # Extracting these gives GEAK the same hypothesis a human reviewer reads in
 # the report; the prose is treated as a *hypothesis to validate*, never as
 # imperative guidance — see ``build_prompt`` for the framing.
+_IDENTIFICATION_LABEL = "**Identification:**"
+_DATA_LABEL = "**Data:**"
 _REASONING_LABEL = "**Reasoning for Slowdown:**"
 _RESOLUTION_LABEL = "**Resolution:**"
 _IMPACT_LABEL = "**Impact estimate:**"
@@ -428,14 +430,21 @@ def _extract_between(
 
 
 def _extract_pitem_prose(body: str) -> dict[str, Any]:
-    """Extract Reasoning / Resolution / Impact-estimate fields from a
-    Detailed Analysis P-item body. All fields default to empty / 0.0 so
-    the parser stays additive — callers that don't care for prose are
-    unaffected.
+    """Extract Identification / Reasoning / Resolution / Impact-estimate
+    fields from a Detailed Analysis P-item body. All fields default to
+    empty / 0.0 so the parser stays additive — callers that don't care
+    for prose are unaffected.
+
+    The Identification line carries per-rank context that pins the
+    P-item back to its source metrics file (e.g.
+    ``(source: gemm_metrics.json → operations[].efficiency.efficiency_percent)``);
+    surfacing it lets GEAK trace any hypothesis back to the raw
+    TraceLens data when it needs to disagree.
 
     Returns::
 
         {
+          "identification":         str,
           "reasoning_for_slowdown": str,
           "resolution":             str,
           "impact_low_ms":          float,
@@ -444,6 +453,10 @@ def _extract_pitem_prose(body: str) -> dict[str, Any]:
           "impact_high_e2e_pct":    float,
         }
     """
+    identification = _extract_between(
+        body, _IDENTIFICATION_LABEL,
+        (_DATA_LABEL, _REASONING_LABEL, _RESOLUTION_LABEL, _IMPACT_LABEL),
+    )
     reasoning = _extract_between(
         body, _REASONING_LABEL, (_RESOLUTION_LABEL, _IMPACT_LABEL),
     )
@@ -451,6 +464,7 @@ def _extract_pitem_prose(body: str) -> dict[str, Any]:
     low_match = _IMPACT_LOW_RE.search(body)
     high_match = _IMPACT_HIGH_RE.search(body)
     return {
+        "identification":         identification,
         "reasoning_for_slowdown": reasoning,
         "resolution":             resolution,
         "impact_low_ms":          _safe_float(low_match.group(1)) if low_match else 0.0,
@@ -606,6 +620,7 @@ def _row_to_candidate(
         # (build_prompt / source-function aggregation) without forcing
         # them to re-join against a rank-indexed sidecar.
         for key in (
+            "identification",
             "reasoning_for_slowdown",
             "resolution",
             "impact_low_ms",

@@ -1366,6 +1366,8 @@ def test_derive_kernel_category_falls_back_to_name_heuristic():
 _SYNTHETIC_PITEM_BODY = """\
 #### 🔴 P1: RMSNorm fused with quantization (Triton)
 
+**Identification:** Four `aiter::rmsnorm_quant` operations were flagged as memory-bound with efficiencies of 0.88%-4.31% against peak HBM bandwidth of 5.3 TB/s. (source: `rmsnorm_metrics.json` → `operations[].efficiency.efficiency_percent`)
+
 **Data:**
 
 | Operation | Args | Kernel Path | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
@@ -1386,8 +1388,10 @@ Low end (baseline shapes): 12.5 ms savings (3.2% E2E). High end (peak decode bat
 """
 
 
-def test_extract_pitem_prose_pulls_three_sections():
+def test_extract_pitem_prose_pulls_all_sections():
     prose = tlr._extract_pitem_prose(_SYNTHETIC_PITEM_BODY)
+    assert "Four `aiter::rmsnorm_quant`" in prose["identification"]
+    assert "rmsnorm_metrics.json" in prose["identification"]
     assert "Memory-bound elementwise kernel" in prose["reasoning_for_slowdown"]
     assert "HBM bandwidth saturated" in prose["reasoning_for_slowdown"]
     assert "Fuse RMSNorm" in prose["resolution"]
@@ -1398,10 +1402,31 @@ def test_extract_pitem_prose_pulls_three_sections():
     assert prose["impact_high_e2e_pct"] == 10.4
 
 
+def test_extract_pitem_prose_identification_stops_at_data_marker():
+    """Identification ends at ``**Data:**`` — must NOT leak the
+    9-column table or any subsequent prose into the identification
+    field. Without the Data end-marker the identification would
+    swallow everything up to ``**Reasoning for Slowdown:**``."""
+    body = (
+        "**Identification:** Three ops flagged at 0.5% efficiency. "
+        "(source: gemm_metrics.json)\n\n"
+        "**Data:**\n\n| Op | Args | ... |\n\n"
+        "**Reasoning for Slowdown:**\nMemory-bound.\n"
+    )
+    prose = tlr._extract_pitem_prose(body)
+    assert prose["identification"].startswith("Three ops flagged")
+    assert "gemm_metrics.json" in prose["identification"]
+    assert "| Op |" not in prose["identification"], (
+        "Identification leaked into the Data table — end-marker order is wrong"
+    )
+    assert "Memory-bound" not in prose["identification"]
+
+
 def test_extract_pitem_prose_returns_empty_strings_when_markers_absent():
-    """Bodies without the three labels must still return the full dict
+    """Bodies without the four labels must still return the full dict
     shape so downstream consumers can rely on key presence."""
     prose = tlr._extract_pitem_prose("**Data:**\n| ... | ... |\n")
+    assert prose["identification"] == ""
     assert prose["reasoning_for_slowdown"] == ""
     assert prose["resolution"] == ""
     assert prose["impact_low_ms"] == 0.0
@@ -1441,6 +1466,7 @@ def test_parse_analysis_md_attaches_prose_from_fixture():
     assert cands, "fixture must produce at least one candidate"
     # All 21 fixture candidates share P-item prose with their group.
     for c in cands:
+        assert "identification" in c
         assert "reasoning_for_slowdown" in c
         assert "resolution" in c
         assert "impact_low_ms" in c
