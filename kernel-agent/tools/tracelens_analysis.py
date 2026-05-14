@@ -1674,6 +1674,25 @@ def write_reports(
     args: argparse.Namespace,
     existing_report_path: Path | None = None,
 ) -> dict[str, str]:
+    """Write Hyperloom-owned sidecar JSONs and surface the upstream Markdown.
+
+    The canonical Markdown final report (``analysis.md``) is owned by the
+    TraceLens v0.3 SDK orchestrator per ``sub_agent_spec.md``: it is the
+    single, contracted exit point for the analysis pipeline. Hyperloom
+    no longer copies or aliases it under other names — the v0.2-era
+    ``standalone_analysis.md`` / ``tracelens_report.md`` /
+    ``--compat-report-path`` outputs were removed in #203 because they
+    (1) wrote multiple byte-identical copies of the same file under
+    different names, (2) bypassed the upstream contract, and
+    (3) silently fabricated a Markdown when the SDK orchestrator failed,
+    masking the upstream error from operators.
+
+    When the SDK orchestrator does not produce ``analysis.md`` (e.g.
+    Claude SDK login expired, orchestrator crashed mid-run), this
+    function raises ``RuntimeError`` rather than synthesizing a
+    replacement. The caller surfaces the underlying TraceLens error to
+    the operator (and to the TraceLens team if reproducible).
+    """
     tracelens_dir = run_dir / "tracelens"
     (tracelens_dir / "system_findings").mkdir(parents=True, exist_ok=True)
     (tracelens_dir / "category_findings").mkdir(parents=True, exist_ok=True)
@@ -1700,44 +1719,29 @@ def write_reports(
     atomic_write_json(tracelens_dir / "tracelens_report.json", report)
     atomic_write_json(run_dir / "kernel_candidates.json", {"hot_kernels": candidates, **report})
 
-    md_path = tracelens_dir / "standalone_analysis.md"
-    if existing_report_path and existing_report_path.exists():
-        if existing_report_path.resolve() != md_path.resolve():
-            md_path.write_text(existing_report_path.read_text(encoding="utf-8"), encoding="utf-8")
-    else:
-        lines = [
-            "# TraceLens Standalone Analysis",
-            "",
-            f"- Model: {args.model_name}",
-            f"- Framework: {args.framework}",
-            f"- Target platform: {args.target_platform}",
-            f"- Trace input type: {trace_input_type}",
-            "",
-            "## Hot Kernels",
-            "",
-        ]
-        for item in candidates:
-            bottleneck = item.get("bottleneck") or "unknown"
-            lines.append(
-                f"- `{item['kernel_id']}` `{item['name']}`: {item['gpu_pct']}% GPU, "
-                f"{item['call_count']} calls, bottleneck `{bottleneck}`, "
-                f"source `{item.get('source_file') or 'unresolved'}`"
+    if existing_report_path is None or not existing_report_path.exists():
+        if not getattr(args, "dry_run", False):
+            raise RuntimeError(
+                "TraceLens SDK orchestrator did not produce analysis.md "
+                f"(expected at {existing_report_path}); refusing to "
+                "fabricate a Markdown report. Inspect the TraceLens skill "
+                "log and report upstream if this is reproducible."
             )
-        md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    readable_report = tracelens_dir / "tracelens_report.md"
-    readable_report.write_text(md_path.read_text(encoding="utf-8"), encoding="utf-8")
-
-    if args.compat_report_path:
-        compat_path = Path(args.compat_report_path)
-        compat_path.parent.mkdir(parents=True, exist_ok=True)
-        compat_path.write_text(md_path.read_text(encoding="utf-8"), encoding="utf-8")
+        # ``--dry-run``: synthesize a tiny stub so test wiring that
+        # checks ``trace_report_path`` existence still passes. Never
+        # taken on a real (non-test) invocation.
+        stub_md = tracelens_dir / "analysis.md"
+        stub_md.write_text(
+            "# TraceLens dry-run stub (no SDK orchestrator output)\n",
+            encoding="utf-8",
+        )
+        existing_report_path = stub_md
 
     return {
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
         "kernel_candidates": str(run_dir / "kernel_candidates.json"),
         "tracelens_report_json": str(tracelens_dir / "tracelens_report.json"),
-        "trace_report_path": str(md_path),
+        "trace_report_path": str(existing_report_path),
     }
 
 
@@ -1754,7 +1758,6 @@ def main() -> int:
     parser.add_argument("--workspace-path", default=os.environ.get("WORKSPACE_PATH", "/workspace"))
     parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
     parser.add_argument("--roofline-json", default="")
-    parser.add_argument("--compat-report-path", default="")
     parser.add_argument(
         "--capture-folder",
         default=os.environ.get("TRACELENS_CAPTURE_FOLDER", ""),
@@ -2190,8 +2193,29 @@ def main() -> int:
                            f"({len(candidates)}, src={tl_csv}); "
                            f"shape backfill from raw trace")
         if not candidates:
-            append_log(log_path,
-                       "fallback: raw trace parser (TraceLens outputs unavailable)")
+            if not args.dry_run:
+                raise RuntimeError(
+                    "No hot-kernel candidates produced by any TraceLens "
+                    "path: SDK orchestrator returned no Detailed-Analysis "
+                    "P-items AND perf-report CLI yielded neither "
+                    "category_data nor kernel_summary.csv usable rows. "
+                    "The legacy raw-trace parser fallback was removed in "
+                    "#203 because it silently papered over TraceLens-side "
+                    "failures with low-quality grep-based source "
+                    "resolution. Inspect the TraceLens skill log at the "
+                    "path above and file an upstream issue if "
+                    "reproducible."
+                )
+            # ``--dry-run`` is the test-only path that bypasses TraceLens
+            # install / CLI / SDK orchestrator entirely. It still parses
+            # the raw trace so unit tests can exercise hot-kernel
+            # extraction and downstream wiring without a real TraceLens
+            # run. Production code never sets ``--dry-run``.
+            append_log(
+                log_path,
+                "dry-run: parsing raw trace for hot kernels "
+                "(production code path raises here — see #203)",
+            )
             candidates = analyze_trace_files(trace_files, args.top_k)
         roofline_by_name = load_roofline_results(args.roofline_json)
         if roofline_by_name:
