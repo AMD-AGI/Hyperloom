@@ -121,9 +121,9 @@ def _resolve_session_dir() -> Path:
     """Resolve the active session_dir for executors that need an output root.
 
     Reads :func:`inference_optimizer.paths.session_dir`; this honors
-    ``$INFERENCE_OPTIMIZER_SESSION_DIR`` and otherwise returns
-    ``/workspace/hyperloom``. Used by executor-class fallback paths when
-    ``ctx.extra["workspace"]`` was not pre-mkdir'd by SubAgentRunner.
+    ``$USER_DATA_PATH`` and otherwise returns ``/workspace/hyperloom``.
+    Used by executor-class fallback paths when ``ctx.extra["workspace"]``
+    was not pre-mkdir'd by SubAgentRunner.
     """
     from ...paths import session_dir as _sd
     return _sd()
