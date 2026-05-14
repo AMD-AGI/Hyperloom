@@ -516,6 +516,12 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
 
     trace = tmp_path / "trace.json"
     trace.write_text("{}", encoding="utf-8")
+    # write_reports now requires the upstream TraceLens v0.3 analysis.md
+    # (see #203). Provide a stub so the function reaches the JSON-writing
+    # branch we are exercising here.
+    analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
+    analysis_md.parent.mkdir(parents=True, exist_ok=True)
+    analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
     candidate = {
         "kernel_id": "k001",
         "name": "paged_attention",
@@ -535,7 +541,6 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         analysis_mode="inference",
         runtime_env="local",
         dry_run=False,
-        compat_report_path="",
     )
 
     artifacts = tla.write_reports(
@@ -544,6 +549,7 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         trace_files=[trace],
         candidates=[candidate],
         args=args,
+        existing_report_path=analysis_md,
     )
     payload = _json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
     enriched = payload["hot_kernels"][0]
@@ -645,6 +651,9 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         _json.dumps({"head_dim": 128, "num_attention_heads": 32}),
         encoding="utf-8",
     )
+    analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
+    analysis_md.parent.mkdir(parents=True, exist_ok=True)
+    analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
     candidate = {
         "kernel_id": "k001",
         "name": "paged_attention",
@@ -662,7 +671,6 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         analysis_mode="inference",
         runtime_env="local",
         dry_run=False,
-        compat_report_path="",
     )
 
     artifacts = tla.write_reports(
@@ -671,10 +679,132 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         trace_files=[trace],
         candidates=[candidate],
         args=args,
+        existing_report_path=analysis_md,
     )
     payload = _json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
 
     assert payload["hot_kernels"][0]["kernel_params"]["HEAD_SIZE"] == 128
+
+
+# ===========================================================================
+# #203 — write_reports must surface the upstream analysis.md as-is
+# (no copies, no aliases, no inline fabricated fallback)
+# ===========================================================================
+def _make_write_reports_args(trace_path):
+    from argparse import Namespace
+
+    return Namespace(
+        trace_input=str(trace_path),
+        model_name="qwen3-30b-a3b",
+        framework="sglang",
+        target_platform="MI300X",
+        analysis_mode="inference",
+        runtime_env="local",
+        dry_run=False,
+    )
+
+
+def test_write_reports_raises_when_analysis_md_missing(tmp_path):
+    """#203: write_reports refuses to fabricate a Markdown when the
+    TraceLens v0.3 SDK orchestrator failed to produce analysis.md.
+    The legacy inline bullet-list fallback silently masked upstream
+    failures (see #144 mis-resolution chain) and is gone.
+    """
+    import pytest
+
+    trace = tmp_path / "trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    args = _make_write_reports_args(trace)
+
+    with pytest.raises(RuntimeError, match="did not produce analysis.md"):
+        tla.write_reports(
+            tmp_path / "run",
+            trace_input_type="file",
+            trace_files=[trace],
+            candidates=[],
+            args=args,
+        )
+
+
+def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
+    """#203: even if a path is passed, the file must actually exist —
+    a non-existent path is treated as orchestrator failure, not as a
+    cue to fabricate a stand-in.
+    """
+    import pytest
+
+    trace = tmp_path / "trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    args = _make_write_reports_args(trace)
+
+    with pytest.raises(RuntimeError, match="did not produce analysis.md"):
+        tla.write_reports(
+            tmp_path / "run",
+            trace_input_type="file",
+            trace_files=[trace],
+            candidates=[],
+            args=args,
+            existing_report_path=tmp_path / "does-not-exist" / "analysis.md",
+        )
+
+
+def test_write_reports_does_not_create_filename_aliases(tmp_path):
+    """#203: ``analysis.md`` is the single contracted exit. The legacy
+    ``standalone_analysis.md`` / ``tracelens_report.md`` aliases were
+    removed because they wrote byte-identical copies of the same file
+    under different names. This test pins that hygiene fix.
+    """
+    trace = tmp_path / "trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    run_dir = tmp_path / "run"
+    tracelens_dir = run_dir / "tracelens"
+    tracelens_dir.mkdir(parents=True, exist_ok=True)
+    analysis_md = tracelens_dir / "analysis.md"
+    analysis_md.write_text("# TraceLens upstream report\n", encoding="utf-8")
+    args = _make_write_reports_args(trace)
+
+    artifacts = tla.write_reports(
+        run_dir,
+        trace_input_type="file",
+        trace_files=[trace],
+        candidates=[],
+        args=args,
+        existing_report_path=analysis_md,
+    )
+
+    # The returned trace_report_path must point at the upstream file,
+    # not at a Hyperloom-owned copy.
+    assert artifacts["trace_report_path"] == str(analysis_md)
+    # And the legacy aliases must NOT exist on disk.
+    assert not (tracelens_dir / "standalone_analysis.md").exists()
+    assert not (tracelens_dir / "tracelens_report.md").exists()
+
+
+def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
+    """#203: Hyperloom must not rewrite the upstream report's contents.
+    Verifying byte-identity here prevents a future refactor from
+    sneaking a re-render in.
+    """
+    trace = tmp_path / "trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    run_dir = tmp_path / "run"
+    tracelens_dir = run_dir / "tracelens"
+    tracelens_dir.mkdir(parents=True, exist_ok=True)
+    analysis_md = tracelens_dir / "analysis.md"
+    upstream_body = "# TraceLens upstream report\n\n## Detailed Analysis\n"
+    analysis_md.write_text(upstream_body, encoding="utf-8")
+    args = _make_write_reports_args(trace)
+
+    tla.write_reports(
+        run_dir,
+        trace_input_type="file",
+        trace_files=[trace],
+        candidates=[],
+        args=args,
+        existing_report_path=analysis_md,
+    )
+
+    assert analysis_md.read_text(encoding="utf-8") == upstream_body
 
 
 # ===========================================================================
@@ -862,7 +992,9 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
         captured["prompt"] = prompt
         captured["options"] = options.kwargs
         output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "standalone_analysis.md").write_text("# report\n", encoding="utf-8")
+        # TraceLens v0.3 contract: orchestrator writes ``analysis.md``.
+        # The legacy ``standalone_analysis.md`` fallback was dropped in #203.
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
         (output_dir / "priority_data.json").write_text(
             _json.dumps({"findings": [], "priorities": []}),
             encoding="utf-8",
@@ -1311,3 +1443,39 @@ def test_derive_kernel_category_falls_back_to_name_heuristic():
     assert tla.derive_kernel_category({"name": "fmha_fwd_kernel"}) == "SDPA"
     assert tla.derive_kernel_category({"name": "rmsnorm_fused"}) == "LayerNorm"
     assert tla.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
+
+
+# ===========================================================================
+# _default_workspace_path — USER_DATA_PATH rollout for TraceLens (#203)
+#
+# Locks the fallback chain so a regression that flips precedence (e.g.
+# putting WORKSPACE_PATH first) would fail loudly. GEAK / OOB / install.sh
+# intentionally still default to $WORKSPACE_PATH; only TraceLens migrated
+# in this PR.
+# ===========================================================================
+def test_default_workspace_path_prefers_user_data_path(monkeypatch):
+    """USER_DATA_PATH wins over both WORKSPACE_PATH and the hard-coded default."""
+    monkeypatch.setenv("USER_DATA_PATH", "/some/user/data")
+    monkeypatch.setenv("WORKSPACE_PATH", "/some/legacy/workspace")
+    assert tla._default_workspace_path() == "/some/user/data"
+
+
+def test_default_workspace_path_falls_back_to_workspace_path(monkeypatch):
+    """When USER_DATA_PATH is unset, WORKSPACE_PATH is honoured (backwards compat)."""
+    monkeypatch.delenv("USER_DATA_PATH", raising=False)
+    monkeypatch.setenv("WORKSPACE_PATH", "/legacy/workspace")
+    assert tla._default_workspace_path() == "/legacy/workspace"
+
+
+def test_default_workspace_path_final_fallback_to_hyperloom_default(monkeypatch):
+    """No envs set → hard-coded default matches inference_optimizer/paths.DEFAULT_SESSION_DIR."""
+    monkeypatch.delenv("USER_DATA_PATH", raising=False)
+    monkeypatch.delenv("WORKSPACE_PATH", raising=False)
+    assert tla._default_workspace_path() == "/workspace/hyperloom"
+
+
+def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch):
+    """An empty USER_DATA_PATH must not shadow a real WORKSPACE_PATH; ``or`` semantics."""
+    monkeypatch.setenv("USER_DATA_PATH", "")
+    monkeypatch.setenv("WORKSPACE_PATH", "/legacy/workspace")
+    assert tla._default_workspace_path() == "/legacy/workspace"

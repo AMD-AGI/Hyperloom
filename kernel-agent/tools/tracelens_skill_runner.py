@@ -281,14 +281,14 @@ async def run_tracelens_skill(
             log(f"[claude-sdk] WARNING: {sdk_error}")
 
     # TraceLens v0.3 ships the final report as ``analysis.md`` per
-    # ``TraceLens/Agent/Analysis/utils/templates/analysis_template.md``. Older
-    # branches (v0.2) used ``standalone_analysis.md`` — accept either so the
-    # runner stays portable across release switches.
+    # ``TraceLens/Agent/Analysis/utils/templates/analysis_template.md``.
+    # We deliberately do NOT accept the v0.2 ``standalone_analysis.md``
+    # fallback any longer: in #203 that fallback was found to silently
+    # paper over SDK-orchestrator failures by picking up a stale
+    # Hyperloom-fabricated bullet list from a prior run. The v0.3 layout
+    # has been the contract since #148, so any miss here is a real
+    # upstream failure that should surface to the operator.
     report_path = output_dir / "analysis.md"
-    if not report_path.exists():
-        legacy_report = output_dir / "standalone_analysis.md"
-        if legacy_report.exists():
-            report_path = legacy_report
     priority_data_path = output_dir / "priority_data.json"
     if not report_path.exists():
         if sdk_error:
