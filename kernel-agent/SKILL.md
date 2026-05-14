@@ -137,13 +137,18 @@ Inputs:
 Run:
 
 ```bash
-python $WORKSPACE_PATH/kernel-agent/tools/tracelens_analysis.py \
+python ${USER_DATA_PATH:-${WORKSPACE_PATH:-/workspace/hyperloom}}/kernel-agent/tools/tracelens_analysis.py \
   --trace-input "$TRACE_INPUT" \
   --session-id "$SESSION_ID" \
   --model-name "$MODEL_NAME" \
   --framework "$FRAMEWORK" \
   --top-k "${TOP_K:-10}"
 ```
+
+`--workspace-path` defaults to `${USER_DATA_PATH:-${WORKSPACE_PATH:-/workspace/hyperloom}}`
+so TraceLens artifacts land alongside the other Hyperloom session data
+(`storage/`, `runs/`, `agents/`, ...) under `$USER_DATA_PATH`. Override
+explicitly with `--workspace-path` if needed.
 
 The tool must return `hot_kernels`, `trace_report_path`, `cli_log_path`, and
 `status_path`.
@@ -237,7 +242,7 @@ TraceLens CLI output, or artifacts written by subagents.
 The final report is the TraceLens v0.3 SDK orchestrator's `analysis.md`,
 written by the upstream skill to:
 
-`$WORKSPACE_PATH/kernel-agent/runs/<session_id>/tracelens/analysis.md`
+`${USER_DATA_PATH:-${WORKSPACE_PATH:-/workspace/hyperloom}}/kernel-agent/runs/<session_id>/tracelens/analysis.md`
 
 Hyperloom does not alias, copy, or wrap this file (#203 removed the
 legacy `standalone_analysis.md` / `tracelens_report.md` copies and the

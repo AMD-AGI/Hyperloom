@@ -1443,3 +1443,39 @@ def test_derive_kernel_category_falls_back_to_name_heuristic():
     assert tla.derive_kernel_category({"name": "fmha_fwd_kernel"}) == "SDPA"
     assert tla.derive_kernel_category({"name": "rmsnorm_fused"}) == "LayerNorm"
     assert tla.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
+
+
+# ===========================================================================
+# _default_workspace_path — USER_DATA_PATH rollout for TraceLens (#203)
+#
+# Locks the fallback chain so a regression that flips precedence (e.g.
+# putting WORKSPACE_PATH first) would fail loudly. GEAK / OOB / install.sh
+# intentionally still default to $WORKSPACE_PATH; only TraceLens migrated
+# in this PR.
+# ===========================================================================
+def test_default_workspace_path_prefers_user_data_path(monkeypatch):
+    """USER_DATA_PATH wins over both WORKSPACE_PATH and the hard-coded default."""
+    monkeypatch.setenv("USER_DATA_PATH", "/some/user/data")
+    monkeypatch.setenv("WORKSPACE_PATH", "/some/legacy/workspace")
+    assert tla._default_workspace_path() == "/some/user/data"
+
+
+def test_default_workspace_path_falls_back_to_workspace_path(monkeypatch):
+    """When USER_DATA_PATH is unset, WORKSPACE_PATH is honoured (backwards compat)."""
+    monkeypatch.delenv("USER_DATA_PATH", raising=False)
+    monkeypatch.setenv("WORKSPACE_PATH", "/legacy/workspace")
+    assert tla._default_workspace_path() == "/legacy/workspace"
+
+
+def test_default_workspace_path_final_fallback_to_hyperloom_default(monkeypatch):
+    """No envs set → hard-coded default matches inference_optimizer/paths.DEFAULT_SESSION_DIR."""
+    monkeypatch.delenv("USER_DATA_PATH", raising=False)
+    monkeypatch.delenv("WORKSPACE_PATH", raising=False)
+    assert tla._default_workspace_path() == "/workspace/hyperloom"
+
+
+def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch):
+    """An empty USER_DATA_PATH must not shadow a real WORKSPACE_PATH; ``or`` semantics."""
+    monkeypatch.setenv("USER_DATA_PATH", "")
+    monkeypatch.setenv("WORKSPACE_PATH", "/legacy/workspace")
+    assert tla._default_workspace_path() == "/legacy/workspace"

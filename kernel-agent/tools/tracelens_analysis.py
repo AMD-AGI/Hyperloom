@@ -1745,6 +1745,42 @@ def write_reports(
     }
 
 
+def _default_workspace_path() -> str:
+    """Resolve the default workspace root for ``--workspace-path``.
+
+    Fallback order (highest precedence first):
+
+    1. ``$USER_DATA_PATH`` — the main session-dir env introduced in
+       ``b0f977c`` and unified by ``e56a0e5`` / ``1e46c14``. This is
+       the user-facing root that ``inference_optimizer/paths.py``
+       reads for every other Hyperloom artifact (orchestrator state,
+       agents, runs, kernel-agent-workspace). Picking it up here keeps
+       TraceLens artifacts co-located with the rest of the session.
+    2. ``$WORKSPACE_PATH`` — the legacy kernel-agent env (default
+       ``/workspace``). Kept as a second-tier fallback so existing
+       launchers / CI / parallel_e2e_runner that already export it
+       continue to work without changes.
+    3. ``/workspace/hyperloom`` — the same hard-coded default as
+       ``inference_optimizer/paths.py::DEFAULT_SESSION_DIR``, so a
+       bare-image run without either env variable lands in the same
+       place the orchestrator does.
+
+    Note: GEAK / OOB tooling (``kernel_optimization.py``, the auth
+    proxy, ray_runtime, install.sh) still defaults to the legacy
+    ``$WORKSPACE_PATH`` (``/workspace``) until that side of the
+    rollout is taken on. RPC-invoked TraceLens (via
+    ``kernel_request_handlers.py``) and explicitly-parameterised
+    callers (``parallel_e2e_runner.py``, the unit tests in
+    ``test_tracelens_csv.py``) are unaffected — they pass
+    ``--workspace-path`` explicitly.
+    """
+    return (
+        os.environ.get("USER_DATA_PATH")
+        or os.environ.get("WORKSPACE_PATH")
+        or "/workspace/hyperloom"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Kernel Agent TraceLens analysis tool")
     parser.add_argument("--trace-input", required=True)
@@ -1755,7 +1791,7 @@ def main() -> int:
     parser.add_argument("--target-platform", default="MI355X")
     parser.add_argument("--analysis-mode", default="default")
     parser.add_argument("--runtime-env", default="local")
-    parser.add_argument("--workspace-path", default=os.environ.get("WORKSPACE_PATH", "/workspace"))
+    parser.add_argument("--workspace-path", default=_default_workspace_path())
     parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
     parser.add_argument("--roofline-json", default="")
     parser.add_argument(
