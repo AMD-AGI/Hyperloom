@@ -138,6 +138,8 @@ Reference `inference_optimizer/SKILL.md` in Cursor chat and describe the workloa
 
 **Minimal launch:**
 
+Example prompt:
+
 ```text
 @$REPO_ROOT/inference_optimizer/SKILL.md
 
@@ -149,6 +151,8 @@ Optimize this model:
 ```
 
 **Typical long-running launch:**
+
+Example prompt:
 
 ```text
 @$REPO_ROOT/inference_optimizer/SKILL.md
@@ -179,10 +183,20 @@ Requirements:
 
 **Resume an existing session:**
 
+Example prompt:
+
 ```text
 @$REPO_ROOT/inference_optimizer/SKILL.md
 
-Resume the previous optimization session.
+Resume the existing Hyperloom optimization session.
+
+Requirements:
+1. Use the existing session directory: /workspace/hyperloom.
+2. Launch `inference_optimizer optimize --resume`; do not start a new session.
+3. Do not pass `--model`; read the model and workload from the saved manifest/state.
+4. Before launching, verify `manifest.json` and `state.json` exist.
+5. Report the log path, PID, initial health check result, current phase, cumulative gain, and best config.
+6. Monitor the process every 300s until the optimization is complete or failed.
 ```
 
 The agent automatically:
