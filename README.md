@@ -88,7 +88,7 @@ Prepare Hyperloom and its dependency source trees on the GPU node, then set the 
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `CURSOR_API_KEY` | Cursor SDK key for the OOB cursor backend; independent issuer (Cursor account, prefix `crsr_...`). When unset, Hyperloom auto-skips cursor from default backend selection and only races claude/codex/geak. | `crsr_xxxxxxxxxxxx` |
-| `CURSOR_DEFAULT_MODEL` | Override the default Cursor model id. | `composer-2` (default) |
+| `CURSOR_DEFAULT_MODEL` | Override the default Cursor model id. | `claude-opus-4-7-thinking-xhigh` (default) |
 
 **Path configuration:**
 

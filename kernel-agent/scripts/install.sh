@@ -88,7 +88,7 @@ OOB_BASE_URL_VAL="${OOB_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}}"
 # Leave empty if the operator has not provisioned a Cursor key — the cursor
 # backend will surface the missing key clearly at run time.
 CURSOR_API_KEY_VAL="${CURSOR_API_KEY:-}"
-CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-composer-2}"
+CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh}"
 
 # Install everything by default. The previous lazy `--with-geak / --with-oob`
 # scheme caused recurring "OOB proxy not running, request errored, found
