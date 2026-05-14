@@ -241,8 +241,9 @@ written by the upstream skill to:
 
 Hyperloom does not alias, copy, or wrap this file (#203 removed the
 legacy `standalone_analysis.md` / `tracelens_report.md` copies and the
-`--compat-report-path` argument). Downstream consumers read the canonical
-upstream path returned in `analysis_report_path` from
+`--compat-report-path` argument; the `${USER_DATA_PATH:-/workspace/hyperloom}/`
+compatibility output is gone with them). Downstream consumers read the
+canonical upstream path returned in `analysis_report_path` from
 `select_kernels_handler`.
 
 ## Backend Selection
