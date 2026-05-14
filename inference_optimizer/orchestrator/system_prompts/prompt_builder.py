@@ -13,7 +13,7 @@ Replaces the previous hand-maintained pair ``orchestration.md`` /
     3. PIPELINE & TIME BUDGET            (phase ordering + per-phase ETA)
     4. ACTIONS YOU MAY USE               (filtered by enabled_actions)
     5. DECISION FRAMEWORK                (always — short, generic)
-    6. KERNEL-OPT PIPELINE               (only when "kernel_opt" is enabled)
+    6. KERNEL-OPT REQUEST REFERENCE      (only when "kernel_opt" is enabled)
     7. RULES FRAGMENT                    (orchestration.md verbatim)
 
 Output is deterministic given the same inputs (sorted action listing,
@@ -43,7 +43,7 @@ from ..action_registry import (
 # ---------------------------------------------------------------------------
 FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
-    "setup", "classify", "target_analysis", "baseline",
+    "target_analysis", "baseline",
     # analysis
     "profile", "pmc_roofline", "deep_kernel_analysis",
     # explore
@@ -54,21 +54,25 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "validate_stack",
     # finalize
     "report",
-    # support
-    "dream", "re_explore", "recover", "comm_optimization", "compiler_tuning",
+    # support phase intentionally removed — comm_optimization /
+    # compiler_tuning / dream / re_explore / recover are all _noop_prep
+    # (cli._NOOP_KINDS_COMMON) and not in the Critic's default approve
+    # whitelist; surfacing them only produced silent "succeeded" spins
+    # and rejected proposals. Re-add when real executors land (see
+    # remain_todo.md sections C, I, M).
 )
 
 NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
-    "setup", "classify", "target_analysis", "baseline",
+    "target_analysis", "baseline",
     # explore (no profile — it only feeds kernel-opt)
     "backends", "params", "sweep",
     # validate (still useful — bench the stacked backends/params)
     "validate_stack",
     # finalize
     "report",
-    # support (omit recover — server lifecycle is Robustness in this profile)
-    "dream", "re_explore",
+    # support phase (dream / re_explore) removed for the same reason
+    # as FULL_ENABLED_ACTIONS.
 )
 
 # Actions that the Kernel agent owns end-to-end (Plan A). Orchestration MUST
@@ -239,7 +243,7 @@ def _format_gain_pair(meta: ActionMetadata) -> str:
 def _format_emit_hint(meta: ActionMetadata) -> str:
     if meta.name in KERNEL_OWNED_ACTIONS:
         if meta.name == "kernel_opt":
-            kind_hint = "select_kernels  -> run_optimization"
+            kind_hint = "run_optimization"
         elif meta.name == "integrate":
             kind_hint = "integrate"
         else:
@@ -381,6 +385,63 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "emit `send_message{topic='heartbeat', body_md='blocked: <reason>'}` and let",
         "Robustness escalate. NEVER stay silent.",
         "",
+        "### FAILURE RECOVERY (apply BEFORE re-proposing an action that just failed)",
+        "",
+        "When the inbox carries a fresh `delegated_result{state!='succeeded'}`",
+        "or `last_action_failures[-1].action == <X>`, do NOT re-propose the same",
+        "action with the same params. Coordinator stamps an audit trail on every",
+        "attempt; consult these three SharedState surfaces in order:",
+        "",
+        "1. **`last_<action>`** (snapshot of the latest attempt) and",
+        "   **`<action>_attempts`** (capped per-action history, newest last).",
+        "   Each entry carries `status` / `decision` / `error_class` /",
+        "   `error_excerpt` / `workspace` / `raw_result_path` /",
+        "   `extras.fingerprint`. The fingerprint is the canonical hash of",
+        "   the eight params fields that determine baseline behavior:",
+        "   `benchmark_script` / `result_dir` / `extra_sglang_args` /",
+        "   `extra_envs` / `model_path` / `gpu_type` / `config_path` /",
+        "   `disable_run_eval`.",
+        "2. **`last_action_failures`** (global rolling log capped at the last",
+        "   10 unpromotable results across ALL kinds, including kernel-owned).",
+        "   Use this when the per-action history doesn't carry the kind you",
+        "   need (e.g. `integrate` failure visible here but `<action>_attempts`",
+        "   only covers the six explore/validate kinds).",
+        "3. **`baseline_failure_streak`** (consecutive failed baselines).",
+        "   Once this hits 3, Coordinator sets `stop_reason='baseline_failed'`",
+        "   and the run terminates; you must recover BEFORE the third failure.",
+        "",
+        "Three decision rules apply in order:",
+        "",
+        "* **RULE F1 — same fingerprint, twice failed → change at least one knob.**",
+        "  If the last two `<action>_attempts` entries share an `extras.fingerprint`",
+        "  with the proposal you're about to emit, PolicyGate WILL deny it with",
+        "  `rule='baseline_self_loop'`. Bump at least one of: `params.benchmark_script`",
+        "  (a sanitized `*.sh` file name — Magpie's `dsr1_fp8_mi300x.sh` hardcodes",
+        "  `--result-dir /workspace/`, but `sglang_mi300x.sh` respects",
+        "  `$RESULT_DIR`), `params.result_dir`, `params.extra_sglang_args`, or",
+        "  `params.extra_envs`.",
+        "* **RULE F2 — `error_class='no_report'` + no `rescued_from_leaked_path:*`",
+        "  warning ⇒ leak salvage missed.** The script wrote results outside the",
+        "  workspace and outside the configured leak destinations. Override",
+        "  `params.benchmark_script` to a script that respects `$RESULT_DIR`",
+        "  (Coordinator already exports `RESULT_DIR=<workspace>` by default), or",
+        "  set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` via `update_state` so the next",
+        "  attempt salvages the leak.",
+        "* **RULE F3 — `error_class='subprocess_nonzero'` with same fingerprint",
+        "  ⇒ stop retrying.** Heartbeat with `body_md='blocked: subprocess",
+        "  repeatedly nonzero <action>'` and let Robustness intervene. Do NOT",
+        "  switch action families just to dodge the failure; Robustness'",
+        "  escalation policy needs the heartbeat to fire its RCA.",
+        "",
+        "Example (baseline failed twice with `error_class='no_report'`):",
+        "",
+        "    propose_action{action_name='baseline',",
+        "        params={benchmark_script: 'sglang_mi300x.sh',",
+        "                result_dir: '<session_dir>/runs/baseline/<task>/leak'},",
+        "        predicted_gain_pct: 0,",
+        "        notes: 'recover from no_report streak — sglang_mi300x.sh honors",
+        "                $RESULT_DIR; the default model script hardcodes /workspace/'}",
+        "",
         "### IDEA GENERATION (T2 / marathon IR-26 — apply after EVERY explore round)",
         "",
         "When a `backends` / `params` / `sweep` round completes, use",
@@ -389,6 +450,16 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "Walk through these stages in order; push each new idea via",
         "`params.grid` (and optionally `params.synergy_groups` /",
         "`params.synergy_mode='auto'`) on the next `delegate`:",
+        "",
+        "**Variant identity is content-based.** The executor hashes",
+        "`(sorted(extra_sglang_args tokens), sorted(extra_envs pairs))` and",
+        "indexes `SharedState.{backends_search,params_search}.tested` by that",
+        "fingerprint. Renaming an already-tested variant (e.g. `attn_aiter`",
+        "→ `attn_aiter_v2`) does NOT bypass dedup — your grid entry will be",
+        "dropped before launch. To re-test, change the actual `extra_sglang_args`",
+        "or `extra_envs`. Both `backends_search` and `params_search` are the",
+        "authoritative dedup ledgers and filter BOTH default grids and",
+        "LLM-supplied `params.grid` uniformly.",
         "",
         "1. **Sub-actions** — sibling flags. If `--max-num-seqs 256` won, also",
         "   try `--max-num-seqs 128` / `512` / `1024`; if `VLLM_ROCM_USE_AITER=1`",
@@ -414,46 +485,75 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
 
 
 _KERNEL_OPT_PIPELINE_BODY: str = """\
-## 6. KERNEL-OPT PIPELINE (sequential, no backtracking)
+## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)
 
-Step **K1** (skip when cached). Emit:
-    request{target_agent: 'kernel', kind: 'select_kernels',
-            params: {trace_input: <verbatim last_profile_trace>, top_k: 10}}
+The three kernel-owned actions (`select_kernels`, `kernel_opt`,
+`integrate`) are scored on the `Action scores` board like every other
+action. Pick them by `eff_score` per the DECISION FRAMEWORK; the blocks
+below are only **payload templates** describing how to build the REQUEST
+once you have selected the action. The Coordinator hard-gates the
+obvious prerequisites (TODO 3/4 fires after a `kernel_opt` KEEP forces
+`integrate`); `select_kernels` itself is enforced only at the REQUEST
+layer for `run_optimization`, and explore actions like `params` /
+`backends` / `sweep` are NEVER gated on it. Everything else flows
+through the scoreboard.
+
+### `select_kernels` — payload (Coordinator gates `run_optimization` until cache is fresh)
+
+  request{target_agent: 'kernel', kind: 'select_kernels',
+          params: {trace_input: <verbatim last_profile_trace>, top_k: 10}}
 
   STRICT: if `last_select_kernels.trace_input` already equals
-  `last_profile_trace`, the candidate list is cached — skip K1 and go to K2
-  using `last_select_kernels.candidates_path` and the kernel_id list under
-  `last_select_kernels.top5`. Re-emit `select_kernels` ONLY after a fresh
-  `profile` action.
+  `last_profile_trace`, the candidate list is cached — do NOT re-emit.
+  `select_kernels` must precede every `run_optimization` request — the
+  Coordinator denies kernel_opt requests with `select_kernels must run
+  first` when the cache is stale, but `params` / `backends` / `sweep` /
+  `report` are NEVER gated on it. Re-emit only after a fresh `profile`
+  action invalidates the cache.
 
-Step **K2**. Pick the next reusable native kernel from
-`last_select_kernels.reusable_native_kernel_ids`, in order, skipping any
-kernel_id already present in `last_kernel_opt.kernel_id`. HARD RULES:
-  - kernel_id MUST appear in `reusable_native_kernel_ids`. Never pick from
-    raw `hot_kernels_top15` if the entry is missing — top hot kernels are
-    often Tensile / CK / vendor binaries and will be rejected with
-    `non_reusable_kernel`.
-  - If `reusable_native_kernel_ids` is empty, do NOT keep emitting
-    run_optimization. Heartbeat instead and consider re-profiling.
-Then emit:
-    request{target_agent: 'kernel', kind: 'run_optimization',
-            params: {kernel_id: <picked kernel_id>,
-                     source_file: <hot_kernels[i].source_file>,
-                     candidates_path: <select_kernels_done.candidates_path>,
-                     backends: 'claude',
-                     budget_minutes: 60}}
+### `kernel_opt` — payload for `run_optimization`
 
-Step **K3**. When `run_optimization_done` arrives, look at
-`result.proposal.decision`:
-  - **KEEP**     -> emit request{kind: 'integrate', params: {kernel_id, patch_path,
-                                target_file, base_tput, extra_sglang_args, config_path}}
-  - **PARTIAL/REVERT** -> don't integrate; pick the NEXT hot kernel (skip
-                          kernels with kernel_id == last_kernel_opt.kernel_id)
-                          and re-issue step K2 with that one.
+When the scoreboard surfaces `kernel_opt`, pick the next reusable
+native kernel from `last_select_kernels.reusable_native_kernel_ids`,
+in order, skipping any kernel_id already present in
+`last_kernel_opt.kernel_id`.
 
-After every successful `integrate` (KEEP), the Coordinator records a new
-entry on `optimization_stack`. The next decision framework tick will trigger
-the validate_stack TODO; obey it before resuming kernel-opt rounds.
+HARD RULES (applied at REQUEST build time, NOT at action-selection time):
+  - kernel_id MUST appear in `reusable_native_kernel_ids`. Never pick
+    from raw `hot_kernels_top15` if the entry is missing — top hot
+    kernels are often Tensile / CK / vendor binaries and will be
+    rejected with `non_reusable_kernel`.
+  - If `reusable_native_kernel_ids` is empty, do NOT propose
+    `kernel_opt` (its `applicable_when` is implicitly violated).
+    Heartbeat instead and consider re-profiling.
+
+  request{target_agent: 'kernel', kind: 'run_optimization',
+          params: {kernel_id: <picked kernel_id>,
+                   source_file: <hot_kernels[i].source_file>,
+                   candidates_path: <select_kernels_done.candidates_path>,
+                   backends: 'claude',
+                   budget_minutes: 60}}
+
+### `integrate` — payload (TODO 3/4 forces this immediately after a KEEP)
+
+When `run_optimization_done` arrives with `result.proposal.decision='KEEP'`,
+the Coordinator's TODO 3/4 makes `integrate` the only allowed action
+until the patch lands on `optimization_stack`. Payload:
+
+  request{target_agent: 'kernel', kind: 'integrate',
+          params: {kernel_id, patch_path, target_file, base_tput,
+                   extra_sglang_args, config_path}}
+
+If `result.proposal.decision` is `PARTIAL` or `REVERT`, the patch is
+rejected — do NOT integrate. The Coordinator unlocks immediately; consult
+the scoreboard for the next action like normal. A second `kernel_opt`
+round on the next reusable kernel_id often surfaces as top-1 (because
+the previous KEEP/REVERT decayed only that kernel_id's branch), but is
+not required — the scoreboard decides.
+
+After every successful `integrate` (KEEP), the Coordinator records a
+new entry on `optimization_stack` and the TODO 4/4 `validate_stack`
+gate fires; obey it before resuming any explore / deep round.
 
 ### KERNEL TARGETING (native vs torch.compile)
 
