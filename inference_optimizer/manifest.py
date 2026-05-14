@@ -14,23 +14,30 @@ Why this lives in its own module:
 Schema v1::
 
     {
-      "schema_version": 1,
-      "session_id":     "<UTC_YYYYMMDDTHHMMSSZ>_<uuid8>",
-      "created_at_utc": "...",
-      "model_path":     "...",
-      "model_name":     "...",
-      "framework":      "sglang|vllm",
-      "gpu_type":       "mi300x|mi325x|mi355x|''",
-      "tp":             N or null,
-      "workload":       {"isl":..., "osl":..., "max_model_len":...,
-                         "precision":..., "conc":...},
-      "objective":      {"kind":"gain_pct|tput|baseline|time_only",
-                         "value":...},
-      "max_minutes":    N,
-      "code_revision":  "<git sha or empty>",
-      "pid":            N,
-      "host":           "..."
+      "schema_version":    1,
+      "session_id":        "<UTC_YYYYMMDDTHHMMSSZ>_<uuid8>",
+      "claw_session_id":   "<uuid>" or null,   # Primus-Claw session UUID
+      "sandbox_user_id":   "<str>"  or null,   # Primus-Claw sandbox user
+      "created_at_utc":    "...",
+      "model_path":        "...",
+      "model_name":        "...",
+      "framework":         "sglang|vllm",
+      "gpu_type":          "mi300x|mi325x|mi355x|''",
+      "tp":                N or null,
+      "workload":          {"isl":..., "osl":..., "max_model_len":...,
+                            "precision":..., "conc":...},
+      "objective":         {"kind":"gain_pct|tput|baseline|time_only",
+                            "value":...},
+      "max_minutes":       N,
+      "code_revision":     "<git sha or empty>",
+      "pid":               N,
+      "host":              "..."
     }
+
+``claw_session_id`` / ``sandbox_user_id`` are read from the
+``CLAW_SESSION_ID`` / ``SANDBOX_USER_ID`` env vars (set by the
+Primus-Claw spawn path); they are ``null`` when Hyperloom runs standalone
+outside the claw sandbox.
 """
 
 from __future__ import annotations
@@ -125,22 +132,26 @@ def build_manifest(
             workload["osl"] = int(args.osl)
         if getattr(args, "precision", None):
             workload["precision"] = str(args.precision)
+    claw_session_id = (os.environ.get("CLAW_SESSION_ID") or "").strip() or None
+    sandbox_user_id = (os.environ.get("SANDBOX_USER_ID") or "").strip() or None
     return {
-        "schema_version": SCHEMA_VERSION,
-        "session_id":     session_id or build_session_id(model_name),
-        "created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "session_dir":    str(session_dir),
-        "model_path":     model_path,
-        "model_name":     model_name,
-        "framework":      framework or "sglang",
-        "gpu_type":       gpu_type,
-        "tp":             tp,
-        "workload":       workload,
-        "objective":      _objective_summary(args) if args is not None else {"kind": "time_only", "value": None},
-        "max_minutes":    int((getattr(args, "max_hours", 0) or 0) * 60) if args is not None else 0,
-        "code_revision":  _git_revision(),
-        "pid":            os.getpid(),
-        "host":           platform.node() or socket.gethostname() or "",
+        "schema_version":  SCHEMA_VERSION,
+        "session_id":      session_id or build_session_id(model_name),
+        "claw_session_id": claw_session_id,
+        "sandbox_user_id": sandbox_user_id,
+        "created_at_utc":  datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "session_dir":     str(session_dir),
+        "model_path":      model_path,
+        "model_name":      model_name,
+        "framework":       framework or "sglang",
+        "gpu_type":        gpu_type,
+        "tp":              tp,
+        "workload":        workload,
+        "objective":       _objective_summary(args) if args is not None else {"kind": "time_only", "value": None},
+        "max_minutes":     int((getattr(args, "max_hours", 0) or 0) * 60) if args is not None else 0,
+        "code_revision":   _git_revision(),
+        "pid":             os.getpid(),
+        "host":            platform.node() or socket.gethostname() or "",
     }
 
 
