@@ -1426,13 +1426,17 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
         return []
     if source_type == "runtime_generated":
         return []
+    # Cursor backend needs CURSOR_API_KEY (separate Cursor gateway); skip from
+    # recommendations when the operator has not provisioned a key so we don't
+    # advertise a backend the run will spend time 401-ing on.
+    cursor_tail = ["cursor"] if os.environ.get("CURSOR_API_KEY", "").strip() else []
     if source_type == "hip_cpp":
-        return ["geak", "claude", "codex"]
+        return ["geak", "claude", "codex"] + cursor_tail
     if source_type == "triton":
-        return ["geak", "claude", "codex"]
+        return ["geak", "claude", "codex"] + cursor_tail
     if source_type == "python":
-        return ["claude", "codex"]
-    return ["claude", "codex"]
+        return ["claude", "codex"] + cursor_tail
+    return ["claude", "codex"] + cursor_tail
 
 
 def build_notes(candidate: dict[str, Any]) -> str:

@@ -200,7 +200,7 @@ def test_compile_generated_kernel_is_not_reusable_native():
     assert "not reusable" in tla.build_notes(candidate)
 
 
-def test_stable_framework_triton_source_is_reusable_native():
+def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
     candidate = {
         "name": "triton_attention_decode_kernel",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/triton_ops.py",
@@ -214,7 +214,12 @@ def test_stable_framework_triton_source_is_reusable_native():
         candidate["name"], candidate["source_file"],
     ) is False
     assert tla.is_reusable_native_kernel(candidate) is True
+    # Without CURSOR_API_KEY: recommendation excludes cursor (auto-skip).
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
     assert tla.recommend_backends(candidate) == ["geak", "claude", "codex"]
+    # With CURSOR_API_KEY: cursor is appended to the recommendation tail.
+    monkeypatch.setenv("CURSOR_API_KEY", "crsr_test_dummy")
+    assert tla.recommend_backends(candidate) == ["geak", "claude", "codex", "cursor"]
 
 
 def test_unknown_source_root_is_not_reusable_native():

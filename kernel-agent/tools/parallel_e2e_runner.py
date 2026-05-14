@@ -364,9 +364,14 @@ def main() -> int:
                              "consistently SIGTERMs the select_patch round "
                              "(observed r38/r39).")
     parser.add_argument("--replicas-per-backend", type=int, default=2)
-    parser.add_argument("--backends", default="geak,claude,codex",
-                        help="Comma list of agentic backends. Note: 'llm' single-shot "
-                             "backend was removed (max_tokens=2048 truncated >4KB kernels).")
+    parser.add_argument("--backends", default=None,
+                        help="Comma list of agentic backends. Defaults to "
+                             "'geak,claude,codex,cursor' when CURSOR_API_KEY is set, "
+                             "otherwise 'geak,claude,codex' (cursor auto-skipped). "
+                             "Pass an explicit value to force-include any backend "
+                             "(missing keys will surface as 401 attempts). Note: "
+                             "'llm' single-shot backend was removed (max_tokens=2048 "
+                             "truncated >4KB kernels).")
     parser.add_argument("--oob-max-turns", type=int, default=100)
     parser.add_argument("--geak-cost-limit", type=float, default=None)
     parser.add_argument("--num-gpus-override", type=int, default=0,
@@ -388,6 +393,17 @@ def main() -> int:
                         help="Reuse a previous run's kernel_candidates.json "
                              "instead of re-running the trace analysis.")
     args = parser.parse_args()
+
+    # Auto-derive --backends when caller did not pass one. Cursor needs
+    # CURSOR_API_KEY (separate Cursor gateway, not the AMD LiteLLM gateway);
+    # skip it from the default set when no key is provisioned to avoid
+    # spending replica slots on guaranteed 401s. Explicit --backends always
+    # wins (failure surfaces in the attempt log).
+    if args.backends is None:
+        if os.environ.get("CURSOR_API_KEY", "").strip():
+            args.backends = "geak,claude,codex,cursor"
+        else:
+            args.backends = "geak,claude,codex"
 
     workspace = Path(args.workspace_path)
     run_dir = workspace / "kernel-agent" / "runs" / args.session_id
@@ -494,7 +510,8 @@ def main() -> int:
         # calls torch.cuda.set_device(rank>=1) inside torchrun fails with
         # "HIP error: invalid device ordinal" (observed in r20/r22). Drop
         # GEAK from the backend list when per_task_gpus >= 2; let claude /
-        # codex handle multi-GPU collectives via standalone HIP / torchrun.
+        # codex / cursor handle multi-GPU collectives via standalone HIP /
+        # torchrun.
         # Set ALLOW_GEAK_MULTIGPU=1 to bypass this guard (e.g. when verifying
         # whether an upstream GEAK fix has lifted the limitation).
         backends_dropped: list[str] = []

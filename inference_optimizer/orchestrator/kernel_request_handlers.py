@@ -84,7 +84,7 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/vllm/",
 )
 _APPLY_TOOL_MODULE: Any | None = None
-_DEFAULT_KERNEL_BACKEND_ORDER = ("claude", "codex", "geak")
+_DEFAULT_KERNEL_BACKEND_ORDER = ("claude", "codex", "cursor", "geak")
 _DEFAULT_KERNEL_BATCH_PARALLEL = 3
 
 
@@ -487,7 +487,7 @@ async def run_optimization_handler(
     When candidate metadata is available, this handler upgrades legacy
     single-kernel requests into a batch over all reusable native kernels. Each
     kernel is optimized concurrently, while backends are tried sequentially per
-    kernel in the preferred order: Claude first, then Codex, then GEAK.
+    kernel in the preferred order: Claude → Codex → Cursor → GEAK.
     """
     if payload.get("_single_kernel"):
         return await _run_optimization_single(payload, session_dir=session_dir)
@@ -505,13 +505,22 @@ def _backend_order(payload: dict) -> list[str]:
     raw = payload.get("backend_order") or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
     if raw:
         order = [item.strip() for item in str(raw).split(",") if item.strip()]
+        explicit = True
     else:
         # Ignore legacy payload["backends"] here. Older Orchestration prompts
         # often send backends="claude"; batch scheduling must still exercise
         # the full fallback ladder.
         order = list(_DEFAULT_KERNEL_BACKEND_ORDER)
-    allowed = {"claude", "codex", "geak"}
-    return [backend for backend in order if backend in allowed]
+        explicit = False
+    allowed = {"claude", "codex", "cursor", "geak"}
+    selected = [backend for backend in order if backend in allowed]
+    # When the operator has not provisioned CURSOR_API_KEY, drop cursor from
+    # the auto-derived ladder so we don't waste a fallback slot on a 401.
+    # Explicit `payload["backend_order"]` / KERNEL_OPT_BACKEND_ORDER still
+    # wins (respect intent; failure surfaces clearly in the attempt log).
+    if not explicit and not os.environ.get("CURSOR_API_KEY", "").strip():
+        selected = [b for b in selected if b != "cursor"]
+    return selected
 
 
 def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
@@ -642,7 +651,7 @@ async def _run_optimization_single(
         kernel_id: str
 
     Optional payload:
-        backends:        comma-separated 'geak,claude,codex' (auto-pick if empty)
+        backends:        comma-separated 'geak,claude,codex,cursor' (auto-pick if empty)
         budget_minutes:  default 60
         source_file:     path to original kernel source (for context)
         candidates_path: path to JSON describing candidates (optional)

@@ -3,7 +3,7 @@
 #
 # Base install is intentionally small and deterministic:
 #   - ray[default]==2.44.1 + click<8.3.0
-#   - Node.js/npm for claude/codex CLIs
+#   - Node.js/npm for claude/codex CLIs and @cursor/sdk
 #   - TraceLens editable install + CLI verification
 #
 # The installer prepares all kernel-agent backends in one pass.
@@ -34,17 +34,19 @@ TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-intern
 # is missing from env, source $REPO_ROOT/.env (defaults to $(pwd)) but
 # protect any keys already set in env from being overwritten by .env.
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ]; then
+if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR_API_KEY:-}" ]; then
   if [ -f "$REPO_ROOT/.env" ]; then
     _snap_safe="${SAFE_API_KEY-}"
     _snap_url="${OPENAI_BASE_URL-}"
+    _snap_cursor="${CURSOR_API_KEY-}"
     set -a
     # shellcheck disable=SC1091
     . "$REPO_ROOT/.env"
     set +a
     [ -n "$_snap_safe" ] && export SAFE_API_KEY="$_snap_safe"
     [ -n "$_snap_url" ]  && export OPENAI_BASE_URL="$_snap_url"
-    unset _snap_safe _snap_url
+    [ -n "$_snap_cursor" ] && export CURSOR_API_KEY="$_snap_cursor"
+    unset _snap_safe _snap_url _snap_cursor
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
@@ -81,6 +83,12 @@ case "${GEAK_MODEL_NAME_VAL}" in
 esac
 OOB_API_KEY_VAL="${OOB_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}}}}"
 OOB_BASE_URL_VAL="${OOB_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}}"
+# Cursor SDK key. Independent issuer (Cursor account, prefix `crsr_...`); never
+# inherit from SAFE_API_KEY / OOB_API_KEY because those address the AMD gateway.
+# Leave empty if the operator has not provisioned a Cursor key — the cursor
+# backend will surface the missing key clearly at run time.
+CURSOR_API_KEY_VAL="${CURSOR_API_KEY:-}"
+CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-composer-2}"
 
 # Install everything by default. The previous lazy `--with-geak / --with-oob`
 # scheme caused recurring "OOB proxy not running, request errored, found
@@ -161,7 +169,7 @@ ensure_python() {
 }
 
 ensure_node() {
-  log "ensuring Node.js/npm for claude/codex CLIs"
+  log "ensuring Node.js/npm for claude/codex CLIs and @cursor/sdk"
   if command -v node >/dev/null 2>&1 && npm --version >/dev/null 2>&1; then
     log "node: $(command -v node) ($(node --version 2>/dev/null || echo unknown))"
     log "npm: $(command -v npm) ($(npm --version 2>/dev/null || echo unknown))"
@@ -425,6 +433,15 @@ ensure_oob() {
     run npm config set prefix /usr/local
     run npm install -g @openai/codex@0.100.0
   fi
+  # @cursor/sdk is a Node library (not a CLI), used by OOB's cursor backend
+  # via `node -e "import '@cursor/sdk'"`. We always install it globally so
+  # the OOB cursor path works without per-pod npm setup. Use `require.resolve`
+  # against the global root to avoid a redundant install when present.
+  if ! NODE_PATH="$(npm root -g 2>/dev/null || true)" \
+       node -e "require.resolve('@cursor/sdk')" >/dev/null 2>&1; then
+    run npm config set prefix /usr/local
+    run npm install -g @cursor/sdk
+  fi
 
   ensure_llm_auth_files
 }
@@ -547,6 +564,11 @@ write_env_file() {
       echo "export LLM_GATEWAY_KEY='${OOB_API_KEY_VAL}'"
     }
     [ -n "${OOB_BASE_URL_VAL}" ] && echo "export OOB_BASE_URL='${OOB_BASE_URL_VAL}'"
+    # Cursor backend env. Only export CURSOR_API_KEY if the operator already
+    # provided one via env or .env; do not synthesise from SAFE_API_KEY (the
+    # Cursor account is a separate issuer).
+    [ -n "${CURSOR_API_KEY_VAL}" ] && echo "export CURSOR_API_KEY='${CURSOR_API_KEY_VAL}'"
+    [ -n "${CURSOR_DEFAULT_MODEL_VAL}" ] && echo "export CURSOR_DEFAULT_MODEL='${CURSOR_DEFAULT_MODEL_VAL}'"
     # Pin TRACELENS_ROOT to the (possibly mirrored) value resolved by
     # ensure_tracelens(). This is what lets setsid nohup inference_optimizer
     # optimize → kernel-agent/tools/tracelens_analysis.py inherit the writable
@@ -592,6 +614,18 @@ PY
       warn "${tool} not found"
     fi
   done
+  # @cursor/sdk is a library, not a CLI; verify via require.resolve.
+  if NODE_PATH="$(npm root -g 2>/dev/null || true)" \
+     node -e "require.resolve('@cursor/sdk')" >/dev/null 2>&1; then
+    log "found @cursor/sdk in $(npm root -g 2>/dev/null || echo '?')"
+  else
+    warn "@cursor/sdk not installed (cursor backend will fail to start)"
+  fi
+  if [ -n "$CURSOR_API_KEY_VAL" ]; then
+    log "CURSOR_API_KEY: set"
+  else
+    warn "CURSOR_API_KEY not set; cursor backend will 401 if invoked"
+  fi
   if [ -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
     log "GEAK ref: $(git -C "${HYPERLOOM_ROOT}/geak" describe --tags --always 2>/dev/null || echo unknown)"
   else
