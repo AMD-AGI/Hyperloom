@@ -611,9 +611,32 @@ async def test_backends_skips_already_tested_when_capped(tmp_path, monkeypatch):
         session_dir=tmp_path,
     )
 
+    # ``tested_variant_names`` was replaced by the ``backends_search``
+    # ledger in Phase 2. Seed it with the first five variants' content
+    # fingerprints so the executor's filter drops them before launch.
+    from inference_optimizer.orchestrator.action_executors._grid_runner import (
+        variant_fingerprint,
+    )
+    tested = {}
+    name_index = {}
+    for i in range(5):
+        fp = variant_fingerprint(f"--flag-{i}", {})
+        tested[fp] = {
+            "name": f"v{i}", "extra_sglang_args": f"--flag-{i}",
+            "extra_envs": {},
+        }
+        name_index[f"v{i}"] = fp
+
     class _Task:
         params = {
-            "tested_variant_names": ["v0", "v1", "v2", "v3", "v4"],
+            "backends_search": {
+                "schema_version": 1,
+                "accepted": [],
+                "rejected": [],
+                "tested": tested,
+                "name_index": name_index,
+                "cursor": 5,
+            },
             "disable_discovery": True,
         }
         task_id = "t-tested"

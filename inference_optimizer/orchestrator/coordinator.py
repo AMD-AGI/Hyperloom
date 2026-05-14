@@ -705,6 +705,13 @@ class Coordinator:
             return False
         if not self._params_grid_exhausted():
             return False
+        # Phase 4 of the dedup-by-fingerprint plan: backends has parity
+        # with params here. Don't switch off explore until BOTH ledgers
+        # have run out of fresh fingerprints — otherwise a brief params
+        # plateau prematurely shuts down the (still productive)
+        # backends search.
+        if not self._backends_grid_exhausted():
+            return False
         return self._all_reusable_kernels_rejected()
 
     def _params_grid_exhausted(self) -> bool:
@@ -722,6 +729,39 @@ class Coordinator:
         rejected_count = len(search.get("rejected") or [])
         if grid_size <= 0:
             return bool(search.get("params_search_exhausted"))
+        return (
+            tested_count >= grid_size
+            or cursor >= grid_size
+            or rejected_count >= grid_size
+        )
+
+    def _backends_grid_exhausted(self) -> bool:
+        """Backends-side parity of :meth:`_params_grid_exhausted`.
+
+        Returns True when ``backends_search.tested`` has covered the
+        default seed grid (either by count or by the executor's own
+        ``backends_search_exhausted`` flag from the last round). An
+        unseeded ledger returns False — Orch hasn't run backends yet,
+        so it isn't "exhausted", it's simply unexplored.
+        """
+        search = self.shared_state.backends_search or {}
+        if not isinstance(search, dict) or not search:
+            return False
+        # The executor stamps this on its last round when no fresh
+        # fingerprint survived dedup — trust it when present.
+        if search.get("backends_search_exhausted"):
+            return True
+        try:
+            from .action_executors.backends import DEFAULT_BACKENDS_GRID
+            grid_size = len(DEFAULT_BACKENDS_GRID)
+        except Exception:  # noqa: BLE001
+            grid_size = 0
+        tested = search.get("tested") or {}
+        tested_count = len(tested) if isinstance(tested, dict) else 0
+        cursor = int(search.get("cursor") or 0)
+        rejected_count = len(search.get("rejected") or [])
+        if grid_size <= 0:
+            return False
         return (
             tested_count >= grid_size
             or cursor >= grid_size
@@ -1298,8 +1338,11 @@ class Coordinator:
             # T2 — pass the cumulative synergy_attempted set so backends
             # phase-2 doesn't re-test the same combo across rounds, and
             # cap each round at 5 phase-1 variants (parity with `params`).
-            # We also feed prior-round phase-1 variant names so each new
-            # round deepens the search instead of replaying the first 5.
+            # The ``backends_search`` ledger (Phase 2 of the dedup-by-
+            # fingerprint plan) covers everything ``tested_variant_names``
+            # used to provide and more: it records ALL tested variants
+            # (not just winners), and is consulted for both the default
+            # grid and LLM-supplied ``params.grid``.
             if pending.action_name == "backends":
                 params.setdefault(
                     "synergy_attempted",
@@ -1307,22 +1350,9 @@ class Coordinator:
                 )
                 params.setdefault("max_candidates_per_round", 5)
                 params.setdefault("max_synergy_combos", 4)
-                # Flatten every variant name observed in past
-                # backend_winners_history rounds; the executor uses this
-                # to skip already-tested entries when cap > 0.
-                tested_names: list[str] = []
-                for round_entry in self.shared_state.backend_winners_history:
-                    if not isinstance(round_entry, dict):
-                        continue
-                    if round_entry.get("action") != "backends":
-                        continue
-                    for w in round_entry.get("winners") or []:
-                        if isinstance(w, dict) and w.get("name"):
-                            tested_names.append(str(w["name"]))
-                if tested_names:
-                    params.setdefault(
-                        "tested_variant_names", tested_names,
-                    )
+                params.setdefault(
+                    "backends_search", self.shared_state.backends_search,
+                )
             if pending.action_name == "params":
                 params.setdefault("params_search", self.shared_state.params_search)
                 # Long runs should advance the search incrementally while
@@ -1389,7 +1419,9 @@ class Coordinator:
                 "config_path", self.shared_state.baseline_config_path
             )
         # T2 — same synergy-dedup + per-round cap plumbing as the
-        # proposal-review path.
+        # proposal-review path. Dedup against previously-tested variants
+        # rides on the shared ``backends_search`` ledger (Phase 2 of the
+        # dedup-by-fingerprint plan).
         if action_name == "backends":
             params.setdefault(
                 "synergy_attempted",
@@ -1397,19 +1429,9 @@ class Coordinator:
             )
             params.setdefault("max_candidates_per_round", 5)
             params.setdefault("max_synergy_combos", 4)
-            tested_names: list[str] = []
-            for round_entry in self.shared_state.backend_winners_history:
-                if not isinstance(round_entry, dict):
-                    continue
-                if round_entry.get("action") != "backends":
-                    continue
-                for w in round_entry.get("winners") or []:
-                    if isinstance(w, dict) and w.get("name"):
-                        tested_names.append(str(w["name"]))
-            if tested_names:
-                params.setdefault(
-                    "tested_variant_names", tested_names,
-                )
+            params.setdefault(
+                "backends_search", self.shared_state.backends_search,
+            )
         idempotency_key = intent.payload.get("idempotency_key") or f"{source}:{action_name}:{len(self.state.pending_proposals)}"
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=action_name,
@@ -2264,6 +2286,20 @@ class Coordinator:
                     ),
                 }
         elif task_kind in ("backends", "params", "sweep"):
+            # backends/params content-fingerprint ledgers (Phase 4 of the
+            # dedup-by-fingerprint plan). Persist BEFORE the promotion
+            # logic below so a winner appended to ``accepted`` further
+            # down sees the latest ``tested`` / ``rejected`` already in
+            # place. ``apply_*_search_update`` preserves the existing
+            # ``accepted`` list (the executor never writes it) so the
+            # Coordinator remains the sole writer for promotion history.
+            if task_kind == "backends" and isinstance(
+                result.get("backends_search_update"), dict
+            ):
+                self.shared_state.apply_backends_search_update(
+                    result["backends_search_update"],
+                )
+                changed = True
             # T1/T2 — persist discovered_flags + synergy_attempted +
             # winners_history so the next Orchestration tick (and IR-26
             # idea-generation prompt section) sees the full search-space
@@ -2381,6 +2417,11 @@ class Coordinator:
                     variant_name=bv.get("name"),
                     tput=best_tput,
                     gain_pct=gain_vs_cb,
+                    extra_sglang_args=str(
+                        bv.get("candidate_extra_sglang_args")
+                        or bv.get("extra_sglang_args") or ""
+                    ),
+                    extra_envs=dict(bv.get("extra_envs") or {}),
                 )
             promoted = False
             if gain_vs_cb is not None and gain_vs_cb >= PROMOTE_THRESHOLD_PCT:
@@ -2445,6 +2486,19 @@ class Coordinator:
                     promoted = True
             if promoted:
                 self.shared_state.params_no_promote_streak = 0
+                # Phase 4 of the dedup-by-fingerprint plan: Coordinator
+                # is the sole writer to ``backends_search.accepted``. On
+                # a backends promote, stamp the winner so the next round
+                # filter treats this variant as accepted, not rejected.
+                if task_kind == "backends" and isinstance(bv, dict) and bv:
+                    promote_entry = dict(bv)
+                    promote_entry.setdefault(
+                        "gain_pct",
+                        float(gain_vs_cb) if isinstance(
+                            gain_vs_cb, (int, float)
+                        ) else None,
+                    )
+                    self.shared_state.record_backends_accepted(promote_entry)
                 changed = True
             else:
                 # Plateau detection: count consecutive grid runs that
