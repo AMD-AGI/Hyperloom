@@ -219,6 +219,20 @@ class SharedState:
     # Persistent params DFS state. ParamsExecutor owns the search mechanics,
     # Coordinator is still the only writer to state.json.
     params_search: dict[str, Any] = field(default_factory=dict)
+    # Persistent backends DFS state — same schema as ``params_search``
+    # (``schema_version`` / ``accepted`` / ``rejected`` / ``tested`` /
+    # ``name_index`` / ``cursor`` / ``last_round``). Owned by
+    # BackendsExecutor; Coordinator merges via
+    # :meth:`apply_backends_search_update` after each round and appends to
+    # ``accepted`` on promote (see :meth:`record_backends_accepted`).
+    #
+    # ``tested`` is keyed by **content fingerprint** (see
+    # :func:`variant_fingerprint`) so two variants with identical
+    # ``extra_sglang_args`` + ``extra_envs`` under different names collapse
+    # to the same row. ``name_index`` is a name → fingerprint map used by
+    # the executor's pre-filter to also reject explicit renames that the
+    # LLM might submit in a fresh ``params.grid``.
+    backends_search: dict[str, Any] = field(default_factory=dict)
     # E2E integrate bookkeeping keyed by kernel_id + patch_path + args. This
     # prevents Orchestration from spending hours re-validating the same patch
     # after repeated NEEDS_REVIEW/REVERT outcomes.
@@ -301,7 +315,113 @@ class SharedState:
                 }
             else:
                 filtered["action_scores"] = {}
+        # Phase 7 of the dedup-by-fingerprint plan: migrate any v1
+        # ``params_search`` ledger (where ``tested`` was keyed by display
+        # name) to schema v2 (keyed by content fingerprint). Backends has
+        # no pre-fingerprint persisted data so it only needs default-key
+        # normalization. We do this here — at the load boundary — so the
+        # executor and Coordinator paths can assume the v2 schema and
+        # never need a fallback branch.
+        filtered["params_search"] = cls._migrate_search_ledger(
+            filtered.get("params_search"), schema_target=2,
+        )
+        filtered["backends_search"] = cls._migrate_search_ledger(
+            filtered.get("backends_search"), schema_target=1,
+        )
         return cls(**filtered)
+
+    @staticmethod
+    def _migrate_search_ledger(
+        ledger: Any, *, schema_target: int,
+    ) -> dict[str, Any]:
+        """Normalize an *_search ledger to the fingerprint-keyed schema.
+
+        Idempotent: already-migrated ledgers are returned with only the
+        defensive defaults filled in. A legacy v1 ledger whose ``tested``
+        is keyed by variant name gets re-keyed by content fingerprint
+        re-computed from the stored ``extra_sglang_args`` / ``extra_envs``;
+        the original name is preserved inside each entry and surfaced
+        through ``name_index`` so display lookups remain stable.
+        """
+        if not isinstance(ledger, dict) or not ledger:
+            return {}
+        from .action_executors._grid_runner import variant_fingerprint
+        out: dict[str, Any] = dict(ledger)
+        out.setdefault("schema_version", schema_target)
+        out.setdefault("accepted", [])
+        out.setdefault("rejected", [])
+        out.setdefault("tested", {})
+        out.setdefault("name_index", {})
+        out.setdefault("cursor", 0)
+        tested = out.get("tested") or {}
+        if not isinstance(tested, dict):
+            tested = {}
+        # A fingerprint key is a 16-char lowercase hex string; anything
+        # else is treated as a legacy display-name key.
+        def _looks_like_fingerprint(key: str) -> bool:
+            return (
+                isinstance(key, str)
+                and len(key) == 16
+                and all(c in "0123456789abcdef" for c in key)
+            )
+        migrated: dict[str, Any] = {}
+        name_index = dict(out.get("name_index") or {})
+        for key, entry in tested.items():
+            if not isinstance(entry, dict):
+                continue
+            if _looks_like_fingerprint(str(key)):
+                # Already fingerprint-keyed; just ensure name_index is in
+                # sync so display-name lookups also work on resume.
+                fp = str(key)
+                entry.setdefault("fingerprint", fp)
+                migrated[fp] = entry
+                nm = entry.get("name")
+                if nm:
+                    name_index[str(nm)] = fp
+                continue
+            # Legacy: key was a display name. Re-derive fingerprint from
+            # stored args/envs. Older entries nested the executor's
+            # full ``result`` dict under ``result``; check both.
+            nested = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+            args = str(
+                entry.get("extra_sglang_args")
+                or nested.get("extra_sglang_args") or ""
+            )
+            envs = dict(
+                entry.get("extra_envs")
+                or nested.get("extra_envs") or {}
+            )
+            fp = variant_fingerprint(args, envs)
+            new_entry = dict(entry)
+            new_entry.setdefault("name", str(key))
+            new_entry.setdefault("extra_sglang_args", args)
+            new_entry.setdefault("extra_envs", envs)
+            new_entry["fingerprint"] = fp
+            migrated[fp] = new_entry
+            name_index[str(key)] = fp
+        out["tested"] = migrated
+        out["name_index"] = name_index
+        # Stamp fingerprints onto accepted/rejected too, so the executor's
+        # fast-path dedup sets fill cleanly on the first resume round.
+        for bucket in ("accepted", "rejected"):
+            rebuilt: list[dict[str, Any]] = []
+            for v in out.get(bucket) or []:
+                if not isinstance(v, dict):
+                    continue
+                v = dict(v)
+                if not v.get("fingerprint"):
+                    v["fingerprint"] = variant_fingerprint(
+                        str(v.get("extra_sglang_args") or ""),
+                        dict(v.get("extra_envs") or {}),
+                    )
+                rebuilt.append(v)
+                if v.get("name") and v.get("fingerprint"):
+                    name_index[str(v["name"])] = str(v["fingerprint"])
+            out[bucket] = rebuilt
+        out["name_index"] = name_index
+        # Bump the schema marker so callers can short-circuit re-migration.
+        out["schema_version"] = max(int(out.get("schema_version") or 0), schema_target)
+        return out
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -852,17 +972,39 @@ class SharedState:
             "workspace": result.get("workspace", ""),
         }
 
-    def push_params_winner(self, *, action: str, variant_name: str,
-                           tput: float, gain_pct: float, max_history: int = 10) -> None:
-        """Append one round's winner to the rolling history buffer."""
+    def push_params_winner(
+        self,
+        *,
+        action: str,
+        variant_name: str,
+        tput: float,
+        gain_pct: float,
+        extra_sglang_args: str | None = None,
+        extra_envs: dict[str, Any] | None = None,
+        max_history: int = 10,
+    ) -> None:
+        """Append one round's winner to the rolling history buffer.
+
+        ``extra_sglang_args`` + ``extra_envs`` (when provided) are folded
+        into the row as ``fingerprint`` so the cross-round
+        :meth:`consistent_winner` detector and the IR-26 idea generator
+        see content identity, not just the display name. Old callers
+        passing only ``variant_name`` still work (fingerprint = empty).
+        """
+        from .action_executors._grid_runner import variant_fingerprint
+        fp = (
+            variant_fingerprint(extra_sglang_args, extra_envs)
+            if (extra_sglang_args is not None or extra_envs is not None)
+            else ""
+        )
         self.params_winner_history.append({
             "action": action,
             "variant_name": variant_name,
             "tput": float(tput) if tput is not None else 0.0,
             "gain_pct": float(gain_pct) if gain_pct is not None else 0.0,
+            "fingerprint": fp,
             "ts": _now_iso(),
         })
-        # Trim oldest entries if we're past max_history.
         if len(self.params_winner_history) > max_history:
             self.params_winner_history = self.params_winner_history[-max_history:]
 
@@ -895,6 +1037,78 @@ class SharedState:
         if not isinstance(update, dict):
             return
         self.params_search = dict(update)
+
+    def apply_backends_search_update(self, update: dict[str, Any]) -> None:
+        """Merge a BackendsExecutor search update into persistent state.
+
+        Mirror of :meth:`apply_params_search_update`. Coordinator calls
+        this once per backends round from
+        :meth:`Coordinator._promote_to_shared_state`. ``accepted`` writes
+        are NOT performed here — the executor only reports
+        ``tested`` / ``rejected`` / ``last_round`` increments;
+        :meth:`record_backends_accepted` is the single writer for
+        ``accepted`` (called by Coordinator on promote).
+        """
+        if not isinstance(update, dict):
+            return
+        # Preserve any ``accepted`` we already promoted: the executor's
+        # update only touches tested/rejected/last_round; overwriting
+        # ``accepted`` from a fresh round would lose history.
+        prior_accepted = list(
+            (self.backends_search or {}).get("accepted") or []
+        )
+        merged = dict(update)
+        if "accepted" not in update or not update.get("accepted"):
+            merged["accepted"] = prior_accepted
+        self.backends_search = merged
+
+    def record_backends_accepted(self, variant: dict[str, Any]) -> None:
+        """Append one promoted variant to ``backends_search.accepted``.
+
+        Called by Coordinator after a backends winner is lifted to
+        ``current_best``. Dedupes by ``fingerprint`` (computed on the fly
+        if absent) so repeated promotes of the same content don't bloat
+        the list. Also removes a matching entry from ``rejected`` so a
+        previously-rejected variant that later won doesn't appear in
+        both buckets.
+        """
+        if not isinstance(variant, dict) or not variant:
+            return
+        from .action_executors._grid_runner import variant_fingerprint
+        args = str(
+            variant.get("candidate_extra_sglang_args")
+            or variant.get("extra_sglang_args") or ""
+        )
+        envs = dict(variant.get("extra_envs") or {})
+        fp = str(variant.get("fingerprint") or variant_fingerprint(args, envs))
+        entry = {
+            "name": str(variant.get("name") or ""),
+            "extra_sglang_args": args,
+            "extra_envs": envs,
+            "note": str(variant.get("note") or ""),
+            "fingerprint": fp,
+            "tput": variant.get("output_throughput") or variant.get("tput"),
+            "gain_pct": variant.get("gain_pct"),
+        }
+        search = dict(self.backends_search or {})
+        search.setdefault("schema_version", 1)
+        accepted = list(search.get("accepted") or [])
+        accepted = [
+            v for v in accepted
+            if not (isinstance(v, dict) and v.get("fingerprint") == fp)
+        ]
+        accepted.append(entry)
+        search["accepted"] = accepted
+        rejected = [
+            v for v in (search.get("rejected") or [])
+            if not (isinstance(v, dict) and v.get("fingerprint") == fp)
+        ]
+        search["rejected"] = rejected
+        name_index = dict(search.get("name_index") or {})
+        if entry["name"]:
+            name_index[entry["name"]] = fp
+        search["name_index"] = name_index
+        self.backends_search = search
 
     # ------------------------------------------------------------------
     # T1/T2 — search-space expansion bookkeeping
@@ -946,36 +1160,40 @@ class SharedState:
         equivalent: orchestrator pane's per-tick "follow-on actions"
         synthesis (marathon/skills/SKILL.md §"Dynamic Idea Generation").
         """
+        from .action_executors._grid_runner import variant_fingerprint
         round_id = f"{action}-{len(self.backend_winners_history) + 1:03d}"
+
+        def _stamped(entry: dict[str, Any]) -> dict[str, Any]:
+            args = str(
+                entry.get("candidate_extra_sglang_args")
+                or entry.get("extra_sglang_args") or ""
+            )
+            envs = dict(entry.get("extra_envs") or {})
+            return {
+                "name": str(entry.get("name", "")),
+                "tput": entry.get("output_throughput") or entry.get("tput"),
+                "gain_pct": entry.get("gain_pct"),
+                "extra_sglang_args": args,
+                "extra_envs": envs,
+                "note": str(entry.get("note") or ""),
+                "fingerprint": (
+                    str(entry.get("fingerprint"))
+                    if entry.get("fingerprint")
+                    else variant_fingerprint(args, envs)
+                ),
+            }
+
         entry = {
             "action": str(action),
             "round_id": round_id,
             "base_tput": float(base_tput) if base_tput is not None else 0.0,
             "base_extra_args": str(base_extra_args or ""),
             "winners": [
-                {
-                    "name": str(w.get("name", "")),
-                    "tput": w.get("output_throughput") or w.get("tput"),
-                    "gain_pct": w.get("gain_pct"),
-                    "extra_sglang_args": str(
-                        w.get("candidate_extra_sglang_args")
-                        or w.get("extra_sglang_args") or ""
-                    ),
-                    "extra_envs": dict(w.get("extra_envs") or {}),
-                    "note": str(w.get("note") or ""),
-                }
-                for w in (winners or [])
-                if isinstance(w, dict)
+                _stamped(w) for w in (winners or []) if isinstance(w, dict)
             ],
             "best": (
                 {
-                    "name": str(best.get("name", "")),
-                    "tput": best.get("output_throughput") or best.get("tput"),
-                    "extra_sglang_args": str(
-                        best.get("candidate_extra_sglang_args")
-                        or best.get("extra_sglang_args") or ""
-                    ),
-                    "extra_envs": dict(best.get("extra_envs") or {}),
+                    **_stamped(best),
                 }
                 if isinstance(best, dict) else None
             ),
@@ -1237,6 +1455,7 @@ class SharedState:
             f"last_select_kernels={self._format_last_select_kernels()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"params_search={self._format_params_search()}",
+            f"backends_search={self._format_backends_search()}",
             f"discovered_flags={self._format_discovered_flags()}",
             f"backend_winners_history={self._format_backend_winners_history()}",
             f"synergy_attempted={len(self.synergy_attempted)} combos",
@@ -1384,12 +1603,20 @@ class SharedState:
         return " | ".join(parts) + suffix
 
     def _format_params_search(self) -> str:
-        if not self.params_search:
+        return self._format_search_state(self.params_search)
+
+    def _format_backends_search(self) -> str:
+        return self._format_search_state(self.backends_search)
+
+    @staticmethod
+    def _format_search_state(search: dict[str, Any] | None) -> str:
+        """Compact one-liner for a *_search dedup ledger (prompt-friendly)."""
+        if not search:
             return "(none)"
-        accepted = self.params_search.get("accepted") or []
-        rejected = self.params_search.get("rejected") or []
-        tested = self.params_search.get("tested") or {}
-        cursor = self.params_search.get("cursor", 0)
+        accepted = search.get("accepted") or []
+        rejected = search.get("rejected") or []
+        tested = search.get("tested") or {}
+        cursor = search.get("cursor", 0)
         acc_names = [
             str(v.get("name", "")) for v in accepted
             if isinstance(v, dict) and v.get("name")
