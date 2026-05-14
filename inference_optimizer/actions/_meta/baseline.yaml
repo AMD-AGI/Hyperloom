@@ -5,9 +5,7 @@ cost_minutes_p75: 10.0
 expected_gain_pct: [0.0, 0.0]
 accuracy_risk: 0.0
 crash_risk: 0.05
-prerequisites:
-  - setup
-  - classify
+prerequisites: []
 requires_lanes:
   - server_lifecycle
   - benchmark_lane
