@@ -5,8 +5,7 @@ cost_minutes_p75: 0.3
 expected_gain_pct: [0.0, 0.0]
 accuracy_risk: 0.0
 crash_risk: 0.0
-prerequisites:
-  - classify
+prerequisites: []
 requires_lanes: []
 allowed_tools:
   - emit_intent
