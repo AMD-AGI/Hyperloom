@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -33,6 +35,56 @@ from .benchmark_result import (
 
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Content-based variant fingerprint (cross-action dedup ledger key).
+#
+# Identity-by-name was too easy for an LLM-supplied grid to bypass: re-emitting
+# an already-tested ``--block-size 128`` under a freshly invented name silently
+# re-burned the wall clock. The fingerprint hashes the *content* that actually
+# changes Magpie behavior (server args + env overrides) so any rename ends up
+# at the same key in ``SharedState.{params_search,backends_search}.tested``.
+#
+# Normalization rules:
+#   * args: ``shlex.split`` → sorted token tuple. Sorting is intentionally
+#     aggressive — two flag strings differing only in token order produce the
+#     same fingerprint. Real "later wins" overrides should be expressed as a
+#     single flag with the final value, not a re-emit in a different order;
+#     this is documented in the Orchestration IR-26 prompt.
+#   * envs: ``(str(k), str(v))`` pairs sorted by key. ``str()`` matches the
+#     ``_baseline_params_fingerprint`` convention so ``"1"`` and ``1`` collide
+#     (Magpie ultimately sees the value as a shell-exported string anyway).
+#   * 16-char SHA-1 prefix: collision-resistant enough for a per-session dedup
+#     ledger while staying compact in ``state.json`` and prompt summaries.
+# ---------------------------------------------------------------------------
+def variant_fingerprint(
+    extra_sglang_args: str | None,
+    extra_envs: dict[str, Any] | None,
+) -> str:
+    """Stable content fingerprint for a (extra_sglang_args, extra_envs) pair.
+
+    See module-level rationale. Name and note are intentionally NOT part of
+    the input — two variants with identical content but different names
+    (e.g. ``A`` and ``A_v2``) must collapse to the same fingerprint.
+    """
+    args_text = str(extra_sglang_args or "")
+    try:
+        args_tokens = sorted(shlex.split(args_text))
+    except ValueError:
+        # Unbalanced quotes / shell-parse failure: fall back to a stable
+        # whitespace split so we still produce *some* fingerprint instead
+        # of crashing the grid pre-flight. Callers can still distinguish
+        # different bad strings; identical bad strings still collide.
+        args_tokens = sorted(args_text.split())
+    env_pairs = sorted(
+        (str(k), str(v)) for k, v in (extra_envs or {}).items()
+    )
+    payload = json.dumps(
+        [args_tokens, [list(p) for p in env_pairs]],
+        sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _resolve_magpie_python() -> str:
@@ -90,6 +142,11 @@ class GridVariant:
     extra_envs: dict[str, str] = field(default_factory=dict)
     note: str = ""                                # optional reason / category
 
+    @property
+    def fingerprint(self) -> str:
+        """Content fingerprint used as dedup-ledger key. See module doc."""
+        return variant_fingerprint(self.extra_sglang_args, self.extra_envs)
+
 
 @dataclass
 class VariantResult:
@@ -115,11 +172,17 @@ class VariantResult:
     error: str | None = None
     note: str = ""
 
+    @property
+    def fingerprint(self) -> str:
+        """Same fingerprint scheme as :class:`GridVariant`."""
+        return variant_fingerprint(self.extra_sglang_args, self.extra_envs)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "name":               self.name,
             "extra_sglang_args":  self.extra_sglang_args,
             "extra_envs":         self.extra_envs,
+            "fingerprint":        self.fingerprint,
             "status":             self.status,
             "output_throughput":  self.output_throughput,
             "request_throughput": self.request_throughput,
@@ -701,4 +764,5 @@ __all__ = [
     "sanitize_result_dir",
     "sanitize_script_name",
     "server_args_env_name",
+    "variant_fingerprint",
 ]

@@ -195,6 +195,14 @@ async def test_coordinator_stops_when_no_more_leverage(session_dir):
             "accepted": [],
             "rejected": [],
         }
+        # Phase 4 of the dedup-by-fingerprint plan: backends now has its
+        # own ledger and the no-leverage gate also requires it to be
+        # exhausted. Stamp the executor's exhaustion flag so this test
+        # reproduces the "everything explored" terminal state.
+        c.shared_state.backends_search = {
+            "backends_search_exhausted": True,
+            "tested": {},
+        }
         c.shared_state.last_select_kernels = {
             "reusable_native_kernel_ids": ["k003", "k006", "k007"],
         }
