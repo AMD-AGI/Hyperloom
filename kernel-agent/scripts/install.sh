@@ -48,12 +48,21 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ]; then
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
-GEAK_REPO="${GEAK_REPO:-https://github.com/luochen-amd/GEAK.git}"
-# TEMPORARY: while the GEAK embedding-endpoint PR is in review, point at the
-# fork branch that already carries the change. Once upstream merges and cuts a
-# new tag (>v3.1.0), revert GEAK_REPO back to AMD-AGI/GEAK and GEAK_REF to the
-# new tag. Keep both overridable via env so operators can pin at will.
-GEAK_REF="${GEAK_REF:-feature/luochen/embedding-endpoint}"
+GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
+# Pin GEAK to the first release that ships RAG MCP retrieval and cross-session
+# memory together. The embedding-endpoint patch is applied via the wekafs
+# overlay (see GEAK_OVERLAY_DIR_VAL below), so the install can stay on the
+# official tag while the upstream PR is in flight.
+GEAK_REF="${GEAK_REF:-v3.1.0}"
+# Hot fix overlay: a copy of the patched GEAK files lives on wekafs so we can
+# fix the slow CPU embedding build without changing GEAK_REPO/GEAK_REF or
+# waiting on the upstream PR. The overlay is rsynced over the fresh GEAK
+# checkout right after `git clone`. Leave the path empty to disable.
+GEAK_OVERLAY_DIR_VAL="${GEAK_OVERLAY_DIR:-/wekafs/hyperloom/geak-rag/geak-3.1.0-embedding-endpoint}"
+# Hot fix prebuilt RAG index snapshot on wekafs: when present this skips the
+# multi-hour build_index.py run and just copies the FAISS / BM25 artifacts
+# into ~/.cache/amd-ai-devtool/semantic-index/. Leave empty to disable.
+GEAK_RAG_INDEX_SNAPSHOT_VAL="${GEAK_RAG_INDEX_SNAPSHOT:-/wekafs/hyperloom/geak-rag/semantic-index-bge-large}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
@@ -325,6 +334,24 @@ ensure_tracelens() {
   fi
 }
 
+apply_geak_overlay() {
+  if [ -z "$GEAK_OVERLAY_DIR_VAL" ]; then
+    return
+  fi
+  if [ ! -d "$GEAK_OVERLAY_DIR_VAL" ] || [ -z "$(ls -A "$GEAK_OVERLAY_DIR_VAL" 2>/dev/null)" ]; then
+    log "GEAK overlay dir not present, skipping: $GEAK_OVERLAY_DIR_VAL"
+    return
+  fi
+  log "Applying GEAK overlay from $GEAK_OVERLAY_DIR_VAL onto ${HYPERLOOM_ROOT}/geak"
+  if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
+    return
+  fi
+  # cp -rT copies the contents of the overlay (not the dir itself) over the
+  # GEAK checkout, overwriting same-named files. Files unique to either side
+  # are preserved.
+  run cp -rT "$GEAK_OVERLAY_DIR_VAL" "${HYPERLOOM_ROOT}/geak"
+}
+
 ensure_geak() {
   log "ensuring GEAK backend"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
@@ -335,6 +362,7 @@ ensure_geak() {
   else
     log "GEAK checkout already present: ${HYPERLOOM_ROOT}/geak"
   fi
+  apply_geak_overlay
   if [ "$CHECK_ONLY" -eq 0 ]; then
     run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"
     run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"
@@ -387,6 +415,17 @@ EOF
 ensure_rag_index() {
   if [ -d "$RAG_INDEX_DIR" ] && [ -n "$(ls -A "$RAG_INDEX_DIR" 2>/dev/null)" ]; then
     log "RAG index already present at $RAG_INDEX_DIR"
+    return
+  fi
+  if [ -n "$GEAK_RAG_INDEX_SNAPSHOT_VAL" ] \
+      && [ -d "$GEAK_RAG_INDEX_SNAPSHOT_VAL" ] \
+      && [ -n "$(ls -A "$GEAK_RAG_INDEX_SNAPSHOT_VAL" 2>/dev/null)" ]; then
+    log "Using prebuilt RAG index snapshot from $GEAK_RAG_INDEX_SNAPSHOT_VAL"
+    if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+      return
+    fi
+    mkdir -p "$RAG_INDEX_DIR"
+    run cp -r "$GEAK_RAG_INDEX_SNAPSHOT_VAL/." "$RAG_INDEX_DIR/"
     return
   fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
@@ -633,6 +672,16 @@ PY
     log "GEAK embedding endpoint: configured (model=${GEAK_EMBEDDING_MODEL_VAL})"
   else
     warn "GEAK embedding endpoint: not configured -> local HuggingFace path"
+  fi
+  if [ -n "${GEAK_OVERLAY_DIR_VAL}" ] && [ -d "${GEAK_OVERLAY_DIR_VAL}" ]; then
+    log "GEAK overlay: present at ${GEAK_OVERLAY_DIR_VAL}"
+  else
+    log "GEAK overlay: not present (using upstream v3.1.0 as-is)"
+  fi
+  if [ -n "${GEAK_RAG_INDEX_SNAPSHOT_VAL}" ] && [ -d "${GEAK_RAG_INDEX_SNAPSHOT_VAL}" ]; then
+    log "RAG index snapshot: present at ${GEAK_RAG_INDEX_SNAPSHOT_VAL}"
+  else
+    log "RAG index snapshot: not present (will rebuild via build_index.py)"
   fi
   if grep -q "rag: true" "$GEAK_CONFIG" 2>/dev/null; then
     log "tools.rag enabled in $GEAK_CONFIG"
