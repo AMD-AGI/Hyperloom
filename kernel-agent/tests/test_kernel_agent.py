@@ -121,7 +121,13 @@ class KernelAgentToolTests(unittest.TestCase):
         ray_runtime_text = RAY_RUNTIME.read_text(encoding="utf-8")
 
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"', install_text)
-        self.assertIn('GEAK_REF="${GEAK_REF:-v3.1.0}"', install_text)
+        # TEMPORARY: tracking the upstream GEAK embedding-endpoint branch
+        # while the PR is in review. Revert this assertion (and the
+        # install.sh default) once GEAK upstream merges and cuts a new tag.
+        self.assertIn(
+            'GEAK_REF="${GEAK_REF:-feature/luochen/embedding-endpoint}"',
+            install_text,
+        )
         self.assertIn(
             'GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"',
             install_text,

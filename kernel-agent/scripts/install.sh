@@ -49,11 +49,13 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ]; then
   fi
 fi
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
-# Pin GEAK to the first release that ships RAG MCP retrieval and cross-session
-# memory together. The embedding-endpoint patch is applied via the wekafs
-# overlay (see GEAK_OVERLAY_DIR_VAL below), so the install can stay on the
-# official tag while the upstream PR is in flight.
-GEAK_REF="${GEAK_REF:-v3.1.0}"
+# TEMPORARY: while the embedding-endpoint PR is in review, pull GEAK from the
+# upstream branch that already carries the fix (built on top of v3.1.0). Once
+# the upstream PR lands and a new tag is cut, revert GEAK_REF back to the
+# new tag (e.g. v3.2.0). Keep this overridable via env so operators can pin
+# at will. The wekafs overlay below remains as a belt-and-suspenders safety
+# net for environments where the upstream branch is unreachable.
+GEAK_REF="${GEAK_REF:-feature/luochen/embedding-endpoint}"
 # Hot fix overlay: a copy of the patched GEAK files lives on wekafs so we can
 # fix the slow CPU embedding build without changing GEAK_REPO/GEAK_REF or
 # waiting on the upstream PR. The overlay is rsynced over the fresh GEAK
