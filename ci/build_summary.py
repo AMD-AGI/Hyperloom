@@ -111,6 +111,7 @@ def collect_rows(
             "framework": metrics.get("framework") or detected.get("framework"),
             "precision": detected.get("precision"),
             "tp": metrics.get("tp") or detected.get("tp"),
+            "params_b": detected.get("params_b"),
             "gpu_type": metrics.get("gpu_type"),
             "baseline_tok_per_gpu": (
                 metrics.get("tok_per_gpu_baseline")
