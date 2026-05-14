@@ -101,7 +101,7 @@ async def _run(ticks: int, model: str | None) -> int:
     # lets the orchestration loop progress to baseline quickly.
     async def _noop_prep(ctx) -> dict:
         return {"status": "succeeded", "kind": ctx.task.kind, "note": "no-op stub for smoke demo"}
-    for kind in ("setup", "classify", "target_analysis", "report"):
+    for kind in ("target_analysis", "report"):
         coordinator.sub.register_executor(kind, _noop_prep)
 
     # Override orchestration system prompt for the smoke demo: model_class +
