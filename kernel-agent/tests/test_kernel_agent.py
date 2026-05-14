@@ -121,7 +121,17 @@ class KernelAgentToolTests(unittest.TestCase):
         ray_runtime_text = RAY_RUNTIME.read_text(encoding="utf-8")
 
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"', install_text)
-        self.assertIn('GEAK_REF="${GEAK_REF:-v3.1.0}"', install_text)
+        # TEMPORARY: tracking GEAK fork branch while the embedding-endpoint
+        # change is in review. Revert this assertion (and the install.sh
+        # defaults) once the GEAK upstream PR lands and a new tag is cut.
+        self.assertIn(
+            'GEAK_REF="${GEAK_REF:-feature/luochen/embedding-endpoint}"',
+            install_text,
+        )
+        self.assertIn(
+            'GEAK_REPO="${GEAK_REPO:-https://github.com/luochen-amd/GEAK.git}"',
+            install_text,
+        )
         self.assertIn('python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"', install_text)
         self.assertIn('python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"', install_text)
         self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cpu}"', install_text)

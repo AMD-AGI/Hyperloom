@@ -48,11 +48,12 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ]; then
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
-GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
-# Pin GEAK to the first release that ships RAG MCP retrieval and cross-session
-# memory together. Keep this overridable so future GEAK fixes can move Hyperloom
-# forward without reworking the installer contract.
-GEAK_REF="${GEAK_REF:-v3.1.0}"
+GEAK_REPO="${GEAK_REPO:-https://github.com/luochen-amd/GEAK.git}"
+# TEMPORARY: while the GEAK embedding-endpoint PR is in review, point at the
+# fork branch that already carries the change. Once upstream merges and cuts a
+# new tag (>v3.1.0), revert GEAK_REPO back to AMD-AGI/GEAK and GEAK_REF to the
+# new tag. Keep both overridable via env so operators can pin at will.
+GEAK_REF="${GEAK_REF:-feature/luochen/embedding-endpoint}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
