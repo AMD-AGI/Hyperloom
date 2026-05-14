@@ -144,8 +144,11 @@ def test_materialize_config_injects_model_with_other_overrides(tmp_path):
 
 
 # ===========================================================================
-# Regression: gpu_type injection sets runner_type AND removes the legacy
-# `benchmark_script` field so Magpie's runner_type -> script logic wins.
+# Regression: gpu_type injection sets runner_type AND force-pins the generic
+# `{framework}_{gpu_type}.sh` so Magpie's resolver hits priority 1 (explicit
+# user override) and never falls through to the InferenceX native script
+# (which hardcodes `--result-dir /workspace/`). See
+# `design/magpie-generic-script-and-user-data-path.md` §3.
 # ===========================================================================
 def test_materialize_config_injects_runner_type(tmp_path):
     """gpu_type kwarg must land in benchmark.runner_type as-is."""
@@ -160,10 +163,12 @@ def test_materialize_config_injects_runner_type(tmp_path):
     assert rendered["benchmark"]["runner_type"] == "mi355x"
 
 
-def test_materialize_config_pops_legacy_benchmark_script(tmp_path):
-    """If the source YAML still hardcodes a benchmark_script (priority 1
-    in Magpie's resolver), gpu_type must remove it; otherwise runner_type
-    is silently ignored and the run uses the wrong GPU's script."""
+def test_materialize_config_forces_generic_benchmark_script(tmp_path):
+    """When `gpu_type` is supplied, `benchmark.benchmark_script` MUST be
+    pinned to the generic `{framework}_{gpu_type}.sh` so Magpie's
+    resolver hits priority 1 (explicit override) and never silently
+    falls through to the InferenceX native script (e.g.
+    `dsr1_fp8_mi300x.sh`) which hardcodes `--result-dir /workspace/`."""
     import yaml
     src_yaml = tmp_path / "src.yaml"
     src_yaml.write_text(yaml.safe_dump({
@@ -181,8 +186,33 @@ def test_materialize_config_pops_legacy_benchmark_script(tmp_path):
     with out.open() as f:
         rendered = yaml.safe_load(f)
     assert rendered["benchmark"]["runner_type"] == "mi355x"
-    assert "benchmark_script" not in rendered["benchmark"], \
-        "legacy benchmark_script must be popped so runner_type wins"
+    assert rendered["benchmark"]["benchmark_script"] == "sglang_mi355x.sh", \
+        "gpu_type must pin the generic {framework}_{gpu_type}.sh"
+
+
+def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
+    tmp_path,
+):
+    """Even when the source YAML doesn't carry a `benchmark_script`, the
+    renderer MUST still write one explicitly — otherwise Magpie's
+    resolver would fall through to the InferenceX native script."""
+    import yaml
+    src_yaml = tmp_path / "src.yaml"
+    src_yaml.write_text(yaml.safe_dump({
+        "benchmark": {
+            "framework": "vllm",
+            "model": "/m",
+            # No benchmark_script field at all.
+        },
+    }))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    out = _materialize_config_with_envs(
+        src_yaml, out_dir, gpu_type="mi300x",
+    )
+    with out.open() as f:
+        rendered = yaml.safe_load(f)
+    assert rendered["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
 
 
 # ===========================================================================

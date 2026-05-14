@@ -494,7 +494,10 @@ def test_grid_variant_yaml_preserves_base_extra_args_and_env_overrides(
 
     assert bench["model"] == "/wekafs/models/DeepSeek-R1-0528"
     assert bench["runner_type"] == "mi355x"
-    assert "benchmark_script" not in bench
+    # gpu_type now force-pins the generic {framework}_{gpu_type}.sh so
+    # Magpie's resolver doesn't fall through to InferenceX native
+    # scripts. Source YAML's framework here is "vllm".
+    assert bench["benchmark_script"] == "vllm_mi355x.sh"
     assert envs["TP"] == 8
     assert envs["CONC"] == 64
     assert envs["ISL"] == 1024

@@ -157,9 +157,13 @@ def test_materialize_config_with_envs_pins_benchmark_script_after_gpu_pop(
     assert cfg["benchmark"]["runner_type"] == "mi300x"
 
 
-def test_materialize_config_with_envs_pop_without_override(tmp_path):
-    """Without ``benchmark_script`` override, gpu_type still pops the
-    YAML's hardcoded script (legacy behavior preserved)."""
+def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
+    """Without an explicit ``benchmark_script`` override, gpu_type now
+    force-pins the generic ``{framework}_{gpu_type}.sh`` so Magpie's
+    resolver hits priority 1 (explicit user override) and never silently
+    falls through to the InferenceX native script (e.g.
+    ``dsr1_fp8_mi300x.sh``) which hardcodes ``--result-dir /workspace/``.
+    See ``design/magpie-generic-script-and-user-data-path.md`` §3."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, benchmark_script="dsr1_fp8_mi300x.sh")
     out = tmp_path / "out"
@@ -170,7 +174,8 @@ def test_materialize_config_with_envs_pop_without_override(tmp_path):
         gpu_type="mi300x",
     )
     cfg = yaml.safe_load(materialized.read_text())
-    assert "benchmark_script" not in cfg["benchmark"]
+    # framework in _write_yaml fixture is "sglang".
+    assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
 
 
 # ---------------------------------------------------------------------------
