@@ -300,14 +300,13 @@ def apply_runtime_benchmark_overrides(
     then OOM-failed even though the launch environment had ``TP=8``.
 
     ``benchmark_script`` (when non-empty) lets the caller force-select a
-    specific Magpie script (e.g. ``sglang_mi300x.sh``) to route around
-    a model-default script that hardcodes a problematic ``--result-dir``
-    (see SKILL.md "Magpie leak-path salvage"). The value MUST already be
-    sanitized via :func:`sanitize_script_name` — callers at the executor
-    boundary do that so any ``ValueError`` surfaces as ``error_class=
-    bad_param`` instead of an unsafe subprocess invocation. The script
-    is written AFTER the ``gpu_type`` pop below so the operator-supplied
-    override wins over Magpie's runner_type → script auto-selection.
+    specific Magpie script (e.g. a model-specific ``dsr1_fp8_mi300x.sh``)
+    that the operator deliberately wants benchmarked. The value MUST
+    already be sanitized via :func:`sanitize_script_name` — callers at
+    the executor boundary do that so any ``ValueError`` surfaces as
+    ``error_class=bad_param`` instead of an unsafe subprocess invocation.
+    The override is written AFTER the ``gpu_type``-derived generic script
+    below so the operator-supplied pick wins over Hyperloom's default.
     """
     if model_path:
         bench["model"] = str(model_path)
@@ -318,11 +317,18 @@ def apply_runtime_benchmark_overrides(
 
     if gpu_type:
         bench["runner_type"] = str(gpu_type)
-        # Magpie priority: explicit benchmark_script > native script >
-        # runner_type-derived generic script. Drop stale explicit scripts so
-        # runtime GPU selection actually wins; the operator-supplied
-        # ``benchmark_script`` (next block) re-pins one if requested.
-        bench.pop("benchmark_script", None)
+        # Magpie priority: explicit benchmark_script > InferenceX native
+        # script > runner_type-derived generic script. Force-pin the
+        # generic ``{framework}_{gpu_type}.sh`` so Magpie's resolver hits
+        # priority 1 and never falls through to InferenceX native
+        # scripts (e.g. ``dsr1_fp8_mi300x.sh``) that hardcode
+        # ``--result-dir /workspace/`` and ignore ``EXTRA_*_ARGS``. See
+        # ``design/magpie-generic-script-and-user-data-path.md``.
+        framework = str(bench.get("framework") or "").lower()
+        if framework:
+            bench["benchmark_script"] = f"{framework}_{gpu_type}.sh"
+        else:
+            bench.pop("benchmark_script", None)
 
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
@@ -371,16 +377,16 @@ def _build_variant_yaml(
     would otherwise win over the user's runtime selection.
 
     ``gpu_type`` (when non-empty) injects ``benchmark.runner_type`` and
-    pops any explicit ``benchmark.benchmark_script`` so Magpie's
-    runner_type -> script logic actually fires for the requested GPU.
+    force-pins ``benchmark.benchmark_script`` to the generic
+    ``{framework}_{gpu_type}.sh`` so Magpie's resolver does NOT fall
+    through to an InferenceX native script (which hardcodes
+    ``--result-dir /workspace/`` and ignores ``EXTRA_*_ARGS``).
 
     ``benchmark_script`` (when non-empty, must already be sanitized via
     :func:`sanitize_script_name`) force-pins the Magpie script per
-    variant — used by Orchestration to route around model-default
-    scripts that hardcode ``--result-dir /workspace/`` (the leak path
-    that prompted SKILL.md's salvage section). The override is applied
-    AFTER the gpu_type pop so it wins over Magpie's runner_type-derived
-    script.
+    variant when an operator deliberately wants a specific (often
+    model-specific) script benchmarked. Applied AFTER the
+    ``gpu_type``-derived generic script so the operator pick wins.
     """
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
