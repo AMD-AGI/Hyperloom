@@ -102,10 +102,17 @@ COOLDOWN_TICKS: dict[str, int] = {
 }
 
 
-# Marathon priors per model_class. Mirrors the table at
-# ``/wekafs/zgong/TBO/inference_optimization/marathon/skills/SKILL.md`` L832-839.
-# Only the six actions explicitly tabulated in marathon are listed; every
-# other action falls back to ``compute_initial_priors_from_metadata``.
+# Marathon priors per model_class. Originally mirrored the table at
+# ``/wekafs/zgong/TBO/inference_optimization/marathon/skills/SKILL.md`` L832-839
+# (the six deep/operator-family rows). Extended here with the three explore
+# actions (``backends`` / ``params`` / ``sweep``) so they share the same
+# 1-10 curated-prior scale instead of falling through to
+# ``compute_initial_priors_from_metadata`` (which produces ~0.4-1.0 numbers
+# in gain%/min units that don't compete with the 6-9 marathon rows).
+# ``backends`` and ``params`` are seeded at 10x their auto-computed value
+# (8.4 and 9.5 respectively) — empirical evidence from GLM-5 / DeepSeek-R1
+# shows these are first-class levers on MoE; ``sweep`` is a validation
+# action and stays low at 1.0 so it doesn't crowd out real exploration.
 #
 # Marathon names use kebab-case (deep-kernel-analysis); inference_optimizer
 # uses snake_case (deep_kernel_analysis). The mapping below uses the
@@ -118,6 +125,9 @@ MARATHON_PRIORS: dict[str, dict[str, float]] = {
         "framework_rebuild": 3.0,
         "comm_optimization": 2.0,
         "compiler_tuning": 6.0,
+        "backends": 8.4,
+        "params": 9.5,
+        "sweep": 1.0,
     },
     "moe_mla": {
         "deep_kernel_analysis": 8.0,
@@ -126,6 +136,9 @@ MARATHON_PRIORS: dict[str, dict[str, float]] = {
         "framework_rebuild": 4.0,
         "comm_optimization": 5.0,
         "compiler_tuning": 3.0,
+        "backends": 8.4,
+        "params": 9.5,
+        "sweep": 1.0,
     },
     "moe_swa": {
         "deep_kernel_analysis": 8.0,
@@ -134,6 +147,9 @@ MARATHON_PRIORS: dict[str, dict[str, float]] = {
         "framework_rebuild": 4.0,
         "comm_optimization": 5.0,
         "compiler_tuning": 3.0,
+        "backends": 8.4,
+        "params": 9.5,
+        "sweep": 1.0,
     },
     "moe_mla_nsa": {
         "deep_kernel_analysis": 8.0,
@@ -142,6 +158,9 @@ MARATHON_PRIORS: dict[str, dict[str, float]] = {
         "framework_rebuild": 4.0,
         "comm_optimization": 6.0,
         "compiler_tuning": 3.0,
+        "backends": 8.4,
+        "params": 9.5,
+        "sweep": 1.0,
     },
 }
 

@@ -174,7 +174,7 @@ inference_optimizer optimize \
   --gpu-type MI300X \          # or omit for rocm-smi auto-detect
   --model-class moe_mla \      # dense / moe_mla / moe_swa / moe_mla_nsa; biases marathon priors
   --max-hours 2 \
-  --compare-against-gpu B200   # optional — fetches InferenceX reference data
+  --compare-against-gpu B200   # optional — when set, fetches real InferenceX reference; when unset, target_analysis still runs and writes a 'no_target_gpu_configured' marker JSON
 ```
 
 **Caller responsibility (post-classify-removal)**: the in-loop `setup` /
@@ -187,7 +187,7 @@ supply session metadata directly via CLI flags / env vars:
 | Framework | `--framework` | `FRAMEWORK` | `vllm` / `sglang` |
 | GPU type | `--gpu-type` | `GPU_TYPE` | rocm-smi auto-detect when unset |
 | Model class | `--model-class` | `MODEL_CLASS` | drives `orchestrator/scoring.py` marathon priors; defaults to `moe_mla` when unset |
-| External reference GPU | `--compare-against-gpu` | — | when set, Coordinator hard-gates `target_analysis` so the InferenceX baseline is fetched into `$SESSION_DIR/target_analysis/target_baseline.json` *before* `baseline` runs; the report renders an "External baseline (advisory)" section automatically when the JSON is on disk |
+| External reference GPU | `--compare-against-gpu` | — | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
 
 Install or validate the optimizer + downstream stack with the bundled
 installer. It is idempotent and chains to `kernel-agent/scripts/install.sh`,
