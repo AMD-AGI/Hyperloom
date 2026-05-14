@@ -146,7 +146,7 @@ def test_full_prompt_has_seven_sections(registry, rules_path):
         "## 3. PIPELINE & TIME BUDGET",
         "## 4. ACTIONS YOU MAY USE",
         "## 5. DECISION FRAMEWORK (apply EVERY tick BEFORE emitting)",
-        "## 6. KERNEL-OPT PIPELINE (sequential, no backtracking)",
+        "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
         "## 7. RULES & OUTPUT PROTOCOL",
     ]
     actual_top = [h for h in headers if h.startswith("## ")]
@@ -164,7 +164,7 @@ def test_no_kernel_prompt_drops_section_six(registry, rules_path):
         rules_fragment_path=rules_path,
     )
     headers = [h for h in _section_headers(text) if h.startswith("## ")]
-    assert "## 6. KERNEL-OPT PIPELINE (sequential, no backtracking)" not in headers
+    assert "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)" not in headers
     # Other sections still present
     assert "## 1. MISSION" in headers
     assert "## 4. ACTIONS YOU MAY USE" in headers
@@ -323,7 +323,7 @@ def test_explicit_kernel_enabled_override_wins(registry, rules_path):
         max_minutes=60,
         rules_fragment_path=rules_path,
     )
-    assert "## 6. KERNEL-OPT PIPELINE" not in text
+    assert "## 6. KERNEL-OPT REQUEST REFERENCE" not in text
 
 
 # ---------------------------------------------------------------------------
