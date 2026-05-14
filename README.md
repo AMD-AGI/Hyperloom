@@ -34,7 +34,7 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 
 - **Easy to scale** — each job runs in isolated sandboxed containers (GPU or CPU). Single-node optimizations run in-sandbox; multi-node workloads fan out via RayJob for distributed benchmarking.
 - **Data flywheel** — every optimization run feeds results back through Minio storage and Langfuse observability, creating a closed feedback loop that continuously improves the agent's knowledge base and scoring heuristics.
-- **Full MCP + Skills support** — sandboxes connect to BenchMark/RayJob, GEAK, OOB, and InferenceX via MCP (local and remote), run TraceLens profiling via local CLI, and load optimization Skills on demand, giving the agent the same profiling, kernel-rewrite, and domain-specific capabilities at cloud scale.
+- **Full Skills support** — sandboxes load optimization Skills on demand, giving the agent the same profiling, kernel-rewrite, and domain-specific capabilities at cloud scale.
 
 1. Go to **[core42.example-internal-host.invalid/hyperloom](https://core42.example-internal-host.invalid/hyperloom/)**
 2. Select **Claw Agent** or **Get Started** from the landing page to enter PrimusClaw
@@ -56,16 +56,25 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 
 #### Step 1 — Prepare GPU Environment
 
-An AMD GPU node (MI300X) is required. Use a local machine or request an Authoring Pod on [Primus-SaFE](https://core42.example-internal-host.invalid/authoring):
+An AMD GPU node is required, with MI300X and MI355X supported. Use a local machine or request an Authoring Pod on [Primus-SaFE](https://core42.example-internal-host.invalid/authoring).
+
+The inference image can be an SGLang or vLLM ROCm image. The example below uses SGLang:
 
 ```bash
 docker run --rm -it --device=/dev/kfd --device=/dev/dri --group-add video \
-  harbor.core42.example-internal-host.invalid/sync/sglang:v0.5.11-rocm720-mi30x
+  lmsysorg/sglang:v0.5.11-rocm720-mi30x
 ```
 
-#### Step 2 — Configure Environment Variables
+Image examples:
 
-Ensure the following environment variables are set on the GPU node:
+- SGLang MI300X: `lmsysorg/sglang:v0.5.11-rocm720-mi30x`
+- SGLang MI355X: `lmsysorg/sglang:v0.5.11-rocm720-mi35x`
+- vLLM MI300X: `vllm/vllm-openai-rocm:v0.18.0`
+- vLLM MI355X: `vllm/vllm-openai-rocm:v0.18.0`
+
+#### Step 2 — Prepare Source Trees and Configure Environment Variables
+
+Prepare Hyperloom and its dependency source trees on the GPU node, then set the path environment variables explicitly. Hyperloom does not pin these internal source repositories to fixed paths; runtime uses the repo paths you provide through the environment.
 
 **Required:**
 
@@ -76,28 +85,27 @@ Ensure the following environment variables are set on the GPU node:
 
 **Path configuration:**
 
-| Variable | Description | Default |
+| Variable | Description | Example |
 |----------|-------------|---------|
-| `REPO_ROOT` | Hyperloom repo root | `/wekafs/HyperloomV2` |
-| `OOB_SRC` | OOB source path | `/wekafs/hyperloom/OOB` |
-| `INFERENCEX_PATH` | InferenceX path | `/wekafs/InferenceX` |
-| `TRACELENS_ROOT` | TraceLens path | `/wekafs/hyperloom/TraceLens-internal` |
+| `REPO_ROOT` | Hyperloom repo root | `/workspace/Hyperloom` |
+| `OOB_SRC` | OOB source root | `/workspace/OOB` |
+| `INFERENCEX_PATH` | InferenceX repo root | `/workspace/InferenceX` |
+| `TRACELENS_ROOT` | TraceLens-internal repo root | `/workspace/TraceLens-internal` |
 
-> Unreleased repo directories are available on the core42 cluster.
+Prepare the source trees from the corresponding repositories:
 
-**Optional:**
-
-| Variable | Description |
-|----------|-------------|
-| `NODE_TLS_REJECT_UNAUTHORIZED=0` | Required for internal network TLS certificate issues |
+- Hyperloom: this repository; clone it and point `REPO_ROOT` at the repo root.
+- OOB: clone the [AMD-AGI/Primus-Claw](https://github.com/AMD-AGI/Primus-Claw) repository, then point `OOB_SRC` at its `OOB/` subdirectory.
+- InferenceX: [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX); point `INFERENCEX_PATH` at the local repo root.
+- TraceLens-internal: [AMD-AGI/TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal/); checkout `release/hyperloom_integration_v0.3` and point `TRACELENS_ROOT` at that checkout.
 
 > `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.example-internal-host.invalid/litellm-gateway). GEAK and OOB API Key / Base URL are automatically inherited from `SAFE_API_KEY` / `OPENAI_BASE_URL` — no separate configuration needed.
 
 #### Step 3 — Connect via Cursor Remote SSH
 
 1. Connect to the GPU node via Remote SSH in Cursor
-2. Open the `/wekafs/HyperloomV2` directory
-3. `cd /wekafs/HyperloomV2` to ensure skill files load correctly
+2. Open the Hyperloom directory pointed to by `$REPO_ROOT`
+3. `cd "$REPO_ROOT"` to ensure skill files load correctly
 
 #### Step 4 — Launch Inference Optimization in Cursor Chat
 
@@ -106,16 +114,16 @@ Reference `inference_optimizer/SKILL.md` and describe the task in natural langua
 **Basic usage:**
 
 ```
-@/wekafs/HyperloomV2/inference_optimizer/SKILL.md
-Optimize /wekafs/models/Qwen3-30B-A3B inference on MI300X.
+@$REPO_ROOT/inference_optimizer/SKILL.md
+Optimize /path/to/your/model inference on MI300X.
 --framework sglang --max-hours 2
 ```
 
 **Full parameter example (long-running):**
 
 ```
-@/wekafs/HyperloomV2/inference_optimizer/SKILL.md
-Optimize /wekafs/models/Qwen3-30B-A3B inference on MI300X.
+@$REPO_ROOT/inference_optimizer/SKILL.md
+Optimize /path/to/your/model inference on MI300X.
 
 Environment:
 - FRAMEWORK=sglang
@@ -126,9 +134,10 @@ Environment:
 - --max-hours 24
 - Run in background: setsid nohup
 
-OOB_PATH: /wekafs/hyperloom/OOB
-InferenceX_PATH: /wekafs/InferenceX
-NODE_TLS_REJECT_UNAUTHORIZED=0
+REPO_ROOT: /workspace/Hyperloom
+OOB_SRC: /workspace/OOB
+INFERENCEX_PATH: /workspace/InferenceX
+TRACELENS_ROOT: /workspace/TraceLens-internal
 
 Requirements:
 1. Report the session ID, log path, PID, and initial health check result.
@@ -191,20 +200,25 @@ Hyperloom/
 ├── inference_optimizer/                  # Inference optimization skill (sole entry point)
 │   ├── SKILL.md                          # Skill spec (Cursor/Claw entry point)
 │   ├── cli.py                            # CLI entry: inference_optimizer optimize
+│   ├── actions/_meta/                    # Action metadata and scheduling policy
+│   ├── baseline_comparison/              # InferenceX baseline comparison and target analysis
 │   ├── orchestrator/                     # Coordinator + agent roles + action executors
-│   └── scripts/                          # Install scripts, baseline configs
+│   │   ├── action_executors/             # Executors for baseline/profile/params/sweep, etc.
+│   │   ├── backends/                     # Claude/Codex/Critic backend adapters
+│   │   └── system_prompts/               # Orchestration prompt construction
+│   ├── scripts/                          # Install scripts, baseline/profile configs
+│   └── tests/                            # Inference optimizer unit and regression tests
 ├── kernel-agent/                         # Kernel Agent toolkit (TraceLens/GEAK/OOB tools)
 │   ├── SKILL.md                          # Kernel Agent operation spec
 │   ├── tools/                            # TraceLens analysis, kernel optimization, patch apply
 │   │   └── backends/                     # GEAK/OOB submission (Ray-scheduled)
-│   └── scripts/                          # One-click installer (install.sh)
+│   ├── scripts/                          # Runtime setup scripts: install.sh, auth proxy, etc.
+│   └── tests/                            # Kernel Agent tool tests
 ├── critic-agent/                         # Critic-agent subprocess runtime (proposal review)
 ├── robustness-agent/                     # Robustness-agent subprocess runtime (health/RCA)
 ├── ci/                                   # CI orchestration (PR submitter, AB test)
-├── docs/                                 # Architecture docs, case studies
-├── slides/                               # Architecture diagrams
+├── docs/                                 # Architecture docs, case studies, and Mermaid diagrams
 ├── scripts/                              # Repo-level helper scripts
-├── .cursor/mcp.json                      # Cursor MCP config (currently empty)
 ├── .env.template                         # Environment variables
 └── README.md
 ```
