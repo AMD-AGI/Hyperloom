@@ -1007,6 +1007,159 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
 
 
 # ===========================================================================
+# #194 §3 — splitter must receive --R so mixed-window selection uses the
+# analytic PD ratio. Source: tracelens_analysis must pass --R when given
+# either via --split-r CLI arg or via the RANDOM_RANGE_RATIO env var (the
+# same env Hyperloom propagates from the YAML config to the benchmark
+# subprocess). Without --R the splitter falls back to an empirical
+# heuristic, drifting from the benchmark-contract ratio the skill aligns
+# the rest of the pipeline to.
+# ===========================================================================
+def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
+    """Helper: stage a TraceLens-ish tree, stub subprocess.run + which,
+    drive tla.main() once, and return the list of captured argvs."""
+    import gzip
+    import json as _json
+    import os as _os
+    from unittest.mock import patch
+
+    tl_root = tmp_path / "TraceLens-internal"
+    skill_dir = (
+        tl_root / "TraceLens" / "Agent" / "Analysis" / ".cursor" / "skills"
+    )
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "analysis-orchestrator.md").write_text("stub")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    capture = tmp_path / "capture_traces"
+    capture.mkdir()
+    trace = tmp_path / "trace.json.gz"
+    with gzip.open(trace, "wt") as f:
+        _json.dump({"traceEvents": [
+            {"cat": "kernel", "name": "void some_real_kernel<...>", "dur": 5.0},
+        ]}, f)
+
+    captured: list[list[str]] = []
+
+    class _Result:
+        def __init__(self, returncode=0, stdout=""):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    def fake_run(cmd, *_a, **_kw):
+        captured.append(list(cmd))
+        return _Result(returncode=0, stdout="ok")
+
+    argv = [
+        "tracelens_analysis.py",
+        "--trace-input", str(trace),
+        "--workspace-path", str(workspace),
+        "--tracelens-root", str(tl_root),
+        "--target-platform", "MI300X",
+        "--top-k", "5",
+        "--budget-minutes", "1",
+        "--no-llm-orchestrator",
+        "--capture-folder", str(capture),
+        *extra_argv,
+    ]
+
+    env_backup = dict(_os.environ)
+    try:
+        for k, v in (env_overrides or {}).items():
+            if v is None:
+                _os.environ.pop(k, None)
+            else:
+                _os.environ[k] = v
+        with patch.object(tla.subprocess, "run", side_effect=fake_run), \
+             patch.object(tla.shutil, "which", side_effect=lambda n: f"/usr/bin/{n}"), \
+             patch.object(tla.sys, "argv", argv):
+            try:
+                tla.main()
+            except SystemExit:
+                pass
+    finally:
+        _os.environ.clear()
+        _os.environ.update(env_backup)
+
+    return captured, trace
+
+
+def _find_splitter_cmd(captured):
+    return next(
+        (c for c in captured
+         if any("split_inference_trace_annotation" in str(p) for p in c)),
+        None,
+    )
+
+
+def test_194_3_splitter_receives_R_from_cli_arg(tmp_path):
+    """`--split-r 0.5` on the wrapper must produce `--R 0.5` on the
+    splitter argv. Floating-point ratios must survive verbatim — the
+    splitter declares `type=float` and any string coercion to int
+    would silently truncate fractional R."""
+    captured, _ = _drive_main_capturing_subprocess(
+        tmp_path,
+        extra_argv=[
+            "--split-conc", "32",
+            "--split-osl", "1024",
+            "--split-r", "0.5",
+        ],
+        env_overrides={"RANDOM_RANGE_RATIO": None},
+    )
+    splitter_cmd = _find_splitter_cmd(captured)
+    assert splitter_cmd is not None, f"splitter never invoked; cmds={captured}"
+    assert "--R" in splitter_cmd, splitter_cmd
+    # The value must immediately follow --R.
+    assert splitter_cmd[splitter_cmd.index("--R") + 1] == "0.5", splitter_cmd
+
+
+def test_194_3_splitter_receives_R_from_random_range_ratio_env(tmp_path):
+    """Without --split-r, the wrapper falls back to RANDOM_RANGE_RATIO
+    env — the same variable Hyperloom propagates from the YAML config
+    into every Magpie subprocess. Locks down the env→splitter seam."""
+    captured, _ = _drive_main_capturing_subprocess(
+        tmp_path,
+        extra_argv=["--split-conc", "32", "--split-osl", "1024"],
+        env_overrides={"RANDOM_RANGE_RATIO": "0.8"},
+    )
+    splitter_cmd = _find_splitter_cmd(captured)
+    assert splitter_cmd is not None, f"splitter never invoked; cmds={captured}"
+    assert "--R" in splitter_cmd, splitter_cmd
+    assert splitter_cmd[splitter_cmd.index("--R") + 1] == "0.8", splitter_cmd
+
+
+def test_194_3_splitter_omits_R_when_unset(tmp_path):
+    """No --split-r and no RANDOM_RANGE_RATIO env → the splitter must
+    not see --R. The splitter's built-in default (`R=None`) keeps the
+    old heuristic path live for legacy traces that pre-date the
+    skill-aligned formulas."""
+    captured, _ = _drive_main_capturing_subprocess(
+        tmp_path,
+        extra_argv=["--split-conc", "32", "--split-osl", "1024"],
+        env_overrides={"RANDOM_RANGE_RATIO": None, "TRACELENS_SPLIT_R": None},
+    )
+    splitter_cmd = _find_splitter_cmd(captured)
+    assert splitter_cmd is not None, f"splitter never invoked; cmds={captured}"
+    assert "--R" not in splitter_cmd, splitter_cmd
+
+
+def test_194_3_splitter_ignores_non_numeric_R(tmp_path):
+    """A malformed env value must NOT be propagated to the splitter —
+    the splitter would `argparse.error` and abort the whole pipeline
+    on a value error. Silently dropping (with a log line) is the
+    least-bad option; it falls back to the splitter's default heuristic
+    which is exactly the pre-#194-§3 behaviour."""
+    captured, _ = _drive_main_capturing_subprocess(
+        tmp_path,
+        extra_argv=["--split-conc", "32", "--split-osl", "1024"],
+        env_overrides={"RANDOM_RANGE_RATIO": "not-a-float"},
+    )
+    splitter_cmd = _find_splitter_cmd(captured)
+    assert splitter_cmd is not None, f"splitter never invoked; cmds={captured}"
+    assert "--R" not in splitter_cmd, splitter_cmd
+
+
+# ===========================================================================
 # parse_analysis_md — TraceLens v0.3 final-report contract (#155 review)
 # ===========================================================================
 _FIXTURE_LLAMA70B_ANALYSIS_MD = (

@@ -23,8 +23,10 @@ checkpoint cadence) lands in P0-5 and beyond.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
+import shlex
 import signal
 import time
 from dataclasses import dataclass, field
@@ -1394,6 +1396,142 @@ class Coordinator:
             )
         return None
 
+    @staticmethod
+    def _pmc_roofline_enabled() -> bool:
+        return os.environ.get("HYPERLOOM_ENABLE_PMC_ROOFLINE", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+
+    @staticmethod
+    def _pmc_roofline_force() -> bool:
+        return os.environ.get("HYPERLOOM_PMC_ROOFLINE_FORCE", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+
+    def _build_pmc_roofline_params(self) -> dict[str, Any] | None:
+        """Build pmc_roofline task params from the materialized Magpie YAML."""
+        config_path = self.shared_state.baseline_config_path
+        if not config_path:
+            log.info("PMC roofline enabled but baseline_config_path is empty")
+            return None
+        path = Path(config_path)
+        if not path.exists():
+            log.warning("PMC roofline config missing: %s", path)
+            return None
+        try:
+            import yaml  # type: ignore[import-untyped]
+            cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to read PMC roofline workload config %s: %s", path, exc)
+            return None
+
+        bench = cfg.get("benchmark") if isinstance(cfg.get("benchmark"), dict) else {}
+        envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
+        framework = str(bench.get("framework") or self.shared_state.framework or "vllm").lower()
+        model = str(bench.get("model") or self.shared_state.model_path or "").strip()
+        if not model:
+            log.warning("PMC roofline config has no model path")
+            return None
+
+        port = int(os.environ.get("HYPERLOOM_PMC_ROOFLINE_PORT", "30001"))
+        tp = str(envs.get("TP") or os.environ.get("TP") or "1")
+        precision = str(bench.get("precision") or os.environ.get("PRECISION") or "bf16").lower()
+        max_model_len = str(envs.get("MAX_MODEL_LEN") or os.environ.get("MAX_MODEL_LEN") or "8192")
+        extra_key = "EXTRA_VLLM_ARGS" if framework == "vllm" else "EXTRA_SGLANG_ARGS"
+        extra_args = shlex.split(str(envs.get(extra_key) or ""))
+        gpu_type = (
+            os.environ.get("HYPERLOOM_PMC_ROOFLINE_GPU_TYPE")
+            or self.shared_state.gpu_type
+            or os.environ.get("GPU_TYPE", "")
+        ).strip().lower()
+
+        if framework == "vllm":
+            dtype = "bfloat16" if precision in {"bf16", "bfloat16"} else precision
+            server_cmd = [
+                "vllm", "serve", model,
+                "--host", "0.0.0.0",
+                "--port", str(port),
+                "--tensor-parallel-size", tp,
+                "--trust-remote-code",
+                "--dtype", dtype,
+                "--max-model-len", max_model_len,
+            ] + extra_args
+            backend = "vllm"
+        else:
+            server_cmd = [
+                "python", "-m", "sglang.launch_server",
+                "--model-path", model,
+                "--host", "0.0.0.0",
+                "--port", str(port),
+                "--tensor-parallel-size", tp,
+                "--trust-remote-code",
+                "--max-model-len", max_model_len,
+            ] + extra_args
+            backend = "sglang"
+
+        inferencex = os.environ.get("INFERENCEX_PATH", "/hyperloom/InferenceX").rstrip("/")
+        bench_script = f"{inferencex}/utils/bench_serving/benchmark_serving.py"
+        isl = str(envs.get("ISL") or os.environ.get("ISL") or "256")
+        osl = str(envs.get("OSL") or os.environ.get("OSL") or "256")
+        conc = int(envs.get("CONC") or os.environ.get("CONC") or 1)
+        num_prompts = str(envs.get("NUM_PROMPTS") or max(conc, 1))
+        benchmark_cmd = [
+            "python", bench_script,
+            "--backend", backend,
+            "--base-url", f"http://127.0.0.1:{port}",
+            "--model", model,
+            "--dataset-name", "random",
+            "--random-input-len", isl,
+            "--random-output-len", osl,
+            "--num-prompts", num_prompts,
+            "--max-concurrency", str(conc),
+            "--request-rate", "inf",
+            "--ignore-eos",
+        ]
+
+        return {
+            "profile_mode": os.environ.get("HYPERLOOM_PMC_ROOFLINE_MODE", "launch"),
+            "server_cmd": server_cmd,
+            "health_url": f"http://127.0.0.1:{port}/health",
+            "benchmark_cmd": benchmark_cmd,
+            "output_dir": str(Path(self.session_dir) / "runs" / "pmc_roofline" / "auto"),
+            "duration_ms": int(os.environ.get("HYPERLOOM_PMC_ROOFLINE_DURATION_MS", "15000")),
+            "precision": precision,
+            "gpu_type": gpu_type,
+            "startup_timeout_s": int(os.environ.get("HYPERLOOM_PMC_ROOFLINE_STARTUP_TIMEOUT_S", "600")),
+        }
+
+    async def _maybe_enqueue_pmc_roofline(self) -> None:
+        if not self._pmc_roofline_enabled():
+            return
+        if self.shared_state.last_profile_roofline and not self._pmc_roofline_force():
+            return
+        params = self._build_pmc_roofline_params()
+        if not params:
+            return
+        key_src = "|".join([
+            self.shared_state.last_profile_trace or "",
+            self.shared_state.baseline_config_path or "",
+            str(params.get("profile_mode") or ""),
+        ])
+        key = hashlib.sha256(key_src.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        task = await self.tasks.create(
+            kind="pmc_roofline",
+            params=params,
+            idempotency_key=f"auto-pmc-roofline-{key}",
+            requires_lanes=["profile_lane"],
+            lease_ttl_sec=1800,
+        )
+        await self.bus.append_and_seq(Message.new(
+            "coordinator", "*", "event",
+            {
+                "kind": "task_queued",
+                "task_id": task.task_id,
+                "source": "coordinator_auto_pmc_roofline",
+                "action": "pmc_roofline",
+            },
+        ))
+
     # ==================================================================
     # Intent handling
     # ==================================================================
@@ -1783,6 +1921,7 @@ class Coordinator:
                     and result.get("status") in ("ok", "succeeded")
                 ):
                     self.shared_state.record_select_kernels(merged_payload, result)
+                    await self._maybe_enqueue_pmc_roofline()
                     self.shared_state.save(self.session_dir)
                 # Mirror kernel-opt outcomes into SharedState so Orch
                 # sees decision/speedup in its prompt next tick and

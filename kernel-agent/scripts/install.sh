@@ -84,14 +84,27 @@ GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
 GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
 RAG_INDEX_DIR="${HOME}/.cache/amd-ai-devtool/semantic-index"
-GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cuda}"
+GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cpu}"
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
+CODEX_MODEL_VAL="${CODEX_MODEL:-gpt-5.4}"
 # GEAK/OOB use the user's LiteLLM-compatible endpoint. The canonical env is
 # OPENAI_BASE_URL + SAFE_API_KEY; keep fallbacks for older launchers.
 GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}"
 GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-${LLM_API_BASE:-}}}}"
+# LiteLLM provider-specific base_url normalisation:
+#   * Anthropic client appends /v1/messages itself; leaving /v1 here yields
+#     /v1/v1/messages → 404. Strip /v1 when GEAK is on a claude model.
+#   * OpenAI client tolerates both shapes (verified), so for gpt-* models
+#     leave the original base_url alone to stay compatible with operators
+#     who set OPENAI_BASE_URL with the trailing /v1.
+case "${GEAK_MODEL_NAME_VAL}" in
+  claude-*|anthropic/claude-*)
+    GEAK_BASE_URL_VAL="${GEAK_BASE_URL_VAL%/v1}"
+    GEAK_BASE_URL_VAL="${GEAK_BASE_URL_VAL%/}"
+    ;;
+esac
 OOB_API_KEY_VAL="${OOB_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}}}}"
 OOB_BASE_URL_VAL="${OOB_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}}"
 
@@ -465,10 +478,16 @@ ensure_llm_auth_files() {
 }
 EOF
   chmod 600 /root/.claude/config.json
+  # Codex 0.100.0 won't send Authorization to non-openai.com endpoints; the
+  # 4002 auth-proxy injects PROXY_AUTH_TOKEN instead. Writing OPENAI_API_KEY
+  # here would survive that injection but the gateway still rejects with
+  # "token not present" because codex never actually transmits the value.
+  # Keep the field empty so codex stays in apikey-mode without leaking the
+  # SaFE key into any client header.
   cat > /root/.codex/auth.json <<EOF
 {
   "auth_mode": "apikey",
-  "OPENAI_API_KEY": "${OOB_API_KEY_VAL}"
+  "OPENAI_API_KEY": ""
 }
 EOF
   chmod 600 /root/.codex/auth.json
@@ -566,6 +585,7 @@ write_env_file() {
     [ -n "${GEAK_MEMORY_STORE_PATH_VAL}" ] && echo "export GEAK_MEMORY_STORE_PATH='${GEAK_MEMORY_STORE_PATH_VAL}'"
     [ -n "${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}" ] && echo "export GEAK_SAVE_TO_KNOWLEDGE_BASE='${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}'"
     [ -n "${GEAK_MEMORY_MIN_SPEEDUP_VAL}" ] && echo "export GEAK_MEMORY_MIN_SPEEDUP='${GEAK_MEMORY_MIN_SPEEDUP_VAL}'"
+    [ -n "${CODEX_MODEL_VAL}" ] && echo "export CODEX_MODEL='${CODEX_MODEL_VAL}'"
   } > "$env_file"
   chmod 600 "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
