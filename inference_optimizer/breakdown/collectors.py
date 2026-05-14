@@ -790,11 +790,158 @@ def _scan_profile_reports(session_dir: Path) -> list[tuple[Path, Path]]:
     return out
 
 
-def _collect_detected_kernels(
-    session_dir: Path, warnings: list[str], cap: int = 50,
+def _read_kernel_candidates(
+    session_dir: Path, state: dict[str, Any], warnings: list[str],
 ) -> list[dict[str, Any]]:
-    detected: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    """Return the ``hot_kernels`` array from ``kernel_candidates.json``.
+
+    The MAE-era dashboard required GPU duration + call count for every
+    detected kernel. That data is NOT in benchmark_report.json; it lives
+    in kernel-agent's ``kernel_candidates.json`` which is the input the
+    kernel agent uses to decide what to optimize.
+
+    Resolves the file via:
+      1. ``state.last_select_kernels.candidates_path`` — orchestrator-recorded path
+      2. ``session_dir / kernel-agent-workspace/kernel-agent/runs/hyperloom/kernel_candidates.json``
+      3. ``session_dir / kernel-agent-workspace/**/kernel_candidates.json`` glob fallback
+    """
+    sk = state.get("last_select_kernels") or {}
+    raw_path = sk.get("candidates_path") if isinstance(sk, dict) else None
+    candidate_paths: list[Path] = []
+    if raw_path:
+        # The recorded path is usually a container path (/workspace/...) that
+        # doesn't exist on wekafs; rewrite the prefix to the session_dir's
+        # actual on-disk root before falling back to glob.
+        p = Path(str(raw_path))
+        candidate_paths.append(p)
+        try:
+            idx = p.parts.index("kernel-agent-workspace")
+            candidate_paths.append(session_dir.joinpath(*p.parts[idx:]))
+        except ValueError:
+            pass
+    candidate_paths.append(
+        session_dir / "kernel-agent-workspace" / "kernel-agent"
+        / "runs" / "hyperloom" / "kernel_candidates.json"
+    )
+    candidate_paths.extend(
+        sorted((session_dir / "kernel-agent-workspace").rglob("kernel_candidates.json"))
+    )
+    for path in candidate_paths:
+        if not path or not path.exists():
+            continue
+        data = _load_json_safe(path, warnings)
+        if isinstance(data, dict):
+            hk = data.get("hot_kernels")
+            if isinstance(hk, list):
+                return hk
+    # Final fallback: state.last_select_kernels.hot_kernels_top15.
+    # This is what the orchestrator actually copied out of
+    # kernel_candidates.json — usually the same shape, just truncated to
+    # 15. Used when the on-disk file is missing (e.g. test fixtures or
+    # sessions where the kernel-agent workspace got rotated away).
+    inline = sk.get("hot_kernels_top15") if isinstance(sk, dict) else None
+    if isinstance(inline, list):
+        return inline
+    return []
+
+
+def _index_invocations_by_kernel(
+    invs: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Fold per-attempt invocations into per-kernel summary for one lane.
+
+    The returned dict maps kernel_id -> ``{attempts, best_speedup,
+    decision, last_status}`` so the detected-kernel collector can stamp
+    every detected kernel with both lanes' per-kernel verdicts.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for inv in invs:
+        kid = str(inv.get("kernel_id") or "")
+        if not kid:
+            continue
+        ent = out.setdefault(kid, {
+            "attempts": 0, "best_speedup": None,
+            "decision": "", "last_status": "",
+        })
+        ent["attempts"] += 1
+        spd = inv.get("micro_speedup")
+        if isinstance(spd, (int, float)):
+            cur = ent["best_speedup"]
+            if cur is None or float(spd) > cur:
+                ent["best_speedup"] = float(spd)
+        # KEEP/PARTIAL outrank everything else; FAILED never overrides KEEP.
+        dec = str(inv.get("decision") or "")
+        if dec in ("KEEP", "PARTIAL") or not ent["decision"]:
+            ent["decision"] = dec or ent["decision"]
+        ent["last_status"] = str(inv.get("status") or ent["last_status"])
+    return out
+
+
+def _collect_detected_kernels(
+    session_dir: Path,
+    state: dict[str, Any],
+    geak: list[dict[str, Any]],
+    oob: list[dict[str, Any]],
+    warnings: list[str],
+    *,
+    cap: int | None = None,
+) -> list[dict[str, Any]]:
+    """Build the canonical per-kernel lifecycle row used by the report.
+
+    Each entry merges:
+      * static profile fields (gpu_pct, duration_us, call_count,
+        bandwidth/compute util, kernel_category, bottleneck, name,
+        source_file, arithmetic_intensity, reusable_native_kernel) from
+        ``kernel_candidates.json`` (preferred) or ``benchmark_report.kernel_summary``,
+      * ``selected_for_optimization`` — whether the orchestrator routed
+        this kernel into the optimization pipeline,
+      * ``geak`` / ``oob`` — per-lane ``{attempts, best_speedup,
+        decision}`` summaries reduced from the invocation lists,
+      * ``adopted_by`` — which lane's patch ended up in the final stack
+        (looked up via ``kernel_integrate_attempts`` KEEP entries),
+      * ``final_decision`` — ``kept`` / ``reverted`` / ``rejected`` /
+        ``not_optimized``.
+
+    The merge is keyed by ``kernel_id``; rows from
+    ``kernel_candidates.json`` take precedence on shape conflicts since
+    that file is what the kernel agent actually consumed.
+    """
+    by_kid: dict[str, dict[str, Any]] = {}
+
+    # 1) candidates.json (preferred — has call_count / duration_us)
+    for k in _read_kernel_candidates(session_dir, state, warnings):
+        if not isinstance(k, dict):
+            continue
+        kid = str(k.get("kernel_id") or k.get("name") or "")
+        if not kid:
+            continue
+        by_kid[kid] = {
+            "kernel_id":               kid,
+            "name":                    str(k.get("name") or ""),
+            "gpu_pct":                 _to_float(k.get("gpu_pct")),
+            "duration_us":             _to_float(k.get("duration_us")),
+            "call_count":              int(k.get("call_count") or 0) or None,
+            "bandwidth_util_pct":      _to_float(k.get("bandwidth_utilization_pct")),
+            "compute_util_pct":        _to_float(k.get("compute_utilization_pct")),
+            "kernel_category":         str(k.get("kernel_category") or ""),
+            "bottleneck":              str(k.get("bottleneck") or ""),
+            "arithmetic_intensity":    _to_float(k.get("arithmetic_intensity")),
+            "reusable_native_kernel":  bool(k.get("reusable_native_kernel")),
+            "source_file":             k.get("source_file") or "",
+            "recommended_actions":     list(k.get("recommended_actions") or []),
+            "recommended_backends":    list(k.get("recommended_backends") or []),
+            "optimization_notes":      str(k.get("optimization_notes") or ""),
+        }
+
+    # 2) benchmark_report.kernel_summary fallback — pulls in the long
+    #    tail of trace kernels that didn't make the top-N candidates
+    #    list. We dedupe by name against the candidates entries (so
+    #    k001..k0NN absorb their fallback rows instead of producing
+    #    twin entries), and any genuinely new fallback entry gets a
+    #    short ``rNNN`` alias as ``kernel_id`` so the table column
+    #    stays narrow.
+    name_to_kid = {e["name"]: kid for kid, e in by_kid.items() if e.get("name")}
+    residual_counter = 0
     for task_dir, report_path in _scan_profile_reports(session_dir):
         report = _load_json_safe(report_path, warnings)
         if not isinstance(report, dict):
@@ -809,26 +956,139 @@ def _collect_detected_kernels(
         for k in kernel_summary if isinstance(kernel_summary, list) else []:
             if not isinstance(k, dict):
                 continue
-            kid = str(k.get("kernel_id") or k.get("name") or "")
-            if not kid or kid in seen:
+            name_str = str(k.get("name") or "")
+            if not name_str:
                 continue
-            seen.add(kid)
-            bn = bottleneck_by_kid.get(kid) or {}
-            detected.append({
-                "kernel_id":               kid,
-                "name":                    str(k.get("name") or ""),
-                "gpu_pct":                 _to_float(k.get("gpu_pct")),
-                "time_ms":                 _to_float(k.get("time_ms")),
-                "bottleneck":              str(bn.get("bottleneck") or k.get("bottleneck") or ""),
-                "arithmetic_intensity":    _to_float(k.get("arithmetic_intensity")),
-                "reusable_native_kernel":  bool(k.get("reusable_native_kernel")),
-                "source_file":             k.get("source_file"),
-                "detected_from_task":      task_dir.name,
-                "benchmark_report_path":   _rel(report_path, session_dir) or str(report_path),
-            })
-            if len(detected) >= cap:
-                return detected
-    return detected
+            existing_kid = name_to_kid.get(name_str)
+            if existing_kid is not None:
+                # Merge missing fields into the candidates-side entry
+                # rather than appending a duplicate row.
+                entry = by_kid[existing_kid]
+                if entry.get("gpu_pct") is None:
+                    entry["gpu_pct"] = _to_float(k.get("gpu_pct"))
+                if entry.get("duration_us") is None:
+                    t_ms = _to_float(k.get("time_ms"))
+                    entry["duration_us"] = (t_ms * 1000.0) if t_ms is not None else None
+                if not entry.get("bottleneck"):
+                    bn = bottleneck_by_kid.get(k.get("kernel_id")) or {}
+                    entry["bottleneck"] = str(bn.get("bottleneck") or k.get("bottleneck") or "")
+                if entry.get("arithmetic_intensity") is None:
+                    entry["arithmetic_intensity"] = _to_float(k.get("arithmetic_intensity"))
+                continue
+
+            input_kid = str(k.get("kernel_id") or "")
+            # Keep the input kernel_id when it's already a short alias
+            # (orchestrator-assigned, e.g. ``k002``) instead of clobbering
+            # it with a residual alias. Mangled C++ symbols (input_kid ==
+            # name, len ≫ 16) get a generated alias to keep the table
+            # narrow.
+            is_short_alias = (
+                input_kid
+                and input_kid != name_str
+                and len(input_kid) <= 8
+                and input_kid not in by_kid
+            )
+            if is_short_alias:
+                alias = input_kid
+            else:
+                residual_counter += 1
+                alias = f"r{residual_counter:03d}"
+            bn = bottleneck_by_kid.get(k.get("kernel_id")) or {}
+            t_ms = _to_float(k.get("time_ms"))
+            by_kid[alias] = {
+                "kernel_id":              alias,
+                "name":                   name_str,
+                "gpu_pct":                _to_float(k.get("gpu_pct")),
+                "duration_us":            (t_ms * 1000.0) if t_ms is not None else None,
+                "call_count":             None,
+                "bandwidth_util_pct":     None,
+                "compute_util_pct":       None,
+                "kernel_category":        "",
+                "bottleneck":             str(bn.get("bottleneck") or k.get("bottleneck") or ""),
+                "arithmetic_intensity":   _to_float(k.get("arithmetic_intensity")),
+                "reusable_native_kernel": bool(k.get("reusable_native_kernel")),
+                "source_file":            k.get("source_file") or "",
+                "recommended_actions":    [],
+                "recommended_backends":   [],
+                "optimization_notes":     "",
+                "detected_from_task":     task_dir.name,
+                "benchmark_report_path":  _rel(report_path, session_dir) or str(report_path),
+            }
+            name_to_kid[name_str] = alias
+
+    # 3) lifecycle stamps (selected / geak / oob / adopted_by / final_decision)
+    selected_ids = {
+        str(e.get("kernel_id") or "")
+        for e in ((state.get("last_select_kernels") or {}).get("hot_kernels_top15") or [])
+        if isinstance(e, dict)
+    }
+    geak_idx = _index_invocations_by_kernel(geak)
+    oob_idx = _index_invocations_by_kernel(oob)
+
+    integ = state.get("kernel_integrate_attempts") or {}
+    adopted_kids: set[str] = set()
+    reverted_kids: set[str] = set()
+    if isinstance(integ, dict):
+        for ent in integ.values():
+            if not isinstance(ent, dict):
+                continue
+            kid = str(ent.get("kernel_id") or "")
+            if not kid:
+                continue
+            dec = ent.get("last_decision")
+            if dec == "KEEP":
+                adopted_kids.add(kid)
+            elif dec in ("REVERT", "REJECT"):
+                reverted_kids.add(kid)
+
+    rejected_kids = {
+        str(k or "") for k in (state.get("rejected_kernel_ids") or [])
+    } - adopted_kids
+
+    for kid, entry in by_kid.items():
+        entry["selected_for_optimization"] = kid in selected_ids
+        entry["geak"] = geak_idx.get(kid)  # None if lane never touched this kid
+        entry["oob"] = oob_idx.get(kid)
+        if kid in adopted_kids:
+            # Disambiguate which lane's patch was kept.
+            g_kept = bool(entry["geak"] and entry["geak"]["decision"] in ("KEEP", "PARTIAL"))
+            o_kept = bool(entry["oob"] and entry["oob"]["decision"] in ("KEEP", "PARTIAL"))
+            if g_kept and not o_kept:
+                entry["adopted_by"] = "geak"
+            elif o_kept and not g_kept:
+                entry["adopted_by"] = "oob"
+            elif g_kept and o_kept:
+                # Prefer the lane with higher micro-speedup.
+                g_spd = (entry["geak"] or {}).get("best_speedup") or 0.0
+                o_spd = (entry["oob"] or {}).get("best_speedup") or 0.0
+                entry["adopted_by"] = "geak" if g_spd >= o_spd else "oob"
+            else:
+                # Integrate KEEP but neither lane recorded KEEP — likely a
+                # manually staged patch; record as 'kernel_agent' rather
+                # than guessing.
+                entry["adopted_by"] = "kernel_agent"
+            entry["final_decision"] = "kept"
+        elif kid in reverted_kids:
+            entry["adopted_by"] = None
+            entry["final_decision"] = "reverted"
+        elif kid in rejected_kids:
+            entry["adopted_by"] = None
+            entry["final_decision"] = "rejected"
+        elif entry["geak"] or entry["oob"]:
+            entry["adopted_by"] = None
+            entry["final_decision"] = "attempted"
+        else:
+            entry["adopted_by"] = None
+            entry["final_decision"] = "not_optimized"
+
+    # Sort by GPU share descending so the table is actionable top-down.
+    out = sorted(
+        by_kid.values(),
+        key=lambda e: (-(e.get("gpu_pct") or 0.0), e.get("kernel_id") or ""),
+    )
+    if cap is not None and len(out) > cap:
+        return out[:cap]
+    return out
 
 
 def _collect_recommended_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -979,7 +1239,7 @@ def collect_kernel_lifecycle(
     warnings: list[str],
 ) -> dict[str, Any]:
     return {
-        "detected":    _collect_detected_kernels(session_dir, warnings),
+        "detected":    _collect_detected_kernels(session_dir, state, geak, oob, warnings),
         "recommended": _collect_recommended_kernels(state),
         "optimized":   _collect_optimized_kernels(geak, oob, state),
         "adopted":     _collect_adopted_kernels(state),
@@ -1032,6 +1292,57 @@ def _shape_ledger(
     }
 
 
+def _patch_winners_history(
+    rows: list[Any], baseline_tput: float | None,
+) -> list[dict[str, Any]]:
+    """Fix two recurring data-quality issues in ``backend_winners_history``:
+
+    * ``base_tput`` is occasionally written as ``0.0`` (Coordinator
+      didn't stamp the round's baseline). When that happens we fall
+      back to the session's ``baseline_tput``.
+    * Per-winner ``gain_pct`` is frequently null. We compute it from
+      ``(winner.tput - base_tput) / base_tput * 100`` when both are
+      known so the dashboard table can show real gains.
+    """
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        row = dict(r)
+        try:
+            bt = float(row.get("base_tput") or 0.0)
+        except (TypeError, ValueError):
+            bt = 0.0
+        if bt <= 0 and baseline_tput and baseline_tput > 0:
+            row["base_tput"] = float(baseline_tput)
+            row["base_tput_source"] = "session_baseline"
+            bt = float(baseline_tput)
+        if bt > 0:
+            winners = list(row.get("winners") or [])
+            new_winners: list[dict[str, Any]] = []
+            for w in winners:
+                if not isinstance(w, dict):
+                    continue
+                w2 = dict(w)
+                if w2.get("gain_pct") in (None, "") and w2.get("tput") is not None:
+                    try:
+                        w2["gain_pct"] = (float(w2["tput"]) - bt) / bt * 100.0
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        pass
+                new_winners.append(w2)
+            row["winners"] = new_winners
+            best = row.get("best")
+            if isinstance(best, dict) and best.get("gain_pct") in (None, "") and best.get("tput") is not None:
+                try:
+                    best = dict(best)
+                    best["gain_pct"] = (float(best["tput"]) - bt) / bt * 100.0
+                    row["best"] = best
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pass
+        out.append(row)
+    return out
+
+
 def collect_param_search(
     state: dict[str, Any],
     warnings: list[str],
@@ -1042,12 +1353,15 @@ def collect_param_search(
 
     backends_ledger = _shape_ledger(state.get("backends_search"))
 
+    baseline_tput = _to_float(state.get("baseline_tput"))
     return {
         "params":                  params_ledger,
         "backends":                backends_ledger,
         "synergy_attempted":       list(state.get("synergy_attempted") or []),
         "discovered_flags":        dict(state.get("discovered_flags") or {}),
-        "backend_winners_history": list(state.get("backend_winners_history") or []),
+        "backend_winners_history": _patch_winners_history(
+            state.get("backend_winners_history") or [], baseline_tput,
+        ),
     }
 
 
