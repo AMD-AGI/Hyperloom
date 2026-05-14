@@ -5,9 +5,8 @@ Locks the three P3 fixes uncovered by the resume3 1h validation
 
 * **Bug A** ``ReportExecutor`` failed with ``could not resolve session_dir``
   because Coordinator never threaded the active session_dir into the
-  runner context. Fix: cli.py exports ``$INFERENCE_OPTIMIZER_SESSION_DIR``
-  and report.py picks it up before falling back to the most-recent-session
-  heuristic.
+  runner context. Fix: cli.py exports ``$USER_DATA_PATH`` and report.py
+  picks it up before falling back to the most-recent-session heuristic.
 
 * **Bug B** Codex Kernel LLM emitted a duplicate (hallucinated) RESPONSE
   to the same REQUEST that the programmatic_handler had already answered.
@@ -64,7 +63,7 @@ def _silent_backends() -> dict[str, object]:
 
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     return make_session_dir()
 
 
@@ -73,8 +72,8 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_report_resolves_session_dir_from_env(tmp_path, monkeypatch):
-    """When CLI exports INFERENCE_OPTIMIZER_SESSION_DIR, ReportExecutor
-    uses it without needing task.params or ctx.extra to carry it."""
+    """When CLI exports USER_DATA_PATH, ReportExecutor uses it without
+    needing task.params or ctx.extra to carry it."""
     sd = tmp_path / "real-session"
     sd.mkdir()
     state = SharedState(session_id=sd.name, model_name="qwen3-8b",
@@ -87,7 +86,7 @@ async def test_report_resolves_session_dir_from_env(tmp_path, monkeypatch):
     storage_dir.mkdir()
     SqliteConnection(storage_dir / "coordinator.db").close()
 
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(sd))
+    monkeypatch.setenv("USER_DATA_PATH", str(sd))
 
     class _Ctx:
         task = Task(task_id="t-1", kind="report", params={},
@@ -112,7 +111,7 @@ async def test_report_prefers_ctx_extra_over_env(tmp_path, monkeypatch):
     (sd / "storage").mkdir()
     SqliteConnection(sd / "storage" / "coordinator.db").close()
 
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path / "wrong"))
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "wrong"))
 
     class _Ctx:
         task = Task(task_id="t-2", kind="report", params={},
