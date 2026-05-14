@@ -93,6 +93,7 @@ def materialize_config_with_envs(
     extra_envs: dict[str, Any] | None = None,
     model_path: str | None = None,
     gpu_type: str | None = None,
+    benchmark_script: str | None = None,
     out_name: str = "baseline_config.with_envs.yaml",
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
@@ -101,9 +102,20 @@ def materialize_config_with_envs(
 
     * ``MODEL_PATH`` / ``model_path`` arg → ``benchmark.model`` (overrides
       the legacy hardcoded ``Qwen-Qwen3-8B`` default that ships in every YAML).
-    * ``GPU_TYPE`` / ``gpu_type`` arg → ``benchmark.runner_type`` (and pop
-      any explicit ``benchmark.benchmark_script`` so Magpie's runner_type
-      → script logic actually fires).
+    * ``GPU_TYPE`` / ``gpu_type`` arg → ``benchmark.runner_type`` AND pin
+      ``benchmark.benchmark_script`` to the generic
+      ``{framework}_{gpu_type}.sh`` so Magpie's resolver hits priority 1
+      (explicit user override) and never silently falls through to the
+      InferenceX native script (e.g. ``dsr1_fp8_mi300x.sh``) which
+      hardcodes ``--result-dir /workspace/`` and ignores
+      ``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS``. See
+      ``design/magpie-generic-script-and-user-data-path.md``.
+    * ``benchmark_script`` arg (when non-empty, must be sanitized by the
+      executor via :func:`_grid_runner.sanitize_script_name`) re-pins
+      ``benchmark.benchmark_script`` AFTER the gpu_type-derived generic
+      script above so an operator-supplied override (typically a model
+      script the operator deliberately wants tested) wins. See SKILL.md
+      "Magpie leak-path salvage" for use cases.
     * ``PRECISION`` → ``benchmark.precision``.
     * ``CONC, ISL, OSL, MAX_MODEL_LEN, TP, RANDOM_RANGE_RATIO`` → injected
       as integers into ``benchmark.envs``.
@@ -133,7 +145,13 @@ def materialize_config_with_envs(
         bench["precision"] = precision
     if gpu_type:
         bench["runner_type"] = str(gpu_type)
-        bench.pop("benchmark_script", None)
+        framework = str(bench.get("framework") or "").lower()
+        if framework:
+            bench["benchmark_script"] = f"{framework}_{gpu_type}.sh"
+        else:
+            bench.pop("benchmark_script", None)
+    if benchmark_script:
+        bench["benchmark_script"] = str(benchmark_script)
     envs = bench.setdefault("envs", {})
     for env_key in (
         "CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP",
