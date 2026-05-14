@@ -57,12 +57,36 @@ from inference_optimizer.storage.connection import SqliteConnection
 # ---------------------------------------------------------------------------
 def test_session_dir_default_is_workspace_hyperloom(monkeypatch):
     monkeypatch.delenv(paths.ENV_OVERRIDE_SESSION_DIR, raising=False)
+    monkeypatch.delenv(paths.ENV_USER_DATA_PATH, raising=False)
     assert paths.session_dir() == Path("/workspace/hyperloom")
 
 
 def test_session_dir_env_override_wins(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_OVERRIDE_SESSION_DIR, str(tmp_path / "alt"))
+    monkeypatch.delenv(paths.ENV_USER_DATA_PATH, raising=False)
     assert paths.session_dir() == tmp_path / "alt"
+
+
+def test_session_dir_user_data_path_overrides_default(tmp_path, monkeypatch):
+    """USER_DATA_PATH is the user-facing knob — when set (and the legacy
+    INFERENCE_OPTIMIZER_SESSION_DIR is not), session_dir() must honour
+    it instead of falling back to /workspace/hyperloom."""
+    monkeypatch.delenv(paths.ENV_OVERRIDE_SESSION_DIR, raising=False)
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "ud"))
+    assert paths.session_dir() == tmp_path / "ud"
+
+
+def test_session_dir_override_takes_precedence_over_user_data(
+    tmp_path, monkeypatch,
+):
+    """Locks the precedence contract:
+    INFERENCE_OPTIMIZER_SESSION_DIR > USER_DATA_PATH > default. The
+    legacy/test override must keep winning so existing fixtures that
+    monkeypatch only the legacy var aren't broken by an ambient
+    USER_DATA_PATH in the dev shell."""
+    monkeypatch.setenv(paths.ENV_OVERRIDE_SESSION_DIR, str(tmp_path / "legacy"))
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "ud"))
+    assert paths.session_dir() == tmp_path / "legacy"
 
 
 def test_make_session_dir_creates_full_skeleton(tmp_path, monkeypatch):
