@@ -238,3 +238,184 @@ def test_concurrent_patchers_converge_to_single_patch(fake_inferencex):
     # Exactly one patched line — no doubles, no remaining legacy line.
     assert text.count(_PATCHED_LINE) == 1
     assert _LEGACY_LINE not in text
+
+
+# ===========================================================================
+# PR-D §2: benchmark_serving.py PROFILE_EXTRA_BODY consumer patch
+# ===========================================================================
+from inference_optimizer.orchestrator.action_executors._inferencex_patcher import (  # noqa: E402
+    ensure_benchmark_serving_patched,
+)
+
+
+# Verbatim copy of the line PR-D §2 targets — replicating the exact
+# 41-space leading indent because the patcher matches on that prefix.
+_BS_LEGACY_LINE = (
+    '                                         extra_body={"num_steps": 1, '
+    '"merge_profiles": True, "profile_by_stage": True},'
+)
+_BS_UPSTREAM_FIXTURE = f"""\
+async def benchmark_serving_main(...):
+    # Pretend we're inside the function-call site at line 541.
+    await async_request_openai_completions(
+                                         api_url=base_url + "/start_profile",
+                                         prompt_len=test_prompt_len,
+                                         output_len=test_output_len,
+{_BS_LEGACY_LINE}
+                                         logprobs=logprobs,
+                                         best_of=best_of,
+    )
+"""
+
+
+@pytest.fixture
+def fake_inferencex_with_benchmark_serving(tmp_path: Path) -> Path:
+    bench_dir = tmp_path / "utils" / "bench_serving"
+    bench_dir.mkdir(parents=True)
+    lib = bench_dir / "benchmark_serving.py"
+    lib.write_text(_BS_UPSTREAM_FIXTURE, encoding="utf-8")
+    lib.chmod(0o644)
+    return tmp_path
+
+
+def test_benchmark_serving_patch_adds_profile_extra_body_lookup(
+    fake_inferencex_with_benchmark_serving,
+):
+    """A clean fixture must be patched so the resulting line reads
+    ``PROFILE_EXTRA_BODY`` from env at request time. The upstream
+    literal dict must remain as the JSON fallback default so the
+    patch is backward-compatible when the env var is unset."""
+    src = (
+        fake_inferencex_with_benchmark_serving / "utils" / "bench_serving"
+        / "benchmark_serving.py"
+    )
+    rc = ensure_benchmark_serving_patched(fake_inferencex_with_benchmark_serving)
+    assert rc is True
+    text = src.read_text(encoding="utf-8")
+    assert "PROFILE_EXTRA_BODY" in text, (
+        "patched file must reference PROFILE_EXTRA_BODY env var"
+    )
+    assert _BS_LEGACY_LINE not in text, (
+        "legacy hardcoded extra_body line must be replaced, not retained"
+    )
+    # The JSON-form default dict must survive as the JSON fallback so
+    # unsetting PROFILE_EXTRA_BODY yields byte-identical request body
+    # to upstream after json.loads round-trips it back to Python.
+    # (Note: JSON uses lowercase ``true``; ``True`` would crash
+    # json.loads on the unset-env path — see PR-D §2 fix.)
+    assert (
+        '{"num_steps": 1, "merge_profiles": true, "profile_by_stage": true}'
+        in text
+    )
+
+
+def test_benchmark_serving_patch_is_idempotent(
+    fake_inferencex_with_benchmark_serving,
+):
+    """Second call must short-circuit on the sentinel — no second
+    rewrite, file content stable."""
+    src = (
+        fake_inferencex_with_benchmark_serving / "utils" / "bench_serving"
+        / "benchmark_serving.py"
+    )
+    assert ensure_benchmark_serving_patched(
+        fake_inferencex_with_benchmark_serving
+    ) is True
+    snapshot = src.read_text(encoding="utf-8")
+    assert ensure_benchmark_serving_patched(
+        fake_inferencex_with_benchmark_serving
+    ) is True
+    assert src.read_text(encoding="utf-8") == snapshot
+    # Sentinel must occur exactly once (no double-patch).
+    assert snapshot.count("PROFILE_EXTRA_BODY") == 1
+
+
+def test_benchmark_serving_patch_returns_false_when_path_missing(
+    tmp_path, monkeypatch,
+):
+    """A tmpdir without the benchmark_serving.py file must fail-soft."""
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    assert ensure_benchmark_serving_patched(tmp_path) is False
+
+
+def test_benchmark_serving_patch_returns_false_when_legacy_line_missing(
+    tmp_path,
+):
+    """If upstream has refactored the extra_body= line (different
+    indent, different default dict), the patcher refuses to guess —
+    operator sees a warning and has to investigate."""
+    bench_dir = tmp_path / "utils" / "bench_serving"
+    bench_dir.mkdir(parents=True)
+    src = bench_dir / "benchmark_serving.py"
+    src.write_text(
+        "async def benchmark_serving_main(...): pass\n"
+        "# This is a hand-patched / refactored file with no legacy line.\n",
+        encoding="utf-8",
+    )
+    rc = ensure_benchmark_serving_patched(tmp_path)
+    assert rc is False
+    assert "PROFILE_EXTRA_BODY" not in src.read_text(encoding="utf-8")
+
+
+def test_benchmark_serving_patch_uses_env_var_when_no_explicit_path(
+    fake_inferencex_with_benchmark_serving, monkeypatch,
+):
+    """Like the benchmark_lib.sh patcher, this one honours
+    ``$INFERENCEX_PATH`` when no explicit path is passed."""
+    monkeypatch.setenv(
+        "INFERENCEX_PATH", str(fake_inferencex_with_benchmark_serving),
+    )
+    assert ensure_benchmark_serving_patched(None) is True
+    src = (
+        fake_inferencex_with_benchmark_serving / "utils" / "bench_serving"
+        / "benchmark_serving.py"
+    )
+    assert "PROFILE_EXTRA_BODY" in src.read_text(encoding="utf-8")
+
+
+def test_benchmark_serving_patched_line_is_executable_python(
+    fake_inferencex_with_benchmark_serving,
+):
+    """The patched line must be syntactically valid Python — otherwise
+    a profile run on a patched InferenceX would crash with a
+    SyntaxError at import time instead of just dropping env-var
+    awareness. Extract the patched line by sentinel match and feed it
+    to compile() in a synthesised function body."""
+    ensure_benchmark_serving_patched(fake_inferencex_with_benchmark_serving)
+    src = (
+        fake_inferencex_with_benchmark_serving / "utils" / "bench_serving"
+        / "benchmark_serving.py"
+    )
+    text = src.read_text(encoding="utf-8")
+    # The patched line is the unique line containing PROFILE_EXTRA_BODY.
+    patched_line = next(
+        ln for ln in text.splitlines() if "PROFILE_EXTRA_BODY" in ln
+    )
+    # Strip leading whitespace + the ``extra_body=`` prefix so we have
+    # a bare expression to evaluate. Keep the trailing comma off.
+    expr = patched_line.strip()
+    assert expr.startswith("extra_body="), expr
+    expr = expr[len("extra_body="):].rstrip(",")
+    # Must be parseable.
+    compile(expr, "<patched>", "eval")
+    # And must evaluate to the upstream default when PROFILE_EXTRA_BODY
+    # is unset — backward-compat invariant.
+    import os
+    os.environ.pop("PROFILE_EXTRA_BODY", None)
+    result = eval(expr, {"__builtins__": __builtins__})  # noqa: PGH001
+    assert result == {
+        "num_steps": 1, "merge_profiles": True, "profile_by_stage": True,
+    }, f"unexpected default extra_body: {result!r}"
+    # And must honour the env var when set.
+    os.environ["PROFILE_EXTRA_BODY"] = (
+        '{"num_steps": 10, "shape_discovery": true, "roofline_annotations": true}'
+    )
+    try:
+        result_env = eval(expr, {"__builtins__": __builtins__})  # noqa: PGH001
+        assert result_env == {
+            "num_steps": 10,
+            "shape_discovery": True,
+            "roofline_annotations": True,
+        }
+    finally:
+        os.environ.pop("PROFILE_EXTRA_BODY", None)
