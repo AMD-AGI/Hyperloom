@@ -92,12 +92,139 @@ _LOCK_PATH = "/tmp/hyperloom_server_patcher.lock"
 # hung NFS / weird filesystems.
 _GIT_TIMEOUT_SEC = 30
 
-# TraceLens currently ships SGLang patches only for v0.5.9. Hyperloom's
-# default deployment uses v0.5.10 — version mismatch is the *common* case
-# and must fail-soft cleanly. Bump this string when TraceLens adds new
-# versions (or refactor to discover via a manifest file inside the
-# patches directory).
-_SGLANG_SUPPORTED_VERSIONS: frozenset[str] = frozenset({"0.5.9"})
+# PR-C §2: SGLang version gate is a *minor-version* allowlist rather
+# than an exact pin so the fuzzy patch fallback (PR-C §1) gets a
+# chance to apply TraceLens patches against a freshly bumped point
+# release. ``0.5.x`` covers all of 0.5.9, 0.5.10, 0.5.11, … which is
+# the typical bump cadence between TraceLens patch revisions.
+#
+# Behaviour at the apply layer: if the fuzzy fallback also rejects
+# the patch (real context conflict, not just whitespace drift), the
+# whole patch set fail-softs anyway — so widening the version gate
+# here is safe; it just lets borderline-compatible versions reach
+# the fuzzy path that would otherwise be rejected upfront.
+#
+# Override via ``HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS=<csv>`` for
+# operators who want to either tighten (back to exact pins) or
+# extend (e.g. ``0.5,0.6``) the allowlist without a code change.
+# Tighten to a frozenset of exact versions via
+# ``HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS=<csv>``; when set this
+# wins over the minor allowlist.
+_SGLANG_DEFAULT_ALLOWED_MINORS: tuple[str, ...] = ("0.5",)
+
+# PR-D §5: TraceLens-shipped manifest filename(s). When present in the
+# SGLang patches dir, the manifest is the source of truth for which
+# SGLang versions the patches support — Hyperloom's hardcoded default
+# allowlist is bypassed entirely. The day TraceLens starts shipping
+# this file, the Hyperloom gate auto-adapts without a code change,
+# which is the decoupling intent of the #194 §5 follow-up
+# recommendation ("discover supported SGLang versions from the
+# TraceLens patches dir rather than from a hardcoded allowlist").
+# Format: plain text, one version per line, ``#`` starts comments,
+# blank lines ignored. Operator env-var pins still beat the manifest
+# so debugging escape hatches keep working.
+_SGLANG_SUPPORTED_VERSIONS_MANIFEST_NAMES: tuple[str, ...] = (
+    "SUPPORTED_VERSIONS.txt",
+    "SUPPORTED_VERSIONS",
+)
+
+
+def _load_sglang_supported_versions_from_manifest(
+    patches_dir: Path,
+) -> frozenset[str] | None:
+    """Read the TraceLens-shipped ``SUPPORTED_VERSIONS`` manifest if
+    one exists in ``patches_dir``.
+
+    Format: one version per line; ``#`` comments and blank lines are
+    skipped. Returns ``None`` if no manifest file is present (the
+    common case today — TraceLens doesn't ship one yet, so this is a
+    forward-compatible hook that auto-activates when they do).
+    Returns an empty frozenset only if the file is explicitly empty
+    after comment/blank stripping — operators see that as "TraceLens
+    declares zero supported versions", which correctly rejects all.
+    """
+    for name in _SGLANG_SUPPORTED_VERSIONS_MANIFEST_NAMES:
+        manifest = patches_dir / name
+        if not manifest.is_file():
+            continue
+        try:
+            raw = manifest.read_text(encoding="utf-8")
+        except OSError as e:
+            log.warning(
+                "_server_patcher: cannot read SGLang version manifest %s (%s);"
+                " falling back to hardcoded allowlist", manifest, e,
+            )
+            return None
+        versions: set[str] = set()
+        for line in raw.splitlines():
+            stripped = line.split("#", 1)[0].strip()
+            if stripped:
+                versions.add(stripped)
+        log.info(
+            "_server_patcher: loaded %d SGLang version(s) from TraceLens "
+            "manifest %s (PR-D §5: decoupled from Hyperloom hardcoded "
+            "allowlist)", len(versions), manifest,
+        )
+        return frozenset(versions)
+    return None
+
+
+def _sglang_version_accepted(
+    version: str, *, patches_dir: Path | None = None,
+) -> bool:
+    """Return True iff ``version`` is in the configured allowlist.
+
+    Resolution order (highest precedence first):
+
+    1. ``$HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS`` (csv) — exact pins.
+       Operator escape hatch; matches pre-PR-C behaviour for callers
+       who want to lock down to known-good versions.
+    2. ``$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS`` (csv) — minor-version
+       allowlist (e.g. ``0.5,0.6``); a version is accepted iff it
+       equals or startswith one of the listed prefixes followed by
+       ``.`` (so ``0.5`` matches ``0.5.9`` but not ``0.50.0``).
+    3. **TraceLens-shipped ``SUPPORTED_VERSIONS`` manifest** when
+       present in ``patches_dir`` (PR-D §5). The manifest fully
+       replaces the hardcoded default; if the manifest exists,
+       :data:`_SGLANG_DEFAULT_ALLOWED_MINORS` is not consulted.
+       TraceLens owns this list because TraceLens owns the patches;
+       Hyperloom learning the list from TraceLens decouples version
+       support bumps from Hyperloom code changes.
+    4. :data:`_SGLANG_DEFAULT_ALLOWED_MINORS` — the built-in default,
+       only consulted when no operator override AND no vendor
+       manifest is present.
+    """
+    text = (version or "").strip()
+    if not text:
+        return False
+    exact = os.environ.get("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", "").strip()
+    if exact:
+        allowed_exact = {v.strip() for v in exact.split(",") if v.strip()}
+        return text in allowed_exact
+    minors_env = os.environ.get(
+        "HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", "",
+    ).strip()
+    if minors_env:
+        minors = tuple(v.strip() for v in minors_env.split(",") if v.strip())
+        return any(
+            text == minor or text.startswith(f"{minor}.")
+            for minor in minors
+        )
+    # PR-D §5: vendor manifest. When present, the manifest IS the
+    # allowlist — fully replaces the hardcoded default. When absent,
+    # the manifest helper returns None and we fall through to the
+    # default below (preserves PR-C.2 behaviour for today's TraceLens
+    # which doesn't ship the manifest).
+    if patches_dir is not None:
+        manifest_versions = _load_sglang_supported_versions_from_manifest(
+            patches_dir,
+        )
+        if manifest_versions is not None:
+            return text in manifest_versions
+    return any(
+        text == minor or text.startswith(f"{minor}.")
+        for minor in _SGLANG_DEFAULT_ALLOWED_MINORS
+    )
 
 # Path within the TraceLens checkout that hosts the patch sets.
 _PATCH_TREE_REL = ("examples", "custom_workflows", "inference_analysis")
@@ -145,10 +272,26 @@ class _PatchPlan:
     """All information needed to apply (or verify) a patch set."""
     framework: str
     version: str
-    apply_root: Path             # cwd for ``git apply``
-    patches: tuple[Path, ...]    # in apply order
-    sentinel_file: Path          # file we grep to detect "already patched"
-    sentinel_text: str           # substring expected in sentinel_file
+    apply_root: Path                       # cwd for ``git apply``
+    patches: tuple[Path, ...]              # in apply order
+    sentinel_file: Path                    # file we grep to detect "already patched"
+    # PR-D §4: list of substrings that MUST ALL be present in
+    # ``sentinel_file`` for the install to count as patched. A single
+    # substring (the historical case) goes in a 1-tuple; multi-element
+    # tuples raise the bar for accidental false positives if upstream
+    # ever happens to merge a field name we use as a marker (the
+    # combined probability of N marker strings ALL appearing
+    # un-coordinated is vanishingly small). The vLLM plan uses both
+    # ``capture_torch_profiler_dir`` and ``detailed_trace_annotation``,
+    # which the TraceLens patch always adds together but upstream has
+    # no reason to merge as a co-occurring pair.
+    sentinel_text: tuple[str, ...]
+    # PR-D §1: per-plan ``-p<N>`` strip count. Editable SGLang layouts
+    # and the vLLM patch set both use ``-p1`` (default); wheel-install
+    # SGLang uses ``-p3`` so the ``a/python/sglang/`` prefix is
+    # stripped relative to the wheel install dir. Always passed to
+    # both ``git apply`` and ``patch``.
+    apply_strip: int = 1
 
 
 def _resolve_tracelens_root(arg: Path | str | None) -> Path | None:
@@ -211,13 +354,19 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
         )
         return None
 
+    # PR-D §4: both substrings live in the same dataclass body that
+    # the TraceLens patch adds to ``profiler.py``. Requiring BOTH
+    # collapses the false-positive surface to ~zero: upstream vLLM
+    # has no reason to add a config field named both
+    # ``capture_torch_profiler_dir`` AND ``detailed_trace_annotation``
+    # without also adopting the TraceLens patch.
     return _PatchPlan(
         framework="vllm",
         version=version,
         apply_root=install_root,
         patches=(patch_file,),
         sentinel_file=sentinel,
-        sentinel_text="capture_torch_profiler_dir",
+        sentinel_text=("capture_torch_profiler_dir", "detailed_trace_annotation"),
     )
 
 
@@ -236,15 +385,10 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         return None
 
     version = (getattr(sglang, "__version__", "") or "").strip()
-    if version not in _SGLANG_SUPPORTED_VERSIONS:
-        log.info(
-            "_server_patcher: SGLang %s not in supported set %s; skip "
-            "(TraceLens ships patches for these versions only — bump "
-            "_SGLANG_SUPPORTED_VERSIONS when TraceLens adds support)",
-            version, sorted(_SGLANG_SUPPORTED_VERSIONS),
-        )
-        return None
 
+    # Resolve the patches dir BEFORE the version check so the gate
+    # can consult the TraceLens-shipped manifest (PR-D §5). If the
+    # patches dir itself is missing, no point checking the version.
     patches_dir = _patch_tree(tracelens_root, "sglang_roofline_patches")
     if not patches_dir.is_dir():
         log.info(
@@ -252,41 +396,84 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
             patches_dir,
         )
         return None
+
+    if not _sglang_version_accepted(version, patches_dir=patches_dir):
+        log.info(
+            "_server_patcher: SGLang %s not in supported version list "
+            "(consulted: $HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS, "
+            "$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS, %s/SUPPORTED_VERSIONS, "
+            "then built-in minor allowlist %s); skip",
+            version, patches_dir, _SGLANG_DEFAULT_ALLOWED_MINORS,
+        )
+        return None
     patches = tuple(sorted(patches_dir.glob("*.patch")))
     if not patches:
         log.info("_server_patcher: SGLang patches directory empty; skip")
         return None
 
-    # The SGLang patches use ``a/python/sglang/...`` prefix — they
-    # assume an editable install where the repo's ``python/sglang/...``
-    # layout is preserved. For pip-wheel installs ``sglang/`` sits
-    # directly under site-packages with no ``python/`` parent, so the
-    # patches' ``-p1`` strip won't match.
+    # PR-D §1: support both layouts.
+    #
+    # * Editable install (``.../python/sglang/__init__.py``): apply
+    #   from the repo root with ``-p1`` so the patches' ``a/python/
+    #   sglang/...`` prefix matches the on-disk path verbatim. This is
+    #   the historical layout and the only one PR #200 supported.
+    # * Wheel install (``site-packages/sglang/__init__.py`` with no
+    #   ``python/`` parent): apply from inside the wheel sglang/ dir
+    #   itself with ``-p3`` so the prefix is stripped to ``srt/...``
+    #   (matching the wheel layout). The actual sglang/ files end up
+    #   modified in place — no symlinks, no tmpdirs, no copies, so
+    #   ``git apply``'s symlink-safety check never trips.
     sglang_module = Path(sglang.__file__).resolve()
-    if sglang_module.parent.parent.name != "python":
-        log.info(
-            "_server_patcher: SGLang install at %s is not an editable "
-            "`python/sglang/` layout — patches assume that layout, so "
-            "skip patching", sglang_module,
-        )
+    resolution = _resolve_sglang_apply_root(sglang_module)
+    if resolution is None:
         return None
-    apply_root = sglang_module.parent.parent.parent
+    apply_root, apply_strip = resolution
 
-    # Sentinel: the kernel_shape_profiler patch creates an entirely new
-    # file. Its presence + a unique content marker is a robust "already
-    # patched" signal.
-    sentinel = (
-        apply_root / "python" / "sglang" / "srt" / "utils"
-        / "kernel_shape_profiler.py"
-    )
+    # Sentinel: the kernel_shape_profiler patch creates an entirely
+    # new file. In both layouts it lands at the wheel-side path
+    # ``sglang/srt/utils/kernel_shape_profiler.py`` (relative to the
+    # parent of sglang/), so we resolve the absolute path off
+    # ``sglang_module`` itself to keep both branches symmetric.
+    sentinel = sglang_module.parent / "srt" / "utils" / "kernel_shape_profiler.py"
     return _PatchPlan(
         framework="sglang",
         version=version,
         apply_root=apply_root,
         patches=patches,
         sentinel_file=sentinel,
-        sentinel_text="kernel_shape_profiler",
+        # The SGLang sentinel file ``kernel_shape_profiler.py`` is
+        # *created* by the patch — its mere existence + a unique
+        # internal identifier is already a robust signal. Kept as a
+        # 1-tuple for type uniformity with vLLM (PR-D §4).
+        sentinel_text=("kernel_shape_profiler",),
+        apply_strip=apply_strip,
     )
+
+
+def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
+    """Pick ``(apply_root, strip_count)`` for the active SGLang install.
+
+    * Editable layout (``<repo>/python/sglang/__init__.py``):
+      ``(repo_root, 1)``. Patches reference ``a/python/sglang/...``;
+      with ``-p1`` the prefix is stripped to ``python/sglang/...``
+      relative to ``<repo>``, which matches the on-disk path.
+    * Wheel layout (``site-packages/sglang/__init__.py`` with no
+      ``python/`` parent): ``(<site-packages>/sglang, 3)``. With
+      ``-p3`` the patch path is stripped to ``srt/...`` relative to
+      the wheel install dir, which matches the wheel layout. PR-D §1.
+    * Anything else: return ``None`` so the caller fail-softs.
+    """
+    if sglang_module.parent.parent.name == "python":
+        return sglang_module.parent.parent.parent, 1
+    sglang_dir = sglang_module.parent
+    if sglang_dir.name == "sglang":
+        return sglang_dir, 3
+    log.info(
+        "_server_patcher: SGLang install at %s has unexpected layout "
+        "(parent dir name=%r); skip patching",
+        sglang_module, sglang_dir.name,
+    )
+    return None
 
 
 # ---------------------------------------------------------------------
@@ -305,12 +492,19 @@ def _ensure_patched(plan: _PatchPlan) -> bool:
 
 
 def _is_patched(plan: _PatchPlan) -> bool:
+    """True iff the sentinel file exists AND every marker substring in
+    ``plan.sentinel_text`` is present. The all-of-N rule (PR-D §4)
+    raises the bar for false positives if upstream ever merges one of
+    our marker identifiers without also adopting the TraceLens patch
+    — the combined probability of all N markers co-occurring
+    un-coordinated is vanishingly small."""
     try:
         if not plan.sentinel_file.exists():
             return False
-        return plan.sentinel_text in plan.sentinel_file.read_text(
+        content = plan.sentinel_file.read_text(
             encoding="utf-8", errors="replace",
         )
+        return all(marker in content for marker in plan.sentinel_text)
     except OSError:
         return False
 
@@ -360,40 +554,174 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
             plan.framework,
         )
         return False
+    patch_bin = shutil.which("patch")  # may be ``None`` — fuzzy fallback then disabled
 
+    # PR-C §1: per-patch precheck. Each patch must EITHER pass
+    # ``git apply --check`` (the strict path, preferred) OR pass
+    # ``patch -p1 --fuzz=2 --dry-run`` (the fuzzy fallback for minor
+    # context drift when TraceLens patches haven't been rev'd against
+    # a slightly newer SGLang / vLLM point release). If neither
+    # accepts the patch the whole set is rejected and we fail-soft.
+    strip_arg = f"-p{plan.apply_strip}"
+
+    apply_modes: dict[Path, str] = {}
     for p in plan.patches:
-        if not _git(git, ("apply", "--check", str(p)), plan.apply_root):
+        if _git(git, ("apply", "--check", strip_arg, str(p)), plan.apply_root):
+            apply_modes[p] = "git"
+            continue
+        if patch_bin and _patch_dry_run(patch_bin, p, plan.apply_root, plan.apply_strip):
             log.warning(
-                "_server_patcher: `git apply --check` failed for %s "
-                "(version %s, patch %s); fail-soft skip",
-                plan.framework, plan.version, p.name,
+                "_server_patcher: %s patch %s did not apply cleanly with "
+                "`git apply --check %s`; falling back to `patch %s --fuzz=2` "
+                "(TraceLens patch may lag deployed %s by a point release)",
+                plan.framework, p.name, strip_arg, strip_arg, plan.framework,
             )
-            return False
+            apply_modes[p] = "patch"
+            continue
+        log.warning(
+            "_server_patcher: `git apply --check %s` AND fuzzy `patch %s "
+            "--dry-run` both failed for %s (version %s, patch %s); fail-soft "
+            "skip", strip_arg, strip_arg, plan.framework, plan.version, p.name,
+        )
+        return False
 
-    applied: list[Path] = []
+    applied: list[tuple[Path, str]] = []
     for p in plan.patches:
-        if _git(git, ("apply", str(p)), plan.apply_root):
-            applied.append(p)
+        mode = apply_modes[p]
+        if mode == "git":
+            ok = _git(git, ("apply", strip_arg, str(p)), plan.apply_root)
+        else:
+            ok = _patch_apply(
+                patch_bin, p, plan.apply_root, plan.apply_strip,  # type: ignore[arg-type]
+            )
+        if ok:
+            applied.append((p, mode))
             continue
         log.error(
             "_server_patcher: %s patch %s failed during apply after "
-            "passing --check; rolling back %d previously-applied patches",
-            plan.framework, p.name, len(applied),
+            "passing precheck (mode=%s); rolling back %d previously-applied "
+            "patches",
+            plan.framework, p.name, mode, len(applied),
         )
-        for prev in reversed(applied):
-            if not _git(git, ("apply", "-R", str(prev)), plan.apply_root):
+        for prev, prev_mode in reversed(applied):
+            if prev_mode == "git":
+                rolled_back = _git(
+                    git, ("apply", "-R", strip_arg, str(prev)), plan.apply_root,
+                )
+            else:
+                rolled_back = (
+                    patch_bin is not None
+                    and _patch_apply(
+                        patch_bin, prev, plan.apply_root, plan.apply_strip,
+                        reverse=True,
+                    )
+                )
+            if not rolled_back:
                 log.error(
-                    "_server_patcher: rollback of %s also failed — "
+                    "_server_patcher: rollback of %s (mode=%s) also failed — "
                     "install may be in inconsistent state; manual review "
-                    "required", prev.name,
+                    "required", prev.name, prev_mode,
                 )
         return False
 
+    fuzzy_count = sum(1 for _, mode in applied if mode == "patch")
     log.info(
         "_server_patcher: applied %d TraceLens patch(es) for %s %s "
-        "(issue #194 §4/§5)",
-        len(plan.patches), plan.framework, plan.version,
+        "(strict=%d, fuzzy=%d) (issue #194 §4/§5)",
+        len(applied), plan.framework, plan.version,
+        len(applied) - fuzzy_count, fuzzy_count,
     )
+    return True
+
+
+# PR-D §6: fuzz value chosen deliberately at GNU patch's default (2)
+# rather than the maximum (10).
+#
+# Rationale: fuzz=10 (PR-C §1's original value) tolerates up to 10
+# context lines of mismatch per hunk — near GNU patch's practical
+# upper limit. That lets multi-line upstream refactors near a patch
+# site silently apply the patch's CHANGE lines to a similar-looking
+# but semantically wrong location: framework imports cleanly, profile
+# hooks attach to the wrong call site, profile data is silently
+# misleading rather than absent.
+#
+# fuzz=2 (the default) still tolerates whitespace and single-line
+# context drift (the common point-release case the fuzzy fallback was
+# designed for), but rejects multi-line drift hard so the patcher
+# fail-softs visibly (apply rejected → no shape_discovery flag, but
+# no wrong-place mutation). The flag is kept explicit (not omitted)
+# so the choice is grep-discoverable and survives any future GNU
+# patch default change.
+_FUZZ = 2
+
+
+def _patch_dry_run(
+    patch_bin: str, patch_file: Path, cwd: Path, strip: int = 1,
+) -> bool:
+    """Probe ``patch -p<strip> --fuzz=2 --dry-run`` for a single patch.
+
+    Used as a fuzzy fallback when ``git apply --check`` rejects a patch
+    due to minor context drift (whitespace / single-line edits in the
+    target that don't affect the diff's semantic intent). The dry-run
+    has zero filesystem side effects so it's safe to gate the actual
+    apply on this check. ``strip`` matches the ``-p<N>`` flag git apply
+    uses for the same patch — PR-D §1 may pass ``-p3`` for wheel
+    SGLang installs vs the default ``-p1`` for editable installs.
+
+    fuzz value: see :data:`_FUZZ` — defaults to 2 (whitespace +
+    single-line tolerance only; multi-line drift is rejected hard).
+    """
+    try:
+        with patch_file.open("rb") as fh:
+            result = subprocess.run(
+                (patch_bin, f"-p{strip}", f"--fuzz={_FUZZ}", "--dry-run", "--silent"),
+                cwd=str(cwd),
+                stdin=fh,
+                capture_output=True,
+                timeout=_GIT_TIMEOUT_SEC,
+            )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log.warning(
+            "_server_patcher: patch --dry-run in %s failed to spawn (%s)",
+            cwd, e,
+        )
+        return False
+    return result.returncode == 0
+
+
+def _patch_apply(
+    patch_bin: str, patch_file: Path, cwd: Path, strip: int = 1, *,
+    reverse: bool = False,
+) -> bool:
+    """Real ``patch -p<strip> --fuzz=2`` apply (or reverse). Mirrors
+    :func:`_patch_dry_run` but actually mutates the working tree.
+    Returns True iff rc == 0."""
+    args = [patch_bin, f"-p{strip}", f"--fuzz={_FUZZ}", "--silent"]
+    if reverse:
+        args.append("--reverse")
+    try:
+        with patch_file.open("rb") as fh:
+            result = subprocess.run(
+                args,
+                cwd=str(cwd),
+                stdin=fh,
+                capture_output=True,
+                timeout=_GIT_TIMEOUT_SEC,
+            )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log.warning(
+            "_server_patcher: patch%s in %s failed to spawn (%s)",
+            " --reverse" if reverse else "", cwd, e,
+        )
+        return False
+    if result.returncode != 0:
+        err = result.stderr.decode("utf-8", errors="replace")[:500] \
+            if result.stderr else ""
+        log.debug(
+            "_server_patcher: patch%s rc=%d stderr=%r",
+            " --reverse" if reverse else "", result.returncode, err,
+        )
+        return False
     return True
 
 
