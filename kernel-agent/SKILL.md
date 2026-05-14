@@ -56,11 +56,16 @@ are accepted as no-ops for backwards compat):
   `${HYPERLOOM_ROOT}/geak-config/local.yaml` (model resolution:
   `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL` from env, default
   `claude-opus-4-7`)
-- GEAK RAG MCP (`mcp_tools/rag-mcp`) with `tools.rag: true`; the first RAG
-  index build writes to `~/.cache/amd-ai-devtool/semantic-index/` and may
-  download the ~1.3 GB BGE embedding model. The installer builds this index
-  with `GEAK_RAG_INDEX_DEVICE=cuda` by default because CPU embedding can take
-  hours; set `GEAK_RAG_INDEX_DEVICE=cpu` only for CPU-only environments.
+- GEAK RAG MCP (`mcp_tools/rag-mcp`) with `tools.rag: true`. The RAG index
+  is built once at install time and stored under
+  `~/.cache/amd-ai-devtool/semantic-index/`. By default the installer
+  points GEAK at a remote OpenAI-compatible embedding endpoint
+  (`GEAK_EMBEDDING_BASE_URL` defaults to `OPENAI_BASE_URL`,
+  `GEAK_EMBEDDING_API_KEY` to `SAFE_API_KEY`/`OPENAI_API_KEY`,
+  `GEAK_EMBEDDING_MODEL=BAAI/bge-large-en-v1.5`), so first-run builds
+  finish in minutes instead of stalling on CPU embedding inference. Unset
+  `GEAK_EMBEDDING_BASE_URL` to fall back to the local HuggingFace path;
+  `GEAK_RAG_INDEX_DEVICE` (default `cpu`) only matters in that fallback.
 - GEAK cross-session memory env; by default Hyperloom stores GEAK's SQLite
   memory DB at `/wekafs/hyperloom/geak-memory/memory.db`, enables
   `GEAK_SAVE_TO_KNOWLEDGE_BASE=1`, and aligns

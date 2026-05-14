@@ -124,12 +124,23 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('GEAK_REF="${GEAK_REF:-v3.1.0}"', install_text)
         self.assertIn('python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"', install_text)
         self.assertIn('python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"', install_text)
-        self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cuda}"', install_text)
+        self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cpu}"', install_text)
         self.assertIn("python3 scripts/build_index.py --force --device", install_text)
         self.assertIn("ensure_node()", install_text)
         self.assertIn("installing Node.js 20 from NodeSource", install_text)
         self.assertIn("ensure_node", install_text)
-        self.assertIn("GEAK_RAG_INDEX_DEVICE=cuda", skill_text)
+        # Remote embedding endpoint defaults thread through install.sh and env.sh
+        self.assertIn(
+            'GEAK_EMBEDDING_BASE_URL_VAL="${GEAK_EMBEDDING_BASE_URL:-${OPENAI_BASE_URL:-}}"',
+            install_text,
+        )
+        self.assertIn("export GEAK_EMBEDDING_BASE_URL=", install_text)
+        self.assertIn("export GEAK_EMBEDDING_API_KEY=", install_text)
+        self.assertIn("export GEAK_EMBEDDING_MODEL=", install_text)
+        self.assertIn("GEAK_EMBEDDING_BASE_URL", ray_runtime_text)
+        self.assertIn("GEAK_EMBEDDING_API_KEY", ray_runtime_text)
+        self.assertIn("GEAK_EMBEDDING_MODEL", ray_runtime_text)
+        self.assertIn("GEAK_EMBEDDING_BASE_URL", skill_text)
         self.assertIn("tools:", install_text)
         self.assertIn("  rag: true", install_text)
         self.assertIn("GEAK_MEMORY_STORE_PATH", install_text)

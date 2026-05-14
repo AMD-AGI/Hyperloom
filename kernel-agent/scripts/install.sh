@@ -59,6 +59,15 @@ GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
 RAG_INDEX_DIR="${HOME}/.cache/amd-ai-devtool/semantic-index"
 GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cpu}"
+# GEAK RAG embedding endpoint. Default to the same LiteLLM-compatible base URL
+# the rest of the kernel-agent already targets, so build_index.py and the
+# rag-mcp server skip local CPU embedding inference (which can take 1h+ on
+# this knowledge base) and reuse the existing gateway. Set
+# GEAK_EMBEDDING_BASE_URL=empty (or unset OPENAI_BASE_URL) to fall back to
+# the local HuggingFace path.
+GEAK_EMBEDDING_BASE_URL_VAL="${GEAK_EMBEDDING_BASE_URL:-${OPENAI_BASE_URL:-}}"
+GEAK_EMBEDDING_API_KEY_VAL="${GEAK_EMBEDDING_API_KEY:-${SAFE_API_KEY:-${OPENAI_API_KEY:-}}}"
+GEAK_EMBEDDING_MODEL_VAL="${GEAK_EMBEDDING_MODEL:-BAAI/bge-large-en-v1.5}"
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
@@ -383,8 +392,16 @@ ensure_rag_index() {
     warn "RAG index missing at $RAG_INDEX_DIR"
     return
   fi
-  log "building RAG index at $RAG_INDEX_DIR on device=${GEAK_RAG_INDEX_DEVICE_VAL} (first run downloads ~1.3 GB embedding model)"
-  run bash -lc "cd '${HYPERLOOM_ROOT}/geak' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"
+  if [ -n "$GEAK_EMBEDDING_BASE_URL_VAL" ]; then
+    log "building RAG index at $RAG_INDEX_DIR via remote embedding endpoint (model=${GEAK_EMBEDDING_MODEL_VAL})"
+  else
+    log "building RAG index at $RAG_INDEX_DIR on device=${GEAK_RAG_INDEX_DEVICE_VAL} (first run downloads ~1.3 GB embedding model)"
+  fi
+  run env \
+    GEAK_EMBEDDING_BASE_URL="${GEAK_EMBEDDING_BASE_URL_VAL}" \
+    GEAK_EMBEDDING_API_KEY="${GEAK_EMBEDDING_API_KEY_VAL}" \
+    GEAK_EMBEDDING_MODEL="${GEAK_EMBEDDING_MODEL_VAL}" \
+    bash -lc "cd '${HYPERLOOM_ROOT}/geak' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"
 }
 
 ensure_oob() {
@@ -559,6 +576,9 @@ write_env_file() {
     [ -n "${GEAK_MEMORY_STORE_PATH_VAL}" ] && echo "export GEAK_MEMORY_STORE_PATH='${GEAK_MEMORY_STORE_PATH_VAL}'"
     [ -n "${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}" ] && echo "export GEAK_SAVE_TO_KNOWLEDGE_BASE='${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}'"
     [ -n "${GEAK_MEMORY_MIN_SPEEDUP_VAL}" ] && echo "export GEAK_MEMORY_MIN_SPEEDUP='${GEAK_MEMORY_MIN_SPEEDUP_VAL}'"
+    [ -n "${GEAK_EMBEDDING_BASE_URL_VAL}" ] && echo "export GEAK_EMBEDDING_BASE_URL='${GEAK_EMBEDDING_BASE_URL_VAL}'"
+    [ -n "${GEAK_EMBEDDING_API_KEY_VAL}" ] && echo "export GEAK_EMBEDDING_API_KEY='${GEAK_EMBEDDING_API_KEY_VAL}'"
+    [ -n "${GEAK_EMBEDDING_MODEL_VAL}" ] && echo "export GEAK_EMBEDDING_MODEL='${GEAK_EMBEDDING_MODEL_VAL}'"
     [ -n "${CODEX_MODEL_VAL}" ] && echo "export CODEX_MODEL='${CODEX_MODEL_VAL}'"
   } > "$env_file"
   chmod 600 "$env_file"
@@ -608,6 +628,11 @@ PY
     warn "RAG index missing at $RAG_INDEX_DIR"
   fi
   log "RAG index build device: ${GEAK_RAG_INDEX_DEVICE_VAL}"
+  if [ -n "${GEAK_EMBEDDING_BASE_URL_VAL}" ]; then
+    log "GEAK embedding endpoint: configured (model=${GEAK_EMBEDDING_MODEL_VAL})"
+  else
+    warn "GEAK embedding endpoint: not configured -> local HuggingFace path"
+  fi
   if grep -q "rag: true" "$GEAK_CONFIG" 2>/dev/null; then
     log "tools.rag enabled in $GEAK_CONFIG"
   else
