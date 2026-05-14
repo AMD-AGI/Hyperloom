@@ -26,7 +26,7 @@ session has actually arrived.
 
 After a successful `backends` / `params` / `integrate` round produces a
 KEEP entry on `optimization_stack`, the Coordinator's
-`_required_next_step()` adds a `TODO 5/5: validate_stack required`
+`_required_next_step()` adds a `TODO 4/4: validate_stack required`
 entry to the per-tick checklist. Until Orchestration runs
 `validate_stack`, every other action is denied with
 `policy_denied{rule='validate_stack_required'}`. The TODO clears as

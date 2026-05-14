@@ -1,8 +1,9 @@
 """Coordinator hard-gate regression tests for the post-classify pipeline.
 
 After the deletion of the in-loop ``setup`` / ``classify`` actions, two
-Coordinator-enforced gates remain (see plan ``prep-actions-hard-gates``
-and the follow-up ``remove-pmc-hard-gate``):
+Coordinator-enforced action-layer gates remain (see plan
+``prep-actions-hard-gates`` and the follow-ups ``remove-pmc-hard-gate``
+and ``remove-select-kernels-action-gate``):
 
 * ``target_analysis`` — fires whenever
   ``$SESSION_DIR/target_analysis/target_baseline.json`` is missing
@@ -13,13 +14,19 @@ and the follow-up ``remove-pmc-hard-gate``):
   the kernel_id has not yet been integrated into ``optimization_stack``
   (and is not on ``rejected_kernel_ids``).
 
-The ``pmc_roofline`` hard-gate was removed: PMC is now opt-in advisory
-enrichment for ``kernel_opt`` only and never blocks any other action.
-The ``pmc_roofline gate`` section below contains the reverse regression
-asserting the gate stays off.
+Two former gates have been demoted; this file holds reverse regressions
+for both:
 
-These tests exercise each gate's open / closed transitions plus the
-matching ``_sequence_denial_for_action`` deny / allow pairs.
+* ``pmc_roofline`` is now opt-in advisory enrichment for ``kernel_opt``
+  only and never blocks any other action.
+* ``select_kernels`` is now enforced ONLY at the REQUEST layer for
+  ``run_optimization`` (see ``_sequence_denial_for_request``). Action-
+  layer explore actions (``params`` / ``backends`` / ``sweep`` /
+  ``report``) are never gated on a fresh ``last_select_kernels`` cache.
+
+These tests exercise each remaining gate's open / closed transitions
+plus the matching ``_sequence_denial_for_action`` deny / allow pairs,
+and the reverse regressions for the two demoted gates.
 """
 
 from __future__ import annotations
@@ -103,7 +110,7 @@ def test_target_analysis_gate_fires_when_compare_unset_and_json_missing(session_
     writes a 'no_target_gpu_configured' marker JSON."""
     coord = Coordinator(session_dir, backends=_backends_full())
     todo = coord._required_next_step()
-    assert "TODO 0/5" in todo
+    assert "TODO 0/4" in todo
     assert "target_analysis is required now" in todo
     assert "no_target_gpu_configured" in todo
     assert "baseline is required now" not in todo
@@ -115,7 +122,7 @@ def test_target_analysis_gate_fires_when_compare_set_and_json_missing(session_di
         compare_against_gpu="b300",
     )
     todo = coord._required_next_step()
-    assert "TODO 0/5" in todo
+    assert "TODO 0/4" in todo
     assert "target_analysis is required now" in todo
     assert "b300" in todo
 
@@ -199,8 +206,10 @@ def test_target_analysis_denial_clears_after_baseline_json_written(session_dir):
 # ===========================================================================
 def test_pmc_roofline_gate_does_not_fire_when_pmc_missing(session_dir):
     """With ``last_profile_trace`` set and ``last_profile_pmc_summary``
-    empty, the next required step must be ``select_kernels`` (TODO 3/5),
-    NOT ``pmc_roofline``. The PMC hard-gate has been removed."""
+    empty, ``_required_next_step()`` must NOT mention ``pmc_roofline``.
+    The PMC hard-gate has been removed. With no ``kernel_opt`` KEEP
+    pending and no unvalidated stack KEEPs, the chain has reached its
+    end and the required step is empty."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
@@ -208,15 +217,15 @@ def test_pmc_roofline_gate_does_not_fire_when_pmc_missing(session_dir):
     s.last_profile_trace = "/tmp/profile.tar.gz"
     todo = coord._required_next_step()
     assert "pmc_roofline" not in todo
-    assert "TODO 3/5" in todo
-    assert "select_kernels is required now" in todo
+    assert "select_kernels" not in todo
+    assert todo == ""
 
 
 def test_pmc_roofline_gate_does_not_block_explore_actions(session_dir):
     """``_sequence_denial_for_action`` must not deny any action with the
-    reason ``pmc_roofline must run before ...``. Explore actions may
-    still hit the ``select_kernels must run first`` denial — that is a
-    separate (still-active) gate and not the subject of this test."""
+    reason ``pmc_roofline must run before ...``. With both the PMC and
+    the action-layer ``select_kernels`` hard-gates removed, no explore
+    action should be denied at all when only the cache is empty."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
@@ -235,7 +244,7 @@ def test_pmc_roofline_gate_does_not_block_explore_actions(session_dir):
 def test_pmc_summary_present_does_not_change_required_next_step(session_dir):
     """Sanity: setting ``last_profile_pmc_summary`` to a value must NOT
     change ``_required_next_step()`` because PMC is no longer part of
-    the TODO chain."""
+    the TODO chain. The chain is empty either way."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
@@ -245,8 +254,7 @@ def test_pmc_summary_present_does_not_change_required_next_step(session_dir):
     s.last_profile_pmc_summary = "/tmp/pmc.json"
     todo_with_pmc = coord._required_next_step()
     assert todo_without_pmc == todo_with_pmc
-    assert "TODO 3/5" in todo_with_pmc
-    assert "select_kernels is required now" in todo_with_pmc
+    assert todo_with_pmc == ""
 
 
 def test_pmc_roofline_gate_skipped_in_no_kernel_mode(session_dir):
@@ -304,7 +312,7 @@ def test_integrate_gate_fires_when_keep_pending(session_dir):
     }
     assert coord._kernel_opt_keep_pending() == "k-rmsnorm"
     todo = coord._required_next_step()
-    assert "TODO 4/5" in todo
+    assert "TODO 3/4" in todo
     assert "integrate is required now" in todo
     assert "k-rmsnorm" in todo
 
@@ -356,3 +364,92 @@ def test_integrate_denial_blocks_explore_but_allows_safe_actions(session_dir):
     assert coord._sequence_denial_for_action("integrate") is None
     assert coord._sequence_denial_for_action("validate_stack") is None
     assert coord._sequence_denial_for_action("report") is None
+
+
+# ===========================================================================
+# select_kernels gate — DEMOTED. Action-layer gate has been removed; the
+# request-layer gate on ``run_optimization`` remains as the only enforcement
+# point. Reverse regressions guard against the action-layer gate coming back
+# AND assert the request-layer gate stays in place.
+# ===========================================================================
+def test_select_kernels_gate_does_not_block_explore_actions(session_dir):
+    """With ``last_profile_trace`` set and ``last_select_kernels`` cache
+    empty, ``_sequence_denial_for_action`` must NOT deny any explore
+    action with ``select_kernels must run first``."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.last_profile_trace = "/tmp/profile.tar.gz"
+    # Cache deliberately empty; would have triggered the old gate.
+    s.last_select_kernels = {}
+    for action in ("backends", "params", "sweep", "report", "profile",
+                   "pmc_roofline", "validate_stack"):
+        denied = coord._sequence_denial_for_action(action)
+        if denied is None:
+            continue
+        assert "select_kernels must run first" not in str(denied), (
+            f"{action!r} hit the removed select_kernels action-layer "
+            f"gate: {denied!s}"
+        )
+
+
+def test_select_kernels_gate_does_not_appear_in_required_next_step(session_dir):
+    """``_required_next_step()`` must not surface a select_kernels TODO
+    even when ``last_select_kernels`` is stale."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_select_kernels = {}
+    todo = coord._required_next_step()
+    assert "select_kernels" not in todo
+    # No other gate is open in this state, so the chain is empty.
+    assert todo == ""
+
+
+def test_select_kernels_gate_still_blocks_run_optimization_request(session_dir):
+    """The request-layer gate on ``run_optimization`` MUST still fire
+    when ``last_select_kernels`` is stale. This is the sole remaining
+    enforcement point that keeps ``kernel_opt`` from running without
+    candidates."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_select_kernels = {}
+    denied = coord._sequence_denial_for_request("kernel", "run_optimization")
+    assert isinstance(denied, PolicyDenied)
+    assert denied.rule == "execution_order"
+    assert "select_kernels must run first" in str(denied)
+
+
+def test_select_kernels_request_itself_passes(session_dir):
+    """``select_kernels`` REQUEST itself bypasses
+    ``_sequence_denial_for_request``'s prerequisite check (it IS the
+    prerequisite). Baseline + profile prerequisites still apply."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_select_kernels = {}
+    assert coord._sequence_denial_for_request("kernel", "select_kernels") is None
+
+
+def test_select_kernels_gate_clears_run_opt_request_when_cache_fresh(session_dir):
+    """Once ``last_select_kernels.trace_input`` matches the current
+    ``last_profile_trace``, the request-layer gate clears and
+    ``run_optimization`` is allowed through."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_select_kernels = {
+        "trace_input": "/tmp/profile.tar.gz",
+        "candidates_path": "/tmp/cands.json",
+    }
+    assert coord._sequence_denial_for_request("kernel", "run_optimization") is None

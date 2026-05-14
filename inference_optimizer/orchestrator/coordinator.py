@@ -1036,17 +1036,17 @@ class Coordinator:
         sequence deterministic and visible in the prompt every tick.
 
         Pipeline (after the deletion of the in-loop ``setup`` / ``classify``
-        actions, which are now external-SKILL responsibilities, and the
-        deletion of the PMC hard-gate — ``pmc_roofline`` is now opt-in
-        advisory enrichment for ``kernel_opt`` only, never a prerequisite
-        for explore actions):
+        actions, the deletion of the PMC hard-gate, and the deletion of
+        the action-layer ``select_kernels`` hard-gate — ``select_kernels``
+        is now only enforced as a prerequisite for ``run_optimization``
+        REQUESTs at the request layer, never for explore actions like
+        ``params`` / ``backends`` / ``sweep`` / ``report``):
 
             TODO 0  target_analysis  (only when --compare-against-gpu set)
             TODO 1  baseline
             TODO 2  profile          (kernel mode only)
-            TODO 3  select_kernels   (kernel mode only, after profile)
-            TODO 4  integrate        (kernel mode only, after kernel_opt KEEP)
-            TODO 5  validate_stack   (when unvalidated KEEPs landed)
+            TODO 3  integrate        (kernel mode only, after kernel_opt KEEP)
+            TODO 4  validate_stack   (when unvalidated KEEPs landed)
 
         ``validate_stack`` precedence is critical: once at least one KEEP
         has been added to ``optimization_stack`` since the last successful
@@ -1059,7 +1059,7 @@ class Coordinator:
         if not self._target_analysis_baseline_exists():
             if self._compare_against_gpu:
                 return (
-                    f"TODO 0/5: target_analysis is required now. "
+                    f"TODO 0/4: target_analysis is required now. "
                     f"--compare-against-gpu="
                     f"{self._compare_against_gpu!r} was set but "
                     "$SESSION_DIR/target_analysis/target_baseline.json is "
@@ -1067,7 +1067,7 @@ class Coordinator:
                     "the external InferenceX reference has been fetched."
                 )
             return (
-                "TODO 0/5: target_analysis is required now. "
+                "TODO 0/4: target_analysis is required now. "
                 "$SESSION_DIR/target_analysis/target_baseline.json is "
                 "missing; propose/delegate only `target_analysis` so a "
                 "reason='no_target_gpu_configured' marker JSON is written "
@@ -1076,34 +1076,31 @@ class Coordinator:
             )
         if self.shared_state.baseline_tput <= 0:
             return (
-                "TODO 1/5: baseline is required now. Propose/delegate only "
+                "TODO 1/4: baseline is required now. Propose/delegate only "
                 "`baseline` until baseline_tput > 0."
             )
-        # Profile / select_kernels / integrate guards only apply when the
-        # kernel agent is alive — no-kernel runs have no way to service the
-        # request and the mandate would be meaningless. ``pmc_roofline`` is
-        # NOT gated here: it is opt-in advisory enrichment for ``kernel_opt``
-        # via ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1``, never a prerequisite for
-        # any other action.
+        # Profile / integrate guards only apply when the kernel agent is
+        # alive — no-kernel runs have no way to service the request and
+        # the mandate would be meaningless. Two related gates are NOT
+        # surfaced here:
+        # * ``pmc_roofline`` is opt-in advisory enrichment for
+        #   ``kernel_opt`` via ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1`` and
+        #   never a prerequisite for any other action.
+        # * ``select_kernels`` is a prerequisite ONLY for ``run_optimization``
+        #   REQUESTs (enforced in ``_sequence_denial_for_request``); it is
+        #   NOT a prerequisite for ``params`` / ``backends`` / ``sweep`` /
+        #   ``report``.
         if "kernel" in self.role_registry:
             if not self.shared_state.last_profile_trace:
                 return (
-                    "TODO 2/5: profile is required now. Baseline exists but "
+                    "TODO 2/4: profile is required now. Baseline exists but "
                     "last_profile_trace is empty; propose/delegate only `profile`. "
                     "Do not run backends/params/sweep yet."
-                )
-            select = self.shared_state.last_select_kernels or {}
-            if select.get("trace_input") != self.shared_state.last_profile_trace:
-                return (
-                    "TODO 3/5: select_kernels is required now. Emit "
-                    "request{target_agent='kernel', kind='select_kernels', "
-                    "params={trace_input: last_profile_trace, top_k: 10}} before "
-                    "backends/params/sweep."
                 )
             pending_kid = self._kernel_opt_keep_pending()
             if pending_kid:
                 return (
-                    f"TODO 4/5: integrate is required now. kernel_opt "
+                    f"TODO 3/4: integrate is required now. kernel_opt "
                     f"returned KEEP for kernel_id={pending_kid!r} but the "
                     "patch has not been integrated into optimization_stack. "
                     "Emit request{target_agent='kernel', kind='integrate', "
@@ -1114,7 +1111,7 @@ class Coordinator:
                 )
         if self.shared_state.optimization_stack_has_unvalidated_keeps():
             return (
-                "TODO 5/5: validate_stack required. New KEEP'd entries have "
+                "TODO 4/4: validate_stack required. New KEEP'd entries have "
                 "landed on optimization_stack since the last validate_stack run "
                 f"(stack_len={len(self.shared_state.optimization_stack)}, "
                 f"validated_at_len="
@@ -1274,14 +1271,18 @@ class Coordinator:
             self_loop = self._baseline_self_loop_denial(proposed_params)
             if self_loop is not None:
                 return self_loop
-        # Profile / select_kernels / integrate guards only apply when kernel
-        # agent is in the role registry — no-kernel mode skips them.
-        # ``pmc_roofline`` is intentionally NOT gated here: it is opt-in
-        # advisory enrichment for ``kernel_opt`` via
-        # ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1`` and never blocks any other
-        # action. A platform that cannot run rocprof (no Ray context, no
-        # CAP_SYS_PTRACE, missing rocprofiler-register) must not deadlock
-        # the explore / kernel pipeline.
+        # Profile / integrate guards only apply when kernel agent is in
+        # the role registry — no-kernel mode skips them. Two related gates
+        # are intentionally NOT enforced at the action layer:
+        # * ``pmc_roofline`` is opt-in advisory enrichment for
+        #   ``kernel_opt`` via ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1`` and
+        #   never blocks any other action. A platform that cannot run
+        #   rocprof must not deadlock the explore / kernel pipeline.
+        # * ``select_kernels`` is enforced at the REQUEST layer
+        #   (``_sequence_denial_for_request``) for ``run_optimization``
+        #   only. ``params`` / ``backends`` / ``sweep`` / ``report`` are
+        #   never gated on a fresh ``last_select_kernels`` cache — those
+        #   actions don't need kernel candidates to make progress.
         if "kernel" in self.role_registry:
             if (
                 self.shared_state.baseline_tput > 0
@@ -1292,20 +1293,6 @@ class Coordinator:
                     f"action={action!r} denied: profile must run before {action!r}",
                     rule="execution_order",
                     hint="propose/delegate `profile`; last_profile_trace is empty",
-                )
-            select = self.shared_state.last_select_kernels or {}
-            needs_select = (
-                bool(self.shared_state.last_profile_trace)
-                and select.get("trace_input") != self.shared_state.last_profile_trace
-            )
-            if needs_select and action in {"backends", "params", "sweep", "report"}:
-                return PolicyDenied(
-                    f"action={action!r} denied: select_kernels must run first",
-                    rule="execution_order",
-                    hint=(
-                        "emit request{target_agent='kernel', kind='select_kernels', "
-                        "params={trace_input: last_profile_trace, top_k: 10}}"
-                    ),
                 )
             # integrate gate: kernel_opt KEEP awaiting integrate. Allow
             # integrate / validate_stack / report through; recover is not
