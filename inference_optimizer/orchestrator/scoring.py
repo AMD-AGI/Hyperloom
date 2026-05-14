@@ -119,7 +119,7 @@ COOLDOWN_TICKS: dict[str, int] = {
 # snake_case names so seed_action_scores can look them up directly.
 MARATHON_PRIORS: dict[str, dict[str, float]] = {
     "dense": {
-        "deep_kernel_analysis": 9.0,
+        "deep_kernel_analysis": 2.0,
         "operator_tuning": 4.0,
         "kernel_opt": 8.0,
         "framework_rebuild": 3.0,
@@ -130,7 +130,7 @@ MARATHON_PRIORS: dict[str, dict[str, float]] = {
         "sweep": 1.0,
     },
     "moe_mla": {
-        "deep_kernel_analysis": 8.0,
+        "deep_kernel_analysis": 2.0,
         "operator_tuning": 7.0,
         "kernel_opt": 6.0,
         "framework_rebuild": 4.0,
@@ -141,7 +141,7 @@ MARATHON_PRIORS: dict[str, dict[str, float]] = {
         "sweep": 1.0,
     },
     "moe_swa": {
-        "deep_kernel_analysis": 8.0,
+        "deep_kernel_analysis": 2.0,
         "operator_tuning": 7.0,
         "kernel_opt": 6.0,
         "framework_rebuild": 4.0,
@@ -152,7 +152,7 @@ MARATHON_PRIORS: dict[str, dict[str, float]] = {
         "sweep": 1.0,
     },
     "moe_mla_nsa": {
-        "deep_kernel_analysis": 8.0,
+        "deep_kernel_analysis": 2.0,
         "operator_tuning": 7.0,
         "kernel_opt": 6.0,
         "framework_rebuild": 4.0,
