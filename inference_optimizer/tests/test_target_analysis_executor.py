@@ -280,7 +280,7 @@ async def test_report_executor_renders_external_baseline_section(
         "source": "https://inferencex.semianalysis.com/api/v1",
     }))
 
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(sd))
+    monkeypatch.setenv("USER_DATA_PATH", str(sd))
 
     class _ReportCtx:
         task = Task(task_id="r-1", kind="report", params={},

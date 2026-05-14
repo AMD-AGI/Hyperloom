@@ -355,10 +355,9 @@ class ReportExecutor:
         Strategy (in order):
         1. ``ctx.extra['session_dir']``     — Coordinator injects this for in-process runs
         2. ``task.params['session_dir']``   — explicit wins (e.g. tests)
-        3. :func:`paths.session_dir`        — honours
-           ``$INFERENCE_OPTIMIZER_SESSION_DIR`` and otherwise returns
-           ``/workspace/hyperloom``. Returns the path only if it exists
-           and contains ``state.json``.
+        3. :func:`paths.session_dir`        — honours ``$USER_DATA_PATH``
+           and otherwise returns ``/workspace/hyperloom``. Returns the
+           path only if it exists and contains ``state.json``.
         4. None → runner returns failed status with an error
         """
         extra = getattr(ctx, "extra", None) or {}

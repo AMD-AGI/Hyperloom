@@ -35,7 +35,7 @@ from inference_optimizer.paths import make_session_dir
 # ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     return make_session_dir()
 
 
@@ -249,7 +249,7 @@ def test_required_next_step_validate_stack_after_unvalidated_keep(session_dir):
 
 
 def test_required_next_step_no_kernel_skips_profile_select(tmp_path, monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     sd = make_session_dir()
     coord = Coordinator(
         sd,

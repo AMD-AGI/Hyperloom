@@ -1,11 +1,10 @@
-"""Filesystem path resolver (DESIGN v0.6 §23 — flattened in v0.6.1).
+"""Filesystem path resolver.
 
 Two distinct path concepts:
 
 1. **Session paths** — per-run mutable artifacts (SQLite DB, state.json,
-   personas, results, kernel-agent workspace, patches, logs). v0.6.1
-   collapses the previous ``<root>/<session_id>/`` layout to a single
-   fixed directory::
+   personas, results, kernel-agent workspace, patches, logs). State
+   lives in one fixed directory::
 
         /workspace/hyperloom/
             manifest.json
@@ -19,17 +18,14 @@ Two distinct path concepts:
             patches/<kernel_id>/
             reports/  logs/
 
-   Each sandbox is short-lived and dedicated to a single optimizer run,
-   so there is no need for a session_id subdirectory.
+   Each sandbox is single-use, so there is no session_id subdirectory.
 
    Resolution order (see :func:`session_dir`):
 
-   1. ``INFERENCE_OPTIMIZER_SESSION_DIR`` — developer / unit-test override
-      (kept verbatim from v0.6.1; tests already monkeypatch this).
-   2. ``USER_DATA_PATH`` — user-facing env. This is the canonical knob
-      production launchers and the SDK should set; it is documented in
-      ``.env.template`` and ``SKILL.md``.
-   3. ``DEFAULT_SESSION_DIR`` (``/workspace/hyperloom``).
+   1. ``USER_DATA_PATH`` — user-facing env (documented in
+      ``.env.template`` and ``SKILL.md``); production launchers and
+      the SDK set this.
+   2. ``DEFAULT_SESSION_DIR`` (``/workspace/hyperloom``).
 
 2. **Runtime asset paths** — read-only files shipped with the package
    (shell scripts, kernel-opt prompt templates, action metadata, agent
@@ -43,7 +39,6 @@ import os
 from pathlib import Path
 
 DEFAULT_SESSION_DIR = Path("/workspace/hyperloom")
-ENV_OVERRIDE_SESSION_DIR = "INFERENCE_OPTIMIZER_SESSION_DIR"
 ENV_USER_DATA_PATH = "USER_DATA_PATH"
 ENV_OVERRIDE_ASSET_ROOT = "INFERENCE_OPTIMIZER_ASSET_ROOT"
 
@@ -86,17 +81,10 @@ def session_dir() -> Path:
 
     Resolution order:
 
-    1. ``$INFERENCE_OPTIMIZER_SESSION_DIR`` env var (developer /
-       unit-test override; kept verbatim from v0.6.1 so existing tests
-       that monkeypatch this env var keep working).
-    2. ``$USER_DATA_PATH`` env var (the user-facing knob, documented in
-       ``.env.template`` and ``SKILL.md``; this is what production
-       launchers and the SDK should set).
-    3. ``DEFAULT_SESSION_DIR`` (``/workspace/hyperloom``).
+    1. ``$USER_DATA_PATH`` env var (documented in ``.env.template`` and
+       ``SKILL.md``; production launchers and the SDK set this).
+    2. ``DEFAULT_SESSION_DIR`` (``/workspace/hyperloom``).
     """
-    override = os.environ.get(ENV_OVERRIDE_SESSION_DIR)
-    if override:
-        return Path(override)
     user_data = os.environ.get(ENV_USER_DATA_PATH)
     if user_data:
         return Path(user_data)
@@ -109,8 +97,8 @@ def make_session_dir() -> Path:
     Idempotent (``mkdir -p`` semantics). Returns the absolute path.
 
     The CLI calls this exactly once at startup, before the Coordinator
-    is instantiated. Tests call it after pinning
-    ``INFERENCE_OPTIMIZER_SESSION_DIR`` to ``tmp_path``.
+    is instantiated. Tests call it after pinning ``USER_DATA_PATH`` to
+    ``tmp_path``.
     """
     sd = session_dir()
     sd.mkdir(parents=True, exist_ok=True)
@@ -167,7 +155,6 @@ __all__ = [
     "AssetRootNotFound",
     "DEFAULT_SESSION_DIR",
     "ENV_OVERRIDE_ASSET_ROOT",
-    "ENV_OVERRIDE_SESSION_DIR",
     "ENV_USER_DATA_PATH",
     "PACKAGE_ROOT",
     "agent_session_dir",
