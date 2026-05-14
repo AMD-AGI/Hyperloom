@@ -13,7 +13,7 @@ Replaces the previous hand-maintained pair ``orchestration.md`` /
     3. PIPELINE & TIME BUDGET            (phase ordering + per-phase ETA)
     4. ACTIONS YOU MAY USE               (filtered by enabled_actions)
     5. DECISION FRAMEWORK                (always — short, generic)
-    6. KERNEL-OPT PIPELINE               (only when "kernel_opt" is enabled)
+    6. KERNEL-OPT REQUEST REFERENCE      (only when "kernel_opt" is enabled)
     7. RULES FRAGMENT                    (orchestration.md verbatim)
 
 Output is deterministic given the same inputs (sorted action listing,
@@ -243,7 +243,7 @@ def _format_gain_pair(meta: ActionMetadata) -> str:
 def _format_emit_hint(meta: ActionMetadata) -> str:
     if meta.name in KERNEL_OWNED_ACTIONS:
         if meta.name == "kernel_opt":
-            kind_hint = "select_kernels  -> run_optimization"
+            kind_hint = "run_optimization"
         elif meta.name == "integrate":
             kind_hint = "integrate"
         else:
@@ -485,46 +485,70 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
 
 
 _KERNEL_OPT_PIPELINE_BODY: str = """\
-## 6. KERNEL-OPT PIPELINE (sequential, no backtracking)
+## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)
 
-Step **K1** (skip when cached). Emit:
-    request{target_agent: 'kernel', kind: 'select_kernels',
-            params: {trace_input: <verbatim last_profile_trace>, top_k: 10}}
+The three kernel-owned actions (`select_kernels`, `kernel_opt`,
+`integrate`) are scored on the `Action scores` board like every other
+action. Pick them by `eff_score` per the DECISION FRAMEWORK; the blocks
+below are only **payload templates** describing how to build the REQUEST
+once you have selected the action. The Coordinator hard-gates the
+obvious prerequisites (TODO 4/6 fires when `select_kernels` is stale,
+TODO 5/6 fires after a `kernel_opt` KEEP forces `integrate`); everything
+else flows through the scoreboard.
+
+### `select_kernels` — payload (gated by TODO 4/6 when cache is stale)
+
+  request{target_agent: 'kernel', kind: 'select_kernels',
+          params: {trace_input: <verbatim last_profile_trace>, top_k: 10}}
 
   STRICT: if `last_select_kernels.trace_input` already equals
-  `last_profile_trace`, the candidate list is cached — skip K1 and go to K2
-  using `last_select_kernels.candidates_path` and the kernel_id list under
-  `last_select_kernels.top5`. Re-emit `select_kernels` ONLY after a fresh
-  `profile` action.
+  `last_profile_trace`, the candidate list is cached — do NOT re-emit.
+  The TODO 4/6 gate only fires when the cache is stale. Re-emit only
+  after a fresh `profile` action invalidates the cache.
 
-Step **K2**. Pick the next reusable native kernel from
-`last_select_kernels.reusable_native_kernel_ids`, in order, skipping any
-kernel_id already present in `last_kernel_opt.kernel_id`. HARD RULES:
-  - kernel_id MUST appear in `reusable_native_kernel_ids`. Never pick from
-    raw `hot_kernels_top15` if the entry is missing — top hot kernels are
-    often Tensile / CK / vendor binaries and will be rejected with
-    `non_reusable_kernel`.
-  - If `reusable_native_kernel_ids` is empty, do NOT keep emitting
-    run_optimization. Heartbeat instead and consider re-profiling.
-Then emit:
-    request{target_agent: 'kernel', kind: 'run_optimization',
-            params: {kernel_id: <picked kernel_id>,
-                     source_file: <hot_kernels[i].source_file>,
-                     candidates_path: <select_kernels_done.candidates_path>,
-                     backends: 'claude',
-                     budget_minutes: 60}}
+### `kernel_opt` — payload for `run_optimization`
 
-Step **K3**. When `run_optimization_done` arrives, look at
-`result.proposal.decision`:
-  - **KEEP**     -> emit request{kind: 'integrate', params: {kernel_id, patch_path,
-                                target_file, base_tput, extra_sglang_args, config_path}}
-  - **PARTIAL/REVERT** -> don't integrate; pick the NEXT hot kernel (skip
-                          kernels with kernel_id == last_kernel_opt.kernel_id)
-                          and re-issue step K2 with that one.
+When the scoreboard surfaces `kernel_opt`, pick the next reusable
+native kernel from `last_select_kernels.reusable_native_kernel_ids`,
+in order, skipping any kernel_id already present in
+`last_kernel_opt.kernel_id`.
 
-After every successful `integrate` (KEEP), the Coordinator records a new
-entry on `optimization_stack`. The next decision framework tick will trigger
-the validate_stack TODO; obey it before resuming kernel-opt rounds.
+HARD RULES (applied at REQUEST build time, NOT at action-selection time):
+  - kernel_id MUST appear in `reusable_native_kernel_ids`. Never pick
+    from raw `hot_kernels_top15` if the entry is missing — top hot
+    kernels are often Tensile / CK / vendor binaries and will be
+    rejected with `non_reusable_kernel`.
+  - If `reusable_native_kernel_ids` is empty, do NOT propose
+    `kernel_opt` (its `applicable_when` is implicitly violated).
+    Heartbeat instead and consider re-profiling.
+
+  request{target_agent: 'kernel', kind: 'run_optimization',
+          params: {kernel_id: <picked kernel_id>,
+                   source_file: <hot_kernels[i].source_file>,
+                   candidates_path: <select_kernels_done.candidates_path>,
+                   backends: 'claude',
+                   budget_minutes: 60}}
+
+### `integrate` — payload (TODO 5/6 forces this immediately after a KEEP)
+
+When `run_optimization_done` arrives with `result.proposal.decision='KEEP'`,
+the Coordinator's TODO 5/6 makes `integrate` the only allowed action
+until the patch lands on `optimization_stack`. Payload:
+
+  request{target_agent: 'kernel', kind: 'integrate',
+          params: {kernel_id, patch_path, target_file, base_tput,
+                   extra_sglang_args, config_path}}
+
+If `result.proposal.decision` is `PARTIAL` or `REVERT`, the patch is
+rejected — do NOT integrate. The Coordinator unlocks immediately; consult
+the scoreboard for the next action like normal. A second `kernel_opt`
+round on the next reusable kernel_id often surfaces as top-1 (because
+the previous KEEP/REVERT decayed only that kernel_id's branch), but is
+not required — the scoreboard decides.
+
+After every successful `integrate` (KEEP), the Coordinator records a
+new entry on `optimization_stack` and the TODO 6/6 `validate_stack`
+gate fires; obey it before resuming any explore / deep round.
 
 ### KERNEL TARGETING (native vs torch.compile)
 
