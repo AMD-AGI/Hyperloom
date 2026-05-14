@@ -34,11 +34,9 @@ The CLI starts a Python Coordinator that coordinates:
   intents. `--robustness-mock` for offline / smoke tests.
 
 State lives in **one fixed session directory** — `/workspace/hyperloom`
-by default. v0.6.1 collapses the previous `<root>/<session_id>/` layout
-to a flat directory because every sandbox is single-use; there is no
-session_id in the path. The user-facing override is `$USER_DATA_PATH`
-(documented in `.env.template`); `$INFERENCE_OPTIMIZER_SESSION_DIR`
-is kept for tests / forced overrides and wins over both.
+by default. Every sandbox is single-use, so the path is flat (no
+`session_id` subdirectory). Override via `$USER_DATA_PATH` (documented
+in `.env.template`).
 
 ```text
 /workspace/hyperloom/                     # session_dir (fixed)
@@ -72,11 +70,8 @@ Always prefer `manifest.json` / `state.json` / `coordinator.db` over
 guessing from terminal logs.
 
 Session dir resolution order (`inference_optimizer/paths.py`):
-1. `$INFERENCE_OPTIMIZER_SESSION_DIR` env → use as-is (developer /
-   unit-test override; kept verbatim from v0.6.1).
-2. `$USER_DATA_PATH` env → use as-is (the user-facing knob; production
-   launchers and the SDK should set this).
-3. Default `/workspace/hyperloom`.
+1. `$USER_DATA_PATH` env → use as-is.
+2. Default `/workspace/hyperloom`.
 
 Path helpers (don't string-concat):
 
@@ -252,19 +247,11 @@ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 ```
 
 In sandboxes where `/workspace/hyperloom` is unwritable, override the
-session location. Production launchers and the SDK should use
-`USER_DATA_PATH`; tests / one-off forced overrides use the legacy
-`INFERENCE_OPTIMIZER_SESSION_DIR` (which still wins over
-`USER_DATA_PATH` so existing fixtures don't break):
+session location with `USER_DATA_PATH`:
 
 ```bash
-# Production knob — documented in .env.template
 export USER_DATA_PATH="$RUN_ROOT/optimizer-session"
 mkdir -p "$USER_DATA_PATH"
-
-# Test / forced override (wins over USER_DATA_PATH)
-export INFERENCE_OPTIMIZER_SESSION_DIR="$RUN_ROOT/optimizer-session"
-mkdir -p "$INFERENCE_OPTIMIZER_SESSION_DIR"
 ```
 
 The CLI calls `make_session_dir()` once at startup; that creates the
@@ -320,16 +307,14 @@ them at runtime:
 - `benchmark.runner_type` <- `--gpu-type` / `$GPU_TYPE` / rocm-smi auto-detect
 
 `benchmark.benchmark_script` is deliberately NOT set in the shipped
-YAMLs. At materialize time Hyperloom **explicitly pins it to**
+YAMLs. At materialize time Hyperloom pins it to
 `{framework}_{runner_type}.sh` (e.g. `sglang_mi300x.sh` /
 `sglang_mi355x.sh`) so Magpie's resolver hits priority 1 (explicit
-user override) and never silently falls through to an InferenceX
-native script (e.g. `dsr1_fp8_mi300x.sh`) that hardcodes
-`--result-dir /workspace/` and ignores `EXTRA_*_ARGS`. See
-`design/magpie-generic-script-and-user-data-path.md` §3. Each shipped
-YAML has a commented `# benchmark_script: ...` template right under
-`framework:` for manual debug overrides; Orchestration can also route
-around the default per-task via `params.benchmark_script` (sanitized).
+user override) and uses the generic script — which respects
+`RESULT_DIR` and `EXTRA_*_ARGS`. Each shipped YAML has a commented
+`# benchmark_script: ...` template right under `framework:` for manual
+debug overrides; Orchestration can also route per-task via
+`params.benchmark_script` (sanitized).
 
 Before a new model run, verify these fields match the environment:
 
@@ -342,51 +327,40 @@ Before a new model run, verify these fields match the environment:
 
 ### Magpie leak-path salvage (`INFERENCE_OPTIMIZER_RESCUE_PATHS`)
 
-> **Note (post-`design/magpie-generic-script-and-user-data-path.md` §3):**
-> The default benchmark path now force-pins `{framework}_{runner_type}.sh`
-> at materialize time (`_workload_envs.py` and `_grid_runner.py`), so
-> InferenceX native scripts that hardcode `--result-dir /workspace/`
-> are no longer reached on the default path. The salvage logic below
-> is kept as **defense-in-depth** — it primarily fires when an operator
-> explicitly opts into a leaky script via `params.benchmark_script`.
+The default benchmark path force-pins `{framework}_{runner_type}.sh` at
+materialize time so Magpie's resolver picks the generic script that
+respects `RESULT_DIR` and `EXTRA_*_ARGS`. The salvage logic below is
+defense-in-depth; it primarily fires when an operator explicitly opts
+into a leaky script via `params.benchmark_script` whose underlying
+`*.sh` hardcodes a `--result-dir` outside the per-task workspace.
 
-Magpie's framework-specific scripts (notably
-`dsr1_fp8_mi300x.sh`) hardcode `--result-dir /workspace/`, so when the
-optimizer launches a benchmark with a per-task workspace InferenceX
-writes its `inferencex_result.json` to `/workspace/` instead of into the
-workspace Magpie returned. The wrapper then reports `success: false`
-even though the numerical run completed. To stop this single bug from
-looping baselines forever, `extract_benchmark_measurement` runs a
-second-chance salvage pass over documented leak destinations whenever
-the in-workspace search produced no usable measurement:
+When the in-workspace search produces no usable measurement,
+`extract_benchmark_measurement` runs a second-chance salvage pass over
+documented leak destinations:
 
 1. `$INFERENCE_OPTIMIZER_RESCUE_PATHS` — colon-separated list of files
    and/or directories. Directories are scanned for
    `inferencex_result*.json`.
 2. Default: `/workspace/inferencex_result.json`.
 
-Salvage is mtime-gated: only files written *after* the executor captured
-`subprocess_started_unix = time.time()` (right before `subprocess.run`)
-are eligible, so a stale leak from a prior run can never masquerade as
-the current run's result. Adopted leaks are tagged in the result's
-`nonfatal_warnings` as `rescued_from_leaked_path:<path>` so operators
-can audit which path the salvage picked. The fix for the underlying
-hardcoded `--result-dir` lives in the relevant Magpie script(s); this
-escape hatch is a safety net, not a substitute.
+Salvage is mtime-gated: only files written *after* the executor
+captured `subprocess_started_unix = time.time()` (right before
+`subprocess.run`) are eligible, so a stale leak can never masquerade
+as the current run's result. Adopted leaks are tagged in the result's
+`nonfatal_warnings` as `rescued_from_leaked_path:<path>`.
 
 When salvage adopts a leaked file, `_materialize_rescue_into_workspace`
 also `shutil.copy2`s it into the task workspace (preserving the
-basename — `inferencex_result.json`, `inferencex_result_eval.json`, etc.)
-so the canonical artifact lives alongside `benchmark_report.json` and
-the NFS clone of `<session>/runs/<action>/<task_id>/` is self-contained.
-`raw_result_path` advertises the in-workspace copy; the original leak
-location is preserved verbatim in the `rescued_from_leaked_path:<path>`
-warning. The copy is best-effort: on a permission / disk error the
-salvage falls back to the leak path and additionally emits
-`rescued_copy_into_workspace_failed:<path>` so operators see why the
-canonical layout is missing without losing the measurement itself.
+basename — `inferencex_result.json`, `inferencex_result_eval.json`,
+etc.) so the canonical artifact lives alongside `benchmark_report.json`
+and the NFS clone of `<session>/runs/<action>/<task_id>/` is
+self-contained. `raw_result_path` advertises the in-workspace copy;
+the original leak location is preserved verbatim in the
+`rescued_from_leaked_path:<path>` warning. The copy is best-effort:
+on a permission / disk error the salvage falls back to the leak path
+and additionally emits `rescued_copy_into_workspace_failed:<path>`.
 
-`inferencex_result.json` is only one of several artifacts Magpie's shell
+`inferencex_result.json` is one of several artifacts Magpie's shell
 wrappers hardcode under `/workspace/`. The single_node `*.sh` scripts
 also redirect:
 
@@ -409,17 +383,16 @@ root list is `$INFERENCE_OPTIMIZER_LEAK_ROOTS` (colon-separated, with
 code, and the test suite pins it to a sandbox via an autouse fixture
 so unit tests stay isolated from the host's real `/workspace`.
 
-The same mtime gate is now applied per variant in `_grid_runner.py`
+The same mtime gate is applied per variant in `_grid_runner.py`
 (`variant_started_unix = time.time()` is captured immediately before
-each `_run_magpie` call, and forwarded to `extract_benchmark_measurement
-(subprocess_started_unix=...)`). Without this, every variant in a
-`backends` / `params` / `sweep` grid would inherit the previous variant's
-or even the previous *baseline*'s `/workspace/inferencex_result.json` —
-silently producing fake winners. The same `extract_benchmark_measurement`
-salvage helpers apply to grid variants and to validate_stack runs.
+each `_run_magpie` call and forwarded to
+`extract_benchmark_measurement(subprocess_started_unix=...)`), so
+variants in a `backends` / `params` / `sweep` grid never adopt
+another variant's `/workspace/inferencex_result.json`. The same
+salvage helpers apply to validate_stack runs.
 
-Orchestration can route around the leak proactively via two new
-`task.params` knobs (descriptive `params_schema` blocks live in each
+Orchestration can route per-task via two `task.params` knobs
+(descriptive `params_schema` blocks live in each
 `actions/_meta/<action>.yaml`):
 
 * `params.benchmark_script` — bare `*.sh` file name (sanitized at every
@@ -427,9 +400,7 @@ Orchestration can route around the leak proactively via two new
   metacharacters are rejected with `error_class=bad_param`). When set,
   Magpie's `benchmark.benchmark_script` is rewritten in the materialized
   YAML *after* the gpu_type → script auto-selection runs, so the
-  operator pick wins. Typical use: pin `sglang_mi300x.sh` when the
-  default model script (`dsr1_fp8_mi300x.sh`) hardcodes `--result-dir
-  /workspace/`. Honored by baseline / profile / validate_stack /
+  operator pick wins. Honored by baseline / profile / validate_stack /
   backends / params / sweep.
 * `params.result_dir` — absolute or workspace-relative path (sanitized
   via `sanitize_result_dir`). Forwarded as `$RESULT_DIR` for that
@@ -460,7 +431,7 @@ as `baseline_config.with_envs.yaml`, and forwards the path on
 `params` / `backends` / `sweep` task. Variants thus benchmark the **same
 workload baseline ran**; without this contract they would render from the
 YAML's smoke defaults (`TP=1` / `CONC=8` / `ISL=256` / `OSL=256`) and produce
-~10x lower throughput (the historical fairness bug). Downstream actions
+~10x lower throughput. Downstream actions
 re-materialize on top of `config_path`; per-variant `extra_envs` (e.g. sweep's
 explicit `CONC`/`ISL`/`OSL`) still win because `_grid_runner._build_variant_yaml`
 applies them last.
@@ -607,7 +578,7 @@ only when `_workload_envs.materialize_config_with_envs` defaults don't fit
 ## Launch a New Optimization
 
 Assumes Step 1 (install) already ran. Session lives at `/workspace/hyperloom`
-(override `$INFERENCE_OPTIMIZER_SESSION_DIR`); there is no `--session-name`.
+(override `$USER_DATA_PATH`); there is no `--session-name`.
 For sandboxes that don't persist `export`s across shell calls (Cursor agents),
 copy `inference_optimizer/scripts/setup_env.sh.example` to
 `optimizer_runs/setup_env.sh`, fill in the workload block, and `.` it each call.
@@ -650,7 +621,7 @@ After launching, do a short health check:
 sleep 30
 pid="$(cat "$PID_FILE")"
 test -d "/proc/$pid" && echo "optimizer_alive=true pid=$pid"
-session_dir="${INFERENCE_OPTIMIZER_SESSION_DIR:-/workspace/hyperloom}"
+session_dir="${USER_DATA_PATH:-/workspace/hyperloom}"
 test -f "$session_dir/manifest.json" && echo "manifest_present=true"
 test -f "$session_dir/state.json" && echo "state_exists=true" \
   && python3 -c "import json; print(json.load(open('$session_dir/state.json')).get('stop_reason'))"
@@ -662,7 +633,7 @@ exist + no early `stop_reason`.
 ## Resume Existing Session
 
 `--resume` is a flag (no argument); it picks up `/workspace/hyperloom`
-(override: `$INFERENCE_OPTIMIZER_SESSION_DIR`). The CLI refuses to start
+(override: `$USER_DATA_PATH`). The CLI refuses to start
 if `manifest.json` or `state.json` is missing.
 
 Reuse the Launch template above with these diffs: drop `--model`, add
@@ -686,7 +657,7 @@ setsid nohup bash "$REPO_ROOT/optimizer_runs/robustness_monitor.sh" \
   2>&1 < /dev/null &
 ```
 
-Reads `$REPO_ROOT`, `$PID_FILE`, and (optional) `$INFERENCE_OPTIMIZER_SESSION_DIR`
+Reads `$REPO_ROOT`, `$PID_FILE`, and (optional) `$USER_DATA_PATH`
 / `$MAX_HOURS` / `$TARGET_GAIN`. Edit the example before copying if defaults
 need to change. `stop_reason` interpretation matches the `## Monitoring` reader.
 
@@ -695,7 +666,7 @@ need to change. `stop_reason` interpretation matches the `## Monitoring` reader.
 Poll at most every 5 minutes unless debugging a startup failure.
 
 ```bash
-export SESSION="${INFERENCE_OPTIMIZER_SESSION_DIR:-/workspace/hyperloom}"
+export SESSION="${USER_DATA_PATH:-/workspace/hyperloom}"
 python3 - <<'PY'
 import json, os, pathlib
 s = json.loads((pathlib.Path(os.environ["SESSION"]) / "state.json").read_text())
