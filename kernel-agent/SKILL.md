@@ -68,11 +68,26 @@ are accepted as no-ops for backwards compat):
   `${HYPERLOOM_ROOT}/geak-config/local.yaml` (model resolution:
   `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL` from env, default
   `claude-opus-4-7`)
-- GEAK RAG MCP (`mcp_tools/rag-mcp`) with `tools.rag: true`; the first RAG
-  index build writes to `~/.cache/amd-ai-devtool/semantic-index/` and may
-  download the ~1.3 GB BGE embedding model. The installer builds this index
-  with `GEAK_RAG_INDEX_DEVICE=cuda` by default because CPU embedding can take
-  hours; set `GEAK_RAG_INDEX_DEVICE=cpu` only for CPU-only environments.
+- GEAK MCP tools — installed as five pip packages from
+  `${HYPERLOOM_ROOT}/geak/mcp_tools/`. The bundled `minisweagent` imports
+  these at preprocess + run time; missing any of them fails the GEAK
+  attempt fast (observed on Qwen3-32B 2026-05-15: `profiler_mcp` not
+  installed → 4-minute aborts with zero-byte baselines).
+    - `rag-mcp` — knowledge-base retrieval; gated by `tools.rag: true`.
+      The first RAG index build writes to
+      `~/.cache/amd-ai-devtool/semantic-index/` and may download the
+      ~1.3 GB BGE embedding model. The installer builds this index with
+      `GEAK_RAG_INDEX_DEVICE=cuda` by default because CPU embedding can
+      take hours; set `GEAK_RAG_INDEX_DEVICE=cpu` only for CPU-only
+      environments.
+    - `profiler-mcp` — Metrix-backed instrumented profiling
+      (`preprocessor.py` Step 5/7); produces `profile.json` per attempt.
+    - `metrix-mcp` — AMD Metrix backend for `profiler-mcp`.
+    - `cross-session-memory-mcp` — SQLite-backed cross-session memory
+      retriever; points at `GEAK_MEMORY_STORE_PATH` (default
+      `/wekafs/hyperloom/geak-memory/memory.db`).
+    - `automated-test-discovery` — pre-fills the eval_command harness so
+      GEAK gets a runnable baseline benchmark.
 - GEAK cross-session memory env; by default Hyperloom stores GEAK's SQLite
   memory DB at `/wekafs/hyperloom/geak-memory/memory.db`, enables
   `GEAK_SAVE_TO_KNOWLEDGE_BASE=1`, and aligns
