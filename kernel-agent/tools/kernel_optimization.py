@@ -97,13 +97,13 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
     if not isinstance(artifact_paths, dict):
         artifact_paths = {}
     report_path = (
-        payload.get("analysis_report_path")
-        or artifact_paths.get("tracelens_agent_report")
+        payload.get("trace_report_path")
+        or artifact_paths.get("trace_report_path")
     )
     if report_path:
         for candidate in candidates:
             if isinstance(candidate, dict):
-                candidate.setdefault("tracelens_agent_report", str(report_path))
+                candidate.setdefault("trace_report_path", str(report_path))
     return candidates
 
 
@@ -991,7 +991,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
             "still measure compute/IO improvements.\n"
         )
     tracelens_context_block = ""
-    report_path_str = str(candidate.get("tracelens_agent_report") or "")
+    report_path_str = str(candidate.get("trace_report_path") or "")
     report_path = Path(report_path_str) if report_path_str else None
     if report_path and report_path.exists():
         try:
@@ -1078,7 +1078,15 @@ def _import_backend(name: str):
 
 
 def _kernel_agent_root() -> Path:
-    return Path(os.environ.get("WORKSPACE_PATH", "/workspace")) / "kernel-agent"
+    """Output root for kernel-agent tools.
+
+    Lands at ``$USER_DATA_PATH/kernel-agent`` (the per-session tool-output
+    namespace; sibling of ``$USER_DATA_PATH/kernel-agent-workspace``
+    which keeps cross-task GEAK/OOB artefacts keyed by kernel_id).
+    Legacy default was ``$WORKSPACE_PATH/kernel-agent``; the env was
+    removed during the all-artefacts-under-USER_DATA_PATH migration.
+    """
+    return Path(os.environ.get("USER_DATA_PATH", "/workspace/hyperloom")) / "kernel-agent"
 
 
 def _geak_output_dir(session_id: str, prompt_file: Path) -> Path:
@@ -2033,7 +2041,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Kernel Agent optimization tool")
     parser.add_argument("--kernel-id", required=True)
     parser.add_argument("--session-id", default="")
-    parser.add_argument("--workspace-path", default=os.environ.get("WORKSPACE_PATH", "/workspace"))
+    parser.add_argument(
+        "--workspace-path",
+        default=os.environ.get("USER_DATA_PATH", "/workspace/hyperloom"),
+        help=(
+            "Root the tool writes under (output lands at "
+            "<workspace_path>/kernel-agent/runs/<session_id>/...). "
+            "Defaults to $USER_DATA_PATH."
+        ),
+    )
     parser.add_argument("--candidates-path", default="")
     parser.add_argument("--backends", default="")
     parser.add_argument("--benchmark-file", default="")
