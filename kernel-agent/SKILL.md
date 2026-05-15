@@ -9,10 +9,18 @@ You are the resident Claude Kernel Agent. Claw owns the RPC/port layer. This
 skill only defines how to handle requests, run tools, persist artifacts, expose
 logs, and return structured results.
 
-All files live under `$WORKSPACE_PATH/kernel-agent`; default `WORKSPACE_PATH` is
-`/workspace`. Do not write outside that tree except reading user-provided trace
-or source paths and the TraceLens install at
-`/wekafs/hyperloom/TraceLens-internal`.
+All tool-call artefacts (TraceLens runs, optimization_attempts.jsonl,
+verification JSON, per-tool logs) live under
+`$USER_DATA_PATH/kernel-agent/runs/<session_id>/` — the per-session output
+namespace. The sibling `$USER_DATA_PATH/kernel-agent-workspace/<kernel_id>/`
+tree (created by Coordinator) holds cross-task GEAK/OOB work artefacts
+keyed by `kernel_id`. Default `USER_DATA_PATH` is `/workspace/hyperloom`.
+Do not write outside `$USER_DATA_PATH` except for reading user-provided
+trace/source paths and the read-only TraceLens source at
+`$TRACELENS_ROOT` (default `/wekafs/hyperloom/TraceLens-internal`).
+The legacy `WORKSPACE_PATH` env was retired during the
+all-artefacts-under-`USER_DATA_PATH` migration; rename launchers that
+still set it.
 
 ## Setup
 
@@ -39,9 +47,11 @@ correct env-wins semantics.
 ### Step 1 — Install (one-time per pod / venv rebuild)
 
 ```bash
-export REPO_ROOT="$(pwd)"  # hyperloom repo root that owns .env (or `cd` there)
-bash $WORKSPACE_PATH/kernel-agent/scripts/install.sh
-. $WORKSPACE_PATH/kernel-agent/env.sh   # exports SAFE_API_KEY/OPENAI_BASE_URL + auth aliases
+export REPO_ROOT="$(pwd)"   # hyperloom repo root that owns .env (or `cd` there)
+bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+# install.sh writes the pod-local env at $HYPERLOOM_RUNTIME_DIR/kernel-agent.env.sh
+# (= $USER_DATA_PATH/runtime/kernel-agent.env.sh by default).
+. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 ```
 
 `install.sh` always installs everything (no `--with-*` flags any more — those
@@ -80,7 +90,7 @@ Use `--check-only` to verify the current environment without installing,
 and `--dry-run` to print planned actions:
 
 ```bash
-bash $WORKSPACE_PATH/kernel-agent/scripts/install.sh --check-only
+bash "$REPO_ROOT/kernel-agent/scripts/install.sh" --check-only
 ```
 
 ### Step 2 — Start Ray with all visible GPUs
@@ -105,7 +115,7 @@ HTTP 401 / `Primus.00009 token not present` / `Claude SDK exit code 1`,
 re-run the supervisor (idempotent, noop if healthy):
 
 ```bash
-bash $WORKSPACE_PATH/kernel-agent/scripts/ensure_auth_proxy.sh
+bash "$REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh"
 ```
 
 It TCP-probes `:4002`, then HTTP-probes via `curl`. If the port is open
@@ -137,7 +147,7 @@ Inputs:
 Run:
 
 ```bash
-python $WORKSPACE_PATH/kernel-agent/tools/tracelens_analysis.py \
+python "$REPO_ROOT/kernel-agent/tools/tracelens_analysis.py" \
   --trace-input "$TRACE_INPUT" \
   --session-id "$SESSION_ID" \
   --model-name "$MODEL_NAME" \
@@ -164,7 +174,7 @@ Inputs:
 Run:
 
 ```bash
-python $WORKSPACE_PATH/kernel-agent/tools/kernel_optimization.py \
+python "$REPO_ROOT/kernel-agent/tools/kernel_optimization.py" \
   --session-id "$SESSION_ID" \
   --kernel-id "$KERNEL_ID" \
   ${BACKENDS:+--backends "$BACKENDS"} \
@@ -236,7 +246,7 @@ TraceLens CLI output, or artifacts written by subagents.
 
 The final report is written to:
 
-`$WORKSPACE_PATH/kernel-agent/runs/<session_id>/tracelens/standalone_analysis.md`
+`$USER_DATA_PATH/kernel-agent/runs/<session_id>/tracelens/standalone_analysis.md`
 
 If Executor requests compatibility output, also write
 `${USER_DATA_PATH:-/workspace/hyperloom}/standalone_analysis.md`.
@@ -298,7 +308,9 @@ attempt but mark `geak_without_benchmark: true`.
 
 ## Artifacts
 
-Each request creates a `run_id` and writes:
+Every path below is relative to `$USER_DATA_PATH/kernel-agent/` (the
+per-session tool-output namespace). Each request creates a `run_id` and
+writes:
 
 - `runs/<session_id>/session_state.json`
 - `runs/<session_id>/trace_input_manifest.json`
@@ -312,6 +324,11 @@ Each request creates a `run_id` and writes:
 - `runs/<session_id>/results/<kernel_id>.json`
 - `runs/<session_id>/logs/<tool>/<run_id>.log`
 - `runs/<session_id>/status/<tool>/<run_id>.json`
+
+Cross-task GEAK/OOB work artefacts keyed by `kernel_id` live in the
+sibling tree `$USER_DATA_PATH/kernel-agent-workspace/<kernel_id>/`
+(populated by Coordinator and reused across multiple `kernel_optimization.py`
+invocations on the same kernel).
 
 `status` must include `state`, `current_step`, `pid`, `started_at`,
 `updated_at`, `log_path`, `artifact_paths`, `offset_bytes`, and `last_lines`.
