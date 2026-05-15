@@ -157,6 +157,14 @@ class ProfileExecutor(BaselineExecutor):
             else:
                 result["trace_dir"] = None
                 result["trace_files"] = []
+                result["status"] = "failed"
+                result["error_class"] = "no_trace_files"
+                probed = ", ".join(
+                    str(p) for p in _candidate_trace_dirs(workspace)
+                )
+                result["error"] = (
+                    f"no .trace.json.gz under {workspace_str} (probed: {probed})"
+                )
                 if existing_empty_dirs:
                     log.warning(
                         "profile_executor: trace dirs exist but no "
