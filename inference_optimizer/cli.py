@@ -2085,14 +2085,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model-class", type=str,
         default=os.environ.get("MODEL_CLASS", None),
         help=(
-            "Model class hint consumed by orchestrator/scoring marathon "
-            "priors. Recognised values (case-insensitive, with -/+/space "
-            "tolerated): dense / moe_mla / moe_swa / moe_mla_nsa. The "
-            "deleted `classify` action used to discover this from the "
-            "model files; the external SKILL caller is now expected to "
-            "supply it via this flag (or the MODEL_CLASS env var). "
-            "Unset / unknown values fall back to the `moe_mla` marathon "
-            "priors so DeepSeek-shaped sessions keep working."
+            "Model class hint consumed by "
+            "``orchestrator/scoring.MODEL_CLASS_ACTION_PRIORS`` to seed "
+            "per-action base scores. Recognised values (case-insensitive, "
+            "with -/+/space tolerated): dense / moe_mla / moe_swa / "
+            "moe_mla_nsa. The deleted ``classify`` action used to discover "
+            "this from the model files; the external SKILL caller is now "
+            "expected to supply it via this flag (or the MODEL_CLASS env "
+            "var). Unset / unknown values fall back to the ``moe_mla`` "
+            "curated priors so DeepSeek-shaped sessions keep working."
         ),
     )
     opt.add_argument("--target-summary", type=str, default=None,
