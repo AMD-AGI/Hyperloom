@@ -57,8 +57,12 @@ class ClawClient:
 
     # ── Session CRUD ──
 
-    def create_session(self, name: str, agent_id: str | None = None,
-                       sandbox_image: str | None = None) -> dict:
+    def create_session(
+        self,
+        name: str,
+        agent_id: str | None = None,
+        sandbox_image: str | None = None,
+    ) -> dict:
         agent_id = agent_id or self.agent_id
         body: dict = {"name": name, "agent_id": agent_id}
         if sandbox_image:
@@ -67,8 +71,7 @@ class ClawClient:
             self._url("/sessions"),
             json=body,
         ))
-        log.info("Created session %s (name=%s, sandbox_image=%s)",
-                 data["data"]["session_id"], name, sandbox_image or "cpu")
+        log.info("Created session %s (name=%s)", data["data"]["session_id"], name)
         return data["data"]
 
     def get_session(self, session_id: str) -> dict:
@@ -90,6 +93,7 @@ class ClawClient:
         task_mode: str = "agent",
         tools: list[int] | None = None,
         plugin_id: int | None = 4,
+        resource: dict | None = None,
     ) -> dict:
         body = {
             "content": content,
@@ -99,8 +103,15 @@ class ClawClient:
             "attachments": [],
             "tools": tools if tools is not None else self.default_tools,
             "workspaceId": self.sandbox_workspace or os.environ.get("SANDBOX_WORKSPACE", ""),
-            "pluginId": plugin_id,
         }
+        # pluginId is optional. Omit entirely when caller passes None so the
+        # Claw backend uses whatever default the agent_id implies (matches
+        # the GUI behavior for remote-mode multi-node sessions, where no
+        # plugin is selected by the user).
+        if plugin_id is not None:
+            body["pluginId"] = plugin_id
+        if resource:
+            body["resource"] = resource
         resp = self._session.post(
             self._url(f"/sessions/{session_id}/messages"),
             json=body,
