@@ -13,16 +13,6 @@ on:
         description: 'Trigger reason'
         required: false
         default: 'manual'
-  # PR-approve trigger: when a maintainer approves a PR that also carries
-  # the `run-pr-ci` label, run the canonical comparison model (dsr1) on
-  # PR head so reviewers can compare InferenceX numbers against the PR's
-  # changes before merging. The label gate exists because PR-CI burns
-  # ~hours of MI300X time per run; we only want it on PRs the reviewer
-  # has explicitly opted in. GitHub already restricts pull_request_review
-  # to repo collaborators on private repos, so secret-injection risk is
-  # bounded.
-  pull_request_review:
-    types: [submitted]
 
 env:
   SAFE_BASE_URL: ${{ secrets.SAFE_BASE_URL }}
@@ -33,53 +23,21 @@ env:
   WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
   SANDBOX_WORKSPACE: ${{ secrets.SANDBOX_WORKSPACE }}
   LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-  # PR-CI only: GitHub Actions built-in GITHUB_TOKEN, forwarded into the
-  # sandbox via prompt text (Claw API has no env-injection field) so the
-  # agent can git-clone AMD-AGI/Hyperloom @ PR head. Why GITHUB_TOKEN over
-  # a user-created PAT:
-  #   * AMD-AGI org policy bans Classic PATs ("forbidden from accessing
-  #     this repository") and gates fine-grained PATs behind admin
-  #     approval — neither is a viable supply-chain.
-  #   * GITHUB_TOKEN is a per-run installation token with default scope
-  #     `contents: read` on this repo only; lifetime is bounded by the
-  #     workflow run (typically <8h), so SaFE-side token leakage has a
-  #     much smaller blast radius than a 30-day PAT.
-  # actions/checkout@v4 already authenticates against the same token in
-  # the optimize / prepare jobs above; we are just propagating the same
-  # capability into the sandbox.
-  HYPERLOOM_PR_CI_GH_TOKEN: ${{ github.token }}
 
 jobs:
   prepare:
     name: Prepare Model Matrix
     runs-on: ubuntu-latest
-    # Skip the run entirely on review events that don't qualify, so the
-    # downstream `optimize` job (max-parallel=6 on hyperloom-mh826) never
-    # gets matrixed. Two gates, both must pass on pull_request_review:
-    #   1. review.state == 'approved'  (comment / request_changes don't trigger)
-    #   2. PR carries the `run-pr-ci` label (reviewer opt-in; PR-CI burns
-    #      hours of GPU time, so we don't run on every approval)
-    # Schedule / workflow_dispatch bypass both gates (first clause).
-    if: >-
-      github.event_name != 'pull_request_review' ||
-      (github.event.review.state == 'approved' &&
-       contains(github.event.pull_request.labels.*.name, 'run-pr-ci'))
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      # On pull_request_review, default checkout uses the PR's *base* branch.
-      # We want PR head so the comparison reflects the proposed changes.
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Generate matrix
         id: matrix
         working-directory: ci
         env:
-          # PR-approve trigger forces dsr1 (the canonical InferenceX comparison
-          # model). Other triggers honor the workflow_dispatch input.
-          INPUT_MODELS: ${{ github.event_name == 'pull_request_review' && 'dsr1-fp8-mi300x-sglang' || github.event.inputs.models }}
+          INPUT_MODELS: ${{ github.event.inputs.models }}
         run: |
           pip3 install -q pyyaml 2>/dev/null || pip install -q pyyaml
           python3 generate_matrix.py
@@ -96,8 +54,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Report latest InferenceX image versions
         continue-on-error: true
@@ -119,43 +75,12 @@ jobs:
 
       - name: Run optimization
         working-directory: ci
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_NUMBER:  ${{ github.event.pull_request.number }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          INPUT_REASON: ${{ github.event.inputs.trigger_reason }}
         run: |
-          # PR-approve trigger gets --pr-mode + PR head sha so the agent
-          # validates the unmerged code (clones into sandbox /tmp), not
-          # the wekafs deployed snapshot. schedule / workflow_dispatch
-          # keep the legacy /wekafs/HyperloomV2 path unchanged.
-          if [ "$EVENT_NAME" = "pull_request_review" ]; then
-            TRIGGER="pr-approve-PR${PR_NUMBER:-?}"
-            # github.token is auto-injected per workflow run; an empty
-            # value here would mean Actions itself is misconfigured.
-            # Keep the guard so we fail loud instead of silently sending
-            # a half-built prompt to the sandbox.
-            if [ -z "${HYPERLOOM_PR_CI_GH_TOKEN:-}" ]; then
-              echo "::error::github.token is empty — Actions runner misconfigured (workflows on this repo always get a default GITHUB_TOKEN)"
-              exit 2
-            fi
-            python3 orchestrator.py \
-              --trigger "$TRIGGER" \
-              --models "${{ matrix.key }}" \
-              --output-dir "${{ github.workspace }}/ci-output" \
-              --pr-mode \
-              --git-ref "$PR_HEAD_SHA"
-          else
-            if [ -n "${INPUT_REASON:-}" ]; then
-              TRIGGER="$INPUT_REASON"
-            else
-              TRIGGER="scheduled"
-            fi
-            python3 orchestrator.py \
-              --trigger "$TRIGGER" \
-              --models "${{ matrix.key }}" \
-              --output-dir "${{ github.workspace }}/ci-output"
-          fi
+          TRIGGER="${{ github.event.inputs.trigger_reason || 'scheduled' }}"
+          python3 orchestrator.py \
+            --trigger "$TRIGGER" \
+            --models "${{ matrix.key }}" \
+            --output-dir "${{ github.workspace }}/ci-output"
 
       - name: Upload model report
         if: always()
