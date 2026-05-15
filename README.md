@@ -107,14 +107,6 @@ Shell environment variables take precedence over values in `.env`, so advanced u
 | `CURSOR_DEFAULT_MODEL` | Override the default Cursor model id. | `claude-opus-4-7` (default) |
 
 **Path configuration:**
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `REPO_ROOT` | Hyperloom repo root | `/workspace/Hyperloom` |
-| `OOB_SRC` | OOB source root | `/workspace/OOB` |
-| `INFERENCEX_PATH` | InferenceX repo root | `/workspace/InferenceX` |
-| `TRACELENS_ROOT` | TraceLens-internal repo root | `/workspace/TraceLens-internal` |
-
 These paths are used by the agent and installer to wire together the local Hyperloom stack:
 
 | Path | Why it is needed |
