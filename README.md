@@ -56,14 +56,10 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 
 #### Step 1 — Prepare GPU Environment
 
-An AMD GPU node is required, with MI300X and MI355X supported. Use a local machine or request an Authoring Pod on [Primus-SaFE](https://core42.example-internal-host.invalid/authoring).
+An AMD GPU node is required, with MI300X and MI355X supported. Two recommended setups:
 
-The inference image can be an SGLang or vLLM ROCm image. The example below uses SGLang:
-
-```bash
-docker run --rm -it --device=/dev/kfd --device=/dev/dri --group-add video \
-  lmsysorg/sglang:v0.5.11-rocm720-mi30x
-```
+- **Recommended — SaFE Authoring Pod**: create an Authoring Pod on [Primus-SaFE](https://core42.example-internal-host.invalid/authoring) using an SGLang or vLLM inference image.
+- **Bring your own GPU host**: if you run on your own AMD GPU server, you can use one of the image examples below.
 
 Image examples:
 
@@ -107,6 +103,7 @@ Shell environment variables take precedence over values in `.env`, so advanced u
 | `CURSOR_DEFAULT_MODEL` | Override the default Cursor model id. | `claude-opus-4-7` (default) |
 
 **Path configuration:**
+
 These paths are used by the agent and installer to wire together the local Hyperloom stack:
 
 | Path | Why it is needed |
@@ -115,15 +112,7 @@ These paths are used by the agent and installer to wire together the local Hyper
 | `OOB_SRC` | Provides the OOB CLI and auth-proxy used by kernel optimization backends. |
 | `INFERENCEX_PATH` | Provides InferenceX benchmark/evaluation code and reference data used during baseline and target analysis. |
 | `TRACELENS_ROOT` | Provides TraceLens profiling tooling for bottleneck analysis and kernel selection. |
-
-**Optional:**
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `USER_DATA_PATH` | Session directory root (per-run logs, artifacts, archived runs, launcher stdout, Magpie clone, source mirrors, kernel-agent tool outputs). Replaces the legacy `INFERENCE_OPTIMIZER_SESSION_DIR`. | `/workspace/hyperloom` |
-| `HYPERLOOM_ROOT` | Writable source-mirror root (GEAK clone, OOB CLI mirror, TraceLens mirror). Override only if you want mirrors shared across sessions. | `$USER_DATA_PATH/runtime/source-mirrors` |
-| `MAGPIE_DIR` | Magpie clone location. Override only if you maintain a shared Magpie checkout. | `$USER_DATA_PATH/runtime/Magpie` |
-| `INFERENCE_OPTIMIZER_RESCUE_PATHS` | Colon-separated extra roots scanned by the harvest step for leaked `result.json` files (e.g. when a Magpie script writes to a hardcoded `--result-dir`). | unset |
+| `USER_DATA_PATH` | Session directory root for logs, runs, source mirrors, and all per-session artefacts. Optional, defaults to `/workspace/hyperloom`. |
 
 Prepare the source trees from the corresponding repositories:
 
@@ -178,15 +167,14 @@ Optimize inference for this workload:
 - Budget: 24 hours
 
 Paths:
-- Hyperloom repo: /workspace/Hyperloom
-- OOB source: /workspace/OOB
-- InferenceX repo: /workspace/InferenceX
-- TraceLens repo: /workspace/TraceLens-internal
+- Hyperloom repo: $REPO_ROOT
+- OOB source: $OOB_SRC
+- InferenceX repo: $INFERENCEX_PATH
+- TraceLens repo: $TRACELENS_ROOT
 
 Requirements:
-1. Use a writable session directory: /workspace/hyperloom.
-2. Report the session ID, log path, PID, and initial health check result.
-3. Monitor the process every 300s until the optimization is complete or failed.
+1. Report the session ID, log path, PID, and initial health check result.
+2. Monitor the process every 300s until the optimization is complete or failed.
 ```
 
 **Resume an existing session:**
@@ -199,12 +187,11 @@ Example prompt:
 Resume the existing Hyperloom optimization session.
 
 Requirements:
-1. Use the existing session directory: /workspace/hyperloom.
-2. Launch `inference_optimizer optimize --resume`; do not start a new session.
-3. Do not pass `--model`; read the model and workload from the saved manifest/state.
-4. Before launching, verify `manifest.json` and `state.json` exist.
-5. Report the log path, PID, initial health check result, current phase, cumulative gain, and best config.
-6. Monitor the process every 300s until the optimization is complete or failed.
+1. Launch `inference_optimizer optimize --resume`; do not start a new session.
+2. Do not pass `--model`; read the model and workload from the saved manifest/state.
+3. Before launching, verify `manifest.json` and `state.json` exist.
+4. Report the log path, PID, initial health check result, current phase, cumulative gain, and best config.
+5. Monitor the process every 300s until the optimization is complete or failed.
 ```
 
 The agent automatically:
@@ -239,7 +226,7 @@ The chat examples use user-facing field names. The agent maps them to the optimi
 | OOB source | `OOB_SRC` | OOB source root. | set in Step 2 |
 | InferenceX repo | `INFERENCEX_PATH` | InferenceX repository root. | set in Step 2 |
 | TraceLens repo | `TRACELENS_ROOT` | TraceLens-internal repository root. | set in Step 2 |
-| Session directory | `USER_DATA_PATH` | Session directory for state, logs, runs, reports, and resume. Replaces the legacy `INFERENCE_OPTIMIZER_SESSION_DIR`. | `/workspace/hyperloom` |
+| Session directory | `USER_DATA_PATH` | Session directory for state, logs, runs, reports, and resume. To override, set `USER_DATA_PATH` in the shell or specify the path in your prompt. | `/workspace/hyperloom` |
 | Resume | `--resume` | Resume the existing session from the session directory; requires `manifest.json` and `state.json`. | disabled |
 
 > Training and MLPerf-training skills have been retired from this repo. Only inference optimization is supported here.
