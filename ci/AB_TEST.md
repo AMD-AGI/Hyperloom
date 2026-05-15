@@ -1,42 +1,46 @@
 # Inference A/B Test — User Guide
 
-Compare two tool combinations (MCPs + Skill) end-to-end on the Hyperloom
-inference optimization pipeline, across one or all models.
+Compare two Hyperloom-side **plugin builds** end-to-end on the inference
+optimization pipeline, across one or all models.
+
+> Plugin model recap: a plugin is a server-side bundle of tools (MCP servers
+> + a prompt skill that points at a runtime on WekaFS). The CI sends only
+> `pluginId` to the SaFE / Claw API; the plugin transparently picks up its
+> bundled tools list. Today plugin **4 (Hyperloom)** wraps the canonical
+> wekafs `inference_optimizer/` Python package via tool 85
+> (hyperloom-prompt). To A/B test a different runtime, register a new plugin
+> and pass its ID here.
 
 ---
 
-## Step 1: Prepare Your Tools
+## Step 1: Prepare Your Plugins
 
-Register your MCP and Skill on
-[Primus tools](https://oci-slc.example-internal-host.invalid/tools) and take note
-of the **tool IDs**. Each group needs one MCP tool and one Skill tool.
+Register the plugin you want to test on the
+[Primus plugins console](https://oci-slc.example-internal-host.invalid/plugins) (or
+ask the platform team to create one) and take note of its **plugin ID**.
 
-Existing public tools:
+Existing plugins:
 
-| ID | Type  | Name |
-|----|-------|------|
-| 4  | mcp   | `geak-agent-mcp` |
-| 9  | mcp   | `magpie` |
-| 17 | mcp   | `OOB` |
-| 22 | mcp   | `hyperloom-ci` (GEAK + OOB + TraceLens) |
-| 24 | mcp   | `hyperloom-ci-b` (GEAK + OOB) |
-| 20 | skill | `inference-optimization-magpie` |
-| 23 | skill | `inference-optimization-CI` |
-| 25 | skill | `inference-optimization-cli-b` |
+| ID | Name        | Notes |
+|----|-------------|-------|
+| 4  | Hyperloom   | Current production plugin: tool 3 (`hyperloom-public-mcp`) + tool 85 (`hyperloom-prompt` → `@/wekafs/HyperloomV2/inference_optimizer/SKILL.md`) |
+
+When a new plugin is registered, append it to this table.
 
 ## Step 2: Trigger the Workflow
 
-Go to [**Inference A/B Test: TraceLens MCP vs CLI**](https://github.com/AMD-AGI/Hyperloom/actions/workflows/inference-ab-test.yml)
+Go to
+[**Inference A/B Test**](https://github.com/AMD-AGI/Hyperloom/actions/workflows/inference-ab-test.yml)
 and click **Run workflow**.
 
 | Input | Example | Notes |
 |-------|---------|-------|
-| `tools_a` | `22,23` | Tool IDs for group A |
-| `label_a` | `Baseline` | Display label in the report |
-| `tools_b` | `4,23` | Tool IDs for group B |
-| `label_b` | `GEAK v2` | Display label in the report |
+| `plugin_id_a` | `4` | Plugin ID for group A (default `4` = current Hyperloom) |
+| `label_a` | `Plugin 4 (current)` | Display label in the report |
+| `plugin_id_b` | `5` | Plugin ID for group B (override to compare) |
+| `label_b` | `Plugin 5 (experimental)` | Display label in the report |
 | `mode` | `ab` or `single` | See below |
-| `models` | `gptoss-fp4-mi355x-vllm` | Leave empty to run all 6 models |
+| `models` | `gptoss-fp4-mi355x-vllm` | Leave empty to run all models from `ci-config.yaml` |
 
 **Modes:**
 - `ab` — run both groups (2× cost, direct comparison)
@@ -51,30 +55,45 @@ and click **Run workflow**.
 - **Artifact** `ab-comparison` — `ab_comparison.md` for download.
 
 The comparison shows:
-1. **Config diff** — which MCPs / Skill differ between A and B
+1. **Plugin diff** — which plugin ID was used per group (highlighted when different)
 2. **Per-model metrics** — baseline, optimized, gain, vs InferenceX, winner
 3. **Overall** — aggregate win count across all models
+
+If you need a tool-by-tool breakdown of what each plugin contains, query
+`GET /claw-api/v1/plugins/<id>` directly — the workflow no longer expands
+this automatically (plugins are treated as opaque labels).
 
 ---
 
 ## Common Recipes
 
-**Test a new GEAK version**
+**Reproducibility / control run** (same plugin both sides — verifies sandbox
+variance)
 ```
-tools_a = 22,23              label_a = GEAK current
-tools_b = <new_geak>,23      label_b = GEAK experimental
-mode    = ab
-```
-
-**Test a new Skill cheaply (against yesterday's CI)**
-```
-tools_b = 22,<new_skill>     label_b = My new skill
-mode    = single
+plugin_id_a = 4    label_a = Plugin 4 run 1
+plugin_id_b = 4    label_b = Plugin 4 run 2
+mode        = ab
 ```
 
-**Compare TraceLens MCP vs CLI**
+**Test a new plugin against current Hyperloom**
 ```
-tools_a = 22,23     label_a = MCP TraceLens
-tools_b = 24,25     label_b = CLI TraceLens
-mode    = ab
+plugin_id_a = 4    label_a = Plugin 4 (control)
+plugin_id_b = 5    label_b = Plugin 5 (experimental)
+mode        = ab
 ```
+
+**Test a new plugin cheaply (against yesterday's CI)**
+```
+plugin_id_b = 5    label_b = Plugin 5 (experimental)
+mode        = single
+```
+
+> **Why no more `--update` flag?** The CI baseline must stay pinned to
+> InferenceX's published image tag (otherwise tok/s comparisons across runs
+> are apples-to-oranges). To use a different image, edit `ci-config.yaml`
+> directly and commit the change so the diff is reviewable.
+
+> **Why no more `tools_a` / `tools_b`?** The old design exposed individual
+> Claw `tool_id`s. With the move to plugin-bundled skills (plugin 4 = wekafs
+> `inference_optimizer`), tool selection is handled server-side; the client
+> only needs to pick a plugin.
