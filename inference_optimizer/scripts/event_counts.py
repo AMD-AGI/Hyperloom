@@ -4,7 +4,7 @@
 Usage:
     event_counts.py [SESSION_DIR]
 
-SESSION_DIR defaults to $INFERENCE_OPTIMIZER_SESSION_DIR or /workspace/hyperloom.
+SESSION_DIR defaults to $USER_DATA_PATH or /workspace/hyperloom.
 Reads at most the last 500 events from $SESSION_DIR/storage/coordinator.db and
 emits a JSON object of {category: count}.
 """
@@ -22,7 +22,7 @@ def main() -> int:
     session_dir = (
         sys.argv[1]
         if len(sys.argv) > 1
-        else os.environ.get("INFERENCE_OPTIMIZER_SESSION_DIR", "/workspace/hyperloom")
+        else os.environ.get("USER_DATA_PATH", "/workspace/hyperloom")
     )
     db = pathlib.Path(session_dir) / "storage" / "coordinator.db"
     if not db.exists():

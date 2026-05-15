@@ -100,7 +100,7 @@ class TaskRegistry:
     def __init__(self, db: SqliteConnection):
         self.db = db
 
-    async def create(
+    async def create_or_return_existing(
         self,
         *,
         kind: str,
@@ -111,12 +111,19 @@ class TaskRegistry:
         side_effects: list[str] | None = None,
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
-    ) -> Task:
+    ) -> tuple[Task, bool]:
+        """Insert a new task row OR return the existing one keyed by idempotency_key.
+
+        Returns ``(task, was_existing)``. ``was_existing=True`` means the row
+        was already in the DB (any state, including terminal); callers should
+        treat this as a duplicate-emission signal instead of silently
+        proceeding as if a fresh task was queued.
+        """
         existing = await self.db.fetchone(
             "SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,)
         )
         if existing is not None:
-            return Task.from_row(existing)
+            return Task.from_row(existing), True
 
         task_id = task_id or uuid.uuid4().hex
         now = _now_iso()
@@ -142,21 +149,51 @@ class TaskRegistry:
                     now,
                 ),
             )
-        return Task(
-            task_id=task_id,
+        return (
+            Task(
+                task_id=task_id,
+                kind=kind,
+                state="queued",
+                params=params,
+                idempotency_key=idempotency_key,
+                requires_lanes=requires_lanes or [],
+                allowed_tools=allowed_tools or [],
+                side_effects=side_effects or [],
+                lease_ttl_sec=lease_ttl_sec,
+                attempts=0,
+                history=[],
+                created_at=now,
+                updated_at=now,
+            ),
+            False,
+        )
+
+    async def create(
+        self,
+        *,
+        kind: str,
+        params: dict,
+        idempotency_key: str,
+        requires_lanes: list[str] | None = None,
+        allowed_tools: list[str] | None = None,
+        side_effects: list[str] | None = None,
+        lease_ttl_sec: int = 0,
+        task_id: str | None = None,
+    ) -> Task:
+        """Thin wrapper around :meth:`create_or_return_existing` for callers
+        that don't need the ``was_existing`` signal (most legacy callers).
+        """
+        task, _was_existing = await self.create_or_return_existing(
             kind=kind,
-            state="queued",
             params=params,
             idempotency_key=idempotency_key,
-            requires_lanes=requires_lanes or [],
-            allowed_tools=allowed_tools or [],
-            side_effects=side_effects or [],
+            requires_lanes=requires_lanes,
+            allowed_tools=allowed_tools,
+            side_effects=side_effects,
             lease_ttl_sec=lease_ttl_sec,
-            attempts=0,
-            history=[],
-            created_at=now,
-            updated_at=now,
+            task_id=task_id,
         )
+        return task
 
     async def get(self, task_id: str) -> Task:
         row = await self.db.fetchone(

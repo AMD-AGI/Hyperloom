@@ -48,7 +48,7 @@ from inference_optimizer.storage import SqliteConnection
 # ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
     monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", kernel_agent_root)
     return make_session_dir()
@@ -91,6 +91,17 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     assert state.gpu_type == "mi325x"
     assert os.environ["TARGET_GPU_TYPE"] == "mi325x"
     assert os.environ["GPU_TYPE"] == "mi300x"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_leak_root(tmp_path_factory, monkeypatch):
+    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox so
+    Baseline/ProfileExecutor's always-on artifact harvest does not
+    pick up the host's real ``/workspace`` during the stubbed
+    subprocess runs exercised here.
+    """
+    sandbox = tmp_path_factory.mktemp("isolated_leak_root")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
 
 
 # ===========================================================================
@@ -165,8 +176,11 @@ def test_materialize_config_injects_model_with_other_overrides(tmp_path):
 
 
 # ===========================================================================
-# Regression: gpu_type injection sets runner_type AND removes the legacy
-# `benchmark_script` field so Magpie's runner_type -> script logic wins.
+# Regression: gpu_type injection sets runner_type AND force-pins the generic
+# `{framework}_{gpu_type}.sh` so Magpie's resolver hits priority 1 (explicit
+# user override) and never falls through to the InferenceX native script
+# (which hardcodes `--result-dir /workspace/`). See
+# `design/magpie-generic-script-and-user-data-path.md` §3.
 # ===========================================================================
 def test_materialize_config_injects_runner_type(tmp_path):
     """gpu_type kwarg must land in benchmark.runner_type as-is."""
@@ -181,10 +195,12 @@ def test_materialize_config_injects_runner_type(tmp_path):
     assert rendered["benchmark"]["runner_type"] == "mi355x"
 
 
-def test_materialize_config_pops_legacy_benchmark_script(tmp_path):
-    """If the source YAML still hardcodes a benchmark_script (priority 1
-    in Magpie's resolver), gpu_type must remove it; otherwise runner_type
-    is silently ignored and the run uses the wrong GPU's script."""
+def test_materialize_config_forces_generic_benchmark_script(tmp_path):
+    """When `gpu_type` is supplied, `benchmark.benchmark_script` MUST be
+    pinned to the generic `{framework}_{gpu_type}.sh` so Magpie's
+    resolver hits priority 1 (explicit override) and never silently
+    falls through to the InferenceX native script (e.g.
+    `dsr1_fp8_mi300x.sh`) which hardcodes `--result-dir /workspace/`."""
     import yaml
     src_yaml = tmp_path / "src.yaml"
     src_yaml.write_text(yaml.safe_dump({
@@ -202,8 +218,33 @@ def test_materialize_config_pops_legacy_benchmark_script(tmp_path):
     with out.open() as f:
         rendered = yaml.safe_load(f)
     assert rendered["benchmark"]["runner_type"] == "mi355x"
-    assert "benchmark_script" not in rendered["benchmark"], \
-        "legacy benchmark_script must be popped so runner_type wins"
+    assert rendered["benchmark"]["benchmark_script"] == "sglang_mi355x.sh", \
+        "gpu_type must pin the generic {framework}_{gpu_type}.sh"
+
+
+def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
+    tmp_path,
+):
+    """Even when the source YAML doesn't carry a `benchmark_script`, the
+    renderer MUST still write one explicitly — otherwise Magpie's
+    resolver would fall through to the InferenceX native script."""
+    import yaml
+    src_yaml = tmp_path / "src.yaml"
+    src_yaml.write_text(yaml.safe_dump({
+        "benchmark": {
+            "framework": "vllm",
+            "model": "/m",
+            # No benchmark_script field at all.
+        },
+    }))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    out = _materialize_config_with_envs(
+        src_yaml, out_dir, gpu_type="mi300x",
+    )
+    with out.open() as f:
+        rendered = yaml.safe_load(f)
+    assert rendered["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
 
 
 # ===========================================================================
@@ -870,6 +911,59 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     assert res.result["trace_dir"] == str(trace_dir)
     assert len(res.result["trace_files"]) == 2
     assert "main_trace_path" in res.result
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
+    """TraceLens-patched vLLM writes graph-capture traces next to the
+    benchmark workspace, under the profile task's ``capture_traces`` dir."""
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    output_dir = tmp_path / "out"
+    workspace = output_dir / "benchmark_vllm_20260501_001122"
+    workspace.mkdir(parents=True)
+    (workspace / "benchmark_report.json").write_text(json.dumps({
+        "success": True,
+        "framework": "vllm",
+        "model": "/wekafs/models/Qwen-Qwen3-8B",
+        "throughput": {
+            "request_throughput": 3.2, "output_throughput": 800.0,
+            "total_token_throughput": 1600.0, "completed_requests": 80,
+            "duration_seconds": 25.0,
+        },
+        "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158},
+                    "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
+    }))
+    capture_dir = output_dir / "capture_traces"
+    capture_dir.mkdir()
+    (capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz").write_bytes(b"fake-trace")
+    (capture_dir / "graph_capture_rank_0.2.pt.trace.json.gz").write_bytes(b"fake-trace")
+
+    fake_completed = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="ok", stderr="",
+    )
+
+    def _fake_run(*args, **kwargs):
+        return fake_completed
+
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-capture",
+    )
+    sub.register_executor("profile", pe)
+    with patch("subprocess.run", side_effect=_fake_run):
+        res = await sub.run_task(task)
+    assert res.state == "succeeded"
+    assert res.result["framework"] == "vllm"
+    assert res.result["trace_dir"] == str(capture_dir)
+    assert len(res.result["trace_files"]) == 2
+    assert res.result["main_trace_path"].startswith(str(capture_dir))
     db.close()
 
 

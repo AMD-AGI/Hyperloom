@@ -252,9 +252,21 @@ def analyze(
     Never raises. The returned ``BaselineSummary.status`` is one of:
 
     * ``ok``         — upstream had matching rows, ``best`` populated
-    * ``skipped``    — model name mapping miss, no HTTP issued
+    * ``skipped``    — model name mapping miss OR ``compare_against_gpu``
+                      was empty; no HTTP issued
     * ``fetch_error`` — upstream HTTP / decode failed
     * ``no_match``   — upstream had data but nothing matched the filter
+
+    Callers that need to branch on *why* the run was skipped should look
+    at ``BaselineSummary.reason`` instead of regex-matching the warning
+    string. ``reason`` is one of:
+
+    * ``ok``                       — populated ``best``
+    * ``model_mapping_miss``       — local model has no InferenceX name
+    * ``no_target_gpu_configured`` — empty ``compare_against_gpu`` (the
+                                      caller deliberately passed nothing)
+    * ``fetch_error``              — upstream call failed
+    * ``no_match``                 — fetched rows but filter dropped all
 
     The caller (target_analysis ActionRunner) treats every status as
     a success — the optimizer loop never blocks on this step.
@@ -277,6 +289,7 @@ def analyze(
             row_count=0,
             best=None,
             status="skipped",
+            reason="model_mapping_miss",
             warning=(
                 f"model name mapping miss for {model_path!r}; "
                 "no InferenceX display name found"
@@ -293,6 +306,7 @@ def analyze(
             row_count=0,
             best=None,
             status="skipped",
+            reason="no_target_gpu_configured",
             warning="compare_against_gpu is empty",
             source=DEFAULT_BASE_URL,
         )
@@ -307,6 +321,7 @@ def analyze(
             row_count=0,
             best=None,
             status="fetch_error",
+            reason="fetch_error",
             warning=fetch_warn or "unknown fetch failure",
             source=DEFAULT_BASE_URL,
         )
@@ -330,6 +345,7 @@ def analyze(
             row_count=0,
             best=None,
             status="no_match",
+            reason="no_match",
             warning=(
                 f"fetched {len(rows)} rows for {canonical_model!r} but none "
                 f"matched filter (gpu={query.gpu!r}, framework={query.framework!r}, "
@@ -349,6 +365,7 @@ def analyze(
         best=best,
         all_concurrencies=all_points,
         status="ok",
+        reason="ok",
         warning="",
         source=DEFAULT_BASE_URL,
     )
