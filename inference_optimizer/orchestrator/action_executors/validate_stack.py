@@ -32,6 +32,7 @@ from typing import Any
 
 from ..shared_state import SharedState
 from ..sub_agent_runner import RunnerContext
+from ._grid_runner import sanitize_script_name
 from ._workload_envs import materialize_config_with_envs
 from .baseline import BaselineExecutor
 
@@ -237,6 +238,28 @@ class ValidateStackExecutor(BaselineExecutor):
             str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower()
         )
+        # Forward the Orchestration-supplied ``benchmark_script`` override
+        # so validate_stack honors the same script-selection routing as
+        # baseline (see SKILL.md "Magpie leak-path salvage"). If we
+        # skipped this, validate_stack would silently fall back to
+        # Magpie's runner_type-derived script (e.g. dsr1_fp8_mi300x.sh
+        # with hardcoded ``--result-dir /workspace/``) every time, even
+        # after Orchestration learned that ``sglang_mi300x.sh`` succeeds
+        # for this model. ``params.result_dir`` does NOT need explicit
+        # handling here — it flows through ``forwarded_params`` to
+        # BaselineExecutor.__call__, which sets ``$RESULT_DIR``.
+        try:
+            override_script = sanitize_script_name(params.get("benchmark_script"))
+        except ValueError as exc:
+            return {
+                "status": "failed",
+                "error_class": "bad_param",
+                "error": str(exc),
+                "validated_stack_len": validated_stack_len,
+                "applied_args": merged_args,
+                "applied_envs": merged_envs,
+                "applied_entries": applied,
+            }
         materialised = materialize_config_with_envs(
             config_path,
             output_dir,
@@ -245,6 +268,7 @@ class ValidateStackExecutor(BaselineExecutor):
             extra_envs=merged_envs,
             model_path=resolved_model,
             gpu_type=resolved_gpu,
+            benchmark_script=override_script,
             out_name="validate_stack_config.with_envs.yaml",
         )
 
