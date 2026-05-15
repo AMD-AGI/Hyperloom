@@ -150,7 +150,7 @@ async def _run(ticks: int, claude_model: str, codex_model: str) -> int:
     # this smoke run because the orch prompt skips them.
     async def _noop_prep(ctx) -> dict:
         return {"status": "succeeded", "kind": ctx.task.kind, "note": "noop"}
-    for kind in ("setup", "classify", "target_analysis", "report"):
+    for kind in ("target_analysis", "report"):
         coordinator.sub.register_executor(kind, _noop_prep)
 
     coordinator.system_prompt_overrides = {
