@@ -9,7 +9,7 @@
 # This script is idempotent and meant to be sourced or invoked before any
 # OOB-dependent kernel-agent tool runs:
 #
-#   bash $WORKSPACE_PATH/kernel-agent/scripts/ensure_auth_proxy.sh
+#   bash $REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh
 #
 # Behaviour:
 #   * If port :4002 is open AND a benign HTTP probe gets ANY HTTP status
@@ -27,10 +27,20 @@
 
 set -euo pipefail
 
-HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
+# HYPERLOOM_ROOT defaults to the writable source-mirrors location under
+# $USER_DATA_PATH/runtime/source-mirrors (set by install.sh). The auth-proxy
+# log lands next to it for unified monitoring. Operators may still pin
+# HYPERLOOM_ROOT manually if they want the proxy script + log to live
+# elsewhere (e.g. legacy /opt/hyperloom deployments).
+USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
+HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
+HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 PROXY_PY="${PROXY_PY:-${HYPERLOOM_ROOT}/OOB/oob_cli/auth_proxy.py}"
 PROXY_PORT="${AUTH_PROXY_PORT:-4002}"
-LOG_DIR="${HYPERLOOM_ROOT}/logs"
+# Auth-proxy stdout/stderr lands under $USER_DATA_PATH/logs/auth-proxy/
+# by default so a single $USER_DATA_PATH tail covers it. Override
+# AUTH_PROXY_LOG_DIR if you want the legacy ${HYPERLOOM_ROOT}/logs location.
+LOG_DIR="${AUTH_PROXY_LOG_DIR:-${USER_DATA_PATH}/logs/auth-proxy}"
 PROBE_TIMEOUT="${AUTH_PROXY_PROBE_TIMEOUT:-2}"
 START_WAIT_SEC="${AUTH_PROXY_START_WAIT:-10}"
 
