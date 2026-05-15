@@ -257,6 +257,80 @@ def test_run_magpie_prepends_magpie_dir_to_pythonpath(tmp_path, monkeypatch):
     assert env["PYTHONPATH"].split(":")[:2] == ["/workspace/Magpie", "/existing"]
 
 
+def test_run_magpie_pins_magpie_inferencex_path_to_inferencex_path(
+    tmp_path, monkeypatch,
+):
+    """#210 fix (Deval, comment 8): when ``$INFERENCEX_PATH`` is set,
+    the Magpie subprocess must inherit ``$MAGPIE_INFERENCEX_PATH``
+    pointing at the SAME path. This is the canonical contract: Magpie's
+    ``_resolve_default_inferencex_dir`` reads ``$MAGPIE_INFERENCEX_PATH``
+    first, so Magpie loads the same InferenceX checkout Hyperloom's
+    ``_inferencex_patcher`` patched. Without this, Magpie falls through
+    to its own default (``./InferenceX`` next to its repo or
+    ``$XDG_CACHE_HOME/magpie/InferenceX``) and the patches never reach
+    the file actually loaded at runtime."""
+    monkeypatch.setenv("INFERENCEX_PATH", "/wekafs/hyperloom/InferenceX")
+    monkeypatch.delenv("MAGPIE_INFERENCEX_PATH", raising=False)
+    seen: dict[str, object] = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        seen["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        fake_run,
+    )
+    _run_magpie(
+        magpie_python="/opt/venv/bin/python",
+        config_path=tmp_path / "config.yaml",
+        output_dir=tmp_path / "out",
+        timeout_sec=5,
+        cwd=str(tmp_path),
+    )
+    env = seen["env"]
+    assert env.get("MAGPIE_INFERENCEX_PATH") == "/wekafs/hyperloom/InferenceX", (
+        "MAGPIE_INFERENCEX_PATH must be set to $INFERENCEX_PATH so Magpie "
+        "uses the same checkout that Hyperloom's _inferencex_patcher patched"
+    )
+
+
+def test_run_magpie_does_not_set_magpie_inferencex_path_when_inferencex_unset(
+    tmp_path, monkeypatch,
+):
+    """When ``$INFERENCEX_PATH`` is unset (smoke / dry-run shape), do
+    NOT set ``$MAGPIE_INFERENCEX_PATH`` to an empty string — that
+    would force Magpie's resolver to use the empty path verbatim
+    (``Magpie/modes/benchmark/inferencex.py:44`` falls through only
+    when the env value is unset, not when it's empty). Letting Magpie
+    fall through to its own discovery cascade is the correct behaviour
+    when Hyperloom doesn't have an opinion."""
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.delenv("MAGPIE_INFERENCEX_PATH", raising=False)
+    seen: dict[str, object] = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        seen["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        fake_run,
+    )
+    _run_magpie(
+        magpie_python="/opt/venv/bin/python",
+        config_path=tmp_path / "config.yaml",
+        output_dir=tmp_path / "out",
+        timeout_sec=5,
+        cwd=str(tmp_path),
+    )
+    env = seen["env"]
+    assert "MAGPIE_INFERENCEX_PATH" not in env or env["MAGPIE_INFERENCEX_PATH"] == "", (
+        "no $INFERENCEX_PATH set → MAGPIE_INFERENCEX_PATH must NOT be "
+        "force-injected (would shadow Magpie's own discovery cascade)"
+    )
+
+
 @pytest.mark.asyncio
 async def test_run_grid_writes_per_variant_yaml_and_parses_report(tmp_path):
     base = tmp_path / "base.yaml"
