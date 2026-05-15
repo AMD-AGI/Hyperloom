@@ -25,7 +25,7 @@ RAY_RUNTIME = ROOT / "tools" / "backends" / "ray_runtime.py"
 
 
 def run_json(cmd: list[str], *, workspace: Path) -> dict:
-    env = {**os.environ, "WORKSPACE_PATH": str(workspace)}
+    env = {**os.environ, "USER_DATA_PATH": str(workspace)}
     proc = subprocess.run(cmd, text=True, capture_output=True, env=env, timeout=60)
     if proc.returncode != 0:
         raise AssertionError(f"command failed\ncmd={cmd}\nstdout={proc.stdout}\nstderr={proc.stderr}")
@@ -33,7 +33,7 @@ def run_json(cmd: list[str], *, workspace: Path) -> dict:
 
 
 def run_json_allow_fail(cmd: list[str], *, workspace: Path) -> tuple[int, dict]:
-    env = {**os.environ, "WORKSPACE_PATH": str(workspace)}
+    env = {**os.environ, "USER_DATA_PATH": str(workspace)}
     proc = subprocess.run(cmd, text=True, capture_output=True, env=env, timeout=60)
     try:
         payload = json.loads(proc.stdout)
