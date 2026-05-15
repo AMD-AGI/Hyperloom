@@ -84,11 +84,13 @@ def test_prompt_failure_recovery_lists_fingerprint_keys(registry, rules_path):
         assert key in text, f"fingerprint key {key!r} missing from prompt"
 
 
-def test_prompt_failure_recovery_names_three_rules(registry, rules_path):
+def test_prompt_failure_recovery_names_four_rules(registry, rules_path):
     text = _prompt(registry, rules_path)
     assert "RULE F1" in text
     assert "RULE F2" in text
     assert "RULE F3" in text
+    assert "RULE F4" in text
+    assert "policy_loop" in text
 
 
 def test_prompt_failure_recovery_mentions_policy_rule_tag(registry, rules_path):

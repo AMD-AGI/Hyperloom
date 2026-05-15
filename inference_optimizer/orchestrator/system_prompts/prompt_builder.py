@@ -143,10 +143,13 @@ def _section_session_context(
     objective_kind: str,
     objective_value: float | str | None,
     max_minutes: int,
+    framework_source_roots: tuple[str, ...] | None = None,
 ) -> list[str]:
     obj = f"{objective_kind}"
     if objective_value not in (None, ""):
         obj = f"{objective_kind}={objective_value}"
+    roots = framework_source_roots or ()
+    roots_line = ", ".join(roots) if roots else "(defaults from PolicyGate)"
     return [
         "## 2. SESSION CONTEXT",
         "",
@@ -154,6 +157,7 @@ def _section_session_context(
         f"- kernel_enabled   : {'true' if kernel_enabled else 'false'}",
         f"- objective        : {obj}",
         f"- max_minutes      : {max_minutes}",
+        f"- framework_source_roots: {roots_line}",
         "",
         "Per-tick dynamic context (Mission progress, Time budget, Shared",
         "session state, Coordinator checklist, KB hints, inbox tail) is",
@@ -432,6 +436,15 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "  repeatedly nonzero <action>'` and let Robustness intervene. Do NOT",
         "  switch action families just to dodge the failure; Robustness'",
         "  escalation policy needs the heartbeat to fire its RCA.",
+        "* **RULE F4 — `policy_denial_streak` ≥ 2 locks the action.** When the",
+        "  per-tick `Policy denials` block shows `streak≥2` for an action, the",
+        "  Coordinator tags it `[locked: policy_loop:<rule>]`. Re-trying the",
+        "  SAME params will keep colliding. Omit `idempotency_key` (Coordinator",
+        "  derives a fresh tick+content fingerprint) AND change at least one",
+        "  substantive param — e.g. a new `params.grid` variant, different",
+        "  `benchmark_script`, or switch to a sibling action family. At streak≥5",
+        "  the family is auto-pruned; at streak≥10 the run stops with",
+        "  `stop_reason='policy_loop'`.",
         "",
         "Example (baseline failed twice with `error_class='no_report'`):",
         "",
@@ -480,6 +493,27 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "",
         "An explore round that produces zero new ideas is a bug — heartbeat",
         "with body_md='idea-pipeline-empty' so Robustness can intervene.",
+        "",
+        "### PMC roofline (dual mode)",
+        "",
+        "Use `pmc_roofline` after `profile` when you need hardware counters /",
+        "roofline charts. Two deployment modes:",
+        "",
+        "**RayJob mode (production)** — omit `server_cmd`; Coordinator derives",
+        "it from `baseline_config_path` / materialized Magpie YAML. Set",
+        "`params.ray_worker=true` inside the Ray job so GPU allocation is",
+        "owned by Ray.",
+        "",
+        "    delegate{action_name='pmc_roofline',",
+        "        params={ray_worker: true,",
+        "                config_path: <SharedState.baseline_config_path>,",
+        "                output_dir: '<SESSION_DIR>/runs/pmc_roofline/<round>'},",
+        "        predicted_gain_pct: 0,",
+        "        notes: 'PMC roofline via Ray — server_cmd auto-derived'}",
+        "",
+        "**Local debug mode** — set `allow_direct_gpu=true` (or export",
+        "`HYPERLOOM_ALLOW_DIRECT_PMC_ROOFLINE=1`) and pass explicit",
+        "`server_cmd` + `health_url` when no Ray worker is available.",
     ])
     return lines
 
@@ -608,6 +642,7 @@ def build_orchestration_prompt(
     objective_value: float | str | None = None,
     max_minutes: int = 0,
     rules_fragment_path: Path | None = None,
+    framework_source_roots: tuple[str, ...] | None = None,
 ) -> str:
     """Compose the Orchestration system prompt.
 
@@ -650,6 +685,7 @@ def build_orchestration_prompt(
             objective_kind=objective_kind,
             objective_value=objective_value,
             max_minutes=max_minutes,
+            framework_source_roots=framework_source_roots,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
         _section_action_catalogue(actions),
