@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import shlex
@@ -45,6 +46,7 @@ from .kb_digest import format_kb_digest_for_orchestration
 from .kernel_request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from .message_bus import Message, MessageBus
 from .objective import Objective, TimeOnlyObjective
+from .pmc_workload_params import derive_pmc_roofline_params_from_config
 from .policy import (
     KILL_TASK_SOURCE_ALLOWLIST,
     PolicyDenied,
@@ -731,7 +733,7 @@ class Coordinator:
         if await self.tasks.queued() or await self.tasks.running():
             return False
 
-        if self.shared_state.params_no_promote_streak < 5:
+        if self.shared_state.params_no_promote_streak < 5 and not self._params_grid_exhausted():
             return False
         if not self._params_grid_exhausted():
             return False
@@ -742,6 +744,13 @@ class Coordinator:
         # backends search.
         if not self._backends_grid_exhausted():
             return False
+        if (
+            self.action_registry is not None
+            and self.shared_state.all_top_actions_policy_locked(
+                self.action_registry,
+            )
+        ):
+            return True
         return self._all_reusable_kernels_rejected()
 
     def _params_grid_exhausted(self) -> bool:
@@ -929,6 +938,9 @@ class Coordinator:
                         registry=self.action_registry, top_k=12,
                     )
                 )
+            denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
+            if denial_summary:
+                sections.append(denial_summary)
             required_step = self._required_next_step()
             if required_step:
                 sections.append("=== Execution checklist (Coordinator-enforced) ===")
@@ -1388,92 +1400,14 @@ class Coordinator:
         if not config_path:
             log.info("PMC roofline enabled but baseline_config_path is empty")
             return None
-        path = Path(config_path)
-        if not path.exists():
-            log.warning("PMC roofline config missing: %s", path)
-            return None
-        try:
-            import yaml  # type: ignore[import-untyped]
-            cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Failed to read PMC roofline workload config %s: %s", path, exc)
-            return None
-
-        bench = cfg.get("benchmark") if isinstance(cfg.get("benchmark"), dict) else {}
-        envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
-        framework = str(bench.get("framework") or self.shared_state.framework or "vllm").lower()
-        model = str(bench.get("model") or self.shared_state.model_path or "").strip()
-        if not model:
-            log.warning("PMC roofline config has no model path")
-            return None
-
-        port = int(os.environ.get("HYPERLOOM_PMC_ROOFLINE_PORT", "30001"))
-        tp = str(envs.get("TP") or os.environ.get("TP") or "1")
-        precision = str(bench.get("precision") or os.environ.get("PRECISION") or "bf16").lower()
-        max_model_len = str(envs.get("MAX_MODEL_LEN") or os.environ.get("MAX_MODEL_LEN") or "8192")
-        extra_key = "EXTRA_VLLM_ARGS" if framework == "vllm" else "EXTRA_SGLANG_ARGS"
-        extra_args = shlex.split(str(envs.get(extra_key) or ""))
-        gpu_type = (
-            os.environ.get("HYPERLOOM_PMC_ROOFLINE_GPU_TYPE")
-            or self.shared_state.gpu_type
-            or os.environ.get("GPU_TYPE", "")
-        ).strip().lower()
-
-        if framework == "vllm":
-            dtype = "bfloat16" if precision in {"bf16", "bfloat16"} else precision
-            server_cmd = [
-                "vllm", "serve", model,
-                "--host", "0.0.0.0",
-                "--port", str(port),
-                "--tensor-parallel-size", tp,
-                "--trust-remote-code",
-                "--dtype", dtype,
-                "--max-model-len", max_model_len,
-            ] + extra_args
-            backend = "vllm"
-        else:
-            server_cmd = [
-                "python", "-m", "sglang.launch_server",
-                "--model-path", model,
-                "--host", "0.0.0.0",
-                "--port", str(port),
-                "--tensor-parallel-size", tp,
-                "--trust-remote-code",
-                "--max-model-len", max_model_len,
-            ] + extra_args
-            backend = "sglang"
-
-        inferencex = os.environ.get("INFERENCEX_PATH", "/hyperloom/InferenceX").rstrip("/")
-        bench_script = f"{inferencex}/utils/bench_serving/benchmark_serving.py"
-        isl = str(envs.get("ISL") or os.environ.get("ISL") or "256")
-        osl = str(envs.get("OSL") or os.environ.get("OSL") or "256")
-        conc = int(envs.get("CONC") or os.environ.get("CONC") or 1)
-        num_prompts = str(envs.get("NUM_PROMPTS") or max(conc, 1))
-        benchmark_cmd = [
-            "python", bench_script,
-            "--backend", backend,
-            "--base-url", f"http://127.0.0.1:{port}",
-            "--model", model,
-            "--dataset-name", "random",
-            "--random-input-len", isl,
-            "--random-output-len", osl,
-            "--num-prompts", num_prompts,
-            "--max-concurrency", str(conc),
-            "--request-rate", "inf",
-            "--ignore-eos",
-        ]
-
-        return {
-            "profile_mode": os.environ.get("HYPERLOOM_PMC_ROOFLINE_MODE", "launch"),
-            "server_cmd": server_cmd,
-            "health_url": f"http://127.0.0.1:{port}/health",
-            "benchmark_cmd": benchmark_cmd,
-            "output_dir": str(Path(self.session_dir) / "runs" / "pmc_roofline" / "auto"),
-            "duration_ms": int(os.environ.get("HYPERLOOM_PMC_ROOFLINE_DURATION_MS", "15000")),
-            "precision": precision,
-            "gpu_type": gpu_type,
-            "startup_timeout_s": int(os.environ.get("HYPERLOOM_PMC_ROOFLINE_STARTUP_TIMEOUT_S", "600")),
-        }
+        derived = derive_pmc_roofline_params_from_config(
+            config_path,
+            framework=self.shared_state.framework,
+            model_path=self.shared_state.model_path,
+            gpu_type=self.shared_state.gpu_type,
+            output_dir=str(Path(self.session_dir) / "runs" / "pmc_roofline" / "auto"),
+        )
+        return derived
 
     async def _maybe_enqueue_pmc_roofline(self) -> None:
         if not self._pmc_roofline_enabled():
@@ -1706,12 +1640,28 @@ class Coordinator:
     # ------------------------------------------------------------------
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
         action_name = intent.payload["action_name"]
+        if self.shared_state.is_pruned(action_name):
+            await self._record_policy_denied(
+                source, intent,
+                PolicyDenied(
+                    f"delegate{{action_name={action_name!r}}} pruned",
+                    rule="family_pruned",
+                    hint=(
+                        f"{action_name!r} is in pruned_families; pick another "
+                        f"action from Action scores"
+                    ),
+                ),
+                action_name=action_name,
+            )
+            return
         denied = self._sequence_denial_for_action(
             action_name,
             proposed_params=intent.payload.get("params"),
         )
         if denied is not None:
-            await self._record_policy_denied(source, intent, denied)
+            await self._record_policy_denied(
+                source, intent, denied, action_name=action_name,
+            )
             return
         params = dict(intent.payload.get("params") or {})
         # Plumb baseline's materialized YAML into grid-style delegated tasks
@@ -1739,41 +1689,78 @@ class Coordinator:
             params.setdefault(
                 "backends_search", self.shared_state.backends_search,
             )
-        idempotency_key = intent.payload.get("idempotency_key") or f"{source}:{action_name}:{len(self.state.pending_proposals)}"
-        task, was_existing = await self.tasks.create_or_return_existing(
-            kind=action_name,
-            params=params,
-            idempotency_key=idempotency_key,
-        )
-        if was_existing:
-            # Surface the dedup as a policy_denied observation so the LLM
-            # sees the rule+hint next tick and can bump the suffix /
-            # change params instead of spinning on the same key. Without
-            # this feedback the LLM treats the silent return as "task
-            # queued" and waits forever for a delegated_result that will
-            # never arrive (the existing task is already terminal).
-            terminal_states = {"succeeded", "failed", "cancelled", "needs_manual_review"}
-            if task.state in terminal_states:
-                hint = (
-                    f"task {task.task_id} terminated as {task.state!r} and will "
-                    f"NOT be re-run. Bump the idempotency_key suffix (e.g. "
-                    f"backends-round-<N+1>) or change params to create a new task."
-                )
-            else:
+        raw_key = intent.payload.get("idempotency_key")
+        if not raw_key:
+            content_fp = hashlib.sha1(
+                json.dumps(params, sort_keys=True, default=str).encode()
+            ).hexdigest()[:10]
+            raw_key = (
+                f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:"
+                f"{content_fp}"
+            )
+        idempotency_key = str(raw_key)
+        terminal_states = {
+            "succeeded", "failed", "cancelled", "needs_manual_review",
+        }
+        task = None
+        was_existing = False
+        for attempt in range(6):
+            idempotency_key = (
+                str(raw_key) if attempt == 0 else f"{raw_key}-retry{attempt}"
+            )
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind=action_name,
+                params=params,
+                idempotency_key=idempotency_key,
+            )
+            if not was_existing:
+                break
+            if task.state not in terminal_states:
                 hint = (
                     f"task {task.task_id} is still {task.state!r}; wait for the "
                     f"delegated_result event instead of re-emitting the same key."
                 )
+                await self._record_policy_denied(
+                    source, intent,
+                    PolicyDenied(
+                        f"delegate{{action_name={action_name!r}}} duplicate "
+                        f"idempotency_key={idempotency_key!r}",
+                        rule="duplicate_idempotency_key_running",
+                        hint=hint,
+                    ),
+                    action_name=action_name,
+                )
+                return
+        else:
+            hint = (
+                f"task {task.task_id if task else '?'} terminated and could not "
+                f"allocate a fresh idempotency_key after 5 retries"
+            )
+            await self._record_policy_denied(
+                source, intent,
+                PolicyDenied(
+                    f"delegate{{action_name={action_name!r}}} duplicate "
+                    f"idempotency_key exhausted retries for {raw_key!r}",
+                    rule="duplicate_idempotency_key",
+                    hint=hint,
+                ),
+                action_name=action_name,
+            )
+            return
+        if was_existing:
+            # Should not happen after the retry loop unless create failed.
             await self._record_policy_denied(
                 source, intent,
                 PolicyDenied(
                     f"delegate{{action_name={action_name!r}}} duplicate "
                     f"idempotency_key={idempotency_key!r}",
                     rule="duplicate_idempotency_key",
-                    hint=hint,
+                    hint="unexpected duplicate after retry loop",
                 ),
+                action_name=action_name,
             )
             return
+        self.shared_state.reset_policy_denial_streak(action_name)
         await self.bus.append_and_seq(Message.new(
             "coordinator", "*", "event",
             {"kind": "task_queued", "task_id": task.task_id, "source": source, "action": action_name},
@@ -2096,7 +2083,12 @@ class Coordinator:
     # Bookkeeping
     # ------------------------------------------------------------------
     async def _record_policy_denied(
-        self, source: str, intent: Intent, denied: PolicyDenied
+        self,
+        source: str,
+        intent: Intent,
+        denied: PolicyDenied,
+        *,
+        action_name: str | None = None,
     ) -> None:
         await self.bus.append_and_seq(Message.new(
             "coordinator", source, "observation",
@@ -2109,6 +2101,35 @@ class Coordinator:
             },
             priority=0,
         ))
+        resolved_action = action_name or str(
+            (intent.payload or {}).get("action_name") or ""
+        )
+        streak = self.shared_state.record_policy_denial(
+            action_name=resolved_action,
+            rule=str(denied.rule or ""),
+            hint=str(denied.hint or ""),
+            intent_type=intent.type.value,
+            tick=int(self.shared_state.tick or 0),
+            intent_payload=intent.payload,
+        )
+        if resolved_action and streak >= 2:
+            score = self.shared_state.get_action_score(resolved_action)
+            if score is not None:
+                score.locked_reason = f"policy_loop:{denied.rule}"
+                self.shared_state.put_action_score(resolved_action, score)
+        if resolved_action and streak >= 5:
+            self.shared_state.prune_family(resolved_action)
+            await self._record_observation(
+                "coordinator", "observation",
+                {
+                    "kind": "auto_prune",
+                    "action": resolved_action,
+                    "rule": denied.rule,
+                    "streak": streak,
+                },
+            )
+        if streak >= 10:
+            self.shared_state.stop_reason = "policy_loop"
 
     async def _record_observation(self, source: str, topic: str, payload: dict) -> None:
         await self.bus.append_and_seq(Message.new(source, "*", topic, payload))
@@ -2481,10 +2502,16 @@ class Coordinator:
             trace_path = (
                 result.get("main_trace_path")
                 or (result.get("trace_files") or [None])[0]
-                or result.get("trace_dir")
             )
-            if trace_path:
+            profile_status = str(result.get("status") or "")
+            if profile_status == "failed" or result.get("error_class") == "no_trace_files":
+                self.shared_state.last_profile_status = "failed"
+                if not trace_path:
+                    self.shared_state.last_profile_trace = ""
+                changed = True
+            elif trace_path:
                 self.shared_state.last_profile_trace = str(trace_path)
+                self.shared_state.last_profile_status = "succeeded"
                 # Record the server config in effect for this trace so
                 # Orchestration can decide whether to re-profile.
                 profile_args = ""
@@ -2645,6 +2672,9 @@ class Coordinator:
                     param_flags=disc_update.get("param_flags"),
                     source_path=str(disc_update.get("source_path") or ""),
                 )
+                err = disc_update.get("discovery_error")
+                if err:
+                    self.shared_state.discovered_flags_error = str(err)
                 changed = True
             new_attempts = result.get("synergy_attempted_new") or []
             for combo in new_attempts:
@@ -2706,22 +2736,29 @@ class Coordinator:
                 self.shared_state.save(self.session_dir)
                 return
             # Promote a grid-runner winner if it actually beat the
-            # current best by a meaningful margin. We use 0.1% as the
-            # 1-shot KEEP threshold — further relaxed from the prior
-            # 0.5% bar (which itself relaxed marathon's 1.0% per the
-            # resume5 9h finding). The 0.1% gate lets sub-noise winners
-            # enter optimization_stack early so they can compound with
-            # downstream KEEPs; the validate_stack rebench then acts as
-            # the final filter (see validate_stack handler — currently
-            # record-only with a 0.0% warning gate). AND, as a separate
-            # path, promote ANY consistent winner that wins ≥ 2 of last
-            # 3 rounds with average gain ≥ 0.3% — that's the cross-round
-            # signal-vs-noise check (now mostly redundant given the
-            # lower 1-shot bar, but harmless).
-            PROMOTE_THRESHOLD_PCT = 0.1
+            # current best by a meaningful margin. We use 0.2% as the
+            # 1-shot KEEP threshold — relaxed from marathon's original
+            # 1.0% per the resume5 9h finding (35/38 winners landed in
+            # the 0.3–0.84% band but never promoted because each
+            # individual run sat under 1.0%), but kept above the
+            # session-to-session noise floor (~0.1%) so a single noisy
+            # round doesn't lock in a non-improvement. AND, as a
+            # separate path, promote ANY consistent winner that wins
+            # ≥ 2 of last 3 rounds with average gain ≥ 0.1% — that's
+            # the cross-round signal-vs-noise check; rounds individually
+            # under 0.2% still stack up when the same variant keeps
+            # winning, so we don't lose real but small gains.
+            PROMOTE_THRESHOLD_PCT = 0.2
             CROSS_ROUND_LOOKBACK = 3
             CROSS_ROUND_MIN_APPEARANCES = 2
-            CROSS_ROUND_MIN_AVG_GAIN_PCT = 0.3
+            # The cross-round bar must stay strictly under
+            # PROMOTE_THRESHOLD_PCT, otherwise the path is mathematically
+            # unreachable (any 2 sub-threshold rounds whose average
+            # crosses the cross-round bar would also have at least one
+            # round above the 1-shot bar, triggering single-shot promote
+            # first). 0.1% gives us a real cross-round signal between
+            # the noise floor and the 1-shot bar.
+            CROSS_ROUND_MIN_AVG_GAIN_PCT = 0.1
             best_tput = result.get("output_throughput")
             bv = result.get("best_variant") or {}
             best_gain = result.get("best_gain_pct")
