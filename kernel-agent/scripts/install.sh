@@ -435,9 +435,26 @@ ensure_geak() {
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
     run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"
-    run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"
+    # GEAK v3.1.0 ships 5 MCP tools under mcp_tools/; all of them are
+    # imported by the bundled ``minisweagent`` at preprocess time:
+    #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
+    #   * profiler-mcp               — Metrix instrumented profiling
+    #                                  (preprocessor.py:1073 import)
+    #   * metrix-mcp                 — backend for profiler-mcp
+    #   * cross-session-memory-mcp   — GEAK_MEMORY_STORE_PATH retriever
+    #   * automated-test-discovery   — pre-fills eval_command harness
+    # Installing only rag-mcp (the historical default) leaves the
+    # other four ``ModuleNotFoundError`` at runtime — observed on the
+    # 2026-05-15 Qwen3-32B GEAK attempts where ``profiler_mcp`` was
+    # missing and every GEAK attempt aborted in ~4 minutes with a
+    # zero-byte baseline. Install all five together.
+    for _geak_mcp in rag-mcp profiler-mcp metrix-mcp \
+                    cross-session-memory-mcp automated-test-discovery; do
+      run python3 -m pip install -q --no-cache-dir \
+        "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"
+    done
   else
-    log "check-only: skipping GEAK and rag-mcp installation"
+    log "check-only: skipping GEAK and mcp_tools installation"
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
     if [ "$DRY_RUN" -eq 0 ]; then
