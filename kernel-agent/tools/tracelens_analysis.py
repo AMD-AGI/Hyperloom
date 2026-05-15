@@ -2340,6 +2340,12 @@ def main() -> int:
                     # not be the primary source. Try the report first; only if
                     # the report has no Detailed Analysis blocks do we fall
                     # back to ``priority_data.json`` (legacy path).
+                    #
+                    # T2 (this PR): ``priority_data_path`` may be ``None``
+                    # when the v0.3 SDK orchestrator didn't emit the sidecar
+                    # — ``Report_Interfacing.docx`` §2 explicitly disowns
+                    # intermediates, so a missing sidecar is normal and
+                    # must not trigger the legacy fallback at all.
                     raw_agent_candidates = []
                     report_source = ""
                     report_cands = parse_analysis_md(
@@ -2348,7 +2354,7 @@ def main() -> int:
                     if report_cands:
                         raw_agent_candidates = report_cands
                         report_source = "analysis.md"
-                    else:
+                    elif skill_result.priority_data_path is not None:
                         legacy_cands = raw_candidates_from_priority_data(
                             skill_result.priority_data_path, args.top_k,
                         )
@@ -2361,6 +2367,16 @@ def main() -> int:
                                 "Analysis blocks; falling back to "
                                 "priority_data.json",
                             )
+                    else:
+                        append_log(
+                            log_path,
+                            "TraceLens analysis.md had no Detailed "
+                            "Analysis blocks and no priority_data.json "
+                            "sidecar was emitted (v0.3 contract: "
+                            "analysis.md is the single source of truth). "
+                            "Producing empty hot_kernels[] — downstream "
+                            "Coordinator will route to params/backends.",
+                        )
 
                     if raw_agent_candidates:
                         total_dur = sum(
