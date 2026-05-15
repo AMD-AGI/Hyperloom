@@ -31,6 +31,11 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
+  schedule:
+    # Keep the runner pool warm overnight. Cron uses the top2000 candidate
+    # file, excludes models already present in model-leaderboard, and also
+    # excludes models queued/running in other optimize-submit runs.
+    - cron: '0 */8 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > hf_top) ──────
@@ -50,6 +55,16 @@ on:
         description: 'Slice size for candidates_file. 0 = take all rows.'
         required: false
         default: '0'
+      exclude_leaderboard:
+        description: 'Exclude models already present in model-leaderboard before selecting batch.'
+        type: boolean
+        required: false
+        default: false
+      exclude_active_workflows:
+        description: 'Exclude models already queued/running in active optimize-submit workflow runs.'
+        type: boolean
+        required: false
+        default: false
       hf_top:
         description: 'Live HuggingFace top-N (LEGACY fallback; used only if models AND candidates_file are empty)'
         required: false
@@ -262,6 +277,10 @@ on:
         required: false
         default: false
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   # ── Stage 1: build matrix ────────────────────────────────────────────────────
   prepare:
@@ -274,11 +293,14 @@ jobs:
     env:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
       INPUT_MODELS:          ${{ github.event.inputs.models }}
-      INPUT_CANDIDATES_FILE: ${{ github.event.inputs.candidates_file }}
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/top2000_2026-05-15.json' || github.event.inputs.candidates_file }}
       INPUT_BATCH_INDEX:     ${{ github.event.inputs.batch_index }}
-      INPUT_BATCH_SIZE:      ${{ github.event.inputs.batch_size }}
+      INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '60' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
+      INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_leaderboard }}
+      INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_active_workflows }}
+      GITHUB_TOKEN:          ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
