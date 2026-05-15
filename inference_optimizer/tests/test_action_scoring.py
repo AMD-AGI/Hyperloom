@@ -133,7 +133,7 @@ def test_compute_initial_priors_zero_for_measurement_actions():
     assert compute_initial_priors_from_metadata(m) == pytest.approx(0.0)
 
 
-def test_seed_action_scores_uses_marathon_prior_when_available(registry):
+def test_seed_action_scores_uses_model_class_priors_when_available(registry):
     seeded = seed_action_scores(
         registry,
         model_class="moe_mla",
@@ -143,15 +143,18 @@ def test_seed_action_scores_uses_marathon_prior_when_available(registry):
             "vendor_kernel_config",
         ],
     )
-    # marathon moe_mla: operator_tuning=7.0, deep_kernel_analysis=8.0
+    # Curated moe_mla priors (MODEL_CLASS_ACTION_PRIORS in scoring.py):
+    # operator_tuning=7.0, deep_kernel_analysis=2.0 (deliberately downweighted
+    # from the original 8.0 — see commit f97e7e60 — so deep-dive analysis
+    # doesn't crowd out faster explore actions on the scoreboard).
     assert seeded["operator_tuning"]["base_score"] == pytest.approx(7.0)
-    assert seeded["deep_kernel_analysis"]["base_score"] == pytest.approx(8.0)
-    # backends / params / sweep are now seeded from the marathon table too
+    assert seeded["deep_kernel_analysis"]["base_score"] == pytest.approx(2.0)
+    # backends / params / sweep are also seeded from the curated table
     # (10x of their auto value for backends/params; flat 1.0 for sweep).
     assert seeded["backends"]["base_score"] == pytest.approx(8.4)
     assert seeded["params"]["base_score"] == pytest.approx(9.5)
     assert seeded["sweep"]["base_score"] == pytest.approx(1.0)
-    # vendor_kernel_config still has no marathon entry — falls back to auto.
+    # vendor_kernel_config has no curated entry — falls back to auto.
     auto_vendor = compute_initial_priors_from_metadata(
         registry.get("vendor_kernel_config")
     )
@@ -274,7 +277,7 @@ def test_rank_top_k_orders_by_effective_score(registry):
     )
     rows = rank_top_k(seeded, registry, tick=1, k=4)
     names = [r[0] for r in rows]
-    # marathon moe_mla after the explore-family additions:
+    # Curated moe_mla priors after the explore-family additions:
     # params=9.5 > backends=8.4 > operator_tuning=7.0 > kernel_opt=6.0
     assert names[0] == "params"
     assert names[1] == "backends"
@@ -610,7 +613,7 @@ async def test_coordinator_seeds_action_scores_on_construction(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         assert c.shared_state.action_scores
-        # The marathon prior for moe_mla operator_tuning is 7.0; with the
+        # The curated prior for moe_mla operator_tuning is 7.0; with the
         # default model_class fallback we expect 7.0 here.
         assert (
             c.shared_state.action_scores["operator_tuning"]["base_score"]
