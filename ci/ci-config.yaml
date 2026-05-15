@@ -4,7 +4,14 @@ claw:
   sandbox_workspace_env: SANDBOX_WORKSPACE
   sandbox_timeout: 28800
   agent_id: agent_default
-  tools: [74]  # 74=ci-mix300 v1.3.0 skill (scripts on disk); pluginId=4 sent in message body for base tools
+  # plugin 4 (Hyperloom) bundles two tools:
+  #   - tool 3:  hyperloom-public-mcp (primus-safe-core42 MCP server)
+  #   - tool 85: hyperloom-prompt → @/wekafs/HyperloomV2/inference_optimizer/SKILL.md
+  # CI sends pluginId=4 + tools=[] in the message body; the agent reads
+  # SKILL.md off the WekaFS mount and runs the Python `inference_optimizer
+  # optimize` CLI. Marketplace skill download is intentionally NOT used —
+  # the runtime IS on the mount, no /workspace/.skills/ layout required.
+  plugin_id: 4
 
 inferenceX:
   repo: https://github.com/SemiAnalysisAI/InferenceX.git
@@ -14,7 +21,11 @@ inferenceX:
   harbor_prefix: ${HARBOR_PREFIX}
 
 results:
-  result_dir: ${SANDBOX_WORKSPACE}/hyperloom/
+  # result_dir is no longer rendered into the agent prompt — inference_optimizer
+  # has its own canonical session_dir at /workspace/hyperloom (SKILL.md "##
+  # What This Skill Runs"). Kept here for any local CI bookkeeping that
+  # still wants a path string.
+  result_dir: /workspace/hyperloom
   nfs_base: ${NFS_ROOT}/results/ci
   artifact_retention_days: 90
 
