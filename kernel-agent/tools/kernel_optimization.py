@@ -134,7 +134,7 @@ def has_benchmark(args: argparse.Namespace, candidate: dict[str, Any]) -> bool:
 
 def parse_backends(backends: str) -> list[str]:
     parsed = [b.strip().lower() for b in backends.split(",") if b.strip()]
-    allowed = {"geak", "claude", "codex"}
+    allowed = {"geak", "claude", "codex", "cursor"}
     invalid = [b for b in parsed if b not in allowed]
     if invalid:
         raise ValueError(f"unsupported backend(s): {', '.join(invalid)} "
@@ -148,10 +148,17 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     user_backends = parse_backends(args.backends)
     benchmark_available = has_benchmark(args, candidate)
     source_type = str(candidate.get("source_type") or "unknown")
+    # Cursor backend requires CURSOR_API_KEY (Cursor's own gateway, not the
+    # AMD LiteLLM gateway). When the operator has not provisioned a Cursor
+    # key, skip cursor from auto-selected defaults to avoid wasted 401
+    # attempts. User-specified `--backends cursor` still wins (respects
+    # explicit intent; the missing key surfaces as a clear backend failure).
+    cursor_key_present = bool(os.environ.get("CURSOR_API_KEY", "").strip())
     notes: dict[str, Any] = {
         "user_specified_backends": bool(user_backends),
         "benchmark_available": benchmark_available,
         "geak_without_benchmark": False,
+        "cursor_key_present": cursor_key_present,
     }
 
     if user_backends:
@@ -159,12 +166,19 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
             notes["geak_without_benchmark"] = True
         return user_backends, notes
 
+    def _with_cursor(base: list[str]) -> list[str]:
+        if cursor_key_present:
+            return base + ["cursor"]
+        return base
+
     if source_type == "vendor_binary":
         return [], notes
     if source_type == "hip_cpp":
-        return ["geak"] if benchmark_available else ["claude", "codex"]
+        if benchmark_available:
+            return ["geak"], notes
+        return _with_cursor(["claude", "codex"]), notes
 
-    selected = ["claude", "codex"]
+    selected = _with_cursor(["claude", "codex"])
     if benchmark_available:
         selected.insert(0, "geak")
     return selected, notes
@@ -885,7 +899,7 @@ def invoke_backend(
                         if best_patch_path:
                             result["geak_per_task_best_patch"] = best_patch_path
             return result
-        if backend in {"claude", "codex"}:
+        if backend in {"claude", "codex", "cursor"}:
             oob = _import_backend("oob_submit")
             out_dir = _oob_output_dir(args.session_id)
             is_multigpu = bool((candidate or {}).get("is_multigpu"))
