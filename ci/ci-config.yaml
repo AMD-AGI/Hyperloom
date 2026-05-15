@@ -21,7 +21,13 @@ inferenceX:
   harbor_prefix: ${HARBOR_PREFIX}
 
 results:
-  result_dir: ${SANDBOX_WORKSPACE}/hyperloom/
+  # Container-internal absolute path. Must match SaFE backend prompt_builder.go
+  # (which renders '/workspace/hyperloom') so the agent's RESULT_DIR / cd /
+  # cp commands all resolve in-pod regardless of K8s workspace name.
+  # Do NOT prefix with ${SANDBOX_WORKSPACE} — that's a K8s namespace, not an fs
+  # path; using it here mis-renders to e.g. 'core42-sandbox/hyperloom/'.
+  # No trailing slash so '{result_dir}/ci_metrics.json' joins cleanly.
+  result_dir: /workspace/hyperloom
   nfs_base: ${NFS_ROOT}/results/ci
   artifact_retention_days: 90
 

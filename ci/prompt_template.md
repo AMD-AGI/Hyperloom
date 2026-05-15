@@ -76,7 +76,7 @@ Target GPU: {target_gpu}
 Raw performance values:
 {inferenceX_data}
 
-Optimize and push ahead of {target_gpu}. Use InferenceX data from Hyperloom as starting point for sglang {runner} baseline.
+Optimize and push ahead of {target_gpu}. Use InferenceX data from Hyperloom as starting point for {framework} {runner} baseline.
 
 IMPORTANT benchmark parameters (must match InferenceX):
 - Use --random-range-ratio 0.8 for ALL benchmarks (baseline, DFS, sweep). Do NOT use 1.0.
