@@ -2047,7 +2047,17 @@ def main() -> int:
             "$TRACELENS_SOURCE_ROOT when set."
         ),
     )
-    parser.add_argument("--workspace-path", default=_default_workspace_path())
+    parser.add_argument(
+        "--workspace-path",
+        default=_default_workspace_path(),
+        help=(
+            "Root the tool writes under (output lands at "
+            "<workspace_path>/kernel-agent/runs/<session_id>/...). "
+            "Defaults to $USER_DATA_PATH so every kernel-agent artefact "
+            "stays inside the session dir; falls back to $WORKSPACE_PATH "
+            "for legacy launchers, then to /workspace/hyperloom."
+        ),
+    )
     parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
     parser.add_argument("--roofline-json", default="")
     parser.add_argument(
