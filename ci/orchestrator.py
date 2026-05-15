@@ -40,16 +40,33 @@ log = logging.getLogger("ci-orchestrator")
 
 CI_DIR = Path(__file__).resolve().parent
 PROMPT_TEMPLATE = (CI_DIR / "prompt_template.md").read_text()
+PROMPT_TEMPLATE_PR = (CI_DIR / "prompt_template_pr.md").read_text()
 
-# Skill files are NOT embedded in the prompt. We send pluginId=4 (Hyperloom),
-# whose bundled tool 85 prompt template references the inference_optimizer
-# Python package on the WekaFS mount: /wekafs/HyperloomV2/inference_optimizer/.
-# The agent reads SKILL.md off the mount and runs `inference_optimizer optimize`
-# directly — there is no marketplace skill download or /workspace/.skills/
-# layout involved. ci-mix300 (tool 74) is intentionally NOT used; it duplicated
-# inference_optimizer's coverage and was never reliably injected by Brain
-# (plugin 4's tools list does not include it). See ab-session-logs/ +
-# .harvest/run25853202679-* for the canonical inference_optimizer artifacts.
+# Two prompt paths exist:
+#
+#   1. prompt_template.md (default, scheduled / workflow_dispatch CI):
+#      Agent cd's into /wekafs/HyperloomV2 (= the deployed Hyperloom snapshot
+#      on the WekaFS mount) and runs the Python `inference_optimizer optimize`
+#      CLI from there. This validates the *deployed* version, not main HEAD —
+#      wekafs is hand-maintained and may lag main by 50+ commits with local
+#      uncommitted edits. That is the *intended* behavior for schedule runs:
+#      we want to know what the production-deployed Hyperloom does today.
+#
+#   2. prompt_template_pr.md (PR-approve trigger only):
+#      Agent first git-clones the PR head commit into the sandbox at
+#      /tmp/Hyperloom-pr, installs from there, and drives the skill out of
+#      the cloned tree. This validates the *unmerged PR code*, not the
+#      wekafs snapshot — required so reviewer-visible numbers actually
+#      reflect what the PR proposes to ship. GH_TOKEN is formatted into
+#      the prompt (Claw API has no env-injection field; ClawClient.create_
+#      session/send_message bodies only accept name/agent_id/sandbox_image/
+#      content/tools/pluginId/workspaceId). Use a fine-grained PAT scoped
+#      to AMD-AGI/Hyperloom + contents:read with short expiration.
+#
+# Both paths share the same plugin 4 (tools 3 + 85). The skill runtime IS
+# the inference_optimizer Python package — there is no marketplace skill
+# download or /workspace/.skills/ layout. ci-mix300 (tool 74) is
+# intentionally NOT bundled in plugin 4.
 
 
 def load_config(config_path: str | None = None) -> dict:
@@ -58,14 +75,21 @@ def load_config(config_path: str | None = None) -> dict:
         return yaml.safe_load(f)
 
 
-def render_prompt(merged: dict) -> str:
-    """Render the agent prompt for the inference_optimizer skill on /wekafs.
+def render_prompt(merged: dict, *, pr_mode: bool = False,
+                  git_ref: str | None = None,
+                  gh_token: str | None = None) -> str:
+    """Render the agent prompt for the inference_optimizer skill.
 
-    The skill (HyperloomV2/inference_optimizer) is reached via plugin 4's
-    bundled tool 85 prompt template — agent reads SKILL.md off /wekafs and
-    runs the Python `inference_optimizer optimize` CLI directly. We don't
-    inject benchmark scripts, server flags, or kernel-opt-specific knobs
-    here; the skill's own _preflight() + executors handle all of that.
+    Two paths:
+      - pr_mode=False (default): use prompt_template.md, agent cd's into
+        /wekafs/HyperloomV2 (deployed snapshot). Used by schedule /
+        workflow_dispatch.
+      - pr_mode=True: use prompt_template_pr.md, agent first git-clones
+        the PR head commit into /tmp inside the sandbox, then installs +
+        drives the skill from there. Required so reviewer-visible numbers
+        on PR-approve trigger reflect the proposed code, not the
+        wekafs-deployed snapshot. Requires both git_ref (PR head sha)
+        and gh_token (fine-grained PAT for private repo clone).
     """
     isl, osl = merged["isl_osl_configs"][0]
     ifx_text = format_benchmark_for_prompt(
@@ -79,7 +103,7 @@ def render_prompt(merged: dict) -> str:
     safe_api_key = os.environ.get("CLAW_API_KEY", "")
     safe_base_url = os.environ.get("SAFE_BASE_URL", "")
 
-    return PROMPT_TEMPLATE.format(
+    common_fields = dict(
         model_hf=merged["model_hf"],
         model_path=merged["model_path"],
         framework=merged["framework"],
@@ -96,6 +120,22 @@ def render_prompt(merged: dict) -> str:
         safe_api_key=safe_api_key,
         safe_base_url=safe_base_url,
     )
+
+    if pr_mode:
+        if not git_ref:
+            raise ValueError("pr_mode=True requires git_ref (PR head sha)")
+        if not gh_token:
+            raise ValueError(
+                "pr_mode=True requires gh_token (fine-grained PAT). "
+                "Set HYPERLOOM_PR_CI_GH_TOKEN env or pass --gh-token-env"
+            )
+        return PROMPT_TEMPLATE_PR.format(
+            git_ref=git_ref,
+            gh_token=gh_token,
+            **common_fields,
+        )
+
+    return PROMPT_TEMPLATE.format(**common_fields)
 
 
 _STREAM_TRUNCATION_MIN_TOOL_CALLS = 3  # fewer tool calls than this in <10min = likely truncation
@@ -153,19 +193,32 @@ def run_model(
     merged: dict,
     nfs_base: str,
     sandbox_timeout: int,
+    *,
+    pr_mode: bool = False,
+    git_ref: str | None = None,
+    gh_token: str | None = None,
 ) -> dict:
-    """Execute the full optimization flow for a single model."""
+    """Execute the full optimization flow for a single model.
+
+    pr_mode + git_ref + gh_token are forwarded to render_prompt to switch
+    between schedule path (/wekafs/HyperloomV2) and PR-approve path
+    (sandbox-internal git clone of PR head). See render_prompt() docstring.
+    """
     model_name = merged["model_hf"].split("/")[-1]
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
-    # Use a local temp dir for downloading files — nfs_base may be read-only on the runner
     result_dir = os.path.join(tempfile.gettempdir(), "hyperloom-ci", model_name, timestamp)
 
     log.info("═" * 60)
     log.info("Starting model: %s (%s)", model_name, merged["precision"])
+    if pr_mode:
+        log.info("PR-CI mode: validating commit %s (sandbox will git-clone PR head)",
+                 git_ref[:12] if git_ref else "?")
     log.info("═" * 60)
 
-    prompt = render_prompt(merged)
-    log.info("Prompt length: %d chars", len(prompt))
+    prompt = render_prompt(merged, pr_mode=pr_mode,
+                           git_ref=git_ref, gh_token=gh_token)
+    # NEVER log full prompt in pr_mode — it contains the GH PAT.
+    log.info("Prompt length: %d chars (pr_mode=%s)", len(prompt), pr_mode)
 
     status = "failed"
     session_id = None
@@ -374,6 +427,22 @@ def main():
                              "Inference A/B Test workflow to compare different Hyperloom-side "
                              "plugin builds (e.g. 4 = current wekafs inference_optimizer; "
                              "5 = an experimental successor with a different SKILL.md).")
+    parser.add_argument("--pr-mode", action="store_true",
+                        help="PR-CI mode: render prompt_template_pr.md so the agent "
+                             "first git-clones --git-ref into /tmp/Hyperloom-pr inside "
+                             "the sandbox, then installs + drives the skill from PR head "
+                             "(NOT from /wekafs/HyperloomV2). Required so reviewer-visible "
+                             "numbers reflect the proposed code, not the wekafs snapshot.")
+    parser.add_argument("--git-ref", default=None,
+                        help="In --pr-mode: PR head commit sha (or branch name) for the "
+                             "agent to clone. Use the full sha — branch name on the PR "
+                             "could move during review.")
+    parser.add_argument("--gh-token-env", default="HYPERLOOM_PR_CI_GH_TOKEN",
+                        help="In --pr-mode: env var holding the fine-grained PAT used "
+                             "to clone AMD-AGI/Hyperloom inside the sandbox. The token "
+                             "value gets formatted into the prompt — Claw API has no "
+                             "env-injection field. Use a token scoped to AMD-AGI/Hyperloom "
+                             "+ contents:read with short expiration.")
     parser.add_argument("--dry-run", action="store_true", help="Print prompts without executing")
     parser.add_argument("--output-dir", default="ci-output", help="Output directory for reports")
     args = parser.parse_args()
@@ -497,29 +566,54 @@ def main():
         log.error("No valid models to process")
         sys.exit(1)
 
-    # Dry run: print prompts and exit
+    # PR-mode: resolve + validate token / git-ref upfront so we fail fast
+    # before spinning up any sandbox.
+    pr_mode = bool(args.pr_mode)
+    git_ref: str | None = None
+    gh_token: str | None = None
+    if pr_mode:
+        if not args.git_ref:
+            log.error("--pr-mode requires --git-ref (PR head commit sha)")
+            sys.exit(2)
+        git_ref = args.git_ref
+        gh_token = os.environ.get(args.gh_token_env)
+        if not gh_token:
+            log.error("--pr-mode requires env %s to hold a GitHub PAT (got empty/unset)",
+                      args.gh_token_env)
+            sys.exit(2)
+        log.info("PR-CI mode enabled: git_ref=%s, gh_token=*** (from %s)",
+                 git_ref[:12] if len(git_ref) > 12 else git_ref, args.gh_token_env)
+
+    # Dry run: print prompts and exit. Mask the GH PAT in pr_mode so the
+    # log doesn't leak it.
     if args.dry_run:
         for merged in merged_models:
-            prompt = render_prompt(merged)
+            prompt = render_prompt(merged, pr_mode=pr_mode,
+                                   git_ref=git_ref,
+                                   gh_token=gh_token)
+            if pr_mode and gh_token:
+                prompt = prompt.replace(gh_token, "***GH_TOKEN_REDACTED***")
             print(f"\n{'=' * 60}")
-            print(f"Model: {merged['model_hf']} ({merged['precision']})")
+            print(f"Model: {merged['model_hf']} ({merged['precision']}) "
+                  f"[pr_mode={pr_mode}]")
             print(f"{'=' * 60}")
             print(prompt)
         sys.exit(0)
 
-    # Override plugin_id if provided via CLI (Inference A/B Test path).
     if args.plugin_id is not None:
         claw_cfg["plugin_id"] = args.plugin_id
         log.info("Overriding Claw plugin_id from CLI: %s", claw_cfg["plugin_id"])
 
-    # Execute
     claw = ClawClient.from_config(claw_cfg)
     nfs_base = results_cfg.get("nfs_base") or (get_nfs_root() + "/results/ci")
     sandbox_timeout = claw_cfg.get("sandbox_timeout", 14400)
     results = []
 
     for merged in merged_models:
-        result = run_model(claw, merged, nfs_base, sandbox_timeout)
+        result = run_model(
+            claw, merged, nfs_base, sandbox_timeout,
+            pr_mode=pr_mode, git_ref=git_ref, gh_token=gh_token,
+        )
         results.append(result)
         log.info("Result for %s: status=%s, gain=%s",
                  result["model"], result["status"],

@@ -30,6 +30,12 @@ env:
   WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
   SANDBOX_WORKSPACE: ${{ secrets.SANDBOX_WORKSPACE }}
   LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+  # PR-CI only: fine-grained PAT for AMD-AGI/Hyperloom (contents:read)
+  # used by the agent inside the sandbox to git-clone the PR head commit
+  # before running inference_optimizer. Token gets formatted into the
+  # prompt because Claw API has no env-injection field. Use a short
+  # expiration and minimal scope.
+  HYPERLOOM_PR_CI_GH_TOKEN: ${{ secrets.HYPERLOOM_PR_CI_GH_TOKEN }}
 
 jobs:
   prepare:
@@ -97,19 +103,36 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER:  ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           INPUT_REASON: ${{ github.event.inputs.trigger_reason }}
         run: |
-          if [ -n "${INPUT_REASON:-}" ]; then
-            TRIGGER="$INPUT_REASON"
-          elif [ "$EVENT_NAME" = "pull_request_review" ]; then
-            TRIGGER="pr-approve-comparison-PR${PR_NUMBER:-?}"
+          # PR-approve trigger gets --pr-mode + PR head sha so the agent
+          # validates the unmerged code (clones into sandbox /tmp), not
+          # the wekafs deployed snapshot. schedule / workflow_dispatch
+          # keep the legacy /wekafs/HyperloomV2 path unchanged.
+          if [ "$EVENT_NAME" = "pull_request_review" ]; then
+            TRIGGER="pr-approve-PR${PR_NUMBER:-?}"
+            if [ -z "${HYPERLOOM_PR_CI_GH_TOKEN:-}" ]; then
+              echo "::error::HYPERLOOM_PR_CI_GH_TOKEN secret is empty — PR-CI cannot clone AMD-AGI/Hyperloom from inside the sandbox"
+              exit 2
+            fi
+            python3 orchestrator.py \
+              --trigger "$TRIGGER" \
+              --models "${{ matrix.key }}" \
+              --output-dir "${{ github.workspace }}/ci-output" \
+              --pr-mode \
+              --git-ref "$PR_HEAD_SHA"
           else
-            TRIGGER="scheduled"
+            if [ -n "${INPUT_REASON:-}" ]; then
+              TRIGGER="$INPUT_REASON"
+            else
+              TRIGGER="scheduled"
+            fi
+            python3 orchestrator.py \
+              --trigger "$TRIGGER" \
+              --models "${{ matrix.key }}" \
+              --output-dir "${{ github.workspace }}/ci-output"
           fi
-          python3 orchestrator.py \
-            --trigger "$TRIGGER" \
-            --models "${{ matrix.key }}" \
-            --output-dir "${{ github.workspace }}/ci-output"
 
       - name: Upload model report
         if: always()
