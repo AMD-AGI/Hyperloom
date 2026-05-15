@@ -125,8 +125,8 @@ MARATHON_PRIORS: dict[str, dict[str, float]] = {
         "framework_rebuild": 3.0,
         "comm_optimization": 2.0,
         "compiler_tuning": 6.0,
-        "backends": 8.4,
-        "params": 9.5,
+        "backends": 9.0,
+        "params": 9.0,
         "sweep": 1.0,
     },
     "moe_mla": {
@@ -136,8 +136,8 @@ MARATHON_PRIORS: dict[str, dict[str, float]] = {
         "framework_rebuild": 4.0,
         "comm_optimization": 5.0,
         "compiler_tuning": 3.0,
-        "backends": 8.4,
-        "params": 9.5,
+        "backends": 9.0,
+        "params": 9.0,
         "sweep": 1.0,
     },
     "moe_swa": {
@@ -147,8 +147,8 @@ MARATHON_PRIORS: dict[str, dict[str, float]] = {
         "framework_rebuild": 4.0,
         "comm_optimization": 5.0,
         "compiler_tuning": 3.0,
-        "backends": 8.4,
-        "params": 9.5,
+        "backends": 9.0,
+        "params": 9.0,
         "sweep": 1.0,
     },
     "moe_mla_nsa": {
@@ -158,8 +158,8 @@ MARATHON_PRIORS: dict[str, dict[str, float]] = {
         "framework_rebuild": 4.0,
         "comm_optimization": 6.0,
         "compiler_tuning": 3.0,
-        "backends": 8.4,
-        "params": 9.5,
+        "backends": 9.0,
+        "params": 9.0,
         "sweep": 1.0,
     },
 }
