@@ -57,11 +57,16 @@ PROMPT_TEMPLATE_PR = (CI_DIR / "prompt_template_pr.md").read_text()
 #      /tmp/Hyperloom-pr, installs from there, and drives the skill out of
 #      the cloned tree. This validates the *unmerged PR code*, not the
 #      wekafs snapshot — required so reviewer-visible numbers actually
-#      reflect what the PR proposes to ship. GH_TOKEN is formatted into
-#      the prompt (Claw API has no env-injection field; ClawClient.create_
-#      session/send_message bodies only accept name/agent_id/sandbox_image/
-#      content/tools/pluginId/workspaceId). Use a fine-grained PAT scoped
-#      to AMD-AGI/Hyperloom + contents:read with short expiration.
+#      reflect what the PR proposes to ship. The GitHub token is formatted
+#      into the prompt (Claw API has no env-injection field; ClawClient.
+#      create_session/send_message bodies only accept name/agent_id/
+#      sandbox_image/content/tools/pluginId/workspaceId). The workflow
+#      passes ${{ github.token }} (per-run installation token,
+#      contents:read on this repo only, lifetime ≤ workflow run) — chosen
+#      over a user-created PAT because AMD-AGI org policy bans Classic
+#      PATs and gates fine-grained PATs behind admin approval. The flag
+#      `--gh-token-env` keeps it pluggable: any env-var holding a token
+#      that can clone AMD-AGI/Hyperloom works.
 #
 # Both paths share the same plugin 4 (tools 3 + 85). The skill runtime IS
 # the inference_optimizer Python package — there is no marketplace skill
@@ -89,7 +94,8 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
         drives the skill from there. Required so reviewer-visible numbers
         on PR-approve trigger reflect the proposed code, not the
         wekafs-deployed snapshot. Requires both git_ref (PR head sha)
-        and gh_token (fine-grained PAT for private repo clone).
+        and gh_token (any GitHub token that can clone AMD-AGI/Hyperloom;
+        the workflow passes the per-run GITHUB_TOKEN).
     """
     isl, osl = merged["isl_osl_configs"][0]
     ifx_text = format_benchmark_for_prompt(
@@ -126,8 +132,10 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
             raise ValueError("pr_mode=True requires git_ref (PR head sha)")
         if not gh_token:
             raise ValueError(
-                "pr_mode=True requires gh_token (fine-grained PAT). "
-                "Set HYPERLOOM_PR_CI_GH_TOKEN env or pass --gh-token-env"
+                "pr_mode=True requires gh_token (any GitHub token that can "
+                "clone AMD-AGI/Hyperloom — the workflow passes the per-run "
+                "GITHUB_TOKEN via ${{ github.token }}). Set "
+                "HYPERLOOM_PR_CI_GH_TOKEN env or pass --gh-token-env"
             )
         return PROMPT_TEMPLATE_PR.format(
             git_ref=git_ref,
@@ -217,7 +225,7 @@ def run_model(
 
     prompt = render_prompt(merged, pr_mode=pr_mode,
                            git_ref=git_ref, gh_token=gh_token)
-    # NEVER log full prompt in pr_mode — it contains the GH PAT.
+    # NEVER log full prompt in pr_mode — it contains the GH token.
     log.info("Prompt length: %d chars (pr_mode=%s)", len(prompt), pr_mode)
 
     status = "failed"
@@ -438,11 +446,15 @@ def main():
                              "agent to clone. Use the full sha — branch name on the PR "
                              "could move during review.")
     parser.add_argument("--gh-token-env", default="HYPERLOOM_PR_CI_GH_TOKEN",
-                        help="In --pr-mode: env var holding the fine-grained PAT used "
-                             "to clone AMD-AGI/Hyperloom inside the sandbox. The token "
-                             "value gets formatted into the prompt — Claw API has no "
-                             "env-injection field. Use a token scoped to AMD-AGI/Hyperloom "
-                             "+ contents:read with short expiration.")
+                        help="In --pr-mode: env var holding a GitHub token that can "
+                             "clone AMD-AGI/Hyperloom inside the sandbox. The workflow "
+                             "passes ${{ github.token }} (per-run GITHUB_TOKEN) — "
+                             "AMD-AGI org policy bans Classic PATs and gates "
+                             "fine-grained PATs behind admin approval, so the built-in "
+                             "GITHUB_TOKEN is the only viable choice. The token value "
+                             "gets formatted into the prompt — Claw API has no "
+                             "env-injection field — but GITHUB_TOKEN dies with "
+                             "the workflow run, so leak blast radius is bounded.")
     parser.add_argument("--dry-run", action="store_true", help="Print prompts without executing")
     parser.add_argument("--output-dir", default="ci-output", help="Output directory for reports")
     args = parser.parse_args()
@@ -578,13 +590,14 @@ def main():
         git_ref = args.git_ref
         gh_token = os.environ.get(args.gh_token_env)
         if not gh_token:
-            log.error("--pr-mode requires env %s to hold a GitHub PAT (got empty/unset)",
+            log.error("--pr-mode requires env %s to hold a GitHub token (got empty/unset). "
+                      "The workflow normally passes ${{ github.token }} here.",
                       args.gh_token_env)
             sys.exit(2)
         log.info("PR-CI mode enabled: git_ref=%s, gh_token=*** (from %s)",
                  git_ref[:12] if len(git_ref) > 12 else git_ref, args.gh_token_env)
 
-    # Dry run: print prompts and exit. Mask the GH PAT in pr_mode so the
+    # Dry run: print prompts and exit. Mask the GH token in pr_mode so the
     # log doesn't leak it.
     if args.dry_run:
         for merged in merged_models:

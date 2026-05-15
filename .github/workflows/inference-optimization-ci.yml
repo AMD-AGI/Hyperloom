@@ -30,12 +30,21 @@ env:
   WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
   SANDBOX_WORKSPACE: ${{ secrets.SANDBOX_WORKSPACE }}
   LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-  # PR-CI only: fine-grained PAT for AMD-AGI/Hyperloom (contents:read)
-  # used by the agent inside the sandbox to git-clone the PR head commit
-  # before running inference_optimizer. Token gets formatted into the
-  # prompt because Claw API has no env-injection field. Use a short
-  # expiration and minimal scope.
-  HYPERLOOM_PR_CI_GH_TOKEN: ${{ secrets.HYPERLOOM_PR_CI_GH_TOKEN }}
+  # PR-CI only: GitHub Actions built-in GITHUB_TOKEN, forwarded into the
+  # sandbox via prompt text (Claw API has no env-injection field) so the
+  # agent can git-clone AMD-AGI/Hyperloom @ PR head. Why GITHUB_TOKEN over
+  # a user-created PAT:
+  #   * AMD-AGI org policy bans Classic PATs ("forbidden from accessing
+  #     this repository") and gates fine-grained PATs behind admin
+  #     approval — neither is a viable supply-chain.
+  #   * GITHUB_TOKEN is a per-run installation token with default scope
+  #     `contents: read` on this repo only; lifetime is bounded by the
+  #     workflow run (typically <8h), so SaFE-side token leakage has a
+  #     much smaller blast radius than a 30-day PAT.
+  # actions/checkout@v4 already authenticates against the same token in
+  # the optimize / prepare jobs above; we are just propagating the same
+  # capability into the sandbox.
+  HYPERLOOM_PR_CI_GH_TOKEN: ${{ github.token }}
 
 jobs:
   prepare:
@@ -112,8 +121,12 @@ jobs:
           # keep the legacy /wekafs/HyperloomV2 path unchanged.
           if [ "$EVENT_NAME" = "pull_request_review" ]; then
             TRIGGER="pr-approve-PR${PR_NUMBER:-?}"
+            # github.token is auto-injected per workflow run; an empty
+            # value here would mean Actions itself is misconfigured.
+            # Keep the guard so we fail loud instead of silently sending
+            # a half-built prompt to the sandbox.
             if [ -z "${HYPERLOOM_PR_CI_GH_TOKEN:-}" ]; then
-              echo "::error::HYPERLOOM_PR_CI_GH_TOKEN secret is empty — PR-CI cannot clone AMD-AGI/Hyperloom from inside the sandbox"
+              echo "::error::github.token is empty — Actions runner misconfigured (workflows on this repo always get a default GITHUB_TOKEN)"
               exit 2
             fi
             python3 orchestrator.py \
