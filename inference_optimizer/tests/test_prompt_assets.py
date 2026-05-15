@@ -45,13 +45,11 @@ def test_orchestration_md_is_rules_fragment():
     text = p.read_text(encoding="utf-8")
     assert "SESSION_DIR" in text
     assert "Output protocol" in text
-    # Builder injects these as section headers / step markers — they MUST
-    # NOT appear in the rules fragment.
-    assert "Step **K1**" not in text
-    assert "Step **K2**" not in text
-    assert "Step **K3**" not in text
+    # Builder injects these as section headers / payload templates — they
+    # MUST NOT appear in the rules fragment.
     assert "## DECISION FRAMEWORK" not in text
-    assert "## KERNEL-OPT PIPELINE" not in text
+    assert "## 6. KERNEL-OPT REQUEST REFERENCE" not in text
+    assert "payload templates" not in text
 
 
 def test_orchestration_no_kernel_md_was_removed():
@@ -91,12 +89,15 @@ def test_build_full_prompt_contains_kernel_opt_pipeline(registry):
     assert "## 3. PIPELINE & TIME BUDGET" in text
     assert "## 4. ACTIONS YOU MAY USE" in text
     assert "## 5. DECISION FRAMEWORK" in text
-    assert "## 6. KERNEL-OPT PIPELINE" in text
+    assert "## 6. KERNEL-OPT REQUEST REFERENCE" in text
     assert "## 7. RULES & OUTPUT PROTOCOL" in text
-    # Section 6 hard-coded markers
-    assert "Step **K1**" in text
-    assert "Step **K2**" in text
-    assert "Step **K3**" in text
+    # Section 6 payload-template markers (one per kernel-owned action).
+    # These are the unique request shapes the builder emits in section 6;
+    # the rules fragment uses a different surface form ("kind MUST be
+    # EXACTLY one of select_kernels / ...") so it won't false-positive.
+    assert "kind: 'select_kernels'" in text
+    assert "kind: 'run_optimization'" in text
+    assert "kind: 'integrate'" in text
     # Action catalogue includes the kernel-owned actions
     assert "kernel_opt" in text
     assert "integrate" in text
@@ -121,9 +122,11 @@ def test_build_no_kernel_prompt_drops_kernel_pipeline_and_actions(registry):
     assert "## 4. ACTIONS YOU MAY USE" in text
     assert "## 5. DECISION FRAMEWORK" in text
     assert "## 7. RULES & OUTPUT PROTOCOL" in text
-    # Kernel-opt pipeline block must be absent (builder skipped section 6)
-    assert "## 6. KERNEL-OPT PIPELINE" not in text
-    assert "Step **K1**" not in text
+    # Kernel-opt request-reference block must be absent (builder skipped
+    # section 6 because no kernel-owned actions are enabled).
+    assert "## 6. KERNEL-OPT REQUEST REFERENCE" not in text
+    assert "kind: 'select_kernels'" not in text
+    assert "kind: 'run_optimization'" not in text
     # Kernel-owned action names must NOT appear as catalogue bullets
     # (the bare word may still appear inside the rules fragment, e.g.
     # in a hard rule that mentions kernel_opt by name — that's fine).
