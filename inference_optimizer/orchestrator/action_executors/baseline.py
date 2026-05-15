@@ -383,6 +383,15 @@ class BaselineExecutor:
         # up. Operators / Orchestration can override the destination
         # via ``task.params['result_dir']``.
         env["RESULT_DIR"] = override_result_dir or str(output_dir)
+        # Pin SERVER_LOG / GPU_METRICS_CSV per-task so Magpie's
+        # ``single_node/*.sh`` wrappers write the server log and per-second
+        # GPU telemetry into the task workspace alongside
+        # ``benchmark_report.json`` instead of leaking to
+        # ``/workspace/server.log`` / ``/workspace/gpu_metrics.csv``.
+        # ``harvest_leaked_artifacts`` still runs below as defense-in-depth
+        # for any wrapper that hardcodes the destination ignoring the env.
+        env["SERVER_LOG"] = str(output_dir / "server.log")
+        env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
 
         log.info("baseline_executor: launching Magpie cmd=%s output_dir=%s",
                  cmd, output_dir)

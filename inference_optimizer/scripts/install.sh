@@ -8,7 +8,8 @@
 # Stack (in order):
 #   1. inference_optimizer + extras (pulls in claude_agent_sdk via
 #      pyproject `[test]` extra)
-#   2. Magpie (benchmark engine) into $WORKSPACE_ROOT/Magpie
+#   2. Magpie (benchmark engine) into $HYPERLOOM_RUNTIME_DIR/Magpie
+#      (= $USER_DATA_PATH/runtime/Magpie by default)
 #   3. InferenceX checkout detection (sets INFERENCEX_PATH for runtime)
 #   4. Delegates to kernel-agent/scripts/install.sh for ray, ray-head
 #      bring-up, Node/npm, TraceLens, GEAK, OOB and the auth-proxy. kernel-agent
@@ -23,15 +24,19 @@
 
 set -euo pipefail
 
+# Single artefact root: everything writable defaults to $USER_DATA_PATH so
+# operators can monitor a run end-to-end by tailing one directory. Magpie
+# clone, source mirrors, generated env / GEAK config, and the pod-local
+# auth-proxy state all derive from $HYPERLOOM_RUNTIME_DIR.
+# Removed envs: WORKSPACE_ROOT / WORKSPACE_PATH (collapsed into USER_DATA_PATH).
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
-WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace}"
 USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
-HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
+HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/kernel-agent}"
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
-MAGPIE_DIR="${MAGPIE_DIR:-${WORKSPACE_ROOT}/Magpie}"
+MAGPIE_DIR="${MAGPIE_DIR:-${HYPERLOOM_RUNTIME_DIR}/Magpie}"
 
 DRY_RUN=0
 CHECK_ONLY=0
@@ -43,7 +48,7 @@ Usage: inference_optimizer/scripts/install.sh [options]
 
 Installs:
   - inference_optimizer Python package (with claude_agent_sdk via [test])
-  - Magpie (cloned to $WORKSPACE_ROOT/Magpie)
+  - Magpie (cloned to $HYPERLOOM_RUNTIME_DIR/Magpie by default)
   - Detects/exports INFERENCEX_PATH
   - Chains to kernel-agent/scripts/install.sh for Ray + ray-head start,
     Node/npm, TraceLens, GEAK, OOB CLI, and the OOB auth-proxy.
@@ -55,7 +60,7 @@ Options:
   -h, --help            Show this help
 
 Env overrides:
-  REPO_ROOT, WORKSPACE_ROOT, KERNEL_AGENT_ROOT, MAGPIE_REPO, MAGPIE_DIR,
+  REPO_ROOT, KERNEL_AGENT_ROOT, MAGPIE_REPO, MAGPIE_DIR,
   INFERENCEX_PATH, PYTHON, TRACELENS_ROOT, USER_DATA_PATH,
   HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV, HYPERLOOM_ROOT
 EOF
@@ -106,12 +111,21 @@ resolve_python() {
 resolve_python
 log "PYTHON=${PYTHON}"
 log "REPO_ROOT=${REPO_ROOT}"
-log "WORKSPACE_ROOT=${WORKSPACE_ROOT}"
+log "USER_DATA_PATH=${USER_DATA_PATH}"
+log "HYPERLOOM_RUNTIME_DIR=${HYPERLOOM_RUNTIME_DIR}"
 log "HYPERLOOM_ROOT=${HYPERLOOM_ROOT}"
 log "KERNEL_AGENT_ROOT=${KERNEL_AGENT_ROOT}"
 log "KERNEL_AGENT_ENV=${KERNEL_AGENT_ENV}"
+log "MAGPIE_DIR=${MAGPIE_DIR}"
 export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
 export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
+# Pre-create the writable runtime root so ensure_magpie / chain_kernel_agent
+# never race on missing parents (Magpie's pip install -e writes egg-info
+# under MAGPIE_DIR; install.sh of kernel-agent writes geak-config /
+# kernel-agent.env.sh into HYPERLOOM_RUNTIME_DIR).
+if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
+  mkdir -p "${HYPERLOOM_RUNTIME_DIR}"
+fi
 
 # pip --break-system-packages when PYTHON is the system interpreter
 # (e.g. bare ubuntu/debian image without a venv). Detect by comparing
@@ -155,7 +169,7 @@ ensure_magpie() {
     return 0
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    mkdir -p "$WORKSPACE_ROOT"
+    mkdir -p "$(dirname "$MAGPIE_DIR")"
   fi
   if [ ! -f "$MAGPIE_DIR/setup.py" ] && [ ! -f "$MAGPIE_DIR/pyproject.toml" ]; then
     log "cloning Magpie from $MAGPIE_REPO"
@@ -176,6 +190,7 @@ ensure_inferencex() {
   fi
   for candidate in \
       "$MAGPIE_DIR/InferenceX" \
+      "${HYPERLOOM_RUNTIME_DIR}/InferenceX" \
       "/wekafs/hyperloom/InferenceX" \
       "/opt/hyperloom/InferenceX" \
       "/wekafs/fully-local/inference_optimization/InferenceX"
@@ -204,7 +219,7 @@ chain_kernel_agent() {
     return 0
   fi
   log "delegating ray + TraceLens + GEAK + OOB + auth-proxy to ${script}"
-  export REPO_ROOT WORKSPACE_ROOT KERNEL_AGENT_ROOT MAGPIE_DIR HYPERLOOM_ROOT
+  export REPO_ROOT KERNEL_AGENT_ROOT MAGPIE_DIR HYPERLOOM_ROOT
   export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
   export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
   [ -n "${INFERENCEX_PATH:-}" ] && export INFERENCEX_PATH
