@@ -28,11 +28,70 @@ from typing import Any
 from tracelens_skill_runner import (
     aggregate_by_source_function,
     discover_capture_folder,
+    extract_idle_pct_from_analysis_md,
     normalize_upstream_category,
     parse_analysis_md,
     raw_candidates_from_priority_data,
     run_tracelens_skill,
 )
+
+
+HIGH_IDLE_PCT_THRESHOLD_DEFAULT = 20.0
+HIGH_IDLE_PCT_THRESHOLD_ENV = "HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD"
+
+
+def _resolve_idle_pct_threshold() -> float:
+    """Return the idle-percent gate threshold (default 20.0%).
+
+    The default is chosen with the TraceLens team (PR #206 review): a
+    trace where the GPU spends >20% of wall time idle is dominated by
+    host-side stalls (sync, allocator contention, scheduler gaps) which
+    per-kernel optimization cannot fix. Operators with workloads that
+    legitimately run with higher idle (e.g. very small batches during
+    bring-up benchmarks) can override the threshold via the
+    ``HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD`` environment variable; an
+    unparseable or negative value falls back to the default.
+    """
+    raw = os.environ.get(HIGH_IDLE_PCT_THRESHOLD_ENV, "").strip()
+    if not raw:
+        return HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    if value < 0.0:
+        return HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    return value
+
+
+def _build_high_idle_warning(
+    *, idle_pct: float, threshold_pct: float, report_path: Path,
+) -> dict[str, Any]:
+    """Build the structured ``trace_health_warnings[]`` entry for a high-idle trace.
+
+    The entry is consumed by ``kernel_request_handlers.select_kernels_handler``
+    (T4) which uses it to route to parameter optimization instead of
+    GEAK kernel rewriting. The shape is deliberately minimal and
+    JSON-serializable so it can be written verbatim into the audit
+    summary, the orchestrator result, and any operator-facing surfaces.
+    """
+    return {
+        "code": "high_gpu_idle_pct",
+        "severity": "warning",
+        "idle_pct": round(idle_pct, 2),
+        "threshold_pct": round(threshold_pct, 2),
+        "source": str(report_path),
+        "message": (
+            f"GPU was idle {idle_pct:.2f}% of trace wall time (threshold "
+            f"{threshold_pct:.2f}%). Per Report_Interfacing.docx §3, "
+            "kernel-level rewriting is unlikely to improve end-to-end "
+            "latency in this regime — recommend parameter optimization "
+            "(batch size, KV-cache shape, prefill/decode split) over "
+            "per-kernel rewrites. Hyperloom is suppressing the hot-kernel "
+            "candidate list and surfacing this warning so the Coordinator "
+            "can route to params/backends."
+        ),
+    }
 
 
 KERNEL_HINTS = (
@@ -1787,6 +1846,7 @@ def build_audit_summary(
     framework: str = "",
     target_platform: str = "",
     task_groups: list[dict[str, Any]] | None = None,
+    trace_health_warnings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the ``tracelens/summary.json`` payload from finalized candidates.
 
@@ -1861,6 +1921,12 @@ def build_audit_summary(
         "tasks":           tasks,
         "skipped":         skipped,
         "task_groups":     group_entries,
+        # T3: trace-quality findings (e.g. high GPU idle, future:
+        # exposed-comm spikes, allocator contention). An empty list is
+        # the steady-state signal; non-empty entries explain to the
+        # operator why ``tasks`` may be empty even though the trace
+        # parsed cleanly.
+        "trace_health_warnings": list(trace_health_warnings or []),
     }
 
 
@@ -1872,6 +1938,7 @@ def write_reports(
     candidates: list[dict[str, Any]],
     args: argparse.Namespace,
     existing_report_path: Path | None = None,
+    trace_health_warnings: list[dict[str, Any]] | None = None,
 ) -> dict[str, str]:
     """Write Hyperloom-owned sidecar JSONs and surface the upstream Markdown.
 
@@ -1948,6 +2015,7 @@ def write_reports(
         framework=str(args.framework or ""),
         target_platform=str(args.target_platform or ""),
         task_groups=task_groups,
+        trace_health_warnings=trace_health_warnings,
     )
     summary_path = tracelens_dir / "summary.json"
     atomic_write_json(summary_path, summary)
@@ -2139,6 +2207,13 @@ def main() -> int:
     agent_report_path: Path | None = None
     orchestrator_mode = "inline"
     orchestrator_error = ""
+    # T3: structured trace-health findings that the handler surfaces to
+    # the Coordinator / GEAK. Populated from the Executive Summary's
+    # ``Idle %`` row (extracted via ``extract_idle_pct_from_analysis_md``)
+    # and any future trace-quality gates we add here. Stays empty in the
+    # inline / non-SDK paths because raw-trace mode never produces an
+    # ``analysis.md`` Executive Summary to interrogate.
+    trace_health_warnings: list[dict[str, Any]] = []
 
     try:
         update_status(status_path, state="running", current_step="discover_trace_input",
@@ -2346,37 +2421,87 @@ def main() -> int:
                     # — ``Report_Interfacing.docx`` §2 explicitly disowns
                     # intermediates, so a missing sidecar is normal and
                     # must not trigger the legacy fallback at all.
+                    #
+                    # T3 (this PR): before consuming any candidates, gate on
+                    # the Executive Summary's ``Idle %``. When idle time
+                    # dominates wall-clock, kernel rewrites cannot improve
+                    # end-to-end latency (Report_Interfacing.docx §3), so we
+                    # short-circuit to empty hot_kernels[] and surface a
+                    # ``trace_health_warnings`` entry that the handler (T4)
+                    # uses to route to parameter optimization.
                     raw_agent_candidates = []
                     report_source = ""
-                    report_cands = parse_analysis_md(
-                        skill_result.report_path, args.top_k,
+                    idle_pct_value = extract_idle_pct_from_analysis_md(
+                        skill_result.report_path,
                     )
-                    if report_cands:
-                        raw_agent_candidates = report_cands
-                        report_source = "analysis.md"
-                    elif skill_result.priority_data_path is not None:
-                        legacy_cands = raw_candidates_from_priority_data(
-                            skill_result.priority_data_path, args.top_k,
+                    idle_pct_threshold = _resolve_idle_pct_threshold()
+                    high_idle_detected = (
+                        idle_pct_value is not None
+                        and idle_pct_value > idle_pct_threshold
+                    )
+                    if high_idle_detected:
+                        # idle_pct_value is known to be a float here because
+                        # high_idle_detected required it to be not None.
+                        assert idle_pct_value is not None
+                        trace_health_warnings.append(
+                            _build_high_idle_warning(
+                                idle_pct=idle_pct_value,
+                                threshold_pct=idle_pct_threshold,
+                                report_path=skill_result.report_path,
+                            )
                         )
-                        if legacy_cands:
-                            raw_agent_candidates = legacy_cands
-                            report_source = "priority_data.json"
+                        report_source = "skipped:high_gpu_idle_pct"
+                        append_log(
+                            log_path,
+                            f"TraceLens Executive Summary reports "
+                            f"Idle % = {idle_pct_value:.2f}% (threshold "
+                            f"{idle_pct_threshold:.2f}%); suppressing "
+                            "hot_kernels[] — kernel rewriting cannot move "
+                            "end-to-end latency in the high-idle regime. "
+                            "Coordinator will see this in "
+                            "trace_health_warnings[] and route to "
+                            "parameter optimization.",
+                        )
+                    else:
+                        if idle_pct_value is not None:
+                            append_log(
+                                log_path,
+                                f"TraceLens Executive Summary: "
+                                f"Idle % = {idle_pct_value:.2f}% "
+                                f"(threshold {idle_pct_threshold:.2f}%) — "
+                                "below gate, continuing with kernel "
+                                "candidate extraction",
+                            )
+                        report_cands = parse_analysis_md(
+                            skill_result.report_path, args.top_k,
+                        )
+                        if report_cands:
+                            raw_agent_candidates = report_cands
+                            report_source = "analysis.md"
+                        elif skill_result.priority_data_path is not None:
+                            legacy_cands = raw_candidates_from_priority_data(
+                                skill_result.priority_data_path, args.top_k,
+                            )
+                            if legacy_cands:
+                                raw_agent_candidates = legacy_cands
+                                report_source = "priority_data.json"
+                                append_log(
+                                    log_path,
+                                    "TraceLens analysis.md had no Detailed "
+                                    "Analysis blocks; falling back to "
+                                    "priority_data.json",
+                                )
+                        else:
                             append_log(
                                 log_path,
                                 "TraceLens analysis.md had no Detailed "
-                                "Analysis blocks; falling back to "
-                                "priority_data.json",
+                                "Analysis blocks and no priority_data.json "
+                                "sidecar was emitted (v0.3 contract: "
+                                "analysis.md is the single source of truth)."
+                                " Producing empty hot_kernels[] — "
+                                "downstream Coordinator will route to "
+                                "params/backends.",
                             )
-                    else:
-                        append_log(
-                            log_path,
-                            "TraceLens analysis.md had no Detailed "
-                            "Analysis blocks and no priority_data.json "
-                            "sidecar was emitted (v0.3 contract: "
-                            "analysis.md is the single source of truth). "
-                            "Producing empty hot_kernels[] — downstream "
-                            "Coordinator will route to params/backends.",
-                        )
 
                     if raw_agent_candidates:
                         total_dur = sum(
@@ -2527,7 +2652,8 @@ def main() -> int:
         artifacts.update(write_reports(run_dir, trace_input_type=trace_input_type,
                                        trace_files=trace_files, candidates=candidates,
                                        args=args,
-                                       existing_report_path=agent_report_path))
+                                       existing_report_path=agent_report_path,
+                                       trace_health_warnings=trace_health_warnings))
         if args.roofline_json:
             artifacts["roofline_json"] = str(Path(args.roofline_json).expanduser())
         artifacts["cli_log_path"] = str(log_path)
@@ -2558,6 +2684,12 @@ def main() -> int:
             "artifact_paths": artifacts,
             "orchestrator_mode": orchestrator_mode,
             "orchestrator_error": orchestrator_error,
+            # T3: structured trace-quality findings (high GPU idle, …) that
+            # the handler (``select_kernels_handler``, T4) surfaces upward
+            # so the Coordinator can decide between kernel-rewrite and
+            # parameter-optimization routes. Empty list is the steady-state
+            # ("nothing wrong") signal.
+            "trace_health_warnings": trace_health_warnings,
         }
         atomic_write_json(run_dir / "session_state.json", {
             "session_id": session_id,
