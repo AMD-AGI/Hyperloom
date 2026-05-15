@@ -130,7 +130,7 @@ async def _run(ticks: int, target_gain: float) -> int:
     coordinator.sub.register_executor("params",   params_executor)
     coordinator.sub.register_executor("sweep",    sweep_executor)
     coordinator.sub.register_executor("report",   report_executor)
-    for kind in ("setup", "classify", "target_analysis",
+    for kind in ("target_analysis",
                   "dream", "re_explore", "recover",
                   "comm_optimization", "compiler_tuning"):
         coordinator.sub.register_executor(kind, _noop_prep)
