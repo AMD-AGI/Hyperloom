@@ -159,9 +159,8 @@ async def test_promote_backends_winner_updates_current_best_and_gain(session_dir
 
 @pytest.mark.asyncio
 async def test_promote_backends_does_not_overwrite_when_below_threshold(session_dir):
-    """Improvement < 0.1% (further relaxed from the prior 0.5% P5 bar;
-    marathon was 1.0%) and not yet a consistent winner across rounds →
-    current_best stays."""
+    """Improvement < 0.2% (P5 threshold; marathon was 1.0%) and not yet
+    a consistent winner across rounds → current_best stays."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.baseline_tput = 800.0
@@ -169,7 +168,7 @@ async def test_promote_backends_does_not_overwrite_when_below_threshold(session_
         c.shared_state.cumulative_gain = 0.0
         c.shared_state.save(session_dir)
 
-        # +0.05% — below the 0.1% single-round KEEP bar
+        # +0.05% — below the 0.2% single-round KEEP bar
         result = {
             "status": "succeeded",
             "output_throughput": 800.4,
