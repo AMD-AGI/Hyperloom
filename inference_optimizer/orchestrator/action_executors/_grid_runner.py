@@ -513,6 +513,19 @@ def _run_magpie(
     # hardcoded ``--result-dir /workspace/``) still leak; the
     # ``extract_benchmark_measurement`` salvage path picks those up.
     env["RESULT_DIR"] = result_dir or str(output_dir)
+    # Magpie's ``InferenceX/benchmarks/single_node/*.sh`` wrappers default
+    # ``SERVER_LOG=/workspace/server.log`` and the GPU monitor's
+    # ``GPU_METRICS_CSV=/workspace/gpu_metrics.csv``. Both honor env-var
+    # overrides — pin them per-task so server stdout/stderr and per-second
+    # GPU telemetry land alongside ``benchmark_report.json`` instead of
+    # leaking outside the session. Always overwrite (not ``setdefault``)
+    # so a stale value inherited from the parent shell can't redirect a
+    # variant's logs into a previous run's slot.
+    # ``harvest_leaked_artifacts`` still runs as defense-in-depth for any
+    # wrapper that ignores these vars (the older
+    # ``inferencex_result.json`` leak path also stays covered).
+    env["SERVER_LOG"] = str(output_dir / "server.log")
+    env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
     cmd = [
         magpie_python, "-m", "Magpie", "-v", "benchmark",
         "--benchmark-config", str(config_path),
