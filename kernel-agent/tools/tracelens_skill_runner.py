@@ -676,17 +676,47 @@ def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
         return None
 
 
+def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
+    """Per-row sort key for the ``Lower Efficiency`` budget filter.
+
+    ``TraceLens_Report_Interfacing.docx`` §3 (Hyperloom v3 approach):
+
+      > Filter for GEAK based on budget (Higher P-item, Lower Efficiency)
+
+    P-item rank is the outer order, so this key only orders rows *within*
+    one P-item. Rows where TraceLens did not report an efficiency value
+    (``_row_to_candidate`` defaulted ``efficiency_percent`` to ``0.0``)
+    are demoted to last so they don't outrank rows TraceLens actually
+    measured. Python's sort is stable, so true-zero / equal-efficiency
+    rows preserve TraceLens's original ``Data:`` row order.
+    """
+    eff = candidate.get("efficiency_percent")
+    try:
+        value = float(eff)
+    except (TypeError, ValueError):
+        return float("inf")
+    if value <= 0.0:
+        return float("inf")
+    return value
+
+
 def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
     """Parse the TraceLens v0.3 ``analysis.md`` final report into hot-kernels.
 
-    This is the reviewer-preferred exit interface: only the final report is
-    consumed, not intermediate per-category JSON. The returned list mirrors
-    the priority order of ``priority_data.findings`` (P1 first, P2 next, …)
-    and, within a P-item, preserves the ``Operation`` rows of the 9-column
-    Data table.
+    This is the only place in Hyperloom that reads TraceLens candidate
+    data. The returned list follows the priority order required by
+    ``TraceLens_Report_Interfacing.docx`` §3 ("Filter for GEAK based on
+    budget (Higher P-item, Lower Efficiency)"):
 
-    Empty / non-existent reports return an empty list so callers can fall
-    back to the legacy ``priority_data.json`` parser.
+    1. **Higher P-item first** — rank=1 rows before rank=2 rows, etc.
+    2. **Lower Efficiency first** within the same P-item, so rows with
+       more optimization headroom survive the ``top_k`` budget cap.
+       Rows with no efficiency value land last (see
+       :func:`_efficiency_sort_key`).
+
+    Empty / non-existent reports return an empty list so callers can
+    surface that signal upstream (Hyperloom does not fall back to
+    intermediate sidecars per docx §2).
     """
 
     if not md_path.exists():
@@ -738,6 +768,7 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
             "impact_score_high": pitem_meta.get("impact_score_high", 0.0),
         }
         prose = _extract_pitem_prose(body)
+        pitem_candidates: list[dict[str, Any]] = []
         for cells in rows[1:]:
             cand = _row_to_candidate(
                 header_row,
@@ -751,6 +782,9 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
             )
             if cand is None:
                 continue
+            pitem_candidates.append(cand)
+        pitem_candidates.sort(key=_efficiency_sort_key)
+        for cand in pitem_candidates:
             candidates.append(cand)
             if len(candidates) >= top_k:
                 return candidates
