@@ -658,8 +658,10 @@ async def select_kernels_handler(
         # T4 (this PR): when TraceLens itself fails permanently — TraceLens
         # not on PATH, perf-report CLI crashed, analysis.md not produced,
         # subprocess timeout, etc. — we must NOT block the Coordinator.
-        # Per Report_Interfacing.docx §4 ("usage guidance"), a failed
-        # TraceLens run is a routing signal, not a fatal error: the
+        # Per Hyperloom design (T4 finishing-touches; docx does NOT spell
+        # this out — closest hint is §2's idle-gate "Sanity checks must be
+        # present" bullet), a failed TraceLens run is a routing signal,
+        # not a fatal error: the
         # Coordinator should fall through to parameter optimization
         # (batch size, KV cache shape, prefill/decode split) which does
         # not require kernel candidates. We rewrite the handler result

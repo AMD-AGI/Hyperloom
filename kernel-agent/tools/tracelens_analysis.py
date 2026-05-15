@@ -80,7 +80,8 @@ def _build_high_idle_warning(
         "source": str(report_path),
         "message": (
             f"GPU was idle {idle_pct:.2f}% of trace wall time (threshold "
-            f"{threshold_pct:.2f}%). Per Report_Interfacing.docx §3, "
+            f"{threshold_pct:.2f}%). Per Report_Interfacing.docx §2 "
+            "(idle-gate sanity check in Possible Approach (Hyperloom v3)), "
             "kernel-level rewriting is unlikely to improve end-to-end "
             "latency in this regime — recommend parameter optimization "
             "(batch size, KV-cache shape, prefill/decode split) over "
@@ -1887,7 +1888,8 @@ def main() -> int:
                     # T3 (this PR): before consuming any candidates, gate on
                     # the Executive Summary's ``Idle %``. When idle time
                     # dominates wall-clock, kernel rewrites cannot improve
-                    # end-to-end latency (Report_Interfacing.docx §3), so we
+                    # end-to-end latency (Report_Interfacing.docx §2 idle-gate
+                    # sanity check), so we
                     # short-circuit to empty hot_kernels[] and surface a
                     # ``trace_health_warnings`` entry that the handler (T4)
                     # uses to route to parameter optimization.
@@ -2002,7 +2004,9 @@ def main() -> int:
             )
         if not candidates:
             if allow_empty_candidates:
-                # docx §3 routing signal (high idle / TraceLens failure):
+                # Hyperloom routing signal (high idle from docx §2 idle-gate
+                # sanity check / TraceLens permanent failure per Hyperloom
+                # T4 design — docx does not define this fallback):
                 # keep ``candidates`` empty and let the Coordinator pivot to
                 # ``params`` / ``backends`` based on the
                 # ``trace_health_warnings`` we already populated. NEVER
