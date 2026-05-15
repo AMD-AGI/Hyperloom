@@ -1297,9 +1297,11 @@ async def test_select_kernels_handler_requires_kernel_agent_root(session_dir, mo
 # ===========================================================================
 # T4 — TraceLens permanent failure is a routing signal, not a fatal error
 # ===========================================================================
-# Per Report_Interfacing.docx §4, a failed TraceLens run must not block
-# the Coordinator from running parameter optimization (batch size, KV
-# cache shape, prefill/decode split). The handler rewrites
+# Per Hyperloom design (T4 finishing-touches; docx does NOT define this
+# routing — closest hint is §2's "Sanity checks must be present" bullet),
+# a failed TraceLens run must not block the Coordinator from running
+# parameter optimization (batch size, KV cache shape, prefill/decode
+# split). The handler rewrites
 # ``status=failed`` from the tool into ``status=ok`` + empty
 # ``hot_kernels`` + a structured ``trace_health_warnings[]`` entry so:
 #   * the Coordinator's "do I have kernels?" branch sees the empty list

@@ -929,9 +929,9 @@ class SharedState:
         analyzer (Hyperloom v0.4 finishing-touches T3 / T4):
 
         * ``high_gpu_idle_pct`` — Executive Summary's ``Idle %`` exceeded
-          the gate threshold; per Report_Interfacing.docx §3 the LLM
-          should pivot to parameter optimization rather than kernel
-          rewriting in this regime.
+          the gate threshold; per Report_Interfacing.docx §2 (idle-gate
+          sanity check) the LLM should pivot to parameter optimization
+          rather than kernel rewriting in this regime.
         * ``tracelens_analysis_failed`` — the TraceLens subprocess crashed
           permanently (perf-CLI missing, ``analysis.md`` not produced,
           timeout, …); Coordinator already demoted this to ``status=ok``
