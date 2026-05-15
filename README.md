@@ -92,6 +92,15 @@ Prepare Hyperloom and its dependency source trees on the GPU node, then set the 
 | `INFERENCEX_PATH` | InferenceX repo root | `/workspace/InferenceX` |
 | `TRACELENS_ROOT` | TraceLens-internal repo root | `/workspace/TraceLens-internal` |
 
+**Optional:**
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `USER_DATA_PATH` | Session directory root (per-run logs, artifacts, archived runs, launcher stdout, Magpie clone, source mirrors, kernel-agent tool outputs). Replaces the legacy `INFERENCE_OPTIMIZER_SESSION_DIR`. | `/workspace/hyperloom` |
+| `HYPERLOOM_ROOT` | Writable source-mirror root (GEAK clone, OOB CLI mirror, TraceLens mirror). Override only if you want mirrors shared across sessions. | `$USER_DATA_PATH/runtime/source-mirrors` |
+| `MAGPIE_DIR` | Magpie clone location. Override only if you maintain a shared Magpie checkout. | `$USER_DATA_PATH/runtime/Magpie` |
+| `INFERENCE_OPTIMIZER_RESCUE_PATHS` | Colon-separated extra roots scanned by the harvest step for leaked `result.json` files (e.g. when a Magpie script writes to a hardcoded `--result-dir`). | unset |
+
 Prepare the source trees from the corresponding repositories:
 
 - Hyperloom: this repository; clone it and point `REPO_ROOT` at the repo root.
@@ -160,8 +169,18 @@ The agent automatically:
 | `--target-gain` | Target throughput improvement % | 10 |
 | `--no-kernel` | Param tuning only, skip kernel optimization | disabled |
 | `--gpu-type` | GPU model (MI300X / MI355X) | auto-detect |
+| `--model-class` | Model architecture family used by the orchestrator's scoring and action selection. Supply explicitly; the agent no longer derives this from a `classify` action. | unset |
+| `--compare-against-gpu` | Opt into InferenceX reference fetching for the named GPU (e.g. `B200`). When omitted, `target_analysis` records a `no_target_gpu_configured` marker and the run proceeds without an external reference. | unset |
 
 > Training and MLPerf-training skills have been retired from this repo. Only inference optimization is supported here.
+
+#### Migration Notes (upgrading from earlier Hyperloom releases)
+
+1. **Session directory env renamed.** Set `USER_DATA_PATH` instead of `INFERENCE_OPTIMIZER_SESSION_DIR`. The legacy variable is no longer read.
+2. **`setup` and `classify` actions removed.** If your launcher relied on them being in the action graph, supply the equivalents on the CLI:
+   - `--model-class <…>` for what `classify` used to derive.
+   - `--compare-against-gpu <…>` to opt into InferenceX reference fetching (otherwise `target_analysis` writes a `no_target_gpu_configured` marker and the run proceeds).
+3. **Magpie benchmark script is now generic-pinned by default.** When `--gpu-type` is set, the YAML renderer pins `benchmark_script=<framework>_<gpu_type>.sh` to stop InferenceX-native scripts from silently leaking `result.json` outside the session dir. If you intentionally use a model-specific script (e.g. `dsr1_fp8_mi300x.sh`), keep passing `benchmark_script=` explicitly — operator overrides still win against the generic-script pin. You may additionally want to set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` so the harvest step can recover leaked `result.json` files written to hardcoded `--result-dir` locations.
 
 ---
 
