@@ -1,6 +1,7 @@
 """Regression tests for the kernel-agent tracelens_analysis filter fixes.
 
-Locks two related fixes uncovered by the resume3/resume4 1h validation:
+Locks the raw trace filtering fix uncovered by the resume3/resume4 1h
+validation:
 
 * **A path** ``is_kernel_event`` previously did fuzzy substring matching
   on `KERNEL_HINTS=("kernel","triton","hip","cuda",...)` against both the
@@ -9,11 +10,8 @@ Locks two related fixes uncovered by the resume3/resume4 1h validation:
   accumulates the entire wrapped GPU duration) to be the #1 hot kernel —
   88ms attributed to a CPU sync. Fix: require ``cat == 'kernel'`` strictly.
 
-* **B path** the wrapper now reads TraceLens's own ``kernel_summary.csv``
-  output first; falls back to the (fixed) raw parser only when the csv
-  is missing.  TraceLens already filters host-side events correctly via
-  ``Parent cpu_op == hipGraphLaunch`` joins, so reading its csv is both
-  more accurate and self-tracking when TraceLens schema improves.
+The production TraceLens interface now consumes only ``analysis.md``. Legacy
+``priority_data`` / ``category_data`` / CSV fallbacks are intentionally gone.
 """
 
 from __future__ import annotations
@@ -114,69 +112,6 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
     # No sync poison left
     for n in kept_names:
         assert "synchronize" not in n.lower()
-
-
-# ===========================================================================
-# B path — parse_tracelens_kernel_summary
-# ===========================================================================
-@pytest.fixture
-def tl_csv(tmp_path: Path) -> Path:
-    """Write a kernel_summary.csv shaped like real TraceLens output."""
-    csv_path = tmp_path / "kernel_summary.csv"
-    # \u00b5 == µ (micro sign as TraceLens emits)
-    csv_path.write_text(
-        "Parent op category,Parent cpu_op,Kernel name,Kernel stream,"
-        "Kernel duration (\u00b5s)_sum,Kernel duration (\u00b5s)_count,"
-        "Kernel duration (\u00b5s)_mean,Kernel duration (\u00b5s)_min\n"
-        "graph,hipGraphLaunch,Cijk_Alik_Bljk_*MT256x16x64,3,5077.217,37,137.22,121.4\n"
-        "graph,hipGraphLaunch,Cijk_Alik_Bljk_*MT16x16x512,3,2084.107,72,28.94,16.6\n"
-        "graph,hipGraphLaunch,_ZN5aiter24add_rmsnorm_quant_kernel<bf16>,3,466.586,72,6.48,5.9\n"
-        "graph,hipGraphLaunch,_ZN5aiter24add_rmsnorm_quant_kernel<bf16>,5,442.089,72,6.14,5.1\n"
-        "graph,hipGraphLaunch,paged_attention_ll4mi_QKV_mfma16_kernel<...>,3,889.104,36,24.69,21.6\n"
-        "graph,hipGraphLaunch,_ZN7sgl_hip10activation18act_and_mul_kernel<bf16>,3,380.188,36,10.56,9.8\n",
-        encoding="utf-8",
-    )
-    return csv_path
-
-
-def test_b_parses_tracelens_csv(tl_csv):
-    out = tla.parse_tracelens_kernel_summary(tl_csv, top_k=10)
-    assert out is not None
-    assert len(out) == 5  # 6 csv rows but 2 add_rmsnorm rows aggregate by name
-    # Top-1 should be the GEMM with biggest sum-duration
-    top = out[0]
-    assert top["name"].startswith("Cijk_Alik_Bljk_*MT256x16x64")
-    assert top["duration_us"] == pytest.approx(5077.217, rel=1e-3)
-    assert top["call_count"] == 37
-    assert top["kernel_id"] == "k001"
-    # Check aggregation: add_rmsnorm appears once with summed duration
-    add_rmsnorm = [k for k in out if "add_rmsnorm_quant" in k["name"]]
-    assert len(add_rmsnorm) == 1
-    assert add_rmsnorm[0]["duration_us"] == pytest.approx(466.586 + 442.089, rel=1e-3)
-    assert add_rmsnorm[0]["call_count"] == 144
-    # gpu_pct is computed against total
-    total = sum(k["duration_us"] for k in out)
-    assert sum(k["gpu_pct"] for k in out) == pytest.approx(100.0, abs=0.5)
-
-
-def test_b_returns_none_when_csv_missing(tmp_path):
-    out = tla.parse_tracelens_kernel_summary(tmp_path / "nonexistent.csv", top_k=10)
-    assert out is None
-
-
-def test_b_returns_none_when_csv_missing_required_columns(tmp_path):
-    bad = tmp_path / "kernel_summary.csv"
-    bad.write_text("foo,bar\n1,2\n", encoding="utf-8")
-    assert tla.parse_tracelens_kernel_summary(bad, top_k=10) is None
-
-
-def test_b_returns_none_when_csv_has_zero_kernels(tmp_path):
-    empty = tmp_path / "kernel_summary.csv"
-    empty.write_text(
-        "Kernel name,Kernel duration (\u00b5s)_sum,Kernel duration (\u00b5s)_count\n",
-        encoding="utf-8",
-    )
-    assert tla.parse_tracelens_kernel_summary(empty, top_k=10) is None
 
 
 # ===========================================================================
@@ -292,22 +227,6 @@ def test_known_rmsnorm_harness_is_registered_without_repo_root():
     assert any("rmsnorm" in path.lower() for path in files)
 
 
-# ===========================================================================
-# #125 — TraceLens structured output consumption
-# (kernel_category / shape / source_path triple for GEAK)
-# ===========================================================================
-
-
-def test_125_csv_extracts_parent_op_category(tl_csv):
-    """csv parser surfaces 'Parent op category' as tracelens_category."""
-    out = tla.parse_tracelens_kernel_summary(tl_csv, top_k=10)
-    assert out is not None
-    for cand in out:
-        assert cand.get("tracelens_category") == "graph", (
-            f"missing/wrong tracelens_category on {cand['name']}: {cand}"
-        )
-
-
 def test_125_finalize_adds_kernel_category_for_attention():
     cand = {"name": "paged_attention_ll4mi_QKV_mfma16_kernel<bf16>"}
     assert tla.derive_kernel_category(cand) == "SDPA"
@@ -335,217 +254,6 @@ def test_125_derive_category_normalizations():
     ]
     for name, expected in cases:
         assert tla.derive_kernel_category({"name": name}) == expected, name
-
-
-@pytest.fixture
-def tl_category_data(tmp_path: Path) -> Path:
-    """Mock TraceLens orchestrator category_data/ directory."""
-    cd = tmp_path / "category_data"
-    cd.mkdir()
-    (cd / "GEMM.json").write_text(
-        '{"category": "GEMM", "kernels": ['
-        '{"name": "Cijk_Alik_Bljk_MT256x16x64", "duration_us": 5077.2, '
-        '"call_count": 37, "shape": [16, 64, 64], "source_path": '
-        '"/sgl-workspace/aiter/csrc/kernels/gemm.cu"},'
-        '{"name": "rocblas_dgemm_kernel", "duration_us": 1200.0, '
-        '"call_count": 10, "shape": [16, 16, 512]}'
-        ']}'
-    )
-    (cd / "SDPA.json").write_text(
-        '{"name": "SDPA", "items": ['
-        '{"name": "paged_attention_ll4mi_QKV_mfma16_kernel<bf16>", '
-        '"duration_us": 889.1, "call_count": 36, '
-        '"input_shape": [1, 2048, 64], "path": '
-        '"/sgl-workspace/sglang/csrc/attention.cu"}'
-        ']}'
-    )
-    return cd
-
-
-def test_125_parses_category_data_with_full_triple(tl_category_data):
-    out = tla.parse_tracelens_category_data(tl_category_data, top_k=10)
-    assert out is not None
-    assert len(out) == 3, f"expected 3 kernels, got {len(out)}"
-    by_name = {c["name"]: c for c in out}
-
-    gemm = by_name["Cijk_Alik_Bljk_MT256x16x64"]
-    assert gemm["kernel_category"] == "GEMM"
-    assert gemm["shapes"]
-    assert gemm["source_file"] == "/sgl-workspace/aiter/csrc/kernels/gemm.cu"
-    assert gemm["source_path"] == gemm["source_file"]
-    assert gemm["duration_us"] == pytest.approx(5077.2, rel=1e-3)
-
-    sdpa = by_name["paged_attention_ll4mi_QKV_mfma16_kernel<bf16>"]
-    assert sdpa["kernel_category"] == "SDPA"
-    assert sdpa["source_file"] == "/sgl-workspace/sglang/csrc/attention.cu"
-
-
-def test_125_category_data_returns_none_when_dir_missing(tmp_path):
-    out = tla.parse_tracelens_category_data(tmp_path / "nope", top_k=10)
-    assert out is None
-
-
-def test_125_category_data_returns_none_when_dir_empty(tmp_path):
-    cd = tmp_path / "category_data"
-    cd.mkdir()
-    out = tla.parse_tracelens_category_data(cd, top_k=10)
-    assert out is None
-
-
-def test_125_category_data_handles_flat_dict_layout(tmp_path):
-    cd = tmp_path / "category_data"
-    cd.mkdir()
-    (cd / "all.json").write_text(
-        '{"GEMM": [{"name": "k1", "duration_us": 10, "shape": [1,2]}],'
-        ' "SDPA": [{"name": "k2", "duration_us": 20}]}'
-    )
-    out = tla.parse_tracelens_category_data(cd, top_k=10)
-    assert out is not None
-    assert len(out) == 2
-    by_name = {c["name"]: c for c in out}
-    assert by_name["k1"]["kernel_category"] == "GEMM"
-    assert by_name["k2"]["kernel_category"] == "SDPA"
-
-
-def test_125_category_data_skips_invalid_json(tmp_path):
-    cd = tmp_path / "category_data"
-    cd.mkdir()
-    (cd / "bad.json").write_text("not valid json{")
-    (cd / "good.json").write_text(
-        '{"category": "GEMM", "kernels": [{"name": "k1", "duration_us": 10}]}'
-    )
-    out = tla.parse_tracelens_category_data(cd, top_k=10)
-    assert out is not None
-    assert len(out) == 1
-    assert out[0]["name"] == "k1"
-
-
-def test_125_csv_carries_category_through_to_finalize(tl_csv):
-    out = tla.parse_tracelens_kernel_summary(tl_csv, top_k=10)
-    assert out is not None
-    for cand in out:
-        assert cand["tracelens_category"] == "graph"
-        assert cand["kernel_category"]
-
-
-def test_125_augment_csv_with_raw_shapes(tmp_path: Path, tl_csv):
-    """augment_csv_candidates_with_raw_shapes pulls shape from raw trace."""
-    import gzip
-    import json as _json
-
-    raw = tmp_path / "raw.json.gz"
-    with gzip.open(raw, "wt") as f:
-        _json.dump({
-            "traceEvents": [
-                {
-                    "name": "Cijk_Alik_Bljk_*MT256x16x64",
-                    "cat": "kernel",
-                    "dur": 137.22,
-                    "ts": 1,
-                    "args": {"shape": [[256, 16, 64]]},
-                },
-            ]
-        }, f)
-
-    candidates = tla.parse_tracelens_kernel_summary(tl_csv, top_k=10)
-    gemm = next(c for c in candidates if c["name"].startswith("Cijk_Alik_Bljk_*MT256x16x64"))
-    assert gemm.get("shapes") == [], "csv path should produce empty shapes pre-augment"
-
-    tla.augment_csv_candidates_with_raw_shapes(candidates, [raw])
-
-    gemm = next(c for c in candidates if c["name"].startswith("Cijk_Alik_Bljk_*MT256x16x64"))
-    assert gemm["shapes"], f"expected shape backfilled, got {gemm['shapes']}"
-
-
-def test_125_augment_csv_with_unified_perf_summary_shape_dtype(tmp_path: Path, tl_csv):
-    """unified_perf_summary carries TraceLens Input Dims/Input type."""
-    unified = tmp_path / "unified_perf_summary.csv"
-    kernel_name = "Cijk_Alik_Bljk_*MT256x16x64"
-    unclear_kernel_name = "unclear_elementwise_kernel"
-    unified.write_text(
-        "name,Input Dims,Input type,kernel_details_summary,perf_params\n"
-        "aten::mm,\"((24576,8192), (8192,28672), (24576,28672))\","
-        "\"('c10::BFloat16', 'c10::BFloat16', 'c10::BFloat16')\","
-        f"\"[{{'name': '{kernel_name}', 'stream': 3, 'count': 4}}]\","
-        "\"{'shape_out': (24576, 28672), 'output_dtype': 'c10::BFloat16'}\"\n"
-        "aten::mm,\"((24576,8192), (8192,28672), (24576,28672))\","
-        "\"('c10::BFloat16', 'c10::BFloat16', 'c10::BFloat16')\","
-        f"\"[{{'name': '{kernel_name}', 'stream': 4, 'count': 3}}]\","
-        "\"{'shape_out': (24576, 28672), 'output_dtype': 'c10::BFloat16'}\"\n"
-        "aten::add,\"((1,), (), ())\","
-        "\"('long int', 'long int', 'Scalar')\","
-        f"\"[{{'name': '{unclear_kernel_name}', 'stream': 3}}]\","
-        "\"{'shape_in1': (1,), 'shape_in2': (), "
-        "'dtype_in1_in2_out': ('long int', 'long int', None), "
-        "'stride_output': None}\"\n",
-        encoding="utf-8",
-    )
-    candidates = tla.parse_tracelens_kernel_summary(tl_csv, top_k=10)
-    candidates.append({"name": unclear_kernel_name})
-    gemm = next(c for c in candidates if c["name"] == kernel_name)
-    assert "input_shapes" not in gemm or gemm["input_shapes"] == []
-
-    tla.augment_csv_candidates_with_unified_perf_summary(candidates, unified)
-
-    gemm = next(c for c in candidates if c["name"] == kernel_name)
-    assert gemm["input_shapes"] == [
-        {"call_num": 7, "shape": [24576, 8192]},
-        {"call_num": 7, "shape": [8192, 28672]},
-        {"call_num": 7, "shape": [24576, 28672]},
-    ]
-    assert gemm["input_dtypes"] == ["c10::BFloat16"]
-    assert gemm["output_shapes"] == [[24576, 28672]]
-    assert gemm["output_dtypes"] == ["c10::BFloat16"]
-    assert gemm["runtime_args"]["tracelens_args"] == [
-        {
-            "op": "aten::mm",
-            "input_dims": "((24576,8192), (8192,28672), (24576,28672))",
-            "input_types": "('c10::BFloat16', 'c10::BFloat16', 'c10::BFloat16')",
-        }
-    ]
-    unclear = next(c for c in candidates if c["name"] == unclear_kernel_name)
-    assert unclear.get("output_shapes", []) == []
-    assert unclear.get("output_dtypes", []) == []
-
-
-def test_125_csv_no_parent_op_category_column_degrades_gracefully(tmp_path):
-    """Older TraceLens builds lack 'Parent op category' — must not crash."""
-    csv = tmp_path / "kernel_summary.csv"
-    csv.write_text(
-        "Kernel name,Kernel duration (\u00b5s)_sum,Kernel duration (\u00b5s)_count\n"
-        "my_kernel,100.0,5\n",
-        encoding="utf-8",
-    )
-    out = tla.parse_tracelens_kernel_summary(csv, top_k=10)
-    assert out is not None
-    assert len(out) == 1
-    assert out[0].get("tracelens_category", "") == ""  # field absent or empty
-    assert "kernel_category" in out[0]
-
-
-def test_125_extract_category_kernels_layouts():
-    """_extract_category_kernels handles all three observed layouts."""
-    # Layout 1: kernels array
-    out1 = tla._extract_category_kernels(
-        {"category": "GEMM", "kernels": [{"name": "k1"}]}
-    )
-    assert len(out1) == 1 and out1[0]["category"] == "GEMM"
-
-    # Layout 2: items array (alt key)
-    out2 = tla._extract_category_kernels(
-        {"name": "SDPA", "items": [{"name": "k2"}]}
-    )
-    assert len(out2) == 1 and out2[0]["category"] == "SDPA"
-
-    # Layout 3: flat dict-of-lists
-    out3 = tla._extract_category_kernels(
-        {"GEMM": [{"name": "k1"}], "SDPA": [{"name": "k2"}]}
-    )
-    assert {e["category"] for e in out3} == {"GEMM", "SDPA"}
-
-    # Layout 4: bare list
-    out4 = tla._extract_category_kernels([{"name": "k", "category": "X"}])
-    assert len(out4) == 1
 
 
 def test_125_finalize_outputs_source_path_field():
@@ -889,42 +597,6 @@ def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
     assert "Do not ask the user" in prompt
 
 
-def test_124_priority_data_members_convert_to_raw_candidates(tmp_path):
-    import json as _json
-
-    priority = tmp_path / "priority_data.json"
-    priority.write_text(_json.dumps({
-        "findings": [{
-            "category": "gemm",
-            "impact_score": 4.2,
-            "library": "hipBLASLt",
-            "members": [{
-                "operation": "Cijk_Alik_Bljk_MT256",
-                "time_ms": 5.5,
-                "impact_score": 3.1,
-                "library": "hipBLASLt",
-                "bound_type": "compute",
-            }],
-        }],
-    }), encoding="utf-8")
-
-    rows = tlr.raw_candidates_from_priority_data(priority, top_k=10)
-    assert rows == [{
-        "name": "Cijk_Alik_Bljk_MT256",
-        "duration_us": 5500.0,
-        "call_count": 1,
-        "source_file": "",
-        "source_type": "unknown",
-        "shapes": [],
-        "tracelens_category": "gemm",
-        "impact_score": 3.1,
-        "impact_score_low": 0.0,
-        "impact_score_high": 0.0,
-        "library": "hipBLASLt",
-        "bound_type": "compute",
-    }]
-
-
 def test_count_gpu_kernel_events_distinguishes_cpu_only_and_real_traces(tmp_path):
     import gzip, json as _json
     cpu_only = tmp_path / "cpu_only.json.gz"
@@ -981,9 +653,6 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
         captured.append(list(cmd))
         return _Result()
 
-    def fake_which(name):
-        return f"/usr/bin/{name}"
-
     argv = [
         "tracelens_analysis.py",
         "--trace-input", str(trace),
@@ -998,7 +667,6 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
     env_backup = dict(_os.environ)
     try:
         with patch.object(tla.subprocess, "run", side_effect=fake_run), \
-             patch.object(tla.shutil, "which", side_effect=fake_which), \
              patch.object(tla.sys, "argv", argv):
             try:
                 rc = tla.main()
@@ -1022,7 +690,6 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
 
 def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     import asyncio
-    import json as _json
     from dataclasses import dataclass
     from typing import Any
 
@@ -1048,10 +715,6 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
         # TraceLens v0.3 contract: orchestrator writes ``analysis.md``.
         # The legacy ``standalone_analysis.md`` fallback was dropped in #203.
         (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
-        (output_dir / "priority_data.json").write_text(
-            _json.dumps({"findings": [], "priorities": []}),
-            encoding="utf-8",
-        )
         yield _Message(content=[_TextBlock("done")])
 
     res = asyncio.run(tlr.run_tracelens_skill(
@@ -1069,78 +732,17 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     ))
 
     assert res.report_path.exists()
-    assert res.priority_data_path is not None and res.priority_data_path.exists()
+    assert res.artifact_paths["tracelens_agent_report"] == str(res.report_path)
     assert "analysis-orchestrator" in captured["prompt"] or "skill.md" in captured["prompt"]
     assert "Bash" in captured["options"]["allowed_tools"]
     assert "Task" in captured["options"]["allowed_tools"]
 
 
 # ===========================================================================
-# T2 — Intermediate sidecars (priority_data.json /
-# category_data/category_manifest.json) are best-effort, not contracted
-# inputs (TraceLens_Report_Interfacing.docx §2). A v0.3 SDK orchestrator
-# that emits only ``analysis.md`` must produce a successful
-# ``TraceLensSkillRunResult`` with ``priority_data_path=None`` — not a
-# RuntimeError.
+# T2 — analysis.md is the only contracted TraceLens output.
 # ===========================================================================
-def test_t2_run_tracelens_skill_succeeds_without_priority_data_sidecar(tmp_path):
-    """SDK orchestrator that emits ONLY analysis.md (no sidecars) must
-    succeed: priority_data is optional per docx §2."""
-    import asyncio
-    import json as _json  # noqa: F401  (parity with sibling test)
-    from dataclasses import dataclass
-    from typing import Any
-
-    @dataclass
-    class _TextBlock:
-        text: str
-
-    @dataclass
-    class _Message:
-        content: list[Any]
-
-    class _FakeOptions:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    output_dir = tmp_path / "out"
-
-    async def _fake_query(*, prompt, options):
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
-        yield _Message(content=[_TextBlock("done — no sidecars")])
-
-    res = asyncio.run(tlr.run_tracelens_skill(
-        skill_path=tmp_path / "skill.md",
-        trace_path=tmp_path / "trace.json.gz",
-        output_dir=output_dir,
-        tracelens_root=tmp_path,
-        platform="MI300X",
-        framework="sglang",
-        analysis_mode="default",
-        capture_folder=None,
-        budget_minutes=1,
-        sdk_query_factory=_fake_query,
-        sdk_options_cls=_FakeOptions,
-    ))
-
-    assert res.report_path.exists(), "analysis.md is the single source of truth and must exist"
-    assert res.priority_data_path is None, (
-        "priority_data.json was not emitted; the result must surface that as "
-        "None rather than fabricate a path"
-    )
-    assert "tracelens_agent_report" in res.artifact_paths
-    assert "tracelens_priority_data" not in res.artifact_paths, (
-        "audit must not advertise a sidecar that doesn't exist on disk"
-    )
-    assert "tracelens_category_manifest" not in res.artifact_paths
-
-
-def test_t2_run_tracelens_skill_surfaces_category_manifest_when_present(tmp_path):
-    """Category-manifest sidecar (also optional per docx §2): when the
-    SDK orchestrator does write it, ``artifact_paths`` should advertise
-    the path so audit/log surfaces can pick it up — but it remains
-    non-required."""
+def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
+    """SDK orchestrator sidecars must not be surfaced as Hyperloom inputs."""
     import asyncio
     import json as _json
     from dataclasses import dataclass
@@ -1163,11 +765,14 @@ def test_t2_run_tracelens_skill_surfaces_category_manifest_when_present(tmp_path
     async def _fake_query(*, prompt, options):
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        (output_dir / "priority_data.json").write_text(
+            _json.dumps({"findings": []}), encoding="utf-8",
+        )
         (output_dir / "category_data").mkdir(parents=True, exist_ok=True)
         (output_dir / "category_data" / "category_manifest.json").write_text(
             _json.dumps({"categories": []}), encoding="utf-8",
         )
-        yield _Message(content=[_TextBlock("done — only manifest sidecar")])
+        yield _Message(content=[_TextBlock("done — sidecars ignored")])
 
     res = asyncio.run(tlr.run_tracelens_skill(
         skill_path=tmp_path / "skill.md",
@@ -1183,10 +788,10 @@ def test_t2_run_tracelens_skill_surfaces_category_manifest_when_present(tmp_path
         sdk_options_cls=_FakeOptions,
     ))
 
-    assert res.priority_data_path is None
-    assert res.artifact_paths.get("tracelens_category_manifest", "").endswith(
-        "category_manifest.json"
-    )
+    assert res.report_path.exists(), "analysis.md is the single source of truth and must exist"
+    assert "tracelens_agent_report" in res.artifact_paths
+    assert "tracelens_priority_data" not in res.artifact_paths
+    assert "tracelens_category_manifest" not in res.artifact_paths
 
 
 def test_t2_missing_analysis_md_still_raises(tmp_path):
@@ -1249,8 +854,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
     import json as _json
     from unittest.mock import patch
 
-    # Pretend TraceLens root + perf-report CLI are present so the run
-    # reaches the splitter step.
+    # Pretend TraceLens root is present so the run reaches the splitter step.
     tl_root = tmp_path / "TraceLens-internal"
     skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / ".cursor" / "skills"
     skill_dir.mkdir(parents=True)
@@ -1276,11 +880,8 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
 
     def fake_run(cmd, *args, **kwargs):
         captured.append(list(cmd))
-        # Make the perf-report CLI probe + actual run + pip install all succeed.
+        # Make pip install and splitter invocations succeed.
         return _Result(returncode=0, stdout="ok")
-
-    def fake_which(name):
-        return f"/usr/bin/{name}"
 
     argv = [
         "tracelens_analysis.py",
@@ -1299,16 +900,13 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
     env_backup = dict(_os.environ)
     try:
         with patch.object(tla.subprocess, "run", side_effect=fake_run), \
-             patch.object(tla.shutil, "which", side_effect=fake_which), \
              patch.object(tla.sys, "argv", argv):
             try:
                 tla.main()
             except SystemExit as exc:
-                # tla.main() may CLI-exit via sys.exit() depending on the
-                # mocked perf-report CLI's rc. Either a clean exit code (0 /
-                # None) or a soft-fallback non-zero is acceptable here — the
-                # test asserts the splitter command shape further down, not
-                # the program's overall exit status.
+                # tla.main() may CLI-exit because the mocked run does not
+                # produce analysis.md. The test asserts the splitter command
+                # shape below, not the program's overall exit status.
                 _ = exc
     finally:
         _os.environ.clear()
@@ -1336,19 +934,17 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
     assert "--CONC" in splitter_cmd and "8" in splitter_cmd, splitter_cmd
     assert "--OSL" in splitter_cmd and "1024" in splitter_cmd, splitter_cmd
 
-    perf_cmd = next(
-        (c for c in captured
-         if c
-         and "TraceLens_generate_perf_report_pytorch_inference" in str(c[0])
-         and "--profile_json_path" in c),
-        None,
+    assert all(
+        not (
+            c
+            and "TraceLens_generate_perf_report_pytorch_inference" in str(c[0])
+            and "--profile_json_path" in c
+        )
+        for c in captured
+    ), (
+        "perf-report CSV fallback must not run; analysis.md is the single "
+        f"source of truth. cmds={captured}"
     )
-    assert perf_cmd is not None, f"perf-report CLI never invoked; cmds={captured}"
-    assert "--group_by_parent_module" in perf_cmd, perf_cmd
-    assert "--enable_pseudo_ops" in perf_cmd, perf_cmd
-    assert "--group_by_num_kernels" in perf_cmd, perf_cmd
-    assert "--gpu_arch_json_path" in perf_cmd, perf_cmd
-    assert "--capture_folder" in perf_cmd and str(capture) in perf_cmd, perf_cmd
 
 
 # ===========================================================================
@@ -1416,7 +1012,6 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
             else:
                 _os.environ[k] = v
         with patch.object(tla.subprocess, "run", side_effect=fake_run), \
-             patch.object(tla.shutil, "which", side_effect=lambda n: f"/usr/bin/{n}"), \
              patch.object(tla.sys, "argv", argv):
             try:
                 tla.main()
@@ -2464,65 +2059,6 @@ def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch
     monkeypatch.setenv("USER_DATA_PATH", "")
     monkeypatch.setenv("WORKSPACE_PATH", "/legacy/workspace")
     assert tla._default_workspace_path() == "/legacy/workspace"
-
-
-# ===========================================================================
-# T1 — Inference-only perf-report CLI (Hyperloom v0.4 finishing-touches)
-# ===========================================================================
-# The legacy ``TraceLens_generate_perf_report_pytorch`` (training-mode)
-# fallback was removed because Hyperloom is inference-only since v0.4 and
-# the training CLI emits a different field shape that silently breaks
-# downstream fusion / roofline analysis. install.sh + SKILL.md + the
-# runtime dispatcher are all updated together so a missing inference CLI
-# fails fast at every layer instead of degrading to a CLI whose output
-# the analyzers cannot consume.
-
-def test_select_perf_report_cli_uses_inference_when_present(tmp_path, monkeypatch):
-    """When the inference CLI is on PATH, ``select_perf_report_cli`` returns
-    its name verbatim — no second-best fallback is consulted."""
-    log_path = tmp_path / "cli.log"
-    log_path.touch()
-
-    def fake_which(name: str) -> str | None:
-        if name == tla.INFERENCE_PERF_CLI:
-            return f"/usr/local/bin/{name}"
-        return None
-
-    monkeypatch.setattr(tla.shutil, "which", fake_which)
-    assert tla.select_perf_report_cli(log_path) == tla.INFERENCE_PERF_CLI
-
-
-def test_select_perf_report_cli_rejects_legacy_only_path(tmp_path, monkeypatch):
-    """T1 contract: a host with only the legacy training-mode CLI on PATH
-    must fail fast (no silent fallback). This is the inverse of the old
-    behaviour where ``select_perf_report_cli`` accepted the legacy CLI
-    with a WARN. The replacement message points operators at the right
-    fix (bump TraceLens-internal)."""
-    log_path = tmp_path / "cli.log"
-    log_path.touch()
-
-    legacy_only = {
-        tla.INFERENCE_PERF_CLI: None,
-        "TraceLens_generate_perf_report_pytorch": "/usr/local/bin/TraceLens_generate_perf_report_pytorch",
-    }
-
-    monkeypatch.setattr(tla.shutil, "which", lambda name: legacy_only.get(name))
-    with pytest.raises(RuntimeError) as excinfo:
-        tla.select_perf_report_cli(log_path)
-    msg = str(excinfo.value)
-    assert tla.INFERENCE_PERF_CLI in msg
-    assert "inference-only" in msg
-    assert "bump TraceLens-internal" in msg
-
-
-def test_select_perf_report_cli_module_has_no_legacy_constant():
-    """Defensive: the ``LEGACY_PERF_CLI`` constant used to live alongside
-    ``INFERENCE_PERF_CLI``. Pin its absence so a future revert can't
-    silently reintroduce the fallback."""
-    assert not hasattr(tla, "LEGACY_PERF_CLI"), (
-        "LEGACY_PERF_CLI was removed in v0.4 finishing-touches; "
-        "any reintroduction must be a deliberate revert with discussion"
-    )
 
 
 # ===========================================================================
