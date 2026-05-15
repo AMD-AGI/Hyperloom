@@ -126,6 +126,7 @@ class TargetAnalysisExecutor:
                 "kind":   ctx.task.kind,
                 "note":   "skipped: no session_dir",
                 "baseline_status": "skipped",
+                "reason": "no_session_dir",
             }
 
         compare_against_gpu = str(
@@ -149,6 +150,7 @@ class TargetAnalysisExecutor:
                     "kind":   ctx.task.kind,
                     "note":   f"analyzer crashed: {exc}",
                     "baseline_status": "fetch_error",
+                    "reason": "analyzer_crash",
                 }
             return self._format_result(ctx, summary, session_dir)
 
@@ -175,6 +177,7 @@ class TargetAnalysisExecutor:
                 "kind":   ctx.task.kind,
                 "note":   f"analyzer crashed: {exc}",
                 "baseline_status": "fetch_error",
+                "reason": "analyzer_crash",
             }
         return self._format_result(ctx, summary, session_dir)
 
@@ -197,6 +200,7 @@ class TargetAnalysisExecutor:
             "status":          "succeeded",
             "kind":            ctx.task.kind,
             "baseline_status": getattr(summary, "status", "unknown"),
+            "reason":          getattr(summary, "reason", ""),
             "warning":         getattr(summary, "warning", ""),
             "row_count":       getattr(summary, "row_count", 0),
             "json_path":       str(json_path),
@@ -208,8 +212,9 @@ class TargetAnalysisExecutor:
             out["best_conc"] = best.conc
             out["best_decode_tp"] = best.decode_tp
         log.info(
-            "target_analysis_executor: status=%s rows=%d (%s)",
-            out["baseline_status"], out["row_count"], out["warning"] or "ok",
+            "target_analysis_executor: status=%s reason=%s rows=%d (%s)",
+            out["baseline_status"], out["reason"] or "-",
+            out["row_count"], out["warning"] or "ok",
         )
         return out
 

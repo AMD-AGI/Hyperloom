@@ -14,13 +14,39 @@ WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-${WORKSPACE_PATH}}"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${WORKSPACE_PATH}/kernel-agent}"
 HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
-INFERENCE_OPTIMIZER_SESSION_DIR="${INFERENCE_OPTIMIZER_SESSION_DIR:-/workspace/hyperloom}"
-HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${INFERENCE_OPTIMIZER_SESSION_DIR}/runtime}"
+USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
+HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
 MAGPIE_DIR="${MAGPIE_DIR:-${WORKSPACE_ROOT}/Magpie}"
-MAGPIE_PYTHON="${MAGPIE_PYTHON:-${MAGPIE_DIR}/venv/bin/python}"
+# Resolve MAGPIE_PYTHON dynamically. The previous default
+# ${MAGPIE_DIR}/venv/bin/python assumed a Magpie-private venv, but
+# inference_optimizer/scripts/install.sh's ensure_magpie() does
+# `pip install -e $MAGPIE_DIR` into the driver Python's site-packages
+# (or the container image pre-installs it that way) — no venv is ever
+# created at $MAGPIE_DIR/venv. Mirrors _resolve_magpie_python() in
+# inference_optimizer/orchestrator/action_executors/_grid_runner.py:
+#   $MAGPIE_PYTHON env > python3 on PATH that can `import Magpie`
+#     > /opt/venv/bin/python (if it exists) > python3 on PATH.
+_resolve_magpie_python() {
+  if [ -n "${MAGPIE_PYTHON:-}" ]; then
+    printf '%s' "$MAGPIE_PYTHON"
+    return 0
+  fi
+  local candidate
+  candidate="$(command -v python3 2>/dev/null || true)"
+  if [ -n "$candidate" ] && "$candidate" -c "import Magpie" >/dev/null 2>&1; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  if [ -x /opt/venv/bin/python ]; then
+    printf '%s' /opt/venv/bin/python
+    return 0
+  fi
+  printf '%s' "${candidate:-/opt/venv/bin/python}"
+}
+MAGPIE_PYTHON="$(_resolve_magpie_python)"
 PYTHONPATH="${MAGPIE_DIR}:${PYTHONPATH:-}"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
@@ -166,6 +192,65 @@ run() {
 ensure_python() {
   python3 --version >/dev/null || die "python3 is required"
   python3 -m pip --version >/dev/null || die "pip is required"
+}
+
+# PR-D §3: pin `git` and `patch` so the TraceLens server patcher has the
+# binaries it expects on every deployment.
+#
+# Background: `inference_optimizer/orchestrator/action_executors/_server_patcher.py`
+# uses two binaries to apply TraceLens patches to vLLM/SGLang installs:
+#   * `git apply` — strict path, default; bails immediately on context drift.
+#   * `patch -p<N> --fuzz=2` — PR-C fuzzy fallback (tightened from
+#     PR-C's original `--fuzz=10` to GNU patch's default `--fuzz=2` in
+#     PR-D §6 to reject multi-line context drift that could mis-apply
+#     patch CHANGE lines to wrong-but-similar-looking call sites).
+#     Still tolerates whitespace and single-line drift, the common
+#     point-release case the fuzzy fallback was designed for.
+#
+# Stripped runtime images (`lmsysorg/sglang:v0.5.9-rocm700-mi30x` and the
+# minimal vLLM serving images) sometimes ship without one or both binaries.
+# `_server_patcher` fail-softs in that case → `--enable-shape-discovery-
+# for-cuda-graph-profile` is silently never injected → graph-replayed
+# kernels stay opaque, exactly what #194 §5 was trying to fix.
+#
+# Apt-installing here is the cheap, framework-agnostic safety net: it's
+# the same install path the existing `ensure_node` helper takes for
+# Node.js, so it carries no new failure modes.
+ensure_patch_tools() {
+  log "ensuring git + patch (required by inference_optimizer/_server_patcher fuzzy-fallback path)"
+  local need_git=0 need_patch=0
+  command -v git >/dev/null 2>&1   || need_git=1
+  command -v patch >/dev/null 2>&1 || need_patch=1
+  if [ "$need_git" -eq 0 ] && [ "$need_patch" -eq 0 ]; then
+    log "git: $(command -v git) ($(git --version 2>/dev/null | head -1))"
+    log "patch: $(command -v patch) ($(patch --version 2>/dev/null | head -1))"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    [ "$need_git" -eq 1 ]   && warn "git missing; TraceLens server-patch strict path (\`git apply\`) will fail-soft"
+    [ "$need_patch" -eq 1 ] && warn "patch missing; TraceLens server-patch fuzzy fallback (\`patch --fuzz=2\`) will fail-soft"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would apt-get install git/patch because: git=$([ $need_git -eq 1 ] && echo missing || echo present), patch=$([ $need_patch -eq 1 ] && echo missing || echo present)"
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    [ "$need_git" -eq 1 ]   && warn "git missing and apt-get unavailable; install \`git\` manually for TraceLens server patching"
+    [ "$need_patch" -eq 1 ] && warn "patch missing and apt-get unavailable; install \`patch\` manually for TraceLens server patching fuzzy fallback"
+    return 0
+  fi
+  local pkgs=()
+  [ "$need_git" -eq 1 ]   && pkgs+=("git")
+  [ "$need_patch" -eq 1 ] && pkgs+=("patch")
+  log "apt-get installing: ${pkgs[*]}"
+  apt-get update >/dev/null 2>&1 || warn "apt-get update failed; install may pull stale package indices"
+  if ! apt-get -y install "${pkgs[@]}" >/dev/null; then
+    warn "apt-get install of ${pkgs[*]} failed; TraceLens server patching may fail-soft on this host"
+    return 0
+  fi
+  command -v git >/dev/null 2>&1   || warn "git still missing after apt-get install"
+  command -v patch >/dev/null 2>&1 || warn "patch still missing after apt-get install"
 }
 
 ensure_node() {
@@ -541,7 +626,7 @@ write_env_file() {
   {
     echo '#!/bin/sh'
     echo "# kernel-agent runtime env (regenerated by install.sh)"
-    [ -n "${INFERENCE_OPTIMIZER_SESSION_DIR:-}" ] && echo "export INFERENCE_OPTIMIZER_SESSION_DIR='${INFERENCE_OPTIMIZER_SESSION_DIR}'"
+    [ -n "${USER_DATA_PATH:-}" ] && echo "export USER_DATA_PATH='${USER_DATA_PATH}'"
     [ -n "${HYPERLOOM_RUNTIME_DIR:-}" ] && echo "export HYPERLOOM_RUNTIME_DIR='${HYPERLOOM_RUNTIME_DIR}'"
     [ -n "${KERNEL_AGENT_ENV:-}" ] && echo "export KERNEL_AGENT_ENV='${KERNEL_AGENT_ENV}'"
     [ -n "${HYPERLOOM_KERNEL_AGENT_ROOT:-}" ] && echo "export HYPERLOOM_KERNEL_AGENT_ROOT='${HYPERLOOM_KERNEL_AGENT_ROOT}'"
@@ -614,6 +699,13 @@ PY
       warn "${tool} not found"
     fi
   done
+  for tool in git patch; do
+    if command -v "$tool" >/dev/null 2>&1; then
+      log "found ${tool}: $(command -v "$tool")"
+    else
+      warn "${tool} not found (TraceLens server patcher will fail-soft without it)"
+    fi
+  done
   # @cursor/sdk is a library, not a CLI; verify via require.resolve.
   if NODE_PATH="$(npm root -g 2>/dev/null || true)" \
      node -e "require.resolve('@cursor/sdk')" >/dev/null 2>&1; then
@@ -656,6 +748,7 @@ main() {
   fi
   ensure_python
   ensure_node
+  ensure_patch_tools
   ensure_ray
   ensure_ray_started
   ensure_tracelens

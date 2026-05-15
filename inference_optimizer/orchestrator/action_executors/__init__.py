@@ -41,6 +41,7 @@ from .profile import (
 )
 from .pmc_roofline import PMCRooflineExecutor, pmc_roofline_executor
 from .report import ReportExecutor, report_executor
+from .session_breakdown import SessionBreakdownExecutor, session_breakdown_executor
 from .sweep import (
     DEFAULT_CONC_VALUES,
     DEFAULT_ISL_OSL,
@@ -72,6 +73,7 @@ __all__ = [
     "ProfileExecutor",
     "ReportExecutor",
     "SYNERGY_GROUPS",
+    "SessionBreakdownExecutor",
     "SweepExecutor",
     "TargetAnalysisExecutor",
     "ValidateStackExecutor",
@@ -85,6 +87,7 @@ __all__ = [
     "pmc_roofline_executor",
     "profile_executor",
     "report_executor",
+    "session_breakdown_executor",
     "sweep_executor",
     "validate_stack_executor",
 ]

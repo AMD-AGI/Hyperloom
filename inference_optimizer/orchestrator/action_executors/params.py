@@ -31,7 +31,14 @@ from typing import Any
 import yaml
 
 from ...session_paths import runs_dir
-from ._grid_runner import GridVariant, VariantResult, run_grid, _resolve_session_dir
+from ._grid_runner import (
+    GridVariant,
+    VariantResult,
+    _resolve_session_dir,
+    run_grid,
+    sanitize_result_dir,
+    sanitize_script_name,
+)
 from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
@@ -233,15 +240,27 @@ DEFAULT_NCCL_GRID: list[GridVariant] = [
 
 # ---------------------------------------------------------------------------
 def _variant_to_dict(v: GridVariant) -> dict[str, Any]:
+    """Serialize a GridVariant for params_search/backends_search storage.
+
+    ``fingerprint`` is stamped so dedup-ledger consumers (and the
+    Coordinator's promote path) don't have to recompute the hash from
+    (extra_sglang_args, extra_envs) on every read.
+    """
     return {
         "name": v.name,
         "extra_sglang_args": v.extra_sglang_args,
         "extra_envs": dict(v.extra_envs),
         "note": v.note,
+        "fingerprint": v.fingerprint,
     }
 
 
 def _dict_to_variant(v: dict[str, Any]) -> GridVariant:
+    """Round-trip helper. ``fingerprint`` in the dict is ignored —
+    :class:`GridVariant.fingerprint` is a computed property derived from
+    args/envs, so reading a stale or absent value would never disagree
+    with what re-hashing produces at runtime.
+    """
     return GridVariant(
         name=str(v["name"]),
         extra_sglang_args=str(v.get("extra_sglang_args", "") or ""),
@@ -289,14 +308,41 @@ def _result_with_effective_args(
 
 
 def _initial_search_state() -> dict[str, Any]:
+    """Empty :attr:`SharedState.params_search` ledger (schema v2).
+
+    Schema v2 (Phase 3): ``tested`` is keyed by content fingerprint
+    instead of variant name, and a ``name_index`` (name → fingerprint)
+    sits alongside for legacy / display lookups. Old v1 ledgers (name-
+    keyed) are auto-migrated on load — see
+    :meth:`SharedState.load_or_init`.
+    """
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "accepted": [],
         "rejected": [],
         "tested": {},
+        "name_index": {},
         "cursor": 0,
         "last_round": {},
     }
+
+
+def _params_entry_fp(entry: Any) -> str:
+    """Best-effort fingerprint extraction from a params_search entry.
+
+    Recomputes from stored args/envs if ``fingerprint`` is missing — covers
+    schema-v1 ledgers that haven't been migrated yet.
+    """
+    if not isinstance(entry, dict):
+        return ""
+    fp = entry.get("fingerprint")
+    if fp:
+        return str(fp)
+    from ._grid_runner import variant_fingerprint as _vfp
+    return _vfp(
+        str(entry.get("extra_sglang_args") or ""),
+        dict(entry.get("extra_envs") or {}),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -369,11 +415,23 @@ class ParamsExecutor:
             str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower()
         )
+        # See backends.py for rationale. Same Orchestration-supplied
+        # override surface for benchmark_script / result_dir.
+        try:
+            override_script = sanitize_script_name(params.get("benchmark_script"))
+            override_result_dir = sanitize_result_dir(params.get("result_dir"))
+        except ValueError as exc:
+            return {
+                "status": "failed",
+                "error_class": "bad_param",
+                "error": str(exc),
+            }
         config_path = materialize_config_with_envs(
             config_path,
             output_root,
             model_path=resolved_model_for_render or None,
             gpu_type=resolved_gpu_for_render or None,
+            benchmark_script=override_script,
             out_name="params_base.with_envs.yaml",
         )
 
@@ -430,10 +488,15 @@ class ParamsExecutor:
             discovered_source = str(src_path)
 
         search = dict(params.get("params_search") or _initial_search_state())
-        search.setdefault("schema_version", 1)
+        # Schema versions: v1 keyed tested by variant name; v2 keys by
+        # content fingerprint. The executor accepts both shapes for
+        # resume — old name keys still rescue dedup via ``name_index``
+        # fallback in the candidate filter below.
+        search.setdefault("schema_version", 2)
         search.setdefault("accepted", [])
         search.setdefault("rejected", [])
         search.setdefault("tested", {})
+        search.setdefault("name_index", {})
         search.setdefault("cursor", 0)
         base_variant_name = str(params.get("base_variant_name") or "").strip()
         if base_variant_name:
@@ -460,22 +523,40 @@ class ParamsExecutor:
                     *list(search.get("accepted") or []),
                 ]
 
-        accepted_names = {
-            str(v.get("name")) for v in search.get("accepted", [])
-            if isinstance(v, dict) and v.get("name")
+        # Build the dedup set by content fingerprint (the schema-v2
+        # primary key). Legacy v1 rows lacked the fingerprint field —
+        # ``_params_entry_fp`` re-derives one from stored args/envs so
+        # resume after a schema bump still blocks re-runs.
+        accepted_fps = {_params_entry_fp(v) for v in search.get("accepted", [])}
+        rejected_fps = {_params_entry_fp(v) for v in search.get("rejected", [])}
+        accepted_fps.discard("")
+        rejected_fps.discard("")
+        tested_dict = search.get("tested") or {}
+        tested_fps = set(tested_dict.keys())
+        for entry in tested_dict.values():
+            tested_fps.add(_params_entry_fp(entry))
+        tested_fps.discard("")
+        # Legacy ``tested`` rows keyed by name (schema v1) — keep the
+        # name fast-path so we don't depend on the re-derivation above
+        # round-tripping perfectly. ``name_index`` also feeds this set.
+        legacy_tested_names = {
+            k for k, v in tested_dict.items()
+            if isinstance(v, dict) and k == v.get("name")
         }
-        rejected_names = {
-            str(v.get("name")) for v in search.get("rejected", [])
-            if isinstance(v, dict) and v.get("name")
-        }
-        tested_names = set((search.get("tested") or {}).keys())
+        name_index = dict(search.get("name_index") or {})
 
-        candidates = [
-            v for v in grid
-            if v.name not in accepted_names
-            and v.name not in rejected_names
-            and v.name not in tested_names
-        ]
+        def _is_dup(variant: GridVariant) -> bool:
+            fp = variant.fingerprint
+            if fp in accepted_fps or fp in rejected_fps or fp in tested_fps:
+                return True
+            legacy = name_index.get(variant.name)
+            if legacy and legacy in (accepted_fps | rejected_fps | tested_fps):
+                return True
+            if variant.name in legacy_tested_names:
+                return True
+            return False
+
+        candidates = [v for v in grid if not _is_dup(v)]
         if max_candidates > 0:
             candidates = candidates[:max_candidates]
 
@@ -515,6 +596,8 @@ class ParamsExecutor:
             variant_timeout_sec=timeout_sec,
             model_path=resolved_model,
             gpu_type=resolved_gpu,
+            benchmark_script=override_script,
+            result_dir=override_result_dir,
         )
 
         candidate_by_name = {v.name: v for v in candidates}
@@ -548,6 +631,8 @@ class ParamsExecutor:
                     variant_timeout_sec=timeout_sec,
                     model_path=resolved_model,
                     gpu_type=resolved_gpu,
+                    benchmark_script=override_script,
+                    result_dir=override_result_dir,
                 )
 
         all_results = single_results + combo_results
@@ -589,15 +674,25 @@ class ParamsExecutor:
         for name in selected_new_names:
             accepted_next.append(candidate_by_name[name])
 
+        # ``tested`` is keyed by content fingerprint (schema v2). Legacy
+        # name-keyed entries from a pre-migration ledger are preserved
+        # verbatim so a resume mid-migration doesn't silently lose
+        # history; new writes always land at the fingerprint key.
         tested = dict(search.get("tested") or {})
         rejected = list(search.get("rejected") or [])
         for r in single_results:
             gain = _result_gain(r.output_throughput, base_tput)
-            tested[r.name] = {
+            fp = r.fingerprint
+            tested[fp] = {
+                "name": r.name,
+                "extra_sglang_args": r.extra_sglang_args,
+                "extra_envs": dict(r.extra_envs or {}),
+                "fingerprint": fp,
                 "result": r.to_dict(),
                 "gain_pct": gain,
                 "base_tput": base_tput,
             }
+            name_index[r.name] = fp
             if r.name not in set(selected_new_names):
                 reason = "not_keep" if (gain is None or gain < keep_threshold_pct) \
                     else "combo_conflict"
@@ -609,22 +704,39 @@ class ParamsExecutor:
                 })
 
         accepted_dicts = [_variant_to_dict(v) for v in accepted_next]
-        # Deduplicate rejected by name while preserving latest reason.
-        rejected_by_name = {
-            str(v.get("name")): v for v in rejected
-            if isinstance(v, dict) and v.get("name")
-            and str(v.get("name")) not in {a["name"] for a in accepted_dicts}
+        accepted_fps_next = {
+            str(a.get("fingerprint") or "") for a in accepted_dicts
         }
+        accepted_fps_next.discard("")
+        # Deduplicate rejected by fingerprint while preserving latest
+        # reason; drop any fp that already lives in ``accepted``.
+        rejected_by_fp: dict[str, dict[str, Any]] = {}
+        for entry in rejected:
+            if not isinstance(entry, dict):
+                continue
+            fp = str(entry.get("fingerprint") or "")
+            if not fp:
+                fp = _params_entry_fp(entry)
+            if not fp or fp in accepted_fps_next:
+                continue
+            rejected_by_fp[fp] = entry
+        # Exhaustion is defined as "no fingerprint survived the dedup
+        # filter this round" — that's what the Coordinator's
+        # ``_params_grid_exhausted`` consumes. ``len(tested) >= len(grid)``
+        # over-promised exhaustion when the LLM passed a custom grid.
+        params_search_exhausted = len(candidates) == 0
         search_update = {
-            "schema_version": 1,
+            "schema_version": 2,
             "accepted": accepted_dicts,
-            "rejected": list(rejected_by_name.values()),
+            "rejected": list(rejected_by_fp.values()),
             "tested": tested,
+            "name_index": name_index,
             "cursor": len(tested),
             "last_round": {
                 "base_tput": base_tput,
                 "base_extra_args": base_extra_args,
                 "tested": [r.name for r in single_results],
+                "tested_fp": [r.fingerprint for r in single_results],
                 "round_winners": [r.name for r in round_winners],
                 "selected_new": list(selected_new_names),
                 "combo_tested": [r.name for r in combo_results],
@@ -647,7 +759,7 @@ class ParamsExecutor:
             "output_throughput": best.output_throughput if best else None,
             "workspace": output_root.as_posix(),
             "params_search_update": search_update,
-            "params_search_exhausted": len(search_update["tested"]) >= len(grid),
+            "params_search_exhausted": params_search_exhausted,
             "discovered_flags_update": (
                 {
                     "framework": framework or "sglang",

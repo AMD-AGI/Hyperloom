@@ -28,3 +28,18 @@ pipeline_phase: explore
 typical_runtime_min: 8.0
 applicable_when:
   - "baseline_tput > 0"
+# Descriptive — see baseline.yaml. Each grid variant inherits these knobs
+# so the script pinning persists across phase-1 and phase-2 (synergy)
+# variants without an extra round-trip through the orchestrator.
+params_schema:
+  benchmark_script:
+    type: string
+    description: |
+      Bare *.sh file name. Force-pin Magpie script for every variant in
+      this grid run; same semantics as baseline.params_schema.benchmark_script.
+  result_dir:
+    type: string
+    description: |
+      Absolute or workspace-relative path forwarded as $RESULT_DIR for
+      every variant. Coordinator defaults RESULT_DIR to the variant slot;
+      only override when redirecting to a known leak destination.
