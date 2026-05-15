@@ -2736,22 +2736,29 @@ class Coordinator:
                 self.shared_state.save(self.session_dir)
                 return
             # Promote a grid-runner winner if it actually beat the
-            # current best by a meaningful margin. We use 0.1% as the
-            # 1-shot KEEP threshold — further relaxed from the prior
-            # 0.5% bar (which itself relaxed marathon's 1.0% per the
-            # resume5 9h finding). The 0.1% gate lets sub-noise winners
-            # enter optimization_stack early so they can compound with
-            # downstream KEEPs; the validate_stack rebench then acts as
-            # the final filter (see validate_stack handler — currently
-            # record-only with a 0.0% warning gate). AND, as a separate
-            # path, promote ANY consistent winner that wins ≥ 2 of last
-            # 3 rounds with average gain ≥ 0.3% — that's the cross-round
-            # signal-vs-noise check (now mostly redundant given the
-            # lower 1-shot bar, but harmless).
-            PROMOTE_THRESHOLD_PCT = 0.1
+            # current best by a meaningful margin. We use 0.2% as the
+            # 1-shot KEEP threshold — relaxed from marathon's original
+            # 1.0% per the resume5 9h finding (35/38 winners landed in
+            # the 0.3–0.84% band but never promoted because each
+            # individual run sat under 1.0%), but kept above the
+            # session-to-session noise floor (~0.1%) so a single noisy
+            # round doesn't lock in a non-improvement. AND, as a
+            # separate path, promote ANY consistent winner that wins
+            # ≥ 2 of last 3 rounds with average gain ≥ 0.1% — that's
+            # the cross-round signal-vs-noise check; rounds individually
+            # under 0.2% still stack up when the same variant keeps
+            # winning, so we don't lose real but small gains.
+            PROMOTE_THRESHOLD_PCT = 0.2
             CROSS_ROUND_LOOKBACK = 3
             CROSS_ROUND_MIN_APPEARANCES = 2
-            CROSS_ROUND_MIN_AVG_GAIN_PCT = 0.3
+            # The cross-round bar must stay strictly under
+            # PROMOTE_THRESHOLD_PCT, otherwise the path is mathematically
+            # unreachable (any 2 sub-threshold rounds whose average
+            # crosses the cross-round bar would also have at least one
+            # round above the 1-shot bar, triggering single-shot promote
+            # first). 0.1% gives us a real cross-round signal between
+            # the noise floor and the 1-shot bar.
+            CROSS_ROUND_MIN_AVG_GAIN_PCT = 0.1
             best_tput = result.get("output_throughput")
             bv = result.get("best_variant") or {}
             best_gain = result.get("best_gain_pct")
