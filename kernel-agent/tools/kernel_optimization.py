@@ -2071,7 +2071,33 @@ def main() -> int:
     parser.add_argument("--correctness-passed", choices=["true", "false", "unknown"], default="unknown")
     parser.add_argument("--accuracy-passed", choices=["true", "false", "unknown"], default="unknown")
     parser.add_argument("--oob-max-turns", type=int, default=int(os.environ.get("KERNEL_AGENT_OOB_MAX_TURNS", "100")))
-    parser.add_argument("--geak-cost-limit", type=float, default=None)
+    # GEAK cost limit semantics:
+    #   * GEAK's bundled ``config/geak.yaml`` declares ``cost_limit: 0.``
+    #     (= unlimited) — that is the design contract the GEAK team picked.
+    #   * GEAK's sub-agent spawn path (``parallel_agent`` → ``DefaultAgent``)
+    #     does NOT honour that yaml entry; it falls back to
+    #     ``AgentConfig.cost_limit = 3.0`` (``minisweagent/agents/default.py``).
+    #     Observed 2026-05-15 on Qwen3-32B: every sub-agent died at $3.08
+    #     after ~50 steps, well before producing a real optimisation.
+    #   * The only externally addressable lever is GEAK's ``-l/--cost-limit``
+    #     CLI option (``minisweagent/run/mini.py:194``) which writes
+    #     ``config["agent"]["cost_limit"]`` and is honoured by every child
+    #     agent spawned from that config.
+    # We therefore default to ``0.0`` so Hyperloom matches GEAK's stated
+    # geak.yaml contract instead of inheriting the dataclass-default $3
+    # via the sub-agent fallback path. Operators can pin a finite cap with
+    # ``HYPERLOOM_GEAK_COST_LIMIT`` or ``--geak-cost-limit`` when they want
+    # a budget guardrail (e.g. CI smoke runs).
+    parser.add_argument(
+        "--geak-cost-limit",
+        type=float,
+        default=float(os.environ.get("HYPERLOOM_GEAK_COST_LIMIT", "0.0")),
+        help=(
+            "Per-attempt GEAK cost cap in USD; 0 means unlimited (mirrors "
+            "GEAK's geak.yaml `cost_limit: 0.`). Set via "
+            "$HYPERLOOM_GEAK_COST_LIMIT or this flag for CI budgets."
+        ),
+    )
     parser.add_argument("--disable-rag", action="store_true",
                         help="Run GEAK with tools.rag disabled for this request.")
     parser.add_argument("--disable-xs-memory", action="store_true",
