@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from tracelens_skill_runner import (
+    aggregate_by_source_function,
     discover_capture_folder,
     normalize_upstream_category,
     parse_analysis_md,
@@ -256,6 +257,26 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
 )
+# Kernel-name substrings that mark an operation as non-patchable regardless
+# of source-file resolution: vendor BLAS routines, RCCL/NCCL collectives,
+# raw memcpy/copy ops, and PyTorch native copy. Folded from the feature
+# branch's ``tracelens_geak_task_parser._NON_PATCHABLE_MARKERS`` so the
+# unified ``classify_patchability`` gate emits a clean rejection reason
+# for the same kernels that parser used to drop.
+_NON_PATCHABLE_NAME_MARKERS: tuple[str, ...] = (
+    "rocblas",
+    "hipblas",
+    "hipblaslt",
+    "rocblaslt",
+    "tensile",
+    "miopen",
+    "ck_kernels",
+    "nccl",
+    "rccl",
+    "hipmemcpy",
+    "__amd_rocclr_copybuffer",
+    "aten::copy",
+)
 
 
 def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
@@ -275,21 +296,70 @@ def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
     return False
 
 
-def is_reusable_native_kernel(candidate: dict[str, Any]) -> bool:
-    """Whether a candidate is safe to send to kernel optimization backends."""
+def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
+    """Return ``(reusable, skip_reason)`` for a hot-kernel candidate.
+
+    Single source of truth for the kernel-opt routing gate. ``skip_reason``
+    is empty when the candidate is reusable; otherwise it is a short
+    human-readable explanation suitable for the summary.json audit
+    sidecar. :func:`is_reusable_native_kernel` returns the boolean half
+    so existing callers keep working.
+
+    Compared to the legacy logic this also rejects:
+
+    * kernels whose name contains a vendor BLAS / collective / native-op
+      marker from :data:`_NON_PATCHABLE_NAME_MARKERS`, even when the
+      reported source file resolves to a reusable framework root;
+    * ``aten::*`` PyTorch native ops without a library hint (these
+      typically point at Tensile / vendor backends and have no rewritable
+      Python source).
+    """
     source_file = str(candidate.get("source_file") or "")
+    name = str(candidate.get("name") or "")
+    lower_name = name.lower()
     if not source_file:
-        return False
+        return False, "source file not resolved"
     if candidate.get("source_type") == "vendor_binary":
-        return False
+        return False, "vendor binary (no rewritable source)"
     if candidate.get("vendor_dispatch_wrapper"):
-        return False
-    if is_runtime_generated_kernel(str(candidate.get("name") or ""), source_file):
-        return False
+        return False, f"vendor dispatch wrapper at {source_file}"
+    for marker in _NON_PATCHABLE_NAME_MARKERS:
+        if marker in lower_name:
+            return False, (
+                f"non-patchable kernel name marker '{marker}' in {name!r}"
+            )
+    if name.startswith("aten::"):
+        library = str(candidate.get("library") or "").strip().lower()
+        if not library or library in {"tensile", "pytorch native"}:
+            return False, (
+                f"PyTorch native op {name!r} backed by "
+                f"{candidate.get('library') or 'unknown'} library "
+                "(typically Tensile / vendor backend)"
+            )
+    if is_runtime_generated_kernel(name, source_file):
+        return False, (
+            f"runtime-generated (torch.compile / Inductor cache): {source_file}"
+        )
     lower_file = source_file.lower()
     if not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS):
-        return False
-    return candidate.get("source_type") in {"hip_cpp", "triton", "python"}
+        return False, (
+            f"source not under a reusable framework root: {source_file}"
+        )
+    source_type = candidate.get("source_type")
+    if source_type not in {"hip_cpp", "triton", "python"}:
+        return False, (
+            f"source_type={source_type!r} not in {{hip_cpp, triton, python}}"
+        )
+    return True, ""
+
+
+def is_reusable_native_kernel(candidate: dict[str, Any]) -> bool:
+    """Whether a candidate is safe to send to kernel optimization backends.
+
+    Thin wrapper over :func:`classify_patchability` kept for backward
+    compatibility with downstream consumers that only need the bool.
+    """
+    return classify_patchability(candidate)[0]
 
 
 # Wrapper TUs that just dispatch to a precompiled .so / .co (no device body
@@ -1395,7 +1465,12 @@ def _finalize_candidates(
         item["runtime_generated_kernel"] = is_runtime_generated_kernel(
             item["name"], item.get("source_file", "")
         )
-        item["reusable_native_kernel"] = is_reusable_native_kernel(item)
+        # Single classify_patchability call covers both the boolean
+        # routing gate AND the human-readable rejection reason consumed
+        # by the summary.json audit sidecar (PR-A §3 of issue tbd).
+        reusable, skip_reason = classify_patchability(item)
+        item["reusable_native_kernel"] = reusable
+        item["skip_reason"] = skip_reason
         item["benchmark_files"] = find_benchmark_files(
             item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
         )
@@ -1417,6 +1492,22 @@ def _finalize_candidates(
 
 
 def recommend_backends(candidate: dict[str, Any]) -> list[str]:
+    """Recommend a backend ladder for a reusable native kernel.
+
+    Policy (#144 last comment Layer 1, broadened): every kernel that
+    Claude/Codex can rewrite, GEAK can rewrite too. Include GEAK in
+    every default ladder so high-priority kernels reach GEAK FIRST;
+    Claude/Codex stay on as fallbacks if GEAK times out or rejects.
+
+    The kernel-agent's :func:`kernel_optimization.choose_backends` still
+    sets ``geak_without_benchmark=True`` when no harness is present so
+    operators / downstream KEEP gates can audit verification confidence
+    — but GEAK is no longer pre-filtered from the ladder upstream.
+
+    Only ``[]`` returns: unresolved source, non-reusable native (e.g.
+    Inductor cache), vendor binaries, and runtime-generated kernels
+    (where there's no stable source to rewrite).
+    """
     source_type = candidate.get("source_type")
     if not candidate.get("source_file"):
         return []
@@ -1426,13 +1517,14 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
         return []
     if source_type == "runtime_generated":
         return []
-    if source_type == "hip_cpp":
-        return ["geak", "claude", "codex"]
-    if source_type == "triton":
-        return ["geak", "claude", "codex"]
-    if source_type == "python":
-        return ["claude", "codex"]
-    return ["claude", "codex"]
+    # Unified ladder per #144 last comment Layer 1 (broadened): every kernel
+    # Claude/Codex/Cursor can rewrite, GEAK can rewrite too. GEAK is FIRST
+    # (high-priority handoff). Cursor backend needs CURSOR_API_KEY (separate
+    # Cursor gateway); skip from recommendations when the operator has not
+    # provisioned a key so we don't advertise a backend the run will spend
+    # time 401-ing on.
+    cursor_tail = ["cursor"] if os.environ.get("CURSOR_API_KEY", "").strip() else []
+    return ["geak", "claude", "codex"] + cursor_tail
 
 
 def build_notes(candidate: dict[str, Any]) -> str:
@@ -1665,6 +1757,118 @@ def enrich_candidates_with_runtime_metadata(
         flags.setdefault("num_gpus_recommended", item.get("num_gpus_recommended"))
 
 
+def build_task_groups(
+    candidates: list[dict[str, Any]],
+    *,
+    source_root: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Aggregate finalized candidates by AST-resolved source function.
+
+    Thin wrapper over
+    :func:`tracelens_skill_runner.aggregate_by_source_function` that:
+
+    * only considers candidates marked ``reusable_native_kernel`` so
+      vendor / aten:: / runtime-generated kernels are never grouped
+      (they were rejected upstream by ``classify_patchability``);
+    * filters each group's ``kernel_ids`` and ``primary_kernel_id`` to
+      the same reusable subset, so a group that mixes a reusable
+      Triton function with a non-reusable aten:: launcher in its row
+      list still dispatches only the reusable kernel_id.
+
+    Returns ``[]`` when no candidate carries a parseable launcher path
+    (the LLama70B fixture case — all rows have empty Kernel Path), so
+    callers fall through to per-kernel dispatch.
+    """
+    reusable = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel")]
+    if not reusable:
+        return []
+    return aggregate_by_source_function(reusable, source_root=source_root)
+
+
+def build_audit_summary(
+    candidates: list[dict[str, Any]],
+    *,
+    trace_input: str,
+    framework: str = "",
+    target_platform: str = "",
+    task_groups: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build the ``tracelens/summary.json`` payload from finalized candidates.
+
+    Splits ``candidates`` into ``tasks`` (those that pass
+    :func:`classify_patchability` and are routable to a kernel-opt backend)
+    and ``skipped`` (those rejected, each carrying ``skip_reason`` so an
+    operator can see exactly why a TraceLens hot kernel was dropped from
+    routing). Both halves preserve the priority order of the input list.
+
+    The function is pure — it reads ``candidates`` and returns a dict — so
+    it is straightforward to test against fixture data without touching
+    the filesystem.
+    """
+    tasks: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        reusable = bool(cand.get("reusable_native_kernel"))
+        compact = {
+            "kernel_id":         cand.get("kernel_id"),
+            "name":              cand.get("name"),
+            "source_file":       cand.get("source_file") or "",
+            "source_type":       cand.get("source_type") or "",
+            "kernel_category":   cand.get("kernel_category") or "",
+            "gpu_pct":           cand.get("gpu_pct"),
+            "duration_us":       cand.get("duration_us"),
+            "call_count":        cand.get("call_count"),
+            "tracelens_pitem_rank":  cand.get("tracelens_pitem_rank"),
+            "tracelens_pitem_title": cand.get("tracelens_pitem_title"),
+            "bound_type":        cand.get("bound_type") or "",
+        }
+        if reusable:
+            compact["recommended_backends"] = list(
+                cand.get("recommended_backends") or []
+            )
+            tasks.append(compact)
+        else:
+            compact["skip_reason"] = cand.get("skip_reason") or "unknown"
+            skipped.append(compact)
+    # PR-B §1: summarize task_groups (source-function aggregation)
+    # alongside the per-kernel ``tasks`` view. Each group entry is a
+    # compact projection: the function identity + member kernel_ids +
+    # aggregate cost. The full per-row data lives inside the
+    # ``task_groups[]`` list on kernel_candidates.json — summary.json
+    # is the audit view, not the dispatch payload.
+    group_entries: list[dict[str, Any]] = []
+    for group in task_groups or []:
+        if not isinstance(group, dict):
+            continue
+        group_entries.append({
+            "task_group_id":        group.get("task_group_id"),
+            "source_path":          group.get("source_path"),
+            "definition_line":      group.get("definition_line"),
+            "function_name":        group.get("function_name"),
+            "ast_resolved":         bool(group.get("ast_resolved")),
+            "primary_kernel_id":    group.get("primary_kernel_id"),
+            "kernel_ids":           list(group.get("kernel_ids") or []),
+            "row_count":            len(group.get("rows") or []),
+            "aggregate_duration_us": group.get("aggregate_duration_us"),
+            "aggregate_call_count": group.get("aggregate_call_count"),
+            "aggregate_gpu_pct":    group.get("aggregate_gpu_pct"),
+        })
+    return {
+        "generated_at":    utc_now(),
+        "trace_input":     trace_input,
+        "framework":       framework,
+        "target_platform": target_platform,
+        "task_count":      len(tasks),
+        "skipped_count":   len(skipped),
+        "task_group_count": len(group_entries),
+        "tasks":           tasks,
+        "skipped":         skipped,
+        "task_groups":     group_entries,
+    }
+
+
 def write_reports(
     run_dir: Path,
     *,
@@ -1704,6 +1908,17 @@ def write_reports(
         "trace_files": [str(p) for p in trace_files],
         "created_at": utc_now(),
     }
+    # PR-B §1: aggregate reusable candidates into source-function task
+    # groups so downstream dispatch (run_optimization_handler) can submit
+    # one GEAK task per (path, line, fn) instead of one per kernel_id.
+    # Aggregation is additive: ``hot_kernels[]`` keeps its full per-row
+    # priority order, and groups reference candidates by kernel_id.
+    # Candidates whose ``tracelens_launcher_path`` cannot be parsed
+    # (LLama70B fixture, raw-trace path, csv fallback) produce zero
+    # groups and the caller falls through to the legacy per-kernel
+    # dispatch.
+    source_root_str = getattr(args, "source_root", None)
+    task_groups = build_task_groups(candidates, source_root=source_root_str)
     report = {
         "model_name": args.model_name,
         "framework": args.framework,
@@ -1712,12 +1927,35 @@ def write_reports(
         "runtime_env": args.runtime_env,
         "trace_input_type": trace_input_type,
         "hot_kernels": candidates,
+        "task_groups": task_groups,
         "source": "tracelens_analysis",
         "dry_run": args.dry_run,
     }
     atomic_write_json(run_dir / "trace_input_manifest.json", manifest)
     atomic_write_json(tracelens_dir / "tracelens_report.json", report)
-    atomic_write_json(run_dir / "kernel_candidates.json", {"hot_kernels": candidates, **report})
+    atomic_write_json(
+        run_dir / "kernel_candidates.json",
+        {"hot_kernels": candidates, "task_groups": task_groups, **report},
+    )
+
+    # PR-A §3: per-run audit sidecar listing which TraceLens hot kernels
+    # were routed to a kernel-opt backend (``tasks``) and which were
+    # dropped (``skipped``, each with ``skip_reason``). Mirrors the
+    # feature branch's ``tracelens_geak_task_parser.summary.json`` and is
+    # the primary debug surface when GEAK comes back with surprising
+    # results — operator can answer "did TraceLens see kernel X? did we
+    # send it to GEAK? if not, why not?" in one read. PR-B adds
+    # ``task_groups[]`` so an operator can also see which kernels
+    # collapsed into the same source function.
+    summary = build_audit_summary(
+        candidates,
+        trace_input=str(Path(args.trace_input).resolve()),
+        framework=str(args.framework or ""),
+        target_platform=str(args.target_platform or ""),
+        task_groups=task_groups,
+    )
+    summary_path = tracelens_dir / "summary.json"
+    atomic_write_json(summary_path, summary)
 
     if existing_report_path is None or not existing_report_path.exists():
         if not getattr(args, "dry_run", False):
@@ -1741,7 +1979,13 @@ def write_reports(
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
         "kernel_candidates": str(run_dir / "kernel_candidates.json"),
         "tracelens_report_json": str(tracelens_dir / "tracelens_report.json"),
+        # Post-#203 (PR #217): the canonical Markdown exit IS the
+        # upstream SDK orchestrator's analysis.md surfaced via
+        # ``existing_report_path``; Hyperloom no longer aliases or
+        # copies it. PR-A §3 adds the ``summary.json`` audit sidecar
+        # alongside (separate file, not a Markdown alias).
         "trace_report_path": str(existing_report_path),
+        "tracelens_summary": str(summary_path),
     }
 
 
@@ -1791,6 +2035,18 @@ def main() -> int:
     parser.add_argument("--target-platform", default="MI355X")
     parser.add_argument("--analysis-mode", default="default")
     parser.add_argument("--runtime-env", default="local")
+    parser.add_argument(
+        "--source-root",
+        default=os.environ.get("TRACELENS_SOURCE_ROOT", "") or None,
+        help=(
+            "Optional root directory against which TraceLens launcher "
+            "paths (e.g. ``aiter/ops/rmsnorm.py(76): rmsnorm``) are "
+            "resolved for AST-based function-line lookup. Used only by "
+            "the PR-B source-function aggregation pass; absolute paths "
+            "in the report don't need this. Defaults to "
+            "$TRACELENS_SOURCE_ROOT when set."
+        ),
+    )
     parser.add_argument("--workspace-path", default=_default_workspace_path())
     parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
     parser.add_argument("--roofline-json", default="")

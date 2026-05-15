@@ -134,7 +134,7 @@ def has_benchmark(args: argparse.Namespace, candidate: dict[str, Any]) -> bool:
 
 def parse_backends(backends: str) -> list[str]:
     parsed = [b.strip().lower() for b in backends.split(",") if b.strip()]
-    allowed = {"geak", "claude", "codex"}
+    allowed = {"geak", "claude", "codex", "cursor"}
     invalid = [b for b in parsed if b not in allowed]
     if invalid:
         raise ValueError(f"unsupported backend(s): {', '.join(invalid)} "
@@ -145,13 +145,36 @@ def parse_backends(backends: str) -> list[str]:
 
 
 def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    """Select the backend ladder for a kernel-opt run.
+
+    Policy (#144 last comment Layer 1, broadened): every kernel
+    Claude/Codex can rewrite, GEAK can rewrite too. Include GEAK in
+    every default ladder, FIRST (high-priority handoff) — Claude/Codex
+    follow as fallbacks if GEAK times out or rejects.
+
+    When no benchmark/test harness is available, GEAK still attempts
+    the rewrite but ``geak_without_benchmark=True`` is flagged so
+    downstream KEEP gates / operators know verification confidence is
+    reduced. Aligns the auto-pick with the SKILL.md "allow the attempt
+    but mark" contract that previously only applied to user-specified
+    backends.
+
+    Only ``[]`` returns: vendor binaries (nothing rewritable upstream).
+    """
     user_backends = parse_backends(args.backends)
     benchmark_available = has_benchmark(args, candidate)
     source_type = str(candidate.get("source_type") or "unknown")
+    # Cursor backend requires CURSOR_API_KEY (Cursor's own gateway, not the
+    # AMD LiteLLM gateway). When the operator has not provisioned a Cursor
+    # key, skip cursor from auto-selected defaults to avoid wasted 401
+    # attempts. User-specified `--backends cursor` still wins (respects
+    # explicit intent; the missing key surfaces as a clear backend failure).
+    cursor_key_present = bool(os.environ.get("CURSOR_API_KEY", "").strip())
     notes: dict[str, Any] = {
         "user_specified_backends": bool(user_backends),
         "benchmark_available": benchmark_available,
         "geak_without_benchmark": False,
+        "cursor_key_present": cursor_key_present,
     }
 
     if user_backends:
@@ -161,12 +184,17 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
 
     if source_type == "vendor_binary":
         return [], notes
-    if source_type == "hip_cpp":
-        return ["geak"] if benchmark_available else ["claude", "codex"]
 
-    selected = ["claude", "codex"]
-    if benchmark_available:
-        selected.insert(0, "geak")
+    # Unified ladder per #144 last comment Layer 1 (broadened): every
+    # kernel Claude/Codex can rewrite, GEAK can rewrite too. GEAK is
+    # FIRST (high-priority handoff). When no benchmark/test harness is
+    # present, GEAK still attempts but ``geak_without_benchmark=True``
+    # is flagged so downstream KEEP gates know verification confidence
+    # is reduced — matches the SKILL.md "allow but mark" contract that
+    # previously only applied to user-specified backends.
+    selected = ["geak", "claude", "codex"]
+    if not benchmark_available:
+        notes["geak_without_benchmark"] = True
     return selected, notes
 
 
@@ -255,6 +283,413 @@ def _target_build_flag(target_platform: str) -> str:
 
 def _env_target_platform() -> str:
     return os.environ.get("TARGET_GPU_TYPE", "") or os.environ.get("GPU_TYPE", "")
+
+
+def _format_shapes_for_case(shapes: Any) -> str:
+    """Render a candidate row's ``shapes`` field as one comma-joined line.
+
+    Rows in a ``task_group`` come straight from TraceLens's 9-column
+    Detailed Analysis Data table where ``Args`` is a ``<br>``-joined
+    list of ``(shape) dtype`` strings. The ``_row_to_candidate`` parser
+    has already split them into a Python list; here we collapse back
+    to one line so the case bullet stays single-line.
+    """
+    if not shapes:
+        return ""
+    if isinstance(shapes, str):
+        return shapes
+    if isinstance(shapes, (list, tuple)):
+        parts: list[str] = []
+        for entry in shapes:
+            if isinstance(entry, str):
+                parts.append(entry)
+            elif isinstance(entry, dict):
+                # Some rows carry {call_num, shape} dicts; render the
+                # shape verbatim and tag the call_num if present.
+                shape = entry.get("shape") or entry.get("Args") or ""
+                call_num = entry.get("call_num")
+                if shape:
+                    parts.append(f"{shape}" + (f" (x{call_num})" if call_num else ""))
+            else:
+                parts.append(str(entry))
+        return ", ".join(p for p in parts if p)
+    return str(shapes)
+
+
+def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
+    """Render the multi-row benchmark cases section for a task_group.
+
+    Returns the empty string when ``candidate["task_group"]`` is absent
+    so the prompt body stays byte-identical for legacy per-kernel
+    dispatch. When present, emits one bullet per TraceLens Operation
+    row sorted by aggregate time (descending). Each bullet carries
+    ``operation``, ``args``, ``aggregate_time_ms``, ``percent_e2e``,
+    ``count``, ``per_call_ms``, ``flops_per_byte``, ``efficiency``,
+    and ``bound``.
+
+    The two most useful fields for backend dispatch decisions are
+    ``bound`` (memory vs compute drives which optimization lens to
+    apply — see ``_build_priority_block``) and ``per_call_ms``
+    (separates "high-count tiny-shape decode launch overhead" from
+    "fat per-invocation prefill cost"). Both are surfaced verbatim
+    rather than buried inside the kernel_metadata JSON.
+    """
+    group = candidate.get("task_group")
+    if not isinstance(group, dict):
+        return ""
+    rows = group.get("rows") or []
+    if not isinstance(rows, list) or not rows:
+        return ""
+    function_name = str(group.get("function_name") or "")
+    source_path = str(group.get("source_path") or "")
+    definition_line = group.get("definition_line")
+    ast_resolved = bool(group.get("ast_resolved"))
+    location = f"{source_path}:{definition_line}" if source_path and definition_line else ""
+
+    lines: list[str] = [
+        "",
+        "## Benchmark cases (TraceLens, sorted by aggregate time)",
+        "",
+    ]
+    if len(rows) > 1:
+        lines.extend([
+            f"This kernel resolves to the same source function across "
+            f"{len(rows)} TraceLens rows ("
+            f"{function_name or '<unknown function>'}"
+            + (f" at {location}" if location else "")
+            + (", AST-resolved" if ast_resolved else "")
+            + "). Optimize the source function once; the patch applies "
+            f"to all rows below. Use the first row as the primary",
+            "benchmark case; treat the rest as supplementary shape coverage.",
+            "",
+        ])
+    else:
+        lines.extend([
+            f"This kernel maps to a single TraceLens row in "
+            f"{function_name or '<unknown function>'}"
+            + (f" at {location}" if location else "")
+            + ". The case below is the primary benchmark target.",
+            "",
+        ])
+
+    for idx, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            continue
+        op = str(row.get("name") or "").strip()
+        shapes = _format_shapes_for_case(row.get("shapes"))
+        try:
+            duration_us = float(row.get("duration_us") or 0.0)
+        except (TypeError, ValueError):
+            duration_us = 0.0
+        aggregate_time_ms = duration_us / 1000.0
+        try:
+            count = int(row.get("call_count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        per_call_ms = (aggregate_time_ms / count) if count else 0.0
+        percent_e2e = row.get("percent_of_total")
+        flops_per_byte = row.get("flops_per_byte")
+        bound = str(row.get("bound_type") or "").strip() or "unknown"
+        eff_pct = row.get("efficiency_percent")
+        eff_peak_val = row.get("efficiency_peak_value")
+        eff_peak_unit = str(row.get("efficiency_peak_unit") or "").strip()
+        if eff_pct and eff_peak_val and eff_peak_unit:
+            efficiency = f"{eff_pct:.2f}% of {eff_peak_val} {eff_peak_unit}"
+        elif eff_pct:
+            efficiency = f"{eff_pct:.2f}%"
+        else:
+            efficiency = "unknown"
+        lines.append(
+            f"- Case {idx}: operation={op}; args={shapes or '-'}; "
+            f"aggregate_time_ms={aggregate_time_ms:.3f}; "
+            f"percent_e2e={percent_e2e if percent_e2e is not None else '-'}; "
+            f"count={count}; per_call_ms={per_call_ms:.6f}; "
+            f"flops_per_byte={flops_per_byte if flops_per_byte is not None else '-'}; "
+            f"efficiency={efficiency}; bound={bound}"
+        )
+    return "\n".join(lines)
+
+
+# PR-B §3: ordered optimization directions, keyed by bound type so the
+# agent's first lever matches the kernel's actual bottleneck. The order
+# below mirrors the feature branch's ``tracelens_geak_task_parser``
+# Optimization directions section; ``compute`` flips the top two
+# entries, ``unknown`` falls back to the feature-branch default order.
+# Each entry is one already-formatted bullet line.
+# Each bullet is a SINGLE string broken across lines for readability —
+# wrap in ``( ... )`` so adjacent-literal concatenation is explicit and
+# a forgotten trailing comma can't silently merge two bullets together
+# (defensive against the github-code-quality "Implicit string
+# concatenation in a list" lint; byte-identical to the un-wrapped form
+# at parse time).
+_PRIORITY_BULLETS: dict[str, list[str]] = {
+    "memory": [
+        (
+            "1. **Memory traffic reduction** (primary lever for memory-bound rows): "
+            "improve coalescing / vectorization, fuse with neighbouring ops to "
+            "amortize global loads, reduce intermediate writes, and avoid extra "
+            "global-memory round trips."
+        ),
+        (
+            "2. **Shape-aware tuning**: specialize block sizes and grid indexing "
+            "for the dominant TraceLens Args. Memory-bound kernels are especially "
+            "sensitive to load-coalescing alignment on the dominant shape."
+        ),
+        (
+            "3. **Launch amortization** for tiny high-count decode shapes: "
+            "persistent / batched handling or wrapper-level batching when source "
+            "and harness allow."
+        ),
+        (
+            "4. **Structural simplification**: hoist loop-invariant computations, "
+            "remove redundant address arithmetic, collapse dual-pass logic."
+        ),
+        (
+            "5. **Compute utilization** (rarely the bottleneck here, but check): "
+            "MFMA tile choice, occupancy, register / shared-memory balance."
+        ),
+    ],
+    "compute": [
+        (
+            "1. **Compute utilization** (primary lever for compute-bound rows): "
+            "improve MFMA tile choice, occupancy, and register / shared-memory "
+            "balance so the same FLOPs issue under a better-utilized pipeline."
+        ),
+        (
+            "2. **Shape-aware tuning**: specialize block sizes and grid indexing "
+            "for the dominant TraceLens Args. Compute-bound kernels often hit "
+            "different efficiency ceilings on K-major vs N-major shapes."
+        ),
+        (
+            "3. **Structural simplification**: hoist loop-invariant computations, "
+            "remove redundant address arithmetic, collapse dual-pass logic."
+        ),
+        (
+            "4. **Memory traffic reduction** (secondary): coalescing / "
+            "vectorization, fewer intermediate writes — rarely the bottleneck "
+            "here but worth measuring after a compute-side change."
+        ),
+        (
+            "5. **Launch amortization** for tiny high-count decode shapes: "
+            "persistent / batched handling or wrapper-level batching."
+        ),
+    ],
+    "unknown": [
+        (
+            "1. **Structural simplification**: hoist loop-invariant computations, "
+            "remove redundant address arithmetic, collapse dual-pass logic."
+        ),
+        (
+            "2. **Shape-aware tuning**: specialize block sizes and grid indexing "
+            "for the dominant TraceLens Args."
+        ),
+        (
+            "3. **Memory traffic reduction**: improve coalescing / vectorization, "
+            "reduce intermediate writes, avoid extra global-memory round trips."
+        ),
+        "4. **Launch amortization** for tiny high-count decode shapes.",
+        (
+            "5. **Compute utilization**: improve MFMA tile choice, occupancy, "
+            "register / shared-memory balance."
+        ),
+    ],
+}
+
+
+def _classify_bound(bound_type: str) -> str:
+    """Map TraceLens ``bound`` strings to one of the three priority keys.
+
+    TraceLens emits values like ``memory-bound`` / ``Memory-Bound`` /
+    ``compute-bound`` / ``mixed`` / ``-`` / empty. Normalise to one of
+    ``memory`` / ``compute`` / ``unknown`` so the priority block stays
+    deterministic.
+    """
+    text = (bound_type or "").lower()
+    if "memory" in text or "bandwidth" in text or "hbm" in text:
+        return "memory"
+    if "compute" in text or "arithmetic" in text or "flops" in text:
+        return "compute"
+    return "unknown"
+
+
+def _build_priority_block(candidate: dict[str, Any]) -> str:
+    """Render the bound-keyed optimization priority list.
+
+    Pulls ``bound_type`` from the candidate (set by ``_row_to_candidate``
+    when the TraceLens v0.3 report carries a ``Bound`` column).
+    Returns the empty string when ``bound_type`` is missing AND no
+    ``task_group`` is attached — the section is purely additive context;
+    skipping it on legacy candidates keeps the prompt body byte-identical
+    to PR-A.
+
+    When a ``task_group`` is present, the bound classification of the
+    *primary* row is used; non-primary rows are typically the same
+    Operation called from different shapes and share the same bound.
+    """
+    group = candidate.get("task_group")
+    bound_type = str(candidate.get("bound_type") or "").strip()
+    if not bound_type and isinstance(group, dict):
+        rows = group.get("rows") or []
+        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+            bound_type = str(rows[0].get("bound_type") or "").strip()
+    if not bound_type:
+        return ""
+    bucket = _classify_bound(bound_type)
+    label = bound_type or "unknown"
+    header_line = (
+        f"## Optimization priorities (TraceLens bound: `{label}`)"
+    )
+    intro = (
+        "The list below orders optimization levers by expected payoff for "
+        "this kernel's bottleneck. Try lever 1 first; only move to lever 2 "
+        "if profiling shows lever 1 is exhausted or not applicable."
+    )
+    lines = ["", header_line, "", intro, ""]
+    lines.extend(_PRIORITY_BULLETS[bucket])
+    return "\n".join(lines)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Mirror of ``tracelens_skill_runner._safe_float`` — coerce
+    ``int / float / numeric str`` to ``float``; everything else (None,
+    empty string, malformed) → ``default``. Used by hypothesis-block
+    helpers so per-row impact numbers from ``all_pitem_prose`` survive
+    JSON round-trips that may have already converted them to strings."""
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _format_impact_range(
+    low_ms: float, low_e2e: float, high_ms: float, high_e2e: float,
+) -> str:
+    """One-line impact range formatter; empty string when both ends zero."""
+    if not (low_ms or high_ms):
+        return ""
+    return (
+        f"**Estimated impact range:** low {low_ms:.2f} ms savings "
+        f"({low_e2e:.2f}% E2E), high {high_ms:.2f} ms savings "
+        f"({high_e2e:.2f}% E2E). These are TraceLens roofline estimates, "
+        "not measured speedups — confirm with a real benchmark."
+    )
+
+
+def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
+    """Render a TraceLens hypothesis section for the candidate, if any.
+
+    Returns empty string when none of the prose fields are present so the
+    block is invisible for candidates whose TraceLens P-item lacked
+    Reasoning / Resolution / Impact sections.
+
+    When the candidate carries a ``task_group`` whose
+    ``all_pitem_prose`` list contains MORE than one entry — i.e. the
+    same source function legitimately appears across multiple
+    TraceLens P-items (e.g. memory-bound at decode shapes, compute-
+    bound at prefill shapes) — every P-item's prose is rendered with
+    a ``### P{rank}`` header so GEAK sees all framings, not just the
+    primary's. Single-P-item / no-P-item candidates fall back to the
+    legacy single-block layout (reads from candidate's prose fields
+    directly).
+
+    Framing notes:
+
+    * TraceLens's ``Reasoning for Slowdown`` / ``Resolution`` are
+      themselves LLM-generated by the analysis-orchestrator skill —
+      anchoring GEAK to them as ground truth would degrade optimization
+      quality when the hypothesis is wrong. We label the block
+      explicitly as a hypothesis to *validate*, not an imperative.
+    * Numeric ``Impact estimate`` (low / high ms savings + %E2E) is
+      pure roofline arithmetic and is safer to surface directly; the
+      agent still needs a real measurement before declaring success.
+    """
+    # Multi-P-item case (Q2): the same source function spans multiple
+    # TraceLens P-items. Each P-item contributes its own prose tuple;
+    # render them all so GEAK sees every framing, not just the
+    # primary's.
+    group = candidate.get("task_group")
+    all_prose: list[Any] = []
+    if isinstance(group, dict):
+        raw = group.get("all_pitem_prose")
+        if isinstance(raw, list):
+            all_prose = [e for e in raw if isinstance(e, dict)]
+
+    if len(all_prose) > 1:
+        lines: list[str] = [
+            "",
+            "## TraceLens Hypothesis [validate before acting]",
+            "",
+            "This source function appears across MULTIPLE TraceLens P-items;",
+            "each subsection below is the analysis-orchestrator's hypothesis",
+            "for the corresponding P-item. Treat them as starting points —",
+            "verify each against the source / a quick micro-benchmark before",
+            "committing to a direction. If your measurements contradict any",
+            "hypothesis, follow the data and document the discrepancy in",
+            "`optimization_report.md`.",
+            "",
+        ]
+        for entry in all_prose:
+            rank = entry.get("rank") or 0
+            title = str(entry.get("title") or "").strip()
+            header = f"### P{rank}" if rank else "### (un-ranked TraceLens entry)"
+            if title:
+                header += f" — {title}"
+            lines.extend([header, ""])
+            ident = str(entry.get("identification") or "").strip()
+            reason = str(entry.get("reasoning_for_slowdown") or "").strip()
+            resol = str(entry.get("resolution") or "").strip()
+            if ident:
+                lines.extend(["**Identification (TraceLens context):**", ident, ""])
+            if reason:
+                lines.extend(["**Reasoning for slowdown (hypothesis):**", reason, ""])
+            if resol:
+                lines.extend(["**Recommended direction (hypothesis):**", resol, ""])
+            impact = _format_impact_range(
+                _safe_float(entry.get("impact_low_ms")),
+                _safe_float(entry.get("impact_low_e2e_pct")),
+                _safe_float(entry.get("impact_high_ms")),
+                _safe_float(entry.get("impact_high_e2e_pct")),
+            )
+            if impact:
+                lines.extend([impact, ""])
+        return "\n".join(lines).rstrip()
+
+    # Single-P-item / no-P-item path: read prose from the candidate
+    # directly. Backward-compatible with raw-trace / csv-fallback
+    # candidates that have no ``task_group`` attached.
+    identification = str(candidate.get("identification") or "").strip()
+    reasoning = str(candidate.get("reasoning_for_slowdown") or "").strip()
+    resolution = str(candidate.get("resolution") or "").strip()
+    low_ms = _safe_float(candidate.get("impact_low_ms"))
+    low_e2e = _safe_float(candidate.get("impact_low_e2e_pct"))
+    high_ms = _safe_float(candidate.get("impact_high_ms"))
+    high_e2e = _safe_float(candidate.get("impact_high_e2e_pct"))
+    if not (identification or reasoning or resolution or low_ms or high_ms):
+        return ""
+    lines = [
+        "",
+        "## TraceLens Hypothesis [validate before acting]",
+        "",
+        "The lines below are the TraceLens analysis-orchestrator's",
+        "hypothesis for this kernel. Treat them as a starting point —",
+        "verify the reasoning against the source / a quick micro-benchmark",
+        "before committing to the recommended direction. If your",
+        "measurements contradict the hypothesis, follow the data and",
+        "document the discrepancy in `optimization_report.md`.",
+        "",
+    ]
+    if identification:
+        lines.extend(["**Identification (TraceLens context):**", identification, ""])
+    if reasoning:
+        lines.extend(["**Reasoning for slowdown (hypothesis):**", reasoning, ""])
+    if resolution:
+        lines.extend(["**Recommended direction (hypothesis):**", resolution, ""])
+    impact = _format_impact_range(low_ms, low_e2e, high_ms, high_e2e)
+    if impact:
+        lines.append(impact)
+    return "\n".join(lines)
 
 
 def _coerce_cli_value(value: str | bool) -> Any:
@@ -419,6 +854,9 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     )
     platform_intro, hardware_notes = _hardware_prompt_blocks(target_platform)
     platform_build_flag = _target_build_flag(target_platform)
+    hypothesis_block = _build_hypothesis_block(candidate)
+    benchmark_cases_block = _build_benchmark_cases_block(candidate)
+    priority_block = _build_priority_block(candidate)
     bench_block = ""
     if bench_files:
         bench_block = "\nKnown benchmark/test files (also copied into your workspace as -f):\n"
@@ -600,6 +1038,9 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "- Use homogeneous mode. Set max_rounds to 5.",
         "",
         hardware_notes,
+        hypothesis_block,
+        benchmark_cases_block,
+        priority_block,
         "",
         "Preserve function name, signature, decorators, and numerical behavior.",
         "Return complete optimized code plus explanation of correctness assumptions.",
@@ -885,7 +1326,7 @@ def invoke_backend(
                         if best_patch_path:
                             result["geak_per_task_best_patch"] = best_patch_path
             return result
-        if backend in {"claude", "codex"}:
+        if backend in {"claude", "codex", "cursor"}:
             oob = _import_backend("oob_submit")
             out_dir = _oob_output_dir(args.session_id)
             is_multigpu = bool((candidate or {}).get("is_multigpu"))

@@ -3,7 +3,7 @@
 #
 # Base install is intentionally small and deterministic:
 #   - ray[default]==2.44.1 + click<8.3.0
-#   - Node.js/npm for claude/codex CLIs
+#   - Node.js/npm for claude/codex CLIs and @cursor/sdk
 #   - TraceLens editable install + CLI verification
 #
 # The installer prepares all kernel-agent backends in one pass.
@@ -60,17 +60,19 @@ TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-intern
 # is missing from env, source $REPO_ROOT/.env (defaults to $(pwd)) but
 # protect any keys already set in env from being overwritten by .env.
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ]; then
+if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR_API_KEY:-}" ]; then
   if [ -f "$REPO_ROOT/.env" ]; then
     _snap_safe="${SAFE_API_KEY-}"
     _snap_url="${OPENAI_BASE_URL-}"
+    _snap_cursor="${CURSOR_API_KEY-}"
     set -a
     # shellcheck disable=SC1091
     . "$REPO_ROOT/.env"
     set +a
     [ -n "$_snap_safe" ] && export SAFE_API_KEY="$_snap_safe"
     [ -n "$_snap_url" ]  && export OPENAI_BASE_URL="$_snap_url"
-    unset _snap_safe _snap_url
+    [ -n "$_snap_cursor" ] && export CURSOR_API_KEY="$_snap_cursor"
+    unset _snap_safe _snap_url _snap_cursor
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
@@ -107,6 +109,12 @@ case "${GEAK_MODEL_NAME_VAL}" in
 esac
 OOB_API_KEY_VAL="${OOB_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}}}}"
 OOB_BASE_URL_VAL="${OOB_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}}"
+# Cursor SDK key. Independent issuer (Cursor account, prefix `crsr_...`); never
+# inherit from SAFE_API_KEY / OOB_API_KEY because those address the AMD gateway.
+# Leave empty if the operator has not provisioned a Cursor key — the cursor
+# backend will surface the missing key clearly at run time.
+CURSOR_API_KEY_VAL="${CURSOR_API_KEY:-}"
+CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh}"
 
 # Install everything by default. The previous lazy `--with-geak / --with-oob`
 # scheme caused recurring "OOB proxy not running, request errored, found
@@ -186,8 +194,67 @@ ensure_python() {
   python3 -m pip --version >/dev/null || die "pip is required"
 }
 
+# PR-D §3: pin `git` and `patch` so the TraceLens server patcher has the
+# binaries it expects on every deployment.
+#
+# Background: `inference_optimizer/orchestrator/action_executors/_server_patcher.py`
+# uses two binaries to apply TraceLens patches to vLLM/SGLang installs:
+#   * `git apply` — strict path, default; bails immediately on context drift.
+#   * `patch -p<N> --fuzz=2` — PR-C fuzzy fallback (tightened from
+#     PR-C's original `--fuzz=10` to GNU patch's default `--fuzz=2` in
+#     PR-D §6 to reject multi-line context drift that could mis-apply
+#     patch CHANGE lines to wrong-but-similar-looking call sites).
+#     Still tolerates whitespace and single-line drift, the common
+#     point-release case the fuzzy fallback was designed for.
+#
+# Stripped runtime images (`lmsysorg/sglang:v0.5.9-rocm700-mi30x` and the
+# minimal vLLM serving images) sometimes ship without one or both binaries.
+# `_server_patcher` fail-softs in that case → `--enable-shape-discovery-
+# for-cuda-graph-profile` is silently never injected → graph-replayed
+# kernels stay opaque, exactly what #194 §5 was trying to fix.
+#
+# Apt-installing here is the cheap, framework-agnostic safety net: it's
+# the same install path the existing `ensure_node` helper takes for
+# Node.js, so it carries no new failure modes.
+ensure_patch_tools() {
+  log "ensuring git + patch (required by inference_optimizer/_server_patcher fuzzy-fallback path)"
+  local need_git=0 need_patch=0
+  command -v git >/dev/null 2>&1   || need_git=1
+  command -v patch >/dev/null 2>&1 || need_patch=1
+  if [ "$need_git" -eq 0 ] && [ "$need_patch" -eq 0 ]; then
+    log "git: $(command -v git) ($(git --version 2>/dev/null | head -1))"
+    log "patch: $(command -v patch) ($(patch --version 2>/dev/null | head -1))"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    [ "$need_git" -eq 1 ]   && warn "git missing; TraceLens server-patch strict path (\`git apply\`) will fail-soft"
+    [ "$need_patch" -eq 1 ] && warn "patch missing; TraceLens server-patch fuzzy fallback (\`patch --fuzz=2\`) will fail-soft"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would apt-get install git/patch because: git=$([ $need_git -eq 1 ] && echo missing || echo present), patch=$([ $need_patch -eq 1 ] && echo missing || echo present)"
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    [ "$need_git" -eq 1 ]   && warn "git missing and apt-get unavailable; install \`git\` manually for TraceLens server patching"
+    [ "$need_patch" -eq 1 ] && warn "patch missing and apt-get unavailable; install \`patch\` manually for TraceLens server patching fuzzy fallback"
+    return 0
+  fi
+  local pkgs=()
+  [ "$need_git" -eq 1 ]   && pkgs+=("git")
+  [ "$need_patch" -eq 1 ] && pkgs+=("patch")
+  log "apt-get installing: ${pkgs[*]}"
+  apt-get update >/dev/null 2>&1 || warn "apt-get update failed; install may pull stale package indices"
+  if ! apt-get -y install "${pkgs[@]}" >/dev/null; then
+    warn "apt-get install of ${pkgs[*]} failed; TraceLens server patching may fail-soft on this host"
+    return 0
+  fi
+  command -v git >/dev/null 2>&1   || warn "git still missing after apt-get install"
+  command -v patch >/dev/null 2>&1 || warn "patch still missing after apt-get install"
+}
+
 ensure_node() {
-  log "ensuring Node.js/npm for claude/codex CLIs"
+  log "ensuring Node.js/npm for claude/codex CLIs and @cursor/sdk"
   if command -v node >/dev/null 2>&1 && npm --version >/dev/null 2>&1; then
     log "node: $(command -v node) ($(node --version 2>/dev/null || echo unknown))"
     log "npm: $(command -v npm) ($(npm --version 2>/dev/null || echo unknown))"
@@ -451,6 +518,15 @@ ensure_oob() {
     run npm config set prefix /usr/local
     run npm install -g @openai/codex@0.100.0
   fi
+  # @cursor/sdk is a Node library (not a CLI), used by OOB's cursor backend
+  # via `node -e "import '@cursor/sdk'"`. We always install it globally so
+  # the OOB cursor path works without per-pod npm setup. Use `require.resolve`
+  # against the global root to avoid a redundant install when present.
+  if ! NODE_PATH="$(npm root -g 2>/dev/null || true)" \
+       node -e "require.resolve('@cursor/sdk')" >/dev/null 2>&1; then
+    run npm config set prefix /usr/local
+    run npm install -g @cursor/sdk
+  fi
 
   ensure_llm_auth_files
 }
@@ -573,6 +649,11 @@ write_env_file() {
       echo "export LLM_GATEWAY_KEY='${OOB_API_KEY_VAL}'"
     }
     [ -n "${OOB_BASE_URL_VAL}" ] && echo "export OOB_BASE_URL='${OOB_BASE_URL_VAL}'"
+    # Cursor backend env. Only export CURSOR_API_KEY if the operator already
+    # provided one via env or .env; do not synthesise from SAFE_API_KEY (the
+    # Cursor account is a separate issuer).
+    [ -n "${CURSOR_API_KEY_VAL}" ] && echo "export CURSOR_API_KEY='${CURSOR_API_KEY_VAL}'"
+    [ -n "${CURSOR_DEFAULT_MODEL_VAL}" ] && echo "export CURSOR_DEFAULT_MODEL='${CURSOR_DEFAULT_MODEL_VAL}'"
     # Pin TRACELENS_ROOT to the (possibly mirrored) value resolved by
     # ensure_tracelens(). This is what lets setsid nohup inference_optimizer
     # optimize → kernel-agent/tools/tracelens_analysis.py inherit the writable
@@ -618,6 +699,25 @@ PY
       warn "${tool} not found"
     fi
   done
+  for tool in git patch; do
+    if command -v "$tool" >/dev/null 2>&1; then
+      log "found ${tool}: $(command -v "$tool")"
+    else
+      warn "${tool} not found (TraceLens server patcher will fail-soft without it)"
+    fi
+  done
+  # @cursor/sdk is a library, not a CLI; verify via require.resolve.
+  if NODE_PATH="$(npm root -g 2>/dev/null || true)" \
+     node -e "require.resolve('@cursor/sdk')" >/dev/null 2>&1; then
+    log "found @cursor/sdk in $(npm root -g 2>/dev/null || echo '?')"
+  else
+    warn "@cursor/sdk not installed (cursor backend will fail to start)"
+  fi
+  if [ -n "$CURSOR_API_KEY_VAL" ]; then
+    log "CURSOR_API_KEY: set"
+  else
+    warn "CURSOR_API_KEY not set; cursor backend will 401 if invoked"
+  fi
   if [ -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
     log "GEAK ref: $(git -C "${HYPERLOOM_ROOT}/geak" describe --tags --always 2>/dev/null || echo unknown)"
   else
@@ -648,6 +748,7 @@ main() {
   fi
   ensure_python
   ensure_node
+  ensure_patch_tools
   ensure_ray
   ensure_ray_started
   ensure_tracelens

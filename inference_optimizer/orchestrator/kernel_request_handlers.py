@@ -85,7 +85,7 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/vllm/",
 )
 _APPLY_TOOL_MODULE: Any | None = None
-_DEFAULT_KERNEL_BACKEND_ORDER = ("claude", "codex", "geak")
+_DEFAULT_KERNEL_BACKEND_ORDER = ("claude", "codex", "cursor", "geak")
 _DEFAULT_KERNEL_BATCH_PARALLEL = 3
 _CANDIDATE_ENV_KEYS = {
     "CONC",
@@ -644,6 +644,12 @@ async def select_kernels_handler(
             _enrich_candidate_trace_report(
                 result.get("hot_kernels"), str(report_path),
             )
+        # PR-A §3 (#206): surface tracelens/summary.json — the per-run
+        # audit sidecar listing reusable tasks vs skipped kernels with
+        # reasons, so operators can see at a glance whether GEAK was
+        # offered the kernels they expected.
+        if isinstance(artifacts, dict) and artifacts.get("tracelens_summary"):
+            result["tracelens_summary_path"] = str(artifacts["tracelens_summary"])
         metadata = _load_materialized_workload_metadata(state.baseline_config_path)
         _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
         candidates_path = result.get("candidates_path")
@@ -665,7 +671,7 @@ async def run_optimization_handler(
     When candidate metadata is available, this handler upgrades legacy
     single-kernel requests into a batch over all reusable native kernels. Each
     kernel is optimized concurrently, while backends are tried sequentially per
-    kernel in the preferred order: Claude first, then Codex, then GEAK.
+    kernel in the preferred order: Claude → Codex → Cursor → GEAK.
     """
     if payload.get("_single_kernel"):
         return await _run_optimization_single(payload, session_dir=session_dir)
@@ -683,13 +689,22 @@ def _backend_order(payload: dict) -> list[str]:
     raw = payload.get("backend_order") or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
     if raw:
         order = [item.strip() for item in str(raw).split(",") if item.strip()]
+        explicit = True
     else:
         # Ignore legacy payload["backends"] here. Older Orchestration prompts
         # often send backends="claude"; batch scheduling must still exercise
         # the full fallback ladder.
         order = list(_DEFAULT_KERNEL_BACKEND_ORDER)
-    allowed = {"claude", "codex", "geak"}
-    return [backend for backend in order if backend in allowed]
+        explicit = False
+    allowed = {"claude", "codex", "cursor", "geak"}
+    selected = [backend for backend in order if backend in allowed]
+    # When the operator has not provisioned CURSOR_API_KEY, drop cursor from
+    # the auto-derived ladder so we don't waste a fallback slot on a 401.
+    # Explicit `payload["backend_order"]` / KERNEL_OPT_BACKEND_ORDER still
+    # wins (respect intent; failure surfaces clearly in the attempt log).
+    if not explicit and not os.environ.get("CURSOR_API_KEY", "").strip():
+        selected = [b for b in selected if b != "cursor"]
+    return selected
 
 
 def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
@@ -705,12 +720,78 @@ def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
         return []
     reusable_ids = data.get("reusable_native_kernel_ids") or []
     reusable_id_set = {str(item) for item in reusable_ids if item}
+
+    # PR-B §1: collapse kernels that share a source function into a
+    # single dispatch via ``task_groups[]``. Each group emits exactly
+    # one GEAK / Codex / Claude request keyed off ``primary_kernel_id``,
+    # and the full row list lives on ``item["task_group"]`` so
+    # ``build_prompt`` can render multi-row benchmark cases. Kernels
+    # whose launcher path wasn't parseable (analysis.md with empty
+    # Kernel Path, raw-trace path, csv fallback) fall through to the
+    # legacy per-kernel path below — aggregation is purely additive,
+    # never lossy.
+    task_groups = data.get("task_groups") or []
+    if not isinstance(task_groups, list):
+        task_groups = []
+    kernel_by_id: dict[str, dict[str, Any]] = {
+        str(k.get("kernel_id") or ""): k
+        for k in kernels
+        if isinstance(k, dict) and k.get("kernel_id")
+    }
+    grouped_kernel_ids: set[str] = set()
     selected: list[dict[str, Any]] = []
+    for group in task_groups:
+        if not isinstance(group, dict):
+            continue
+        member_ids = [str(k) for k in (group.get("kernel_ids") or []) if k]
+        if not member_ids:
+            continue
+        # Only members marked reusable_native_kernel survive (vendor /
+        # aten:: / runtime-generated were filtered upstream by
+        # ``classify_patchability``); the group's primary may itself
+        # have been rejected, in which case we fall through to the
+        # legacy path for the surviving non-primary reusable members
+        # (no special-casing needed — they just won't be in
+        # ``grouped_kernel_ids`` and the loop below picks them up).
+        primary = str(group.get("primary_kernel_id") or "")
+        primary_cand = kernel_by_id.get(primary)
+        if primary_cand is None or primary_cand.get("reusable_native_kernel") is not True:
+            # Fall back to the first reusable member in priority order.
+            # ``primary`` itself is only read on the line above to look
+            # up ``primary_cand``; downstream code reads ``primary_cand``
+            # directly so we don't need to refresh ``primary`` here.
+            primary_cand = next(
+                (
+                    kernel_by_id[m]
+                    for m in member_ids
+                    if m in kernel_by_id
+                    and kernel_by_id[m].get("reusable_native_kernel") is True
+                    and kernel_by_id[m].get("source_file")
+                ),
+                None,
+            )
+            if primary_cand is None:
+                continue
+        if not primary_cand.get("source_file"):
+            continue
+        # Shallow copy + attach group so the kernel_optimization.py
+        # subprocess sees ``candidate["task_group"]`` and can render
+        # benchmark cases. The non-primary member kernel_ids are
+        # marked seen so the legacy loop skips them.
+        item = dict(primary_cand)
+        item["task_group"] = group
+        selected.append(item)
+        grouped_kernel_ids.update(member_ids)
+
+    # Legacy per-kernel pass for any reusable kernel that wasn't
+    # absorbed into a task_group above (no parseable launcher path).
     for item in kernels:
         if not isinstance(item, dict):
             continue
         kernel_id = str(item.get("kernel_id") or "")
         if not kernel_id:
+            continue
+        if kernel_id in grouped_kernel_ids:
             continue
         if reusable_id_set and kernel_id not in reusable_id_set:
             continue
@@ -820,7 +901,7 @@ async def _run_optimization_single(
         kernel_id: str
 
     Optional payload:
-        backends:        comma-separated 'geak,claude,codex' (auto-pick if empty)
+        backends:        comma-separated 'geak,claude,codex,cursor' (auto-pick if empty)
         budget_minutes:  default 60
         source_file:     path to original kernel source (for context)
         candidates_path: path to JSON describing candidates (optional)
