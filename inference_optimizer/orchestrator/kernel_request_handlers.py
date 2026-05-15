@@ -85,7 +85,7 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/vllm/",
 )
 _APPLY_TOOL_MODULE: Any | None = None
-_DEFAULT_KERNEL_BACKEND_ORDER = ("claude", "codex", "cursor", "geak")
+_DEFAULT_KERNEL_BACKEND_ORDER = ("geak", "claude", "codex", "cursor")
 _DEFAULT_KERNEL_BATCH_PARALLEL = 3
 _CANDIDATE_ENV_KEYS = {
     "CONC",
@@ -746,7 +746,12 @@ def _backend_order(payload: dict) -> list[str]:
     else:
         # Ignore legacy payload["backends"] here. Older Orchestration prompts
         # often send backends="claude"; batch scheduling must still exercise
-        # the full fallback ladder.
+        # the full fallback ladder. The default ladder mirrors
+        # ``kernel_optimization.choose_backends`` so single-kernel and batch
+        # paths agree on the policy (GEAK FIRST per #144 last comment Layer 1
+        # — high-priority handoff, Claude/Codex follow as fallbacks if GEAK
+        # times out or rejects). Cursor only joins the ladder when the
+        # operator has provisioned ``CURSOR_API_KEY``; see filter below.
         order = list(_DEFAULT_KERNEL_BACKEND_ORDER)
         explicit = False
     allowed = {"claude", "codex", "cursor", "geak"}
