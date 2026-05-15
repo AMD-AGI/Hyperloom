@@ -659,6 +659,54 @@ def _row_to_candidate(
     return candidate
 
 
+_IDLE_PCT_TABLE_RE = re.compile(
+    r"^\|\s*Idle\s*%\s*\|\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*\|",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
+    """Extract ``Idle %`` from the Executive Summary table in ``analysis.md``.
+
+    The TraceLens v0.3 ``analysis_template.md`` always emits an Executive
+    Summary table whose rows are ``| Metric | Value |``; the row of
+    interest looks exactly like ``| Idle % | 0.25% |``. Per
+    ``Report_Interfacing.docx`` §3, the Executive Summary is the
+    workload-level health snapshot that should gate any kernel-level
+    optimization recommendation: a high idle percentage means the GPU
+    spent most of the trace waiting (host stalls, sync, allocator
+    contention, …), so per-kernel speedups will not move end-to-end
+    latency and the operator should reach for parameter optimization
+    (batch size, KV cache shape, prefill/decode split) instead.
+
+    Returns the idle percentage as a float (e.g. ``0.25`` for ``0.25%``),
+    or ``None`` when:
+      * the file doesn't exist or can't be decoded
+      * the Executive Summary table has no ``Idle %`` row (older
+        TraceLens templates, or a partial / malformed report)
+      * the value is not numerically parseable
+
+    Returning ``None`` rather than raising lets callers downgrade
+    gracefully to "skip the idle-gate check" rather than failing the
+    whole run on a TraceLens template drift. The runtime gate in
+    ``tracelens_analysis.py`` treats ``None`` as "don't warn".
+    """
+    try:
+        text = md_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    match = _IDLE_PCT_TABLE_RE.search(text)
+    if not match:
+        return None
+
+    raw = match.group(1)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
     """Parse the TraceLens v0.3 ``analysis.md`` final report into hot-kernels.
 
@@ -1123,6 +1171,7 @@ __all__ = [
     "aggregate_by_source_function",
     "build_orchestrator_prompt",
     "discover_capture_folder",
+    "extract_idle_pct_from_analysis_md",
     "infer_analysis_mode",
     "normalize_upstream_category",
     "parse_analysis_md",
