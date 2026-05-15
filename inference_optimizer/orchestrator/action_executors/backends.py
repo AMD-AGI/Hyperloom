@@ -346,21 +346,17 @@ _BACKEND_KEYWORDS = (
     "schedule", "allreduce", "fusion",
 )
 
-# Default search paths for AST-based flag discovery. Override via env so
-# operators with non-standard installs (custom forks, pip-editable in a
-# different prefix) can still get dynamic discovery without code changes.
-DEFAULT_SGLANG_SERVER_ARGS = Path(
-    os.environ.get(
-        "INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS",
-        "/sgl-workspace/sglang/python/sglang/srt/server_args.py",
-    )
+from ..framework_paths import (
+    resolve_sglang_server_args_path,
+    resolve_vllm_arg_utils_path,
 )
-DEFAULT_VLLM_ARG_UTILS = Path(
-    os.environ.get(
-        "INFERENCE_OPTIMIZER_VLLM_ARG_UTILS",
-        "/sgl-workspace/vllm/vllm/engine/arg_utils.py",
-    )
+
+# Default search paths for AST-based flag discovery (env override, then
+# /sgl-workspace, then importlib.util.find_spec site-packages).
+DEFAULT_SGLANG_SERVER_ARGS, _SGLANG_DISCOVERY_NOTE = (
+    resolve_sglang_server_args_path()
 )
+DEFAULT_VLLM_ARG_UTILS, _VLLM_DISCOVERY_NOTE = resolve_vllm_arg_utils_path()
 
 
 def discover_backend_flags(
@@ -638,16 +634,16 @@ class BackendsExecutor:
                 import sys as _sys
                 _self_mod = _sys.modules[__name__]
                 if is_vllm:
-                    src_path = _self_mod.DEFAULT_VLLM_ARG_UTILS
+                    src_path, discovery_note = resolve_vllm_arg_utils_path()
                     discovered = discover_vllm_backend_flags(
                         arg_utils_path=src_path,
                     )
                 else:
-                    src_path = _self_mod.DEFAULT_SGLANG_SERVER_ARGS
+                    src_path, discovery_note = resolve_sglang_server_args_path()
                     discovered = discover_backend_flags(
                         server_args_path=src_path,
                     )
-                src_path = str(src_path)
+                src_path_str = str(src_path)
                 if discovered:
                     grid = _augment_grid_with_discovered_flags(
                         grid, discovered, framework=framework or "auto",
@@ -655,7 +651,14 @@ class BackendsExecutor:
                     self._record_discovered(
                         framework=framework or ("vllm" if is_vllm else "sglang"),
                         backend_flags=discovered,
-                        source_path=src_path,
+                        source_path=src_path_str,
+                    )
+                elif not disable_discovery:
+                    self._record_discovered(
+                        framework=framework or ("vllm" if is_vllm else "sglang"),
+                        backend_flags=[],
+                        source_path=src_path_str,
+                        discovery_error=discovery_note,
                     )
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
@@ -983,6 +986,7 @@ class BackendsExecutor:
         framework: str,
         backend_flags: list[str],
         source_path: str,
+        discovery_error: str = "",
     ) -> None:
         """Stage one framework's discovered flags for the next result dict.
 
@@ -991,11 +995,14 @@ class BackendsExecutor:
         on a per-instance buffer that gets drained into the result dict
         by ``_pop_discovered_update``.
         """
-        self._pending_discovered = {
+        payload: dict[str, Any] = {
             "framework": framework,
             "backend_flags": list(backend_flags),
             "source_path": source_path,
         }
+        if discovery_error:
+            payload["discovery_error"] = discovery_error
+        self._pending_discovered = payload
 
     def _pop_discovered_update(self) -> dict[str, Any] | None:
         out = getattr(self, "_pending_discovered", None)
