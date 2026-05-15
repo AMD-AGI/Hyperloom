@@ -102,7 +102,28 @@ GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
 GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
 RAG_INDEX_DIR="${HOME}/.cache/amd-ai-devtool/semantic-index"
-GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cpu}"
+# RAG index build device. Resolution:
+#   1. If $GEAK_RAG_INDEX_DEVICE is set explicitly, honor it verbatim
+#      (operator override; lets CPU-only environments opt out).
+#   2. Otherwise auto-detect: prefer GPU when either rocm-smi reports
+#      a device or torch.cuda.is_available() returns True; fall back
+#      to cpu only when no accelerator is visible.
+# Rationale: CPU embedding can take 1.5h+ on the BGE-large model and
+# repeatedly triggered zombie installers when the launcher timed out
+# mid-build (observed: 58min CPU run vs ~1min cuda run). The kernel-agent
+# runtime is always installed on GPU pods (IR-1 in the inference_optimizer
+# SKILL gates this), so cuda is the right default.
+if [ -z "${GEAK_RAG_INDEX_DEVICE:-}" ]; then
+  if command -v rocm-smi >/dev/null 2>&1 && rocm-smi --showid >/dev/null 2>&1; then
+    GEAK_RAG_INDEX_DEVICE_VAL="cuda"
+  elif python3 -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
+    GEAK_RAG_INDEX_DEVICE_VAL="cuda"
+  else
+    GEAK_RAG_INDEX_DEVICE_VAL="cpu"
+  fi
+else
+  GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE}"
+fi
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
