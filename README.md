@@ -107,14 +107,6 @@ Shell environment variables take precedence over values in `.env`, so advanced u
 | `CURSOR_DEFAULT_MODEL` | Override the default Cursor model id. | `claude-opus-4-7` (default) |
 
 **Path configuration:**
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `REPO_ROOT` | Hyperloom repo root | `/workspace/Hyperloom` |
-| `OOB_SRC` | OOB source root | `/workspace/OOB` |
-| `INFERENCEX_PATH` | InferenceX repo root | `/workspace/InferenceX` |
-| `TRACELENS_ROOT` | TraceLens-internal repo root | `/workspace/TraceLens-internal` |
-
 These paths are used by the agent and installer to wire together the local Hyperloom stack:
 
 | Path | Why it is needed |
@@ -123,6 +115,15 @@ These paths are used by the agent and installer to wire together the local Hyper
 | `OOB_SRC` | Provides the OOB CLI and auth-proxy used by kernel optimization backends. |
 | `INFERENCEX_PATH` | Provides InferenceX benchmark/evaluation code and reference data used during baseline and target analysis. |
 | `TRACELENS_ROOT` | Provides TraceLens profiling tooling for bottleneck analysis and kernel selection. |
+
+**Optional:**
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `USER_DATA_PATH` | Session directory root (per-run logs, artifacts, archived runs, launcher stdout, Magpie clone, source mirrors, kernel-agent tool outputs). Replaces the legacy `INFERENCE_OPTIMIZER_SESSION_DIR`. | `/workspace/hyperloom` |
+| `HYPERLOOM_ROOT` | Writable source-mirror root (GEAK clone, OOB CLI mirror, TraceLens mirror). Override only if you want mirrors shared across sessions. | `$USER_DATA_PATH/runtime/source-mirrors` |
+| `MAGPIE_DIR` | Magpie clone location. Override only if you maintain a shared Magpie checkout. | `$USER_DATA_PATH/runtime/Magpie` |
+| `INFERENCE_OPTIMIZER_RESCUE_PATHS` | Colon-separated extra roots scanned by the harvest step for leaked `result.json` files (e.g. when a Magpie script writes to a hardcoded `--result-dir`). | unset |
 
 Prepare the source trees from the corresponding repositories:
 
@@ -224,6 +225,8 @@ The chat examples use user-facing field names. The agent maps them to the optimi
 | Model | `--model`, `MODEL_PATH` | Model path. Required for a new run; ignored when resuming. | required |
 | Framework | `--framework`, `FRAMEWORK` | Inference framework: `sglang` or `vllm`. A session cannot mix frameworks. | `sglang` |
 | GPU | `--gpu-type`, `GPU_TYPE` | Target GPU type: `mi300x`, `mi325x`, or `mi355x`; can also be auto-detected. | auto-detect |
+| Model class | `--model-class` | Model architecture family used by the orchestrator's scoring and action selection. Supply explicitly; the agent no longer derives this from a `classify` action. | unset |
+| Compare against GPU | `--compare-against-gpu` | Opt into InferenceX reference fetching for the named GPU (e.g. `B200`). When omitted, `target_analysis` records a `no_target_gpu_configured` marker and the run proceeds without an external reference. | unset |
 | TP | `TP` | Tensor parallel size used by Magpie benchmark configs. | `1` |
 | CONC | `CONC` | Benchmark concurrency. | YAML default, commonly `8` |
 | ISL | `--isl`, `ISL` | Input sequence length. | `256` |
@@ -236,10 +239,18 @@ The chat examples use user-facing field names. The agent maps them to the optimi
 | OOB source | `OOB_SRC` | OOB source root. | set in Step 2 |
 | InferenceX repo | `INFERENCEX_PATH` | InferenceX repository root. | set in Step 2 |
 | TraceLens repo | `TRACELENS_ROOT` | TraceLens-internal repository root. | set in Step 2 |
-| Session directory | `INFERENCE_OPTIMIZER_SESSION_DIR` | Session directory for state, logs, runs, reports, and resume. | `/workspace/hyperloom` |
+| Session directory | `USER_DATA_PATH` | Session directory for state, logs, runs, reports, and resume. Replaces the legacy `INFERENCE_OPTIMIZER_SESSION_DIR`. | `/workspace/hyperloom` |
 | Resume | `--resume` | Resume the existing session from the session directory; requires `manifest.json` and `state.json`. | disabled |
 
 > Training and MLPerf-training skills have been retired from this repo. Only inference optimization is supported here.
+
+#### Migration Notes (upgrading from earlier Hyperloom releases)
+
+1. **Session directory env renamed.** Set `USER_DATA_PATH` instead of `INFERENCE_OPTIMIZER_SESSION_DIR`. The legacy variable is no longer read.
+2. **`setup` and `classify` actions removed.** If your launcher relied on them being in the action graph, supply the equivalents on the CLI:
+   - `--model-class <…>` for what `classify` used to derive.
+   - `--compare-against-gpu <…>` to opt into InferenceX reference fetching (otherwise `target_analysis` writes a `no_target_gpu_configured` marker and the run proceeds).
+3. **Magpie benchmark script is now generic-pinned by default.** When `--gpu-type` is set, the YAML renderer pins `benchmark_script=<framework>_<gpu_type>.sh` to stop InferenceX-native scripts from silently leaking `result.json` outside the session dir. If you intentionally use a model-specific script (e.g. `dsr1_fp8_mi300x.sh`), keep passing `benchmark_script=` explicitly — operator overrides still win against the generic-script pin. You may additionally want to set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` so the harvest step can recover leaked `result.json` files written to hardcoded `--result-dir` locations.
 
 ---
 
