@@ -1191,6 +1191,92 @@ def test_parse_analysis_md_top_k_caps_total_rows(tmp_path):
 
 
 # ===========================================================================
+# docx §3 — Filter for GEAK based on budget (Higher P-item, Lower Efficiency)
+# ===========================================================================
+def _write_two_pitem_analysis_md(md: Path) -> None:
+    md.write_text(
+        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
+        "<!-- impact-begin kind=p_item category=sdpa_fwd mid=1.5 low=0.5 high=3.0 -->\n"
+        "\n"
+        "## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### 🔴 P1: GEMM cluster (Tensile)\n\n"
+        "**Identification:** stub identification\n"
+        "**Data:**\n"
+        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
+        "FLOPS/Byte | Efficiency | Bound |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| high_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "80% of 708 TFLOPS | compute-bound |\n"
+        "| low_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "5% of 708 TFLOPS | compute-bound |\n"
+        "| unknown_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        " | compute-bound |\n"
+        "| mid_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "40% of 708 TFLOPS | compute-bound |\n"
+        "**Reasoning for Slowdown:** stub reasoning\n"
+        "**Resolution:** stub resolution\n"
+        "**Impact estimate:**\n"
+        "Low end: 1.0 ms savings (0.1% E2E)\n"
+        "High end: 2.0 ms savings (0.2% E2E)\n"
+        "\n"
+        "<!-- reasoning-candidate tier=compute rank=2 -->\n"
+        "#### 🟡 P2: SDPA (CK)\n\n"
+        "**Identification:** stub identification\n"
+        "**Data:**\n"
+        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
+        "FLOPS/Byte | Efficiency | Bound |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| p2_sdpa | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "10% of 708 TFLOPS | compute-bound |\n"
+        "**Reasoning for Slowdown:** stub reasoning\n"
+        "**Resolution:** stub resolution\n"
+        "**Impact estimate:**\n"
+        "Low end: 1.0 ms savings (0.1% E2E)\n"
+        "High end: 2.0 ms savings (0.2% E2E)\n",
+        encoding="utf-8",
+    )
+
+
+def test_parse_analysis_md_sorts_within_pitem_by_lower_efficiency(tmp_path):
+    """docx §3: ``Filter for GEAK based on budget (Higher P-item, Lower
+    Efficiency)``. Within a P-item, rows with lower efficiency must come
+    first so they survive the ``top_k`` budget cap. Cross-P-item order
+    is still rank-based (P1 before P2)."""
+    md = tmp_path / "analysis.md"
+    _write_two_pitem_analysis_md(md)
+
+    cands = tlr.parse_analysis_md(md, top_k=10)
+    names = [c["name"] for c in cands]
+    assert names == [
+        # P1 rows sorted ascending by efficiency:
+        "low_eff_gemm",
+        "mid_eff_gemm",
+        "high_eff_gemm",
+        # Unknown / 0.0 efficiency lands last within the P-item:
+        "unknown_eff_gemm",
+        # P2 still after every P1 row regardless of efficiency:
+        "p2_sdpa",
+    ]
+
+
+def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
+    """docx §3 budget cap: after sorting by efficiency within a P-item,
+    the ``top_k`` slice must keep the lowest-efficiency rows. Without
+    the sort, a budget of 2 would drop the kernel with the most
+    headroom — exactly the regression docx §3 calls out."""
+    md = tmp_path / "analysis.md"
+    _write_two_pitem_analysis_md(md)
+
+    cands = tlr.parse_analysis_md(md, top_k=2)
+    names = [c["name"] for c in cands]
+    assert names == ["low_eff_gemm", "mid_eff_gemm"], (
+        "top_k=2 must keep the two lowest-efficiency P1 rows; the "
+        "high-efficiency / unknown rows must be dropped before any P2 row"
+    )
+
+
+# ===========================================================================
 # normalize_upstream_category — TraceLens orchestrator_prepare.py enum (#155 #4)
 # ===========================================================================
 @pytest.mark.parametrize("raw,expected", [
