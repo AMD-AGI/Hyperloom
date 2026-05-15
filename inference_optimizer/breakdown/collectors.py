@@ -528,25 +528,33 @@ def collect_capability_summary(
 # §7 / §8 GEAK / OOB invocations
 # ---------------------------------------------------------------------------
 def _kernel_agent_run_dirs(session_dir: Path) -> list[Path]:
-    """All ``$SD/kernel-agent-workspace/<*>/kernel-agent/runs/<sid>/`` dirs.
+    """All ``<sd>/kernel-agent/runs/<sid>/`` dirs (and legacy fallbacks).
 
-    Hyperloom v2 spawns ``kernel_optimization.py --workspace-path
-    $SD/kernel-agent-workspace``; the script then creates
-    ``<workspace>/kernel-agent/runs/<session_id>/...``. We scan both the
-    canonical single-level form and the legacy nested form for safety.
+    Post-migration, ``Coordinator.kernel_request_handlers`` spawns
+    ``kernel_optimization.py --workspace-path $SD`` and the tool creates
+    ``<sd>/kernel-agent/runs/<session_id>/...``. Pre-migration sessions
+    landed under ``<sd>/kernel-agent-workspace/kernel-agent/runs/...``
+    (Coordinator used to pass ``--workspace-path $SD/kernel-agent-workspace``)
+    or, even older, ``<sd>/kernel-agent-workspace/<kid>/kernel-agent/runs/...``.
+    We scan all three so historical sessions still render.
     """
     candidates: list[Path] = []
-    root = session_dir / "kernel-agent-workspace"
-    if not root.exists():
-        return candidates
-    # Canonical: $SD/kernel-agent-workspace/kernel-agent/runs/<sid>/
-    for sub in (root / "kernel-agent" / "runs").glob("*"):
-        if sub.is_dir():
-            candidates.append(sub)
-    # Per-kernel: $SD/kernel-agent-workspace/<kid>/...  (older layout)
-    for kid_dir in root.glob("*/kernel-agent/runs/*"):
-        if kid_dir.is_dir() and kid_dir not in candidates:
-            candidates.append(kid_dir)
+    # Canonical (current): <sd>/kernel-agent/runs/<sid>/
+    new_root = session_dir / "kernel-agent" / "runs"
+    if new_root.is_dir():
+        for sub in new_root.glob("*"):
+            if sub.is_dir() and sub not in candidates:
+                candidates.append(sub)
+    # Legacy double-nested: <sd>/kernel-agent-workspace/kernel-agent/runs/<sid>/
+    legacy_root = session_dir / "kernel-agent-workspace"
+    if legacy_root.is_dir():
+        for sub in (legacy_root / "kernel-agent" / "runs").glob("*"):
+            if sub.is_dir() and sub not in candidates:
+                candidates.append(sub)
+        # Even older per-kernel form: <sd>/kernel-agent-workspace/<kid>/kernel-agent/runs/<sid>/
+        for kid_dir in legacy_root.glob("*/kernel-agent/runs/*"):
+            if kid_dir.is_dir() and kid_dir not in candidates:
+                candidates.append(kid_dir)
     return candidates
 
 
@@ -802,23 +810,40 @@ def _read_kernel_candidates(
 
     Resolves the file via:
       1. ``state.last_select_kernels.candidates_path`` — orchestrator-recorded path
-      2. ``session_dir / kernel-agent-workspace/kernel-agent/runs/hyperloom/kernel_candidates.json``
-      3. ``session_dir / kernel-agent-workspace/**/kernel_candidates.json`` glob fallback
+      2. ``session_dir / kernel-agent / runs / <session_id> / kernel_candidates.json``
+         (new layout after the all-artefacts-under-USER_DATA_PATH migration)
+      3. ``session_dir / kernel-agent / **/kernel_candidates.json`` glob fallback (new)
+      4. ``session_dir / kernel-agent-workspace / kernel-agent / runs / hyperloom /
+         kernel_candidates.json`` (legacy double-nested layout from pre-migration
+         sessions, kept for breakdown replay of historical runs)
+      5. ``session_dir / kernel-agent-workspace / **/kernel_candidates.json`` glob fallback
     """
     sk = state.get("last_select_kernels") or {}
     raw_path = sk.get("candidates_path") if isinstance(sk, dict) else None
     candidate_paths: list[Path] = []
     if raw_path:
-        # The recorded path is usually a container path (/workspace/...) that
-        # doesn't exist on wekafs; rewrite the prefix to the session_dir's
-        # actual on-disk root before falling back to glob.
+        # The recorded path is usually a container path (/workspace/... or
+        # /workspace/hyperloom/...) that doesn't exist on wekafs; rewrite the
+        # prefix to the session_dir's actual on-disk root before falling back
+        # to glob. The "kernel-agent" / "kernel-agent-workspace" anchors below
+        # let us re-root either the new (single-nested) or legacy
+        # (double-nested) layout.
         p = Path(str(raw_path))
         candidate_paths.append(p)
-        try:
-            idx = p.parts.index("kernel-agent-workspace")
-            candidate_paths.append(session_dir.joinpath(*p.parts[idx:]))
-        except ValueError:
-            pass
+        for anchor in ("kernel-agent-workspace", "kernel-agent"):
+            try:
+                idx = p.parts.index(anchor)
+                candidate_paths.append(session_dir.joinpath(*p.parts[idx:]))
+                break
+            except ValueError:
+                continue
+    # New layout (post-migration): tools write under <sd>/kernel-agent/runs/<session_id>/.
+    candidate_paths.extend(
+        sorted((session_dir / "kernel-agent").rglob("kernel_candidates.json"))
+    )
+    # Legacy double-nested layout: pre-migration sessions wrote under
+    # <sd>/kernel-agent-workspace/kernel-agent/runs/hyperloom/. Keep the
+    # globs around so historical sessions still rehydrate.
     candidate_paths.append(
         session_dir / "kernel-agent-workspace" / "kernel-agent"
         / "runs" / "hyperloom" / "kernel_candidates.json"

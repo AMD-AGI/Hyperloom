@@ -913,9 +913,11 @@ def _ensure_oob_proxy_source() -> bool:
     """Make sure ``auth_proxy.py`` exists at the path supervisor expects.
 
     ``ensure_auth_proxy.sh`` looks for the script at
-    ``${HYPERLOOM_ROOT}/OOB/oob_cli/auth_proxy.py`` (default
-    ``/opt/hyperloom/OOB/oob_cli/auth_proxy.py``). On a fresh sandbox where
-    ``kernel-agent/scripts/install.sh`` has NOT run yet, that file is absent
+    ``${HYPERLOOM_ROOT}/OOB/oob_cli/auth_proxy.py``. After the migration
+    ``HYPERLOOM_ROOT`` defaults to ``$USER_DATA_PATH/runtime/source-mirrors``
+    so the auth-proxy source ends up under the session tree alongside the
+    GEAK / TraceLens mirrors. On a fresh sandbox where
+    ``kernel-agent/scripts/install.sh`` has NOT run yet, the file is absent
     and the supervisor silently noops + returns 1, leaving :4002 dead and
     Claude SDK requests hitting the gateway directly with ``x-api-key`` →
     HTTP 401 → "Waiting for first result" hang.
@@ -925,7 +927,13 @@ def _ensure_oob_proxy_source() -> bool:
     ``inference_optimization/OOB``) so the supervisor can find + start it.
     Returns True if the file is present afterwards, False otherwise.
     """
-    hyperloom_root = Path(os.environ.get("HYPERLOOM_ROOT", "/opt/hyperloom"))
+    from .paths import source_mirrors_dir as _source_mirrors
+
+    hyperloom_root_env = os.environ.get("HYPERLOOM_ROOT")
+    if hyperloom_root_env:
+        hyperloom_root = Path(hyperloom_root_env)
+    else:
+        hyperloom_root = _source_mirrors(_session_dir_resolve())
     target_dir = hyperloom_root / "OOB" / "oob_cli"
     proxy_py = target_dir / "auth_proxy.py"
     if proxy_py.is_file():
@@ -1478,13 +1486,23 @@ def _preflight() -> tuple[str, str] | None:
         print("Preflight: ray installed OK")
 
     # 2. Magpie — the benchmark engine all executors shell out to.
+    # ``$MAGPIE_DIR`` is the operator override; install.sh defaults it
+    # to ``$HYPERLOOM_RUNTIME_DIR/Magpie`` (= ``$USER_DATA_PATH/runtime/
+    # Magpie``) so a missing Magpie auto-clones into the session tree.
+    # Falls back to legacy ``/workspace/Magpie`` for environments still
+    # on pre-migration launchers.
     check = subprocess.run(
         [magpie_python, "-c", "import Magpie"],
         capture_output=True,
     )
     if check.returncode != 0:
-        workspace_root = os.environ.get("WORKSPACE_ROOT") or "/workspace"
-        magpie_dir = Path(workspace_root) / "Magpie"
+        magpie_env = os.environ.get("MAGPIE_DIR")
+        if magpie_env:
+            magpie_dir = Path(magpie_env)
+        else:
+            from .paths import magpie_dir as _magpie_default
+            magpie_dir = _magpie_default(_session_dir_resolve())
+        magpie_dir.parent.mkdir(parents=True, exist_ok=True)
         if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
             print(f"Preflight: Magpie not importable and not found at {magpie_dir}; cloning ...")
             subprocess.run(
@@ -1507,10 +1525,24 @@ def _preflight() -> tuple[str, str] | None:
     # auto-installed by benchmark_lib.sh at runtime.
     inferencex_path = os.environ.get("INFERENCEX_PATH", "")
     if not inferencex_path:
-        workspace_root = os.environ.get("WORKSPACE_ROOT") or "/workspace"
-        # Check common mount points
+        from .paths import (
+            magpie_dir as _magpie_default,
+            runtime_dir as _runtime_default,
+        )
+        runtime_root = _runtime_default(_session_dir_resolve())
+        magpie_root = (
+            Path(os.environ["MAGPIE_DIR"])
+            if os.environ.get("MAGPIE_DIR")
+            else _magpie_default(_session_dir_resolve())
+        )
+        # InferenceX detection order: Magpie's own InferenceX submodule
+        # first (the canonical layout after install.sh), then the
+        # standalone runtime checkout, then legacy host-level mounts so
+        # existing pre-migration pods keep working.
         for candidate in (
-            Path(workspace_root) / "Magpie" / "InferenceX",
+            magpie_root / "InferenceX",
+            runtime_root / "InferenceX",
+            Path("/wekafs/hyperloom/InferenceX"),
             Path("/opt/hyperloom/InferenceX"),
             Path("/wekafs/fully-local/inference_optimization/InferenceX"),
         ):
@@ -1837,7 +1869,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             )
             sys.exit(2)
         # Default WORKSPACE_PATH for the critic-agent runtime if the
-        # operator hasn't already pinned it.
+        # operator hasn't already pinned it. NOTE: in the critic-agent
+        # runtime this env names the SKILL static-asset root (not a
+        # writable artefact directory), so it points at the repo root.
+        # The legacy "artefact root" meaning of WORKSPACE_PATH used by
+        # kernel-agent tools was retired during the
+        # all-artefacts-under-USER_DATA_PATH migration.
         os.environ.setdefault("WORKSPACE_PATH", str(Path(__file__).resolve().parents[1]))
 
     # Resolve robustness backend choice + runtime root, mirroring critic.
