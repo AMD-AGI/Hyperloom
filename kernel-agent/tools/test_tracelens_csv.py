@@ -2523,3 +2523,175 @@ def test_select_perf_report_cli_module_has_no_legacy_constant():
         "LEGACY_PERF_CLI was removed in v0.4 finishing-touches; "
         "any reintroduction must be a deliberate revert with discussion"
     )
+
+
+# ===========================================================================
+# T3 — Idle-% sanity gate on the Executive Summary
+# ===========================================================================
+# Per Report_Interfacing.docx §3, the Executive Summary table reports
+# ``Idle %`` (e.g. ``| Idle % | 0.25% |``). When idle time dominates wall
+# clock, kernel-level rewriting cannot improve end-to-end latency — the
+# operator should pivot to parameter optimization (batch size, KV cache
+# shape, prefill/decode split). The default threshold is 20%, overridable
+# via ``HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD``.
+
+_EXEC_SUMMARY_LOW_IDLE = """\
+# Workload Analysis
+
+## Executive Summary
+
+A single-rank trace.
+
+| Metric | Value |
+|--------|-------|
+| Total Time | 1234.5 ms |
+| Compute % | 99.30% |
+| Idle % | 0.25% |
+| Exposed Communication % | 0.42% |
+"""
+
+_EXEC_SUMMARY_HIGH_IDLE = """\
+# Workload Analysis
+
+## Executive Summary
+
+A single-rank trace that's mostly waiting on the host.
+
+| Metric | Value |
+|--------|-------|
+| Total Time | 9999.9 ms |
+| Compute % | 30.00% |
+| Idle % | 60.50% |
+| Exposed Communication % | 9.50% |
+"""
+
+_EXEC_SUMMARY_NO_IDLE_ROW = """\
+# Workload Analysis
+
+## Executive Summary
+
+| Metric | Value |
+|--------|-------|
+| Total Time | 1234.5 ms |
+| Compute % | 99.30% |
+"""
+
+
+def test_extract_idle_pct_parses_low_idle_row(tmp_path):
+    md = tmp_path / "analysis.md"
+    md.write_text(_EXEC_SUMMARY_LOW_IDLE, encoding="utf-8")
+    assert tlr.extract_idle_pct_from_analysis_md(md) == pytest.approx(0.25)
+
+
+def test_extract_idle_pct_parses_high_idle_row(tmp_path):
+    md = tmp_path / "analysis.md"
+    md.write_text(_EXEC_SUMMARY_HIGH_IDLE, encoding="utf-8")
+    assert tlr.extract_idle_pct_from_analysis_md(md) == pytest.approx(60.5)
+
+
+def test_extract_idle_pct_returns_none_when_no_idle_row(tmp_path):
+    """Older / partial reports without an Idle % row degrade gracefully
+    to ``None`` so the runtime gate skips rather than failing the run."""
+    md = tmp_path / "analysis.md"
+    md.write_text(_EXEC_SUMMARY_NO_IDLE_ROW, encoding="utf-8")
+    assert tlr.extract_idle_pct_from_analysis_md(md) is None
+
+
+def test_extract_idle_pct_returns_none_when_file_missing(tmp_path):
+    assert tlr.extract_idle_pct_from_analysis_md(tmp_path / "nope.md") is None
+
+
+def test_extract_idle_pct_against_llama70b_fixture():
+    """Real TraceLens v0.3 fixture: Llama 3 70B has Idle % = 0.25% in
+    its Executive Summary — pin this against drift in the regex."""
+    fixture = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "tracelens_v03_llama70b_analysis.md"
+    assert fixture.exists(), f"fixture must be present: {fixture}"
+    assert tlr.extract_idle_pct_from_analysis_md(fixture) == pytest.approx(0.25)
+
+
+def test_resolve_idle_pct_threshold_uses_default_when_env_unset(monkeypatch):
+    monkeypatch.delenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, raising=False)
+    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+
+
+def test_resolve_idle_pct_threshold_honours_env_override(monkeypatch):
+    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "35.5")
+    assert tla._resolve_idle_pct_threshold() == pytest.approx(35.5)
+
+
+def test_resolve_idle_pct_threshold_rejects_nonsense_env_value(monkeypatch):
+    """Operators who paste garbage into the env var should get the default,
+    not a crash. The shape of this code defends against silent failure
+    by validating ``float()`` and the non-negative guard."""
+    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "not-a-float")
+    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "-5")
+    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "")
+    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+
+
+def test_build_high_idle_warning_shape(tmp_path):
+    """The structured warning is the contract between
+    ``tracelens_analysis`` and ``select_kernels_handler`` (T4). Pin the
+    shape: code, severity, idle_pct (rounded), threshold_pct (rounded),
+    source path, and a human-readable message that names both numbers."""
+    report = tmp_path / "analysis.md"
+    report.write_text("# noop\n", encoding="utf-8")
+    # 42.567 → round-to-2 = 42.57 (unambiguous, avoids banker's-rounding
+    # ties that bite e.g. 42.345 → 42.34 on Python's round()).
+    w = tla._build_high_idle_warning(
+        idle_pct=42.567, threshold_pct=20.0, report_path=report,
+    )
+    assert w["code"] == "high_gpu_idle_pct"
+    assert w["severity"] == "warning"
+    assert w["idle_pct"] == pytest.approx(42.57)
+    assert w["threshold_pct"] == pytest.approx(20.0)
+    assert w["source"] == str(report)
+    # The pre-rounded value (3 d.p.) shows up in the message via :.2f
+    # formatting → "42.57%", and the threshold uses the same formatter.
+    assert "42.57%" in w["message"]
+    assert "20.00%" in w["message"]
+    assert "parameter optimization" in w["message"]
+
+
+def test_build_audit_summary_propagates_trace_health_warnings():
+    """``summary.json`` (the audit sidecar) must surface the same
+    structured warnings as the JSON-RPC ``result`` so an operator
+    inspecting the on-disk artefact and the live response see the same
+    findings."""
+    warnings = [
+        {
+            "code": "high_gpu_idle_pct",
+            "severity": "warning",
+            "idle_pct": 35.0,
+            "threshold_pct": 20.0,
+            "source": "/tmp/x/analysis.md",
+            "message": "test",
+        }
+    ]
+    summary = tla.build_audit_summary(
+        [],
+        trace_input="/tmp/trace.json.gz",
+        framework="sglang",
+        target_platform="MI300X",
+        task_groups=[],
+        trace_health_warnings=warnings,
+    )
+    assert summary["trace_health_warnings"] == warnings
+    assert summary["task_count"] == 0
+    assert summary["skipped_count"] == 0
+
+
+def test_build_audit_summary_defaults_trace_health_warnings_to_empty_list():
+    """Steady-state (no findings) is the empty list — never ``None`` —
+    so downstream consumers can ``for w in summary[...]`` without a
+    ``None`` guard."""
+    summary = tla.build_audit_summary(
+        [],
+        trace_input="/tmp/trace.json.gz",
+        framework="sglang",
+        target_platform="MI300X",
+        task_groups=[],
+    )
+    assert summary["trace_health_warnings"] == []
