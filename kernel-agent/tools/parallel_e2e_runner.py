@@ -300,7 +300,19 @@ def main() -> int:
                              "'llm' single-shot backend was removed (max_tokens=2048 "
                              "truncated >4KB kernels).")
     parser.add_argument("--oob-max-turns", type=int, default=100)
-    parser.add_argument("--geak-cost-limit", type=float, default=None)
+    # Mirror kernel_optimization.py's default: 0.0 = unlimited, aligning with
+    # GEAK's geak.yaml `cost_limit: 0.` contract. GEAK's sub-agent fallback
+    # path would otherwise cap each attempt at $3.0 (the dataclass default in
+    # ``minisweagent/agents/default.py``), killing sub-agents after ~50 steps.
+    parser.add_argument(
+        "--geak-cost-limit",
+        type=float,
+        default=float(os.environ.get("HYPERLOOM_GEAK_COST_LIMIT", "0.0")),
+        help=(
+            "Per-attempt GEAK cost cap in USD; 0 means unlimited (mirrors "
+            "GEAK's geak.yaml). Override via $HYPERLOOM_GEAK_COST_LIMIT."
+        ),
+    )
     parser.add_argument("--num-gpus-override", type=int, default=0,
                         help="If >0, override candidate.num_gpus_recommended for "
                              "every backend task. Use 2 to test the multi-GPU "
