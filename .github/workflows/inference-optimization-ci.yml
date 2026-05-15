@@ -13,6 +13,13 @@ on:
         description: 'Trigger reason'
         required: false
         default: 'manual'
+  # PR-approve trigger: when a maintainer approves a PR, run the canonical
+  # comparison model (dsr1) on PR head so reviewers can compare InferenceX
+  # numbers against the PR's prompt/config changes before merging.
+  # GitHub already restricts pull_request_review to repo collaborators on
+  # private repos, so secret-injection risk is bounded.
+  pull_request_review:
+    types: [submitted]
 
 env:
   SAFE_BASE_URL: ${{ secrets.SAFE_BASE_URL }}
@@ -28,16 +35,26 @@ jobs:
   prepare:
     name: Prepare Model Matrix
     runs-on: ubuntu-latest
+    # Skip the run entirely on review events that aren't approvals (so a
+    # plain "comment" or "request_changes" review doesn't burn a hyperloom
+    # GPU job slot).
+    if: github.event_name != 'pull_request_review' || github.event.review.state == 'approved'
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
+      # On pull_request_review, default checkout uses the PR's *base* branch.
+      # We want PR head so the comparison reflects the proposed changes.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Generate matrix
         id: matrix
         working-directory: ci
         env:
-          INPUT_MODELS: ${{ github.event.inputs.models }}
+          # PR-approve trigger forces dsr1 (the canonical InferenceX comparison
+          # model). Other triggers honor the workflow_dispatch input.
+          INPUT_MODELS: ${{ github.event_name == 'pull_request_review' && 'dsr1-fp8-mi300x-sglang' || github.event.inputs.models }}
         run: |
           pip3 install -q pyyaml 2>/dev/null || pip install -q pyyaml
           python3 generate_matrix.py
@@ -54,6 +71,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Report latest InferenceX image versions
         continue-on-error: true
@@ -75,8 +94,18 @@ jobs:
 
       - name: Run optimization
         working-directory: ci
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER:  ${{ github.event.pull_request.number }}
+          INPUT_REASON: ${{ github.event.inputs.trigger_reason }}
         run: |
-          TRIGGER="${{ github.event.inputs.trigger_reason || 'scheduled' }}"
+          if [ -n "${INPUT_REASON:-}" ]; then
+            TRIGGER="$INPUT_REASON"
+          elif [ "$EVENT_NAME" = "pull_request_review" ]; then
+            TRIGGER="pr-approve-comparison-PR${PR_NUMBER:-?}"
+          else
+            TRIGGER="scheduled"
+          fi
           python3 orchestrator.py \
             --trigger "$TRIGGER" \
             --models "${{ matrix.key }}" \
