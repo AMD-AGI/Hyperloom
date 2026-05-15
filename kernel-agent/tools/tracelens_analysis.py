@@ -9,13 +9,11 @@ local validation without requiring TraceLens to be installed.
 from __future__ import annotations
 
 import argparse
-import ast
 import asyncio
 import gzip
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,7 +29,6 @@ from tracelens_skill_runner import (
     extract_idle_pct_from_analysis_md,
     normalize_upstream_category,
     parse_analysis_md,
-    raw_candidates_from_priority_data,
     run_tracelens_skill,
 )
 
@@ -112,15 +109,6 @@ RUNTIME_API_NAMES = {
     "cudastreamsynchronize",
 }
 DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
-
-# TraceLens perf-report CLI for vLLM/SGLang inference traces (issue #124
-# Bug 1). It assumes graph-replay execution and emits the fields that
-# downstream fusion / roofline analysis expects. Hyperloom is
-# inference-only since v0.4, so the legacy ``..._pytorch`` (training)
-# fallback that used to live here has been removed — a missing inference
-# CLI is now a hard error rather than a silent degradation to a CLI
-# whose output shape doesn't match the inference-analysis contract.
-INFERENCE_PERF_CLI = "TraceLens_generate_perf_report_pytorch_inference"
 
 
 def utc_now() -> str:
@@ -829,153 +817,6 @@ def upgrade_pybind_shim_source(source_file: str, kernel_name: str,
     return source_file
 
 
-# ---------------------------------------------------------------------------
-# B path: prefer TraceLens-generated kernel_summary csv
-# ---------------------------------------------------------------------------
-# TraceLens already does the right thing — it uses the cuda graph parent +
-# hipGraphLaunch parent_cpu_op join to count REAL device time per kernel
-# launch (and skips the host-side `cuda::synchronize` python-frame events
-# that confused our raw parser). Reading TraceLens's own csv output is
-# both (a) more accurate and (b) auto-tracks future TraceLens improvements.
-# Schema (from `--enable_kernel_summary --output_csvs_dir <dir>`):
-#   columns: Parent op category | Parent cpu_op | Kernel name |
-#            Kernel stream | Kernel duration (µs)_sum |
-#            Kernel duration (µs)_count | Kernel duration (µs)_mean | ...
-# We pick top_k by sum-duration and aggregate variants whose names
-# differ only by template parameters (Cijk_*MT256x16x64 vs Cijk_*MT16x16x512
-# stay separate — they ARE different rocBLAS variants — but the same
-# bf16 add_rmsnorm_quant_kernel called from 2 stream_ids merges).
-
-_TRACELENS_REQUIRED_COLS = (
-    "Kernel name",
-    "Kernel duration (\u00b5s)_sum",
-    "Kernel duration (\u00b5s)_count",
-)
-
-
-def parse_tracelens_kernel_summary(
-    csv_path: Path, top_k: int,
-) -> list[dict[str, Any]] | None:
-    """Read TraceLens's ``kernel_summary.csv`` → wrapper schema (top_k).
-
-    Returns ``None`` if the csv doesn't exist, is missing required columns,
-    or contains zero kernel rows — the caller falls back to the raw parser.
-    """
-    import csv as _csv  # localised; we don't want a hard import at module load
-    if not csv_path.exists():
-        return None
-    try:
-        with csv_path.open(encoding="utf-8") as f:
-            rdr = _csv.DictReader(f)
-            field_lookup = {h.lower(): h for h in (rdr.fieldnames or [])}
-            for required in _TRACELENS_REQUIRED_COLS:
-                if required.lower() not in field_lookup:
-                    return None
-            name_col = field_lookup["kernel name"]
-            sum_col = field_lookup["kernel duration (\u00b5s)_sum"]
-            count_col = field_lookup["kernel duration (\u00b5s)_count"]
-            # #125: Parent op category column is optional — older TraceLens
-            # builds may not emit it; we degrade gracefully when missing.
-            cat_col = field_lookup.get("parent op category")
-            rows = []
-            for r in rdr:
-                name = (r.get(name_col) or "").strip()
-                if not name:
-                    continue
-                try:
-                    dur = float(r.get(sum_col) or 0)
-                except ValueError:
-                    continue
-                try:
-                    cnt = int(float(r.get(count_col) or 0))
-                except ValueError:
-                    cnt = 0
-                if dur <= 0:
-                    continue
-                row = {"name": name, "duration_us": dur, "call_count": cnt,
-                       "tracelens_category": ""}
-                if cat_col:
-                    row["tracelens_category"] = (r.get(cat_col) or "").strip()
-                rows.append(row)
-    except Exception:
-        return None
-    if not rows:
-        return None
-    # Aggregate same-name rows (same kernel launched on multiple streams).
-    agg: dict[str, dict[str, Any]] = {}
-    for r in rows:
-        bucket = agg.setdefault(
-            r["name"],
-            {"name": r["name"], "duration_us": 0.0, "call_count": 0,
-             "source_file": "", "source_type": "unknown", "shapes": [],
-             "tracelens_category": ""},
-        )
-        bucket["duration_us"] += r["duration_us"]
-        bucket["call_count"] += r["call_count"]
-        # First non-empty category wins (variants of same kernel rarely
-        # straddle different framework-side categories).
-        if not bucket["tracelens_category"] and r.get("tracelens_category"):
-            bucket["tracelens_category"] = r["tracelens_category"]
-    total_dur = sum(c["duration_us"] for c in agg.values())
-    top = sorted(agg.values(), key=lambda x: x["duration_us"], reverse=True)[:top_k]
-    return _finalize_candidates(top, total_dur=total_dur)
-
-
-def _safe_literal(value: Any) -> Any:
-    if value in (None, ""):
-        return None
-    try:
-        return ast.literal_eval(str(value))
-    except (SyntaxError, ValueError):
-        return None
-
-
-def _shape_to_jsonable(value: Any) -> Any:
-    if isinstance(value, tuple):
-        return [_shape_to_jsonable(v) for v in value]
-    if isinstance(value, list):
-        return [_shape_to_jsonable(v) for v in value]
-    return value
-
-
-def _non_scalar_shapes(input_dims: Any) -> list[Any]:
-    parsed = _safe_literal(input_dims)
-    if parsed is None:
-        return []
-    if not isinstance(parsed, (list, tuple)):
-        parsed = (parsed,)
-    shapes: list[Any] = []
-    for dim in parsed:
-        if dim in (None, "", (), []):
-            continue
-        shape = _shape_to_jsonable(dim)
-        if shape not in shapes:
-            shapes.append(shape)
-    return shapes
-
-
-def _non_scalar_dtypes(input_types: Any) -> list[str]:
-    parsed = _safe_literal(input_types)
-    if parsed is None:
-        return []
-    if not isinstance(parsed, (list, tuple)):
-        parsed = (parsed,)
-    dtypes: list[str] = []
-    for dtype in parsed:
-        text = str(dtype or "").strip()
-        if not text or text.lower() == "scalar":
-            continue
-        if text not in dtypes:
-            dtypes.append(text)
-    return dtypes
-
-
-def _append_unique_list(target: list[Any], values: list[Any]) -> None:
-    for value in values:
-        if value not in target:
-            target.append(value)
-
-
 def _coerce_count(value: Any) -> int | None:
     if value in (None, ""):
         return None
@@ -987,46 +828,6 @@ def _coerce_count(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return count if count > 0 else None
-
-
-def _kernel_detail_call_count(details: Any, kernel_name: str) -> int | None:
-    parsed = _safe_literal(details)
-    if isinstance(parsed, list):
-        total = 0
-        for entry in parsed:
-            if not isinstance(entry, dict) or entry.get("name") != kernel_name:
-                continue
-            count = _coerce_count(entry.get("count") or entry.get("call_count"))
-            if count:
-                total += count
-        return total or None
-
-    text = str(details or "")
-    if kernel_name not in text:
-        return None
-    pattern = re.compile(
-        r"\{[^{}]*['\"]name['\"]\s*:\s*['\"]"
-        + re.escape(kernel_name)
-        + r"['\"][^{}]*['\"]count['\"]\s*:\s*([^,}]+)"
-    )
-    total = 0
-    for match in pattern.finditer(text):
-        count = _coerce_count(match.group(1))
-        if count:
-            total += count
-    return total or None
-
-
-def _row_call_count(row: dict[str, Any], details_col: str, name: str,
-                    operation_count_col: str | None) -> int:
-    detail_count = _kernel_detail_call_count(row.get(details_col), name)
-    if detail_count:
-        return detail_count
-    if operation_count_col:
-        op_count = _coerce_count(row.get(operation_count_col))
-        if op_count:
-            return op_count
-    return 1
 
 
 def _merge_shape_call(target: list[Any], shape: Any, call_num: int) -> None:
@@ -1055,330 +856,12 @@ def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any
     return entries
 
 
-def _materialized_output_stride(perf_params: dict[str, Any]) -> bool:
-    stride = perf_params.get("stride_output")
-    return stride not in (None, "", (), [])
-
-
-def _output_shapes_from_perf_params(perf_params: Any) -> list[Any]:
-    parsed = _safe_literal(perf_params)
-    if not isinstance(parsed, dict):
-        return []
-
-    shapes: list[Any] = []
-
-    def add_shape(value: Any) -> None:
-        if value in (None, "", (), []):
-            return
-        shape = _shape_to_jsonable(value)
-        if shape in (None, "", [], ()):
-            return
-        if shape not in shapes:
-            shapes.append(shape)
-
-    for key in ("shape_out", "output_shape"):
-        add_shape(parsed.get(key))
-
-    output_shapes = parsed.get("output_shapes")
-    if isinstance(output_shapes, (list, tuple)):
-        jsonable_output_shapes = _shape_to_jsonable(output_shapes)
-        if (
-            isinstance(jsonable_output_shapes, list)
-            and jsonable_output_shapes
-            and all(isinstance(shape, list) for shape in jsonable_output_shapes)
-        ):
-            for shape in output_shapes:
-                add_shape(shape)
-        else:
-            add_shape(output_shapes)
-
-    if _materialized_output_stride(parsed):
-        add_shape(parsed.get("op_shape"))
-
-    return shapes
-
-
-def _output_dtypes_from_perf_params(perf_params: Any) -> list[str]:
-    parsed = _safe_literal(perf_params)
-    if not isinstance(parsed, dict):
-        return []
-
-    dtypes: list[str] = []
-
-    def add_dtype(value: Any) -> None:
-        text = str(value or "").strip()
-        if not text or text.lower() in {"none", "scalar"}:
-            return
-        if text not in dtypes:
-            dtypes.append(text)
-
-    for key in ("dtype_out", "output_dtype", "output_type"):
-        add_dtype(parsed.get(key))
-
-    for key in ("dtype_in_out", "dtype_in1_in2_out"):
-        value = parsed.get(key)
-        if isinstance(value, (list, tuple)) and value:
-            add_dtype(value[-1])
-
-    return dtypes
-
-
-def augment_csv_candidates_with_unified_perf_summary(
-    candidates: list[dict[str, Any]], csv_path: Path,
-) -> None:
-    """Backfill TraceLens shapes/dtypes from unified_perf_summary.csv."""
-    import csv as _csv
-    if not candidates or not csv_path.exists():
-        return
-    by_name = {str(c.get("name") or ""): c for c in candidates if c.get("name")}
-    if not by_name:
-        return
-    try:
-        with csv_path.open(encoding="utf-8") as f:
-            rdr = _csv.DictReader(f)
-            field_lookup = {h.lower(): h for h in (rdr.fieldnames or [])}
-            details_col = field_lookup.get("kernel_details_summary")
-            dims_col = field_lookup.get("input dims")
-            type_col = field_lookup.get("input type")
-            perf_params_col = field_lookup.get("perf_params")
-            operation_count_col = field_lookup.get("operation_count")
-            op_col = field_lookup.get("name")
-            if not details_col or not dims_col or not type_col:
-                return
-            for row in rdr:
-                details = str(row.get(details_col) or "")
-                if not details:
-                    continue
-                for name, candidate in by_name.items():
-                    if name not in details:
-                        continue
-                    shapes = _non_scalar_shapes(row.get(dims_col))
-                    dtypes = _non_scalar_dtypes(row.get(type_col))
-                    output_shapes = _output_shapes_from_perf_params(
-                        row.get(perf_params_col) if perf_params_col else None
-                    )
-                    output_dtypes = _output_dtypes_from_perf_params(
-                        row.get(perf_params_col) if perf_params_col else None
-                    )
-                    if shapes:
-                        input_shapes = candidate.setdefault("input_shapes", [])
-                        if isinstance(input_shapes, list):
-                            call_count = _row_call_count(
-                                row, details_col, name, operation_count_col,
-                            )
-                            for shape in shapes:
-                                _merge_shape_call(input_shapes, shape, call_count)
-                        legacy_shapes = candidate.setdefault("shapes", [])
-                        if isinstance(legacy_shapes, list):
-                            _append_unique_list(legacy_shapes, shapes)
-                    if dtypes:
-                        existing_dtypes = candidate.setdefault("input_dtypes", [])
-                        if isinstance(existing_dtypes, list):
-                            _append_unique_list(existing_dtypes, dtypes)
-                    if output_shapes:
-                        existing_output_shapes = candidate.setdefault("output_shapes", [])
-                        if isinstance(existing_output_shapes, list):
-                            _append_unique_list(existing_output_shapes, output_shapes)
-                    if output_dtypes:
-                        existing_output_dtypes = candidate.setdefault("output_dtypes", [])
-                        if isinstance(existing_output_dtypes, list):
-                            _append_unique_list(existing_output_dtypes, output_dtypes)
-                    runtime_args = candidate.setdefault("runtime_args", {})
-                    if isinstance(runtime_args, dict):
-                        args_rows = runtime_args.setdefault("tracelens_args", [])
-                        if isinstance(args_rows, list):
-                            item = {
-                                "op": str(row.get(op_col) or ""),
-                                "input_dims": row.get(dims_col) or "",
-                                "input_types": row.get(type_col) or "",
-                            }
-                            if item not in args_rows:
-                                args_rows.append(item)
-    except Exception:
-        return
-
-
-# ---------------------------------------------------------------------------
-# #125: TraceLens orchestrator structured outputs (category_data/*.json)
-# ---------------------------------------------------------------------------
-# When the analysis-orchestrator skill runs (Step 5+), TraceLens
-# emits per-category JSON files carrying the GEAK-required triple
-# (kernel_category, kernel_shape, kernel_path) directly. We consume them
-# when present; otherwise we fall back to the kernel_summary.csv parser
-# (with shape backfill from raw trace) or, as a last resort, the legacy
-# raw-trace parser.
-#
-# The schema is still being negotiated with the TraceLens team
-# (traceLens-issue.md §3.4.5 / §7.2). We accept three observed layouts:
-#
-#   (1) {"category": "GEMM", "kernels": [{name, duration_us, shape,
-#                                          source_path, ...}, ...]}
-#   (2) {"name": "GEMM", "items": [...]}                # alt key names
-#   (3) {"GEMM": [...], "SDPA": [...]}                  # flat dict-of-lists
-
-
-def _extract_category_kernels(payload: Any) -> list[dict[str, Any]]:
-    """Best-effort kernel list extractor for category_data layouts."""
-    out: list[dict[str, Any]] = []
-    if isinstance(payload, dict):
-        cat = (payload.get("category") or payload.get("name") or "").strip()
-        kernels = payload.get("kernels") or payload.get("items") or payload.get("entries")
-        if isinstance(kernels, list):
-            for k in kernels:
-                if isinstance(k, dict):
-                    item = dict(k)
-                    if cat and not item.get("category"):
-                        item["category"] = cat
-                    out.append(item)
-            return out
-        # Flat dict-of-lists layout.
-        for k, v in payload.items():
-            if isinstance(v, list):
-                for entry in v:
-                    if isinstance(entry, dict):
-                        item = dict(entry)
-                        item.setdefault("category", k)
-                        out.append(item)
-    elif isinstance(payload, list):
-        for entry in payload:
-            if isinstance(entry, dict):
-                out.append(entry)
-    return out
-
-
-def parse_tracelens_category_data(
-    category_dir: Path, top_k: int,
-) -> list[dict[str, Any]] | None:
-    """Read TraceLens ``category_data/*.json`` → candidates with the GEAK
-    (kernel_category, shape, source_path) triple (#125).
-
-    Returns ``None`` when the directory doesn't exist, is empty, or yields
-    no parseable kernels. Caller falls back to the csv parser.
-    """
-    if not category_dir.exists() or not category_dir.is_dir():
-        return None
-
-    rows: list[dict[str, Any]] = []
-    for jp in sorted(category_dir.glob("*.json")):
-        try:
-            payload = json.loads(jp.read_text(encoding="utf-8", errors="replace"))
-        except Exception:
-            continue
-        for entry in _extract_category_kernels(payload):
-            name = str(entry.get("name") or entry.get("kernel_name") or "").strip()
-            if not name:
-                continue
-            try:
-                dur = float(
-                    entry.get("duration_us")
-                    or entry.get("duration")
-                    or entry.get("sum_duration_us")
-                    or 0
-                )
-            except (TypeError, ValueError):
-                continue
-            if dur <= 0:
-                continue
-            try:
-                cnt = int(float(entry.get("call_count") or entry.get("count") or 0))
-            except (TypeError, ValueError):
-                cnt = 0
-            shape = entry.get("shape") or entry.get("input_shape") or entry.get("shapes")
-            shapes_field: list[Any] = []
-            if isinstance(shape, list):
-                shapes_field = [shape] if shape and not isinstance(shape[0], (list, dict)) else list(shape)
-            elif shape:
-                shapes_field = [shape]
-            source_path = str(
-                entry.get("source_path") or entry.get("source_file")
-                or entry.get("path") or ""
-            ).strip()
-            rows.append({
-                "name": name,
-                "duration_us": dur,
-                "call_count": cnt,
-                "tracelens_category": str(entry.get("category") or "").strip(),
-                "shapes": shapes_field,
-                "source_file": source_path,
-            })
-
-    if not rows:
-        return None
-
-    # Aggregate same-name rows (rare across category files but defensive).
-    agg: dict[str, dict[str, Any]] = {}
-    for r in rows:
-        bucket = agg.setdefault(
-            r["name"],
-            {"name": r["name"], "duration_us": 0.0, "call_count": 0,
-             "source_file": r["source_file"],
-             "source_type": "unknown",
-             "shapes": [],
-             "tracelens_category": r["tracelens_category"]},
-        )
-        bucket["duration_us"] += r["duration_us"]
-        bucket["call_count"] += r["call_count"]
-        for sh in r["shapes"]:
-            if sh not in bucket["shapes"]:
-                bucket["shapes"].append(sh)
-        if not bucket["source_file"] and r["source_file"]:
-            bucket["source_file"] = r["source_file"]
-        if not bucket["tracelens_category"] and r["tracelens_category"]:
-            bucket["tracelens_category"] = r["tracelens_category"]
-
-    total_dur = sum(c["duration_us"] for c in agg.values())
-    top = sorted(agg.values(), key=lambda x: x["duration_us"], reverse=True)[:top_k]
-    return _finalize_candidates(top, total_dur=total_dur)
-
-
-def augment_csv_candidates_with_raw_shapes(
-    candidates: list[dict[str, Any]], trace_files: list[Path],
-) -> None:
-    """Best-effort shape backfill for csv-only candidates (#125).
-
-    The csv parser doesn't carry shape info because ``kernel_summary.csv``
-    aggregates by kernel name and drops per-launch ``Input Dims``. We mine
-    the raw trace once for any candidate whose ``shapes`` list is still
-    empty. Failures are silent — this is enrichment, not a hard requirement.
-    """
-    needs_shape = [c for c in candidates if not c.get("shapes")]
-    if not needs_shape:
-        return
-    name_set = {c["name"] for c in needs_shape}
-    found: dict[str, list[Any]] = {}
-    for tf in trace_files:
-        try:
-            payload = open_json(tf)
-        except Exception:
-            continue
-        events = payload.get("traceEvents") if isinstance(payload, dict) else None
-        if not isinstance(events, list):
-            continue
-        for ev in events:
-            if not isinstance(ev, dict) or not is_kernel_event(ev):
-                continue
-            ename = str(ev.get("kernel_name") or ev.get("name") or "")
-            if ename not in name_set:
-                continue
-            shape = extract_shape(ev)
-            if not shape:
-                continue
-            bucket = found.setdefault(ename, [])
-            if shape not in bucket:
-                bucket.append(shape)
-    for cand in needs_shape:
-        sh = found.get(cand["name"])
-        if sh:
-            cand["shapes"] = sh
-
-
 def derive_kernel_category(candidate: dict[str, Any]) -> str:
     """Map a candidate to its GEAK-facing kernel category (#125).
 
     Priority:
       1. Explicit category from TraceLens (the ``analysis.md`` 9-column table
-         in the Detailed Analysis section, or the legacy
-         ``priority_data.findings[].category`` / category_data ``category``).
+         in the Detailed Analysis section).
          Mapped via the upstream ``CATEGORY_SKILL_MAP`` keyset
          (``orchestrator_prepare.py``) — see PR #155 review comment from
          @tsrikris (TraceLens team).
@@ -1482,9 +965,7 @@ def _finalize_candidates(
 ) -> list[dict[str, Any]]:
     """Apply source resolution / pybind upgrade / backend recommend / notes.
 
-    Shared post-processing for both the raw-trace parser
-    (``analyze_trace_files``) and the TraceLens csv parser
-    (``parse_tracelens_kernel_summary``). Mutates ``top`` in place.
+    Shared post-processing for parsed candidate rows. Mutates ``top`` in place.
     """
     sum_dur = total_dur if total_dur is not None else sum(it.get("duration_us", 0.0) for it in top)
     sum_dur = sum_dur or 1.0
@@ -1494,7 +975,7 @@ def _finalize_candidates(
         item.setdefault("source_type", "unknown")
         item.setdefault("shapes", [])
         item["kernel_id"] = f"k{idx:03d}"
-        # Honour pre-computed gpu_pct (B path), else compute now.
+        # Honour pre-computed gpu_pct when present, else compute now.
         if not item.get("gpu_pct"):
             item["gpu_pct"] = round(item["duration_us"] / sum_dur * 100.0, 3)
         item["duration_us"] = round(item["duration_us"], 3)
@@ -1541,9 +1022,9 @@ def _finalize_candidates(
         item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
         item["recommended_backends"] = recommend_backends(item)
         item["optimization_notes"] = build_notes(item)
-        # #125: surface a stable kernel_category for GEAK to dispatch on,
-        # plus source_path mirror for parity with TraceLens category_data.
-        # shape is already populated in `shapes`.
+        # Surface a stable kernel_category for GEAK to dispatch on, plus a
+        # source_path mirror for downstream prompt/report consumers. Shape is
+        # already populated in `shapes`.
         item["kernel_category"] = derive_kernel_category(item)
         item.setdefault("source_path", item.get("source_file", ""))
     return top
@@ -1598,27 +1079,6 @@ def build_notes(candidate: dict[str, Any]) -> str:
     if not candidate.get("reusable_native_kernel", is_reusable_native_kernel(candidate)):
         return "not a reusable native source; kernel-opt disabled"
     return f"resolved source: {candidate['source_file']}"
-
-
-def select_perf_report_cli(log_path: Path) -> str:
-    """Pick the TraceLens perf-report CLI for the current install (#124).
-
-    Hyperloom is inference-only since v0.4, so the only accepted CLI is
-    ``TraceLens_generate_perf_report_pytorch_inference``. The legacy
-    training-mode ``TraceLens_generate_perf_report_pytorch`` fallback
-    was removed because (a) the two CLIs emit different field shapes
-    (the training CLI's output silently breaks the downstream
-    fusion / roofline analyzers) and (b) Hyperloom never targets
-    training workloads. A missing inference CLI is a hard error.
-    """
-    if shutil.which(INFERENCE_PERF_CLI):
-        append_log(log_path, f"perf report CLI: {INFERENCE_PERF_CLI} (TraceLens #124)")
-        return INFERENCE_PERF_CLI
-    raise RuntimeError(
-        f"TraceLens perf-report CLI {INFERENCE_PERF_CLI!r} not on PATH. "
-        "Hyperloom is inference-only since v0.4; bump TraceLens-internal to a "
-        "version that ships the inference perf-report CLI."
-    )
 
 
 def run_command(cmd: list[str], *, cwd: Path | None, log_path: Path, timeout_s: int) -> int:
@@ -2151,7 +1611,11 @@ def main() -> int:
         "--no-llm-orchestrator",
         dest="use_llm_orchestrator",
         action="store_false",
-        help="Disable the Claude SDK TraceLens skill runner and use inline parsing only.",
+        help=(
+            "Disable the Claude SDK TraceLens skill runner. Production runs "
+            "will fail rather than falling back to intermediate/CSV candidate "
+            "parsers; --dry-run still uses the test-only raw parser."
+        ),
     )
     parser.add_argument(
         "--skip-split",
@@ -2215,6 +1679,7 @@ def main() -> int:
     artifacts: dict[str, str] = {}
     agent_candidates: list[dict[str, Any]] | None = None
     agent_report_path: Path | None = None
+    allow_empty_candidates = False
     orchestrator_mode = "inline"
     orchestrator_error = ""
     # T3: structured trace-health findings that the handler surfaces to
@@ -2270,11 +1735,6 @@ def main() -> int:
             run_command([sys.executable, "-m", "pip", "install", "-e", "."],
                         cwd=tl_root, log_path=log_path,
                         timeout_s=max(60, int(args.budget_minutes * 60)))
-            perf_cli = select_perf_report_cli(log_path)
-            rc = run_command([perf_cli, "--help"],
-                             cwd=tl_root, log_path=log_path, timeout_s=60)
-            if rc != 0:
-                raise RuntimeError(f"{perf_cli} --help failed")
             # TraceLens-internal v0.3 (#148): the standalone analysis skill
             # lives under TraceLens/Agent/Analysis/ with the shorter file name
             # `analysis-orchestrator.md` (renamed from
@@ -2418,19 +1878,11 @@ def main() -> int:
                     agent_report_path = skill_result.report_path
                     orchestrator_mode = "claude_agent_sdk"
 
-                    # Per PR #155 review (TraceLens team @tsrikris):
-                    # the final ``analysis.md`` report is the contracted exit
-                    # point; intermediate ``priority_data.json`` /
-                    # ``category_data/*.json`` are sub-agent inputs and should
-                    # not be the primary source. Try the report first; only if
-                    # the report has no Detailed Analysis blocks do we fall
-                    # back to ``priority_data.json`` (legacy path).
-                    #
-                    # T2 (this PR): ``priority_data_path`` may be ``None``
-                    # when the v0.3 SDK orchestrator didn't emit the sidecar
-                    # — ``Report_Interfacing.docx`` §2 explicitly disowns
-                    # intermediates, so a missing sidecar is normal and
-                    # must not trigger the legacy fallback at all.
+                    # Per TraceLens_Report_Interfacing.docx §2, the final
+                    # ``analysis.md`` report is the contracted exit point.
+                    # Intermediate sidecars / CSVs are not a production
+                    # fallback because they can hide malformed TraceLens
+                    # reports or incorrect profiling.
                     #
                     # T3 (this PR): before consuming any candidates, gate on
                     # the Executive Summary's ``Idle %``. When idle time
@@ -2453,6 +1905,8 @@ def main() -> int:
                         # idle_pct_value is known to be a float here because
                         # high_idle_detected required it to be not None.
                         assert idle_pct_value is not None
+                        agent_candidates = []
+                        allow_empty_candidates = True
                         trace_health_warnings.append(
                             _build_high_idle_warning(
                                 idle_pct=idle_pct_value,
@@ -2488,26 +1942,15 @@ def main() -> int:
                         if report_cands:
                             raw_agent_candidates = report_cands
                             report_source = "analysis.md"
-                        elif skill_result.priority_data_path is not None:
-                            legacy_cands = raw_candidates_from_priority_data(
-                                skill_result.priority_data_path, args.top_k,
-                            )
-                            if legacy_cands:
-                                raw_agent_candidates = legacy_cands
-                                report_source = "priority_data.json"
-                                append_log(
-                                    log_path,
-                                    "TraceLens analysis.md had no Detailed "
-                                    "Analysis blocks; falling back to "
-                                    "priority_data.json",
-                                )
                         else:
+                            agent_candidates = []
+                            allow_empty_candidates = True
                             append_log(
                                 log_path,
                                 "TraceLens analysis.md had no Detailed "
-                                "Analysis blocks and no priority_data.json "
-                                "sidecar was emitted (v0.3 contract: "
-                                "analysis.md is the single source of truth)."
+                                "Analysis compute candidate blocks "
+                                "(v0.3 contract: analysis.md is the single "
+                                "source of truth)."
                                 " Producing empty hot_kernels[] — "
                                 "downstream Coordinator will route to "
                                 "params/backends.",
@@ -2528,121 +1971,51 @@ def main() -> int:
                             f"{len(agent_candidates)} hot kernels "
                             f"(source={report_source})",
                         )
-                    else:
-                        orchestrator_mode = "claude_agent_sdk_with_inline_candidates"
-                        append_log(
-                            log_path,
-                            "WARNING: TraceLens SDK orchestrator produced no "
-                            "priority candidates; using inline parser for "
-                            "hot-kernel candidate extraction",
-                        )
                 except Exception as exc:  # noqa: BLE001
                     orchestrator_error = f"{type(exc).__name__}: {exc}"
                     append_log(
                         log_path,
                         f"WARNING: TraceLens SDK orchestrator failed; "
-                        f"falling back to inline parser: {type(exc).__name__}: {exc}",
+                        f"not falling back to intermediate/CSV candidate "
+                        f"parsers: {type(exc).__name__}: {exc}",
                     )
 
             if agent_candidates is None:
-                update_status(status_path, state="running", current_step="run_tracelens_cli",
-                              log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                              started_at=started_at)
-                csv_dir = tracelens_dir / "csvs"
-                xlsx_path = tracelens_dir / "perf_report.xlsx"
-                perf_cmd = [
-                    perf_cli,
-                    "--profile_json_path", str(cli_trace_path),
-                    "--output_xlsx_path", str(xlsx_path),
-                    "--output_csvs_dir", str(csv_dir),
-                    "--gpu_arch_json_path",
-                    str(tl_root / "TraceLens/Agent/Analysis/utils/arch" / f"{args.target_platform}.json"),
-                    "--include_unlinked_kernels",
-                    "--group_by_parent_module",
-                    "--enable_pseudo_ops",
-                    "--enable_kernel_summary",
-                    "--group_by_num_kernels",
-                ]
-                explicit_capture_folder = (
-                    Path(args.capture_folder).expanduser().resolve()
-                    if args.capture_folder else
-                    discover_capture_folder(Path(args.trace_input).expanduser().resolve(), trace_files)
+                raise RuntimeError(
+                    "TraceLens analysis.md was not produced; refusing to "
+                    "fall back to priority_data/category_data/CSV candidate "
+                    "parsers because analysis.md is the single source of truth."
                 )
-                if explicit_capture_folder:
-                    perf_cmd += ["--capture_folder", str(explicit_capture_folder)]
-                rc = run_command(perf_cmd, cwd=None, log_path=log_path,
-                    timeout_s=max(60, int(args.budget_minutes * 60)))
-                if rc != 0:
-                    append_log(log_path, "WARNING: TraceLens report CLI failed; falling back to raw trace parser")
-                else:
-                    artifacts["tracelens_xlsx"] = str(xlsx_path)
-                    artifacts["tracelens_csv_dir"] = str(csv_dir)
         else:
             append_log(log_path, "[dry-run] skipping TraceLens install and external CLI")
 
         update_status(status_path, state="running", current_step="extract_hot_kernels",
                       log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                       started_at=started_at)
-        # Hot-kernel extraction priority (#125):
-        #   1. TraceLens orchestrator's category_data/*.json — the GEAK
-        #      (kernel_category, shape, source_path) triple is on disk
-        #   2. TraceLens kernel_summary.csv — name + duration + framework
-        #      category; we backfill shape from the raw trace
-        #   3. Raw-trace parser — last-resort legacy path
+        # Production candidate extraction is analysis.md-only. Intermediate
+        # sidecars / CSVs are not parsed as fallbacks.
         candidates = agent_candidates
         if candidates:
             append_log(
                 log_path,
                 f"hot kernels from TraceLens SDK orchestrator ({len(candidates)})",
             )
-        tl_csv_dir_local = artifacts.get("tracelens_csv_dir")
-        if not candidates and tl_csv_dir_local:
-            # category_data may sit peer-of-csv or inside-csv depending on
-            # the TraceLens release; probe both.
-            for cat_dir_candidate in (
-                Path(tl_csv_dir_local).parent / "category_data",
-                Path(tl_csv_dir_local) / "category_data",
-            ):
-                if cat_dir_candidate.exists() and cat_dir_candidate.is_dir():
-                    cat_candidates = parse_tracelens_category_data(
-                        cat_dir_candidate, args.top_k,
-                    )
-                    if cat_candidates:
-                        candidates = cat_candidates
-                        artifacts["tracelens_category_dir"] = str(cat_dir_candidate)
-                        append_log(
-                            log_path,
-                            f"hot kernels from TraceLens category_data "
-                            f"({len(candidates)}, src={cat_dir_candidate})",
-                        )
-                        break
-        if not candidates and tl_csv_dir_local:
-            tl_csv = Path(tl_csv_dir_local) / "kernel_summary.csv"
-            candidates = parse_tracelens_kernel_summary(tl_csv, args.top_k)
-            if candidates:
-                augment_csv_candidates_with_unified_perf_summary(
-                    candidates,
-                    Path(tl_csv_dir_local) / "unified_perf_summary.csv",
-                )
-                # #125: csv has no shape info; mine raw trace as best-effort.
-                augment_csv_candidates_with_raw_shapes(candidates, trace_files)
-                append_log(log_path,
-                           f"hot kernels from TraceLens csv "
-                           f"({len(candidates)}, src={tl_csv}); "
-                           f"shape backfill from raw trace")
         if not candidates:
-            if not args.dry_run:
+            if allow_empty_candidates:
+                candidates = []
+                append_log(
+                    log_path,
+                    "TraceLens produced no kernel candidates; returning "
+                    "empty hot_kernels[] without fallback so params/backends "
+                    "optimization can continue.",
+                )
+            elif not args.dry_run:
                 raise RuntimeError(
                     "No hot-kernel candidates produced by any TraceLens "
-                    "path: SDK orchestrator returned no Detailed-Analysis "
-                    "P-items AND perf-report CLI yielded neither "
-                    "category_data nor kernel_summary.csv usable rows. "
-                    "The legacy raw-trace parser fallback was removed in "
-                    "#203 because it silently papered over TraceLens-side "
-                    "failures with low-quality grep-based source "
-                    "resolution. Inspect the TraceLens skill log at the "
-                    "path above and file an upstream issue if "
-                    "reproducible."
+                    "analysis.md path. Refusing intermediate/CSV/raw-trace "
+                    "fallbacks because analysis.md is the single source of "
+                    "truth. Inspect the TraceLens skill log and report "
+                    "upstream if reproducible."
                 )
             # ``--dry-run`` is the test-only path that bypasses TraceLens
             # install / CLI / SDK orchestrator entirely. It still parses
