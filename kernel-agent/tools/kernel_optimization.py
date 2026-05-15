@@ -1929,9 +1929,6 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
     artifact_valid = bool(best_artifact_path)
     correctness_signal = getattr(args, "correctness_passed", None)
     correctness_source = "cli_override" if correctness_signal is not None else "missing"
-    if correctness_signal is None and getattr(args, "accuracy_passed", None) is True:
-        correctness_signal = True
-        correctness_source = "accuracy_override"
     if correctness_signal is None and best is not None:
         bp = best.get("backend_paths") or {}
         correctness_signal = _extract_correctness_from_report(
@@ -1946,6 +1943,9 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
         )
         if correctness_signal is not None:
             correctness_source = "geak_report"
+    if correctness_signal is None and getattr(args, "accuracy_passed", None) is True:
+        correctness_signal = True
+        correctness_source = "accuracy_override"
     correctness_passed = bool(best and correctness_signal is True)
     if args.micro_speedup is not None:
         micro_speedup = float(args.micro_speedup)
