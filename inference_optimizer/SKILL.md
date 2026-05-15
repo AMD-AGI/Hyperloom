@@ -83,7 +83,9 @@ you want a fully self-contained session.
 
 Paths emitted by agents must resolve under `$SESSION_DIR` — PolicyGate
 enforces this (with a framework-source allowlist for `source_file`:
-`/sgl-workspace/{aiter,sglang,vllm}/`).
+`/sgl-workspace/{aiter,sglang,vllm}/` plus any paths in
+`$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` — colon-separated, unioned
+with defaults; auto-probed by `inference_optimizer/scripts/install.sh`).
 
 Always prefer `manifest.json` / `state.json` / `coordinator.db` over
 guessing from terminal logs.
@@ -866,6 +868,7 @@ direct Codex). See `## Critic Backend Selection`.
 - Repeated `select_kernels` with unchanged trace/config: bug — reuse `last_select_kernels`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
 - `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
+- `stop_reason=policy_loop`: Coordinator hit ≥10 consecutive `policy_denied` events for the same action/rule pair; all top actions may be locked or pruned. Inspect `SharedState.policy_denial_history` and the per-tick `Policy denials` block. To recover: manually edit `state.json` to remove the action from `pruned_families`, clear `policy_denial_streak` / `stop_reason`, and re-propose with fresh `params.grid` content (omit stale `idempotency_key`).
 - `stop_reason=time_exhausted`: resume same session (`--resume`); do not start fresh.
 
 ## Report Back To User
