@@ -3,22 +3,22 @@ name: "Inference A/B Test"
 on:
   workflow_dispatch:
     inputs:
-      tools_a:
-        description: 'A group: Claw tool IDs'
+      plugin_id_a:
+        description: 'A group: Claw plugin ID (e.g. 4 = current Hyperloom = wekafs inference_optimizer)'
         required: false
-        default: '74'
+        default: '4'
       label_a:
         description: 'A group label (shown in comparison table)'
         required: false
-        default: 'Baseline (no-update)'
-      tools_b:
-        description: 'B group: Claw tool IDs'
+        default: 'Plugin 4 (current)'
+      plugin_id_b:
+        description: 'B group: Claw plugin ID (override to compare a different plugin build)'
         required: false
-        default: '74'
+        default: '4'
       label_b:
         description: 'B group label (shown in comparison table)'
         required: false
-        default: 'Latest images (--update)'
+        default: 'Plugin 4 (control)'
       mode:
         description: 'ab = run both A and B, single = run B only (cheaper)'
         required: false
@@ -27,14 +27,6 @@ on:
         options:
           - ab
           - single
-      update_b:
-        description: 'Run group B with --update (latest images from InferenceX)'
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
       models:
         description: 'Comma-separated model keys (empty = all from ci-config.yaml)'
         required: false
@@ -88,7 +80,7 @@ jobs:
           python3 orchestrator.py \
             --trigger "ab-test-A" \
             --models "${{ matrix.key }}" \
-            --tools "${{ github.event.inputs.tools_a }}" \
+            --plugin-id "${{ github.event.inputs.plugin_id_a }}" \
             --output-dir "${{ github.workspace }}/ci-output"
 
       - name: Upload report
@@ -122,9 +114,8 @@ jobs:
           python3 orchestrator.py \
             --trigger "ab-test-B" \
             --models "${{ matrix.key }}" \
-            --tools "${{ github.event.inputs.tools_b }}" \
-            --output-dir "${{ github.workspace }}/ci-output" \
-            ${{ github.event.inputs.update_b == 'true' && '--update' || '' }}
+            --plugin-id "${{ github.event.inputs.plugin_id_b }}" \
+            --output-dir "${{ github.workspace }}/ci-output"
 
       - name: Upload report
         if: always()
@@ -188,7 +179,7 @@ jobs:
         run: |
           pip3 install -q requests 2>/dev/null || true
           python3 - <<'PYEOF'
-          import json, os, glob, ssl, urllib.request
+          import json, os, glob
 
           def load_summary(prefix):
               results = {}
@@ -198,62 +189,24 @@ jobs:
                       results[m["model"]] = m
               return results
 
-          def fetch_tool_configs(tool_ids_str):
-              api_key = os.environ.get("CLAW_API_KEY", "")
-              api_url = os.environ.get("SAFE_BASE_URL", "") + "/api/tools/api/v1/tools?offset=0&limit=100&order=desc"
-              ctx = ssl.create_default_context()
-              ctx.check_hostname = False
-              ctx.verify_mode = ssl.CERT_NONE
-              req = urllib.request.Request(api_url, headers={"Authorization": f"Bearer {api_key}"})
-              with urllib.request.urlopen(req, context=ctx) as resp:
-                  data = json.loads(resp.read())
-              all_tools = {t["id"]: t for t in data.get("tools", [])}
-              tool_ids = [int(x.strip()) for x in tool_ids_str.split(",")]
-              servers = {}
-              skill_name = None
-              for tid in tool_ids:
-                  t = all_tools.get(tid)
-                  if not t: continue
-                  if t["type"] == "mcp":
-                      for name, cfg in (t.get("config", {}).get("mcpServers", {})).items():
-                          servers[cfg.get("url", "")] = name
-                  elif t["type"] == "skill":
-                      skill_name = t["name"]
-              return servers, skill_name
+          def build_config_diff(plugin_id_a, plugin_id_b):
+              """Plugin-level diff: compare the two plugin IDs as opaque labels.
 
-          def build_config_diff(tools_a_str, tools_b_str, label_a, label_b):
-              try:
-                  a_urls, a_skill = fetch_tool_configs(tools_a_str)
-                  b_urls, b_skill = fetch_tool_configs(tools_b_str)
-              except Exception as e:
-                  print(f"API fetch failed, using labels only: {e}")
-                  return [], f"A: {label_a} (tools {tools_a_str}) | B: {label_b} (tools {tools_b_str})"
-
-              all_urls = sorted(set(list(a_urls.keys()) + list(b_urls.keys())))
-              diff_rows = []
-              diff_items = []
-              for url in all_urls:
-                  a_name = a_urls.get(url)
-                  b_name = b_urls.get(url)
-                  label = (a_name or b_name or "").replace("oci-", "").replace("-agent", "").replace("agent-mcp-", "").upper()
-                  if a_name and b_name:
-                      diff_rows.append((label, "Same", "Same", False))
-                  elif a_name:
-                      diff_rows.append((label, "Remote MCP", "N/A", True))
-                      diff_items.append(f"{label}: A=MCP, B=N/A")
-                  elif b_name:
-                      diff_rows.append((label, "N/A", "Remote MCP", True))
-                      diff_items.append(f"{label}: A=N/A, B=MCP")
-
-              if a_skill != b_skill:
-                  a_short = (a_skill or "").replace("inference-optimization-", "")
-                  b_short = (b_skill or "").replace("inference-optimization-", "")
-                  diff_rows.append(("Skill", a_short, b_short, True))
-              else:
-                  diff_rows.append(("Skill", "Same", "Same", False))
-
-              subtitle = " | ".join(diff_items) if diff_items else f"tools {tools_a_str} vs {tools_b_str}"
-              return diff_rows, subtitle
+              Plugins encapsulate tools / mcp servers / prompt templates
+              server-side, so the per-tool URL/skill expansion the old version
+              did is now hidden behind the plugin abstraction. If you need a
+              detailed breakdown, query GET /claw-api/v1/plugins/<id> manually
+              and add the column you need here.
+              """
+              if plugin_id_a == plugin_id_b:
+                  return (
+                      [("Plugin", f"plugin {plugin_id_a}", f"plugin {plugin_id_b}", False)],
+                      f"plugin {plugin_id_a} (control / reproducibility run)",
+                  )
+              return (
+                  [("Plugin", f"plugin {plugin_id_a}", f"plugin {plugin_id_b}", True)],
+                  f"plugin {plugin_id_a} vs plugin {plugin_id_b}",
+              )
 
           a = load_summary("A")
           b = load_summary("B")
@@ -262,10 +215,10 @@ jobs:
           mode = "${{ github.event.inputs.mode }}" or "ab"
           label_a = "Last CI (baseline)" if mode == "single" else ("${{ github.event.inputs.label_a }}" or "A")
           label_b = "${{ github.event.inputs.label_b }}" or "B"
-          tools_a = "${{ github.event.inputs.tools_a }}"
-          tools_b = "${{ github.event.inputs.tools_b }}"
+          plugin_id_a = "${{ github.event.inputs.plugin_id_a }}"
+          plugin_id_b = "${{ github.event.inputs.plugin_id_b }}"
 
-          config_diff, subtitle = build_config_diff(tools_a, tools_b, label_a, label_b)
+          config_diff, subtitle = build_config_diff(plugin_id_a, plugin_id_b)
 
           def fmt(v, suffix=""): return f"{v:.1f}{suffix}" if v is not None else "N/A"
 
