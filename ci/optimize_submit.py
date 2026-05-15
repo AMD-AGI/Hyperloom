@@ -143,12 +143,6 @@ def _proxy() -> str:
     return os.environ.get("HARBOR_PREFIX", DEFAULT_PROXY)
 
 
-# Default images — DEPRECATED as a true default. The CI A/B path needs to keep
-# the image pinned to whatever InferenceX published its public baseline on
-# (otherwise tok/s gains compare apples to oranges). These constants are kept
-# only as last-resort fallbacks for ad-hoc CLI usage; production callers (the
-# optimize-submit.yml workflow) should pass --image explicitly. detect_image()
-# logs a warning whenever a fallback is consumed.
 def _default_sglang_image() -> str:
     return f"{_proxy()}/lmsysorg/sglang:v0.5.10-rocm720-mi30x"
 
@@ -372,19 +366,7 @@ def detect_concurrency(tp: int, framework: str) -> int:
 
 
 def detect_image(framework: str) -> str:
-    """Pick a fallback image when the caller didn't pass --image.
-
-    Logs a warning so the operator knows the resulting baseline can't be
-    apples-to-apples compared against InferenceX (which publishes results
-    pinned to a specific image tag).
-    """
-    image = _default_vllm_image() if framework == "vllm" else _default_sglang_image()
-    log.warning(
-        "no --image passed; falling back to %s. To compare against InferenceX, "
-        "pass --image with the exact tag from InferenceX/.github/configs/amd-master.yaml.",
-        image,
-    )
-    return image
+    return _default_vllm_image() if framework == "vllm" else _default_sglang_image()
 
 
 def auto_detect(hf: HuggingFaceClient, repo_id: str) -> DetectedConfig | None:
@@ -553,7 +535,6 @@ class SafeOptimizeClient:
         mode: str = "local",
         gpu_type: str | None = None,
         inferencex_path: str | None = None,
-        plugin_id: int | None = None,
     ) -> dict:
         body = {
             "displayName": display_name,
@@ -577,14 +558,6 @@ class SafeOptimizeClient:
             body["gpuType"] = gpu_type
         if inferencex_path:
             body["inferencexPath"] = inferencex_path
-        # SaFE backend currently hardcodes plugin 4 + tools=[16,18] in
-        # apiserver/.../optimization/handler.go (NewOptimizationTask), so
-        # passing pluginId here is forward-compat only — useful once SaFE
-        # adds body-field passthrough so the same workflow can A/B test
-        # plugin 4 (Hyperloom -> wekafs inference_optimizer) against future
-        # plugins (e.g. when ci-mix300 / new skill versions get registered).
-        if plugin_id is not None:
-            body["pluginId"] = plugin_id
         return self._request("POST", "api/v1/optimization/tasks", body)
 
     # ── Task lifecycle ──
@@ -747,7 +720,6 @@ def process_model(
     mode: str,
     gpu_type: str | None = None,
     inferencex_path: str | None = None,
-    plugin_id: int | None = None,
 ) -> SubmissionRecord:
     rec = SubmissionRecord(
         model=repo_id,
@@ -811,8 +783,7 @@ def process_model(
     try:
         result = safe.submit_task(
             model_id, display_name, framework, precision, tp, conc, isl, osl, image,
-            mode=mode, gpu_type=gpu_type, inferencex_path=inferencex_path,
-            plugin_id=plugin_id)
+            mode=mode, gpu_type=gpu_type, inferencex_path=inferencex_path)
     except Exception as e:
         rec.status = "failed"
         rec.error = f"submit_task: {e}"
@@ -1062,13 +1033,6 @@ def _build_parser() -> argparse.ArgumentParser:
                              f"(defaults to $SAFE_OPTIMIZE_INFERENCEX_PATH then "
                              f"'{DEFAULT_INFERENCEX_PATH}'). SaFE backend default is "
                              f"/hyperloom/InferenceX which doesn't exist on core42.")
-    parser.add_argument("--plugin-id", type=int, default=None,
-                        help="Forward this pluginId to the SaFE optimization task body. "
-                             "SaFE backend currently hardcodes plugin 4 + tools=[16,18] "
-                             "in apiserver/.../optimization/handler.go, so this is "
-                             "forward-compatible only — useful for A/B testing once SaFE "
-                             "supports body-field passthrough (e.g. compare plugin 4 "
-                             "Hyperloom = wekafs inference_optimizer vs future plugins).")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""),
                         help="HuggingFace token (or set $HF_TOKEN)")
 
@@ -1208,7 +1172,6 @@ def main() -> int:
             mode=args.mode,
             gpu_type=gpu_type,
             inferencex_path=inferencex_path,
-            plugin_id=args.plugin_id,
         )
         records.append(rec)
 
