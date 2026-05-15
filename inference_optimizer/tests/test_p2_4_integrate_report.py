@@ -42,6 +42,14 @@ from inference_optimizer.storage import SqliteConnection
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    # Pin the kernel-agent root so integrate_handler -> _maybe_apply_kernel_patch
+    # can resolve apply_kernel_patch.py from a known location even when the
+    # host env var is unset (e.g. CI without install.sh).
+    kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
+    monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", kernel_agent_root)
+    # Skip the `python3 -c "import Magpie"` probe inside _resolve_magpie_python
+    # so subprocess.run mocks only see the actual Magpie launch command.
+    monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     return make_session_dir()
 
 
