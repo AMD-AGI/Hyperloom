@@ -95,15 +95,15 @@ async def test_promote_at_half_pct_threshold(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_no_promote_below_half_pct(session_dir):
-    """+0.3% over current_best is below 0.5% AND not yet a consistent
-    winner (only 1 round) — must NOT promote."""
+async def test_no_promote_below_one_tenth_pct(session_dir):
+    """+0.08% over current_best is below the 0.1% 1-shot bar AND not yet a
+    consistent winner (only 1 round) — must NOT promote."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         _baseline_state(c, base=800.0, current=833.6)
         result = {
             "status": "succeeded",
-            "output_throughput": 836.1,  # +0.3% over 833.6
+            "output_throughput": 834.27,  # +0.08% over 833.6
             "best_variant": {"name": "mem_fraction_0_85",
                              "extra_sglang_args": "--mem-fraction-static 0.85"},
         }

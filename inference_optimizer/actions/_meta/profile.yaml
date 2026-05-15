@@ -25,7 +25,7 @@ pipeline_phase: analysis
 typical_runtime_min: 3.0
 applicable_when:
   - "baseline_tput > 0"
-  - "trace_path == ''"
+  - "trace_path == '' OR last_profile_status == 'failed'"
 # Descriptive — see baseline.yaml. ProfileExecutor inherits BaselineExecutor
 # and consumes the same params surface, so the same script/result_dir
 # overrides apply when the profile invocation also lands on a leaky script.
