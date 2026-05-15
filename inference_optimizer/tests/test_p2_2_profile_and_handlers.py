@@ -1270,6 +1270,248 @@ async def test_select_kernels_handler_t4_defaults_warnings_to_empty_list(
     assert res["trace_health_warnings"] == []
 
 
+# ===========================================================================
+# T5 (this PR) — trace_health_warnings must reach the Orchestration LLM
+# ===========================================================================
+# Handler-boundary plumbing alone is not enough: the Orchestration LLM
+# only sees what ``SharedState._format_*`` renders into its prompt. Pin
+# that record_select_kernels keeps the warning list AND that
+# _format_last_select_kernels surfaces it inline so the LLM grounds its
+# next ACTION on the routing signal (params vs kernel-opt vs re-profile).
+
+def test_record_select_kernels_persists_trace_health_warnings(session_dir):
+    """``record_select_kernels`` must keep ``trace_health_warnings`` from
+    the handler result verbatim in ``last_select_kernels`` so prompt
+    rendering can see it on the next tick."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    warning = {
+        "code": "high_gpu_idle_pct",
+        "severity": "warning",
+        "idle_pct": 35.0,
+        "threshold_pct": 20.0,
+        "source": "/tmp/x/analysis.md",
+        "message": "high idle",
+    }
+    state.record_select_kernels(
+        {"trace_input": "/tmp/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [],
+            "trace_health_warnings": [warning],
+        },
+    )
+    assert state.last_select_kernels["trace_health_warnings"] == [warning]
+
+
+def test_record_select_kernels_defaults_warnings_to_empty_list(session_dir):
+    """Steady-state (no warnings emitted) — the cached entry must still
+    expose ``trace_health_warnings`` as an empty list rather than the
+    field being absent, so iteration code in renderers / consumers
+    doesn't need a ``KeyError`` guard."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.record_select_kernels(
+        {"trace_input": "/tmp/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [{"kernel_id": "k1", "reusable_native_kernel": True}],
+        },
+    )
+    assert state.last_select_kernels["trace_health_warnings"] == []
+
+
+def test_record_select_kernels_filters_invalid_warning_entries(session_dir):
+    """Defensive: a buggy tool emitting non-dict entries or dicts
+    missing the ``code`` field shouldn't poison ``last_select_kernels``.
+    We accept only well-formed dicts with at least a ``code`` key so
+    the prompt renderer never has to defensively coerce types."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.record_select_kernels(
+        {"trace_input": "/tmp/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [],
+            "trace_health_warnings": [
+                "not-a-dict",
+                {"severity": "warning"},  # missing 'code'
+                {"code": "high_gpu_idle_pct", "idle_pct": 30.0,
+                 "threshold_pct": 20.0},
+                None,
+            ],
+        },
+    )
+    warnings = state.last_select_kernels["trace_health_warnings"]
+    assert len(warnings) == 1
+    assert warnings[0]["code"] == "high_gpu_idle_pct"
+
+
+def test_format_last_select_kernels_renders_idle_warning_inline(session_dir):
+    """Prompt rendering: when an idle warning was persisted, the
+    Orchestration prompt line must surface it with the numeric context
+    so the LLM can ground its routing on the actual percentages."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.record_select_kernels(
+        {"trace_input": "/tmp/trace.json.gz"},
+        {
+            "status": "ok",
+            "hot_kernels": [],
+            "trace_health_warnings": [
+                {
+                    "code": "high_gpu_idle_pct",
+                    "severity": "warning",
+                    "idle_pct": 60.5,
+                    "threshold_pct": 20.0,
+                    "source": "/tmp/x/analysis.md",
+                    "message": "high idle",
+                }
+            ],
+        },
+    )
+    rendered = state._format_last_select_kernels()
+    assert "high_gpu_idle_pct" in rendered
+    assert "60.5%" in rendered
+    assert "20.0%" in rendered
+    assert "warnings=[" in rendered
+
+
+def test_format_last_select_kernels_renders_failure_warning_with_rc(session_dir):
+    """Tool-failure warning carries ``returncode``; the prompt must
+    surface that too so an operator-or-LLM can distinguish 'TraceLens
+    crashed' (rc=1) from a benign skip."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.record_select_kernels(
+        {"trace_input": "/tmp/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [],
+            "trace_health_warnings": [
+                {
+                    "code": "tracelens_analysis_failed",
+                    "severity": "warning",
+                    "returncode": 1,
+                    "error": "RuntimeError: …",
+                    "message": "TraceLens failed",
+                }
+            ],
+        },
+    )
+    rendered = state._format_last_select_kernels()
+    assert "tracelens_analysis_failed" in rendered
+    assert "rc=1" in rendered
+
+
+def test_format_last_select_kernels_omits_warnings_suffix_in_steady_state(session_dir):
+    """Format-stability guard: when no warnings were recorded (the
+    common case), the prompt line MUST NOT gain a gratuitous
+    ``warnings=[]`` suffix. Prompt format stability matters because
+    we have downstream prompt-snapshot tests pinned to the legacy
+    format; growing the line in the steady state would break them."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.record_select_kernels(
+        {"trace_input": "/tmp/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [{"kernel_id": "k1", "reusable_native_kernel": True}],
+        },
+    )
+    rendered = state._format_last_select_kernels()
+    assert "warnings=" not in rendered, (
+        "no warnings → no warnings= suffix; this keeps existing prompt "
+        "snapshots stable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_t5_handler_to_sharedstate_e2e_idle_warning_reaches_prompt(
+    session_dir, monkeypatch,
+):
+    """End-to-end pinning of the routing signal path:
+       tracelens_analysis (T3)  →  handler result.trace_health_warnings
+                                →  SharedState.last_select_kernels (this PR)
+                                →  Orchestration prompt line  (this PR)
+    Without ALL three steps the LLM cannot route on idle %, and the
+    upstream T3 work is wasted."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "ok",
+            "tool": "tracelens_analysis",
+            "hot_kernels": [],
+            "trace_health_warnings": [
+                {
+                    "code": "high_gpu_idle_pct",
+                    "severity": "warning",
+                    "idle_pct": 42.0,
+                    "threshold_pct": 20.0,
+                    "source": "/tmp/runs/abc/tracelens/analysis.md",
+                    "message": "high idle",
+                }
+            ],
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    # Step 1: handler boundary carries the warning.
+    assert res["trace_health_warnings"][0]["code"] == "high_gpu_idle_pct"
+
+    # Step 2: SharedState persists it.
+    state = SharedState.load_or_init(session_dir)
+    state.record_select_kernels({"trace_input": str(session_dir)}, res)
+    assert state.last_select_kernels["trace_health_warnings"][0]["code"] == "high_gpu_idle_pct"
+
+    # Step 3: prompt rendering surfaces it.
+    rendered = state._format_last_select_kernels()
+    assert "high_gpu_idle_pct" in rendered
+    assert "42.0%" in rendered
+
+
+@pytest.mark.asyncio
+async def test_t5_handler_to_sharedstate_e2e_failure_warning_reaches_prompt(
+    session_dir, monkeypatch,
+):
+    """Same path for T4: when TraceLens fails permanently, the
+    failure warning must reach the Orchestration prompt so the LLM
+    doesn't keep re-trying TraceLens or guessing why ``hot_kernels=[]``."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "failed",
+            "tool": "tracelens_analysis",
+            "error": "RuntimeError: TraceLens crashed",
+            "returncode": 1,
+            "hot_kernels": [],
+        }
+        return 1, json.dumps(payload), "stderr"
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    state = SharedState.load_or_init(session_dir)
+    state.record_select_kernels({"trace_input": str(session_dir)}, res)
+    rendered = state._format_last_select_kernels()
+    assert "tracelens_analysis_failed" in rendered
+    assert "rc=1" in rendered
+
+
 @pytest.mark.asyncio
 async def test_select_kernels_handler_t4_failure_appends_to_existing_warnings(
     session_dir, monkeypatch,
