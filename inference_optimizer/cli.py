@@ -29,9 +29,6 @@ Env vars consumed (besides the standard backend creds):
   CODEX_MODEL                                  — default gpt-5.4
   USER_DATA_PATH                               — override session dir
                                                  (default: /workspace/hyperloom).
-  INFERENCE_OPTIMIZER_KB_ROOT                  — marathon KB dir (kb_query.py +
-                                                 entries.jsonl); default:
-                                                 Hyperloom/marathon/skills/kb
 """
 
 from __future__ import annotations
