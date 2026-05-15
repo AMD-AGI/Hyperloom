@@ -369,10 +369,13 @@ def main():
                         help="Comma-separated model subset (matches per-entry `key` field, "
                              "fallback `inferenceX_key`)")
     parser.add_argument("--trigger", default="manual", help="Trigger type: scheduled/manual/inferenceX")
-    parser.add_argument("--tools", default=None, help="Comma-separated Claw tool IDs (overrides ci-config)")
+    parser.add_argument("--plugin-id", type=int, default=None,
+                        help="Override claw.plugin_id from ci-config.yaml. Used by the "
+                             "Inference A/B Test workflow to compare different Hyperloom-side "
+                             "plugin builds (e.g. 4 = current wekafs inference_optimizer; "
+                             "5 = an experimental successor with a different SKILL.md).")
     parser.add_argument("--dry-run", action="store_true", help="Print prompts without executing")
     parser.add_argument("--output-dir", default="ci-output", help="Output directory for reports")
-    parser.add_argument("--update", action="store_true", help="Update images to latest stable before running")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -428,13 +431,13 @@ def main():
         )
         yaml_path = Path(_tmpdir) / ifx_cfg["config_path"]
 
-        # Optionally update images in the cloned amd-master.yaml to latest stable
+        # Read-only image version report. We deliberately don't pass --update —
+        # CI baselines must stay pinned to the InferenceX image tag (otherwise
+        # tok/s comparisons across runs are apples-to-oranges). Operators who
+        # need a different image override it explicitly via ci-config.yaml.
         check_script = CI_DIR.parent / "inference_optimization" / "InferenceX" / "utils" / "check_image_versions.py"
         if check_script.exists():
             cmd = [sys.executable, str(check_script), "--config-files", str(yaml_path)]
-            if args.update:
-                cmd.append("--update")
-                log.info("--update flag set: upgrading images to latest stable")
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
                                         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
@@ -504,10 +507,10 @@ def main():
             print(prompt)
         sys.exit(0)
 
-    # Override tools if provided via CLI
-    if args.tools:
-        claw_cfg["tools"] = [int(t.strip()) for t in args.tools.split(",")]
-        log.info("Overriding Claw tools from CLI: %s", claw_cfg["tools"])
+    # Override plugin_id if provided via CLI (Inference A/B Test path).
+    if args.plugin_id is not None:
+        claw_cfg["plugin_id"] = args.plugin_id
+        log.info("Overriding Claw plugin_id from CLI: %s", claw_cfg["plugin_id"])
 
     # Execute
     claw = ClawClient.from_config(claw_cfg)
