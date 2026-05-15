@@ -25,6 +25,7 @@ from inferenceX_parser import (
     find_benchmark_script,
     format_benchmark_for_prompt,
     get_latest_commit,
+    get_nfs_root,
     merge_model_config,
     resolve_var,
 )
@@ -40,26 +41,16 @@ log = logging.getLogger("ci-orchestrator")
 CI_DIR = Path(__file__).resolve().parent
 PROMPT_TEMPLATE = (CI_DIR / "prompt_template.md").read_text()
 
-# Load skill files from repo — embedded in prompt to bypass tool-mounting failures
-_SKILL_ROOT = CI_DIR.parent / ".cursor" / "skills" / "inference-optimization"
-
-
-def _read_skill_file(*parts: str) -> str:
-    p = _SKILL_ROOT.joinpath(*parts)
-    return p.read_text() if p.exists() else ""
-
-
-SKILL_MD = _read_skill_file("SKILL.md")
-CLAW_MD = _read_skill_file("modes", "CLAW.md")
-RUN_BASELINE_SH = _read_skill_file("scripts", "run_baseline.sh")
-RUN_SWEEP_SH = _read_skill_file("scripts", "run_sweep.sh")
-EXECUTOR_SH = _read_skill_file("scripts", "executor.sh")
-COMMON_SH = _read_skill_file("scripts", "common.sh")
+# Skill files are NOT embedded in the prompt. The ci-mix300 skill is delivered
+# via plugin 4 (sent in the message body as pluginId=4). The agent's runtime
+# auto-downloads it to /workspace/.skills/ci-mix300/ on first use via its
+# built-in download_skill tool. See Primus-Claw plugin-from-message.ts for
+# how Brain resolves plugin tools at runtime.
 
 
 def load_config(config_path: str | None = None) -> dict:
     path = Path(config_path) if config_path else CI_DIR / "ci-config.yaml"
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -96,25 +87,10 @@ def render_prompt(merged: dict) -> str:
     else:
         bss = "No InferenceX benchmark script found. Construct server launch manually."
 
-    # Embed skill files so agent doesn't depend on tool mounting
-    skill_section = ""
-    if SKILL_MD:
-        skill_section += f"\n<skill_md>\n{SKILL_MD}\n</skill_md>\n"
-    if CLAW_MD:
-        skill_section += f"\n<claw_md>\n{CLAW_MD}\n</claw_md>\n"
-    if RUN_BASELINE_SH:
-        skill_section += f"\n<run_baseline_sh>\n{RUN_BASELINE_SH}\n</run_baseline_sh>\n"
-    if RUN_SWEEP_SH:
-        skill_section += f"\n<run_sweep_sh>\n{RUN_SWEEP_SH}\n</run_sweep_sh>\n"
-    if EXECUTOR_SH:
-        skill_section += f"\n<executor_sh>\n{EXECUTOR_SH}\n</executor_sh>\n"
-    if COMMON_SH:
-        skill_section += f"\n<common_sh>\n{COMMON_SH}\n</common_sh>\n"
-
     safe_api_key = os.environ.get("CLAW_API_KEY", "")
     safe_base_url = os.environ.get("SAFE_BASE_URL", "")
     sandbox_workspace = os.environ.get("SANDBOX_WORKSPACE", "")
-    nfs_root = os.environ.get("NFS_ROOT", "/workspace")
+    nfs_root = get_nfs_root(default="/workspace")
 
     return PROMPT_TEMPLATE.format(
         model_hf=merged["model_hf"],
@@ -140,7 +116,6 @@ def render_prompt(merged: dict) -> str:
         inferenceX_data=ifx_text,
         runner=merged["runner"],
         benchmark_script_section=bss,
-        skill_section=skill_section,
         safe_api_key=safe_api_key,
         safe_base_url=safe_base_url,
         sandbox_workspace=sandbox_workspace,
@@ -357,7 +332,7 @@ def run_model(
 
     # 3b. NFS fallback: scan NFS for results written by PyTorchJob/RayJob.
     if not report_content:
-        nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+        nfs_root = get_nfs_root()
         nfs_scan_dirs = [
             f"{nfs_root}/hyperloom-results",
             f"{nfs_root}/results/ci",
@@ -561,7 +536,7 @@ def main():
 
     # Execute
     claw = ClawClient.from_config(claw_cfg)
-    nfs_base = results_cfg.get("nfs_base") or (os.environ.get("NFS_ROOT", "/wekafs") + "/results/ci")
+    nfs_base = results_cfg.get("nfs_base") or (get_nfs_root() + "/results/ci")
     sandbox_timeout = claw_cfg.get("sandbox_timeout", 14400)
     results = []
 
