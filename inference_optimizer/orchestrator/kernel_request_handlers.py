@@ -404,10 +404,14 @@ async def select_kernels_handler(
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
-    workspace_path = (
-        payload.get("workspace_path")
-        or str(session_dir / "kernel-agent-workspace")
-    )
+    # Tool output lands at ``<workspace_path>/kernel-agent/runs/<session_id>/``
+    # (the suffix is hardcoded inside ``tracelens_analysis.py``). Pass the
+    # session root so the artefacts settle at
+    # ``<session_dir>/kernel-agent/runs/...`` — a sibling of
+    # ``<session_dir>/kernel-agent-workspace/<kernel_id>/`` (which the
+    # tool also reads/writes for cross-call GEAK/OOB artefacts). Both
+    # locations now live under ``$USER_DATA_PATH`` for unified monitoring.
+    workspace_path = payload.get("workspace_path") or str(session_dir)
     Path(workspace_path).mkdir(parents=True, exist_ok=True)
 
     # Backfill workload context from SharedState so downstream
@@ -664,10 +668,13 @@ async def _run_optimization_single(
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
-    workspace_path = (
-        payload.get("workspace_path")
-        or str(session_dir / "kernel-agent-workspace")
-    )
+    # Same convention as :func:`select_kernels_handler`: pass the session
+    # root so ``kernel_optimization.py`` lands its run artefacts at
+    # ``<session_dir>/kernel-agent/runs/<session_id>/`` while still reading
+    # ``<session_dir>/kernel-agent-workspace/<kernel_id>/`` for the
+    # cross-call GEAK/OOB cache. Both subtrees live under
+    # ``$USER_DATA_PATH``.
+    workspace_path = payload.get("workspace_path") or str(session_dir)
     Path(workspace_path).mkdir(parents=True, exist_ok=True)
 
     from .shared_state import SharedState
