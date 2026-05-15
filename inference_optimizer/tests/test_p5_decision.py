@@ -7,10 +7,11 @@ the current_best by 0.3–0.84% but never crossed the 1.0% promote bar.
 
 Three behaviours are guarded:
 
-A. ``_promote_to_shared_state`` for grid actions now uses a 0.5%
-   single-shot KEEP threshold (relaxed from 1.0%) AND additionally
-   promotes any consistent winner that wins ≥ 2 of last 3 rounds
-   with avg gain ≥ 0.3% — the cross-round signal-vs-noise check.
+A. ``_promote_to_shared_state`` for grid actions now uses a 0.2%
+   single-shot KEEP threshold (relaxed from marathon's 1.0%, but still
+   above the ~0.1% session noise floor) AND additionally promotes any
+   consistent winner that wins ≥ 2 of last 3 rounds with avg gain ≥
+   0.1% — the cross-round signal-vs-noise check.
 B. ``params_no_promote_streak`` increments on every grid round that
    doesn't promote and resets on promotion. The prompt summary
    surfaces the streak so Orch can switch to kernel-opt at >= 5.
@@ -26,6 +27,7 @@ from typing import Any
 
 import pytest
 
+from inference_optimizer.orchestrator import kernel_request_handlers as krh
 from inference_optimizer.orchestrator.backends import (
     MockBackend,
     ScriptedPlan,
@@ -55,6 +57,14 @@ def _silent_backends() -> dict[str, object]:
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    # Pin HYPERLOOM_KERNEL_AGENT_ROOT so kernel-request handlers that need
+    # to resolve apply_kernel_patch.py / kernel_optimization.py from disk
+    # work even when the host env var is unset.
+    kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
+    monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", kernel_agent_root)
+    # Skip the `python3 -c "import Magpie"` probe inside _resolve_magpie_python
+    # so subprocess.run mocks only see the actual Magpie launch command.
+    monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     return make_session_dir()
 
 
@@ -95,15 +105,15 @@ async def test_promote_at_half_pct_threshold(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_no_promote_below_half_pct(session_dir):
-    """+0.3% over current_best is below 0.5% AND not yet a consistent
-    winner (only 1 round) — must NOT promote."""
+async def test_no_promote_below_one_tenth_pct(session_dir):
+    """+0.08% over current_best is below the 0.2% 1-shot bar AND not yet a
+    consistent winner (only 1 round) — must NOT promote."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         _baseline_state(c, base=800.0, current=833.6)
         result = {
             "status": "succeeded",
-            "output_throughput": 836.1,  # +0.3% over 833.6
+            "output_throughput": 834.27,  # +0.08% over 833.6
             "best_variant": {"name": "mem_fraction_0_85",
                              "extra_sglang_args": "--mem-fraction-static 0.85"},
         }
@@ -122,33 +132,37 @@ async def test_no_promote_below_half_pct(session_dir):
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_consistent_winner_promoted_below_threshold(session_dir):
-    """Decode_steps_8 wins 2 of last 3 rounds with avg gain ~0.6% but
-    no individual round crosses 0.5%. The cross-round path catches it."""
+    """Decode_steps_8 wins 2 of last 3 rounds with avg gain ~0.15% but
+    no individual round crosses the 0.2% 1-shot KEEP bar. The cross-round
+    path (CROSS_ROUND_MIN_AVG_GAIN_PCT=0.1) catches it."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         _baseline_state(c, base=800.0, current=833.6)
-        # Round 1: decode_steps_8 +0.40% — sub-threshold, recorded
+        # Round 1: decode_steps_8 +0.150% — below the 0.2% 1-shot bar,
+        # recorded into history without changing current_best.
         await c._promote_to_shared_state("params", {
             "status": "succeeded",
-            "output_throughput": 836.93,
+            "output_throughput": 834.85,
             "best_variant": {"name": "decode_steps_8"},
         })
-        # Round 2: chunked_prefill_64k +0.10% — sub-threshold, recorded
+        # Round 2: chunked_prefill_64k +0.096% — different variant,
+        # also sub-threshold; recorded.
         await c._promote_to_shared_state("params", {
             "status": "succeeded",
             "output_throughput": 834.4,
             "best_variant": {"name": "chunked_prefill_64k"},
         })
-        # Round 3: decode_steps_8 +0.45% again — still sub-threshold,
-        # but NOW decode_steps_8 has 2 of last 3 rounds with avg ~0.42%.
+        # Round 3: decode_steps_8 +0.156% again — still under 0.2%,
+        # but NOW decode_steps_8 has 2 of last 3 rounds with
+        # avg ≈ 0.153% ≥ 0.1% → cross-round path promotes it.
         await c._promote_to_shared_state("params", {
             "status": "succeeded",
-            "output_throughput": 837.4,
+            "output_throughput": 834.9,
             "best_variant": {"name": "decode_steps_8"},
         })
         cb = c.shared_state.current_best
         assert cb["variant_name"] == "decode_steps_8"
-        assert cb["tput"] == pytest.approx(837.4, abs=0.1)
+        assert cb["tput"] == pytest.approx(834.9, abs=0.1)
         assert c.shared_state.params_no_promote_streak == 0
     finally:
         await c.stop()

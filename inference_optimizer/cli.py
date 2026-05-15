@@ -70,6 +70,7 @@ from .orchestrator.backends import (
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
+from .orchestrator.framework_paths import resolve_source_file_allowlist
 from .orchestrator.objective import Objective, build_objective
 from .orchestrator.shared_state import SharedState
 from .orchestrator.system_prompts.prompt_builder import (
@@ -147,6 +148,7 @@ def _build_orchestration_prompt(
         objective_value=value,
         max_minutes=int(max_minutes),
         rules_fragment_path=_orchestration_rules_fragment_path(),
+        framework_source_roots=resolve_source_file_allowlist(),
     )
 
 

@@ -319,18 +319,19 @@ async def test_profile_trace_appears_in_prompt_summary(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_profile_trace_falls_back_to_trace_dir_when_no_main(session_dir):
-    """If profile result only has trace_dir (no .json.gz files yet),
-    SharedState should still get a usable hint instead of staying empty."""
+async def test_profile_trace_dir_without_json_not_promoted(session_dir):
+    """Empty trace_dir without .trace.json.gz must NOT be promoted."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        result = {
-            "status": "succeeded",
-            "trace_dir": "/tmp/ws/torch_trace",
-            "trace_files": [],
-            "workspace": "/tmp/ws",
-        }
-        await c._promote_to_shared_state("profile", result)
-        assert c.shared_state.last_profile_trace == "/tmp/ws/torch_trace"
+        await c._promote_to_shared_state(
+            "profile",
+            {
+                "status": "succeeded",
+                "trace_dir": "/tmp/ws/torch_trace",
+                "trace_files": [],
+                "workspace": "/tmp/ws",
+            },
+        )
+        assert c.shared_state.last_profile_trace == ""
     finally:
         await c.stop()
