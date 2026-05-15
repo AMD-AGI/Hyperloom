@@ -357,3 +357,402 @@ def test_build_prompt_metadata_extracts_extra_sglang_args():
     assert metadata["runtime_flags"]["disable_cuda_graph"] is True
     assert metadata["kernel_params"]["KV_DTYPE"] == "fp8"
     assert metadata["kernel_params"]["BLOCK_SIZE"] == 16
+
+
+# ============================================================================
+# PR-A §4: TraceLens hypothesis block in build_prompt
+# ============================================================================
+def test_build_hypothesis_block_returns_empty_when_no_prose_fields():
+    """Candidates from non-TraceLens-v0.3 paths (raw trace, csv fallback,
+    legacy priority_data) lack the prose fields. The block must be a no-op
+    in that case so the prompt body is byte-identical to pre-PR."""
+    block = ko._build_hypothesis_block(
+        {"name": "kernel_no_prose", "source_type": "triton"},
+    )
+    assert block == ""
+
+
+def test_build_hypothesis_block_renders_reasoning_and_resolution():
+    block = ko._build_hypothesis_block({
+        "name": "rms_norm",
+        "reasoning_for_slowdown": "Memory-bound kernel saturating HBM bandwidth.",
+        "resolution": "Fuse RMSNorm with the following GEMM to amortize loads.",
+        "impact_low_ms": 0.0,
+        "impact_low_e2e_pct": 0.0,
+        "impact_high_ms": 0.0,
+        "impact_high_e2e_pct": 0.0,
+    })
+    assert "## TraceLens Hypothesis [validate before acting]" in block
+    assert "Memory-bound kernel saturating HBM bandwidth." in block
+    assert "Fuse RMSNorm with the following GEMM" in block
+    # Hypothesis framing must always be present so GEAK doesn't take
+    # TraceLens's guess as ground truth.
+    assert "verify the reasoning" in block
+    assert "(hypothesis)" in block
+    # Empty impact range must not be rendered.
+    assert "Estimated impact range" not in block
+
+
+def test_build_hypothesis_block_renders_impact_range_when_set():
+    block = ko._build_hypothesis_block({
+        "name": "fused_moe",
+        "reasoning_for_slowdown": "",
+        "resolution": "",
+        "impact_low_ms": 12.5,
+        "impact_low_e2e_pct": 3.2,
+        "impact_high_ms": 40.0,
+        "impact_high_e2e_pct": 10.4,
+    })
+    assert "Estimated impact range" in block
+    assert "12.50 ms" in block
+    assert "3.20% E2E" in block
+    assert "40.00 ms" in block
+    assert "10.40% E2E" in block
+    # Numbers are TraceLens roofline estimates — the framing must say so
+    # so GEAK doesn't treat them as measured speedups.
+    assert "roofline" in block
+    assert "Reasoning for slowdown" not in block
+    assert "Recommended direction" not in block
+
+
+def test_build_hypothesis_block_renders_identification_when_present():
+    """The Identification line carries per-rank context + the source
+    metrics-file reference (e.g. ``gemm_metrics.json → operations[].
+    efficiency.efficiency_percent``). Surfacing it lets GEAK trace any
+    hypothesis back to the raw TraceLens data when it needs to
+    disagree. Must be labelled distinctly from Reasoning so the agent
+    doesn't conflate "what was flagged" with "why it's slow"."""
+    block = ko._build_hypothesis_block({
+        "name": "rms_norm",
+        "identification": (
+            "Four `aiter::rmsnorm_quant` operations flagged as memory-bound. "
+            "(source: rmsnorm_metrics.json -> operations[].efficiency.efficiency_percent)"
+        ),
+        "reasoning_for_slowdown": "Memory-bound kernel saturating HBM bandwidth.",
+        "resolution": "Fuse RMSNorm with the following GEMM.",
+    })
+    assert "Identification (TraceLens context):" in block
+    assert "Four `aiter::rmsnorm_quant`" in block
+    assert "rmsnorm_metrics.json" in block
+    # Identification appears BEFORE Reasoning so the agent reads the
+    # "what" before the "why" — matches the template's section order.
+    id_pos = block.index("Identification (TraceLens context):")
+    reason_pos = block.index("Reasoning for slowdown (hypothesis):")
+    assert id_pos < reason_pos
+
+
+def test_build_hypothesis_block_renders_when_only_identification_present():
+    """A P-item with only Identification (no Reasoning/Resolution/Impact)
+    must still produce a block — GEAK needs the source pointer even
+    when the analysis-orchestrator didn't synthesise downstream prose."""
+    block = ko._build_hypothesis_block({
+        "name": "kernel",
+        "identification": "Three ops flagged. (source: gemm_metrics.json)",
+    })
+    assert block != ""
+    assert "Identification (TraceLens context):" in block
+
+
+def test_build_hypothesis_block_renders_all_pitem_prose_when_function_spans_pitems():
+    """Q2: when ``task_group.all_pitem_prose`` carries multiple distinct
+    entries (same source function flagged in multiple TraceLens
+    P-items), every P-item's prose is rendered with a ``### P{rank}``
+    header. GEAK sees both framings, not just the primary's. Order
+    follows the input list (already rank-sorted by
+    ``aggregate_by_source_function``)."""
+    candidate = {
+        "name": "aiter::rms_norm",
+        # Primary's own prose fields are intentionally divergent /
+        # absent so the test confirms the renderer reads from
+        # ``all_pitem_prose`` (not from candidate's flat prose) when
+        # the multi-P-item path is taken.
+        "identification": "<should not appear in multi-pitem render>",
+        "reasoning_for_slowdown": "<should not appear>",
+        "task_group": {
+            "all_pitem_prose": [
+                {
+                    "rank": 2,
+                    "title": "Memory-Bound at decode shapes",
+                    "identification": "Decode rows: 2.0% of HBM peak. (source: rmsnorm_metrics.json)",
+                    "reasoning_for_slowdown": "Small batch → low arithmetic intensity → HBM-bound.",
+                    "resolution": "Increase batch upstream OR fuse with adjacent elementwise.",
+                    "impact_low_ms": 5.0,
+                    "impact_low_e2e_pct": 1.0,
+                    "impact_high_ms": 10.0,
+                    "impact_high_e2e_pct": 2.0,
+                },
+                {
+                    "rank": 5,
+                    "title": "Compute-Bound at prefill shapes",
+                    "identification": "Prefill rows: 95% of compute peak. (source: rmsnorm_metrics.json)",
+                    "reasoning_for_slowdown": "Large batch saturates MFMA pipelines.",
+                    "resolution": "Tile-size tuning; compute-side levers only.",
+                    "impact_low_ms": 1.0,
+                    "impact_low_e2e_pct": 0.2,
+                    "impact_high_ms": 3.0,
+                    "impact_high_e2e_pct": 0.6,
+                },
+            ],
+        },
+    }
+    block = ko._build_hypothesis_block(candidate)
+    # Multi-P-item header copy:
+    assert "appears across MULTIPLE TraceLens P-items" in block
+    # Each P-item gets its own subheader + prose:
+    assert "### P2 — Memory-Bound at decode shapes" in block
+    assert "### P5 — Compute-Bound at prefill shapes" in block
+    assert "Decode rows: 2.0% of HBM peak" in block
+    assert "Prefill rows: 95% of compute peak" in block
+    assert "Increase batch upstream" in block
+    assert "Tile-size tuning" in block
+    # P2 must appear before P5 (rank-ascending order):
+    p2_pos = block.index("### P2")
+    p5_pos = block.index("### P5")
+    assert p2_pos < p5_pos
+    # Per-P-item impact ranges are rendered, BOTH variants:
+    assert "5.00 ms" in block and "10.00 ms" in block
+    assert "1.00 ms" in block and "3.00 ms" in block
+    # Candidate's flat prose fields must NOT leak into the multi-pitem
+    # render — that would conflate which P-item the prose came from.
+    assert "<should not appear>" not in block
+
+
+def test_build_hypothesis_block_falls_back_to_flat_prose_for_single_pitem():
+    """When ``all_pitem_prose`` has exactly one entry, the legacy flat
+    layout fires (reads from candidate's prose fields). This is the
+    common case — the multi-P-item layout would add unhelpful header
+    noise for single-finding kernels."""
+    candidate = {
+        "name": "kernel",
+        "reasoning_for_slowdown": "Memory-bound.",
+        "resolution": "Fuse with neighbour.",
+        "task_group": {
+            "all_pitem_prose": [
+                {
+                    "rank": 1,
+                    "title": "Memory-Bound GEMM",
+                    "reasoning_for_slowdown": "Memory-bound.",
+                    "resolution": "Fuse with neighbour.",
+                },
+            ],
+        },
+    }
+    block = ko._build_hypothesis_block(candidate)
+    # Legacy flat header (no "MULTIPLE TraceLens P-items" prose):
+    assert "appears across MULTIPLE" not in block
+    assert "**Reasoning for slowdown (hypothesis):**" in block
+    assert "Memory-bound." in block
+
+
+def test_build_prompt_omits_hypothesis_block_when_no_prose():
+    """Backward compat: candidates without prose fields produce the same
+    prompt shape as before — no surprise section, no extra blank lines
+    that change downstream token counts."""
+    prompt = ko.build_prompt(
+        {"name": "legacy_kernel", "source_type": "triton"},
+        _prompt_args("mi300x"),
+    )
+    assert "TraceLens Hypothesis" not in prompt
+
+
+def test_build_prompt_includes_hypothesis_block_when_prose_present():
+    prompt = ko.build_prompt(
+        {
+            "name": "rms_norm",
+            "source_type": "triton",
+            "reasoning_for_slowdown": "Memory-bound; HBM bandwidth saturated.",
+            "resolution": "Fuse with subsequent GEMM to halve global loads.",
+            "impact_low_ms": 5.0,
+            "impact_low_e2e_pct": 1.2,
+            "impact_high_ms": 20.0,
+            "impact_high_e2e_pct": 5.0,
+        },
+        _prompt_args("mi300x"),
+    )
+    assert "## TraceLens Hypothesis [validate before acting]" in prompt
+    assert "Memory-bound; HBM bandwidth saturated." in prompt
+    assert "Fuse with subsequent GEMM" in prompt
+    assert "5.00 ms" in prompt
+    assert "20.00 ms" in prompt
+
+
+# ============================================================================
+# PR-B §2: benchmark-cases block in build_prompt
+# ============================================================================
+def test_build_benchmark_cases_block_returns_empty_without_task_group():
+    """Legacy per-kernel dispatch (no task_group attached) must produce
+    byte-identical output to PR-A."""
+    block = ko._build_benchmark_cases_block(
+        {"name": "rms_norm", "source_type": "triton"},
+    )
+    assert block == ""
+
+
+def test_build_benchmark_cases_block_renders_single_row():
+    block = ko._build_benchmark_cases_block({
+        "name": "rms_norm",
+        "task_group": {
+            "function_name": "rms_norm",
+            "source_path": "/sgl-workspace/aiter/rmsnorm.py",
+            "definition_line": 42,
+            "ast_resolved": True,
+            "rows": [{
+                "name": "rms_norm",
+                "shapes": ["(8,4096) bf16"],
+                "duration_us": 100_000.0,  # 100 ms aggregate
+                "call_count": 100,
+                "percent_of_total": 4.2,
+                "flops_per_byte": 0.5,
+                "bound_type": "memory-bound",
+                "efficiency_percent": 30.0,
+                "efficiency_peak_value": 5.3,
+                "efficiency_peak_unit": "TB/s",
+            }],
+        },
+    })
+    assert "## Benchmark cases" in block
+    assert "single TraceLens row" in block
+    assert "rms_norm" in block
+    assert "/sgl-workspace/aiter/rmsnorm.py:42" in block
+    assert "Case 1: operation=rms_norm" in block
+    # 100 ms / 100 calls = 1.000000 ms per call.
+    assert "per_call_ms=1.000000" in block
+    assert "bound=memory-bound" in block
+    assert "30.00% of 5.3 TB/s" in block
+
+
+def test_build_benchmark_cases_block_renders_multiple_rows_sorted_by_time():
+    """Multi-row groups must explicitly say 'optimize once, applies to all'
+    and render rows in aggregate-time-descending order from build_prompt's
+    perspective (the test_group_rows arrive pre-sorted from aggregate)."""
+    block = ko._build_benchmark_cases_block({
+        "name": "rms_norm",
+        "task_group": {
+            "function_name": "rms_norm",
+            "source_path": "/foo/x.py",
+            "definition_line": 10,
+            "rows": [
+                {
+                    "name": "rms_norm_prefill",
+                    "shapes": ["(64,4096) bf16"],
+                    "duration_us": 500_000.0,
+                    "call_count": 8,
+                    "bound_type": "compute-bound",
+                },
+                {
+                    "name": "rms_norm_decode",
+                    "shapes": ["(8,4096) bf16"],
+                    "duration_us": 50_000.0,
+                    "call_count": 100,
+                    "bound_type": "memory-bound",
+                },
+            ],
+        },
+    })
+    assert "across 2 TraceLens rows" in block
+    assert "Optimize the source function once" in block
+    case_1_idx = block.index("Case 1: operation=rms_norm_prefill")
+    case_2_idx = block.index("Case 2: operation=rms_norm_decode")
+    assert case_1_idx < case_2_idx
+
+
+def test_build_prompt_includes_benchmark_cases_when_task_group_present():
+    """End-to-end: build_prompt threads the new block in when the
+    candidate carries a task_group."""
+    prompt = ko.build_prompt(
+        {
+            "name": "rms_norm",
+            "source_type": "triton",
+            "task_group": {
+                "function_name": "rms_norm",
+                "source_path": "/foo/x.py",
+                "definition_line": 10,
+                "rows": [{
+                    "name": "rms_norm",
+                    "shapes": ["(8,4096) bf16"],
+                    "duration_us": 100_000.0,
+                    "call_count": 100,
+                    "bound_type": "memory-bound",
+                }],
+            },
+        },
+        _prompt_args("mi300x"),
+    )
+    assert "## Benchmark cases" in prompt
+    assert "operation=rms_norm" in prompt
+
+
+def test_build_prompt_omits_benchmark_cases_for_legacy_candidates():
+    prompt = ko.build_prompt(
+        {"name": "legacy_kernel", "source_type": "triton"},
+        _prompt_args("mi300x"),
+    )
+    assert "## Benchmark cases" not in prompt
+
+
+# ============================================================================
+# PR-B §3: bound-keyed optimization priority block in build_prompt
+# ============================================================================
+def test_build_priority_block_empty_when_no_bound_info():
+    block = ko._build_priority_block({"name": "kernel", "source_type": "triton"})
+    assert block == ""
+
+
+def test_build_priority_block_memory_bound_leads_with_memory_traffic():
+    block = ko._build_priority_block({
+        "name": "rms_norm",
+        "bound_type": "memory-bound",
+    })
+    assert "Optimization priorities" in block
+    assert "memory-bound" in block
+    # Lever 1 must be memory traffic; lever 2 must be shape-aware.
+    lev1 = block.index("1. **Memory traffic reduction**")
+    lev2 = block.index("2. **Shape-aware tuning**")
+    assert lev1 < lev2
+
+
+def test_build_priority_block_compute_bound_leads_with_compute_utilization():
+    block = ko._build_priority_block({
+        "name": "gemm_kernel",
+        "bound_type": "compute-bound",
+    })
+    assert "1. **Compute utilization**" in block
+    assert "primary lever for compute-bound" in block
+
+
+def test_build_priority_block_unknown_bound_uses_default_order():
+    block = ko._build_priority_block({
+        "name": "kernel",
+        "bound_type": "mixed",
+    })
+    # mixed → unknown bucket → structural simplification first.
+    assert "1. **Structural simplification**" in block
+
+
+def test_build_priority_block_reads_bound_from_task_group_primary_row():
+    """When candidate has no top-level bound_type, fall back to the
+    first task_group row's bound_type."""
+    block = ko._build_priority_block({
+        "name": "rms_norm",
+        "task_group": {
+            "rows": [{"name": "rms_norm", "bound_type": "memory-bound"}],
+        },
+    })
+    assert "1. **Memory traffic reduction**" in block
+
+
+def test_build_prompt_includes_priority_block_when_bound_present():
+    prompt = ko.build_prompt(
+        {"name": "gemm", "source_type": "triton", "bound_type": "compute-bound"},
+        _prompt_args("mi300x"),
+    )
+    assert "## Optimization priorities" in prompt
+    assert "1. **Compute utilization**" in prompt
+
+
+def test_build_prompt_omits_priority_block_for_legacy_candidates():
+    prompt = ko.build_prompt(
+        {"name": "legacy", "source_type": "triton"},
+        _prompt_args("mi300x"),
+    )
+    assert "## Optimization priorities" not in prompt
