@@ -2002,6 +2002,13 @@ def main() -> int:
             )
         if not candidates:
             if allow_empty_candidates:
+                # docx §3 routing signal (high idle / TraceLens failure):
+                # keep ``candidates`` empty and let the Coordinator pivot to
+                # ``params`` / ``backends`` based on the
+                # ``trace_health_warnings`` we already populated. NEVER
+                # fall through to ``analyze_trace_files`` here — that would
+                # re-populate hot_kernels from the raw trace and silently
+                # undo the idle-gate / TraceLens-failure suppression.
                 candidates = []
                 append_log(
                     log_path,
@@ -2009,7 +2016,20 @@ def main() -> int:
                     "empty hot_kernels[] without fallback so params/backends "
                     "optimization can continue.",
                 )
-            elif not args.dry_run:
+            elif args.dry_run:
+                # ``--dry-run`` is the test-only path that bypasses
+                # TraceLens install / CLI / SDK orchestrator entirely. It
+                # still parses the raw trace so unit tests can exercise
+                # hot-kernel extraction and downstream wiring without a
+                # real TraceLens run. Production code never sets
+                # ``--dry-run``.
+                append_log(
+                    log_path,
+                    "dry-run: parsing raw trace for hot kernels "
+                    "(production code path raises here — see #203)",
+                )
+                candidates = analyze_trace_files(trace_files, args.top_k)
+            else:
                 raise RuntimeError(
                     "No hot-kernel candidates produced by any TraceLens "
                     "analysis.md path. Refusing intermediate/CSV/raw-trace "
@@ -2017,17 +2037,6 @@ def main() -> int:
                     "truth. Inspect the TraceLens skill log and report "
                     "upstream if reproducible."
                 )
-            # ``--dry-run`` is the test-only path that bypasses TraceLens
-            # install / CLI / SDK orchestrator entirely. It still parses
-            # the raw trace so unit tests can exercise hot-kernel
-            # extraction and downstream wiring without a real TraceLens
-            # run. Production code never sets ``--dry-run``.
-            append_log(
-                log_path,
-                "dry-run: parsing raw trace for hot kernels "
-                "(production code path raises here — see #203)",
-            )
-            candidates = analyze_trace_files(trace_files, args.top_k)
         roofline_by_name = load_roofline_results(args.roofline_json)
         if roofline_by_name:
             append_log(log_path, f"merged roofline results: {len(roofline_by_name)} kernels")
