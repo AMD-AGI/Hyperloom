@@ -640,9 +640,11 @@ def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
     The TraceLens v0.3 ``analysis_template.md`` always emits an Executive
     Summary table whose rows are ``| Metric | Value |``; the row of
     interest looks exactly like ``| Idle % | 0.25% |``. Per
-    ``Report_Interfacing.docx`` §3, the Executive Summary is the
-    workload-level health snapshot that should gate any kernel-level
-    optimization recommendation: a high idle percentage means the GPU
+    ``Report_Interfacing.docx`` §1 (Executive Summary schema) and §2
+    (idle-gate sanity check in Possible Approach (Hyperloom v3)), the
+    Executive Summary is the workload-level health snapshot that should
+    gate any kernel-level optimization recommendation: a high idle
+    percentage means the GPU
     spent most of the trace waiting (host stalls, sync, allocator
     contention, …), so per-kernel speedups will not move end-to-end
     latency and the operator should reach for parameter optimization
@@ -679,7 +681,8 @@ def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
 def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
     """Per-row sort key for the ``Lower Efficiency`` budget filter.
 
-    ``TraceLens_Report_Interfacing.docx`` §3 (Hyperloom v3 approach):
+    ``TraceLens_Report_Interfacing.docx`` §2 Recommended Interfacing
+    Approach → Possible Approach (Hyperloom v3):
 
       > Filter for GEAK based on budget (Higher P-item, Lower Efficiency)
 
@@ -705,8 +708,9 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
 
     This is the only place in Hyperloom that reads TraceLens candidate
     data. The returned list follows the priority order required by
-    ``TraceLens_Report_Interfacing.docx`` §3 ("Filter for GEAK based on
-    budget (Higher P-item, Lower Efficiency)"):
+    ``TraceLens_Report_Interfacing.docx`` §2 Recommended Interfacing
+    Approach ("Filter for GEAK based on budget (Higher P-item,
+    Lower Efficiency)"):
 
     1. **Higher P-item first** — rank=1 rows before rank=2 rows, etc.
     2. **Lower Efficiency first** within the same P-item, so rows with
