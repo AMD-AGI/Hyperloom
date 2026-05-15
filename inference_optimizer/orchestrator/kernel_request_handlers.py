@@ -483,6 +483,54 @@ async def select_kernels_handler(
         # kernels they expected.
         if isinstance(artifacts, dict) and artifacts.get("tracelens_summary"):
             result["tracelens_summary_path"] = str(artifacts["tracelens_summary"])
+
+        # T4 (this PR): when TraceLens itself fails permanently — TraceLens
+        # not on PATH, perf-report CLI crashed, analysis.md not produced,
+        # subprocess timeout, etc. — we must NOT block the Coordinator.
+        # Per Report_Interfacing.docx §4 ("usage guidance"), a failed
+        # TraceLens run is a routing signal, not a fatal error: the
+        # Coordinator should fall through to parameter optimization
+        # (batch size, KV cache shape, prefill/decode split) which does
+        # not require kernel candidates. We rewrite the handler result
+        # so:
+        #   * ``status`` becomes ``ok`` (parameter opt still allowed),
+        #   * ``hot_kernels`` is an empty list (no GEAK / kernel-rewrite
+        #     candidates to feed),
+        #   * a structured ``trace_health_warnings[]`` entry carries the
+        #     diagnostic (``rc``, ``error`` tail, ``stderr_tail``) so an
+        #     operator can still investigate the upstream TraceLens
+        #     failure without burying it.
+        # Configuration errors raised *before* the subprocess call
+        # (missing ``trace_input``, missing kernel-agent root) keep
+        # ``status=failed`` because those are Hyperloom bugs / mis-
+        # configuration the operator must fix — not transient TraceLens
+        # issues that the Coordinator can route around.
+        if result.get("status") == "failed":
+            failure_warning: dict[str, Any] = {
+                "code": "tracelens_analysis_failed",
+                "severity": "warning",
+                "message": (
+                    "TraceLens analysis failed; suppressing hot_kernels[] and "
+                    "promoting status to ok so the Coordinator can still route "
+                    "to parameter optimization (batch size, KV cache shape, "
+                    "prefill/decode split). See ``stderr_tail`` / ``error`` for "
+                    "the upstream failure."
+                ),
+            }
+            for key in ("returncode", "rc", "error", "stderr_tail", "raw_stdout_tail"):
+                if key in result and result[key] not in (None, ""):
+                    failure_warning[key] = result[key]
+            health = list(result.get("trace_health_warnings") or [])
+            health.append(failure_warning)
+            result["trace_health_warnings"] = health
+            result["status"] = "ok"
+            result["hot_kernels"] = []
+            result.setdefault("orchestrator_error", failure_warning.get("error", ""))
+
+        # T3 / T4: guarantee ``trace_health_warnings`` is always a list
+        # at the handler boundary so downstream code can iterate without
+        # a ``None``-guard. Empty list = steady-state ("nothing wrong").
+        result.setdefault("trace_health_warnings", [])
     return result
 
 
