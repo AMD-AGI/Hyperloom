@@ -1856,9 +1856,16 @@ def test_function_line_from_ast_returns_none_on_invalid_source(tmp_path):
     assert tlr._function_line_from_ast(tmp_path / "does_not_exist.py", "x") is None
 
 def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
-    """Two candidates that resolve to the same function become one group;
-    a third candidate at a different function stays separate."""
-    # Create a real Python file so the AST resolver can run.
+    """Two candidates that share the same Operation name AND resolve to
+    the same source function become one group; a third candidate at a
+    different function stays separate.
+
+    Uses the SAME ``name`` for the two grouped candidates because that
+    matches TraceLens's real-world contract: rows in a Detailed Analysis
+    Data table that share a Kernel Path also share the Operation name
+    by construction (see standalone_analysis.md examples). The
+    grouping key is ``(operation, source_path, line, function)`` —
+    different operations sharing a Python wrapper would NOT merge."""
     src = tmp_path / "rmsnorm.py"
     src.write_text(
         "def rms_norm(x):\n    return x\n\n\ndef other_fn(x):\n    return x\n",
@@ -1867,7 +1874,7 @@ def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
     cands = [
         {
             "kernel_id": "k001",
-            "name": "rms_norm_call_1",
+            "name": "aiter::rms_norm",
             "duration_us": 100.0,
             "call_count": 64,
             "gpu_pct": 5.0,
@@ -1875,7 +1882,7 @@ def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
         },
         {
             "kernel_id": "k002",
-            "name": "rms_norm_call_2",
+            "name": "aiter::rms_norm",  # same op, different shape
             "duration_us": 50.0,
             "call_count": 32,
             "gpu_pct": 2.5,
@@ -1883,7 +1890,7 @@ def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
         },
         {
             "kernel_id": "k003",
-            "name": "other_fn_call",
+            "name": "aiter::other_fn_kernel",
             "duration_us": 30.0,
             "call_count": 16,
             "gpu_pct": 1.5,
@@ -1892,25 +1899,294 @@ def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
     ]
     groups = tlr.aggregate_by_source_function(cands)
     assert len(groups) == 2
-    # Heaviest group (rms_norm: 150 us aggregate) comes first.
     g0, g1 = groups
     assert g0["function_name"] == "rms_norm"
+    assert g0["operation"] == "aiter::rms_norm"
     assert g0["task_group_id"] == "tg001"
     assert set(g0["kernel_ids"]) == {"k001", "k002"}
-    assert g0["primary_kernel_id"] == "k001"  # highest duration_us
+    assert g0["primary_kernel_id"] == "k001"
     assert g0["aggregate_duration_us"] == 150.0
     assert g0["aggregate_call_count"] == 96
     assert g0["aggregate_gpu_pct"] == 7.5
-    # AST resolved the launcher line=2 → AST FunctionDef lineno=1.
     assert g0["definition_line"] == 1
     assert g0["ast_resolved"] is True
 
     assert g1["function_name"] == "other_fn"
+    assert g1["operation"] == "aiter::other_fn_kernel"
     assert g1["task_group_id"] == "tg002"
     assert g1["kernel_ids"] == ["k003"]
-    # Fixture: line 1 ``def rms_norm``, blank lines 3-4, ``def other_fn``
-    # on line 5; AST resolves the launcher's reported line=5 to itself.
     assert g1["definition_line"] == 5
+
+
+def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path):
+    """Q1 invariant: two semantically-distinct kernel operations that
+    happen to share the same Python wrapper (same Kernel Path) MUST
+    stay in separate task_groups. This is the real-world hazard the
+    user surfaced — P1 ``vllm::rocm_unquantized_gemm`` and P2
+    ``vllm::rocm_aiter_triton_add_rmsnorm_pad`` both have Kernel Path
+    ``vllm/model_executor/models/gpt_oss.py(283): forward`` because
+    that's the calling Python frame, not the kernel implementation.
+    Keying on source function alone would merge them into one
+    meaningless ``rewrite forward`` task; including operation_name
+    keeps each kernel identity intact."""
+    src = tmp_path / "gpt_oss.py"
+    src.write_text(
+        "def x():\n    pass\n\n\ndef forward(x):\n    return x\n",
+        encoding="utf-8",
+    )
+    launcher = f"{src}(5): forward"
+    cands = [
+        {
+            "kernel_id": "k001",
+            "name": "vllm::rocm_unquantized_gemm",
+            "duration_us": 12704.0,
+            "call_count": 360,
+            "tracelens_launcher_path": launcher,
+        },
+        {
+            "kernel_id": "k002",
+            "name": "vllm::rocm_aiter_triton_add_rmsnorm_pad",
+            "duration_us": 9870.0,
+            "call_count": 360,
+            "tracelens_launcher_path": launcher,
+        },
+        # Same op as k001 at a different shape MUST still merge with k001.
+        {
+            "kernel_id": "k003",
+            "name": "vllm::rocm_unquantized_gemm",
+            "duration_us": 1260.0,
+            "call_count": 36,
+            "tracelens_launcher_path": launcher,
+        },
+    ]
+    groups = tlr.aggregate_by_source_function(cands)
+    assert len(groups) == 2, (
+        f"expected 2 groups (one per Operation); got {len(groups)} — "
+        "k001 and k002 likely merged on shared wrapper, the bug"
+    )
+    by_op = {g["operation"]: g for g in groups}
+    assert "vllm::rocm_unquantized_gemm" in by_op
+    assert "vllm::rocm_aiter_triton_add_rmsnorm_pad" in by_op
+    gemm_group = by_op["vllm::rocm_unquantized_gemm"]
+    assert set(gemm_group["kernel_ids"]) == {"k001", "k003"}, (
+        "same-Operation rows at different shapes must collapse into one group"
+    )
+    rms_group = by_op["vllm::rocm_aiter_triton_add_rmsnorm_pad"]
+    assert rms_group["kernel_ids"] == ["k002"]
+
+
+def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_path):
+    """Q2 invariant: when the same operation+source-function legitimately
+    appears in MULTIPLE TraceLens P-items (e.g. the same kernel
+    classified once at decode shapes and again at prefill shapes,
+    yielding two distinct prose tuples), every P-item's prose is
+    collected on the task_group's ``all_pitem_prose`` list, deduped
+    by ``(rank, title)`` and sorted by rank ascending so P1 reads
+    first."""
+    src = tmp_path / "rmsnorm.py"
+    src.write_text("def rms_norm(x):\n    return x\n", encoding="utf-8")
+    launcher = f"{src}(1): rms_norm"
+    cands = [
+        {
+            "kernel_id": "k001",
+            "name": "aiter::rms_norm",
+            "duration_us": 200.0,
+            "call_count": 100,
+            "tracelens_launcher_path": launcher,
+            "tracelens_pitem_rank": 2,
+            "tracelens_pitem_title": "Memory-Bound at decode shapes",
+            "identification": "Decode-shape Identification.",
+            "reasoning_for_slowdown": "Decode-shape Reasoning.",
+            "resolution": "Decode-shape Resolution.",
+            "impact_low_ms": 5.0,
+            "impact_high_ms": 10.0,
+        },
+        {
+            "kernel_id": "k002",
+            "name": "aiter::rms_norm",
+            "duration_us": 80.0,
+            "call_count": 40,
+            "tracelens_launcher_path": launcher,
+            "tracelens_pitem_rank": 5,
+            "tracelens_pitem_title": "Compute-Bound at prefill shapes",
+            "identification": "Prefill-shape Identification.",
+            "reasoning_for_slowdown": "Prefill-shape Reasoning.",
+            "resolution": "Prefill-shape Resolution.",
+            "impact_low_ms": 1.0,
+            "impact_high_ms": 3.0,
+        },
+        # Same P2 again — must dedupe (only one entry retained).
+        {
+            "kernel_id": "k003",
+            "name": "aiter::rms_norm",
+            "duration_us": 50.0,
+            "call_count": 25,
+            "tracelens_launcher_path": launcher,
+            "tracelens_pitem_rank": 2,
+            "tracelens_pitem_title": "Memory-Bound at decode shapes",
+            "identification": "Decode-shape Identification.",
+            "reasoning_for_slowdown": "Decode-shape Reasoning.",
+            "resolution": "Decode-shape Resolution.",
+            "impact_low_ms": 5.0,
+            "impact_high_ms": 10.0,
+        },
+    ]
+    groups = tlr.aggregate_by_source_function(cands)
+    assert len(groups) == 1
+    g = groups[0]
+    prose = g["all_pitem_prose"]
+    assert len(prose) == 2, (
+        f"expected 2 distinct (rank,title) prose entries; got {len(prose)}"
+    )
+    # Sorted by rank ascending → P2 first, P5 second.
+    assert prose[0]["rank"] == 2
+    assert "decode" in prose[0]["title"].lower()
+    assert prose[0]["reasoning_for_slowdown"] == "Decode-shape Reasoning."
+    assert prose[1]["rank"] == 5
+    assert "prefill" in prose[1]["title"].lower()
+    assert prose[1]["resolution"] == "Prefill-shape Resolution."
+    # Set-typed bookkeeping must not leak into the returned dict
+    # (would break JSON serialization in summary.json / kernel_candidates.json).
+    assert "_pitem_prose_seen" not in g
+
+
+def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
+    tmp_path,
+):
+    """End-to-end pin for the most common P-item shape: same Operation
+    name + same source function + DIFFERENT Args (shapes) per row.
+
+    This is exactly the P1 ``vllm::rocm_unquantized_gemm`` pattern from
+    the user screenshot — 4 rows of one kernel at 4 distinct shape
+    tuples. The contract end-to-end:
+
+    1. ``aggregate_by_source_function`` collapses all rows into ONE
+       ``task_group`` (Q1 invariant: same operation+source key).
+    2. The group's ``rows[]`` preserves each candidate's own ``shapes``
+       list verbatim — no shape de-duplication, no cross-row mixing.
+    3. ``primary_kernel_id`` is the heaviest (max ``duration_us``).
+    4. ``_build_benchmark_cases_block`` renders one ``Case N:`` line
+       per row, each with that row's own Args / time / count / bound /
+       efficiency. GEAK sees every shape variant as its own benchmark
+       case it can target individually.
+    """
+    src = tmp_path / "model_executor.py"
+    src.write_text(
+        "def x(): pass\n\n\ndef forward(x):\n    return x\n",
+        encoding="utf-8",
+    )
+    launcher = f"{src}(5): forward"
+    cands = [
+        {
+            "kernel_id": "k001",
+            "name": "vllm::rocm_unquantized_gemm",
+            "shapes": ["(64,2880) bf16", "(128,2880) bf16", "(128,) bf16"],
+            "duration_us": 12704.0,
+            "call_count": 360,
+            "bound_type": "memory-bound",
+            "tracelens_launcher_path": launcher,
+        },
+        {
+            "kernel_id": "k002",
+            "name": "vllm::rocm_unquantized_gemm",
+            "shapes": ["(64,2880) bf16", "(640,2880) bf16", "(640,) bf16"],
+            "duration_us": 10992.0,
+            "call_count": 360,
+            "bound_type": "memory-bound",
+            "tracelens_launcher_path": launcher,
+        },
+        {
+            "kernel_id": "k003",
+            "name": "vllm::rocm_unquantized_gemm",
+            "shapes": ["(64,512) bf16", "(2880,512) bf16", "(2880,) bf16"],
+            "duration_us": 9291.0,
+            "call_count": 360,
+            "bound_type": "memory-bound",
+            "tracelens_launcher_path": launcher,
+        },
+        {
+            "kernel_id": "k004",
+            "name": "vllm::rocm_unquantized_gemm",
+            "shapes": ["(2048,2880) bf16", "(128,2880) bf16", "(128,) bf16"],
+            "duration_us": 1260.0,
+            "call_count": 36,
+            "bound_type": "memory-bound",
+            "tracelens_launcher_path": launcher,
+        },
+    ]
+    groups = tlr.aggregate_by_source_function(cands)
+    assert len(groups) == 1, (
+        f"expected 1 task_group (same op + same source); got {len(groups)}"
+    )
+    g = groups[0]
+    assert g["operation"] == "vllm::rocm_unquantized_gemm"
+    assert set(g["kernel_ids"]) == {"k001", "k002", "k003", "k004"}
+    assert g["primary_kernel_id"] == "k001"  # heaviest (12704 us)
+    assert len(g["rows"]) == 4
+    # Each row preserves its own shape list verbatim — no merging,
+    # no de-duplication. Order is duration-desc post-aggregation so
+    # row[0]=k001, row[3]=k004.
+    assert g["rows"][0]["shapes"] == ["(64,2880) bf16", "(128,2880) bf16", "(128,) bf16"]
+    assert g["rows"][3]["shapes"] == ["(2048,2880) bf16", "(128,2880) bf16", "(128,) bf16"]
+    # Cross-row distinctness: the "(640,2880)" shape only appears in
+    # k002's row, never bleeds into k001's or k003's row.
+    assert "(640,2880) bf16" in g["rows"][1]["shapes"]
+    assert "(640,2880) bf16" not in g["rows"][0]["shapes"]
+    assert "(640,2880) bf16" not in g["rows"][2]["shapes"]
+
+    # Now render the benchmark cases block from the primary candidate
+    # carrying the task_group — this is what the kernel_optimization
+    # subprocess sees in build_prompt.
+    import importlib
+    ko = importlib.import_module("kernel_optimization")
+    primary = dict(g["rows"][0])
+    primary["task_group"] = g
+    block = ko._build_benchmark_cases_block(primary)
+    assert "## Benchmark cases" in block
+    # Every row produces a distinct ``Case N:`` line, in
+    # aggregate-time-descending order.
+    assert "Case 1: operation=vllm::rocm_unquantized_gemm" in block
+    assert "Case 2: operation=vllm::rocm_unquantized_gemm" in block
+    assert "Case 3: operation=vllm::rocm_unquantized_gemm" in block
+    assert "Case 4: operation=vllm::rocm_unquantized_gemm" in block
+    # Each row's distinct Args appear in its own Case line. The
+    # ``(640,2880) bf16`` shape only exists in k002's row, so it must
+    # appear in exactly one Case (the second, since k002 is the
+    # second-heaviest at 10992 us).
+    assert block.count("(640,2880) bf16") == 1
+    case2_segment = block.split("Case 2:")[1].split("Case 3:")[0]
+    assert "(640,2880) bf16" in case2_segment, (
+        "k002's unique shape must land in Case 2 — confirms shape "
+        "preservation per-row, not cross-row merging"
+    )
+    # Same for k003's unique ``(2880,512)`` shape → Case 3.
+    case3_segment = block.split("Case 3:")[1].split("Case 4:")[0]
+    assert "(2880,512) bf16" in case3_segment
+    # And k004's unique ``(2048,2880)`` shape → Case 4.
+    case4_segment = block.split("Case 4:")[1]
+    assert "(2048,2880) bf16" in case4_segment
+
+
+def test_aggregate_drops_empty_prose_entries(tmp_path):
+    """Candidates from non-Detailed-Analysis paths (raw-trace fallback)
+    have rank=0 and no prose. They contribute exactly one bookkeeping
+    entry to ``all_pitem_prose`` during aggregation, but the
+    post-process step drops it so JSON consumers see an empty list,
+    not a noise entry."""
+    src = tmp_path / "rmsnorm.py"
+    src.write_text("def rms_norm(x):\n    return x\n", encoding="utf-8")
+    cands = [
+        {
+            "kernel_id": "k001",
+            "name": "aiter::rms_norm",
+            "duration_us": 100.0,
+            "tracelens_launcher_path": f"{src}(1): rms_norm",
+            # No P-item rank, no prose — raw-trace fallback shape.
+        },
+    ]
+    groups = tlr.aggregate_by_source_function(cands)
+    assert len(groups) == 1
+    assert groups[0]["all_pitem_prose"] == []
 
 
 def test_aggregate_by_source_function_skips_unparseable_launcher_paths():

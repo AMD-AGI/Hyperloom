@@ -453,6 +453,97 @@ def test_build_hypothesis_block_renders_when_only_identification_present():
     assert "Identification (TraceLens context):" in block
 
 
+def test_build_hypothesis_block_renders_all_pitem_prose_when_function_spans_pitems():
+    """Q2: when ``task_group.all_pitem_prose`` carries multiple distinct
+    entries (same source function flagged in multiple TraceLens
+    P-items), every P-item's prose is rendered with a ``### P{rank}``
+    header. GEAK sees both framings, not just the primary's. Order
+    follows the input list (already rank-sorted by
+    ``aggregate_by_source_function``)."""
+    candidate = {
+        "name": "aiter::rms_norm",
+        # Primary's own prose fields are intentionally divergent /
+        # absent so the test confirms the renderer reads from
+        # ``all_pitem_prose`` (not from candidate's flat prose) when
+        # the multi-P-item path is taken.
+        "identification": "<should not appear in multi-pitem render>",
+        "reasoning_for_slowdown": "<should not appear>",
+        "task_group": {
+            "all_pitem_prose": [
+                {
+                    "rank": 2,
+                    "title": "Memory-Bound at decode shapes",
+                    "identification": "Decode rows: 2.0% of HBM peak. (source: rmsnorm_metrics.json)",
+                    "reasoning_for_slowdown": "Small batch → low arithmetic intensity → HBM-bound.",
+                    "resolution": "Increase batch upstream OR fuse with adjacent elementwise.",
+                    "impact_low_ms": 5.0,
+                    "impact_low_e2e_pct": 1.0,
+                    "impact_high_ms": 10.0,
+                    "impact_high_e2e_pct": 2.0,
+                },
+                {
+                    "rank": 5,
+                    "title": "Compute-Bound at prefill shapes",
+                    "identification": "Prefill rows: 95% of compute peak. (source: rmsnorm_metrics.json)",
+                    "reasoning_for_slowdown": "Large batch saturates MFMA pipelines.",
+                    "resolution": "Tile-size tuning; compute-side levers only.",
+                    "impact_low_ms": 1.0,
+                    "impact_low_e2e_pct": 0.2,
+                    "impact_high_ms": 3.0,
+                    "impact_high_e2e_pct": 0.6,
+                },
+            ],
+        },
+    }
+    block = ko._build_hypothesis_block(candidate)
+    # Multi-P-item header copy:
+    assert "appears across MULTIPLE TraceLens P-items" in block
+    # Each P-item gets its own subheader + prose:
+    assert "### P2 — Memory-Bound at decode shapes" in block
+    assert "### P5 — Compute-Bound at prefill shapes" in block
+    assert "Decode rows: 2.0% of HBM peak" in block
+    assert "Prefill rows: 95% of compute peak" in block
+    assert "Increase batch upstream" in block
+    assert "Tile-size tuning" in block
+    # P2 must appear before P5 (rank-ascending order):
+    p2_pos = block.index("### P2")
+    p5_pos = block.index("### P5")
+    assert p2_pos < p5_pos
+    # Per-P-item impact ranges are rendered, BOTH variants:
+    assert "5.00 ms" in block and "10.00 ms" in block
+    assert "1.00 ms" in block and "3.00 ms" in block
+    # Candidate's flat prose fields must NOT leak into the multi-pitem
+    # render — that would conflate which P-item the prose came from.
+    assert "<should not appear>" not in block
+
+
+def test_build_hypothesis_block_falls_back_to_flat_prose_for_single_pitem():
+    """When ``all_pitem_prose`` has exactly one entry, the legacy flat
+    layout fires (reads from candidate's prose fields). This is the
+    common case — the multi-P-item layout would add unhelpful header
+    noise for single-finding kernels."""
+    candidate = {
+        "name": "kernel",
+        "reasoning_for_slowdown": "Memory-bound.",
+        "resolution": "Fuse with neighbour.",
+        "task_group": {
+            "all_pitem_prose": [
+                {
+                    "rank": 1,
+                    "title": "Memory-Bound GEMM",
+                    "reasoning_for_slowdown": "Memory-bound.",
+                    "resolution": "Fuse with neighbour.",
+                },
+            ],
+        },
+    }
+    block = ko._build_hypothesis_block(candidate)
+    # Legacy flat header (no "MULTIPLE TraceLens P-items" prose):
+    assert "appears across MULTIPLE" not in block
+    assert "**Reasoning for slowdown (hypothesis):**" in block
+    assert "Memory-bound." in block
+
+
 def test_build_prompt_omits_hypothesis_block_when_no_prose():
     """Backward compat: candidates without prose fields produce the same
     prompt shape as before — no surprise section, no extra blank lines

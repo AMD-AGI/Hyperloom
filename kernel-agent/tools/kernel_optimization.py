@@ -182,25 +182,17 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
             notes["geak_without_benchmark"] = True
         return user_backends, notes
 
-    def _with_cursor(base: list[str]) -> list[str]:
-        if cursor_key_present:
-            return base + ["cursor"]
-        return base
-
     if source_type == "vendor_binary":
         return [], notes
 
     # Unified ladder per #144 last comment Layer 1 (broadened): every
-    # kernel Claude/Codex/Cursor can rewrite, GEAK can rewrite too. GEAK
-    # is FIRST (high-priority handoff). Cursor appended via
-    # ``_with_cursor`` so it auto-drops when ``$CURSOR_API_KEY`` is
-    # missing (avoids wasted 401 attempts). When no benchmark/test
-    # harness is present, GEAK still attempts but
-    # ``geak_without_benchmark=True`` is flagged so downstream KEEP
-    # gates know verification confidence is reduced — matches the
-    # SKILL.md "allow but mark" contract that previously only applied
-    # to user-specified backends.
-    selected = ["geak"] + _with_cursor(["claude", "codex"])
+    # kernel Claude/Codex can rewrite, GEAK can rewrite too. GEAK is
+    # FIRST (high-priority handoff). When no benchmark/test harness is
+    # present, GEAK still attempts but ``geak_without_benchmark=True``
+    # is flagged so downstream KEEP gates know verification confidence
+    # is reduced — matches the SKILL.md "allow but mark" contract that
+    # previously only applied to user-specified backends.
+    selected = ["geak", "claude", "codex"]
     if not benchmark_available:
         notes["geak_without_benchmark"] = True
     return selected, notes
@@ -557,12 +549,50 @@ def _build_priority_block(candidate: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Mirror of ``tracelens_skill_runner._safe_float`` — coerce
+    ``int / float / numeric str`` to ``float``; everything else (None,
+    empty string, malformed) → ``default``. Used by hypothesis-block
+    helpers so per-row impact numbers from ``all_pitem_prose`` survive
+    JSON round-trips that may have already converted them to strings."""
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _format_impact_range(
+    low_ms: float, low_e2e: float, high_ms: float, high_e2e: float,
+) -> str:
+    """One-line impact range formatter; empty string when both ends zero."""
+    if not (low_ms or high_ms):
+        return ""
+    return (
+        f"**Estimated impact range:** low {low_ms:.2f} ms savings "
+        f"({low_e2e:.2f}% E2E), high {high_ms:.2f} ms savings "
+        f"({high_e2e:.2f}% E2E). These are TraceLens roofline estimates, "
+        "not measured speedups — confirm with a real benchmark."
+    )
+
+
 def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
     """Render a TraceLens hypothesis section for the candidate, if any.
 
     Returns empty string when none of the prose fields are present so the
     block is invisible for candidates whose TraceLens P-item lacked
     Reasoning / Resolution / Impact sections.
+
+    When the candidate carries a ``task_group`` whose
+    ``all_pitem_prose`` list contains MORE than one entry — i.e. the
+    same source function legitimately appears across multiple
+    TraceLens P-items (e.g. memory-bound at decode shapes, compute-
+    bound at prefill shapes) — every P-item's prose is rendered with
+    a ``### P{rank}`` header so GEAK sees all framings, not just the
+    primary's. Single-P-item / no-P-item candidates fall back to the
+    legacy single-block layout (reads from candidate's prose fields
+    directly).
 
     Framing notes:
 
@@ -575,19 +605,70 @@ def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
       pure roofline arithmetic and is safer to surface directly; the
       agent still needs a real measurement before declaring success.
     """
+    # Multi-P-item case (Q2): the same source function spans multiple
+    # TraceLens P-items. Each P-item contributes its own prose tuple;
+    # render them all so GEAK sees every framing, not just the
+    # primary's.
+    group = candidate.get("task_group")
+    all_prose: list[Any] = []
+    if isinstance(group, dict):
+        raw = group.get("all_pitem_prose")
+        if isinstance(raw, list):
+            all_prose = [e for e in raw if isinstance(e, dict)]
+
+    if len(all_prose) > 1:
+        lines: list[str] = [
+            "",
+            "## TraceLens Hypothesis [validate before acting]",
+            "",
+            "This source function appears across MULTIPLE TraceLens P-items;",
+            "each subsection below is the analysis-orchestrator's hypothesis",
+            "for the corresponding P-item. Treat them as starting points —",
+            "verify each against the source / a quick micro-benchmark before",
+            "committing to a direction. If your measurements contradict any",
+            "hypothesis, follow the data and document the discrepancy in",
+            "`optimization_report.md`.",
+            "",
+        ]
+        for entry in all_prose:
+            rank = entry.get("rank") or 0
+            title = str(entry.get("title") or "").strip()
+            header = f"### P{rank}" if rank else "### (un-ranked TraceLens entry)"
+            if title:
+                header += f" — {title}"
+            lines.extend([header, ""])
+            ident = str(entry.get("identification") or "").strip()
+            reason = str(entry.get("reasoning_for_slowdown") or "").strip()
+            resol = str(entry.get("resolution") or "").strip()
+            if ident:
+                lines.extend(["**Identification (TraceLens context):**", ident, ""])
+            if reason:
+                lines.extend(["**Reasoning for slowdown (hypothesis):**", reason, ""])
+            if resol:
+                lines.extend(["**Recommended direction (hypothesis):**", resol, ""])
+            impact = _format_impact_range(
+                _safe_float(entry.get("impact_low_ms")),
+                _safe_float(entry.get("impact_low_e2e_pct")),
+                _safe_float(entry.get("impact_high_ms")),
+                _safe_float(entry.get("impact_high_e2e_pct")),
+            )
+            if impact:
+                lines.extend([impact, ""])
+        return "\n".join(lines).rstrip()
+
+    # Single-P-item / no-P-item path: read prose from the candidate
+    # directly. Backward-compatible with raw-trace / csv-fallback
+    # candidates that have no ``task_group`` attached.
     identification = str(candidate.get("identification") or "").strip()
     reasoning = str(candidate.get("reasoning_for_slowdown") or "").strip()
     resolution = str(candidate.get("resolution") or "").strip()
-    try:
-        low_ms = float(candidate.get("impact_low_ms") or 0.0)
-        low_e2e = float(candidate.get("impact_low_e2e_pct") or 0.0)
-        high_ms = float(candidate.get("impact_high_ms") or 0.0)
-        high_e2e = float(candidate.get("impact_high_e2e_pct") or 0.0)
-    except (TypeError, ValueError):
-        low_ms = low_e2e = high_ms = high_e2e = 0.0
+    low_ms = _safe_float(candidate.get("impact_low_ms"))
+    low_e2e = _safe_float(candidate.get("impact_low_e2e_pct"))
+    high_ms = _safe_float(candidate.get("impact_high_ms"))
+    high_e2e = _safe_float(candidate.get("impact_high_e2e_pct"))
     if not (identification or reasoning or resolution or low_ms or high_ms):
         return ""
-    lines: list[str] = [
+    lines = [
         "",
         "## TraceLens Hypothesis [validate before acting]",
         "",
@@ -600,22 +681,14 @@ def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
         "",
     ]
     if identification:
-        # Identification carries the per-rank context + the source-file
-        # reference (e.g. ``gemm_metrics.json → operations[].efficiency...``)
-        # so GEAK can trace any hypothesis back to the raw TraceLens
-        # metrics when it needs to disagree.
         lines.extend(["**Identification (TraceLens context):**", identification, ""])
     if reasoning:
         lines.extend(["**Reasoning for slowdown (hypothesis):**", reasoning, ""])
     if resolution:
         lines.extend(["**Recommended direction (hypothesis):**", resolution, ""])
-    if low_ms or high_ms:
-        lines.append(
-            f"**Estimated impact range:** low {low_ms:.2f} ms savings "
-            f"({low_e2e:.2f}% E2E), high {high_ms:.2f} ms savings "
-            f"({high_e2e:.2f}% E2E). These are TraceLens roofline estimates, "
-            "not measured speedups — confirm with a real benchmark."
-        )
+    impact = _format_impact_range(low_ms, low_e2e, high_ms, high_e2e)
+    if impact:
+        lines.append(impact)
     return "\n".join(lines)
 
 

@@ -896,14 +896,28 @@ def aggregate_by_source_function(
         if not root.is_dir():
             root = None
 
-    groups: dict[tuple[str, int, str], dict[str, Any]] = {}
+    # Grouping key includes the kernel ``operation`` name as the
+    # primary component (NOT just the AST-resolved source function).
+    # Rationale: TraceLens's "Kernel Path" column reports the calling
+    # Python frame (e.g. ``vllm/model_executor/models/gpt_oss.py(283):
+    # forward``), not the kernel implementation itself. Multiple
+    # semantically distinct kernels — e.g. ``vllm::rocm_unquantized_gemm``
+    # (P1 GEMM) and ``vllm::rocm_aiter_triton_add_rmsnorm_pad`` (P2
+    # RMSNorm) — can share the same caller. Keying on source function
+    # alone would merge them into one task_group with a meaningless
+    # "rewrite forward" task. Including ``operation`` keeps each kernel
+    # identity intact while still collapsing the same kernel called at
+    # different shapes (the Q1 case from the user screenshots).
+    groups: dict[tuple[str, str, int, str], dict[str, Any]] = {}
     for cand in candidates:
         if not isinstance(cand, dict):
             continue
         target = _resolve_source_target(cand, source_root=root)
         if target is None:
             continue
+        operation = str(cand.get("name") or "").strip()
         key = (
+            operation,
             target["source_path"],
             int(target["definition_line"]),
             str(target["function_name"]),
@@ -912,6 +926,7 @@ def aggregate_by_source_function(
         if bucket is None:
             bucket = {
                 "task_group_id":          "",  # filled below after sorting
+                "operation":              operation,
                 "source_path":            target["source_path"],
                 "definition_line":        target["definition_line"],
                 "function_name":          target["function_name"],
@@ -923,12 +938,48 @@ def aggregate_by_source_function(
                 "aggregate_duration_us":  0.0,
                 "aggregate_call_count":   0,
                 "aggregate_gpu_pct":      0.0,
+                # Cross-P-item prose collection (Q2). When the same
+                # operation+source-function legitimately spans multiple
+                # TraceLens P-items (e.g. once classified as memory-
+                # bound at decode shapes, again as compute-bound at
+                # prefill shapes), each P-item contributes its own
+                # Identification / Reasoning / Resolution / Impact
+                # tuple. We dedupe by ``(rank, title)`` and keep all
+                # distinct entries so ``build_prompt`` can render every
+                # P-item's hypothesis to GEAK rather than dropping all
+                # but the primary's on the floor.
+                "all_pitem_prose":        [],
+                "_pitem_prose_seen":      set(),  # popped before return
             }
             groups[key] = bucket
         kid = str(cand.get("kernel_id") or "") or cand.get("name") or ""
         if kid and kid not in bucket["kernel_ids"]:
             bucket["kernel_ids"].append(kid)
         bucket["rows"].append(cand)
+        # Q2: collect this candidate's P-item prose if we haven't seen
+        # the same (rank, title) before in this group. Empty/missing
+        # rank/title still produces a valid de-dup key, so candidates
+        # from non-Detailed-Analysis paths (raw-trace fallback) without
+        # P-item context contribute exactly one entry per group.
+        try:
+            pitem_rank = int(cand.get("tracelens_pitem_rank") or 0)
+        except (TypeError, ValueError):
+            pitem_rank = 0
+        pitem_title = str(cand.get("tracelens_pitem_title") or "")
+        pitem_key = (pitem_rank, pitem_title)
+        if pitem_key not in bucket["_pitem_prose_seen"]:
+            bucket["_pitem_prose_seen"].add(pitem_key)
+            bucket["all_pitem_prose"].append({
+                "rank":                    pitem_rank,
+                "title":                   pitem_title,
+                "identification":          str(cand.get("identification") or "").strip(),
+                "reasoning_for_slowdown":  str(cand.get("reasoning_for_slowdown") or "").strip(),
+                "resolution":              str(cand.get("resolution") or "").strip(),
+                "impact_low_ms":           _safe_float(cand.get("impact_low_ms")),
+                "impact_low_e2e_pct":      _safe_float(cand.get("impact_low_e2e_pct")),
+                "impact_high_ms":          _safe_float(cand.get("impact_high_ms")),
+                "impact_high_e2e_pct":     _safe_float(cand.get("impact_high_e2e_pct")),
+            })
         try:
             bucket["aggregate_duration_us"] += float(cand.get("duration_us") or 0.0)
         except (TypeError, ValueError):
@@ -962,6 +1013,22 @@ def aggregate_by_source_function(
             )
         group["aggregate_duration_us"] = round(group["aggregate_duration_us"], 3)
         group["aggregate_gpu_pct"] = round(group["aggregate_gpu_pct"], 3)
+        # Sort prose entries by rank ascending so P1 reads first; drop
+        # any entry that's entirely empty (rank=0 + no prose) — those
+        # come from non-P-item paths and add no signal.
+        group["all_pitem_prose"].sort(key=lambda e: (e["rank"], e["title"]))
+        group["all_pitem_prose"] = [
+            e for e in group["all_pitem_prose"]
+            if e["rank"]
+            or e["identification"]
+            or e["reasoning_for_slowdown"]
+            or e["resolution"]
+            or e["impact_low_ms"]
+            or e["impact_high_ms"]
+        ]
+        # ``_pitem_prose_seen`` is a set; not JSON-serializable. Pop it
+        # so summary.json / kernel_candidates.json serialization works.
+        group.pop("_pitem_prose_seen", None)
     return ordered
 
 
