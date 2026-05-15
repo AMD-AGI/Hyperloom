@@ -65,6 +65,60 @@ def test_full_enabled_actions_match_registry_minus_pmc_optional(registry):
         assert registry.get(name) is not None
 
 
+# The 5 noop-prep actions below were removed from the enabled sets so the
+# Orchestration LLM no longer proposes them (see remain_todo.md sections
+# C / I / M for the missing executor work). The metadata yamls still live
+# in actions/_meta so future executors don't need to re-introduce the
+# action names; pin both halves of the contract here.
+_REMOVED_NOOP_ACTIONS: tuple[str, ...] = (
+    "comm_optimization",
+    "compiler_tuning",
+    "dream",
+    "re_explore",
+    "recover",
+)
+
+
+@pytest.mark.parametrize("name", _REMOVED_NOOP_ACTIONS)
+def test_noop_actions_excluded_from_full_enabled(name: str):
+    assert name not in FULL_ENABLED_ACTIONS, (
+        f"{name!r} is a noop-prep action and must not be visible to the "
+        "Orchestration LLM until a real executor lands"
+    )
+
+
+@pytest.mark.parametrize("name", _REMOVED_NOOP_ACTIONS)
+def test_noop_actions_excluded_from_no_kernel_enabled(name: str):
+    assert name not in NO_KERNEL_ENABLED_ACTIONS
+
+
+@pytest.mark.parametrize("name", _REMOVED_NOOP_ACTIONS)
+def test_removed_noop_actions_still_have_registry_metadata(registry, name):
+    """We only suppressed the action from the enabled set; the yaml
+    metadata stays in the registry so re-enabling later is a one-line
+    revert in prompt_builder.py."""
+    assert registry.get(name) is not None, (
+        f"action metadata for {name!r} disappeared — re-enabling will be "
+        "harder than expected"
+    )
+
+
+def test_removed_noop_actions_absent_from_default_catalogue(registry, rules_path):
+    text = build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=FULL_ENABLED_ACTIONS,
+        framework="sglang",
+        objective_kind="time_only",
+        objective_value=None,
+        max_minutes=120,
+        rules_fragment_path=rules_path,
+    )
+    for name in _REMOVED_NOOP_ACTIONS:
+        assert f"**{name}**" not in text, (
+            f"{name!r} should not appear as an action bullet in the prompt"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Output structure
 # ---------------------------------------------------------------------------
@@ -92,7 +146,7 @@ def test_full_prompt_has_seven_sections(registry, rules_path):
         "## 3. PIPELINE & TIME BUDGET",
         "## 4. ACTIONS YOU MAY USE",
         "## 5. DECISION FRAMEWORK (apply EVERY tick BEFORE emitting)",
-        "## 6. KERNEL-OPT PIPELINE (sequential, no backtracking)",
+        "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
         "## 7. RULES & OUTPUT PROTOCOL",
     ]
     actual_top = [h for h in headers if h.startswith("## ")]
@@ -110,7 +164,7 @@ def test_no_kernel_prompt_drops_section_six(registry, rules_path):
         rules_fragment_path=rules_path,
     )
     headers = [h for h in _section_headers(text) if h.startswith("## ")]
-    assert "## 6. KERNEL-OPT PIPELINE (sequential, no backtracking)" not in headers
+    assert "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)" not in headers
     # Other sections still present
     assert "## 1. MISSION" in headers
     assert "## 4. ACTIONS YOU MAY USE" in headers
@@ -269,7 +323,7 @@ def test_explicit_kernel_enabled_override_wins(registry, rules_path):
         max_minutes=60,
         rules_fragment_path=rules_path,
     )
-    assert "## 6. KERNEL-OPT PIPELINE" not in text
+    assert "## 6. KERNEL-OPT REQUEST REFERENCE" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -314,3 +368,73 @@ def test_time_budget_section_lists_all_enabled_phases(registry, rules_path):
     # Mandatory rule about validate_stack must be in the budget section so
     # the LLM treats it as part of the schedule, not a side note.
     assert "validate_stack" in pipeline_block
+
+
+# ---------------------------------------------------------------------------
+# #144 last comment Layer 2: orchestrator must NOT pre-pin backends='claude'
+# ---------------------------------------------------------------------------
+def test_run_optimization_example_does_not_pin_backends_to_claude(
+    registry, rules_path,
+):
+    """The ``run_optimization`` example in the kernel-opt pipeline section
+    must NOT contain a literal ``backends: 'claude'`` (or any other backend
+    pin). When the example carried that literal, the LLM echoed it on
+    every kernel-opt request and ``kernel_optimization.choose_backends()``
+    short-circuited to Claude only — even on hip_cpp+benchmark kernels
+    that GEAK can rewrite (the exact regression closed in #144 last
+    comment Layer 2)."""
+    text = build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=FULL_ENABLED_ACTIONS,
+        framework="sglang",
+        objective_kind="time_only",
+        objective_value=None,
+        max_minutes=120,
+        rules_fragment_path=rules_path,
+    )
+    # The example block lives inside the kernel-opt pipeline section.
+    assert "## 6. KERNEL-OPT PIPELINE" in text or "KERNEL-OPT PIPELINE" in text
+    # Extract the K2 step block (where the run_optimization example lives).
+    # We don't want to test on the entire prompt because legitimate
+    # mentions of "claude" elsewhere (e.g. in the explanatory comment)
+    # are fine.
+    assert "kind: 'run_optimization'" in text
+    k2_section = text.split("kind: 'run_optimization'", 1)[1]
+    example_block = k2_section.split("budget_minutes")[0]
+    # The example's `params:` block must NOT carry a `backends: 'claude'`
+    # (or any other backend) literal.
+    assert "backends: 'claude'" not in example_block, (
+        "orchestrator example must not pin backends='claude' — that's the "
+        "#144 last comment Layer 2 regression"
+    )
+    assert "backends: 'codex'" not in example_block
+    assert "backends: 'geak'" not in example_block
+
+
+def test_run_optimization_section_documents_auto_pick_rule(registry, rules_path):
+    """The kernel-opt pipeline section must document that backends are
+    auto-picked by the kernel-agent — so a future contributor doesn't
+    re-add the literal pin "for clarity" and regress #144."""
+    text = build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=FULL_ENABLED_ACTIONS,
+        framework="sglang",
+        objective_kind="time_only",
+        objective_value=None,
+        max_minutes=120,
+        rules_fragment_path=rules_path,
+    )
+    # Look for the auto-pick guidance in the kernel_opt section.
+    # Main's prompt restructure (post-#207 merge) renamed "Step **K2**"
+    # to "### kernel_opt — payload for run_optimization" and the next
+    # subsection is "### integrate — payload"; split there.
+    k2_section = text.split("kind: 'run_optimization'", 1)[1].split("### `integrate`")[0]
+    assert "auto-pick" in k2_section.lower() or "auto-picks" in k2_section.lower(), (
+        "kernel_opt step must document that backends are auto-picked"
+    )
+    assert "choose_backends" in k2_section, (
+        "K2 step must reference the kernel-agent function that does the pick"
+    )
+    # And the historical regression must be called out so the rationale
+    # survives a casual prompt-template cleanup.
+    assert "#144" in k2_section

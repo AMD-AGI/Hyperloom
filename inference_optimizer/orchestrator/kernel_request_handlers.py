@@ -40,6 +40,7 @@ import importlib.util
 import json
 import logging
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -84,15 +85,37 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/vllm/",
 )
 _APPLY_TOOL_MODULE: Any | None = None
-_DEFAULT_KERNEL_BACKEND_ORDER = ("claude", "codex", "geak")
+_DEFAULT_KERNEL_BACKEND_ORDER = ("claude", "codex", "cursor", "geak")
 _DEFAULT_KERNEL_BATCH_PARALLEL = 3
+_CANDIDATE_ENV_KEYS = {
+    "CONC",
+    "ISL",
+    "OSL",
+    "TP",
+    "NUM_PROMPTS",
+    "NUM_WARMUPS",
+    "MAX_MODEL_LEN",
+    "RANDOM_RANGE_RATIO",
+    "ROCR_VISIBLE_DEVICES",
+    "CUDA_VISIBLE_DEVICES",
+}
+_CANDIDATE_ENV_PREFIXES = (
+    "SGLANG_",
+    "VLLM_",
+    "AITER_",
+    "TRITON_",
+    "HIPBLASLT_",
+    "PYTORCH_TUNABLEOP_",
+)
+_SENSITIVE_ENV_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
 
 def _kernel_agent_root_error() -> str | None:
     if HYPERLOOM_KERNEL_AGENT_ROOT is None:
         return (
             f"{_KERNEL_AGENT_ROOT_ENV} is not set; run "
-            "inference_optimizer/scripts/install.sh and source /workspace/hyperloom/runtime/kernel-agent.env.sh"
+            "inference_optimizer/scripts/install.sh and source $KERNEL_AGENT_ENV "
+            "(default: $USER_DATA_PATH/runtime/kernel-agent.env.sh)"
         )
     if not HYPERLOOM_KERNEL_AGENT_ROOT.is_dir():
         return f"{_KERNEL_AGENT_ROOT_ENV} does not exist: {HYPERLOOM_KERNEL_AGENT_ROOT}"
@@ -141,6 +164,153 @@ def _load_candidate_metadata(payload: dict) -> dict[str, Any]:
         if str(item.get("kernel_id") or "") == kernel_id:
             return item
     return {}
+
+
+def _coerce_runtime_value(value: Any) -> Any:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+        try:
+            return float(stripped) if "." in stripped else value
+        except ValueError:
+            return value
+    return value
+
+
+def _candidate_env_allowed(key: str) -> bool:
+    upper = key.upper()
+    if any(part in upper for part in _SENSITIVE_ENV_PARTS):
+        return False
+    return key in _CANDIDATE_ENV_KEYS or any(
+        key.startswith(prefix) for prefix in _CANDIDATE_ENV_PREFIXES
+    )
+
+
+def _split_server_args(raw: str) -> list[str]:
+    try:
+        return shlex.split(raw) if raw else []
+    except ValueError:
+        log.warning("failed to parse materialized server args; preserving raw string")
+        return []
+
+
+def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
+    if not config_path:
+        return {}
+    path = Path(config_path)
+    if not path.exists():
+        return {}
+    try:
+        import yaml  # type: ignore[import-untyped]
+
+        cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("failed to read materialized workload config %s: %s", path, exc)
+        return {}
+    bench = cfg.get("benchmark") if isinstance(cfg.get("benchmark"), dict) else {}
+    envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
+    framework = str(bench.get("framework") or "").strip().lower()
+    server_key = "EXTRA_VLLM_ARGS" if framework == "vllm" else "EXTRA_SGLANG_ARGS"
+    server_args = str(envs.get(server_key) or "").strip()
+    workload = {
+        out_key: _coerce_runtime_value(envs[src_key])
+        for out_key, src_key in (
+            ("tp", "TP"),
+            ("conc", "CONC"),
+            ("isl", "ISL"),
+            ("osl", "OSL"),
+            ("num_prompts", "NUM_PROMPTS"),
+            ("num_warmups", "NUM_WARMUPS"),
+            ("max_model_len", "MAX_MODEL_LEN"),
+            ("random_range_ratio", "RANDOM_RANGE_RATIO"),
+        )
+        if src_key in envs
+    }
+    runtime_args = {
+        "materialized_config": str(path),
+        "framework": framework or None,
+        "model": bench.get("model"),
+        "precision": bench.get("precision"),
+        "server_args": server_args,
+        "server_args_argv": _split_server_args(server_args),
+        "workload": workload,
+    }
+    return {
+        "env_vars": {
+            str(key): str(value)
+            for key, value in envs.items()
+            if _candidate_env_allowed(str(key))
+        },
+        "runtime_args": {
+            key: value for key, value in runtime_args.items()
+            if value not in (None, "", {})
+        },
+    }
+
+
+def _enrich_candidate_runtime_metadata(
+    candidates: Any,
+    metadata: dict[str, Any],
+) -> None:
+    if not isinstance(candidates, list) or not metadata:
+        return
+    env_vars = metadata.get("env_vars") if isinstance(metadata.get("env_vars"), dict) else {}
+    runtime_args = (
+        metadata.get("runtime_args") if isinstance(metadata.get("runtime_args"), dict) else {}
+    )
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        item_env = item.setdefault("env_vars", {})
+        if isinstance(item_env, dict):
+            for key, value in env_vars.items():
+                item_env.setdefault(key, value)
+        item_args = item.setdefault("runtime_args", {})
+        if isinstance(item_args, dict):
+            for key, value in runtime_args.items():
+                item_args.setdefault(key, value)
+
+
+def _enrich_candidate_trace_report(candidates: Any, report_path: str) -> None:
+    if not isinstance(candidates, list) or not report_path:
+        return
+    for item in candidates:
+        if isinstance(item, dict):
+            item.setdefault("trace_report_path", report_path)
+
+
+def _enrich_candidates_artifact(
+    candidates_path: str,
+    metadata: dict[str, Any],
+    *,
+    trace_report_path: str = "",
+) -> None:
+    if not candidates_path:
+        return
+    path = Path(candidates_path)
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("failed to read candidates artifact %s: %s", path, exc)
+        return
+    if not isinstance(data, dict):
+        return
+    if metadata:
+        _enrich_candidate_runtime_metadata(data.get("hot_kernels"), metadata)
+        _enrich_candidate_runtime_metadata(data.get("hot_kernels_top15"), metadata)
+    if trace_report_path:
+        data.setdefault("trace_report_path", trace_report_path)
+        artifact_paths = data.setdefault("artifact_paths", {})
+        if isinstance(artifact_paths, dict):
+            artifact_paths.setdefault("trace_report_path", trace_report_path)
+        _enrich_candidate_trace_report(data.get("hot_kernels"), trace_report_path)
+        _enrich_candidate_trace_report(
+            data.get("hot_kernels_top15"), trace_report_path,
+        )
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
@@ -374,7 +544,7 @@ async def select_kernels_handler(
         top_k:           default 10
         model_name:      default ''
         framework:       default 'sglang'
-        target_platform: default 'MI300X'
+        target_platform: defaults to payload target_platform, then SharedState.gpu_type
         roofline_json:   optional path from a separate pmc_roofline action
         dry_run:         default False (testing)
         budget_minutes:  default 60
@@ -384,8 +554,7 @@ async def select_kernels_handler(
         {
           "status": "ok" | "failed",
           "hot_kernels": [...],
-          "trace_report_path": "...",        # tracelens_report.json (structured)
-          "analysis_report_path": "...",      # analysis.md from TraceLens v0.3
+          "trace_report_path": "...",        # analysis.md from TraceLens v0.3
                                               #   orchestrator (markdown final
                                               #   stakeholder report — pass to
                                               #   GEAK so it can ground its
@@ -403,10 +572,14 @@ async def select_kernels_handler(
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
-    workspace_path = (
-        payload.get("workspace_path")
-        or str(session_dir / "kernel-agent-workspace")
-    )
+    # Tool output lands at ``<workspace_path>/kernel-agent/runs/<session_id>/``
+    # (the suffix is hardcoded inside ``tracelens_analysis.py``). Pass the
+    # session root so the artefacts settle at
+    # ``<session_dir>/kernel-agent/runs/...`` — a sibling of
+    # ``<session_dir>/kernel-agent-workspace/<kernel_id>/`` (which the
+    # tool also reads/writes for cross-call GEAK/OOB artefacts). Both
+    # locations now live under ``$USER_DATA_PATH`` for unified monitoring.
+    workspace_path = payload.get("workspace_path") or str(session_dir)
     Path(workspace_path).mkdir(parents=True, exist_ok=True)
 
     # Backfill workload context from SharedState so downstream
@@ -467,14 +640,29 @@ async def select_kernels_handler(
     # Surface analysis.md path at the handler boundary so the Coordinator can
     # forward it to GEAK without having to dig through artifact_paths.
     if isinstance(result, dict):
-        report_path = result.get("analysis_report_path")
+        report_path = result.get("trace_report_path")
         if not report_path and isinstance(artifacts, dict):
-            report_path = (
-                artifacts.get("tracelens_agent_report")
-                or artifacts.get("trace_report_path")
-            )
+            report_path = artifacts.get("trace_report_path")
         if report_path:
-            result["analysis_report_path"] = str(report_path)
+            result["trace_report_path"] = str(report_path)
+            _enrich_candidate_trace_report(
+                result.get("hot_kernels"), str(report_path),
+            )
+        # PR-A §3 (#206): surface tracelens/summary.json — the per-run
+        # audit sidecar listing reusable tasks vs skipped kernels with
+        # reasons, so operators can see at a glance whether GEAK was
+        # offered the kernels they expected.
+        if isinstance(artifacts, dict) and artifacts.get("tracelens_summary"):
+            result["tracelens_summary_path"] = str(artifacts["tracelens_summary"])
+        metadata = _load_materialized_workload_metadata(state.baseline_config_path)
+        _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
+        candidates_path = result.get("candidates_path")
+        if isinstance(candidates_path, str):
+            _enrich_candidates_artifact(
+                candidates_path,
+                metadata,
+                trace_report_path=str(report_path or ""),
+            )
     return result
 
 
@@ -487,7 +675,7 @@ async def run_optimization_handler(
     When candidate metadata is available, this handler upgrades legacy
     single-kernel requests into a batch over all reusable native kernels. Each
     kernel is optimized concurrently, while backends are tried sequentially per
-    kernel in the preferred order: Claude first, then Codex, then GEAK.
+    kernel in the preferred order: Claude → Codex → Cursor → GEAK.
     """
     if payload.get("_single_kernel"):
         return await _run_optimization_single(payload, session_dir=session_dir)
@@ -505,13 +693,22 @@ def _backend_order(payload: dict) -> list[str]:
     raw = payload.get("backend_order") or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
     if raw:
         order = [item.strip() for item in str(raw).split(",") if item.strip()]
+        explicit = True
     else:
         # Ignore legacy payload["backends"] here. Older Orchestration prompts
         # often send backends="claude"; batch scheduling must still exercise
         # the full fallback ladder.
         order = list(_DEFAULT_KERNEL_BACKEND_ORDER)
-    allowed = {"claude", "codex", "geak"}
-    return [backend for backend in order if backend in allowed]
+        explicit = False
+    allowed = {"claude", "codex", "cursor", "geak"}
+    selected = [backend for backend in order if backend in allowed]
+    # When the operator has not provisioned CURSOR_API_KEY, drop cursor from
+    # the auto-derived ladder so we don't waste a fallback slot on a 401.
+    # Explicit `payload["backend_order"]` / KERNEL_OPT_BACKEND_ORDER still
+    # wins (respect intent; failure surfaces clearly in the attempt log).
+    if not explicit and not os.environ.get("CURSOR_API_KEY", "").strip():
+        selected = [b for b in selected if b != "cursor"]
+    return selected
 
 
 def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
@@ -527,12 +724,78 @@ def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
         return []
     reusable_ids = data.get("reusable_native_kernel_ids") or []
     reusable_id_set = {str(item) for item in reusable_ids if item}
+
+    # PR-B §1: collapse kernels that share a source function into a
+    # single dispatch via ``task_groups[]``. Each group emits exactly
+    # one GEAK / Codex / Claude request keyed off ``primary_kernel_id``,
+    # and the full row list lives on ``item["task_group"]`` so
+    # ``build_prompt`` can render multi-row benchmark cases. Kernels
+    # whose launcher path wasn't parseable (analysis.md with empty
+    # Kernel Path, raw-trace path, csv fallback) fall through to the
+    # legacy per-kernel path below — aggregation is purely additive,
+    # never lossy.
+    task_groups = data.get("task_groups") or []
+    if not isinstance(task_groups, list):
+        task_groups = []
+    kernel_by_id: dict[str, dict[str, Any]] = {
+        str(k.get("kernel_id") or ""): k
+        for k in kernels
+        if isinstance(k, dict) and k.get("kernel_id")
+    }
+    grouped_kernel_ids: set[str] = set()
     selected: list[dict[str, Any]] = []
+    for group in task_groups:
+        if not isinstance(group, dict):
+            continue
+        member_ids = [str(k) for k in (group.get("kernel_ids") or []) if k]
+        if not member_ids:
+            continue
+        # Only members marked reusable_native_kernel survive (vendor /
+        # aten:: / runtime-generated were filtered upstream by
+        # ``classify_patchability``); the group's primary may itself
+        # have been rejected, in which case we fall through to the
+        # legacy path for the surviving non-primary reusable members
+        # (no special-casing needed — they just won't be in
+        # ``grouped_kernel_ids`` and the loop below picks them up).
+        primary = str(group.get("primary_kernel_id") or "")
+        primary_cand = kernel_by_id.get(primary)
+        if primary_cand is None or primary_cand.get("reusable_native_kernel") is not True:
+            # Fall back to the first reusable member in priority order.
+            # ``primary`` itself is only read on the line above to look
+            # up ``primary_cand``; downstream code reads ``primary_cand``
+            # directly so we don't need to refresh ``primary`` here.
+            primary_cand = next(
+                (
+                    kernel_by_id[m]
+                    for m in member_ids
+                    if m in kernel_by_id
+                    and kernel_by_id[m].get("reusable_native_kernel") is True
+                    and kernel_by_id[m].get("source_file")
+                ),
+                None,
+            )
+            if primary_cand is None:
+                continue
+        if not primary_cand.get("source_file"):
+            continue
+        # Shallow copy + attach group so the kernel_optimization.py
+        # subprocess sees ``candidate["task_group"]`` and can render
+        # benchmark cases. The non-primary member kernel_ids are
+        # marked seen so the legacy loop skips them.
+        item = dict(primary_cand)
+        item["task_group"] = group
+        selected.append(item)
+        grouped_kernel_ids.update(member_ids)
+
+    # Legacy per-kernel pass for any reusable kernel that wasn't
+    # absorbed into a task_group above (no parseable launcher path).
     for item in kernels:
         if not isinstance(item, dict):
             continue
         kernel_id = str(item.get("kernel_id") or "")
         if not kernel_id:
+            continue
+        if kernel_id in grouped_kernel_ids:
             continue
         if reusable_id_set and kernel_id not in reusable_id_set:
             continue
@@ -642,10 +905,11 @@ async def _run_optimization_single(
         kernel_id: str
 
     Optional payload:
-        backends:        comma-separated 'geak,claude,codex' (auto-pick if empty)
+        backends:        comma-separated 'geak,claude,codex,cursor' (auto-pick if empty)
         budget_minutes:  default 60
         source_file:     path to original kernel source (for context)
         candidates_path: path to JSON describing candidates (optional)
+        extra_sglang_args: SGLang runtime flags for GEAK metadata (optional)
         enable_rag:      default True; false disables GEAK RAG tools
         enable_xs_memory: default True; false disables GEAK cross-session memory
         dry_run:         default False (testing)
@@ -662,11 +926,23 @@ async def _run_optimization_single(
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
-    workspace_path = (
-        payload.get("workspace_path")
-        or str(session_dir / "kernel-agent-workspace")
-    )
+    # Same convention as :func:`select_kernels_handler`: pass the session
+    # root so ``kernel_optimization.py`` lands its run artefacts at
+    # ``<session_dir>/kernel-agent/runs/<session_id>/`` while still reading
+    # ``<session_dir>/kernel-agent-workspace/<kernel_id>/`` for the
+    # cross-call GEAK/OOB cache. Both subtrees live under
+    # ``$USER_DATA_PATH``.
+    workspace_path = payload.get("workspace_path") or str(session_dir)
     Path(workspace_path).mkdir(parents=True, exist_ok=True)
+
+    from .shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    target_platform = (
+        payload.get("target_platform") or state.gpu_type or ""
+    ).strip()
+    if target_platform:
+        os.environ["TARGET_GPU_TYPE"] = target_platform
 
     cmd = [
         "python3",
@@ -679,6 +955,10 @@ async def _run_optimization_single(
         cmd += ["--backends", str(payload["backends"])]
     if payload.get("source_file"):
         cmd += ["--source-file", str(payload["source_file"])]
+    if target_platform:
+        cmd += ["--target-platform", str(target_platform)]
+    if payload.get("extra_sglang_args"):
+        cmd += ["--extra-sglang-args", str(payload["extra_sglang_args"])]
     if payload.get("candidates_path"):
         cmd += ["--candidates-path", str(payload["candidates_path"])]
     if payload.get("benchmark_file"):
