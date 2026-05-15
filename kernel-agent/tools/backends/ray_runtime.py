@@ -68,8 +68,14 @@ def stop_ray_if_owned(started: bool, log_path: Optional[Path] = None) -> None:
 SAFE_ENV_KEYS = (
     "PATH", "HOME", "LD_LIBRARY_PATH",
     "HYPERLOOM_KERNEL_AGENT_ROOT", "KERNEL_AGENT_ROOT",
+    # USER_DATA_PATH is the single artefact root; HYPERLOOM_RUNTIME_DIR /
+    # KERNEL_AGENT_ENV / MAGPIE_DIR / INFERENCEX_PATH all default under it.
+    # WORKSPACE_ROOT / WORKSPACE_PATH / AGENT_WORKSPACE_ROOT were retired
+    # during the "all artefacts under USER_DATA_PATH" migration — drop them
+    # from the propagate list so we don't accidentally leak stale values
+    # into Ray workers.
     "USER_DATA_PATH", "HYPERLOOM_RUNTIME_DIR", "KERNEL_AGENT_ENV",
-    "WORKSPACE_ROOT", "WORKSPACE_PATH", "MAGPIE_DIR", "INFERENCEX_PATH",
+    "MAGPIE_DIR", "INFERENCEX_PATH",
     "SAFE_API_KEY",
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
     "OPENAI_API_KEY", "OPENAI_BASE_URL",
@@ -84,7 +90,6 @@ SAFE_ENV_KEYS = (
     "GEAK_MEMORY_API_KEY", "GEAK_USE_KNOWLEDGE_BASE",
     "GEAK_MEMORY_DISABLE", "GEAK_MEMORY_NO_CROSS_SESSION",
     "MSWEA_MODEL_NAME",
-    "AGENT_WORKSPACE_ROOT",
 )
 
 
