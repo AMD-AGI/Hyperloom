@@ -4,8 +4,9 @@ DESIGN v0.6 §16 profile action.
 
 Reuses the BaselineExecutor shell-out machinery; the only meaningful
 difference is the YAML config — the profile config has
-``profiler.torch_profiler.enabled: true`` so Magpie writes a
-``torch_trace/`` directory inside the workspace.
+``profiler.torch_profiler.enabled: true`` so Magpie writes trace files under
+``torch_trace/`` or, for TraceLens-patched vLLM graph capture,
+``capture_traces/``.
 
 Result schema (delivered on the bus as ``delegated_result``)::
 
@@ -31,6 +32,10 @@ from pathlib import Path
 from typing import Any
 
 from ...paths import asset_root
+from ._inferencex_patcher import (
+    ensure_benchmark_lib_patched,
+    ensure_benchmark_serving_patched,
+)
 from .baseline import BaselineExecutor
 
 
@@ -42,7 +47,28 @@ log = logging.getLogger(__name__)
 PROFILE_DEFAULT_CONFIG = (
     asset_root() / "scripts" / "configs" / "profile_sglang.yaml"
 )
-PROFILE_DEFAULT_TIMEOUT_SEC = 1500     # Magpie + sglang profile is heavier
+PROFILE_DEFAULT_TIMEOUT_SEC = 2400     # Magpie + sglang profile is heavier, 40 min wall cap
+
+
+def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
+    """Return trace files under ``trace_dir`` in a stable order.
+
+    Magpie's classic torch-profiler path writes under
+    ``<benchmark_workspace>/torch_trace``. TraceLens-patched vLLM writes graph
+    capture traces under ``<profile_task>/capture_traces``. Both use
+    ``*.trace.json.gz`` names, and nested layouts are possible as the profiler
+    evolves.
+    """
+    return sorted(trace_dir.rglob("*.trace.json.gz"))
+
+
+def _candidate_trace_dirs(workspace: Path) -> list[Path]:
+    """Trace directories to probe for a Magpie profile workspace."""
+    return [
+        workspace / "torch_trace",
+        workspace / "capture_traces",
+        workspace.parent / "capture_traces",
+    ]
 
 
 def _default_profile_config() -> Path:
@@ -89,31 +115,69 @@ class ProfileExecutor(BaselineExecutor):
                 ctx.extra = {"workspace": str(output_dir)}
             else:
                 extra["workspace"] = str(output_dir)
+        # Issue #194 §2: ensure InferenceX's benchmark_lib.sh honours
+        # $NUM_PROMPTS. _workload_envs computes a NUM_PROMPTS large
+        # enough to reach the steady-state window, but unpatched
+        # upstream stomps it on every PROFILE=1 run — silently
+        # producing empty traces. The patch is backward-compatible
+        # (no-op when NUM_PROMPTS is unset) and idempotent, so calling
+        # this on every profile launch costs ~1 file read after the
+        # first success.
+        ensure_benchmark_lib_patched()
+        # PR-D §2: ensure InferenceX `benchmark_serving.py` reads our
+        # `PROFILE_EXTRA_BODY` env var. Without this patch the
+        # `/start_profile` request bakes in upstream's hardcoded
+        # `extra_body={"num_steps": 1, ...}` and silently drops
+        # shape_discovery / roofline_annotations / the steady-state
+        # start_step computed by `_workload_envs.py`. Same idempotent
+        # atomic-replace shape as `ensure_benchmark_lib_patched`.
+        ensure_benchmark_serving_patched()
         result = await super().__call__(ctx)
         # Augment with trace_dir if the workspace produced one.
         workspace_str = result.get("workspace")
         if workspace_str:
-            trace_dir = Path(workspace_str) / "torch_trace"
-            if trace_dir.is_dir():
-                # Find the actual trace .json.gz files; pick the one most
-                # likely to be the main rank trace (first by name).
-                trace_files = sorted(trace_dir.glob("*.trace.json.gz"))
-                result["trace_dir"] = str(trace_dir)
-                result["trace_files"] = [str(p) for p in trace_files]
+            workspace = Path(workspace_str)
+            selected_trace_dir: Path | None = None
+            selected_trace_files: list[Path] = []
+            existing_empty_dirs: list[Path] = []
+            for trace_dir in _candidate_trace_dirs(workspace):
+                if not trace_dir.is_dir():
+                    continue
+                trace_files = _trace_files_for_dir(trace_dir)
                 if trace_files:
-                    result["main_trace_path"] = str(trace_files[0])
-                else:
-                    log.warning(
-                        "profile_executor: torch_trace dir exists but no "
-                        ".trace.json.gz files in %s", trace_dir,
-                    )
+                    selected_trace_dir = trace_dir
+                    selected_trace_files = trace_files
+                    break
+                existing_empty_dirs.append(trace_dir)
+
+            if selected_trace_dir is not None:
+                result["trace_dir"] = str(selected_trace_dir)
+                result["trace_files"] = [str(p) for p in selected_trace_files]
+                result["main_trace_path"] = str(selected_trace_files[0])
             else:
                 result["trace_dir"] = None
                 result["trace_files"] = []
-                log.warning(
-                    "profile_executor: workspace=%s has no torch_trace dir",
-                    workspace_str,
+                result["status"] = "failed"
+                result["error_class"] = "no_trace_files"
+                probed = ", ".join(
+                    str(p) for p in _candidate_trace_dirs(workspace)
                 )
+                result["error"] = (
+                    f"no .trace.json.gz under {workspace_str} (probed: {probed})"
+                )
+                if existing_empty_dirs:
+                    log.warning(
+                        "profile_executor: trace dirs exist but no "
+                        ".trace.json.gz files in %s",
+                        ", ".join(str(p) for p in existing_empty_dirs),
+                    )
+                else:
+                    log.warning(
+                        "profile_executor: workspace=%s has no trace dir "
+                        "(checked: %s)",
+                        workspace_str,
+                        ", ".join(str(p) for p in _candidate_trace_dirs(workspace)),
+                    )
         return result
 
 

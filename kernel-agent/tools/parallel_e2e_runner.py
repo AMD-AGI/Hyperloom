@@ -264,7 +264,13 @@ def run_one_attempt(
     # workers; forcing them on the driver clashes with set_visible_accelerator_ids.
     local_env = {
         **env,
-        "WORKSPACE_PATH": str(args.workspace_path),
+        # Push the resolved workspace-path through as USER_DATA_PATH so the
+        # nested kernel_optimization.py / tracelens_analysis.py subprocess
+        # picks the same artefact root (their --workspace-path defaults to
+        # $USER_DATA_PATH). Keep WORKSPACE_PATH around as a legacy alias for
+        # any in-flight launcher that still exports it; production paths
+        # only consume USER_DATA_PATH.
+        "USER_DATA_PATH": str(args.workspace_path),
         "KERNEL_AGENT_NUM_GPUS": str(num_gpus),
     }
     log_path = run_dir / "logs" / "parallel" / f"{backend}_replica{replica}.log"
@@ -338,7 +344,11 @@ def write_summary(run_dir: Path, summary: dict[str, Any]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run Kernel Agent real parallel E2E")
     parser.add_argument("--model-path", default="/wekafs/models/Qwen3-30B-A3B")
-    parser.add_argument("--workspace-path", default=os.environ.get("WORKSPACE_PATH", "/workspace"))
+    parser.add_argument(
+        "--workspace-path",
+        default=os.environ.get("USER_DATA_PATH", "/workspace/hyperloom"),
+        help="Root the tool writes under; defaults to $USER_DATA_PATH.",
+    )
     parser.add_argument("--session-id", default=f"qwen3-30b-{int(time.time())}")
     parser.add_argument("--env-file", default="/wekafs/xiaofei/AgentKernelArena/.env")
     parser.add_argument("--inferencex-path", default="/wekafs/fully-local/inference_optimization/InferenceX")
@@ -364,9 +374,14 @@ def main() -> int:
                              "consistently SIGTERMs the select_patch round "
                              "(observed r38/r39).")
     parser.add_argument("--replicas-per-backend", type=int, default=2)
-    parser.add_argument("--backends", default="geak,claude,codex",
-                        help="Comma list of agentic backends. Note: 'llm' single-shot "
-                             "backend was removed (max_tokens=2048 truncated >4KB kernels).")
+    parser.add_argument("--backends", default=None,
+                        help="Comma list of agentic backends. Defaults to "
+                             "'geak,claude,codex,cursor' when CURSOR_API_KEY is set, "
+                             "otherwise 'geak,claude,codex' (cursor auto-skipped). "
+                             "Pass an explicit value to force-include any backend "
+                             "(missing keys will surface as 401 attempts). Note: "
+                             "'llm' single-shot backend was removed (max_tokens=2048 "
+                             "truncated >4KB kernels).")
     parser.add_argument("--oob-max-turns", type=int, default=100)
     parser.add_argument("--geak-cost-limit", type=float, default=None)
     parser.add_argument("--num-gpus-override", type=int, default=0,
@@ -389,10 +404,27 @@ def main() -> int:
                              "instead of re-running the trace analysis.")
     args = parser.parse_args()
 
+    # Auto-derive --backends when caller did not pass one. Cursor needs
+    # CURSOR_API_KEY (separate Cursor gateway, not the AMD LiteLLM gateway);
+    # skip it from the default set when no key is provisioned to avoid
+    # spending replica slots on guaranteed 401s. Explicit --backends always
+    # wins (failure surfaces in the attempt log).
+    if args.backends is None:
+        if os.environ.get("CURSOR_API_KEY", "").strip():
+            args.backends = "geak,claude,codex,cursor"
+        else:
+            args.backends = "geak,claude,codex"
+
     workspace = Path(args.workspace_path)
     run_dir = workspace / "kernel-agent" / "runs" / args.session_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, **load_env_file(Path(args.env_file)), "WORKSPACE_PATH": str(workspace)}
+    env = {
+        **os.environ,
+        **load_env_file(Path(args.env_file)),
+        # Forward the resolved workspace-path as USER_DATA_PATH so children
+        # default to the same artefact root.
+        "USER_DATA_PATH": str(workspace),
+    }
 
     summary: dict[str, Any] = {
         "session_id": args.session_id,
@@ -494,7 +526,8 @@ def main() -> int:
         # calls torch.cuda.set_device(rank>=1) inside torchrun fails with
         # "HIP error: invalid device ordinal" (observed in r20/r22). Drop
         # GEAK from the backend list when per_task_gpus >= 2; let claude /
-        # codex handle multi-GPU collectives via standalone HIP / torchrun.
+        # codex / cursor handle multi-GPU collectives via standalone HIP /
+        # torchrun.
         # Set ALLOW_GEAK_MULTIGPU=1 to bypass this guard (e.g. when verifying
         # whether an upstream GEAK fix has lifted the limitation).
         backends_dropped: list[str] = []
