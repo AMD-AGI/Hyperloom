@@ -1191,7 +1191,8 @@ def test_parse_analysis_md_top_k_caps_total_rows(tmp_path):
 
 
 # ===========================================================================
-# docx §3 — Filter for GEAK based on budget (Higher P-item, Lower Efficiency)
+# docx §2 Recommended Interfacing Approach — Filter for GEAK based on
+# budget (Higher P-item, Lower Efficiency)
 # ===========================================================================
 def _write_two_pitem_analysis_md(md: Path) -> None:
     md.write_text(
@@ -1239,10 +1240,10 @@ def _write_two_pitem_analysis_md(md: Path) -> None:
 
 
 def test_parse_analysis_md_sorts_within_pitem_by_lower_efficiency(tmp_path):
-    """docx §3: ``Filter for GEAK based on budget (Higher P-item, Lower
-    Efficiency)``. Within a P-item, rows with lower efficiency must come
-    first so they survive the ``top_k`` budget cap. Cross-P-item order
-    is still rank-based (P1 before P2)."""
+    """docx §2 Recommended Interfacing Approach: ``Filter for GEAK based
+    on budget (Higher P-item, Lower Efficiency)``. Within a P-item, rows
+    with lower efficiency must come first so they survive the ``top_k``
+    budget cap. Cross-P-item order is still rank-based (P1 before P2)."""
     md = tmp_path / "analysis.md"
     _write_two_pitem_analysis_md(md)
 
@@ -1261,10 +1262,10 @@ def test_parse_analysis_md_sorts_within_pitem_by_lower_efficiency(tmp_path):
 
 
 def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
-    """docx §3 budget cap: after sorting by efficiency within a P-item,
+    """docx §2 budget cap: after sorting by efficiency within a P-item,
     the ``top_k`` slice must keep the lowest-efficiency rows. Without
     the sort, a budget of 2 would drop the kernel with the most
-    headroom — exactly the regression docx §3 calls out."""
+    headroom — exactly the regression docx §2 calls out."""
     md = tmp_path / "analysis.md"
     _write_two_pitem_analysis_md(md)
 
@@ -2150,7 +2151,8 @@ def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch
 # ===========================================================================
 # T3 — Idle-% sanity gate on the Executive Summary
 # ===========================================================================
-# Per Report_Interfacing.docx §3, the Executive Summary table reports
+# Per Report_Interfacing.docx §1 (Executive Summary schema) and §2
+# (idle-gate sanity check), the Executive Summary table reports
 # ``Idle %`` (e.g. ``| Idle % | 0.25% |``). When idle time dominates wall
 # clock, kernel-level rewriting cannot improve end-to-end latency — the
 # operator should pivot to parameter optimization (batch size, KV cache
