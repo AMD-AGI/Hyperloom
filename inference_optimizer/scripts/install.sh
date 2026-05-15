@@ -238,5 +238,36 @@ ensure_magpie
 ensure_inferencex
 chain_kernel_agent
 
+_probe_framework_source_roots() {
+  log "probing framework source roots for INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"
+  local roots
+  roots="$("$PYTHON" - <<'PY'
+from inference_optimizer.orchestrator.framework_paths import probe_framework_source_roots_for_env
+print(probe_framework_source_roots_for_env())
+PY
+)"
+  if [ -z "$roots" ]; then
+    warn "no framework source roots discovered"
+    return 0
+  fi
+  log "discovered framework roots: $roots"
+  if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
+    log "would append INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=$roots to ${KERNEL_AGENT_ENV}"
+    return 0
+  fi
+  mkdir -p "$(dirname "$KERNEL_AGENT_ENV")"
+  if [ -f "$KERNEL_AGENT_ENV" ] && grep -q '^export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=' "$KERNEL_AGENT_ENV" 2>/dev/null; then
+    sed -i "s|^export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=.*|export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=${roots}|" "$KERNEL_AGENT_ENV"
+  else
+    {
+      echo ""
+      echo "# Framework source roots for PolicyGate + flag discovery (auto-probed)"
+      echo "export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=${roots}"
+    } >> "$KERNEL_AGENT_ENV"
+  fi
+}
+
+_probe_framework_source_roots
+
 log "install complete"
 log "next: source ${KERNEL_AGENT_ENV}, then run inference_optimizer.cli"

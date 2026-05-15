@@ -47,6 +47,10 @@ from .backends import (
     DEFAULT_SGLANG_SERVER_ARGS,
     DEFAULT_VLLM_ARG_UTILS,
 )
+from ..framework_paths import (
+    resolve_sglang_server_args_path,
+    resolve_vllm_arg_utils_path,
+)
 
 
 log = logging.getLogger(__name__)
@@ -90,10 +94,10 @@ def discover_param_flags(
     """
     if server_args_path is None:
         fw = (framework or "sglang").strip().lower()
-        server_args_path = (
-            DEFAULT_VLLM_ARG_UTILS if "vllm" in fw
-            else DEFAULT_SGLANG_SERVER_ARGS
-        )
+        if "vllm" in fw:
+            server_args_path, _note = resolve_vllm_arg_utils_path()
+        else:
+            server_args_path, _note = resolve_sglang_server_args_path()
     if not server_args_path.exists():
         log.info("discover_param_flags: %s not found, returning empty",
                   server_args_path)
@@ -475,17 +479,22 @@ class ParamsExecutor:
         # tests / operators can monkeypatch DEFAULT_*_PATH at runtime.
         discovered_param_flags: list[str] = []
         discovered_source = ""
+        discovery_error = ""
         if not bool(params.get("disable_discovery", False)):
-            import sys as _sys
-            _self_mod = _sys.modules[__name__]
-            src_path = (
-                _self_mod.DEFAULT_VLLM_ARG_UTILS if "vllm" in framework
-                else _self_mod.DEFAULT_SGLANG_SERVER_ARGS
-            )
+            fw = (framework or "sglang").strip().lower()
+            if "vllm" in fw:
+                src_path, discovery_error = resolve_vllm_arg_utils_path()
+            else:
+                src_path, discovery_error = resolve_sglang_server_args_path()
             discovered_param_flags = discover_param_flags(
                 framework=framework, server_args_path=src_path,
             )
             discovered_source = str(src_path)
+            if not discovered_param_flags and discovery_error:
+                discovery_error = (
+                    f"discover_param_flags: no flags from {discovered_source} "
+                    f"({discovery_error})"
+                )
 
         search = dict(params.get("params_search") or _initial_search_state())
         # Schema versions: v1 keyed tested by variant name; v2 keys by
@@ -578,8 +587,12 @@ class ParamsExecutor:
                         "framework": framework or "sglang",
                         "param_flags": discovered_param_flags,
                         "source_path": discovered_source,
+                        **(
+                            {"discovery_error": discovery_error}
+                            if discovery_error else {}
+                        ),
                     }
-                    if discovered_param_flags else None
+                    if discovered_param_flags or discovery_error else None
                 ),
             }
 
@@ -765,8 +778,12 @@ class ParamsExecutor:
                     "framework": framework or "sglang",
                     "param_flags": discovered_param_flags,
                     "source_path": discovered_source,
+                    **(
+                        {"discovery_error": discovery_error}
+                        if discovery_error else {}
+                    ),
                 }
-                if discovered_param_flags else None
+                if discovered_param_flags or discovery_error else None
             ),
         }
 
