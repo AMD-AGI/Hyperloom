@@ -18,6 +18,28 @@ log = logging.getLogger(__name__)
 INFERENCEX_API = "https://inferencex.semianalysis.com/api/v1/benchmarks"
 
 
+def _unmangle_msys_path(v: str) -> str:
+    """Undo Git-Bash-on-Windows MSYS path conversion of /wekafs/* → C:/.../wekafs/*.
+
+    Git Bash auto-converts POSIX paths starting with / into Windows-style paths
+    when passing them as env vars or CLI args. This function detects the
+    mangled form and reverses it. Safe no-op on Linux/macOS or unmangled paths.
+    """
+    if isinstance(v, str) and re.search(r"[A-Za-z]:[/\\].*[/\\]wekafs", v):
+        v = re.sub(r"[A-Za-z]:[/\\].*[/\\](wekafs.*)", r"/\1", v).replace("\\", "/")
+    return v
+
+
+def get_nfs_root(default: str = "/wekafs") -> str:
+    """Return $NFS_ROOT with Windows Git Bash path-mangling defense applied.
+
+    All ci/* code MUST use this helper instead of os.environ.get("NFS_ROOT")
+    directly, otherwise local dry-run on Windows produces malformed paths like
+    `C:/Program Files/Git/wekafs/...` that don't match anything on the runner.
+    """
+    return _unmangle_msys_path(os.environ.get("NFS_ROOT", default))
+
+
 def resolve_var(value: Any, env: dict | None = None) -> Any:
     """Resolve ${VAR} placeholders from environment."""
     if not isinstance(value, str):
@@ -26,10 +48,7 @@ def resolve_var(value: Any, env: dict | None = None) -> Any:
 
     def _replace(m: re.Match) -> str:
         v = env.get(m.group(1), m.group(0))
-        # Git bash on Windows converts /wekafs → C:/.../Git/wekafs; undo that.
-        if isinstance(v, str) and re.search(r"[A-Za-z]:[/\\].*[/\\]wekafs", v):
-            v = re.sub(r"[A-Za-z]:[/\\].*[/\\](wekafs.*)", r"/\1", v).replace("\\", "/")
-        return v
+        return _unmangle_msys_path(v) if isinstance(v, str) else v
 
     return re.sub(r"\$\{(\w+)}", _replace, value)
 
@@ -262,7 +281,7 @@ def merge_model_config(
     kern_backends = model_cfg.get(
         "kernel_opt_backends", defaults.get("kernel_opt_backends", "geak"))
 
-    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    nfs_root = get_nfs_root()
     model_path = model_cfg.get("model_path_override") or f"{nfs_root}/models/{model_hf.replace('/', '-')}"
 
     return {
@@ -286,7 +305,7 @@ def merge_model_config(
         "target_gpu": model_cfg.get("target_gpu", "mi300x"),
         "mode": model_cfg.get("mode", defaults.get("mode", "claw")),
         "gpu_type": model_cfg.get("target_gpu", parsed["runner"]).upper(),
-        "inferencex_path": defaults.get("inferencex_path") or (os.environ.get("NFS_ROOT", "/wekafs") + "/InferenceX"),
+        "inferencex_path": defaults.get("inferencex_path") or (get_nfs_root() + "/InferenceX"),
         "result_dir": defaults.get("result_dir", "/workspace/hyperloom"),
         "inferenceX_benchmarks": ifx_benchmarks,
         "inferenceX_api_name": model_cfg.get("inferenceX_api_name", ""),
