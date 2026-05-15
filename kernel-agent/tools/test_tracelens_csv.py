@@ -2304,3 +2304,62 @@ def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch
     monkeypatch.setenv("USER_DATA_PATH", "")
     monkeypatch.setenv("WORKSPACE_PATH", "/legacy/workspace")
     assert tla._default_workspace_path() == "/legacy/workspace"
+
+
+# ===========================================================================
+# T1 — Inference-only perf-report CLI (Hyperloom v0.4 finishing-touches)
+# ===========================================================================
+# The legacy ``TraceLens_generate_perf_report_pytorch`` (training-mode)
+# fallback was removed because Hyperloom is inference-only since v0.4 and
+# the training CLI emits a different field shape that silently breaks
+# downstream fusion / roofline analysis. install.sh + SKILL.md + the
+# runtime dispatcher are all updated together so a missing inference CLI
+# fails fast at every layer instead of degrading to a CLI whose output
+# the analyzers cannot consume.
+
+def test_select_perf_report_cli_uses_inference_when_present(tmp_path, monkeypatch):
+    """When the inference CLI is on PATH, ``select_perf_report_cli`` returns
+    its name verbatim — no second-best fallback is consulted."""
+    log_path = tmp_path / "cli.log"
+    log_path.touch()
+
+    def fake_which(name: str) -> str | None:
+        if name == tla.INFERENCE_PERF_CLI:
+            return f"/usr/local/bin/{name}"
+        return None
+
+    monkeypatch.setattr(tla.shutil, "which", fake_which)
+    assert tla.select_perf_report_cli(log_path) == tla.INFERENCE_PERF_CLI
+
+
+def test_select_perf_report_cli_rejects_legacy_only_path(tmp_path, monkeypatch):
+    """T1 contract: a host with only the legacy training-mode CLI on PATH
+    must fail fast (no silent fallback). This is the inverse of the old
+    behaviour where ``select_perf_report_cli`` accepted the legacy CLI
+    with a WARN. The replacement message points operators at the right
+    fix (bump TraceLens-internal)."""
+    log_path = tmp_path / "cli.log"
+    log_path.touch()
+
+    legacy_only = {
+        tla.INFERENCE_PERF_CLI: None,
+        "TraceLens_generate_perf_report_pytorch": "/usr/local/bin/TraceLens_generate_perf_report_pytorch",
+    }
+
+    monkeypatch.setattr(tla.shutil, "which", lambda name: legacy_only.get(name))
+    with pytest.raises(RuntimeError) as excinfo:
+        tla.select_perf_report_cli(log_path)
+    msg = str(excinfo.value)
+    assert tla.INFERENCE_PERF_CLI in msg
+    assert "inference-only" in msg
+    assert "bump TraceLens-internal" in msg
+
+
+def test_select_perf_report_cli_module_has_no_legacy_constant():
+    """Defensive: the ``LEGACY_PERF_CLI`` constant used to live alongside
+    ``INFERENCE_PERF_CLI``. Pin its absence so a future revert can't
+    silently reintroduce the fallback."""
+    assert not hasattr(tla, "LEGACY_PERF_CLI"), (
+        "LEGACY_PERF_CLI was removed in v0.4 finishing-touches; "
+        "any reintroduction must be a deliberate revert with discussion"
+    )
