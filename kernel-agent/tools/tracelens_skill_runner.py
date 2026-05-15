@@ -8,6 +8,7 @@ isolated and easy to test.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import shlex
@@ -383,10 +384,94 @@ _EFFICIENCY_RE = re.compile(
     r"([\d.]+)\s*%\s*of\s*([\d.]+)\s*([A-Za-z/]+)",
     re.IGNORECASE,
 )
+# TraceLens v0.3 Detailed Analysis blocks include three sibling labels:
+#   **Reasoning for Slowdown:** <prose>
+#   **Resolution:**             <prose>
+#   **Impact estimate:**        Low end ...: <ms> ms savings (<pct>% E2E)
+#                               High end ...: <ms> ms savings (<pct>% E2E)
+# Extracting these gives GEAK the same hypothesis a human reviewer reads in
+# the report; the prose is treated as a *hypothesis to validate*, never as
+# imperative guidance — see ``build_prompt`` for the framing.
+_IDENTIFICATION_LABEL = "**Identification:**"
+_DATA_LABEL = "**Data:**"
+_REASONING_LABEL = "**Reasoning for Slowdown:**"
+_RESOLUTION_LABEL = "**Resolution:**"
+_IMPACT_LABEL = "**Impact estimate:**"
+_IMPACT_LOW_RE = re.compile(
+    r"Low end[^:\n]*:\s*([0-9.]+)\s*ms savings\s*\(([0-9.]+)%\s*E2E\)",
+    re.IGNORECASE,
+)
+_IMPACT_HIGH_RE = re.compile(
+    r"High end[^:\n]*:\s*([0-9.]+)\s*ms savings\s*\(([0-9.]+)%\s*E2E\)",
+    re.IGNORECASE,
+)
 
 
 def _parse_marker_attrs(blob: str) -> dict[str, str]:
     return dict(re.findall(r"(\w+)=([^\s>]+)", blob))
+
+
+def _extract_between(
+    text: str, start_marker: str, end_markers: tuple[str, ...],
+) -> str:
+    """Return the substring between ``start_marker`` and the earliest of
+    ``end_markers``. Empty string when ``start_marker`` is absent. When no
+    end marker is present, returns the tail of ``text`` after the start
+    marker (defensive: TraceLens occasionally truncates the trailing
+    section)."""
+    start = text.find(start_marker)
+    if start == -1:
+        return ""
+    start += len(start_marker)
+    end_positions = [text.find(m, start) for m in end_markers]
+    end_positions = [pos for pos in end_positions if pos != -1]
+    end = min(end_positions) if end_positions else len(text)
+    return text[start:end].strip()
+
+
+def _extract_pitem_prose(body: str) -> dict[str, Any]:
+    """Extract Identification / Reasoning / Resolution / Impact-estimate
+    fields from a Detailed Analysis P-item body. All fields default to
+    empty / 0.0 so the parser stays additive — callers that don't care
+    for prose are unaffected.
+
+    The Identification line carries per-rank context that pins the
+    P-item back to its source metrics file (e.g.
+    ``(source: gemm_metrics.json → operations[].efficiency.efficiency_percent)``);
+    surfacing it lets GEAK trace any hypothesis back to the raw
+    TraceLens data when it needs to disagree.
+
+    Returns::
+
+        {
+          "identification":         str,
+          "reasoning_for_slowdown": str,
+          "resolution":             str,
+          "impact_low_ms":          float,
+          "impact_low_e2e_pct":     float,
+          "impact_high_ms":         float,
+          "impact_high_e2e_pct":    float,
+        }
+    """
+    identification = _extract_between(
+        body, _IDENTIFICATION_LABEL,
+        (_DATA_LABEL, _REASONING_LABEL, _RESOLUTION_LABEL, _IMPACT_LABEL),
+    )
+    reasoning = _extract_between(
+        body, _REASONING_LABEL, (_RESOLUTION_LABEL, _IMPACT_LABEL),
+    )
+    resolution = _extract_between(body, _RESOLUTION_LABEL, (_IMPACT_LABEL,))
+    low_match = _IMPACT_LOW_RE.search(body)
+    high_match = _IMPACT_HIGH_RE.search(body)
+    return {
+        "identification":         identification,
+        "reasoning_for_slowdown": reasoning,
+        "resolution":             resolution,
+        "impact_low_ms":          _safe_float(low_match.group(1)) if low_match else 0.0,
+        "impact_low_e2e_pct":     _safe_float(low_match.group(2)) if low_match else 0.0,
+        "impact_high_ms":         _safe_float(high_match.group(1)) if high_match else 0.0,
+        "impact_high_e2e_pct":    _safe_float(high_match.group(2)) if high_match else 0.0,
+    }
 
 
 def _extract_pitem_categories(text: str) -> list[dict[str, Any]]:
@@ -470,6 +555,7 @@ def _row_to_candidate(
     title: str,
     library: str,
     impact: dict[str, float],
+    prose: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if len(cells) != len(headers):
         return None
@@ -504,6 +590,13 @@ def _row_to_candidate(
         "duration_us": time_ms * 1000.0,
         "call_count": int(count_val) if count_val else 0,
         "source_file": kernel_path,
+        # PR-B §1: preserve the raw Kernel Path string verbatim so
+        # ``aggregate_by_source_function`` can run AFTER
+        # ``_finalize_candidates`` (which overwrites ``source_file``
+        # with the locate_source_via_grep result). Without this the
+        # launcher string ``<path>(<line>): <fn>`` is lost and AST
+        # resolution falls back to ``None``.
+        "tracelens_launcher_path": kernel_path,
         "source_type": "tracelens_report",
         "shapes": shapes,
         "tracelens_category": category,
@@ -520,6 +613,23 @@ def _row_to_candidate(
         "impact_score_low": impact.get("impact_score_low", 0.0),
         "impact_score_high": impact.get("impact_score_high", 0.0),
     }
+    if prose:
+        # P-item prose is shared across every row in the same Detailed
+        # Analysis block; duplicating it onto each candidate keeps the
+        # candidate dict self-describing for downstream consumers
+        # (build_prompt / source-function aggregation) without forcing
+        # them to re-join against a rank-indexed sidecar.
+        for key in (
+            "identification",
+            "reasoning_for_slowdown",
+            "resolution",
+            "impact_low_ms",
+            "impact_low_e2e_pct",
+            "impact_high_ms",
+            "impact_high_e2e_pct",
+        ):
+            if key in prose:
+                candidate[key] = prose[key]
     return candidate
 
 
@@ -584,6 +694,7 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
             "impact_score_low": pitem_meta.get("impact_score_low", 0.0),
             "impact_score_high": pitem_meta.get("impact_score_high", 0.0),
         }
+        prose = _extract_pitem_prose(body)
         for cells in rows[1:]:
             cand = _row_to_candidate(
                 header_row,
@@ -593,6 +704,7 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
                 title=title,
                 library=library,
                 impact=impact,
+                prose=prose,
             )
             if cand is None:
                 continue
@@ -600,6 +712,324 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
             if len(candidates) >= top_k:
                 return candidates
     return candidates
+
+
+# ---------------------------------------------------------------------------
+# PR-B §1: source-function aggregation
+# ---------------------------------------------------------------------------
+# TraceLens reports each kernel launch site as one Operation row in the
+# 9-column Detailed Analysis table. Multiple rows commonly resolve to the
+# *same* Python source function (e.g. ``rmsnorm`` called from prefill,
+# decode, and capture paths), so dispatching one GEAK task per kernel_id
+# burns the LLM budget on the same function 3-5 times.
+#
+# The feature branch's ``tracelens_geak_task_parser`` solves this by
+# parsing the launcher path string (``path.py(76): function_name``),
+# resolving the function definition line via Python AST when the file
+# exists locally, and grouping every candidate that maps to the same
+# ``(source_path, definition_line, function_name)`` triple into a single
+# ``task_group``. We fold that logic in here so ``parse_analysis_md``
+# remains the single-source-of-truth report consumer, and a sibling
+# ``aggregate_by_source_function`` produces the additive ``task_groups[]``
+# structure that downstream callers (``kernel_optimization.py``,
+# ``kernel_request_handlers._batch_kernel_candidates``) opt into.
+#
+# The parser is conservative: kernels whose ``kernel_path`` is empty
+# (the LLama70B fixture) or malformed simply fall back to the legacy
+# per-kernel dispatch. Aggregation never *replaces* the hot_kernels[]
+# list — it adds a parallel view.
+
+# TraceLens emits the launcher path as ``<absolute or workspace-relative
+# path>(<line>): <function_name>`` for Python frames, and either a bare
+# file path or ``<path>#L<line>`` for HIP/.cu rows. Both shapes resolve
+# to ``(path, line, function_name | None)``; missing pieces are None.
+_LAUNCHER_PATH_RE = re.compile(
+    r"(?P<path>.+?)\((?P<line>\d+)\)\s*:\s*(?P<func>[A-Za-z_][A-Za-z0-9_]*)\s*$",
+)
+# TraceLens emits these for rows whose Kernel Path it cannot resolve
+# (Tensile-backed aten ops, vendor closed-source kernels, etc.). They
+# must not survive launcher parsing — otherwise aggregation groups
+# every placeholder row together under a bogus ``Path("—")``.
+_LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset({
+    "", "-", "—", "–", "n/a", "none", "null", "tbd", "unknown",
+})
+
+
+def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]:
+    """Parse a TraceLens kernel-path string.
+
+    Returns ``(path, line, function_name)`` where ``line`` and
+    ``function_name`` may be ``None``. The two accepted shapes are::
+
+        <path>(<line>): <function_name>      # Python frame, AST-resolvable
+        <path>#L<line>                        # generic file ref
+        <path>                                # bare file ref
+
+    Anything else falls back to ``(stripped_text, None, None)`` so the
+    caller can decide whether to skip the row or treat it as opaque.
+    TraceLens placeholders (``-``, ``—``, ``n/a``, etc.) collapse to
+    ``("", None, None)`` so source-function aggregation skips them.
+    """
+    if not kernel_path:
+        return "", None, None
+    text = kernel_path.strip()
+    if text.lower() in _LAUNCHER_PATH_PLACEHOLDERS:
+        return "", None, None
+    match = _LAUNCHER_PATH_RE.match(text)
+    if match:
+        return (
+            match.group("path").strip(),
+            int(match.group("line")),
+            match.group("func"),
+        )
+    path, _, fragment = text.partition("#L")
+    if fragment.isdigit():
+        return path.strip(), int(fragment), None
+    return text, None, None
+
+
+def _function_line_from_ast(path: Path, function_name: str) -> int | None:
+    """Walk ``path`` with :mod:`ast` and return the lineno of the first
+    ``FunctionDef`` / ``AsyncFunctionDef`` whose name matches.
+
+    Returns ``None`` when the file is unreadable, doesn't parse, or the
+    function is absent — the caller falls back to the launcher's
+    reported line. We accept either function flavor because Triton
+    kernels may be declared async in user code.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name:
+            return node.lineno
+    return None
+
+
+def _resolve_source_target(
+    candidate: dict[str, Any],
+    *,
+    source_root: Path | None,
+) -> dict[str, Any] | None:
+    """Resolve a candidate's launcher path to a stable
+    ``(source_path, definition_line, function_name)`` triple.
+
+    Returns ``None`` when the launcher path cannot be parsed at all
+    (empty / no path component) so the caller falls back to per-kernel
+    dispatch. When ``source_root`` is provided, relative paths are
+    resolved against it; when the resolved file exists on disk and the
+    function name is known, AST resolution overrides the reported line
+    number (TraceLens uses the call site's line, not the
+    ``def`` site).
+    """
+    # Prefer the verbatim ``tracelens_launcher_path`` (set by
+    # ``_row_to_candidate``) so AST resolution still works after
+    # ``_finalize_candidates`` overwrites ``source_file`` with the
+    # grep-located absolute path. Fall back to ``source_file`` /
+    # ``kernel_path`` for candidates from non-v0.3 sources (raw trace
+    # parser, priority_data.json fallback, csv) that never had a
+    # launcher-formatted Kernel Path field.
+    kernel_path = str(
+        candidate.get("tracelens_launcher_path")
+        or candidate.get("source_file")
+        or candidate.get("kernel_path")
+        or ""
+    )
+    raw_path, reported_line, reported_func = _parse_launcher_path(kernel_path)
+    if not raw_path:
+        return None
+    source_path = Path(raw_path)
+    if not source_path.is_absolute() and source_root is not None:
+        source_path = source_root / source_path
+    function_name = reported_func or source_path.stem
+    definition_line = reported_line or 1
+    if source_path.exists() and reported_func:
+        ast_line = _function_line_from_ast(source_path, reported_func)
+        if ast_line is not None:
+            definition_line = ast_line
+    return {
+        "source_path":      str(source_path),
+        "definition_line":  definition_line,
+        "function_name":    function_name,
+        "reported_path":    raw_path,
+        "reported_line":    reported_line,
+        "reported_func":    reported_func,
+        "ast_resolved":     bool(reported_func and source_path.exists()
+                                  and reported_func == function_name
+                                  and reported_line != definition_line),
+    }
+
+
+def aggregate_by_source_function(
+    candidates: list[dict[str, Any]],
+    *,
+    source_root: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Group TraceLens candidates by AST-resolved ``(path, line, fn)``.
+
+    Returns a list of ``task_group`` dicts, sorted by aggregate kernel
+    time (descending). Each group carries:
+
+    * ``task_group_id`` — stable identifier ``tg<NN>``;
+    * ``source_path`` / ``definition_line`` / ``function_name`` — the
+      AST-resolved triple shared by every member candidate;
+    * ``kernel_ids`` — every member candidate's ``kernel_id``;
+    * ``primary_kernel_id`` — the highest-``duration_us`` member, used
+      as the representative for prompt assembly + GEAK dispatch;
+    * ``rows`` — the full candidate dict for every member (so
+      ``build_prompt`` can render the multi-row benchmark cases section
+      without re-joining against ``hot_kernels[]``);
+    * ``aggregate_duration_us`` / ``aggregate_call_count`` / ``aggregate_gpu_pct``
+      — sums across all members.
+
+    Candidates whose ``kernel_path`` cannot be parsed are *not* placed
+    in a group; the caller is expected to dispatch them via the legacy
+    per-kernel path. Aggregation is additive: callers can ignore
+    ``task_groups`` entirely without losing anything.
+    """
+    if not candidates:
+        return []
+    root: Path | None = None
+    if source_root:
+        root = Path(source_root).expanduser()
+        if not root.is_dir():
+            root = None
+
+    # Grouping key includes the kernel ``operation`` name as the
+    # primary component (NOT just the AST-resolved source function).
+    # Rationale: TraceLens's "Kernel Path" column reports the calling
+    # Python frame (e.g. ``vllm/model_executor/models/gpt_oss.py(283):
+    # forward``), not the kernel implementation itself. Multiple
+    # semantically distinct kernels — e.g. ``vllm::rocm_unquantized_gemm``
+    # (P1 GEMM) and ``vllm::rocm_aiter_triton_add_rmsnorm_pad`` (P2
+    # RMSNorm) — can share the same caller. Keying on source function
+    # alone would merge them into one task_group with a meaningless
+    # "rewrite forward" task. Including ``operation`` keeps each kernel
+    # identity intact while still collapsing the same kernel called at
+    # different shapes (the Q1 case from the user screenshots).
+    groups: dict[tuple[str, str, int, str], dict[str, Any]] = {}
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        target = _resolve_source_target(cand, source_root=root)
+        if target is None:
+            continue
+        operation = str(cand.get("name") or "").strip()
+        key = (
+            operation,
+            target["source_path"],
+            int(target["definition_line"]),
+            str(target["function_name"]),
+        )
+        bucket = groups.get(key)
+        if bucket is None:
+            bucket = {
+                "task_group_id":          "",  # filled below after sorting
+                "operation":              operation,
+                "source_path":            target["source_path"],
+                "definition_line":        target["definition_line"],
+                "function_name":          target["function_name"],
+                "ast_resolved":           bool(target.get("ast_resolved")),
+                "reported_path":          target["reported_path"],
+                "kernel_ids":             [],
+                "primary_kernel_id":      "",
+                "rows":                   [],
+                "aggregate_duration_us":  0.0,
+                "aggregate_call_count":   0,
+                "aggregate_gpu_pct":      0.0,
+                # Cross-P-item prose collection (Q2). When the same
+                # operation+source-function legitimately spans multiple
+                # TraceLens P-items (e.g. once classified as memory-
+                # bound at decode shapes, again as compute-bound at
+                # prefill shapes), each P-item contributes its own
+                # Identification / Reasoning / Resolution / Impact
+                # tuple. We dedupe by ``(rank, title)`` and keep all
+                # distinct entries so ``build_prompt`` can render every
+                # P-item's hypothesis to GEAK rather than dropping all
+                # but the primary's on the floor.
+                "all_pitem_prose":        [],
+                "_pitem_prose_seen":      set(),  # popped before return
+            }
+            groups[key] = bucket
+        kid = str(cand.get("kernel_id") or "") or cand.get("name") or ""
+        if kid and kid not in bucket["kernel_ids"]:
+            bucket["kernel_ids"].append(kid)
+        bucket["rows"].append(cand)
+        # Q2: collect this candidate's P-item prose if we haven't seen
+        # the same (rank, title) before in this group. Empty/missing
+        # rank/title still produces a valid de-dup key, so candidates
+        # from non-Detailed-Analysis paths (raw-trace fallback) without
+        # P-item context contribute exactly one entry per group.
+        try:
+            pitem_rank = int(cand.get("tracelens_pitem_rank") or 0)
+        except (TypeError, ValueError):
+            pitem_rank = 0
+        pitem_title = str(cand.get("tracelens_pitem_title") or "")
+        pitem_key = (pitem_rank, pitem_title)
+        if pitem_key not in bucket["_pitem_prose_seen"]:
+            bucket["_pitem_prose_seen"].add(pitem_key)
+            bucket["all_pitem_prose"].append({
+                "rank":                    pitem_rank,
+                "title":                   pitem_title,
+                "identification":          str(cand.get("identification") or "").strip(),
+                "reasoning_for_slowdown":  str(cand.get("reasoning_for_slowdown") or "").strip(),
+                "resolution":              str(cand.get("resolution") or "").strip(),
+                "impact_low_ms":           _safe_float(cand.get("impact_low_ms")),
+                "impact_low_e2e_pct":      _safe_float(cand.get("impact_low_e2e_pct")),
+                "impact_high_ms":          _safe_float(cand.get("impact_high_ms")),
+                "impact_high_e2e_pct":     _safe_float(cand.get("impact_high_e2e_pct")),
+            })
+        try:
+            bucket["aggregate_duration_us"] += float(cand.get("duration_us") or 0.0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            bucket["aggregate_call_count"] += int(cand.get("call_count") or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            bucket["aggregate_gpu_pct"] += float(cand.get("gpu_pct") or 0.0)
+        except (TypeError, ValueError):
+            pass
+
+    ordered = sorted(
+        groups.values(),
+        key=lambda g: g["aggregate_duration_us"],
+        reverse=True,
+    )
+    for idx, group in enumerate(ordered, start=1):
+        group["task_group_id"] = f"tg{idx:03d}"
+        # Sort member rows by duration desc + pick the heaviest as
+        # primary; build_prompt renders the primary row's metadata
+        # and lists the rest as additional benchmark cases.
+        group["rows"].sort(
+            key=lambda r: float(r.get("duration_us") or 0.0), reverse=True,
+        )
+        if group["rows"]:
+            primary = group["rows"][0]
+            group["primary_kernel_id"] = str(
+                primary.get("kernel_id") or primary.get("name") or ""
+            )
+        group["aggregate_duration_us"] = round(group["aggregate_duration_us"], 3)
+        group["aggregate_gpu_pct"] = round(group["aggregate_gpu_pct"], 3)
+        # Sort prose entries by rank ascending so P1 reads first; drop
+        # any entry that's entirely empty (rank=0 + no prose) — those
+        # come from non-P-item paths and add no signal.
+        group["all_pitem_prose"].sort(key=lambda e: (e["rank"], e["title"]))
+        group["all_pitem_prose"] = [
+            e for e in group["all_pitem_prose"]
+            if e["rank"]
+            or e["identification"]
+            or e["reasoning_for_slowdown"]
+            or e["resolution"]
+            or e["impact_low_ms"]
+            or e["impact_high_ms"]
+        ]
+        # ``_pitem_prose_seen`` is a set; not JSON-serializable. Pop it
+        # so summary.json / kernel_candidates.json serialization works.
+        group.pop("_pitem_prose_seen", None)
+    return ordered
 
 
 def raw_candidates_from_priority_data(priority_data_path: Path, top_k: int) -> list[dict[str, Any]]:
@@ -660,6 +1090,11 @@ def raw_candidates_from_priority_data(priority_data_path: Path, top_k: int) -> l
 __all__ = [
     "TraceLensSkillRunResult",
     "UPSTREAM_CATEGORY_TO_GEAK",
+    "_extract_between",
+    "_extract_pitem_prose",
+    "_function_line_from_ast",
+    "_parse_launcher_path",
+    "aggregate_by_source_function",
     "build_orchestrator_prompt",
     "discover_capture_folder",
     "infer_analysis_mode",
