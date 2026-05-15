@@ -497,5 +497,152 @@ class AuthFailureDetectionTests(unittest.TestCase):
         self.assertEqual(ko._count_auth_failures(log), 3)
 
 
+class GeakCostLimitDefaultTests(unittest.TestCase):
+    """Lock in the GEAK cost-limit contract: Hyperloom must pass 0.0
+    (= unlimited) so GEAK's sub-agent spawn path does not silently
+    fall back to ``AgentConfig.cost_limit = 3.0``
+    (``minisweagent/agents/default.py``), which on 2026-05-15 killed
+    every Qwen3-32B GEAK sub-agent at $3.08 after ~50 steps.
+
+    The only externally addressable lever is GEAK's
+    ``-l/--cost-limit`` CLI option (``minisweagent/run/mini.py:194``),
+    which writes ``config["agent"]["cost_limit"]`` and is honoured by
+    every child agent spawned from that config. These tests guard the
+    full propagation chain:
+
+      kernel_optimization.py --geak-cost-limit (default 0.0)
+        → geak_submit.submit(cost_limit=0.0)
+        → ``geak ... --cost-limit 0.0``
+
+    If anyone reverts the default to ``None`` or drops the
+    propagation, every GEAK attempt will silently die at $3 again.
+    """
+
+    # Source-text match: ArgumentParser does not surface ``default=...``
+    # in ``--help`` output, so the most direct way to lock the contract
+    # is to assert the exact ``add_argument`` expression. If anyone
+    # refactors the expression they must update this assertion at the
+    # same time — which is the point.
+    _EXPECTED_DEFAULT_EXPR = (
+        'default=float(os.environ.get("HYPERLOOM_GEAK_COST_LIMIT", "0.0"))'
+    )
+
+    def test_kernel_optimization_default_is_zero(self) -> None:
+        src = OPT_TOOL.read_text(encoding="utf-8")
+        self.assertIn('"--geak-cost-limit"', src)
+        self.assertIn(self._EXPECTED_DEFAULT_EXPR, src,
+                      "kernel_optimization.py --geak-cost-limit default "
+                      "must be 0.0 (matching GEAK geak.yaml `cost_limit: 0.`)")
+
+    def test_parallel_e2e_runner_default_is_zero(self) -> None:
+        tool = ROOT / "tools" / "parallel_e2e_runner.py"
+        src = tool.read_text(encoding="utf-8")
+        self.assertIn('"--geak-cost-limit"', src)
+        self.assertIn(self._EXPECTED_DEFAULT_EXPR, src,
+                      "parallel_e2e_runner.py --geak-cost-limit default "
+                      "must mirror kernel_optimization.py (0.0 / env-overridable)")
+
+    def test_env_var_overrides_default(self) -> None:
+        """End-to-end smoke: HYPERLOOM_GEAK_COST_LIMIT must reach
+        kernel_optimization.py's argparse default at import time.
+        We exercise this by invoking the tool with ``--help`` and a
+        bogus required arg so the parser instantiation completes."""
+        env = {**os.environ, "HYPERLOOM_GEAK_COST_LIMIT": "12.5"}
+        # Inject a probe right before ``main()`` runs so we can read the
+        # resolved default without executing the tool body.
+        probe = (
+            "import sys, re, runpy\n"
+            f"sys.argv = ['kernel_optimization.py', '--help']\n"
+            "try:\n"
+            f"    runpy.run_path(r'{OPT_TOOL}', run_name='__main__')\n"
+            "except SystemExit:\n"
+            "    pass\n"
+        )
+        # Simpler / more direct: import the parser construction as a
+        # subprocess and have argparse error out on missing --kernel-id,
+        # which prints the help line including the resolved default — no,
+        # argparse still does not show defaults. Fall back to AST: load
+        # the source, evaluate the default expression in a controlled
+        # namespace with the env var set.
+        import ast
+        src = OPT_TOOL.read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        default_node = None
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and getattr(node.func, "attr", None) == "add_argument"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "--geak-cost-limit"
+            ):
+                for kw in node.keywords:
+                    if kw.arg == "default":
+                        default_node = kw.value
+                        break
+                break
+        self.assertIsNotNone(default_node,
+                             "--geak-cost-limit add_argument not found")
+        # Evaluate the default expression with our env var set.
+        os.environ["HYPERLOOM_GEAK_COST_LIMIT"] = "12.5"
+        try:
+            value = eval(  # noqa: S307 — controlled expression from our own source
+                compile(ast.Expression(default_node), filename="<test>", mode="eval"),
+                {"os": os, "float": float, "int": int, "str": str},
+            )
+        finally:
+            os.environ.pop("HYPERLOOM_GEAK_COST_LIMIT", None)
+        self.assertEqual(value, 12.5,
+                         "HYPERLOOM_GEAK_COST_LIMIT env var must override "
+                         f"--geak-cost-limit default; got {value!r}")
+
+    def _import_geak_submit(self):
+        # geak_submit imports its sibling ``ray_runtime`` with a bare
+        # ``from ray_runtime import ...``, so the ``backends/`` directory
+        # must be on sys.path BEFORE the import (not the package root).
+        backends_dir = ROOT / "tools" / "backends"
+        sys.path.insert(0, str(backends_dir))
+        try:
+            import importlib
+            if "geak_submit" in sys.modules:
+                return importlib.reload(sys.modules["geak_submit"])
+            return importlib.import_module("geak_submit")
+        finally:
+            sys.path.pop(0)
+
+    def test_geak_submit_build_cmd_propagates_zero(self) -> None:
+        """``_build_cmd(cost_limit=0.0)`` must emit ``--cost-limit 0.0``;
+        the ``is not None`` check is what makes 0.0 reach GEAK's mini.py
+        and override the dataclass $3 default."""
+        geak_submit = self._import_geak_submit()
+        cmd = geak_submit._build_cmd(
+            prompt_file=Path("/tmp/p.md"),
+            output_dir=Path("/tmp/out"),
+            kernel_path="/tmp/k.cu",
+            gpu_ids="0",
+            cost_limit=0.0,
+        )
+        self.assertIn("--cost-limit", cmd,
+                      "cost_limit=0.0 must emit --cost-limit (without it "
+                      "GEAK falls back to AgentConfig.cost_limit = 3.0)")
+        idx = cmd.index("--cost-limit")
+        self.assertEqual(cmd[idx + 1], "0.0",
+                         f"--cost-limit must carry the explicit 0.0 value: {cmd}")
+
+    def test_geak_submit_build_cmd_omits_when_none(self) -> None:
+        """``cost_limit=None`` (direct CLI users of geak_submit) must NOT
+        add the flag, so GEAK falls through to its config-file value."""
+        geak_submit = self._import_geak_submit()
+        cmd = geak_submit._build_cmd(
+            prompt_file=Path("/tmp/p.md"),
+            output_dir=Path("/tmp/out"),
+            kernel_path="/tmp/k.cu",
+            gpu_ids="0",
+            cost_limit=None,
+        )
+        self.assertNotIn("--cost-limit", cmd,
+                         f"cost_limit=None must omit --cost-limit: {cmd}")
+
+
 if __name__ == "__main__":
     unittest.main()
