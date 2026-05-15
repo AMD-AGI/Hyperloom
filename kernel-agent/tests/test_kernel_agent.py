@@ -123,7 +123,24 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"', install_text)
         self.assertIn('GEAK_REF="${GEAK_REF:-v3.1.0}"', install_text)
         self.assertIn('python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"', install_text)
-        self.assertIn('python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"', install_text)
+        # All five GEAK v3.1.0 MCP tools must be pip-installed; minisweagent
+        # imports profiler_mcp / metrix_mcp / cross_session_memory_mcp /
+        # automated_test_discovery in addition to rag-mcp. The
+        # ``for _geak_mcp in ...; do pip install ...; done`` loop has to
+        # include all five, in any order.
+        for _mcp in (
+            "rag-mcp",
+            "profiler-mcp",
+            "metrix-mcp",
+            "cross-session-memory-mcp",
+            "automated-test-discovery",
+        ):
+            self.assertIn(_mcp, install_text)
+        self.assertIn(
+            'python3 -m pip install -q --no-cache-dir \\\n'
+            '        "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"',
+            install_text,
+        )
         self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cuda}"', install_text)
         self.assertIn("python3 scripts/build_index.py --force --device", install_text)
         self.assertIn("ensure_node()", install_text)
