@@ -392,6 +392,20 @@ class BaselineExecutor:
         # `python3` resolves to one with torch+rocm. Magpie YAML also sets
         # this but defending in depth costs nothing.
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+        # #210 (Deval, comment 8): pin Magpie's InferenceX-resolution
+        # to ``$INFERENCEX_PATH`` so Magpie loads the SAME InferenceX
+        # checkout that Hyperloom's ``_inferencex_patcher`` has
+        # patched. ``MAGPIE_INFERENCEX_PATH`` is the highest-precedence
+        # resolution rung in Magpie's
+        # ``_resolve_default_inferencex_dir`` (``Magpie/modes/
+        # benchmark/inferencex.py:43``); without setting it, Magpie
+        # falls through to ``./InferenceX`` next to its repo or the
+        # ``$XDG_CACHE_HOME/magpie/InferenceX`` cache, either of which
+        # may be a separate, unpatched checkout (the symptom reported
+        # in #210 comments 4 + 6).
+        inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+        if inferencex_path:
+            env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
         # Always-on ``$RESULT_DIR`` default: covers Magpie scripts that
         # respect the env var (and would otherwise fall back to a
         # hardcoded path under ``/workspace/``). Scripts that ignore
