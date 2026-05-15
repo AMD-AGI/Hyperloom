@@ -38,6 +38,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
@@ -146,12 +147,45 @@ class HFClient:
         return r.json()
 
     def listing(self, limit: int) -> list[dict]:
-        """Top-N text-generation by downloads. Returns raw HF API records."""
+        """Top-N text-generation by downloads. Returns raw HF API records.
+
+        HuggingFace caps one page at 1000 entries and exposes a cursor in the
+        HTTP ``Link`` header. Follow it until ``limit`` raw entries are fetched
+        so cron can build a stable top-2000 candidate pool.
+        """
+        out: list[dict] = []
+        page_limit = min(max(limit, 1), 1000)
         path = (f"/api/models?sort=downloads&direction=-1"
-                f"&limit={limit}&filter=text-generation")
-        data = self._get(path)
-        assert isinstance(data, list)
-        return data
+                f"&limit={page_limit}&filter=text-generation")
+        seen_urls: set[str] = set()
+        while path and len(out) < limit:
+            url = f"{HF_BASE}{path}" if path.startswith("/") else path
+            if url in seen_urls:
+                break
+            seen_urls.add(url)
+            r = self._sess.get(url, timeout=self.timeout)
+            r.raise_for_status()
+            data = r.json()
+            assert isinstance(data, list)
+            remaining = limit - len(out)
+            out.extend(data[:remaining])
+            if len(out) >= limit:
+                break
+            path = self._next_link_path(r.headers.get("Link") or "")
+        return out
+
+    @staticmethod
+    def _next_link_path(link_header: str) -> str:
+        for chunk in link_header.split(","):
+            if 'rel="next"' not in chunk:
+                continue
+            m = re.search(r"<([^>]+)>", chunk)
+            if not m:
+                continue
+            url = m.group(1)
+            parsed = urlparse(url)
+            return parsed.path + (("?" + parsed.query) if parsed.query else "")
+        return ""
 
     def model_info(self, repo_id: str) -> dict:
         return self._get(f"/api/models/{repo_id}")  # type: ignore[return-value]
