@@ -162,6 +162,51 @@ def _find_benchmark_report(workspace: Path | None) -> Path | None:
     return candidates[0]
 
 
+def _resolve_under_session(
+    session_dir: Path,
+    raw: str | None,
+    anchors: tuple[str, ...] = ("runs", "kernel-agent", "kernel-agent-workspace"),
+) -> Path | None:
+    """Best-effort resolve a possibly-container-rooted path under ``session_dir``.
+
+    State-recorded paths frequently look like ``/workspace/runs/baseline/<sid>/``
+    because the orchestrator wrote them from inside a container, but the
+    breakdown is generated against a wekafs view where the same artefacts
+    live under ``<session_dir>/runs/baseline/<sid>/``.
+
+    Resolution order:
+
+    1. The raw path as-is (covers the development / test case where the
+       state-recorded path is already real).
+    2. For each anchor in ``anchors``, find the first occurrence of the
+       anchor in the raw path's parts and re-root that suffix at
+       ``session_dir``. The default anchors cover the three on-disk
+       conventions hyperloom uses (``runs/...``, ``kernel-agent/...``,
+       ``kernel-agent-workspace/...``).
+
+    Returns the first existing :class:`Path`, or ``None`` if nothing
+    resolves. Never raises — callers that care about the failure should
+    inspect the return value and append to ``warnings`` themselves.
+    """
+    if not raw:
+        return None
+    try:
+        p = Path(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if p.exists():
+        return p
+    for anchor in anchors:
+        try:
+            idx = p.parts.index(anchor)
+        except ValueError:
+            continue
+        candidate = session_dir.joinpath(*p.parts[idx:])
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
     cur = d
     for k in keys:
@@ -245,7 +290,15 @@ def collect_baseline(
 ) -> dict[str, Any]:
     last_b = state.get("last_baseline") or {}
     workspace_str = last_b.get("workspace") or ""
-    workspace = Path(workspace_str) if workspace_str else None
+    # Re-root container-style paths (e.g. ``/workspace/runs/baseline/<sid>/``)
+    # under the actual on-disk session_dir so we can still read
+    # ``benchmark_report.json`` from a wekafs view. See ``_resolve_under_session``.
+    workspace = _resolve_under_session(session_dir, workspace_str)
+    if workspace_str and workspace is None:
+        warnings.append(
+            f"baseline workspace {workspace_str!r} does not resolve under {session_dir}; "
+            "ttft_mean_ms / e2el_mean_ms will be null."
+        )
     report_path = _find_benchmark_report(workspace) if workspace else None
     report = _load_json_safe(report_path, warnings) if report_path else None
 
@@ -1607,7 +1660,9 @@ def collect_telemetry(
     baseline_report: Path | None = None
     last_b = state.get("last_baseline") or {}
     if isinstance(last_b, dict) and last_b.get("workspace"):
-        baseline_report = _find_benchmark_report(Path(last_b["workspace"]))
+        workspace = _resolve_under_session(session_dir, last_b.get("workspace"))
+        if workspace is not None:
+            baseline_report = _find_benchmark_report(workspace)
 
     profile_reports = [
         report for _task, report in _scan_profile_reports(session_dir)
@@ -1762,16 +1817,25 @@ def collect_source_files(
     ]
     critic = session_dir / "critic-workdir"
     rob = session_dir / "robustness-workdir"
-    return {
+    out: dict[str, Any] = {
         "manifest":           "manifest.json",
         "state":              "state.json",
         "baseline_report":    baseline_path,
-        "profile_reports":    profile_reports,
-        "sweep_reports":      sweep_reports,
-        "kernel_attempts":    kernel_attempts,
         "critic_workdir":     "critic-workdir" if critic.exists() else None,
         "robustness_workdir": "robustness-workdir" if rob.exists() else None,
     }
+    # Skip emitting list-valued categories that are empty so the
+    # source_files renderer doesn't surface ``count=0, first_values=—``
+    # rows for kernels / sweep / profile work that simply didn't run.
+    # SourceFiles schema fields are all NotRequired-by-convention.
+    for key, lst in (
+        ("profile_reports", profile_reports),
+        ("sweep_reports",   sweep_reports),
+        ("kernel_attempts", kernel_attempts),
+    ):
+        if lst:
+            out[key] = lst
+    return out
 
 
 __all__ = [
