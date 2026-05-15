@@ -445,3 +445,87 @@ def test_no_kernel_agent_runs_returns_empty_invocations(tmp_path: Path) -> None:
     assert b["geak_invocations"] == []
     assert b["oob_invocations"] == []
     assert b["kernel_lifecycle"]["detected"] == []
+
+
+def test_baseline_resolves_container_workspace_path(tmp_path: Path) -> None:
+    """``last_baseline.workspace`` written as a container path
+    (``/workspace/runs/baseline/<sub>/``) must still resolve under the
+    on-disk ``session_dir`` so ``ttft_mean_ms`` is read from the
+    benchmark report rather than dropped to ``None``.
+
+    Regression for handoff doc §8 TODO #2.
+    """
+    sd = tmp_path / "session"
+    sd.mkdir(parents=True)
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "ttft"})
+    bdir = sd / "runs/baseline/t1/benchmark_001"
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True,
+        "output_throughput_tok_s": 333.0,
+        "mean_ttft_ms": 142.5,
+        "mean_e2el_ms": 1620.4,
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "ttft",
+        "baseline_tput": 333.0,
+        "last_baseline": {"workspace": "/workspace/runs/baseline/t1"},
+    })
+
+    b = build(sd)
+    baseline = b["baseline"]
+    assert baseline["ttft_mean_ms"] == pytest.approx(142.5)
+    assert baseline["e2el_mean_ms"] == pytest.approx(1620.4)
+    assert baseline["benchmark_report_path"] is not None
+    assert "runs/baseline/t1" in baseline["benchmark_report_path"]
+    assert not any(
+        "baseline workspace" in w and "does not resolve" in w
+        for w in b["warnings"]
+    ), b["warnings"]
+
+
+def test_baseline_unresolvable_workspace_emits_warning(tmp_path: Path) -> None:
+    """When the recorded workspace can't be re-rooted under ``session_dir``
+    (e.g. wrong session_dir), the collector must surface a warning rather
+    than silently fall back to ``None``."""
+    sd = tmp_path / "session"
+    sd.mkdir(parents=True)
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "miss"})
+    _write_json(sd / "state.json", {
+        "session_id": "miss",
+        "baseline_tput": 100.0,
+        "last_baseline": {"workspace": "/some/totally/unrelated/path"},
+    })
+    b = build(sd)
+    assert b["baseline"]["ttft_mean_ms"] is None
+    assert any(
+        "baseline workspace" in w and "does not resolve" in w
+        for w in b["warnings"]
+    ), b["warnings"]
+
+
+def test_source_files_drops_empty_kernel_attempts(tmp_path: Path) -> None:
+    """``source_files.kernel_attempts`` must not appear when the session
+    has no kernel-agent runs (instead of rendering a ``count=0,
+    first_values=—`` placeholder row downstream).
+
+    Regression for handoff doc §8 TODO #6.
+    """
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "no-kernels"})
+    _write_json(sd / "state.json", {
+        "session_id": "no-kernels", "baseline_tput": 100.0,
+    })
+    sf = build(sd)["source_files"]
+    assert "kernel_attempts" not in sf
+    assert "profile_reports" not in sf
+    assert "sweep_reports" not in sf
+    assert sf["manifest"] == "manifest.json"
+    assert sf["state"] == "state.json"
+
+
+def test_source_files_keeps_non_empty_kernel_attempts(fixture_session: Path) -> None:
+    """Sanity: when the session DOES have kernel-agent activity, the
+    populated list must still be emitted by the collector."""
+    sf = build(fixture_session)["source_files"]
+    assert sf.get("kernel_attempts"), sf
+    assert any("optimization_attempts.jsonl" in p for p in sf["kernel_attempts"])
