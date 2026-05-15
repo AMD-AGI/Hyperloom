@@ -3,24 +3,65 @@
 #
 # Base install is intentionally small and deterministic:
 #   - ray[default]==2.44.1 + click<8.3.0
-#   - Node.js/npm for claude/codex CLIs
+#   - Node.js/npm for claude/codex CLIs and @cursor/sdk
 #   - TraceLens editable install + CLI verification
 #
 # The installer prepares all kernel-agent backends in one pass.
 
 set -euo pipefail
 
-WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
-WORKSPACE_ROOT="${WORKSPACE_ROOT:-${WORKSPACE_PATH}}"
-KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${WORKSPACE_PATH}/kernel-agent}"
+# Default every writable artefact location under $USER_DATA_PATH so a single
+# session-dir move relocates Magpie / source mirrors / GEAK config / the
+# kernel-agent env file. Operators can still pin individual paths via env
+# overrides (HYPERLOOM_ROOT, MAGPIE_DIR, etc.) — the defaults below take
+# effect only when the corresponding env var is unset.
+#
+# REPO_ROOT / KERNEL_AGENT_ROOT default to the on-disk source location
+# (this script lives at kernel-agent/scripts/install.sh, so its parent's
+# parent is the repo root). Read-only inputs (TRACELENS_ROOT, OOB_SRC,
+# HYPERLOOM_BUNDLE, GEAK_MEMORY_STORE_PATH, RAG_INDEX_DIR) stay outside
+# USER_DATA_PATH for warm-start latency reasons (decision: keep GEAK
+# cross-session memory + RAG embedding cache shared across sessions).
+#
+# Removed envs: WORKSPACE_PATH / WORKSPACE_ROOT (collapsed into the
+# USER_DATA_PATH-rooted defaults). If your launcher exported these,
+# either rename to USER_DATA_PATH or simply drop them.
+KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
-INFERENCE_OPTIMIZER_SESSION_DIR="${INFERENCE_OPTIMIZER_SESSION_DIR:-/workspace/hyperloom}"
-HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${INFERENCE_OPTIMIZER_SESSION_DIR}/runtime}"
+USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
+HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
-HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
+HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
-MAGPIE_DIR="${MAGPIE_DIR:-${WORKSPACE_ROOT}/Magpie}"
-MAGPIE_PYTHON="${MAGPIE_PYTHON:-${MAGPIE_DIR}/venv/bin/python}"
+MAGPIE_DIR="${MAGPIE_DIR:-${HYPERLOOM_RUNTIME_DIR}/Magpie}"
+# Resolve MAGPIE_PYTHON dynamically. The previous default
+# ${MAGPIE_DIR}/venv/bin/python assumed a Magpie-private venv, but
+# inference_optimizer/scripts/install.sh's ensure_magpie() does
+# `pip install -e $MAGPIE_DIR` into the driver Python's site-packages
+# (or the container image pre-installs it that way) — no venv is ever
+# created at $MAGPIE_DIR/venv. Mirrors _resolve_magpie_python() in
+# inference_optimizer/orchestrator/action_executors/_grid_runner.py:
+#   $MAGPIE_PYTHON env > python3 on PATH that can `import Magpie`
+#     > /opt/venv/bin/python (if it exists) > python3 on PATH.
+_resolve_magpie_python() {
+  if [ -n "${MAGPIE_PYTHON:-}" ]; then
+    printf '%s' "$MAGPIE_PYTHON"
+    return 0
+  fi
+  local candidate
+  candidate="$(command -v python3 2>/dev/null || true)"
+  if [ -n "$candidate" ] && "$candidate" -c "import Magpie" >/dev/null 2>&1; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  if [ -x /opt/venv/bin/python ]; then
+    printf '%s' /opt/venv/bin/python
+    return 0
+  fi
+  printf '%s' "${candidate:-/opt/venv/bin/python}"
+}
+MAGPIE_PYTHON="$(_resolve_magpie_python)"
 PYTHONPATH="${MAGPIE_DIR}:${PYTHONPATH:-}"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
@@ -31,20 +72,23 @@ TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"
 
 # Credentials fallback: env always wins. If SAFE_API_KEY or OPENAI_BASE_URL
-# is missing from env, source $REPO_ROOT/.env (defaults to $(pwd)) but
-# protect any keys already set in env from being overwritten by .env.
+# is missing from env, source $REPO_ROOT/.env (resolved above from this
+# script's parent dir) but protect any keys already set in env from being
+# overwritten by .env.
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ]; then
+if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR_API_KEY:-}" ]; then
   if [ -f "$REPO_ROOT/.env" ]; then
     _snap_safe="${SAFE_API_KEY-}"
     _snap_url="${OPENAI_BASE_URL-}"
+    _snap_cursor="${CURSOR_API_KEY-}"
     set -a
     # shellcheck disable=SC1091
     . "$REPO_ROOT/.env"
     set +a
     [ -n "$_snap_safe" ] && export SAFE_API_KEY="$_snap_safe"
     [ -n "$_snap_url" ]  && export OPENAI_BASE_URL="$_snap_url"
-    unset _snap_safe _snap_url
+    [ -n "$_snap_cursor" ] && export CURSOR_API_KEY="$_snap_cursor"
+    unset _snap_safe _snap_url _snap_cursor
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
@@ -58,16 +102,56 @@ GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
 GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
 RAG_INDEX_DIR="${HOME}/.cache/amd-ai-devtool/semantic-index"
-GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cuda}"
+# RAG index build device. Resolution:
+#   1. If $GEAK_RAG_INDEX_DEVICE is set explicitly, honor it verbatim
+#      (operator override; lets CPU-only environments opt out).
+#   2. Otherwise auto-detect: prefer GPU when either rocm-smi reports
+#      a device or torch.cuda.is_available() returns True; fall back
+#      to cpu only when no accelerator is visible.
+# Rationale: CPU embedding can take 1.5h+ on the BGE-large model and
+# repeatedly triggered zombie installers when the launcher timed out
+# mid-build (observed: 58min CPU run vs ~1min cuda run). The kernel-agent
+# runtime is always installed on GPU pods (IR-1 in the inference_optimizer
+# SKILL gates this), so cuda is the right default.
+if [ -z "${GEAK_RAG_INDEX_DEVICE:-}" ]; then
+  if command -v rocm-smi >/dev/null 2>&1 && rocm-smi --showid >/dev/null 2>&1; then
+    GEAK_RAG_INDEX_DEVICE_VAL="cuda"
+  elif python3 -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
+    GEAK_RAG_INDEX_DEVICE_VAL="cuda"
+  else
+    GEAK_RAG_INDEX_DEVICE_VAL="cpu"
+  fi
+else
+  GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE}"
+fi
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
+CODEX_MODEL_VAL="${CODEX_MODEL:-gpt-5.4}"
 # GEAK/OOB use the user's LiteLLM-compatible endpoint. The canonical env is
 # OPENAI_BASE_URL + SAFE_API_KEY; keep fallbacks for older launchers.
 GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}"
 GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-${LLM_API_BASE:-}}}}"
+# LiteLLM provider-specific base_url normalisation:
+#   * Anthropic client appends /v1/messages itself; leaving /v1 here yields
+#     /v1/v1/messages → 404. Strip /v1 when GEAK is on a claude model.
+#   * OpenAI client tolerates both shapes (verified), so for gpt-* models
+#     leave the original base_url alone to stay compatible with operators
+#     who set OPENAI_BASE_URL with the trailing /v1.
+case "${GEAK_MODEL_NAME_VAL}" in
+  claude-*|anthropic/claude-*)
+    GEAK_BASE_URL_VAL="${GEAK_BASE_URL_VAL%/v1}"
+    GEAK_BASE_URL_VAL="${GEAK_BASE_URL_VAL%/}"
+    ;;
+esac
 OOB_API_KEY_VAL="${OOB_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}}}}"
 OOB_BASE_URL_VAL="${OOB_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}}"
+# Cursor SDK key. Independent issuer (Cursor account, prefix `crsr_...`); never
+# inherit from SAFE_API_KEY / OOB_API_KEY because those address the AMD gateway.
+# Leave empty if the operator has not provisioned a Cursor key — the cursor
+# backend will surface the missing key clearly at run time.
+CURSOR_API_KEY_VAL="${CURSOR_API_KEY:-}"
+CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh}"
 
 # Install everything by default. The previous lazy `--with-geak / --with-oob`
 # scheme caused recurring "OOB proxy not running, request errored, found
@@ -147,8 +231,67 @@ ensure_python() {
   python3 -m pip --version >/dev/null || die "pip is required"
 }
 
+# PR-D §3: pin `git` and `patch` so the TraceLens server patcher has the
+# binaries it expects on every deployment.
+#
+# Background: `inference_optimizer/orchestrator/action_executors/_server_patcher.py`
+# uses two binaries to apply TraceLens patches to vLLM/SGLang installs:
+#   * `git apply` — strict path, default; bails immediately on context drift.
+#   * `patch -p<N> --fuzz=2` — PR-C fuzzy fallback (tightened from
+#     PR-C's original `--fuzz=10` to GNU patch's default `--fuzz=2` in
+#     PR-D §6 to reject multi-line context drift that could mis-apply
+#     patch CHANGE lines to wrong-but-similar-looking call sites).
+#     Still tolerates whitespace and single-line drift, the common
+#     point-release case the fuzzy fallback was designed for.
+#
+# Stripped runtime images (`lmsysorg/sglang:v0.5.9-rocm700-mi30x` and the
+# minimal vLLM serving images) sometimes ship without one or both binaries.
+# `_server_patcher` fail-softs in that case → `--enable-shape-discovery-
+# for-cuda-graph-profile` is silently never injected → graph-replayed
+# kernels stay opaque, exactly what #194 §5 was trying to fix.
+#
+# Apt-installing here is the cheap, framework-agnostic safety net: it's
+# the same install path the existing `ensure_node` helper takes for
+# Node.js, so it carries no new failure modes.
+ensure_patch_tools() {
+  log "ensuring git + patch (required by inference_optimizer/_server_patcher fuzzy-fallback path)"
+  local need_git=0 need_patch=0
+  command -v git >/dev/null 2>&1   || need_git=1
+  command -v patch >/dev/null 2>&1 || need_patch=1
+  if [ "$need_git" -eq 0 ] && [ "$need_patch" -eq 0 ]; then
+    log "git: $(command -v git) ($(git --version 2>/dev/null | head -1))"
+    log "patch: $(command -v patch) ($(patch --version 2>/dev/null | head -1))"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    [ "$need_git" -eq 1 ]   && warn "git missing; TraceLens server-patch strict path (\`git apply\`) will fail-soft"
+    [ "$need_patch" -eq 1 ] && warn "patch missing; TraceLens server-patch fuzzy fallback (\`patch --fuzz=2\`) will fail-soft"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would apt-get install git/patch because: git=$([ $need_git -eq 1 ] && echo missing || echo present), patch=$([ $need_patch -eq 1 ] && echo missing || echo present)"
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    [ "$need_git" -eq 1 ]   && warn "git missing and apt-get unavailable; install \`git\` manually for TraceLens server patching"
+    [ "$need_patch" -eq 1 ] && warn "patch missing and apt-get unavailable; install \`patch\` manually for TraceLens server patching fuzzy fallback"
+    return 0
+  fi
+  local pkgs=()
+  [ "$need_git" -eq 1 ]   && pkgs+=("git")
+  [ "$need_patch" -eq 1 ] && pkgs+=("patch")
+  log "apt-get installing: ${pkgs[*]}"
+  apt-get update >/dev/null 2>&1 || warn "apt-get update failed; install may pull stale package indices"
+  if ! apt-get -y install "${pkgs[@]}" >/dev/null; then
+    warn "apt-get install of ${pkgs[*]} failed; TraceLens server patching may fail-soft on this host"
+    return 0
+  fi
+  command -v git >/dev/null 2>&1   || warn "git still missing after apt-get install"
+  command -v patch >/dev/null 2>&1 || warn "patch still missing after apt-get install"
+}
+
 ensure_node() {
-  log "ensuring Node.js/npm for claude/codex CLIs"
+  log "ensuring Node.js/npm for claude/codex CLIs and @cursor/sdk"
   if command -v node >/dev/null 2>&1 && npm --version >/dev/null 2>&1; then
     log "node: $(command -v node) ($(node --version 2>/dev/null || echo unknown))"
     log "npm: $(command -v npm) ($(npm --version 2>/dev/null || echo unknown))"
@@ -412,6 +555,15 @@ ensure_oob() {
     run npm config set prefix /usr/local
     run npm install -g @openai/codex@0.100.0
   fi
+  # @cursor/sdk is a Node library (not a CLI), used by OOB's cursor backend
+  # via `node -e "import '@cursor/sdk'"`. We always install it globally so
+  # the OOB cursor path works without per-pod npm setup. Use `require.resolve`
+  # against the global root to avoid a redundant install when present.
+  if ! NODE_PATH="$(npm root -g 2>/dev/null || true)" \
+       node -e "require.resolve('@cursor/sdk')" >/dev/null 2>&1; then
+    run npm config set prefix /usr/local
+    run npm install -g @cursor/sdk
+  fi
 
   ensure_llm_auth_files
 }
@@ -439,10 +591,16 @@ ensure_llm_auth_files() {
 }
 EOF
   chmod 600 /root/.claude/config.json
+  # Codex 0.100.0 won't send Authorization to non-openai.com endpoints; the
+  # 4002 auth-proxy injects PROXY_AUTH_TOKEN instead. Writing OPENAI_API_KEY
+  # here would survive that injection but the gateway still rejects with
+  # "token not present" because codex never actually transmits the value.
+  # Keep the field empty so codex stays in apikey-mode without leaking the
+  # SaFE key into any client header.
   cat > /root/.codex/auth.json <<EOF
 {
   "auth_mode": "apikey",
-  "OPENAI_API_KEY": "${OOB_API_KEY_VAL}"
+  "OPENAI_API_KEY": ""
 }
 EOF
   chmod 600 /root/.codex/auth.json
@@ -505,13 +663,11 @@ write_env_file() {
   {
     echo '#!/bin/sh'
     echo "# kernel-agent runtime env (regenerated by install.sh)"
-    [ -n "${INFERENCE_OPTIMIZER_SESSION_DIR:-}" ] && echo "export INFERENCE_OPTIMIZER_SESSION_DIR='${INFERENCE_OPTIMIZER_SESSION_DIR}'"
+    [ -n "${USER_DATA_PATH:-}" ] && echo "export USER_DATA_PATH='${USER_DATA_PATH}'"
     [ -n "${HYPERLOOM_RUNTIME_DIR:-}" ] && echo "export HYPERLOOM_RUNTIME_DIR='${HYPERLOOM_RUNTIME_DIR}'"
     [ -n "${KERNEL_AGENT_ENV:-}" ] && echo "export KERNEL_AGENT_ENV='${KERNEL_AGENT_ENV}'"
     [ -n "${HYPERLOOM_KERNEL_AGENT_ROOT:-}" ] && echo "export HYPERLOOM_KERNEL_AGENT_ROOT='${HYPERLOOM_KERNEL_AGENT_ROOT}'"
     [ -n "${KERNEL_AGENT_ROOT:-}" ] && echo "export KERNEL_AGENT_ROOT='${KERNEL_AGENT_ROOT}'"
-    [ -n "${WORKSPACE_ROOT:-}" ] && echo "export WORKSPACE_ROOT='${WORKSPACE_ROOT}'"
-    [ -n "${WORKSPACE_PATH:-}" ] && echo "export WORKSPACE_PATH='${WORKSPACE_PATH}'"
     [ -n "${MAGPIE_DIR:-}" ] && echo "export MAGPIE_DIR='${MAGPIE_DIR}'"
     [ -n "${MAGPIE_PYTHON:-}" ] && echo "export MAGPIE_PYTHON='${MAGPIE_PYTHON}'"
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
@@ -528,6 +684,11 @@ write_env_file() {
       echo "export LLM_GATEWAY_KEY='${OOB_API_KEY_VAL}'"
     }
     [ -n "${OOB_BASE_URL_VAL}" ] && echo "export OOB_BASE_URL='${OOB_BASE_URL_VAL}'"
+    # Cursor backend env. Only export CURSOR_API_KEY if the operator already
+    # provided one via env or .env; do not synthesise from SAFE_API_KEY (the
+    # Cursor account is a separate issuer).
+    [ -n "${CURSOR_API_KEY_VAL}" ] && echo "export CURSOR_API_KEY='${CURSOR_API_KEY_VAL}'"
+    [ -n "${CURSOR_DEFAULT_MODEL_VAL}" ] && echo "export CURSOR_DEFAULT_MODEL='${CURSOR_DEFAULT_MODEL_VAL}'"
     # Pin TRACELENS_ROOT to the (possibly mirrored) value resolved by
     # ensure_tracelens(). This is what lets setsid nohup inference_optimizer
     # optimize → kernel-agent/tools/tracelens_analysis.py inherit the writable
@@ -540,6 +701,7 @@ write_env_file() {
     [ -n "${GEAK_MEMORY_STORE_PATH_VAL}" ] && echo "export GEAK_MEMORY_STORE_PATH='${GEAK_MEMORY_STORE_PATH_VAL}'"
     [ -n "${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}" ] && echo "export GEAK_SAVE_TO_KNOWLEDGE_BASE='${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}'"
     [ -n "${GEAK_MEMORY_MIN_SPEEDUP_VAL}" ] && echo "export GEAK_MEMORY_MIN_SPEEDUP='${GEAK_MEMORY_MIN_SPEEDUP_VAL}'"
+    [ -n "${CODEX_MODEL_VAL}" ] && echo "export CODEX_MODEL='${CODEX_MODEL_VAL}'"
   } > "$env_file"
   chmod 600 "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
@@ -572,6 +734,25 @@ PY
       warn "${tool} not found"
     fi
   done
+  for tool in git patch; do
+    if command -v "$tool" >/dev/null 2>&1; then
+      log "found ${tool}: $(command -v "$tool")"
+    else
+      warn "${tool} not found (TraceLens server patcher will fail-soft without it)"
+    fi
+  done
+  # @cursor/sdk is a library, not a CLI; verify via require.resolve.
+  if NODE_PATH="$(npm root -g 2>/dev/null || true)" \
+     node -e "require.resolve('@cursor/sdk')" >/dev/null 2>&1; then
+    log "found @cursor/sdk in $(npm root -g 2>/dev/null || echo '?')"
+  else
+    warn "@cursor/sdk not installed (cursor backend will fail to start)"
+  fi
+  if [ -n "$CURSOR_API_KEY_VAL" ]; then
+    log "CURSOR_API_KEY: set"
+  else
+    warn "CURSOR_API_KEY not set; cursor backend will 401 if invoked"
+  fi
   if [ -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
     log "GEAK ref: $(git -C "${HYPERLOOM_ROOT}/geak" describe --tags --always 2>/dev/null || echo unknown)"
   else
@@ -598,10 +779,16 @@ PY
 
 main() {
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    mkdir -p "${KERNEL_AGENT_ROOT}/runs"
+    # KERNEL_AGENT_ROOT is now the source root (read-only checkout); tool
+    # outputs land under $USER_DATA_PATH/kernel-agent/runs/<session_id>/
+    # (created lazily by the tools themselves). All we need here is the
+    # writable runtime tree on $USER_DATA_PATH for the env file + GEAK
+    # config + source mirrors.
+    mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${HYPERLOOM_ROOT}"
   fi
   ensure_python
   ensure_node
+  ensure_patch_tools
   ensure_ray
   ensure_ray_started
   ensure_tracelens
