@@ -57,10 +57,29 @@ in `.env.template`).
 │   ├── integrate/<task_id>/
 │   └── kernel_opt/<kernel_id>/<task_id>/
 ├── kernel-agent-workspace/<kernel_id>/   # cross-task GEAK/OOB artefacts
+├── kernel-agent/runs/<session_id>/       # kernel-agent CLI tool outputs
 ├── patches/<kernel_id>/                  # KEEP'd patches + backup
+├── optimizer_runs/                       # launcher stdout / PID / resume / monitor logs
+├── runtime/
+│   ├── kernel-agent.env.sh               # generated; source before any tool call
+│   ├── geak-config/local.yaml            # generated GEAK litellm config
+│   ├── Magpie/                           # cloned by install.sh (was /workspace/Magpie)
+│   └── source-mirrors/                   # writable mirrors (was /opt/hyperloom)
+│       ├── geak/
+│       ├── OOB/oob_cli/
+│       └── TraceLens-internal/
 ├── reports/                              # `report` action output
 └── logs/                                 # cli + reactor + auth-proxy logs
 ```
+
+Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
+or warm-start caches): `$TRACELENS_ROOT` (default `/wekafs/hyperloom/
+TraceLens-internal`), `$OOB_SRC` / `$HYPERLOOM_BUNDLE`,
+`/sgl-workspace/{aiter,sglang,vllm}/`, `~/.claude/config.json` +
+`~/.codex/auth.json`, `~/.cache/amd-ai-devtool/semantic-index/`
+(GEAK RAG embedding cache), `/wekafs/hyperloom/geak-memory/memory.db`
+(GEAK cross-session memory). Each is overridable via its own env if
+you want a fully self-contained session.
 
 Paths emitted by agents must resolve under `$SESSION_DIR` — PolicyGate
 enforces this (with a framework-source allowlist for `source_file`:
@@ -147,8 +166,8 @@ that this `optimize` run skips the kernel optimization phase.
 | Component | Provided by |
 |---|---|
 | `ray==2.44.1` + `click<8.3.0` | pip |
-| TraceLens internal (perf-report CLI) | `ensure_tracelens` (`cp -r` from read-only WekaFS mount to `${HYPERLOOM_ROOT}/TraceLens-internal`) |
-| GEAK CLI + `${HYPERLOOM_ROOT}/geak-config/local.yaml` | `ensure_geak` |
+| TraceLens internal (perf-report CLI) | `ensure_tracelens` (`cp -r` from read-only WekaFS mount to `${HYPERLOOM_ROOT}/TraceLens-internal` = `$USER_DATA_PATH/runtime/source-mirrors/TraceLens-internal`) |
+| GEAK CLI + `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` | `ensure_geak` |
 | Node.js/npm + OOB CLI + claude/codex npm CLIs + `~/.claude/config.json` + `~/.codex/auth.json` | `ensure_node` + `ensure_oob` (mirrors `${HYPERLOOM_BUNDLE}/OOB` → `${HYPERLOOM_ROOT}/OOB/oob_cli`) |
 | OOB auth-proxy on `127.0.0.1:4002` (rewrites `x-api-key` → `Authorization: Bearer`; without it Claude SDK returns 401) | `ensure_auth_proxy.sh` |
 
@@ -226,7 +245,7 @@ boots. Cite the linked section for fixes:
 |----|---|---|
 | 1  | Re-export auth aliases (`ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, ...) from `SAFE_API_KEY`. `OOB_BASE_URL` / `GEAK_BASE_URL` / `LLM_API_BASE` inherit `OPENAI_BASE_URL` directly (Bearer-native, no proxy). | — |
 | 2  | Auto-`pip install` missing `claude-agent-sdk>=0.1.65`, `openai>=1.50`, `httpx>=0.27` into `sys.executable` | `## Failure Handling` — `claude-agent-sdk not installed` |
-| 3  | Bootstrap `auth_proxy.py` source from `$OOB_SRC` (or `/wekafs/fully-local/{,inference_optimization/}OOB`) into `${HYPERLOOM_ROOT:-/opt/hyperloom}/OOB/oob_cli/` if missing | `## Failure Handling` — `Claude SDK exit code 1` |
+| 3  | Bootstrap `auth_proxy.py` source from `$OOB_SRC` (or `/wekafs/fully-local/{,inference_optimization/}OOB`) into `${HYPERLOOM_ROOT}/OOB/oob_cli/` (default `$USER_DATA_PATH/runtime/source-mirrors/OOB/oob_cli/`) if missing | `## Failure Handling` — `Claude SDK exit code 1` |
 | 4  | Re-run `ensure_auth_proxy.sh`; rewrite `~/.claude/config.json` `customApiUrl` and force-override `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` to the proxy URL (overriding any shell/`.env`/k8s value, logged on stdout). On retry-fail restores originals + WARN. | `### Recovery` |
 | 5  | ROCm hygiene (WARN-only): pop `HIP_VISIBLE_DEVICES` if `ROCR_VISIBLE_DEVICES` also set; visible-GPU count vs `$TP` via `rocm-smi --showid`; `/dev/shm` free ≥ 16 GiB | — |
 | 6  | Auto-install missing `ray` / `Magpie` / `InferenceX` (pod rebuild recovery) | — |
@@ -592,10 +611,14 @@ only when `_workload_envs.materialize_config_with_envs` defaults don't fit
 ## Launch a New Optimization
 
 Assumes Step 1 (install) already ran. Session lives at `/workspace/hyperloom`
-(override `$USER_DATA_PATH`); there is no `--session-name`.
+(override `$USER_DATA_PATH`); there is no `--session-name`. Launcher
+artefacts (stdout / PID / resume / monitor logs) land under
+`$USER_DATA_PATH/optimizer_runs/` so a single session-dir move relocates
+the entire run tail.
 For sandboxes that don't persist `export`s across shell calls (Cursor agents),
 copy `inference_optimizer/scripts/setup_env.sh.example` to
-`optimizer_runs/setup_env.sh`, fill in the workload block, and `.` it each call.
+`$USER_DATA_PATH/optimizer_runs/setup_env.sh`, fill in the workload block,
+and `.` it each call.
 After `setsid nohup ... &`, locate the optimizer via
 `pgrep -af 'inference_optimizer.*optimize'` — `$!` may be a wrapper PID.
 
@@ -605,9 +628,10 @@ if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
-export RUN_LOG="$REPO_ROOT/optimizer_runs/run_${RUN_TAG}.log"
-export PID_FILE="$REPO_ROOT/optimizer_runs/run_${RUN_TAG}.pid"
-mkdir -p "$REPO_ROOT/optimizer_runs"
+export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
+export RUN_LOG="$RUN_DIR/run_${RUN_TAG}.log"
+export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
+mkdir -p "$RUN_DIR"
 
 setsid nohup inference_optimizer --verbose optimize \
   --model "$MODEL_PATH" \
@@ -663,17 +687,19 @@ For runs > 5 min, start a monitor in its own `setsid nohup` process. It polls
 `--resume` when the optimizer dies unexpectedly.
 
 ```bash
+export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
+mkdir -p "$RUN_DIR"
 cp "$REPO_ROOT/optimizer_runs/robustness_monitor.sh.example" \
-   "$REPO_ROOT/optimizer_runs/robustness_monitor.sh"
-chmod +x "$REPO_ROOT/optimizer_runs/robustness_monitor.sh"
-setsid nohup bash "$REPO_ROOT/optimizer_runs/robustness_monitor.sh" \
-  > "$REPO_ROOT/optimizer_runs/robustness_monitor_$(date +%Y%m%d_%H%M%S).log" \
+   "$RUN_DIR/robustness_monitor.sh"
+chmod +x "$RUN_DIR/robustness_monitor.sh"
+setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
+  > "$RUN_DIR/robustness_monitor_$(date +%Y%m%d_%H%M%S).log" \
   2>&1 < /dev/null &
 ```
 
-Reads `$REPO_ROOT`, `$PID_FILE`, and (optional) `$USER_DATA_PATH`
-/ `$MAX_HOURS` / `$TARGET_GAIN`. Edit the example before copying if defaults
-need to change. `stop_reason` interpretation matches the `## Monitoring` reader.
+Reads `$PID_FILE` and (optional) `$USER_DATA_PATH` / `$MAX_HOURS` /
+`$TARGET_GAIN`. Edit the example before copying if defaults need to
+change. `stop_reason` interpretation matches the `## Monitoring` reader.
 
 ## Monitoring
 

@@ -1751,7 +1751,17 @@ def main() -> int:
     parser.add_argument("--target-platform", default="MI355X")
     parser.add_argument("--analysis-mode", default="default")
     parser.add_argument("--runtime-env", default="local")
-    parser.add_argument("--workspace-path", default=os.environ.get("WORKSPACE_PATH", "/workspace"))
+    parser.add_argument(
+        "--workspace-path",
+        default=os.environ.get("USER_DATA_PATH", "/workspace/hyperloom"),
+        help=(
+            "Root the tool writes under (output lands at "
+            "<workspace_path>/kernel-agent/runs/<session_id>/...). "
+            "Defaults to $USER_DATA_PATH so every kernel-agent artefact "
+            "stays inside the session dir; legacy launchers that set "
+            "$WORKSPACE_PATH must rename to $USER_DATA_PATH."
+        ),
+    )
     parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
     parser.add_argument("--roofline-json", default="")
     parser.add_argument("--compat-report-path", default="")

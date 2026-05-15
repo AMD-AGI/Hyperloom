@@ -10,16 +10,31 @@
 
 set -euo pipefail
 
-WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
-WORKSPACE_ROOT="${WORKSPACE_ROOT:-${WORKSPACE_PATH}}"
-KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${WORKSPACE_PATH}/kernel-agent}"
+# Default every writable artefact location under $USER_DATA_PATH so a single
+# session-dir move relocates Magpie / source mirrors / GEAK config / the
+# kernel-agent env file. Operators can still pin individual paths via env
+# overrides (HYPERLOOM_ROOT, MAGPIE_DIR, etc.) — the defaults below take
+# effect only when the corresponding env var is unset.
+#
+# REPO_ROOT / KERNEL_AGENT_ROOT default to the on-disk source location
+# (this script lives at kernel-agent/scripts/install.sh, so its parent's
+# parent is the repo root). Read-only inputs (TRACELENS_ROOT, OOB_SRC,
+# HYPERLOOM_BUNDLE, GEAK_MEMORY_STORE_PATH, RAG_INDEX_DIR) stay outside
+# USER_DATA_PATH for warm-start latency reasons (decision: keep GEAK
+# cross-session memory + RAG embedding cache shared across sessions).
+#
+# Removed envs: WORKSPACE_PATH / WORKSPACE_ROOT (collapsed into the
+# USER_DATA_PATH-rooted defaults). If your launcher exported these,
+# either rename to USER_DATA_PATH or simply drop them.
+KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
 USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
-HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-/opt/hyperloom}"
+HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
-MAGPIE_DIR="${MAGPIE_DIR:-${WORKSPACE_ROOT}/Magpie}"
+MAGPIE_DIR="${MAGPIE_DIR:-${HYPERLOOM_RUNTIME_DIR}/Magpie}"
 # Resolve MAGPIE_PYTHON dynamically. The previous default
 # ${MAGPIE_DIR}/venv/bin/python assumed a Magpie-private venv, but
 # inference_optimizer/scripts/install.sh's ensure_magpie() does
@@ -57,9 +72,9 @@ TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"
 
 # Credentials fallback: env always wins. If SAFE_API_KEY or OPENAI_BASE_URL
-# is missing from env, source $REPO_ROOT/.env (defaults to $(pwd)) but
-# protect any keys already set in env from being overwritten by .env.
-REPO_ROOT="${REPO_ROOT:-$(pwd)}"
+# is missing from env, source $REPO_ROOT/.env (resolved above from this
+# script's parent dir) but protect any keys already set in env from being
+# overwritten by .env.
 if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ]; then
   if [ -f "$REPO_ROOT/.env" ]; then
     _snap_safe="${SAFE_API_KEY-}"
@@ -555,8 +570,6 @@ write_env_file() {
     [ -n "${KERNEL_AGENT_ENV:-}" ] && echo "export KERNEL_AGENT_ENV='${KERNEL_AGENT_ENV}'"
     [ -n "${HYPERLOOM_KERNEL_AGENT_ROOT:-}" ] && echo "export HYPERLOOM_KERNEL_AGENT_ROOT='${HYPERLOOM_KERNEL_AGENT_ROOT}'"
     [ -n "${KERNEL_AGENT_ROOT:-}" ] && echo "export KERNEL_AGENT_ROOT='${KERNEL_AGENT_ROOT}'"
-    [ -n "${WORKSPACE_ROOT:-}" ] && echo "export WORKSPACE_ROOT='${WORKSPACE_ROOT}'"
-    [ -n "${WORKSPACE_PATH:-}" ] && echo "export WORKSPACE_PATH='${WORKSPACE_PATH}'"
     [ -n "${MAGPIE_DIR:-}" ] && echo "export MAGPIE_DIR='${MAGPIE_DIR}'"
     [ -n "${MAGPIE_PYTHON:-}" ] && echo "export MAGPIE_PYTHON='${MAGPIE_PYTHON}'"
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
@@ -644,7 +657,12 @@ PY
 
 main() {
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    mkdir -p "${KERNEL_AGENT_ROOT}/runs"
+    # KERNEL_AGENT_ROOT is now the source root (read-only checkout); tool
+    # outputs land under $USER_DATA_PATH/kernel-agent/runs/<session_id>/
+    # (created lazily by the tools themselves). All we need here is the
+    # writable runtime tree on $USER_DATA_PATH for the env file + GEAK
+    # config + source mirrors.
+    mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${HYPERLOOM_ROOT}"
   fi
   ensure_python
   ensure_node
