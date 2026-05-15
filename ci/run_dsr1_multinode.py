@@ -128,6 +128,8 @@ def main() -> int:
         datefmt="%H:%M:%S",
     )
 
+    from inferenceX_parser import get_nfs_root  # noqa: PLC0415
+
     safe_api_key = (os.environ.get("CLAW_API_KEY")
                     or os.environ.get("SAFE_API_KEY") or "")
     safe_base_url = (os.environ.get("SAFE_BASE_URL")
@@ -135,7 +137,7 @@ def main() -> int:
     sandbox_workspace = (args.workspace
                          or os.environ.get("SANDBOX_WORKSPACE")
                          or "core42-sandbox")
-    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    nfs_root = get_nfs_root()
 
     if not safe_api_key:
         log.error("missing CLAW_API_KEY / SAFE_API_KEY env var")
