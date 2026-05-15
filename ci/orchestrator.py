@@ -41,11 +41,15 @@ log = logging.getLogger("ci-orchestrator")
 CI_DIR = Path(__file__).resolve().parent
 PROMPT_TEMPLATE = (CI_DIR / "prompt_template.md").read_text()
 
-# Skill files are NOT embedded in the prompt. The ci-mix300 skill is delivered
-# via plugin 4 (sent in the message body as pluginId=4). The agent's runtime
-# auto-downloads it to /workspace/.skills/ci-mix300/ on first use via its
-# built-in download_skill tool. See Primus-Claw plugin-from-message.ts for
-# how Brain resolves plugin tools at runtime.
+# Skill files are NOT embedded in the prompt. We send pluginId=4 (Hyperloom),
+# whose bundled tool 85 prompt template references the inference_optimizer
+# Python package on the WekaFS mount: /wekafs/HyperloomV2/inference_optimizer/.
+# The agent reads SKILL.md off the mount and runs `inference_optimizer optimize`
+# directly — there is no marketplace skill download or /workspace/.skills/
+# layout involved. ci-mix300 (tool 74) is intentionally NOT used; it duplicated
+# inference_optimizer's coverage and was never reliably injected by Brain
+# (plugin 4's tools list does not include it). See ab-session-logs/ +
+# .harvest/run25853202679-* for the canonical inference_optimizer artifacts.
 
 
 def load_config(config_path: str | None = None) -> dict:
@@ -55,6 +59,14 @@ def load_config(config_path: str | None = None) -> dict:
 
 
 def render_prompt(merged: dict) -> str:
+    """Render the agent prompt for the inference_optimizer skill on /wekafs.
+
+    The skill (HyperloomV2/inference_optimizer) is reached via plugin 4's
+    bundled tool 85 prompt template — agent reads SKILL.md off /wekafs and
+    runs the Python `inference_optimizer optimize` CLI directly. We don't
+    inject benchmark scripts, server flags, or kernel-opt-specific knobs
+    here; the skill's own _preflight() + executors handle all of that.
+    """
     isl, osl = merged["isl_osl_configs"][0]
     ifx_text = format_benchmark_for_prompt(
         merged["inferenceX_benchmarks"],
@@ -63,38 +75,12 @@ def render_prompt(merged: dict) -> str:
         tp=merged.get("tp"),
         conc=merged.get("conc"),
     )
-    script = merged.get("benchmark_script")
-    script_content = merged.get("benchmark_script_content", "")
-    if script and script_content:
-        bss = (
-            f"MANDATORY: Replicate the server config from this InferenceX benchmark script "
-            f"({script}).\n"
-            f"Key env vars for this run: MODEL={merged['model_path']} TP={merged['tp']} "
-            f"EP_SIZE={merged['ep']} CONC={merged['conc']} ISL={isl} OSL={osl} "
-            f"MAX_MODEL_LEN=4096 RANDOM_RANGE_RATIO=0.8 "
-            f"NUM_PROMPTS_MULTIPLIER=10 RESULT_FILENAME=baseline\n"
-            f"DO NOT run the script directly. Extract server launch command and env vars, "
-            f"then reproduce them yourself.\n\n"
-            f"<benchmark_script>\n{script_content}\n</benchmark_script>"
-        )
-    elif script:
-        bss = (
-            f"MANDATORY: Read the InferenceX benchmark script and replicate its server config:\n"
-            f"  {merged['inferencex_path']}/{script}\n"
-            f"Key env vars: MODEL={merged['model_path']} TP={merged['tp']} "
-            f"CONC={merged['conc']} ISL={isl} OSL={osl}"
-        )
-    else:
-        bss = "No InferenceX benchmark script found. Construct server launch manually."
 
     safe_api_key = os.environ.get("CLAW_API_KEY", "")
     safe_base_url = os.environ.get("SAFE_BASE_URL", "")
-    sandbox_workspace = os.environ.get("SANDBOX_WORKSPACE", "")
-    nfs_root = get_nfs_root(default="/workspace")
 
     return PROMPT_TEMPLATE.format(
         model_hf=merged["model_hf"],
-        mode=merged["mode"],
         model_path=merged["model_path"],
         framework=merged["framework"],
         precision=merged["precision"],
@@ -104,22 +90,11 @@ def render_prompt(merged: dict) -> str:
         tp=merged["tp"],
         ep=merged["ep"],
         gpu_type=merged["gpu_type"],
-        inferencex_path=merged["inferencex_path"],
-        sandbox_image=merged["sandbox_image"],
-        kernel_opt_backends=merged["kernel_opt_backends"],
-        kernel_opt_image=merged["kernel_opt_image"],
-        kernel_opt_workspace=merged["kernel_opt_workspace"],
-        geak_step_limit=merged["geak_step_limit"],
-        min_kernels=merged["min_kernels"],
-        result_dir=merged["result_dir"],
+        gpu_type_lc=str(merged["gpu_type"]).lower(),
         target_gpu=merged["target_gpu"],
         inferenceX_data=ifx_text,
-        runner=merged["runner"],
-        benchmark_script_section=bss,
         safe_api_key=safe_api_key,
         safe_base_url=safe_base_url,
-        sandbox_workspace=sandbox_workspace,
-        nfs_root=nfs_root,
     )
 
 

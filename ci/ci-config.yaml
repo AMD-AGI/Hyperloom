@@ -4,13 +4,13 @@ claw:
   sandbox_workspace_env: SANDBOX_WORKSPACE
   sandbox_timeout: 28800
   agent_id: agent_default
-  # NOTE: `tools` (marketplace tool_ids) is intentionally omitted.
-  # When pluginId is set in the message body (we always send pluginId=4),
-  # Brain ignores marketplace tool_ids — see Primus-Claw
-  # packages/brain/src/plugin-from-message.ts marketplaceToolIds():
-  #   if (plugin_id > 0) { return []; }  // logs "plugin.skips_marketplace_tool_ids"
-  # The actual ci-mix300 skill loads via plugin 4's bundled tools list,
-  # discovered/downloaded at runtime by the agent via its download_skill tool.
+  # plugin 4 (Hyperloom) bundles two tools:
+  #   - tool 3:  hyperloom-public-mcp (primus-safe-core42 MCP server)
+  #   - tool 85: hyperloom-prompt → @/wekafs/HyperloomV2/inference_optimizer/SKILL.md
+  # CI sends pluginId=4 + tools=[] in the message body; the agent reads
+  # SKILL.md off the WekaFS mount and runs the Python `inference_optimizer
+  # optimize` CLI. Marketplace skill download is intentionally NOT used —
+  # the runtime IS on the mount, no /workspace/.skills/ layout required.
   plugin_id: 4
 
 inferenceX:
@@ -21,12 +21,10 @@ inferenceX:
   harbor_prefix: ${HARBOR_PREFIX}
 
 results:
-  # Container-internal absolute path. Must match SaFE backend prompt_builder.go
-  # (which renders '/workspace/hyperloom') so the agent's RESULT_DIR / cd /
-  # cp commands all resolve in-pod regardless of K8s workspace name.
-  # Do NOT prefix with ${SANDBOX_WORKSPACE} — that's a K8s namespace, not an fs
-  # path; using it here mis-renders to e.g. 'core42-sandbox/hyperloom/'.
-  # No trailing slash so '{result_dir}/ci_metrics.json' joins cleanly.
+  # result_dir is no longer rendered into the agent prompt — inference_optimizer
+  # has its own canonical session_dir at /workspace/hyperloom (SKILL.md "##
+  # What This Skill Runs"). Kept here for any local CI bookkeeping that
+  # still wants a path string.
   result_dir: /workspace/hyperloom
   nfs_base: ${NFS_ROOT}/results/ci
   artifact_retention_days: 90
