@@ -51,7 +51,9 @@ are accepted as no-ops for backwards compat):
 - Node.js 20 + npm when they are missing (required for the `claude` /
   `codex` npm CLIs)
 - TraceLens editable install from `/wekafs/hyperloom/TraceLens-internal` and
-  verifies `TraceLens_generate_perf_report_pytorch --help`
+  verifies `TraceLens_generate_perf_report_pytorch_inference --help`
+  (Hyperloom is inference-only since v0.4; the training-mode CLI is no
+  longer accepted)
 - GEAK CLI from `GEAK_REF` (default `v3.1.0`) +
   `${HYPERLOOM_ROOT}/geak-config/local.yaml` (model resolution:
   `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL` from env, default
@@ -218,11 +220,12 @@ manual editable install + smoke test before analysis:
 export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 cd "$TRACELENS_ROOT"
 pip install -e .
-# TraceLens #124: prefer the `_inference` perf-report CLI for vLLM/SGLang
-# traces (correct execution mode = graph-replay). The legacy
-# `TraceLens_generate_perf_report_pytorch` is acceptable on older builds.
-TraceLens_generate_perf_report_pytorch_inference --help \
-  || TraceLens_generate_perf_report_pytorch --help
+# TraceLens #124: only the `_inference` perf-report CLI is accepted
+# (correct execution mode = graph-replay for vLLM/SGLang traces). Hyperloom
+# is inference-only since v0.4; the legacy training-mode CLI is no
+# longer accepted — bump TraceLens-internal if the inference CLI is
+# missing.
+TraceLens_generate_perf_report_pytorch_inference --help
 ```
 
 If neither CLI is on PATH, stop and fix installation before analysis. Do not

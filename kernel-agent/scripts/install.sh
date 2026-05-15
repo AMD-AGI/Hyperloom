@@ -394,16 +394,15 @@ ensure_tracelens() {
     run bash -lc "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir -e ."
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    # TraceLens #124: prefer the inference variant (correct entry for
-    # vLLM/SGLang traces). Fall back to the legacy CLI for older builds.
+    # TraceLens #124: only the inference variant is accepted (the correct
+    # entry for vLLM/SGLang traces). Hyperloom is inference-only since
+    # v0.4; the legacy training-mode CLI was removed to keep install /
+    # runtime in lockstep.
     if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
       TraceLens_generate_perf_report_pytorch_inference --help >/dev/null
       log "TraceLens perf CLI verified: TraceLens_generate_perf_report_pytorch_inference (#124)"
-    elif command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
-      TraceLens_generate_perf_report_pytorch --help >/dev/null
-      warn "TraceLens_generate_perf_report_pytorch_inference not found; using legacy TraceLens_generate_perf_report_pytorch"
     else
-      verify_die "Neither TraceLens_generate_perf_report_pytorch_inference nor TraceLens_generate_perf_report_pytorch found after install"
+      verify_die "TraceLens_generate_perf_report_pytorch_inference not found after install (Hyperloom is inference-only since v0.4; bump TraceLens-internal)"
     fi
   fi
 }
@@ -682,15 +681,14 @@ except Exception:
     raise SystemExit(1)
 PY
 )"
-  # TraceLens perf-report CLI: report whichever variant is available
-  # (#124 prefers the _inference suffix; the legacy CLI is acceptable as
-  # a fallback, the dispatcher in tools/tracelens_analysis.py picks at runtime).
+  # TraceLens perf-report CLI: only the inference variant is accepted
+  # (#124). Hyperloom is inference-only since v0.4; the legacy
+  # training-mode CLI was removed because its output shape silently
+  # breaks downstream fusion / roofline analysis.
   if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
     log "found TraceLens_generate_perf_report_pytorch_inference: $(command -v TraceLens_generate_perf_report_pytorch_inference)"
-  elif command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
-    warn "TraceLens_generate_perf_report_pytorch_inference not found; using legacy TraceLens_generate_perf_report_pytorch: $(command -v TraceLens_generate_perf_report_pytorch)"
   else
-    warn "TraceLens perf-report CLI not found (looked for both _inference and legacy)"
+    warn "TraceLens_generate_perf_report_pytorch_inference not found (Hyperloom is inference-only since v0.4)"
   fi
   for tool in geak oob claude codex; do
     if command -v "$tool" >/dev/null 2>&1; then
