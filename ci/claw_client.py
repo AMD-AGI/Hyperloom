@@ -57,9 +57,16 @@ class ClawClient:
 
     # ── Session CRUD ──
 
-    def create_session(self, name: str, agent_id: str | None = None) -> dict:
+    def create_session(
+        self,
+        name: str,
+        agent_id: str | None = None,
+        sandbox_image: str | None = None,
+    ) -> dict:
         agent_id = agent_id or self.agent_id
         body: dict = {"name": name, "agent_id": agent_id}
+        if sandbox_image:
+            body["sandbox_image"] = sandbox_image
         data = self._check(self._session.post(
             self._url("/sessions"),
             json=body,
