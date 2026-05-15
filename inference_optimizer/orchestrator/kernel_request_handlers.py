@@ -40,6 +40,7 @@ import importlib.util
 import json
 import logging
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -86,6 +87,27 @@ _REUSABLE_SOURCE_ROOTS = (
 _APPLY_TOOL_MODULE: Any | None = None
 _DEFAULT_KERNEL_BACKEND_ORDER = ("claude", "codex", "cursor", "geak")
 _DEFAULT_KERNEL_BATCH_PARALLEL = 3
+_CANDIDATE_ENV_KEYS = {
+    "CONC",
+    "ISL",
+    "OSL",
+    "TP",
+    "NUM_PROMPTS",
+    "NUM_WARMUPS",
+    "MAX_MODEL_LEN",
+    "RANDOM_RANGE_RATIO",
+    "ROCR_VISIBLE_DEVICES",
+    "CUDA_VISIBLE_DEVICES",
+}
+_CANDIDATE_ENV_PREFIXES = (
+    "SGLANG_",
+    "VLLM_",
+    "AITER_",
+    "TRITON_",
+    "HIPBLASLT_",
+    "PYTORCH_TUNABLEOP_",
+)
+_SENSITIVE_ENV_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
 
 def _kernel_agent_root_error() -> str | None:
@@ -142,6 +164,153 @@ def _load_candidate_metadata(payload: dict) -> dict[str, Any]:
         if str(item.get("kernel_id") or "") == kernel_id:
             return item
     return {}
+
+
+def _coerce_runtime_value(value: Any) -> Any:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+        try:
+            return float(stripped) if "." in stripped else value
+        except ValueError:
+            return value
+    return value
+
+
+def _candidate_env_allowed(key: str) -> bool:
+    upper = key.upper()
+    if any(part in upper for part in _SENSITIVE_ENV_PARTS):
+        return False
+    return key in _CANDIDATE_ENV_KEYS or any(
+        key.startswith(prefix) for prefix in _CANDIDATE_ENV_PREFIXES
+    )
+
+
+def _split_server_args(raw: str) -> list[str]:
+    try:
+        return shlex.split(raw) if raw else []
+    except ValueError:
+        log.warning("failed to parse materialized server args; preserving raw string")
+        return []
+
+
+def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
+    if not config_path:
+        return {}
+    path = Path(config_path)
+    if not path.exists():
+        return {}
+    try:
+        import yaml  # type: ignore[import-untyped]
+
+        cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("failed to read materialized workload config %s: %s", path, exc)
+        return {}
+    bench = cfg.get("benchmark") if isinstance(cfg.get("benchmark"), dict) else {}
+    envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
+    framework = str(bench.get("framework") or "").strip().lower()
+    server_key = "EXTRA_VLLM_ARGS" if framework == "vllm" else "EXTRA_SGLANG_ARGS"
+    server_args = str(envs.get(server_key) or "").strip()
+    workload = {
+        out_key: _coerce_runtime_value(envs[src_key])
+        for out_key, src_key in (
+            ("tp", "TP"),
+            ("conc", "CONC"),
+            ("isl", "ISL"),
+            ("osl", "OSL"),
+            ("num_prompts", "NUM_PROMPTS"),
+            ("num_warmups", "NUM_WARMUPS"),
+            ("max_model_len", "MAX_MODEL_LEN"),
+            ("random_range_ratio", "RANDOM_RANGE_RATIO"),
+        )
+        if src_key in envs
+    }
+    runtime_args = {
+        "materialized_config": str(path),
+        "framework": framework or None,
+        "model": bench.get("model"),
+        "precision": bench.get("precision"),
+        "server_args": server_args,
+        "server_args_argv": _split_server_args(server_args),
+        "workload": workload,
+    }
+    return {
+        "env_vars": {
+            str(key): str(value)
+            for key, value in envs.items()
+            if _candidate_env_allowed(str(key))
+        },
+        "runtime_args": {
+            key: value for key, value in runtime_args.items()
+            if value not in (None, "", {})
+        },
+    }
+
+
+def _enrich_candidate_runtime_metadata(
+    candidates: Any,
+    metadata: dict[str, Any],
+) -> None:
+    if not isinstance(candidates, list) or not metadata:
+        return
+    env_vars = metadata.get("env_vars") if isinstance(metadata.get("env_vars"), dict) else {}
+    runtime_args = (
+        metadata.get("runtime_args") if isinstance(metadata.get("runtime_args"), dict) else {}
+    )
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        item_env = item.setdefault("env_vars", {})
+        if isinstance(item_env, dict):
+            for key, value in env_vars.items():
+                item_env.setdefault(key, value)
+        item_args = item.setdefault("runtime_args", {})
+        if isinstance(item_args, dict):
+            for key, value in runtime_args.items():
+                item_args.setdefault(key, value)
+
+
+def _enrich_candidate_trace_report(candidates: Any, report_path: str) -> None:
+    if not isinstance(candidates, list) or not report_path:
+        return
+    for item in candidates:
+        if isinstance(item, dict):
+            item.setdefault("trace_report_path", report_path)
+
+
+def _enrich_candidates_artifact(
+    candidates_path: str,
+    metadata: dict[str, Any],
+    *,
+    trace_report_path: str = "",
+) -> None:
+    if not candidates_path:
+        return
+    path = Path(candidates_path)
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("failed to read candidates artifact %s: %s", path, exc)
+        return
+    if not isinstance(data, dict):
+        return
+    if metadata:
+        _enrich_candidate_runtime_metadata(data.get("hot_kernels"), metadata)
+        _enrich_candidate_runtime_metadata(data.get("hot_kernels_top15"), metadata)
+    if trace_report_path:
+        data.setdefault("trace_report_path", trace_report_path)
+        artifact_paths = data.setdefault("artifact_paths", {})
+        if isinstance(artifact_paths, dict):
+            artifact_paths.setdefault("trace_report_path", trace_report_path)
+        _enrich_candidate_trace_report(data.get("hot_kernels"), trace_report_path)
+        _enrich_candidate_trace_report(
+            data.get("hot_kernels_top15"), trace_report_path,
+        )
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
@@ -385,8 +554,7 @@ async def select_kernels_handler(
         {
           "status": "ok" | "failed",
           "hot_kernels": [...],
-          "trace_report_path": "...",        # tracelens_report.json (structured)
-          "analysis_report_path": "...",      # analysis.md from TraceLens v0.3
+          "trace_report_path": "...",        # analysis.md from TraceLens v0.3
                                               #   orchestrator (markdown final
                                               #   stakeholder report — pass to
                                               #   GEAK so it can ground its
@@ -404,10 +572,14 @@ async def select_kernels_handler(
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
-    workspace_path = (
-        payload.get("workspace_path")
-        or str(session_dir / "kernel-agent-workspace")
-    )
+    # Tool output lands at ``<workspace_path>/kernel-agent/runs/<session_id>/``
+    # (the suffix is hardcoded inside ``tracelens_analysis.py``). Pass the
+    # session root so the artefacts settle at
+    # ``<session_dir>/kernel-agent/runs/...`` — a sibling of
+    # ``<session_dir>/kernel-agent-workspace/<kernel_id>/`` (which the
+    # tool also reads/writes for cross-call GEAK/OOB artefacts). Both
+    # locations now live under ``$USER_DATA_PATH`` for unified monitoring.
+    workspace_path = payload.get("workspace_path") or str(session_dir)
     Path(workspace_path).mkdir(parents=True, exist_ok=True)
 
     # Backfill workload context from SharedState so downstream
@@ -468,19 +640,18 @@ async def select_kernels_handler(
     # Surface analysis.md path at the handler boundary so the Coordinator can
     # forward it to GEAK without having to dig through artifact_paths.
     if isinstance(result, dict):
-        report_path = result.get("analysis_report_path")
+        report_path = result.get("trace_report_path")
         if not report_path and isinstance(artifacts, dict):
-            report_path = (
-                artifacts.get("tracelens_agent_report")
-                or artifacts.get("trace_report_path")
-            )
+            report_path = artifacts.get("trace_report_path")
         if report_path:
-            result["analysis_report_path"] = str(report_path)
-        # PR-A §3: surface tracelens/summary.json — the per-run audit
-        # sidecar listing reusable tasks vs skipped kernels with reasons.
-        # Coordinator / SharedState can show this in the prompt summary
-        # so operators see at a glance whether GEAK was offered the
-        # kernels they expected.
+            result["trace_report_path"] = str(report_path)
+            _enrich_candidate_trace_report(
+                result.get("hot_kernels"), str(report_path),
+            )
+        # PR-A §3 (#206): surface tracelens/summary.json — the per-run
+        # audit sidecar listing reusable tasks vs skipped kernels with
+        # reasons, so operators can see at a glance whether GEAK was
+        # offered the kernels they expected.
         if isinstance(artifacts, dict) and artifacts.get("tracelens_summary"):
             result["tracelens_summary_path"] = str(artifacts["tracelens_summary"])
 
@@ -531,6 +702,16 @@ async def select_kernels_handler(
         # at the handler boundary so downstream code can iterate without
         # a ``None``-guard. Empty list = steady-state ("nothing wrong").
         result.setdefault("trace_health_warnings", [])
+
+        metadata = _load_materialized_workload_metadata(state.baseline_config_path)
+        _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
+        candidates_path = result.get("candidates_path")
+        if isinstance(candidates_path, str):
+            _enrich_candidates_artifact(
+                candidates_path,
+                metadata,
+                trace_report_path=str(report_path or ""),
+            )
     return result
 
 
@@ -794,10 +975,13 @@ async def _run_optimization_single(
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
-    workspace_path = (
-        payload.get("workspace_path")
-        or str(session_dir / "kernel-agent-workspace")
-    )
+    # Same convention as :func:`select_kernels_handler`: pass the session
+    # root so ``kernel_optimization.py`` lands its run artefacts at
+    # ``<session_dir>/kernel-agent/runs/<session_id>/`` while still reading
+    # ``<session_dir>/kernel-agent-workspace/<kernel_id>/`` for the
+    # cross-call GEAK/OOB cache. Both subtrees live under
+    # ``$USER_DATA_PATH``.
+    workspace_path = payload.get("workspace_path") or str(session_dir)
     Path(workspace_path).mkdir(parents=True, exist_ok=True)
 
     from .shared_state import SharedState

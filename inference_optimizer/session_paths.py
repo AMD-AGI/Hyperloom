@@ -135,9 +135,34 @@ def kernel_workspace(session_dir: Path, kernel_id: str) -> Path:
     currently chosen patch for one kernel. Survives across tasks so
     re-issuing run_optimization on the same kernel can reuse prior
     artefacts.
+
+    Sibling of :func:`kernel_agent_runs_dir` — the two have intentionally
+    disjoint scopes: this dir is keyed by ``kernel_id`` and survives
+    across tool invocations, while ``kernel-agent/runs/<session_id>/``
+    is keyed by a tool-invocation session id and holds per-call logs /
+    status / TraceLens output.
     """
     kid = str(kernel_id or "").strip() or "unknown"
     return Path(session_dir) / "kernel-agent-workspace" / kid
+
+
+def kernel_agent_runs_dir(session_dir: Path, session_id: str) -> Path:
+    """``<sd>/kernel-agent/runs/<session_id>/`` — kernel-agent tool output root.
+
+    Distinct from :func:`kernel_workspace` (which is keyed by
+    ``kernel_id`` and survives across tool calls). This path holds the
+    per-tool-invocation artefacts produced by
+    ``kernel-agent/tools/{tracelens_analysis,kernel_optimization,
+    parallel_e2e_runner}.py``: per-run logs / status JSON,
+    ``optimization_attempts.jsonl``, TraceLens ``standalone_analysis.md``,
+    verification JSON, etc. — see ``kernel-agent/SKILL.md`` "Artifacts".
+
+    The tools default ``--workspace-path`` to the session root and then
+    write under this subdirectory; callers (Coordinator
+    ``kernel_request_handlers``) pass ``--workspace-path=<sd>``.
+    """
+    sid = str(session_id or "").strip() or "unknown"
+    return Path(session_dir) / "kernel-agent" / "runs" / sid
 
 
 def patches_dir(session_dir: Path, kernel_id: str) -> Path:
@@ -170,6 +195,34 @@ def logs_dir(session_dir: Path) -> Path:
 def agent_log(session_dir: Path, role: str) -> Path:
     """``<sd>/logs/<role>.log`` — one append-only log per persistent agent."""
     return logs_dir(session_dir) / f"{role}.log"
+
+
+# ---------------------------------------------------------------------------
+# Launcher-side artefacts (stdout, PID file, robustness monitor logs)
+# ---------------------------------------------------------------------------
+def optimizer_runs_dir(session_dir: Path) -> Path:
+    """``<sd>/optimizer_runs/`` — host of every ``setsid nohup`` launcher
+    artefact (``run_<tag>.log`` / ``run_<tag>.pid`` /
+    ``robustness_monitor_*.log``).
+
+    The legacy SKILL template wrote these under ``$REPO_ROOT/optimizer_runs/``,
+    which broke cross-shell tailing and made monitor scripts depend on the
+    git checkout location. Sitting under ``$USER_DATA_PATH`` instead means
+    a single ``USER_DATA_PATH`` override moves the whole run tail.
+    """
+    return Path(session_dir) / "optimizer_runs"
+
+
+def optimizer_run_log(session_dir: Path, run_tag: str) -> Path:
+    """``<sd>/optimizer_runs/run_<tag>.log``."""
+    tag = str(run_tag or "").strip() or "unknown"
+    return optimizer_runs_dir(session_dir) / f"run_{tag}.log"
+
+
+def optimizer_run_pidfile(session_dir: Path, run_tag: str) -> Path:
+    """``<sd>/optimizer_runs/run_<tag>.pid``."""
+    tag = str(run_tag or "").strip() or "unknown"
+    return optimizer_runs_dir(session_dir) / f"run_{tag}.pid"
 
 
 # ---------------------------------------------------------------------------
@@ -236,9 +289,13 @@ __all__ = [
     "agent_outbox",
     "agent_persona",
     "agent_prompt_snapshot",
+    "kernel_agent_runs_dir",
     "kernel_workspace",
     "logs_dir",
     "manifest_path",
+    "optimizer_run_log",
+    "optimizer_run_pidfile",
+    "optimizer_runs_dir",
     "patches_dir",
     "report_file",
     "reports_dir",

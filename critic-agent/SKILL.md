@@ -27,8 +27,14 @@ globs:
 > memory, KB read/write, intent envelope assembly. The skill prompts
 > own the *reasoning*.
 >
-> All files live under `$WORKSPACE_PATH/critic-agent`; default
-> `WORKSPACE_PATH` is `/workspace`.
+> Static skill files live under `$WORKSPACE_PATH/critic-agent` —
+> here `WORKSPACE_PATH` names the **skill asset root** (the repo
+> checkout the critic-agent runtime resolves prompts against), not
+> a per-session writable artefact location. Hyperloom's main CLI
+> sets it to `$REPO_ROOT` automatically. Per-session writable
+> outputs (decisions, KB drafts, reviewed_msg_ids, per-turn workdirs)
+> always live under `$USER_DATA_PATH/critic-session-memory/` and
+> `$USER_DATA_PATH/critic-workdir/` regardless of `WORKSPACE_PATH`.
 
 ## Mission
 
