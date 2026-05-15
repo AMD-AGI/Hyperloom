@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OOB (claude/codex) submission via Ray (preferred) or direct CLI fallback.
+"""OOB (claude/codex/cursor) submission via Ray (preferred) or direct CLI fallback.
 
 Self-contained: does not depend on inference-optimization scripts.
 """
@@ -297,7 +297,7 @@ def submit(agent: str, prompt_file: Path, output_dir: Path, source_file: str = "
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="kernel-agent self-contained OOB submitter")
-    parser.add_argument("--agent", required=True, choices=["claude", "codex"])
+    parser.add_argument("--agent", required=True, choices=["claude", "codex", "cursor"])
     parser.add_argument("--prompt-file", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--source-file", default="")
