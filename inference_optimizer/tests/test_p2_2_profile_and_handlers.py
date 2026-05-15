@@ -1140,6 +1140,176 @@ async def test_select_kernels_handler_requires_kernel_agent_root(session_dir, mo
     assert "HYPERLOOM_KERNEL_AGENT_ROOT is not set" in res["error"]
 
 
+# ===========================================================================
+# T4 — TraceLens permanent failure is a routing signal, not a fatal error
+# ===========================================================================
+# Per Report_Interfacing.docx §4, a failed TraceLens run must not block
+# the Coordinator from running parameter optimization (batch size, KV
+# cache shape, prefill/decode split). The handler rewrites
+# ``status=failed`` from the tool into ``status=ok`` + empty
+# ``hot_kernels`` + a structured ``trace_health_warnings[]`` entry so:
+#   * the Coordinator's "do I have kernels?" branch sees the empty list
+#     and falls through to params,
+#   * an operator can still see the upstream rc / error / stderr in the
+#     warning entry rather than buried in subprocess output.
+# Configuration errors (``trace_input`` missing, kernel-agent root not
+# set) DO still return ``failed`` — those are Hyperloom bugs to fix, not
+# TraceLens transients to route around. The two regression tests above
+# (``..._missing_trace_input``, ``..._requires_kernel_agent_root``)
+# already pin that behaviour; these new tests pin the new T4 behaviour
+# without weakening it.
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_t4_demotes_tool_failure_to_ok(
+    session_dir, monkeypatch,
+):
+    """When the underlying tracelens_analysis.py subprocess returns a
+    structured ``status=failed`` (e.g. TraceLens crashed mid-run, perf
+    CLI not on PATH), the handler MUST:
+      * promote the status to ``ok`` so the Coordinator can still route
+        to params/backends,
+      * empty out ``hot_kernels`` so no stale candidates leak into
+        downstream batching,
+      * append a structured warning with code
+        ``tracelens_analysis_failed`` carrying the upstream diagnostic.
+    """
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "failed",
+            "tool": "tracelens_analysis",
+            "error": "RuntimeError: TraceLens perf CLI crashed",
+            "returncode": 1,
+            "stderr_tail": "RuntimeError: graph capture folder missing",
+            # The tool also emits an empty hot_kernels[] on failure in
+            # some paths — we explicitly seed a non-empty list here to
+            # prove the handler clears it.
+            "hot_kernels": [{"kernel_id": "stale_1"}],
+        }
+        return 1, json.dumps(payload), "stderr noise"
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok", (
+        "tool-level failure must be demoted to ok so Coordinator can "
+        "still route to parameter optimization"
+    )
+    assert res["hot_kernels"] == [], (
+        "stale hot_kernels must be cleared on tool failure"
+    )
+    warnings = res.get("trace_health_warnings") or []
+    assert any(w.get("code") == "tracelens_analysis_failed" for w in warnings), (
+        "operator must see WHY hot_kernels[] is empty"
+    )
+    failure_w = next(w for w in warnings if w["code"] == "tracelens_analysis_failed")
+    assert failure_w["severity"] == "warning"
+    assert "TraceLens perf CLI crashed" in failure_w.get("error", "")
+    assert failure_w.get("returncode") == 1
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_t4_passes_through_idle_warning(
+    session_dir, monkeypatch,
+):
+    """When tracelens_analysis emits a ``trace_health_warnings`` from
+    the T3 idle gate (status=ok, empty hot_kernels), the handler must
+    pass it through verbatim. No de-duplication, no rewriting — that
+    warning is the routing signal the Coordinator reads."""
+    idle_warning = {
+        "code": "high_gpu_idle_pct",
+        "severity": "warning",
+        "idle_pct": 35.0,
+        "threshold_pct": 20.0,
+        "source": "/tmp/runs/abc/tracelens/analysis.md",
+        "message": "GPU was idle 35.00% …",
+    }
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "ok",
+            "tool": "tracelens_analysis",
+            "hot_kernels": [],
+            "trace_health_warnings": [idle_warning],
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    assert res["hot_kernels"] == []
+    assert res["trace_health_warnings"] == [idle_warning]
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_t4_defaults_warnings_to_empty_list(
+    session_dir, monkeypatch,
+):
+    """When the tool emits no ``trace_health_warnings`` (steady state),
+    the handler still surfaces an empty list — downstream code (the
+    Coordinator's branching, the prompt-summary renderer) can iterate
+    without a ``None`` guard."""
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "ok",
+            "tool": "tracelens_analysis",
+            "hot_kernels": [{"kernel_id": "fake_1"}],
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    assert res["trace_health_warnings"] == []
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_t4_failure_appends_to_existing_warnings(
+    session_dir, monkeypatch,
+):
+    """Edge case: the tool emits BOTH ``status=failed`` AND a pre-
+    existing ``trace_health_warnings`` list (e.g. the idle gate fired
+    AND then a later step crashed). The handler must preserve the
+    existing entries and APPEND the failure warning, not overwrite."""
+    pre_existing = {
+        "code": "high_gpu_idle_pct",
+        "severity": "warning",
+        "idle_pct": 60.0,
+        "threshold_pct": 20.0,
+        "source": "/tmp/x/analysis.md",
+        "message": "high idle",
+    }
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "failed",
+            "tool": "tracelens_analysis",
+            "error": "RuntimeError: ran out of disk",
+            "returncode": 2,
+            "hot_kernels": [],
+            "trace_health_warnings": [pre_existing],
+        }
+        return 2, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    warnings = res["trace_health_warnings"]
+    assert len(warnings) == 2, "must preserve pre-existing + append failure"
+    assert warnings[0] == pre_existing
+    assert warnings[1]["code"] == "tracelens_analysis_failed"
+
+
 @pytest.mark.asyncio
 async def test_run_optimization_handler_missing_kernel_id(session_dir):
     res = await krh.run_optimization_handler({}, session_dir=session_dir)
