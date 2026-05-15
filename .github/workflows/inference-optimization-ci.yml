@@ -13,11 +13,14 @@ on:
         description: 'Trigger reason'
         required: false
         default: 'manual'
-  # PR-approve trigger: when a maintainer approves a PR, run the canonical
-  # comparison model (dsr1) on PR head so reviewers can compare InferenceX
-  # numbers against the PR's prompt/config changes before merging.
-  # GitHub already restricts pull_request_review to repo collaborators on
-  # private repos, so secret-injection risk is bounded.
+  # PR-approve trigger: when a maintainer approves a PR that also carries
+  # the `run-pr-ci` label, run the canonical comparison model (dsr1) on
+  # PR head so reviewers can compare InferenceX numbers against the PR's
+  # changes before merging. The label gate exists because PR-CI burns
+  # ~hours of MI300X time per run; we only want it on PRs the reviewer
+  # has explicitly opted in. GitHub already restricts pull_request_review
+  # to repo collaborators on private repos, so secret-injection risk is
+  # bounded.
   pull_request_review:
     types: [submitted]
 
@@ -50,10 +53,17 @@ jobs:
   prepare:
     name: Prepare Model Matrix
     runs-on: ubuntu-latest
-    # Skip the run entirely on review events that aren't approvals (so a
-    # plain "comment" or "request_changes" review doesn't burn a hyperloom
-    # GPU job slot).
-    if: github.event_name != 'pull_request_review' || github.event.review.state == 'approved'
+    # Skip the run entirely on review events that don't qualify, so the
+    # downstream `optimize` job (max-parallel=6 on hyperloom-mh826) never
+    # gets matrixed. Two gates, both must pass on pull_request_review:
+    #   1. review.state == 'approved'  (comment / request_changes don't trigger)
+    #   2. PR carries the `run-pr-ci` label (reviewer opt-in; PR-CI burns
+    #      hours of GPU time, so we don't run on every approval)
+    # Schedule / workflow_dispatch bypass both gates (first clause).
+    if: >-
+      github.event_name != 'pull_request_review' ||
+      (github.event.review.state == 'approved' &&
+       contains(github.event.pull_request.labels.*.name, 'run-pr-ci'))
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
