@@ -19,11 +19,13 @@ from collections import Counter
 
 
 def main() -> int:
-    session_dir = (
-        sys.argv[1]
-        if len(sys.argv) > 1
-        else os.environ.get("USER_DATA_PATH", "/workspace/hyperloom")
-    )
+    if len(sys.argv) > 1:
+        session_dir = pathlib.Path(sys.argv[1])
+    else:
+        # Defer to inference_optimizer.paths so resolution rules
+        # (env > default) stay in one place.
+        from inference_optimizer.paths import session_dir as _resolve_sd
+        session_dir = _resolve_sd()
     db = pathlib.Path(session_dir) / "storage" / "coordinator.db"
     if not db.exists():
         print(f"coordinator.db not found at {db}", file=sys.stderr)
