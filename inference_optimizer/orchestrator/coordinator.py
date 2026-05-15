@@ -41,7 +41,6 @@ from .agent_role import AgentRole, default_role_registry
 from .backends.base import Backend, BackendError, BackendTurnResult
 from .cursor_store import CursorStore
 from .intent_parser import Intent, IntentType, NoIntentEmitted
-from .kb_digest import format_kb_digest_for_orchestration
 from .kernel_request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from .message_bus import Message, MessageBus
 from .objective import Objective, TimeOnlyObjective
@@ -933,19 +932,6 @@ class Coordinator:
             if required_step:
                 sections.append("=== Execution checklist (Coordinator-enforced) ===")
                 sections.append(required_step)
-
-        # 1b. Marathon KB retrieval — curated lessons (validated stacks).
-        if agent_name == "orchestration":
-            # Framework is resolved at CLI start time and re-exported as
-            # $FRAMEWORK so the KB digest reads the right partition. Fall
-            # back to sglang for parity with the CLI default.
-            kb_text = format_kb_digest_for_orchestration(
-                model_name=getattr(self.shared_state, "model_name", "") or "",
-                framework=os.environ.get("FRAMEWORK", "sglang").strip().lower() or "sglang",
-            )
-            if kb_text.strip():
-                sections.append("=== Knowledge base hints ===")
-                sections.append(kb_text)
 
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
