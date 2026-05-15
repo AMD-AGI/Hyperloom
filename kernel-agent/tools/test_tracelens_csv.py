@@ -1069,10 +1069,170 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     ))
 
     assert res.report_path.exists()
-    assert res.priority_data_path.exists()
+    assert res.priority_data_path is not None and res.priority_data_path.exists()
     assert "analysis-orchestrator" in captured["prompt"] or "skill.md" in captured["prompt"]
     assert "Bash" in captured["options"]["allowed_tools"]
     assert "Task" in captured["options"]["allowed_tools"]
+
+
+# ===========================================================================
+# T2 — Intermediate sidecars (priority_data.json /
+# category_data/category_manifest.json) are best-effort, not contracted
+# inputs (TraceLens_Report_Interfacing.docx §2). A v0.3 SDK orchestrator
+# that emits only ``analysis.md`` must produce a successful
+# ``TraceLensSkillRunResult`` with ``priority_data_path=None`` — not a
+# RuntimeError.
+# ===========================================================================
+def test_t2_run_tracelens_skill_succeeds_without_priority_data_sidecar(tmp_path):
+    """SDK orchestrator that emits ONLY analysis.md (no sidecars) must
+    succeed: priority_data is optional per docx §2."""
+    import asyncio
+    import json as _json  # noqa: F401  (parity with sibling test)
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class _TextBlock:
+        text: str
+
+    @dataclass
+    class _Message:
+        content: list[Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+
+    async def _fake_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield _Message(content=[_TextBlock("done — no sidecars")])
+
+    res = asyncio.run(tlr.run_tracelens_skill(
+        skill_path=tmp_path / "skill.md",
+        trace_path=tmp_path / "trace.json.gz",
+        output_dir=output_dir,
+        tracelens_root=tmp_path,
+        platform="MI300X",
+        framework="sglang",
+        analysis_mode="default",
+        capture_folder=None,
+        budget_minutes=1,
+        sdk_query_factory=_fake_query,
+        sdk_options_cls=_FakeOptions,
+    ))
+
+    assert res.report_path.exists(), "analysis.md is the single source of truth and must exist"
+    assert res.priority_data_path is None, (
+        "priority_data.json was not emitted; the result must surface that as "
+        "None rather than fabricate a path"
+    )
+    assert "tracelens_agent_report" in res.artifact_paths
+    assert "tracelens_priority_data" not in res.artifact_paths, (
+        "audit must not advertise a sidecar that doesn't exist on disk"
+    )
+    assert "tracelens_category_manifest" not in res.artifact_paths
+
+
+def test_t2_run_tracelens_skill_surfaces_category_manifest_when_present(tmp_path):
+    """Category-manifest sidecar (also optional per docx §2): when the
+    SDK orchestrator does write it, ``artifact_paths`` should advertise
+    the path so audit/log surfaces can pick it up — but it remains
+    non-required."""
+    import asyncio
+    import json as _json
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class _TextBlock:
+        text: str
+
+    @dataclass
+    class _Message:
+        content: list[Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+
+    async def _fake_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        (output_dir / "category_data").mkdir(parents=True, exist_ok=True)
+        (output_dir / "category_data" / "category_manifest.json").write_text(
+            _json.dumps({"categories": []}), encoding="utf-8",
+        )
+        yield _Message(content=[_TextBlock("done — only manifest sidecar")])
+
+    res = asyncio.run(tlr.run_tracelens_skill(
+        skill_path=tmp_path / "skill.md",
+        trace_path=tmp_path / "trace.json.gz",
+        output_dir=output_dir,
+        tracelens_root=tmp_path,
+        platform="MI300X",
+        framework="sglang",
+        analysis_mode="default",
+        capture_folder=None,
+        budget_minutes=1,
+        sdk_query_factory=_fake_query,
+        sdk_options_cls=_FakeOptions,
+    ))
+
+    assert res.priority_data_path is None
+    assert res.artifact_paths.get("tracelens_category_manifest", "").endswith(
+        "category_manifest.json"
+    )
+
+
+def test_t2_missing_analysis_md_still_raises(tmp_path):
+    """Negative control: ``analysis.md`` itself is still the contracted
+    single source of truth, so its absence is still a hard error. T2
+    only relaxes the sidecars, not the report."""
+    import asyncio
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class _TextBlock:
+        text: str
+
+    @dataclass
+    class _Message:
+        content: list[Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+
+    async def _fake_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Deliberately write ONLY a sidecar (no analysis.md). The wrapper
+        # must still fail loudly because analysis.md is the contracted
+        # report (docx §2 "single source of truth").
+        (output_dir / "priority_data.json").write_text("{}", encoding="utf-8")
+        yield _Message(content=[_TextBlock("done")])
+
+    with pytest.raises(RuntimeError, match="analysis.md"):
+        asyncio.run(tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            platform="MI300X",
+            framework="sglang",
+            analysis_mode="default",
+            capture_folder=None,
+            budget_minutes=1,
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        ))
 
 
 # ===========================================================================
