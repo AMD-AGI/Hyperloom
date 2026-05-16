@@ -1391,39 +1391,22 @@ async def test_select_kernels_handler_requires_kernel_agent_root(session_dir, mo
 
 
 # ===========================================================================
-# T4 — TraceLens permanent failure is a routing signal, not a fatal error
+# T4 — TraceLens permanent failure stays failed (no fallback)
 # ===========================================================================
-# Per Hyperloom design (T4 finishing-touches; docx does NOT define this
-# routing — closest hint is §2's "Sanity checks must be present" bullet),
-# a failed TraceLens run must not block the Coordinator from running
-# parameter optimization (batch size, KV cache shape, prefill/decode
-# split). The handler rewrites
-# ``status=failed`` from the tool into ``status=ok`` + empty
-# ``hot_kernels`` + a structured ``trace_health_warnings[]`` entry so:
-#   * the Coordinator's "do I have kernels?" branch sees the empty list
-#     and falls through to params,
-#   * an operator can still see the upstream rc / error / stderr in the
-#     warning entry rather than buried in subprocess output.
-# Configuration errors (``trace_input`` missing, kernel-agent root not
-# set) DO still return ``failed`` — those are Hyperloom bugs to fix, not
-# TraceLens transients to route around. The two regression tests above
-# (``..._missing_trace_input``, ``..._requires_kernel_agent_root``)
-# already pin that behaviour; these new tests pin the new T4 behaviour
-# without weakening it.
+# A failed TraceLens run must not be rewritten into ok+empty kernels. That
+# fallback hid split/annotation problems as a valid "no candidates" result and
+# let Orchestration continue down params/backends. The handler now preserves
+# ``status=failed`` and only appends structured diagnostics so operators can
+# see the upstream rc / error / stderr.
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_t4_demotes_tool_failure_to_ok(
+async def test_select_kernels_handler_t4_keeps_tool_failure_failed(
     session_dir, monkeypatch,
 ):
-    """When the underlying tracelens_analysis.py subprocess returns a
-    structured ``status=failed`` (e.g. TraceLens crashed mid-run, perf
-    CLI not on PATH), the handler MUST:
-      * promote the status to ``ok`` so the Coordinator can still route
-        to params/backends,
-      * empty out ``hot_kernels`` so no stale candidates leak into
-        downstream batching,
-      * append a structured warning with code
-        ``tracelens_analysis_failed`` carrying the upstream diagnostic.
+    """When tracelens_analysis.py returns ``status=failed`` the handler must
+    keep the failure status. Older code demoted this to ok+empty kernels, which
+    let Orchestration keep walking params/backends as if TraceLens had
+    completed. We still clear stale candidates and append a diagnostic warning.
     """
     async def fake_run_subprocess(cmd, *, timeout_sec):
         payload = {
@@ -1444,10 +1427,7 @@ async def test_select_kernels_handler_t4_demotes_tool_failure_to_ok(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
-    assert res["status"] == "ok", (
-        "tool-level failure must be demoted to ok so Coordinator can "
-        "still route to parameter optimization"
-    )
+    assert res["status"] == "failed"
     assert res["hot_kernels"] == [], (
         "stale hot_kernels must be cleared on tool failure"
     )
@@ -1797,7 +1777,7 @@ async def test_select_kernels_handler_t4_failure_appends_to_existing_warnings(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
-    assert res["status"] == "ok"
+    assert res["status"] == "failed"
     warnings = res["trace_health_warnings"]
     assert len(warnings) == 2, "must preserve pre-existing + append failure"
     assert warnings[0] == pre_existing
