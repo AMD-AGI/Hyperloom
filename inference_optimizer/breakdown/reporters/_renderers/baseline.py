@@ -5,11 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 from ..base import Decision, RenderedSection, md_kv_list, md_table, register_renderer
+from ._invocation import render_invocation_block
 
 
 @register_renderer("baseline")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
     b = breakdown.get("baseline") or {}
+    session = breakdown.get("session") or {}
     tput = b.get("throughput_tok_s_per_gpu")
     acc = b.get("accuracy")
     ttft = b.get("ttft_mean_ms")
@@ -74,6 +76,11 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         md_parts.append(md_table(
             ["ts", "status", "decision", "key_metric", "error_class"], rows,
         ))
+
+    inv_md = render_invocation_block(b.get("invocation"), session.get("image"))
+    if inv_md:
+        md_parts.append("")
+        md_parts.append(inv_md)
 
     return RenderedSection(
         section_id="baseline",
