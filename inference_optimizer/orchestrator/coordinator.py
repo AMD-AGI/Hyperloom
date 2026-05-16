@@ -1700,6 +1700,12 @@ class Coordinator:
             await self._record_policy_denied(source, intent, denied)
             return
         params = dict(intent.payload.get("params") or {})
+        # The schema says delegate idempotency_key is top-level, but LLMs
+        # sometimes place it inside params (especially when following older
+        # examples like params={grid: ..., idempotency_key: ...}). Treat the
+        # nested value as a compatibility alias and remove it from executor
+        # params so downstream action runners never see this control field.
+        nested_idempotency_key = params.pop("idempotency_key", None)
         # Plumb baseline's materialized YAML into grid-style delegated tasks
         # so they inherit the workload contract (CONC/ISL/OSL/TP/...) baseline
         # ran. See `_materialize_approved_proposal` for the same logic on the
@@ -1725,7 +1731,11 @@ class Coordinator:
             params.setdefault(
                 "backends_search", self.shared_state.backends_search,
             )
-        idempotency_key = intent.payload.get("idempotency_key") or f"{source}:{action_name}:{len(self.state.pending_proposals)}"
+        idempotency_key = (
+            intent.payload.get("idempotency_key")
+            or nested_idempotency_key
+            or f"{source}:{action_name}:{len(self.state.pending_proposals)}"
+        )
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=action_name,
             params=params,
