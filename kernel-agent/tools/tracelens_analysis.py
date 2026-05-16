@@ -1908,10 +1908,6 @@ def main() -> int:
                         prefilldecode_count=len(prefill_chunks),
                     )
                     trace_health_warnings.append(warning)
-                    agent_candidates = []
-                    allow_empty_candidates = True
-                    orchestrator_mode = "skipped_trace_split_no_steady_state"
-                    trace_split_blocked = True
                     append_log(
                         log_path,
                         f"WARNING: trace split unavailable "
@@ -1920,6 +1916,11 @@ def main() -> int:
                         f"prefilldecode={len(prefill_chunks)}); "
                         "refusing raw-trace fallback and returning "
                         "trace_split_no_steady_state warning",
+                    )
+                    raise RuntimeError(
+                        "trace_split_no_steady_state: TraceLens splitter "
+                        "produced no steady-state chunks; refusing to run "
+                        "TraceLens analysis on the raw trace"
                     )
 
             if args.use_llm_orchestrator and not trace_split_blocked:
