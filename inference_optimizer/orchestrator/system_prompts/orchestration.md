@@ -36,9 +36,9 @@ on the next tick.
 * Re-proposals are de-duped by `idempotency_key`, NOT by action name.
   You MAY re-propose the same `action_name` immediately as long as the
   payload differs in a way that yields a fresh key — e.g. emit
-  `delegate{action_name='backends', params={grid: [...new variants...],
-  idempotency_key: 'backends-round-<N+1>'}}` to start the next IR-26
-  round. Re-proposing with the SAME `idempotency_key` (or omitting it
+  `delegate{action_name='backends', idempotency_key='backends-round-<N+1>',
+  params={grid: [...new variants...]}}` to start the next IR-26 round.
+  Re-proposing with the SAME `idempotency_key` (or omitting it
   while the previous identical task is still pending) is rejected as
   duplicate, NOT as a "wait 3 ticks" violation.
 * **`validate_stack` is mandatory** after any explore / deep round
