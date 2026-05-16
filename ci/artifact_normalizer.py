@@ -188,7 +188,6 @@ def parse_ci_metrics(data: dict[str, Any] | None) -> dict[str, Any]:
         "total_improvement_pct",
         "speedup_pct",
         "speedup_pct_vs_baseline",
-        "best_speedup",
         "best.speedup_pct",
         "best.delta_pct_vs_baseline",
         "best.delta_throughput_pct",
@@ -200,7 +199,13 @@ def parse_ci_metrics(data: dict[str, Any] | None) -> dict[str, Any]:
     )
     # Some agents report speedup as a multiplier (1.10x). Convert to percent
     # only for clear ratio fields.
-    ratio_gain = _first_nested(data, "best.speedup_vs_baseline", "speedup_x", "improvement.speedup_x")
+    ratio_gain = _first_nested(
+        data,
+        "best.speedup_vs_baseline",
+        "best_speedup",
+        "speedup_x",
+        "improvement.speedup_x",
+    )
     if gain is None and ratio_gain is not None:
         rg = _to_float(ratio_gain)
         if rg is not None:
