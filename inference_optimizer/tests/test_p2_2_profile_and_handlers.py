@@ -381,6 +381,7 @@ def _clear_workload_env(monkeypatch):
     for k in (
         "CONC", "ISL", "OSL", "TP", "MAX_MODEL_LEN",
         "RANDOM_RANGE_RATIO", "ROCR_VISIBLE_DEVICES", "FRAMEWORK",
+        "INFERENCEX_PATH",
     ):
         monkeypatch.delenv(k, raising=False)
 
@@ -431,6 +432,24 @@ def test_materialize_profile_window_sglang_skill_formula(
     body = json.loads(rendered["benchmark"]["envs"]["PROFILE_EXTRA_BODY"])
     assert body["start_step"] == 5888
     assert body["num_steps"] == 512
+
+
+def test_materialize_persists_inferencex_path_for_magpie(
+    tmp_path, monkeypatch,
+):
+    """$INFERENCEX_PATH must be written into benchmark.inferencex_path.
+
+    Otherwise Magpie resolves an empty value to its sibling checkout
+    ($MAGPIE_DIR/InferenceX), while Hyperloom's profile patcher may have
+    patched a different checkout.
+    """
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("INFERENCEX_PATH", "/wekafs/InferenceX")
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    assert rendered["benchmark"]["inferencex_path"] == "/wekafs/InferenceX"
 
 
 def test_materialize_profile_window_clamps_to_skill_floor(
@@ -717,27 +736,36 @@ def test_materialize_profile_sglang_does_not_duplicate_shape_discovery(
 
 
 def test_profile_executor_calls_benchmark_lib_patcher():
-    """ProfileExecutor must call ensure_benchmark_lib_patched before
-    launching Magpie, or the steady-state NUM_PROMPTS we just
-    computed gets stomped by upstream `benchmark_lib.sh` and the
-    trace is silently empty.
+    """ProfileExecutor must patch the materialized InferenceX checkout before
+    launching Magpie, or the steady-state NUM_PROMPTS / PROFILE_EXTRA_BODY we
+    just computed gets stomped by upstream InferenceX and the trace is
+    silently empty.
 
     We don't run the full subprocess machinery — that's gated by
     BaselineExecutor.__call__ which already has its own coverage.
-    Here we just lock down the seam: the symbol is imported by name
-    in profile.py and invoked unconditionally inside __call__.
+    Here we just lock down the seam: the symbols are imported by name
+    in profile.py and invoked from the post-materialization hook.
     """
     import inference_optimizer.orchestrator.action_executors.profile as profile_mod
     # The symbol must be re-exportable from the module (so monkey-
     # patching in tests / integration sites is straightforward).
     assert profile_mod.ensure_benchmark_lib_patched is not None
-    # And the source of __call__ must reference it; this is a cheap
-    # regression guard against silent removal during refactors.
+    assert profile_mod.ensure_benchmark_serving_patched is not None
+    # And the source of the hook must reference both patchers; this is a cheap
+    # regression guard against silent removal during refactors. The hook runs
+    # after YAML materialization so it can patch the exact
+    # benchmark.inferencex_path that Magpie will execute.
     import inspect
-    src = inspect.getsource(profile_mod.ProfileExecutor.__call__)
+    src = inspect.getsource(profile_mod.ProfileExecutor._after_materialize_config)
     assert "ensure_benchmark_lib_patched" in src, (
-        "ProfileExecutor.__call__ must invoke ensure_benchmark_lib_patched "
-        "before super().__call__ — otherwise issue #194 §2 regresses."
+        "ProfileExecutor._after_materialize_config must invoke "
+        "ensure_benchmark_lib_patched on the materialized InferenceX path — "
+        "otherwise issue #194 §2 regresses."
+    )
+    assert "ensure_benchmark_serving_patched" in src, (
+        "ProfileExecutor._after_materialize_config must invoke "
+        "ensure_benchmark_serving_patched so PROFILE_EXTRA_BODY reaches "
+        "SGLang's /start_profile request."
     )
 
 
@@ -887,8 +915,9 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     }))
     trace_dir = workspace / "torch_trace"
     trace_dir.mkdir()
-    (trace_dir / "TP-0_main.trace.json.gz").write_bytes(b"fake-trace")
-    (trace_dir / "TP-0_aux.trace.json.gz").write_bytes(b"fake-trace")
+    (trace_dir / "177-TP-0-DECODE.trace.json.gz").write_bytes(b"fake-trace")
+    merged_trace = trace_dir / "merged-177.trace.json.gz"
+    merged_trace.write_bytes(b"fake-trace")
 
     # Stub subprocess.run so we don't actually launch sglang.
     fake_completed = subprocess.CompletedProcess(
@@ -910,7 +939,74 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     assert res.result["framework"] == "sglang"
     assert res.result["trace_dir"] == str(trace_dir)
     assert len(res.result["trace_files"]) == 2
-    assert "main_trace_path" in res.result
+    assert res.result["main_trace_path"] == str(merged_trace)
+    assert res.result["profile_trace_selection_reason"] == "merged_trace_preferred"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_executor_patches_configured_inferencex_path(
+    tmp_path, monkeypatch,
+):
+    """ProfileExecutor must patch the InferenceX checkout Magpie will use.
+
+    Regression for the Qwen3-32B TraceLens run where $INFERENCEX_PATH pointed
+    at /wekafs/InferenceX but Magpie's rendered YAML had an empty
+    benchmark.inferencex_path, so Magpie used $MAGPIE_DIR/InferenceX and lost
+    NUM_PROMPTS / PROFILE_EXTRA_BODY.
+    """
+    fake_ix = tmp_path / "InferenceX"
+    (fake_ix / "benchmarks").mkdir(parents=True)
+    (fake_ix / "utils" / "bench_serving").mkdir(parents=True)
+    (fake_ix / "benchmarks" / "benchmark_lib.sh").write_text(
+        'num_prompts="${NUM_PROMPTS:-$max_concurrency}"\n',
+        encoding="utf-8",
+    )
+    (fake_ix / "utils" / "bench_serving" / "benchmark_serving.py").write_text(
+        "# already patched\nPROFILE_EXTRA_BODY\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("INFERENCEX_PATH", str(fake_ix))
+
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    output_dir = tmp_path / "out"
+    workspace = output_dir / "benchmark_sglang_20260501_001122"
+    workspace.mkdir(parents=True)
+    (workspace / "benchmark_report.json").write_text(json.dumps({
+        "success": True,
+        "framework": "sglang",
+        "model": "/wekafs/models/Qwen-Qwen3-8B",
+        "throughput": {
+            "request_throughput": 3.2, "output_throughput": 800.0,
+            "total_token_throughput": 1600.0, "completed_requests": 80,
+            "duration_seconds": 25.0,
+        },
+        "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158},
+                    "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
+    }))
+
+    fake_completed = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="ok", stderr="",
+    )
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-inferencex-path",
+    )
+    sub.register_executor("profile", pe)
+    with patch("subprocess.run", return_value=fake_completed):
+        res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    materialized = Path(res.result["materialized_config"])
+    import yaml
+    rendered = yaml.safe_load(materialized.read_text())
+    assert rendered["benchmark"]["inferencex_path"] == str(fake_ix)
     db.close()
 
 
