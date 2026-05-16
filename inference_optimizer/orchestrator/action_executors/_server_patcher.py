@@ -259,7 +259,7 @@ def ensure_sglang_patched_for_tracelens(
     plan = _discover_sglang_plan(tracelens_root)
     if plan is None:
         return False
-    return _ensure_patched(plan)
+    return _ensure_patched(plan) and _ensure_sglang_tokenizer_control_profile_args(plan)
 
 
 # ---------------------------------------------------------------------
@@ -286,6 +286,11 @@ class _PatchPlan:
     # which the TraceLens patch always adds together but upstream has
     # no reason to merge as a co-occurring pair.
     sentinel_text: tuple[str, ...]
+    # Additional file-local markers required for a multi-file patch set to
+    # count as complete. SGLang can partially patch (or skip optional files)
+    # while leaving the single historical sentinel present; require the actual
+    # execution-step annotation sites too.
+    extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = ()
     # PR-D §1: per-plan ``-p<N>`` strip count. Editable SGLang layouts
     # and the vLLM patch set both use ``-p1`` (default); wheel-install
     # SGLang uses ``-p3`` so the ``a/python/sglang/`` prefix is
@@ -429,23 +434,74 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         return None
     apply_root, apply_strip = resolution
 
+    optional_missing = {
+        # Dense inference and SGLang 0.5.11 do not have this legacy path.
+        "fused_moe_triton_kernels.patch":
+            "python/sglang/srt/layers/moe/fused_moe_triton/"
+            "fused_moe_triton_kernels.py",
+        # The old mixin was folded/renamed in newer SGLang. http_server.py
+        # and io_struct.py cover the /start_profile request path we use.
+        "tokenizer_communicator_mixin.patch":
+            "python/sglang/srt/managers/tokenizer_communicator_mixin.py",
+    }
+    filtered_patches: list[Path] = []
+    for patch_file in patches:
+        optional_target = optional_missing.get(patch_file.name)
+        if optional_target and not (apply_root / optional_target).exists():
+            log.info(
+                "_server_patcher: skipping optional SGLang patch %s because "
+                "target %s is absent in installed SGLang %s",
+                patch_file.name, optional_target, version,
+            )
+            continue
+        filtered_patches.append(patch_file)
+
     # Sentinel: the kernel_shape_profiler patch creates an entirely
     # new file. In both layouts it lands at the wheel-side path
     # ``sglang/srt/utils/kernel_shape_profiler.py`` (relative to the
     # parent of sglang/), so we resolve the absolute path off
     # ``sglang_module`` itself to keep both branches symmetric.
     sentinel = sglang_module.parent / "srt" / "utils" / "kernel_shape_profiler.py"
+    sglang_pkg = sglang_module.parent
+    filtered_names = {p.name for p in filtered_patches}
+    core_annotation_patch_names = {
+        "scheduler.patch",
+        "scheduler_profiler_mixin.patch",
+        "io_struct.patch",
+        "http_server.patch",
+    }
+    extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = ()
+    if core_annotation_patch_names.issubset(filtered_names):
+        extra_sentinels = (
+            (
+                sglang_pkg / "srt" / "managers" / "scheduler.py",
+                ("_build_profile_annotation", "profile_annotation"),
+            ),
+            (
+                sglang_pkg / "srt" / "managers" / "scheduler_profiler_mixin.py",
+                ("roofline_annotations", "execute_", "torch.profiler.record_function"),
+            ),
+            (
+                sglang_pkg / "srt" / "managers" / "io_struct.py",
+                ("shape_discovery", "roofline_annotations"),
+            ),
+            (
+                sglang_pkg / "srt" / "entrypoints" / "http_server.py",
+                ("shape_discovery", "roofline_annotations"),
+            ),
+        )
     return _PatchPlan(
         framework="sglang",
         version=version,
         apply_root=apply_root,
-        patches=patches,
+        patches=tuple(filtered_patches),
         sentinel_file=sentinel,
-        # The SGLang sentinel file ``kernel_shape_profiler.py`` is
-        # *created* by the patch — its mere existence + a unique
-        # internal identifier is already a robust signal. Kept as a
-        # 1-tuple for type uniformity with vLLM (PR-D §4).
+        # The SGLang sentinel file is necessary but not sufficient: if an
+        # earlier run partially applied only the shape-profiler patch, the old
+        # one-file check would return true while scheduler.py still emitted no
+        # execute_* annotations. Require the actual annotation pipeline too.
         sentinel_text=("kernel_shape_profiler",),
+        extra_sentinels=extra_sentinels,
         apply_strip=apply_strip,
     )
 
@@ -476,6 +532,80 @@ def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
     return None
 
 
+def _ensure_sglang_tokenizer_control_profile_args(plan: _PatchPlan) -> bool:
+    """Adapt TraceLens's legacy tokenizer communicator patch to SGLang 0.5.11.
+
+    TraceLens ships ``tokenizer_communicator_mixin.patch`` for older SGLang
+    layouts. In 0.5.11 the relevant ``start_profile`` method lives in
+    ``tokenizer_control_mixin.py`` instead. Without this small compatibility
+    patch, HTTP /start_profile accepts ``shape_discovery`` in the request model
+    but raises ``unexpected keyword argument`` before the scheduler ever sees
+    the flag, so no execution-step trace is recorded.
+    """
+    sglang_pkg = plan.sentinel_file.parents[2]
+    target = sglang_pkg / "srt" / "managers" / "tokenizer_control_mixin.py"
+    if not target.is_file():
+        # Older layouts use tokenizer_communicator_mixin.py; the TraceLens
+        # patch set handles that file directly.
+        return True
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.warning(
+            "_server_patcher: cannot read %s to patch profile args: %s",
+            target, exc,
+        )
+        return False
+    if "shape_discovery: bool = False" in text and "roofline_annotations: bool = False" in text:
+        return True
+    sig_old = (
+        "        profile_prefix: Optional[str] = None,\n"
+        "        profile_stages: Optional[List[str]] = None,\n"
+        "    ):\n"
+    )
+    sig_new = (
+        "        profile_prefix: Optional[str] = None,\n"
+        "        profile_stages: Optional[List[str]] = None,\n"
+        "        shape_discovery: bool = False,\n"
+        "        roofline_annotations: bool = False,\n"
+        "    ):\n"
+    )
+    req_old = (
+        "            profile_prefix=profile_prefix,\n"
+        "            profile_stages=profile_stages,\n"
+        "        )\n"
+    )
+    req_new = (
+        "            profile_prefix=profile_prefix,\n"
+        "            profile_stages=profile_stages,\n"
+        "            shape_discovery=shape_discovery,\n"
+        "            roofline_annotations=roofline_annotations,\n"
+        "        )\n"
+    )
+    if sig_old not in text or req_old not in text:
+        log.warning(
+            "_server_patcher: tokenizer_control_mixin.py layout changed; "
+            "cannot inject shape_discovery / roofline_annotations into %s",
+            target,
+        )
+        return False
+    patched = text.replace(sig_old, sig_new, 1).replace(req_old, req_new, 1)
+    try:
+        target.write_text(patched, encoding="utf-8")
+    except OSError as exc:
+        log.warning(
+            "_server_patcher: cannot write patched profile args to %s: %s",
+            target, exc,
+        )
+        return False
+    log.info(
+        "_server_patcher: patched %s to forward shape_discovery / "
+        "roofline_annotations to ProfileReq",
+        target,
+    )
+    return True
+
+
 # ---------------------------------------------------------------------
 # Application core
 # ---------------------------------------------------------------------
@@ -504,7 +634,15 @@ def _is_patched(plan: _PatchPlan) -> bool:
         content = plan.sentinel_file.read_text(
             encoding="utf-8", errors="replace",
         )
-        return all(marker in content for marker in plan.sentinel_text)
+        if not all(marker in content for marker in plan.sentinel_text):
+            return False
+        for path, markers in plan.extra_sentinels:
+            if not path.exists():
+                return False
+            extra = path.read_text(encoding="utf-8", errors="replace")
+            if not all(marker in extra for marker in markers):
+                return False
+        return True
     except OSError:
         return False
 
