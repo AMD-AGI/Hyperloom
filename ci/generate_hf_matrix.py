@@ -55,12 +55,10 @@ def _leaderboard_models() -> set[str]:
         with urllib.request.urlopen(LEADERBOARD_URL, timeout=30) as r:
             data = json.load(r)
     except Exception as e:
-        print(f"WARN: failed to query leaderboard for exclusion: {e}",
-              file=sys.stderr)
-        return set()
+        raise RuntimeError(f"failed to query leaderboard for exclusion: {e}") from e
     rows = data.get("results") if isinstance(data, dict) else data
     if not isinstance(rows, list):
-        return set()
+        raise RuntimeError("leaderboard response did not contain a results list")
     return {
         str(item.get("model") or "").strip().lower()
         for item in rows
