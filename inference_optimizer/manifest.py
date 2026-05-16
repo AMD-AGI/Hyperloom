@@ -11,14 +11,16 @@ Why this lives in its own module:
 * Avoids a hard dependency from ``paths`` (called by everything) on
   ``argparse`` and Python version helpers.
 
-Schema v1::
+Schema v2 (image added)::
 
     {
-      "schema_version":    1,
+      "schema_version":    2,
       "session_id":        "<UTC_YYYYMMDDTHHMMSSZ>_<uuid8>",
       "claw_session_id":   "<uuid>" or null,   # Primus-Claw session UUID
       "sandbox_user_id":   "<str>"  or null,   # Primus-Claw sandbox user
       "created_at_utc":    "...",
+      "host":              "...",
+      "image":             "<registry>/<repo>:<tag>" or null,
       "model_path":        "...",
       "model_name":        "...",
       "framework":         "sglang|vllm",
@@ -30,14 +32,24 @@ Schema v1::
                             "value":...},
       "max_minutes":       N,
       "code_revision":     "<git sha or empty>",
-      "pid":               N,
-      "host":              "..."
+      "pid":               N
     }
 
 ``claw_session_id`` / ``sandbox_user_id`` are read from the
 ``CLAW_SESSION_ID`` / ``SANDBOX_USER_ID`` env vars (set by the
 Primus-Claw spawn path); they are ``null`` when Hyperloom runs standalone
 outside the claw sandbox.
+
+``image`` records the container image the run executed inside, for
+later reproducibility / dashboard provenance. Detection priority:
+
+1. ``HYPERLOOM_IMAGE`` env var (preferred — explicitly set by the spawn).
+2. ``CONTAINER_IMAGE`` / ``IMAGE`` env vars (fallback for non-claw spawns).
+3. ``/etc/podinfo/image`` (k8s downward API mount).
+4. ``/etc/hyperloom-image`` (legacy spawn-script convention).
+5. Best-effort parse of ``/proc/1/cgroup`` (extracts the container hash;
+   reported as ``unknown@<sha256_short>``).
+6. ``None`` when nothing matches; consumers warn rather than fabricate.
 """
 
 from __future__ import annotations
@@ -56,7 +68,7 @@ from typing import Any
 
 from .session_paths import manifest_path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _utc_now_compact() -> str:
@@ -74,6 +86,47 @@ def _git_revision() -> str:
         return out.stdout.strip()
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
         return ""
+
+
+def _detect_image() -> str | None:
+    """Best-effort container image detection.
+
+    Tries env vars first (most reliable + easiest for operators to
+    override), then well-known mount points, finally a best-effort
+    cgroup probe. Returns ``None`` when nothing matches; the breakdown
+    layer surfaces a warning rather than fabricating a value.
+
+    Never raises — every disk / parse failure is swallowed.
+    """
+    for var in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
+        val = (os.environ.get(var) or "").strip()
+        if val:
+            return val
+    for marker in ("/etc/podinfo/image", "/etc/hyperloom-image"):
+        try:
+            p = Path(marker)
+            if p.exists():
+                txt = p.read_text(encoding="utf-8", errors="replace").strip()
+                if txt:
+                    return txt
+        except OSError:
+            continue
+    try:
+        cgroup = Path("/proc/1/cgroup")
+        if cgroup.exists():
+            for line in cgroup.read_text(encoding="utf-8", errors="replace").splitlines():
+                if "docker" not in line and "containerd" not in line:
+                    continue
+                # Lines look like
+                # ``12:devices:/docker/<sha256>`` — pull a 12+ hex token.
+                import re as _re
+                m = _re.search(r"([0-9a-f]{12,64})", line)
+                if m:
+                    short = m.group(1)[:12]
+                    return f"unknown@{short}"
+    except OSError:
+        pass
+    return None
 
 
 def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
@@ -152,6 +205,7 @@ def build_manifest(
         "code_revision":   _git_revision(),
         "pid":             os.getpid(),
         "host":            platform.node() or socket.gethostname() or "",
+        "image":           _detect_image(),
     }
 
 
