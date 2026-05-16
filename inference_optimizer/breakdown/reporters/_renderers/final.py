@@ -11,12 +11,14 @@ from ..base import (
     md_kv_list,
     register_renderer,
 )
+from ._invocation import render_invocation_block
 
 
 @register_renderer("final")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
     f = breakdown.get("final") or {}
     b = breakdown.get("baseline") or {}
+    session = breakdown.get("session") or {}
     final_tput = f.get("throughput_tok_s_per_gpu")
     base_tput = b.get("throughput_tok_s_per_gpu")
     gain_v = f.get("cumulative_gain_pct_validated")
@@ -69,7 +71,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "predates V2."
         )
 
-    md = md_kv_list([
+    md_kv = md_kv_list([
         ("final_throughput_tok_s_per_gpu", final_tput),
         ("cumulative_gain_pct_validated",  gain_v),
         ("cumulative_gain_pct_per_round_sum", gain_round),
@@ -80,14 +82,21 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         ("action_path",                    action_path or None),
         ("ttft_mean_ms",                   f.get("ttft_mean_ms")),
         ("e2el_mean_ms",                   f.get("e2el_mean_ms")),
+        ("ttft_e2el_source",               f.get("ttft_e2el_source") or None),
         ("extra_envs",                     f.get("extra_envs") or None),
     ])
+
+    md_parts = [md_kv]
+    inv_md = render_invocation_block(f.get("invocation"), session.get("image"))
+    if inv_md:
+        md_parts.append("")
+        md_parts.append(inv_md)
 
     return RenderedSection(
         section_id="final",
         title="Final Result",
         key_facts=facts,
-        markdown_block=md,
+        markdown_block="\n".join(md_parts).strip(),
         decisions=decisions,
         warnings=warnings,
         skipped=not (final_tput or gain_v),
