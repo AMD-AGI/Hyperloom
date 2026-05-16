@@ -152,6 +152,14 @@ def materialize_config_with_envs(
             bench.pop("benchmark_script", None)
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
+    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+    if inferencex_path:
+        # Magpie resolves an empty benchmark.inferencex_path to its sibling
+        # checkout (usually $MAGPIE_DIR/InferenceX). Hyperloom's profile path
+        # patches the checkout addressed by $INFERENCEX_PATH, so persist the
+        # same path into the YAML to keep Magpie's runtime and Hyperloom's
+        # patch target aligned.
+        bench["inferencex_path"] = inferencex_path
     envs = bench.setdefault("envs", {})
     for env_key in (
         "CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP",
