@@ -655,39 +655,23 @@ async def select_kernels_handler(
         if isinstance(artifacts, dict) and artifacts.get("tracelens_summary"):
             result["tracelens_summary_path"] = str(artifacts["tracelens_summary"])
 
-        # T4 (this PR): when TraceLens itself fails permanently — TraceLens
-        # not on PATH, perf-report CLI crashed, analysis.md not produced,
-        # subprocess timeout, etc. — we must NOT block the Coordinator.
-        # Per Hyperloom design (T4 finishing-touches; docx does NOT spell
-        # this out — closest hint is §2's idle-gate "Sanity checks must be
-        # present" bullet), a failed TraceLens run is a routing signal,
-        # not a fatal error: the
-        # Coordinator should fall through to parameter optimization
-        # (batch size, KV cache shape, prefill/decode split) which does
-        # not require kernel candidates. We rewrite the handler result
-        # so:
-        #   * ``status`` becomes ``ok`` (parameter opt still allowed),
-        #   * ``hot_kernels`` is an empty list (no GEAK / kernel-rewrite
-        #     candidates to feed),
-        #   * a structured ``trace_health_warnings[]`` entry carries the
-        #     diagnostic (``rc``, ``error`` tail, ``stderr_tail``) so an
-        #     operator can still investigate the upstream TraceLens
-        #     failure without burying it.
-        # Configuration errors raised *before* the subprocess call
-        # (missing ``trace_input``, missing kernel-agent root) keep
-        # ``status=failed`` because those are Hyperloom bugs / mis-
-        # configuration the operator must fix — not transient TraceLens
-        # issues that the Coordinator can route around.
-        if result.get("status") == "failed":
+        # A failed TraceLens run is a hard trace-quality / integration
+        # failure, not a valid "empty candidates" signal. Keep
+        # ``status=failed`` so the Coordinator does not continue down a
+        # misleading params/backends path as if kernel analysis had
+        # completed. Still attach a structured warning so operators can
+        # inspect the root cause from SharedState / event logs.
+        if (
+            result.get("status") == "failed"
+            and "trace_split_no_steady_state" not in str(result.get("error") or "")
+        ):
             failure_warning: dict[str, Any] = {
                 "code": "tracelens_analysis_failed",
                 "severity": "warning",
                 "message": (
-                    "TraceLens analysis failed; suppressing hot_kernels[] and "
-                    "promoting status to ok so the Coordinator can still route "
-                    "to parameter optimization (batch size, KV cache shape, "
-                    "prefill/decode split). See ``stderr_tail`` / ``error`` for "
-                    "the upstream failure."
+                    "TraceLens analysis failed; refusing to treat this as a "
+                    "successful empty-kernel result. See ``stderr_tail`` / "
+                    "``error`` for the upstream failure."
                 ),
             }
             for key in ("returncode", "rc", "error", "stderr_tail", "raw_stdout_tail"):
@@ -696,7 +680,6 @@ async def select_kernels_handler(
             health = list(result.get("trace_health_warnings") or [])
             health.append(failure_warning)
             result["trace_health_warnings"] = health
-            result["status"] = "ok"
             result["hot_kernels"] = []
             result.setdefault("orchestrator_error", failure_warning.get("error", ""))
 

@@ -965,10 +965,8 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     )
     out = capsys.readouterr().out
     result = _json.loads(out)
-    assert result["hot_kernels"] == []
-    warnings = result.get("trace_health_warnings") or []
-    assert warnings and warnings[0]["code"] == "trace_split_no_steady_state"
-    assert result["trace_report_path"] == ""
+    assert result["status"] == "failed"
+    assert "trace_split_no_steady_state" in result["error"]
 
 
 # ===========================================================================
