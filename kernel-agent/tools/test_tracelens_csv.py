@@ -846,7 +846,25 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
 # -o/--output-dir, --find-steady-state). The previous --input/--platform
 # form failed at runtime against a real Magpie/SGLang trace.
 # ===========================================================================
-def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_path):
+def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    tp0_decode = trace_dir / "177-TP-0-DECODE.trace.json.gz"
+    tp0_decode.write_text("{}", encoding="utf-8")
+    merged = trace_dir / "merged-177.trace.json.gz"
+    merged.write_text("{}", encoding="utf-8")
+    tp1_extend = trace_dir / "177-TP-1-EXTEND.trace.json.gz"
+    tp1_extend.write_text("{}", encoding="utf-8")
+
+    kind, traces = tla.discover_trace_inputs(trace_dir)
+    assert kind == "capture_dir"
+    assert traces[0] == merged
+    assert traces[-1] == tp0_decode
+
+
+def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
+    tmp_path, capsys,
+):
     """The end-to-end split path must call the real splitter interface,
     not the broken --input/--platform form. Drives a mock subprocess.run
     and asserts argv shape."""
@@ -945,6 +963,12 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
         "perf-report CSV fallback must not run; analysis.md is the single "
         f"source of truth. cmds={captured}"
     )
+    out = capsys.readouterr().out
+    result = _json.loads(out)
+    assert result["hot_kernels"] == []
+    warnings = result.get("trace_health_warnings") or []
+    assert warnings and warnings[0]["code"] == "trace_split_no_steady_state"
+    assert result["trace_report_path"] == ""
 
 
 # ===========================================================================
