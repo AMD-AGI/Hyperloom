@@ -13,9 +13,42 @@
       "non_lm_task": 103,
       "family_blocklist": 34,
       "classify_filter": 5882
-    }
+    },
+    "customer_priority_mapping_file": "ci/candidates/customer_priority_models.json",
+    "customer_priority_force_first": "deepseek-ai/DeepSeek-V3",
+    "customer_priority_appended_count": 11,
+    "customer_priority_appended": [
+      "openai/gpt-oss-120b",
+      "deepseek-ai/DeepSeek-R1",
+      "deepseek-ai/DeepSeek-V3.1",
+      "deepseek-ai/DeepSeek-V3.2",
+      "deepseek-ai/DeepSeek-V4-Flash",
+      "deepseek-ai/DeepSeek-V4-Pro",
+      "deepseek-ai/DeepSeek-R1-0528",
+      "zai-org/GLM-5-FP8",
+      "zai-org/GLM-5.1-FP8",
+      "zai-org/GLM-4.7",
+      "moonshotai/Kimi-K2-Instruct"
+    ],
+    "customer_priority_todo_excluded": [
+      "deepseek-ai/DeepSeek-V4-Flash",
+      "deepseek-ai/DeepSeek-V4-Pro",
+      "zai-org/GLM-5-FP8",
+      "zai-org/GLM-5.1-FP8"
+    ],
+    "customer_priority_todo_reason": "TODO: single-node path is not runnable yet; enable after supported backend/multinode path is validated."
   },
   "candidates": [
+    {
+      "repo_id": "deepseek-ai/DeepSeek-V3",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV3ForCausalLM",
+      "params_b": 684.53,
+      "precision": "FP8",
+      "weight_gb": 684.5,
+      "downloads": 1287758,
+      "source": "customer_priority_force_first"
+    },
     {
       "repo_id": "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ",
       "pipeline_tag": "text-generation",
@@ -18015,6 +18048,76 @@
       "precision": "BF16",
       "weight_gb": 18.8,
       "downloads": 706
+    },
+    {
+      "repo_id": "openai/gpt-oss-120b",
+      "pipeline_tag": "text-generation",
+      "arch": "GptOssForCausalLM",
+      "params_b": 120.41,
+      "precision": "FP4",
+      "weight_gb": 60.2,
+      "downloads": 4661369,
+      "source": "customer_priority_append"
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-R1",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV3ForCausalLM",
+      "params_b": 684.53,
+      "precision": "FP8",
+      "weight_gb": 684.5,
+      "downloads": 3899140,
+      "source": "customer_priority_append"
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-V3.1",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV3ForCausalLM",
+      "params_b": 684.53,
+      "precision": "FP8",
+      "weight_gb": 684.5,
+      "downloads": 193724,
+      "source": "customer_priority_append"
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-V3.2",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV32ForCausalLM",
+      "params_b": 685.4,
+      "precision": "FP8",
+      "weight_gb": 685.4,
+      "downloads": 4210477,
+      "source": "customer_priority_append"
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-R1-0528",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV3ForCausalLM",
+      "params_b": 684.53,
+      "precision": "FP8",
+      "weight_gb": 684.5,
+      "downloads": 1995137,
+      "source": "customer_priority_append"
+    },
+    {
+      "repo_id": "zai-org/GLM-4.7",
+      "pipeline_tag": "text-generation",
+      "arch": "Glm4MoeForCausalLM",
+      "params_b": 358.34,
+      "precision": "BF16",
+      "weight_gb": 716.7,
+      "downloads": 60811,
+      "source": "customer_priority_append"
+    },
+    {
+      "repo_id": "moonshotai/Kimi-K2-Instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV3ForCausalLM",
+      "params_b": 1026.47,
+      "precision": "FP8",
+      "weight_gb": 1026.5,
+      "downloads": 827131,
+      "source": "customer_priority_append"
     }
   ]
 }
