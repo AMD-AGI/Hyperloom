@@ -529,3 +529,272 @@ def test_source_files_keeps_non_empty_kernel_attempts(fixture_session: Path) -> 
     sf = build(fixture_session)["source_files"]
     assert sf.get("kernel_attempts"), sf
     assert any("optimization_attempts.jsonl" in p for p in sf["kernel_attempts"])
+
+
+# ---------------------------------------------------------------------------
+# Attribution method (A1)
+# ---------------------------------------------------------------------------
+def _attribution_fixture(tmp_path: Path, state: dict) -> Path:
+    """Minimal session_dir whose only content drives ``collect_attribution``."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "attr"})
+    base_state = {"session_id": "attr"}
+    base_state.update(state)
+    _write_json(sd / "state.json", base_state)
+    return sd
+
+
+def test_attribution_method_validated(tmp_path: Path) -> None:
+    """``state.gain_per_stack_entry`` written by Coordinator with every
+    entry's ``delta_pct`` set → ``method == "validated"``."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 30.0,
+        "optimization_stack": [
+            {"action": "backends", "variant_name": "flag_X", "gain_pct": 20.0},
+            {"action": "params",   "variant_name": "p1",     "gain_pct": 10.0},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "backends", "variant_name": "flag_X",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 20.0,
+             "delta_pct": 20.0},
+            {"action": "params",   "variant_name": "p1",
+             "stack_len_before": 1, "stack_len_after": 2,
+             "cum_gain_before": 20.0, "cum_gain_after": 30.0,
+             "delta_pct": 10.0},
+        ],
+    })
+    attr = build(sd)["attribution"]
+    assert attr["method"] == "validated"
+
+
+def test_attribution_method_single_source(tmp_path: Path) -> None:
+    """Single-entry stack with no Coordinator-recorded gain ledger →
+    ``method == "single_source"``."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 11.0,
+        "optimization_stack": [
+            {"action": "backends", "variant_name": "vllm_kv_fp8",
+             "gain_pct": 11.0,
+             "ts": "2026-05-15T07:00:00+00:00"},
+        ],
+    })
+    attr = build(sd)["attribution"]
+    assert attr["method"] == "single_source"
+
+
+def test_attribution_method_reconstructed(tmp_path: Path) -> None:
+    """Multi-entry stack with no Coordinator ledger and at least one
+    placeholder ``delta_pct=None`` → ``method == "reconstructed"``."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 25.0,
+        "optimization_stack": [
+            {"action": "backends", "variant_name": "flag_X", "gain_pct": 12.0},
+            {"action": "params",   "variant_name": "p1",     "gain_pct": None},
+            {"action": "kernel_opt:k001", "gain_pct": None},
+        ],
+    })
+    attr = build(sd)["attribution"]
+    assert attr["method"] == "reconstructed"
+
+
+def test_attribution_method_missing(tmp_path: Path) -> None:
+    """No optimization_stack, no Coordinator ledger → ``method == "missing"``."""
+    sd = _attribution_fixture(tmp_path, {"cumulative_gain_validated": 0.0})
+    attr = build(sd)["attribution"]
+    assert attr["method"] == "missing"
+
+
+# ---------------------------------------------------------------------------
+# A2: final.ttft_mean_ms reconstruction
+# ---------------------------------------------------------------------------
+def test_final_ttft_reconstructed_from_validate_stack(tmp_path: Path) -> None:
+    """When ``current_best.ttft_mean_ms`` is not recorded but a
+    ``runs/validate_stack/<h>/benchmark_*/benchmark_report.json`` is on
+    disk, the collector must read the latency from the report, set
+    ``ttft_e2el_source = "validate_stack_disk"``, and append a
+    reconstruction warning."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "rec"})
+    _write_json(sd / "state.json", {
+        "session_id": "rec",
+        "baseline_tput": 100.0,
+        "current_best": {"tput": 220.0},
+        "optimization_stack": [
+            {"action": "backends", "variant_name": "v1", "gain_pct": 120.0},
+        ],
+        "cumulative_gain_validated": 120.0,
+    })
+    bdir = sd / "runs/validate_stack/abc/benchmark_001"
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True,
+        "output_throughput_tok_s": 220.0,
+        "mean_ttft_ms": 88.7,
+        "mean_e2el_ms": 1110.5,
+    })
+    b = build(sd)
+    final = b["final"]
+    assert final["ttft_mean_ms"] == pytest.approx(88.7)
+    assert final["e2el_mean_ms"] == pytest.approx(1110.5)
+    assert final["ttft_e2el_source"] == "validate_stack_disk"
+    assert any(
+        "final.ttft_mean_ms reconstructed from validate_stack_disk" in w
+        for w in b["warnings"]
+    ), b["warnings"]
+
+
+# ---------------------------------------------------------------------------
+# A3: baseline.attempts_history reconstruction
+# ---------------------------------------------------------------------------
+def test_baseline_attempts_history_reconstructed_from_disk(tmp_path: Path) -> None:
+    """When ``state.baseline_attempts == []`` but two
+    ``runs/baseline/<hash>/benchmark_*/`` directories exist, the
+    collector must reconstruct two summary rows tagged
+    ``status="reconstructed"`` and append the reconstruction warning."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "rebh"})
+    _write_json(sd / "state.json", {
+        "session_id": "rebh",
+        "baseline_tput": 333.0,
+        "baseline_attempts": [],
+    })
+    for h, tput in (("hashA", 300.0), ("hashB", 333.0)):
+        bdir = sd / f"runs/baseline/{h}/benchmark_20260515T100000"
+        _write_json(bdir / "benchmark_report.json", {
+            "success": True,
+            "output_throughput_tok_s": tput,
+            "mean_ttft_ms": 100.0,
+        })
+
+    b = build(sd)
+    history = b["baseline"]["attempts_history"]
+    assert len(history) == 2
+    assert all(a["status"] == "reconstructed" for a in history), history
+    task_ids = {a["task_id"] for a in history}
+    assert task_ids == {"hashA", "hashB"}
+    assert any(
+        "baseline.attempts_history reconstructed from runs/baseline/" in w
+        for w in b["warnings"]
+    ), b["warnings"]
+
+
+def test_baseline_attempts_history_state_recorded_takes_precedence(
+    tmp_path: Path,
+) -> None:
+    """When ``state.baseline_attempts`` IS non-empty, the disk fallback
+    must NOT also fire (no duplication, no reconstruction warning)."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "stat"})
+    _write_json(sd / "state.json", {
+        "session_id": "stat",
+        "baseline_tput": 300.0,
+        "baseline_attempts": [
+            {"ts": "2026-05-15T10:00:00+00:00", "task_id": "t1",
+             "status": "succeeded", "decision": "promoted",
+             "key_metric": 300.0},
+        ],
+    })
+    bdir = sd / "runs/baseline/hashA/benchmark_20260515T100000"
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True, "output_throughput_tok_s": 300.0,
+    })
+
+    b = build(sd)
+    history = b["baseline"]["attempts_history"]
+    assert len(history) == 1
+    assert history[0]["status"] == "succeeded"
+    assert not any(
+        "baseline.attempts_history reconstructed" in w
+        for w in b["warnings"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# B3: invocation populated from baseline_config + server.log
+# ---------------------------------------------------------------------------
+def test_baseline_invocation_populated(tmp_path: Path) -> None:
+    """``baseline.invocation`` must read framework_args from server.log,
+    extra_envs from the YAML benchmark.envs block (allowlisted), and
+    keep secret-shaped keys (``OPENAI_API_KEY``) out of the output."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "inv"})
+    bdir = sd / "runs/baseline/h1/benchmark_001"
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True, "output_throughput_tok_s": 421.5,
+        "mean_ttft_ms": 152.3, "mean_e2el_ms": 1840.7,
+    })
+    (bdir / "server.log").write_text(
+        "python -m sglang.launch_server --model /weka/m --tp 8 --port 30000\n"
+        "[INFO] booting...\n",
+        encoding="utf-8",
+    )
+    cfg = sd / "runs/baseline/h1/baseline_config.with_envs.yaml"
+    cfg.write_text(
+        "benchmark:\n"
+        "  envs:\n"
+        "    TP: \"8\"\n"
+        "    VLLM_FLASH_ATTN: \"1\"\n"
+        "    OPENAI_API_KEY: \"secret-do-not-emit\"\n"
+        "    HOME: \"/root\"\n",
+        encoding="utf-8",
+    )
+    _write_json(sd / "state.json", {
+        "session_id": "inv",
+        "baseline_tput": 421.5,
+        "last_baseline": {"workspace": str(sd / "runs/baseline/h1")},
+        "baseline_config_path": str(cfg),
+    })
+
+    b = build(sd)
+    inv = b["baseline"]["invocation"]
+    assert "sglang.launch_server" in inv["framework_args"]
+    assert inv["extra_envs"].get("TP") == "8"
+    assert inv["extra_envs"].get("VLLM_FLASH_ATTN") == "1"
+    assert "OPENAI_API_KEY" not in inv["extra_envs"]
+    assert "HOME" not in inv["extra_envs"]
+    assert inv["server_log_path"] is not None
+    assert "server.log" in inv["server_log_path"]
+
+
+# ---------------------------------------------------------------------------
+# B1 / B3: image detection
+# ---------------------------------------------------------------------------
+def test_session_image_from_env(tmp_path: Path, monkeypatch) -> None:
+    """``HYPERLOOM_IMAGE`` env var must populate ``session.image`` when
+    the manifest lacks the field (V1 manifests). Absent of all sources
+    the field is ``None`` and a single warning is appended — no crash."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "img"})
+    _write_json(sd / "state.json", {"session_id": "img", "baseline_tput": 100.0})
+
+    monkeypatch.setenv("HYPERLOOM_IMAGE",
+                        "registry.example/hyperloom:abc123")
+    monkeypatch.delenv("CONTAINER_IMAGE", raising=False)
+    monkeypatch.delenv("IMAGE", raising=False)
+    b = build(sd)
+    assert b["session"]["image"] == "registry.example/hyperloom:abc123"
+
+    monkeypatch.delenv("HYPERLOOM_IMAGE")
+    b2 = build(sd)
+    assert b2["session"]["image"] is None or isinstance(b2["session"]["image"], str)
+    if b2["session"]["image"] is None:
+        assert any(
+            "image: not configured" in w for w in b2["warnings"]
+        ), b2["warnings"]
+
+
+def test_session_image_from_manifest_takes_precedence(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """``manifest.image`` (written at session start) wins over runtime
+    env vars — captures the spawn-time image even if env later drifts."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {
+        "schema_version": 2, "session_id": "img2",
+        "image": "registry.example/hyperloom:from-manifest",
+    })
+    _write_json(sd / "state.json", {"session_id": "img2"})
+
+    monkeypatch.setenv("HYPERLOOM_IMAGE", "registry.example/hyperloom:from-env")
+    b = build(sd)
+    assert b["session"]["image"] == "registry.example/hyperloom:from-manifest"
