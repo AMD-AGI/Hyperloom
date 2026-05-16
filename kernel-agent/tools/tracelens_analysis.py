@@ -92,6 +92,29 @@ def _build_high_idle_warning(
     }
 
 
+def _build_trace_split_warning(
+    *, trace_input: Path, split_dir: Path, split_rc: int,
+    mixed_count: int, decode_count: int, prefilldecode_count: int,
+) -> dict[str, Any]:
+    return {
+        "code": "trace_split_no_steady_state",
+        "severity": "warning",
+        "trace_input": str(trace_input),
+        "split_dir": str(split_dir),
+        "split_returncode": split_rc,
+        "mixed_count": mixed_count,
+        "decode_only_count": decode_count,
+        "prefilldecode_count": prefilldecode_count,
+        "message": (
+            "TraceLens splitter produced no steady-state chunks; refusing "
+            "to analyze the raw trace because that can report misleading "
+            "high idle and suppress valid kernel opportunities. Verify the "
+            "profile request used TraceLens-compatible annotations and enough "
+            "NUM_PROMPTS to reach the requested start_step/num_steps window."
+        ),
+    }
+
+
 KERNEL_HINTS = (
     "kernel", "triton", "hip", "cuda", "rocblas", "hipblas", "aiter",
     "fmha", "gemm", "attention", "moe", "rmsnorm", "layernorm",
@@ -204,6 +227,24 @@ def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> in
     return count
 
 
+def _trace_input_sort_key(path: Path) -> tuple[int, str]:
+    """Prefer TraceLens-friendly traces when a directory is supplied.
+
+    Magpie/SGLang profile directories contain rank/phase shards such as
+    `TP-0-DECODE.trace.json.gz` as well as a `merged-*.trace.json.gz`.
+    TraceLens's splitter expects the large annotated trace; feeding the first
+    lexicographic shard gives it a tiny single-rank decode slice. Explicit file
+    inputs remain honoured by the caller; this ordering only affects directory
+    discovery.
+    """
+    name = path.name
+    if name.startswith("merged-"):
+        return (0, name)
+    if re.search(r"TP-\d+-DECODE\.trace\.json(?:\.gz)?$", name):
+        return (2, name)
+    return (1, name)
+
+
 def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
     if trace_input.is_file():
         return "file", [trace_input]
@@ -220,6 +261,7 @@ def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
         if trace not in seen:
             seen.add(trace)
             unique.append(trace)
+    unique.sort(key=_trace_input_sort_key)
     if not unique:
         raise FileNotFoundError(f"no trace files found under capture directory: {trace_input}")
     return "capture_dir", unique
@@ -1481,23 +1523,38 @@ def write_reports(
     summary_path = tracelens_dir / "summary.json"
     atomic_write_json(summary_path, summary)
 
-    if existing_report_path is None or not existing_report_path.exists():
+    missing_trace_report = (
+        existing_report_path is None or not existing_report_path.exists()
+    )
+    trace_quality_blocked = any(
+        isinstance(w, dict) and w.get("code") == "trace_split_no_steady_state"
+        for w in (trace_health_warnings or [])
+    )
+    if missing_trace_report:
         if not getattr(args, "dry_run", False):
-            raise RuntimeError(
-                "TraceLens SDK orchestrator did not produce analysis.md "
-                f"(expected at {existing_report_path}); refusing to "
-                "fabricate a Markdown report. Inspect the TraceLens skill "
-                "log and report upstream if this is reproducible."
+            if trace_quality_blocked:
+                # No TraceLens SDK report exists because we intentionally
+                # refused to run it on a raw/non-steady trace. Keep the
+                # structured JSON sidecars and leave trace_report_path empty
+                # rather than fabricating a misleading analysis.md.
+                existing_report_path = None
+            else:
+                raise RuntimeError(
+                    "TraceLens SDK orchestrator did not produce analysis.md "
+                    f"(expected at {existing_report_path}); refusing to "
+                    "fabricate a Markdown report. Inspect the TraceLens skill "
+                    "log and report upstream if this is reproducible."
+                )
+        else:
+            # ``--dry-run``: synthesize a tiny stub so test wiring that
+            # checks ``trace_report_path`` existence still passes. Never
+            # taken on a real (non-test) invocation.
+            stub_md = tracelens_dir / "analysis.md"
+            stub_md.write_text(
+                "# TraceLens dry-run stub (no SDK orchestrator output)\n",
+                encoding="utf-8",
             )
-        # ``--dry-run``: synthesize a tiny stub so test wiring that
-        # checks ``trace_report_path`` existence still passes. Never
-        # taken on a real (non-test) invocation.
-        stub_md = tracelens_dir / "analysis.md"
-        stub_md.write_text(
-            "# TraceLens dry-run stub (no SDK orchestrator output)\n",
-            encoding="utf-8",
-        )
-        existing_report_path = stub_md
+            existing_report_path = stub_md
 
     return {
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
@@ -1508,7 +1565,7 @@ def write_reports(
         # ``existing_report_path``; Hyperloom no longer aliases or
         # copies it. PR-A §3 adds the ``summary.json`` audit sidecar
         # alongside (separate file, not a Markdown alias).
-        "trace_report_path": str(existing_report_path),
+        "trace_report_path": str(existing_report_path) if existing_report_path else "",
         "tracelens_summary": str(summary_path),
     }
 
@@ -1760,6 +1817,7 @@ def main() -> int:
             # if the splitter is unavailable or produces no output, fall back
             # to the original filtered trace (legacy behaviour).
             cli_trace_path = trace_files[0]
+            trace_split_blocked = False
             if not args.skip_split:
                 update_status(status_path, state="running", current_step="split_trace",
                               log_path=log_path, artifact_paths=artifacts, run_id=run_id,
@@ -1841,16 +1899,30 @@ def main() -> int:
                         f"using {cli_trace_path.name} for perf report",
                     )
                 else:
+                    warning = _build_trace_split_warning(
+                        trace_input=trace_files[0],
+                        split_dir=split_dir,
+                        split_rc=split_rc,
+                        mixed_count=len(mixed_chunks),
+                        decode_count=len(decode_chunks),
+                        prefilldecode_count=len(prefill_chunks),
+                    )
+                    trace_health_warnings.append(warning)
+                    agent_candidates = []
+                    allow_empty_candidates = True
+                    orchestrator_mode = "skipped_trace_split_no_steady_state"
+                    trace_split_blocked = True
                     append_log(
                         log_path,
                         f"WARNING: trace split unavailable "
                         f"(rc={split_rc}, mixed={len(mixed_chunks)}, "
                         f"decode_only={len(decode_chunks)}, "
                         f"prefilldecode={len(prefill_chunks)}); "
-                        f"falling back to filtered trace {trace_files[0].name}",
+                        "refusing raw-trace fallback and returning "
+                        "trace_split_no_steady_state warning",
                     )
 
-            if args.use_llm_orchestrator:
+            if args.use_llm_orchestrator and not trace_split_blocked:
                 update_status(status_path, state="running",
                               current_step="run_tracelens_sdk_orchestrator",
                               log_path=log_path, artifact_paths=artifacts,
