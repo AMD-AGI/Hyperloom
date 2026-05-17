@@ -377,3 +377,29 @@ def test_invocation_section_renders_when_present() -> None:
     assert "sglang.launch_server" not in user_text, (
         "framework_args leaked into LLM prompt"
     )
+
+
+def test_invocation_renders_framework_args_source() -> None:
+    """When ``invocation.framework_args_source`` is set the renderer
+    must surface the lineage label (``yaml_cmd`` / ``log_python_cmd``
+    / ``log_args_line`` / ``unknown``) right under the command line.
+
+    Anti-regression for the gap2 production failure where
+    ``framework_args = '(APIServer pid=1757439) INFO ...'`` made the
+    extraction silently look successful — having the source label
+    visible lets a reviewer flag the bad extraction at a glance."""
+    bd = _fixture_breakdown()
+    bd["session"]["image"] = "registry.example/hyperloom:src"
+    bd["baseline"]["invocation"] = {
+        "framework_args":        "python -m sglang.launch_server --tp 4",
+        "framework_args_source": "yaml_cmd",
+        "extra_envs":            {"TP": "4"},
+        "config_path":           "runs/baseline/h1/baseline_config.with_envs.yaml",
+        "server_log_path":       "runs/baseline/h1/benchmark_001/server.log",
+    }
+    r = render_session_report(bd)
+    base = next(s for s in r.sections if s.section_id == "baseline")
+    md = base.markdown_block
+    assert "### Invocation" in md
+    assert "yaml_cmd" in md, md
+    assert "**source**" in md, md
