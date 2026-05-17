@@ -1904,16 +1904,20 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             sys.exit(2)
 
     os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
-    # Re-export $TP and $CONC from the resolved CLI args so downstream
-    # readers (`_workload_envs.apply_runtime_benchmark_overrides`,
-    # Magpie YAML envs) all see the same value as the agent passed at
-    # the CLI. argparse default already pulls from existing env, so
-    # this just ensures the CLI form wins when both are present.
-    os.environ["TP"] = str(tp_resolved)
-    os.environ["CONC"] = str(max(1, int(getattr(args, "conc", 8) or 8)))
-    # Same pattern for --ep so executors / helper / multi_node CLI all
-    # see the same value via $EP. ep<1 normalised to 1 (no-EP mode).
-    os.environ["EP"] = str(ep_resolved)
+    # Re-export $TP / $CONC / $EP from the resolved CLI args, but ONLY in
+    # multi-node mode. Rationale: main's single-node design carries TP /
+    # CONC via `benchmark.envs.TP` / `benchmark.envs.CONC` in the YAML
+    # config (see SKILL.md §"Before a new model run"). Writing the
+    # argparse defaults ("1" / "8" / "1") back into os.environ here
+    # would silently override those YAML values via
+    # `_workload_envs.apply_runtime_benchmark_overrides` (which prefers
+    # env over envs.* for these keys). The multi-node orchestrator
+    # subprocess + sweep child workers still need to see the resolved
+    # CLI values, so the env export stays for nodes>=2 runs.
+    if nodes_resolved >= 2:
+        os.environ["TP"] = str(tp_resolved)
+        os.environ["CONC"] = str(max(1, int(getattr(args, "conc", 8) or 8)))
+        os.environ["EP"] = str(ep_resolved)
     # User-declared grid skip list. Resolution order is already enforced
     # by argparse default (--skip-variants > $SKIP_VARIANTS); we re-export
     # so executors started later via subprocess (multi-node orchestrator,
