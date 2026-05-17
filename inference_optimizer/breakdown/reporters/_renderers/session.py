@@ -25,6 +25,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     stop_reason = str(s.get("stop_reason") or "")
     elapsed = s.get("elapsed_minutes")
     host = str(s.get("host") or "")
+    image = s.get("image")
     code = str(s.get("code_revision") or "")
     tick = s.get("tick_count")
 
@@ -52,6 +53,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         )
     if host:
         facts.append(f"Ran on host `{host}`.")
+    if isinstance(image, str) and image.strip():
+        facts.append(f"Container image `{image}`.")
     if code:
         facts.append(f"Hyperloom code revision `{code}`.")
 
@@ -63,6 +66,11 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         ("elapsed_minutes",  elapsed),
         ("tick_count",       tick),
         ("host",             host or None),
+        # Always include the image row so reviewers can see at a glance
+        # whether the run had its container image recorded; "(not
+        # configured)" makes the gap obvious instead of silently
+        # omitting the field.
+        ("image",            image if (isinstance(image, str) and image.strip()) else "(not configured)"),
         ("code_revision",    code or None),
         ("created_at_utc",   s.get("created_at_utc")),
         ("ended_at_utc",     s.get("ended_at_utc")),
