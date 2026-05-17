@@ -55,6 +55,7 @@ def render_invocation_block(
     if not isinstance(invocation, dict):
         return ""
     framework_args = str(invocation.get("framework_args") or "").strip()
+    framework_args_source = str(invocation.get("framework_args_source") or "").strip()
     extra_envs = invocation.get("extra_envs")
     config_path = invocation.get("config_path")
     server_log_path = invocation.get("server_log_path")
@@ -79,6 +80,17 @@ def render_invocation_block(
         lines.append(f"- **config**: `{config_path}`")
     if framework_args:
         lines.append(f"- **command**: `{_truncate(framework_args, _FRAMEWORK_ARGS_MAX)}`")
+    # Lineage label sits directly under ``command`` so an operator can
+    # see at a glance whether the echoed string came from a parsed
+    # ``Server arguments:`` line, a literal python invocation, the
+    # config yaml, or no source at all (extraction failed).
+    if framework_args_source:
+        suffix = (
+            "  (extraction failed; try server.log or config yaml)"
+            if framework_args_source == "unknown"
+            else ""
+        )
+        lines.append(f"- **source**: {framework_args_source}{suffix}")
     envs_str = _format_envs(extra_envs if isinstance(extra_envs, dict) else None)
     if envs_str:
         lines.append(f"- **envs**: `{envs_str}`")
