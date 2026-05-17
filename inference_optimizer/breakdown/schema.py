@@ -89,7 +89,13 @@ class BenchmarkInvocation(TypedDict, total=False):
     breakdown JSON.
     """
     framework_args: str           # e.g. "python -m sglang.launch_server --model ... --tp 8"
-    framework_args_source: str    # log_args_line / log_python_cmd / yaml_cmd / unknown
+    framework_args_source: str
+    # log_non_default_args (vllm/sglang parsed-args echo, most authoritative)
+    # log_args_line (Server arguments: / Args: Namespace(...) header)
+    # log_python_cmd (literal python/vllm/sglang launch line)
+    # yaml_cmd (cmd/command/launch field in materialized config yaml)
+    # yaml_benchmark (synthesized from magpie benchmark.* fields)
+    # unknown (none of the above; warning emitted)
     extra_envs: dict[str, str]    # allowlisted env vars only (no secrets)
     config_path: str | None       # baseline_config.with_envs.yaml or variant config
     server_log_path: str | None   # for debug
