@@ -27,8 +27,14 @@ from __future__ import annotations
 import ast
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+def _now_iso() -> str:
+    """UTC ISO-8601 timestamp used by the backends_search ledger."""
+    return datetime.now(timezone.utc).isoformat()
 
 from ...session_paths import runs_dir
 from ._grid_runner import (
@@ -39,6 +45,9 @@ from ._grid_runner import (
     pick_winners,
     resolve_skip_spec,
     run_grid,
+    sanitize_result_dir,
+    sanitize_script_name,
+    variant_fingerprint,
 )
 from ._workload_envs import (
     default_baseline_config,
@@ -47,6 +56,26 @@ from ._workload_envs import (
 
 
 log = logging.getLogger(__name__)
+
+
+def _initial_backends_search_state() -> dict[str, Any]:
+    """Empty :attr:`SharedState.backends_search` ledger.
+
+    Schema mirrors :func:`params._initial_search_state` but at
+    ``schema_version=1`` for backends (params is at v2 after the
+    fingerprint migration). Both ledgers key ``tested`` / ``rejected``
+    on the variant **content fingerprint** so LLM renames of an
+    already-tested config collapse to the same row.
+    """
+    return {
+        "schema_version": 1,
+        "accepted": [],
+        "rejected": [],
+        "tested": {},
+        "name_index": {},
+        "cursor": 0,
+        "last_round": {},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -221,23 +250,45 @@ def _build_synergy_combos(
     winner_names: set[str],
 ) -> list[GridVariant]:
     """Generate combo variants from synergy groups where at least one member won."""
+    return _build_synergy_combos_from_groups(
+        grid, list(SYNERGY_GROUPS), require_one_winner=winner_names,
+    )
+
+
+def _build_synergy_combos_from_groups(
+    grid: list[GridVariant],
+    groups: list[list[str]],
+    *,
+    require_one_winner: set[str] | None = None,
+) -> list[GridVariant]:
+    """Materialize combo variants from a list of name-groups.
+
+    Used both by the static SYNERGY_GROUPS path and the LLM-injected
+    ``params.synergy_groups`` path. When ``require_one_winner`` is set,
+    a group is only kept if at least one of its members appears in the
+    set (the original "at least one member won in phase 1" gate). Pass
+    ``None`` (LLM-injected case) to skip that gate entirely — the LLM is
+    explicit about what to test.
+    """
     grid_by_name = {v.name: v for v in grid}
     combos: list[GridVariant] = []
     seen_combo_names: set[str] = set()
 
-    for group in SYNERGY_GROUPS:
-        # All members must exist in the grid
+    for group in groups:
+        if not group:
+            continue
         if not all(name in grid_by_name for name in group):
             continue
-        # At least one must have won in phase 1
-        if not any(name in winner_names for name in group):
+        if (
+            require_one_winner is not None
+            and not any(name in require_one_winner for name in group)
+        ):
             continue
         combo_name = "combo_" + "+".join(group)
         if combo_name in seen_combo_names:
             continue
         seen_combo_names.add(combo_name)
 
-        # Merge args and envs from all group members
         combined_args_parts: list[str] = []
         combined_envs: dict[str, str] = {}
         for name in group:
@@ -256,14 +307,62 @@ def _build_synergy_combos(
     return combos
 
 
+def _auto_synergy_combos(
+    grid: list[GridVariant],
+    winner_names: set[str],
+    *,
+    max_combo_size: int = 3,
+    max_combos: int = 4,
+) -> list[GridVariant]:
+    """T2 — generate combos as Cartesian products over phase-1 winners.
+
+    Used when ``params.synergy_mode == "auto"``: the LLM doesn't have to
+    enumerate group lists, the executor pairs every winner with every
+    other winner up to ``max_combo_size`` members, capped at
+    ``max_combos`` total to bound runtime.
+
+    Mirrors marathon's "test combinations of all winners" step
+    (marathon/skills/actions/backends.md §5).
+    """
+    import itertools
+    if not winner_names:
+        return []
+    grid_by_name = {v.name: v for v in grid}
+    candidates = sorted(n for n in winner_names if n in grid_by_name)
+    if len(candidates) < 2:
+        return []
+    groups: list[list[str]] = []
+    for size in range(2, max(2, min(max_combo_size, len(candidates))) + 1):
+        for combo in itertools.combinations(candidates, size):
+            groups.append(list(combo))
+            if len(groups) >= max_combos:
+                break
+        if len(groups) >= max_combos:
+            break
+    return _build_synergy_combos_from_groups(grid, groups,
+                                              require_one_winner=None)
+
+
 _BACKEND_KEYWORDS = (
     "backend", "enable_", "disable_", "fused", "mixed", "overlap",
     "schedule", "allreduce", "fusion",
 )
 
+from ..framework_paths import (
+    resolve_sglang_server_args_path,
+    resolve_vllm_arg_utils_path,
+)
+
+# Default search paths for AST-based flag discovery (env override, then
+# /sgl-workspace, then importlib.util.find_spec site-packages).
+DEFAULT_SGLANG_SERVER_ARGS, _SGLANG_DISCOVERY_NOTE = (
+    resolve_sglang_server_args_path()
+)
+DEFAULT_VLLM_ARG_UTILS, _VLLM_DISCOVERY_NOTE = resolve_vllm_arg_utils_path()
+
 
 def discover_backend_flags(
-    server_args_path: Path = Path("/sgl-workspace/sglang/python/sglang/srt/server_args.py"),
+    server_args_path: Path = DEFAULT_SGLANG_SERVER_ARGS,
 ) -> list[str]:
     """AST-parse sglang's server_args.py and return discovered flag names.
 
@@ -292,6 +391,109 @@ def discover_backend_flags(
     return sorted(flags)
 
 
+# vLLM exposes its CLI through `EngineArgs` / `AsyncEngineArgs` add_cli_args
+# helpers. AST-walking those for argparse-style add_argument calls would be
+# more accurate but heavy; instead we mine attribute names that match the
+# same keyword set used for SGLang. The fallback is intentionally permissive
+# because vLLM versions reshuffle their classes frequently.
+_VLLM_BACKEND_KEYWORDS = (
+    "backend", "enable_", "disable_", "fused", "mixed",
+    "compilation", "cudagraph", "kv_cache", "attention", "rocm",
+    "aiter", "moe", "scheduler",
+)
+
+
+def discover_vllm_backend_flags(
+    arg_utils_path: Path = DEFAULT_VLLM_ARG_UTILS,
+) -> list[str]:
+    """AST-parse vLLM's arg_utils.py and return likely backend flag names.
+
+    Mirrors :func:`discover_backend_flags` for the vLLM stack. Returns a
+    sorted list of CLI-style flags (``--kv-cache-dtype``, ``--max-num-seqs``).
+    Empty when the file is missing — keeps the executor working on hosts
+    that ship only one of {sglang, vllm}.
+    """
+    if not arg_utils_path.exists():
+        log.info("discover_vllm_backend_flags: %s not found, returning empty",
+                  arg_utils_path)
+        return []
+    try:
+        source = arg_utils_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError) as exc:
+        log.warning("discover_vllm_backend_flags: parse failed: %s", exc)
+        return []
+    flags: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and any(
+            kw in node.attr for kw in _VLLM_BACKEND_KEYWORDS
+        ):
+            flags.add("--" + node.attr.replace("_", "-"))
+        elif isinstance(node, ast.keyword) and node.arg and any(
+            kw in node.arg for kw in _VLLM_BACKEND_KEYWORDS
+        ):
+            flags.add("--" + node.arg.replace("_", "-"))
+    return sorted(flags)
+
+
+def _augment_grid_with_discovered_flags(
+    base_grid: list[GridVariant],
+    discovered: list[str],
+    *,
+    framework: str,
+) -> list[GridVariant]:
+    """Append GridVariant stubs for AST-discovered flags not in the base grid.
+
+    For every discovered flag whose name doesn't already appear in any
+    existing variant's args, we synthesize a single boolean-style probe
+    (just the flag, no value) so the grid runner can A/B test it. Flags
+    that look like enum/integer parameters (containing keywords like
+    ``backend`` / ``size`` / ``num`` / ``ratio``) are skipped here because
+    a bare flag is meaningless for those — the LLM is expected to inject
+    explicit values via ``params.grid``. This keeps the auto-augmentation
+    safe (no malformed CLI) while still expanding the search by ~5-15
+    boolean toggles per session.
+    """
+    if not discovered:
+        return list(base_grid)
+    fw = (framework or "").strip().lower()
+    existing_args = " ".join(v.extra_sglang_args for v in base_grid).lower()
+    existing_envs = {k.lower() for v in base_grid for k in v.extra_envs}
+    out: list[GridVariant] = list(base_grid)
+    # Heuristic: skip flags that obviously want a value, not a bare presence.
+    _NEEDS_VALUE = (
+        "backend", "size", "num", "ratio", "fraction", "policy",
+        "dtype", "tokens", "len", "level", "interval", "config",
+        "batch", "graph", "step", "round",
+    )
+    appended = 0
+    for flag in discovered:
+        # ``flag`` is always ``--foo-bar``; convert back to attr name.
+        attr = flag.lstrip("-").replace("-", "_")
+        if any(kw in attr for kw in _NEEDS_VALUE):
+            continue
+        if flag.lower() in existing_args:
+            continue
+        # Avoid env-shadowed toggles (rare, but guards against duplicate
+        # work when DEFAULT_VLLM_BACKENDS_GRID already exposes the same
+        # behavior through extra_envs).
+        if attr.upper() in existing_envs:
+            continue
+        out.append(GridVariant(
+            name=f"{fw or 'auto'}_discovered_{attr}",
+            extra_sglang_args=flag,
+            note="discovered_ast",
+        ))
+        appended += 1
+    if appended:
+        log.info(
+            "augmented %s grid with %d AST-discovered boolean variants "
+            "(base=%d total=%d)",
+            fw or "auto", appended, len(base_grid), len(out),
+        )
+    return out
+
+
 # ---------------------------------------------------------------------------
 class BackendsExecutor:
     """ActionRunner for the ``backends`` action."""
@@ -303,7 +505,9 @@ class BackendsExecutor:
         default_vllm_grid: list[GridVariant] | None = None,
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
-        variant_timeout_sec: int = 900,
+        variant_timeout_sec: int = 2400,
+        default_max_candidates_per_round: int = 5,
+        default_max_synergy_combos: int = 4,
     ):
         self.default_grid = list(default_grid or DEFAULT_BACKENDS_GRID)
         self.default_vllm_grid = list(default_vllm_grid or DEFAULT_VLLM_BACKENDS_GRID)
@@ -313,6 +517,17 @@ class BackendsExecutor:
         )
         self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
         self.variant_timeout_sec = variant_timeout_sec
+        # Per-round caps mirror ParamsExecutor's incremental-DFS model so a
+        # single `backends` call doesn't burn the whole wall-clock budget on
+        # ~30+ vLLM variants. With cap=5 and ~10min/variant, one round is
+        # ~50min (phase 1) + 4×10min (phase 2 combos) ≈ ~90min. The
+        # Coordinator's IR-26 idea-generation loop then re-proposes a new
+        # `backends` round with a fresh grid (LLM picks the next candidates
+        # based on `backend_winners_history` / `discovered_flags`) instead
+        # of doing one giant exhaustive search. Both can be overridden via
+        # task.params (set to 0 to disable a cap entirely).
+        self.default_max_candidates_per_round = int(default_max_candidates_per_round)
+        self.default_max_synergy_combos = int(default_max_synergy_combos)
 
     async def __call__(self, ctx) -> dict[str, Any]:
         params = ctx.task.params or {}
@@ -346,18 +561,50 @@ class BackendsExecutor:
             str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower()
         )
+        # Orchestration-supplied script + result_dir overrides. Both let
+        # the LLM route variants around scripts that hardcode
+        # ``--result-dir /workspace/`` (see SKILL.md "Magpie leak-path
+        # salvage"). Sanitized once at the executor boundary; downstream
+        # ``run_grid`` / ``materialize_config_with_envs`` calls trust the
+        # values verbatim.
+        try:
+            override_script = sanitize_script_name(params.get("benchmark_script"))
+            override_result_dir = sanitize_result_dir(params.get("result_dir"))
+        except ValueError as exc:
+            return {
+                "status": "failed",
+                "error_class": "bad_param",
+                "error": str(exc),
+            }
         config_path = materialize_config_with_envs(
             config_path,
             output_root,
             model_path=resolved_model or None,
             gpu_type=resolved_gpu or None,
+            benchmark_script=override_script,
             out_name="backends_base.with_envs.yaml",
         )
 
         base_extra_args = params.get("base_extra_args", "")
         base_tput = float(params.get("base_tput", 0.0))
         grid_override = params.get("grid")
-        if grid_override:
+        # Resolve framework once — needed for both grid selection and the
+        # AST-discovery augmentation path below.
+        import yaml
+        with config_path.open(encoding="utf-8") as _f:
+            _cfg = yaml.safe_load(_f) or {}
+        framework = str(
+            (_cfg.get("benchmark") or {}).get("framework") or ""
+        ).lower()
+        is_vllm = "vllm" in framework
+        # ``llm_specified_grid`` is True iff the LLM explicitly passed
+        # ``params.grid=[...]``. The LLM still owns the *search-space
+        # decision* (no cap is applied to LLM grids), but the
+        # ``backends_search`` ledger filters BOTH default and LLM grids
+        # uniformly so an LLM-supplied variant that's content-identical
+        # to a previously-tested one is dropped before launch.
+        llm_specified_grid = bool(grid_override)
+        if llm_specified_grid:
             grid = [
                 GridVariant(name=v["name"],
                             extra_sglang_args=v.get("extra_sglang_args", ""),
@@ -368,15 +615,54 @@ class BackendsExecutor:
         else:
             # Pick the framework-appropriate grid; SGLang flags (--attention-
             # backend, --schedule-policy) are rejected by vLLM and vice versa.
-            import yaml
-            with config_path.open(encoding="utf-8") as _f:
-                _cfg = yaml.safe_load(_f) or {}
-            _fw = str((_cfg.get("benchmark") or {}).get("framework") or "").lower()
             grid = (
                 list(self.default_vllm_grid)
-                if "vllm" in _fw
+                if is_vllm
                 else list(self.default_grid)
             )
+            # T1: AST-discover boolean flags from the live framework's
+            # server_args / arg_utils and append them as auto-probes. The
+            # heuristic in `_augment_grid_with_discovered_flags` skips
+            # value-typed flags (where a bare presence is meaningless),
+            # so the appended set is intentionally conservative — the LLM
+            # remains the source of truth for value-typed combinations
+            # via ``params.grid``. Only runs for the default grid path;
+            # LLM-supplied grids are taken as authoritative.
+            disable_discovery = bool(params.get("disable_discovery", False))
+            if not disable_discovery:
+                # Resolve the discovery path through the module globals so
+                # tests / operators can monkeypatch DEFAULT_*_PATH at
+                # runtime without re-importing this module. (Function
+                # default args bind at def-time; module attrs don't.)
+                import sys as _sys
+                _self_mod = _sys.modules[__name__]
+                if is_vllm:
+                    src_path, discovery_note = resolve_vllm_arg_utils_path()
+                    discovered = discover_vllm_backend_flags(
+                        arg_utils_path=src_path,
+                    )
+                else:
+                    src_path, discovery_note = resolve_sglang_server_args_path()
+                    discovered = discover_backend_flags(
+                        server_args_path=src_path,
+                    )
+                src_path_str = str(src_path)
+                if discovered:
+                    grid = _augment_grid_with_discovered_flags(
+                        grid, discovered, framework=framework or "auto",
+                    )
+                    self._record_discovered(
+                        framework=framework or ("vllm" if is_vllm else "sglang"),
+                        backend_flags=discovered,
+                        source_path=src_path_str,
+                    )
+                elif not disable_discovery:
+                    self._record_discovered(
+                        framework=framework or ("vllm" if is_vllm else "sglang"),
+                        backend_flags=[],
+                        source_path=src_path_str,
+                        discovery_error=discovery_note,
+                    )
 
         # User-declared variant skip list (operator prompt / --skip-variants
         # / task params). Pure name/glob match; hyperloom holds zero policy
@@ -385,8 +671,9 @@ class BackendsExecutor:
         # attn_aiter") was wrong as soon as the operator changed TP or
         # swapped to a head-count fork. Incompatibility knowledge lives
         # with the caller (prompt / brain agent / operator); we just
-        # honour the spec. Dropped variants are surfaced in the response
-        # so the critic agent can attribute grid-size shrinkage.
+        # honour the spec. Applied AFTER the default grid is augmented by
+        # AST discovery, so skip-globs match the final grid (both
+        # operator-typed names and discovery-injected names).
         skip_spec = resolve_skip_spec(params)
         grid, dropped_variants = apply_user_skip_list(
             grid, skip_spec=skip_spec,
@@ -398,10 +685,92 @@ class BackendsExecutor:
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
 
+        # --- Backends search ledger (content fingerprint dedup) ---
+        # The ledger has the same shape as ``params_search``; the
+        # Coordinator injects it from SharedState. Filtering is applied
+        # UNIFORMLY across default and LLM-supplied grids so an LLM
+        # rename of an already-tested variant collapses to the same
+        # fingerprint and gets dropped. ``name_index`` carries old
+        # state-file rows where the fingerprint wasn't yet stamped, so
+        # name-only matches still rescue dedup on resume.
+        search = dict(
+            params.get("backends_search") or _initial_backends_search_state()
+        )
+        search.setdefault("schema_version", 1)
+        search.setdefault("accepted", [])
+        search.setdefault("rejected", [])
+        search.setdefault("tested", {})
+        search.setdefault("name_index", {})
+        search.setdefault("cursor", 0)
+
+        def _entry_fp(entry: Any) -> str:
+            if not isinstance(entry, dict):
+                return ""
+            fp = entry.get("fingerprint")
+            if fp:
+                return str(fp)
+            return variant_fingerprint(
+                str(entry.get("extra_sglang_args") or ""),
+                dict(entry.get("extra_envs") or {}),
+            )
+
+        accepted_fps = {_entry_fp(v) for v in search.get("accepted", [])}
+        rejected_fps = {_entry_fp(v) for v in search.get("rejected", [])}
+        accepted_fps.discard("")
+        rejected_fps.discard("")
+        tested_dict = search.get("tested") or {}
+        tested_fps = set(tested_dict.keys())
+        # Legacy rows whose tested dict was keyed by name pre-migration:
+        # re-derive fingerprints from the stored args/envs so they still
+        # block re-runs even when the resume-side migration hasn't fired.
+        for v in tested_dict.values():
+            if isinstance(v, dict):
+                tested_fps.add(_entry_fp(v))
+        tested_fps.discard("")
+        name_index = dict(search.get("name_index") or {})
+
+        def _is_dup(variant: GridVariant) -> bool:
+            fp = variant.fingerprint
+            if fp in accepted_fps or fp in rejected_fps or fp in tested_fps:
+                return True
+            legacy = name_index.get(variant.name)
+            if legacy and legacy in (accepted_fps | rejected_fps | tested_fps):
+                return True
+            return False
+
+        full_grid_size = len(grid)
+        pre_dedup = list(grid)
+        deduped_grid = [v for v in pre_dedup if not _is_dup(v)]
+        log.info(
+            "backends dedup: grid=%d → %d (filtered=%d) llm_grid=%s",
+            full_grid_size, len(deduped_grid),
+            full_grid_size - len(deduped_grid), llm_specified_grid,
+        )
+
+        # --- Per-round candidate cap (default 5) ---
+        # Only applies when the LLM did NOT explicitly inject a grid via
+        # ``params.grid``: an LLM grid is treated as "I picked these
+        # exact candidates" so cropping it would be wrong. The dedup
+        # filter above still ran on the LLM grid — what's NOT cropped
+        # is the post-dedup remainder.
+        cap = int(params.get(
+            "max_candidates_per_round",
+            self.default_max_candidates_per_round,
+        ))
+        if not llm_specified_grid and cap > 0:
+            grid = deduped_grid[:cap]
+        else:
+            grid = deduped_grid
+        capped_grid_size = len(grid)
+
         # `resolved_model` / `resolved_gpu` were resolved above for the
         # materialization step; reuse them here so each variant's YAML
         # overrides the legacy hardcoded model + benchmark_script fields.
         # --- Phase 1: single-variable grid ---
+        log.info(
+            "backends phase 1: running %d/%d variants (cap=%d, llm_grid=%s)",
+            capped_grid_size, full_grid_size, cap, llm_specified_grid,
+        )
         results = await run_grid(
             base_yaml_path=config_path,
             base_extra_args=base_extra_args,
@@ -410,6 +779,8 @@ class BackendsExecutor:
             variant_timeout_sec=timeout_sec,
             model_path=resolved_model,
             gpu_type=resolved_gpu,
+            benchmark_script=override_script,
+            result_dir=override_result_dir,
         )
         winners = pick_winners(results, baseline_tput=base_tput)
         winner_names = {w.name for w in winners}
@@ -419,12 +790,78 @@ class BackendsExecutor:
         # FP8BMM needs KV fp8, aiter_linear needs aiter base). After
         # phase 1, we generate combo variants from known synergy groups
         # and test them. This avoids underestimating stacked configs.
+        #
+        # Three sources of synergy groups (T2):
+        #   1. ``params.synergy_groups`` — LLM-injected list of name lists
+        #   2. ``params.synergy_mode == "auto"`` — Cartesian over winners
+        #      (capped to small N to bound runtime)
+        #   3. ``SYNERGY_GROUPS`` module constant (default fallback)
+        # The Coordinator-side SharedState ``synergy_attempted`` set is
+        # consulted to skip combos already tested in earlier rounds.
         combo_results: list[VariantResult] = []
+        groups_override = params.get("synergy_groups")
+        synergy_mode = str(params.get("synergy_mode") or "").strip().lower()
+        if isinstance(groups_override, list) and groups_override:
+            override_groups = [
+                [str(x) for x in g if isinstance(x, str)]
+                for g in groups_override
+                if isinstance(g, list) and g
+            ]
+        else:
+            override_groups = None
+        already_attempted: set[str] = set(
+            params.get("synergy_attempted") or []
+        )
+
+        def _combo_key(names: list[str]) -> str:
+            return "+".join(sorted(str(n) for n in names if n))
+
+        # Per-round synergy cap (default 4). LLM-injected synergy_groups
+        # are treated like an LLM grid override and NOT cropped.
+        synergy_cap = int(params.get(
+            "max_synergy_combos", self.default_max_synergy_combos,
+        ))
+        new_attempts: list[list[str]] = []
         if len(winners) >= 1:
-            combos = _build_synergy_combos(grid, winner_names)
+            if override_groups is not None:
+                combos = _build_synergy_combos_from_groups(
+                    grid, override_groups,
+                )
+                llm_specified_synergy = True
+            elif synergy_mode == "auto":
+                combos = _auto_synergy_combos(
+                    grid, winner_names,
+                    max_combo_size=int(params.get("max_combo_size", 3)),
+                    max_combos=synergy_cap if synergy_cap > 0 else int(
+                        params.get("max_combos", 4),
+                    ),
+                )
+                llm_specified_synergy = False
+            else:
+                combos = _build_synergy_combos(grid, winner_names)
+                llm_specified_synergy = False
+
+            if already_attempted:
+                combos = [
+                    c for c in combos
+                    if _combo_key(c.name.removeprefix("combo_").split("+"))
+                    not in already_attempted
+                ]
+            # Apply the default-path cap. `_auto_synergy_combos` already
+            # honored synergy_cap when building, but `_build_synergy_combos`
+            # / `_build_synergy_combos_from_groups` did not.
+            if (
+                not llm_specified_synergy
+                and synergy_cap > 0
+                and len(combos) > synergy_cap
+            ):
+                combos = combos[:synergy_cap]
             if combos:
-                log.info("backends phase 2: testing %d synergy combos",
-                         len(combos))
+                log.info("backends phase 2: testing %d synergy combos "
+                         "(mode=%s skipped_attempted=%d)",
+                         len(combos),
+                         synergy_mode or ("override" if override_groups else "auto-default"),
+                         len(already_attempted))
                 combo_results = await run_grid(
                     base_yaml_path=config_path,
                     base_extra_args=base_extra_args,
@@ -433,7 +870,16 @@ class BackendsExecutor:
                     variant_timeout_sec=timeout_sec,
                     model_path=resolved_model,
                     gpu_type=resolved_gpu,
+                    benchmark_script=override_script,
+                    result_dir=override_result_dir,
                 )
+                # Track which combos were actually tested so the next
+                # round won't replay them. Coordinator persists this
+                # back into SharedState via the result-dict field below.
+                for c in combos:
+                    new_attempts.append(
+                        c.name.removeprefix("combo_").split("+")
+                    )
 
         all_results = results + combo_results
         all_winners = pick_winners(all_results, baseline_tput=base_tput)
@@ -451,6 +897,89 @@ class BackendsExecutor:
 
         successful_runs = [r for r in all_results if r.status == "succeeded"]
 
+        # --- backends_search update -------------------------------------
+        # Mirror of params: append every tested fingerprint to ``tested``,
+        # the non-winners to ``rejected``. ``accepted`` is intentionally
+        # NOT touched here — the Coordinator owns promote semantics and
+        # writes accepted via :meth:`SharedState.record_backends_accepted`
+        # when the round's best beats current_best by the promote gate.
+        winner_fps = {w.fingerprint for w in all_winners}
+        tested_update = dict(search.get("tested") or {})
+        rejected_update = list(search.get("rejected") or [])
+        round_id = f"backends-{int(search.get('cursor') or 0) + 1:03d}"
+        ts = _now_iso()
+        for r in all_results:
+            fp = r.fingerprint
+            gain = (
+                ((r.output_throughput - base_tput) / base_tput * 100.0)
+                if (
+                    isinstance(r.output_throughput, (int, float))
+                    and r.output_throughput > 0
+                    and base_tput > 0
+                )
+                else None
+            )
+            tested_update[fp] = {
+                "name": r.name,
+                "extra_sglang_args": r.extra_sglang_args,
+                "extra_envs": dict(r.extra_envs or {}),
+                "note": r.note,
+                "status": r.status,
+                "tput": r.output_throughput,
+                "gain_pct": gain,
+                "base_tput": base_tput,
+                "round_id": round_id,
+                "ts": ts,
+            }
+            name_index[r.name] = fp
+            if r.status != "succeeded" or fp not in winner_fps:
+                rejected_update.append({
+                    "name": r.name,
+                    "extra_sglang_args": r.extra_sglang_args,
+                    "extra_envs": dict(r.extra_envs or {}),
+                    "note": r.note,
+                    "fingerprint": fp,
+                    "reason": (
+                        "failed" if r.status != "succeeded" else "not_keep"
+                    ),
+                    "gain_pct": gain,
+                    "tput": r.output_throughput,
+                })
+
+        # Dedup rejected by fingerprint, keep the latest reason; also drop
+        # anything that already lives in ``accepted`` (a previously-rejected
+        # variant that later won shouldn't appear in both buckets).
+        accepted_fps_now = {_entry_fp(v) for v in (search.get("accepted") or [])}
+        rejected_dedup: dict[str, dict[str, Any]] = {}
+        for entry in rejected_update:
+            fp = str(entry.get("fingerprint") or "")
+            if not fp or fp in accepted_fps_now:
+                continue
+            rejected_dedup[fp] = entry
+
+        search_update = {
+            "schema_version": 1,
+            "accepted": list(search.get("accepted") or []),
+            "rejected": list(rejected_dedup.values()),
+            "tested": tested_update,
+            "name_index": name_index,
+            "cursor": len(tested_update),
+            "last_round": {
+                "round_id": round_id,
+                "action": "backends",
+                "base_tput": base_tput,
+                "base_extra_args": base_extra_args,
+                "tested": [r.fingerprint for r in all_results],
+                "round_winners": [w.fingerprint for w in all_winners],
+                "combos": [c.fingerprint for c in combo_results],
+                "ts": ts,
+            },
+        }
+        # ``backends_search_exhausted`` means "no new fingerprints made it
+        # past dedup this round" — Coordinator uses it (alongside the
+        # params-grid check) to decide whether to switch to kernel work.
+        backends_search_exhausted = len(deduped_grid) == 0
+
         return {
             "status": "succeeded" if successful_runs else "failed",
             "base_tput": base_tput,
@@ -463,7 +992,45 @@ class BackendsExecutor:
             "workspace": output_root.as_posix(),
             "phase2_combos_tested": len(combo_results),
             "dropped_variants": dropped_variants,
+            # T1/T2 — Coordinator picks these up to update SharedState.
+            "discovered_flags_update": self._pop_discovered_update(),
+            "synergy_attempted_new": new_attempts,
+            # backends_search ledger update (parity with params_search).
+            "backends_search_update": search_update,
+            "backends_search_exhausted": backends_search_exhausted,
         }
+
+    # ------------------------------------------------------------------
+    # T1/T2 — discovery-cache + SharedState plumbing
+    # ------------------------------------------------------------------
+    def _record_discovered(
+        self,
+        *,
+        framework: str,
+        backend_flags: list[str],
+        source_path: str,
+        discovery_error: str = "",
+    ) -> None:
+        """Stage one framework's discovered flags for the next result dict.
+
+        The executor is stateless across invocations w.r.t. SharedState
+        (the Coordinator owns state.json). We stash the latest discovery
+        on a per-instance buffer that gets drained into the result dict
+        by ``_pop_discovered_update``.
+        """
+        payload: dict[str, Any] = {
+            "framework": framework,
+            "backend_flags": list(backend_flags),
+            "source_path": source_path,
+        }
+        if discovery_error:
+            payload["discovery_error"] = discovery_error
+        self._pending_discovered = payload
+
+    def _pop_discovered_update(self) -> dict[str, Any] | None:
+        out = getattr(self, "_pending_discovered", None)
+        self._pending_discovered = None
+        return out
 
 
 backends_executor = BackendsExecutor()
@@ -471,7 +1038,12 @@ backends_executor = BackendsExecutor()
 
 __all__ = [
     "DEFAULT_BACKENDS_GRID",
+    "DEFAULT_SGLANG_SERVER_ARGS",
+    "DEFAULT_VLLM_ARG_UTILS",
+    "DEFAULT_VLLM_BACKENDS_GRID",
+    "SYNERGY_GROUPS",
     "BackendsExecutor",
     "backends_executor",
     "discover_backend_flags",
+    "discover_vllm_backend_flags",
 ]

@@ -27,7 +27,7 @@ Env vars consumed (besides the standard backend creds):
   ROCR_VISIBLE_DEVICES                         — pin the GPU
   CLAUDE_MODEL                                 — default claude-opus-4-7
   CODEX_MODEL                                  — default gpt-5.4
-  INFERENCE_OPTIMIZER_SESSION_DIR              — override session dir for tests
+  USER_DATA_PATH                               — override session dir
                                                  (default: /workspace/hyperloom).
   INFERENCE_OPTIMIZER_KB_ROOT                  — marathon KB dir (kb_query.py +
                                                  entries.jsonl); default:
@@ -44,17 +44,18 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
 from .orchestrator.action_executors import (
+    TargetAnalysisExecutor,
     backends_executor,
     baseline_executor,
     params_executor,
     pmc_roofline_executor,
     profile_executor,
     report_executor,
+    session_breakdown_executor,
     sweep_executor,
     validate_stack_executor,
 )
@@ -69,6 +70,7 @@ from .orchestrator.backends import (
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
+from .orchestrator.framework_paths import resolve_source_file_allowlist
 from .orchestrator.objective import Objective, build_objective
 from .orchestrator.shared_state import SharedState
 from .orchestrator.system_prompts.prompt_builder import (
@@ -77,7 +79,7 @@ from .orchestrator.system_prompts.prompt_builder import (
 )
 from .paths import (
     DEFAULT_SESSION_DIR,
-    ENV_OVERRIDE_SESSION_DIR,
+    ENV_USER_DATA_PATH,
     _SESSION_SKELETON,
     asset_system_prompts_dir,
     make_session_dir,
@@ -146,6 +148,7 @@ def _build_orchestration_prompt(
         objective_value=value,
         max_minutes=int(max_minutes),
         rules_fragment_path=_orchestration_rules_fragment_path(),
+        framework_source_roots=resolve_source_file_allowlist(),
     )
 
 
@@ -186,8 +189,15 @@ _GFX_TO_RUNNER: dict[str, str] = {
     # Magpie subprocess output deep in the run.
     "gfx942":  "mi300x",
     "gfx950":  "mi355x",
-    "gfx1100": "mi325x",
 }
+
+
+def _gpu_runner_type(gpu_type: str) -> str:
+    """Return the Magpie runner label for a resolved real GPU type."""
+    normalized = str(gpu_type or "").strip().lower()
+    if normalized == "mi325x":
+        return "mi300x"
+    return normalized
 
 
 # ---------------------------------------------------------------------------
@@ -475,11 +485,13 @@ def _seed_shared_state(
 ) -> SharedState:
     state = SharedState(
         session_id=session_id,
+        claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
+        sandbox_user_id=(os.environ.get("SANDBOX_USER_ID") or "").strip(),
         model_name=Path(args.model).name,
         model_path=str(args.model),
         model_class=args.model_class or "",
         framework=os.environ.get("FRAMEWORK", "sglang"),
-        gpu_type=os.environ.get("GPU_TYPE", ""),
+        gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         kernel_enabled=not getattr(args, "no_kernel", False),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
@@ -545,8 +557,9 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "backends":       backends_executor,
     "params":         params_executor,
     "sweep":          sweep_executor,
-    "report":         report_executor,
-    "validate_stack": validate_stack_executor,
+    "report":            report_executor,
+    "session_breakdown": session_breakdown_executor,
+    "validate_stack":    validate_stack_executor,
 }
 
 # Real executors enabled only when kernel-mode is on (profile/pmc_roofline
@@ -556,44 +569,73 @@ _REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {
     "pmc_roofline": pmc_roofline_executor,
 }
 
-# Prep / orchestration-only / agent-owned action kinds that the
-# Orchestration loop still needs to dispatch but whose bodies are no-ops
-# (the orchestration agent does the actual work via emit_intent). Kept
-# split so --no-kernel can exclude kernel-owned kinds.
-_NOOP_KINDS_COMMON: tuple[str, ...] = (
-    "setup", "classify", "target_analysis",
-    "dream", "re_explore", "recover",
-    "comm_optimization", "compiler_tuning",
-)
+# Kernel-owned action kinds that the Orchestration loop dispatches via
+# ``request{target_agent='kernel', kind=...}`` but whose executor body
+# in this process is a no-op (the actual work happens inside the kernel
+# agent's request handlers). Kept as a tuple so SubAgentRunner doesn't
+# fail with "no_executor" when these names appear in stale tasks.
+#
+# `dream` / `re_explore` / `recover` / `comm_optimization` /
+# `compiler_tuning` were removed from this list alongside the
+# corresponding entries in `prompt_builder.{FULL,NO_KERNEL}_ENABLED_ACTIONS`.
+# Their executors were `_noop_prep` (silent success) which produced
+# misleading "succeeded" outcomes; with them gone, any stale state.json
+# resume that still references one of these kinds will surface as
+# `no_executor` instead of a fake KEEP. Re-add only when real
+# executors land (see remain_todo.md sections C, I, M).
+#
+# `target_analysis` used to be a noop-when-unset stub here; it is now
+# wired unconditionally to the real :class:`TargetAnalysisExecutor`
+# below (which writes a structured ``reason='no_target_gpu_configured'``
+# marker JSON when ``--compare-against-gpu`` is unset).
 _NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = (
     "kernel_opt", "integrate", "deep_kernel_analysis",
     "operator_tuning", "vendor_kernel_config",
 )
 
 
-def _register_executors(coordinator: Coordinator, *, no_kernel: bool = False) -> None:
+def _register_executors(
+    coordinator: Coordinator,
+    *,
+    no_kernel: bool = False,
+    compare_against_gpu: str | None = None,
+    session_dir: Path | None = None,
+) -> None:
     """Wire all currently-available action executors.
 
     Real executors are pulled from ``_REAL_EXECUTORS_FULL`` (always) and
-    ``_REAL_EXECUTORS_KERNEL_ONLY`` (when kernel-mode is on). Kinds that
-    the Orchestration loop dispatches but whose bodies are no-ops (prep
-    stubs + kernel-owned actions whose work happens in handlers) get
-    ``_noop_prep`` so SubAgentRunner doesn't fail with "no_executor".
+    ``_REAL_EXECUTORS_KERNEL_ONLY`` (when kernel-mode is on). Kernel-owned
+    kinds (whose work is done inside the kernel agent via emit_intent)
+    get ``_noop_prep`` so SubAgentRunner doesn't fail with "no_executor".
 
-    When ``no_kernel`` is True, kernel-owned action stubs are skipped and
-    ``profile`` is also skipped (profiling only feeds kernel-opt).
+    When ``no_kernel`` is True, the kernel-owned executor table is
+    skipped, the kernel-only no-op stubs are skipped, and ``profile`` is
+    also skipped (profiling only feeds kernel-opt).
+
+    ``target_analysis`` is *always* registered with the real
+    :class:`TargetAnalysisExecutor`. When ``compare_against_gpu`` is a
+    non-empty string, the executor fetches the matching InferenceX
+    reference; when empty / None, it writes a structured
+    ``reason='no_target_gpu_configured'`` marker JSON so the report
+    section is rendered uniformly in both cases.
     """
     for kind, fn in _REAL_EXECUTORS_FULL.items():
         coordinator.sub.register_executor(kind, fn)
 
-    if no_kernel:
-        noop_kinds = _NOOP_KINDS_COMMON
-    else:
-        for kind, fn in _REAL_EXECUTORS_KERNEL_ONLY.items():
-            coordinator.sub.register_executor(kind, fn)
-        noop_kinds = _NOOP_KINDS_COMMON + _NOOP_KINDS_KERNEL_ONLY
+    coordinator.sub.register_executor(
+        "target_analysis",
+        TargetAnalysisExecutor(
+            compare_against_gpu=(compare_against_gpu or "").strip(),
+            session_dir=session_dir,
+        ),
+    )
 
-    for kind in noop_kinds:
+    if no_kernel:
+        return
+
+    for kind, fn in _REAL_EXECUTORS_KERNEL_ONLY.items():
+        coordinator.sub.register_executor(kind, fn)
+    for kind in _NOOP_KINDS_KERNEL_ONLY:
         coordinator.sub.register_executor(kind, _noop_prep)
 
 
@@ -873,9 +915,11 @@ def _ensure_oob_proxy_source() -> bool:
     """Make sure ``auth_proxy.py`` exists at the path supervisor expects.
 
     ``ensure_auth_proxy.sh`` looks for the script at
-    ``${HYPERLOOM_ROOT}/OOB/oob_cli/auth_proxy.py`` (default
-    ``/opt/hyperloom/OOB/oob_cli/auth_proxy.py``). On a fresh sandbox where
-    ``kernel-agent/scripts/install.sh`` has NOT run yet, that file is absent
+    ``${HYPERLOOM_ROOT}/OOB/oob_cli/auth_proxy.py``. After the migration
+    ``HYPERLOOM_ROOT`` defaults to ``$USER_DATA_PATH/runtime/source-mirrors``
+    so the auth-proxy source ends up under the session tree alongside the
+    GEAK / TraceLens mirrors. On a fresh sandbox where
+    ``kernel-agent/scripts/install.sh`` has NOT run yet, the file is absent
     and the supervisor silently noops + returns 1, leaving :4002 dead and
     Claude SDK requests hitting the gateway directly with ``x-api-key`` →
     HTTP 401 → "Waiting for first result" hang.
@@ -885,7 +929,13 @@ def _ensure_oob_proxy_source() -> bool:
     ``inference_optimization/OOB``) so the supervisor can find + start it.
     Returns True if the file is present afterwards, False otherwise.
     """
-    hyperloom_root = Path(os.environ.get("HYPERLOOM_ROOT", "/opt/hyperloom"))
+    from .paths import source_mirrors_dir as _source_mirrors
+
+    hyperloom_root_env = os.environ.get("HYPERLOOM_ROOT")
+    if hyperloom_root_env:
+        hyperloom_root = Path(hyperloom_root_env)
+    else:
+        hyperloom_root = _source_mirrors(_session_dir_resolve())
     target_dir = hyperloom_root / "OOB" / "oob_cli"
     proxy_py = target_dir / "auth_proxy.py"
     if proxy_py.is_file():
@@ -1011,7 +1061,7 @@ def _check_shm_disk() -> None:
 
 
 def _check_node_claude_cli() -> None:
-    """WARN-only presence check for the bundled ``claude`` / ``codex`` CLIs.
+    """WARN-only presence check for the bundled agent CLIs and ``@cursor/sdk``.
 
     ``claude_agent_sdk`` typically shells out to the bundled
     ``@anthropic-ai/claude-code`` CLI; without it on PATH the SDK falls
@@ -1021,6 +1071,10 @@ def _check_node_claude_cli() -> None:
     / ``--critic-codex-bare`` and/or ``--kernel-codex``). ``node`` is a
     transitive dep — if it's missing, npm-based recovery via
     ``kernel-agent/scripts/install.sh`` won't work either.
+
+    The cursor backend talks to Cursor's own gateway via the ``@cursor/sdk``
+    Node library (not a CLI). We probe it via ``require.resolve`` against
+    ``$(npm root -g)`` since ``shutil.which('cursor')`` would always miss.
     """
     missing = [t for t in ("node", "claude", "codex") if shutil.which(t) is None]
     if missing:
@@ -1029,6 +1083,29 @@ def _check_node_claude_cli() -> None:
             f"ClaudeBackend / CodexBackend may fall back to direct HTTP. "
             f"Run kernel-agent/scripts/install.sh to bring them in."
         )
+    # @cursor/sdk presence — probe via Node since it's a library, not a CLI.
+    if shutil.which("node") is not None and shutil.which("npm") is not None:
+        try:
+            npm_root = subprocess.run(
+                ["npm", "root", "-g"], capture_output=True, text=True, timeout=10,
+            )
+            global_modules = (npm_root.stdout or "").strip()
+            probe = subprocess.run(
+                ["node", "-e", "require.resolve('@cursor/sdk')"],
+                capture_output=True, text=True, timeout=10,
+                env={**os.environ, "NODE_PATH": global_modules} if global_modules else None,
+            )
+            if probe.returncode != 0:
+                print(
+                    "Preflight: WARNING — @cursor/sdk not resolvable; cursor "
+                    "backend will fail to start. Run kernel-agent/scripts/"
+                    "install.sh to install it globally via npm."
+                )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            print(
+                "Preflight: WARNING — could not probe @cursor/sdk presence; "
+                "cursor backend may be unavailable."
+            )
 
 
 def _emit_preflight_diagnostics(
@@ -1068,8 +1145,8 @@ def _emit_preflight_diagnostics(
     print(f"  asset_root          = {asset_root()}")
     print(
         f"  session_dir         = {_session_dir_resolve()}  "
-        f"({ENV_OVERRIDE_SESSION_DIR}="
-        f"{os.environ.get(ENV_OVERRIDE_SESSION_DIR, '<unset>')}, "
+        f"({ENV_USER_DATA_PATH}="
+        f"{os.environ.get(ENV_USER_DATA_PATH, '<unset>')}, "
         f"default={DEFAULT_SESSION_DIR})"
     )
     print(f"  magpie_python       = {magpie_python}")
@@ -1087,42 +1164,6 @@ def _emit_preflight_diagnostics(
             "  proxy URLs          = DIRECT — auth-proxy unavailable; "
             "Claude SDK may 401"
         )
-
-    # Multi-node topology line. When nodes > 1, ``optimize`` may have just
-    # provisioned the RayJob (before this preflight); we still only print
-    # diagnostics here — no hard-fail if state is temporarily missing.
-    nodes = int(os.environ.get("INFERENCE_OPTIMIZER_NODES", "1") or 1)
-    if nodes > 1:
-        # /tmp/multi_node_state.json mirrors the path baked into
-        # inference_optimizer.multi_node.cli (MULTI_NODE_STATE_FILE env
-        # for tests); reading the same path here keeps the two ends in
-        # sync without importing from multi_node (which would couple
-        # the single-node path to httpx availability).
-        state_path = Path(os.environ.get(
-            "MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"
-        ))
-        if state_path.is_file():
-            try:
-                state = json.loads(state_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                state = {}
-        else:
-            state = {}
-        if state.get("rayjob_id"):
-            print(
-                f"  nodes               = {nodes} (multi_node skill ON, "
-                f"rayjob={state['rayjob_id']}, "
-                f"head={state.get('head_pod_ip', '?')}, "
-                f"RAY_ADDRESS={state.get('ray_address') or '(unset until head IP)'}')"
-            )
-        else:
-            print(
-                f"  nodes               = {nodes} (multi_node EXPECTED: "
-                f"no rayjob_id in {state_path} — pass --rayjob-image or set "
-                f"INFERENCE_OPTIMIZER_RAYJOB_IMAGE so `optimize` can provision "
-                f"the RayJob, or run `python3 -m inference_optimizer.multi_node "
-                f"create-rayjob --nodes {nodes} ...` before benchmarks)"
-            )
 
 
 def _probe_llm_catalog(
@@ -1447,48 +1488,31 @@ def _preflight() -> tuple[str, str] | None:
         print("Preflight: ray installed OK")
 
     # 2. Magpie — the benchmark engine all executors shell out to.
-    #
-    # Resolution order for the source dir, in order of priority:
-    #   1. $MAGPIE_DIR env (operator override; typically a wekafs fork
-    #      with un-pushed local commits — install from there, NEVER
-    #      clone main on top of it).
-    #   2. $WORKSPACE_ROOT/Magpie (default /workspace/Magpie). If the
-    #      dir already has setup.py / pyproject.toml, install from it;
-    #      otherwise git-clone main into it first.
-    #
-    # ``import Magpie`` is the cheap fast-path: if Python already has
-    # Magpie on sys.path, we skip install entirely (saves ~30s of pip
-    # work on every restart). This applies to both branches.
+    # ``$MAGPIE_DIR`` is the operator override; install.sh defaults it
+    # to ``$HYPERLOOM_RUNTIME_DIR/Magpie`` (= ``$USER_DATA_PATH/runtime/
+    # Magpie``) so a missing Magpie auto-clones into the session tree.
+    # Falls back to legacy ``/workspace/Magpie`` for environments still
+    # on pre-migration launchers.
     check = subprocess.run(
         [magpie_python, "-c", "import Magpie"],
         capture_output=True,
     )
     if check.returncode != 0:
-        magpie_env = os.environ.get("MAGPIE_DIR", "").strip()
+        magpie_env = os.environ.get("MAGPIE_DIR")
         if magpie_env:
             magpie_dir = Path(magpie_env)
-            if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
-                print(
-                    f"Preflight: ERROR — $MAGPIE_DIR={magpie_dir} has no "
-                    f"setup.py/pyproject.toml; refusing to clone main on "
-                    f"top of an operator-supplied path. Fix the env or "
-                    f"unset $MAGPIE_DIR to fall back to the default."
-                )
-                raise FileNotFoundError(
-                    f"$MAGPIE_DIR={magpie_dir} is not a valid Magpie checkout"
-                )
-            print(f"Preflight: installing Magpie from $MAGPIE_DIR={magpie_dir} ...")
         else:
-            workspace_root = os.environ.get("WORKSPACE_ROOT") or "/workspace"
-            magpie_dir = Path(workspace_root) / "Magpie"
-            if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
-                print(f"Preflight: Magpie not importable and not found at {magpie_dir}; cloning ...")
-                subprocess.run(
-                    ["git", "clone", "--depth", "1",
-                     "https://github.com/AMD-AGI/Magpie.git", str(magpie_dir)],
-                    check=True,
-                )
-            print(f"Preflight: installing Magpie from {magpie_dir} ...")
+            from .paths import magpie_dir as _magpie_default
+            magpie_dir = _magpie_default(_session_dir_resolve())
+        magpie_dir.parent.mkdir(parents=True, exist_ok=True)
+        if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
+            print(f"Preflight: Magpie not importable and not found at {magpie_dir}; cloning ...")
+            subprocess.run(
+                ["git", "clone", "--depth", "1",
+                 "https://github.com/AMD-AGI/Magpie.git", str(magpie_dir)],
+                check=True,
+            )
+        print(f"Preflight: installing Magpie from {magpie_dir} ...")
         subprocess.run(
             [magpie_python, "-m", "pip", "install", "--quiet",
              *pip_extra, "-e", str(magpie_dir)],
@@ -1503,10 +1527,24 @@ def _preflight() -> tuple[str, str] | None:
     # auto-installed by benchmark_lib.sh at runtime.
     inferencex_path = os.environ.get("INFERENCEX_PATH", "")
     if not inferencex_path:
-        workspace_root = os.environ.get("WORKSPACE_ROOT") or "/workspace"
-        # Check common mount points
+        from .paths import (
+            magpie_dir as _magpie_default,
+            runtime_dir as _runtime_default,
+        )
+        runtime_root = _runtime_default(_session_dir_resolve())
+        magpie_root = (
+            Path(os.environ["MAGPIE_DIR"])
+            if os.environ.get("MAGPIE_DIR")
+            else _magpie_default(_session_dir_resolve())
+        )
+        # InferenceX detection order: Magpie's own InferenceX submodule
+        # first (the canonical layout after install.sh), then the
+        # standalone runtime checkout, then legacy host-level mounts so
+        # existing pre-migration pods keep working.
         for candidate in (
-            Path(workspace_root) / "Magpie" / "InferenceX",
+            magpie_root / "InferenceX",
+            runtime_root / "InferenceX",
+            Path("/wekafs/hyperloom/InferenceX"),
             Path("/opt/hyperloom/InferenceX"),
             Path("/wekafs/fully-local/inference_optimization/InferenceX"),
         ):
@@ -1910,340 +1948,385 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     await asyncio.to_thread(_provision_multi_node_rayjob_stack, args)
 
-    try:
-        proxy_urls = _preflight()
+    proxy_urls = _preflight()
 
-        # Hard-gate Claude model BEFORE any session work. Mutates args.claude_model
-        # in-place when falling back to opus-4-6; aborts with sys.exit(2) if the
-        # gateway catalog cannot be probed or neither allowed model is present.
-        catalog_ids = _validate_and_resolve_claude_model(args, proxy_urls)
-        _smoke_test_codex_model(args, catalog_ids)
-    
-        if args.resume:
-            # Resume mode: session_dir is fixed at /workspace/hyperloom (or
-            # $INFERENCE_OPTIMIZER_SESSION_DIR for tests). We re-mkdir the
-            # skeleton (idempotent) so a partially-initialised previous run
-            # is healed before we touch state.
-            session_dir = make_session_dir()
-            try:
-                manifest = load_manifest(session_dir)
-            except FileNotFoundError as exc:
-                print(f"ERROR: --resume failed: {exc}", file=sys.stderr)
-                sys.exit(2)
-            if not (session_dir / "state.json").exists():
-                print(
-                    f"ERROR: --resume failed: {session_dir}/state.json missing "
-                    f"(manifest exists but Coordinator never wrote SharedState)",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            state = SharedState.load_or_init(session_dir)
-            prior_stop = state.stop_reason
-            print(f"Resuming session: {session_dir}")
-            print(f"  manifest.session_id    : {manifest.get('session_id')}")
-            print(f"  prior baseline_tput   : {state.baseline_tput:.1f}")
-            print(f"  prior cumul_gain      : {state.cumulative_gain:.2f}%")
-            print(f"  prior current_best    : "
-                  f"{(state.current_best or {}).get('action')}/"
-                  f"{(state.current_best or {}).get('tput')}")
-            print(f"  prior stop_reason     : {prior_stop or '(none)'}")
-    
-            # Re-export session-level env vars from persisted state so the
-            # executors (baseline / profile / sweep / backends / params) resolve
-            # model / framework / gpu_type correctly. Without this, a resume
-            # in a fresh shell would fall back to YAML hardcoded defaults,
-            # potentially benchmarking the wrong model on the wrong framework.
-            if state.model_path:
-                os.environ["MODEL_PATH"] = state.model_path
-                print(f"  re-exported MODEL_PATH: {state.model_path}")
-            if state.framework:
-                os.environ["FRAMEWORK"] = state.framework
-                print(f"  re-exported FRAMEWORK : {state.framework}")
-            if state.gpu_type:
-                os.environ["GPU_TYPE"] = state.gpu_type
-                print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
-            # Honour persisted kernel_enabled flag on resume; CLI --no-kernel
-            # can still override on a previously-enabled session.
-            if not state.kernel_enabled:
-                args.no_kernel = True
-                print("  kernel agent          : DISABLED (persisted from original run)")
-    
-            # CRITICAL: a leftover stop_reason from the prior run (most often
-            # "time_exhausted") fools Orchestration into thinking the work is
-            # already done — it just heartbeats forever. Clear it so the new
-            # run has a clean signal. The Coordinator's run() always re-sets
-            # stop_reason at exit anyway.
-            prior_crash = state.crash_count
-            if prior_stop or prior_crash >= 3:
-                state.stop_reason = ""
-                # Reset persisted crash_count so a fresh resume isn't immediately
-                # tripped into "emergency" by accumulated failures from prior runs
-                # (e.g. authentication errors before .env was loaded).
-                state.crash_count = 0
-                state.save(session_dir)
-                print(
-                    f"  → cleared stop_reason and reset crash_count "
-                    f"(was {prior_crash}) for fresh resume"
-                )
-        else:
-            # Resolve model path from --model first, then $MODEL_PATH env. Without
-            # either, fail fast: silently falling back to the YAML's hardcoded
-            # `/wekafs/models/Qwen-Qwen3-8B` was the cause of "the optimizer ran
-            # the wrong model" reports — explicit > implicit.
-            if not args.model:
-                args.model = os.environ.get("MODEL_PATH") or ""
-            if not args.model:
-                print(
-                    "ERROR: model is required. Pass --model <path> or set "
-                    "MODEL_PATH env (or use --resume to continue an existing "
-                    "session at the canonical session_dir).",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            # Re-export the resolved value so downstream subprocess executors
-            # (baseline / profile / sweep / backends / params) inject it into
-            # the Magpie YAML instead of trusting the YAML's hardcoded `model:`.
-            os.environ["MODEL_PATH"] = str(args.model)
-    
-            # Resolve framework: --framework > $FRAMEWORK env > "sglang".
-            # Session-wide; mixing sglang/vllm in one session is not supported.
-            framework = (
-                (args.framework or os.environ.get("FRAMEWORK", "")).strip().lower()
-                or "sglang"
-            )
-            if framework not in ("sglang", "vllm"):
-                print(
-                    f"ERROR: --framework must be sglang or vllm (got {framework!r}); "
-                    "set $FRAMEWORK accordingly or pass --framework",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            os.environ["FRAMEWORK"] = framework
-            print(f"Framework       : {framework}")
-    
-            # Resolve GPU runner type: --gpu-type > $GPU_TYPE > rocm-smi probe.
-            # Result is the canonical Magpie label (mi300x / mi355x). MI325X has
-            # the same architecture as MI300X but Magpie does not yet ship
-            # sglang_mi325x.sh / vllm_mi325x.sh, so we map mi325x -> mi300x with
-            # a warning so the run actually succeeds.
-            gpu_type = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
-            if not gpu_type:
-                gpu_type = _autodetect_gpu_type() or ""
-                if gpu_type:
-                    print(f"GPU type        : {gpu_type} (auto-detected)")
-            if gpu_type == "mi325x":
-                print(
-                    "WARN: mi325x maps to mi300x (same arch; Magpie has no "
-                    "sglang_mi325x.sh / vllm_mi325x.sh yet)",
-                    file=sys.stderr,
-                )
-                gpu_type = "mi300x"
-            if gpu_type:
-                os.environ["GPU_TYPE"] = gpu_type
-                print(f"GPU type        : {gpu_type} (will inject runner_type into Magpie YAML)")
-            else:
-                os.environ.pop("GPU_TYPE", None)
-                print("GPU type        : <unset> (Magpie will auto-detect)")
-    
-            # Compute MAX_MODEL_LEN = ISL + OSL + 4096 headroom, export for yaml injection.
-            max_model_len = args.isl + args.osl + 4096
-            os.environ["MAX_MODEL_LEN"] = str(max_model_len)
-            os.environ["ISL"] = str(args.isl)
-            os.environ["OSL"] = str(args.osl)
-            os.environ["PRECISION"] = args.precision
-            print(f"Workload        : ISL={args.isl} OSL={args.osl} "
-                  f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision}")
-    
-            # session_dir is fixed at /workspace/hyperloom (override:
-            # $INFERENCE_OPTIMIZER_SESSION_DIR). Each sandbox is single-use,
-            # so collision detection is unnecessary; mkdir -p is enough.
-            session_dir = make_session_dir()
-            manifest = write_manifest(session_dir, args=args)
-            print(f"Session dir     : {session_dir}")
-            print(f"Session id      : {manifest['session_id']}  (manifest label only)")
-            _print_session_skeleton(session_dir)
-            _seed_shared_state(
-                session_dir, args, session_id=manifest["session_id"],
-            )
-    
-        objective = build_objective({
-            "MAX_HOURS": str(args.max_hours),
-            "TARGET_GAIN_PCT": str(args.target_gain) if args.target_gain else "",
-            "TARGET_TPUT_PER_GPU": str(args.target_tput) if args.target_tput else "",
-            "TARGET_DIR": args.target_baseline_dir or "",
-        })
-        print(f"Objective       : kind={objective.kind()} {objective.describe()}")
-        no_kernel = getattr(args, "no_kernel", False)
-    
-        # Resolve critic backend choice + critic-agent runtime root before
-        # _build_backends (which constructs CriticAgentBackend immediately and
-        # would otherwise blow up on missing runtime). Fail-fast policy: if the
-        # operator selected --critic-agent (or it's the default) but the
-        # critic-agent runtime is unreachable, we abort with rc=2 instead of
-        # silently falling back to mock/codex_bare.
-        critic_choice = _resolve_critic_choice(args)
-        critic_agent_root: Path | None = None
-        critic_kb_mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
-        if critic_kb_mode not in ("inmemory", "live"):
+    # Hard-gate Claude model BEFORE any session work. Mutates args.claude_model
+    # in-place when falling back to opus-4-6; aborts with sys.exit(2) if the
+    # gateway catalog cannot be probed or neither allowed model is present.
+    catalog_ids = _validate_and_resolve_claude_model(args, proxy_urls)
+    _smoke_test_codex_model(args, catalog_ids)
+
+    if args.resume:
+        # Resume mode: session_dir is fixed at /workspace/hyperloom (or
+        # $USER_DATA_PATH). We re-mkdir the skeleton (idempotent) so a
+        # partially-initialised previous run is healed before we touch
+        # state.
+        session_dir = make_session_dir()
+        try:
+            manifest = load_manifest(session_dir)
+        except FileNotFoundError as exc:
+            print(f"ERROR: --resume failed: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not (session_dir / "state.json").exists():
             print(
-                f"ERROR: CRITIC_KB_CLIENT_MODE={critic_kb_mode!r} not in "
-                "{'inmemory','live'}",
+                f"ERROR: --resume failed: {session_dir}/state.json missing "
+                f"(manifest exists but Coordinator never wrote SharedState)",
                 file=sys.stderr,
             )
             sys.exit(2)
-        if critic_choice == "agent":
-            critic_agent_root = _resolve_critic_agent_root()
-            if critic_agent_root is None:
-                print(
-                    f"ERROR: --critic-agent selected but critic-agent runtime not "
-                    f"found.\n"
-                    f"  Set ${_CRITIC_AGENT_ROOT_ENV} to the directory containing "
-                    f"runtime/cli.py, or install critic-agent at "
-                    f"$REPO_ROOT/critic-agent/.\n"
-                    f"  Bypass with --critic-mock or --critic-codex-bare.",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            _validate_critic_agent_runtime(critic_agent_root)
-            if critic_kb_mode == "live" and not os.environ.get("KB_BASE_URL"):
-                print(
-                    "ERROR: CRITIC_KB_CLIENT_MODE=live but KB_BASE_URL is not "
-                    "set. Either export KB_BASE_URL or unset "
-                    "CRITIC_KB_CLIENT_MODE to fall back to inmemory.",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            # Default WORKSPACE_PATH for the critic-agent runtime if the
-            # operator hasn't already pinned it.
-            os.environ.setdefault("WORKSPACE_PATH", str(Path(__file__).resolve().parents[1]))
-    
-        # Resolve robustness backend choice + runtime root, mirroring critic.
-        robustness_choice = _resolve_robustness_choice(args)
-        robustness_agent_root: Path | None = None
-        robustness_options = _build_robustness_options(args)
-        if robustness_choice == "agent":
-            robustness_agent_root = _resolve_robustness_agent_root()
-            if robustness_agent_root is None:
-                print(
-                    f"ERROR: --robustness-agent selected but robustness-agent "
-                    f"runtime not found.\n"
-                    f"  Set ${_ROBUSTNESS_AGENT_ROOT_ENV} to the directory "
-                    f"containing src/robustness_agent/runtime/cli.py, or install "
-                    f"robustness-agent at $REPO_ROOT/robustness-agent/.\n"
-                    f"  Bypass with --robustness-mock.",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            _validate_robustness_agent_runtime(robustness_agent_root)
-    
-        backends = _build_backends(
-            claude_model=args.claude_model,
-            codex_model=args.codex_model,
-            kernel_codex=args.kernel_codex,
-            critic_choice=critic_choice,
-            session_dir=session_dir,
-            critic_agent_root=critic_agent_root,
-            critic_kb_mode=critic_kb_mode,
-            robustness_choice=robustness_choice,
-            robustness_agent_root=robustness_agent_root,
-            robustness_options=robustness_options,
-            no_kernel=no_kernel,
-        )
-        # Bug A fix: expose the active session_dir to in-process executors
-        # (e.g. ReportExecutor) that don't get session_dir threaded through
-        # task.params. This is read in report.py::_resolve_session_dir.
-        os.environ["INFERENCE_OPTIMIZER_SESSION_DIR"] = str(session_dir)
-        # Production: enable strict path-containment checks in PolicyGate so
-        # any LLM-emitted intent whose path field escapes session_dir lands
-        # as `policy_denied` in its inbox. Tests omit this and keep the
-        # legacy lenient mode for fixture paths under /tmp.
-        os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
-    
-        # When kernel is disabled, strip it from the role registry so
-        # Coordinator does not tick a non-existent agent and PolicyGate does
-        # not expect a backend for it.
-        role_registry = None
-        if no_kernel:
-            from .orchestrator.agent_role import default_role_registry
-            role_registry = {
-                k: v for k, v in default_role_registry().items() if k != "kernel"
-            }
-    
-        coordinator = Coordinator(
-            session_dir, backends=backends, role_registry=role_registry,
-        )
-        framework_for_prompt = (
-            os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
-        )
-        max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
-        prompts: dict[str, str] = {
-            "orchestration": args.orch_prompt or _build_orchestration_prompt(
-                no_kernel=no_kernel,
-                framework=framework_for_prompt,
-                objective=objective,
-                max_minutes=max_minutes_for_prompt,
-            ),
-            "critic":        args.critic_prompt or _load_critic_prompt(),
-        }
-        if not no_kernel:
-            prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
-        coordinator.system_prompt_overrides = prompts
-        _register_executors(coordinator, no_kernel=no_kernel)
-        # Persist effective system prompts for resume / drift inspection.
-        _snapshot_system_prompts(session_dir, prompts=prompts)
-    
-        kernel_str = "DISABLED" if no_kernel else (
-            f"{'Codex' if args.kernel_codex else 'Claude'}"
-        )
-        if critic_choice == "mock":
-            critic_str = "mock"
-        elif critic_choice == "codex_bare":
-            critic_str = f"codex-bare({args.codex_model})"
-        else:  # "agent"
-            critic_str = (
-                f"critic-agent(kb={critic_kb_mode}, codex={args.codex_model}, "
-                f"root={critic_agent_root})"
+        state = SharedState.load_or_init(session_dir)
+        prior_stop = state.stop_reason
+        print(f"Resuming session: {session_dir}")
+        print(f"  manifest.session_id    : {manifest.get('session_id')}")
+        print(f"  prior baseline_tput   : {state.baseline_tput:.1f}")
+        print(f"  prior cumul_gain      : {state.cumulative_gain:.2f}%")
+        print(f"  prior current_best    : "
+              f"{(state.current_best or {}).get('action')}/"
+              f"{(state.current_best or {}).get('tput')}")
+        print(f"  prior stop_reason     : {prior_stop or '(none)'}")
+
+        # Re-export session-level env vars from persisted state so the
+        # executors (baseline / profile / sweep / backends / params) resolve
+        # model / framework / gpu_type correctly. Without this, a resume
+        # in a fresh shell would fall back to YAML hardcoded defaults,
+        # potentially benchmarking the wrong model on the wrong framework.
+        if state.model_path:
+            os.environ["MODEL_PATH"] = state.model_path
+            print(f"  re-exported MODEL_PATH: {state.model_path}")
+        if state.framework:
+            os.environ["FRAMEWORK"] = state.framework
+            print(f"  re-exported FRAMEWORK : {state.framework}")
+        if state.gpu_type:
+            runner_gpu_type = _gpu_runner_type(state.gpu_type)
+            os.environ["TARGET_GPU_TYPE"] = state.gpu_type
+            os.environ["GPU_TYPE"] = runner_gpu_type
+            print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
+            if runner_gpu_type != state.gpu_type:
+                print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
+        # Honour persisted kernel_enabled flag on resume; CLI --no-kernel
+        # can still override on a previously-enabled session.
+        if not state.kernel_enabled:
+            args.no_kernel = True
+            print("  kernel agent          : DISABLED (persisted from original run)")
+
+        # CRITICAL: a leftover stop_reason from the prior run (most often
+        # "time_exhausted") fools Orchestration into thinking the work is
+        # already done — it just heartbeats forever. Clear it so the new
+        # run has a clean signal. The Coordinator's run() always re-sets
+        # stop_reason at exit anyway.
+        prior_crash = state.crash_count
+        if prior_stop or prior_crash >= 3:
+            state.stop_reason = ""
+            # Reset persisted crash_count so a fresh resume isn't immediately
+            # tripped into "emergency" by accumulated failures from prior runs
+            # (e.g. authentication errors before .env was loaded).
+            state.crash_count = 0
+            # Reset start_ts to "now" so the elapsed_minutes value the
+            # orchestration agent sees in its prompt reflects this resume's
+            # budget rather than the original session start; otherwise an
+            # old session that exhausted its budget will look "already
+            # over budget" on resume and the LLM will refuse to propose
+            # any work.
+            from datetime import datetime, timezone
+            state.start_ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+            state.save(session_dir)
+            print(
+                f"  → cleared stop_reason and reset crash_count "
+                f"(was {prior_crash}) for fresh resume"
             )
-        if robustness_choice == "mock":
-            robustness_str = "mock"
+            print(f"  → reset start_ts to {state.start_ts} (resume budget)")
+    else:
+        # Resolve model path from --model first, then $MODEL_PATH env. Without
+        # either, fail fast: silently falling back to the YAML's hardcoded
+        # `/wekafs/models/Qwen-Qwen3-8B` was the cause of "the optimizer ran
+        # the wrong model" reports — explicit > implicit.
+        if not args.model:
+            args.model = os.environ.get("MODEL_PATH") or ""
+        if not args.model:
+            print(
+                "ERROR: model is required. Pass --model <path> or set "
+                "MODEL_PATH env (or use --resume to continue an existing "
+                "session at the canonical session_dir).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # Re-export the resolved value so downstream subprocess executors
+        # (baseline / profile / sweep / backends / params) inject it into
+        # the Magpie YAML instead of trusting the YAML's hardcoded `model:`.
+        os.environ["MODEL_PATH"] = str(args.model)
+
+        # Resolve framework: --framework > $FRAMEWORK env > "sglang".
+        # Session-wide; mixing sglang/vllm in one session is not supported.
+        framework = (
+            (args.framework or os.environ.get("FRAMEWORK", "")).strip().lower()
+            or "sglang"
+        )
+        if framework not in ("sglang", "vllm"):
+            print(
+                f"ERROR: --framework must be sglang or vllm (got {framework!r}); "
+                "set $FRAMEWORK accordingly or pass --framework",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        os.environ["FRAMEWORK"] = framework
+        print(f"Framework       : {framework}")
+
+        # Resolve real target GPU: --gpu-type > $GPU_TYPE > rocm-smi probe.
+        # Keep the real type in args/SharedState so TraceLens and GEAK prompts
+        # see MI325X, while mapping only Magpie's runner env to mi300x.
+        gpu_type = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
+        if not gpu_type:
+            gpu_type = _autodetect_gpu_type() or ""
+            if gpu_type:
+                print(f"GPU type        : {gpu_type} (auto-detected)")
+        runner_gpu_type = _gpu_runner_type(gpu_type)
+        if gpu_type and runner_gpu_type != gpu_type:
+            print(
+                "WARN: mi325x uses mi300x as Magpie runner_type (same arch; "
+                "Magpie has no sglang_mi325x.sh / vllm_mi325x.sh yet)",
+                file=sys.stderr,
+            )
+        args.gpu_type = gpu_type or None
+        if runner_gpu_type:
+            os.environ["TARGET_GPU_TYPE"] = gpu_type
+            os.environ["GPU_TYPE"] = runner_gpu_type
+            print(f"GPU type        : {gpu_type}")
+            print(f"Magpie runner   : {runner_gpu_type} (will inject runner_type into Magpie YAML)")
         else:
-            robustness_str = f"robustness-agent(root={robustness_agent_root})"
-            if robustness_options:
-                kvs = ",".join(f"{k}={v!r}" for k, v in sorted(robustness_options.items()))
-                robustness_str += f"[{kvs}]"
-        print(f"Backends        : "
-              f"orchestration=Claude({args.claude_model}), "
-              f"kernel={kernel_str}, "
-              f"critic={critic_str}, "
-              f"robustness={robustness_str}")
-        print(f"Max ticks       : {args.max_ticks or 'unlimited'} "
-              f"(budget = {args.max_hours}h)")
-        print(f"Tick interval   : {args.tick_interval_sec}s")
-        print()
-    
-        try:
-            stop_reason = await coordinator.run(
-                objective=objective,
-                max_minutes=args.max_hours * 60.0,
-                tick_interval_sec=args.tick_interval_sec,
-                max_ticks=args.max_ticks,
-                install_signal_handlers=True,
+            os.environ.pop("TARGET_GPU_TYPE", None)
+            os.environ.pop("GPU_TYPE", None)
+            args.gpu_type = None
+            print("GPU type        : <unset> (Magpie will auto-detect)")
+
+        # Compute MAX_MODEL_LEN = ISL + OSL + 4096 headroom, export for yaml injection.
+        max_model_len = args.isl + args.osl + 4096
+        os.environ["MAX_MODEL_LEN"] = str(max_model_len)
+        os.environ["ISL"] = str(args.isl)
+        os.environ["OSL"] = str(args.osl)
+        os.environ["PRECISION"] = args.precision
+        print(f"Workload        : ISL={args.isl} OSL={args.osl} "
+              f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision}")
+
+        # session_dir is fixed at /workspace/hyperloom (override:
+        # $USER_DATA_PATH). Each sandbox is single-use, so collision
+        # detection is unnecessary; mkdir -p is enough.
+        session_dir = make_session_dir()
+        manifest = write_manifest(session_dir, args=args)
+        print(f"Session dir     : {session_dir}")
+        print(f"Session id      : {manifest['session_id']}  (manifest label only)")
+        _print_session_skeleton(session_dir)
+        _seed_shared_state(
+            session_dir, args, session_id=manifest["session_id"],
+        )
+
+    objective = build_objective({
+        "MAX_HOURS": str(args.max_hours),
+        "TARGET_GAIN_PCT": str(args.target_gain) if args.target_gain else "",
+        "TARGET_TPUT_PER_GPU": str(args.target_tput) if args.target_tput else "",
+        "TARGET_DIR": args.target_baseline_dir or "",
+    })
+    print(f"Objective       : kind={objective.kind()} {objective.describe()}")
+    no_kernel = getattr(args, "no_kernel", False)
+
+    # Resolve critic backend choice + critic-agent runtime root before
+    # _build_backends (which constructs CriticAgentBackend immediately and
+    # would otherwise blow up on missing runtime). Fail-fast policy: if the
+    # operator selected --critic-agent (or it's the default) but the
+    # critic-agent runtime is unreachable, we abort with rc=2 instead of
+    # silently falling back to mock/codex_bare.
+    critic_choice = _resolve_critic_choice(args)
+    critic_agent_root: Path | None = None
+    critic_kb_mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
+    if critic_kb_mode not in ("inmemory", "live"):
+        print(
+            f"ERROR: CRITIC_KB_CLIENT_MODE={critic_kb_mode!r} not in "
+            "{'inmemory','live'}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if critic_choice == "agent":
+        critic_agent_root = _resolve_critic_agent_root()
+        if critic_agent_root is None:
+            print(
+                f"ERROR: --critic-agent selected but critic-agent runtime not "
+                f"found.\n"
+                f"  Set ${_CRITIC_AGENT_ROOT_ENV} to the directory containing "
+                f"runtime/cli.py, or install critic-agent at "
+                f"$REPO_ROOT/critic-agent/.\n"
+                f"  Bypass with --critic-mock or --critic-codex-bare.",
+                file=sys.stderr,
             )
-        finally:
-            await coordinator.stop()
-    
-        _print_final_summary(coordinator.shared_state, stop_reason)
-        return 0 if stop_reason in (
-            "target_reached",
-            "no_more_leverage",
-            "time_exhausted",
-            "max_ticks",
-        ) else 1
+            sys.exit(2)
+        _validate_critic_agent_runtime(critic_agent_root)
+        if critic_kb_mode == "live" and not os.environ.get("KB_BASE_URL"):
+            print(
+                "ERROR: CRITIC_KB_CLIENT_MODE=live but KB_BASE_URL is not "
+                "set. Either export KB_BASE_URL or unset "
+                "CRITIC_KB_CLIENT_MODE to fall back to inmemory.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # Default WORKSPACE_PATH for the critic-agent runtime if the
+        # operator hasn't already pinned it. NOTE: in the critic-agent
+        # runtime this env names the SKILL static-asset root (not a
+        # writable artefact directory), so it points at the repo root.
+        # The legacy "artefact root" meaning of WORKSPACE_PATH used by
+        # kernel-agent tools was retired during the
+        # all-artefacts-under-USER_DATA_PATH migration.
+        os.environ.setdefault("WORKSPACE_PATH", str(Path(__file__).resolve().parents[1]))
+
+    # Resolve robustness backend choice + runtime root, mirroring critic.
+    robustness_choice = _resolve_robustness_choice(args)
+    robustness_agent_root: Path | None = None
+    robustness_options = _build_robustness_options(args)
+    if robustness_choice == "agent":
+        robustness_agent_root = _resolve_robustness_agent_root()
+        if robustness_agent_root is None:
+            print(
+                f"ERROR: --robustness-agent selected but robustness-agent "
+                f"runtime not found.\n"
+                f"  Set ${_ROBUSTNESS_AGENT_ROOT_ENV} to the directory "
+                f"containing src/robustness_agent/runtime/cli.py, or install "
+                f"robustness-agent at $REPO_ROOT/robustness-agent/.\n"
+                f"  Bypass with --robustness-mock.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        _validate_robustness_agent_runtime(robustness_agent_root)
+
+    backends = _build_backends(
+        claude_model=args.claude_model,
+        codex_model=args.codex_model,
+        kernel_codex=args.kernel_codex,
+        critic_choice=critic_choice,
+        session_dir=session_dir,
+        critic_agent_root=critic_agent_root,
+        critic_kb_mode=critic_kb_mode,
+        robustness_choice=robustness_choice,
+        robustness_agent_root=robustness_agent_root,
+        robustness_options=robustness_options,
+        no_kernel=no_kernel,
+    )
+    # Bug A fix: expose the active session_dir to in-process executors
+    # (e.g. ReportExecutor) that don't get session_dir threaded through
+    # task.params. This is read in report.py::_resolve_session_dir.
+    os.environ["USER_DATA_PATH"] = str(session_dir)
+    # Production: enable strict path-containment checks in PolicyGate so
+    # any LLM-emitted intent whose path field escapes session_dir lands
+    # as `policy_denied` in its inbox. Tests omit this and keep the
+    # legacy lenient mode for fixture paths under /tmp.
+    os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
+
+    # When kernel is disabled, strip it from the role registry so
+    # Coordinator does not tick a non-existent agent and PolicyGate does
+    # not expect a backend for it.
+    role_registry = None
+    if no_kernel:
+        from .orchestrator.agent_role import default_role_registry
+        role_registry = {
+            k: v for k, v in default_role_registry().items() if k != "kernel"
+        }
+
+    coordinator = Coordinator(
+        session_dir, backends=backends, role_registry=role_registry,
+        compare_against_gpu=getattr(args, "compare_against_gpu", None),
+        model_class=(
+            getattr(args, "model_class", None)
+            or os.environ.get("MODEL_CLASS")
+            or ""
+        ),
+    )
+    framework_for_prompt = (
+        os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
+    )
+    max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
+    prompts: dict[str, str] = {
+        "orchestration": args.orch_prompt or _build_orchestration_prompt(
+            no_kernel=no_kernel,
+            framework=framework_for_prompt,
+            objective=objective,
+            max_minutes=max_minutes_for_prompt,
+        ),
+        "critic":        args.critic_prompt or _load_critic_prompt(),
+    }
+    if not no_kernel:
+        prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
+    coordinator.system_prompt_overrides = prompts
+    _register_executors(
+        coordinator,
+        no_kernel=no_kernel,
+        compare_against_gpu=getattr(args, "compare_against_gpu", None),
+        session_dir=session_dir,
+    )
+    # Persist effective system prompts for resume / drift inspection.
+    _snapshot_system_prompts(session_dir, prompts=prompts)
+
+    kernel_str = "DISABLED" if no_kernel else (
+        f"{'Codex' if args.kernel_codex else 'Claude'}"
+    )
+    if critic_choice == "mock":
+        critic_str = "mock"
+    elif critic_choice == "codex_bare":
+        critic_str = f"codex-bare({args.codex_model})"
+    else:  # "agent"
+        critic_str = (
+            f"critic-agent(kb={critic_kb_mode}, codex={args.codex_model}, "
+            f"root={critic_agent_root})"
+        )
+    if robustness_choice == "mock":
+        robustness_str = "mock"
+    else:
+        robustness_str = f"robustness-agent(root={robustness_agent_root})"
+        if robustness_options:
+            kvs = ",".join(f"{k}={v!r}" for k, v in sorted(robustness_options.items()))
+            robustness_str += f"[{kvs}]"
+    print(f"Backends        : "
+          f"orchestration=Claude({args.claude_model}), "
+          f"kernel={kernel_str}, "
+          f"critic={critic_str}, "
+          f"robustness={robustness_str}")
+    print(f"Max ticks       : {args.max_ticks or 'unlimited'} "
+          f"(budget = {args.max_hours}h)")
+    print(f"Tick interval   : {args.tick_interval_sec}s")
+    print()
+
+    if not (getattr(args, "compare_against_gpu", None) or "").strip():
+        print(
+            "[target_analysis] no --compare-against-gpu set; will write a "
+            "marker JSON at $SESSION_DIR/target_analysis/target_baseline.json "
+            "(reason=no_target_gpu_configured) — set --compare-against-gpu "
+            "to fetch real InferenceX reference data.",
+            file=sys.stderr,
+        )
+
+    try:
+        stop_reason = await coordinator.run(
+            objective=objective,
+            max_minutes=args.max_hours * 60.0,
+            tick_interval_sec=args.tick_interval_sec,
+            max_ticks=args.max_ticks,
+            install_signal_handlers=True,
+        )
     finally:
-        # Intentionally empty: keeps the outer ``try`` valid without calling
-        # SaFE stop on RayJob exit (use ``multi_node stop-rayjob`` or owner
-        # cascade when the sandbox workload stops).
-        pass
+        await coordinator.stop()
+        # End-of-session safety net: always materialize session_breakdown.json
+        # for downstream consumers (claw-stats-service / hyperloom-results-
+        # service / offline analysis). Best-effort — a failure here MUST NOT
+        # mask the actual stop_reason, so we swallow exceptions and log.
+        try:
+            from .breakdown import write_breakdown_json
+            breakdown_path = write_breakdown_json(session_dir)
+            print(f"Session breakdown : {breakdown_path}")
+        except Exception:  # noqa: BLE001
+            log.exception("session_breakdown finalize failed (non-fatal)")
+
+    _print_final_summary(coordinator.shared_state, stop_reason)
+    return 0 if stop_reason in (
+        "target_reached",
+        "no_more_leverage",
+        "time_exhausted",
+        "max_ticks",
+    ) else 1
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -2263,11 +2346,10 @@ def _build_parser() -> argparse.ArgumentParser:
                            "state.json)")
     opt.add_argument(
         "--gpu-type", choices=["mi300x", "mi325x", "mi355x"], default=None,
-        help="Override GPU runner type passed to Magpie (sets benchmark."
-             "runner_type). When omitted, the optimizer auto-detects via "
-             "rocm-smi; falls back to Magpie's own auto-detection if rocm-smi "
-             "is unavailable. mi325x is treated as mi300x (same architecture; "
-             "Magpie does not yet ship sglang_mi325x.sh / vllm_mi325x.sh).",
+        help="Override the real target GPU for TraceLens/GEAK prompts. Magpie "
+             "runner_type is derived separately; mi325x currently runs with "
+             "mi300x runner scripts because Magpie does not yet ship "
+             "sglang_mi325x.sh / vllm_mi325x.sh.",
     )
     opt.add_argument(
         "--framework", choices=["sglang", "vllm"], default=None,
@@ -2330,11 +2412,6 @@ def _build_parser() -> argparse.ArgumentParser:
              "DSr1/DSv3 on multi-node. Resolution: --ep > $EP env > 1. "
              "EP > TP is rejected at server-restart time.",
     )
-    # Prefill-Decode disaggregation knobs. `colocated` (default) keeps
-    # current behaviour. `disaggregated` splits the cluster into a
-    # prefill group + decode group; sglang_router / vllm proxy fronts
-    # them at the public 8888 port. All --pd-* flags are forwarded
-    # through to multi_node restart-server via the orchestrator helper.
     opt.add_argument(
         "--pd-mode",
         choices=("colocated", "disaggregated"),
@@ -2410,15 +2487,46 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--resume", action="store_true", default=False,
                       help="Resume the session at the canonical session_dir "
                            "(/workspace/hyperloom by default, or "
-                           "$INFERENCE_OPTIMIZER_SESSION_DIR for tests). "
+                           "$USER_DATA_PATH). "
                            "Skips the SharedState seed and lets the "
                            "Coordinator replay the prior event log + "
                            "state.json. Refuses to start if manifest.json or "
                            "state.json is missing.")
-    opt.add_argument("--model-class", type=str, default=None,
-                      help="Optional model class hint (dense_8B / moe_mla / ...)")
+    opt.add_argument(
+        "--model-class", type=str,
+        default=os.environ.get("MODEL_CLASS", None),
+        help=(
+            "Model class hint consumed by orchestrator/scoring marathon "
+            "priors. Recognised values (case-insensitive, with -/+/space "
+            "tolerated): dense / moe_mla / moe_swa / moe_mla_nsa. The "
+            "deleted `classify` action used to discover this from the "
+            "model files; the external SKILL caller is now expected to "
+            "supply it via this flag (or the MODEL_CLASS env var). "
+            "Unset / unknown values fall back to the `moe_mla` marathon "
+            "priors so DeepSeek-shaped sessions keep working."
+        ),
+    )
     opt.add_argument("--target-summary", type=str, default=None,
                       help="Free-text goal summary surfaced in prompts")
+    opt.add_argument(
+        "--compare-against-gpu", type=str, default=None,
+        help=(
+            "Reference GPU hardware key for external baseline comparison "
+            "(e.g. b300 / mi355x / h200). target_analysis ALWAYS runs as "
+            "TODO 0 and always writes "
+            "$SESSION_DIR/target_analysis/target_baseline.json + a short "
+            "MD report. When this flag is set, the JSON carries the "
+            "matching InferenceX (https://inferencex.semianalysis.com) "
+            "reference data point; when unset, the JSON carries a "
+            "structured reason='no_target_gpu_configured' marker so the "
+            "report still has a deterministic 'External baseline' "
+            "section. The data is REPORT-ONLY: it does not influence "
+            "Objective, scoring, or any agent prompt. Other dimensions "
+            "(model / framework / precision / ISL / OSL) are derived "
+            "from --model and the standard FRAMEWORK / PRECISION / ISL / "
+            "OSL env vars."
+        ),
+    )
     opt.add_argument("--max-ticks", type=int, default=None,
                       help="Hard tick cap (None = unlimited; mostly for tests)")
     opt.add_argument("--tick-interval-sec", type=float, default=0.0,

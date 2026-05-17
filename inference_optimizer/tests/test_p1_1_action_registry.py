@@ -113,7 +113,7 @@ def registry() -> ActionRegistry:
 
 def test_registry_loads_p1_1_actions(registry):
     names = set(registry.names())
-    expected = {"baseline", "classify", "profile", "backends", "report"}
+    expected = {"baseline", "target_analysis", "profile", "backends", "report"}
     assert expected.issubset(names)
 
 
@@ -125,7 +125,7 @@ def test_registry_baseline_metadata(registry):
     assert "benchmark_lane" in baseline.requires_lanes
     assert "Bash" in baseline.allowed_tools
     assert baseline.accuracy_risk == 0.0
-    assert baseline.lease_ttl_sec == 1200
+    assert baseline.lease_ttl_sec == 4200
 
 
 def test_registry_profile_uses_profile_lane(registry):
@@ -138,7 +138,7 @@ def test_registry_profile_uses_profile_lane(registry):
 def test_registry_by_family(registry):
     """report belongs to family=shallow per DESIGN §16.1, not prep."""
     prep = {a.name for a in registry.by_family("prep")}
-    assert {"baseline", "classify"}.issubset(prep)
+    assert {"baseline", "target_analysis"}.issubset(prep)
     analysis = {a.name for a in registry.by_family("analysis")}
     assert "profile" in analysis
     shallow = {a.name for a in registry.by_family("shallow")}
