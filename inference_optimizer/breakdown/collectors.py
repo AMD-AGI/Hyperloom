@@ -310,6 +310,9 @@ def collect_final(
         "action_path":                       action_path,
         "ttft_mean_ms":                      _to_float(cb.get("ttft_mean_ms")),
         "e2el_mean_ms":                      _to_float(cb.get("e2el_mean_ms")),
+        "closing_phase_entered":             bool(state.get("closing_started_unix") or 0),
+        "closing_started_unix":              float(state.get("closing_started_unix") or 0.0),
+        "closing_report_task_id":            str(state.get("closing_report_task_id") or ""),
     }
 
 

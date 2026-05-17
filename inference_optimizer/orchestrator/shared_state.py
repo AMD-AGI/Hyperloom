@@ -156,6 +156,12 @@ class SharedState:
     # re-validation is required after new KEEPs landed.
     cumulative_gain_validated_stack_len: int = 0
     stop_reason: str = ""
+    # Closing phase — set when the wall-clock deadline fires. While True,
+    # Coordinator skips reactor passes and only pumps the dispatcher to
+    # drain a Coordinator-enqueued ``report`` task. Cleared on resume.
+    closing_phase: bool = False
+    closing_started_unix: float = 0.0
+    closing_report_task_id: str = ""
     current_action: str = ""
     crash_count: int = 0
     pruned_families: list[str] = field(default_factory=list)
@@ -1597,6 +1603,9 @@ class SharedState:
             f"tick={int(self.tick or 0)}  "
             f"target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
             f"stop_reason={self.stop_reason or '(none)'}",
+            f"closing_phase={self.closing_phase}  "
+            f"closing_started_unix={self.closing_started_unix or 0.0}  "
+            f"closing_report_task_id={self.closing_report_task_id or '(none)'}",
         ]
         return "\n".join(lines)
 
