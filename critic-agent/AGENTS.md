@@ -27,7 +27,7 @@ return `emit.json["critic_decision_review"]` instead.
 
 | Variable | Purpose |
 |---|---|
-| `WORKSPACE_PATH` | Root for the skill files (defaults to `/workspace`). |
+| `WORKSPACE_PATH` | Skill-asset root the runtime resolves prompts against (NOT an artefact root). Hyperloom sets this to `$REPO_ROOT` automatically; defaults to `/workspace` for standalone use. |
 | `CRITIC_SESSION_MEMORY_DIR` | Persistent volume for per-session memory (default `/var/lib/critic-session-memory`). Mount as PVC. |
 | `CRITIC_KB_CLIENT_MODE` | `live` to talk to the KB service, `inmemory` for dry-run / local tests. |
 | `KB_BASE_URL` | KB service URL when `CRITIC_KB_CLIENT_MODE=live`. |
