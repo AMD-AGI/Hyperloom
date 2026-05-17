@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import platform
 import socket
@@ -67,6 +68,8 @@ from pathlib import Path
 from typing import Any
 
 from .session_paths import manifest_path
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 2
 
@@ -124,8 +127,12 @@ def _detect_image() -> str | None:
                 if m:
                     short = m.group(1)[:12]
                     return f"unknown@{short}"
-    except OSError:
-        pass
+    except OSError as exc:
+        # /proc/1/cgroup may be unreadable in restricted sandboxes,
+        # non-Linux hosts, or stripped-down containers. Best-effort
+        # source — fall through to None so the breakdown layer surfaces
+        # an honest "image not detected" rather than fabricating one.
+        log.debug("cgroup-based image detection failed: %r", exc)
     return None
 
 
