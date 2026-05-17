@@ -12,6 +12,7 @@ The schema each collector matches is defined in :mod:`.schema`.
 
 from __future__ import annotations
 
+import ast
 import glob
 import json
 import logging
@@ -72,6 +73,18 @@ def _filter_envs(envs: dict[str, Any] | None) -> dict[str, str]:
 
 
 # --- framework-args extraction patterns -----------------------------------
+# Pass-0 ("log_non_default_args"): vllm (and recent sglang) print a single
+# line like ``non-default args: {'model': '/path', 'tensor_parallel_size':
+# 8, ...}`` right after argv parsing — it captures the *resolved* parsed
+# arg dict (post-CLI, post-env-override) and is therefore the most
+# authoritative cmdline-equivalent the framework itself emits. We match
+# loosely (``re.search``) so any leading ``(APIServer pid=...) INFO ...
+# [utils.py:233]`` log prefix is allowed; the dict literal must end the
+# line so a greedy ``\{.+\}`` is safe.
+_FRAMEWORK_ARGS_NON_DEFAULT_RE = re.compile(
+    r"non[-_]default args:\s*(\{.+\})\s*$",
+    re.IGNORECASE,
+)
 # Pass-1 ("log_args_line"): the runner echoes the parsed launch arguments
 # under one of these stable headers — most reliable signal because it
 # survives any number of preceding INFO log lines.
@@ -135,28 +148,36 @@ def _starts_with_python_prefix(text: str) -> bool:
     return False
 
 
-def _extract_yaml_cmd(config_yaml: Path) -> str:
-    """Look for a ``cmd`` / ``command`` / ``launch`` field in the config yaml.
+def _load_yaml_dict_safe(config_yaml: Path) -> dict | None:
+    """Parse ``config_yaml`` and return the top-level dict, or ``None`` on
+    any miss / parse failure / non-dict root. Never raises.
 
-    Yaml fallback for sessions whose server.log starts with INFO noise.
-    Reads from these locations (first-non-empty wins):
-      * top-level ``cmd`` / ``command`` / ``launch``
-      * nested ``benchmark.cmd`` / ``benchmark.command``
-    Returns ``""`` on any miss / parse failure.
+    Shared by both yaml-based passes (Pass 3 ``yaml_cmd`` and Pass 4
+    ``yaml_benchmark``) so the file is read + parsed at most once per
+    ``_extract_framework_args`` invocation.
     """
     try:
         import yaml  # type: ignore[import-not-found]
     except ImportError:
         log.debug("PyYAML unavailable; skipping yaml framework_args fallback")
-        return ""
+        return None
     try:
         text = config_yaml.read_text(encoding="utf-8", errors="replace")
         data = yaml.safe_load(text)
     except (OSError, yaml.YAMLError) as exc:
         log.debug("failed to parse %s for framework_args: %r", config_yaml, exc)
-        return ""
-    if not isinstance(data, dict):
-        return ""
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _yaml_cmd_from_dict(data: dict) -> str:
+    """Look for a ``cmd`` / ``command`` / ``launch`` field in a parsed yaml.
+
+    Reads from these locations (first-non-empty wins):
+      * top-level ``cmd`` / ``command`` / ``launch``
+      * nested ``benchmark.cmd`` / ``benchmark.command``
+    Returns ``""`` on any miss.
+    """
     for key in ("cmd", "command", "launch"):
         val = data.get(key)
         if isinstance(val, str) and val.strip():
@@ -170,6 +191,57 @@ def _extract_yaml_cmd(config_yaml: Path) -> str:
     return ""
 
 
+def _yaml_benchmark_synthesis(data: dict) -> str:
+    """Synthesize a readable arg string from a magpie ``benchmark.*`` dict.
+
+    Magpie-style materialized configs don't carry a literal ``cmd:`` field
+    — the launcher assembles the cmdline at runtime from structured
+    ``benchmark.{framework, model, precision, tp, gpu_selection, envs}``.
+    When neither server.log nor a yaml ``cmd:`` field is available, we
+    stringify those structured fields so the operator at least sees which
+    framework + model + precision + tp + envs were configured. The
+    ``yaml_benchmark`` source label flags downstream consumers that this
+    is a synthesized representation, not a literal cmdline.
+
+    Returns ``""`` unless both ``benchmark.framework`` AND ``benchmark.model``
+    are non-empty (those two are the minimum needed for the synthesis to
+    convey anything useful).
+    """
+    bench = data.get("benchmark")
+    if not isinstance(bench, dict):
+        return ""
+    fw = bench.get("framework")
+    model = bench.get("model")
+    fw_ok = isinstance(fw, str) and fw.strip()
+    model_ok = isinstance(model, str) and model.strip()
+    if not fw_ok or not model_ok:
+        return ""
+    parts: list[str] = [f"framework={fw.strip()}", f"model={model.strip()}"]
+    prec = bench.get("precision")
+    if prec is not None and str(prec).strip():
+        parts.append(f"precision={str(prec).strip()}")
+    tp = bench.get("tp")
+    if tp is not None and str(tp).strip():
+        parts.append(f"tp={str(tp).strip()}")
+    gpu_sel = bench.get("gpu_selection")
+    if isinstance(gpu_sel, dict):
+        for key in ("gpu_type", "gpu", "type"):
+            v = gpu_sel.get(key)
+            if v is not None and str(v).strip():
+                parts.append(f"gpu={str(v).strip()}")
+                break
+    elif isinstance(gpu_sel, str) and gpu_sel.strip():
+        parts.append(f"gpu={gpu_sel.strip()}")
+    envs = bench.get("envs")
+    if isinstance(envs, dict) and envs:
+        env_pairs = " ".join(
+            f"{k}={v}" for k, v in envs.items() if isinstance(k, str)
+        )
+        if env_pairs:
+            parts.append(f"envs=[{env_pairs}]")
+    return " ".join(parts)
+
+
 def _extract_framework_args(
     server_log: Path | None,
     config_yaml: Path | None = None,
@@ -177,12 +249,20 @@ def _extract_framework_args(
     """Best-effort extract the launch command for a benchmark variant.
 
     Returns ``(args_string, source)`` where ``source`` documents lineage:
+      * ``"log_non_default_args"`` — found a ``non-default args: {...}``
+        line (vllm / recent sglang echo of the parsed argv dict).
+        Highest priority because it's emitted *by the framework itself*
+        after argv parsing, so it captures the actually-used values.
       * ``"log_args_line"`` — found a line like ``Server arguments: ...``
         or ``Args: Namespace(...)`` in server.log
       * ``"log_python_cmd"`` — found a line starting with ``python``,
         ``python3``, ``vllm``, ``sglang.launch_server`` etc. in server.log
       * ``"yaml_cmd"`` — fell back to ``cmd:`` / ``command:`` / ``launch:``
         in the materialized config yaml
+      * ``"yaml_benchmark"`` — synthesized from magpie ``benchmark.*``
+        structured fields (framework / model / precision / tp / envs).
+        NOT a literal cmdline — flagged via the source label so consumers
+        can treat it differently from log-extracted values.
       * ``"unknown"`` — none of the above; ``args_string`` is empty
     Never raises. Caller decides whether to surface a warning when source
     is ``unknown``.
@@ -197,6 +277,30 @@ def _extract_framework_args(
             chunk = ""
 
     lines = chunk.splitlines() if chunk else []
+
+    # Pass 0: vllm / sglang ``non-default args: {...}`` echo. The dict
+    # is the framework's own post-parse view of argv, so it beats any of
+    # the literal-cmdline passes when present. Parse via ast.literal_eval
+    # — if the eval fails (malformed dict, embedded objects), we treat
+    # the line as a miss and continue to Pass 1 rather than regex-hacking
+    # a half-parse (anti-hallucination invariant).
+    for line in lines:
+        m = _FRAMEWORK_ARGS_NON_DEFAULT_RE.search(line)
+        if not m:
+            continue
+        dict_text = m.group(1)
+        try:
+            parsed = ast.literal_eval(dict_text)
+        except (ValueError, SyntaxError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        # Sorted-by-key, repr() values — stable across runs and keeps
+        # path strings quoted so an operator can copy-paste verbatim.
+        formatted = " ".join(
+            f"{k}={parsed[k]!r}" for k in sorted(parsed.keys(), key=str)
+        )
+        return formatted, "log_non_default_args"
 
     # Pass 1: stable launch-summary headers. These are emitted by the
     # framework itself once it's parsed argv, so they survive any
@@ -228,16 +332,24 @@ def _extract_framework_args(
         if cleaned and _starts_with_python_prefix(cleaned):
             return cleaned, "log_python_cmd"
 
-    # Pass 3: yaml fallback. Only consulted when the log gave us nothing.
+    # Pass 3 + Pass 4: yaml fallback. Load the config yaml at most once,
+    # then prefer a literal ``cmd:`` field (Pass 3) over the magpie
+    # ``benchmark.*`` synthesis (Pass 4) — a literal cmdline is always
+    # more authoritative than a structured-config reconstruction.
     if config_yaml is not None:
         try:
             yaml_exists = config_yaml.exists()
         except OSError:
             yaml_exists = False
         if yaml_exists:
-            cmd = _extract_yaml_cmd(config_yaml)
-            if cmd:
-                return cmd, "yaml_cmd"
+            data = _load_yaml_dict_safe(config_yaml)
+            if isinstance(data, dict):
+                cmd = _yaml_cmd_from_dict(data)
+                if cmd:
+                    return cmd, "yaml_cmd"
+                synth = _yaml_benchmark_synthesis(data)
+                if synth:
+                    return synth, "yaml_benchmark"
 
     return "", "unknown"
 
