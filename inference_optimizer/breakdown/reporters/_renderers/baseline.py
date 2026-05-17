@@ -5,15 +5,18 @@ from __future__ import annotations
 from typing import Any
 
 from ..base import Decision, RenderedSection, md_kv_list, md_table, register_renderer
+from ._invocation import render_invocation_block
 
 
 @register_renderer("baseline")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
     b = breakdown.get("baseline") or {}
+    session = breakdown.get("session") or {}
     tput = b.get("throughput_tok_s_per_gpu")
     acc = b.get("accuracy")
     ttft = b.get("ttft_mean_ms")
     e2el = b.get("e2el_mean_ms")
+    ttft_source = str(b.get("ttft_e2el_source") or "")
     fail_streak = int(b.get("failure_streak") or 0)
     attempts = b.get("attempts_history") or []
 
@@ -53,12 +56,19 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if attempts:
         facts.append(f"Baseline attempts recorded: {len(attempts)}.")
 
+    # Annotate the ttft row inline when it was reconstructed via the
+    # runs/baseline/ disk walk fallback — readers should see at a
+    # glance that the latency didn't come from state.last_baseline.
+    ttft_display: Any = ttft
+    if ttft is not None and ttft_source == "runs_baseline_disk":
+        ttft_display = f"{float(ttft):.1f} (reconstructed from runs/baseline/ disk walk)"
     md_parts: list[str] = []
     md_parts.append(md_kv_list([
         ("throughput_tok_s_per_gpu", tput),
         ("accuracy",                 acc),
-        ("ttft_mean_ms",             ttft),
+        ("ttft_mean_ms",             ttft_display),
         ("e2el_mean_ms",             e2el),
+        ("ttft_e2el_source",         ttft_source or None),
         ("config_path",              b.get("config_path")),
         ("benchmark_report_path",    b.get("benchmark_report_path")),
         ("failure_streak",           fail_streak or None),
@@ -74,6 +84,11 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         md_parts.append(md_table(
             ["ts", "status", "decision", "key_metric", "error_class"], rows,
         ))
+
+    inv_md = render_invocation_block(b.get("invocation"), session.get("image"))
+    if inv_md:
+        md_parts.append("")
+        md_parts.append(inv_md)
 
     return RenderedSection(
         section_id="baseline",
