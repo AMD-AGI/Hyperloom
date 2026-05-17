@@ -960,3 +960,92 @@ def test_framework_args_unknown_with_warning(tmp_path: Path) -> None:
     assert any(
         "framework_args extraction failed" in w for w in b["warnings"]
     ), b["warnings"]
+
+
+def test_framework_args_from_non_default_args_vllm(tmp_path: Path) -> None:
+    """vllm prints ``non-default args: {parsed-dict}`` right after argv
+    parsing. The extractor picks this up first (Pass 0) because it
+    captures the *resolved* values the framework actually used — beats
+    any other heuristic. Output must be sorted-by-key + repr() values
+    so the string is stable across runs."""
+    sd = tmp_path / "session"
+    _make_invocation_fixture(
+        sd,
+        server_log_text=(
+            "(APIServer pid=1645301) INFO 05-12 10:51:30 [config.py:120] booting\n"
+            "(APIServer pid=1645301) INFO 05-12 10:51:32 [utils.py:233] "
+            "non-default args: {'model': '/wekafs/models/deepseek-ai-DeepSeek-R1', "
+            "'port': 8888, 'tensor_parallel_size': 8, 'max_model_len': 4096, "
+            "'gpu_memory_utilization': 0.85}\n"
+            "(APIServer pid=1645301) INFO 05-12 10:51:35 [server.py:99] ready\n"
+        ),
+        yaml_text=None,
+    )
+    inv = build(sd)["baseline"]["invocation"]
+    assert inv["framework_args_source"] == "log_non_default_args"
+    assert "tensor_parallel_size=8" in inv["framework_args"]
+    assert "model=" in inv["framework_args"]
+    assert "/wekafs/models/deepseek-ai-DeepSeek-R1" in inv["framework_args"]
+    # Deterministic ordering: keys sorted alphabetically. So
+    # ``gpu_memory_utilization`` (g) must precede ``model`` (m) which
+    # must precede ``tensor_parallel_size`` (t) in the emitted string.
+    s = inv["framework_args"]
+    assert s.index("gpu_memory_utilization=") < s.index("model="), s
+    assert s.index("model=") < s.index("tensor_parallel_size="), s
+
+
+def test_framework_args_pass0_takes_priority_over_python_cmd(tmp_path: Path) -> None:
+    """When server.log contains BOTH a ``non-default args: {...}`` line
+    AND a literal ``python -m vllm.entrypoints...`` line, Pass 0 must
+    win — the parsed-arg dict is more authoritative than the raw
+    cmdline (which might contain unresolved env-var placeholders)."""
+    sd = tmp_path / "session"
+    _make_invocation_fixture(
+        sd,
+        server_log_text=(
+            "(APIServer pid=1645301) INFO 05-12 10:51:30 [config.py:120] booting\n"
+            "python -m vllm.entrypoints.openai.api_server --model /weka/m --tp 8\n"
+            "(APIServer pid=1645301) INFO 05-12 10:51:32 [utils.py:233] "
+            "non-default args: {'model': '/weka/m', 'tensor_parallel_size': 8, "
+            "'port': 8888}\n"
+            "(APIServer pid=1645301) INFO 05-12 10:51:35 [server.py:99] ready\n"
+        ),
+        yaml_text=None,
+    )
+    inv = build(sd)["baseline"]["invocation"]
+    assert inv["framework_args_source"] == "log_non_default_args"
+    # And the chosen string is the formatted dict, not the python line.
+    assert "python -m vllm.entrypoints" not in inv["framework_args"]
+    assert "tensor_parallel_size=8" in inv["framework_args"]
+
+
+def test_framework_args_from_yaml_benchmark_synthesis(tmp_path: Path) -> None:
+    """server.log has only INFO noise; yaml is magpie-style with no
+    ``cmd:`` field but a populated ``benchmark.*`` block →
+    Pass 4 synthesizes a readable string from the structured fields and
+    labels the source ``yaml_benchmark`` so consumers know it's not a
+    literal cmdline."""
+    sd = tmp_path / "session"
+    _make_invocation_fixture(
+        sd,
+        server_log_text=(
+            "(APIServer pid=1757439) INFO 05-12 14:21:14 [utils.py:299]\n"
+            "(APIServer pid=1757439) INFO 05-12 14:21:15 [server.py:50] init\n"
+        ),
+        yaml_text=(
+            "benchmark:\n"
+            "  framework: vllm\n"
+            "  model: /path\n"
+            "  precision: fp8\n"
+            "  tp: 8\n"
+            "  envs:\n"
+            "    VLLM_FLASH_ATTN: \"1\"\n"
+        ),
+    )
+    inv = build(sd)["baseline"]["invocation"]
+    assert inv["framework_args_source"] == "yaml_benchmark"
+    s = inv["framework_args"]
+    assert "framework=vllm" in s, s
+    assert "model=/path" in s, s
+    assert "tp=8" in s, s
+    assert "envs=[VLLM_FLASH_ATTN=1]" in s, s
