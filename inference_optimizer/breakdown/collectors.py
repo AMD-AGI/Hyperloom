@@ -71,35 +71,175 @@ def _filter_envs(envs: dict[str, Any] | None) -> dict[str, str]:
     return out
 
 
-def _extract_framework_args(server_log: Path | None) -> str:
-    """Read the first non-empty line of a benchmark ``server.log``.
+# --- framework-args extraction patterns -----------------------------------
+# Pass-1 ("log_args_line"): the runner echoes the parsed launch arguments
+# under one of these stable headers — most reliable signal because it
+# survives any number of preceding INFO log lines.
+_FRAMEWORK_ARGS_HEADER_RE = re.compile(
+    r"^[^|]*?Server arguments?:\s*(.+)$",
+    re.IGNORECASE,
+)
+_FRAMEWORK_ARGS_NAMESPACE_RE = re.compile(
+    r"^[^|]*?Args:\s*Namespace\((.+)\)\s*$",
+    re.IGNORECASE,
+)
+_FRAMEWORK_ARGS_LAUNCH_RE = re.compile(
+    r"^[^|]*?Launch(?:ing)? server with:\s*(.+)$",
+    re.IGNORECASE,
+)
+# Pass-2 ("log_python_cmd"): a literal ``python ... vllm/sglang ...``
+# command somewhere in server.log. We accept it after stripping a
+# leading ``(APIServer pid=...) INFO 05-12 ... [utils.py:299]``-style
+# log prefix that vllm/sglang emit.
+_LOG_PREFIX_RE = re.compile(
+    r"^\s*(?:\([^)]*\)\s+)?(?:INFO|WARN|WARNING|ERROR|DEBUG|TRACE)\s+"
+    r"\d[\d:\-\s]*\[[^\]]+\]\s*",
+    re.IGNORECASE,
+)
+_LOG_TIMESTAMP_RE = re.compile(
+    r"^\s*\[?\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}[^\]]*\]?\s*",
+)
+_PYTHON_CMD_PREFIXES: tuple[str, ...] = (
+    "python", "python3", "vllm", "sglang.launch_server",
+    "inference-optimizer", "ray",
+)
+# Server log size cap — pathological logs (multi-MB) get truncated so
+# the per-line scan stays bounded. 256 KB easily covers any startup
+# banner that echoes the launch line.
+_SERVER_LOG_MAX_BYTES = 256 * 1024
 
-    Hyperloom's benchmark runner echoes the launch command (the ``python
-    -m sglang.launch_server ...`` / ``python -m vllm.entrypoints ...``
-    invocation) as the very first line of server.log. That single line
-    is the canonical "what command did we actually run" record and is
-    what we surface in :class:`BenchmarkInvocation.framework_args`.
 
-    Reads at most 64 KB defensively — we never need more than the
-    first line, and even pathological logs cap out fast. Returns
-    ``""`` on any miss / read error so the collector can decide
-    whether to omit the field entirely.
+def _strip_log_prefix(line: str) -> str:
+    """Strip a leading ``[ts] LEVEL [src.py:NN]`` style prefix from a log line.
+
+    The vllm/sglang server echoes the launch command on its own line
+    after ~50 INFO log lines, each shaped like
+    ``(APIServer pid=1757439) INFO 05-12 14:21:14 [utils.py:299] ...``.
+    To match the literal command we strip both the parenthetical
+    process tag and the level/timestamp/source-frame prefix, leaving
+    just the trailing payload.
     """
-    if server_log is None:
+    s = line
+    s = _LOG_PREFIX_RE.sub("", s)
+    s = _LOG_TIMESTAMP_RE.sub("", s)
+    return s.strip()
+
+
+def _starts_with_python_prefix(text: str) -> bool:
+    head = text.lstrip()
+    for prefix in _PYTHON_CMD_PREFIXES:
+        if head.startswith(prefix):
+            tail = head[len(prefix):]
+            if not tail or tail[0] in (" ", "\t", "-", "."):
+                return True
+    return False
+
+
+def _extract_yaml_cmd(config_yaml: Path) -> str:
+    """Look for a ``cmd`` / ``command`` / ``launch`` field in the config yaml.
+
+    Yaml fallback for sessions whose server.log starts with INFO noise.
+    Reads from these locations (first-non-empty wins):
+      * top-level ``cmd`` / ``command`` / ``launch``
+      * nested ``benchmark.cmd`` / ``benchmark.command``
+    Returns ``""`` on any miss / parse failure.
+    """
+    try:
+        import yaml  # type: ignore[import-not-found]
+    except ImportError:
+        log.debug("PyYAML unavailable; skipping yaml framework_args fallback")
         return ""
     try:
-        if not server_log.exists():
-            return ""
-        # 64 KB is plenty for the first launch line; bounds the worst case.
-        with server_log.open("r", encoding="utf-8", errors="replace") as fh:
-            chunk = fh.read(64 * 1024)
-    except OSError:
+        text = config_yaml.read_text(encoding="utf-8", errors="replace")
+        data = yaml.safe_load(text)
+    except (OSError, yaml.YAMLError) as exc:
+        log.debug("failed to parse %s for framework_args: %r", config_yaml, exc)
         return ""
-    for line in chunk.splitlines():
-        line = line.strip()
-        if line:
-            return line
+    if not isinstance(data, dict):
+        return ""
+    for key in ("cmd", "command", "launch"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    bench = data.get("benchmark")
+    if isinstance(bench, dict):
+        for key in ("cmd", "command"):
+            val = bench.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
     return ""
+
+
+def _extract_framework_args(
+    server_log: Path | None,
+    config_yaml: Path | None = None,
+) -> tuple[str, str]:
+    """Best-effort extract the launch command for a benchmark variant.
+
+    Returns ``(args_string, source)`` where ``source`` documents lineage:
+      * ``"log_args_line"`` — found a line like ``Server arguments: ...``
+        or ``Args: Namespace(...)`` in server.log
+      * ``"log_python_cmd"`` — found a line starting with ``python``,
+        ``python3``, ``vllm``, ``sglang.launch_server`` etc. in server.log
+      * ``"yaml_cmd"`` — fell back to ``cmd:`` / ``command:`` / ``launch:``
+        in the materialized config yaml
+      * ``"unknown"`` — none of the above; ``args_string`` is empty
+    Never raises. Caller decides whether to surface a warning when source
+    is ``unknown``.
+    """
+    chunk: str = ""
+    if server_log is not None:
+        try:
+            if server_log.exists():
+                with server_log.open("r", encoding="utf-8", errors="replace") as fh:
+                    chunk = fh.read(_SERVER_LOG_MAX_BYTES)
+        except OSError:
+            chunk = ""
+
+    lines = chunk.splitlines() if chunk else []
+
+    # Pass 1: stable launch-summary headers. These are emitted by the
+    # framework itself once it's parsed argv, so they survive any
+    # preceding log noise and are the most authoritative when present.
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m = _FRAMEWORK_ARGS_HEADER_RE.match(stripped)
+        if m:
+            return m.group(1).strip(), "log_args_line"
+        m = _FRAMEWORK_ARGS_LAUNCH_RE.match(stripped)
+        if m:
+            return m.group(1).strip(), "log_args_line"
+        m = _FRAMEWORK_ARGS_NAMESPACE_RE.match(stripped)
+        if m:
+            return f"Namespace({m.group(1).strip()})", "log_args_line"
+
+    # Pass 2: a literal python/vllm/sglang command somewhere in the log.
+    # Strip the noisy ``(...) INFO 05-12 14:21:14 [utils.py:299]`` prefix
+    # before testing — the command itself starts on the same line.
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _starts_with_python_prefix(stripped):
+            return stripped, "log_python_cmd"
+        cleaned = _strip_log_prefix(stripped)
+        if cleaned and _starts_with_python_prefix(cleaned):
+            return cleaned, "log_python_cmd"
+
+    # Pass 3: yaml fallback. Only consulted when the log gave us nothing.
+    if config_yaml is not None:
+        try:
+            yaml_exists = config_yaml.exists()
+        except OSError:
+            yaml_exists = False
+        if yaml_exists:
+            cmd = _extract_yaml_cmd(config_yaml)
+            if cmd:
+                return cmd, "yaml_cmd"
+
+    return "", "unknown"
 
 
 def _read_invocation_envs(config_path: Path | None) -> dict[str, str]:
@@ -464,6 +604,40 @@ def collect_baseline(
 
     _, ttft, _tpot, e2el = _benchmark_report_metrics(report if isinstance(report, dict) else None)
 
+    # Symmetric to A2 (final.ttft validate_stack disk walk): when
+    # state.last_baseline.workspace doesn't resolve to a readable
+    # benchmark_report.json, but ``runs/baseline/<hash>/benchmark_*/
+    # benchmark_report.json`` exists on disk, use the most recent. Real
+    # production sessions (e.g. zgong's V2) hit this gap — wekafs view
+    # has the report file but the state-recorded workspace doesn't
+    # match the wekafs root.
+    ttft_source: str | None = "state_workspace" if ttft is not None else None
+    if ttft is None:
+        candidates = sorted(
+            (session_dir / "runs" / "baseline").glob(
+                "*/benchmark_*/benchmark_report.json"
+            ),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if candidates:
+            disk_report_path = candidates[0]
+            disk_report = _load_json_safe(disk_report_path, warnings) or {}
+            _, ttft_disk, _tpot, e2el_disk = _benchmark_report_metrics(disk_report)
+            if ttft_disk is not None:
+                ttft = ttft_disk
+                if e2el is None and e2el_disk is not None:
+                    e2el = e2el_disk
+                if report_path is None:
+                    report_path = disk_report_path
+                ttft_source = "runs_baseline_disk"
+                warnings.append(
+                    "baseline.ttft_mean_ms reconstructed from runs/baseline/ disk walk; "
+                    "state.last_baseline.workspace did not resolve."
+                )
+    if ttft_source is None:
+        ttft_source = "unavailable"
+
     attempts = state.get("baseline_attempts") or []
     history: list[dict[str, Any]] = []
     for a in attempts:
@@ -497,9 +671,15 @@ def collect_baseline(
     config_path_raw = state.get("baseline_config_path") or None
     config_resolved = _resolve_under_session(session_dir, config_path_raw) if config_path_raw else None
     server_log_path: Path | None = None
-    if workspace:
-        # The most recent benchmark dir under the resolved workspace
-        # owns the matching server.log; fall back to None on miss.
+    # Prefer the report we already located (state-resolved or disk-walked) so
+    # the invocation surfaces the same benchmark variant as ttft/e2el. Fall
+    # back to the resolved workspace on the off chance state still pointed
+    # at the right place but the report itself was unreadable.
+    if report_path is not None:
+        candidate_log = report_path.parent / "server.log"
+        if candidate_log.exists():
+            server_log_path = candidate_log
+    if server_log_path is None and workspace:
         bench_dirs = sorted(
             workspace.glob("benchmark_*/server.log"),
             key=lambda p: p.stat().st_mtime,
@@ -508,20 +688,45 @@ def collect_baseline(
         if bench_dirs:
             server_log_path = bench_dirs[0]
 
+    # If we disk-walked into a benchmark dir, the matching config yaml
+    # usually sits as a sibling (or one level up under <task>/). Prefer
+    # that over state.baseline_config_path when the latter doesn't
+    # resolve, so the yaml fallback in _extract_framework_args has a
+    # real file to read.
+    if config_resolved is None and report_path is not None:
+        for candidate in (
+            report_path.parent / "baseline_config.with_envs.yaml",
+            report_path.parent.parent / "baseline_config.with_envs.yaml",
+        ):
+            if candidate.exists():
+                config_resolved = candidate
+                break
+
+    args_str, args_source = _extract_framework_args(
+        server_log_path, config_yaml=config_resolved,
+    )
     invocation = {
-        "framework_args":   _extract_framework_args(server_log_path),
-        "extra_envs":       _read_invocation_envs(config_resolved),
-        "config_path":      _rel(config_resolved, session_dir) if config_resolved else (
+        "framework_args":        args_str,
+        "framework_args_source": args_source,
+        "extra_envs":            _read_invocation_envs(config_resolved),
+        "config_path":           _rel(config_resolved, session_dir) if config_resolved else (
             config_path_raw if config_path_raw else None
         ),
-        "server_log_path":  _rel(server_log_path, session_dir) if server_log_path else None,
+        "server_log_path":       _rel(server_log_path, session_dir) if server_log_path else None,
     }
+    if args_source == "unknown":
+        warnings.append(
+            "framework_args extraction failed for "
+            f"{(_rel(server_log_path, session_dir) if server_log_path else 'no server.log')}; "
+            "tried server.log + yaml"
+        )
 
     return {
         "throughput_tok_s_per_gpu": _to_float(state.get("baseline_tput")) or 0.0,
         "accuracy":                 _to_float(state.get("baseline_accuracy")) or 0.0,
         "ttft_mean_ms":             ttft,
         "e2el_mean_ms":             e2el,
+        "ttft_e2el_source":         ttft_source,
         "config_path":              config_path_raw,
         "benchmark_report_path":    _rel(report_path, session_dir) if report_path else None,
         "attempts_history":         history,
@@ -732,11 +937,21 @@ def _build_final_invocation(
         log_candidate = bench_dir / "server.log"
         if log_candidate.exists():
             server_log_path = log_candidate
+    args_str, args_source = _extract_framework_args(
+        server_log_path, config_yaml=config_path,
+    )
+    if args_source == "unknown":
+        warnings.append(
+            "framework_args extraction failed for "
+            f"{(_rel(server_log_path, session_dir) if server_log_path else 'no server.log')}; "
+            "tried server.log + yaml"
+        )
     return {
-        "framework_args":   _extract_framework_args(server_log_path),
-        "extra_envs":       _read_invocation_envs(config_path),
-        "config_path":      _rel(config_path, session_dir) if config_path else None,
-        "server_log_path":  _rel(server_log_path, session_dir) if server_log_path else None,
+        "framework_args":        args_str,
+        "framework_args_source": args_source,
+        "extra_envs":            _read_invocation_envs(config_path),
+        "config_path":           _rel(config_path, session_dir) if config_path else None,
+        "server_log_path":       _rel(server_log_path, session_dir) if server_log_path else None,
     }
 
 

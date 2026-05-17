@@ -798,3 +798,165 @@ def test_session_image_from_manifest_takes_precedence(
     monkeypatch.setenv("HYPERLOOM_IMAGE", "registry.example/hyperloom:from-env")
     b = build(sd)
     assert b["session"]["image"] == "registry.example/hyperloom:from-manifest"
+
+
+# ---------------------------------------------------------------------------
+# C1: baseline.ttft_mean_ms disk-walk fallback
+# ---------------------------------------------------------------------------
+def test_baseline_ttft_disk_walk_fallback(tmp_path: Path) -> None:
+    """When ``state.last_baseline.workspace`` does not resolve to a
+    readable benchmark report, but ``runs/baseline/<hash>/benchmark_*/
+    benchmark_report.json`` exists on disk, the collector must walk
+    that directory and surface the latency from the most recent
+    report (mirrors the A2 final.ttft validate_stack disk walk).
+
+    Production parallel: zgong's V2 session
+    ``deepseek-ai-DeepSeek-R1_20260512T102109Z_0dc064c4`` had a valid
+    benchmark_report.json on wekafs but state's recorded workspace
+    didn't resolve."""
+    sd = tmp_path / "session"
+    sd.mkdir(parents=True)
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "diskwalk"})
+    bdir = sd / "runs/baseline/541e643a84e14352a2ff64bdfe27b2c9/benchmark_001"
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True,
+        "output_throughput_tok_s": 421.5,
+        "mean_ttft_ms": 99.5,
+        "mean_e2el_ms": 1500.0,
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "diskwalk",
+        "baseline_tput": 421.5,
+        # Recorded workspace doesn't resolve under session_dir on wekafs
+        # — exactly the production failure mode we're guarding against.
+        "last_baseline": {"workspace": "/workspace/runs/baseline/different-hash"},
+    })
+
+    b = build(sd)
+    baseline = b["baseline"]
+    assert baseline["ttft_mean_ms"] == pytest.approx(99.5)
+    assert baseline["e2el_mean_ms"] == pytest.approx(1500.0)
+    assert baseline["ttft_e2el_source"] == "runs_baseline_disk"
+    assert any(
+        "baseline.ttft_mean_ms reconstructed from runs/baseline/ disk walk" in w
+        for w in b["warnings"]
+    ), b["warnings"]
+
+
+# ---------------------------------------------------------------------------
+# C2: framework_args extraction lineage
+# ---------------------------------------------------------------------------
+def _make_invocation_fixture(
+    sd: Path,
+    server_log_text: str | None,
+    yaml_text: str | None,
+) -> None:
+    """Minimal fixture: state pointing at runs/baseline/h1, optional
+    server.log + baseline_config.with_envs.yaml beside the report."""
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "fa"})
+    bdir = sd / "runs/baseline/h1/benchmark_001"
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True, "output_throughput_tok_s": 200.0,
+        "mean_ttft_ms": 120.0, "mean_e2el_ms": 1500.0,
+    })
+    if server_log_text is not None:
+        (bdir / "server.log").write_text(server_log_text, encoding="utf-8")
+    cfg_path = sd / "runs/baseline/h1/baseline_config.with_envs.yaml"
+    if yaml_text is not None:
+        cfg_path.write_text(yaml_text, encoding="utf-8")
+    state: dict[str, Any] = {
+        "session_id": "fa",
+        "baseline_tput": 200.0,
+        "last_baseline": {"workspace": str(sd / "runs/baseline/h1")},
+    }
+    if yaml_text is not None:
+        state["baseline_config_path"] = str(cfg_path)
+    _write_json(sd / "state.json", state)
+
+
+def test_framework_args_from_server_arguments_line(tmp_path: Path) -> None:
+    """``Server arguments: ...`` header in server.log → source =
+    ``log_args_line``; the captured args (not the header) get echoed."""
+    sd = tmp_path / "session"
+    _make_invocation_fixture(
+        sd,
+        server_log_text=(
+            "INFO 05-12 14:21:14 [server.py:42] booting up\n"
+            "INFO 05-12 14:21:15 [server.py:50] Server arguments: "
+            "--model /weka/m --tp 8 --port 30001\n"
+            "INFO 05-12 14:21:16 [server.py:99] ready\n"
+        ),
+        yaml_text=None,
+    )
+    inv = build(sd)["baseline"]["invocation"]
+    assert "--tp 8" in inv["framework_args"]
+    assert "--port 30001" in inv["framework_args"]
+    assert inv["framework_args_source"] == "log_args_line"
+
+
+def test_framework_args_from_python_cmd_line(tmp_path: Path) -> None:
+    """A literal ``python -m vllm.entrypoints...`` line surrounded by
+    INFO log noise → source = ``log_python_cmd``; the python command
+    line is what gets surfaced (Pass-2 fallback)."""
+    sd = tmp_path / "session"
+    _make_invocation_fixture(
+        sd,
+        server_log_text=(
+            "(APIServer pid=1757439) INFO 05-12 14:21:14 [utils.py:299] booting\n"
+            "(APIServer pid=1757439) INFO 05-12 14:21:15 [server.py:50] init\n"
+            "python -m vllm.entrypoints.openai.api_server --model /weka/m --tp 8\n"
+            "(APIServer pid=1757439) INFO 05-12 14:22:00 [server.py:99] ready\n"
+        ),
+        yaml_text=None,
+    )
+    inv = build(sd)["baseline"]["invocation"]
+    assert "vllm.entrypoints" in inv["framework_args"]
+    assert inv["framework_args_source"] == "log_python_cmd"
+
+
+def test_framework_args_from_yaml_cmd_fallback(tmp_path: Path) -> None:
+    """server.log has only INFO noise (no header, no python prefix);
+    yaml has a ``cmd: ...`` field → source = ``yaml_cmd``."""
+    sd = tmp_path / "session"
+    _make_invocation_fixture(
+        sd,
+        server_log_text=(
+            "(APIServer pid=1757439) INFO 05-12 14:21:14 [utils.py:299]\n"
+            "(APIServer pid=1757439) INFO 05-12 14:21:15 [server.py:50] init\n"
+        ),
+        yaml_text=(
+            'cmd: "python -m sglang.launch_server --tp 4 --model /weka/m"\n'
+            "benchmark:\n"
+            "  envs:\n"
+            "    TP: \"4\"\n"
+        ),
+    )
+    inv = build(sd)["baseline"]["invocation"]
+    assert "sglang.launch_server" in inv["framework_args"]
+    assert inv["framework_args_source"] == "yaml_cmd"
+
+
+def test_framework_args_unknown_with_warning(tmp_path: Path) -> None:
+    """server.log has only INFO noise + yaml has no ``cmd``/``command``/
+    ``launch`` field → source = ``unknown``, framework_args is empty,
+    and a ``framework_args extraction failed`` warning is appended."""
+    sd = tmp_path / "session"
+    _make_invocation_fixture(
+        sd,
+        server_log_text=(
+            "(APIServer pid=1757439) INFO 05-12 14:21:14 [utils.py:299]\n"
+            "(APIServer pid=1757439) INFO 05-12 14:21:15 [server.py:50] init\n"
+        ),
+        yaml_text=(
+            "benchmark:\n"
+            "  envs:\n"
+            "    TP: \"8\"\n"
+        ),
+    )
+    b = build(sd)
+    inv = b["baseline"]["invocation"]
+    assert inv["framework_args"] == ""
+    assert inv["framework_args_source"] == "unknown"
+    assert any(
+        "framework_args extraction failed" in w for w in b["warnings"]
+    ), b["warnings"]
