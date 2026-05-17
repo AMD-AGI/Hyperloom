@@ -1499,6 +1499,7 @@ def _preflight() -> tuple[str, str] | None:
     )
     if check.returncode != 0:
         magpie_env = os.environ.get("MAGPIE_DIR")
+        magpie_env_explicit = bool(magpie_env)
         if magpie_env:
             magpie_dir = Path(magpie_env)
         else:
@@ -1506,6 +1507,23 @@ def _preflight() -> tuple[str, str] | None:
             magpie_dir = _magpie_default(_session_dir_resolve())
         magpie_dir.parent.mkdir(parents=True, exist_ok=True)
         if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
+            # Refuse-to-clobber guard: when $MAGPIE_DIR was set explicitly by
+            # the operator (e.g. a wekafs fork with un-pushed local commits),
+            # cloning Magpie main on top would silently destroy local work.
+            # Auto-clone only happens for the default path resolved from
+            # `paths.magpie_dir(session_dir)`.
+            if magpie_env_explicit:
+                print(
+                    f"Preflight: ERROR — $MAGPIE_DIR={magpie_dir} has no "
+                    f"setup.py/pyproject.toml; refusing to clone Magpie "
+                    f"main on top of an operator-supplied path. Fix the "
+                    f"env or unset $MAGPIE_DIR to fall back to the "
+                    f"session-default location.",
+                    file=sys.stderr,
+                )
+                raise FileNotFoundError(
+                    f"$MAGPIE_DIR={magpie_dir} is not a valid Magpie checkout"
+                )
             print(f"Preflight: Magpie not importable and not found at {magpie_dir}; cloning ...")
             subprocess.run(
                 ["git", "clone", "--depth", "1",
