@@ -1045,17 +1045,92 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         kill_ep = _build_multinode_kill_entrypoint(pid_dir)
         launch_ep = _build_multinode_launch_entrypoint(args, nnodes, pid_dir, log_dir)
 
-        kill_sub = _exec_kill_submission(
-            head_ip, kill_ep, label="restart kill", args=args,
+        # Resume-running-launch fast path: if the previous restart-server
+        # invocation already submitted a launch with identical
+        # framework/model/tp/ep/pd_mode AND the Ray dashboard reports
+        # that job is still RUNNING, skip KILL+LAUNCH and just resume
+        # polling it.
+        #
+        # Rationale: large MoE servers (DSr1-0528 671B FP8, TP=16) need
+        # 5-10 minutes to load weights + Triton/AITER JIT compile, far
+        # longer than the 110s --poll-timeout most retry loops use. The
+        # legacy "kill old, launch new" path means every retry iteration
+        # resets the server boot from zero — sglang/vllm can never
+        # finish loading because the next 110s retry kills it again.
+        #
+        # Disable with MULTI_NODE_RESTART_RESUME_RUNNING=0 (operator
+        # explicitly wants a fresh server even though the flags match).
+        launch_sub: str = ""
+        resume_enabled = (
+            os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING", "1").lower()
+            not in ("0", "false", "no", "off")
         )
+        prev_sub = str(state.get("last_restart_submission_id") or "").strip()
+        prev_match = bool(prev_sub) and (
+            str(state.get("last_restart_framework") or "") == str(args.framework)
+            and str(state.get("last_restart_model") or "") == str(args.model)
+            and int(state.get("last_restart_tp") or 0) == int(args.tp)
+            and int(state.get("last_restart_ep") or 1) == int(getattr(args, "ep", 1) or 1)
+            and str(state.get("last_restart_pd_mode") or "colocated")
+                == (getattr(args, "pd_mode", "") or "colocated").lower()
+        )
+        if resume_enabled and prev_match:
+            _prev_status = ""
+            try:
+                with ray_dashboard.RayDashboardClient(head_ip) as _probe:
+                    _job = _probe.get_job(prev_sub)
+                    _prev_status = str(_job.get("status", "")).upper()
+            except Exception as _exc:  # noqa: BLE001
+                info(f"resume probe failed: {_exc!r}; falling back to KILL+LAUNCH")
+            if _prev_status == "RUNNING":
+                info(f"resume: reusing launch_sub={prev_sub} "
+                     f"(framework={args.framework} model={args.model} "
+                     f"tp={args.tp} ep={getattr(args, 'ep', 1)}) "
+                     f"— skipping KILL+LAUNCH, just polling")
+                launch_sub = prev_sub
+            elif _prev_status in _TERMINAL_OK_STATUSES:
+                info(f"resume: prior launch_sub={prev_sub} already SUCCEEDED; "
+                     f"skipping KILL+LAUNCH, treating as healthy")
+                launch_sub = prev_sub
+
+        kill_sub = ""
+        if not launch_sub:
+            kill_sub = _exec_kill_submission(
+                head_ip, kill_ep, label="restart kill", args=args,
+            )
 
         with ray_dashboard.RayDashboardClient(head_ip) as ray:
-            # Phase B: launch new. Driver returns once every rank
+            # Phase B: launch new (skipped above when resuming an
+            # existing RUNNING launch). Driver returns once every rank
             # spawned its launcher; rank 0 /health probe is best-effort
             # (driver internal, see launch_multinode.py).
-            launch_sub = ray.submit_job(_wrap_for_dash(launch_ep))
-            info(f"launch submission_id={launch_sub} "
-                 f"(driver waits for actors, then returns; servers detached)")
+            if not launch_sub:
+                launch_sub = ray.submit_job(_wrap_for_dash(launch_ep))
+                info(f"launch submission_id={launch_sub} "
+                     f"(driver waits for actors, then returns; servers detached)")
+
+            # EARLY checkpoint: persist the launch identity + config NOW,
+            # before the (potentially long) _short_poll. Without this,
+            # the next 110s poll timeout raises TransientFailure and
+            # cmd_restart_server returns early — leaving state.json
+            # untouched. The retry loop's next invocation can't see
+            # last_restart_submission_id, falls into KILL+LAUNCH again,
+            # and the server bootstrap is reset from zero. Persisting
+            # here lets the resume-running-launch fast path above
+            # actually fire on retry.
+            state["last_server_pid_dir"] = pid_dir
+            state["last_server_log_dir"] = log_dir
+            if kill_sub:
+                state["last_kill_submission_id"] = kill_sub
+            state["last_restart_submission_id"] = launch_sub
+            state["last_restart_framework"] = args.framework
+            state["last_restart_model"] = args.model
+            state["last_restart_tp"] = int(args.tp)
+            state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
+            state["last_restart_pd_mode"] = (
+                getattr(args, "pd_mode", "") or "colocated"
+            ).lower()
+            _save_state(state)
 
             def _fetch_launch():
                 j = ray.get_job(launch_sub)
