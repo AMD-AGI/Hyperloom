@@ -183,8 +183,18 @@ user later passes `--no-kernel` at runtime, the installer still prepares
 kernel-agent / TraceLens / GEAK / OOB / auth-proxy; `--no-kernel` only means
 that this `optimize` run skips the kernel optimization phase.
 
-`kernel-agent/scripts/install.sh` installs everything in one shot (no
-`--with-*` flags to remember):
+`install.sh` installs everything in one shot (no `--with-*` flags to
+remember). Direct steps in `inference_optimizer/scripts/install.sh`:
+
+| Component | Provided by |
+|---|---|
+| `inference_optimizer` pkg + `claude_agent_sdk` extras (`pip install -e .[test]`) | `ensure_inference_optimizer` |
+| **Magpie** (`git clone --depth 1 $MAGPIE_REPO $MAGPIE_DIR` + `pip install -e`; default `$MAGPIE_DIR=$HYPERLOOM_RUNTIME_DIR/Magpie`) | `ensure_magpie` |
+| `INFERENCEX_PATH` auto-detection (scans `$MAGPIE_DIR/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX` → WekaFS fallbacks) | `ensure_inferencex` |
+| `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
+
+Chained from `kernel-agent/scripts/install.sh` (single chain at the end
+of `inference_optimizer/install.sh`):
 
 | Component | Provided by |
 |---|---|
