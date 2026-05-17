@@ -22,6 +22,7 @@ The runner now follows a round-based incremental search:
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
 from pathlib import Path
@@ -37,14 +38,89 @@ from ._grid_runner import (
     apply_user_skip_list,
     resolve_skip_spec,
     run_grid,
+    sanitize_result_dir,
+    sanitize_script_name,
 )
 from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
 )
+from .backends import (
+    DEFAULT_SGLANG_SERVER_ARGS,
+    DEFAULT_VLLM_ARG_UTILS,
+)
+from ..framework_paths import (
+    resolve_sglang_server_args_path,
+    resolve_vllm_arg_utils_path,
+)
 
 
 log = logging.getLogger(__name__)
+
+
+# T1 — keywords identifying server-parameter-style attrs in framework
+# server_args.py / arg_utils.py. These are intentionally narrower than
+# backends._BACKEND_KEYWORDS: backends toggles dispatch paths (boolean
+# flags), params tune scheduling / memory / batching values (typed args
+# the LLM should fill in via params.grid). The set below was distilled
+# from marathon/skills/actions/params.md PARAM_GRID + KNOWLEDGE-BASE
+# server-parameter reference.
+_PARAM_KEYWORDS = (
+    "max_num", "max_running", "max_prefill", "max_seq",
+    "cuda_graph", "cudagraph",
+    "decode_steps", "continuous_decode",
+    "mem_fraction", "memory_utilization", "gpu_memory",
+    "chunked_prefill", "schedule_conservativeness", "schedule_policy",
+    "tokenizer_worker", "stream_interval",
+    "block_size", "kv_cache_dtype",
+    "max_cudagraph", "compilation_config",
+    "radix_cache", "prefix_cach",
+)
+
+
+def discover_param_flags(
+    *,
+    framework: str = "sglang",
+    server_args_path: Path | None = None,
+) -> list[str]:
+    """AST-discover server-parameter flags from the live framework source.
+
+    Mirrors :func:`backends.discover_backend_flags` for parameter-tuning
+    attrs. Returns CLI-style flag names (``--cuda-graph-max-bs``,
+    ``--max-num-seqs``, ...) — values are NOT inferred; the caller / LLM
+    fills them in via ``params.grid`` injection. Returns ``[]`` when the
+    source file is missing.
+
+    ``framework`` accepts ``"sglang"`` (default) or ``"vllm"``; pass
+    ``server_args_path`` to override the default search path entirely.
+    """
+    if server_args_path is None:
+        fw = (framework or "sglang").strip().lower()
+        if "vllm" in fw:
+            server_args_path, _note = resolve_vllm_arg_utils_path()
+        else:
+            server_args_path, _note = resolve_sglang_server_args_path()
+    if not server_args_path.exists():
+        log.info("discover_param_flags: %s not found, returning empty",
+                  server_args_path)
+        return []
+    try:
+        source = server_args_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError) as exc:
+        log.warning("discover_param_flags: parse failed: %s", exc)
+        return []
+    flags: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and any(
+            kw in node.attr for kw in _PARAM_KEYWORDS
+        ):
+            flags.add("--" + node.attr.replace("_", "-"))
+        elif isinstance(node, ast.keyword) and node.arg and any(
+            kw in node.arg for kw in _PARAM_KEYWORDS
+        ):
+            flags.add("--" + node.arg.replace("_", "-"))
+    return sorted(flags)
 
 
 # ---------------------------------------------------------------------------
@@ -170,15 +246,27 @@ DEFAULT_NCCL_GRID: list[GridVariant] = [
 
 # ---------------------------------------------------------------------------
 def _variant_to_dict(v: GridVariant) -> dict[str, Any]:
+    """Serialize a GridVariant for params_search/backends_search storage.
+
+    ``fingerprint`` is stamped so dedup-ledger consumers (and the
+    Coordinator's promote path) don't have to recompute the hash from
+    (extra_sglang_args, extra_envs) on every read.
+    """
     return {
         "name": v.name,
         "extra_sglang_args": v.extra_sglang_args,
         "extra_envs": dict(v.extra_envs),
         "note": v.note,
+        "fingerprint": v.fingerprint,
     }
 
 
 def _dict_to_variant(v: dict[str, Any]) -> GridVariant:
+    """Round-trip helper. ``fingerprint`` in the dict is ignored —
+    :class:`GridVariant.fingerprint` is a computed property derived from
+    args/envs, so reading a stale or absent value would never disagree
+    with what re-hashing produces at runtime.
+    """
     return GridVariant(
         name=str(v["name"]),
         extra_sglang_args=str(v.get("extra_sglang_args", "") or ""),
@@ -226,14 +314,41 @@ def _result_with_effective_args(
 
 
 def _initial_search_state() -> dict[str, Any]:
+    """Empty :attr:`SharedState.params_search` ledger (schema v2).
+
+    Schema v2 (Phase 3): ``tested`` is keyed by content fingerprint
+    instead of variant name, and a ``name_index`` (name → fingerprint)
+    sits alongside for legacy / display lookups. Old v1 ledgers (name-
+    keyed) are auto-migrated on load — see
+    :meth:`SharedState.load_or_init`.
+    """
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "accepted": [],
         "rejected": [],
         "tested": {},
+        "name_index": {},
         "cursor": 0,
         "last_round": {},
     }
+
+
+def _params_entry_fp(entry: Any) -> str:
+    """Best-effort fingerprint extraction from a params_search entry.
+
+    Recomputes from stored args/envs if ``fingerprint`` is missing — covers
+    schema-v1 ledgers that haven't been migrated yet.
+    """
+    if not isinstance(entry, dict):
+        return ""
+    fp = entry.get("fingerprint")
+    if fp:
+        return str(fp)
+    from ._grid_runner import variant_fingerprint as _vfp
+    return _vfp(
+        str(entry.get("extra_sglang_args") or ""),
+        dict(entry.get("extra_envs") or {}),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +363,7 @@ class ParamsExecutor:
         default_nccl_grid: list[GridVariant] | None = None,
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
-        variant_timeout_sec: int = 900,
+        variant_timeout_sec: int = 2400,
         include_nccl: bool = False,
         default_max_candidates_per_round: int = 0,
         keep_threshold_pct: float = 0.5,
@@ -306,11 +421,23 @@ class ParamsExecutor:
             str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower()
         )
+        # See backends.py for rationale. Same Orchestration-supplied
+        # override surface for benchmark_script / result_dir.
+        try:
+            override_script = sanitize_script_name(params.get("benchmark_script"))
+            override_result_dir = sanitize_result_dir(params.get("result_dir"))
+        except ValueError as exc:
+            return {
+                "status": "failed",
+                "error_class": "bad_param",
+                "error": str(exc),
+            }
         config_path = materialize_config_with_envs(
             config_path,
             output_root,
             model_path=resolved_model_for_render or None,
             gpu_type=resolved_gpu_for_render or None,
+            benchmark_script=override_script,
             out_name="params_base.with_envs.yaml",
         )
 
@@ -326,6 +453,7 @@ class ParamsExecutor:
 
         # Compose grid: flags first, then optional NCCL.
         grid_override = params.get("grid")
+        framework = _config_framework(config_path)
         if grid_override:
             grid = [
                 GridVariant(name=v["name"],
@@ -335,7 +463,6 @@ class ParamsExecutor:
                 for v in grid_override
             ]
         else:
-            framework = _config_framework(config_path)
             grid = (
                 list(self.default_vllm_grid)
                 if "vllm" in framework
@@ -344,11 +471,39 @@ class ParamsExecutor:
             if self.include_nccl or params.get("include_nccl"):
                 grid += list(self.default_nccl_grid)
 
+        # T1 — AST-discover parameter flag names from the live framework
+        # so the Orchestration prompt sees the full namespace and can
+        # synthesize value-filled candidates via params.grid. We do NOT
+        # auto-augment the grid here (most param flags need a value, not
+        # a bare presence — see backends._augment_grid_with_discovered_flags
+        # rationale). Discovered flags are surfaced to SharedState only.
+        # We resolve the discovery path through this module's globals so
+        # tests / operators can monkeypatch DEFAULT_*_PATH at runtime.
+        discovered_param_flags: list[str] = []
+        discovered_source = ""
+        discovery_error = ""
+        if not bool(params.get("disable_discovery", False)):
+            fw = (framework or "sglang").strip().lower()
+            if "vllm" in fw:
+                src_path, discovery_error = resolve_vllm_arg_utils_path()
+            else:
+                src_path, discovery_error = resolve_sglang_server_args_path()
+            discovered_param_flags = discover_param_flags(
+                framework=framework, server_args_path=src_path,
+            )
+            discovered_source = str(src_path)
+            if not discovered_param_flags and discovery_error:
+                discovery_error = (
+                    f"discover_param_flags: no flags from {discovered_source} "
+                    f"({discovery_error})"
+                )
+
         # User-declared variant skip list (operator prompt / --skip-variants
         # / task params). Same helper as backends.py so the contract is
         # uniform: a single SKIP_VARIANTS spec prunes both grids. Pure
         # name/glob match; no model knowledge required. Anything the agent
-        # already knows is incompatible should come through here.
+        # already knows is incompatible should come through here. Applied
+        # AFTER discovery so dropped flags don't accidentally re-appear.
         skip_spec = resolve_skip_spec(params)
         grid, user_dropped = apply_user_skip_list(grid, skip_spec=skip_spec)
         for d in user_dropped:
@@ -357,10 +512,15 @@ class ParamsExecutor:
         dropped_variants = list(user_dropped)
 
         search = dict(params.get("params_search") or _initial_search_state())
-        search.setdefault("schema_version", 1)
+        # Schema versions: v1 keyed tested by variant name; v2 keys by
+        # content fingerprint. The executor accepts both shapes for
+        # resume — old name keys still rescue dedup via ``name_index``
+        # fallback in the candidate filter below.
+        search.setdefault("schema_version", 2)
         search.setdefault("accepted", [])
         search.setdefault("rejected", [])
         search.setdefault("tested", {})
+        search.setdefault("name_index", {})
         search.setdefault("cursor", 0)
         base_variant_name = str(params.get("base_variant_name") or "").strip()
         if base_variant_name:
@@ -387,22 +547,40 @@ class ParamsExecutor:
                     *list(search.get("accepted") or []),
                 ]
 
-        accepted_names = {
-            str(v.get("name")) for v in search.get("accepted", [])
-            if isinstance(v, dict) and v.get("name")
+        # Build the dedup set by content fingerprint (the schema-v2
+        # primary key). Legacy v1 rows lacked the fingerprint field —
+        # ``_params_entry_fp`` re-derives one from stored args/envs so
+        # resume after a schema bump still blocks re-runs.
+        accepted_fps = {_params_entry_fp(v) for v in search.get("accepted", [])}
+        rejected_fps = {_params_entry_fp(v) for v in search.get("rejected", [])}
+        accepted_fps.discard("")
+        rejected_fps.discard("")
+        tested_dict = search.get("tested") or {}
+        tested_fps = set(tested_dict.keys())
+        for entry in tested_dict.values():
+            tested_fps.add(_params_entry_fp(entry))
+        tested_fps.discard("")
+        # Legacy ``tested`` rows keyed by name (schema v1) — keep the
+        # name fast-path so we don't depend on the re-derivation above
+        # round-tripping perfectly. ``name_index`` also feeds this set.
+        legacy_tested_names = {
+            k for k, v in tested_dict.items()
+            if isinstance(v, dict) and k == v.get("name")
         }
-        rejected_names = {
-            str(v.get("name")) for v in search.get("rejected", [])
-            if isinstance(v, dict) and v.get("name")
-        }
-        tested_names = set((search.get("tested") or {}).keys())
+        name_index = dict(search.get("name_index") or {})
 
-        candidates = [
-            v for v in grid
-            if v.name not in accepted_names
-            and v.name not in rejected_names
-            and v.name not in tested_names
-        ]
+        def _is_dup(variant: GridVariant) -> bool:
+            fp = variant.fingerprint
+            if fp in accepted_fps or fp in rejected_fps or fp in tested_fps:
+                return True
+            legacy = name_index.get(variant.name)
+            if legacy and legacy in (accepted_fps | rejected_fps | tested_fps):
+                return True
+            if variant.name in legacy_tested_names:
+                return True
+            return False
+
+        candidates = [v for v in grid if not _is_dup(v)]
         if max_candidates > 0:
             candidates = candidates[:max_candidates]
 
@@ -420,6 +598,18 @@ class ParamsExecutor:
                 "params_search_update": search,
                 "params_search_exhausted": True,
                 "dropped_variants": dropped_variants,
+                "discovered_flags_update": (
+                    {
+                        "framework": framework or "sglang",
+                        "param_flags": discovered_param_flags,
+                        "source_path": discovered_source,
+                        **(
+                            {"discovery_error": discovery_error}
+                            if discovery_error else {}
+                        ),
+                    }
+                    if discovered_param_flags or discovery_error else None
+                ),
             }
 
         # Reuse the resolved model/gpu from the materialization step above
@@ -435,6 +625,8 @@ class ParamsExecutor:
             variant_timeout_sec=timeout_sec,
             model_path=resolved_model,
             gpu_type=resolved_gpu,
+            benchmark_script=override_script,
+            result_dir=override_result_dir,
         )
 
         candidate_by_name = {v.name: v for v in candidates}
@@ -468,6 +660,8 @@ class ParamsExecutor:
                     variant_timeout_sec=timeout_sec,
                     model_path=resolved_model,
                     gpu_type=resolved_gpu,
+                    benchmark_script=override_script,
+                    result_dir=override_result_dir,
                 )
 
         all_results = single_results + combo_results
@@ -509,15 +703,25 @@ class ParamsExecutor:
         for name in selected_new_names:
             accepted_next.append(candidate_by_name[name])
 
+        # ``tested`` is keyed by content fingerprint (schema v2). Legacy
+        # name-keyed entries from a pre-migration ledger are preserved
+        # verbatim so a resume mid-migration doesn't silently lose
+        # history; new writes always land at the fingerprint key.
         tested = dict(search.get("tested") or {})
         rejected = list(search.get("rejected") or [])
         for r in single_results:
             gain = _result_gain(r.output_throughput, base_tput)
-            tested[r.name] = {
+            fp = r.fingerprint
+            tested[fp] = {
+                "name": r.name,
+                "extra_sglang_args": r.extra_sglang_args,
+                "extra_envs": dict(r.extra_envs or {}),
+                "fingerprint": fp,
                 "result": r.to_dict(),
                 "gain_pct": gain,
                 "base_tput": base_tput,
             }
+            name_index[r.name] = fp
             if r.name not in set(selected_new_names):
                 reason = "not_keep" if (gain is None or gain < keep_threshold_pct) \
                     else "combo_conflict"
@@ -529,22 +733,39 @@ class ParamsExecutor:
                 })
 
         accepted_dicts = [_variant_to_dict(v) for v in accepted_next]
-        # Deduplicate rejected by name while preserving latest reason.
-        rejected_by_name = {
-            str(v.get("name")): v for v in rejected
-            if isinstance(v, dict) and v.get("name")
-            and str(v.get("name")) not in {a["name"] for a in accepted_dicts}
+        accepted_fps_next = {
+            str(a.get("fingerprint") or "") for a in accepted_dicts
         }
+        accepted_fps_next.discard("")
+        # Deduplicate rejected by fingerprint while preserving latest
+        # reason; drop any fp that already lives in ``accepted``.
+        rejected_by_fp: dict[str, dict[str, Any]] = {}
+        for entry in rejected:
+            if not isinstance(entry, dict):
+                continue
+            fp = str(entry.get("fingerprint") or "")
+            if not fp:
+                fp = _params_entry_fp(entry)
+            if not fp or fp in accepted_fps_next:
+                continue
+            rejected_by_fp[fp] = entry
+        # Exhaustion is defined as "no fingerprint survived the dedup
+        # filter this round" — that's what the Coordinator's
+        # ``_params_grid_exhausted`` consumes. ``len(tested) >= len(grid)``
+        # over-promised exhaustion when the LLM passed a custom grid.
+        params_search_exhausted = len(candidates) == 0
         search_update = {
-            "schema_version": 1,
+            "schema_version": 2,
             "accepted": accepted_dicts,
-            "rejected": list(rejected_by_name.values()),
+            "rejected": list(rejected_by_fp.values()),
             "tested": tested,
+            "name_index": name_index,
             "cursor": len(tested),
             "last_round": {
                 "base_tput": base_tput,
                 "base_extra_args": base_extra_args,
                 "tested": [r.name for r in single_results],
+                "tested_fp": [r.fingerprint for r in single_results],
                 "round_winners": [r.name for r in round_winners],
                 "selected_new": list(selected_new_names),
                 "combo_tested": [r.name for r in combo_results],
@@ -567,8 +788,20 @@ class ParamsExecutor:
             "output_throughput": best.output_throughput if best else None,
             "workspace": output_root.as_posix(),
             "params_search_update": search_update,
-            "params_search_exhausted": len(search_update["tested"]) >= len(grid),
+            "params_search_exhausted": params_search_exhausted,
             "dropped_variants": dropped_variants,
+            "discovered_flags_update": (
+                {
+                    "framework": framework or "sglang",
+                    "param_flags": discovered_param_flags,
+                    "source_path": discovered_source,
+                    **(
+                        {"discovery_error": discovery_error}
+                        if discovery_error else {}
+                    ),
+                }
+                if discovered_param_flags or discovery_error else None
+            ),
         }
 
 
@@ -580,5 +813,6 @@ __all__ = [
     "DEFAULT_PARAMS_GRID",
     "DEFAULT_VLLM_PARAMS_GRID",
     "ParamsExecutor",
+    "discover_param_flags",
     "params_executor",
 ]

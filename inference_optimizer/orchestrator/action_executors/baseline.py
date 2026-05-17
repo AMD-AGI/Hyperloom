@@ -34,21 +34,27 @@ Implementation notes:
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
 from ...paths import asset_root
 from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
+from ._grid_runner import sanitize_result_dir, sanitize_script_name
 from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
 )
-from .benchmark_result import extract_benchmark_measurement
+from .benchmark_result import (
+    extract_benchmark_measurement,
+    harvest_leaked_artifacts,
+)
 
 
 log = logging.getLogger(__name__)
@@ -61,20 +67,24 @@ log = logging.getLogger(__name__)
 BASELINE_DEFAULT_CONFIG = (
     asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
 )
-BASELINE_DEFAULT_TIMEOUT_SEC = 1500           # WARM-start cap (aiter jit cache populated)
-BASELINE_COLD_START_TIMEOUT_SEC = 3600        # COLD-start cap (aiter jit cache empty/sparse)
+BASELINE_DEFAULT_TIMEOUT_SEC = 2400           # WARM-start cap, 40 min (aiter jit cache populated)
+BASELINE_COLD_START_TIMEOUT_SEC = 3600        # COLD-start cap, 60 min (aiter jit cache empty/sparse)
 COLD_START_KERNEL_THRESHOLD = 20              # < N .so files under aiter jit/build/ ⇒ COLD
 
-# Probe order for aiter's JIT cache root. First path that exists wins.
-# Override via env `INFERENCE_OPTIMIZER_AITER_JIT_DIR=/abs/path` (single path,
-# tried before this list).
+# Legacy fallback probe order for aiter's JIT cache dir. Used only when
+# `importlib.util.find_spec("aiter")` cannot resolve aiter dynamically
+# (e.g. probe invoked from a venv where aiter isn't importable). First
+# path that exists wins. Override via env
+# `INFERENCE_OPTIMIZER_AITER_JIT_DIR=/abs/path` (tried before this list).
 AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
+    "/sgl-workspace/aiter/aiter/jit",
     "/sgl-workspace/aiter/aiter/jit/build",
-    "/usr/local/lib/python3.10/site-packages/aiter/jit/build",
-    "/usr/local/lib/python3.12/dist-packages/aiter/jit/build",
-    "/usr/local/lib/python3.12/site-packages/aiter/jit/build",
-    "/opt/venv/lib/python3.10/site-packages/aiter/jit/build",
-    "/opt/venv/lib/python3.12/site-packages/aiter/jit/build",
+    "/usr/local/lib/python3.10/dist-packages/aiter/jit",
+    "/usr/local/lib/python3.12/dist-packages/aiter/jit",
+    "/usr/local/lib/python3.10/site-packages/aiter/jit",
+    "/usr/local/lib/python3.12/site-packages/aiter/jit",
+    "/opt/venv/lib/python3.10/site-packages/aiter/jit",
+    "/opt/venv/lib/python3.12/site-packages/aiter/jit",
 )
 
 
@@ -85,12 +95,44 @@ _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
 
 
-def _probe_aiter_jit_cache() -> dict[str, Any]:
-    """Inspect aiter's JIT cache root to decide cold vs warm start.
+def _resolve_aiter_jit_dir_dynamic() -> list[str]:
+    """Locate aiter's ``jit/`` dir via Python's import machinery.
 
-    Pure read-only filesystem probe — no subprocess, no GPU touch. The
-    first path under `AITER_JIT_PROBE_PATHS` (or `$INFERENCE_OPTIMIZER_AITER_JIT_DIR`
-    if set) that exists wins; we count `.so` files recursively and sum
+    Wheel-packaged aiter ships ~80 pre-built ``.so`` directly under
+    ``<aiter>/jit/``; only runtime-JIT staging (a handful of patched
+    kernels) lives under ``<aiter>/jit/build/<module>/build/``. Counting
+    at ``<aiter>/jit/`` therefore correctly reflects a warm install,
+    while the legacy fixed list (precise to ``jit/build``) mis-reports
+    every wheel install as COLD.
+
+    Returns an ordered candidate list (``jit`` preferred over
+    ``jit/build``). Empty if aiter cannot be located.
+    """
+    try:
+        spec = importlib.util.find_spec("aiter")
+    except (ImportError, ValueError):  # noqa: BLE001 — aiter not importable
+        return []
+    if spec is None or not spec.origin:
+        return []
+    aiter_root = Path(spec.origin).parent
+    return [
+        str(aiter_root / "jit"),
+        str(aiter_root / "jit" / "build"),
+    ]
+
+
+def _probe_aiter_jit_cache() -> dict[str, Any]:
+    """Inspect aiter's ``jit/`` dir to decide cold vs warm start.
+
+    Pure read-only filesystem probe — no subprocess, no GPU touch.
+    Resolution order:
+
+      1. ``$INFERENCE_OPTIMIZER_AITER_JIT_DIR`` env override
+      2. Dynamic ``<aiter>/jit`` then ``<aiter>/jit/build`` resolved via
+         ``importlib.util.find_spec("aiter")``
+      3. Legacy ``AITER_JIT_PROBE_PATHS`` fallback
+
+    First existing dir wins; we count ``.so`` files recursively and sum
     their byte sizes. Any IO error degrades to ``probe_status="error"``
     so callers (and unit tests on hosts with no aiter install) fall back
     to the default WARM timeout instead of crashing.
@@ -114,6 +156,7 @@ def _probe_aiter_jit_cache() -> dict[str, Any]:
     override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
     if override:
         candidates.append(override)
+    candidates.extend(_resolve_aiter_jit_dir_dynamic())
     candidates.extend(AITER_JIT_PROBE_PATHS)
 
     try:
@@ -286,6 +329,23 @@ class BaselineExecutor:
             str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower()
         )
+        # Orchestration-supplied script + result_dir overrides. Both are
+        # surfaced as ``task.params`` so the LLM can route around scripts
+        # that hardcode ``--result-dir /workspace/`` (see SKILL.md
+        # "Magpie leak-path salvage"). Sanitization at the executor
+        # boundary turns any malformed override into ``error_class=
+        # bad_param``; the Coordinator promotes that to a
+        # ``policy_denied`` observation rather than an unsafe subprocess.
+        try:
+            override_script = sanitize_script_name(params.get("benchmark_script"))
+            override_result_dir = sanitize_result_dir(params.get("result_dir"))
+        except ValueError as exc:
+            return {
+                "status": "failed",
+                "error_class": "bad_param",
+                "error": str(exc),
+                "output_dir": str(output_dir),
+            }
         config_path = materialize_config_with_envs(
             config_path,
             output_dir,
@@ -298,6 +358,7 @@ class BaselineExecutor:
             extra_envs=dict(params.get("extra_envs") or {}),
             model_path=resolved_model,
             gpu_type=resolved_gpu,
+            benchmark_script=override_script,
         )
         # Stash for the result so Coordinator can plumb it forward to
         # downstream params/backends/sweep tasks (workload-contract reuse).
@@ -314,6 +375,23 @@ class BaselineExecutor:
         # `python3` resolves to one with torch+rocm. Magpie YAML also sets
         # this but defending in depth costs nothing.
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+        # Always-on ``$RESULT_DIR`` default: covers Magpie scripts that
+        # respect the env var (and would otherwise fall back to a
+        # hardcoded path under ``/workspace/``). Scripts that ignore
+        # ``$RESULT_DIR`` still leak — the
+        # ``extract_benchmark_measurement`` salvage pass picks those
+        # up. Operators / Orchestration can override the destination
+        # via ``task.params['result_dir']``.
+        env["RESULT_DIR"] = override_result_dir or str(output_dir)
+        # Pin SERVER_LOG / GPU_METRICS_CSV per-task so Magpie's
+        # ``single_node/*.sh`` wrappers write the server log and per-second
+        # GPU telemetry into the task workspace alongside
+        # ``benchmark_report.json`` instead of leaking to
+        # ``/workspace/server.log`` / ``/workspace/gpu_metrics.csv``.
+        # ``harvest_leaked_artifacts`` still runs below as defense-in-depth
+        # for any wrapper that hardcodes the destination ignoring the env.
+        env["SERVER_LOG"] = str(output_dir / "server.log")
+        env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
 
         # Multi-node mode (--nodes >= 2): inject MAGPIE_RUN_PHASE=client +
         # BENCHMARK_BASE_URL=<head pod ClusterIP> so Magpie skips its own
@@ -362,7 +440,12 @@ class BaselineExecutor:
                  cmd, output_dir)
 
         # subprocess.run is sync — wrap in asyncio.to_thread so we don't
-        # block the Coordinator reactor loop.
+        # block the Coordinator reactor loop. We snapshot the wall-clock
+        # immediately before launch so extract_benchmark_measurement can
+        # mtime-gate the documented Magpie leak destinations (e.g.
+        # ``/workspace/inferencex_result.json``) — only files written
+        # *after* this run started are valid salvage candidates.
+        subprocess_started_unix = time.time()
         try:
             proc = await asyncio.to_thread(
                 subprocess.run, cmd,
@@ -370,16 +453,61 @@ class BaselineExecutor:
                 env=env, cwd=str(self.cwd),
             )
         except subprocess.TimeoutExpired as exc:
+            # Harvest whatever the wrapper managed to write before the
+            # timer fired — particularly ``server.log`` (often the
+            # smoking gun: "failed to allocate memory" / "could not
+            # load checkpoint" etc.) and ``gpu_metrics.csv``.
+            timeout_candidates = sorted(output_dir.glob("benchmark_*"))
+            timeout_destination = (
+                timeout_candidates[-1] if timeout_candidates else output_dir
+            )
+            timeout_harvested = harvest_leaked_artifacts(
+                timeout_destination,
+                subprocess_started_unix=subprocess_started_unix,
+            )
             return {
                 "status": "failed",
                 "error_class": "timeout",
                 "error": f"baseline benchmark exceeded {timeout_sec}s: {exc}",
                 "output_dir": str(output_dir),
+                "harvested_artifacts": [str(dst) for _, dst in timeout_harvested],
+                "nonfatal_warnings": [
+                    f"harvested_leaked_artifact:{src}"
+                    for src, _ in timeout_harvested
+                ],
             }
 
         # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
         candidates = sorted(output_dir.glob("benchmark_*"))
+        # Always-on artifact harvest. Magpie's shell wrappers hardcode
+        # ``/workspace/server.log`` + ``/workspace/gpu_metrics.csv`` +
+        # ``/workspace/profile_*.trace.json.gz`` + ``/workspace/
+        # inferencex_result*.json`` (see ``harvest_leaked_artifacts``
+        # for the full list). Without this pass the NFS clone of
+        # ``<session>/runs/baseline/<task_id>/`` is missing the
+        # wrapper-side artifacts even on a fully successful run.
+        # Runs unconditionally (success / failure / no_workspace) so
+        # diagnostics for the failure paths survive too. Mtime gating
+        # rejects stale leaks from prior runs. Destination prefers the
+        # benchmark workspace dir; falls back to the task output_dir
+        # when Magpie never created one.
+        harvest_destination = candidates[-1] if candidates else output_dir
+        harvested = harvest_leaked_artifacts(
+            harvest_destination,
+            subprocess_started_unix=subprocess_started_unix,
+        )
+        if harvested:
+            log.info(
+                "baseline_executor: harvested %d leaked artifact(s) "
+                "into workspace: %s",
+                len(harvested),
+                ", ".join(str(src.name) for src, _ in harvested),
+            )
         if not candidates:
+            failure_extras = {
+                "output_dir": str(output_dir),
+                "harvested_artifacts": [str(dst) for _, dst in harvested],
+            }
             if proc.returncode != 0:
                 tail = (proc.stderr or proc.stdout or "")[-2000:]
                 return {
@@ -387,13 +515,13 @@ class BaselineExecutor:
                     "error_class": "subprocess_nonzero",
                     "returncode": proc.returncode,
                     "error": tail,
-                    "output_dir": str(output_dir),
+                    **failure_extras,
                 }
             return {
                 "status": "failed",
                 "error_class": "no_workspace",
                 "error": "Magpie completed but produced no benchmark_* workspace",
-                "output_dir": str(output_dir),
+                **failure_extras,
             }
         workspace = candidates[-1]
         report_path = workspace / "benchmark_report.json"
@@ -406,10 +534,16 @@ class BaselineExecutor:
             except (OSError, json.JSONDecodeError):
                 report = None
 
-        measurement = extract_benchmark_measurement(report, workspace=workspace)
+        measurement = extract_benchmark_measurement(
+            report,
+            workspace=workspace,
+            subprocess_started_unix=subprocess_started_unix,
+        )
         warnings = list(measurement.pop("nonfatal_warnings", []) or [])
         if proc.returncode != 0:
             warnings.append("magpie_nonzero_after_valid_measurement")
+        for leak_src, _ in harvested:
+            warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
         if not measurement.get("valid_measurement"):
             if proc.returncode != 0:

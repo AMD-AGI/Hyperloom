@@ -9,10 +9,12 @@ local validation without requiring TraceLens to be installed.
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import gzip
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from tracelens_skill_runner import (
+    aggregate_by_source_function,
     discover_capture_folder,
     normalize_upstream_category,
     parse_analysis_md,
@@ -254,6 +257,26 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
 )
+# Kernel-name substrings that mark an operation as non-patchable regardless
+# of source-file resolution: vendor BLAS routines, RCCL/NCCL collectives,
+# raw memcpy/copy ops, and PyTorch native copy. Folded from the feature
+# branch's ``tracelens_geak_task_parser._NON_PATCHABLE_MARKERS`` so the
+# unified ``classify_patchability`` gate emits a clean rejection reason
+# for the same kernels that parser used to drop.
+_NON_PATCHABLE_NAME_MARKERS: tuple[str, ...] = (
+    "rocblas",
+    "hipblas",
+    "hipblaslt",
+    "rocblaslt",
+    "tensile",
+    "miopen",
+    "ck_kernels",
+    "nccl",
+    "rccl",
+    "hipmemcpy",
+    "__amd_rocclr_copybuffer",
+    "aten::copy",
+)
 
 
 def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
@@ -273,21 +296,70 @@ def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
     return False
 
 
-def is_reusable_native_kernel(candidate: dict[str, Any]) -> bool:
-    """Whether a candidate is safe to send to kernel optimization backends."""
+def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
+    """Return ``(reusable, skip_reason)`` for a hot-kernel candidate.
+
+    Single source of truth for the kernel-opt routing gate. ``skip_reason``
+    is empty when the candidate is reusable; otherwise it is a short
+    human-readable explanation suitable for the summary.json audit
+    sidecar. :func:`is_reusable_native_kernel` returns the boolean half
+    so existing callers keep working.
+
+    Compared to the legacy logic this also rejects:
+
+    * kernels whose name contains a vendor BLAS / collective / native-op
+      marker from :data:`_NON_PATCHABLE_NAME_MARKERS`, even when the
+      reported source file resolves to a reusable framework root;
+    * ``aten::*`` PyTorch native ops without a library hint (these
+      typically point at Tensile / vendor backends and have no rewritable
+      Python source).
+    """
     source_file = str(candidate.get("source_file") or "")
+    name = str(candidate.get("name") or "")
+    lower_name = name.lower()
     if not source_file:
-        return False
+        return False, "source file not resolved"
     if candidate.get("source_type") == "vendor_binary":
-        return False
+        return False, "vendor binary (no rewritable source)"
     if candidate.get("vendor_dispatch_wrapper"):
-        return False
-    if is_runtime_generated_kernel(str(candidate.get("name") or ""), source_file):
-        return False
+        return False, f"vendor dispatch wrapper at {source_file}"
+    for marker in _NON_PATCHABLE_NAME_MARKERS:
+        if marker in lower_name:
+            return False, (
+                f"non-patchable kernel name marker '{marker}' in {name!r}"
+            )
+    if name.startswith("aten::"):
+        library = str(candidate.get("library") or "").strip().lower()
+        if not library or library in {"tensile", "pytorch native"}:
+            return False, (
+                f"PyTorch native op {name!r} backed by "
+                f"{candidate.get('library') or 'unknown'} library "
+                "(typically Tensile / vendor backend)"
+            )
+    if is_runtime_generated_kernel(name, source_file):
+        return False, (
+            f"runtime-generated (torch.compile / Inductor cache): {source_file}"
+        )
     lower_file = source_file.lower()
     if not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS):
-        return False
-    return candidate.get("source_type") in {"hip_cpp", "triton", "python"}
+        return False, (
+            f"source not under a reusable framework root: {source_file}"
+        )
+    source_type = candidate.get("source_type")
+    if source_type not in {"hip_cpp", "triton", "python"}:
+        return False, (
+            f"source_type={source_type!r} not in {{hip_cpp, triton, python}}"
+        )
+    return True, ""
+
+
+def is_reusable_native_kernel(candidate: dict[str, Any]) -> bool:
+    """Whether a candidate is safe to send to kernel optimization backends.
+
+    Thin wrapper over :func:`classify_patchability` kept for backward
+    compatibility with downstream consumers that only need the bool.
+    """
+    return classify_patchability(candidate)[0]
 
 
 # Wrapper TUs that just dispatch to a precompiled .so / .co (no device body
@@ -791,6 +863,283 @@ def parse_tracelens_kernel_summary(
     return _finalize_candidates(top, total_dur=total_dur)
 
 
+def _safe_literal(value: Any) -> Any:
+    if value in (None, ""):
+        return None
+    try:
+        return ast.literal_eval(str(value))
+    except (SyntaxError, ValueError):
+        return None
+
+
+def _shape_to_jsonable(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_shape_to_jsonable(v) for v in value]
+    if isinstance(value, list):
+        return [_shape_to_jsonable(v) for v in value]
+    return value
+
+
+def _non_scalar_shapes(input_dims: Any) -> list[Any]:
+    parsed = _safe_literal(input_dims)
+    if parsed is None:
+        return []
+    if not isinstance(parsed, (list, tuple)):
+        parsed = (parsed,)
+    shapes: list[Any] = []
+    for dim in parsed:
+        if dim in (None, "", (), []):
+            continue
+        shape = _shape_to_jsonable(dim)
+        if shape not in shapes:
+            shapes.append(shape)
+    return shapes
+
+
+def _non_scalar_dtypes(input_types: Any) -> list[str]:
+    parsed = _safe_literal(input_types)
+    if parsed is None:
+        return []
+    if not isinstance(parsed, (list, tuple)):
+        parsed = (parsed,)
+    dtypes: list[str] = []
+    for dtype in parsed:
+        text = str(dtype or "").strip()
+        if not text or text.lower() == "scalar":
+            continue
+        if text not in dtypes:
+            dtypes.append(text)
+    return dtypes
+
+
+def _append_unique_list(target: list[Any], values: list[Any]) -> None:
+    for value in values:
+        if value not in target:
+            target.append(value)
+
+
+def _coerce_count(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if text.startswith("np.float64(") and text.endswith(")"):
+        text = text[len("np.float64("):-1]
+    try:
+        count = int(float(text))
+    except (TypeError, ValueError):
+        return None
+    return count if count > 0 else None
+
+
+def _kernel_detail_call_count(details: Any, kernel_name: str) -> int | None:
+    parsed = _safe_literal(details)
+    if isinstance(parsed, list):
+        total = 0
+        for entry in parsed:
+            if not isinstance(entry, dict) or entry.get("name") != kernel_name:
+                continue
+            count = _coerce_count(entry.get("count") or entry.get("call_count"))
+            if count:
+                total += count
+        return total or None
+
+    text = str(details or "")
+    if kernel_name not in text:
+        return None
+    pattern = re.compile(
+        r"\{[^{}]*['\"]name['\"]\s*:\s*['\"]"
+        + re.escape(kernel_name)
+        + r"['\"][^{}]*['\"]count['\"]\s*:\s*([^,}]+)"
+    )
+    total = 0
+    for match in pattern.finditer(text):
+        count = _coerce_count(match.group(1))
+        if count:
+            total += count
+    return total or None
+
+
+def _row_call_count(row: dict[str, Any], details_col: str, name: str,
+                    operation_count_col: str | None) -> int:
+    detail_count = _kernel_detail_call_count(row.get(details_col), name)
+    if detail_count:
+        return detail_count
+    if operation_count_col:
+        op_count = _coerce_count(row.get(operation_count_col))
+        if op_count:
+            return op_count
+    return 1
+
+
+def _merge_shape_call(target: list[Any], shape: Any, call_num: int) -> None:
+    for entry in target:
+        if isinstance(entry, dict) and entry.get("shape") == shape:
+            entry["call_num"] = int(entry.get("call_num") or 0) + call_num
+            return
+    target.append({"call_num": call_num, "shape": shape})
+
+
+def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any]]:
+    if not isinstance(shapes, list):
+        return []
+    count = _coerce_count(call_num) or 1
+    entries: list[dict[str, Any]] = []
+    for shape in shapes:
+        if isinstance(shape, dict):
+            value = shape.get("shape")
+            shape_count = _coerce_count(shape.get("call_num")) or count
+        else:
+            value = shape
+            shape_count = count
+        if value in (None, "", [], ()):
+            continue
+        _merge_shape_call(entries, value, shape_count)
+    return entries
+
+
+def _materialized_output_stride(perf_params: dict[str, Any]) -> bool:
+    stride = perf_params.get("stride_output")
+    return stride not in (None, "", (), [])
+
+
+def _output_shapes_from_perf_params(perf_params: Any) -> list[Any]:
+    parsed = _safe_literal(perf_params)
+    if not isinstance(parsed, dict):
+        return []
+
+    shapes: list[Any] = []
+
+    def add_shape(value: Any) -> None:
+        if value in (None, "", (), []):
+            return
+        shape = _shape_to_jsonable(value)
+        if shape in (None, "", [], ()):
+            return
+        if shape not in shapes:
+            shapes.append(shape)
+
+    for key in ("shape_out", "output_shape"):
+        add_shape(parsed.get(key))
+
+    output_shapes = parsed.get("output_shapes")
+    if isinstance(output_shapes, (list, tuple)):
+        jsonable_output_shapes = _shape_to_jsonable(output_shapes)
+        if (
+            isinstance(jsonable_output_shapes, list)
+            and jsonable_output_shapes
+            and all(isinstance(shape, list) for shape in jsonable_output_shapes)
+        ):
+            for shape in output_shapes:
+                add_shape(shape)
+        else:
+            add_shape(output_shapes)
+
+    if _materialized_output_stride(parsed):
+        add_shape(parsed.get("op_shape"))
+
+    return shapes
+
+
+def _output_dtypes_from_perf_params(perf_params: Any) -> list[str]:
+    parsed = _safe_literal(perf_params)
+    if not isinstance(parsed, dict):
+        return []
+
+    dtypes: list[str] = []
+
+    def add_dtype(value: Any) -> None:
+        text = str(value or "").strip()
+        if not text or text.lower() in {"none", "scalar"}:
+            return
+        if text not in dtypes:
+            dtypes.append(text)
+
+    for key in ("dtype_out", "output_dtype", "output_type"):
+        add_dtype(parsed.get(key))
+
+    for key in ("dtype_in_out", "dtype_in1_in2_out"):
+        value = parsed.get(key)
+        if isinstance(value, (list, tuple)) and value:
+            add_dtype(value[-1])
+
+    return dtypes
+
+
+def augment_csv_candidates_with_unified_perf_summary(
+    candidates: list[dict[str, Any]], csv_path: Path,
+) -> None:
+    """Backfill TraceLens shapes/dtypes from unified_perf_summary.csv."""
+    import csv as _csv
+    if not candidates or not csv_path.exists():
+        return
+    by_name = {str(c.get("name") or ""): c for c in candidates if c.get("name")}
+    if not by_name:
+        return
+    try:
+        with csv_path.open(encoding="utf-8") as f:
+            rdr = _csv.DictReader(f)
+            field_lookup = {h.lower(): h for h in (rdr.fieldnames or [])}
+            details_col = field_lookup.get("kernel_details_summary")
+            dims_col = field_lookup.get("input dims")
+            type_col = field_lookup.get("input type")
+            perf_params_col = field_lookup.get("perf_params")
+            operation_count_col = field_lookup.get("operation_count")
+            op_col = field_lookup.get("name")
+            if not details_col or not dims_col or not type_col:
+                return
+            for row in rdr:
+                details = str(row.get(details_col) or "")
+                if not details:
+                    continue
+                for name, candidate in by_name.items():
+                    if name not in details:
+                        continue
+                    shapes = _non_scalar_shapes(row.get(dims_col))
+                    dtypes = _non_scalar_dtypes(row.get(type_col))
+                    output_shapes = _output_shapes_from_perf_params(
+                        row.get(perf_params_col) if perf_params_col else None
+                    )
+                    output_dtypes = _output_dtypes_from_perf_params(
+                        row.get(perf_params_col) if perf_params_col else None
+                    )
+                    if shapes:
+                        input_shapes = candidate.setdefault("input_shapes", [])
+                        if isinstance(input_shapes, list):
+                            call_count = _row_call_count(
+                                row, details_col, name, operation_count_col,
+                            )
+                            for shape in shapes:
+                                _merge_shape_call(input_shapes, shape, call_count)
+                        legacy_shapes = candidate.setdefault("shapes", [])
+                        if isinstance(legacy_shapes, list):
+                            _append_unique_list(legacy_shapes, shapes)
+                    if dtypes:
+                        existing_dtypes = candidate.setdefault("input_dtypes", [])
+                        if isinstance(existing_dtypes, list):
+                            _append_unique_list(existing_dtypes, dtypes)
+                    if output_shapes:
+                        existing_output_shapes = candidate.setdefault("output_shapes", [])
+                        if isinstance(existing_output_shapes, list):
+                            _append_unique_list(existing_output_shapes, output_shapes)
+                    if output_dtypes:
+                        existing_output_dtypes = candidate.setdefault("output_dtypes", [])
+                        if isinstance(existing_output_dtypes, list):
+                            _append_unique_list(existing_output_dtypes, output_dtypes)
+                    runtime_args = candidate.setdefault("runtime_args", {})
+                    if isinstance(runtime_args, dict):
+                        args_rows = runtime_args.setdefault("tracelens_args", [])
+                        if isinstance(args_rows, list):
+                            item = {
+                                "op": str(row.get(op_col) or ""),
+                                "input_dims": row.get(dims_col) or "",
+                                "input_types": row.get(type_col) or "",
+                            }
+                            if item not in args_rows:
+                                args_rows.append(item)
+    except Exception:
+        return
+
+
 # ---------------------------------------------------------------------------
 # #125: TraceLens orchestrator structured outputs (category_data/*.json)
 # ---------------------------------------------------------------------------
@@ -1116,7 +1465,12 @@ def _finalize_candidates(
         item["runtime_generated_kernel"] = is_runtime_generated_kernel(
             item["name"], item.get("source_file", "")
         )
-        item["reusable_native_kernel"] = is_reusable_native_kernel(item)
+        # Single classify_patchability call covers both the boolean
+        # routing gate AND the human-readable rejection reason consumed
+        # by the summary.json audit sidecar (PR-A §3 of issue tbd).
+        reusable, skip_reason = classify_patchability(item)
+        item["reusable_native_kernel"] = reusable
+        item["skip_reason"] = skip_reason
         item["benchmark_files"] = find_benchmark_files(
             item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
         )
@@ -1138,6 +1492,22 @@ def _finalize_candidates(
 
 
 def recommend_backends(candidate: dict[str, Any]) -> list[str]:
+    """Recommend a backend ladder for a reusable native kernel.
+
+    Policy (#144 last comment Layer 1, broadened): every kernel that
+    Claude/Codex can rewrite, GEAK can rewrite too. Include GEAK in
+    every default ladder so high-priority kernels reach GEAK FIRST;
+    Claude/Codex stay on as fallbacks if GEAK times out or rejects.
+
+    The kernel-agent's :func:`kernel_optimization.choose_backends` still
+    sets ``geak_without_benchmark=True`` when no harness is present so
+    operators / downstream KEEP gates can audit verification confidence
+    — but GEAK is no longer pre-filtered from the ladder upstream.
+
+    Only ``[]`` returns: unresolved source, non-reusable native (e.g.
+    Inductor cache), vendor binaries, and runtime-generated kernels
+    (where there's no stable source to rewrite).
+    """
     source_type = candidate.get("source_type")
     if not candidate.get("source_file"):
         return []
@@ -1147,13 +1517,14 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
         return []
     if source_type == "runtime_generated":
         return []
-    if source_type == "hip_cpp":
-        return ["geak", "claude", "codex"]
-    if source_type == "triton":
-        return ["geak", "claude", "codex"]
-    if source_type == "python":
-        return ["claude", "codex"]
-    return ["claude", "codex"]
+    # Unified ladder per #144 last comment Layer 1 (broadened): every kernel
+    # Claude/Codex/Cursor can rewrite, GEAK can rewrite too. GEAK is FIRST
+    # (high-priority handoff). Cursor backend needs CURSOR_API_KEY (separate
+    # Cursor gateway); skip from recommendations when the operator has not
+    # provisioned a key so we don't advertise a backend the run will spend
+    # time 401-ing on.
+    cursor_tail = ["cursor"] if os.environ.get("CURSOR_API_KEY", "").strip() else []
+    return ["geak", "claude", "codex"] + cursor_tail
 
 
 def build_notes(candidate: dict[str, Any]) -> str:
@@ -1283,6 +1654,221 @@ def merge_roofline_into_candidates(
             item.setdefault("recommended_actions", [])
 
 
+def _candidate_model_config_paths(model_name: str) -> list[Path]:
+    text = str(model_name or "").strip()
+    if not text:
+        return []
+    raw = Path(text).expanduser()
+    candidates: list[Path] = []
+    if raw.suffix == ".json":
+        candidates.append(raw)
+    candidates.append(raw / "config.json")
+    models_root = Path(os.environ.get("HYPERLOOM_MODELS_ROOT", "/wekafs/models"))
+    candidates.append(models_root / text / "config.json")
+    candidates.append(models_root / raw.name / "config.json")
+    out: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
+
+
+def load_model_kernel_params(model_name: str) -> dict[str, Any]:
+    """Read HF config.json and return attention parameters relevant to GEAK."""
+    for config_path in _candidate_model_config_paths(model_name):
+        if not config_path.is_file():
+            continue
+        try:
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        params: dict[str, Any] = {
+            "MODEL_CONFIG_PATH": str(config_path),
+        }
+        has_mla_dims = any(
+            cfg.get(key) is not None
+            for key in ("qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim")
+        )
+        if cfg.get("head_dim") is not None:
+            params["HEAD_SIZE"] = cfg.get("head_dim")
+        elif not has_mla_dims:
+            hidden = cfg.get("hidden_size")
+            heads = cfg.get("num_attention_heads")
+            if isinstance(hidden, int) and isinstance(heads, int) and heads > 0 and hidden % heads == 0:
+                params["HEAD_SIZE"] = hidden // heads
+        for src, dst in (
+            ("qk_nope_head_dim", "QK_NOPE_HEAD_DIM"),
+            ("qk_rope_head_dim", "QK_ROPE_HEAD_DIM"),
+            ("v_head_dim", "V_HEAD_DIM"),
+            ("kv_lora_rank", "KV_LORA_RANK"),
+            ("num_attention_heads", "NUM_ATTENTION_HEADS"),
+            ("num_key_value_heads", "NUM_KEY_VALUE_HEADS"),
+            ("hidden_size", "HIDDEN_SIZE"),
+        ):
+            if cfg.get(src) is not None:
+                params[dst] = cfg[src]
+        return params
+    return {}
+
+
+def enrich_candidates_with_runtime_metadata(
+    candidates: list[dict[str, Any]], args: argparse.Namespace,
+) -> None:
+    """Attach stable runtime metadata fields before GEAK prompt generation."""
+    framework = str(getattr(args, "framework", "") or "").strip()
+    model_params = load_model_kernel_params(str(getattr(args, "model_name", "") or ""))
+    runtime_flags = {
+        "analysis_mode": getattr(args, "analysis_mode", ""),
+        "runtime_env": getattr(args, "runtime_env", ""),
+        "target_platform": getattr(args, "target_platform", ""),
+    }
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        if framework:
+            item.setdefault("framework", framework)
+            item.setdefault("backend", framework)
+        if "input_shapes" not in item:
+            item["input_shapes"] = _shape_call_entries(
+                item.get("shapes", []) or [], item.get("call_count"),
+            )
+        item.setdefault("output_shapes", [])
+        item.setdefault("input_dtypes", item.get("dtypes", []) or [])
+        item.setdefault("output_dtypes", [])
+        item.setdefault("runtime_args", {})
+        item.setdefault("env_vars", {})
+        item.setdefault("kernel_params", {})
+        if model_params:
+            params = item["kernel_params"]
+            if isinstance(params, dict):
+                for key, value in model_params.items():
+                    params.setdefault(key, value)
+        flags = item.get("runtime_flags")
+        if not isinstance(flags, dict):
+            flags = {}
+            item["runtime_flags"] = flags
+        for key, value in runtime_flags.items():
+            if value not in (None, ""):
+                flags.setdefault(key, value)
+        flags.setdefault("is_multigpu", bool(item.get("is_multigpu")))
+        flags.setdefault("num_gpus_recommended", item.get("num_gpus_recommended"))
+
+
+def build_task_groups(
+    candidates: list[dict[str, Any]],
+    *,
+    source_root: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Aggregate finalized candidates by AST-resolved source function.
+
+    Thin wrapper over
+    :func:`tracelens_skill_runner.aggregate_by_source_function` that:
+
+    * only considers candidates marked ``reusable_native_kernel`` so
+      vendor / aten:: / runtime-generated kernels are never grouped
+      (they were rejected upstream by ``classify_patchability``);
+    * filters each group's ``kernel_ids`` and ``primary_kernel_id`` to
+      the same reusable subset, so a group that mixes a reusable
+      Triton function with a non-reusable aten:: launcher in its row
+      list still dispatches only the reusable kernel_id.
+
+    Returns ``[]`` when no candidate carries a parseable launcher path
+    (the LLama70B fixture case — all rows have empty Kernel Path), so
+    callers fall through to per-kernel dispatch.
+    """
+    reusable = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel")]
+    if not reusable:
+        return []
+    return aggregate_by_source_function(reusable, source_root=source_root)
+
+
+def build_audit_summary(
+    candidates: list[dict[str, Any]],
+    *,
+    trace_input: str,
+    framework: str = "",
+    target_platform: str = "",
+    task_groups: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build the ``tracelens/summary.json`` payload from finalized candidates.
+
+    Splits ``candidates`` into ``tasks`` (those that pass
+    :func:`classify_patchability` and are routable to a kernel-opt backend)
+    and ``skipped`` (those rejected, each carrying ``skip_reason`` so an
+    operator can see exactly why a TraceLens hot kernel was dropped from
+    routing). Both halves preserve the priority order of the input list.
+
+    The function is pure — it reads ``candidates`` and returns a dict — so
+    it is straightforward to test against fixture data without touching
+    the filesystem.
+    """
+    tasks: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        reusable = bool(cand.get("reusable_native_kernel"))
+        compact = {
+            "kernel_id":         cand.get("kernel_id"),
+            "name":              cand.get("name"),
+            "source_file":       cand.get("source_file") or "",
+            "source_type":       cand.get("source_type") or "",
+            "kernel_category":   cand.get("kernel_category") or "",
+            "gpu_pct":           cand.get("gpu_pct"),
+            "duration_us":       cand.get("duration_us"),
+            "call_count":        cand.get("call_count"),
+            "tracelens_pitem_rank":  cand.get("tracelens_pitem_rank"),
+            "tracelens_pitem_title": cand.get("tracelens_pitem_title"),
+            "bound_type":        cand.get("bound_type") or "",
+        }
+        if reusable:
+            compact["recommended_backends"] = list(
+                cand.get("recommended_backends") or []
+            )
+            tasks.append(compact)
+        else:
+            compact["skip_reason"] = cand.get("skip_reason") or "unknown"
+            skipped.append(compact)
+    # PR-B §1: summarize task_groups (source-function aggregation)
+    # alongside the per-kernel ``tasks`` view. Each group entry is a
+    # compact projection: the function identity + member kernel_ids +
+    # aggregate cost. The full per-row data lives inside the
+    # ``task_groups[]`` list on kernel_candidates.json — summary.json
+    # is the audit view, not the dispatch payload.
+    group_entries: list[dict[str, Any]] = []
+    for group in task_groups or []:
+        if not isinstance(group, dict):
+            continue
+        group_entries.append({
+            "task_group_id":        group.get("task_group_id"),
+            "source_path":          group.get("source_path"),
+            "definition_line":      group.get("definition_line"),
+            "function_name":        group.get("function_name"),
+            "ast_resolved":         bool(group.get("ast_resolved")),
+            "primary_kernel_id":    group.get("primary_kernel_id"),
+            "kernel_ids":           list(group.get("kernel_ids") or []),
+            "row_count":            len(group.get("rows") or []),
+            "aggregate_duration_us": group.get("aggregate_duration_us"),
+            "aggregate_call_count": group.get("aggregate_call_count"),
+            "aggregate_gpu_pct":    group.get("aggregate_gpu_pct"),
+        })
+    return {
+        "generated_at":    utc_now(),
+        "trace_input":     trace_input,
+        "framework":       framework,
+        "target_platform": target_platform,
+        "task_count":      len(tasks),
+        "skipped_count":   len(skipped),
+        "task_group_count": len(group_entries),
+        "tasks":           tasks,
+        "skipped":         skipped,
+        "task_groups":     group_entries,
+    }
+
+
 def write_reports(
     run_dir: Path,
     *,
@@ -1292,9 +1878,29 @@ def write_reports(
     args: argparse.Namespace,
     existing_report_path: Path | None = None,
 ) -> dict[str, str]:
+    """Write Hyperloom-owned sidecar JSONs and surface the upstream Markdown.
+
+    The canonical Markdown final report (``analysis.md``) is owned by the
+    TraceLens v0.3 SDK orchestrator per ``sub_agent_spec.md``: it is the
+    single, contracted exit point for the analysis pipeline. Hyperloom
+    no longer copies or aliases it under other names — the v0.2-era
+    ``standalone_analysis.md`` / ``tracelens_report.md`` /
+    ``--compat-report-path`` outputs were removed in #203 because they
+    (1) wrote multiple byte-identical copies of the same file under
+    different names, (2) bypassed the upstream contract, and
+    (3) silently fabricated a Markdown when the SDK orchestrator failed,
+    masking the upstream error from operators.
+
+    When the SDK orchestrator does not produce ``analysis.md`` (e.g.
+    Claude SDK login expired, orchestrator crashed mid-run), this
+    function raises ``RuntimeError`` rather than synthesizing a
+    replacement. The caller surfaces the underlying TraceLens error to
+    the operator (and to the TraceLens team if reproducible).
+    """
     tracelens_dir = run_dir / "tracelens"
     (tracelens_dir / "system_findings").mkdir(parents=True, exist_ok=True)
     (tracelens_dir / "category_findings").mkdir(parents=True, exist_ok=True)
+    enrich_candidates_with_runtime_metadata(candidates, args)
 
     manifest = {
         "trace_input": str(Path(args.trace_input).resolve()),
@@ -1302,6 +1908,17 @@ def write_reports(
         "trace_files": [str(p) for p in trace_files],
         "created_at": utc_now(),
     }
+    # PR-B §1: aggregate reusable candidates into source-function task
+    # groups so downstream dispatch (run_optimization_handler) can submit
+    # one GEAK task per (path, line, fn) instead of one per kernel_id.
+    # Aggregation is additive: ``hot_kernels[]`` keeps its full per-row
+    # priority order, and groups reference candidates by kernel_id.
+    # Candidates whose ``tracelens_launcher_path`` cannot be parsed
+    # (LLama70B fixture, raw-trace path, csv fallback) produce zero
+    # groups and the caller falls through to the legacy per-kernel
+    # dispatch.
+    source_root_str = getattr(args, "source_root", None)
+    task_groups = build_task_groups(candidates, source_root=source_root_str)
     report = {
         "model_name": args.model_name,
         "framework": args.framework,
@@ -1310,52 +1927,102 @@ def write_reports(
         "runtime_env": args.runtime_env,
         "trace_input_type": trace_input_type,
         "hot_kernels": candidates,
+        "task_groups": task_groups,
         "source": "tracelens_analysis",
         "dry_run": args.dry_run,
     }
     atomic_write_json(run_dir / "trace_input_manifest.json", manifest)
     atomic_write_json(tracelens_dir / "tracelens_report.json", report)
-    atomic_write_json(run_dir / "kernel_candidates.json", {"hot_kernels": candidates, **report})
+    atomic_write_json(
+        run_dir / "kernel_candidates.json",
+        {"hot_kernels": candidates, "task_groups": task_groups, **report},
+    )
 
-    md_path = tracelens_dir / "standalone_analysis.md"
-    if existing_report_path and existing_report_path.exists():
-        if existing_report_path.resolve() != md_path.resolve():
-            md_path.write_text(existing_report_path.read_text(encoding="utf-8"), encoding="utf-8")
-    else:
-        lines = [
-            "# TraceLens Standalone Analysis",
-            "",
-            f"- Model: {args.model_name}",
-            f"- Framework: {args.framework}",
-            f"- Target platform: {args.target_platform}",
-            f"- Trace input type: {trace_input_type}",
-            "",
-            "## Hot Kernels",
-            "",
-        ]
-        for item in candidates:
-            bottleneck = item.get("bottleneck") or "unknown"
-            lines.append(
-                f"- `{item['kernel_id']}` `{item['name']}`: {item['gpu_pct']}% GPU, "
-                f"{item['call_count']} calls, bottleneck `{bottleneck}`, "
-                f"source `{item.get('source_file') or 'unresolved'}`"
+    # PR-A §3: per-run audit sidecar listing which TraceLens hot kernels
+    # were routed to a kernel-opt backend (``tasks``) and which were
+    # dropped (``skipped``, each with ``skip_reason``). Mirrors the
+    # feature branch's ``tracelens_geak_task_parser.summary.json`` and is
+    # the primary debug surface when GEAK comes back with surprising
+    # results — operator can answer "did TraceLens see kernel X? did we
+    # send it to GEAK? if not, why not?" in one read. PR-B adds
+    # ``task_groups[]`` so an operator can also see which kernels
+    # collapsed into the same source function.
+    summary = build_audit_summary(
+        candidates,
+        trace_input=str(Path(args.trace_input).resolve()),
+        framework=str(args.framework or ""),
+        target_platform=str(args.target_platform or ""),
+        task_groups=task_groups,
+    )
+    summary_path = tracelens_dir / "summary.json"
+    atomic_write_json(summary_path, summary)
+
+    if existing_report_path is None or not existing_report_path.exists():
+        if not getattr(args, "dry_run", False):
+            raise RuntimeError(
+                "TraceLens SDK orchestrator did not produce analysis.md "
+                f"(expected at {existing_report_path}); refusing to "
+                "fabricate a Markdown report. Inspect the TraceLens skill "
+                "log and report upstream if this is reproducible."
             )
-        md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    readable_report = tracelens_dir / "tracelens_report.md"
-    readable_report.write_text(md_path.read_text(encoding="utf-8"), encoding="utf-8")
-
-    if args.compat_report_path:
-        compat_path = Path(args.compat_report_path)
-        compat_path.parent.mkdir(parents=True, exist_ok=True)
-        compat_path.write_text(md_path.read_text(encoding="utf-8"), encoding="utf-8")
+        # ``--dry-run``: synthesize a tiny stub so test wiring that
+        # checks ``trace_report_path`` existence still passes. Never
+        # taken on a real (non-test) invocation.
+        stub_md = tracelens_dir / "analysis.md"
+        stub_md.write_text(
+            "# TraceLens dry-run stub (no SDK orchestrator output)\n",
+            encoding="utf-8",
+        )
+        existing_report_path = stub_md
 
     return {
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
         "kernel_candidates": str(run_dir / "kernel_candidates.json"),
         "tracelens_report_json": str(tracelens_dir / "tracelens_report.json"),
-        "trace_report_path": str(md_path),
+        # Post-#203 (PR #217): the canonical Markdown exit IS the
+        # upstream SDK orchestrator's analysis.md surfaced via
+        # ``existing_report_path``; Hyperloom no longer aliases or
+        # copies it. PR-A §3 adds the ``summary.json`` audit sidecar
+        # alongside (separate file, not a Markdown alias).
+        "trace_report_path": str(existing_report_path),
+        "tracelens_summary": str(summary_path),
     }
+
+
+def _default_workspace_path() -> str:
+    """Resolve the default workspace root for ``--workspace-path``.
+
+    Fallback order (highest precedence first):
+
+    1. ``$USER_DATA_PATH`` — the main session-dir env introduced in
+       ``b0f977c`` and unified by ``e56a0e5`` / ``1e46c14``. This is
+       the user-facing root that ``inference_optimizer/paths.py``
+       reads for every other Hyperloom artifact (orchestrator state,
+       agents, runs, kernel-agent-workspace). Picking it up here keeps
+       TraceLens artifacts co-located with the rest of the session.
+    2. ``$WORKSPACE_PATH`` — the legacy kernel-agent env (default
+       ``/workspace``). Kept as a second-tier fallback so existing
+       launchers / CI / parallel_e2e_runner that already export it
+       continue to work without changes.
+    3. ``/workspace/hyperloom`` — the same hard-coded default as
+       ``inference_optimizer/paths.py::DEFAULT_SESSION_DIR``, so a
+       bare-image run without either env variable lands in the same
+       place the orchestrator does.
+
+    Note: GEAK / OOB tooling (``kernel_optimization.py``, the auth
+    proxy, ray_runtime, install.sh) still defaults to the legacy
+    ``$WORKSPACE_PATH`` (``/workspace``) until that side of the
+    rollout is taken on. RPC-invoked TraceLens (via
+    ``kernel_request_handlers.py``) and explicitly-parameterised
+    callers (``parallel_e2e_runner.py``, the unit tests in
+    ``test_tracelens_csv.py``) are unaffected — they pass
+    ``--workspace-path`` explicitly.
+    """
+    return (
+        os.environ.get("USER_DATA_PATH")
+        or os.environ.get("WORKSPACE_PATH")
+        or "/workspace/hyperloom"
+    )
 
 
 def main() -> int:
@@ -1368,10 +2035,31 @@ def main() -> int:
     parser.add_argument("--target-platform", default="MI355X")
     parser.add_argument("--analysis-mode", default="default")
     parser.add_argument("--runtime-env", default="local")
-    parser.add_argument("--workspace-path", default=os.environ.get("WORKSPACE_PATH", "/workspace"))
+    parser.add_argument(
+        "--source-root",
+        default=os.environ.get("TRACELENS_SOURCE_ROOT", "") or None,
+        help=(
+            "Optional root directory against which TraceLens launcher "
+            "paths (e.g. ``aiter/ops/rmsnorm.py(76): rmsnorm``) are "
+            "resolved for AST-based function-line lookup. Used only by "
+            "the PR-B source-function aggregation pass; absolute paths "
+            "in the report don't need this. Defaults to "
+            "$TRACELENS_SOURCE_ROOT when set."
+        ),
+    )
+    parser.add_argument(
+        "--workspace-path",
+        default=_default_workspace_path(),
+        help=(
+            "Root the tool writes under (output lands at "
+            "<workspace_path>/kernel-agent/runs/<session_id>/...). "
+            "Defaults to $USER_DATA_PATH so every kernel-agent artefact "
+            "stays inside the session dir; falls back to $WORKSPACE_PATH "
+            "for legacy launchers, then to /workspace/hyperloom."
+        ),
+    )
     parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
     parser.add_argument("--roofline-json", default="")
-    parser.add_argument("--compat-report-path", default="")
     parser.add_argument(
         "--capture-folder",
         default=os.environ.get("TRACELENS_CAPTURE_FOLDER", ""),
@@ -1435,6 +2123,21 @@ def main() -> int:
         help=(
             "Maximum output sequence length hint for the splitter (#127). "
             "Maps to --OSL. Defaults to $OSL when set."
+        ),
+    )
+    parser.add_argument(
+        "--split-r",
+        default=(
+            os.environ.get("TRACELENS_SPLIT_R", "")
+            or os.environ.get("RANDOM_RANGE_RATIO", "")
+        ),
+        help=(
+            "OSL window ratio R for the splitter (#194 §3). Maps to "
+            "--R on TraceLens.TraceUtils.split_inference_trace_annotation. "
+            "Pairs with --CONC / --OSL so mixed-window selection uses the "
+            "benchmark-contract PD ratio instead of an empirical default. "
+            "Defaults to $RANDOM_RANGE_RATIO when set; leave empty to let "
+            "the splitter fall back to its built-in heuristic."
         ),
     )
     args = parser.parse_args()
@@ -1535,10 +2238,15 @@ def main() -> int:
                 # TraceLens splitter CLI (real interface):
                 #   python -m TraceLens.TraceUtils.split_inference_trace_annotation
                 #     <trace_path> -o <output_dir> --find-steady-state
-                #     [--num-steps N] [--CONC C] [--OSL O]
+                #     [--num-steps N] [--CONC C] [--OSL O] [--R r]
                 # `--platform` does not exist; --find-steady-state writes
                 # mixed_steady_state_* / decode_only_steady_state_* /
                 # prefilldecode_steady_state_* into output_dir.
+                # --R (#194 §3) feeds mixed-window selection's analytic
+                # PD-ratio computation: per-request OSL is sampled from
+                # [R*OSL, OSL], so without --R the splitter has to guess
+                # the workload's prefill/decode mix from heuristics and
+                # may pick a sub-optimal steady-state window.
                 split_cmd = [
                     sys.executable, "-m",
                     "TraceLens.TraceUtils.split_inference_trace_annotation",
@@ -1553,6 +2261,24 @@ def main() -> int:
                 osl = args.split_osl or os.environ.get("OSL", "").strip()
                 if str(osl).strip():
                     split_cmd += ["--OSL", str(osl).strip()]
+                # --R is a float (splitter declares `type=float`); we
+                # only pass it through when the user / env provided one
+                # so the splitter's built-in default keeps working for
+                # legacy trace files that pre-date the #194 alignment.
+                r_raw = args.split_r or os.environ.get(
+                    "RANDOM_RANGE_RATIO", "",
+                )
+                r_str = str(r_raw).strip()
+                if r_str:
+                    try:
+                        float(r_str)
+                    except ValueError:
+                        append_log(
+                            log_path,
+                            f"split_trace: ignoring non-numeric --R={r_str!r}",
+                        )
+                    else:
+                        split_cmd += ["--R", r_str]
                 split_rc = run_command(
                     split_cmd,
                     cwd=tl_root,
@@ -1758,6 +2484,10 @@ def main() -> int:
             tl_csv = Path(tl_csv_dir_local) / "kernel_summary.csv"
             candidates = parse_tracelens_kernel_summary(tl_csv, args.top_k)
             if candidates:
+                augment_csv_candidates_with_unified_perf_summary(
+                    candidates,
+                    Path(tl_csv_dir_local) / "unified_perf_summary.csv",
+                )
                 # #125: csv has no shape info; mine raw trace as best-effort.
                 augment_csv_candidates_with_raw_shapes(candidates, trace_files)
                 append_log(log_path,
@@ -1765,8 +2495,29 @@ def main() -> int:
                            f"({len(candidates)}, src={tl_csv}); "
                            f"shape backfill from raw trace")
         if not candidates:
-            append_log(log_path,
-                       "fallback: raw trace parser (TraceLens outputs unavailable)")
+            if not args.dry_run:
+                raise RuntimeError(
+                    "No hot-kernel candidates produced by any TraceLens "
+                    "path: SDK orchestrator returned no Detailed-Analysis "
+                    "P-items AND perf-report CLI yielded neither "
+                    "category_data nor kernel_summary.csv usable rows. "
+                    "The legacy raw-trace parser fallback was removed in "
+                    "#203 because it silently papered over TraceLens-side "
+                    "failures with low-quality grep-based source "
+                    "resolution. Inspect the TraceLens skill log at the "
+                    "path above and file an upstream issue if "
+                    "reproducible."
+                )
+            # ``--dry-run`` is the test-only path that bypasses TraceLens
+            # install / CLI / SDK orchestrator entirely. It still parses
+            # the raw trace so unit tests can exercise hot-kernel
+            # extraction and downstream wiring without a real TraceLens
+            # run. Production code never sets ``--dry-run``.
+            append_log(
+                log_path,
+                "dry-run: parsing raw trace for hot kernels "
+                "(production code path raises here — see #203)",
+            )
             candidates = analyze_trace_files(trace_files, args.top_k)
         roofline_by_name = load_roofline_results(args.roofline_json)
         if roofline_by_name:
