@@ -44,6 +44,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1087,6 +1088,42 @@ def _emit_preflight_diagnostics(
             "Claude SDK may 401"
         )
 
+    # Multi-node topology line. When nodes > 1, ``optimize`` may have just
+    # provisioned the RayJob (before this preflight); we still only print
+    # diagnostics here — no hard-fail if state is temporarily missing.
+    nodes = int(os.environ.get("INFERENCE_OPTIMIZER_NODES", "1") or 1)
+    if nodes > 1:
+        # /tmp/multi_node_state.json mirrors the path baked into
+        # inference_optimizer.multi_node.cli (MULTI_NODE_STATE_FILE env
+        # for tests); reading the same path here keeps the two ends in
+        # sync without importing from multi_node (which would couple
+        # the single-node path to httpx availability).
+        state_path = Path(os.environ.get(
+            "MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"
+        ))
+        if state_path.is_file():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                state = {}
+        else:
+            state = {}
+        if state.get("rayjob_id"):
+            print(
+                f"  nodes               = {nodes} (multi_node skill ON, "
+                f"rayjob={state['rayjob_id']}, "
+                f"head={state.get('head_pod_ip', '?')}, "
+                f"RAY_ADDRESS={state.get('ray_address') or '(unset until head IP)'}')"
+            )
+        else:
+            print(
+                f"  nodes               = {nodes} (multi_node EXPECTED: "
+                f"no rayjob_id in {state_path} — pass --rayjob-image or set "
+                f"INFERENCE_OPTIMIZER_RAYJOB_IMAGE so `optimize` can provision "
+                f"the RayJob, or run `python3 -m inference_optimizer.multi_node "
+                f"create-rayjob --nodes {nodes} ...` before benchmarks)"
+            )
+
 
 def _probe_llm_catalog(
     *,
@@ -1410,21 +1447,48 @@ def _preflight() -> tuple[str, str] | None:
         print("Preflight: ray installed OK")
 
     # 2. Magpie — the benchmark engine all executors shell out to.
+    #
+    # Resolution order for the source dir, in order of priority:
+    #   1. $MAGPIE_DIR env (operator override; typically a wekafs fork
+    #      with un-pushed local commits — install from there, NEVER
+    #      clone main on top of it).
+    #   2. $WORKSPACE_ROOT/Magpie (default /workspace/Magpie). If the
+    #      dir already has setup.py / pyproject.toml, install from it;
+    #      otherwise git-clone main into it first.
+    #
+    # ``import Magpie`` is the cheap fast-path: if Python already has
+    # Magpie on sys.path, we skip install entirely (saves ~30s of pip
+    # work on every restart). This applies to both branches.
     check = subprocess.run(
         [magpie_python, "-c", "import Magpie"],
         capture_output=True,
     )
     if check.returncode != 0:
-        workspace_root = os.environ.get("WORKSPACE_ROOT") or "/workspace"
-        magpie_dir = Path(workspace_root) / "Magpie"
-        if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
-            print(f"Preflight: Magpie not importable and not found at {magpie_dir}; cloning ...")
-            subprocess.run(
-                ["git", "clone", "--depth", "1",
-                 "https://github.com/AMD-AGI/Magpie.git", str(magpie_dir)],
-                check=True,
-            )
-        print(f"Preflight: installing Magpie from {magpie_dir} ...")
+        magpie_env = os.environ.get("MAGPIE_DIR", "").strip()
+        if magpie_env:
+            magpie_dir = Path(magpie_env)
+            if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
+                print(
+                    f"Preflight: ERROR — $MAGPIE_DIR={magpie_dir} has no "
+                    f"setup.py/pyproject.toml; refusing to clone main on "
+                    f"top of an operator-supplied path. Fix the env or "
+                    f"unset $MAGPIE_DIR to fall back to the default."
+                )
+                raise FileNotFoundError(
+                    f"$MAGPIE_DIR={magpie_dir} is not a valid Magpie checkout"
+                )
+            print(f"Preflight: installing Magpie from $MAGPIE_DIR={magpie_dir} ...")
+        else:
+            workspace_root = os.environ.get("WORKSPACE_ROOT") or "/workspace"
+            magpie_dir = Path(workspace_root) / "Magpie"
+            if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
+                print(f"Preflight: Magpie not importable and not found at {magpie_dir}; cloning ...")
+                subprocess.run(
+                    ["git", "clone", "--depth", "1",
+                     "https://github.com/AMD-AGI/Magpie.git", str(magpie_dir)],
+                    check=True,
+                )
+            print(f"Preflight: installing Magpie from {magpie_dir} ...")
         subprocess.run(
             [magpie_python, "-m", "pip", "install", "--quiet",
              *pip_extra, "-e", str(magpie_dir)],
@@ -1549,335 +1613,637 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     return options
 
 
-async def _run_optimize(args: argparse.Namespace) -> int:
-    proxy_urls = _preflight()
+def _gc_old_profile_traces(
+    root: str = "/wekafs/hyperloom/profile-traces",
+    retention_days: int = 7,
+    keep: str | None = None,
+) -> None:
+    """Best-effort GC of stale per-RayJob profile-trace dirs on shared wekafs.
 
-    # Hard-gate Claude model BEFORE any session work. Mutates args.claude_model
-    # in-place when falling back to opus-4-6; aborts with sys.exit(2) if the
-    # gateway catalog cannot be probed or neither allowed model is present.
-    catalog_ids = _validate_and_resolve_claude_model(args, proxy_urls)
-    _smoke_test_codex_model(args, catalog_ids)
+    Removes only top-level subdirectories whose mtime is older than
+    ``retention_days``. The active session's dir (just mkdir'd seconds ago)
+    is always young enough; ``keep`` adds an explicit name-match guard so
+    the current run is never collected even if a clock skew flipped mtime.
 
-    if args.resume:
-        # Resume mode: session_dir is fixed at /workspace/hyperloom (or
-        # $INFERENCE_OPTIMIZER_SESSION_DIR for tests). We re-mkdir the
-        # skeleton (idempotent) so a partially-initialised previous run
-        # is healed before we touch state.
-        session_dir = make_session_dir()
-        try:
-            manifest = load_manifest(session_dir)
-        except FileNotFoundError as exc:
-            print(f"ERROR: --resume failed: {exc}", file=sys.stderr)
-            sys.exit(2)
-        if not (session_dir / "state.json").exists():
-            print(
-                f"ERROR: --resume failed: {session_dir}/state.json missing "
-                f"(manifest exists but Coordinator never wrote SharedState)",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        state = SharedState.load_or_init(session_dir)
-        prior_stop = state.stop_reason
-        print(f"Resuming session: {session_dir}")
-        print(f"  manifest.session_id    : {manifest.get('session_id')}")
-        print(f"  prior baseline_tput   : {state.baseline_tput:.1f}")
-        print(f"  prior cumul_gain      : {state.cumulative_gain:.2f}%")
-        print(f"  prior current_best    : "
-              f"{(state.current_best or {}).get('action')}/"
-              f"{(state.current_best or {}).get('tput')}")
-        print(f"  prior stop_reason     : {prior_stop or '(none)'}")
+    Failure is logged + swallowed: GC must never block optimizer startup.
 
-        # Re-export session-level env vars from persisted state so the
-        # executors (baseline / profile / sweep / backends / params) resolve
-        # model / framework / gpu_type correctly. Without this, a resume
-        # in a fresh shell would fall back to YAML hardcoded defaults,
-        # potentially benchmarking the wrong model on the wrong framework.
-        if state.model_path:
-            os.environ["MODEL_PATH"] = state.model_path
-            print(f"  re-exported MODEL_PATH: {state.model_path}")
-        if state.framework:
-            os.environ["FRAMEWORK"] = state.framework
-            print(f"  re-exported FRAMEWORK : {state.framework}")
-        if state.gpu_type:
-            os.environ["GPU_TYPE"] = state.gpu_type
-            print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
-        # Honour persisted kernel_enabled flag on resume; CLI --no-kernel
-        # can still override on a previously-enabled session.
-        if not state.kernel_enabled:
-            args.no_kernel = True
-            print("  kernel agent          : DISABLED (persisted from original run)")
-
-        # CRITICAL: a leftover stop_reason from the prior run (most often
-        # "time_exhausted") fools Orchestration into thinking the work is
-        # already done — it just heartbeats forever. Clear it so the new
-        # run has a clean signal. The Coordinator's run() always re-sets
-        # stop_reason at exit anyway.
-        prior_crash = state.crash_count
-        if prior_stop or prior_crash >= 3:
-            state.stop_reason = ""
-            # Reset persisted crash_count so a fresh resume isn't immediately
-            # tripped into "emergency" by accumulated failures from prior runs
-            # (e.g. authentication errors before .env was loaded).
-            state.crash_count = 0
-            state.save(session_dir)
-            print(
-                f"  → cleared stop_reason and reset crash_count "
-                f"(was {prior_crash}) for fresh resume"
-            )
-    else:
-        # Resolve model path from --model first, then $MODEL_PATH env. Without
-        # either, fail fast: silently falling back to the YAML's hardcoded
-        # `/wekafs/models/Qwen-Qwen3-8B` was the cause of "the optimizer ran
-        # the wrong model" reports — explicit > implicit.
-        if not args.model:
-            args.model = os.environ.get("MODEL_PATH") or ""
-        if not args.model:
-            print(
-                "ERROR: model is required. Pass --model <path> or set "
-                "MODEL_PATH env (or use --resume to continue an existing "
-                "session at the canonical session_dir).",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        # Re-export the resolved value so downstream subprocess executors
-        # (baseline / profile / sweep / backends / params) inject it into
-        # the Magpie YAML instead of trusting the YAML's hardcoded `model:`.
-        os.environ["MODEL_PATH"] = str(args.model)
-
-        # Resolve framework: --framework > $FRAMEWORK env > "sglang".
-        # Session-wide; mixing sglang/vllm in one session is not supported.
-        framework = (
-            (args.framework or os.environ.get("FRAMEWORK", "")).strip().lower()
-            or "sglang"
+    Override knobs (env):
+      HYPERLOOM_MN_TRACE_RETENTION_DAYS -- int days, default 7
+      HYPERLOOM_MN_TRACE_GC_DISABLE     -- "1" disables GC entirely
+    """
+    if os.environ.get("HYPERLOOM_MN_TRACE_GC_DISABLE", "").strip() in (
+        "1", "true", "yes",
+    ):
+        return
+    try:
+        retention_days = int(
+            os.environ.get("HYPERLOOM_MN_TRACE_RETENTION_DAYS") or retention_days
         )
-        if framework not in ("sglang", "vllm"):
-            print(
-                f"ERROR: --framework must be sglang or vllm (got {framework!r}); "
-                "set $FRAMEWORK accordingly or pass --framework",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        os.environ["FRAMEWORK"] = framework
-        print(f"Framework       : {framework}")
-
-        # Resolve GPU runner type: --gpu-type > $GPU_TYPE > rocm-smi probe.
-        # Result is the canonical Magpie label (mi300x / mi355x). MI325X has
-        # the same architecture as MI300X but Magpie does not yet ship
-        # sglang_mi325x.sh / vllm_mi325x.sh, so we map mi325x -> mi300x with
-        # a warning so the run actually succeeds.
-        gpu_type = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
-        if not gpu_type:
-            gpu_type = _autodetect_gpu_type() or ""
-            if gpu_type:
-                print(f"GPU type        : {gpu_type} (auto-detected)")
-        if gpu_type == "mi325x":
-            print(
-                "WARN: mi325x maps to mi300x (same arch; Magpie has no "
-                "sglang_mi325x.sh / vllm_mi325x.sh yet)",
-                file=sys.stderr,
-            )
-            gpu_type = "mi300x"
-        if gpu_type:
-            os.environ["GPU_TYPE"] = gpu_type
-            print(f"GPU type        : {gpu_type} (will inject runner_type into Magpie YAML)")
-        else:
-            os.environ.pop("GPU_TYPE", None)
-            print("GPU type        : <unset> (Magpie will auto-detect)")
-
-        # Compute MAX_MODEL_LEN = ISL + OSL + 4096 headroom, export for yaml injection.
-        max_model_len = args.isl + args.osl + 4096
-        os.environ["MAX_MODEL_LEN"] = str(max_model_len)
-        os.environ["ISL"] = str(args.isl)
-        os.environ["OSL"] = str(args.osl)
-        os.environ["PRECISION"] = args.precision
-        print(f"Workload        : ISL={args.isl} OSL={args.osl} "
-              f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision}")
-
-        # session_dir is fixed at /workspace/hyperloom (override:
-        # $INFERENCE_OPTIMIZER_SESSION_DIR). Each sandbox is single-use,
-        # so collision detection is unnecessary; mkdir -p is enough.
-        session_dir = make_session_dir()
-        manifest = write_manifest(session_dir, args=args)
-        print(f"Session dir     : {session_dir}")
-        print(f"Session id      : {manifest['session_id']}  (manifest label only)")
-        _print_session_skeleton(session_dir)
-        _seed_shared_state(
-            session_dir, args, session_id=manifest["session_id"],
-        )
-
-    objective = build_objective({
-        "MAX_HOURS": str(args.max_hours),
-        "TARGET_GAIN_PCT": str(args.target_gain) if args.target_gain else "",
-        "TARGET_TPUT_PER_GPU": str(args.target_tput) if args.target_tput else "",
-        "TARGET_DIR": args.target_baseline_dir or "",
-    })
-    print(f"Objective       : kind={objective.kind()} {objective.describe()}")
-    no_kernel = getattr(args, "no_kernel", False)
-
-    # Resolve critic backend choice + critic-agent runtime root before
-    # _build_backends (which constructs CriticAgentBackend immediately and
-    # would otherwise blow up on missing runtime). Fail-fast policy: if the
-    # operator selected --critic-agent (or it's the default) but the
-    # critic-agent runtime is unreachable, we abort with rc=2 instead of
-    # silently falling back to mock/codex_bare.
-    critic_choice = _resolve_critic_choice(args)
-    critic_agent_root: Path | None = None
-    critic_kb_mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
-    if critic_kb_mode not in ("inmemory", "live"):
+    except ValueError:
+        retention_days = 7
+    base = Path(root)
+    if not base.is_dir():
+        return
+    cutoff = time.time() - retention_days * 86400
+    keep_name = Path(keep).name if keep else ""
+    removed = 0
+    kept = 0
+    try:
+        for child in base.iterdir():
+            if not child.is_dir():
+                continue
+            if keep_name and child.name == keep_name:
+                kept += 1
+                continue
+            try:
+                mtime = child.stat().st_mtime
+            except OSError:
+                continue
+            if mtime >= cutoff:
+                kept += 1
+                continue
+            try:
+                shutil.rmtree(child)
+                removed += 1
+            except OSError as exc:
+                print(
+                    f"WARN multi-node GC: failed to rm {child}: {exc}",
+                    file=sys.stderr,
+                )
+    except OSError as exc:
+        print(f"WARN multi-node GC: scan failed under {base}: {exc}", file=sys.stderr)
+        return
+    if removed or kept:
         print(
-            f"ERROR: CRITIC_KB_CLIENT_MODE={critic_kb_mode!r} not in "
-            "{'inmemory','live'}",
+            f"multi-node: GC profile-traces removed={removed} kept={kept} "
+            f"retention={retention_days}d root={root}"
+        )
+
+
+def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
+    """When ``--nodes >= 2``, create/reuse SaFE RayJob, bootstrap once, export RAY_ADDRESS."""
+    nodes = max(1, int(args.nodes))
+    if nodes < 2:
+        return
+
+    from .multi_node.cli import cmd_bootstrap, cmd_create_rayjob, _load_state
+    from .orchestrator.action_executors._multi_node_env import export_ray_address_to_os
+
+    state_path = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))
+    image = (
+        (getattr(args, "rayjob_image", None) or "").strip()
+        or os.environ.get("INFERENCE_OPTIMIZER_RAYJOB_IMAGE", "").strip()
+    )
+    if not image and state_path.is_file():
+        try:
+            prior = json.loads(state_path.read_text(encoding="utf-8"))
+            image = str((prior.get("last_create_request") or {}).get("image") or "").strip()
+        except (OSError, json.JSONDecodeError, TypeError):
+            image = ""
+    if not image:
+        print(
+            "ERROR: --nodes >= 2 requires a RayJob container image. Pass "
+            "--rayjob-image <harbor/...> or set INFERENCE_OPTIMIZER_RAYJOB_IMAGE.",
             file=sys.stderr,
         )
         sys.exit(2)
-    if critic_choice == "agent":
-        critic_agent_root = _resolve_critic_agent_root()
-        if critic_agent_root is None:
-            print(
-                f"ERROR: --critic-agent selected but critic-agent runtime not "
-                f"found.\n"
-                f"  Set ${_CRITIC_AGENT_ROOT_ENV} to the directory containing "
-                f"runtime/cli.py, or install critic-agent at "
-                f"$REPO_ROOT/critic-agent/.\n"
-                f"  Bypass with --critic-mock or --critic-codex-bare.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        _validate_critic_agent_runtime(critic_agent_root)
-        if critic_kb_mode == "live" and not os.environ.get("KB_BASE_URL"):
-            print(
-                "ERROR: CRITIC_KB_CLIENT_MODE=live but KB_BASE_URL is not "
-                "set. Either export KB_BASE_URL or unset "
-                "CRITIC_KB_CLIENT_MODE to fall back to inmemory.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        # Default WORKSPACE_PATH for the critic-agent runtime if the
-        # operator hasn't already pinned it.
-        os.environ.setdefault("WORKSPACE_PATH", str(Path(__file__).resolve().parents[1]))
 
-    # Resolve robustness backend choice + runtime root, mirroring critic.
-    robustness_choice = _resolve_robustness_choice(args)
-    robustness_agent_root: Path | None = None
-    robustness_options = _build_robustness_options(args)
-    if robustness_choice == "agent":
-        robustness_agent_root = _resolve_robustness_agent_root()
-        if robustness_agent_root is None:
-            print(
-                f"ERROR: --robustness-agent selected but robustness-agent "
-                f"runtime not found.\n"
-                f"  Set ${_ROBUSTNESS_AGENT_ROOT_ENV} to the directory "
-                f"containing src/robustness_agent/runtime/cli.py, or install "
-                f"robustness-agent at $REPO_ROOT/robustness-agent/.\n"
-                f"  Bypass with --robustness-mock.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        _validate_robustness_agent_runtime(robustness_agent_root)
+    gpn = getattr(args, "rayjob_gpus_per_node", None)
+    if gpn is None:
+        try:
+            gpn = int(os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8)
+        except ValueError:
+            gpn = 8
 
-    backends = _build_backends(
-        claude_model=args.claude_model,
-        codex_model=args.codex_model,
-        kernel_codex=args.kernel_codex,
-        critic_choice=critic_choice,
-        session_dir=session_dir,
-        critic_agent_root=critic_agent_root,
-        critic_kb_mode=critic_kb_mode,
-        robustness_choice=robustness_choice,
-        robustness_agent_root=robustness_agent_root,
-        robustness_options=robustness_options,
-        no_kernel=no_kernel,
+    ns_create = argparse.Namespace(
+        workspace=None,
+        image=image,
+        nodes=nodes,
+        gpus_per_node=int(gpn),
+        cpus_per_node=96,
+        mem_per_node=1024,
+        ephemeral_per_node=400,
+        display_name=None,
+        description=None,
+        owner_id=None,
+        extra_env=[],
+        extra_label=[],
+        no_wait=False,
+        recreate=False,
+        poll_interval=6,
+        poll_timeout=110,
     )
-    # Bug A fix: expose the active session_dir to in-process executors
-    # (e.g. ReportExecutor) that don't get session_dir threaded through
-    # task.params. This is read in report.py::_resolve_session_dir.
-    os.environ["INFERENCE_OPTIMIZER_SESSION_DIR"] = str(session_dir)
-    # Production: enable strict path-containment checks in PolicyGate so
-    # any LLM-emitted intent whose path field escapes session_dir lands
-    # as `policy_denied` in its inbox. Tests omit this and keep the
-    # legacy lenient mode for fixture paths under /tmp.
-    os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
+    rc = cmd_create_rayjob(ns_create)
+    if rc != 0:
+        sys.exit(rc)
 
-    # When kernel is disabled, strip it from the role registry so
-    # Coordinator does not tick a non-existent agent and PolicyGate does
-    # not expect a backend for it.
-    role_registry = None
-    if no_kernel:
-        from .orchestrator.agent_role import default_role_registry
-        role_registry = {
-            k: v for k, v in default_role_registry().items() if k != "kernel"
-        }
-
-    coordinator = Coordinator(
-        session_dir, backends=backends, role_registry=role_registry,
-    )
-    framework_for_prompt = (
-        os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
-    )
-    max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
-    prompts: dict[str, str] = {
-        "orchestration": args.orch_prompt or _build_orchestration_prompt(
-            no_kernel=no_kernel,
-            framework=framework_for_prompt,
-            objective=objective,
-            max_minutes=max_minutes_for_prompt,
-        ),
-        "critic":        args.critic_prompt or _load_critic_prompt(),
-    }
-    if not no_kernel:
-        prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
-    coordinator.system_prompt_overrides = prompts
-    _register_executors(coordinator, no_kernel=no_kernel)
-    # Persist effective system prompts for resume / drift inspection.
-    _snapshot_system_prompts(session_dir, prompts=prompts)
-
-    kernel_str = "DISABLED" if no_kernel else (
-        f"{'Codex' if args.kernel_codex else 'Claude'}"
-    )
-    if critic_choice == "mock":
-        critic_str = "mock"
-    elif critic_choice == "codex_bare":
-        critic_str = f"codex-bare({args.codex_model})"
-    else:  # "agent"
-        critic_str = (
-            f"critic-agent(kb={critic_kb_mode}, codex={args.codex_model}, "
-            f"root={critic_agent_root})"
+    state = _load_state()
+    if not state.get("last_bootstrap_submission_id"):
+        ns_boot = argparse.Namespace(
+            script=None,
+            force=False,
+            print_logs=False,
+            poll_interval=6,
+            poll_timeout=110,
         )
-    if robustness_choice == "mock":
-        robustness_str = "mock"
+        rc_boot = cmd_bootstrap(ns_boot)
+        if rc_boot != 0:
+            sys.exit(rc_boot)
+
+    export_ray_address_to_os()
+    ra = os.environ.get("RAY_ADDRESS", "")
+    if ra:
+        print(f"multi-node: exported RAY_ADDRESS={ra} for kernel-agent Ray tasks")
+
+    # Multi-node only: server-side sglang/vllm pods (head + worker) must
+    # write torch traces to a path that the sandbox-side profile_executor
+    # can read. Per-pod /tmp is invisible to the sandbox; wekafs is the
+    # only fs both sides mount. Namespace the dir by ``rayjob_id`` so a
+    # restart of the same RayJob reuses the directory and a new RayJob
+    # gets a fresh one. This env is consumed by:
+    #   * multi_node.cli._build_multinode_launch_entrypoint -> --torch-profiler-dir
+    #   * orchestrator.action_executors.profile.ProfileExecutor.__call__
+    state_after = _load_state()
+    rid = (state_after.get("rayjob_id") or "").strip()
+    if rid:
+        trace_root = f"/wekafs/hyperloom/profile-traces/{rid}/torch_trace"
+        try:
+            Path(trace_root).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(
+                f"WARN multi-node: cannot mkdir {trace_root}: {exc}; "
+                f"server traces will fall back to per-pod /tmp",
+                file=sys.stderr,
+            )
+        else:
+            os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = trace_root
+            print(
+                f"multi-node: exported HYPERLOOM_MN_PROFILE_TRACE_DIR={trace_root}"
+            )
+            # Best-effort GC of older sibling RayJob trace dirs. Runs only
+            # AFTER the current session's dir is mkdir'd, so the active
+            # rayjob_id is name-guarded and its mtime is fresh.
+            _gc_old_profile_traces(
+                root="/wekafs/hyperloom/profile-traces",
+                keep=rid,
+            )
+
+
+async def _run_optimize(args: argparse.Namespace) -> int:
+    # Surface --nodes to the rest of the process (preflight diagnostics
+    # and any executor that wants to short-circuit when the optimizer is
+    # in single-node mode) by exporting it before _preflight runs. We
+    # re-export even when the env var was already set so the CLI flag
+    # always wins, matching the documented resolution order.
+    nodes_resolved = max(1, int(args.nodes))
+    tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
+    ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
+    # Resolve gpus_per_node with the same priority chain
+    # `_provision_multi_node_rayjob_stack` uses (CLI > env > 8) so the
+    # validation here matches what SaFE actually ends up seeing.
+    gpn_attr = getattr(args, "rayjob_gpus_per_node", None)
+    if gpn_attr is not None:
+        gpus_per_node_resolved = int(gpn_attr)
     else:
-        robustness_str = f"robustness-agent(root={robustness_agent_root})"
-        if robustness_options:
-            kvs = ",".join(f"{k}={v!r}" for k, v in sorted(robustness_options.items()))
-            robustness_str += f"[{kvs}]"
-    print(f"Backends        : "
-          f"orchestration=Claude({args.claude_model}), "
-          f"kernel={kernel_str}, "
-          f"critic={critic_str}, "
-          f"robustness={robustness_str}")
-    print(f"Max ticks       : {args.max_ticks or 'unlimited'} "
-          f"(budget = {args.max_hours}h)")
-    print(f"Tick interval   : {args.tick_interval_sec}s")
-    print()
+        try:
+            gpus_per_node_resolved = int(
+                os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8,
+            )
+        except ValueError:
+            gpus_per_node_resolved = 8
+    total_gpus = nodes_resolved * gpus_per_node_resolved
+
+    # Topology sanity gates — multi-node ONLY (nodes >= 2). Single-pod
+    # runs keep their legacy code paths untouched (Magpie owns the
+    # server lifecycle there, and the TP/EP knobs flow through env
+    # rather than the multi_node CLI). Rejected at CLI parse time so
+    # the agent gets an immediate, attributable error instead of a
+    # cryptic sglang/vllm launcher crash 30 minutes into a cold start.
+    if nodes_resolved >= 2:
+        # Gate 1: total cluster GPUs must hold the model's TP shards.
+        #   nodes * gpus_per_node >= tp
+        # Anything less means at least one TP rank has no GPU to land on.
+        if total_gpus < tp_resolved:
+            print(
+                f"ERROR: TP={tp_resolved} exceeds total GPU count "
+                f"({nodes_resolved} nodes * {gpus_per_node_resolved} "
+                f"gpus_per_node = {total_gpus}). Either lower --tp, raise "
+                "--nodes, or use a larger --rayjob-gpus-per-node pod "
+                "template.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # Gate 2: expert-parallel size cannot exceed TP — sglang/vllm
+        # cannot place more expert shards than ranks. Helper repeats
+        # this check at server-restart time, but failing here keeps
+        # the agent from spending bootstrap minutes on an unrunnable
+        # topology.
+        if ep_resolved > tp_resolved:
+            print(
+                f"ERROR: EP={ep_resolved} > TP={tp_resolved}. Expert-parallel "
+                "size must be <= tensor-parallel size. Either lower --ep or "
+                "raise --tp.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+    os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
+    # Re-export $TP and $CONC from the resolved CLI args so downstream
+    # readers (`_workload_envs.apply_runtime_benchmark_overrides`,
+    # Magpie YAML envs) all see the same value as the agent passed at
+    # the CLI. argparse default already pulls from existing env, so
+    # this just ensures the CLI form wins when both are present.
+    os.environ["TP"] = str(tp_resolved)
+    os.environ["CONC"] = str(max(1, int(getattr(args, "conc", 8) or 8)))
+    # Same pattern for --ep so executors / helper / multi_node CLI all
+    # see the same value via $EP. ep<1 normalised to 1 (no-EP mode).
+    os.environ["EP"] = str(ep_resolved)
+    # User-declared grid skip list. Resolution order is already enforced
+    # by argparse default (--skip-variants > $SKIP_VARIANTS); we re-export
+    # so executors started later via subprocess (multi-node orchestrator,
+    # sweep child workers) inherit the same spec without re-parsing argv.
+    # Empty string is intentional: it clears any stale value left by a
+    # prior session in the same shell.
+    skip_variants_resolved = (getattr(args, "skip_variants", "") or "").strip()
+    os.environ["SKIP_VARIANTS"] = skip_variants_resolved
+    # Surface PD_* knobs the same way for executors / helper. Empty
+    # string means "let helper resolve from state.json"; pd_mode
+    # always exported so colocated runs explicitly clear any stale
+    # PD_MODE the operator may have left set.
+    pd_mode = (getattr(args, "pd_mode", "") or "colocated").lower()
+    # nodes_resolved is already computed above (TP/EP gates).
+    if pd_mode == "disaggregated" and nodes_resolved < 2:
+        # PD disaggregation logically requires at least one prefill pod
+        # and one decode pod; with NODES=1 that would mean co-hosting
+        # both server roles on the same GPU set, which defeats the
+        # latency-isolation purpose and is not supported by sglang/vllm
+        # in the current architecture (also rejected later by
+        # _resolve_pd_args, but we fail at CLI parse so the agent gets
+        # an immediate, attributable error).
+        print(
+            f"ERROR: --pd-mode disaggregated requires --nodes >= 2 "
+            f"(got --nodes {nodes_resolved}). PD splits the cluster "
+            "into prefill + decode groups; a single pod cannot host "
+            "both. Either drop --pd-mode (defaults to colocated) or "
+            "raise --nodes.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    os.environ["PD_MODE"] = pd_mode
+    if pd_mode == "disaggregated":
+        for cli_attr, env_key in (
+            ("pd_prefill_nodes", "PD_PREFILL_NODES"),
+            ("pd_decode_nodes", "PD_DECODE_NODES"),
+            ("pd_prefill_tp", "PD_PREFILL_TP"),
+            ("pd_decode_tp", "PD_DECODE_TP"),
+        ):
+            v = int(getattr(args, cli_attr, 0) or 0)
+            if v > 0:
+                os.environ[env_key] = str(v)
+        for cli_attr, env_key in (
+            ("pd_transfer_backend", "PD_TRANSFER_BACKEND"),
+            ("pd_ib_device", "PD_IB_DEVICE"),
+        ):
+            v = (getattr(args, cli_attr, "") or "").strip()
+            if v:
+                os.environ[env_key] = v
+
+    await asyncio.to_thread(_provision_multi_node_rayjob_stack, args)
 
     try:
-        stop_reason = await coordinator.run(
-            objective=objective,
-            max_minutes=args.max_hours * 60.0,
-            tick_interval_sec=args.tick_interval_sec,
-            max_ticks=args.max_ticks,
-            install_signal_handlers=True,
-        )
-    finally:
-        await coordinator.stop()
+        proxy_urls = _preflight()
 
-    _print_final_summary(coordinator.shared_state, stop_reason)
-    return 0 if stop_reason in (
-        "target_reached",
-        "no_more_leverage",
-        "time_exhausted",
-        "max_ticks",
-    ) else 1
+        # Hard-gate Claude model BEFORE any session work. Mutates args.claude_model
+        # in-place when falling back to opus-4-6; aborts with sys.exit(2) if the
+        # gateway catalog cannot be probed or neither allowed model is present.
+        catalog_ids = _validate_and_resolve_claude_model(args, proxy_urls)
+        _smoke_test_codex_model(args, catalog_ids)
+    
+        if args.resume:
+            # Resume mode: session_dir is fixed at /workspace/hyperloom (or
+            # $INFERENCE_OPTIMIZER_SESSION_DIR for tests). We re-mkdir the
+            # skeleton (idempotent) so a partially-initialised previous run
+            # is healed before we touch state.
+            session_dir = make_session_dir()
+            try:
+                manifest = load_manifest(session_dir)
+            except FileNotFoundError as exc:
+                print(f"ERROR: --resume failed: {exc}", file=sys.stderr)
+                sys.exit(2)
+            if not (session_dir / "state.json").exists():
+                print(
+                    f"ERROR: --resume failed: {session_dir}/state.json missing "
+                    f"(manifest exists but Coordinator never wrote SharedState)",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            state = SharedState.load_or_init(session_dir)
+            prior_stop = state.stop_reason
+            print(f"Resuming session: {session_dir}")
+            print(f"  manifest.session_id    : {manifest.get('session_id')}")
+            print(f"  prior baseline_tput   : {state.baseline_tput:.1f}")
+            print(f"  prior cumul_gain      : {state.cumulative_gain:.2f}%")
+            print(f"  prior current_best    : "
+                  f"{(state.current_best or {}).get('action')}/"
+                  f"{(state.current_best or {}).get('tput')}")
+            print(f"  prior stop_reason     : {prior_stop or '(none)'}")
+    
+            # Re-export session-level env vars from persisted state so the
+            # executors (baseline / profile / sweep / backends / params) resolve
+            # model / framework / gpu_type correctly. Without this, a resume
+            # in a fresh shell would fall back to YAML hardcoded defaults,
+            # potentially benchmarking the wrong model on the wrong framework.
+            if state.model_path:
+                os.environ["MODEL_PATH"] = state.model_path
+                print(f"  re-exported MODEL_PATH: {state.model_path}")
+            if state.framework:
+                os.environ["FRAMEWORK"] = state.framework
+                print(f"  re-exported FRAMEWORK : {state.framework}")
+            if state.gpu_type:
+                os.environ["GPU_TYPE"] = state.gpu_type
+                print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
+            # Honour persisted kernel_enabled flag on resume; CLI --no-kernel
+            # can still override on a previously-enabled session.
+            if not state.kernel_enabled:
+                args.no_kernel = True
+                print("  kernel agent          : DISABLED (persisted from original run)")
+    
+            # CRITICAL: a leftover stop_reason from the prior run (most often
+            # "time_exhausted") fools Orchestration into thinking the work is
+            # already done — it just heartbeats forever. Clear it so the new
+            # run has a clean signal. The Coordinator's run() always re-sets
+            # stop_reason at exit anyway.
+            prior_crash = state.crash_count
+            if prior_stop or prior_crash >= 3:
+                state.stop_reason = ""
+                # Reset persisted crash_count so a fresh resume isn't immediately
+                # tripped into "emergency" by accumulated failures from prior runs
+                # (e.g. authentication errors before .env was loaded).
+                state.crash_count = 0
+                state.save(session_dir)
+                print(
+                    f"  → cleared stop_reason and reset crash_count "
+                    f"(was {prior_crash}) for fresh resume"
+                )
+        else:
+            # Resolve model path from --model first, then $MODEL_PATH env. Without
+            # either, fail fast: silently falling back to the YAML's hardcoded
+            # `/wekafs/models/Qwen-Qwen3-8B` was the cause of "the optimizer ran
+            # the wrong model" reports — explicit > implicit.
+            if not args.model:
+                args.model = os.environ.get("MODEL_PATH") or ""
+            if not args.model:
+                print(
+                    "ERROR: model is required. Pass --model <path> or set "
+                    "MODEL_PATH env (or use --resume to continue an existing "
+                    "session at the canonical session_dir).",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            # Re-export the resolved value so downstream subprocess executors
+            # (baseline / profile / sweep / backends / params) inject it into
+            # the Magpie YAML instead of trusting the YAML's hardcoded `model:`.
+            os.environ["MODEL_PATH"] = str(args.model)
+    
+            # Resolve framework: --framework > $FRAMEWORK env > "sglang".
+            # Session-wide; mixing sglang/vllm in one session is not supported.
+            framework = (
+                (args.framework or os.environ.get("FRAMEWORK", "")).strip().lower()
+                or "sglang"
+            )
+            if framework not in ("sglang", "vllm"):
+                print(
+                    f"ERROR: --framework must be sglang or vllm (got {framework!r}); "
+                    "set $FRAMEWORK accordingly or pass --framework",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            os.environ["FRAMEWORK"] = framework
+            print(f"Framework       : {framework}")
+    
+            # Resolve GPU runner type: --gpu-type > $GPU_TYPE > rocm-smi probe.
+            # Result is the canonical Magpie label (mi300x / mi355x). MI325X has
+            # the same architecture as MI300X but Magpie does not yet ship
+            # sglang_mi325x.sh / vllm_mi325x.sh, so we map mi325x -> mi300x with
+            # a warning so the run actually succeeds.
+            gpu_type = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
+            if not gpu_type:
+                gpu_type = _autodetect_gpu_type() or ""
+                if gpu_type:
+                    print(f"GPU type        : {gpu_type} (auto-detected)")
+            if gpu_type == "mi325x":
+                print(
+                    "WARN: mi325x maps to mi300x (same arch; Magpie has no "
+                    "sglang_mi325x.sh / vllm_mi325x.sh yet)",
+                    file=sys.stderr,
+                )
+                gpu_type = "mi300x"
+            if gpu_type:
+                os.environ["GPU_TYPE"] = gpu_type
+                print(f"GPU type        : {gpu_type} (will inject runner_type into Magpie YAML)")
+            else:
+                os.environ.pop("GPU_TYPE", None)
+                print("GPU type        : <unset> (Magpie will auto-detect)")
+    
+            # Compute MAX_MODEL_LEN = ISL + OSL + 4096 headroom, export for yaml injection.
+            max_model_len = args.isl + args.osl + 4096
+            os.environ["MAX_MODEL_LEN"] = str(max_model_len)
+            os.environ["ISL"] = str(args.isl)
+            os.environ["OSL"] = str(args.osl)
+            os.environ["PRECISION"] = args.precision
+            print(f"Workload        : ISL={args.isl} OSL={args.osl} "
+                  f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision}")
+    
+            # session_dir is fixed at /workspace/hyperloom (override:
+            # $INFERENCE_OPTIMIZER_SESSION_DIR). Each sandbox is single-use,
+            # so collision detection is unnecessary; mkdir -p is enough.
+            session_dir = make_session_dir()
+            manifest = write_manifest(session_dir, args=args)
+            print(f"Session dir     : {session_dir}")
+            print(f"Session id      : {manifest['session_id']}  (manifest label only)")
+            _print_session_skeleton(session_dir)
+            _seed_shared_state(
+                session_dir, args, session_id=manifest["session_id"],
+            )
+    
+        objective = build_objective({
+            "MAX_HOURS": str(args.max_hours),
+            "TARGET_GAIN_PCT": str(args.target_gain) if args.target_gain else "",
+            "TARGET_TPUT_PER_GPU": str(args.target_tput) if args.target_tput else "",
+            "TARGET_DIR": args.target_baseline_dir or "",
+        })
+        print(f"Objective       : kind={objective.kind()} {objective.describe()}")
+        no_kernel = getattr(args, "no_kernel", False)
+    
+        # Resolve critic backend choice + critic-agent runtime root before
+        # _build_backends (which constructs CriticAgentBackend immediately and
+        # would otherwise blow up on missing runtime). Fail-fast policy: if the
+        # operator selected --critic-agent (or it's the default) but the
+        # critic-agent runtime is unreachable, we abort with rc=2 instead of
+        # silently falling back to mock/codex_bare.
+        critic_choice = _resolve_critic_choice(args)
+        critic_agent_root: Path | None = None
+        critic_kb_mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
+        if critic_kb_mode not in ("inmemory", "live"):
+            print(
+                f"ERROR: CRITIC_KB_CLIENT_MODE={critic_kb_mode!r} not in "
+                "{'inmemory','live'}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if critic_choice == "agent":
+            critic_agent_root = _resolve_critic_agent_root()
+            if critic_agent_root is None:
+                print(
+                    f"ERROR: --critic-agent selected but critic-agent runtime not "
+                    f"found.\n"
+                    f"  Set ${_CRITIC_AGENT_ROOT_ENV} to the directory containing "
+                    f"runtime/cli.py, or install critic-agent at "
+                    f"$REPO_ROOT/critic-agent/.\n"
+                    f"  Bypass with --critic-mock or --critic-codex-bare.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            _validate_critic_agent_runtime(critic_agent_root)
+            if critic_kb_mode == "live" and not os.environ.get("KB_BASE_URL"):
+                print(
+                    "ERROR: CRITIC_KB_CLIENT_MODE=live but KB_BASE_URL is not "
+                    "set. Either export KB_BASE_URL or unset "
+                    "CRITIC_KB_CLIENT_MODE to fall back to inmemory.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            # Default WORKSPACE_PATH for the critic-agent runtime if the
+            # operator hasn't already pinned it.
+            os.environ.setdefault("WORKSPACE_PATH", str(Path(__file__).resolve().parents[1]))
+    
+        # Resolve robustness backend choice + runtime root, mirroring critic.
+        robustness_choice = _resolve_robustness_choice(args)
+        robustness_agent_root: Path | None = None
+        robustness_options = _build_robustness_options(args)
+        if robustness_choice == "agent":
+            robustness_agent_root = _resolve_robustness_agent_root()
+            if robustness_agent_root is None:
+                print(
+                    f"ERROR: --robustness-agent selected but robustness-agent "
+                    f"runtime not found.\n"
+                    f"  Set ${_ROBUSTNESS_AGENT_ROOT_ENV} to the directory "
+                    f"containing src/robustness_agent/runtime/cli.py, or install "
+                    f"robustness-agent at $REPO_ROOT/robustness-agent/.\n"
+                    f"  Bypass with --robustness-mock.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            _validate_robustness_agent_runtime(robustness_agent_root)
+    
+        backends = _build_backends(
+            claude_model=args.claude_model,
+            codex_model=args.codex_model,
+            kernel_codex=args.kernel_codex,
+            critic_choice=critic_choice,
+            session_dir=session_dir,
+            critic_agent_root=critic_agent_root,
+            critic_kb_mode=critic_kb_mode,
+            robustness_choice=robustness_choice,
+            robustness_agent_root=robustness_agent_root,
+            robustness_options=robustness_options,
+            no_kernel=no_kernel,
+        )
+        # Bug A fix: expose the active session_dir to in-process executors
+        # (e.g. ReportExecutor) that don't get session_dir threaded through
+        # task.params. This is read in report.py::_resolve_session_dir.
+        os.environ["INFERENCE_OPTIMIZER_SESSION_DIR"] = str(session_dir)
+        # Production: enable strict path-containment checks in PolicyGate so
+        # any LLM-emitted intent whose path field escapes session_dir lands
+        # as `policy_denied` in its inbox. Tests omit this and keep the
+        # legacy lenient mode for fixture paths under /tmp.
+        os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
+    
+        # When kernel is disabled, strip it from the role registry so
+        # Coordinator does not tick a non-existent agent and PolicyGate does
+        # not expect a backend for it.
+        role_registry = None
+        if no_kernel:
+            from .orchestrator.agent_role import default_role_registry
+            role_registry = {
+                k: v for k, v in default_role_registry().items() if k != "kernel"
+            }
+    
+        coordinator = Coordinator(
+            session_dir, backends=backends, role_registry=role_registry,
+        )
+        framework_for_prompt = (
+            os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
+        )
+        max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
+        prompts: dict[str, str] = {
+            "orchestration": args.orch_prompt or _build_orchestration_prompt(
+                no_kernel=no_kernel,
+                framework=framework_for_prompt,
+                objective=objective,
+                max_minutes=max_minutes_for_prompt,
+            ),
+            "critic":        args.critic_prompt or _load_critic_prompt(),
+        }
+        if not no_kernel:
+            prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
+        coordinator.system_prompt_overrides = prompts
+        _register_executors(coordinator, no_kernel=no_kernel)
+        # Persist effective system prompts for resume / drift inspection.
+        _snapshot_system_prompts(session_dir, prompts=prompts)
+    
+        kernel_str = "DISABLED" if no_kernel else (
+            f"{'Codex' if args.kernel_codex else 'Claude'}"
+        )
+        if critic_choice == "mock":
+            critic_str = "mock"
+        elif critic_choice == "codex_bare":
+            critic_str = f"codex-bare({args.codex_model})"
+        else:  # "agent"
+            critic_str = (
+                f"critic-agent(kb={critic_kb_mode}, codex={args.codex_model}, "
+                f"root={critic_agent_root})"
+            )
+        if robustness_choice == "mock":
+            robustness_str = "mock"
+        else:
+            robustness_str = f"robustness-agent(root={robustness_agent_root})"
+            if robustness_options:
+                kvs = ",".join(f"{k}={v!r}" for k, v in sorted(robustness_options.items()))
+                robustness_str += f"[{kvs}]"
+        print(f"Backends        : "
+              f"orchestration=Claude({args.claude_model}), "
+              f"kernel={kernel_str}, "
+              f"critic={critic_str}, "
+              f"robustness={robustness_str}")
+        print(f"Max ticks       : {args.max_ticks or 'unlimited'} "
+              f"(budget = {args.max_hours}h)")
+        print(f"Tick interval   : {args.tick_interval_sec}s")
+        print()
+    
+        try:
+            stop_reason = await coordinator.run(
+                objective=objective,
+                max_minutes=args.max_hours * 60.0,
+                tick_interval_sec=args.tick_interval_sec,
+                max_ticks=args.max_ticks,
+                install_signal_handlers=True,
+            )
+        finally:
+            await coordinator.stop()
+    
+        _print_final_summary(coordinator.shared_state, stop_reason)
+        return 0 if stop_reason in (
+            "target_reached",
+            "no_more_leverage",
+            "time_exhausted",
+            "max_ticks",
+        ) else 1
+    finally:
+        # Intentionally empty: keeps the outer ``try`` valid without calling
+        # SaFE stop on RayJob exit (use ``multi_node stop-rayjob`` or owner
+        # cascade when the sandbox workload stops).
+        pass
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1909,6 +2275,121 @@ def _build_parser() -> argparse.ArgumentParser:
              "--framework > $FRAMEWORK env > sglang (default). Selection is "
              "session-wide; mixing sglang and vllm in a single session is "
              "not supported.",
+    )
+    opt.add_argument(
+        "--nodes", type=int,
+        default=int(os.environ.get("INFERENCE_OPTIMIZER_NODES", "1") or 1),
+        help="Total number of GPU nodes for the inference RayJob. "
+             "1 (default) keeps the legacy single-pod path. "
+             ">=2: `optimize` provisions the SaFE RayJob before preflight "
+             "(unless already in /tmp/multi_node_state.json), runs bootstrap "
+             "once, and exports RAY_ADDRESS for kernel-agent. Does not stop the "
+             "RayJob on exit; run `python3 -m inference_optimizer.multi_node "
+             "stop-rayjob` when you want to release it. Requires "
+             "--rayjob-image or INFERENCE_OPTIMIZER_RAYJOB_IMAGE. "
+             "Resolution: --nodes > $INFERENCE_OPTIMIZER_NODES env > 1.",
+    )
+    opt.add_argument(
+        "--rayjob-image",
+        default=None,
+        help="Container image for the multi-node RayJob (head+workers). "
+             "Required when --nodes>=2 unless INFERENCE_OPTIMIZER_RAYJOB_IMAGE "
+             "is set or state file last_create_request.image is present.",
+    )
+    opt.add_argument(
+        "--rayjob-gpus-per-node",
+        type=int,
+        default=None,
+        help="GPUs per RayJob pod (default: INFERENCE_OPTIMIZER_GPUS_PER_NODE "
+             "or 8). Passed to multi_node create-rayjob.",
+    )
+    opt.add_argument(
+        "--tp", type=int,
+        default=int(os.environ.get("TP", "1") or 1),
+        help="Tensor parallel size. Resolution: --tp > $TP env > 1. "
+             "Symmetric with --ep — historically TP only flowed in via "
+             "$TP env (read by _workload_envs); the CLI flag was added "
+             "so the agent can pass `--tp N` directly from the prompt's "
+             "Environment block instead of having to `export TP=N` "
+             "first. Either path still works.",
+    )
+    opt.add_argument(
+        "--conc", type=int,
+        default=int(os.environ.get("CONC", "8") or 8),
+        help="Magpie client concurrency cap (max in-flight requests). "
+             "Resolution: --conc > $CONC env > 8. Symmetric with --tp; "
+             "agent can pass `--conc N` directly from the prompt.",
+    )
+    opt.add_argument(
+        "--ep", type=int,
+        default=int(os.environ.get("EP", "1") or 1),
+        help="Expert-parallel size for MoE inference. 1 (default) keeps "
+             "experts sharded by TP (legacy behaviour). >=2 enables true "
+             "expert parallelism: sglang adds `--expert-parallel-size N`, "
+             "vllm adds `--enable-expert-parallel`. Typical: EP=TP for "
+             "DSr1/DSv3 on multi-node. Resolution: --ep > $EP env > 1. "
+             "EP > TP is rejected at server-restart time.",
+    )
+    # Prefill-Decode disaggregation knobs. `colocated` (default) keeps
+    # current behaviour. `disaggregated` splits the cluster into a
+    # prefill group + decode group; sglang_router / vllm proxy fronts
+    # them at the public 8888 port. All --pd-* flags are forwarded
+    # through to multi_node restart-server via the orchestrator helper.
+    opt.add_argument(
+        "--pd-mode",
+        choices=("colocated", "disaggregated"),
+        default="colocated",
+        help="Prefill-Decode disaggregation mode. ALWAYS defaults to "
+             "`colocated` regardless of any inherited $PD_MODE env, so "
+             "PD only turns on when the agent explicitly passes "
+             "`--pd-mode disaggregated` (driven by the prompt's "
+             "Environment block having a PD_MODE=disaggregated line). "
+             "Stale env from a previous restart cannot accidentally "
+             "re-enable PD.",
+    )
+    opt.add_argument(
+        "--pd-prefill-nodes", type=int,
+        default=int(os.environ.get("PD_PREFILL_NODES", "0") or 0),
+        help="Number of prefill nodes (disaggregated only); pn+dn=nodes",
+    )
+    opt.add_argument(
+        "--pd-decode-nodes", type=int,
+        default=int(os.environ.get("PD_DECODE_NODES", "0") or 0),
+        help="Number of decode nodes (disaggregated only)",
+    )
+    opt.add_argument(
+        "--pd-prefill-tp", type=int,
+        default=int(os.environ.get("PD_PREFILL_TP", "0") or 0),
+        help="TP for prefill group (disaggregated only); default = --tp",
+    )
+    opt.add_argument(
+        "--pd-decode-tp", type=int,
+        default=int(os.environ.get("PD_DECODE_TP", "0") or 0),
+        help="TP for decode group (disaggregated only); default = --tp",
+    )
+    opt.add_argument(
+        "--pd-transfer-backend", type=str,
+        default=os.environ.get("PD_TRANSFER_BACKEND", ""),
+        help="sglang: mooncake|nixl ; vllm: NixlConnector|...; empty = default",
+    )
+    opt.add_argument(
+        "--pd-ib-device", type=str,
+        default=os.environ.get("PD_IB_DEVICE", ""),
+        help="comma-separated IB/RoCE device list (e.g. mlx5_0,mlx5_1). "
+             "Empty = use $NCCL_IB_HCA from RayJob pod env at server-launch time.",
+    )
+    opt.add_argument(
+        "--skip-variants", type=str,
+        default=os.environ.get("SKIP_VARIANTS", ""),
+        help="Comma/whitespace-separated list of variant names or fnmatch "
+             "globs to drop from the backends/params grids before launch. "
+             "Examples: `attn_aiter` (exact), `attn_aiter,sched_dfs` (two "
+             "exacts), `attn_*,vllm_aiter_*` (globs). Resolution: "
+             "--skip-variants > $SKIP_VARIANTS > empty. Exported back into "
+             "$SKIP_VARIANTS so all executors and the multi-node orchestrator "
+             "subprocess see the same value. Dropped variants surface in "
+             "state.json under each action's `dropped_variants` field tagged "
+             "`source=user_skip`.",
     )
     opt.add_argument("--max-hours", type=float, default=2.0,
                       help="Wall-clock budget in hours (default 2.0)")

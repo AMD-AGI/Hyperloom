@@ -146,11 +146,18 @@ already handle the read-only-source case.
 
 ### Step 2 — Launch
 
+Read `nodes` from the user prompt FIRST (look for `nodes=N`, `N nodes`,
+`N pods`, `multi-node`, ...). Default to `1` when the prompt
+is silent. **If `nodes >= 2`, do "Step 3 — Multi-Node" below BEFORE running this
+command** — the multi-node RayJob must be created first; then come back
+and launch with `--nodes <N>`.
+
 ```bash
 inference_optimizer optimize \
   --model "$MODEL_PATH" \
   --framework vllm \           # or sglang (default)
   --gpu-type MI300X \          # or omit for rocm-smi auto-detect
+  --nodes 1 \                  # 1 = single-pod (default); >=2 requires Step 3 done first
   --max-hours 2
 ```
 
@@ -217,6 +224,88 @@ installer truth.
 Do NOT manually `pip install claude-agent-sdk`, copy `auth_proxy.py`, export
 `ANTHROPIC_*`, start ray, pip install Magpie, source `.env`, edit
 `~/.claude/config.json`, or `curl /v1/models` — `_preflight()` owns all of these. Unless anything is missing. 
+
+### Step 3 — Multi-Node (only if `nodes >= 2`)
+
+(Skip this whole section when `nodes == 1` — the default single-pod path
+in Step 2 covers everything else in this document.)
+
+There are no GPUs in the sandbox; the inference server has to live on a
+separate multi-pod RayJob. Provision and bootstrap it BEFORE running
+`inference_optimizer optimize`. Read [`multi_node/SKILL.md`](multi_node/SKILL.md)
+for the full playbook.
+
+**HARD RULE — RayJob lifecycle goes through `inference_optimizer.multi_node`
+ONLY.** Every create / poll / restart-server / stop on the multi-node
+RayJob MUST be a `python3 -m inference_optimizer.multi_node <subcommand>`
+invocation. Do NOT shell out to `curl` against `/api/v1/workloads`,
+do NOT use `kubectl` to create / patch / delete RayJob resources, and
+do NOT write your own SaFE / KubeRay client. Bypassing the CLI silently
+breaks idempotent retries, ownerId cascading cleanup, terminal-failure
+detection (`exit 2` + `MULTI_NODE_FAILURE_SNAPSHOT`), state-file
+sharing across subcommands, and the Magpie-side BENCHMARK_BASE_URL
+plumbing — there is no shortcut.
+
+Where each parameter comes from:
+
+* **From sandbox env (DO NOT read from user prompt, DO NOT pass on CLI)**:
+  `SAFE_API_URL` / `SAFE_API_KEY` / `SAFE_WORKSPACE` / `DISPLAY_NAME` /
+  `WORKLOAD_ID` (sandbox SaFE workload id for RayJob `ownerId` cascading
+  cleanup). Brain / SaFE export these at sandbox startup; the CLI picks
+  them up on its own.
+* **From user prompt (read literally, copy verbatim)**:
+  - `--image` from `RayJob image: <harbor.../sglang-or-vllm:tag>`
+  - `--nodes` from `Nodes=N` / `N nodes` / `N pods` / 多节点说法 (default 1)
+  - `--tp` (only used by `restart-server`) from
+    `TP=N` / `tensor parallel N` (typically `nodes * gpus-per-node`)
+  - `--cpus-per-node` / `--mem-per-node` / `--ephemeral-per-node` from
+    `RayJob resource: CPU=X, GPU=Y, memory=ZGi, ephemeralStorage=WGi`.
+    Defaults (32 CPU / 128 GiB mem / 500 GiB ephem) are too small for
+    real models; pass the prompt's values verbatim.
+  - `--gpus-per-node` only if the prompt explicitly asks for less than a
+    full node (default 8)
+  - `--extra-env KEY=VAL` (repeatable) for any `env:` block items in the
+    prompt that aren't covered by the sandbox-env / fanout list. Typical
+    cluster-specific keys: `PATH_TO_BNXT_TAR_PACKAGE=/wekafs/...`.
+    Brain-reserved key `RAY_JOB_ENTRYPOINT` and the `*_API_KEY` /
+    `*_BASE_URL` set are auto-injected — don't
+    duplicate them.
+* **CLI computes / generates**: PID files, log files, dist-init address,
+  Ray dashboard URL, ClusterIP service URL.
+
+Minimum sequence (use the values verbatim from the user prompt; the
+example below is for a "Nodes=3 / CPU=96 / GPU=8 / memory=1024Gi /
+ephemeralStorage=400Gi" prompt with one cluster-specific env var):
+
+```bash
+# 1. Create the RayJob (writes rayjob_id to state immediately; safe to retry while Pending).
+python3 -m inference_optimizer.multi_node create-rayjob \
+    --image harbor.core42.primus-safe.amd.com/custom/sync/sglang:202604290707 \
+    --nodes 3 \
+    --cpus-per-node 96 \
+    --mem-per-node 1024 \
+    --ephemeral-per-node 400 \
+    --extra-env PATH_TO_BNXT_TAR_PACKAGE=/wekafs/primus/data/libbnxt/libbnxt_re-234.0.154.0.tar.gz
+
+# 2. Install the toolchain (oob/claude/codex/tracelens) inside the head pod.
+python3 -m inference_optimizer.multi_node bootstrap
+
+# 3. Sanity-check the toolchain is on PATH.
+python3 -m inference_optimizer.multi_node verify
+
+# 4. Now launch the optimizer with the same N. Add restart-server before
+#    benchmarking to bring the actual vllm/sglang server up on the head pod.
+python3 -m inference_optimizer.multi_node restart-server \
+    --framework sglang --model "$MODEL_PATH" --tp <N*8>
+inference_optimizer optimize ... --nodes <N>
+
+# 5. At session end (always do this):
+python3 -m inference_optimizer.multi_node stop-rayjob
+```
+
+If you forget step 1-3 and run `optimize --nodes <N>` directly, the
+preflight diagnostic line prints `nodes = N (multi_node skill EXPECTED
+but state file missing ...)` — stop and do step 1-3 first.
 
 ### Recovery
 
