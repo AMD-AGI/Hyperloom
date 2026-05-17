@@ -91,7 +91,7 @@ def build(session_dir: Path | str) -> dict[str, Any]:
                                        lambda: collectors.collect_baseline(sd, state, warnings),
                                        warnings)
     final             = _safe_collect("final",
-                                       lambda: collectors.collect_final(state, warnings),
+                                       lambda: collectors.collect_final(sd, state, warnings),
                                        warnings)
     phase_timeline    = _safe_collect("phase_timeline",
                                        lambda: collectors.collect_phase_timeline(state, warnings),
