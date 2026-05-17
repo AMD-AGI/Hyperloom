@@ -30,6 +30,7 @@ import os
 import shlex
 import signal
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -111,6 +112,22 @@ _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
     "disable_run_eval",
 )
 _BASELINE_SELF_LOOP_THRESHOLD: int = 2
+
+
+def effective_closing_grace_sec(
+    max_minutes: float | None,
+    closing_grace_sec: float | None,
+) -> float:
+    """Resolve the closing-phase grace window after the wall-clock deadline.
+
+    When ``closing_grace_sec`` is explicitly set (including ``0`` to disable
+    closing), that value wins. Otherwise default to
+    ``min(120, max_minutes * 60 * 0.02)`` so short smoke runs do not burn
+  2 minutes on report flush.
+    """
+    if closing_grace_sec is not None:
+        return float(closing_grace_sec)
+    return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
 
 
 def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any]:
@@ -221,13 +238,6 @@ class Coordinator:
         self.locks = ResourceLockManager(SqliteLeaseBackend(self.db))
         self.tasks = TaskRegistry(self.db)
         self.cursors = CursorStore(self.db)
-        # `strict_paths` defers to the env flag (CLI flips this on for
-        # production; tests omit the env so the path check stays off and
-        # legacy `/tmp/<fixture>` payload values still pass).
-        self.policy = PolicyGate(
-            role_registry=self.role_registry,
-            session_dir=self.session_dir,
-        )
         self.sub = sub_agent_runner or SubAgentRunner(
             self.locks, self.tasks, session_dir=self.session_dir,
         )
@@ -235,6 +245,14 @@ class Coordinator:
         # Persistent session state (state.json) — load existing for resume;
         # save() is called whenever the Coordinator mutates a persistent field.
         self.shared_state = SharedState.load_or_init(self.session_dir)
+        # `strict_paths` defers to the env flag (CLI flips this on for
+        # production; tests omit the env so the path check stays off and
+        # legacy `/tmp/<fixture>` payload values still pass).
+        self.policy = PolicyGate(
+            role_registry=self.role_registry,
+            session_dir=self.session_dir,
+            shared_state=self.shared_state,
+        )
         # External SKILL fills `model_class` via --model-class / MODEL_CLASS
         # (the deleted `classify` action used to do this from inside the loop).
         # Only overwrite a blank value so a resumed session keeps whatever was
@@ -272,6 +290,9 @@ class Coordinator:
             log.exception("Coordinator: failed to load ActionRegistry; "
                           "scoring will be disabled this session.")
             self.action_registry = None
+        # Wall-clock budget tracking for per-tick Time-budget prompt injection.
+        self._run_deadline: float | None = None
+        self._run_started_monotonic: float | None = None
         # Latest objective wired by ``Coordinator.run()``. Used by
         # ``_compose_prompt`` to refresh ``shared_state.target_gap_pct`` on
         # every Orchestration tick. None outside a run (e.g. bounded tick()
@@ -593,6 +614,7 @@ class Coordinator:
         stop_when: Callable[["Coordinator"], Awaitable[bool] | bool] | None = None,
         install_signal_handlers: bool = False,
         crash_emergency_threshold: int = 25,
+        closing_grace_sec: float | None = None,
     ) -> str:
         """Run reactor + dispatcher in a long-running loop until a stop
         condition fires.
@@ -603,7 +625,8 @@ class Coordinator:
             → ``stop_reason="signal"``
         * objective.reached(shared_state)  → ``"target_reached"``
         * no remaining automated levers     → ``"no_more_leverage"``
-        * wall-clock budget exceeded        → ``"time_exhausted"``
+        * wall-clock budget exceeded        → enter closing phase, then
+            ``"time_exhausted"`` after report flush or grace elapses
         * crash_count >= ``crash_emergency_threshold`` → ``"emergency"``
         * custom ``stop_when`` callback returns True → ``"custom"``
         * ``max_ticks`` reached (test guard) → ``"max_ticks"``
@@ -614,9 +637,12 @@ class Coordinator:
         objective = objective or TimeOnlyObjective()
         # Stash so ``_compose_prompt`` can update target_gap_pct.
         self._current_objective = objective
+        grace_sec = effective_closing_grace_sec(max_minutes, closing_grace_sec)
         deadline = (
             time.monotonic() + max_minutes * 60.0 if max_minutes else None
         )
+        self._run_started_monotonic = time.monotonic()
+        self._run_deadline = deadline
         max_minutes_value = max_minutes if max_minutes is not None else 0
         # Persist budget so prompts and Resume can see it.
         if max_minutes is not None:
@@ -642,6 +668,7 @@ class Coordinator:
 
         tick_n = 0
         stop_reason = ""
+        closing_deadline: float | None = None
         try:
             while not stop_reason:
                 tick_n += 1
@@ -649,11 +676,14 @@ class Coordinator:
                 # math in orchestrator/scoring.py. Persisted on the next
                 # save() (after _promote_to_shared_state or stop).
                 self.shared_state.increment_tick()
-                # Run one reactor + dispatcher pass.
-                for name in self._tick_roles:
-                    if self._stop.is_set():
-                        break
-                    await self._reactor_pass(name)
+                in_closing = self.shared_state.closing_phase
+                # Run one reactor + dispatcher pass. During closing, skip
+                # LLM reactor passes and only pump the deterministic report.
+                if not in_closing:
+                    for name in self._tick_roles:
+                        if self._stop.is_set():
+                            break
+                        await self._reactor_pass(name)
                 if not self._stop.is_set():
                     await self._pump_dispatcher_once()
 
@@ -661,7 +691,7 @@ class Coordinator:
                 if self._stop.is_set():
                     stop_reason = "signal"
                     break
-                if self.shared_state.stop_reason:
+                if self.shared_state.stop_reason and not in_closing:
                     stop_reason = self.shared_state.stop_reason
                     break
                 if objective.reached(self.shared_state):
@@ -670,9 +700,34 @@ class Coordinator:
                 if await self._has_no_more_leverage():
                     stop_reason = "no_more_leverage"
                     break
-                if deadline is not None and time.monotonic() >= deadline:
-                    stop_reason = "time_exhausted"
-                    break
+                if (
+                    deadline is not None
+                    and time.monotonic() >= deadline
+                    and not in_closing
+                ):
+                    if grace_sec <= 0:
+                        stop_reason = "time_exhausted"
+                        break
+                    closing_deadline = await self._enter_closing_phase(
+                        grace_sec=grace_sec,
+                    )
+                    continue
+                if in_closing:
+                    report_terminal = await self._closing_report_terminal()
+                    grace_blown = (
+                        closing_deadline is not None
+                        and time.monotonic() >= closing_deadline
+                    )
+                    if report_terminal or grace_blown:
+                        if grace_blown and not report_terminal:
+                            log.warning(
+                                "Coordinator: closing-grace exhausted (%.0fs) "
+                                "before report task %s finished",
+                                grace_sec,
+                                self.shared_state.closing_report_task_id,
+                            )
+                        stop_reason = "time_exhausted"
+                        break
                 if self.shared_state.crash_count >= crash_emergency_threshold:
                     stop_reason = "emergency"
                     break
@@ -700,6 +755,8 @@ class Coordinator:
                     except asyncio.TimeoutError:
                         pass
         finally:
+            if self.shared_state.closing_phase:
+                self.shared_state.closing_phase = False
             self.shared_state.stop_reason = stop_reason or "unknown"
             self.shared_state.save(self.session_dir)
             log.info(
@@ -807,6 +864,82 @@ class Coordinator:
             or rejected_count >= grid_size
         )
 
+    async def _enter_closing_phase(self, *, grace_sec: float) -> float:
+        """Enter report-flush phase after the wall-clock deadline.
+
+        Skips Orchestration→Critic; enqueues a deterministic ``report`` task
+        directly into the TaskRegistry. Returns the monotonic closing deadline.
+        """
+        closing_started = time.time()
+        closing_deadline = time.monotonic() + float(grace_sec)
+        self.shared_state.closing_phase = True
+        self.shared_state.closing_started_unix = closing_started
+        self.shared_state.save(self.session_dir)
+
+        log.info(
+            "Coordinator: entering closing phase (grace=%.0fs); "
+            "enqueueing deterministic report task",
+            grace_sec,
+        )
+
+        try:
+            for q in await self.tasks.queued():
+                if q.kind == "report":
+                    continue
+                await self.tasks.transition(
+                    q.task_id,
+                    "cancelled",
+                    evidence={"reason": "closing_phase"},
+                )
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "closing_phase: cancel of queued tasks failed (non-fatal)",
+            )
+
+        idempotency_key = (
+            f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
+        )
+        task, _existing = await self.tasks.create_or_return_existing(
+            kind="report",
+            params={
+                "session_dir": str(self.session_dir),
+                "max_highlights": 50,
+            },
+            idempotency_key=idempotency_key,
+            requires_lanes=[],
+            allowed_tools=["Read"],
+            side_effects=["writes_results"],
+            lease_ttl_sec=120,
+        )
+        self.shared_state.closing_report_task_id = task.task_id
+        self.shared_state.save(self.session_dir)
+
+        await self.bus.append_and_seq(Message.new(
+            "coordinator", "*", "event",
+            {
+                "kind": "closing_phase_entered",
+                "task_id": task.task_id,
+                "grace_sec": float(grace_sec),
+                "closing_started_unix": closing_started,
+            },
+        ))
+        return closing_deadline
+
+    async def _closing_report_terminal(self) -> bool:
+        """True when the closing-phase report task reached a terminal state."""
+        task_id = self.shared_state.closing_report_task_id
+        if not task_id:
+            return False
+        from .task_registry import TaskNotFound
+
+        try:
+            task = await self.tasks.get(task_id)
+        except TaskNotFound:
+            return True
+        return task.state in {
+            "succeeded", "failed", "cancelled", "needs_manual_review",
+        }
+
     def _all_reusable_kernels_rejected(self) -> bool:
         select = self.shared_state.last_select_kernels or {}
         reusable = {
@@ -908,6 +1041,26 @@ class Coordinator:
         if agent_name == "orchestration":
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
+            if self._run_deadline is not None and self._run_started_monotonic is not None:
+                remaining_min = max(
+                    0.0, (self._run_deadline - time.monotonic()) / 60.0,
+                )
+                elapsed_min = (
+                    time.monotonic() - self._run_started_monotonic
+                ) / 60.0
+                budget_min = self.shared_state.max_minutes or 0
+                sections.append("=== Time budget ===")
+                sections.append(
+                    f"elapsed={elapsed_min:.1f}min  remaining={remaining_min:.1f}min  "
+                    f"budget={budget_min}min  "
+                    f"closing_phase={self.shared_state.closing_phase}"
+                )
+                if remaining_min <= 5.0 and not self.shared_state.closing_phase:
+                    sections.append(
+                        "WARNING: < 5 min remaining. Prefer `report` next; new "
+                        "explore rounds or validate_stack will likely be cut "
+                        "by the deadline."
+                    )
 
         # 1. Shared session state — gives the agent goal + progress context
         # even on tick 1 when the inbox is empty.

@@ -162,6 +162,11 @@ def _section_session_context(
         "Per-tick dynamic context (Mission progress, Time budget, Shared",
         "session state, Coordinator checklist, KB hints, inbox tail) is",
         "appended below the system prompt every tick by the Coordinator.",
+        "The Time-budget block carries `remaining=X.Xmin`. When `remaining` is",
+        "smaller than `report.typical_runtime_min` * 3 you SHOULD propose",
+        "`report` as the next action — the Coordinator will also auto-flush a",
+        "deterministic report at the deadline, but proposing it earlier",
+        "captures any LLM narrative you want surfaced.",
     ]
 
 
@@ -233,6 +238,10 @@ def _section_pipeline_and_budget(
         "KEEP'd entry in optimization_stack, you MUST run `validate_stack` before",
         "the next explore round or before `report`. The Coordinator surfaces a",
         "TODO in the per-tick checklist when this trigger is active.",
+        "",
+        "At the wall-clock deadline the Coordinator auto-enqueues a deterministic",
+        "`report` (no LLM) during closing phase — do not waste ticks re-proposing",
+        "it unless you want an earlier narrative version before time runs out.",
     ])
     return lines
 
