@@ -424,8 +424,12 @@ def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
                 m = re.search(r"([0-9a-f]{12,64})", line)
                 if m:
                     return f"unknown@{m.group(1)[:12]}"
-    except OSError:
-        pass
+    except OSError as exc:
+        # /proc/1/cgroup may be unreadable in restricted sandboxes,
+        # non-Linux hosts, or stripped-down containers. Best-effort
+        # source — fall through to None so consumers see an honest
+        # "image not detected" rather than a fabricated value.
+        log.debug("cgroup-based image detection failed: %r", exc)
     return None
 
 
