@@ -16,6 +16,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     acc = b.get("accuracy")
     ttft = b.get("ttft_mean_ms")
     e2el = b.get("e2el_mean_ms")
+    ttft_source = str(b.get("ttft_e2el_source") or "")
     fail_streak = int(b.get("failure_streak") or 0)
     attempts = b.get("attempts_history") or []
 
@@ -55,12 +56,19 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if attempts:
         facts.append(f"Baseline attempts recorded: {len(attempts)}.")
 
+    # Annotate the ttft row inline when it was reconstructed via the
+    # runs/baseline/ disk walk fallback — readers should see at a
+    # glance that the latency didn't come from state.last_baseline.
+    ttft_display: Any = ttft
+    if ttft is not None and ttft_source == "runs_baseline_disk":
+        ttft_display = f"{float(ttft):.1f} (reconstructed from runs/baseline/ disk walk)"
     md_parts: list[str] = []
     md_parts.append(md_kv_list([
         ("throughput_tok_s_per_gpu", tput),
         ("accuracy",                 acc),
-        ("ttft_mean_ms",             ttft),
+        ("ttft_mean_ms",             ttft_display),
         ("e2el_mean_ms",             e2el),
+        ("ttft_e2el_source",         ttft_source or None),
         ("config_path",              b.get("config_path")),
         ("benchmark_report_path",    b.get("benchmark_report_path")),
         ("failure_streak",           fail_streak or None),

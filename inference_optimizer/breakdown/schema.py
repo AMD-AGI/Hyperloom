@@ -89,6 +89,7 @@ class BenchmarkInvocation(TypedDict, total=False):
     breakdown JSON.
     """
     framework_args: str           # e.g. "python -m sglang.launch_server --model ... --tp 8"
+    framework_args_source: str    # log_args_line / log_python_cmd / yaml_cmd / unknown
     extra_envs: dict[str, str]    # allowlisted env vars only (no secrets)
     config_path: str | None       # baseline_config.with_envs.yaml or variant config
     server_log_path: str | None   # for debug
@@ -99,6 +100,7 @@ class Baseline(TypedDict, total=False):
     accuracy: float
     ttft_mean_ms: float | None
     e2el_mean_ms: float | None
+    ttft_e2el_source: str         # state_workspace / runs_baseline_disk / unavailable
     config_path: str | None
     benchmark_report_path: str | None
     attempts_history: list[BaselineAttemptSummary]
