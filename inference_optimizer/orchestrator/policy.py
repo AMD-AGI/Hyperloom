@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .framework_paths import resolve_source_file_allowlist
 from .intent_parser import Intent, IntentType
 from .message_bus import TOPIC_ALLOWLIST
 
@@ -145,11 +146,7 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset({
 # source trees that legitimately live outside session_dir. We allowlist
 # the well-known parents here; anything else falls through to the
 # session_dir containment check.
-SOURCE_FILE_ALLOWLIST: tuple[str, ...] = (
-    "/sgl-workspace/aiter/",
-    "/sgl-workspace/sglang/",
-    "/sgl-workspace/vllm/",
-)
+SOURCE_FILE_ALLOWLIST: tuple[str, ...] = resolve_source_file_allowlist()
 
 # Field name-only allowlist: when the payload key is `source_file`, the
 # value may match SOURCE_FILE_ALLOWLIST instead of being session-rooted.

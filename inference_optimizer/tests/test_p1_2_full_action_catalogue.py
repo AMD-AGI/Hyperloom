@@ -19,21 +19,22 @@ from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
 # DESIGN §16.1 plus isolated PMC roofline analysis action and the Phase 3
 # ``validate_stack`` action introduced for cumulative-gain validation.
 EXPECTED_ACTIONS_V06: dict[str, str] = {
-    # prep (5 — incl. validate_stack which lives in `prep` family because
-    # it's a measurement action that doesn't introduce new modifications)
-    "setup":                "prep",
-    "classify":             "prep",
+    # prep (3 — incl. validate_stack which lives in `prep` family because
+    # it's a measurement action that doesn't introduce new modifications;
+    # `setup` / `classify` are owned by the external SKILL caller, not
+    # the optimizer's action loop)
     "target_analysis":      "prep",
     "baseline":             "prep",
     "validate_stack":       "prep",
     # analysis (2)
     "profile":              "analysis",
     "pmc_roofline":         "analysis",
-    # shallow (4) — report lives here per DESIGN §16.1
+    # shallow (5) — report + session_breakdown live here per DESIGN §16.1
     "backends":             "shallow",
     "params":               "shallow",
     "sweep":                "shallow",
     "report":               "shallow",
+    "session_breakdown":    "shallow",
     # deep_kernel (5)
     "kernel_opt":           "deep_kernel",
     "integrate":            "deep_kernel",
@@ -213,8 +214,9 @@ def test_runs_actions_fallback_matches_registry(registry):
 def test_cli_real_executors_consistent_with_runs_actions():
     """Every action wired with a real executor in
     ``cli._register_executors`` must either be in ``_runs_actions()``
-    (writes per-task artefacts under ``runs/<kind>/<task_id>/``) or be the
-    special ``report`` action (writes to ``reports/`` instead).
+    (writes per-task artefacts under ``runs/<kind>/<task_id>/``) or be one
+    of the special session-root writers (``report`` → ``reports/``,
+    ``session_breakdown`` → ``session_breakdown.json`` at the session root).
 
     This is the primary cli ↔ session_paths drift guard: if someone adds
     a real executor without giving its yaml a ``pipeline_phase`` that
@@ -226,28 +228,29 @@ def test_cli_real_executors_consistent_with_runs_actions():
     )
     from inference_optimizer.session_paths import _runs_actions
 
-    REPORTS_ONLY = {"report"}
+    SESSION_ROOT_WRITERS = {"report", "session_breakdown"}
     runs = _runs_actions()
     real_kinds = (
         set(_REAL_EXECUTORS_FULL.keys())
         | set(_REAL_EXECUTORS_KERNEL_ONLY.keys())
     )
 
-    missing_from_runs = (real_kinds - REPORTS_ONLY) - runs
+    missing_from_runs = (real_kinds - SESSION_ROOT_WRITERS) - runs
     assert not missing_from_runs, (
         f"actions {sorted(missing_from_runs)!r} have a real executor in "
         f"cli._REAL_EXECUTORS_* but are not in _runs_actions(); "
         f"SubAgentRunner will not pre-mkdir the workspace and the "
         f"executor's runs_dir() fallback will raise. Either give the "
         f"action a yaml pipeline_phase in _RUNS_WORKSPACE_PHASES, or "
-        f"document why it should be exempt (cf. report → reports/)."
+        f"document why it should be exempt (cf. report → reports/, "
+        f"session_breakdown → session_breakdown.json)."
     )
 
-    overclaim = REPORTS_ONLY & runs
+    overclaim = SESSION_ROOT_WRITERS & runs
     assert not overclaim, (
-        f"actions {sorted(overclaim)!r} are listed in REPORTS_ONLY but "
-        f"are also in _runs_actions(); pick one (write either to runs/ "
-        f"or to reports/, not both)."
+        f"actions {sorted(overclaim)!r} are listed in SESSION_ROOT_WRITERS "
+        f"but are also in _runs_actions(); pick one (write either to "
+        f"runs/ or to the session root, not both)."
     )
 
 

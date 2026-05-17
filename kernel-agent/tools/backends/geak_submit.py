@@ -36,7 +36,11 @@ def _find_geak_bin() -> str:
 def _resolve_geak_config() -> Path:
     geak_config = os.environ.get("GEAK_CONFIG", "").strip()
     if not geak_config:
-        raise ValueError("GEAK_CONFIG is required; run inference_optimizer/scripts/install.sh and source /workspace/hyperloom/runtime/kernel-agent.env.sh")
+        raise ValueError(
+            "GEAK_CONFIG is required; run inference_optimizer/scripts/install.sh "
+            "and source $KERNEL_AGENT_ENV "
+            "(default: $USER_DATA_PATH/runtime/kernel-agent.env.sh)"
+        )
     path = Path(geak_config)
     if not path.is_file():
         raise ValueError(f"GEAK_CONFIG does not exist: {path}")
@@ -111,7 +115,11 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
             return {
                 "returncode": 2,
                 "stdout_tail": "",
-                "stderr_tail": "GEAK_CONFIG is required; run inference_optimizer/scripts/install.sh and source /workspace/hyperloom/runtime/kernel-agent.env.sh",
+                "stderr_tail": (
+                    "GEAK_CONFIG is required; run inference_optimizer/scripts/install.sh "
+                    "and source $KERNEL_AGENT_ENV "
+                    "(default: $USER_DATA_PATH/runtime/kernel-agent.env.sh)"
+                ),
                 "stdout": "",
                 "gpu_ids": gpu_ids,
                 "elapsed_s": 0.0,
