@@ -129,12 +129,13 @@ if [ -z "${GEAK_RAG_INDEX_DEVICE:-}" ]; then
 else
   GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE}"
 fi
-# When 1 (default), ensure_rag_index runs GEAK scripts/build_index.py after
-# GEAK install. Set KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0 to skip — useful for
-# multi-node RayJob bootstrap paths that re-run the installer repeatedly and
-# don't need a fresh RAG index every time (the cuda auto-detect above keeps
-# the on-build cost ~1min so the default of 1 stays cheap on GPU pods).
-KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-1}"
+# When 1, ensure_rag_index runs GEAK scripts/build_index.py after GEAK
+# install. Defaults to 0 so the multi-node sandbox path (CPU-only client,
+# `--device` auto-detect lands on cpu, BGE-large embedding ~1.5h) does not
+# silently stall every bootstrap. The single-node / GPU-pod path can opt
+# in with `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1` (cuda auto-detect makes
+# the on-build cost ~1min there).
+KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-0}"
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
@@ -347,7 +348,7 @@ ensure_node() {
 ensure_ray() {
   log "ensuring ray[default]==2.44.1 and click<8.3.0"
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install --quiet --no-cache-dir "click<8.3.0" "ray[default]==2.44.1"
+    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "click<8.3.0" "ray[default]==2.44.1"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
     python3 - <<'PY'
@@ -444,7 +445,7 @@ ensure_tracelens() {
   log "ensuring TraceLens CLI from $TRACELENS_ROOT"
   if [ "$CHECK_ONLY" -eq 0 ]; then
     # Do not use bash -lc: login profiles reset PATH (drops venv) and break pip.
-    run sh -c "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir -e ."
+    run sh -c "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir --break-system-packages -e ."
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
     # TraceLens #124: prefer the inference variant (correct entry for
@@ -472,8 +473,8 @@ ensure_geak() {
     log "GEAK checkout already present: ${HYPERLOOM_ROOT}/geak"
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"
-    run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"
+    run python3 -m pip install -q --no-cache-dir --break-system-packages "${HYPERLOOM_ROOT}/geak"
+    run python3 -m pip install -q --no-cache-dir --break-system-packages "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"
   else
     log "check-only: skipping GEAK and rag-mcp installation"
   fi
@@ -550,9 +551,9 @@ ensure_oob() {
         run cp -r "$OOB_SRC" "${HYPERLOOM_ROOT}/OOB/oob_cli"
       fi
       if [ -f "${HYPERLOOM_ROOT}/OOB/oob_cli/requirements.txt" ]; then
-        run python3 -m pip install -q --no-cache-dir -r "${HYPERLOOM_ROOT}/OOB/oob_cli/requirements.txt"
+        run python3 -m pip install -q --no-cache-dir --break-system-packages -r "${HYPERLOOM_ROOT}/OOB/oob_cli/requirements.txt"
       fi
-      run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/OOB/oob_cli"
+      run python3 -m pip install -q --no-cache-dir --break-system-packages "${HYPERLOOM_ROOT}/OOB/oob_cli"
     else
       warn "OOB source not found: $OOB_SRC"
     fi
