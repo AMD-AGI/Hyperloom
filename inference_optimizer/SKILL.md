@@ -128,10 +128,31 @@ schedules on the same XCD); neither `current_best` nor
 > see `orchestrator/system_prompts/kernel.md`). IR-1 above is the
 > *outer* gate that fires before the optimizer process exists.
 
+### IR-2 — install.sh MUST succeed before every launch
+
+Run `bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"` and
+source the regenerated
+`${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}`
+in the **same shell** that will spawn `inference_optimizer optimize`.
+Skipping install strikes silently *after* `baseline` succeeds: missing
+TraceLens/GEAK/OOB CLI → `select_kernels` / `kernel_opt` fail; dead
+auth-proxy → Claude SDK `401`; no live Ray head → `kernel_opt` tasks
+hang; missing `kernel-agent.env.sh` → first claude/codex call returns
+`401`. `install.sh --check-only` is a *diagnostic*, never a substitute.
+
+**Resume carve-out.** `... optimize --resume` may skip install only when
+ALL hold: (1) `install.sh` exited 0 earlier in the *same shell*; (2)
+`kernel-agent.env.sh` is still sourced; (3)
+`${USER_DATA_PATH:-/workspace/hyperloom}/manifest.json` exists. Any
+failure → treat as fresh launch and re-run `install.sh`.
+
+> The in-loop equivalent is `_preflight()` steps 1–12 (drift repair, not
+> a substitute for this outer gate).
+
 ## Setup
 
-This skill is **two commands**. Do NOT replicate setup steps inside chat —
-both commands are idempotent, do auto-detection, and re-run safely.
+Two commands: Step 1 implements **IR-2** (install gate), Step 2 launches.
+Both are idempotent; do not replicate them inside chat.
 
 ### Credentials (env only)
 
@@ -211,14 +232,9 @@ supply session metadata directly via CLI flags / env vars:
 | Model class | `--model-class` | `MODEL_CLASS` | drives `orchestrator/scoring.py` marathon priors; defaults to `moe_mla` when unset |
 | External reference GPU | `--compare-against-gpu` | — | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
 
-Install or validate the optimizer + downstream stack with the bundled
-installer. It is idempotent and chains to `kernel-agent/scripts/install.sh`,
-so a single call covers: inference_optimizer + `claude_agent_sdk` extras,
-Magpie, InferenceX detection, Ray (with a live ray head started), Node.js/npm,
-TraceLens CLI, GEAK + OOB CLI, the OOB auth-proxy on `:4002`, and the pod-local
-`kernel-agent.env.sh`.
-A user request to optimize a model is approval to run this on a fresh node;
-do not stop for an extra confirmation:
+A user request to optimize a model is approval to run Step 1 on a fresh
+node; do not stop for an extra confirmation. After IR-2, smoke-test the
+CLI:
 
 ```bash
 export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
@@ -234,15 +250,14 @@ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 "$PYTHON" -m inference_optimizer.cli --help
 ```
 
-Notes: with `set -u` active, assign dependent vars on separate lines (Bash
-expands RHS before assigning, so chained `export A=... B=$A` can fail with
-`unbound variable` on a clean environment). The installer leaves a live Ray
-head; `ray status` must succeed because `select_kernels` submits Ray tasks
-with `num_gpus>=1` — never restart Ray with `--num-gpus=0`.
+Quirks: with `set -u`, assign dependent vars on separate lines (chained
+`export A=... B=$A` can fail with `unbound variable`). The installer
+leaves a live Ray head; `ray status` must succeed because `select_kernels`
+submits tasks with `num_gpus>=1` — never restart Ray with `--num-gpus=0`.
 
-The CLI runs `_preflight()` on every launch as a safety net for `install.sh`.
-Steps 1–9 run before `_preflight()` returns; 10–12 run before Coordinator
-boots. Cite the linked section for fixes:
+`_preflight()` runs every launch as the in-loop counterpart of IR-2.
+Steps 1–9 run before it returns; 10–12 run before Coordinator boots.
+Cite the linked section for fixes:
 
 | #  | Check | On-fail / Reference |
 |----|---|---|
@@ -259,9 +274,8 @@ boots. Cite the linked section for fixes:
 | 11 | Codex smoke-test (WARN-only): `--codex-model` checked when codex actually used (`--critic-agent` / `--critic-codex-bare` / `--kernel-codex`) | — |
 | 12 | Critic-agent runtime probe (when `--critic-agent` active): resolve `CRITIC_AGENT_ROOT` (env > sibling `$REPO_ROOT/critic-agent/` > abort), `python -m runtime.cli --help` (5s timeout); abort rc=2 if it fails. Default-sets `WORKSPACE_PATH` / `CRITIC_SESSION_MEMORY_DIR` / `CRITIC_KB_CLIENT_MODE`. | `## Critic Backend Selection` |
 
-`install.sh` is the canonical bring-up; `_preflight()` catches drift mid-run.
-Don't manually pip-install SDKs, edit `~/.claude/config.json`, start Ray, or
-`curl /v1/models` — `_preflight()` owns all of these. See `kernel-agent/SKILL.md`
+Don't manually pip-install SDKs, edit `~/.claude/config.json`, start Ray,
+or `curl /v1/models` — `_preflight()` owns these. See `kernel-agent/SKILL.md`
 for the chained installer truth.
 
 ### Recovery
@@ -295,9 +309,10 @@ full subdirectory skeleton in place (idempotent — safe to re-run).
 
 ## Portable Preflight
 
-Implements **IR-1**. Before every new model run, verify the model path,
-GPU visibility, and that no stale serving process holds VRAM. The
-script exits non-zero on any violation so the calling shell aborts
+Implements **IR-1**. Run order is always **IR-2 → IR-1 → launch**:
+without IR-2 the script below has no `torch` to import. Verify the
+model path, GPU visibility, and that no stale serving process holds
+VRAM; exit non-zero on any violation so the calling shell aborts
 before `inference_optimizer optimize` is spawned. Never print tokens.
 
 ```bash
