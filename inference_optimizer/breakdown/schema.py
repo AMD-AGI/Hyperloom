@@ -105,6 +105,9 @@ class Final(TypedDict, total=False):
     action_path: list[str]        # ordered list of action:variant labels from optimization_stack
     ttft_mean_ms: float | None
     e2el_mean_ms: float | None
+    closing_phase_entered: bool
+    closing_started_unix: float
+    closing_report_task_id: str
 
 
 # ---------------------------------------------------------------------------
