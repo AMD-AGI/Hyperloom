@@ -41,7 +41,15 @@ from inference_optimizer.storage import SqliteConnection
 # ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    # Pin the kernel-agent root so integrate_handler -> _maybe_apply_kernel_patch
+    # can resolve apply_kernel_patch.py from a known location even when the
+    # host env var is unset (e.g. CI without install.sh).
+    kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
+    monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", kernel_agent_root)
+    # Skip the `python3 -c "import Magpie"` probe inside _resolve_magpie_python
+    # so subprocess.run mocks only see the actual Magpie launch command.
+    monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     return make_session_dir()
 
 
@@ -695,10 +703,10 @@ async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path,
     the runner reports a structured failure (not a crash). Note the
     SubAgentRunner state stays "succeeded" because the runner returned
     a dict (didn't raise) — the failure signal is inside result['status']."""
-    # Pin INFERENCE_OPTIMIZER_SESSION_DIR at a path with no state.json so
+    # Pin USER_DATA_PATH at a path with no state.json so
     # ReportExecutor's resolution returns None (canonical default would
     # also work, but we use tmp_path to keep the test hermetic).
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path / "noses"))
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "noses"))
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)

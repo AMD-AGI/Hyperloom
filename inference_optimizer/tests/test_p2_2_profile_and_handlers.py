@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from inference_optimizer import cli as optimizer_cli
 from inference_optimizer.orchestrator import kernel_request_handlers as krh
 from inference_optimizer.orchestrator.action_executors.baseline import (
     BaselineExecutor,
@@ -35,6 +38,7 @@ from inference_optimizer.orchestrator.resource_lock import (
 from inference_optimizer.orchestrator.sub_agent_runner import (
     RunnerContext, SubAgentRunner,
 )
+from inference_optimizer.manifest import build_manifest
 from inference_optimizer.paths import make_session_dir
 from inference_optimizer.storage import SqliteConnection
 
@@ -44,7 +48,7 @@ from inference_optimizer.storage import SqliteConnection
 # ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
     monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", kernel_agent_root)
     return make_session_dir()
@@ -59,6 +63,45 @@ def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {n: MockBackend(silent, name=n)
             for n in ("orchestration", "kernel", "critic", "robustness")}
+
+
+def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch):
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.setenv("GPU_TYPE", "mi300x")
+    monkeypatch.setenv("TARGET_GPU_TYPE", "mi325x")
+    args = SimpleNamespace(
+        model="/models/Qwen3",
+        model_class="",
+        target_summary="",
+        max_hours=1,
+        no_kernel=False,
+        gpu_type="mi325x",
+        target_gain=None,
+        target_tput=None,
+    )
+
+    assert optimizer_cli._gpu_runner_type("mi325x") == "mi300x"
+    assert optimizer_cli._GFX_TO_RUNNER.get("gfx1100") is None
+    manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
+    state = optimizer_cli._seed_shared_state(
+        tmp_path, args, session_id="mi325x-session",
+    )
+
+    assert manifest["gpu_type"] == "mi325x"
+    assert state.gpu_type == "mi325x"
+    assert os.environ["TARGET_GPU_TYPE"] == "mi325x"
+    assert os.environ["GPU_TYPE"] == "mi300x"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_leak_root(tmp_path_factory, monkeypatch):
+    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox so
+    Baseline/ProfileExecutor's always-on artifact harvest does not
+    pick up the host's real ``/workspace`` during the stubbed
+    subprocess runs exercised here.
+    """
+    sandbox = tmp_path_factory.mktemp("isolated_leak_root")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
 
 
 # ===========================================================================
@@ -133,8 +176,11 @@ def test_materialize_config_injects_model_with_other_overrides(tmp_path):
 
 
 # ===========================================================================
-# Regression: gpu_type injection sets runner_type AND removes the legacy
-# `benchmark_script` field so Magpie's runner_type -> script logic wins.
+# Regression: gpu_type injection sets runner_type AND force-pins the generic
+# `{framework}_{gpu_type}.sh` so Magpie's resolver hits priority 1 (explicit
+# user override) and never falls through to the InferenceX native script
+# (which hardcodes `--result-dir /workspace/`). See
+# `design/magpie-generic-script-and-user-data-path.md` §3.
 # ===========================================================================
 def test_materialize_config_injects_runner_type(tmp_path):
     """gpu_type kwarg must land in benchmark.runner_type as-is."""
@@ -149,10 +195,12 @@ def test_materialize_config_injects_runner_type(tmp_path):
     assert rendered["benchmark"]["runner_type"] == "mi355x"
 
 
-def test_materialize_config_pops_legacy_benchmark_script(tmp_path):
-    """If the source YAML still hardcodes a benchmark_script (priority 1
-    in Magpie's resolver), gpu_type must remove it; otherwise runner_type
-    is silently ignored and the run uses the wrong GPU's script."""
+def test_materialize_config_forces_generic_benchmark_script(tmp_path):
+    """When `gpu_type` is supplied, `benchmark.benchmark_script` MUST be
+    pinned to the generic `{framework}_{gpu_type}.sh` so Magpie's
+    resolver hits priority 1 (explicit override) and never silently
+    falls through to the InferenceX native script (e.g.
+    `dsr1_fp8_mi300x.sh`) which hardcodes `--result-dir /workspace/`."""
     import yaml
     src_yaml = tmp_path / "src.yaml"
     src_yaml.write_text(yaml.safe_dump({
@@ -170,8 +218,33 @@ def test_materialize_config_pops_legacy_benchmark_script(tmp_path):
     with out.open() as f:
         rendered = yaml.safe_load(f)
     assert rendered["benchmark"]["runner_type"] == "mi355x"
-    assert "benchmark_script" not in rendered["benchmark"], \
-        "legacy benchmark_script must be popped so runner_type wins"
+    assert rendered["benchmark"]["benchmark_script"] == "sglang_mi355x.sh", \
+        "gpu_type must pin the generic {framework}_{gpu_type}.sh"
+
+
+def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
+    tmp_path,
+):
+    """Even when the source YAML doesn't carry a `benchmark_script`, the
+    renderer MUST still write one explicitly — otherwise Magpie's
+    resolver would fall through to the InferenceX native script."""
+    import yaml
+    src_yaml = tmp_path / "src.yaml"
+    src_yaml.write_text(yaml.safe_dump({
+        "benchmark": {
+            "framework": "vllm",
+            "model": "/m",
+            # No benchmark_script field at all.
+        },
+    }))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    out = _materialize_config_with_envs(
+        src_yaml, out_dir, gpu_type="mi300x",
+    )
+    with out.open() as f:
+        rendered = yaml.safe_load(f)
+    assert rendered["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
 
 
 # ===========================================================================
@@ -268,6 +341,404 @@ def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
     envs = rendered["benchmark"]["envs"]
     # yaml default is "1" — should be preserved as-is when TP not overridden upward
     assert envs.get("ROCR_VISIBLE_DEVICES") == "1"
+
+
+# ===========================================================================
+# Regression #194: steady-state window must follow the TraceLens magpie
+# skill formulas, not the old `delay = 5*CONC; max = clamp(16*OSL/CONC,4,64)`
+# placeholders.
+#
+# Skill:
+#   max_iters   = min(1024, max(256, OSL * 16 / CONC))
+#   delay_iters = OSL * (RANDOM_RANGE_RATIO + 1) * 3 - max_iters / 2
+#
+# Worked example used in the issue: OSL=1024, CONC=32, R=1
+#   max_iters   = min(1024, max(256, 1024*16/32))   = max(256, 512) = 512
+#   delay_iters = 1024 * (1+1) * 3 - 512/2          = 6144 - 256    = 5888
+#
+# Previous Hyperloom code gave (160, 64) for the same inputs — roughly 1/8
+# of the skill window and ignored R entirely, so issue #194 §1 flagged
+# Optimizer-driven profiles as under-representing decode-heavy steady state.
+# ===========================================================================
+def _profile_yaml(tmp_path, framework: str, envs: dict) -> Path:
+    """Synthesize a minimal profile YAML the materializer recognises as
+    PROFILE=1 + torch_profiler.enabled=True.
+    """
+    import yaml as _yaml
+    src = tmp_path / f"src_{framework}.yaml"
+    src.write_text(_yaml.safe_dump({
+        "benchmark": {
+            "framework": framework,
+            "model": "/m",
+            "envs": {"PROFILE": "1", **envs},
+            "profiler": {"torch_profiler": {"enabled": True}},
+        },
+    }))
+    return src
+
+
+def _clear_workload_env(monkeypatch):
+    for k in (
+        "CONC", "ISL", "OSL", "TP", "MAX_MODEL_LEN",
+        "RANDOM_RANGE_RATIO", "ROCR_VISIBLE_DEVICES", "FRAMEWORK",
+    ):
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_materialize_profile_window_vllm_skill_formula_default_R(
+    tmp_path, monkeypatch,
+):
+    """vLLM: OSL=1024, CONC=32, R unset → max=512, delay=5888 per skill."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.delay_iterations 5888" in extra, extra
+    assert "--profiler-config.max_iterations 512" in extra, extra
+
+
+def test_materialize_profile_window_vllm_skill_formula_explicit_R(
+    tmp_path, monkeypatch,
+):
+    """vLLM: explicit R=0.5 must shrink delay (skill: 3*OSL*(R+1) term)."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("RANDOM_RANGE_RATIO", "0.5")
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    # R=0.5: delay = 1024 * 1.5 * 3 - 512/2 = 4608 - 256 = 4352; max=512.
+    extra = envs["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.delay_iterations 4352" in extra, extra
+    assert "--profiler-config.max_iterations 512" in extra, extra
+    # And R must round-trip into the YAML as a float, not stringified-int.
+    assert envs["RANDOM_RANGE_RATIO"] == 0.5
+
+
+def test_materialize_profile_window_sglang_skill_formula(
+    tmp_path, monkeypatch,
+):
+    """SGLang path writes the same window into PROFILE_EXTRA_BODY."""
+    import json
+    import yaml
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    body = json.loads(rendered["benchmark"]["envs"]["PROFILE_EXTRA_BODY"])
+    assert body["start_step"] == 5888
+    assert body["num_steps"] == 512
+
+
+def test_materialize_profile_window_clamps_to_skill_floor(
+    tmp_path, monkeypatch,
+):
+    """Skill: max_iters has a floor of 256 (not 4) and a ceiling of 1024.
+
+    OSL=256, CONC=64 ⇒ 16*OSL/CONC = 64, so the floor must kick in.
+    Old formula clamped to 64; new formula must clamp to 256.
+    """
+    import yaml
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 64, "ISL": 256, "OSL": 256})
+    out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.max_iterations 256" in extra, extra
+
+
+# ===========================================================================
+# Regression #194 §2: NUM_PROMPTS must be sized to cover the steady-state
+# window. With the skill formulas, delay_iters reaches into the thousands
+# for non-trivial OSL — an under-sized NUM_PROMPTS makes the engine exit
+# before the profile window opens, yielding empty traces.
+#
+# The formula (from `_workload_envs`):
+#   required_iters    = delay_iters + max_iters
+#   iters_to_prompts  = ceil(required_iters * CONC / OSL)   # batch math
+#   NUM_PROMPTS       = max(CONC, iters_to_prompts * 2)     # 2x buffer
+#
+# Profile mode FORCE-overrides any caller-supplied NUM_PROMPTS — we own
+# the floor and an under-sized value silently kills the trace.
+# ===========================================================================
+def test_materialize_profile_num_prompts_covers_steady_state_window(
+    tmp_path, monkeypatch,
+):
+    """OSL=1024 / CONC=32 / R=1 → delay+max = 6400 iters ⇒ NUM_PROMPTS=400."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    # delay=5888, max=512 → required=6400; 6400*32/1024 = 200; *2 = 400.
+    assert envs["NUM_PROMPTS"] == 400, envs.get("NUM_PROMPTS")
+
+
+def test_materialize_profile_num_prompts_floors_at_conc_for_tiny_osl(
+    tmp_path, monkeypatch,
+):
+    """Tiny OSL with skill floor max_iters=256 still produces a sane
+    NUM_PROMPTS (covers the floor's delay+max window)."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 64, "OSL": 64})
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    # max=256, delay=64*2*3-128=256, required=512; 512*32/64=256; *2=512.
+    assert envs["NUM_PROMPTS"] == 512, envs.get("NUM_PROMPTS")
+
+
+def test_materialize_profile_force_overrides_user_num_prompts(
+    tmp_path, monkeypatch,
+):
+    """Profile mode must IGNORE caller-supplied NUM_PROMPTS — an
+    under-sized value (skill default `max_concurrency * 1`) would
+    silently empty the trace."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(
+        tmp_path, "vllm",
+        # Caller deliberately under-sizes to trip the regression.
+        {"CONC": 32, "ISL": 256, "OSL": 1024, "NUM_PROMPTS": 32},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    # Hyperloom-computed 400 must win over the caller's 32.
+    assert envs["NUM_PROMPTS"] == 400, envs.get("NUM_PROMPTS")
+
+
+def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
+    tmp_path, monkeypatch,
+):
+    """The §2 override is profile-only. Baseline / sweep paths must
+    still get the existing seq_cost-based NUM_PROMPTS (or honour a
+    caller-supplied value), so the §2 fix can't accidentally explode
+    baseline run lengths."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    src = tmp_path / "baseline.yaml"
+    src.write_text(yaml.safe_dump({
+        "benchmark": {
+            "framework": "vllm",
+            "model": "/m",
+            "envs": {"CONC": 32, "ISL": 256, "OSL": 1024},
+            # No profiler.torch_profiler.enabled, no PROFILE=1.
+        },
+    }))
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    # seq_cost=1280 → factor=5 → CONC*5 = 160 (legacy baseline path).
+    assert envs["NUM_PROMPTS"] == 160, envs.get("NUM_PROMPTS")
+
+
+# ===========================================================================
+# Regression #194 §4 / §5: when the runtime patcher (server_patcher)
+# successfully applies TraceLens's patches to the in-container vLLM /
+# SGLang install, materialize must auto-append the flags that only
+# exist in the patched build:
+#
+#   * vLLM:   --profiler-config.capture_torch_profiler_dir <dir>
+#   * vLLM:   --profiler-config.detailed_trace_annotation True
+#   * SGLang: --enable-shape-discovery-for-cuda-graph-profile
+#
+# When the patcher fails-soft (returns False), materialize must NOT
+# inject any of those — otherwise unpatched vLLM rejects them as
+# unknown JSON keys and crashes the entire profile.
+#
+# The kill switch HYPERLOOM_ENABLE_PATCH=0 must short-circuit the
+# patcher entirely so users can disable runtime patching when their
+# image is a custom fork / read-only / under audit.
+# ===========================================================================
+def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
+    """Replace the two patcher symbols on `_workload_envs` with stubs
+    that record invocation counts so we can assert per-framework
+    dispatch (vLLM path must not invoke the SGLang patcher and vice
+    versa)."""
+    from inference_optimizer.orchestrator.action_executors import _workload_envs
+    counts = {"vllm": 0, "sglang": 0}
+
+    def _vllm_stub() -> bool:
+        counts["vllm"] += 1
+        return vllm
+
+    def _sglang_stub() -> bool:
+        counts["sglang"] += 1
+        return sglang
+
+    monkeypatch.setattr(
+        _workload_envs, "ensure_vllm_patched_for_tracelens", _vllm_stub,
+    )
+    monkeypatch.setattr(
+        _workload_envs, "ensure_sglang_patched_for_tracelens", _sglang_stub,
+    )
+    return counts
+
+
+def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
+    tmp_path, monkeypatch,
+):
+    """Patcher returns True for vLLM ⇒ EXTRA_VLLM_ARGS gains
+    capture_torch_profiler_dir + detailed_trace_annotation, on top of
+    the §1 delay/max iterations."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    counts = _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.delay_iterations 5888" in extra, extra
+    assert "--profiler-config.max_iterations 512" in extra, extra
+    assert "--profiler-config.capture_torch_profiler_dir " in extra, extra
+    assert "--profiler-config.detailed_trace_annotation True" in extra, extra
+    # Per-framework dispatch: the SGLang patcher must NOT be invoked
+    # when the YAML's framework is vLLM (saves an unnecessary file
+    # probe + lock acquisition).
+    assert counts == {"vllm": 1, "sglang": 0}, counts
+
+
+def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
+    tmp_path, monkeypatch,
+):
+    """Patcher returns False (unpatchable image) ⇒ EXTRA_VLLM_ARGS
+    keeps only the §1 safe set. Otherwise unpatched vLLM would
+    crash on `unknown JSON key`."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.delay_iterations 5888" in extra, extra
+    assert "capture_torch_profiler_dir" not in extra, extra
+    assert "detailed_trace_annotation" not in extra, extra
+
+
+def test_materialize_profile_sglang_injects_shape_discovery_when_patched(
+    tmp_path, monkeypatch,
+):
+    """Patcher returns True for SGLang ⇒ EXTRA_SGLANG_ARGS gains
+    --enable-shape-discovery-for-cuda-graph-profile."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    counts = _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
+        "EXTRA_SGLANG_ARGS", "",
+    )
+    assert "--enable-shape-discovery-for-cuda-graph-profile" in extra, extra
+    # Per-framework dispatch in reverse: the vLLM patcher must NOT be
+    # invoked when the YAML's framework is SGLang.
+    assert counts == {"vllm": 0, "sglang": 1}, counts
+
+
+def test_materialize_profile_sglang_omits_shape_discovery_when_patch_fails(
+    tmp_path, monkeypatch,
+):
+    """Patcher returns False ⇒ no shape-discovery flag (otherwise
+    SGLang argparse errors on the unknown flag)."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=False)
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
+        "EXTRA_SGLANG_ARGS", "",
+    )
+    assert "shape-discovery" not in extra, extra
+
+
+def test_materialize_profile_kill_switch_skips_patcher_entirely(
+    tmp_path, monkeypatch,
+):
+    """HYPERLOOM_ENABLE_PATCH=0 must short-circuit the patcher call
+    entirely — neither vLLM nor SGLang patcher should be touched, and
+    no TraceLens-only flags should land in the YAML. This is the
+    escape hatch for users with custom forks / read-only filesystems
+    / compliance requirements."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    counts = _mock_patchers(monkeypatch, vllm=True, sglang=True)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    # Safe §1 flags still present.
+    assert "--profiler-config.delay_iterations 5888" in extra, extra
+    # TraceLens-only flags absent.
+    assert "capture_torch_profiler_dir" not in extra, extra
+    assert "detailed_trace_annotation" not in extra, extra
+    # Patchers never invoked.
+    assert counts == {"vllm": 0, "sglang": 0}, counts
+
+
+def test_materialize_profile_kill_switch_default_is_on(
+    tmp_path, monkeypatch,
+):
+    """Unset HYPERLOOM_ENABLE_PATCH == default-on. The patcher must
+    be invoked so users on TraceLens-patched images get the enhanced
+    flags without any opt-in step. Symmetric to the kill-switch test
+    above."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_ENABLE_PATCH", raising=False)
+    counts = _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    _materialize_config_with_envs(src, tmp_path)
+    assert counts["vllm"] == 1, counts
+
+
+def test_materialize_profile_sglang_does_not_duplicate_shape_discovery(
+    tmp_path, monkeypatch,
+):
+    """If EXTRA_SGLANG_ARGS already mentions
+    --enable-shape-discovery-for-cuda-graph-profile (e.g. user
+    pre-populated it in the YAML or via env), the materializer must
+    NOT append a duplicate copy."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    src = _profile_yaml(
+        tmp_path, "sglang",
+        {
+            "CONC": 32, "ISL": 256, "OSL": 1024,
+            "EXTRA_SGLANG_ARGS": (
+                "--enable-profile-cuda-graph "
+                "--enable-shape-discovery-for-cuda-graph-profile"
+            ),
+        },
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+    assert extra.count("--enable-shape-discovery-for-cuda-graph-profile") == 1, extra
+
+
+def test_profile_executor_calls_benchmark_lib_patcher():
+    """ProfileExecutor must call ensure_benchmark_lib_patched before
+    launching Magpie, or the steady-state NUM_PROMPTS we just
+    computed gets stomped by upstream `benchmark_lib.sh` and the
+    trace is silently empty.
+
+    We don't run the full subprocess machinery — that's gated by
+    BaselineExecutor.__call__ which already has its own coverage.
+    Here we just lock down the seam: the symbol is imported by name
+    in profile.py and invoked unconditionally inside __call__.
+    """
+    import inference_optimizer.orchestrator.action_executors.profile as profile_mod
+    # The symbol must be re-exportable from the module (so monkey-
+    # patching in tests / integration sites is straightforward).
+    assert profile_mod.ensure_benchmark_lib_patched is not None
+    # And the source of __call__ must reference it; this is a cheap
+    # regression guard against silent removal during refactors.
+    import inspect
+    src = inspect.getsource(profile_mod.ProfileExecutor.__call__)
+    assert "ensure_benchmark_lib_patched" in src, (
+        "ProfileExecutor.__call__ must invoke ensure_benchmark_lib_patched "
+        "before super().__call__ — otherwise issue #194 §2 regresses."
+    )
 
 
 # ===========================================================================
@@ -443,6 +914,59 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     db.close()
 
 
+@pytest.mark.asyncio
+async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
+    """TraceLens-patched vLLM writes graph-capture traces next to the
+    benchmark workspace, under the profile task's ``capture_traces`` dir."""
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    output_dir = tmp_path / "out"
+    workspace = output_dir / "benchmark_vllm_20260501_001122"
+    workspace.mkdir(parents=True)
+    (workspace / "benchmark_report.json").write_text(json.dumps({
+        "success": True,
+        "framework": "vllm",
+        "model": "/wekafs/models/Qwen-Qwen3-8B",
+        "throughput": {
+            "request_throughput": 3.2, "output_throughput": 800.0,
+            "total_token_throughput": 1600.0, "completed_requests": 80,
+            "duration_seconds": 25.0,
+        },
+        "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158},
+                    "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
+    }))
+    capture_dir = output_dir / "capture_traces"
+    capture_dir.mkdir()
+    (capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz").write_bytes(b"fake-trace")
+    (capture_dir / "graph_capture_rank_0.2.pt.trace.json.gz").write_bytes(b"fake-trace")
+
+    fake_completed = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="ok", stderr="",
+    )
+
+    def _fake_run(*args, **kwargs):
+        return fake_completed
+
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-capture",
+    )
+    sub.register_executor("profile", pe)
+    with patch("subprocess.run", side_effect=_fake_run):
+        res = await sub.run_task(task)
+    assert res.state == "succeeded"
+    assert res.result["framework"] == "vllm"
+    assert res.result["trace_dir"] == str(capture_dir)
+    assert len(res.result["trace_files"]) == 2
+    assert res.result["main_trace_path"].startswith(str(capture_dir))
+    db.close()
+
+
 # ===========================================================================
 # kernel_request_handlers — direct unit
 # ===========================================================================
@@ -539,25 +1063,20 @@ async def test_select_kernels_handler_backfills_workload_context_from_state(
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_surfaces_analysis_report_path(
+async def test_select_kernels_handler_surfaces_trace_report_path(
     session_dir, monkeypatch,
 ):
-    """The handler must forward the TraceLens v0.3 ``analysis.md`` path so
-    GEAK / Coordinator can ground their actions on the same final stakeholder
-    report Hyperloom parsed for ``hot_kernels`` (PR #155 review, scheme C)."""
+    """The handler must forward the TraceLens v0.3 analysis.md path."""
     captured: dict = {}
 
     async def fake_run_subprocess(cmd, *, timeout_sec):
         captured["cmd"] = list(cmd)
-        # Mimic both the explicit field set by tracelens_analysis.py and the
-        # backwards-compatible nested location, so a partial-rollout SDK still
-        # surfaces the path through the handler.
         payload = {
             "status": "ok",
             "hot_kernels": [],
-            "analysis_report_path": "/tmp/runs/abc/tracelens/analysis.md",
+            "trace_report_path": "/tmp/runs/abc/tracelens/analysis.md",
             "artifact_paths": {
-                "tracelens_agent_report": "/tmp/runs/abc/tracelens/analysis.md",
+                "trace_report_path": "/tmp/runs/abc/tracelens/analysis.md",
                 "kernel_candidates": "/tmp/runs/abc/kernel_candidates.json",
             },
         }
@@ -568,23 +1087,182 @@ async def test_select_kernels_handler_surfaces_analysis_report_path(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
-    assert res["analysis_report_path"] == "/tmp/runs/abc/tracelens/analysis.md"
+    assert res["trace_report_path"] == "/tmp/runs/abc/tracelens/analysis.md"
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_falls_back_to_artifact_paths_for_report(
+async def test_select_kernels_handler_persists_trace_report_to_candidates(
+    session_dir, tmp_path, monkeypatch,
+):
+    """Disk candidates must carry the TraceLens report path for GEAK prompts."""
+    report_path = tmp_path / "analysis.md"
+    report_path.write_text("# TraceLens Report\n", encoding="utf-8")
+    candidates_path = tmp_path / "kernel_candidates.json"
+    candidates_path.write_text(
+        json.dumps({
+            "hot_kernels": [{
+                "kernel_id": "k1",
+                "name": "paged_attention",
+                "source_file": "/sgl-workspace/sglang/kernels/paged.py",
+                "reusable_native_kernel": True,
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        return 0, json.dumps({
+            "status": "ok",
+            "hot_kernels": json.loads(candidates_path.read_text(encoding="utf-8"))["hot_kernels"],
+            "trace_report_path": str(report_path),
+            "artifact_paths": {
+                "kernel_candidates": str(candidates_path),
+                "trace_report_path": str(report_path),
+            },
+        }), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+
+    persisted = json.loads(candidates_path.read_text(encoding="utf-8"))
+    candidate = persisted["hot_kernels"][0]
+    assert res["hot_kernels"][0]["trace_report_path"] == str(report_path)
+    assert persisted["trace_report_path"] == str(report_path)
+    assert persisted["artifact_paths"]["trace_report_path"] == str(report_path)
+    assert candidate["trace_report_path"] == str(report_path)
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_backfills_runtime_metadata_from_config(
+    session_dir, tmp_path, monkeypatch,
+):
+    """GEAK candidates must inherit the materialized Magpie workload config."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    config_path = tmp_path / "profile_config.with_envs.yaml"
+    config_path.write_text(
+        """
+benchmark:
+  framework: sglang
+  model: /models/Qwen3
+  precision: bf16
+  envs:
+    TP: 8
+    CONC: 64
+    ISL: 1024
+    OSL: 1024
+    NUM_PROMPTS: 512
+    MAX_MODEL_LEN: 8192
+    EXTRA_SGLANG_ARGS: "--kv-cache-dtype fp8 --page-size 16"
+    SGLANG_USE_TRITON: "1"
+    ROCR_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+    SAFE_API_KEY: "should-not-leak"
+""",
+        encoding="utf-8",
+    )
+    state = SharedState.load_or_init(session_dir)
+    state.baseline_config_path = str(config_path)
+    state.save(session_dir)
+
+    candidates_path = tmp_path / "kernel_candidates.json"
+    candidates_path.write_text(
+        json.dumps({
+            "hot_kernels": [{
+                "kernel_id": "k1",
+                "name": "paged_attention",
+                "source_file": "/sgl-workspace/sglang/kernels/paged.py",
+                "reusable_native_kernel": True,
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        return 0, json.dumps({
+            "status": "ok",
+            "hot_kernels": json.loads(candidates_path.read_text(encoding="utf-8"))["hot_kernels"],
+            "artifact_paths": {"kernel_candidates": str(candidates_path)},
+        }), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+
+    enriched = json.loads(candidates_path.read_text(encoding="utf-8"))["hot_kernels"][0]
+    assert res["hot_kernels"][0]["env_vars"]["SGLANG_USE_TRITON"] == "1"
+    assert enriched["env_vars"]["TP"] == "8"
+    assert enriched["env_vars"]["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
+    assert "SAFE_API_KEY" not in enriched["env_vars"]
+    assert enriched["runtime_args"]["framework"] == "sglang"
+    assert enriched["runtime_args"]["server_args"] == "--kv-cache-dtype fp8 --page-size 16"
+    assert enriched["runtime_args"]["workload"] == {
+        "tp": 8,
+        "conc": 64,
+        "isl": 1024,
+        "osl": 1024,
+        "num_prompts": 512,
+        "max_model_len": 8192,
+    }
+
+
+def test_materialized_workload_metadata_filters_prefixed_secrets(tmp_path):
+    config_path = tmp_path / "profile_config.with_envs.yaml"
+    config_path.write_text(
+        """
+benchmark:
+  framework: vllm
+  envs:
+    VLLM_USE_V1: "1"
+    VLLM_API_KEY: "should-not-leak"
+    TRITON_AUTH_TOKEN: "should-not-leak"
+""",
+        encoding="utf-8",
+    )
+
+    metadata = krh._load_materialized_workload_metadata(str(config_path))
+
+    assert metadata["env_vars"]["VLLM_USE_V1"] == "1"
+    assert "VLLM_API_KEY" not in metadata["env_vars"]
+    assert "TRITON_AUTH_TOKEN" not in metadata["env_vars"]
+
+
+def test_materialized_workload_metadata_tolerates_bad_server_args(tmp_path):
+    config_path = tmp_path / "profile_config.with_envs.yaml"
+    config_path.write_text(
+        """
+benchmark:
+  framework: sglang
+  envs:
+    EXTRA_SGLANG_ARGS: "--kv-cache-dtype 'unterminated"
+    TP: 1
+""",
+        encoding="utf-8",
+    )
+
+    metadata = krh._load_materialized_workload_metadata(str(config_path))
+
+    assert metadata["runtime_args"]["server_args"] == "--kv-cache-dtype 'unterminated"
+    assert metadata["runtime_args"]["server_args_argv"] == []
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_uses_artifact_trace_report_path(
     session_dir, monkeypatch,
 ):
-    """If the underlying tool only surfaces analysis.md inside artifact_paths
-    (e.g. an older tracelens_analysis.py build that wasn't updated yet), the
-    handler must still hoist it to the top-level ``analysis_report_path`` for
-    Coordinator/GEAK consumers."""
+    """TraceLens now surfaces the upstream analysis.md as trace_report_path."""
     async def fake_run_subprocess(cmd, *, timeout_sec):
         payload = {
             "status": "ok",
             "hot_kernels": [],
             "artifact_paths": {
-                "tracelens_agent_report": "/tmp/legacy/tracelens/analysis.md",
+                "trace_report_path": "/tmp/tracelens/analysis.md",
             },
         }
         return 0, json.dumps(payload), ""
@@ -594,7 +1272,7 @@ async def test_select_kernels_handler_falls_back_to_artifact_paths_for_report(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
-    assert res["analysis_report_path"] == "/tmp/legacy/tracelens/analysis.md"
+    assert res["trace_report_path"] == "/tmp/tracelens/analysis.md"
 
 
 @pytest.mark.asyncio
@@ -635,12 +1313,194 @@ async def test_run_optimization_handler_dry_run(session_dir):
     assert res.get("status") in ("ok", "succeeded", "failed")  # dry-run may still fail validation
 
 
+@pytest.mark.asyncio
+async def test_run_optimization_handler_forwards_extra_sglang_args(session_dir):
+    captured: dict[str, object] = {}
+
+    async def fake_run(cmd, *, timeout_sec):
+        captured["cmd"] = cmd
+        captured["timeout_sec"] = timeout_sec
+        return 0, '{"status": "ok"}', ""
+
+    payload = {
+        "kernel_id": "fake_kernel_1",
+        "session_id": session_dir.name,
+        "source_file": "/sgl-workspace/sglang/python/sglang/fake.py",
+        "extra_sglang_args": "--kv-cache-dtype fp8 --page-size 16",
+        "dry_run": True,
+        "_single_kernel": True,
+    }
+    with patch.object(krh, "_validate_reusable_native_kernel", return_value=None), \
+         patch.object(krh, "_run_subprocess", side_effect=fake_run):
+        res = await krh.run_optimization_handler(payload, session_dir=session_dir)
+
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert "--extra-sglang-args" in cmd
+    assert cmd[cmd.index("--extra-sglang-args") + 1] == "--kv-cache-dtype fp8 --page-size 16"
+
+
+def test_run_optimization_handler_backfills_target_platform_from_state(session_dir):
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.gpu_type = "mi325x"
+    state.save(session_dir)
+    captured: dict[str, object] = {}
+
+    async def fake_run(cmd, *, timeout_sec):
+        captured["cmd"] = cmd
+        return 0, '{"status": "ok"}', ""
+
+    payload = {
+        "kernel_id": "fake_kernel_1",
+        "session_id": session_dir.name,
+        "source_file": "/sgl-workspace/sglang/python/sglang/fake.py",
+        "dry_run": True,
+        "_single_kernel": True,
+    }
+    with patch.object(krh, "_validate_reusable_native_kernel", return_value=None), \
+         patch.object(krh, "_run_subprocess", side_effect=fake_run):
+        res = asyncio.run(
+            krh.run_optimization_handler(payload, session_dir=session_dir),
+        )
+
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert "--target-platform" in cmd
+    assert cmd[cmd.index("--target-platform") + 1] == "mi325x"
+
+
 def test_handlers_dispatch_table():
     """P2-2 only registered select_kernels + run_optimization. P2-4
     added apply_patch + integrate (covered in test_p2_4_integrate_report)."""
     assert krh.has_handler("select_kernels")
     assert krh.has_handler("run_optimization")
     assert not krh.has_handler("totally_unknown_kind")
+
+
+# ===========================================================================
+# PR-B §1: _batch_kernel_candidates collapses task_group members
+# ===========================================================================
+def _write_candidates_json(tmp_path, payload):
+    p = tmp_path / "kernel_candidates.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    return p
+
+
+def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
+    """Two reusable kernels in the same task_group must dispatch as ONE
+    candidate (the primary), with the full group attached for
+    build_prompt to render multi-row benchmark cases."""
+    candidates_path = _write_candidates_json(tmp_path, {
+        "hot_kernels": [
+            {
+                "kernel_id": "k001", "name": "rms_norm_prefill",
+                "source_file": "/sgl-workspace/aiter/rmsnorm.py",
+                "reusable_native_kernel": True,
+                "duration_us": 100.0,
+            },
+            {
+                "kernel_id": "k002", "name": "rms_norm_decode",
+                "source_file": "/sgl-workspace/aiter/rmsnorm.py",
+                "reusable_native_kernel": True,
+                "duration_us": 50.0,
+            },
+            {
+                "kernel_id": "k003", "name": "other_kernel",
+                "source_file": "/sgl-workspace/aiter/other.py",
+                "reusable_native_kernel": True,
+                "duration_us": 30.0,
+            },
+        ],
+        "task_groups": [
+            {
+                "task_group_id": "tg001",
+                "function_name": "rms_norm",
+                "source_path": "/sgl-workspace/aiter/rmsnorm.py",
+                "definition_line": 10,
+                "primary_kernel_id": "k001",
+                "kernel_ids": ["k001", "k002"],
+                "rows": [
+                    {"kernel_id": "k001", "name": "rms_norm_prefill"},
+                    {"kernel_id": "k002", "name": "rms_norm_decode"},
+                ],
+                "aggregate_duration_us": 150.0,
+            },
+        ],
+    })
+    selected = krh._batch_kernel_candidates({"candidates_path": str(candidates_path)})
+    # k001 (primary) + k003 (ungrouped) = 2 dispatches, not 3.
+    kernel_ids = [c.get("kernel_id") for c in selected]
+    assert kernel_ids == ["k001", "k003"]
+    # The primary carries the full group dict so build_prompt can render
+    # both rows as benchmark cases.
+    assert selected[0]["task_group"]["task_group_id"] == "tg001"
+    assert set(selected[0]["task_group"]["kernel_ids"]) == {"k001", "k002"}
+    # The ungrouped kernel has no task_group attached.
+    assert "task_group" not in selected[1]
+
+
+def test_batch_kernel_candidates_falls_back_when_primary_is_non_reusable(tmp_path):
+    """If the group's primary_kernel_id was rejected by classify_patchability
+    (e.g. vendor BLAS name marker landed on the heaviest row), dispatch
+    falls back to the first reusable member instead of dropping the
+    whole group."""
+    candidates_path = _write_candidates_json(tmp_path, {
+        "hot_kernels": [
+            {
+                "kernel_id": "k001", "name": "rocblas_sgemm_call",
+                "source_file": "/sgl-workspace/aiter/foo.py",
+                "reusable_native_kernel": False,  # primary rejected
+                "duration_us": 200.0,
+            },
+            {
+                "kernel_id": "k002", "name": "rms_norm_call",
+                "source_file": "/sgl-workspace/aiter/foo.py",
+                "reusable_native_kernel": True,
+                "duration_us": 50.0,
+            },
+        ],
+        "task_groups": [
+            {
+                "task_group_id": "tg001",
+                "function_name": "foo",
+                "primary_kernel_id": "k001",
+                "kernel_ids": ["k001", "k002"],
+                "rows": [
+                    {"kernel_id": "k001"},
+                    {"kernel_id": "k002"},
+                ],
+            },
+        ],
+    })
+    selected = krh._batch_kernel_candidates({"candidates_path": str(candidates_path)})
+    # k002 (the only reusable member) replaces the rejected primary.
+    assert [c["kernel_id"] for c in selected] == ["k002"]
+    assert selected[0]["task_group"]["task_group_id"] == "tg001"
+
+
+def test_batch_kernel_candidates_legacy_path_unchanged_without_task_groups(tmp_path):
+    """When kernel_candidates.json has no task_groups[] (older runs,
+    raw-trace fallback, LLama70B fixture path), the candidate list is
+    byte-identical to pre-PR-B behaviour."""
+    candidates_path = _write_candidates_json(tmp_path, {
+        "hot_kernels": [
+            {
+                "kernel_id": "k001", "name": "rms_norm",
+                "source_file": "/sgl-workspace/aiter/rmsnorm.py",
+                "reusable_native_kernel": True,
+            },
+            {
+                "kernel_id": "k002", "name": "vendor",
+                "source_file": "/sgl-workspace/aiter/vendor.py",
+                "reusable_native_kernel": False,
+            },
+        ],
+    })
+    selected = krh._batch_kernel_candidates({"candidates_path": str(candidates_path)})
+    assert [c["kernel_id"] for c in selected] == ["k001"]
+    assert "task_group" not in selected[0]
 
 
 # ===========================================================================
