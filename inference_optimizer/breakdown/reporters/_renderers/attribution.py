@@ -20,7 +20,18 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     a = breakdown.get("attribution") or {}
     sb = a.get("source_breakdown") or {}
     notes = a.get("notes") or []
-    method = a.get("method") or ""
+    # ``attribution.method`` is the collector's authoritative provenance
+    # label (validated / single_source / reconstructed / missing). Render
+    # it verbatim — never substitute a more-confident-sounding string,
+    # otherwise we re-introduce the very hallucination this field exists
+    # to prevent. Empty / "missing" surfaces as "unknown attribution
+    # method" so the audit trail is explicit.
+    method_raw = a.get("method")
+    method = str(method_raw) if isinstance(method_raw, str) else ""
+    if method in ("", "missing"):
+        method_display = "unknown attribution method"
+    else:
+        method_display = method
 
     total_v = sb.get("validated_total_pct")
     rows = [
@@ -34,8 +45,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     facts: list[str] = []
     if total_v is not None:
         facts.append(f"Validated total gain attributed: {fmt_pct(total_v, plus=True)}.")
-    if method:
-        facts.append(f"Attribution method: `{method}`.")
+    facts.append(f"Attribution method: `{method_display}`.")
     has_any_split = any(r[1] not in (None, 0, 0.0) for r in rows)
     if not has_any_split:
         facts.append(
