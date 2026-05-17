@@ -10,6 +10,10 @@
 
 set -euo pipefail
 
+# Ray/K8s subprocesses may inherit a minimal PATH; git/apt/node live under
+# /usr/bin even when callers only prepend /opt/venv/bin.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+
 WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-${WORKSPACE_PATH}}"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${WORKSPACE_PATH}/kernel-agent}"
@@ -59,6 +63,9 @@ GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
 RAG_INDEX_DIR="${HOME}/.cache/amd-ai-devtool/semantic-index"
 GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cuda}"
+# When 1 (default), ensure_rag_index runs GEAK scripts/build_index.py after GEAK install.
+# Set KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0 to skip (saves first-run download + embed time).
+KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-0}"
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
@@ -97,6 +104,9 @@ Options:
   --check-only       Verify current environment, do not install
   --dry-run          Print actions without running installs
   -h, --help         Show this help
+
+Environment (optional):
+  KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0   Skip the GEAK semantic RAG index build in ensure_rag_index.
 
 Legacy options (accepted but no-op, kept for backwards compat):
   --with-geak / --with-oob / --with-llm / --all-backends / --backend NAME
@@ -273,6 +283,7 @@ ensure_tracelens() {
       log "TraceLens root not writable ($TRACELENS_ROOT); mirroring to $TRACELENS_MIRROR_DIR"
       mkdir -p "$(dirname "$TRACELENS_MIRROR_DIR")"
       if [ ! -d "$TRACELENS_MIRROR_DIR" ]; then
+        log "mirroring TraceLens to writable dir (large tree; may take minutes): $TRACELENS_ROOT -> $TRACELENS_MIRROR_DIR"
         run cp -r "$TRACELENS_ROOT" "$TRACELENS_MIRROR_DIR"
       else
         log "TraceLens mirror already present: $TRACELENS_MIRROR_DIR"
@@ -285,7 +296,8 @@ ensure_tracelens() {
   fi
   log "ensuring TraceLens CLI from $TRACELENS_ROOT"
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run bash -lc "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir -e ."
+    # Do not use bash -lc: login profiles reset PATH (drops venv) and break pip.
+    run sh -c "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir -e ."
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
     # TraceLens #124: prefer the inference variant (correct entry for
@@ -362,6 +374,12 @@ EOF
 }
 
 ensure_rag_index() {
+  case "$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL" in
+    0|false|FALSE|no|NO|off|OFF)
+      log "skipping GEAK RAG index build (KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL)"
+      return 0
+      ;;
+  esac
   if [ -d "$RAG_INDEX_DIR" ] && [ -n "$(ls -A "$RAG_INDEX_DIR" 2>/dev/null)" ]; then
     log "RAG index already present at $RAG_INDEX_DIR"
     return
@@ -371,7 +389,7 @@ ensure_rag_index() {
     return
   fi
   log "building RAG index at $RAG_INDEX_DIR on device=${GEAK_RAG_INDEX_DEVICE_VAL} (first run downloads ~1.3 GB embedding model)"
-  run bash -lc "cd '${HYPERLOOM_ROOT}/geak' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"
+  run sh -c "cd '${HYPERLOOM_ROOT}/geak' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"
 }
 
 ensure_oob() {
