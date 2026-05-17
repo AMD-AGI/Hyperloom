@@ -589,7 +589,10 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
             if r.payload.get("kind") == "integrate_done"
         ]
         assert len(integrate_results) == 4
-        assert run_calls == 3
+        # Each successful integrate runs apply_kernel_patch + BaselineExecutor
+        # (two ``subprocess.run`` hooks). The 4th request is capped before the
+        # handler runs, so 3 * 2 == 6.
+        assert run_calls == 6
         assert [r["decision"] for r in integrate_results[:3]] == [
             "NEEDS_REVIEW",
             "NEEDS_REVIEW",

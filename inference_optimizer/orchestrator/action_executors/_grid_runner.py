@@ -76,6 +76,101 @@ _MAGPIE_CWD_DEFAULT = "/tmp"
 _VARIANT_TIMEOUT_SEC_DEFAULT = 900
 
 
+# ---------------------------------------------------------------------------
+# User-declared variant skip list
+#
+# Operators (or the brain agent via the prompt's Environment block) can
+# pre-prune the search grid by declaring SKIP_VARIANTS. The value is a
+# comma/whitespace-separated list of variant patterns; each pattern is
+# matched against ``GridVariant.name`` either exactly or as a fnmatch glob
+# (``*`` / ``?`` / ``[abc]`` supported). Empty patterns are ignored.
+#
+# Examples
+# --------
+#   SKIP_VARIANTS=attn_aiter                 # exact name
+#   SKIP_VARIANTS=attn_aiter,sched_dfs       # two exact names
+#   SKIP_VARIANTS=attn_*,vllm_aiter_fp8bmm   # glob + exact mixed
+#
+# Resolution order (most-specific wins):
+#   params["skip_variants"]  >  $SKIP_VARIANTS  >  ""
+#
+# The helper is intentionally *only* a name-based filter; no model/TP
+# predicates here. Model-aware static rules live in each executor's own
+# ``_filter_incompatible_variants`` (kept as a safety net) and will
+# eventually migrate to the KB.
+import fnmatch as _fnmatch  # noqa: E402  (kept near callers for grep-ability)
+
+
+def resolve_skip_spec(params: dict | None) -> str:
+    """Resolve the active skip spec from task params + process env.
+
+    ``params["skip_variants"]`` may be a list[str] or a single str; both are
+    flattened to comma-joined form before pattern parsing.
+    """
+    val = ""
+    if params and "skip_variants" in params:
+        raw = params.get("skip_variants")
+        if isinstance(raw, (list, tuple)):
+            val = ",".join(str(x) for x in raw if x is not None)
+        elif raw is not None:
+            val = str(raw)
+    if not val.strip():
+        val = os.environ.get("SKIP_VARIANTS", "")
+    return (val or "").strip()
+
+
+def _parse_skip_spec(spec: str) -> list[str]:
+    """Split ``spec`` on commas and whitespace; drop empties."""
+    if not spec:
+        return []
+    out: list[str] = []
+    for token in spec.replace("\n", ",").split(","):
+        for sub in token.split():
+            t = sub.strip()
+            if t:
+                out.append(t)
+    return out
+
+
+def apply_user_skip_list(
+    grid: list["GridVariant"],
+    *,
+    skip_spec: str,
+) -> tuple[list["GridVariant"], list[dict]]:
+    """Drop variants whose name matches any pattern in ``skip_spec``.
+
+    Returns ``(kept, dropped)`` where each dropped entry is
+    ``{"name", "reason", "source"}`` with source=``"user_skip"`` so
+    callers can distinguish user-driven skips from model/kernel
+    incompatibility skips when both layers run.
+    """
+    patterns = _parse_skip_spec(skip_spec)
+    if not patterns:
+        return list(grid), []
+
+    kept: list[GridVariant] = []
+    dropped: list[dict] = []
+    for v in grid:
+        matched_pat: str | None = None
+        for pat in patterns:
+            # Exact name first (cheaper, more common), then fnmatch for
+            # globs. fnmatch also accepts plain names so the second branch
+            # alone would suffice, but keeping the fast-path makes logs
+            # explicit ("matched 'attn_aiter'" vs "matched 'attn_*'").
+            if pat == v.name or _fnmatch.fnmatchcase(v.name, pat):
+                matched_pat = pat
+                break
+        if matched_pat is None:
+            kept.append(v)
+            continue
+        dropped.append({
+            "name": v.name,
+            "source": "user_skip",
+            "reason": f"matched SKIP_VARIANTS pattern '{matched_pat}'",
+        })
+    return kept, dropped
+
+
 @dataclass
 class GridVariant:
     """One row of the grid we're going to test."""
@@ -281,7 +376,17 @@ def _kill_stale_servers() -> None:
 
     NOTE: uses /proc scan instead of `subprocess.run(["pgrep",...])` to avoid
     conflicting with test mocks that patch subprocess.run for Magpie calls.
+
+    Multi-node short-circuit: in --nodes>=2 mode the inference servers run
+    inside the RayJob pods, NOT in this sandbox. Scanning sandbox /proc
+    finds nothing matching, and clearing sandbox /dev/shm/vllm* would only
+    remove unrelated state. Skip the whole sweep + the 2s settle sleep —
+    server lifecycle there is owned by `multi_node restart-server`.
     """
+    from ._multi_node_env import is_multi_node
+    if is_multi_node():
+        return
+
     import signal
     import glob
     import time
@@ -339,6 +444,13 @@ def _run_magpie(
     magpie_dir = os.environ.get("MAGPIE_DIR", "")
     if magpie_dir:
         env["PYTHONPATH"] = f"{magpie_dir}:{env.get('PYTHONPATH', '')}"
+
+    # Multi-node mode: tell Magpie to skip its local-server launch and
+    # point benchmark_serving at the head pod's ClusterIP. Returns {} in
+    # single-node mode so the env stays exactly as before.
+    from ._multi_node_env import magpie_remote_env
+    env.update(magpie_remote_env())
+
     cmd = [
         magpie_python, "-m", "Magpie", "-v", "benchmark",
         "--benchmark-config", str(config_path),
@@ -406,6 +518,38 @@ async def run_grid(
             "grid_runner: variant %d/%d name=%s args=%s",
             i + 1, len(grid), variant.name, variant.extra_sglang_args,
         )
+
+        # Multi-node only: restart sglang/vllm with this variant's
+        # server-side flags so each grid row runs against a fresh
+        # server (parity with single-node Magpie's PHASE=all). No-op
+        # in single-node mode.
+        from ._multi_node_server_lifecycle import (
+            ServerRestartFailed,
+            restart_server_for_round,
+        )
+        try:
+            # PD knobs auto-resolved by the helper from $PD_* env. The
+            # grid runner doesn't sweep PD ratio yet (see params.py for
+            # the grid surface), so PD config stays constant across
+            # variants within one run.
+            await restart_server_for_round(
+                extra_sglang_args=merge_server_args(
+                    base_extra_args, variant.extra_sglang_args,
+                ),
+                model_path=model_path,
+                ep=int(os.environ.get("EP") or 0) or None,
+            )
+        except ServerRestartFailed as exc:
+            results.append(VariantResult(
+                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                extra_envs=dict(variant.extra_envs),
+                status="failed",
+                error=f"mn_server_restart_failed: {exc}",
+                note=variant.note,
+            ))
+            if not keep_going_on_failure:
+                break
+            continue
 
         try:
             rc, stdout, stderr = await asyncio.to_thread(
