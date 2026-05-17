@@ -76,6 +76,44 @@ class ProfileExecutor(BaselineExecutor):
         """Override BaselineExecutor's resolver to pick the profile yaml."""
         return _default_profile_config()
 
+    def _resolve_mn_round_trace_root(self, ctx) -> str:
+        """Return per-round wekafs trace dir for multi-node, or '' otherwise.
+
+        Layout (Q2 = multi-level): one dir per RayJob, one subdir per
+        profile round, ``torch_trace/`` underneath::
+
+            /wekafs/hyperloom/profile-traces/
+              <rayjob_id>/
+                <round_id>/
+                  torch_trace/
+                    *.trace.json.gz
+
+        ``round_id`` is the orchestrator task id (already unique per
+        round and stable across the magpie spawn → trace consumption
+        boundary). ``rayjob_id`` is taken from
+        ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` (which ``cli.py`` exports as
+        ``/wekafs/hyperloom/profile-traces/<rayjob>/torch_trace`` on
+        provisioning) by stripping the trailing ``torch_trace`` segment.
+        Falls back to ``<rayjob>=default`` if the env is missing so the
+        executor still produces a usable path rather than crashing.
+        """
+        from ._multi_node_env import is_multi_node
+        if not is_multi_node():
+            return ""
+        provisioned = os.environ.get(
+            "HYPERLOOM_MN_PROFILE_TRACE_DIR", ""
+        ).strip()
+        if provisioned:
+            base = Path(provisioned)
+            if base.name == "torch_trace":
+                rayjob_root = base.parent
+            else:
+                rayjob_root = base
+        else:
+            rayjob_root = Path("/wekafs/hyperloom/profile-traces/default")
+        round_id = str(getattr(ctx.task, "task_id", "") or "round").strip() or "round"
+        return str(rayjob_root / round_id / "torch_trace")
+
     async def __call__(self, ctx) -> dict[str, Any]:
         # Override action label so per-task output lands under runs/profile/
         # rather than runs/baseline/ when the runner derives the path.
@@ -87,12 +125,78 @@ class ProfileExecutor(BaselineExecutor):
             # Stash so BaselineExecutor.__call__ picks it up via extra.
             if extra is None:
                 ctx.extra = {"workspace": str(output_dir)}
+                extra = ctx.extra
             else:
                 extra["workspace"] = str(output_dir)
+
+        # Multi-node only: pre-restart the inference server with this
+        # round's profiler dir so sglang launches with
+        # ``--torch-profiler-dir <round_path>`` and writes traces to a
+        # round-scoped wekafs directory both pods and the sandbox can
+        # see. Mark ctx.extra so BaselineExecutor.__call__ doesn't run a
+        # second restart on top of ours. No-op in single-node mode (the
+        # helper short-circuits and ``round_trace_root`` is "").
+        round_trace_root = self._resolve_mn_round_trace_root(ctx)
+        if round_trace_root:
+            from ._multi_node_server_lifecycle import (
+                ServerRestartFailed,
+                restart_server_for_round,
+            )
+            try:
+                # PD knobs auto-resolved by the helper from $PD_* env
+                # (cli.py exported them). See baseline.py for rationale.
+                await restart_server_for_round(
+                    extra_sglang_args=str(params.get("extra_sglang_args") or ""),
+                    torch_profiler_dir=round_trace_root,
+                    framework=os.environ.get("FRAMEWORK") or None,
+                    model_path=(
+                        str(params.get("model_path") or "").strip()
+                        or os.environ.get("MODEL_PATH") or None
+                    ),
+                    tp=int(os.environ.get("TP") or 0) or None,
+                    ep=int(os.environ.get("EP") or 0) or None,
+                )
+            except ServerRestartFailed as exc:
+                return {
+                    "status": "failed",
+                    "error_class": "mn_server_restart_failed",
+                    "error": str(exc),
+                    "trace_dir": round_trace_root,
+                }
+            extra["mn_round_restarted"] = True
+
         result = await super().__call__(ctx)
-        # Augment with trace_dir if the workspace produced one.
+        # Multi-node: trace files live at the round-scoped wekafs dir we
+        # just restarted with. We do NOT read $HYPERLOOM_MN_PROFILE_TRACE_DIR
+        # here because the helper restored it back to the rayjob-root
+        # default after restart so a subsequent non-profile round won't
+        # leak this round's path. Single-node falls through to the
+        # workspace/torch_trace branch below.
         workspace_str = result.get("workspace")
-        if workspace_str:
+        if round_trace_root:
+            trace_dir = Path(round_trace_root)
+            if trace_dir.is_dir():
+                trace_files = sorted(trace_dir.glob("*.trace.json.gz"))
+                result["trace_dir"] = str(trace_dir)
+                result["trace_files"] = [str(p) for p in trace_files]
+                if trace_files:
+                    result["main_trace_path"] = str(trace_files[0])
+                else:
+                    log.warning(
+                        "profile_executor: multi-node trace dir %s exists "
+                        "but no .trace.json.gz files found yet (server "
+                        "pods may still be flushing)", trace_dir,
+                    )
+            else:
+                result["trace_dir"] = None
+                result["trace_files"] = []
+                log.warning(
+                    "profile_executor: round trace dir %s does not exist "
+                    "after magpie completed; check sglang server logs for "
+                    "torch profiler errors",
+                    round_trace_root,
+                )
+        elif workspace_str:
             trace_dir = Path(workspace_str) / "torch_trace"
             if trace_dir.is_dir():
                 # Find the actual trace .json.gz files; pick the one most
