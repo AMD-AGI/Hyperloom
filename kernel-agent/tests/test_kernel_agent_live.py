@@ -72,7 +72,7 @@ def run_json(cmd: list[str], *, workspace: Path, env: dict[str, str], timeout: i
         cmd,
         text=True,
         capture_output=True,
-        env={**os.environ, **env, "WORKSPACE_PATH": str(workspace)},
+        env={**os.environ, **env, "USER_DATA_PATH": str(workspace)},
         timeout=timeout,
     )
     if proc.returncode != 0:
