@@ -31,7 +31,15 @@ from pathlib import Path
 from typing import Any
 
 from ...session_paths import runs_dir
-from ._grid_runner import GridVariant, VariantResult, pick_winners, run_grid, _resolve_session_dir
+from ._grid_runner import (
+    GridVariant,
+    VariantResult,
+    _resolve_session_dir,
+    apply_user_skip_list,
+    pick_winners,
+    resolve_skip_spec,
+    run_grid,
+)
 from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
@@ -369,6 +377,24 @@ class BackendsExecutor:
                 if "vllm" in _fw
                 else list(self.default_grid)
             )
+
+        # User-declared variant skip list (operator prompt / --skip-variants
+        # / task params). Pure name/glob match; hyperloom holds zero policy
+        # about which (model, TP, framework) combinations are incompatible
+        # — every static rule we considered (e.g. "DSr1 + TP>8 ⇒ drop
+        # attn_aiter") was wrong as soon as the operator changed TP or
+        # swapped to a head-count fork. Incompatibility knowledge lives
+        # with the caller (prompt / brain agent / operator); we just
+        # honour the spec. Dropped variants are surfaced in the response
+        # so the critic agent can attribute grid-size shrinkage.
+        skip_spec = resolve_skip_spec(params)
+        grid, dropped_variants = apply_user_skip_list(
+            grid, skip_spec=skip_spec,
+        )
+        for d in dropped_variants:
+            log.info("backends: user-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
 
@@ -436,6 +462,7 @@ class BackendsExecutor:
             "output_throughput": best.output_throughput if best else None,
             "workspace": output_root.as_posix(),
             "phase2_combos_tested": len(combo_results),
+            "dropped_variants": dropped_variants,
         }
 
 

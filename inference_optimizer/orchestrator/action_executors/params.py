@@ -30,7 +30,14 @@ from typing import Any
 import yaml
 
 from ...session_paths import runs_dir
-from ._grid_runner import GridVariant, VariantResult, run_grid, _resolve_session_dir
+from ._grid_runner import (
+    GridVariant,
+    VariantResult,
+    _resolve_session_dir,
+    apply_user_skip_list,
+    resolve_skip_spec,
+    run_grid,
+)
 from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
@@ -337,6 +344,18 @@ class ParamsExecutor:
             if self.include_nccl or params.get("include_nccl"):
                 grid += list(self.default_nccl_grid)
 
+        # User-declared variant skip list (operator prompt / --skip-variants
+        # / task params). Same helper as backends.py so the contract is
+        # uniform: a single SKIP_VARIANTS spec prunes both grids. Pure
+        # name/glob match; no model knowledge required. Anything the agent
+        # already knows is incompatible should come through here.
+        skip_spec = resolve_skip_spec(params)
+        grid, user_dropped = apply_user_skip_list(grid, skip_spec=skip_spec)
+        for d in user_dropped:
+            log.info("params: user-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        dropped_variants = list(user_dropped)
+
         search = dict(params.get("params_search") or _initial_search_state())
         search.setdefault("schema_version", 1)
         search.setdefault("accepted", [])
@@ -400,6 +419,7 @@ class ParamsExecutor:
                 "workspace": output_root.as_posix(),
                 "params_search_update": search,
                 "params_search_exhausted": True,
+                "dropped_variants": dropped_variants,
             }
 
         # Reuse the resolved model/gpu from the materialization step above
@@ -548,6 +568,7 @@ class ParamsExecutor:
             "workspace": output_root.as_posix(),
             "params_search_update": search_update,
             "params_search_exhausted": len(search_update["tested"]) >= len(grid),
+            "dropped_variants": dropped_variants,
         }
 
 

@@ -351,6 +351,14 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
     """
     def _run() -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
+        from .action_executors._multi_node_env import (
+            is_multi_node,
+            ray_gcs_address_from_state,
+        )
+        if is_multi_node():
+            addr = ray_gcs_address_from_state()
+            if addr:
+                env.setdefault("RAY_ADDRESS", addr)
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
         return subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout_sec, env=env,
@@ -710,6 +718,15 @@ async def _run_optimization_single(
     # hard wall-clock; killing this wrapper at the exact same second loses
     # optimized_versions/ and report paths.
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60 + 180
+
+    from .action_executors._multi_node_env import is_multi_node
+
+    if is_multi_node():
+        from inference_optimizer.multi_node.cli import (
+            kill_inference_for_kernel_agent_best_effort,
+        )
+
+        await asyncio.to_thread(kill_inference_for_kernel_agent_best_effort)
 
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
     return _shape_tool_result(rc, stdout, stderr)
