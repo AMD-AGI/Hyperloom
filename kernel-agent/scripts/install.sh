@@ -504,6 +504,28 @@ model:
     max_tokens: 16384
 tools:
   rag: true
+run:
+  mode: full
+  budgets:
+    quick:
+      total_s: 3600
+      preprocess_soft_cap_s: 900
+      preprocess_hard_cap_fraction: 0.5
+      finalize_grace_s: 300
+      kill_buffer_s: 60
+    full:
+      total_s: 7200
+      preprocess_soft_cap_s: 900
+      preprocess_hard_cap_fraction: 0.5
+      finalize_grace_s: 300
+      kill_buffer_s: 60
+  presets:
+    quick:
+      orchestrator:
+        max_rounds: 2
+    full:
+      orchestrator:
+        max_rounds: 5
 EOF
       chmod 600 "$GEAK_CONFIG"
       grep -Eq '^[[:space:]]*model_class:[[:space:]]*litellm[[:space:]]*$' "$GEAK_CONFIG" \
