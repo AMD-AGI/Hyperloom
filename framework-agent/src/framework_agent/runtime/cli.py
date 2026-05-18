@@ -1,13 +1,16 @@
 """Framework Agent CLI entry point.
 
-PR A ships two subcommands:
+Subcommands:
 
-* ``fa schema``     - placeholder schema summary (real schema lands in PR-C).
+* ``fa schema``     - placeholder schema summary.
 * ``fa candidates`` - enumerate PR/ref candidates from the configured
-  sources (primus_cortex in PR-A; github backend in PR-B).
+  sources (primus_cortex + github).
+* ``fa explore``    - run the full exploration pipeline; defaults to
+  ``--plan`` mode (drop audit material only); ``--execute`` adds
+  worktree + venv + build/benchmark/accuracy commands.
 
-``fa explore`` and ``fa kb`` land in subsequent PRs per the implementation
-plan in ``claw-dev/docs-zh/framework-agent-hyperloom-implementation-plan.md``.
+``fa kb`` lands in a subsequent PR per the implementation plan in
+``claw-dev/docs-zh/framework-agent-hyperloom-implementation-plan.md``.
 """
 
 from __future__ import annotations
@@ -54,27 +57,31 @@ def _load_request(path: str) -> "ExploreRequest":
 
 
 def _cmd_schema(args: argparse.Namespace) -> None:
-    """Print the ExploreRequest schema summary (PR-A placeholder).
-
-    Full schema will land in the explore PR together with explorer.py.
-    """
+    """Print the ExploreRequest schema summary."""
     del args
     _emit_json(
         {
-            "status": "placeholder",
-            "pr": "A",
-            "note": (
-                "PR-A ships schema + candidates only. Full ExploreRequest "
-                "schema is delivered in subsequent PRs (explore + isolation)."
-            ),
             "required": ["framework", "repo_url", "baseline"],
-            "subcommands_available": ["schema", "candidates"],
-            "subcommands_planned": ["explore", "kb"],
-            "search_modes_supported": ["primus_cortex"],
-            "search_modes_planned": ["github"],
+            "subcommands_available": ["schema", "candidates", "explore"],
+            "subcommands_planned": ["kb"],
+            "search_modes_supported": ["primus_cortex", "github"],
+            "modes": {
+                "plan": "drop audit material only (pr.patches + pr_files.json)",
+                "execute": "additionally create worktree+venv and run build/bench commands",
+            },
+            "promotion_policy": "manual_only",
         },
         "-",
     )
+
+
+def _cmd_explore(args: argparse.Namespace) -> None:
+    """Run the full exploration; plan by default, build/bench when --execute."""
+    from ..explorer import explore
+
+    request = _load_request(args.request)
+    summary = explore(request, execute=bool(args.execute))
+    _emit_json(summary, args.out)
 
 
 def _cmd_candidates(args: argparse.Namespace) -> None:
@@ -121,6 +128,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output path (default '-' = stdout)",
     )
     cand_p.set_defaults(func=_cmd_candidates)
+
+    explore_p = sub.add_parser(
+        "explore",
+        help="Run the exploration pipeline (plan by default; --execute to build/bench)",
+    )
+    explore_p.add_argument(
+        "--request",
+        required=True,
+        help="Path to a JSON ExploreRequest file",
+    )
+    explore_p.add_argument(
+        "--execute",
+        action="store_true",
+        default=False,
+        help="Run build/benchmark commands (default: plan-only with audit material)",
+    )
+    explore_p.add_argument(
+        "--out",
+        default="-",
+        help="Output path (default '-' = stdout)",
+    )
+    explore_p.set_defaults(func=_cmd_explore)
 
     return parser
 

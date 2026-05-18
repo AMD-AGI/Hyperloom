@@ -4,14 +4,11 @@ Routes :class:`ExploreRequest` to one or more backends based on
 ``request.search_modes`` and merges results into a single deduplicated
 list of :class:`Candidate` records.
 
-Phase A backends:
+Backends:
 
 * ``primus_cortex`` - internal REST service (hard-fail on errors).
-
-Phase B will add:
-
-* ``github`` - anonymous GitHub Search fallback (best-effort, may be
-  rate-limited).
+* ``github``        - anonymous GitHub Search fallback (best-effort,
+  may be rate-limited; returns empty list on failure).
 
 Dispatcher contract:
 
@@ -30,6 +27,7 @@ from typing import Iterable
 
 from ..models import Candidate, ExploreRequest
 from ._shared import GitHubPr
+from . import github as github_backend
 from .primus_cortex import PrimusCortexError, list_perf_prs
 
 
@@ -84,11 +82,21 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
         if mode == "primus_cortex":
             out.extend(_run_primus_cortex(request))
         elif mode == "github":
-            continue
+            out.extend(_run_github(request))
         else:
             raise SourceConfigError(f"unknown search_mode: {mode!r}")
 
     return _dedupe(out)
+
+
+def _run_github(request: ExploreRequest) -> list[Candidate]:
+    """Query anonymous GitHub Search; best-effort - empty list on failure."""
+    prs = github_backend.search_perf_prs(
+        request.repo_url,
+        gap_description=request.gap_description,
+        limit=request.max_search_candidates,
+    )
+    return [_pr_to_candidate(pr, request.repo_url, "github") for pr in prs]
 
 
 def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:

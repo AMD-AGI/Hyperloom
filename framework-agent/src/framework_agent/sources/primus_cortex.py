@@ -254,9 +254,76 @@ def pr_patches(
     base_url: str,
     timeout_sec: float = 30.0,
 ) -> str:
-    """GET ``/v1/repos/{repo}/prs/{number}/patches`` returning raw unified patch text."""
+    """GET ``/v1/repos/{repo}/prs/{number}/patches`` and render as unified diff.
+
+    The primus-cortex service returns a JSON array
+    ``[{"file": {...}, "patch": "@@ ...", "patch_truncated": bool}]``
+    instead of raw unified-diff text. This helper synthesises ``diff --git`` /
+    ``--- a/<path>`` / ``+++ b/<path>`` headers per file so the result is a
+    valid unified patch that ``git apply`` can consume. Renamed and deleted
+    files honour ``previous_path`` and ``status``. Items missing the
+    ``patch`` field (e.g. binary diffs) emit only the file header and skip
+    the hunk body.
+    """
     url = _build_url(base_url, f"/v1/repos/{repo_slug}/prs/{number}/patches")
-    return _http_get_text(url, timeout_sec=timeout_sec)
+    payload = _http_get_json(url, timeout_sec=timeout_sec)
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        for key in ("patches", "items", "data"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                items = value
+                break
+        else:
+            raise PrimusCortexError(
+                f"primus_cortex pr_patches at {url} returned dict without list field "
+                f"(tried patches/items/data); keys={list(payload.keys())!r}"
+            )
+    elif isinstance(payload, str):
+        return payload
+    else:
+        raise PrimusCortexError(
+            f"primus_cortex pr_patches at {url} returned non-list/dict/str: {type(payload).__name__}"
+        )
+
+    chunks: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        file_meta = item.get("file") if isinstance(item.get("file"), dict) else item
+        path = (
+            file_meta.get("file_path")
+            or file_meta.get("filename")
+            or file_meta.get("path")
+            or ""
+        )
+        if not isinstance(path, str) or not path:
+            continue
+        previous_path = file_meta.get("previous_path") or path
+        status = (file_meta.get("status") or "").lower()
+        old_path = (
+            previous_path
+            if isinstance(previous_path, str) and previous_path
+            else path
+        )
+        if status == "added":
+            old_label = "/dev/null"
+        else:
+            old_label = f"a/{old_path}"
+        if status == "deleted" or status == "removed":
+            new_label = "/dev/null"
+        else:
+            new_label = f"b/{path}"
+        chunks.append(f"diff --git a/{old_path} b/{path}")
+        chunks.append(f"--- {old_label}")
+        chunks.append(f"+++ {new_label}")
+        patch_body = item.get("patch")
+        if isinstance(patch_body, str) and patch_body:
+            chunks.append(patch_body.rstrip("\n"))
+    if not chunks:
+        return ""
+    return "\n".join(chunks) + "\n"
 
 
 def search_perf_prs_via_primus_search(
