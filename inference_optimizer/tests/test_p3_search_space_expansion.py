@@ -250,6 +250,11 @@ async def test_backends_executor_emits_discovery_and_synergy_attempts(
     # env var is read at import time only.
     from inference_optimizer.orchestrator.action_executors import backends as be_mod
     monkeypatch.setattr(be_mod, "DEFAULT_SGLANG_SERVER_ARGS", fake_args)
+    monkeypatch.setattr(
+        be_mod,
+        "resolve_sglang_server_args_path",
+        lambda: (fake_args, str(fake_args)),
+    )
 
     base_yaml = tmp_path / "base.yaml"
     base_yaml.write_text(
@@ -343,6 +348,11 @@ async def test_params_executor_emits_discovery_update(tmp_path, monkeypatch):
     )
     from inference_optimizer.orchestrator.action_executors import params as p_mod
     monkeypatch.setattr(p_mod, "DEFAULT_SGLANG_SERVER_ARGS", fake_args)
+    monkeypatch.setattr(
+        p_mod,
+        "resolve_sglang_server_args_path",
+        lambda: (fake_args, str(fake_args)),
+    )
 
     base_yaml = tmp_path / "base.yaml"
     base_yaml.write_text(
@@ -499,6 +509,11 @@ def _wire_be_module(monkeypatch, tmp_path, captured):
         "        self.enable_overlap_schedule = False\n"
     )
     monkeypatch.setattr(be_mod, "DEFAULT_SGLANG_SERVER_ARGS", fake_args)
+    monkeypatch.setattr(
+        be_mod,
+        "resolve_sglang_server_args_path",
+        lambda: (fake_args, str(fake_args)),
+    )
 
     async def _fake_run_grid(*, base_yaml_path, base_extra_args, grid,
                               output_root, **_kw):
