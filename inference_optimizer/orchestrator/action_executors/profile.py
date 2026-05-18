@@ -71,6 +71,14 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
     ]
 
 
+def _safe_mtime(p: Path) -> float:
+    """Return st_mtime, or 0 on stat() failure (e.g. NFS stale handle)."""
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def _default_profile_config() -> Path:
     """Resolve default profile YAML based on $FRAMEWORK env (sglang/vllm)."""
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
@@ -103,25 +111,31 @@ class ProfileExecutor(BaselineExecutor):
         return _default_profile_config()
 
     def _resolve_mn_round_trace_root(self, ctx) -> str:
-        """Return per-round wekafs trace dir for multi-node, or '' otherwise.
+        """Return the shared wekafs torch-trace base for multi-node, or ''.
 
-        Layout (Q2 = multi-level): one dir per RayJob, one subdir per
-        profile round, ``torch_trace/`` underneath::
+        Returns the SAME base dir for every profile round in the session.
+        ``cli.py`` exports it as
+        ``$HYPERLOOM_MN_PROFILE_TRACE_DIR`` =
+        ``/wekafs/hyperloom/profile-traces/<rayjob>/torch_trace`` at
+        provisioning time. Sglang server's ``SGLANG_TORCH_PROFILER_DIR``
+        is pinned to this base on first launch (see
+        ``multi_node/scripts/launch_multinode.py``), so all profile
+        rounds write trace.json.gz files into a single shared dir.
 
-            /wekafs/hyperloom/profile-traces/
-              <rayjob_id>/
-                <round_id>/
-                  torch_trace/
-                    *.trace.json.gz
+        The ``__call__`` mtime gate (records ``task_started_unix`` and
+        filters trace files newer than that) is what isolates the
+        current round's traces from earlier rounds' leftovers.
 
-        ``round_id`` is the orchestrator task id (already unique per
-        round and stable across the magpie spawn → trace consumption
-        boundary). ``rayjob_id`` is taken from
-        ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` (which ``cli.py`` exports as
-        ``/wekafs/hyperloom/profile-traces/<rayjob>/torch_trace`` on
-        provisioning) by stripping the trailing ``torch_trace`` segment.
-        Falls back to ``<rayjob>=default`` if the env is missing so the
-        executor still produces a usable path rather than crashing.
+        Why not round-scoped subdirs anymore: the multi_node restart
+        path now resumes a running launch (cli.py's
+        ``MULTI_NODE_RESTART_RESUME_RUNNING``), so SGLANG_TORCH_PROFILER_DIR
+        never gets re-injected per round — only the first sglang launch
+        sees that env. A single shared base + mtime gate is the simplest
+        fix that keeps resume's 14-min cold-start saving intact.
+
+        Falls back to ``/wekafs/hyperloom/profile-traces/default/torch_trace``
+        if HYPERLOOM_MN_PROFILE_TRACE_DIR is missing so the executor still
+        produces a usable path rather than crashing.
         """
         from ._multi_node_env import is_multi_node
         if not is_multi_node():
@@ -130,15 +144,8 @@ class ProfileExecutor(BaselineExecutor):
             "HYPERLOOM_MN_PROFILE_TRACE_DIR", ""
         ).strip()
         if provisioned:
-            base = Path(provisioned)
-            if base.name == "torch_trace":
-                rayjob_root = base.parent
-            else:
-                rayjob_root = base
-        else:
-            rayjob_root = Path("/wekafs/hyperloom/profile-traces/default")
-        round_id = str(getattr(ctx.task, "task_id", "") or "round").strip() or "round"
-        return str(rayjob_root / round_id / "torch_trace")
+            return provisioned
+        return "/wekafs/hyperloom/profile-traces/default/torch_trace"
 
     async def __call__(self, ctx) -> dict[str, Any]:
         # Override action label so per-task output lands under runs/profile/
@@ -154,6 +161,16 @@ class ProfileExecutor(BaselineExecutor):
                 extra = ctx.extra
             else:
                 extra["workspace"] = str(output_dir)
+
+        # Mtime gate for the multi-node shared-trace-dir layout. Captured
+        # BEFORE super().__call__ kicks off the magpie subprocess so any
+        # trace.json.gz written by this round's /start_profile request is
+        # newer than this timestamp. Previous rounds' traces (which live
+        # in the same wekafs base dir under the resume path) stay below
+        # this watermark and are filtered out. See
+        # ``_resolve_mn_round_trace_root`` for why we share a single base.
+        import time as _time
+        task_started_unix = _time.time()
 
         # Multi-node only: pre-restart the inference server with this
         # round's profiler dir so sglang launches with
@@ -217,17 +234,38 @@ class ProfileExecutor(BaselineExecutor):
         # workspace/torch_trace branch below.
         workspace_str = result.get("workspace")
         if round_trace_root:
-            # Multi-node branch: torch traces land at the round-scoped
-            # wekafs path the helper restarted sglang with. main's
-            # `_candidate_trace_dirs` is workspace-local, so it never
-            # matches in multi-node — handle it explicitly here.
+            # Multi-node branch: torch traces land at the SHARED wekafs
+            # base dir that sglang's ``SGLANG_TORCH_PROFILER_DIR`` was
+            # pinned to on first launch (see
+            # ``_resolve_mn_round_trace_root`` for design rationale).
+            # main's ``_candidate_trace_dirs`` is workspace-local, so it
+            # never matches in multi-node — handle it explicitly here.
+            #
+            # Mtime gate: every profile round writes into the same base
+            # dir under the resume path, so we filter to files created
+            # at-or-after this round's ``task_started_unix``. Without
+            # this, the executor would always pick up the FIRST round's
+            # stale trace.
             trace_dir = Path(round_trace_root)
             if trace_dir.is_dir():
-                trace_files = sorted(trace_dir.glob("*.trace.json.gz"))
+                all_files = sorted(trace_dir.glob("*.trace.json.gz"))
+                trace_files = [
+                    p for p in all_files
+                    if _safe_mtime(p) >= task_started_unix
+                ]
                 result["trace_dir"] = str(trace_dir)
                 result["trace_files"] = [str(p) for p in trace_files]
                 if trace_files:
                     result["main_trace_path"] = str(trace_files[0])
+                elif all_files:
+                    log.warning(
+                        "profile_executor: multi-node trace dir %s has "
+                        "%d historical trace(s) but none with mtime >= "
+                        "%.0f (this round's start); sglang may have "
+                        "skipped /start_profile or the trace flush is "
+                        "lagging", trace_dir, len(all_files),
+                        task_started_unix,
+                    )
                 else:
                     log.warning(
                         "profile_executor: multi-node trace dir %s exists "
