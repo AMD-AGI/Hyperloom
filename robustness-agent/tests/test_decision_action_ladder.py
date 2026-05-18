@@ -244,3 +244,108 @@ async def test_rca_provider_failure_does_not_break_ladder():
     )
     assert out.findings[0].rca_text == ""
     assert any(i.type is IntentType.ALERT for i in out.intents)
+
+
+# ---------------------------------------------------------------------------
+# gpu_memory_leaked — Change B contract
+# ---------------------------------------------------------------------------
+
+def _gpu_leak_symptom(*, summary: str = "all 4 GPUs full, no owner") -> Symptom:
+    return Symptom(
+        name="gpu_memory_leaked",
+        severity=SymptomSeverity.HIGH,
+        summary=summary,
+        evidence={
+            "consecutive_hits": 2,
+            "gpu_count": 4,
+            "per_gpu": [{"gpu_id": i, "free_mb": 108.0} for i in range(4)],
+            "owner_patterns": ["EngineCore", "Magpie"],
+        },
+        subject={},  # session-wide
+        source="local",
+        suggestion="delegate(recover, params={force_gpu_cleanup: true})",
+    )
+
+
+async def test_gpu_memory_leaked_emits_alert_escalate_and_delegate():
+    ladder = ActionLadder()
+    out = await ladder.decide(
+        [_gpu_leak_symptom()], tick_index=7, now_unix=1.0,
+    )
+    types = [i.type for i in out.intents]
+    assert types == [
+        IntentType.ALERT,
+        IntentType.ESCALATE_STRATEGY_CHANGE,
+        IntentType.DELEGATE,
+    ]
+    alert = out.intents[0]
+    assert alert.payload["severity"] == "high"
+    assert "gpu_memory_leaked" in alert.payload["summary"] or alert.payload.get("detail", {}).get("symptom") == "gpu_memory_leaked"
+
+    escalate = out.intents[1]
+    assert escalate.payload["reason"] == "gpu_memory_leaked"
+    assert escalate.payload["severity"] == "high"
+    assert "recover" in escalate.payload["next_action_hint"]
+    assert "report" in escalate.payload["next_action_hint"]
+
+    delegate = out.intents[2]
+    assert delegate.payload["action_name"] == "recover"
+    assert delegate.payload["params"]["force_gpu_cleanup"] is True
+    assert delegate.payload["params"]["reason"] == "gpu_memory_leaked"
+    assert delegate.payload["params"]["evidence"]["consecutive_hits"] == 2
+    # tick-indexed idempotency_key per design.
+    assert delegate.payload["idempotency_key"] == "recover-gpu-leak-tick-7"
+
+    # The Finding mirrors all three intent envelopes for the audit log.
+    assert out.findings and out.findings[0].symptom_name == "gpu_memory_leaked"
+    finding_types = [i["intent_type"] for i in out.findings[0].intents]
+    assert "alert" in finding_types
+    assert "escalate_strategy_change" in finding_types
+    assert "delegate" in finding_types
+
+
+async def test_gpu_memory_leaked_does_not_emit_prune_branch():
+    """Per design decision (no_prune_only_escalate)."""
+    ladder = ActionLadder()
+    out = await ladder.decide(
+        [_gpu_leak_symptom()], tick_index=0, now_unix=1.0,
+    )
+    types = [i.type for i in out.intents]
+    assert IntentType.PRUNE_BRANCH not in types
+
+
+async def test_gpu_memory_leaked_cooldown_dedups_within_window():
+    """Same dedup_key suppressed within ``cooldown_ticks``."""
+    ladder = ActionLadder(config=ActionLadderConfig(cooldown_ticks=5))
+    first = await ladder.decide(
+        [_gpu_leak_symptom()], tick_index=0, now_unix=1.0,
+    )
+    second = await ladder.decide(
+        [_gpu_leak_symptom()], tick_index=1, now_unix=2.0,
+    )
+    # First tick fires the full trio.
+    first_types = [i.type for i in first.intents]
+    assert IntentType.DELEGATE in first_types
+    # Second tick is in the cooldown window: only heartbeat falls through.
+    second_types = [i.type for i in second.intents]
+    assert IntentType.DELEGATE not in second_types
+    assert IntentType.ALERT not in second_types
+    assert IntentType.ESCALATE_STRATEGY_CHANGE not in second_types
+    assert any(
+        i.payload.get("topic") == "heartbeat" for i in second.intents
+    )
+
+
+async def test_gpu_memory_leaked_idempotency_key_advances_with_tick():
+    """After cooldown elapses, the next emit carries a fresh tick-indexed key."""
+    ladder = ActionLadder(config=ActionLadderConfig(cooldown_ticks=3))
+    first = await ladder.decide(
+        [_gpu_leak_symptom()], tick_index=0, now_unix=1.0,
+    )
+    second = await ladder.decide(
+        [_gpu_leak_symptom()], tick_index=5, now_unix=2.0,
+    )
+    first_delegate = next(i for i in first.intents if i.type is IntentType.DELEGATE)
+    second_delegate = next(i for i in second.intents if i.type is IntentType.DELEGATE)
+    assert first_delegate.payload["idempotency_key"] == "recover-gpu-leak-tick-0"
+    assert second_delegate.payload["idempotency_key"] == "recover-gpu-leak-tick-5"
