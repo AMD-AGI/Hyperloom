@@ -45,7 +45,9 @@ from inference_optimizer.orchestrator.backends import (
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
-from inference_optimizer.orchestrator.policy import PolicyDenied
+from inference_optimizer.orchestrator.agent_role import default_role_registry
+from inference_optimizer.orchestrator.policy import PolicyDenied, PolicyGate
+from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 from inference_optimizer.session_paths import target_baseline_json
 
@@ -453,3 +455,28 @@ def test_select_kernels_gate_clears_run_opt_request_when_cache_fresh(session_dir
         "candidates_path": "/tmp/cands.json",
     }
     assert coord._sequence_denial_for_request("kernel", "run_optimization") is None
+
+
+def test_closing_phase_denies_non_report_proposals():
+    state = SharedState(closing_phase=True)
+    gate = PolicyGate(
+        role_registry=default_role_registry(),
+        shared_state=state,
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PROPOSE_ACTION,
+                payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
+            ),
+        )
+    assert exc.value.rule == "closing_phase_only_report"
+
+    gate.validate_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.PROPOSE_ACTION,
+            payload={"action_name": "report", "predicted_gain_pct": 0.0},
+        ),
+    )
