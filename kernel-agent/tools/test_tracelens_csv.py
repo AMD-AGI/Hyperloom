@@ -16,6 +16,7 @@ The production TraceLens interface now consumes only ``analysis.md``. Legacy
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -1698,6 +1699,264 @@ def test_parse_launcher_path_returns_none_for_empty_and_garbage():
     assert path == "just/a/path.py"
     assert line is None
     assert func is None
+
+
+# ---------------------------------------------------------------------------
+# _resolve_launcher_to_abs_source — TraceLens launcher path → absolute file.
+#
+# torch.profiler strips ``sys.path`` prefixes from ``__file__`` before
+# writing Python frame names, so TraceLens forwards strings like
+# ``aiter/ops/rmsnorm.py(62): rmsnorm2d_fwd``. Without resolution the
+# patchability gate rejects every row as ``source not under a reusable
+# framework root``. These tests pin the three production-image
+# resolution paths (importlib spec, env override, hardcoded fallback)
+# plus the placeholder and absolute-path no-op cases.
+# ---------------------------------------------------------------------------
+
+
+def _seed_pkg(tmp_path, pkg: str, relpath: str, funcs: tuple[str, ...] = ()) -> Path:
+    """Create ``<tmp_path>/<pkg>/<relpath>`` and return the absolute file.
+
+    ``funcs`` lets a test declare top-level ``def`` names that resolver
+    AST validation expects to find. Empty by default for non-Python
+    fixtures (``.cu`` etc.) where AST is intentionally skipped.
+    """
+    target = tmp_path / pkg / relpath
+    target.parent.mkdir(parents=True, exist_ok=True)
+    body = ["# stub for resolver tests\n"]
+    for fn in funcs:
+        body.append(f"def {fn}(*args, **kwargs):\n    pass\n")
+    target.write_text("".join(body), encoding="utf-8")
+    return target
+
+
+def test_resolve_launcher_via_env_override(tmp_path, monkeypatch):
+    """``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` is the highest-priority
+    resolver source. Operator can pre-stage any framework root layout
+    without needing the package to be importable in the current
+    interpreter."""
+    target = _seed_pkg(
+        tmp_path, "aiter", "ops/rmsnorm.py", funcs=("rmsnorm2d_fwd",),
+    )
+    monkeypatch.setenv(
+        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
+        f"aiter={tmp_path}",
+    )
+
+    resolved = tlr._resolve_launcher_to_abs_source(
+        "aiter/ops/rmsnorm.py(62): rmsnorm2d_fwd",
+    )
+    assert resolved is not None
+    abs_path, line, func = resolved
+    assert abs_path == str(target)
+    assert line == 62
+    assert func == "rmsnorm2d_fwd"
+
+
+def test_resolve_launcher_via_importlib_spec(monkeypatch):
+    """When no env override is set, ``importlib.util.find_spec`` walks
+    the live ``sys.path`` and returns the absolute origin. This is the
+    path that should fire on a regular production pod (aiter / sglang
+    are editable installs at /sgl-workspace, vllm sits under
+    dist-packages).
+
+    ``unittest`` is shipped with every CPython interpreter (no
+    production deps needed), and ``unittest/case.py`` always defines
+    the ``expectedFailure`` decorator — perfect for pinning the
+    find_spec branch AND the AST-symbol guard without depending on
+    aiter/sglang/vllm being installed in the test env."""
+    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
+    resolved = tlr._resolve_launcher_to_abs_source(
+        "unittest/case.py(1): expectedFailure",
+    )
+    assert resolved is not None
+    abs_path, line, func = resolved
+    assert os.path.isabs(abs_path) and abs_path.endswith("unittest/case.py")
+    assert line == 1
+    assert func == "expectedFailure"
+
+
+def test_resolve_launcher_via_hardcoded_fallback(tmp_path, monkeypatch):
+    """When the package isn't importable but a hardcoded fallback root
+    holds the file on disk, the resolver still succeeds. This is the
+    safety net for static-analysis paths that parse CSVs without
+    actually importing ``aiter`` / ``sglang`` / ``vllm``."""
+    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
+
+    # Seed a fake aiter checkout under tmp_path and force the fallback
+    # table to point at it. The package is NOT made importable, so the
+    # ``find_spec`` branch must miss and the resolver must fall through
+    # to the hardcoded table.
+    _seed_pkg(
+        tmp_path,
+        "aiter_pinned_xfx",
+        "ops/rmsnorm.py",
+        funcs=("rmsnorm2d_fwd_with_add",),
+    )
+    monkeypatch.setattr(
+        tlr,
+        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
+        {"aiter_pinned_xfx": (str(tmp_path),)},
+    )
+    # Force find_spec to return None so the test exercises the
+    # fallback table even if some operator pre-installed a real
+    # ``aiter_pinned_xfx`` package.
+    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
+
+    resolved = tlr._resolve_launcher_to_abs_source(
+        "aiter_pinned_xfx/ops/rmsnorm.py(76): rmsnorm2d_fwd_with_add",
+    )
+    assert resolved is not None
+    abs_path, line, func = resolved
+    assert abs_path == str(tmp_path / "aiter_pinned_xfx" / "ops" / "rmsnorm.py")
+    assert line == 76
+    assert func == "rmsnorm2d_fwd_with_add"
+
+
+def test_resolve_launcher_returns_none_for_absolute_path():
+    """Already-absolute launcher paths are returned as None so the
+    caller preserves the original string verbatim — there's nothing
+    to rewrite, and pretending we resolved would silently swallow
+    paths the operator deliberately set to a non-package location."""
+    assert (
+        tlr._resolve_launcher_to_abs_source(
+            "/sgl-workspace/aiter/aiter/ops/rmsnorm.py(62): fn",
+        )
+        is None
+    )
+
+
+def test_resolve_launcher_returns_none_for_placeholders_and_misses():
+    """Placeholders, empty strings, and unresolvable packages must
+    collapse to None so the patchability gate emits its normal
+    ``source file not resolved`` / ``source not under a reusable
+    framework root`` rejection (vs. a fabricated path)."""
+    assert tlr._resolve_launcher_to_abs_source("") is None
+    assert tlr._resolve_launcher_to_abs_source("—") is None
+    # Package doesn't exist anywhere → resolver gives up; caller falls
+    # back to the verbatim launcher string.
+    assert (
+        tlr._resolve_launcher_to_abs_source(
+            "definitely_not_a_real_pkg_8x9z/foo.py(1): fn",
+        )
+        is None
+    )
+
+
+def test_resolve_launcher_rejects_when_function_not_in_file(tmp_path, monkeypatch):
+    """AST validation guard: when the resolved ``.py`` exists but does
+    NOT define the launcher's function, the resolver MUST refuse the
+    path. This catches two real failure modes — ``sys.path`` shadowing
+    (find_spec returns the wrong same-named package) and operator
+    misconfiguration of ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` pointing
+    at a stub/snapshot tree. Without this check GEAK would receive a
+    real-on-disk source path that doesn't host the kernel."""
+    # Seed a real .py file under tmp_path but DO NOT define
+    # rmsnorm2d_fwd in it.
+    target = tmp_path / "aiter_shadowed_xyz" / "ops" / "rmsnorm.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "def some_other_function():\n    pass\n", encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
+        f"aiter_shadowed_xyz={tmp_path}",
+    )
+    # No fallback paths should rescue this — we want to assert the
+    # bad-symbol path is rejected outright.
+    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
+    monkeypatch.setattr(tlr, "_FRAMEWORK_PKG_FALLBACK_ROOTS", {})
+
+    assert (
+        tlr._resolve_launcher_to_abs_source(
+            "aiter_shadowed_xyz/ops/rmsnorm.py(62): rmsnorm2d_fwd",
+        )
+        is None
+    )
+
+
+def test_resolve_launcher_ast_check_falls_through_to_next_root(tmp_path, monkeypatch):
+    """When the first candidate root holds a stub that fails AST
+    validation, the resolver MUST keep walking the candidate list
+    instead of short-circuiting — otherwise a single bad spec
+    (shadowed pkg / stale wheel) permanently masks the real source on
+    the fallback path."""
+    bad_root = tmp_path / "bad"
+    good_root = tmp_path / "good"
+    bad_target = bad_root / "aiter_pinned_qrs" / "ops" / "rmsnorm.py"
+    bad_target.parent.mkdir(parents=True, exist_ok=True)
+    bad_target.write_text("def not_it():\n    pass\n", encoding="utf-8")
+    good_target = good_root / "aiter_pinned_qrs" / "ops" / "rmsnorm.py"
+    good_target.parent.mkdir(parents=True, exist_ok=True)
+    good_target.write_text(
+        "def rmsnorm2d_fwd(x):\n    return x\n", encoding="utf-8",
+    )
+
+    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
+    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
+    monkeypatch.setattr(
+        tlr,
+        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
+        {"aiter_pinned_qrs": (str(bad_root), str(good_root))},
+    )
+
+    resolved = tlr._resolve_launcher_to_abs_source(
+        "aiter_pinned_qrs/ops/rmsnorm.py(76): rmsnorm2d_fwd",
+    )
+    assert resolved is not None
+    abs_path, line, func = resolved
+    assert abs_path == str(good_target)
+    assert line == 76
+    assert func == "rmsnorm2d_fwd"
+
+
+def test_resolve_launcher_skips_ast_check_for_non_py_sources(tmp_path, monkeypatch):
+    """AST validation only applies to Python sources. HIP/CUDA refs
+    (``<path>#L<line>`` shape) and bare ``.cu`` paths must pass
+    existence-only validation since ``ast.parse`` cannot walk them.
+    Pin this so we don't accidentally regress HIP kernel resolution
+    when the gate hardens."""
+    target = tmp_path / "aiter_hipxyz" / "csrc" / "rms_hip.cu"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("// device code\n", encoding="utf-8")
+    monkeypatch.setenv(
+        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
+        f"aiter_hipxyz={tmp_path}",
+    )
+
+    resolved = tlr._resolve_launcher_to_abs_source(
+        "aiter_hipxyz/csrc/rms_hip.cu#L42",
+    )
+    assert resolved is not None
+    abs_path, line, func = resolved
+    assert abs_path == str(target)
+    assert line == 42
+    assert func is None
+
+
+def test_resolve_launcher_skips_unparseable_env_entries(tmp_path, monkeypatch):
+    """Malformed ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` entries are
+    silently skipped — a single bad export must not poison the whole
+    resolver."""
+    target = _seed_pkg(
+        tmp_path,
+        "vllm",
+        "model_executor/models/qwen.py",
+        funcs=("forward",),
+    )
+    monkeypatch.setenv(
+        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
+        # First entry has no '=' (skipped); second is malformed (no key);
+        # third is the only valid one and must win.
+        f"junk_without_equals,=/just/value,vllm={tmp_path}",
+    )
+
+    resolved = tlr._resolve_launcher_to_abs_source(
+        "vllm/model_executor/models/qwen.py(10): forward",
+    )
+    assert resolved is not None
+    abs_path, _, _ = resolved
+    assert abs_path == str(target)
 
 
 def test_function_line_from_ast_finds_def_lineno(tmp_path):
