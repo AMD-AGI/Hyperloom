@@ -12,15 +12,425 @@ The schema each collector matches is defined in :mod:`.schema`.
 
 from __future__ import annotations
 
+import ast
 import glob
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Invocation-record env filter (allowlist + secret-pattern denylist)
+# ---------------------------------------------------------------------------
+# We only surface env vars that are known to influence the launched
+# benchmark workload (knobs an operator would reasonably want to replay).
+# Anything outside the allowlist gets dropped — keeps secrets, host
+# fingerprints, and shell aliases out of the breakdown JSON entirely.
+_ENV_ALLOWLIST_EXACT: frozenset[str] = frozenset({
+    "TP", "FRAMEWORK", "GPU_TYPE", "PRECISION", "CONC", "ISL", "OSL",
+    "MAX_MODEL_LEN", "USER_DATA_PATH", "MODEL_PATH", "MODEL_NAME",
+})
+_ENV_ALLOWLIST_PREFIXES: tuple[str, ...] = (
+    "HYPERLOOM_", "VLLM_", "SGLANG_", "RAY_", "HSA_", "ROCM_", "TORCH_", "HF_",
+)
+# Defense-in-depth: even if a future operator adds a credential-shaped
+# key under one of the allowlisted prefixes (e.g. ``HF_API_TOKEN``) we
+# still strip it before emit. Match is case-insensitive; substring match
+# is intentional (catches ``MY_API_KEY``, ``X_PASSWORD_FILE`` etc.).
+_ENV_DENY_PATTERN = re.compile(
+    r"(KEY|TOKEN|SECRET|PASSWORD|AUTH|CREDENTIAL|COOKIE|API_KEY)",
+    re.IGNORECASE,
+)
+
+
+def _filter_envs(envs: dict[str, Any] | None) -> dict[str, str]:
+    """Apply the allowlist + secret denylist to a raw env dict.
+
+    Always returns a fresh ``dict[str, str]`` (values stringified, None
+    becomes ``""``). Non-string keys are dropped silently.
+    """
+    if not isinstance(envs, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in envs.items():
+        if not isinstance(k, str):
+            continue
+        keep = (k in _ENV_ALLOWLIST_EXACT) or any(
+            k.startswith(p) for p in _ENV_ALLOWLIST_PREFIXES
+        )
+        if not keep:
+            continue
+        if _ENV_DENY_PATTERN.search(k):
+            continue
+        out[k] = "" if v is None else str(v)
+    return out
+
+
+# --- framework-args extraction patterns -----------------------------------
+# Pass-0 ("log_non_default_args"): vllm (and recent sglang) print a single
+# line like ``non-default args: {'model': '/path', 'tensor_parallel_size':
+# 8, ...}`` right after argv parsing — it captures the *resolved* parsed
+# arg dict (post-CLI, post-env-override) and is therefore the most
+# authoritative cmdline-equivalent the framework itself emits. We match
+# loosely (``re.search``) so any leading ``(APIServer pid=...) INFO ...
+# [utils.py:233]`` log prefix is allowed; the dict literal must end the
+# line so a greedy ``\{.+\}`` is safe.
+_FRAMEWORK_ARGS_NON_DEFAULT_RE = re.compile(
+    r"non[-_]default args:\s*(\{.+\})\s*$",
+    re.IGNORECASE,
+)
+# Pass-1 ("log_args_line"): the runner echoes the parsed launch arguments
+# under one of these stable headers — most reliable signal because it
+# survives any number of preceding INFO log lines.
+_FRAMEWORK_ARGS_HEADER_RE = re.compile(
+    r"^[^|]*?Server arguments?:\s*(.+)$",
+    re.IGNORECASE,
+)
+_FRAMEWORK_ARGS_NAMESPACE_RE = re.compile(
+    r"^[^|]*?Args:\s*Namespace\((.+)\)\s*$",
+    re.IGNORECASE,
+)
+_FRAMEWORK_ARGS_LAUNCH_RE = re.compile(
+    r"^[^|]*?Launch(?:ing)? server with:\s*(.+)$",
+    re.IGNORECASE,
+)
+# Pass-2 ("log_python_cmd"): a literal ``python ... vllm/sglang ...``
+# command somewhere in server.log. We accept it after stripping a
+# leading ``(APIServer pid=...) INFO 05-12 ... [utils.py:299]``-style
+# log prefix that vllm/sglang emit.
+_LOG_PREFIX_RE = re.compile(
+    r"^\s*(?:\([^)]*\)\s+)?(?:INFO|WARN|WARNING|ERROR|DEBUG|TRACE)\s+"
+    r"\d[\d:\-\s]*\[[^\]]+\]\s*",
+    re.IGNORECASE,
+)
+_LOG_TIMESTAMP_RE = re.compile(
+    r"^\s*\[?\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}[^\]]*\]?\s*",
+)
+_PYTHON_CMD_PREFIXES: tuple[str, ...] = (
+    "python", "python3", "vllm", "sglang.launch_server",
+    "inference-optimizer", "ray",
+)
+# Server log size cap — pathological logs (multi-MB) get truncated so
+# the per-line scan stays bounded. 256 KB easily covers any startup
+# banner that echoes the launch line.
+_SERVER_LOG_MAX_BYTES = 256 * 1024
+
+
+def _strip_log_prefix(line: str) -> str:
+    """Strip a leading ``[ts] LEVEL [src.py:NN]`` style prefix from a log line.
+
+    The vllm/sglang server echoes the launch command on its own line
+    after ~50 INFO log lines, each shaped like
+    ``(APIServer pid=1757439) INFO 05-12 14:21:14 [utils.py:299] ...``.
+    To match the literal command we strip both the parenthetical
+    process tag and the level/timestamp/source-frame prefix, leaving
+    just the trailing payload.
+    """
+    s = line
+    s = _LOG_PREFIX_RE.sub("", s)
+    s = _LOG_TIMESTAMP_RE.sub("", s)
+    return s.strip()
+
+
+def _starts_with_python_prefix(text: str) -> bool:
+    head = text.lstrip()
+    for prefix in _PYTHON_CMD_PREFIXES:
+        if head.startswith(prefix):
+            tail = head[len(prefix):]
+            if not tail or tail[0] in (" ", "\t", "-", "."):
+                return True
+    return False
+
+
+def _load_yaml_dict_safe(config_yaml: Path) -> dict | None:
+    """Parse ``config_yaml`` and return the top-level dict, or ``None`` on
+    any miss / parse failure / non-dict root. Never raises.
+
+    Shared by both yaml-based passes (Pass 3 ``yaml_cmd`` and Pass 4
+    ``yaml_benchmark``) so the file is read + parsed at most once per
+    ``_extract_framework_args`` invocation.
+    """
+    try:
+        import yaml  # type: ignore[import-not-found]
+    except ImportError:
+        log.debug("PyYAML unavailable; skipping yaml framework_args fallback")
+        return None
+    try:
+        text = config_yaml.read_text(encoding="utf-8", errors="replace")
+        data = yaml.safe_load(text)
+    except (OSError, yaml.YAMLError) as exc:
+        log.debug("failed to parse %s for framework_args: %r", config_yaml, exc)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _yaml_cmd_from_dict(data: dict) -> str:
+    """Look for a ``cmd`` / ``command`` / ``launch`` field in a parsed yaml.
+
+    Reads from these locations (first-non-empty wins):
+      * top-level ``cmd`` / ``command`` / ``launch``
+      * nested ``benchmark.cmd`` / ``benchmark.command``
+    Returns ``""`` on any miss.
+    """
+    for key in ("cmd", "command", "launch"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    bench = data.get("benchmark")
+    if isinstance(bench, dict):
+        for key in ("cmd", "command"):
+            val = bench.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return ""
+
+
+def _yaml_benchmark_synthesis(data: dict) -> str:
+    """Synthesize a readable arg string from a magpie ``benchmark.*`` dict.
+
+    Magpie-style materialized configs don't carry a literal ``cmd:`` field
+    — the launcher assembles the cmdline at runtime from structured
+    ``benchmark.{framework, model, precision, tp, gpu_selection, envs}``.
+    When neither server.log nor a yaml ``cmd:`` field is available, we
+    stringify those structured fields so the operator at least sees which
+    framework + model + precision + tp + envs were configured. The
+    ``yaml_benchmark`` source label flags downstream consumers that this
+    is a synthesized representation, not a literal cmdline.
+
+    Returns ``""`` unless both ``benchmark.framework`` AND ``benchmark.model``
+    are non-empty (those two are the minimum needed for the synthesis to
+    convey anything useful).
+    """
+    bench = data.get("benchmark")
+    if not isinstance(bench, dict):
+        return ""
+    fw = bench.get("framework")
+    model = bench.get("model")
+    fw_ok = isinstance(fw, str) and fw.strip()
+    model_ok = isinstance(model, str) and model.strip()
+    if not fw_ok or not model_ok:
+        return ""
+    parts: list[str] = [f"framework={fw.strip()}", f"model={model.strip()}"]
+    prec = bench.get("precision")
+    if prec is not None and str(prec).strip():
+        parts.append(f"precision={str(prec).strip()}")
+    tp = bench.get("tp")
+    if tp is not None and str(tp).strip():
+        parts.append(f"tp={str(tp).strip()}")
+    gpu_sel = bench.get("gpu_selection")
+    if isinstance(gpu_sel, dict):
+        for key in ("gpu_type", "gpu", "type"):
+            v = gpu_sel.get(key)
+            if v is not None and str(v).strip():
+                parts.append(f"gpu={str(v).strip()}")
+                break
+    elif isinstance(gpu_sel, str) and gpu_sel.strip():
+        parts.append(f"gpu={gpu_sel.strip()}")
+    envs = bench.get("envs")
+    if isinstance(envs, dict) and envs:
+        env_pairs = " ".join(
+            f"{k}={v}" for k, v in envs.items() if isinstance(k, str)
+        )
+        if env_pairs:
+            parts.append(f"envs=[{env_pairs}]")
+    return " ".join(parts)
+
+
+def _extract_framework_args(
+    server_log: Path | None,
+    config_yaml: Path | None = None,
+) -> tuple[str, str]:
+    """Best-effort extract the launch command for a benchmark variant.
+
+    Returns ``(args_string, source)`` where ``source`` documents lineage:
+      * ``"log_non_default_args"`` — found a ``non-default args: {...}``
+        line (vllm / recent sglang echo of the parsed argv dict).
+        Highest priority because it's emitted *by the framework itself*
+        after argv parsing, so it captures the actually-used values.
+      * ``"log_args_line"`` — found a line like ``Server arguments: ...``
+        or ``Args: Namespace(...)`` in server.log
+      * ``"log_python_cmd"`` — found a line starting with ``python``,
+        ``python3``, ``vllm``, ``sglang.launch_server`` etc. in server.log
+      * ``"yaml_cmd"`` — fell back to ``cmd:`` / ``command:`` / ``launch:``
+        in the materialized config yaml
+      * ``"yaml_benchmark"`` — synthesized from magpie ``benchmark.*``
+        structured fields (framework / model / precision / tp / envs).
+        NOT a literal cmdline — flagged via the source label so consumers
+        can treat it differently from log-extracted values.
+      * ``"unknown"`` — none of the above; ``args_string`` is empty
+    Never raises. Caller decides whether to surface a warning when source
+    is ``unknown``.
+    """
+    chunk: str = ""
+    if server_log is not None:
+        try:
+            if server_log.exists():
+                with server_log.open("r", encoding="utf-8", errors="replace") as fh:
+                    chunk = fh.read(_SERVER_LOG_MAX_BYTES)
+        except OSError:
+            chunk = ""
+
+    lines = chunk.splitlines() if chunk else []
+
+    # Pass 0: vllm / sglang ``non-default args: {...}`` echo. The dict
+    # is the framework's own post-parse view of argv, so it beats any of
+    # the literal-cmdline passes when present. Parse via ast.literal_eval
+    # — if the eval fails (malformed dict, embedded objects), we treat
+    # the line as a miss and continue to Pass 1 rather than regex-hacking
+    # a half-parse (anti-hallucination invariant).
+    for line in lines:
+        m = _FRAMEWORK_ARGS_NON_DEFAULT_RE.search(line)
+        if not m:
+            continue
+        dict_text = m.group(1)
+        try:
+            parsed = ast.literal_eval(dict_text)
+        except (ValueError, SyntaxError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        # Sorted-by-key, repr() values — stable across runs and keeps
+        # path strings quoted so an operator can copy-paste verbatim.
+        formatted = " ".join(
+            f"{k}={parsed[k]!r}" for k in sorted(parsed.keys(), key=str)
+        )
+        return formatted, "log_non_default_args"
+
+    # Pass 1: stable launch-summary headers. These are emitted by the
+    # framework itself once it's parsed argv, so they survive any
+    # preceding log noise and are the most authoritative when present.
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m = _FRAMEWORK_ARGS_HEADER_RE.match(stripped)
+        if m:
+            return m.group(1).strip(), "log_args_line"
+        m = _FRAMEWORK_ARGS_LAUNCH_RE.match(stripped)
+        if m:
+            return m.group(1).strip(), "log_args_line"
+        m = _FRAMEWORK_ARGS_NAMESPACE_RE.match(stripped)
+        if m:
+            return f"Namespace({m.group(1).strip()})", "log_args_line"
+
+    # Pass 2: a literal python/vllm/sglang command somewhere in the log.
+    # Strip the noisy ``(...) INFO 05-12 14:21:14 [utils.py:299]`` prefix
+    # before testing — the command itself starts on the same line.
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _starts_with_python_prefix(stripped):
+            return stripped, "log_python_cmd"
+        cleaned = _strip_log_prefix(stripped)
+        if cleaned and _starts_with_python_prefix(cleaned):
+            return cleaned, "log_python_cmd"
+
+    # Pass 3 + Pass 4: yaml fallback. Load the config yaml at most once,
+    # then prefer a literal ``cmd:`` field (Pass 3) over the magpie
+    # ``benchmark.*`` synthesis (Pass 4) — a literal cmdline is always
+    # more authoritative than a structured-config reconstruction.
+    if config_yaml is not None:
+        try:
+            yaml_exists = config_yaml.exists()
+        except OSError:
+            yaml_exists = False
+        if yaml_exists:
+            data = _load_yaml_dict_safe(config_yaml)
+            if isinstance(data, dict):
+                cmd = _yaml_cmd_from_dict(data)
+                if cmd:
+                    return cmd, "yaml_cmd"
+                synth = _yaml_benchmark_synthesis(data)
+                if synth:
+                    return synth, "yaml_benchmark"
+
+    return "", "unknown"
+
+
+def _read_invocation_envs(config_path: Path | None) -> dict[str, str]:
+    """Read ``benchmark.envs`` from a ``baseline_config.with_envs.yaml``
+    (or any sibling variant config) and return the allowlisted subset.
+
+    Falls back to the top-level ``envs:`` block for older config layouts
+    that didn't yet nest under ``benchmark:``. Returns ``{}`` on any
+    read / parse failure or if PyYAML is somehow missing — never raises.
+    """
+    if config_path is None:
+        return {}
+    try:
+        if not config_path.exists():
+            return {}
+    except OSError:
+        return {}
+    try:
+        import yaml
+    except ImportError:
+        log.debug("PyYAML unavailable; skipping invocation env extraction")
+        return {}
+    try:
+        text = config_path.read_text(encoding="utf-8", errors="replace")
+        data = yaml.safe_load(text)
+    except (OSError, yaml.YAMLError) as exc:
+        log.debug("failed to parse invocation config %s: %r", config_path, exc)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    bench = data.get("benchmark") if isinstance(data.get("benchmark"), dict) else {}
+    raw_envs = bench.get("envs") if isinstance(bench, dict) else None
+    if raw_envs is None:
+        raw_envs = data.get("envs")
+    return _filter_envs(raw_envs if isinstance(raw_envs, dict) else None)
+
+
+def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
+    """Resolve the container image for ``collect_session``.
+
+    Prefers the manifest field (written once at session start, captures
+    the spawn-time image even if the env later changes). Falls back to
+    the same env / mount-point chain the manifest helper uses, so V1
+    manifests (no ``image`` field) still surface a value when one of
+    the envs is set. Mirrors :func:`manifest._detect_image` but kept as
+    a separate function to avoid an import cycle.
+    """
+    manifest_image = manifest.get("image") if isinstance(manifest, dict) else None
+    if isinstance(manifest_image, str) and manifest_image.strip():
+        return manifest_image.strip()
+    for var in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
+        val = (os.environ.get(var) or "").strip()
+        if val:
+            return val
+    for marker in ("/etc/podinfo/image", "/etc/hyperloom-image"):
+        try:
+            p = Path(marker)
+            if p.exists():
+                txt = p.read_text(encoding="utf-8", errors="replace").strip()
+                if txt:
+                    return txt
+        except OSError:
+            continue
+    try:
+        cgroup = Path("/proc/1/cgroup")
+        if cgroup.exists():
+            for line in cgroup.read_text(encoding="utf-8", errors="replace").splitlines():
+                if "docker" not in line and "containerd" not in line:
+                    continue
+                m = re.search(r"([0-9a-f]{12,64})", line)
+                if m:
+                    return f"unknown@{m.group(1)[:12]}"
+    except OSError as exc:
+        # /proc/1/cgroup may be unreadable in restricted sandboxes,
+        # non-Linux hosts, or stripped-down containers. Best-effort
+        # source — fall through to None so consumers see an honest
+        # "image not detected" rather than a fabricated value.
+        log.debug("cgroup-based image detection failed: %r", exc)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +572,51 @@ def _find_benchmark_report(workspace: Path | None) -> Path | None:
     return candidates[0]
 
 
+def _resolve_under_session(
+    session_dir: Path,
+    raw: str | None,
+    anchors: tuple[str, ...] = ("runs", "kernel-agent", "kernel-agent-workspace"),
+) -> Path | None:
+    """Best-effort resolve a possibly-container-rooted path under ``session_dir``.
+
+    State-recorded paths frequently look like ``/workspace/runs/baseline/<sid>/``
+    because the orchestrator wrote them from inside a container, but the
+    breakdown is generated against a wekafs view where the same artefacts
+    live under ``<session_dir>/runs/baseline/<sid>/``.
+
+    Resolution order:
+
+    1. The raw path as-is (covers the development / test case where the
+       state-recorded path is already real).
+    2. For each anchor in ``anchors``, find the first occurrence of the
+       anchor in the raw path's parts and re-root that suffix at
+       ``session_dir``. The default anchors cover the three on-disk
+       conventions hyperloom uses (``runs/...``, ``kernel-agent/...``,
+       ``kernel-agent-workspace/...``).
+
+    Returns the first existing :class:`Path`, or ``None`` if nothing
+    resolves. Never raises — callers that care about the failure should
+    inspect the return value and append to ``warnings`` themselves.
+    """
+    if not raw:
+        return None
+    try:
+        p = Path(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if p.exists():
+        return p
+    for anchor in anchors:
+        try:
+            idx = p.parts.index(anchor)
+        except ValueError:
+            continue
+        candidate = session_dir.joinpath(*p.parts[idx:])
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
     cur = d
     for k in keys:
@@ -192,6 +647,11 @@ def collect_session(
             elapsed_min = (datetime.now(timezone.utc) - start).total_seconds() / 60.0
         except (ValueError, TypeError):
             pass
+    image = _detect_image_for_session(manifest)
+    if image is None:
+        warnings.append(
+            "image: not configured (set HYPERLOOM_IMAGE env var)"
+        )
     return {
         "session_id":       str(state.get("session_id") or manifest.get("session_id") or ""),
         "claw_session_id":  manifest.get("claw_session_id") or state.get("claw_session_id"),
@@ -202,6 +662,7 @@ def collect_session(
         "max_minutes":      int(state.get("max_minutes") or manifest.get("max_minutes") or 0),
         "elapsed_minutes":  round(elapsed_min, 2) if elapsed_min is not None else 0.0,
         "host":             str(manifest.get("host") or ""),
+        "image":            image,
         "code_revision":    str(manifest.get("code_revision") or ""),
         "pid":              int(manifest.get("pid") or 0),
         "session_dir":      str(session_dir),
@@ -245,11 +706,53 @@ def collect_baseline(
 ) -> dict[str, Any]:
     last_b = state.get("last_baseline") or {}
     workspace_str = last_b.get("workspace") or ""
-    workspace = Path(workspace_str) if workspace_str else None
+    # Re-root container-style paths (e.g. ``/workspace/runs/baseline/<sid>/``)
+    # under the actual on-disk session_dir so we can still read
+    # ``benchmark_report.json`` from a wekafs view. See ``_resolve_under_session``.
+    workspace = _resolve_under_session(session_dir, workspace_str)
+    if workspace_str and workspace is None:
+        warnings.append(
+            f"baseline workspace {workspace_str!r} does not resolve under {session_dir}; "
+            "ttft_mean_ms / e2el_mean_ms will be null."
+        )
     report_path = _find_benchmark_report(workspace) if workspace else None
     report = _load_json_safe(report_path, warnings) if report_path else None
 
     _, ttft, _tpot, e2el = _benchmark_report_metrics(report if isinstance(report, dict) else None)
+
+    # Symmetric to A2 (final.ttft validate_stack disk walk): when
+    # state.last_baseline.workspace doesn't resolve to a readable
+    # benchmark_report.json, but ``runs/baseline/<hash>/benchmark_*/
+    # benchmark_report.json`` exists on disk, use the most recent. Real
+    # production sessions (e.g. zgong's V2) hit this gap — wekafs view
+    # has the report file but the state-recorded workspace doesn't
+    # match the wekafs root.
+    ttft_source: str | None = "state_workspace" if ttft is not None else None
+    if ttft is None:
+        candidates = sorted(
+            (session_dir / "runs" / "baseline").glob(
+                "*/benchmark_*/benchmark_report.json"
+            ),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if candidates:
+            disk_report_path = candidates[0]
+            disk_report = _load_json_safe(disk_report_path, warnings) or {}
+            _, ttft_disk, _tpot, e2el_disk = _benchmark_report_metrics(disk_report)
+            if ttft_disk is not None:
+                ttft = ttft_disk
+                if e2el is None and e2el_disk is not None:
+                    e2el = e2el_disk
+                if report_path is None:
+                    report_path = disk_report_path
+                ttft_source = "runs_baseline_disk"
+                warnings.append(
+                    "baseline.ttft_mean_ms reconstructed from runs/baseline/ disk walk; "
+                    "state.last_baseline.workspace did not resolve."
+                )
+    if ttft_source is None:
+        ttft_source = "unavailable"
 
     attempts = state.get("baseline_attempts") or []
     history: list[dict[str, Any]] = []
@@ -266,22 +769,151 @@ def collect_baseline(
             "error_class":   a.get("error_class"),
         })
 
+    # Disk-walking fallback: state.baseline_attempts is empty in many
+    # production sessions even when multiple baseline runs left
+    # ``runs/baseline/<hash>/`` dirs behind. Reconstruct so dashboards
+    # don't show "0 baseline attempts" for sessions that obviously had
+    # several. Each entry is marked ``status="reconstructed"`` so it's
+    # visibly distinct from a state-recorded one.
+    if not history:
+        reconstructed = _reconstruct_baseline_attempts(session_dir, warnings)
+        if reconstructed:
+            history = reconstructed
+            warnings.append(
+                "baseline.attempts_history reconstructed from runs/baseline/ "
+                "(state.baseline_attempts was empty); detail fields are partial."
+            )
+
+    config_path_raw = state.get("baseline_config_path") or None
+    config_resolved = _resolve_under_session(session_dir, config_path_raw) if config_path_raw else None
+    server_log_path: Path | None = None
+    # Prefer the report we already located (state-resolved or disk-walked) so
+    # the invocation surfaces the same benchmark variant as ttft/e2el. Fall
+    # back to the resolved workspace on the off chance state still pointed
+    # at the right place but the report itself was unreadable.
+    if report_path is not None:
+        candidate_log = report_path.parent / "server.log"
+        if candidate_log.exists():
+            server_log_path = candidate_log
+    if server_log_path is None and workspace:
+        bench_dirs = sorted(
+            workspace.glob("benchmark_*/server.log"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if bench_dirs:
+            server_log_path = bench_dirs[0]
+
+    # If we disk-walked into a benchmark dir, the matching config yaml
+    # usually sits as a sibling (or one level up under <task>/). Prefer
+    # that over state.baseline_config_path when the latter doesn't
+    # resolve, so the yaml fallback in _extract_framework_args has a
+    # real file to read.
+    if config_resolved is None and report_path is not None:
+        for candidate in (
+            report_path.parent / "baseline_config.with_envs.yaml",
+            report_path.parent.parent / "baseline_config.with_envs.yaml",
+        ):
+            if candidate.exists():
+                config_resolved = candidate
+                break
+
+    args_str, args_source = _extract_framework_args(
+        server_log_path, config_yaml=config_resolved,
+    )
+    invocation = {
+        "framework_args":        args_str,
+        "framework_args_source": args_source,
+        "extra_envs":            _read_invocation_envs(config_resolved),
+        "config_path":           _rel(config_resolved, session_dir) if config_resolved else (
+            config_path_raw if config_path_raw else None
+        ),
+        "server_log_path":       _rel(server_log_path, session_dir) if server_log_path else None,
+    }
+    if args_source == "unknown":
+        warnings.append(
+            "framework_args extraction failed for "
+            f"{(_rel(server_log_path, session_dir) if server_log_path else 'no server.log')}; "
+            "tried server.log + yaml"
+        )
+
     return {
         "throughput_tok_s_per_gpu": _to_float(state.get("baseline_tput")) or 0.0,
         "accuracy":                 _to_float(state.get("baseline_accuracy")) or 0.0,
         "ttft_mean_ms":             ttft,
         "e2el_mean_ms":             e2el,
-        "config_path":              state.get("baseline_config_path") or None,
+        "ttft_e2el_source":         ttft_source,
+        "config_path":              config_path_raw,
         "benchmark_report_path":    _rel(report_path, session_dir) if report_path else None,
         "attempts_history":         history,
         "failure_streak":           int(state.get("baseline_failure_streak") or 0),
+        "invocation":               invocation,
     }
+
+
+def _reconstruct_baseline_attempts(
+    session_dir: Path,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Walk ``<sd>/runs/baseline/<hash>/benchmark_*/benchmark_report.json``
+    and synthesize :class:`BaselineAttemptSummary` rows for each.
+
+    Used when ``state.baseline_attempts`` is empty but the on-disk
+    runs/baseline/ tree shows that baseline ran (one or many times).
+    Reads only what we can be certain of; everything else stays empty.
+    """
+    root = session_dir / "runs" / "baseline"
+    if not root.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    reports = sorted(
+        root.glob("*/benchmark_*/benchmark_report.json"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    for report_path in reports:
+        bench_dir = report_path.parent
+        # task dir = <sd>/runs/baseline/<HASH> ; bench dir = <task>/benchmark_<ts>
+        task_dir = bench_dir.parent
+        ts_iso = ""
+        # Prefer a parseable ``benchmark_<UTC>`` suffix, else mtime.
+        m = re.search(r"benchmark_(\d{8})[T_](\d{6})", bench_dir.name)
+        if m:
+            try:
+                dt = datetime.strptime(
+                    f"{m.group(1)}T{m.group(2)}",
+                    "%Y%m%dT%H%M%S",
+                ).replace(tzinfo=timezone.utc)
+                ts_iso = dt.isoformat(timespec="seconds")
+            except ValueError:
+                ts_iso = ""
+        if not ts_iso:
+            try:
+                ts_iso = datetime.fromtimestamp(
+                    report_path.stat().st_mtime, tz=timezone.utc,
+                ).isoformat(timespec="seconds")
+            except OSError:
+                ts_iso = ""
+        report = _load_json_safe(report_path, warnings)
+        out_tput, _ttft, _tpot, _e2el = _benchmark_report_metrics(
+            report if isinstance(report, dict) else None
+        )
+        out.append({
+            "ts":           ts_iso,
+            "task_id":      task_dir.name,
+            "status":       "reconstructed",
+            "decision":     "",
+            "key_metric":   out_tput,
+            "workspace":    _rel(task_dir, session_dir) or str(task_dir),
+            "error_class":  None,
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------
 # §4 Final (validated)
 # ---------------------------------------------------------------------------
 def collect_final(
+    session_dir: Path,
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
@@ -298,6 +930,41 @@ def collect_final(
         variant = str(entry.get("variant_name") or "")
         action_path.append(f"{action}:{variant}" if variant else action)
 
+    ttft = _to_float(cb.get("ttft_mean_ms"))
+    e2el = _to_float(cb.get("e2el_mean_ms"))
+    ttft_e2el_source = "current_best" if ttft is not None else "unavailable"
+
+    # Disk-walk reconstruction. Coordinator usually leaves
+    # ``current_best.ttft_mean_ms`` unset — the value lives only in the
+    # actual benchmark_report.json on disk. Walk validate_stack first
+    # (most authoritative: it's the run that produced the validated
+    # cumulative gain), fall back to the latest stack entry's workspace.
+    reconstructed_report: Path | None = None
+    if ttft is None:
+        reconstructed_report = _find_latest_validate_stack_report(session_dir)
+        if reconstructed_report is not None:
+            ttft_e2el_source = "validate_stack_disk"
+        else:
+            reconstructed_report = _find_stack_top_report(session_dir, state)
+            if reconstructed_report is not None:
+                ttft_e2el_source = "stack_top_disk"
+    if reconstructed_report is not None:
+        report = _load_json_safe(reconstructed_report, warnings)
+        if isinstance(report, dict):
+            _, ttft_disk, _tpot, e2el_disk = _benchmark_report_metrics(report)
+            if ttft is None and ttft_disk is not None:
+                ttft = ttft_disk
+            if e2el is None and e2el_disk is not None:
+                e2el = e2el_disk
+        warnings.append(
+            f"final.ttft_mean_ms reconstructed from {ttft_e2el_source}; "
+            "current_best did not record it (Coordinator gap)"
+        )
+
+    invocation = _build_final_invocation(
+        session_dir, state, reconstructed_report, warnings,
+    )
+
     return {
         "throughput_tok_s_per_gpu":          _to_float(cb.get("tput")),
         "cumulative_gain_pct_validated":     _to_float(state.get("cumulative_gain_validated")) or 0.0,
@@ -308,11 +975,102 @@ def collect_final(
         "extra_sglang_args":                 str(cb.get("extra_sglang_args") or ""),
         "extra_envs":                        dict(cb.get("extra_envs") or {}),
         "action_path":                       action_path,
-        "ttft_mean_ms":                      _to_float(cb.get("ttft_mean_ms")),
-        "e2el_mean_ms":                      _to_float(cb.get("e2el_mean_ms")),
+        "ttft_mean_ms":                      ttft,
+        "e2el_mean_ms":                      e2el,
+        "ttft_e2el_source":                  ttft_e2el_source,
+        "invocation":                        invocation,
         "closing_phase_entered":             bool(state.get("closing_started_unix") or 0),
         "closing_started_unix":              float(state.get("closing_started_unix") or 0.0),
         "closing_report_task_id":            str(state.get("closing_report_task_id") or ""),
+    }
+
+
+def _find_latest_validate_stack_report(session_dir: Path) -> Path | None:
+    """Most-recent validate_stack benchmark_report.json under session_dir.
+
+    validate_stack is the action that re-runs the entire optimization
+    stack to produce a confirmed cumulative gain number, so its
+    benchmark report is the authoritative source for "what does the
+    final stack actually clock at".
+    """
+    root = session_dir / "runs" / "validate_stack"
+    if not root.exists():
+        return None
+    candidates = sorted(
+        root.glob("*/benchmark_*/benchmark_report.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _find_stack_top_report(
+    session_dir: Path, state: dict[str, Any],
+) -> Path | None:
+    """Last optimization_stack entry's benchmark_report.json (best-effort).
+
+    Used when no validate_stack run was recorded — the topmost stack
+    entry's KEEP run is the next-best evidence of "the final
+    configuration's measured throughput / latency".
+    """
+    stack = state.get("optimization_stack") or []
+    if not isinstance(stack, list) or not stack:
+        return None
+    last = stack[-1] if isinstance(stack[-1], dict) else None
+    if last is None:
+        return None
+    workspace_str = last.get("workspace") or ""
+    if not workspace_str:
+        return None
+    workspace = _resolve_under_session(session_dir, workspace_str)
+    if workspace is None:
+        return None
+    return _find_benchmark_report(workspace)
+
+
+def _build_final_invocation(
+    session_dir: Path,
+    state: dict[str, Any],
+    benchmark_report: Path | None,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Best-effort :class:`BenchmarkInvocation` for the final stack run.
+
+    The "config" we surface here is the ``baseline_config.with_envs.yaml``
+    sibling of whichever benchmark_report we used for ttft / e2el. That
+    is, the file the workload was actually launched with — so an
+    operator can replay the exact same command + envs.
+    """
+    config_path: Path | None = None
+    server_log_path: Path | None = None
+    if benchmark_report is not None:
+        bench_dir = benchmark_report.parent
+        task_dir = bench_dir.parent
+        for candidate in (
+            bench_dir / "baseline_config.with_envs.yaml",
+            task_dir / "baseline_config.with_envs.yaml",
+        ):
+            if candidate.exists():
+                config_path = candidate
+                break
+        log_candidate = bench_dir / "server.log"
+        if log_candidate.exists():
+            server_log_path = log_candidate
+    args_str, args_source = _extract_framework_args(
+        server_log_path, config_yaml=config_path,
+    )
+    if args_source == "unknown":
+        warnings.append(
+            "framework_args extraction failed for "
+            f"{(_rel(server_log_path, session_dir) if server_log_path else 'no server.log')}; "
+            "tried server.log + yaml"
+        )
+    return {
+        "framework_args":        args_str,
+        "framework_args_source": args_source,
+        "extra_envs":            _read_invocation_envs(config_path),
+        "config_path":           _rel(config_path, session_dir) if config_path else None,
+        "server_log_path":       _rel(server_log_path, session_dir) if server_log_path else None,
     }
 
 
@@ -1610,7 +2368,9 @@ def collect_telemetry(
     baseline_report: Path | None = None
     last_b = state.get("last_baseline") or {}
     if isinstance(last_b, dict) and last_b.get("workspace"):
-        baseline_report = _find_benchmark_report(Path(last_b["workspace"]))
+        workspace = _resolve_under_session(session_dir, last_b.get("workspace"))
+        if workspace is not None:
+            baseline_report = _find_benchmark_report(workspace)
 
     profile_reports = [
         report for _task, report in _scan_profile_reports(session_dir)
@@ -1656,9 +2416,33 @@ def collect_attribution(
     # Prefer authoritative per-stack ledger if Coordinator wrote it
     # (new state field `gain_per_stack_entry`). Otherwise reconstruct a
     # best-effort approximation from optimization_stack alone.
-    entries = state.get("gain_per_stack_entry")
-    if not isinstance(entries, list):
+    state_entries = state.get("gain_per_stack_entry")
+    state_provided = isinstance(state_entries, list) and len(state_entries) > 0
+    if state_provided:
+        entries = list(state_entries)
+    else:
         entries = _reconstruct_gain_ledger(state, warnings)
+
+    # Classify the attribution lineage so consumers (dashboard, LLM
+    # narrator) can render an honest provenance label rather than
+    # silently presenting a reconstructed split as validated.
+    stack = state.get("optimization_stack") or []
+    stack_len = len(stack) if isinstance(stack, list) else 0
+    method: str
+    if state_provided:
+        all_deltas_set = all(
+            isinstance(e, dict) and e.get("delta_pct") is not None
+            for e in state_entries
+        )
+        method = "validated" if all_deltas_set else "reconstructed"
+    elif stack_len == 1:
+        # Single-entry stack: ``final.action_path`` unambiguously
+        # identifies the one source of gain.
+        method = "single_source"
+    elif stack_len > 1:
+        method = "reconstructed"
+    else:
+        method = "missing"
 
     # Bucket entries by family for source_breakdown. Honor validated
     # total as the ground-truth denominator.
@@ -1694,7 +2478,7 @@ def collect_attribution(
         oob_total = kernel_total
 
     notes: list[str] = []
-    if not isinstance(state.get("gain_per_stack_entry"), list):
+    if not state_provided:
         notes.append(
             "gain_per_stack_entry not written by Coordinator; "
             "attribution reconstructed best-effort from optimization_stack."
@@ -1702,6 +2486,7 @@ def collect_attribution(
 
     return {
         "gain_per_stack_entry": entries,
+        "method":               method,
         "source_breakdown": {
             "geak_pct_of_total":     round(geak_total, 2),
             "oob_pct_of_total":      round(oob_total, 2),
@@ -1765,16 +2550,25 @@ def collect_source_files(
     ]
     critic = session_dir / "critic-workdir"
     rob = session_dir / "robustness-workdir"
-    return {
+    out: dict[str, Any] = {
         "manifest":           "manifest.json",
         "state":              "state.json",
         "baseline_report":    baseline_path,
-        "profile_reports":    profile_reports,
-        "sweep_reports":      sweep_reports,
-        "kernel_attempts":    kernel_attempts,
         "critic_workdir":     "critic-workdir" if critic.exists() else None,
         "robustness_workdir": "robustness-workdir" if rob.exists() else None,
     }
+    # Skip emitting list-valued categories that are empty so the
+    # source_files renderer doesn't surface ``count=0, first_values=—``
+    # rows for kernels / sweep / profile work that simply didn't run.
+    # SourceFiles schema fields are all NotRequired-by-convention.
+    for key, lst in (
+        ("profile_reports", profile_reports),
+        ("sweep_reports",   sweep_reports),
+        ("kernel_attempts", kernel_attempts),
+    ):
+        if lst:
+            out[key] = lst
+    return out
 
 
 __all__ = [

@@ -58,6 +58,27 @@ def _first_of(data: dict[str, Any], *keys: str) -> Any | None:
     return None
 
 
+def _first_nested(data: dict[str, Any], *paths: str) -> Any | None:
+    """Return the first non-None value from dotted paths.
+
+    Agents have produced several ci_metrics schemas over time. The original
+    schema was flat (baseline_throughput / optimized_throughput / gain_pct);
+    newer reports often use nested baseline/best dictionaries with varied key
+    names. Dotted lookup keeps the parser compact and backwards compatible.
+    """
+    for path in paths:
+        cur: Any = data
+        ok = True
+        for part in path.split("."):
+            if not isinstance(cur, dict) or cur.get(part) is None:
+                ok = False
+                break
+            cur = cur.get(part)
+        if ok:
+            return cur
+    return None
+
+
 def _relative(path: Path | None, root: Path) -> str | None:
     if path is None:
         return None
@@ -97,23 +118,133 @@ def parse_env_file(path: Path | None) -> dict[str, str]:
 
 def parse_ci_metrics(data: dict[str, Any] | None) -> dict[str, Any]:
     data = data or {}
-    baseline = _first_of(
+    baseline = _first_nested(
         data,
+        # Flat canonical / prior CI schema.
         "baseline_throughput",
         "tok_per_gpu_baseline",
         "baseline_output_tput_per_gpu",
         "baseline_output_tput_tok_s",
         "baseline_tok_per_gpu",
+        "baseline_throughput_tok_per_s_per_gpu",
+        "baseline_output_tput_tok_s_per_gpu",
+        "baseline_output_throughput_tok_s_per_gpu",
+        # Nested baseline/best schemas emitted by newer agents.
+        "baseline.output_throughput_per_gpu",
+        "baseline.output_tok_per_s_per_gpu",
+        "baseline.output_tok_s_per_gpu",
+        "baseline.output_throughput_tok_s_per_gpu",
+        "baseline.baseline_throughput_tok_per_s_per_gpu",
+        "baseline.throughput_per_gpu",
+        "baseline.per_gpu_tok_per_s",
+        "baseline.output_tput_tok_s_per_gpu",
+        "best.matched_n_baseline_tok_s_per_gpu",
+        "best.matched_n_baseline_tok_s_at_192p",
+        "best.matched_n_baseline_output_tok_s",
+        # Total throughput fallbacks, used only when no per-GPU field exists.
+        "baseline.output_throughput_tok_s",
+        "baseline.output_tok_per_s",
+        "baseline.output_tok_s",
+        "baseline.output_tput_tok_s",
+        "baseline.output_tokps",
+        "baseline.output_throughput_tokps",
     )
-    optimized = _first_of(
+    optimized = _first_nested(
         data,
+        # Flat canonical / prior CI schema.
         "optimized_throughput",
         "tok_per_gpu_optimized",
         "optimized_output_tput_per_gpu",
         "optimized_output_tput_tok_s",
         "optimized_tok_per_gpu",
+        "best_throughput_tok_per_s_per_gpu",
+        "best_output_tput_tok_s_per_gpu",
+        "best_output_throughput_tok_s_per_gpu",
+        # Nested best schemas.
+        "best.output_throughput_per_gpu",
+        "best.output_tok_per_s_per_gpu",
+        "best.output_tok_s_per_gpu",
+        "best.output_throughput_tok_s_per_gpu",
+        "best.throughput_per_gpu",
+        "best.per_gpu_tok_per_s",
+        "best.output_tput_tok_s_per_gpu",
+        "best.output_throughput_tok_s_at_192p",
+        "best.output_tok_s_at_192p",
+        "best.output_tput_tok_s_at_192p",
+        # Total throughput fallbacks.
+        "best.output_throughput_tok_s",
+        "best.output_tok_per_s",
+        "best.output_tok_s",
+        "best.output_tput_tok_s",
+        "best.output_tokps",
+        "best.output_tokps_mean",
+        "best.output_throughput",
+        "best.output_throughput_tokps",
     )
-    gain = _first_of(data, "gain_pct", "improvement_pct", "total_improvement_pct")
+    gain = _first_nested(
+        data,
+        "gain_pct",
+        "improvement_pct",
+        "total_improvement_pct",
+        "speedup_pct",
+        "speedup_pct_vs_baseline",
+        "best.speedup_pct",
+        "best.delta_pct_vs_baseline",
+        "best.delta_throughput_pct",
+        "best.improvement_pct",
+        "best.improvement_pct_vs_matched_n_baseline",
+        "improvement.throughput_delta_pct",
+        "improvement.output_tok_s_pct",
+        "improvement.output_tps_pct",
+    )
+    # Some agents report speedup as a multiplier (1.10x). Convert to percent
+    # only for clear ratio fields.
+    ratio_gain = _first_nested(
+        data,
+        "best.speedup_vs_baseline",
+        "best_speedup",
+        "speedup_x",
+        "improvement.speedup_x",
+    )
+    if gain is None and ratio_gain is not None:
+        rg = _to_float(ratio_gain)
+        if rg is not None:
+            gain = (rg - 1.0) * 100.0
+
+    baseline_tpot = _first_nested(
+        data,
+        "baseline_tpot_ms",
+        "baseline.tpot_ms",
+        "baseline.mean_tpot_ms",
+        "baseline.tpot_mean_ms",
+        "baseline.tpot_ms_mean",
+    )
+    optimized_tpot = _first_nested(
+        data,
+        "best_tpot_ms",
+        "optimized_tpot_ms",
+        "best.tpot_ms",
+        "best.mean_tpot_ms",
+        "best.tpot_mean_ms",
+        "best.tpot_ms_mean",
+    )
+    baseline_ttft = _first_nested(
+        data,
+        "baseline_ttft_ms",
+        "baseline.ttft_ms",
+        "baseline.mean_ttft_ms",
+        "baseline.ttft_mean_ms",
+        "baseline.ttft_ms_mean",
+    )
+    optimized_ttft = _first_nested(
+        data,
+        "best_ttft_ms",
+        "optimized_ttft_ms",
+        "best.ttft_ms",
+        "best.mean_ttft_ms",
+        "best.ttft_mean_ms",
+        "best.ttft_ms_mean",
+    )
 
     metrics = {
         "baseline_throughput": _to_float(baseline),
@@ -131,6 +262,10 @@ def parse_ci_metrics(data: dict[str, Any] | None) -> dict[str, Any]:
         "conc": _to_int(data.get("conc")),
         "isl": _to_int(data.get("isl")),
         "osl": _to_int(data.get("osl")),
+        "baseline_tpot_ms": _to_float(baseline_tpot),
+        "optimized_tpot_ms": _to_float(optimized_tpot),
+        "baseline_ttft_ms": _to_float(baseline_ttft),
+        "optimized_ttft_ms": _to_float(optimized_ttft),
         "actions": data.get("actions_taken") or data.get("actions") or [],
     }
     if metrics["gain_pct"] is None and metrics["baseline_throughput"] and metrics["optimized_throughput"]:
