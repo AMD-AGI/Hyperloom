@@ -106,6 +106,16 @@ class Config:
     health_probe_targets: list[str] = field(default_factory=list)
     health_probe_timeout_s: float = 1.5
 
+    # -- gpu_memory_leaked signal (2026-05) --
+    # Trip thresholds: a GPU is "full" when EITHER util_mem_pct exceeds
+    # ``gpu_leak_util_mem_pct_threshold`` OR free MiB falls below
+    # ``gpu_leak_free_mb_threshold``. The detector fires only after the
+    # whole-pod condition holds for ``gpu_leak_min_consecutive_ticks``
+    # back-to-back ticks (anti-flap against baseline cold-start).
+    gpu_leak_util_mem_pct_threshold: float = 99.0
+    gpu_leak_free_mb_threshold: float = 500.0
+    gpu_leak_min_consecutive_ticks: int = 2
+
     # -- ring buffer (local mode only) --
     local_metrics_history_s: int = 3600
     local_metrics_sample_interval: int = 5

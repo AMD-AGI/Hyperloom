@@ -45,6 +45,7 @@ from .role.reactor import Reactor, ReactorComponents
 from .signals import Classifier, SymptomSeverity
 from .signals.crash import CrashConfig
 from .signals.event import EventConfig
+from .signals.gpu_leak import GpuLeakConfig
 from .signals.health import HealthConfig
 from .signals.local_health import LocalHealthConfig
 from .signals.stall import StallConfig
@@ -139,6 +140,11 @@ def build_reactor_components(
         health_config=HealthConfig(),
         local_health_config=LocalHealthConfig(
             gpu_temp_warn_c=config.gpu_temp_warn_c,
+        ),
+        gpu_leak_config=GpuLeakConfig(
+            util_mem_pct_threshold=config.gpu_leak_util_mem_pct_threshold,
+            free_mb_threshold=config.gpu_leak_free_mb_threshold,
+            min_consecutive_ticks=config.gpu_leak_min_consecutive_ticks,
         ),
     )
 

@@ -17,6 +17,7 @@ from ..sources.base import SourceData
 from .cluster_fault import ClusterFaultConfig, evaluate_cluster_fault_signals
 from .crash import CrashConfig, evaluate_crash_signals
 from .event import EventConfig, evaluate_event_signals
+from .gpu_leak import GpuLeakConfig, GpuLeakDetector
 from .health import HealthConfig, evaluate_health_signals
 from .local_health import LocalHealthConfig, evaluate_local_health_signals
 from .stall import StallConfig, evaluate_stall_signals
@@ -28,7 +29,14 @@ SignalEvaluator = Callable[[ReactorContext, SourceData], list[Symptom]]
 
 @dataclass
 class Classifier:
-    """Compose the configured signal evaluators."""
+    """Compose the configured signal evaluators.
+
+    Most evaluators are pure functions; the ``gpu_leak`` rule is
+    stateful (it counts consecutive hits to suppress false positives
+    from cold-start VRAM ramps) and therefore lives behind a
+    :class:`GpuLeakDetector` instance constructed in
+    :meth:`__post_init__`.
+    """
 
     stall_config: StallConfig = field(default_factory=StallConfig)
     crash_config: CrashConfig = field(default_factory=CrashConfig)
@@ -38,7 +46,12 @@ class Classifier:
     cluster_fault_config: ClusterFaultConfig = field(
         default_factory=ClusterFaultConfig
     )
+    gpu_leak_config: GpuLeakConfig = field(default_factory=GpuLeakConfig)
     extra_evaluators: list[SignalEvaluator] = field(default_factory=list)
+    _gpu_leak_detector: GpuLeakDetector = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._gpu_leak_detector = GpuLeakDetector(self.gpu_leak_config)
 
     def classify(self, data: SourceData, ctx: ReactorContext) -> list[Symptom]:
         symptoms: list[Symptom] = []
@@ -57,6 +70,7 @@ class Classifier:
         symptoms.extend(
             evaluate_local_health_signals(ctx, data, config=self.local_health_config)
         )
+        symptoms.extend(self._gpu_leak_detector.evaluate(ctx, data))
         symptoms.extend(
             evaluate_cluster_fault_signals(
                 ctx, data, config=self.cluster_fault_config
