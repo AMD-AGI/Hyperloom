@@ -60,6 +60,11 @@ def load_env_file(path: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         env[key.strip()] = value.strip().strip('"').strip("'")
+    if "SAFE_API_KEY" in env:
+        env.setdefault("OOB_API_KEY", env["SAFE_API_KEY"])
+        env.setdefault("ANTHROPIC_API_KEY", env["SAFE_API_KEY"])
+        env.setdefault("OPENAI_API_KEY", env["SAFE_API_KEY"])
+        env.setdefault("ANTHROPIC_AUTH_TOKEN", env["SAFE_API_KEY"])
     if "ANTHROPIC_AUTH_TOKEN" in env:
         env.setdefault("ANTHROPIC_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])
         env.setdefault("OPENAI_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])
@@ -68,7 +73,11 @@ def load_env_file(path: Path) -> dict[str, str]:
         env.setdefault("AMD_LLM_API_KEY", env["AMD_API_KEY"])
         env.setdefault("LLM_API_KEY", env["AMD_API_KEY"])
         env.setdefault("GEAK_API_KEY", env["AMD_API_KEY"])
-    if "ANTHROPIC_BASE_URL" in env:
+    if "OPENAI_BASE_URL" in env:
+        env.setdefault("ANTHROPIC_BASE_URL", env["OPENAI_BASE_URL"])
+        env.setdefault("OOB_BASE_URL", env["OPENAI_BASE_URL"])
+        env.setdefault("LLM_API_BASE", env["OPENAI_BASE_URL"])
+    elif "ANTHROPIC_BASE_URL" in env:
         env.setdefault("OPENAI_BASE_URL", env["ANTHROPIC_BASE_URL"])
         env.setdefault("OOB_BASE_URL", env["ANTHROPIC_BASE_URL"])
         env.setdefault("LLM_API_BASE", env["ANTHROPIC_BASE_URL"])
