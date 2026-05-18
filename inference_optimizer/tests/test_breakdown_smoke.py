@@ -445,3 +445,607 @@ def test_no_kernel_agent_runs_returns_empty_invocations(tmp_path: Path) -> None:
     assert b["geak_invocations"] == []
     assert b["oob_invocations"] == []
     assert b["kernel_lifecycle"]["detected"] == []
+
+
+def test_baseline_resolves_container_workspace_path(tmp_path: Path) -> None:
+    """``last_baseline.workspace`` written as a container path
+    (``/workspace/runs/baseline/<sub>/``) must still resolve under the
+    on-disk ``session_dir`` so ``ttft_mean_ms`` is read from the
+    benchmark report rather than dropped to ``None``.
+
+    Regression for handoff doc §8 TODO #2.
+    """
+    sd = tmp_path / "session"
+    sd.mkdir(parents=True)
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "ttft"})
+    bdir = sd / "runs/baseline/t1/benchmark_001"
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True,
+        "output_throughput_tok_s": 333.0,
+        "mean_ttft_ms": 142.5,
+        "mean_e2el_ms": 1620.4,
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "ttft",
+        "baseline_tput": 333.0,
+        "last_baseline": {"workspace": "/workspace/runs/baseline/t1"},
+    })
+
+    b = build(sd)
+    baseline = b["baseline"]
+    assert baseline["ttft_mean_ms"] == pytest.approx(142.5)
+    assert baseline["e2el_mean_ms"] == pytest.approx(1620.4)
+    assert baseline["benchmark_report_path"] is not None
+    assert "runs/baseline/t1" in baseline["benchmark_report_path"]
+    assert not any(
+        "baseline workspace" in w and "does not resolve" in w
+        for w in b["warnings"]
+    ), b["warnings"]
+
+
+def test_baseline_unresolvable_workspace_emits_warning(tmp_path: Path) -> None:
+    """When the recorded workspace can't be re-rooted under ``session_dir``
+    (e.g. wrong session_dir), the collector must surface a warning rather
+    than silently fall back to ``None``."""
+    sd = tmp_path / "session"
+    sd.mkdir(parents=True)
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "miss"})
+    _write_json(sd / "state.json", {
+        "session_id": "miss",
+        "baseline_tput": 100.0,
+        "last_baseline": {"workspace": "/some/totally/unrelated/path"},
+    })
+    b = build(sd)
+    assert b["baseline"]["ttft_mean_ms"] is None
+    assert any(
+        "baseline workspace" in w and "does not resolve" in w
+        for w in b["warnings"]
+    ), b["warnings"]
+
+
+def test_source_files_drops_empty_kernel_attempts(tmp_path: Path) -> None:
+    """``source_files.kernel_attempts`` must not appear when the session
+    has no kernel-agent runs (instead of rendering a ``count=0,
+    first_values=—`` placeholder row downstream).
+
+    Regression for handoff doc §8 TODO #6.
+    """
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "no-kernels"})
+    _write_json(sd / "state.json", {
+        "session_id": "no-kernels", "baseline_tput": 100.0,
+    })
+    sf = build(sd)["source_files"]
+    assert "kernel_attempts" not in sf
+    assert "profile_reports" not in sf
+    assert "sweep_reports" not in sf
+    assert sf["manifest"] == "manifest.json"
+    assert sf["state"] == "state.json"
+
+
+def test_source_files_keeps_non_empty_kernel_attempts(fixture_session: Path) -> None:
+    """Sanity: when the session DOES have kernel-agent activity, the
+    populated list must still be emitted by the collector."""
+    sf = build(fixture_session)["source_files"]
+    assert sf.get("kernel_attempts"), sf
+    assert any("optimization_attempts.jsonl" in p for p in sf["kernel_attempts"])
+
+
+# ---------------------------------------------------------------------------
+# Attribution method (A1)
+# ---------------------------------------------------------------------------
+def _attribution_fixture(tmp_path: Path, state: dict) -> Path:
+    """Minimal session_dir whose only content drives ``collect_attribution``."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "attr"})
+    base_state = {"session_id": "attr"}
+    base_state.update(state)
+    _write_json(sd / "state.json", base_state)
+    return sd
+
+
+def test_attribution_method_validated(tmp_path: Path) -> None:
+    """``state.gain_per_stack_entry`` written by Coordinator with every
+    entry's ``delta_pct`` set → ``method == "validated"``."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 30.0,
+        "optimization_stack": [
+            {"action": "backends", "variant_name": "flag_X", "gain_pct": 20.0},
+            {"action": "params",   "variant_name": "p1",     "gain_pct": 10.0},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "backends", "variant_name": "flag_X",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 20.0,
+             "delta_pct": 20.0},
+            {"action": "params",   "variant_name": "p1",
+             "stack_len_before": 1, "stack_len_after": 2,
+             "cum_gain_before": 20.0, "cum_gain_after": 30.0,
+             "delta_pct": 10.0},
+        ],
+    })
+    attr = build(sd)["attribution"]
+    assert attr["method"] == "validated"
+
+
+def test_attribution_method_single_source(tmp_path: Path) -> None:
+    """Single-entry stack with no Coordinator-recorded gain ledger →
+    ``method == "single_source"``."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 11.0,
+        "optimization_stack": [
+            {"action": "backends", "variant_name": "vllm_kv_fp8",
+             "gain_pct": 11.0,
+             "ts": "2026-05-15T07:00:00+00:00"},
+        ],
+    })
+    attr = build(sd)["attribution"]
+    assert attr["method"] == "single_source"
+
+
+def test_attribution_method_reconstructed(tmp_path: Path) -> None:
+    """Multi-entry stack with no Coordinator ledger and at least one
+    placeholder ``delta_pct=None`` → ``method == "reconstructed"``."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 25.0,
+        "optimization_stack": [
+            {"action": "backends", "variant_name": "flag_X", "gain_pct": 12.0},
+            {"action": "params",   "variant_name": "p1",     "gain_pct": None},
+            {"action": "kernel_opt:k001", "gain_pct": None},
+        ],
+    })
+    attr = build(sd)["attribution"]
+    assert attr["method"] == "reconstructed"
+
+
+def test_attribution_method_missing(tmp_path: Path) -> None:
+    """No optimization_stack, no Coordinator ledger → ``method == "missing"``."""
+    sd = _attribution_fixture(tmp_path, {"cumulative_gain_validated": 0.0})
+    attr = build(sd)["attribution"]
+    assert attr["method"] == "missing"
+
+
+# ---------------------------------------------------------------------------
+# A2: final.ttft_mean_ms reconstruction
+# ---------------------------------------------------------------------------
+def test_final_ttft_reconstructed_from_validate_stack(tmp_path: Path) -> None:
+    """When ``current_best.ttft_mean_ms`` is not recorded but a
+    ``runs/validate_stack/<h>/benchmark_*/benchmark_report.json`` is on
+    disk, the collector must read the latency from the report, set
+    ``ttft_e2el_source = "validate_stack_disk"``, and append a
+    reconstruction warning."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "rec"})
+    _write_json(sd / "state.json", {
+        "session_id": "rec",
+        "baseline_tput": 100.0,
+        "current_best": {"tput": 220.0},
+        "optimization_stack": [
+            {"action": "backends", "variant_name": "v1", "gain_pct": 120.0},
+        ],
+        "cumulative_gain_validated": 120.0,
+    })
+    bdir = sd / "runs/validate_stack/abc/benchmark_001"
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True,
+        "output_throughput_tok_s": 220.0,
+        "mean_ttft_ms": 88.7,
+        "mean_e2el_ms": 1110.5,
+    })
+    b = build(sd)
+    final = b["final"]
+    assert final["ttft_mean_ms"] == pytest.approx(88.7)
+    assert final["e2el_mean_ms"] == pytest.approx(1110.5)
+    assert final["ttft_e2el_source"] == "validate_stack_disk"
+    assert any(
+        "final.ttft_mean_ms reconstructed from validate_stack_disk" in w
+        for w in b["warnings"]
+    ), b["warnings"]
+
+
+# ---------------------------------------------------------------------------
+# A3: baseline.attempts_history reconstruction
+# ---------------------------------------------------------------------------
+def test_baseline_attempts_history_reconstructed_from_disk(tmp_path: Path) -> None:
+    """When ``state.baseline_attempts == []`` but two
+    ``runs/baseline/<hash>/benchmark_*/`` directories exist, the
+    collector must reconstruct two summary rows tagged
+    ``status="reconstructed"`` and append the reconstruction warning."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "rebh"})
+    _write_json(sd / "state.json", {
+        "session_id": "rebh",
+        "baseline_tput": 333.0,
+        "baseline_attempts": [],
+    })
+    for h, tput in (("hashA", 300.0), ("hashB", 333.0)):
+        bdir = sd / f"runs/baseline/{h}/benchmark_20260515T100000"
+        _write_json(bdir / "benchmark_report.json", {
+            "success": True,
+            "output_throughput_tok_s": tput,
+            "mean_ttft_ms": 100.0,
+        })
+
+    b = build(sd)
+    history = b["baseline"]["attempts_history"]
+    assert len(history) == 2
+    assert all(a["status"] == "reconstructed" for a in history), history
+    task_ids = {a["task_id"] for a in history}
+    assert task_ids == {"hashA", "hashB"}
+    assert any(
+        "baseline.attempts_history reconstructed from runs/baseline/" in w
+        for w in b["warnings"]
+    ), b["warnings"]
+
+
+def test_baseline_attempts_history_state_recorded_takes_precedence(
+    tmp_path: Path,
+) -> None:
+    """When ``state.baseline_attempts`` IS non-empty, the disk fallback
+    must NOT also fire (no duplication, no reconstruction warning)."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "stat"})
+    _write_json(sd / "state.json", {
+        "session_id": "stat",
+        "baseline_tput": 300.0,
+        "baseline_attempts": [
+            {"ts": "2026-05-15T10:00:00+00:00", "task_id": "t1",
+             "status": "succeeded", "decision": "promoted",
+             "key_metric": 300.0},
+        ],
+    })
+    bdir = sd / "runs/baseline/hashA/benchmark_20260515T100000"
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True, "output_throughput_tok_s": 300.0,
+    })
+
+    b = build(sd)
+    history = b["baseline"]["attempts_history"]
+    assert len(history) == 1
+    assert history[0]["status"] == "succeeded"
+    assert not any(
+        "baseline.attempts_history reconstructed" in w
+        for w in b["warnings"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# B3: invocation populated from baseline_config + server.log
+# ---------------------------------------------------------------------------
+def test_baseline_invocation_populated(tmp_path: Path) -> None:
+    """``baseline.invocation`` must read framework_args from server.log,
+    extra_envs from the YAML benchmark.envs block (allowlisted), and
+    keep secret-shaped keys (``OPENAI_API_KEY``) out of the output."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "inv"})
+    bdir = sd / "runs/baseline/h1/benchmark_001"
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True, "output_throughput_tok_s": 421.5,
+        "mean_ttft_ms": 152.3, "mean_e2el_ms": 1840.7,
+    })
+    (bdir / "server.log").write_text(
+        "python -m sglang.launch_server --model /weka/m --tp 8 --port 30000\n"
+        "[INFO] booting...\n",
+        encoding="utf-8",
+    )
+    cfg = sd / "runs/baseline/h1/baseline_config.with_envs.yaml"
+    cfg.write_text(
+        "benchmark:\n"
+        "  envs:\n"
+        "    TP: \"8\"\n"
+        "    VLLM_FLASH_ATTN: \"1\"\n"
+        "    OPENAI_API_KEY: \"secret-do-not-emit\"\n"
+        "    HOME: \"/root\"\n",
+        encoding="utf-8",
+    )
+    _write_json(sd / "state.json", {
+        "session_id": "inv",
+        "baseline_tput": 421.5,
+        "last_baseline": {"workspace": str(sd / "runs/baseline/h1")},
+        "baseline_config_path": str(cfg),
+    })
+
+    b = build(sd)
+    inv = b["baseline"]["invocation"]
+    assert "sglang.launch_server" in inv["framework_args"]
+    assert inv["extra_envs"].get("TP") == "8"
+    assert inv["extra_envs"].get("VLLM_FLASH_ATTN") == "1"
+    assert "OPENAI_API_KEY" not in inv["extra_envs"]
+    assert "HOME" not in inv["extra_envs"]
+    assert inv["server_log_path"] is not None
+    assert "server.log" in inv["server_log_path"]
+
+
+# ---------------------------------------------------------------------------
+# B1 / B3: image detection
+# ---------------------------------------------------------------------------
+def test_session_image_from_env(tmp_path: Path, monkeypatch) -> None:
+    """``HYPERLOOM_IMAGE`` env var must populate ``session.image`` when
+    the manifest lacks the field (V1 manifests). Absent of all sources
+    the field is ``None`` and a single warning is appended — no crash."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "img"})
+    _write_json(sd / "state.json", {"session_id": "img", "baseline_tput": 100.0})
+
+    monkeypatch.setenv("HYPERLOOM_IMAGE",
+                        "registry.example/hyperloom:abc123")
+    monkeypatch.delenv("CONTAINER_IMAGE", raising=False)
+    monkeypatch.delenv("IMAGE", raising=False)
+    b = build(sd)
+    assert b["session"]["image"] == "registry.example/hyperloom:abc123"
+
+    monkeypatch.delenv("HYPERLOOM_IMAGE")
+    b2 = build(sd)
+    assert b2["session"]["image"] is None or isinstance(b2["session"]["image"], str)
+    if b2["session"]["image"] is None:
+        assert any(
+            "image: not configured" in w for w in b2["warnings"]
+        ), b2["warnings"]
+
+
+def test_session_image_from_manifest_takes_precedence(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """``manifest.image`` (written at session start) wins over runtime
+    env vars — captures the spawn-time image even if env later drifts."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {
+        "schema_version": 2, "session_id": "img2",
+        "image": "registry.example/hyperloom:from-manifest",
+    })
+    _write_json(sd / "state.json", {"session_id": "img2"})
+
+    monkeypatch.setenv("HYPERLOOM_IMAGE", "registry.example/hyperloom:from-env")
+    b = build(sd)
+    assert b["session"]["image"] == "registry.example/hyperloom:from-manifest"
+
+
+# ---------------------------------------------------------------------------
+# C1: baseline.ttft_mean_ms disk-walk fallback
+# ---------------------------------------------------------------------------
+def test_baseline_ttft_disk_walk_fallback(tmp_path: Path) -> None:
+    """When ``state.last_baseline.workspace`` does not resolve to a
+    readable benchmark report, but ``runs/baseline/<hash>/benchmark_*/
+    benchmark_report.json`` exists on disk, the collector must walk
+    that directory and surface the latency from the most recent
+    report (mirrors the A2 final.ttft validate_stack disk walk).
+
+    Production parallel: zgong's V2 session
+    ``deepseek-ai-DeepSeek-R1_20260512T102109Z_0dc064c4`` had a valid
+    benchmark_report.json on wekafs but state's recorded workspace
+    didn't resolve."""
+    sd = tmp_path / "session"
+    sd.mkdir(parents=True)
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "diskwalk"})
+    bdir = sd / "runs/baseline/541e643a84e14352a2ff64bdfe27b2c9/benchmark_001"
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True,
+        "output_throughput_tok_s": 421.5,
+        "mean_ttft_ms": 99.5,
+        "mean_e2el_ms": 1500.0,
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "diskwalk",
+        "baseline_tput": 421.5,
+        # Recorded workspace doesn't resolve under session_dir on wekafs
+        # — exactly the production failure mode we're guarding against.
+        "last_baseline": {"workspace": "/workspace/runs/baseline/different-hash"},
+    })
+
+    b = build(sd)
+    baseline = b["baseline"]
+    assert baseline["ttft_mean_ms"] == pytest.approx(99.5)
+    assert baseline["e2el_mean_ms"] == pytest.approx(1500.0)
+    assert baseline["ttft_e2el_source"] == "runs_baseline_disk"
+    assert any(
+        "baseline.ttft_mean_ms reconstructed from runs/baseline/ disk walk" in w
+        for w in b["warnings"]
+    ), b["warnings"]
+
+
+# ---------------------------------------------------------------------------
+# C2: framework_args extraction lineage
+# ---------------------------------------------------------------------------
+def _make_invocation_fixture(
+    sd: Path,
+    server_log_text: str | None,
+    yaml_text: str | None,
+) -> None:
+    """Minimal fixture: state pointing at runs/baseline/h1, optional
+    server.log + baseline_config.with_envs.yaml beside the report."""
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "fa"})
+    bdir = sd / "runs/baseline/h1/benchmark_001"
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True, "output_throughput_tok_s": 200.0,
+        "mean_ttft_ms": 120.0, "mean_e2el_ms": 1500.0,
+    })
+    if server_log_text is not None:
+        (bdir / "server.log").write_text(server_log_text, encoding="utf-8")
+    cfg_path = sd / "runs/baseline/h1/baseline_config.with_envs.yaml"
+    if yaml_text is not None:
+        cfg_path.write_text(yaml_text, encoding="utf-8")
+    state: dict[str, Any] = {
+        "session_id": "fa",
+        "baseline_tput": 200.0,
+        "last_baseline": {"workspace": str(sd / "runs/baseline/h1")},
+    }
+    if yaml_text is not None:
+        state["baseline_config_path"] = str(cfg_path)
+    _write_json(sd / "state.json", state)
+
+
+def test_framework_args_from_server_arguments_line(tmp_path: Path) -> None:
+    """``Server arguments: ...`` header in server.log → source =
+    ``log_args_line``; the captured args (not the header) get echoed."""
+    sd = tmp_path / "session"
+    _make_invocation_fixture(
+        sd,
+        server_log_text=(
+            "INFO 05-12 14:21:14 [server.py:42] booting up\n"
+            "INFO 05-12 14:21:15 [server.py:50] Server arguments: "
+            "--model /weka/m --tp 8 --port 30001\n"
+            "INFO 05-12 14:21:16 [server.py:99] ready\n"
+        ),
+        yaml_text=None,
+    )
+    inv = build(sd)["baseline"]["invocation"]
+    assert "--tp 8" in inv["framework_args"]
+    assert "--port 30001" in inv["framework_args"]
+    assert inv["framework_args_source"] == "log_args_line"
+
+
+def test_framework_args_from_python_cmd_line(tmp_path: Path) -> None:
+    """A literal ``python -m vllm.entrypoints...`` line surrounded by
+    INFO log noise → source = ``log_python_cmd``; the python command
+    line is what gets surfaced (Pass-2 fallback)."""
+    sd = tmp_path / "session"
+    _make_invocation_fixture(
+        sd,
+        server_log_text=(
+            "(APIServer pid=1757439) INFO 05-12 14:21:14 [utils.py:299] booting\n"
+            "(APIServer pid=1757439) INFO 05-12 14:21:15 [server.py:50] init\n"
+            "python -m vllm.entrypoints.openai.api_server --model /weka/m --tp 8\n"
+            "(APIServer pid=1757439) INFO 05-12 14:22:00 [server.py:99] ready\n"
+        ),
+        yaml_text=None,
+    )
+    inv = build(sd)["baseline"]["invocation"]
+    assert "vllm.entrypoints" in inv["framework_args"]
+    assert inv["framework_args_source"] == "log_python_cmd"
+
+
+def test_framework_args_from_yaml_cmd_fallback(tmp_path: Path) -> None:
+    """server.log has only INFO noise (no header, no python prefix);
+    yaml has a ``cmd: ...`` field → source = ``yaml_cmd``."""
+    sd = tmp_path / "session"
+    _make_invocation_fixture(
+        sd,
+        server_log_text=(
+            "(APIServer pid=1757439) INFO 05-12 14:21:14 [utils.py:299]\n"
+            "(APIServer pid=1757439) INFO 05-12 14:21:15 [server.py:50] init\n"
+        ),
+        yaml_text=(
+            'cmd: "python -m sglang.launch_server --tp 4 --model /weka/m"\n'
+            "benchmark:\n"
+            "  envs:\n"
+            "    TP: \"4\"\n"
+        ),
+    )
+    inv = build(sd)["baseline"]["invocation"]
+    assert "sglang.launch_server" in inv["framework_args"]
+    assert inv["framework_args_source"] == "yaml_cmd"
+
+
+def test_framework_args_unknown_with_warning(tmp_path: Path) -> None:
+    """server.log has only INFO noise + yaml has no ``cmd``/``command``/
+    ``launch`` field → source = ``unknown``, framework_args is empty,
+    and a ``framework_args extraction failed`` warning is appended."""
+    sd = tmp_path / "session"
+    _make_invocation_fixture(
+        sd,
+        server_log_text=(
+            "(APIServer pid=1757439) INFO 05-12 14:21:14 [utils.py:299]\n"
+            "(APIServer pid=1757439) INFO 05-12 14:21:15 [server.py:50] init\n"
+        ),
+        yaml_text=(
+            "benchmark:\n"
+            "  envs:\n"
+            "    TP: \"8\"\n"
+        ),
+    )
+    b = build(sd)
+    inv = b["baseline"]["invocation"]
+    assert inv["framework_args"] == ""
+    assert inv["framework_args_source"] == "unknown"
+    assert any(
+        "framework_args extraction failed" in w for w in b["warnings"]
+    ), b["warnings"]
+
+
+def test_framework_args_from_non_default_args_vllm(tmp_path: Path) -> None:
+    """vllm prints ``non-default args: {parsed-dict}`` right after argv
+    parsing. The extractor picks this up first (Pass 0) because it
+    captures the *resolved* values the framework actually used — beats
+    any other heuristic. Output must be sorted-by-key + repr() values
+    so the string is stable across runs."""
+    sd = tmp_path / "session"
+    _make_invocation_fixture(
+        sd,
+        server_log_text=(
+            "(APIServer pid=1645301) INFO 05-12 10:51:30 [config.py:120] booting\n"
+            "(APIServer pid=1645301) INFO 05-12 10:51:32 [utils.py:233] "
+            "non-default args: {'model': '/wekafs/models/deepseek-ai-DeepSeek-R1', "
+            "'port': 8888, 'tensor_parallel_size': 8, 'max_model_len': 4096, "
+            "'gpu_memory_utilization': 0.85}\n"
+            "(APIServer pid=1645301) INFO 05-12 10:51:35 [server.py:99] ready\n"
+        ),
+        yaml_text=None,
+    )
+    inv = build(sd)["baseline"]["invocation"]
+    assert inv["framework_args_source"] == "log_non_default_args"
+    assert "tensor_parallel_size=8" in inv["framework_args"]
+    assert "model=" in inv["framework_args"]
+    assert "/wekafs/models/deepseek-ai-DeepSeek-R1" in inv["framework_args"]
+    # Deterministic ordering: keys sorted alphabetically. So
+    # ``gpu_memory_utilization`` (g) must precede ``model`` (m) which
+    # must precede ``tensor_parallel_size`` (t) in the emitted string.
+    s = inv["framework_args"]
+    assert s.index("gpu_memory_utilization=") < s.index("model="), s
+    assert s.index("model=") < s.index("tensor_parallel_size="), s
+
+
+def test_framework_args_pass0_takes_priority_over_python_cmd(tmp_path: Path) -> None:
+    """When server.log contains BOTH a ``non-default args: {...}`` line
+    AND a literal ``python -m vllm.entrypoints...`` line, Pass 0 must
+    win — the parsed-arg dict is more authoritative than the raw
+    cmdline (which might contain unresolved env-var placeholders)."""
+    sd = tmp_path / "session"
+    _make_invocation_fixture(
+        sd,
+        server_log_text=(
+            "(APIServer pid=1645301) INFO 05-12 10:51:30 [config.py:120] booting\n"
+            "python -m vllm.entrypoints.openai.api_server --model /weka/m --tp 8\n"
+            "(APIServer pid=1645301) INFO 05-12 10:51:32 [utils.py:233] "
+            "non-default args: {'model': '/weka/m', 'tensor_parallel_size': 8, "
+            "'port': 8888}\n"
+            "(APIServer pid=1645301) INFO 05-12 10:51:35 [server.py:99] ready\n"
+        ),
+        yaml_text=None,
+    )
+    inv = build(sd)["baseline"]["invocation"]
+    assert inv["framework_args_source"] == "log_non_default_args"
+    # And the chosen string is the formatted dict, not the python line.
+    assert "python -m vllm.entrypoints" not in inv["framework_args"]
+    assert "tensor_parallel_size=8" in inv["framework_args"]
+
+
+def test_framework_args_from_yaml_benchmark_synthesis(tmp_path: Path) -> None:
+    """server.log has only INFO noise; yaml is magpie-style with no
+    ``cmd:`` field but a populated ``benchmark.*`` block →
+    Pass 4 synthesizes a readable string from the structured fields and
+    labels the source ``yaml_benchmark`` so consumers know it's not a
+    literal cmdline."""
+    sd = tmp_path / "session"
+    _make_invocation_fixture(
+        sd,
+        server_log_text=(
+            "(APIServer pid=1757439) INFO 05-12 14:21:14 [utils.py:299]\n"
+            "(APIServer pid=1757439) INFO 05-12 14:21:15 [server.py:50] init\n"
+        ),
+        yaml_text=(
+            "benchmark:\n"
+            "  framework: vllm\n"
+            "  model: /path\n"
+            "  precision: fp8\n"
+            "  tp: 8\n"
+            "  envs:\n"
+            "    VLLM_FLASH_ATTN: \"1\"\n"
+        ),
+    )
+    inv = build(sd)["baseline"]["invocation"]
+    assert inv["framework_args_source"] == "yaml_benchmark"
+    s = inv["framework_args"]
+    assert "framework=vllm" in s, s
+    assert "model=/path" in s, s
+    assert "tp=8" in s, s
+    assert "envs=[VLLM_FLASH_ATTN=1]" in s, s
