@@ -33,21 +33,31 @@ from tracelens_skill_runner import (
 )
 
 
-HIGH_IDLE_PCT_THRESHOLD_DEFAULT = 20.0
+HIGH_IDLE_PCT_THRESHOLD_DEFAULT = 80.0
 HIGH_IDLE_PCT_THRESHOLD_ENV = "HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD"
 
 
 def _resolve_idle_pct_threshold() -> float:
-    """Return the idle-percent gate threshold (default 20.0%).
+    """Return the idle-percent gate threshold (default 80.0%).
 
-    The default is chosen with the TraceLens team (PR #206 review): a
-    trace where the GPU spends >20% of wall time idle is dominated by
-    host-side stalls (sync, allocator contention, scheduler gaps) which
-    per-kernel optimization cannot fix. Operators with workloads that
-    legitimately run with higher idle (e.g. very small batches during
-    bring-up benchmarks) can override the threshold via the
-    ``HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD`` environment variable; an
-    unparseable or negative value falls back to the default.
+    Report_Interfacing.docx §2 (idle-gate sanity check) lists ``<10-20%``
+    as a *rough* target. We initially picked the upper edge (20%) of
+    that band as the gate. Empirically every production-scale run we
+    measured on Qwen3-32B (formal cases A–D in
+    issue_bak/tracelens-profile-debug-20260516) reports
+    ``Idle % ∈ [48%, 60%]``, so the 20% gate suppressed kernel
+    rewriting on every real workload and the whole TraceLens →
+    GEAK pipeline never reached ``run_optimization``. After confirming
+    with the TraceLens team that this idle floor is structural to
+    SGLang inference traces (host-side scheduling + JIT/launch
+    overhead that the docx envisioned at GEMM-microbench scale never
+    accounts for), the gate is relaxed to **80%** — kernel rewriting
+    is still suppressed when the GPU is essentially never on
+    (``Idle % > 80%``), but realistic ``Idle % ≈ 50–60%`` traces are
+    no longer treated as fatally host-bound. Operators with workloads
+    that need the original conservative gate can pin it via the
+    ``HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD`` environment variable;
+    an unparseable or negative value falls back to the default.
     """
     raw = os.environ.get(HIGH_IDLE_PCT_THRESHOLD_ENV, "").strip()
     if not raw:
