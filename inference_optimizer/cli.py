@@ -73,6 +73,7 @@ from .orchestrator.coordinator import Coordinator
 from .orchestrator.framework_paths import resolve_source_file_allowlist
 from .orchestrator.objective import Objective, build_objective
 from .orchestrator.shared_state import SharedState
+from .orchestrator.system_prompts.critic_prompt_builder import build_critic_prompt
 from .orchestrator.system_prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
@@ -152,9 +153,34 @@ def _build_orchestration_prompt(
     )
 
 
-def _load_critic_prompt() -> str:
-    """Return the Critic system prompt sourced from ``system_prompts/critic.md``."""
-    return (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
+def _critic_rules_fragment_path() -> Path:
+    """Path to the critic rules-only fragment (section 6 of the built prompt)."""
+    return asset_system_prompts_dir() / "critic.md"
+
+
+def _build_critic_prompt(
+    *,
+    no_kernel: bool,
+    framework: str,
+    max_minutes: int,
+    action_registry: ActionRegistry | None = None,
+) -> str:
+    """Compose the Critic system prompt for this run.
+
+    Replaces the legacy hand-maintained whitelist in ``critic.md`` with a
+    registry-driven catalogue so new actions (e.g. ``validate_stack``) cannot
+    drift out of the critic's known-action list.
+    """
+    registry = action_registry or ActionRegistry().load()
+    enabled = default_enabled_actions(no_kernel=no_kernel)
+    return build_critic_prompt(
+        action_registry=registry,
+        enabled_actions=enabled,
+        framework=framework,
+        kernel_enabled=not no_kernel,
+        max_minutes=int(max_minutes),
+        rules_fragment_path=_critic_rules_fragment_path(),
+    )
 
 
 _DEFAULT_KERNEL_PROMPT = (
@@ -443,6 +469,7 @@ def _build_backends(
             session_dir=session_dir,
             codex_model=codex_model,
             kb_mode=critic_kb_mode,
+            known_actions=default_enabled_actions(no_kernel=no_kernel),
         )
 
     if robustness_choice not in ("mock", "agent"):
@@ -1954,7 +1981,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             objective=objective,
             max_minutes=max_minutes_for_prompt,
         ),
-        "critic":        args.critic_prompt or _load_critic_prompt(),
+        "critic":        _build_critic_prompt(
+            no_kernel=no_kernel,
+            framework=framework_for_prompt,
+            max_minutes=max_minutes_for_prompt,
+        ),
     }
     if not no_kernel:
         prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
@@ -2241,8 +2272,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--orch-prompt", type=str, default=None,
                       help="Override Orchestration system prompt (file path or inline)")
-    opt.add_argument("--critic-prompt", type=str, default=None,
-                      help="Override Critic system prompt")
     opt.add_argument("--kernel-prompt", type=str, default=None,
                       help="Override Kernel system prompt")
 
@@ -2259,7 +2288,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.command == "optimize":
         # Resolve any --*-prompt that point at a file.
-        for attr in ("orch_prompt", "critic_prompt", "kernel_prompt"):
+        for attr in ("orch_prompt", "kernel_prompt"):
             v = getattr(args, attr)
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))
