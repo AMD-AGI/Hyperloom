@@ -9,6 +9,8 @@ isolated and easy to test.
 from __future__ import annotations
 
 import ast
+import importlib.util
+import os
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -564,6 +566,21 @@ def _row_to_candidate(
     kernel_path = record.get("kernel path", "").strip()
     if kernel_path in {"-", "—"}:
         kernel_path = ""
+    # PR: when TraceLens reports a launcher path relative to a known
+    # framework package (``aiter/...`` / ``sglang/...`` / ``vllm/...``)
+    # — that's what torch.profiler emits after stripping ``sys.path``
+    # prefixes — promote it to the absolute on-disk source file so the
+    # downstream patchability gate stops emitting ``source not under a
+    # reusable framework root`` and GEAK can target real reusable
+    # kernels (e.g. ``/sgl-workspace/aiter/aiter/ops/rmsnorm.py``).
+    # The verbatim launcher string is preserved on
+    # ``tracelens_launcher_path`` below so AST-based source-function
+    # aggregation still works.
+    resolved_source_file = kernel_path
+    if kernel_path:
+        resolved = _resolve_launcher_to_abs_source(kernel_path)
+        if resolved is not None:
+            resolved_source_file, _resolved_line, _resolved_func = resolved
     time_ms = _safe_float(record.get("time (ms)"))
     percent_e2e = _safe_float(record.get("%e2e"))
     count_val = _safe_float(record.get("count"), 1.0)
@@ -584,7 +601,7 @@ def _row_to_candidate(
         "name": name,
         "duration_us": time_ms * 1000.0,
         "call_count": int(count_val) if count_val else 0,
-        "source_file": kernel_path,
+        "source_file": resolved_source_file,
         # PR-B §1: preserve the raw Kernel Path string verbatim so
         # ``aggregate_by_source_function`` can run AFTER
         # ``_finalize_candidates`` (which overwrites ``source_file``
@@ -867,6 +884,175 @@ def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]
     if fragment.isdigit():
         return path.strip(), int(fragment), None
     return text, None, None
+
+
+# ---------------------------------------------------------------------------
+# Launcher path → absolute source file resolver.
+#
+# PyTorch profiler records Python frames with ``__file__`` already made
+# relative to ``sys.path`` entries — e.g. ``aiter/ops/rmsnorm.py(62):
+# rmsnorm2d_fwd``. TraceLens forwards that string verbatim as the
+# ``Kernel Path`` column. Without resolution the downstream patchability
+# gate rejects every row with ``source not under a reusable framework
+# root`` because the relative segment never matches an absolute
+# allowlist prefix, and GEAK never gets to rewrite real reusable
+# kernels (e.g. ``/sgl-workspace/aiter/aiter/ops/rmsnorm.py``).
+#
+# Resolution strategy (most-specific first):
+#   1. ``HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` env override, format
+#      ``pkg=/abs/parent[,pkg=/abs/parent...]``. Per-package operator
+#      escape hatch when the install layout deviates from defaults.
+#   2. ``importlib.util.find_spec(pkg)`` walks the live ``sys.path``
+#      and returns the absolute origin. Robust to editable installs,
+#      wheel installs, and dist-packages layouts alike.
+#   3. Hardcoded fallback table for the production image when the
+#      package is not yet imported. Keeps the gate working from
+#      static-analysis paths where ``import aiter`` might not have run
+#      (e.g. CSV-only parses).
+#
+# Returns the absolute source path when it exists on disk; ``None``
+# otherwise so the caller falls back to the original relative string
+# and downstream gates emit their normal ``source file not resolved``
+# rejection.
+_FRAMEWORK_PKG_FALLBACK_ROOTS: dict[str, tuple[str, ...]] = {
+    "aiter": ("/sgl-workspace/aiter",),
+    "sglang": ("/sgl-workspace/sglang/python", "/sgl-workspace/sglang"),
+    "vllm": (
+        "/usr/local/lib/python3.12/dist-packages",
+        "/usr/local/lib/python3.10/dist-packages",
+        "/opt/venv/lib/python3.10/site-packages",
+        "/sgl-workspace/vllm",
+    ),
+}
+_FRAMEWORK_SOURCE_ROOTS_ENV = "HYPERLOOM_FRAMEWORK_SOURCE_ROOTS"
+
+
+def _env_framework_source_roots() -> dict[str, tuple[str, ...]]:
+    """Parse ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` into ``{pkg: (root,...)}``.
+
+    Format: comma-separated ``pkg=/abs/parent`` entries. Empty / unparseable
+    entries are skipped silently so a malformed export doesn't poison
+    the whole resolver. Values are not validated for existence here —
+    that's the caller's job, so the operator can pre-stage paths.
+    """
+    raw = os.environ.get(_FRAMEWORK_SOURCE_ROOTS_ENV, "").strip()
+    if not raw:
+        return {}
+    out: dict[str, list[str]] = {}
+    for chunk in raw.split(","):
+        if "=" not in chunk:
+            continue
+        key, sep, value = chunk.partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+        if not key or not value:
+            continue
+        out.setdefault(key, []).append(value)
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def _package_root_parent(pkg: str) -> str | None:
+    """Return the directory that contains ``pkg/`` on the live ``sys.path``.
+
+    ``importlib.util.find_spec`` is used so editable installs (``aiter``
+    at ``/sgl-workspace/aiter/aiter/__init__.py``), wheel installs
+    (``vllm`` at ``/usr/local/lib/python3.12/dist-packages/vllm/...``),
+    and namespace packages all resolve correctly without hardcoding.
+    Returns ``None`` when the package isn't importable in the current
+    interpreter.
+    """
+    try:
+        spec = importlib.util.find_spec(pkg)
+    except (ImportError, ValueError):
+        return None
+    if spec is None:
+        return None
+    if spec.submodule_search_locations:
+        # Regular or namespace package: the first search location is the
+        # package directory; its parent is what we want to prepend to
+        # ``pkg/rest/of/path``.
+        loc = list(spec.submodule_search_locations)[0]
+        return os.path.dirname(loc)
+    if spec.origin and spec.origin.endswith(".py"):
+        # Single-file module (rare for frameworks but kept for safety).
+        return os.path.dirname(os.path.dirname(spec.origin))
+    return None
+
+
+def _resolve_launcher_to_abs_source(
+    kernel_path: str,
+) -> tuple[str, int | None, str | None] | None:
+    """Resolve a TraceLens launcher-path string to an absolute file path.
+
+    Returns ``(abs_file, line, function_name)`` when resolution succeeds
+    AND the resolved file exists on disk. Returns ``None`` when:
+
+    * the launcher path is empty / a placeholder / has no path component;
+    * the path is already absolute (caller can use it verbatim — the
+      caller takes care of preserving the original string);
+    * no candidate root yields an existing file.
+
+    The resolver is deliberately conservative: a non-existent absolute
+    path is treated as a miss so the caller can fall back to the
+    grep-based locator in ``tracelens_analysis._finalize_candidates``
+    instead of producing a fabricated absolute path that downstream
+    consumers would treat as authoritative.
+    """
+    raw_path, line, func = _parse_launcher_path(kernel_path)
+    if not raw_path:
+        return None
+    if os.path.isabs(raw_path):
+        # Already absolute — caller can use ``raw_path`` directly; the
+        # resolver returns None to signal "no rewrite needed" (preserves
+        # the original string verbatim in ``source_file``).
+        return None
+    # Pick the leading path segment as the candidate package.
+    head = raw_path.split("/", 1)[0]
+    if not head or head.startswith("."):
+        return None
+
+    candidate_roots: list[str] = []
+    env_roots = _env_framework_source_roots()
+    candidate_roots.extend(env_roots.get(head, ()))
+    pkg_parent = _package_root_parent(head)
+    if pkg_parent:
+        candidate_roots.append(pkg_parent)
+    candidate_roots.extend(_FRAMEWORK_PKG_FALLBACK_ROOTS.get(head, ()))
+
+    seen: set[str] = set()
+    for root in candidate_roots:
+        if not root or root in seen:
+            continue
+        seen.add(root)
+        abs_path = os.path.join(root, raw_path)
+        if not os.path.isfile(abs_path):
+            continue
+        # Validate the resolved path so we never hand GEAK a file whose
+        # contents don't actually contain the launcher's function. This
+        # catches two real failure modes:
+        #
+        #   * sys.path shadowing — two installed packages share a leaf
+        #     name (e.g. namespace clash from a stale wheel + the
+        #     editable checkout) and ``find_spec`` returns the wrong
+        #     one. Without this check we'd "resolve" to a real file
+        #     that doesn't host the launcher's symbol.
+        #   * Operator misconfiguration of
+        #     ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` — pointing at a
+        #     directory that happens to contain a same-named ``.py``
+        #     stub (test fixture, snapshot, doc example) instead of
+        #     the live source tree.
+        #
+        # When the launcher provides no function name (``#L<line>`` /
+        # bare-path shapes), or the source is not a ``.py`` file, we
+        # fall through to existence-only validation since AST cannot
+        # walk it. Verification failures fall through to the next
+        # candidate root rather than short-circuiting, so a shadowing
+        # spec doesn't block a valid fallback entry.
+        if func and abs_path.endswith(".py"):
+            if _function_line_from_ast(Path(abs_path), func) is None:
+                continue
+        return abs_path, line, func
+    return None
 
 
 def _function_line_from_ast(path: Path, function_name: str) -> int | None:
