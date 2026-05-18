@@ -922,11 +922,26 @@ def _build_multinode_launch_entrypoint(
     py = _read_pod_script("launch_multinode.py")
     wait_flag = "--no-wait-health" if args.no_wait_health else ""
     extra_args = args.extra_args or ""
-    # Multi-node only: forward sandbox-side env to the head pod so
-    # SGLANG_TORCH_PROFILER_DIR can be pinned to a wekafs path that
-    # both server pods and the sandbox can read. Empty string => skip
-    # (single-node behaviour, kept as default).
+    # Multi-node only: pin SGLANG_TORCH_PROFILER_DIR to a wekafs path
+    # that both server pods and the sandbox can read. Resolution
+    # (first-match wins):
+    #   1. $HYPERLOOM_MN_PROFILE_TRACE_DIR env — set by
+    #      ``inference_optimizer.cli._provision_multi_node_rayjob_stack``
+    #      when ``optimize`` provisions the RayJob in-process.
+    #   2. Derive from state.json's ``rayjob_id`` —
+    #      ``/wekafs/hyperloom/profile-traces/<rayjob>/torch_trace``.
+    #      Triggered when the agent calls ``multi_node create-rayjob``
+    #      + ``restart-server`` directly (without going through
+    #      ``inference_optimizer.cli._run_optimize``); in that path the
+    #      env never gets set, so we recompute from the persisted rayjob_id.
+    # Empty string => skip the flag entirely (single-node default).
     profiler_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
+    if not profiler_dir:
+        _st = _load_state()
+        _rid = str(_st.get("rayjob_id") or "").strip()
+        if _rid:
+            profiler_dir = f"/wekafs/hyperloom/profile-traces/{_rid}/torch_trace"
+            info(f"profile-traces dir derived from rayjob_id: {profiler_dir}")
     profiler_arg = f"--torch-profiler-dir {profiler_dir!r} " if profiler_dir else ""
     # Expert parallel size. ep <= 1 => no flag (sglang/vllm legacy
     # TP-shard experts); ep > 1 => launch_multinode.py translates to
