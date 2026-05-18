@@ -37,12 +37,19 @@ from .base import Source, SourceData, SourceUnavailable
 log = logging.getLogger(__name__)
 
 
-# Default process patterns we surface in ``local_processes``. Matches
-# the existing monitors so refactoring stays drop-in.
+# Default process patterns we surface in ``local_processes``. The list
+# spans every owner that may legitimately hold AMD GPU VRAM during an
+# inference_optimizer session, so the gpu_memory_leaked signal can
+# distinguish "leaked VRAM (no live owner)" from "active server holding
+# VRAM". ``sglang.launch_server`` / ``EngineCore`` / ``Magpie`` were
+# added in 2026-05 alongside the GPU-leak detector.
 _DEFAULT_PROCESS_PATTERNS: tuple[str, ...] = (
     "sglang.srt",
+    "sglang.launch_server",
     "vllm.entrypoints",
     "vllm serve",
+    "EngineCore",
+    "Magpie",
     "benchmark_serving",
 )
 
@@ -317,6 +324,8 @@ def _sample_rocm_smi() -> dict[str, Any]:
                 "rocm-smi",
                 "--showuse",
                 "--showmemuse",
+                "--showmeminfo",
+                "vram",
                 "--showtemp",
                 "--showpower",
                 "--csv",
@@ -340,7 +349,9 @@ def _sample_rocm_smi() -> dict[str, Any]:
 
 # Mapping rocm-smi column header -> SourceData GPU snapshot field. The
 # column names below are stable across ROCm 5.x / 6.x; new metrics map
-# to None and stay in ``raw`` for future inspection.
+# to None and stay in ``raw`` for future inspection. The two
+# ``VRAM Total ... Memory (B)`` columns are bytes-valued and translated
+# to MiB by ``_parse_rocm_smi_csv`` via :data:`_ROCM_BYTE_TO_MB_FIELDS`.
 _ROCM_HEADER_MAP: dict[str, str] = {
     "GPU use (%)": "util_gpu_pct",
     "GPU memory use (%)": "util_mem_pct",
@@ -349,7 +360,17 @@ _ROCM_HEADER_MAP: dict[str, str] = {
     "Temperature (Sensor memory) (C)": "temperature_memory_c",
     "Average Graphics Package Power (W)": "power_watts",
     "Current Socket Graphics Package Power (W)": "power_watts",
+    "VRAM Total Used Memory (B)": "vram_used_mb",
+    "VRAM Total Memory (B)": "vram_total_mb",
 }
+
+# Snapshot fields whose underlying rocm-smi CSV value is in bytes; the
+# parser divides by 1024**2 so the final units match nvidia-smi
+# (``vram_used_mb`` / ``vram_total_mb``).
+_ROCM_BYTE_TO_MB_FIELDS: frozenset[str] = frozenset({
+    "vram_used_mb",
+    "vram_total_mb",
+})
 
 
 def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
@@ -389,8 +410,11 @@ def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
             if not field:
                 continue
             value = _coerce_float_or_none(cells[col_idx])
-            if value is not None:
-                snapshot[field] = value
+            if value is None:
+                continue
+            if field in _ROCM_BYTE_TO_MB_FIELDS:
+                value = value / (1024.0 * 1024.0)
+            snapshot[field] = value
     out: list[dict[str, Any]] = []
     for k in sorted(by_id):
         snap = by_id[k]

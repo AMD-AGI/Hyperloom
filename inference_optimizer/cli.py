@@ -59,6 +59,7 @@ from .orchestrator.action_executors import (
     sweep_executor,
     validate_stack_executor,
 )
+from .orchestrator.action_executors.recover import recover_executor
 from .orchestrator.backends import (
     ClaudeBackend,
     CodexBackend,
@@ -587,6 +588,13 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "report":            report_executor,
     "session_breakdown": session_breakdown_executor,
     "validate_stack":    validate_stack_executor,
+    # ``recover`` re-enabled in 2026-05 alongside the robustness-agent
+    # ``gpu_memory_leaked`` signal (Change A/B): a real executor now
+    # cleans up leaked VRAM owners and, behind
+    # ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``, optionally shells out to
+    # ``rocm-smi --gpureset``. See
+    # ``orchestrator/action_executors/recover.py``.
+    "recover":           recover_executor,
 }
 
 # Real executors enabled only when kernel-mode is on (profile/pmc_roofline
@@ -602,14 +610,21 @@ _REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {
 # agent's request handlers). Kept as a tuple so SubAgentRunner doesn't
 # fail with "no_executor" when these names appear in stale tasks.
 #
-# `dream` / `re_explore` / `recover` / `comm_optimization` /
-# `compiler_tuning` were removed from this list alongside the
-# corresponding entries in `prompt_builder.{FULL,NO_KERNEL}_ENABLED_ACTIONS`.
-# Their executors were `_noop_prep` (silent success) which produced
-# misleading "succeeded" outcomes; with them gone, any stale state.json
-# resume that still references one of these kinds will surface as
+# `dream` / `re_explore` / `comm_optimization` / `compiler_tuning` were
+# removed from this list alongside the corresponding entries in
+# `prompt_builder.{FULL,NO_KERNEL}_ENABLED_ACTIONS`. Their executors
+# were `_noop_prep` (silent success) which produced misleading
+# "succeeded" outcomes; with them gone, any stale state.json resume
+# that still references one of these kinds will surface as
 # `no_executor` instead of a fake KEEP. Re-add only when real
 # executors land (see remain_todo.md sections C, I, M).
+#
+# `recover` was originally in that removed-stub list, but is now bound
+# above to :data:`recover_executor` (a real implementation that frees
+# leaked GPU VRAM). See the Change A/B/C plan
+# (``gpu-leak-robustness-fix``) for the design notes; the executor is
+# the SubAgentRunner-side counterpart of the robustness-agent
+# ``gpu_memory_leaked`` signal.
 #
 # `target_analysis` used to be a noop-when-unset stub here; it is now
 # wired unconditionally to the real :class:`TargetAnalysisExecutor`
