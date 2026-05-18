@@ -13,9 +13,189 @@
       "non_lm_task": 103,
       "family_blocklist": 34,
       "classify_filter": 5882
-    }
+    },
+    "customer_priority_mapping_file": "ci/candidates/customer_priority_models.json",
+    "customer_priority_force_first": "deepseek-ai/DeepSeek-V3",
+    "customer_priority_appended_count": 11,
+    "customer_priority_appended": [
+      "openai/gpt-oss-120b",
+      "deepseek-ai/DeepSeek-R1",
+      "deepseek-ai/DeepSeek-V3.1",
+      "deepseek-ai/DeepSeek-V3.2",
+      "deepseek-ai/DeepSeek-V4-Flash",
+      "deepseek-ai/DeepSeek-V4-Pro",
+      "deepseek-ai/DeepSeek-R1-0528",
+      "zai-org/GLM-5-FP8",
+      "zai-org/GLM-5.1-FP8",
+      "zai-org/GLM-4.7",
+      "moonshotai/Kimi-K2-Instruct"
+    ],
+    "customer_priority_todo_excluded": [
+      "deepseek-ai/DeepSeek-V4-Flash",
+      "deepseek-ai/DeepSeek-V4-Pro",
+      "zai-org/GLM-5-FP8",
+      "zai-org/GLM-5.1-FP8"
+    ],
+    "customer_priority_todo_reason": "TODO: single-node path is not runnable yet; enable after supported backend/multinode path is validated.",
+    "customer_priority_front_count": 14,
+    "customer_priority_front": [
+      "deepseek-ai/DeepSeek-V3",
+      "openai/gpt-oss-120b",
+      "deepseek-ai/DeepSeek-R1",
+      "deepseek-ai/DeepSeek-V3.1",
+      "deepseek-ai/DeepSeek-V3.2",
+      "deepseek-ai/DeepSeek-R1-0528",
+      "Qwen/Qwen3-235B-A22B",
+      "Qwen/Qwen3-Next-80B-A3B-Instruct",
+      "zai-org/GLM-4.7",
+      "moonshotai/Kimi-K2-Instruct",
+      "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic",
+      "MiniMaxAI/MiniMax-M2.5",
+      "MiniMaxAI/MiniMax-M2.7",
+      "stepfun-ai/Step-3.5-Flash"
+    ]
   },
   "candidates": [
+    {
+      "repo_id": "deepseek-ai/DeepSeek-V3",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV3ForCausalLM",
+      "params_b": 684.53,
+      "precision": "FP8",
+      "weight_gb": 684.5,
+      "downloads": 1287758,
+      "source": "customer_priority_force_first"
+    },
+    {
+      "repo_id": "openai/gpt-oss-120b",
+      "pipeline_tag": "text-generation",
+      "arch": "GptOssForCausalLM",
+      "params_b": 120.41,
+      "precision": "FP4",
+      "weight_gb": 60.2,
+      "downloads": 4661369,
+      "source": "customer_priority_front"
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-R1",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV3ForCausalLM",
+      "params_b": 684.53,
+      "precision": "FP8",
+      "weight_gb": 684.5,
+      "downloads": 3899140,
+      "source": "customer_priority_front"
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-V3.1",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV3ForCausalLM",
+      "params_b": 684.53,
+      "precision": "FP8",
+      "weight_gb": 684.5,
+      "downloads": 193724,
+      "source": "customer_priority_front"
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-V3.2",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV32ForCausalLM",
+      "params_b": 685.4,
+      "precision": "FP8",
+      "weight_gb": 685.4,
+      "downloads": 4210477,
+      "source": "customer_priority_front"
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-R1-0528",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV3ForCausalLM",
+      "params_b": 684.53,
+      "precision": "FP8",
+      "weight_gb": 684.5,
+      "downloads": 1995137,
+      "source": "customer_priority_front"
+    },
+    {
+      "repo_id": "Qwen/Qwen3-235B-A22B",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3MoeForCausalLM",
+      "params_b": 235.09,
+      "precision": "BF16",
+      "weight_gb": 470.2,
+      "downloads": 517762,
+      "source": "customer_priority_front"
+    },
+    {
+      "repo_id": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "Qwen3NextForCausalLM",
+      "params_b": 81.32,
+      "precision": "BF16",
+      "weight_gb": 162.6,
+      "downloads": 298750,
+      "source": "customer_priority_front"
+    },
+    {
+      "repo_id": "zai-org/GLM-4.7",
+      "pipeline_tag": "text-generation",
+      "arch": "Glm4MoeForCausalLM",
+      "params_b": 358.34,
+      "precision": "BF16",
+      "weight_gb": 716.7,
+      "downloads": 60811,
+      "source": "customer_priority_front"
+    },
+    {
+      "repo_id": "moonshotai/Kimi-K2-Instruct",
+      "pipeline_tag": "text-generation",
+      "arch": "DeepseekV3ForCausalLM",
+      "params_b": 1026.47,
+      "precision": "FP8",
+      "weight_gb": 1026.5,
+      "downloads": 827131,
+      "source": "customer_priority_front"
+    },
+    {
+      "repo_id": "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic",
+      "pipeline_tag": "text-generation",
+      "arch": "LlamaForCausalLM",
+      "params_b": 70.56,
+      "precision": "BF16",
+      "weight_gb": 141.1,
+      "downloads": 69239,
+      "source": "customer_priority_front"
+    },
+    {
+      "repo_id": "MiniMaxAI/MiniMax-M2.5",
+      "pipeline_tag": "text-generation",
+      "arch": "MiniMaxM2ForCausalLM",
+      "params_b": 228.7,
+      "precision": "FP8",
+      "weight_gb": 228.7,
+      "downloads": 822973,
+      "source": "customer_priority_front"
+    },
+    {
+      "repo_id": "MiniMaxAI/MiniMax-M2.7",
+      "pipeline_tag": "text-generation",
+      "arch": "MiniMaxM2ForCausalLM",
+      "params_b": 228.7,
+      "precision": "FP8",
+      "weight_gb": 228.7,
+      "downloads": 679573,
+      "source": "customer_priority_front"
+    },
+    {
+      "repo_id": "stepfun-ai/Step-3.5-Flash",
+      "pipeline_tag": "text-generation",
+      "arch": "Step3p5ForCausalLM",
+      "params_b": 199.38,
+      "precision": "BF16",
+      "weight_gb": 398.8,
+      "downloads": 239680,
+      "source": "customer_priority_front"
+    },
     {
       "repo_id": "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ",
       "pipeline_tag": "text-generation",
@@ -170,15 +350,6 @@
       "downloads": 830401
     },
     {
-      "repo_id": "MiniMaxAI/MiniMax-M2.5",
-      "pipeline_tag": "text-generation",
-      "arch": "MiniMaxM2ForCausalLM",
-      "params_b": 228.7,
-      "precision": "FP8",
-      "weight_gb": 228.7,
-      "downloads": 822973
-    },
-    {
       "repo_id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
       "pipeline_tag": "text-generation",
       "arch": "NemotronHForCausalLM",
@@ -204,15 +375,6 @@
       "precision": "BF16",
       "weight_gb": 15.2,
       "downloads": 690998
-    },
-    {
-      "repo_id": "MiniMaxAI/MiniMax-M2.7",
-      "pipeline_tag": "text-generation",
-      "arch": "MiniMaxM2ForCausalLM",
-      "params_b": 228.7,
-      "precision": "FP8",
-      "weight_gb": 228.7,
-      "downloads": 679573
     },
     {
       "repo_id": "bineric/lynx-instruct-30b",
@@ -330,15 +492,6 @@
       "precision": "INT4",
       "weight_gb": 35.3,
       "downloads": 518773
-    },
-    {
-      "repo_id": "Qwen/Qwen3-235B-A22B",
-      "pipeline_tag": "text-generation",
-      "arch": "Qwen3MoeForCausalLM",
-      "params_b": 235.09,
-      "precision": "BF16",
-      "weight_gb": 470.2,
-      "downloads": 517762
     },
     {
       "repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GPTQ-Int4",
@@ -539,15 +692,6 @@
       "downloads": 310065
     },
     {
-      "repo_id": "Qwen/Qwen3-Next-80B-A3B-Instruct",
-      "pipeline_tag": "text-generation",
-      "arch": "Qwen3NextForCausalLM",
-      "params_b": 81.32,
-      "precision": "BF16",
-      "weight_gb": 162.6,
-      "downloads": 298750
-    },
-    {
       "repo_id": "unsloth/Meta-Llama-3.1-8B-Instruct",
       "pipeline_tag": "text-generation",
       "arch": "LlamaForCausalLM",
@@ -591,15 +735,6 @@
       "precision": "BF16",
       "weight_gb": 15.6,
       "downloads": 248259
-    },
-    {
-      "repo_id": "stepfun-ai/Step-3.5-Flash",
-      "pipeline_tag": "text-generation",
-      "arch": "Step3p5ForCausalLM",
-      "params_b": 199.38,
-      "precision": "BF16",
-      "weight_gb": 398.8,
-      "downloads": 239680
     },
     {
       "repo_id": "RedHatAI/Meta-Llama-3.1-8B-FP8",
@@ -1320,15 +1455,6 @@
       "precision": "BF16",
       "weight_gb": 15.2,
       "downloads": 70535
-    },
-    {
-      "repo_id": "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic",
-      "pipeline_tag": "text-generation",
-      "arch": "LlamaForCausalLM",
-      "params_b": 70.56,
-      "precision": "BF16",
-      "weight_gb": 141.1,
-      "downloads": 69239
     },
     {
       "repo_id": "unsloth/Qwen2.5-7B",
