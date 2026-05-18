@@ -25,6 +25,7 @@ from inferenceX_parser import (
     find_benchmark_script,
     format_benchmark_for_prompt,
     get_latest_commit,
+    get_nfs_root,
     merge_model_config,
     resolve_var,
 )
@@ -39,31 +40,63 @@ log = logging.getLogger("ci-orchestrator")
 
 CI_DIR = Path(__file__).resolve().parent
 PROMPT_TEMPLATE = (CI_DIR / "prompt_template.md").read_text()
+PROMPT_TEMPLATE_PR = (CI_DIR / "prompt_template_pr.md").read_text()
 
-# Load skill files from repo — embedded in prompt to bypass tool-mounting failures
-_SKILL_ROOT = CI_DIR.parent / ".cursor" / "skills" / "inference-optimization"
-
-
-def _read_skill_file(*parts: str) -> str:
-    p = _SKILL_ROOT.joinpath(*parts)
-    return p.read_text() if p.exists() else ""
-
-
-SKILL_MD = _read_skill_file("SKILL.md")
-CLAW_MD = _read_skill_file("modes", "CLAW.md")
-RUN_BASELINE_SH = _read_skill_file("scripts", "run_baseline.sh")
-RUN_SWEEP_SH = _read_skill_file("scripts", "run_sweep.sh")
-EXECUTOR_SH = _read_skill_file("scripts", "executor.sh")
-COMMON_SH = _read_skill_file("scripts", "common.sh")
+# Two prompt paths exist:
+#
+#   1. prompt_template.md (default, scheduled / workflow_dispatch CI):
+#      Agent cd's into /wekafs/HyperloomV2 (= the deployed Hyperloom snapshot
+#      on the WekaFS mount) and runs the Python `inference_optimizer optimize`
+#      CLI from there. This validates the *deployed* version, not main HEAD —
+#      wekafs is hand-maintained and may lag main by 50+ commits with local
+#      uncommitted edits. That is the *intended* behavior for schedule runs:
+#      we want to know what the production-deployed Hyperloom does today.
+#
+#   2. prompt_template_pr.md (PR-approve trigger only):
+#      Agent first git-clones the PR head commit into the sandbox at
+#      /tmp/Hyperloom-pr, installs from there, and drives the skill out of
+#      the cloned tree. This validates the *unmerged PR code*, not the
+#      wekafs snapshot — required so reviewer-visible numbers actually
+#      reflect what the PR proposes to ship. The GitHub token is formatted
+#      into the prompt (Claw API has no env-injection field; ClawClient.
+#      create_session/send_message bodies only accept name/agent_id/
+#      sandbox_image/content/tools/pluginId/workspaceId). The workflow
+#      passes ${{ github.token }} (per-run installation token,
+#      contents:read on this repo only, lifetime ≤ workflow run) — chosen
+#      over a user-created PAT because AMD-AGI org policy bans Classic
+#      PATs and gates fine-grained PATs behind admin approval. The flag
+#      `--gh-token-env` keeps it pluggable: any env-var holding a token
+#      that can clone AMD-AGI/Hyperloom works.
+#
+# Both paths share the same plugin 4 (tools 3 + 85). The skill runtime IS
+# the inference_optimizer Python package — there is no marketplace skill
+# download or /workspace/.skills/ layout. ci-mix300 (tool 74) is
+# intentionally NOT bundled in plugin 4.
 
 
 def load_config(config_path: str | None = None) -> dict:
     path = Path(config_path) if config_path else CI_DIR / "ci-config.yaml"
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
-def render_prompt(merged: dict) -> str:
+def render_prompt(merged: dict, *, pr_mode: bool = False,
+                  git_ref: str | None = None,
+                  gh_token: str | None = None) -> str:
+    """Render the agent prompt for the inference_optimizer skill.
+
+    Two paths:
+      - pr_mode=False (default): use prompt_template.md, agent cd's into
+        /wekafs/HyperloomV2 (deployed snapshot). Used by schedule /
+        workflow_dispatch.
+      - pr_mode=True: use prompt_template_pr.md, agent first git-clones
+        the PR head commit into /tmp inside the sandbox, then installs +
+        drives the skill from there. Required so reviewer-visible numbers
+        on PR-approve trigger reflect the proposed code, not the
+        wekafs-deployed snapshot. Requires both git_ref (PR head sha)
+        and gh_token (any GitHub token that can clone AMD-AGI/Hyperloom;
+        the workflow passes the per-run GITHUB_TOKEN).
+    """
     isl, osl = merged["isl_osl_configs"][0]
     ifx_text = format_benchmark_for_prompt(
         merged["inferenceX_benchmarks"],
@@ -72,53 +105,12 @@ def render_prompt(merged: dict) -> str:
         tp=merged.get("tp"),
         conc=merged.get("conc"),
     )
-    script = merged.get("benchmark_script")
-    script_content = merged.get("benchmark_script_content", "")
-    if script and script_content:
-        bss = (
-            f"MANDATORY: Replicate the server config from this InferenceX benchmark script "
-            f"({script}).\n"
-            f"Key env vars for this run: MODEL={merged['model_path']} TP={merged['tp']} "
-            f"EP_SIZE={merged['ep']} CONC={merged['conc']} ISL={isl} OSL={osl} "
-            f"MAX_MODEL_LEN=4096 RANDOM_RANGE_RATIO=0.8 "
-            f"NUM_PROMPTS_MULTIPLIER=10 RESULT_FILENAME=baseline\n"
-            f"DO NOT run the script directly. Extract server launch command and env vars, "
-            f"then reproduce them yourself.\n\n"
-            f"<benchmark_script>\n{script_content}\n</benchmark_script>"
-        )
-    elif script:
-        bss = (
-            f"MANDATORY: Read the InferenceX benchmark script and replicate its server config:\n"
-            f"  {merged['inferencex_path']}/{script}\n"
-            f"Key env vars: MODEL={merged['model_path']} TP={merged['tp']} "
-            f"CONC={merged['conc']} ISL={isl} OSL={osl}"
-        )
-    else:
-        bss = "No InferenceX benchmark script found. Construct server launch manually."
-
-    # Embed skill files so agent doesn't depend on tool mounting
-    skill_section = ""
-    if SKILL_MD:
-        skill_section += f"\n<skill_md>\n{SKILL_MD}\n</skill_md>\n"
-    if CLAW_MD:
-        skill_section += f"\n<claw_md>\n{CLAW_MD}\n</claw_md>\n"
-    if RUN_BASELINE_SH:
-        skill_section += f"\n<run_baseline_sh>\n{RUN_BASELINE_SH}\n</run_baseline_sh>\n"
-    if RUN_SWEEP_SH:
-        skill_section += f"\n<run_sweep_sh>\n{RUN_SWEEP_SH}\n</run_sweep_sh>\n"
-    if EXECUTOR_SH:
-        skill_section += f"\n<executor_sh>\n{EXECUTOR_SH}\n</executor_sh>\n"
-    if COMMON_SH:
-        skill_section += f"\n<common_sh>\n{COMMON_SH}\n</common_sh>\n"
 
     safe_api_key = os.environ.get("CLAW_API_KEY", "")
     safe_base_url = os.environ.get("SAFE_BASE_URL", "")
-    sandbox_workspace = os.environ.get("SANDBOX_WORKSPACE", "")
-    nfs_root = os.environ.get("NFS_ROOT", "/workspace")
 
-    return PROMPT_TEMPLATE.format(
+    common_fields = dict(
         model_hf=merged["model_hf"],
-        mode=merged["mode"],
         model_path=merged["model_path"],
         framework=merged["framework"],
         precision=merged["precision"],
@@ -128,24 +120,30 @@ def render_prompt(merged: dict) -> str:
         tp=merged["tp"],
         ep=merged["ep"],
         gpu_type=merged["gpu_type"],
-        inferencex_path=merged["inferencex_path"],
-        sandbox_image=merged["sandbox_image"],
-        kernel_opt_backends=merged["kernel_opt_backends"],
-        kernel_opt_image=merged["kernel_opt_image"],
-        kernel_opt_workspace=merged["kernel_opt_workspace"],
-        geak_step_limit=merged["geak_step_limit"],
-        min_kernels=merged["min_kernels"],
-        result_dir=merged["result_dir"],
+        gpu_type_lc=str(merged["gpu_type"]).lower(),
         target_gpu=merged["target_gpu"],
         inferenceX_data=ifx_text,
-        runner=merged["runner"],
-        benchmark_script_section=bss,
-        skill_section=skill_section,
         safe_api_key=safe_api_key,
         safe_base_url=safe_base_url,
-        sandbox_workspace=sandbox_workspace,
-        nfs_root=nfs_root,
     )
+
+    if pr_mode:
+        if not git_ref:
+            raise ValueError("pr_mode=True requires git_ref (PR head sha)")
+        if not gh_token:
+            raise ValueError(
+                "pr_mode=True requires gh_token (any GitHub token that can "
+                "clone AMD-AGI/Hyperloom — the workflow passes the per-run "
+                "GITHUB_TOKEN via ${{ github.token }}). Set "
+                "HYPERLOOM_PR_CI_GH_TOKEN env or pass --gh-token-env"
+            )
+        return PROMPT_TEMPLATE_PR.format(
+            git_ref=git_ref,
+            gh_token=gh_token,
+            **common_fields,
+        )
+
+    return PROMPT_TEMPLATE.format(**common_fields)
 
 
 _STREAM_TRUNCATION_MIN_TOOL_CALLS = 3  # fewer tool calls than this in <10min = likely truncation
@@ -203,19 +201,32 @@ def run_model(
     merged: dict,
     nfs_base: str,
     sandbox_timeout: int,
+    *,
+    pr_mode: bool = False,
+    git_ref: str | None = None,
+    gh_token: str | None = None,
 ) -> dict:
-    """Execute the full optimization flow for a single model."""
+    """Execute the full optimization flow for a single model.
+
+    pr_mode + git_ref + gh_token are forwarded to render_prompt to switch
+    between schedule path (/wekafs/HyperloomV2) and PR-approve path
+    (sandbox-internal git clone of PR head). See render_prompt() docstring.
+    """
     model_name = merged["model_hf"].split("/")[-1]
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
-    # Use a local temp dir for downloading files — nfs_base may be read-only on the runner
     result_dir = os.path.join(tempfile.gettempdir(), "hyperloom-ci", model_name, timestamp)
 
     log.info("═" * 60)
     log.info("Starting model: %s (%s)", model_name, merged["precision"])
+    if pr_mode:
+        log.info("PR-CI mode: validating commit %s (sandbox will git-clone PR head)",
+                 git_ref[:12] if git_ref else "?")
     log.info("═" * 60)
 
-    prompt = render_prompt(merged)
-    log.info("Prompt length: %d chars", len(prompt))
+    prompt = render_prompt(merged, pr_mode=pr_mode,
+                           git_ref=git_ref, gh_token=gh_token)
+    # NEVER log full prompt in pr_mode — it contains the GH token.
+    log.info("Prompt length: %d chars (pr_mode=%s)", len(prompt), pr_mode)
 
     status = "failed"
     session_id = None
@@ -357,7 +368,7 @@ def run_model(
 
     # 3b. NFS fallback: scan NFS for results written by PyTorchJob/RayJob.
     if not report_content:
-        nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+        nfs_root = get_nfs_root()
         nfs_scan_dirs = [
             f"{nfs_root}/hyperloom-results",
             f"{nfs_root}/results/ci",
@@ -419,10 +430,33 @@ def main():
                         help="Comma-separated model subset (matches per-entry `key` field, "
                              "fallback `inferenceX_key`)")
     parser.add_argument("--trigger", default="manual", help="Trigger type: scheduled/manual/inferenceX")
-    parser.add_argument("--tools", default=None, help="Comma-separated Claw tool IDs (overrides ci-config)")
+    parser.add_argument("--plugin-id", type=int, default=None,
+                        help="Override claw.plugin_id from ci-config.yaml. Used by the "
+                             "Inference A/B Test workflow to compare different Hyperloom-side "
+                             "plugin builds (e.g. 4 = current wekafs inference_optimizer; "
+                             "5 = an experimental successor with a different SKILL.md).")
+    parser.add_argument("--pr-mode", action="store_true",
+                        help="PR-CI mode: render prompt_template_pr.md so the agent "
+                             "first git-clones --git-ref into /tmp/Hyperloom-pr inside "
+                             "the sandbox, then installs + drives the skill from PR head "
+                             "(NOT from /wekafs/HyperloomV2). Required so reviewer-visible "
+                             "numbers reflect the proposed code, not the wekafs snapshot.")
+    parser.add_argument("--git-ref", default=None,
+                        help="In --pr-mode: PR head commit sha (or branch name) for the "
+                             "agent to clone. Use the full sha — branch name on the PR "
+                             "could move during review.")
+    parser.add_argument("--gh-token-env", default="HYPERLOOM_PR_CI_GH_TOKEN",
+                        help="In --pr-mode: env var holding a GitHub token that can "
+                             "clone AMD-AGI/Hyperloom inside the sandbox. The workflow "
+                             "passes ${{ github.token }} (per-run GITHUB_TOKEN) — "
+                             "AMD-AGI org policy bans Classic PATs and gates "
+                             "fine-grained PATs behind admin approval, so the built-in "
+                             "GITHUB_TOKEN is the only viable choice. The token value "
+                             "gets formatted into the prompt — Claw API has no "
+                             "env-injection field — but GITHUB_TOKEN dies with "
+                             "the workflow run, so leak blast radius is bounded.")
     parser.add_argument("--dry-run", action="store_true", help="Print prompts without executing")
     parser.add_argument("--output-dir", default="ci-output", help="Output directory for reports")
-    parser.add_argument("--update", action="store_true", help="Update images to latest stable before running")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -478,13 +512,13 @@ def main():
         )
         yaml_path = Path(_tmpdir) / ifx_cfg["config_path"]
 
-        # Optionally update images in the cloned amd-master.yaml to latest stable
+        # Read-only image version report. We deliberately don't pass --update —
+        # CI baselines must stay pinned to the InferenceX image tag (otherwise
+        # tok/s comparisons across runs are apples-to-oranges). Operators who
+        # need a different image override it explicitly via ci-config.yaml.
         check_script = CI_DIR.parent / "inference_optimization" / "InferenceX" / "utils" / "check_image_versions.py"
         if check_script.exists():
             cmd = [sys.executable, str(check_script), "--config-files", str(yaml_path)]
-            if args.update:
-                cmd.append("--update")
-                log.info("--update flag set: upgrading images to latest stable")
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
                                         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
@@ -544,29 +578,55 @@ def main():
         log.error("No valid models to process")
         sys.exit(1)
 
-    # Dry run: print prompts and exit
+    # PR-mode: resolve + validate token / git-ref upfront so we fail fast
+    # before spinning up any sandbox.
+    pr_mode = bool(args.pr_mode)
+    git_ref: str | None = None
+    gh_token: str | None = None
+    if pr_mode:
+        if not args.git_ref:
+            log.error("--pr-mode requires --git-ref (PR head commit sha)")
+            sys.exit(2)
+        git_ref = args.git_ref
+        gh_token = os.environ.get(args.gh_token_env)
+        if not gh_token:
+            log.error("--pr-mode requires env %s to hold a GitHub token (got empty/unset). "
+                      "The workflow normally passes ${{ github.token }} here.",
+                      args.gh_token_env)
+            sys.exit(2)
+        log.info("PR-CI mode enabled: git_ref=%s, gh_token=*** (from %s)",
+                 git_ref[:12] if len(git_ref) > 12 else git_ref, args.gh_token_env)
+
+    # Dry run: print prompts and exit. Mask the GH token in pr_mode so the
+    # log doesn't leak it.
     if args.dry_run:
         for merged in merged_models:
-            prompt = render_prompt(merged)
+            prompt = render_prompt(merged, pr_mode=pr_mode,
+                                   git_ref=git_ref,
+                                   gh_token=gh_token)
+            if pr_mode and gh_token:
+                prompt = prompt.replace(gh_token, "***GH_TOKEN_REDACTED***")
             print(f"\n{'=' * 60}")
-            print(f"Model: {merged['model_hf']} ({merged['precision']})")
+            print(f"Model: {merged['model_hf']} ({merged['precision']}) "
+                  f"[pr_mode={pr_mode}]")
             print(f"{'=' * 60}")
             print(prompt)
         sys.exit(0)
 
-    # Override tools if provided via CLI
-    if args.tools:
-        claw_cfg["tools"] = [int(t.strip()) for t in args.tools.split(",")]
-        log.info("Overriding Claw tools from CLI: %s", claw_cfg["tools"])
+    if args.plugin_id is not None:
+        claw_cfg["plugin_id"] = args.plugin_id
+        log.info("Overriding Claw plugin_id from CLI: %s", claw_cfg["plugin_id"])
 
-    # Execute
     claw = ClawClient.from_config(claw_cfg)
-    nfs_base = results_cfg.get("nfs_base") or (os.environ.get("NFS_ROOT", "/wekafs") + "/results/ci")
+    nfs_base = results_cfg.get("nfs_base") or (get_nfs_root() + "/results/ci")
     sandbox_timeout = claw_cfg.get("sandbox_timeout", 14400)
     results = []
 
     for merged in merged_models:
-        result = run_model(claw, merged, nfs_base, sandbox_timeout)
+        result = run_model(
+            claw, merged, nfs_base, sandbox_timeout,
+            pr_mode=pr_mode, git_ref=git_ref, gh_token=gh_token,
+        )
         results.append(result)
         log.info("Result for %s: status=%s, gain=%s",
                  result["model"], result["status"],
