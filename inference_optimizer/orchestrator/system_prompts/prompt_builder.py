@@ -162,6 +162,11 @@ def _section_session_context(
         "Per-tick dynamic context (Mission progress, Time budget, Shared",
         "session state, Coordinator checklist, KB hints, inbox tail) is",
         "appended below the system prompt every tick by the Coordinator.",
+        "The Time-budget block carries `remaining=X.Xmin`. When `remaining` is",
+        "smaller than `report.typical_runtime_min` * 3 you SHOULD propose",
+        "`report` as the next action — the Coordinator will also auto-flush a",
+        "deterministic report at the deadline, but proposing it earlier",
+        "captures any LLM narrative you want surfaced.",
     ]
 
 
@@ -233,6 +238,10 @@ def _section_pipeline_and_budget(
         "KEEP'd entry in optimization_stack, you MUST run `validate_stack` before",
         "the next explore round or before `report`. The Coordinator surfaces a",
         "TODO in the per-tick checklist when this trigger is active.",
+        "",
+        "At the wall-clock deadline the Coordinator auto-enqueues a deterministic",
+        "`report` (no LLM) during closing phase — do not waste ticks re-proposing",
+        "it unless you want an earlier narrative version before time runs out.",
     ])
     return lines
 
@@ -473,6 +482,13 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "or `extra_envs`. Both `backends_search` and `params_search` are the",
         "authoritative dedup ledgers and filter BOTH default grids and",
         "LLM-supplied `params.grid` uniformly.",
+        "",
+        "**Use the numeric `gain_pct` on every row.** The `*_search` and",
+        "`backend_winners_history` blocks now render `±x.xx%` per variant.",
+        "Read them as ranking signal: a `-2%` reject means the flag itself is",
+        "bad on this workload (don't retry the same value), `-0.3%` is",
+        "'try a different value', and a sub-threshold `+0.4%` reject is a",
+        "candidate for a synergy combo with another winner.",
         "",
         "1. **Sub-actions** — sibling flags. If `--max-num-seqs 256` won, also",
         "   try `--max-num-seqs 128` / `512` / `1024`; if `VLLM_ROCM_USE_AITER=1`",
