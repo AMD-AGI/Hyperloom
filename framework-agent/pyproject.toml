@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "framework-agent"
+version = "0.1.0"
+description = "Framework Agent - standalone PR/ref exploration agent for Hyperloom serving framework backends (vLLM / SGLang). Does NOT integrate with inference_optimizer's 5-role mesh."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+ast = [
+    "libcst>=1.0",
+]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=1.0",
+]
+
+[project.scripts]
+framework-agent = "framework_agent.runtime.cli:main"
+fa = "framework_agent.runtime.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# PR1 skeleton: tests/ directory ships in PR2; pyproject keeps pythonpath
+# only so editable installs resolve `framework_agent.*` from src/.
+pythonpath = ["src"]
+filterwarnings = [
+    "error::SyntaxWarning",
+    "ignore::DeprecationWarning",
+]
