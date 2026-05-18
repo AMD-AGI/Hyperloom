@@ -345,6 +345,18 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/aiter/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
+    # Production vLLM wheel install layout (system dist-packages).
+    # Required since vLLM in the current image ships under
+    # ``/usr/local/lib/python3.12/dist-packages/vllm/`` rather than the
+    # editable ``/sgl-workspace/vllm/`` checkout the legacy entries
+    # assumed. The python3.10 fallback covers older images where the
+    # interpreter has not yet been bumped.
+    "/usr/local/lib/python3.12/dist-packages/aiter/",
+    "/usr/local/lib/python3.12/dist-packages/sglang/",
+    "/usr/local/lib/python3.12/dist-packages/vllm/",
+    "/usr/local/lib/python3.10/dist-packages/aiter/",
+    "/usr/local/lib/python3.10/dist-packages/sglang/",
+    "/usr/local/lib/python3.10/dist-packages/vllm/",
 )
 # Kernel-name substrings that mark an operation as non-patchable regardless
 # of source-file resolution: vendor BLAS routines, RCCL/NCCL collectives,
