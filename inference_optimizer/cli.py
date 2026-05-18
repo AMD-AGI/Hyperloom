@@ -1303,10 +1303,16 @@ def _validate_and_resolve_claude_model(
     if not base_url:
         base_url = os.environ.get("OPENAI_BASE_URL", "")
 
+    # Catalog probe goes through the OOB auth-proxy URL to the upstream
+    # LiteLLM gateway, which expects a virtual key (sk-...). SAFE_API_KEY
+    # is the SaFE control-plane key (ak-...) and is used by the OOB proxy
+    # itself to upstream-rewrite, NOT by this client. Use the sk- keys
+    # first; SAFE_API_KEY only as last-resort fallback (e.g. when running
+    # outside the multi-node sandbox where only ak- is provisioned).
     api_key = (
-        os.environ.get("SAFE_API_KEY", "")
-        or os.environ.get("OPENAI_API_KEY", "")
+        os.environ.get("OPENAI_API_KEY", "")
         or os.environ.get("ANTHROPIC_API_KEY", "")
+        or os.environ.get("SAFE_API_KEY", "")
     )
 
     catalog_ids = _probe_llm_catalog(base_url=base_url, api_key=api_key)
