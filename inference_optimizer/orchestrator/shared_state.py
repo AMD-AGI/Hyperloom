@@ -162,6 +162,16 @@ class SharedState:
     start_ts: str = field(default_factory=_now_iso)
     max_minutes: int = 0
     last_profile_trace: str = ""
+    # ``succeeded`` / ``failed`` for the most recent profile attempt. When
+    # ``failed`` (e.g. ``no_trace_files``), Orchestration may re-run profile
+    # even though ``last_profile_trace`` is non-empty from a prior bad run.
+    last_profile_status: str = ""
+    # Rolling log of PolicyGate denials (newest last, cap 50).
+    policy_denial_history: list[dict[str, Any]] = field(default_factory=list)
+    # Per-(action_name, rule) consecutive denial counter.
+    policy_denial_streak: dict[str, int] = field(default_factory=dict)
+    # Set when AST flag discovery cannot locate framework source files.
+    discovered_flags_error: str = ""
     # Server EXTRA_SGLANG_ARGS in effect when last_profile_trace was captured.
     # Orchestration uses this to decide whether re-profiling would change the
     # hot-kernel distribution; identical args means the same trace.
@@ -472,6 +482,95 @@ class SharedState:
 
     def is_pruned(self, family: str) -> bool:
         return family in self.pruned_families
+
+    def prune_family(self, family: str) -> bool:
+        """Alias for :meth:`add_pruned_family` (policy-loop stop-loss)."""
+        return self.add_pruned_family(family)
+
+    _POLICY_DENIAL_HISTORY_CAP = 50
+
+    def record_policy_denial(
+        self,
+        *,
+        action_name: str,
+        rule: str,
+        hint: str,
+        intent_type: str,
+        tick: int,
+        intent_payload: dict[str, Any] | None = None,
+    ) -> int:
+        """Append a denial row and bump per-(action,rule) streak."""
+        key = f"{action_name or '*'}:{rule}"
+        streak = int(self.policy_denial_streak.get(key, 0)) + 1
+        self.policy_denial_streak[key] = streak
+        entry = {
+            "tick": int(tick),
+            "action_name": action_name or "",
+            "rule": rule,
+            "hint": hint or "",
+            "intent_type": intent_type,
+            "streak": streak,
+            "ts": _now_iso(),
+        }
+        if intent_payload:
+            entry["intent_payload_keys"] = sorted(intent_payload.keys())
+        history = list(self.policy_denial_history or [])
+        history.append(entry)
+        if len(history) > self._POLICY_DENIAL_HISTORY_CAP:
+            history = history[-self._POLICY_DENIAL_HISTORY_CAP :]
+        self.policy_denial_history = history
+        return streak
+
+    def reset_policy_denial_streak(self, action_name: str) -> None:
+        if not action_name:
+            return
+        prefix = f"{action_name}:"
+        self.policy_denial_streak = {
+            k: v
+            for k, v in (self.policy_denial_streak or {}).items()
+            if not k.startswith(prefix)
+        }
+
+    def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
+        if not self.policy_denial_history:
+            return ""
+        rows = list(self.policy_denial_history)[-top_k:]
+        lines = [
+            "=== Recent policy denials "
+            f"(newest last, total={len(self.policy_denial_history)}) ==="
+        ]
+        for r in rows:
+            lines.append(
+                f"  tick={r.get('tick')} action={r.get('action_name')!r} "
+                f"rule={r.get('rule')!r} streak={r.get('streak')} "
+                f"hint={str(r.get('hint') or '')[:140]!r}"
+            )
+        return "\n".join(lines)
+
+    def all_top_actions_policy_locked(self, registry: Any, *, top_k: int = 12) -> bool:
+        """True when every visible top-K action row carries a policy_loop lock."""
+        if not self.action_scores or registry is None:
+            return False
+        target_mult = _target_gap_multiplier(
+            target_gap_pct=float(self.target_gap_pct or 0.0),
+            cumulative_gain=float(self.cumulative_gain or 0.0),
+        )
+        rows = _rank_top_k(
+            self.action_scores,
+            registry,
+            tick=int(self.tick or 0),
+            target_gap_mult=target_mult,
+            k=int(top_k),
+        )
+        if not rows:
+            return False
+        positive = [(n, eff, a) for n, eff, a in rows if eff > 0]
+        if not positive:
+            return False
+        return all(
+            str(a.locked_reason or "").startswith("policy_loop:")
+            for _, _, a in positive
+        )
 
     def increment_crash_count(self, by: int = 1) -> int:
         self.crash_count += by
@@ -1508,7 +1607,9 @@ class SharedState:
             f"crash_count={self.crash_count}",
             f"pruned_families={self.pruned_families or '(none)'}",
             f"last_profile_trace={self.last_profile_trace or '(none)'}",
+            f"last_profile_status={self.last_profile_status or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
+            f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
             f"last_profile_roofline={self.last_profile_roofline or '(none)'}",
             f"last_profile_kernel_breakdown={self.last_profile_kernel_breakdown or '(none)'}",
             f"last_select_kernels={self._format_last_select_kernels()}",

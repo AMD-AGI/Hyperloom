@@ -311,3 +311,95 @@ def test_capability_decision_kind_round_trips(
     cap = next(s for s in r.sections if s.section_id == "capability_summary")
     decisions = {d.subject: d.kind for d in cap.decisions}
     assert decisions.get("sweep") == expected_kind
+
+
+# ---------------------------------------------------------------------------
+# A1 / B4: attribution method + invocation rendering
+# ---------------------------------------------------------------------------
+def test_attribution_method_renders_from_field() -> None:
+    """The attribution renderer must surface the collector's
+    ``attribution.method`` verbatim — no hard-coded "single-source"
+    fallback string when method says "reconstructed".
+
+    Anti-regression for the rendering hallucination where the renderer
+    used to print "single-source (inferred from final.action_path)"
+    even on multi-entry stacks where the lineage was actually
+    best-effort reconstructed.
+    """
+    bd = _fixture_breakdown()
+    bd["attribution"] = {
+        "method": "reconstructed",
+        "source_breakdown": {
+            "validated_total_pct": 14.5,
+            "backends_pct_of_total": 10.0,
+            "params_pct_of_total":   4.5,
+            "geak_pct_of_total":     0.0,
+            "oob_pct_of_total":      0.0,
+            "sweep_pct_of_total":    0.0,
+        },
+        "notes": [],
+    }
+    r = render_session_report(bd)
+    sec = next(s for s in r.sections if s.section_id == "attribution")
+    assert any("reconstructed" in fact for fact in sec.key_facts), sec.key_facts
+    assert not any(
+        "single-source" in fact and "single_source" not in fact
+        for fact in sec.key_facts
+    ), sec.key_facts
+
+
+def test_invocation_section_renders_when_present() -> None:
+    """Both baseline and final renderers must surface an
+    ``### Invocation`` block with framework_args + image when the
+    breakdown has ``baseline.invocation`` populated. Secret-shaped
+    envs (``OPENAI_API_KEY``) must not appear in the output."""
+    bd = _fixture_breakdown()
+    bd["session"]["image"] = "registry.example/hyperloom:abc123"
+    bd["baseline"]["invocation"] = {
+        "framework_args": "python -m sglang.launch_server --model /weka/m --tp 8",
+        "extra_envs":     {"TP": "8", "VLLM_FLASH_ATTN": "1"},
+        "config_path":    "runs/baseline/h1/baseline_config.with_envs.yaml",
+        "server_log_path":"runs/baseline/h1/benchmark_001/server.log",
+    }
+    r = render_session_report(bd)
+    base = next(s for s in r.sections if s.section_id == "baseline")
+    md = base.markdown_block
+    assert "### Invocation" in md
+    assert "sglang.launch_server" in md
+    assert "registry.example/hyperloom:abc123" in md
+    assert "TP=8" in md
+    assert "VLLM_FLASH_ATTN=1" in md
+    assert "OPENAI_API_KEY" not in md
+    # The compose layer must NOT pass the invocation through to the
+    # LLM user prompt (command lines often contain transient values).
+    prompt = json.loads(r.llm_user_prompt)
+    user_text = json.dumps(prompt)
+    assert "sglang.launch_server" not in user_text, (
+        "framework_args leaked into LLM prompt"
+    )
+
+
+def test_invocation_renders_framework_args_source() -> None:
+    """When ``invocation.framework_args_source`` is set the renderer
+    must surface the lineage label (``yaml_cmd`` / ``log_python_cmd``
+    / ``log_args_line`` / ``unknown``) right under the command line.
+
+    Anti-regression for the gap2 production failure where
+    ``framework_args = '(APIServer pid=1757439) INFO ...'`` made the
+    extraction silently look successful — having the source label
+    visible lets a reviewer flag the bad extraction at a glance."""
+    bd = _fixture_breakdown()
+    bd["session"]["image"] = "registry.example/hyperloom:src"
+    bd["baseline"]["invocation"] = {
+        "framework_args":        "python -m sglang.launch_server --tp 4",
+        "framework_args_source": "yaml_cmd",
+        "extra_envs":            {"TP": "4"},
+        "config_path":           "runs/baseline/h1/baseline_config.with_envs.yaml",
+        "server_log_path":       "runs/baseline/h1/benchmark_001/server.log",
+    }
+    r = render_session_report(bd)
+    base = next(s for s in r.sections if s.section_id == "baseline")
+    md = base.markdown_block
+    assert "### Invocation" in md
+    assert "yaml_cmd" in md, md
+    assert "**source**" in md, md
