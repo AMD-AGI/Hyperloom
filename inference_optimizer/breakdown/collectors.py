@@ -979,6 +979,9 @@ def collect_final(
         "e2el_mean_ms":                      e2el,
         "ttft_e2el_source":                  ttft_e2el_source,
         "invocation":                        invocation,
+        "closing_phase_entered":             bool(state.get("closing_started_unix") or 0),
+        "closing_started_unix":              float(state.get("closing_started_unix") or 0.0),
+        "closing_report_task_id":            str(state.get("closing_report_task_id") or ""),
     }
 
 
