@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from ..pmc_workload_params import derive_pmc_roofline_params_from_config
 from ..roofline_integration import _as_cmd, run_isolated_pmc_roofline
 from ..sub_agent_runner import RunnerContext
 
@@ -36,6 +37,25 @@ def _ray_context_present(params: dict[str, Any]) -> bool:
     )
 
 
+def _find_materialized_config(params: dict[str, Any]) -> Path | None:
+    raw = params.get("config_path")
+    if raw:
+        p = Path(str(raw))
+        if p.is_file():
+            return p
+    workspace = str(params.get("workspace") or "").strip()
+    if workspace:
+        for name in (
+            "baseline_config.with_envs.yaml",
+            "materialized_config.yaml",
+            "baseline_config.yaml",
+        ):
+            candidate = Path(workspace) / name
+            if candidate.is_file():
+                return candidate
+    return None
+
+
 class PMCRooflineExecutor:
     """Run PMC/roofline collection in an isolated server process."""
 
@@ -57,19 +77,42 @@ class PMCRooflineExecutor:
             }
 
         server_cmd = _as_cmd(params.get("server_cmd"))
+        health_url = str(params.get("health_url") or "")
+        benchmark_cmd = _as_cmd(params.get("benchmark_cmd")) or None
+
+        if not server_cmd:
+            cfg_file = _find_materialized_config(params)
+            if cfg_file is not None:
+                derived = derive_pmc_roofline_params_from_config(
+                    cfg_file,
+                    framework=str(params.get("framework") or ""),
+                    model_path=str(params.get("model_path") or ""),
+                    gpu_type=str(params.get("gpu_type") or ""),
+                    output_dir=params.get("output_dir"),
+                )
+                if derived:
+                    server_cmd = _as_cmd(derived.get("server_cmd"))
+                    if not health_url:
+                        health_url = str(derived.get("health_url") or "")
+                    if benchmark_cmd is None:
+                        benchmark_cmd = _as_cmd(derived.get("benchmark_cmd")) or None
+
         if not server_cmd:
             return {
                 "status": "failed",
                 "error_class": "missing_server_cmd",
-                "error": "pmc_roofline requires task.params.server_cmd",
+                "error": (
+                    "pmc_roofline requires task.params.server_cmd or a readable "
+                    "params.config_path / workspace materialized_config"
+                ),
             }
 
         output_dir = Path(
             params.get("output_dir")
             or Path("/tmp") / f"pmc-roofline-{ctx.task.task_id[:8]}"
         )
-        health_url = str(params.get("health_url") or "http://127.0.0.1:8000/health")
-        benchmark_cmd = _as_cmd(params.get("benchmark_cmd")) or None
+        if not health_url:
+            health_url = "http://127.0.0.1:8000/health"
         env_overrides = {
             str(k): str(v)
             for k, v in dict(params.get("extra_envs") or {}).items()
