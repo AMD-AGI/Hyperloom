@@ -26,9 +26,8 @@ fa = "framework_agent.runtime.cli:main"
 where = ["src"]
 
 [tool.pytest.ini_options]
-# PR1 skeleton: tests/ directory ships in PR2; pyproject keeps pythonpath
-# only so editable installs resolve `framework_agent.*` from src/.
 pythonpath = ["src"]
+testpaths = ["tests"]
 filterwarnings = [
     "error::SyntaxWarning",
     "ignore::DeprecationWarning",
