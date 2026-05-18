@@ -20,6 +20,11 @@ from .classifier import Classifier
 from .cluster_fault import evaluate_cluster_fault_signals
 from .crash import evaluate_crash_signals
 from .event import evaluate_event_signals
+from .gpu_leak import (
+    GpuLeakConfig,
+    GpuLeakDetector,
+    evaluate_gpu_leak_signals,
+)
 from .health import evaluate_health_signals
 from .local_health import evaluate_local_health_signals
 from .stall import evaluate_stall_signals
@@ -27,11 +32,14 @@ from .symptom import Symptom, SymptomSeverity
 
 __all__ = [
     "Classifier",
+    "GpuLeakConfig",
+    "GpuLeakDetector",
     "Symptom",
     "SymptomSeverity",
     "evaluate_cluster_fault_signals",
     "evaluate_crash_signals",
     "evaluate_event_signals",
+    "evaluate_gpu_leak_signals",
     "evaluate_health_signals",
     "evaluate_local_health_signals",
     "evaluate_stall_signals",
