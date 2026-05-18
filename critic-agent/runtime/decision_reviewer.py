@@ -231,6 +231,11 @@ class DecisionReviewer:
         bundle.messages = list(req.messages)
         bundle.decision = dict(req.decision)
         bundle.review_constraints = self._review_constraints()
+        known = req.options.get("known_actions")
+        if isinstance(known, list) and known:
+            bundle.review_constraints["known_actions"] = sorted(
+                str(a) for a in known if isinstance(a, str)
+            )
 
         # Hard requirement: if model/framework still unknown, KB reads must be
         # skipped and the Critic should fall back to needs_review.
