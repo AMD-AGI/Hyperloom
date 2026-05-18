@@ -8,9 +8,9 @@ Subcommands:
 * ``fa explore``    - run the full exploration pipeline; defaults to
   ``--plan`` mode (drop audit material only); ``--execute`` adds
   worktree + venv + build/benchmark/accuracy commands.
-
-``fa kb`` lands in a subsequent PR per the implementation plan in
-``claw-dev/docs-zh/framework-agent-hyperloom-implementation-plan.md``.
+* ``fa kb``         - knowledge-base operations: ``list``, ``show``,
+  ``search``, ``contribute``, ``synthesize``. Defaults to pure-Python
+  digest; ``synthesize --with-llm`` lazy-imports ``claude_agent_sdk``.
 """
 
 from __future__ import annotations
@@ -62,14 +62,15 @@ def _cmd_schema(args: argparse.Namespace) -> None:
     _emit_json(
         {
             "required": ["framework", "repo_url", "baseline"],
-            "subcommands_available": ["schema", "candidates", "explore"],
-            "subcommands_planned": ["kb"],
+            "subcommands_available": ["schema", "candidates", "explore", "kb"],
+            "subcommands_planned": [],
             "search_modes_supported": ["primus_cortex", "github"],
             "modes": {
                 "plan": "drop audit material only (pr.patches + pr_files.json)",
                 "execute": "additionally create worktree+venv and run build/bench commands",
             },
             "promotion_policy": "manual_only",
+            "kb_subcommands": ["list", "show", "search", "contribute", "synthesize"],
         },
         "-",
     )
@@ -100,6 +101,110 @@ def _cmd_candidates(args: argparse.Namespace) -> None:
         "candidates": [asdict(c) for c in candidates],
     }
     _emit_json(payload, args.out)
+
+
+def _cmd_kb(args: argparse.Namespace) -> None:
+    """Dispatch ``fa kb <op>`` to the appropriate kb-module helper."""
+    from .. import kb as kb_mod
+    from ..models import Finding
+
+    op = args.kb_op
+    if op == "list":
+        _emit_json(
+            {
+                "kb_root": str(kb_mod._resolve_kb_root()),
+                "domains": kb_mod.list_domains(),
+            },
+            args.out,
+        )
+        return
+    if op == "show":
+        files = kb_mod.get_domain_files(args.domain)
+        if not files:
+            raise RuntimeAdapterError(
+                f"domain {args.domain!r} not found under {kb_mod._resolve_kb_root()}"
+            )
+        _emit_json(
+            {
+                "domain": args.domain,
+                "files": [
+                    {"path": str(p), "size_bytes": p.stat().st_size}
+                    for p in files
+                    if p.is_file()
+                ],
+            },
+            args.out,
+        )
+        return
+    if op == "search":
+        hits = kb_mod.search_kb(args.query, domains=args.domain or None)
+        _emit_json(
+            {
+                "query": args.query,
+                "domain_filter": list(args.domain) if args.domain else None,
+                "count": len(hits),
+                "hits": [
+                    {"domain": h.domain, "path": str(h.path)} for h in hits
+                ],
+            },
+            args.out,
+        )
+        return
+    if op == "contribute":
+        if not args.body and not args.body_file:
+            raise RuntimeAdapterError(
+                "fa kb contribute requires --body or --body-file"
+            )
+        text = args.body or Path(args.body_file).read_text(encoding="utf-8")
+        path = kb_mod.contribute_to_kb(
+            domain=args.domain,
+            finding=text,
+            source=args.source,
+            session_id=args.session_id,
+        )
+        _emit_json({"status": "appended", "path": str(path)}, args.out)
+        return
+    if op == "synthesize":
+        findings: list[Finding] = []
+        if args.findings:
+            raw = json.loads(Path(args.findings).read_text(encoding="utf-8"))
+            if not isinstance(raw, list):
+                raise RuntimeAdapterError(
+                    "--findings file must contain a JSON array of Finding objects"
+                )
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                findings.append(
+                    Finding(
+                        title=str(item.get("title") or ""),
+                        body=str(item.get("body") or ""),
+                        source=str(item.get("source") or ""),
+                        session_id=str(item.get("session_id") or ""),
+                        candidate_ref=str(item.get("candidate_ref") or ""),
+                        metrics={
+                            str(k): float(v)
+                            for k, v in (item.get("metrics") or {}).items()
+                            if isinstance(v, (int, float))
+                        },
+                    )
+                )
+        markdown = kb_mod.synthesize_findings(
+            args.domain,
+            findings,
+            with_llm=bool(args.with_llm),
+            model=args.model,
+        )
+        if args.out and args.out != "-":
+            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.out).write_text(markdown, encoding="utf-8")
+        else:
+            sys.stdout.write(markdown)
+            if not markdown.endswith("\n"):
+                sys.stdout.write("\n")
+            sys.stdout.flush()
+        return
+    raise RuntimeAdapterError(f"unknown kb op: {op!r}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -150,6 +255,70 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output path (default '-' = stdout)",
     )
     explore_p.set_defaults(func=_cmd_explore)
+
+    kb_p = sub.add_parser(
+        "kb",
+        help="Knowledge-base operations (list / show / search / contribute / synthesize)",
+    )
+    kb_sub = kb_p.add_subparsers(dest="kb_op", required=True)
+
+    kb_list_p = kb_sub.add_parser("list", help="List available KB domains")
+    kb_list_p.add_argument("--out", default="-", help="Output path (default stdout)")
+    kb_list_p.set_defaults(func=_cmd_kb)
+
+    kb_show_p = kb_sub.add_parser("show", help="Show files within a KB domain")
+    kb_show_p.add_argument("--domain", required=True)
+    kb_show_p.add_argument("--out", default="-", help="Output path (default stdout)")
+    kb_show_p.set_defaults(func=_cmd_kb)
+
+    kb_search_p = kb_sub.add_parser("search", help="Search KB content (case-insensitive)")
+    kb_search_p.add_argument("--query", required=True)
+    kb_search_p.add_argument(
+        "--domain",
+        action="append",
+        default=[],
+        help="Restrict search to this domain (repeatable)",
+    )
+    kb_search_p.add_argument("--out", default="-", help="Output path (default stdout)")
+    kb_search_p.set_defaults(func=_cmd_kb)
+
+    kb_contrib_p = kb_sub.add_parser(
+        "contribute",
+        help="Append a finding to ${KB}/<domain>/empirical_kb.md",
+    )
+    kb_contrib_p.add_argument("--domain", required=True)
+    kb_contrib_p.add_argument("--body", default="", help="Finding markdown body")
+    kb_contrib_p.add_argument(
+        "--body-file", default="", help="Read finding body from this file"
+    )
+    kb_contrib_p.add_argument("--source", default="manual")
+    kb_contrib_p.add_argument("--session-id", default="manual")
+    kb_contrib_p.add_argument("--out", default="-", help="Output path (default stdout)")
+    kb_contrib_p.set_defaults(func=_cmd_kb)
+
+    kb_syn_p = kb_sub.add_parser(
+        "synthesize",
+        help="Synthesise a markdown digest from a list of Finding records",
+    )
+    kb_syn_p.add_argument("--domain", required=True)
+    kb_syn_p.add_argument(
+        "--findings",
+        default="",
+        help="JSON file containing a list of Finding objects (optional; empty -> empty digest)",
+    )
+    kb_syn_p.add_argument(
+        "--with-llm",
+        action="store_true",
+        default=False,
+        help="Route through claude_agent_sdk (lazy-imported); default is pure-Python",
+    )
+    kb_syn_p.add_argument(
+        "--model",
+        default="claude-opus-4-7",
+        help="LLM model identifier (only used with --with-llm)",
+    )
+    kb_syn_p.add_argument("--out", default="-", help="Output path (default stdout)")
+    kb_syn_p.set_defaults(func=_cmd_kb)
 
     return parser
 

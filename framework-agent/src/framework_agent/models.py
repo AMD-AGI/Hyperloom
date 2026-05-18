@@ -266,6 +266,8 @@ class ExploreRequest:
     # Fusion-plan additions (not present in zhenggong v0.2)
     gap_description: str = ""
     search_modes: tuple[str, ...] = ("primus_cortex", "github")
+    # KB integration (PR4); empty string disables the contribute hook.
+    kb_domain: str = ""
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "ExploreRequest":
@@ -319,6 +321,7 @@ class ExploreRequest:
             pr_filter=PrFilter.from_dict(raw.get("pr_filter")),
             gap_description=str(raw.get("gap_description") or "").strip(),
             search_modes=_parse_search_modes(raw.get("search_modes")),
+            kb_domain=str(raw.get("kb_domain") or "").strip(),
         )
 
 
@@ -341,6 +344,22 @@ class CommandResult:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict for JSON output."""
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class Finding:
+    """A single distilled observation suitable for KB contribution.
+
+    Used by :mod:`framework_agent.kb.synthesize_findings`. Keeping the
+    record frozen + flat keeps the markdown rendering deterministic.
+    """
+
+    title: str
+    body: str = ""
+    source: str = ""
+    session_id: str = ""
+    candidate_ref: str = ""
+    metrics: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass

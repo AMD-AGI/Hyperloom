@@ -29,7 +29,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
-from .models import Candidate, CandidateResult, ExploreRequest, PrFilter
+from .models import Candidate, CandidateResult, ExploreRequest, Finding, PrFilter
 from .shell import render_template, run_command
 from .sources import primus_cortex
 from .sources._shared import _repo_slug
@@ -606,6 +606,7 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
         "files_json_present": sum(1 for r in results if r.files_json_path),
         "policy": "patches_and_files_only",
     }
+    kb_contribution = _contribute_findings_to_kb(req, winner_result, execute=execute)
     return {
         "ok": True,
         "mode": "execute" if execute else "plan",
@@ -633,7 +634,65 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
         "pr_filter_applied": asdict(req.pr_filter),
         "skipped_candidates": skipped_candidates,
         "audit_materials": audit_materials,
+        "kb_contribution": kb_contribution,
         "candidates": [r.to_dict() for r in results],
+    }
+
+
+def _contribute_findings_to_kb(
+    req: ExploreRequest,
+    winner: CandidateResult | None,
+    *,
+    execute: bool,
+) -> dict[str, object]:
+    """Append a Finding to ``${KB}/<domain>/empirical_kb.md`` when warranted.
+
+    Hook fires only when all of the following are true:
+
+    * ``execute=True`` (plan mode never writes anything outside work_dir);
+    * ``req.kb_domain`` is non-empty (explicit opt-in);
+    * a ``winner`` candidate exists.
+
+    The hook is best-effort - any KB write error is captured into the
+    returned dict so the explore summary stays usable even if the KB
+    directory is read-only. Returns a metadata dict that gets folded
+    into ``explore_summary.json`` under the ``kb_contribution`` key.
+    """
+    if not execute or not req.kb_domain or winner is None:
+        return {"status": "skipped", "reason": "execute+kb_domain+winner required"}
+    from .kb import contribute_to_kb, synthesize_findings
+
+    metrics: dict[str, float] = {}
+    if winner.throughput is not None:
+        metrics["throughput"] = float(winner.throughput)
+        metrics["baseline_throughput"] = float(req.baseline.throughput)
+        if req.baseline.throughput > 0:
+            metrics["throughput_ratio"] = winner.throughput / req.baseline.throughput
+    if winner.accuracy is not None:
+        metrics["accuracy"] = float(winner.accuracy)
+    finding = Finding(
+        title=f"{req.framework} winner {winner.candidate.ref}",
+        body=f"Reason: {winner.reason or 'gates passed'}",
+        source="fa explore --execute",
+        session_id=Path(req.work_dir).name or "session",
+        candidate_ref=winner.candidate.ref,
+        metrics=metrics,
+    )
+    body = synthesize_findings(req.kb_domain, [finding], with_llm=False)
+    try:
+        path = contribute_to_kb(
+            domain=req.kb_domain,
+            finding=body,
+            source=finding.source,
+            session_id=finding.session_id,
+        )
+    except OSError as exc:  # noqa: BLE001 - any disk error must not fail explore
+        return {"status": "failed", "reason": str(exc)}
+    return {
+        "status": "appended",
+        "domain": req.kb_domain,
+        "path": str(path),
+        "finding_title": finding.title,
     }
 
 
