@@ -29,6 +29,7 @@ from typing import Any, Iterable
 from ..role.envelope import (
     Intent,
     build_alert,
+    build_delegate,
     build_escalate,
     build_heartbeat,
     build_prune_branch,
@@ -82,6 +83,11 @@ class ActionLadder:
     def __init__(self, *, config: ActionLadderConfig | None = None) -> None:
         self._config = config or ActionLadderConfig()
         self._last_emitted_tick: dict[tuple[str, ...], int] = {}
+        # Updated at the top of each :meth:`decide` call so per-symptom
+        # branches (notably ``gpu_memory_leaked``) can stamp a stable
+        # tick-indexed ``idempotency_key`` onto the intents they emit
+        # without threading the tick through every helper.
+        self._last_tick_index: int = 0
 
     async def decide(
         self,
@@ -101,6 +107,7 @@ class ActionLadder:
         intents: list[Intent] = []
         findings: list[Finding] = []
         any_emit = False
+        self._last_tick_index = tick_index
         if rca_provider is not None:
             set_tick = getattr(rca_provider, "set_tick", None)
             if callable(set_tick):
@@ -195,6 +202,41 @@ class ActionLadder:
             family = sym.evidence.get("family") if isinstance(sym.evidence, dict) else None
             if isinstance(family, str) and family.strip():
                 intents.append(build_prune_branch(family=family, reason="repeated_failure"))
+        elif sym.name == "gpu_memory_leaked":
+            # Per design decision (no_prune_only_escalate): do NOT
+            # ``prune_branch`` server-launching families — let the
+            # recover sub-agent's outcome decide whether the optimizer
+            # can keep going. Emit an advisory escalate + the actual
+            # recovery delegate; the high-severity ``alert`` from the
+            # base ``_recommend`` call already covers operator visibility.
+            evidence = (
+                dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
+            )
+            intents.append(
+                build_escalate(
+                    reason="gpu_memory_leaked",
+                    next_action_hint=(
+                        "delegate(recover, params={force_gpu_cleanup: true}) "
+                        "is being dispatched; if recover returns "
+                        "needs_review, propose `report` to finalize at the "
+                        "last validated gain"
+                    ),
+                    severity="high",
+                )
+            )
+            intents.append(
+                build_delegate(
+                    action_name="recover",
+                    params={
+                        "reason": "gpu_memory_leaked",
+                        "force_gpu_cleanup": True,
+                        "evidence": evidence,
+                    },
+                    idempotency_key=(
+                        f"recover-gpu-leak-tick-{self._last_tick_index}"
+                    ),
+                )
+            )
         return intents
 
 
