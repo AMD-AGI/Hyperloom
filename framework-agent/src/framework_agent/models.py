@@ -1,0 +1,369 @@
+"""Request and result models for framework PR/ref exploration.
+
+Ported from zhenggong/framework-agent with two fusion-plan additions:
+
+* :attr:`ExploreRequest.gap_description` - free-form bottleneck description
+  consumed by :mod:`framework_agent.keywords` to extract perf keywords
+  before hitting GitHub Search.
+* :attr:`ExploreRequest.search_modes` - tuple of enabled candidate
+  sources. Order matters; ``("primus_cortex", "github")`` means we union
+  results from both, with primus-cortex hard-failing on transport errors
+  and GitHub falling back to best-effort.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+PRIMUS_CORTEX_ENV_VAR = "PRIMUS_CORTEX_PR_API"
+
+
+@dataclass(frozen=True)
+class Baseline:
+    """Baseline throughput/accuracy that thresholds compare against."""
+
+    throughput: float
+    accuracy: float | None = None
+    completed: str = ""
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "Baseline":
+        """Parse raw dict into Baseline; throughput must be > 0."""
+        throughput = float(raw.get("throughput") or raw.get("output_throughput") or 0.0)
+        if throughput <= 0:
+            raise ValueError("baseline.throughput must be > 0")
+        accuracy_raw = raw.get("accuracy")
+        accuracy = float(accuracy_raw) if isinstance(accuracy_raw, (int, float)) else None
+        return cls(
+            throughput=throughput,
+            accuracy=accuracy,
+            completed=str(raw.get("completed") or ""),
+        )
+
+
+@dataclass(frozen=True)
+class Thresholds:
+    """Winner-gate thresholds: throughput ratio + accuracy drop."""
+
+    min_throughput_ratio: float = 1.05
+    max_accuracy_drop: float = 0.05
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | None) -> "Thresholds":
+        """Parse raw dict; missing keys fall back to defaults."""
+        raw = raw or {}
+        return cls(
+            min_throughput_ratio=float(raw.get("min_throughput_ratio", 1.05)),
+            max_accuracy_drop=float(raw.get("max_accuracy_drop", 0.05)),
+        )
+
+
+@dataclass(frozen=True)
+class PrimusCortexConfig:
+    """Configuration for the internal primus-cortex-pr-monitor service.
+
+    When present on :class:`ExploreRequest`, the agent routes PR candidate
+    enumeration through this service. Errors are hard-failed by callers
+    (see :mod:`framework_agent.sources.primus_cortex`).
+    """
+
+    base_url: str
+    timeout_sec: float = 10.0
+    default_label: str | None = None
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "PrimusCortexConfig":
+        """Parse primus_cortex block; base_url is mandatory."""
+        base_url = str(raw.get("base_url") or "").strip()
+        if not base_url:
+            raise ValueError("primus_cortex.base_url is required when primus_cortex block is set")
+        timeout_raw = raw.get("timeout_sec", 10.0)
+        label_raw = raw.get("default_label")
+        return cls(
+            base_url=base_url,
+            timeout_sec=float(timeout_raw),
+            default_label=(
+                str(label_raw).strip()
+                if isinstance(label_raw, str) and label_raw.strip()
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    """A single build/benchmark/accuracy command for a candidate run."""
+
+    command: str
+    timeout_sec: int = 3600
+    required: bool = True
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CommandSpec":
+        """Parse a command block; command text is mandatory."""
+        command = str(raw.get("command") or "").strip()
+        if not command:
+            raise ValueError("command spec requires a non-empty command")
+        return cls(
+            command=command,
+            timeout_sec=int(raw.get("timeout_sec", 3600)),
+            required=bool(raw.get("required", True)),
+        )
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """A single PR or git ref candidate (explicit, primus_cortex, or github)."""
+
+    ref: str
+    repo: str
+    source: str = "explicit"
+    head_sha: str = ""
+    title: str = ""
+    labels: tuple[str, ...] = ()
+    author: str = ""
+    changed_files: tuple[str, ...] = ()
+    updated_at: str = ""
+    html_url: str = ""
+
+    @property
+    def slug(self) -> str:
+        """Filesystem-safe slug derived from ref (used for candidate_dir name)."""
+        out = []
+        for ch in self.ref.lower():
+            if ch.isalnum():
+                out.append(ch)
+            elif ch in (".", "-", "_"):
+                out.append(ch)
+            else:
+                out.append("-")
+        slug = "".join(out).strip("-")
+        return slug or "candidate"
+
+    @property
+    def pr_number(self) -> int | None:
+        """Return the PR number when ref starts with ``PR:``; else None."""
+        if not self.ref.startswith("PR:"):
+            return None
+        try:
+            return int(self.ref.split(":", 1)[1])
+        except (ValueError, IndexError):
+            return None
+
+
+@dataclass(frozen=True)
+class PrFilter:
+    """Server-side and client-side filter applied to enumerated PR candidates.
+
+    Path filters require Stage 2 enrichment (changed_files populated).
+    Labels are case-insensitive. Dates flow through to primus-cortex's
+    REST query when supported.
+    """
+
+    include_paths: tuple[str, ...] = ()
+    exclude_paths: tuple[str, ...] = ()
+    require_labels: tuple[str, ...] = ()
+    exclude_labels: tuple[str, ...] = ()
+    authors: tuple[str, ...] = ()
+    since: str = ""
+    until: str = ""
+    max_changed_files: int = 0
+    min_changed_files: int = 0
+
+    @staticmethod
+    def _as_tuple(raw: Any) -> tuple[str, ...]:
+        """Coerce string/list/None into a clean tuple of non-empty strings."""
+        if raw is None:
+            return ()
+        if isinstance(raw, str):
+            return (raw.strip(),) if raw.strip() else ()
+        if isinstance(raw, (list, tuple)):
+            return tuple(str(v).strip() for v in raw if str(v).strip())
+        raise ValueError(
+            f"pr_filter list field must be string or list, got {type(raw).__name__}"
+        )
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | None) -> "PrFilter":
+        """Parse pr_filter block; missing keys fall back to empty defaults."""
+        if raw is None:
+            return cls()
+        if not isinstance(raw, dict):
+            raise ValueError("pr_filter must be an object when present")
+        return cls(
+            include_paths=cls._as_tuple(raw.get("include_paths")),
+            exclude_paths=cls._as_tuple(raw.get("exclude_paths")),
+            require_labels=cls._as_tuple(raw.get("require_labels")),
+            exclude_labels=cls._as_tuple(raw.get("exclude_labels")),
+            authors=cls._as_tuple(raw.get("authors")),
+            since=str(raw.get("since") or "").strip(),
+            until=str(raw.get("until") or "").strip(),
+            max_changed_files=int(raw.get("max_changed_files", 0) or 0),
+            min_changed_files=int(raw.get("min_changed_files", 0) or 0),
+        )
+
+    @property
+    def is_empty(self) -> bool:
+        """True when no constraint is set (filter is a no-op)."""
+        return (
+            not self.include_paths
+            and not self.exclude_paths
+            and not self.require_labels
+            and not self.exclude_labels
+            and not self.authors
+            and not self.since
+            and not self.until
+            and self.max_changed_files == 0
+            and self.min_changed_files == 0
+        )
+
+
+_VALID_SEARCH_MODES = frozenset({"primus_cortex", "github"})
+
+
+def _parse_search_modes(raw: Any) -> tuple[str, ...]:
+    """Coerce a list of mode names; default to primus_cortex + github."""
+    if raw is None or raw == "":
+        return ("primus_cortex", "github")
+    if isinstance(raw, str):
+        items = [raw.strip()] if raw.strip() else []
+    elif isinstance(raw, (list, tuple)):
+        items = [str(v).strip() for v in raw if str(v).strip()]
+    else:
+        raise ValueError(
+            f"search_modes must be string or list, got {type(raw).__name__}"
+        )
+    for item in items:
+        if item not in _VALID_SEARCH_MODES:
+            raise ValueError(
+                f"search_modes contains unknown source {item!r}; "
+                f"valid values are {sorted(_VALID_SEARCH_MODES)!r}"
+            )
+    return tuple(items)
+
+
+@dataclass(frozen=True)
+class ExploreRequest:
+    """Top-level request for `fa explore` / `fa candidates`."""
+
+    framework: str
+    repo_url: str
+    work_dir: Path
+    baseline: Baseline
+    thresholds: Thresholds = field(default_factory=Thresholds)
+    candidate_refs: tuple[str, ...] = ()
+    search_perf_prs: bool = False
+    max_search_candidates: int = 5
+    prepare_candidate_env: bool = True
+    commands: dict[str, CommandSpec] = field(default_factory=dict)
+    outputs: dict[str, str] = field(default_factory=dict)
+    primus_cortex: PrimusCortexConfig | None = None
+    pr_filter: PrFilter = field(default_factory=PrFilter)
+    # Fusion-plan additions (not present in zhenggong v0.2)
+    gap_description: str = ""
+    search_modes: tuple[str, ...] = ("primus_cortex", "github")
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "ExploreRequest":
+        """Parse a JSON request payload into ExploreRequest, validating required fields."""
+        framework = str(raw.get("framework") or "").strip().lower()
+        if not framework:
+            raise ValueError("framework is required")
+        repo_url = str(raw.get("repo_url") or "").strip()
+        if not repo_url:
+            raise ValueError("repo_url is required")
+        work_dir = Path(str(raw.get("work_dir") or "/tmp/framework-agent")).expanduser()
+        baseline_raw = raw.get("baseline")
+        if not isinstance(baseline_raw, dict):
+            raise ValueError("baseline object is required")
+        commands_raw = raw.get("commands") or {}
+        if not isinstance(commands_raw, dict):
+            raise ValueError("commands must be an object")
+        commands = {
+            str(name): CommandSpec.from_dict(spec)
+            for name, spec in commands_raw.items()
+            if isinstance(spec, dict)
+        }
+        outputs = raw.get("outputs") or {}
+        if not isinstance(outputs, dict):
+            raise ValueError("outputs must be an object when present")
+        primus_raw = raw.get("primus_cortex")
+        if isinstance(primus_raw, dict):
+            primus_cortex = PrimusCortexConfig.from_dict(primus_raw)
+        elif primus_raw is None:
+            env_base_url = os.environ.get(PRIMUS_CORTEX_ENV_VAR, "").strip()
+            primus_cortex = (
+                PrimusCortexConfig(base_url=env_base_url) if env_base_url else None
+            )
+        else:
+            raise ValueError("primus_cortex must be an object when present")
+        return cls(
+            framework=framework,
+            repo_url=repo_url,
+            work_dir=work_dir,
+            baseline=Baseline.from_dict(baseline_raw),
+            thresholds=Thresholds.from_dict(raw.get("thresholds")),
+            candidate_refs=tuple(
+                str(r).strip() for r in raw.get("candidate_refs") or () if str(r).strip()
+            ),
+            search_perf_prs=bool(raw.get("search_perf_prs", False)),
+            max_search_candidates=int(raw.get("max_search_candidates", 5)),
+            prepare_candidate_env=bool(raw.get("prepare_candidate_env", True)),
+            commands=commands,
+            outputs={str(k): str(v) for k, v in outputs.items()},
+            primus_cortex=primus_cortex,
+            pr_filter=PrFilter.from_dict(raw.get("pr_filter")),
+            gap_description=str(raw.get("gap_description") or "").strip(),
+            search_modes=_parse_search_modes(raw.get("search_modes")),
+        )
+
+
+@dataclass
+class CommandResult:
+    """Result of a single shell command (build/bench/accuracy)."""
+
+    name: str
+    command: str
+    returncode: int
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+    timed_out: bool = False
+
+    @property
+    def ok(self) -> bool:
+        """True iff returncode == 0 and command did not time out."""
+        return self.returncode == 0 and not self.timed_out
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict for JSON output."""
+        return asdict(self)
+
+
+@dataclass
+class CandidateResult:
+    """Per-candidate run summary used in explore_summary.json."""
+
+    candidate: Candidate
+    candidate_dir: str
+    worktree_dir: str
+    venv_dir: str
+    status: str
+    throughput: float | None = None
+    accuracy: float | None = None
+    completed: str = ""
+    winner: bool = False
+    reason: str = ""
+    commands: list[CommandResult] = field(default_factory=list)
+    patches_path: str = ""
+    files_json_path: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict for JSON output, expanding nested fields."""
+        data = asdict(self)
+        data["candidate"] = asdict(self.candidate)
+        data["commands"] = [c.to_dict() for c in self.commands]
+        return data
