@@ -431,16 +431,15 @@ ensure_tracelens() {
     run bash -lc "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir -e ."
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    # TraceLens #124: prefer the inference variant (correct entry for
-    # vLLM/SGLang traces). Fall back to the legacy CLI for older builds.
+    # TraceLens #124: only the inference variant is accepted (the correct
+    # entry for vLLM/SGLang traces). Hyperloom is inference-only since
+    # v0.4; the legacy training-mode CLI was removed to keep install /
+    # runtime in lockstep.
     if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
       TraceLens_generate_perf_report_pytorch_inference --help >/dev/null
       log "TraceLens perf CLI verified: TraceLens_generate_perf_report_pytorch_inference (#124)"
-    elif command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
-      TraceLens_generate_perf_report_pytorch --help >/dev/null
-      warn "TraceLens_generate_perf_report_pytorch_inference not found; using legacy TraceLens_generate_perf_report_pytorch"
     else
-      verify_die "Neither TraceLens_generate_perf_report_pytorch_inference nor TraceLens_generate_perf_report_pytorch found after install"
+      verify_die "TraceLens_generate_perf_report_pytorch_inference not found after install (Hyperloom is inference-only since v0.4; bump TraceLens-internal)"
     fi
   fi
 }
@@ -457,9 +456,38 @@ ensure_geak() {
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
     run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"
-    run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"
+    # GEAK v3.1.0 ships 5 MCP tools under mcp_tools/; all of them are
+    # imported by the bundled ``minisweagent`` at preprocess time:
+    #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
+    #   * profiler-mcp               — Metrix instrumented profiling
+    #                                  (preprocessor.py:1073 import)
+    #   * metrix-mcp                 — backend for profiler-mcp
+    #   * cross-session-memory-mcp   — GEAK_MEMORY_STORE_PATH retriever
+    #   * automated-test-discovery   — pre-fills eval_command harness
+    # Installing only rag-mcp (the historical default) leaves the
+    # other four ``ModuleNotFoundError`` at runtime — observed on the
+    # 2026-05-15 Qwen3-32B GEAK attempts where ``profiler_mcp`` was
+    # missing and every GEAK attempt aborted in ~4 minutes with a
+    # zero-byte baseline. Install all five together.
+    for _geak_mcp in rag-mcp profiler-mcp metrix-mcp \
+                    cross-session-memory-mcp automated-test-discovery; do
+      run python3 -m pip install -q --no-cache-dir \
+        "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"
+    done
+    # Patch GEAK's bundled prompt YAML to remove the misleading
+    # ``task_runner.py performance`` example that causes sub-agent
+    # LLMs to burn budget on ``find /`` for a non-existent script.
+    # Idempotent and fail-soft — see kernel-agent/tools/geak_prompt_patcher.py
+    # for the full rationale. Always best-effort; only blocking when
+    # the operator explicitly opts in via HYPERLOOM_GEAK_PROMPT_PATCH_REQUIRED=1.
+    _geak_patcher="${KERNEL_AGENT_ROOT}/tools/geak_prompt_patcher.py"
+    if [ -f "$_geak_patcher" ]; then
+      run python3 "$_geak_patcher"
+    else
+      warn "geak prompt patcher missing at $_geak_patcher; skip"
+    fi
   else
-    log "check-only: skipping GEAK and rag-mcp installation"
+    log "check-only: skipping GEAK and mcp_tools installation"
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
     if [ "$DRY_RUN" -eq 0 ]; then
@@ -717,15 +745,14 @@ except Exception:
     raise SystemExit(1)
 PY
 )"
-  # TraceLens perf-report CLI: report whichever variant is available
-  # (#124 prefers the _inference suffix; the legacy CLI is acceptable as
-  # a fallback, the dispatcher in tools/tracelens_analysis.py picks at runtime).
+  # TraceLens perf-report CLI: only the inference variant is accepted
+  # (#124). Hyperloom is inference-only since v0.4; the legacy
+  # training-mode CLI was removed because its output shape silently
+  # breaks downstream fusion / roofline analysis.
   if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
     log "found TraceLens_generate_perf_report_pytorch_inference: $(command -v TraceLens_generate_perf_report_pytorch_inference)"
-  elif command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
-    warn "TraceLens_generate_perf_report_pytorch_inference not found; using legacy TraceLens_generate_perf_report_pytorch: $(command -v TraceLens_generate_perf_report_pytorch)"
   else
-    warn "TraceLens perf-report CLI not found (looked for both _inference and legacy)"
+    warn "TraceLens_generate_perf_report_pytorch_inference not found (Hyperloom is inference-only since v0.4)"
   fi
   for tool in geak oob claude codex; do
     if command -v "$tool" >/dev/null 2>&1; then
