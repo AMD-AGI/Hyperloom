@@ -453,6 +453,18 @@ ensure_geak() {
       run python3 -m pip install -q --no-cache-dir \
         "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"
     done
+    # Patch GEAK's bundled prompt YAML to remove the misleading
+    # ``task_runner.py performance`` example that causes sub-agent
+    # LLMs to burn budget on ``find /`` for a non-existent script.
+    # Idempotent and fail-soft — see kernel-agent/tools/geak_prompt_patcher.py
+    # for the full rationale. Always best-effort; only blocking when
+    # the operator explicitly opts in via HYPERLOOM_GEAK_PROMPT_PATCH_REQUIRED=1.
+    _geak_patcher="${KERNEL_AGENT_ROOT}/tools/geak_prompt_patcher.py"
+    if [ -f "$_geak_patcher" ]; then
+      run python3 "$_geak_patcher"
+    else
+      warn "geak prompt patcher missing at $_geak_patcher; skip"
+    fi
   else
     log "check-only: skipping GEAK and mcp_tools installation"
   fi
