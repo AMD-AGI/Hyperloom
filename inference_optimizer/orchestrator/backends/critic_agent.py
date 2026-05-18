@@ -114,6 +114,9 @@ Rules (mirror SKILL.md Hard Rules + Approve Standard):
   runtime falls back to a heartbeat.
 - `approve` requires comparable before/after benchmark, accuracy gate
   (or waiver), active-path proof when relevant, and a clear rollback.
+- If `review_constraints.known_actions` is non-empty, any
+  `alternative_action` MUST be drawn from it; otherwise omit
+  `alternative_action`.
 ==== END OUTPUT FORMAT ====
 """.strip()
 
@@ -275,6 +278,7 @@ class CriticAgentBackend:
     kb_env: dict[str, str] | None = None
     runtime_caller_factory: Callable[[], RuntimeCaller] | None = None
     static_context: dict[str, Any] | None = None
+    known_actions: tuple[str, ...] = ()
     name: str = "critic-agent"
 
     # Runtime state — populated in __post_init__ and mutated turn-over-turn.
@@ -386,12 +390,16 @@ class CriticAgentBackend:
         emit_path = workdir / "emit.json"
 
         session_id = self.session_dir.name
-        request = {
+        request: dict[str, Any] = {
             "kind": "coordinator_inbox",
             "session_id": session_id,
             "raw_prompt": prompt,
             "context": dict(self._static_context),
         }
+        if self.known_actions:
+            request["options"] = {
+                "known_actions": list(self.known_actions),
+            }
         request_path.write_text(
             json.dumps(request, ensure_ascii=False, indent=2),
             encoding="utf-8",
