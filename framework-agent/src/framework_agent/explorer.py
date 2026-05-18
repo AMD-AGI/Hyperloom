@@ -315,9 +315,16 @@ def _repo_cache_dir(req: ExploreRequest) -> Path:
     return req.work_dir / "_repos" / (safe or "repo")
 
 
-def _run_git(args: list[str], *, cwd: Path | None = None, timeout_sec: int = 1800) -> None:
-    """Run a git command with a timeout; raise on non-zero."""
+def _run_subprocess(
+    args: list[str], *, cwd: Path | None = None, timeout_sec: int = 1800
+) -> None:
+    """Run a subprocess with a timeout; raise CalledProcessError on non-zero."""
     subprocess.run(args, cwd=str(cwd) if cwd else None, check=True, timeout=timeout_sec)
+
+
+def _run_git(args: list[str], *, cwd: Path | None = None, timeout_sec: int = 1800) -> None:
+    """Run a git command with a timeout; thin wrapper over :func:`_run_subprocess`."""
+    _run_subprocess(args, cwd=cwd, timeout_sec=timeout_sec)
 
 
 def _ensure_repo_cache(req: ExploreRequest) -> Path:
@@ -394,7 +401,7 @@ def _prepare_candidate_workspace(
     )
     if venv_dir.exists():
         shutil.rmtree(venv_dir)
-    _run_git(
+    _run_subprocess(
         [sys.executable, "-m", "venv", "--system-site-packages", str(venv_dir)],
         timeout_sec=600,
     )
@@ -558,7 +565,7 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
             spec = req.commands.get(name)
             if spec is None:
                 continue
-            command = render_template(spec.command, variables)
+            command = render_template(spec.command, variables, shell_quote=True)
             result = run_command(
                 name,
                 command,

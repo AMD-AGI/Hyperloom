@@ -18,7 +18,9 @@ Dispatcher contract:
   requested without ``primus_cortex`` block / env var) -> raise
   :class:`SourceConfigError`.
 * Per-mode errors propagate per the backend's policy (primus_cortex
-  hard-fails; github will be best-effort in Phase B).
+  hard-fails on network/parse errors; github is best-effort and
+  returns an empty list when the GitHub Search API is unavailable
+  or rate-limited).
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from typing import Iterable
 from ..models import Candidate, ExploreRequest
 from ._shared import GitHubPr
 from . import github as github_backend
-from .primus_cortex import PrimusCortexError, list_perf_prs
+from .primus_cortex import list_perf_prs
 
 
 class SourceConfigError(RuntimeError):
@@ -108,16 +110,13 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
             "block was provided (nor PRIMUS_CORTEX_PR_API env var)"
         )
     label = cfg.default_label
-    try:
-        prs = list_perf_prs(
-            request.repo_url,
-            base_url=cfg.base_url,
-            limit=request.max_search_candidates,
-            label=label,
-            timeout_sec=cfg.timeout_sec,
-        )
-    except PrimusCortexError:
-        raise
+    prs = list_perf_prs(
+        request.repo_url,
+        base_url=cfg.base_url,
+        limit=request.max_search_candidates,
+        label=label,
+        timeout_sec=cfg.timeout_sec,
+    )
     return [_pr_to_candidate(pr, request.repo_url, "primus_cortex") for pr in prs]
 
 

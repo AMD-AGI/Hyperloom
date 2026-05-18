@@ -1,13 +1,18 @@
 """Shell helpers for trusted framework exploration commands.
 
-Ported verbatim from zhenggong/framework-agent. Pure subprocess + template
-rendering with no external deps.
+Pure subprocess + template rendering with no external deps. The
+template renderer accepts an optional ``shell_quote`` flag that
+wraps each substituted value in ``shlex.quote`` so an attacker who
+managed to seed a candidate ref or path with shell metacharacters
+cannot break out of the rendered command string. Callers that
+render *paths* (not shell commands) keep ``shell_quote=False``.
 """
 
 from __future__ import annotations
 
-import subprocess
 import re
+import shlex
+import subprocess
 from pathlib import Path
 
 from .models import CommandResult
@@ -48,15 +53,28 @@ def run_command(
         )
 
 
-def render_template(template: str, variables: dict[str, str]) -> str:
+def render_template(
+    template: str,
+    variables: dict[str, str],
+    *,
+    shell_quote: bool = False,
+) -> str:
     """Render known ``{var}`` placeholders, raise on unknown placeholders.
 
     Does not touch JSON-style ``{...}`` braces that don't match the
     ``[A-Za-z_][A-Za-z0-9_]*`` identifier pattern.
+
+    When ``shell_quote=True`` each substituted value is wrapped with
+    :func:`shlex.quote`. Use this when the rendered string will be
+    handed to a shell (e.g. ``subprocess.run(shell=True)``); the
+    quoting is a no-op for plain alphanumeric / path-safe values
+    and transparently neutralises shell metacharacters in any
+    untrusted input.
     """
     rendered = template
     for key, value in variables.items():
-        rendered = rendered.replace("{" + key + "}", value)
+        replacement = shlex.quote(value) if shell_quote else value
+        rendered = rendered.replace("{" + key + "}", replacement)
     unknown = sorted(set(re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", rendered)))
     if unknown:
         raise ValueError(
