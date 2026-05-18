@@ -726,9 +726,14 @@ def _ensure_auth_proxy_and_claude_config(
     import json as _json
 
     proxy_port = int(os.environ.get("AUTH_PROXY_PORT", "4002"))
-    upstream_url = base_url or os.environ.get(
-        "ANTHROPIC_BASE_URL",
-        os.environ.get("OPENAI_BASE_URL", ""),
+    # OPENAI_BASE_URL is the canonical LiteLLM endpoint; ANTHROPIC_BASE_URL is
+    # the legacy fallback for older sandbox env where only the Anthropic alias
+    # was exported. Prefer OPENAI to stay consistent with install.sh /
+    # ensure_auth_proxy.sh / ray_runtime.py.
+    upstream_url = (
+        base_url
+        or os.environ.get("OPENAI_BASE_URL", "")
+        or os.environ.get("ANTHROPIC_BASE_URL", "")
     )
     if not upstream_url:
         print("Preflight: no LLM base URL set; skipping auth-proxy setup")
