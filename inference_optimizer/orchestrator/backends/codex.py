@@ -15,10 +15,12 @@ intent transport is JSON-in-text:
 
 Authentication:
 
-* `ANTHROPIC_BASE_URL` (or `OPENAI_BASE_URL`) — proxy endpoint
+* `OPENAI_BASE_URL` (or `ANTHROPIC_BASE_URL`) — proxy endpoint
 * `ANTHROPIC_AUTH_TOKEN` (or `OPENAI_API_KEY`) — auth token
   The AMD proxy serves both Claude AND OpenAI models from the same URL,
-  hence we accept the ANTHROPIC_* env vars too.
+  hence we accept the ANTHROPIC_* env vars too. OPENAI_BASE_URL is the
+  canonical (install.sh/ensure_auth_proxy.sh agree); ANTHROPIC_BASE_URL is
+  kept as a legacy fallback.
 
 Test seam:
 
@@ -120,7 +122,10 @@ class CodexBackend:
 
     model: str = "gpt-5.4"
     api_key_env: str = "ANTHROPIC_AUTH_TOKEN"  # AMD proxy; accepts OPENAI too
-    base_url_env: str = "ANTHROPIC_BASE_URL"
+    # Canonical LiteLLM env (install.sh/ensure_auth_proxy.sh agree). When two
+    # base-URL envs coexist, OPENAI_BASE_URL wins; ANTHROPIC_BASE_URL is the
+    # legacy fallback.
+    base_url_env: str = "OPENAI_BASE_URL"
     max_completion_tokens: int = 2000
     name: str = "codex"
 
@@ -152,6 +157,7 @@ class CodexBackend:
         base_url = (
             os.environ.get(self.base_url_env)
             or os.environ.get("OPENAI_BASE_URL")
+            or os.environ.get("ANTHROPIC_BASE_URL")
         )
         kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
