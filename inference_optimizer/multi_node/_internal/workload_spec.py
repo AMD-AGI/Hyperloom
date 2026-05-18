@@ -37,10 +37,11 @@ Decisions baked in here that the caller cannot override:
   The RayJob **submitter** long-run driver is **only** ``env.RAY_JOB_ENTRYPOINT``
   (below), not ``entryPoints``.
 * ``env`` — SaFE workload ``Env map[string]string`` (JSON ``"env": {...}``).
-  User ``extra_env`` is merged first (reserved keys stripped); defaults
-  ``NCCL_DEBUG=INFO`` and ``NCCL_DEBUG_FILE=/tmp/nccl-r%r.log`` (``%r`` =
-  NCCL rank in log path) apply when absent; ``RAY_JOB_ENTRYPOINT`` is
-  then set to base64(``tail -f /dev/null``) for the **KubeRay submitter**
+  User ``extra_env`` is merged first (reserved keys stripped); no defaults
+  are injected, so debug knobs (``NCCL_DEBUG``, ``NCCL_DEBUG_FILE``,
+  ``TORCH_DISTRIBUTED_DEBUG``, etc.) must be passed explicitly via
+  ``--extra-env`` when triaging. ``RAY_JOB_ENTRYPOINT`` is then set to
+  base64(``tail -f /dev/null``) for the **KubeRay submitter**
   (``updateRayJob`` / ``spec.entrypoint``) and cannot be overridden by callers.
   Legacy ``RAYJOB_LONG_LIVED`` is stripped from ``extra_env`` if present.
 """
@@ -158,10 +159,9 @@ def build_rayjob_workload_body(
     # env: SaFE CreateWorkloadRequest.Env (map[string]string) is injected into
     # RayJob pods after dispatcher merges with chart defaults. User keys from
     # extra_env win for the same name; reserved keys are stripped in sanitize.
+    # Pass NCCL_DEBUG / NCCL_DEBUG_FILE / TORCH_DISTRIBUTED_DEBUG via --extra-env
+    # only when triaging — they are not injected here.
     env: dict[str, str] = _sanitize_extra_env(extra_env)
-    # Default NCCL logging for cross-node TP/RoCE triage; override via --extra-env.
-    env.setdefault("NCCL_DEBUG", "INFO")
-    env.setdefault("NCCL_DEBUG_FILE", "/tmp/nccl-r%r.log")
     env["RAY_JOB_ENTRYPOINT"] = _b64(_SUBMITTER_BLOCK_ENTRYPOINT)
 
     # labels: caller-supplied first (sanitized), then a brain-managed

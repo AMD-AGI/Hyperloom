@@ -130,12 +130,15 @@ else
   GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE}"
 fi
 # When 1, ensure_rag_index runs GEAK scripts/build_index.py after GEAK
-# install. Defaults to 0 so the multi-node sandbox path (CPU-only client,
-# `--device` auto-detect lands on cpu, BGE-large embedding ~1.5h) does not
-# silently stall every bootstrap. The single-node / GPU-pod path can opt
-# in with `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1` (cuda auto-detect makes
-# the on-build cost ~1min there).
-KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-0}"
+# install. Defaults to 1 so GEAK kernel-opt gets RAG-augmented retrieval
+# out of the box on the canonical GPU-pod path (cuda auto-detect, BGE-
+# large embedding ~1min). Callers that don't want this — e.g. claude-only
+# kernel-opt, CPU-only sandbox where BGE-large takes ~1.5h, or any path
+# where install.sh latency matters more than RAG quality — should set
+# `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0` in the launching env (Brain
+# propagates Environment block vars from the prompt into sandbox env, so
+# operators can flip this per-task without editing this script).
+KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-1}"
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
@@ -195,7 +198,9 @@ Options:
   -h, --help         Show this help
 
 Environment (optional):
-  KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0   Skip the GEAK semantic RAG index build in ensure_rag_index.
+  KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1   Build the GEAK semantic RAG index in ensure_rag_index (default).
+                                        Set 0 to skip — useful for claude-only kernel-opt or CPU-only
+                                        sandboxes where BGE-large embedding takes ~1.5h.
 
 Legacy options (accepted but no-op, kept for backwards compat):
   --with-geak / --with-oob / --with-llm / --all-backends / --backend NAME
