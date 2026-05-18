@@ -2437,8 +2437,11 @@ def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch
 # ``Idle %`` (e.g. ``| Idle % | 0.25% |``). When idle time dominates wall
 # clock, kernel-level rewriting cannot improve end-to-end latency — the
 # operator should pivot to parameter optimization (batch size, KV cache
-# shape, prefill/decode split). The default threshold is 20%, overridable
-# via ``HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD``.
+# shape, prefill/decode split). The default threshold is 80% (raised
+# from the docx-suggested 20% after observing every production
+# Qwen3-32B trace land in the 48–60% band; see
+# ``HIGH_IDLE_PCT_THRESHOLD_DEFAULT`` docstring), overridable via
+# ``HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD``.
 
 _EXEC_SUMMARY_LOW_IDLE = """\
 # Workload Analysis
