@@ -40,6 +40,7 @@ class SessionMeta(TypedDict, total=False):
     pid: int
     session_dir: str
     tick_count: int
+    image: str | None             # container image fully-qualified (or None if not configured)
 
 
 # ---------------------------------------------------------------------------
@@ -79,15 +80,38 @@ class BaselineAttemptSummary(TypedDict, total=False):
     error_class: str | None
 
 
+class BenchmarkInvocation(TypedDict, total=False):
+    """Replayable record of how a benchmark variant was launched.
+
+    Allows operators to rerun the exact same workload (server command +
+    env vars + config) when investigating a regression. ``extra_envs`` is
+    allowlist-filtered in the collector to keep secrets out of the
+    breakdown JSON.
+    """
+    framework_args: str           # e.g. "python -m sglang.launch_server --model ... --tp 8"
+    framework_args_source: str
+    # log_non_default_args (vllm/sglang parsed-args echo, most authoritative)
+    # log_args_line (Server arguments: / Args: Namespace(...) header)
+    # log_python_cmd (literal python/vllm/sglang launch line)
+    # yaml_cmd (cmd/command/launch field in materialized config yaml)
+    # yaml_benchmark (synthesized from magpie benchmark.* fields)
+    # unknown (none of the above; warning emitted)
+    extra_envs: dict[str, str]    # allowlisted env vars only (no secrets)
+    config_path: str | None       # baseline_config.with_envs.yaml or variant config
+    server_log_path: str | None   # for debug
+
+
 class Baseline(TypedDict, total=False):
     throughput_tok_s_per_gpu: float
     accuracy: float
     ttft_mean_ms: float | None
     e2el_mean_ms: float | None
+    ttft_e2el_source: str         # state_workspace / runs_baseline_disk / unavailable
     config_path: str | None
     benchmark_report_path: str | None
     attempts_history: list[BaselineAttemptSummary]
     failure_streak: int
+    invocation: BenchmarkInvocation
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +129,8 @@ class Final(TypedDict, total=False):
     action_path: list[str]        # ordered list of action:variant labels from optimization_stack
     ttft_mean_ms: float | None
     e2el_mean_ms: float | None
+    ttft_e2el_source: str         # current_best / validate_stack_disk / stack_top_disk / unavailable
+    invocation: BenchmarkInvocation
     closing_phase_entered: bool
     closing_started_unix: float
     closing_report_task_id: str
@@ -384,6 +410,8 @@ class SourceBreakdown(TypedDict, total=False):
 
 class Attribution(TypedDict, total=False):
     gain_per_stack_entry: list[StackGainEntry]
+    # validated / single_source / reconstructed / missing
+    method: str
     source_breakdown: SourceBreakdown
     notes: list[str]              # human-readable caveats
 
@@ -432,6 +460,7 @@ __all__ = [
     "Attribution",
     "Baseline",
     "BaselineAttemptSummary",
+    "BenchmarkInvocation",
     "CapabilityEntry",
     "CapabilitySummary",
     "CriticIteration",
