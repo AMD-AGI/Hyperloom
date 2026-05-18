@@ -449,7 +449,18 @@ def _spawn_remote(
     log_file = Path(log_dir) / log_fname
 
     sub_env = _subprocess_env()
-    tpd = (torch_profiler_dir or "").strip()
+    # Resume-aware fallback: when the orchestrator (profile_executor) reuses
+    # an already-running sglang server (resume path in multi_node cli.py),
+    # this LAUNCH never re-runs, so any later round-scoped torch_profiler_dir
+    # has no chance of reaching sglang's env. Falling back to
+    # $HYPERLOOM_MN_PROFILE_TRACE_DIR (cli.py exports this as
+    # `/wekafs/.../<rayjob>/torch_trace`, a single base shared by every
+    # profile round) lets sglang write trace.json.gz to that shared dir
+    # on its FIRST launch, then profile_executor mtime-filters per-round.
+    tpd = (
+        (torch_profiler_dir or "").strip()
+        or os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
+    )
     if tpd:
         # Pin sglang torch profiler output to a shared dir; mkdir is
         # safe across racing ranks (exist_ok). Failure to mkdir is
