@@ -43,13 +43,17 @@ from inference_optimizer.storage import SqliteConnection
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     # Point HYPERLOOM_KERNEL_AGENT_ROOT at the repo's kernel-agent tree so
-    # ``integrate_handler`` -> ``_maybe_apply_kernel_patch`` -> ``_load_apply_tool``
-    # can resolve ``apply_kernel_patch.py`` without requiring the operator to
-    # source ``$KERNEL_AGENT_ENV`` before running pytest. Same convention as
-    # test_p2_2_profile_and_handlers.py.
-    from inference_optimizer.orchestrator import kernel_request_handlers as krh
+    # ``integrate_handler`` -> ``_maybe_apply_kernel_patch`` ->
+    # ``_load_apply_tool`` can resolve ``apply_kernel_patch.py`` without
+    # requiring the operator to source ``$KERNEL_AGENT_ENV`` before
+    # running pytest. ``krh`` is already imported at module top — no
+    # inline reimport. Same convention as test_p2_2_profile_and_handlers.py.
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
     monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", kernel_agent_root)
+    # Skip the ``python3 -c "import Magpie"`` probe inside
+    # _resolve_magpie_python so subprocess.run mocks only see the actual
+    # Magpie launch command (origin/main behaviour).
+    monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     return make_session_dir()
 
 
