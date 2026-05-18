@@ -43,7 +43,6 @@ from .agent_role import AgentRole, default_role_registry
 from .backends.base import Backend, BackendError, BackendTurnResult
 from .cursor_store import CursorStore
 from .intent_parser import Intent, IntentType, NoIntentEmitted
-from .kb_digest import format_kb_digest_for_orchestration
 from .kernel_request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from .message_bus import Message, MessageBus
 from .objective import Objective, TimeOnlyObjective
@@ -1099,19 +1098,6 @@ class Coordinator:
                 sections.append("=== Execution checklist (Coordinator-enforced) ===")
                 sections.append(required_step)
 
-        # 1b. Marathon KB retrieval — curated lessons (validated stacks).
-        if agent_name == "orchestration":
-            # Framework is resolved at CLI start time and re-exported as
-            # $FRAMEWORK so the KB digest reads the right partition. Fall
-            # back to sglang for parity with the CLI default.
-            kb_text = format_kb_digest_for_orchestration(
-                model_name=getattr(self.shared_state, "model_name", "") or "",
-                framework=os.environ.get("FRAMEWORK", "sglang").strip().lower() or "sglang",
-            )
-            if kb_text.strip():
-                sections.append("=== Knowledge base hints ===")
-                sections.append(kb_text)
-
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
         msgs = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
@@ -1817,6 +1803,12 @@ class Coordinator:
             )
             return
         params = dict(intent.payload.get("params") or {})
+        # The schema says delegate idempotency_key is top-level, but LLMs
+        # sometimes place it inside params (especially when following older
+        # examples like params={grid: ..., idempotency_key: ...}). Treat the
+        # nested value as a compatibility alias and remove it from executor
+        # params so downstream action runners never see this control field.
+        nested_idempotency_key = params.pop("idempotency_key", None)
         # Plumb baseline's materialized YAML into grid-style delegated tasks
         # so they inherit the workload contract (CONC/ISL/OSL/TP/...) baseline
         # ran. See `_materialize_approved_proposal` for the same logic on the
@@ -1842,7 +1834,23 @@ class Coordinator:
             params.setdefault(
                 "backends_search", self.shared_state.backends_search,
             )
-        raw_key = intent.payload.get("idempotency_key")
+        # Idempotency-key resolution chain (most-explicit first):
+        #   1. ``intent.payload.idempotency_key`` — schema-correct top-level
+        #      placement.
+        #   2. ``nested_idempotency_key`` — compatibility for LLM outputs that
+        #      accidentally nest the field under ``params={...}`` (HEAD
+        #      commit 56840aa; LLMs follow stale prompt examples).
+        #   3. Content-fingerprint auto-generated key
+        #      ``<source>:<action>:t<tick>:<sha1[:10]>`` — only when neither
+        #      explicit form is supplied. Hashing ``params`` keeps the same
+        #      operation+inputs collapsing to one task across re-emissions.
+        # When the resolved key collides with an existing task in a
+        # *terminal* state, the retry loop below re-tries up to 5 times with
+        # ``-retry<N>`` suffixes so the operator can resubmit identical
+        # params without manual bumping. Collisions with non-terminal tasks
+        # are surfaced as policy_denied so the LLM waits for the existing
+        # delegated_result instead of spinning.
+        raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
         if not raw_key:
             content_fp = hashlib.sha1(
                 json.dumps(params, sort_keys=True, default=str).encode()
