@@ -1304,6 +1304,10 @@ def collect_capability_summary(
             explore_search.get("winners_history") or []
         )
 
+    # v0.8 §3.12 §4.2 — specialist sub-agent capability row. Counts
+    # are derived from ``specialist_rounds`` so they always agree with
+    # ``specialist_runs`` (Inv-12.2 single source).
+    specialist_row = _specialist_capability_row(state)
     return {
         "geak":           geak_cap,
         "oob":            oob_cap,
@@ -1314,6 +1318,49 @@ def collect_capability_summary(
         "params":         params,
         "sweep":          sweep_cap,
         "validate_stack": validate,
+        # v0.8 §3.12 §4.2 — sub-agent visibility row.
+        "specialist":     specialist_row,
+    }
+
+
+def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
+    """Derive ``capability_summary.specialist`` from
+    ``specialist_rounds``.
+
+    Single source of truth per Inv-12.2: the row never diverges from
+    the ``specialist_runs`` section because both read the same
+    SharedState ledger.
+    """
+    rounds = state.get("specialist_rounds") or []
+    if not isinstance(rounds, list) or not rounds:
+        return {
+            "status":    "not_attempted",
+            "attempts":  0,
+            "keeps":     0,
+            "tested":    0,
+        }
+    attempts = 0
+    proposals_total = 0
+    proposals_kept = 0
+    for r in rounds:
+        if not isinstance(r, dict):
+            continue
+        attempts += 1
+        proposals_total += int(r.get("proposals_total") or 0)
+        proposals_kept += int(r.get("proposals_kept") or 0)
+    if attempts == 0:
+        status = "not_attempted"
+    elif proposals_kept > 0:
+        status = "kept"
+    elif proposals_total > 0:
+        status = "tried"
+    else:
+        status = "attempted"
+    return {
+        "status":   status,
+        "attempts": attempts,
+        "keeps":    proposals_kept,
+        "tested":   proposals_total,
     }
 
 
@@ -2316,9 +2363,39 @@ def collect_critic_robustness(
                 "workdir": _rel(iter_dir, session_dir) or str(iter_dir),
             })
 
+    # v0.8 §3.12 §4.4 — kb_writes_summary mirrors the critic-agent's
+    # ``commit-review`` output count, grouped by verdict. Source is
+    # the same ``critic-workdir/<iter>/review.json`` we already
+    # parsed above so we don't re-read the disk.
+    kb_writes_summary = _critic_kb_writes_summary(critic_iters)
+
     return {
         "critic_iterations":  critic_iters,
         "robustness_signals": robustness_signals,
+        "kb_writes_summary":  kb_writes_summary,
+    }
+
+
+def _critic_kb_writes_summary(
+    critic_iters: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the ``critic_robustness.kb_writes_summary`` sub-block
+    (KB_design §3.12 §4.4).
+
+    Counts each iteration's verdict; downstream dashboards group on
+    ``by_verdict`` to render the KEEP / REVERT / NEEDS_INFO mix.
+    """
+    by_verdict: dict[str, int] = {}
+    total = 0
+    for entry in critic_iters:
+        verdict = str((entry or {}).get("verdict") or "").strip().upper()
+        if not verdict:
+            continue
+        total += 1
+        by_verdict[verdict] = by_verdict.get(verdict, 0) + 1
+    return {
+        "total":      total,
+        "by_verdict": by_verdict,
     }
 
 
@@ -3142,6 +3219,146 @@ def collect_kb_provenance(
     return out
 
 
+# ---------------------------------------------------------------------------
+# v0.8 §3.12 §4.3 — specialist_runs section
+# ---------------------------------------------------------------------------
+def collect_specialist_runs(
+    session_dir: Path,
+    state: dict[str, Any],
+    warnings: list[str],
+    *,
+    include_transcripts: bool = False,
+) -> list[dict[str, Any]]:
+    """Build the ``specialist_runs`` breakdown section.
+
+    Two data sources merge here (KB_design §3.12 §4.3):
+
+    1. ``state.json.specialist_rounds[]`` — per-round summary the
+       Coordinator writes after every EXPLORE specialist dispatch.
+    2. ``<session_dir>/runs/specialist/<task_id>/specialist_done.json``
+       — the runner's per-task transcript / proposal_set artifact.
+
+    The function is best-effort: a missing ``runs/specialist/``
+    directory simply means no transcripts get attached. We never
+    crash the export — every recoverable issue lands in ``warnings``
+    via the caller's ``_safe_collect`` wrapper.
+
+    Args:
+        session_dir: absolute session root.
+        state: parsed ``state.json`` as returned by
+            :func:`_load_state`.
+        warnings: shared warnings list (mutated in place).
+        include_transcripts: when True, the transcript file bytes are
+            inlined under each transcript ref's ``body`` field. The
+            CLI flag ``--breakdown-include-transcripts`` controls
+            this; default is False (path-only, smaller payload).
+    """
+    rounds = state.get("specialist_rounds") or []
+    if not isinstance(rounds, list) or not rounds:
+        return []
+
+    # Pre-index the runs/specialist/ directory so the round-merge
+    # below is O(1) per task lookup.
+    runs_root = session_dir / "runs" / "specialist"
+    by_task: dict[str, Path] = {}
+    if runs_root.exists():
+        try:
+            for child in runs_root.iterdir():
+                if not child.is_dir():
+                    continue
+                done_path = child / "specialist_done.json"
+                if done_path.exists():
+                    by_task[child.name] = done_path
+        except OSError as exc:
+            warnings.append(
+                f"specialist_runs: failed to scan {runs_root}: {exc!r}"
+            )
+
+    out: list[dict[str, Any]] = []
+    for raw in rounds:
+        if not isinstance(raw, dict):
+            continue
+        entry: dict[str, Any] = {
+            "round_id":          int(raw.get("round_id") or 0),
+            "dispatched_at":     str(raw.get("dispatched_at") or ""),
+            "completed_at":      str(raw.get("completed_at") or ""),
+            "domains":           list(raw.get("domains") or []),
+            "parallelism":       int(raw.get("parallelism") or 0),
+            "proposals_total":   int(raw.get("proposals_total") or 0),
+            "proposals_kept":    int(raw.get("proposals_kept") or 0),
+            "proposals_rejected": int(raw.get("proposals_rejected") or 0),
+            "proposals_skipped": int(raw.get("proposals_skipped") or 0),
+            "kb_edge_ids":       list(raw.get("kb_edge_ids") or []),
+            "confidence_avg":    _to_float(raw.get("confidence_avg")),
+            "domain_breakdown":  _normalize_specialist_domain_breakdown(
+                raw.get("domain_breakdown"),
+            ),
+            "notes":             list(raw.get("notes") or []),
+        }
+        # Attach transcript refs from runs/specialist/.
+        task_ids = list(raw.get("task_ids") or [])
+        transcripts: list[dict[str, Any]] = []
+        for tid in task_ids:
+            tid_str = str(tid)
+            done_path = by_task.get(tid_str)
+            if done_path is None:
+                continue
+            ref: dict[str, Any] = {
+                "task_id": tid_str,
+                "domain": _domain_for_task(raw, tid_str),
+                "path": _rel(done_path, session_dir) or str(done_path),
+            }
+            if include_transcripts:
+                try:
+                    ref["body"] = done_path.read_text(
+                        encoding="utf-8", errors="replace",
+                    )
+                except OSError as exc:
+                    warnings.append(
+                        f"specialist_runs: cannot read transcript "
+                        f"{done_path}: {exc!r}"
+                    )
+            transcripts.append(ref)
+        entry["transcripts"] = transcripts
+        out.append(entry)
+    return out
+
+
+def _normalize_specialist_domain_breakdown(
+    raw: Any,
+) -> dict[str, dict[str, int]]:
+    if not isinstance(raw, dict):
+        return {}
+    norm: dict[str, dict[str, int]] = {}
+    for domain, payload in raw.items():
+        if not isinstance(payload, dict):
+            continue
+        norm[str(domain)] = {
+            "dispatched":         int(payload.get("dispatched") or 0),
+            "proposals_total":    int(payload.get("proposals_total") or 0),
+            "proposals_kept":     int(payload.get("proposals_kept") or 0),
+            "proposals_rejected": int(payload.get("proposals_rejected") or 0),
+        }
+    return norm
+
+
+def _domain_for_task(round_entry: dict[str, Any], task_id: str) -> str:
+    """Best-effort lookup of the domain associated with ``task_id``
+    inside a single ``specialist_rounds`` entry. Returns "" when the
+    round doesn't carry the mapping (older rounds packed in M5)."""
+    mapping = round_entry.get("task_domains")
+    if isinstance(mapping, dict):
+        v = mapping.get(task_id)
+        if isinstance(v, str):
+            return v
+    # Fallback: if the round has exactly one domain we can attribute
+    # the task to it without ambiguity.
+    domains = round_entry.get("domains") or []
+    if isinstance(domains, list) and len(domains) == 1:
+        return str(domains[0])
+    return ""
+
+
 __all__ = [
     "collect_attribution",
     "collect_baseline",
@@ -3156,6 +3373,7 @@ __all__ = [
     "collect_phase_timeline",
     "collect_session",
     "collect_source_files",
+    "collect_specialist_runs",
     "collect_sweep",
     "collect_telemetry",
     "collect_workload",
