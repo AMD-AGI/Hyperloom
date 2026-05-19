@@ -35,12 +35,14 @@ HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/kernel-agent}"
+FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${REPO_ROOT}/framework-agent}"
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 MAGPIE_DIR="${MAGPIE_DIR:-${HYPERLOOM_RUNTIME_DIR}/Magpie}"
 
 DRY_RUN=0
 CHECK_ONLY=0
 SKIP_KERNEL_AGENT=0
+SKIP_FRAMEWORK_AGENT=0
 
 usage() {
   cat <<'EOF'
@@ -52,16 +54,22 @@ Installs:
   - Detects/exports INFERENCEX_PATH
   - Chains to kernel-agent/scripts/install.sh for Ray + ray-head start,
     Node/npm, TraceLens, GEAK, OOB CLI, and the OOB auth-proxy.
+  - Chains to framework-agent/scripts/install.sh for the `fa` CLI
+    consumed by `--framework-pr-discover` / `--framework-pr` at
+    optimize-time. framework-agent is fully standalone; the chain
+    just makes the `fa` binary available on PATH inside the same
+    sandbox without operators having to run a second installer.
 
 Options:
-  --check-only          Verify only, do not install
-  --dry-run             Print actions without running them
-  --skip-kernel-agent   Skip the chained kernel-agent installer
-  -h, --help            Show this help
+  --check-only           Verify only, do not install
+  --dry-run              Print actions without running them
+  --skip-kernel-agent    Skip the chained kernel-agent installer
+  --skip-framework-agent Skip the chained framework-agent installer
+  -h, --help             Show this help
 
 Env overrides:
-  REPO_ROOT, KERNEL_AGENT_ROOT, MAGPIE_REPO, MAGPIE_DIR,
-  INFERENCEX_PATH, PYTHON, TRACELENS_ROOT, USER_DATA_PATH,
+  REPO_ROOT, KERNEL_AGENT_ROOT, FRAMEWORK_AGENT_ROOT, MAGPIE_REPO,
+  MAGPIE_DIR, INFERENCEX_PATH, PYTHON, TRACELENS_ROOT, USER_DATA_PATH,
   HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV, HYPERLOOM_ROOT
 EOF
 }
@@ -71,6 +79,7 @@ while [ "$#" -gt 0 ]; do
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --skip-kernel-agent) SKIP_KERNEL_AGENT=1 ;;
+    --skip-framework-agent) SKIP_FRAMEWORK_AGENT=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[inference-optimizer] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
@@ -233,10 +242,36 @@ chain_kernel_agent() {
   bash "$script" "${args[@]}"
 }
 
+# --- 5. Chain to framework-agent ---
+# Mirrors chain_kernel_agent but for the `fa` CLI used by
+# --framework-pr-discover. framework-agent's installer is fully
+# self-contained (zero shared state with kernel-agent), so we just
+# delegate. Failures here are non-fatal: the IO main path still
+# works without fa; only --framework-pr-discover requires it.
+chain_framework_agent() {
+  if [ "$SKIP_FRAMEWORK_AGENT" -eq 1 ]; then
+    log "skipping framework-agent installer (--skip-framework-agent)"
+    return 0
+  fi
+  local script="${FRAMEWORK_AGENT_ROOT}/scripts/install.sh"
+  if [ ! -f "$script" ]; then
+    warn "framework-agent installer not found at $script; --framework-pr-discover will be unavailable"
+    return 0
+  fi
+  log "delegating fa CLI install to ${script}"
+  export REPO_ROOT FRAMEWORK_AGENT_ROOT
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would run: bash '$script'"
+    return 0
+  fi
+  bash "$script" || warn "framework-agent install returned non-zero; --framework-pr-discover will fail at runtime"
+}
+
 ensure_inference_optimizer
 ensure_magpie
 ensure_inferencex
 chain_kernel_agent
+chain_framework_agent
 
 _probe_framework_source_roots() {
   log "probing framework source roots for INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"

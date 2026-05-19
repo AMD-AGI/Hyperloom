@@ -5,7 +5,7 @@ Hermetic - pure-Python, no network/GPU/disk.
 
 from __future__ import annotations
 
-from framework_agent.keywords import extract_keywords
+from framework_agent.keywords import extract_keywords, score_title_against_keywords
 
 
 def test_extract_whitelist_hits_are_lowercase_and_sorted() -> None:
@@ -50,3 +50,36 @@ def test_extract_dedupes_and_orders_stably() -> None:
     out_b = extract_keywords("attention fp8 rocm")
     assert sorted(set(out_a)) == out_a
     assert out_a == out_b
+
+
+# ---------------------------------------------------------------------------
+# score_title_against_keywords (B2 rerank helper)
+# ---------------------------------------------------------------------------
+
+
+def test_score_title_counts_overlap() -> None:
+    """Returns the number of distinct keyword tokens present in the title."""
+    assert score_title_against_keywords("fp8 MoE perf", ["fp8", "moe"]) == 2
+
+
+def test_score_title_case_insensitive() -> None:
+    """Matching is lowercase-insensitive on both the title and the keywords."""
+    assert score_title_against_keywords("FP8 MoE perf", ["FP8", "MOE"]) == 2
+
+
+def test_score_title_zero_when_no_overlap() -> None:
+    """No overlapping tokens -> 0 (used by the rank function to tail-sort)."""
+    assert score_title_against_keywords("doc update", ["fp8", "moe"]) == 0
+
+
+def test_score_title_handles_empty_inputs() -> None:
+    """Empty title or empty keyword list never crashes; returns 0."""
+    assert score_title_against_keywords("", ["fp8"]) == 0
+    assert score_title_against_keywords("fp8 stuff", []) == 0
+
+
+def test_score_title_snake_case_token() -> None:
+    """snake_case tokens count as a single token by the regex token split."""
+    assert score_title_against_keywords(
+        "tensor_parallel optimisation", ["tensor_parallel"]
+    ) == 1

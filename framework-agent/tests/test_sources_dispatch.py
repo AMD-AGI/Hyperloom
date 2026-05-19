@@ -81,3 +81,233 @@ def test_dispatch_unions_primus_and_github(monkeypatch) -> None:
     by_ref = {c.ref: c.source for c in out}
     assert by_ref["PR:2"] == "primus_cortex"
     assert by_ref["PR:3"] == "github"
+
+
+# ---------------------------------------------------------------------------
+# B2 fix: gap-aware primus_cortex routing + client-side rerank
+# ---------------------------------------------------------------------------
+
+
+def test_primus_uses_search_endpoint_when_gap_present(monkeypatch) -> None:
+    """When gap_description yields keywords, dispatcher uses /v1/search/prs."""
+    captured: dict[str, object] = {}
+
+    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
+        captured["called"] = "search"
+        captured["query"] = query
+        captured["limit"] = limit
+        return [
+            GitHubPr(number=10, title="MoE fp8 perf improvement", html_url="u10"),
+            GitHubPr(number=11, title="random doc edit", html_url="u11"),
+            GitHubPr(number=12, title="fp8 attention fusion", html_url="u12"),
+        ]
+
+    def fake_list(*_a, **_kw):
+        captured["called"] = "list"
+        return []
+
+    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "list_perf_prs", fake_list)
+
+    req = _minimal_request(
+        search_perf_prs=True,
+        search_modes=["primus_cortex"],
+        max_search_candidates=2,
+        primus_cortex={"base_url": "http://x"},
+        gap_description="improve sglang fp8 MoE on MI300X",
+    )
+    out = src.enumerate_candidates(req)
+    assert captured["called"] == "search", "search endpoint must be preferred when keywords present"
+    # over-fetch = 3 * max_search_candidates = 6
+    assert captured["limit"] == 6
+    # Rerank: MoE+fp8 title first, fp8 second, doc edit last; trimmed to limit=2
+    refs = [c.ref for c in out]
+    assert refs[0] == "PR:10"
+    assert refs[1] == "PR:12"
+    assert len(refs) == 2
+
+
+def test_primus_falls_back_to_list_when_search_returns_empty(monkeypatch) -> None:
+    """B2 v2: when /v1/search/prs returns 0 candidates (word-AND match too tight),
+    fall back to list_perf_prs + client-side rerank rather than failing the run."""
+    calls: list[str] = []
+
+    def fake_search(*_a, **_kw):
+        calls.append("search")
+        return []  # service returns empty - the real-world failure mode
+
+    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec):  # noqa: ARG001
+        calls.append("list")
+        return [
+            GitHubPr(number=40, title="NPU Ascend backend", html_url="u40"),
+            GitHubPr(number=41, title="fp8 MoE quant", html_url="u41"),
+        ]
+
+    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "list_perf_prs", fake_list)
+
+    req = _minimal_request(
+        search_perf_prs=True,
+        search_modes=["primus_cortex"],
+        max_search_candidates=1,
+        primus_cortex={"base_url": "http://x"},
+        gap_description="improve sglang fp8 MoE on MI300X throughput",
+    )
+    out = src.enumerate_candidates(req)
+    assert calls == ["search", "list"], "must try search first, then fall back to list"
+    refs = [c.ref for c in out]
+    assert refs == ["PR:41"], "rerank picks the fp8/MoE PR over the NPU one"
+
+
+def test_primus_falls_back_to_list_when_search_unavailable(monkeypatch) -> None:
+    """If the search endpoint raises PrimusCortexError, fall back to list_perf_prs."""
+    captured: dict[str, object] = {}
+
+    def fake_search(*_a, **_kw):
+        raise src.PrimusCortexError("404 Not Found at /v1/search/prs")
+
+    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec):  # noqa: ARG001
+        captured["called"] = "list"
+        captured["limit"] = limit
+        return [
+            GitHubPr(number=20, title="NPU Ascend backend", html_url="u20"),
+            GitHubPr(number=21, title="fp8 MoE quant", html_url="u21"),
+        ]
+
+    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "list_perf_prs", fake_list)
+
+    req = _minimal_request(
+        search_perf_prs=True,
+        search_modes=["primus_cortex"],
+        max_search_candidates=2,
+        primus_cortex={"base_url": "http://x"},
+        gap_description="improve sglang fp8 MoE on MI300X",
+    )
+    out = src.enumerate_candidates(req)
+    assert captured["called"] == "list", "must fall back to list_perf_prs when search fails"
+    # Fallback over-fetch still uses 3x
+    assert captured["limit"] == 6
+    refs = [c.ref for c in out]
+    # Rerank still applied to the list_perf_prs payload: fp8/MoE first
+    assert refs[0] == "PR:21"
+
+
+def test_primus_no_gap_uses_label_only_path(monkeypatch) -> None:
+    """When gap_description is empty, dispatcher uses the cheap label-only listing."""
+    captured: dict[str, object] = {}
+
+    def fake_search(*_a, **_kw):
+        captured["called"] = "search"
+        return []
+
+    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec):  # noqa: ARG001
+        captured["called"] = "list"
+        captured["limit"] = limit
+        return [
+            GitHubPr(number=30, title="generic PR", html_url="u30"),
+        ]
+
+    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "list_perf_prs", fake_list)
+
+    req = _minimal_request(
+        search_perf_prs=True,
+        search_modes=["primus_cortex"],
+        max_search_candidates=1,
+        primus_cortex={"base_url": "http://x"},
+        # gap_description omitted (defaults to empty)
+    )
+    out = src.enumerate_candidates(req)
+    assert captured["called"] == "list"
+    # No over-fetch when gap is empty (preserves old cheap path)
+    assert captured["limit"] == 1
+    assert [c.ref for c in out] == ["PR:30"]
+
+
+def test_rank_by_keyword_overlap_preserves_ties() -> None:
+    """Ties in score preserve the upstream order (stable sort)."""
+    prs = [
+        GitHubPr(number=1, title="fp8 moe a", html_url="u1"),
+        GitHubPr(number=2, title="fp8 moe b", html_url="u2"),
+        GitHubPr(number=3, title="unrelated", html_url="u3"),
+    ]
+    out = src._rank_by_keyword_overlap(prs, ["fp8", "moe"])
+    assert [pr.number for pr in out] == [1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# C: explicit keyword override
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_keywords_explicit_overrides_gap() -> None:
+    """request.keywords (non-empty) wins over extract_keywords(gap_description)."""
+    req = _minimal_request(
+        gap_description="improve sglang fp8 MoE on MI300X",  # auto would yield ['fp8','moe','sglang']
+        keywords=["mi300x"],                                  # but explicit wins
+    )
+    assert src._resolve_keywords(req) == ["mi300x"]
+
+
+def test_resolve_keywords_fallback_to_gap_extract() -> None:
+    """Empty request.keywords + non-empty gap -> auto-extract."""
+    req = _minimal_request(
+        gap_description="improve sglang fp8 MoE",
+        keywords=[],
+    )
+    out = src._resolve_keywords(req)
+    # extract_keywords whitelist hits sglang/fp8/moe; order = sorted
+    assert "fp8" in out and "moe" in out and "sglang" in out
+
+
+def test_resolve_keywords_both_empty_returns_empty() -> None:
+    """Neither keywords nor gap -> empty list (cheapest path)."""
+    req = _minimal_request(keywords=[], gap_description="")
+    assert src._resolve_keywords(req) == []
+
+
+def test_resolve_keywords_lowercases_explicit() -> None:
+    """Explicit override is lowercased to match service token shape."""
+    req = _minimal_request(keywords=["MI300X", "FP8"])
+    assert src._resolve_keywords(req) == ["mi300x", "fp8"]
+
+
+def test_primus_uses_explicit_keywords(monkeypatch) -> None:
+    """End-to-end: --framework-keywords sent as Primus query verbatim,
+    bypassing the gap_description auto-extract."""
+    captured: dict[str, object] = {}
+
+    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
+        captured["query"] = query
+        return [GitHubPr(number=99, title="mi300x perf PR", html_url="u")]
+
+    def fake_list(*_a, **_kw):
+        captured["list_called"] = True
+        return []
+
+    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "list_perf_prs", fake_list)
+
+    req = _minimal_request(
+        search_perf_prs=True,
+        search_modes=["primus_cortex"],
+        max_search_candidates=1,
+        primus_cortex={"base_url": "http://x"},
+        gap_description="improve sglang fp8 MoE",   # auto would be 'fp8 moe sglang'
+        keywords=["mi300x"],                         # but explicit wins
+    )
+    out = src.enumerate_candidates(req)
+    assert captured["query"] == "mi300x", "service query must be the explicit keyword"
+    assert "list_called" not in captured, "non-empty search result should not trigger fallback"
+    assert [c.ref for c in out] == ["PR:99"]
+
+
+def test_rank_by_keyword_overlap_empty_keywords_is_identity() -> None:
+    """An empty keyword list returns the input list unchanged."""
+    prs = [
+        GitHubPr(number=1, title="a", html_url="u1"),
+        GitHubPr(number=2, title="b", html_url="u2"),
+    ]
+    out = src._rank_by_keyword_overlap(prs, [])
+    assert out == prs

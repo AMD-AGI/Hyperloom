@@ -12,6 +12,7 @@ Returns a sorted, deduplicated list of:
 from __future__ import annotations
 
 import re
+from typing import Sequence
 
 
 _TECHNICAL_TERMS = frozenset({
@@ -48,4 +49,22 @@ def extract_keywords(description: str) -> list[str]:
     return sorted(keywords)
 
 
-__all__ = ["extract_keywords"]
+def score_title_against_keywords(title: str, keywords: Sequence[str]) -> int:
+    """Count how many of the given keywords overlap with the title's tokens.
+
+    Used by the primus_cortex dispatcher to rerank candidate PRs returned
+    by service-side search so the most gap-relevant titles come first.
+    Lowercase, snake_case-aware token split mirrors :func:`extract_keywords`
+    so a keyword like ``fp8`` matches both ``fp8`` and ``fp8_moe``.
+
+    Returns 0 for an empty title or an empty keywords list. Pure-Python,
+    no regex compile cache needed because titles are short.
+    """
+    if not keywords or not title:
+        return 0
+    title_tokens = set(re.findall(r"[a-z][a-z0-9_]+", title.lower()))
+    kw_set = {k.lower() for k in keywords}
+    return len(title_tokens & kw_set)
+
+
+__all__ = ["extract_keywords", "score_title_against_keywords"]

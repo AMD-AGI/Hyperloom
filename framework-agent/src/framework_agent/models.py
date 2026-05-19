@@ -225,6 +225,31 @@ class PrFilter:
 _VALID_SEARCH_MODES = frozenset({"primus_cortex", "github"})
 
 
+def _parse_keywords(raw: Any) -> tuple[str, ...]:
+    """Coerce an optional ``keywords`` field into a tuple of trimmed strings.
+
+    Accepts:
+      * ``None`` / missing  -> ``()``  (auto-extract from gap_description)
+      * empty string        -> ``()``
+      * non-empty string    -> split on comma/whitespace
+      * list / tuple        -> coerce items to str + trim + drop empties
+
+    Anything else raises ``ValueError`` (matches the strictness of the
+    other ``_parse_*`` helpers in this module).
+    """
+    if raw is None or raw == "":
+        return ()
+    if isinstance(raw, str):
+        items = [tok.strip() for tok in raw.replace(",", " ").split() if tok.strip()]
+        return tuple(items)
+    if isinstance(raw, (list, tuple)):
+        items = [str(v).strip() for v in raw if str(v).strip()]
+        return tuple(items)
+    raise ValueError(
+        f"keywords must be list/tuple/str when present, got {type(raw).__name__}"
+    )
+
+
 def _parse_search_modes(raw: Any) -> tuple[str, ...]:
     """Coerce a list of mode names; default to primus_cortex + github."""
     if raw is None or raw == "":
@@ -265,6 +290,10 @@ class ExploreRequest:
     pr_filter: PrFilter = field(default_factory=PrFilter)
     # Fusion-plan additions (not present in zhenggong v0.2)
     gap_description: str = ""
+    # C: explicit keyword override for the primus_cortex search query +
+    # client-side rerank. Non-empty value bypasses extract_keywords() and
+    # uses these tokens verbatim. See ``sources._resolve_keywords``.
+    keywords: tuple[str, ...] = ()
     search_modes: tuple[str, ...] = ("primus_cortex", "github")
     # KB integration (PR4); empty string disables the contribute hook.
     kb_domain: str = ""
@@ -320,6 +349,7 @@ class ExploreRequest:
             primus_cortex=primus_cortex,
             pr_filter=PrFilter.from_dict(raw.get("pr_filter")),
             gap_description=str(raw.get("gap_description") or "").strip(),
+            keywords=_parse_keywords(raw.get("keywords")),
             search_modes=_parse_search_modes(raw.get("search_modes")),
             kb_domain=str(raw.get("kb_domain") or "").strip(),
         )

@@ -49,6 +49,37 @@ PRs (see implementation plan).
 | robustness-agent | yes (KILL_TASK etc.) | no (auto recover) | inference_optimizer |
 | **framework-agent** | **no** | **yes** | **standalone (any LLM tool / CLI)** |
 
+## Used by inference_optimizer as a pre-stage
+
+`inference_optimizer` can drive `fa explore` as a one-shot
+*before-baseline* step via `--framework-pr-discover` (or apply an
+explicit ref via `--framework-pr PR:N`). The IO side handles the
+hand-off (resolve PR `head_sha`, `git checkout` sglang, `pip install
+-e python/`); framework-agent itself stays standalone and only
+produces the winner record:
+
+```bash
+# Auto-discover via fa (Primus Cortex + GitHub) and apply before baseline
+inference_optimizer optimize \
+    --model "$MODEL_PATH" \
+    --framework sglang \
+    --framework-pr-discover \
+    --framework-gap "improve sglang fp8 MoE on MI300X" \
+    --max-hours 2
+
+# Or explicit PR ref - skips fa, jumps straight to git checkout + pip install
+inference_optimizer optimize \
+    --model "$MODEL_PATH" \
+    --framework sglang \
+    --framework-pr PR:25748 \
+    --max-hours 2
+```
+
+See `inference_optimizer/SKILL.md` "Optional: Framework-Agent
+Pre-stage" for the full IO-side contract and
+`inference_optimizer/orchestrator/framework_pr_discover.py` for the
+implementation.
+
 ## Design references
 
 - `claw-dev/docs-zh/framework-explorer-merged-design.md` - upstream
