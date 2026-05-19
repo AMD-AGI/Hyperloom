@@ -310,13 +310,17 @@ def test_gate_robustness_prune_branch_requires_family(gate):
     assert exc.value.rule == "payload"
 
 
-def test_gate_orchestration_prune_branch_rejected(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", Intent(
-            type=IntentType.PRUNE_BRANCH,
-            payload={"family": "deep_kernel", "reason": "x"},
-        ))
-    assert exc.value.rule == "role"
+def test_gate_orchestration_prune_branch_allowed_with_family(gate):
+    """Roofline-v2 C3: Orchestration was granted PRUNE_BRANCH so it can
+    forward the structured ``suggested_prunes`` advice from the ``roofline``
+    action to the Coordinator. FORCE_DISPATCH / ESCALATE_STRATEGY_CHANGE
+    remain robustness-only; see
+    ``test_orchestration_prune_branch_permission.py`` for the boundary tests.
+    """
+    gate.validate_intent("orchestration", Intent(
+        type=IntentType.PRUNE_BRANCH,
+        payload={"family": "deep_kernel", "reason": "x"},
+    ))
 
 
 def test_gate_orchestration_update_state_non_core_ok(gate):
