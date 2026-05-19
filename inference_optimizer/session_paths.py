@@ -378,6 +378,22 @@ def cortex_audit_jsonl(session_dir: Path) -> Path:
     return cortex_dir(session_dir) / ".kb_audit.jsonl"
 
 
+def pr_monitor_status_json(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.pr_monitor_status.json`` — one-shot marker
+    written by ``cli._bootstrap_knowledge_plane`` (KB_gaps/Gap-02) with
+    the boot-time PR Monitor reachability snapshot. Breakdown collector
+    reads it to emit ``warnings`` entries like ``pr_monitor:disabled``
+    or ``pr_monitor:unreachable`` so dashboards can light up on
+    --no-pr-monitor / cross-cluster failures without scraping logs.
+
+    Schema (JSON):
+
+    ``{enabled: bool, url: str | None, reachable: bool, mcp_url: str,
+       window_days: int, status_text: str}``
+    """
+    return cortex_dir(session_dir) / ".pr_monitor_status.json"
+
+
 def cortex_flusher_pid(session_dir: Path) -> Path:
     """``<sd>/runtime/cortex/.kb_flusher.pid`` — flusher daemon pid file
     (one line). Robustness reads this to detect a dead flusher.

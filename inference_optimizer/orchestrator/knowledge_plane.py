@@ -225,6 +225,55 @@ class KnowledgePlane:
             return ""
         return self.pr_monitor_mcp_url
 
+    def pr_feed_warm_all_domains(
+        self,
+        *,
+        window_days: int | None = None,
+        per_repo_limit: int | None = None,
+        total_budget_sec: float = DEFAULT_PR_FEED_TOTAL_BUDGET_SEC,
+    ) -> dict[str, tuple[list[PRSummary], list[str]]]:
+        """Batch-warm the PR feed for every known specialist domain.
+
+        Called once per EXPLORE phase entry (KB_design §3.6 §5.2 +
+        KB_gaps/Gap-02 PR 5.4) so the per-domain cache is populated
+        before the orchestration LLM gets a chance to dispatch
+        specialists. Per-domain warmups run serially — the
+        :class:`PRMonitorClient` itself reuses an HTTP session, so the
+        cumulative wall-clock budget is shared across all domains via
+        ``total_budget_sec``.
+
+        Returns a ``{domain: (prs, warnings)}`` map. Always returns
+        an entry per known domain, even when the underlying call
+        fails (so downstream callers can produce a uniform breakdown
+        row). Aggregated warnings are also stashed on
+        :attr:`last_warnings` for the breakdown collector.
+
+        Fail-soft: a domain whose pr_feed_warm raises bubbles up the
+        exception text as a single warning rather than poisoning the
+        whole batch.
+        """
+        out: dict[str, tuple[list[PRSummary], list[str]]] = {}
+        all_warnings: list[str] = []
+        # ``SPECIALIST_DOMAIN_KEYS`` is the authoritative list; the
+        # domain_repos yaml may be a strict subset (e.g. operator
+        # masked some domains by removing repos). We still call
+        # pr_feed_warm so the unknown-domain warning surfaces in a
+        # consistent shape.
+        for domain in SPECIALIST_DOMAIN_KEYS:
+            try:
+                prs, warnings = self.pr_feed_warm(
+                    domain,
+                    window_days=window_days,
+                    per_repo_limit=per_repo_limit,
+                    total_budget_sec=total_budget_sec,
+                )
+            except Exception as exc:  # noqa: BLE001 — defensive
+                prs, warnings = [], [f"pr_feed_warm:{domain}:exc:{exc!r}"[:240]]
+            out[domain] = (prs, warnings)
+            all_warnings.extend(warnings)
+        self.last_warnings = all_warnings
+        return out
+
     def pr_feed_warm(
         self,
         domain: str,
