@@ -48,7 +48,7 @@ from .orchestrator.action_executors import (
     TargetAnalysisExecutor,
     backends_executor,
     baseline_executor,
-    make_roofline_stub_executor,
+    make_roofline_executor,
     params_executor,
     pmc_roofline_executor,
     profile_executor,
@@ -628,16 +628,17 @@ def _register_executors(
         ),
     )
 
-    # Roofline-v2 N2a: wire the `roofline` composite action with a stub
-    # executor. The stub holds a `coordinator.shared_state` reference
-    # (same constructor signature N2b's real executor will use) so cli
-    # wiring stays stable across N2a → N2b. N2b will replace the stub
-    # with the production orchestration logic that runs profile +
-    # trace_analyze sub-steps and promotes results to SharedState
-    # inline. See design/roofline-v2.md §8.4.
+    # Roofline-v2 N2b: wire the `roofline` composite action with the real
+    # `RooflineExecutor` that orchestrates profile + trace_analyze
+    # sub-steps in-process and promotes SharedState inline. The
+    # `RooflineStubExecutor` (kept exported in action_executors) is
+    # available as a §11 fallback wiring path: swap to
+    # `make_roofline_stub_executor` here to temporarily disable real
+    # execution without removing the action entry. See design/roofline-v2.md
+    # §8.4 for the orchestration algorithm.
     coordinator.sub.register_executor(
         "roofline",
-        make_roofline_stub_executor(shared_state=coordinator.shared_state),
+        make_roofline_executor(shared_state=coordinator.shared_state),
     )
 
     if no_kernel:
