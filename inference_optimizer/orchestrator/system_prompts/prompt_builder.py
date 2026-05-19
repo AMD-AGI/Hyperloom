@@ -47,10 +47,21 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # analysis
     "profile", "pmc_roofline", "deep_kernel_analysis",
     # explore
+    #
+    # ``explore`` is the v0.8 M3 unified action (KB_design §3.4): it
+    # subsumes v0.6 ``backends`` / ``params`` and inlines
+    # ``validate_stack``'s per-KEEP rebench. The legacy three are kept
+    # in this list for the M3 transitional period (so a v0.6 resume with
+    # queued backends/params/validate_stack tasks still has a runner);
+    # the catalogue marks them DEPRECATED and steers the LLM toward
+    # ``explore`` (see ``_format_action_deprecation_hint``).
+    "explore",
     "backends", "params", "sweep",
     # deep — kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
     "kernel_opt", "integrate", "operator_tuning", "vendor_kernel_config",
-    # validate (Phase 3 — closes the loop on accumulated KEEPs)
+    # validate (Phase 3 — closes the loop on accumulated KEEPs). Listed
+    # here for M3 backward-compat; explore's inlined stack rebench
+    # supersedes the standalone action for v0.8 sessions.
     "validate_stack",
     # finalize
     "report",
@@ -75,14 +86,16 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
     # explore (no profile — it only feeds kernel-opt)
+    "explore",
     "backends", "params", "sweep",
-    # validate (still useful — bench the stacked backends/params)
+    # validate (still useful — bench the stacked backends/params on
+    # v0.6 resumes; explore inlines its own per-KEEP rebench)
     "validate_stack",
     # finalize
     "report",
     # support — recover is needed even without kernel-opt because GPU
-    # leaks from baseline / backends / params / sweep can still hang the
-    # session; the executor itself is kernel-agnostic.
+    # leaks from baseline / explore / backends / params / sweep can
+    # still hang the session; the executor itself is kernel-agnostic.
     "recover",
 )
 
@@ -103,8 +116,28 @@ KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
 # LLM only sees the action name and may never realize it can synthesize
 # new variants from the discovered_flags surface.
 GRID_INJECTABLE_ACTIONS: frozenset[str] = frozenset({
-    "backends", "params", "sweep",
+    "explore", "backends", "params", "sweep",
 })
+
+# v0.8 M3 — actions that have been superseded by ``explore`` (KB_design
+# §3.4). The catalogue marks these with a DEPRECATED tag and a one-line
+# replacement hint so the LLM gravitates to the new action without us
+# having to remove the legacy executors mid-flight (deletion lands in
+# M3 §PR9, after the dogfood window closes).
+DEPRECATED_ACTIONS: dict[str, str] = {
+    "backends": (
+        "Use `explore` instead — KB_design §3.4 merged backends/params into "
+        "one action with per-KEEP stack rebench inlined."
+    ),
+    "params": (
+        "Use `explore` instead — same flag namespace, same dedup ledger "
+        "(`explore_search` supersedes `params_search`)."
+    ),
+    "validate_stack": (
+        "Use `explore` instead — every `explore` KEEP triggers an automatic "
+        "stack rebench, so standalone validate_stack is no longer needed."
+    ),
+}
 
 # Phase ordering for the catalogue section. Any action whose pipeline_phase
 # is not in this tuple is appended at the end (defensive; current registry
@@ -178,7 +211,62 @@ def _section_session_context(
         "`report` as the next action — the Coordinator will also auto-flush a",
         "deterministic report at the deadline, but proposing it earlier",
         "captures any LLM narrative you want surfaced.",
+        "",
+        "**Phase awareness (v0.8 §3.2 / §3.3)**: every tick also brings a",
+        "`=== Phase ===` block carrying the current phase, elapsed seconds",
+        "in that phase, and budget cap. The `=== Phase-allowed actions ===`",
+        "block lists the exact set of actions you may propose this tick;",
+        "anything outside that set returns `policy_denied` with rule",
+        "`phase_incompatible`. The 5-phase chain is:",
+        "  PRELUDE → EXPLORE → KERNEL → SWEEP → CLOSE",
+        "Transitions are Coordinator-owned (you cannot write phase).",
     ]
+
+
+# ---------------------------------------------------------------------------
+# v0.8 §3.3 — phase semantics injected into the static system prompt
+# ---------------------------------------------------------------------------
+def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
+    """Render the per-phase allowed-action contract.
+
+    The actual *current* phase is injected dynamically by
+    ``Coordinator._compose_prompt``; this section explains what each
+    phase **means** so the LLM has a stable mental model independent
+    of the runtime state.
+    """
+    # Lazy import: phase_state imports only stdlib so this is safe at
+    # module-import time, but keeping it local makes the lazy
+    # dependency explicit (and lets tests stub PHASE_ALLOWED_ACTIONS
+    # without rewriting this file).
+    from ..phase_state import PHASE_ALLOWED_ACTIONS, PHASE_NAMES
+
+    lines: list[str] = [
+        "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
+        "",
+        "The Coordinator runs the optimization in a 5-phase linear pipeline.",
+        "Each tick it injects a `=== Phase ===` block with the current",
+        "phase. Per-phase action allowlists (PolicyGate R1 enforces these):",
+        "",
+    ]
+    for phase in PHASE_NAMES:
+        allowed = sorted(PHASE_ALLOWED_ACTIONS.get(phase, frozenset()))
+        if not kernel_enabled and phase == "KERNEL":
+            # No-kernel run will not enter KERNEL phase; render but flag.
+            lines.append(
+                f"- **{phase}**: {', '.join(allowed)} (skipped in --no-kernel runs)"
+            )
+        else:
+            lines.append(f"- **{phase}**: {', '.join(allowed)}")
+    lines.extend([
+        "",
+        "Phase transitions are Coordinator-owned and based on machine-",
+        "judgeable signals: `baseline_tput > 0` exits PRELUDE; plateau",
+        "judges or budget caps exit EXPLORE / KERNEL / SWEEP; the wall-",
+        "clock deadline (closing phase) exits to CLOSE. You influence",
+        "transitions indirectly — by driving the current phase's signals",
+        "in the right direction — never by writing `phase` directly.",
+    ])
+    return lines
 
 
 def _filter_actions(
@@ -285,6 +373,22 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
 
 def _format_grid_injection_hint(name: str) -> str | None:
     """Return a per-action one-liner showing the LLM how to override grid."""
+    if name == "explore":
+        return (
+            "GRID INPUT (v0.8 M3, REQUIRED): emit "
+            "`delegate{action_name='explore', params={grid: [{name, "
+            "extra_args, extra_envs, provenance, kb_evidence?, "
+            "pr_evidence?, source_evidence?}, ...], "
+            "base_extra_args?, base_tput?, accuracy_baseline?, "
+            "keep_threshold_pct?: 0.2, stack_stable_threshold_pct?: 0.5}}`. "
+            "Variants run serially; each KEEP triggers an inlined "
+            "stack rebench (replaces validate_stack). Provenance is "
+            "one of 'default_grid' / 'llm_direct' / 'specialist:<domain>' "
+            "(specialist arrives in M5). The executor dedups against "
+            "SharedState.explore_search by canonical_fingerprint, so a "
+            "rename of an already-tested (args, envs) collapses to the "
+            "same row."
+        )
     if name == "backends":
         return (
             "GRID OVERRIDE (T1/T2): emit "
@@ -314,6 +418,11 @@ def _format_grid_injection_hint(name: str) -> str | None:
     return None
 
 
+def _format_action_deprecation_hint(name: str) -> str | None:
+    """Return a DEPRECATED tag + replacement hint for v0.8 M3 retired actions."""
+    return DEPRECATED_ACTIONS.get(name)
+
+
 def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
     lines: list[str] = [
         "## 4. ACTIONS YOU MAY USE",
@@ -330,7 +439,12 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
         lines.append("")
         for name in names:
             meta = name_to_meta[name]
-            tag = " (KERNEL-OWNED)" if name in KERNEL_OWNED_ACTIONS else ""
+            tag_parts: list[str] = []
+            if name in KERNEL_OWNED_ACTIONS:
+                tag_parts.append("KERNEL-OWNED")
+            if name in DEPRECATED_ACTIONS:
+                tag_parts.append("DEPRECATED")
+            tag = (" (" + ", ".join(tag_parts) + ")") if tag_parts else ""
             lines.append(
                 f"- **{name}**{tag} — {meta.description}"
             )
@@ -342,6 +456,9 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
                 f"family={meta.family}"
             )
             lines.append(f"    EMIT: {_format_emit_hint(meta)}")
+            deprecation_hint = _format_action_deprecation_hint(name)
+            if deprecation_hint:
+                lines.append(f"    DEPRECATED: {deprecation_hint}")
             grid_hint = _format_grid_injection_hint(name)
             if grid_hint:
                 lines.append(f"    {grid_hint}")
@@ -715,6 +832,11 @@ def build_orchestration_prompt(
             framework_source_roots=framework_source_roots,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
+        # v0.8 §3.3 — phase contract sits between the legacy v0.6
+        # PIPELINE & TIME BUDGET (§3, action-runtime view) and the
+        # ACTIONS catalogue (§4) so the LLM sees the *policy* layer
+        # before the *catalogue*.
+        _section_phase_semantics(kernel_enabled=kernel_enabled),
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled),
     ]
