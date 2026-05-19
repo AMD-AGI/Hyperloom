@@ -424,10 +424,38 @@ class StackGainEntry(TypedDict, total=False):
 class SourceBreakdown(TypedDict, total=False):
     geak_pct_of_total: float
     oob_pct_of_total: float
+    # v0.8 M3 — primary explore family bucket.
+    explore_pct_of_total: float
     backends_pct_of_total: float
     params_pct_of_total: float
     sweep_pct_of_total: float
     validated_total_pct: float
+
+
+class PhaseBreakdownExplore(TypedDict, total=False):
+    """v0.8 M7 (KB_design §3.12 §4.6) — explore-phase gain split by
+    specialist domain. ``by_domain`` keys are SpecialistDomain.key
+    strings (``framework_specialist`` / …) plus ``default_grid`` /
+    ``llm_direct`` for non-specialist provenance."""
+    total_gain_pct: float
+    by_domain: dict[str, float]
+
+
+class PhaseBreakdownKernel(TypedDict, total=False):
+    """v0.8 M7 — kernel-phase gain split by ``kernel_id`` (KB_design
+    §3.12 §4.6)."""
+    total_gain_pct: float
+    by_kernel_id: dict[str, float]
+
+
+class PhaseBreakdown(TypedDict, total=False):
+    """v0.8 M7 per-phase gain attribution (KB_design §3.13 M7 §6)."""
+    prelude: PhaseBreakdownExplore         # always 0 by definition
+    explore: PhaseBreakdownExplore
+    kernel:  PhaseBreakdownKernel
+    sweep:   PhaseBreakdownExplore         # usually 0 (sweep is measurement)
+    close:   PhaseBreakdownExplore         # usually 0
+    unattributed: PhaseBreakdownExplore    # gain whose phase couldn't be inferred
 
 
 class Attribution(TypedDict, total=False):
@@ -435,6 +463,8 @@ class Attribution(TypedDict, total=False):
     # validated / single_source / reconstructed / missing
     method: str
     source_breakdown: SourceBreakdown
+    # v0.8 M7 — per-phase gain attribution.
+    phase_breakdown: PhaseBreakdown
     notes: list[str]              # human-readable caveats
 
 
@@ -580,6 +610,9 @@ __all__ = [
     "RobustnessSignal",
     "SessionBreakdown",
     "SessionMeta",
+    "PhaseBreakdown",
+    "PhaseBreakdownExplore",
+    "PhaseBreakdownKernel",
     "SourceBreakdown",
     "SourceFiles",
     "StackGainEntry",
