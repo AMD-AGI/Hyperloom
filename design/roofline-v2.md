@@ -363,21 +363,53 @@ v1 把 sub-agent 这一层强行插在 TraceLens 报告和主 LLM 之间，**本
 
 ---
 
-## 7. 模块 / Commit 分解（实施跟踪表）
+## 7. 模块 / Commit 分解（v2.0 实施跟踪表）
 
-| Commit | 内容 | 主文件数 | 行数（含测试） | 状态 |
+### 7.1 v1 commit 处理（revert / 保留）
+
+按 §6.1 教训，v1 sub-agent 方向的所有 commit 必须 `git revert`；
+analysis.md 缓存 (C1) 和 Orchestration PRUNE_BRANCH 权限 (C3) 保留。
+
+| v1 Commit | hash | 状态 v2.0 | 处理 |
+|---|---|---|---|
+| **C1** SharedState 缓存 analysis.md | `23cb52b` | ✅ 保留 | v2 直接复用（这是 TraceLens 团队反馈"加一份缓存"的正确实现） |
+| **C2** `RooflineAnalysis` schema | `9683ea0` | ❌ revert | sub-agent 已废，不需要结构化产物 |
+| **C3** Orchestration PRUNE_BRANCH 权限 | `15804ce` | ✅ 保留 | 主 LLM 看完 analysis.md 仍要 emit PRUNE_BRANCH |
+| **doc v1** | `92a1a5c` | ⚠️ 不 revert | 历史记录；v2 本文档已大改覆盖 |
+| **doc v1.1** | `a0bce0f` | ⚠️ 不 revert | 同上 |
+| **C4a** action 注册 + stub | `05febe3` | ❌ revert | v2 RooflineExecutor 完全不同 |
+| **C4b** sub-agent LLM executor | `96ea5f1` | ❌ revert | sub-agent 方向已废 |
+| **C4c** coordinator + sequence_denial | `dcc4ce3` | ❌ revert (部分) | record_roofline_analysis 调用、roofline-specific gate 已废；但 "roofline 加入 sequence_actions" 是对的（v2 复合 action 也需要） |
+| **C5** `_format_roofline_decision` 渲染 + orchestration.md 指导段 | `a4cb7ae` | ❌ revert (部分) | _format_roofline_decision 整段废；orchestration.md 的 PRUNE_BRANCH "You CAN" 修正保留 |
+| **C6** verify + audit 脚本 | `4dc246e` | ⚠️ 部分保留 | verify_roofline_v2.py 核心逻辑（gain/wall_clock/action_seq 对比）保留；audit_roofline_decisions.py 里 "advice_consumed_count" 等 sub-agent-specific 字段废，改为统计 cache hit rate + LLM 决策对照 analysis.md 关键字 |
+
+revert 顺序：从最新往最旧（C6 → C5 → C4c → C4b → C4a → C2），每个用
+`git revert <hash> --no-edit`，commit message 清晰标注是"v2.0 回退
+v1 sub-agent 实施"。
+
+### 7.2 v2.0 新增 commit 计划
+
+| Commit | 内容 | 文件数 | 行数 | 状态 |
 |---|---|---|---|---|
-| **C1** | SharedState 缓存 analysis.md 全文 + snapshot 元数据 | 1 + 1 测试 | +283 | ✅ `23cb52b` |
-| **C2** | RooflineAnalysis schema + `record_roofline_analysis` | 1 + 1 测试 | +393 | ✅ `9683ea0` |
-| **C3** | Orchestration 获 PRUNE_BRANCH intent 权限 | 2 + 2 测试 | +180 | ✅ `15804ce` |
-| **C4a** | action 注册基础：meta yaml + markdown + scoring prior + cli 注册（stub executor 占位，返回 `primary="unknown"` 安全 fallback） | 4 + 1 测试 | ~120 | 📝 待写 |
-| **C4b** | sub-agent executor 实现：roofline.py 完整逻辑（替换 stub）+ analyzer system prompt + 单测（mock backend fixture，覆盖 happy / timeout / malformed JSON / idempotency） | 3 + 1 测试 | ~280 | 📝 待写 |
-| **C4c** | coordinator 集成：`task_kind == "roofline"` 分支调 record_roofline_analysis + sequence_denial 加 roofline 前置（必须有 analysis_md_text）+ 单测 | 1 改 + 1 测试 | ~120 | 📝 待写 |
-| **C5** | prompt 渲染 `_format_roofline_decision` 结论段 + "Pruning Rules" 段 + "Re-Profile Guidance" 段 + 单测 | 2 + 1 测试 | ~150 | 📝 待写 |
-| **C6** | `scripts/verify_roofline_v2.py` + `scripts/audit_roofline_decisions.py` | 2 | ~250 | 📝 待写 |
-| **C7** | Qwen3-32B baseline vs exp 真实 GPU 跑（用 nohup 后台，每 5 min 进度汇报）+ 数字记录追加进本文档 §11 | 0 代码 / 本文档追加 | 0 | 📝 待 GPU |
+| **D1** revert sequence | git revert C6/C5/C4c/C4b/C4a/C2（共 6 个 revert commits） | 0 净代码 | -3400 (回吐之前的实施) | 📝 待执行 |
+| **N1** `select_kernels → trace_analyze` rename | 跨 inference_optimizer + kernel-agent 两 repo 改名（action_registry / handler / scoring / cli / tests / kernel-agent tool 入口）；不改语义 | ~15-20 文件（机械替换） | ~50 净改动 | 📝 待执行 |
+| **N2** RooflineExecutor 复合 action | (a) `actions/_meta/roofline.yaml`（family=analysis, prerequisites=[baseline]）；(b) `actions/roofline.md` playbook（说明复合 action 语义）；(c) `orchestrator/action_executors/roofline.py` 顺序编排 profile + trace_analyze 协程；(d) `cli.py` 注册；(e) scoring prior=7.5；(f) 单测 | 6 新 + 2 改 | ~250 | 📝 待执行 |
+| **N3** Coordinator wire + sequence_denial | (a) `_promote_to_shared_state` 不需要新分支（profile + trace_analyze 子任务的 promote 各自走原路径）；(b) `_sequence_denial_for_action` 加 4 个优化 action 对 analysis.md_text 的依赖检查；(c) 单测 | 1 改 + 1 测试 | ~150 | 📝 待执行 |
+| **N4** 分层 flags 渲染 (Z 方案) | (a) `shared_state.py` `_format_discovered_flags` 重写按 `<framework>.<action>` 分组 × tested 状态标记；(b) 单测覆盖典型 / 空 / 大量 flag 场景 | 1 改 + 1 测试 | ~200 |  📝 待执行 |
+| **N5** analysis.md 全文注入 + orchestration prompt 指导段 | (a) `shared_state.py` `_format_analysis_md_full()` 渲染整段；(b) `to_prompt_summary` 加入；(c) `orchestration.md` 写 "How to consume analysis.md + discovered_flags + tested" 指导段（取代 C5 的 _format_roofline_decision）；(d) 单测 | 2 改 + 1 测试 | ~250 | 📝 待执行 |
+| **N6** prompt 三段切分 + cache hit rate 度量 | (a) `claude.py` ClaudeBackend 改造 prompt 组装为 stable / snapshot-stable / per-tick 三段，让 Claude Code automatic caching 命中最大化；(b) 从 `ResultMessage.usage` 提取 `cache_creation_input_tokens` / `cache_read_input_tokens` 写入 SharedState audit 字段；(c) 单测 mock ResultMessage 验证 metric 流程 | 2 改 + 1 测试 | ~200 | 📝 待执行 |
+| **N7** verify + audit 脚本更新 | (a) `verify_roofline_v2.py` 加 cache hit rate 列 + roofline action 调用次数（替代 sub-agent advice 统计）；(b) `audit_roofline_decisions.py` 改为 "decision audit"：统计 LLM PRUNE_BRANCH 是否引用了 analysis.md 段、propose 的 flag 是否在 discovered_flags 中、cache hit rate；(c) 测试 fixture 更新 | 2 改 + 1 测试 | ~150 | 📝 待执行 |
+| **N8** Qwen3-32B 真实 GPU 跑 + RATIONALE | C7 等价；填充本文档 §13 | 0 代码 | 0 + 文档追加 | 📝 待 GPU |
 
-**累计估算**：~1450 行（含 ~800 行测试 + ~200 行 yaml/md + ~200 行脚本），核心 Python ~250 行；4 GPU·hour 验证。
+**N1-N7 累计估算**：~1250 行新代码（含 ~600 行测试 + ~50 行 yaml/md +
+~150 行脚本），核心 Python ~450 行；外加 N1 rename 的 ~50 行机械改动。
+**比 v1 实施（~3400 行）少 ~60%**。
+
+### 7.3 sub-commit 拆分原则
+
+每个 N* commit 必须 ≤5 主代码文件、单测独立可跑、零回归（pre-existing
+`test_action_scoring` 失败除外）。N2 / N5 / N6 可能触及 5 文件边缘，
+必要时进一步拆为 a/b 子 commit（按 N4 已实践的模式）。
 
 ---
 
@@ -680,3 +712,74 @@ _C7 完成后在此追加 baseline / exp 数字、prompt diff 截图引用、aud
 |---|---|---|
 | 2026-05-19 | v1 初稿，C1-C3 已实施，C4-C7 待写 | xiaofei + 助手 |
 | 2026-05-19 | v1.1 拆 C4 为 C4a/C4b/C4c（每 sub-commit ≤5 文件），调研 ClaudeBackend / scoring / cli 集成点后微调 §8.2 | xiaofei + 助手 |
+| 2026-05-19 | **v2.0** 彻底回退 v1 sub-agent 方向（根本原因：违背 TraceLens 团队"直接给 orchestrator"的反馈、sub-agent 缺 discovered_flags 导致幻觉 flag、token 担忧实为误判）。roofline 改复合 action（profile + trace_analyze），analysis.md 全文直接注入，分层 flags 渲染，接入 prompt caching。`select_kernels` rename 为 `trace_analyze`。详见 §6.1 教训、§7.1 commit revert 表、§15 回退执行清单。本次 commit 仅改 §1/§4/§5/§6/§7；§8/§9/§10/§11/§12 + 新增 §15 由后续 doc-v2-C/doc-v2-D commits 完成。 | xiaofei + 助手 |
+
+---
+
+## 15. v2.0 回退执行清单
+
+按 §7.1 表格，本节给出 git revert 的具体顺序 + 校验 + 新 commit 推进
+的精确 checklist。**所有 revert 必须先于任何 N* 新代码开始**，确保
+worktree 在新代码落地前回到干净的"v1 sub-agent 残骸已移除"状态。
+
+### 15.1 Revert 顺序（从最新 commit 向最旧）
+
+```bash
+cd /wekafs/xiaofei/Hyperloom-roofline-v2
+git status                  # 确认 worktree clean (设计 doc 改动应已 commit)
+git log --oneline -15       # 最新 commit 应是 doc-v2-C，其下是 doc-v2-B/A
+
+# Revert v1 sub-agent 实施 (新→旧)
+git revert 4dc246e --no-edit    # C6 verify + audit 脚本 (部分保留，N7 重写)
+git revert a4cb7ae --no-edit    # C5 _format_roofline_decision + orchestration.md 段
+git revert dcc4ce3 --no-edit    # C4c coordinator 集成 + sequence_denial
+git revert 96ea5f1 --no-edit    # C4b sub-agent LLM executor
+git revert 05febe3 --no-edit    # C4a action 注册 + stub
+git revert 9683ea0 --no-edit    # C2 RooflineAnalysis schema
+
+# 不 revert:
+# - 23cb52b (C1 缓存 analysis.md) — v2 复用
+# - 15804ce (C3 Orchestration PRUNE_BRANCH) — v2 复用
+# - 92a1a5c / a0bce0f (v1 / v1.1 doc commits) — 历史保留
+# - 135a1aa / 1fb1cd7 (doc-v2-A/B 当前重写) — v2 在用
+```
+
+### 15.2 Revert 后预期状态
+
+| 项 | 验证命令 | 期望 |
+|---|---|---|
+| revert 总数 | `git log --oneline \| head -15 \| grep -c "Revert"` | 6 |
+| 是否还有 sub-agent 痕迹 | `grep -r "sub_agent\|RooflineAnalysis\|roofline_analyzer" inference_optimizer/orchestrator inference_optimizer/actions inference_optimizer/tests` | 0 匹配 |
+| C1 / C3 是否仍在 | `git log --oneline 23cb52b 15804ce` | 两 commit 存在 |
+| 测试 | `python -m pytest inference_optimizer/tests/test_record_select_kernels_analysis_md.py inference_optimizer/tests/test_orchestration_prune_branch_permission.py -q` | 全过 |
+| 整体测试不破 | `python -m pytest inference_optimizer/tests/ -q` | 仅 pre-existing test_action_scoring 失败 |
+
+### 15.3 Revert 后开始 N* 新 commits
+
+按 §7.2 顺序串行执行：N1 (rename) → N2 (RooflineExecutor) →
+N3 (Coordinator wire) → N4 (分层 flags) → N5 (analysis.md 注入 +
+prompt 指导段) → N6 (prompt 三段切分 + cache metric) → N7 (verify/audit
+更新) → N8 (Qwen3-32B GPU + 填本文档 §13)。
+
+每个 N* commit 完成后，commit message 必须引用本文档对应章节
+（如 `feat(roofline-v2): RooflineExecutor 复合 action [N2] (design §8.x)`）。
+
+### 15.4 失败回退路径
+
+若 N* 中任一 commit 测试失败或推进困难：
+
+1. 不要往前推 — 当前 N* commit `git reset --hard HEAD~1` 回退
+2. 修本文档 §7/§8 对应小节，说明遇到的问题 + 方案微调
+3. 重新尝试 N* 实施
+4. 若整体方向出问题（如 prompt caching 实测 hit rate < 30%）→ 在本
+   §15 加 v2.1 子节，记录方向调整，再继续。**不要在没改本文档前
+   动代码**（v1 → v2 的最痛教训）。
+
+### 15.5 不在本 PR 范围（明确划红线）
+
+- `roofline` 复合 action 内部的 profile 失败但 trace_analyze 仍可跑的
+  "subset retry" 优化 → v2.1
+- UNPRUNE_BRANCH intent（让 LLM 撤销之前的 prune）→ 单独 PR
+- 直接调 `anthropic` SDK 绕过 Claude Code（如 cache hit rate < 50%
+  才考虑）→ 单独 PR
+- 跨 framework （vLLM / TGI）的 flag 分层 yaml taxonomy → 单独 PR
