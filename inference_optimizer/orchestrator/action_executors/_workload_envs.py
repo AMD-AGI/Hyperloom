@@ -176,9 +176,20 @@ def materialize_config_with_envs(
     rocr_env = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
     if rocr_env:
         envs["ROCR_VISIBLE_DEVICES"] = rocr_env
-    resolved_tp = int(envs.get("TP") or os.environ.get("TP") or 1)
+    tp_from_env = os.environ.get("TP", "").strip()
+    tp_from_yaml = envs.get("TP")
     rocr_yaml = str(envs.get("ROCR_VISIBLE_DEVICES") or "").strip()
     rocr_devices = [d.strip() for d in rocr_yaml.split(",") if d.strip()]
+    if tp_from_env:
+        resolved_tp = int(tp_from_env)
+    elif rocr_yaml and not tp_from_yaml:
+        # Derive TP from user-pinned GPU list when the YAML template
+        # doesn't set TP — avoids inheriting a stale TP from templates
+        # built for a different GPU count.
+        resolved_tp = len(rocr_devices)
+        envs["TP"] = resolved_tp
+    else:
+        resolved_tp = int(tp_from_yaml or 1)
     if not rocr_yaml or len(rocr_devices) < resolved_tp:
         derived = ",".join(str(i) for i in range(resolved_tp))
         if rocr_yaml and rocr_yaml != derived:
