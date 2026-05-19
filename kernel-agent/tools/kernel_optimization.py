@@ -1095,6 +1095,147 @@ def _geak_output_dir(session_id: str, prompt_file: Path) -> Path:
     return out
 
 
+def _unittest_output_dir(session_id: str, prompt_file: Path) -> Path:
+    """Per-attempt directory for the auto-generated AgentKernelArena unittest.
+
+    Sibling of ``_geak_output_dir`` so the harness, the GEAK runtime, and the
+    artefacts a human would later need to reproduce the test all live under
+    the same session subtree.
+    """
+    out = _kernel_agent_root() / "unittests" / session_id / prompt_file.stem
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _append_unittest_context_to_prompt(
+    prompt_file: Path, manifest: dict[str, Any],
+) -> None:
+    """Append a short, machine-friendly block describing the auto-generated
+    unittest harness so GEAK / OOB sub-agents know:
+
+      * which file inside the harness to overwrite (the symlinked source
+        under ``source/<basename>``);
+      * how to run the correctness gate themselves
+        (``python3 scripts/task_runner.py correctness``);
+      * which baseline they are compared against (the snapshot under
+        ``source/_baseline_snapshot/``).
+
+    The block is best-effort: a malformed prompt file just gets skipped
+    (we don't want unittest generation to brick a working GEAK call).
+    """
+    try:
+        existing = prompt_file.read_text(encoding="utf-8")
+    except OSError:
+        return
+    test_cmd = manifest.get("test_command") or ""
+    perf_cmd = manifest.get("performance_command") or ""
+    source = manifest.get("source_file") or ""
+    snapshot = manifest.get("baseline_snapshot") or ""
+    status = manifest.get("status") or "unknown"
+    sv = manifest.get("self_verify") or {}
+    shapes = manifest.get("shapes") or []
+    section = [
+        "",
+        "## Auto-generated unittest harness (Hyperloom unittest_agent)",
+        "",
+        f"- Status: **{status}** (self_verify compile={sv.get('compile')!r}, "
+        f"correctness={sv.get('correctness')!r}).",
+        f"- Workspace dir: `{manifest.get('out_dir')}`",
+        f"- Unittest source mirror: `{source}`",
+        f"- Frozen baseline kept at: `{snapshot}` "
+        "(this is the golden reference your optimized version is compared "
+        "against; DO NOT touch).",
+        f"- Correctness command: `{test_cmd}` "
+        "(exits 0 only when the optimized output matches the snapshot within "
+        "the kernel's natural fp tolerance across every captured shape).",
+        f"- Performance command: `{perf_cmd}`",
+        f"- Captured shapes: {len(shapes)} (representative of the live "
+        "vLLM/SGLang decode/prefill traffic this kernel handled in profile).",
+        "",
+        "GEAK / OOB agent workflow:",
+        "1. Edit the sandbox `kernel_url` file from the task header (the "
+        "worktree copy under `results/round_*/worktrees/...`). This is the "
+        "file GEAK's patch saver diffs; if you only edit the unittest mirror, "
+        "the saved patch will be empty.",
+        f"2. After each edit, copy the edited `kernel_url` file over `{source}` "
+        "so the unittest harness imports the same optimized code you want to "
+        "submit.",
+        "3. Run the correctness command above; iterate until it returns 0.",
+        "4. Run the performance command above to measure speedup.",
+        "5. Report `[CORRECTNESS] PASS/FAIL` + `[MICRO_SPEEDUP] X.XXx` at the "
+        "end of `optimization_report.md` as usual.",
+        "",
+    ]
+    appended = existing.rstrip() + "\n" + "\n".join(section)
+    try:
+        prompt_file.write_text(appended, encoding="utf-8")
+    except OSError:
+        return
+
+
+def _maybe_generate_unittest(
+    candidate: dict[str, Any] | None,
+    prompt_file: Path,
+    args: argparse.Namespace,
+    log_path: Path | None,
+    target_platform: str,
+) -> dict[str, Any] | None:
+    """Generate an AgentKernelArena-style unittest before handing off to GEAK.
+
+    Lives between ``invoke_backend`` and the GEAK submitter so:
+
+      * the unittest is co-located with the GEAK run dir (one prompt → one
+        harness → one set of GEAK results, easy to correlate);
+      * a failure in generation never blocks GEAK — we fall back to the
+        legacy ``test_command`` discovery from ``candidate.benchmark_files``;
+      * the generated ``correctness`` runner becomes GEAK's ``--test-command``
+        so GEAK measures speedup *against the captured baseline* rather than
+        whatever surrogate it would invent on its own (the previous default
+        behaviour).
+    """
+    if candidate is None:
+        return None
+    if os.environ.get("HYPERLOOM_DISABLE_UNITTEST_AGENT", "").strip() in ("1", "true", "yes"):
+        return None
+    tools_dir = Path(__file__).resolve().parent
+    if str(tools_dir) not in sys.path:
+        sys.path.insert(0, str(tools_dir))
+    try:
+        import importlib
+        ua = importlib.import_module("unittest_agent")
+    except Exception as exc:  # noqa: BLE001
+        if log_path is not None:
+            append_log(log_path, f"[unittest_agent] import failed: "
+                                 f"{type(exc).__name__}: {exc}")
+        return None
+    out_dir = _unittest_output_dir(args.session_id, prompt_file)
+    if log_path is not None:
+        append_log(log_path, f"[unittest_agent] generating harness for "
+                             f"kernel_id={candidate.get('kernel_id') or candidate.get('name')} "
+                             f"at {out_dir}")
+    try:
+        manifest = ua.generate_unittest(
+            candidate,
+            out_dir=out_dir,
+            target_platform=target_platform,
+            log=(lambda m: append_log(log_path, m)) if log_path is not None else None,
+            self_verify=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if log_path is not None:
+            append_log(log_path, f"[unittest_agent] generation raised: "
+                                 f"{type(exc).__name__}: {exc}")
+        return None
+    if log_path is not None:
+        append_log(
+            log_path,
+            f"[unittest_agent] status={manifest.get('status')} "
+            f"shapes={manifest.get('num_shapes')} "
+            f"self_verify={manifest.get('self_verify')}",
+        )
+    return manifest
+
+
 def _set_yaml_tools_rag(text: str, enabled: bool) -> str:
     """Return YAML text with tools.rag set without mutating the source config."""
     value = "true" if enabled else "false"
@@ -1229,7 +1370,8 @@ def invoke_backend(
     # round + a select_patch round at the end. Empirically 60 min lets
     # individual sub-agents finish but consistently SIGTERMs the
     # select_patch round (r38, r39 both fell back to per-task best_results
-    # salvage). 90 min is the new default; override via --geak-budget-min.
+    # salvage). 120 min is the default so GEAK has room for multi-round
+    # optimization plus final selection; override via --geak-budget-min.
     if backend == "geak":
         budget_min = float(getattr(args, "geak_budget_min", 0)
                            or getattr(args, "budget_minutes", 60) or 60)
@@ -1248,32 +1390,67 @@ def invoke_backend(
         if backend == "geak":
             geak = _import_backend("geak_submit")
             out_dir = _geak_output_dir(args.session_id, prompt_file)
+            # Generate an AgentKernelArena-style unittest *first* so GEAK
+            # gets a real correctness + perf harness derived from the
+            # live profile (captured shapes, dtypes, env vars). The harness
+            # is co-located with the GEAK run dir; on success it becomes
+            # GEAK's --test-command and is also pasted into the prompt so
+            # GEAK knows to write its optimized version under
+            # `source/<kernel_basename>` (the file the harness imports).
+            target_platform_for_unit = (
+                getattr(args, "target_platform", "") or _env_target_platform()
+            )
+            unittest_manifest = _maybe_generate_unittest(
+                candidate, prompt_file, args, log_path, target_platform_for_unit,
+            )
+
             # GEAK preprocess will INVENT a wrong path (e.g.
             # `/sgl-workspace/aiter/./benchmarks/bench_<kernel>.py` which does
             # not exist) when --test-command is empty, causing torchrun exit 2
-            # at baseline measurement. Always pick a real existing test from
-            # candidate.benchmark_files, prefixing with `torchrun` for the
-            # multi-GPU path so collective init_process_group succeeds.
+            # at baseline measurement. Pick from (in priority order):
+            #   (1) the auto-generated unittest harness (most faithful to
+            #       the live e2e shapes / env), single-GPU compute kernels;
+            #   (2) candidate.benchmark_files (legacy path, used when the
+            #       unittest generator was degraded / skipped, or for
+            #       multi-GPU collectives that need torchrun);
+            #   (3) empty (GEAK falls back to its own harness inventor).
             test_command = ""
             cand_name = str((candidate or {}).get("name") or "")
             is_multigpu = (
                 bool((candidate or {}).get("is_multigpu"))
                 or kernel_name_implies_multigpu(cand_name)
             )
-            if is_multigpu and num_gpus >= 2:
+            unittest_test_cmd = ""
+            if (
+                unittest_manifest is not None
+                and unittest_manifest.get("status") == "ok"
+                and not is_multigpu
+            ):
+                unittest_test_cmd = str(unittest_manifest.get("test_command") or "")
+                if unittest_test_cmd:
+                    test_command = unittest_test_cmd
+
+            if not test_command and is_multigpu and num_gpus >= 2:
                 for bf in bench_files:
                     if bf.endswith(".py") and Path(bf).exists() and (
                         "test_" in Path(bf).name or "bench" in Path(bf).name
                     ):
                         test_command = f"torchrun --nproc_per_node={num_gpus} {bf}"
                         break
-            elif not is_multigpu:
+            elif not test_command and not is_multigpu:
                 for bf in bench_files:
                     if bf.endswith(".py") and Path(bf).exists() and (
                         "test_" in Path(bf).name or "bench" in Path(bf).name
                     ):
                         test_command = f"python {bf}"
                         break
+
+            # Augment the GEAK prompt with an explicit pointer to the
+            # generated harness so the agent knows where to land its
+            # optimized version. We append rather than rewrite to avoid
+            # disturbing the rest of the prompt rendered by build_prompt().
+            if unittest_manifest is not None and unittest_manifest.get("status") in ("ok", "degraded"):
+                _append_unittest_context_to_prompt(prompt_file, unittest_manifest)
             previous_env = _apply_geak_env_overrides(args, prompt_file)
             try:
                 result = geak.submit(
@@ -1291,6 +1468,12 @@ def invoke_backend(
                 _restore_env(previous_env)
             result["stdout"] = result.get("stdout_tail", "")
             result["output_dir"] = str(out_dir)
+            if unittest_manifest is not None:
+                result["unittest_manifest"] = unittest_manifest
+                result["unittest_out_dir"] = unittest_manifest.get("out_dir") or ""
+                result["unittest_status"] = unittest_manifest.get("status") or "unknown"
+                if unittest_test_cmd:
+                    result["unittest_test_command"] = unittest_test_cmd
             # Surface GEAK partial outputs (final_report.json / results dir)
             # so a SIGTERM'd attempt with patches on disk still gets
             # promoted to "partial" by the run_attempt scanner below.
@@ -1488,6 +1671,15 @@ def run_attempt(
                 backend_paths["cli_execution_log"] = cli_log
             if session_id_oob:
                 backend_paths["oob_session_id"] = session_id_oob
+            unittest_status = (result.get("unittest_status") or "") if isinstance(result, dict) else ""
+            if unittest_status:
+                backend_paths["unittest_status"] = unittest_status
+                ut_dir = (result.get("unittest_out_dir") or "") if isinstance(result, dict) else ""
+                if ut_dir:
+                    backend_paths["unittest_out_dir"] = ut_dir
+                ut_cmd = (result.get("unittest_test_command") or "") if isinstance(result, dict) else ""
+                if ut_cmd:
+                    backend_paths["unittest_test_command"] = ut_cmd
             # GEAK partial-output surface (forwarded by invoke_backend on
             # the geak branch). final_report.json / per-round patches.
             geak_final = (result.get("geak_final_report") or "") if isinstance(result, dict) else ""
@@ -2060,9 +2252,9 @@ def main() -> int:
     parser.add_argument("--budget-minutes", type=float, default=60.0,
                         help="Per-attempt wall-clock budget for claude/codex "
                              "OOB backends. GEAK uses --geak-budget-min.")
-    parser.add_argument("--geak-budget-min", type=float, default=90.0,
+    parser.add_argument("--geak-budget-min", type=float, default=120.0,
                         help="Per-attempt wall-clock budget for GEAK only "
-                             "(default 90 min; needed because GEAK runs "
+                             "(default 120 min; needed because GEAK runs "
                              "per-task patch sub-agents serially + a final "
                              "select_patch round, and 60 min consistently "
                              "SIGTERMs the select_patch round).")
