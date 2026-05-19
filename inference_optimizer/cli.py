@@ -685,12 +685,102 @@ _NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = (
 )
 
 
+def _build_specialist_executor(
+    args: argparse.Namespace,
+    *,
+    session_dir: Path,
+    knowledge_plane: Any,
+) -> "Callable[[Any], Awaitable[dict]]":
+    """v0.8 §3.5 / §3.13 M5 + KB_gaps/Gap-01 — build the specialist
+    executor adapter.
+
+    Returns an ``async fn(ctx: RunnerContext) -> dict`` compatible with
+    :data:`SubAgentRunner.ExecutorFn`. The adapter wraps a
+    :class:`SpecialistRunner` and translates its
+    :class:`SpecialistRunResult` dataclass into the dict the dispatcher
+    expects to publish onto the bus.
+
+    Backend choice: every specialist runs on Claude (matching the
+    orchestration role). The CLI flag ``--specialist-model`` overrides
+    the default model (``--claude-model``) so operators can dedicate a
+    cheaper / faster model to specialist research without touching the
+    main orchestration loop. KB_design §3.5 §6 / §3.14 R-05.
+
+    The factory captures ``session_dir`` + ``knowledge_plane`` once at
+    cli boot; the same runner instance handles every specialist task
+    for the session.
+    """
+    from .orchestrator.specialist_runner import (
+        DEFAULT_SPECIALIST_TOOLS,
+        SpecialistRunner,
+    )
+    from .orchestrator.sub_agent_runner import SubAgentResult
+
+    claude_model = (
+        (getattr(args, "specialist_model", None) or args.claude_model)
+        .strip()
+    )
+    max_turns = int(getattr(args, "specialist_max_turns", 8) or 8)
+    per_turn_max_seconds = float(
+        getattr(args, "specialist_per_turn_max_seconds", 600.0) or 600.0
+    )
+
+    def _backend_factory(domain: Any) -> Any:
+        # KB_design §3.5 §6 — specialist backend protocol is identical to
+        # orchestration (Claude). ``domain`` is the resolved
+        # ``SpecialistDomain`` object; runners may use it to pick a
+        # per-domain model in the future, but M5 uses one model for all.
+        return ClaudeBackend(model=claude_model, max_turns_default=max_turns)
+
+    runner = SpecialistRunner(
+        backend_factory=_backend_factory,
+        session_dir=session_dir,
+        default_tools=DEFAULT_SPECIALIST_TOOLS,
+        default_max_turns=max_turns,
+        per_turn_max_seconds=per_turn_max_seconds,
+        knowledge_plane=knowledge_plane,
+    )
+
+    async def _executor(ctx: Any) -> dict:
+        """Adapter: SubAgentRunner.run_task → SpecialistRunner.run.
+
+        The SubAgentRunner wrapper has already transitioned the task to
+        ``running`` and ``ctx.task`` is the live :class:`Task`. We
+        always return a dict (even on failure) so the dispatcher's
+        ``state.transition('succeeded', evidence={...})`` step gets a
+        well-formed payload. SpecialistRunResult's distinction between
+        ``succeeded`` / ``empty_synthesised`` / ``stale`` etc. is
+        preserved under ``result.runner_status`` for downstream
+        analytics (breakdown.specialist_runs).
+        """
+        run_result = await runner.run(ctx)
+        # Translate dataclass → dict. The Coordinator's
+        # ``_handle_intent`` Gap-03 path (when wired) will pull
+        # ``specialist_done`` out of result.payload['specialist_done'].
+        return {
+            "runner_status": run_result.status,
+            "task_id": run_result.task_id,
+            "domain": run_result.domain,
+            "gap_canonical_id": run_result.gap_canonical_id,
+            "specialist_done": run_result.specialist_done,
+            "turns_used": run_result.turns_used,
+            "workspace": run_result.workspace,
+            "transcript_path": run_result.transcript_path,
+            "done_path": run_result.done_path,
+            "error": run_result.error,
+            "notes": list(run_result.notes or []),
+        }
+
+    return _executor
+
+
 def _register_executors(
     coordinator: Coordinator,
     *,
     no_kernel: bool = False,
     compare_against_gpu: str | None = None,
     session_dir: Path | None = None,
+    specialist_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
 ) -> None:
     """Wire all currently-available action executors.
 
@@ -709,6 +799,12 @@ def _register_executors(
     reference; when empty / None, it writes a structured
     ``reason='no_target_gpu_configured'`` marker JSON so the report
     section is rendered uniformly in both cases.
+
+    ``specialist_executor`` (v0.8 §3.5 / KB_gaps/Gap-01): the
+    :func:`_build_specialist_executor` adapter, when the operator has
+    ``--research-lane-capacity > 0``. ``None`` keeps the legacy
+    behaviour where a ``delegate{action='specialist'}`` task hits
+    ``no_executor`` and fails (M3 / pre-M5 path).
     """
     for kind, fn in _REAL_EXECUTORS_FULL.items():
         coordinator.sub.register_executor(kind, fn)
@@ -720,6 +816,13 @@ def _register_executors(
             session_dir=session_dir,
         ),
     )
+
+    # v0.8 §3.5 + KB_gaps/Gap-01 — register the specialist sub-agent
+    # adapter so ``delegate{action='specialist'}`` no longer hits
+    # ``no_executor``. Gated by ``--research-lane-capacity`` upstream
+    # (cli only passes a non-None executor when capacity > 0).
+    if specialist_executor is not None:
+        coordinator.sub.register_executor("specialist", specialist_executor)
 
     if no_kernel:
         return
@@ -2111,6 +2214,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         cortex_client = _bootstrap_cortex_kb(
             args, session_dir=session_dir, manifest=manifest, resume=True,
         )
+        # v0.8 M4 + KB_gaps/Gap-02 — KnowledgePlane facade. Bootstrapped
+        # alongside the cortex client so a resumed session also gets the
+        # PR Monitor + KB readonly tools wired into specialist dispatch.
+        # Returns a plane that fail-soft degrades when PR Monitor or
+        # Cortex is unreachable; specialists then see empty pr_feed /
+        # kb_subgraph and continue. ``None`` only when --no-cortex.
+        knowledge_plane = (
+            None if getattr(args, "no_cortex", False)
+            else _bootstrap_knowledge_plane(args, cortex_client=cortex_client)
+        )
     else:
         # Resolve model path from --model first, then $MODEL_PATH env. Without
         # either, fail fast: silently falling back to the YAML's hardcoded
@@ -2201,6 +2314,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # into T2/T3/T4 hooks). Fails fast unless --no-cortex.
         cortex_client = _bootstrap_cortex_kb(
             args, session_dir=session_dir, manifest=manifest, resume=False,
+        )
+        # v0.8 M4 + KB_gaps/Gap-02 — KnowledgePlane facade for specialist
+        # sub-agents. Wraps cortex_client (already T0'd above) + a
+        # PR Monitor REST client; fail-soft on either side so specialist
+        # dispatch always has a non-None plane to consult.
+        knowledge_plane = (
+            None if getattr(args, "no_cortex", False)
+            else _bootstrap_knowledge_plane(args, cortex_client=cortex_client)
         )
 
     objective = build_objective({
@@ -2383,6 +2504,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         ),
         cortex_kb=cortex_client,
         phase_budget_pct=phase_budget_pct or None,
+        # v0.8 §3.5 + KB_gaps/Gap-01/Gap-02 — KnowledgePlane facade.
+        # ``None`` when --no-cortex; otherwise wraps Cortex KB +
+        # PR Monitor for specialist prompt assembly.
+        knowledge_plane=knowledge_plane,
     )
     framework_for_prompt = (
         os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
@@ -2404,11 +2529,29 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if not no_kernel:
         prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
     coordinator.system_prompt_overrides = prompts
+    # v0.8 §3.5 + KB_gaps/Gap-01 — build specialist executor when the
+    # research_lane capacity is non-zero. ``args.research_lane_capacity``
+    # is already clamped to [0, 32] by ``_seed_shared_state``; a value
+    # of 0 means "degrade to M3 LLM-direct grid", and we keep
+    # ``specialist_executor=None`` so the dispatcher falls back to the
+    # legacy ``no_executor`` rejection (which PolicyGate R2 also
+    # short-circuits in practice).
+    specialist_capacity = int(
+        getattr(args, "research_lane_capacity", 1) or 0
+    )
+    specialist_executor: "Any" = None
+    if specialist_capacity > 0:
+        specialist_executor = _build_specialist_executor(
+            args,
+            session_dir=session_dir,
+            knowledge_plane=knowledge_plane,
+        )
     _register_executors(
         coordinator,
         no_kernel=no_kernel,
         compare_against_gpu=getattr(args, "compare_against_gpu", None),
         session_dir=session_dir,
+        specialist_executor=specialist_executor,
     )
     # Persist effective system prompts for resume / drift inspection.
     _snapshot_system_prompts(session_dir, prompts=prompts)
@@ -2800,6 +2943,47 @@ def _build_parser() -> argparse.ArgumentParser:
              "dispatch entirely (degrades to M3 LLM-direct grid); 1 is "
              "the M5 default; 6 is the M6 default. Range [0, 32]. "
              "Locked at session start.",
+    )
+    # ------------------------------------------------------------------
+    # v0.8 §3.5 / §3.13 M5 + KB_gaps/Gap-01 — specialist sub-agent
+    # backend selection. Specialists run via Claude (default) and inherit
+    # the orchestration model unless overridden. Per-task turn / time
+    # caps protect against runaway LLM consumption (KB_design §3.14 R-05).
+    # ------------------------------------------------------------------
+    opt.add_argument(
+        "--specialist-model",
+        dest="specialist_model",
+        type=str,
+        default=os.environ.get("INFERENCE_OPTIMIZER_SPECIALIST_MODEL", "")
+        or None,
+        help="Claude model used for specialist sub-agents (defaults to "
+             "the orchestration --claude-model). KB_design §3.5 §6.",
+    )
+    opt.add_argument(
+        "--specialist-max-turns",
+        dest="specialist_max_turns",
+        type=int,
+        default=int(
+            os.environ.get("INFERENCE_OPTIMIZER_SPECIALIST_MAX_TURNS", "8")
+            or "8"
+        ),
+        help="Hard cap on LLM turns per specialist task (KB_design "
+             "§3.5 §6). On exhaustion the runner synthesises an empty "
+             "specialist_done (Inv-5.3).",
+    )
+    opt.add_argument(
+        "--specialist-per-turn-max-seconds",
+        dest="specialist_per_turn_max_seconds",
+        type=float,
+        default=float(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS", "600"
+            )
+            or "600"
+        ),
+        help="Wall-clock cap per specialist turn (default 600s). Used "
+             "by the robustness stale-scan to detect stuck specialists "
+             "(KB_design §3.5 §9 / §3.13 M5 §4).",
     )
     # ------------------------------------------------------------------
     # v0.8 §3.9 — drop scoreboard (KB_design §3.9 §7)
