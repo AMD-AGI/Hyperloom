@@ -101,15 +101,22 @@ def test_roofline_in_sequence_actions(session_dir):
     assert "target_analysis must run first" in str(denied)
 
 
-def test_roofline_passes_profile_gate(session_dir):
+def test_roofline_passes_profile_gate(session_dir, monkeypatch):
     """`roofline` is exempt from the profile-must-run-first gate
-    because it internally runs profile."""
+    because it internally runs profile.
+
+    Updated for N9: direct `profile` propose is now blocked. We test
+    the escape-hatch path here to assert the underlying profile gate
+    behaviour separately from the N9 hard-block (which is fully
+    covered in test_n9_profile_blocked_from_propose.py).
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_DIRECT_PROFILE", "1")
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
     # No last_profile_trace yet
     assert coord.shared_state.last_profile_trace == ""
 
-    # profile / roofline / validate_stack should pass
+    # roofline / profile (escape-hatch-on) / validate_stack pass
     assert coord._sequence_denial_for_action("roofline") is None
     assert coord._sequence_denial_for_action("profile") is None
 
@@ -117,8 +124,9 @@ def test_roofline_passes_profile_gate(session_dir):
     denied = coord._sequence_denial_for_action("backends")
     assert isinstance(denied, PolicyDenied)
     assert "profile must run" in str(denied)
-    # Hint mentions both roofline (preferred) and profile (legacy)
-    assert denied.hint and "roofline" in denied.hint and "profile" in denied.hint
+    # N3+N9: hint now points at roofline as the only recommended path
+    # (profile is escape-hatch-only, not advertised in the hint)
+    assert denied.hint and "roofline" in denied.hint
 
 
 def test_roofline_denied_when_baseline_not_run(session_dir):
@@ -231,14 +239,23 @@ def test_run_optimization_request_allowed_with_matching_cache(session_dir):
 # Non-gated actions stay unaffected
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("action", [
-    "sweep", "validate_stack", "report", "integrate", "profile",
+    "sweep", "validate_stack", "report", "integrate",
 ])
 def test_non_optimization_actions_not_subject_to_roofline_gate(
     session_dir, action,
 ):
-    """sweep / validate_stack / report / integrate / profile do NOT
-    require analysis_md_text. Only the explicit 4 optimization actions
-    do (per §6.5 design doc)."""
+    """sweep / validate_stack / report / integrate do NOT require
+    analysis_md_text. Only the explicit propose-path optimization
+    actions (backends / params / comm_optimization) do (per §6.5
+    design doc).
+
+    Note: `profile` is intentionally NOT in this parametrize set
+    because N9 introduced a separate hard-block on profile-direct-
+    propose with its own "roofline" hint (see
+    test_n9_profile_blocked_from_propose.py); the roofline-gate
+    presence-of-roofline-in-message check would incorrectly fire on
+    the N9 denial.
+    """
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
     coord.shared_state.last_profile_trace = "/tmp/profile.gz"
