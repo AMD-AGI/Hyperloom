@@ -779,6 +779,76 @@ class Coordinator:
             ))
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: phase_transition event bus write failed")
+        # v0.8 §3.2 — phase-entry side effects (KB_gaps/Gap-02 PR 5.4 +
+        # follow-up Gap-04 / Gap-05 / Gap-06). Side effects are
+        # *additive* — failures inside a hook are logged but never
+        # roll back the transition. Keeping the dispatch table inside
+        # ``_on_phase_entered`` so the per-phase branches stay together
+        # and future phase entries (KERNEL auto-profile, SWEEP grid,
+        # CLOSE sequencer) only need one new branch each.
+        try:
+            await self._on_phase_entered(from_phase=prior or "", to_phase=target)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("Coordinator: _on_phase_entered hook failed")
+
+    async def _on_phase_entered(self, *, from_phase: str, to_phase: str) -> None:
+        """Fire per-phase entry side effects.
+
+        Pure dispatcher: each branch is a thin wrapper around a
+        ``_on_enter_<phase>`` method. Hooks are infallible from the
+        caller's perspective (callers should not need to wrap them in
+        try/except — the dispatcher itself catches and logs).
+
+        Currently wired:
+
+        * ``EXPLORE`` — pre-warm PR feed across every specialist domain
+          (KB_design §3.6 + KB_gaps/Gap-02). The first specialist
+          dispatch after EXPLORE entry then sees a populated cache
+          rather than a cold ``pr_monitor`` fetch.
+
+        Future:
+
+        * ``KERNEL`` — auto-enqueue ``profile`` (KB_gaps/Gap-04).
+        * ``SWEEP`` — auto-enqueue ``sweep`` with recipe-driven grid
+          (KB_gaps/Gap-05).
+        * ``CLOSE`` — 5-step sequencer (KB_gaps/Gap-06).
+        """
+        target = (to_phase or "").upper()
+        if target == _phase_state.PHASE_EXPLORE:
+            await self._on_enter_explore(from_phase=from_phase)
+        # Other phases land here without effects until KB_gaps/Gap-04/05/06.
+
+    async def _on_enter_explore(self, *, from_phase: str) -> None:
+        """KB_gaps/Gap-02 PR 5.4 — warm the PR feed across every
+        specialist domain on EXPLORE entry.
+
+        Best-effort: any failure is logged + the run continues. A
+        downstream specialist dispatch still calls
+        :meth:`KnowledgePlane.pr_feed_warm` individually
+        (``_handle_delegate`` → ``_warm_specialist_params``), so even
+        a hard failure here only loses the upfront cache-priming.
+
+        The aggregated warnings end up on
+        :attr:`KnowledgePlane.last_warnings`; the breakdown collector
+        (KB_design §3.12) can surface them next to the session-level
+        ``pr_monitor`` status.
+        """
+        plane = self.knowledge_plane
+        if plane is None:
+            return
+        try:
+            results = plane.pr_feed_warm_all_domains()
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.warning(
+                "EXPLORE entry: pr_feed_warm_all_domains failed: %r", exc,
+            )
+            return
+        total_prs = sum(len(prs) for prs, _w in results.values())
+        log.info(
+            "EXPLORE entry (from=%s): warmed pr_feed across %d domains "
+            "(total PRs cached=%d)",
+            from_phase or "<unknown>", len(results), total_prs,
+        )
 
     def _ensure_action_scores_seeded(self) -> None:
         """v0.8 §3.9 — no-op stub.
