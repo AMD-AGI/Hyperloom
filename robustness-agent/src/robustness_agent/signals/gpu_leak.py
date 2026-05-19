@@ -39,14 +39,23 @@ log = logging.getLogger(__name__)
 # Default inference-server / benchmark owners whose presence proves the
 # VRAM is being used legitimately rather than leaked. Mirrors the
 # extended ``_DEFAULT_PROCESS_PATTERNS`` in
-# :mod:`robustness_agent.sources.local_probe`.
+# :mod:`robustness_agent.sources.local_probe`. The 2026-05-18 vLLM v1
+# additions (``vllm.v1.engine.core`` / ``vllm.engine.async_llm_engine``)
+# close the false-fire gap where ``EngineCore-`` child PIDs hold VRAM
+# but their cmdline does not contain ``vllm.entrypoints``.
 _DEFAULT_OWNER_PATTERNS: tuple[str, ...] = (
     "sglang.launch_server",
     "sglang.srt",
     "vllm.entrypoints",
     "vllm serve",
+    "vllm.v1.engine.core",
+    "vllm.engine.async_llm_engine",
     "EngineCore",
     "Magpie",
+    "inferencex",
+    "ray::IDLE",
+    "raylet",
+    "hipcc",
     "benchmark_serving",
 )
 
