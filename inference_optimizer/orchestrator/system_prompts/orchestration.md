@@ -55,6 +55,13 @@ on the next tick.
   to consume the TraceLens Analysis" below). `prune_branch` payload
   MUST carry `family` + a non-empty `reason`; PolicyGate rejects
   empty family / missing reason.
+* **NEVER propose `profile` directly.** Always propose `roofline`
+  instead — it is a composite action whose executor internally runs
+  profile + trace_analyze atomically and produces the snapshot that
+  `backends` / `params` / `comm_optimization` / `kernel_opt` need.
+  Direct `profile` proposes are hard-rejected by PolicyGate
+  (`rule=execution_order`, "design §6.5 N9") to prevent the
+  duplicate-profile waste pattern observed during v2 roll-out.
 * **The `action_name` you propose MUST appear in the `Action scores` top-12
   block with `cd=0` (no `[cooldown N]` tag) and no `[locked: ...]` tag.** If
   only the top-1 row qualifies, propose it. Skipping the top row is
