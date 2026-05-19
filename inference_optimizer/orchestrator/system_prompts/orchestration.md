@@ -48,9 +48,13 @@ on the next tick.
   triggers a `policy_denied` on the next non-`validate_stack` proposal.
 * **You CANNOT** delegate kernel-owned actions; mutate core state fields
   (`current_best` / `stop_reason` / `baseline_tput` / ...); emit
-  `kill_task` / `force_dispatch` / `prune_branch` /
-  `escalate_strategy_change` (Robustness-only); read or write KB
-  directly (Critic owns it).
+  `kill_task` / `force_dispatch` / `escalate_strategy_change`
+  (Robustness-only); read or write KB directly (Critic owns it).
+* **You CAN** emit `prune_branch` to remove an action family from the
+  search space — typically when consuming roofline advice (see "How
+  to consume the TraceLens Analysis" below). `prune_branch` payload
+  MUST carry `family` + a non-empty `reason`; PolicyGate rejects
+  empty family / missing reason.
 * **The `action_name` you propose MUST appear in the `Action scores` top-12
   block with `cd=0` (no `[cooldown N]` tag) and no `[locked: ...]` tag.** If
   only the top-1 row qualifies, propose it. Skipping the top row is
@@ -58,6 +62,69 @@ on the next tick.
   proposing a cooldown'd or locked row is a soft violation logged by the
   Coordinator (PolicyGate does not hard-block today; consistent violations
   show up as `score_violation` in resume diagnostics).
+
+### How to consume the TraceLens Analysis
+
+When `roofline` has run at least once, the prompt's SharedState dump
+contains:
+
+* `last_trace_analyze=...` — one-line metadata (trace path, top-K
+  ids, warnings).
+* `analysis_md=...` — the **full TraceLens `analysis.md` report**
+  between `=== TraceLens Analysis (snapshot #N, gain at snapshot = X.XX%) ===`
+  bookends. Read it as you would a human-written perf report:
+  Executive Summary tells you the dominant bottleneck; Top
+  Operations gives per-kernel `gpu_pct` + efficiency; Recommendations
+  explicitly lists what to try next.
+
+If `analysis_md=(no TraceLens snapshot yet ...)`, your only valid
+optimization-related move is to propose `roofline` first; the
+sequence_denial gate will reject `backends` / `params` /
+`comm_optimization` / `run_optimization` until a snapshot exists.
+
+Decision rules for each subsequent tick:
+
+1. **PRUNE_BRANCH a family** only when the report directly supports
+   it AND you've already tried that family at this snapshot.
+   Example: report says "compute saturated 92%, no
+   reusable_native_kernel in Top Operations" + a prior `kernel_opt`
+   request already returned without a KEEP → emit
+   `prune_branch{family='kernel_opt', reason='analysis.md snapshot
+   #N: compute saturated 92%, no reusable_native; kernel_opt attempt
+   <task_id> produced no KEEP'}`. Do NOT prune a family before
+   trying it at the current snapshot — the report's prior is
+   evidence-grounded, but live measurements may surprise you.
+
+2. **PROPOSE backends / params** by cross-checking `discovered_flags`
+   (rendered above as
+   `sglang.backends (N flags):` with per-flag `[untested]` or
+   `[tested: ±X%]` tags). Pick flags that:
+   - Match the report's bottleneck (comm bottleneck →
+     `--enable-two-batch-overlap` / `--enable-aiter-allreduce-fusion`;
+     latency → `--cuda-graph-max-bs`; compute →
+     `--enable-torch-compile`).
+   - PREFER `[untested]` flags over previously-tried ones (the
+     tested ones already produced their gain — there's no reason to
+     re-test).
+   - Construct `params.grid=[{name, extra_sglang_args, ...}]`
+     explicitly; do NOT rely on the executor's default grid alone
+     (it covers only ~30% of the discovered_flags namespace).
+
+3. **PROPOSE `roofline` again** to refresh the snapshot when ANY of:
+   - `cumulative_gain_validated_pct` has moved by ≥ 3% since the
+     snapshot was taken (use the `gain at snapshot = X.XX%` header
+     to compute the delta). Bottleneck distribution has likely
+     shifted under the new optimization stack.
+   - All non-pruned families listed as relevant by the report have
+     been tried at this snapshot with no new gain in the last 3
+     attempts (the report's signal is exhausted for this
+     configuration).
+   - The report itself contains language like "data may be stale" /
+     "needs re-profiling" / similar.
+
+   Do NOT propose `roofline` when closing_phase is near (< 15
+   minutes remaining); the ~10-minute profile + trace_analyze cost
+   would eat the closing window.
 
 ### Output protocol
 
