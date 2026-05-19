@@ -60,6 +60,42 @@ from .system_prompts.specialist_prompt_builder import (
 log = logging.getLogger(__name__)
 
 
+# PR Monitor MCP tool whitelist (KB_design §3.13 M4 §6 — 12 readonly
+# tools mirroring ``primus-cortex-pr-monitor-access.md``). Specialists
+# get these alongside the Cortex KB readonly MCP surface and the
+# stdlib tools below. The set is gated by
+# ``KnowledgePlane.pr_monitor_enabled`` at runtime: when PR Monitor
+# is disabled (``--no-pr-monitor``), the SpecialistRunner strips
+# every ``mcp__pr_monitor__*`` from the per-task whitelist so the
+# LLM doesn't try to call an absent endpoint.
+PR_MONITOR_MCP_TOOLS: tuple[str, ...] = (
+    "mcp__pr_monitor__pr_repos_list",
+    "mcp__pr_monitor__pr_repo_stats",
+    "mcp__pr_monitor__pr_list",
+    "mcp__pr_monitor__pr_get",
+    "mcp__pr_monitor__pr_files",
+    "mcp__pr_monitor__pr_file_patch",
+    "mcp__pr_monitor__pr_patches",
+    "mcp__pr_monitor__pr_blob",
+    "mcp__pr_monitor__pr_commit_files",
+    "mcp__pr_monitor__pr_commit_file",
+    "mcp__pr_monitor__pr_pr_file_baseline",
+    "mcp__pr_monitor__pr_search",
+)
+
+
+# Cortex KB readonly MCP tools (KB_design §3.5 §10 / §3.11 R5). Write
+# endpoints (propose_*, hypothesize, ingest_attempt, verify, commit)
+# are explicitly **not** in this set and additionally appear in
+# :data:`SPECIALIST_TOOL_DENYLIST` so any operator extension that
+# tries to include them gets stripped at build time.
+CORTEX_KB_READONLY_MCP_TOOLS: tuple[str, ...] = (
+    "mcp__cortex_kb__traverse",
+    "mcp__cortex_kb__find_recipe",
+    "mcp__cortex_kb__query",
+)
+
+
 # Default tool whitelist for specialists (KB_design §3.5 §10 / §3.11 R5).
 # These tool names follow the Claude / Cursor convention; the actual MCP
 # server names depend on operator config. The set is intentionally
@@ -73,12 +109,7 @@ DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
     # invocations.
     "Bash",
     "WebSearch", "WebFetch",
-    # MCP read-only surfaces.
-    "mcp__pr_monitor__list_prs", "mcp__pr_monitor__get_pr",
-    "mcp__cortex_kb__traverse",
-    "mcp__cortex_kb__find_recipe",
-    "mcp__cortex_kb__query",
-)
+) + PR_MONITOR_MCP_TOOLS + CORTEX_KB_READONLY_MCP_TOOLS
 
 
 # Tools explicitly denied even if the operator extends the whitelist —
@@ -179,6 +210,7 @@ class SpecialistRunner:
         default_tools: tuple[str, ...] = DEFAULT_SPECIALIST_TOOLS,
         default_max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS,
         per_turn_max_seconds: float = 90.0,
+        knowledge_plane: Any = None,
     ):
         """Create a runner.
 
@@ -186,12 +218,58 @@ class SpecialistRunner:
         Backend``. The factory pattern lets the CLI inject a per-domain
         Claude / Codex / Mock backend without baking the choice into the
         runner itself.
+
+        ``knowledge_plane`` (optional, v0.8 M4) lets the runner consult
+        the :class:`KnowledgePlane` at task dispatch to gate the
+        ``mcp__pr_monitor__*`` tool block — when PR Monitor is
+        disabled (``--no-pr-monitor``) the runner strips those tool
+        names from the per-task whitelist so the LLM doesn't get
+        offered an absent endpoint. ``None`` leaves the default tool
+        list untouched (back-compat for callers / tests that don't
+        wire a plane yet).
         """
         self.backend_factory = backend_factory
         self.session_dir = Path(session_dir) if session_dir else None
         self.default_tools = tuple(default_tools)
         self.default_max_turns = int(default_max_turns)
         self.per_turn_max_seconds = float(per_turn_max_seconds)
+        self.knowledge_plane = knowledge_plane
+
+    def _resolve_tools(self) -> tuple[str, ...]:
+        """Return the per-task tool whitelist, gated on the
+        KnowledgePlane's PR Monitor availability.
+
+        Also strips anything in :data:`SPECIALIST_TOOL_DENYLIST`
+        unconditionally (defense in depth — caller may have extended
+        ``default_tools`` carelessly).
+        """
+        tools = list(self.default_tools)
+        # Strip the PR Monitor block when the plane says it's unreachable
+        # / disabled. We err on the side of stripping when no plane is
+        # wired BUT only when explicitly asked; back-compat for old
+        # callers/tests stays intact because they don't set
+        # ``knowledge_plane``.
+        plane = self.knowledge_plane
+        if plane is not None:
+            try:
+                pr_enabled = bool(plane.pr_monitor_enabled)
+            except AttributeError:
+                pr_enabled = True   # unknown surface; trust default
+            if not pr_enabled:
+                tools = [t for t in tools if not t.startswith("mcp__pr_monitor__")]
+            cortex_enabled = True
+            try:
+                cortex_enabled = bool(plane.cortex_enabled)
+            except AttributeError:
+                cortex_enabled = True
+            if not cortex_enabled:
+                tools = [
+                    t for t in tools
+                    if not t.startswith("mcp__cortex_kb__")
+                ]
+        # Always enforce the deny list.
+        tools = [t for t in tools if t not in SPECIALIST_TOOL_DENYLIST]
+        return tuple(tools)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -324,6 +402,7 @@ class SpecialistRunner:
         turns_used = 0
         backend_error: str = ""
 
+        resolved_tools = self._resolve_tools()
         for turn_idx in range(1, max_turns + 1):
             turns_used = turn_idx
             try:
@@ -334,7 +413,7 @@ class SpecialistRunner:
                 turn_result = await backend.run(
                     prompt=user_prompt if turn_idx == 1 else combined_prompt,
                     system_prompt=system_prompt,
-                    tools=list(self.default_tools),
+                    tools=list(resolved_tools),
                     max_turns=1,
                 )
             except BackendError as exc:
@@ -567,7 +646,9 @@ class SpecialistRunner:
 
 
 __all__ = [
+    "CORTEX_KB_READONLY_MCP_TOOLS",
     "DEFAULT_SPECIALIST_TOOLS",
+    "PR_MONITOR_MCP_TOOLS",
     "SPECIALIST_TOOL_DENYLIST",
     "SpecialistRunResult",
     "SpecialistRunner",
