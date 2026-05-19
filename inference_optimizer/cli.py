@@ -2277,6 +2277,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         os.environ["INFERENCE_OPTIMIZER_STRICT_PHASE"] = "1"
     else:
         os.environ.pop("INFERENCE_OPTIMIZER_STRICT_PHASE", None)
+    # v0.8 §3.9 — propagate the ``--legacy-action-scores`` choice so
+    # ``SharedState.from_dict`` (called from anywhere — Coordinator,
+    # breakdown, resume probes) handles the drop / warn behavior
+    # uniformly. Default ``drop`` matches the env-unset case.
+    legacy_mode = str(
+        getattr(args, "legacy_action_scores", "drop") or "drop",
+    ).strip().lower()
+    if legacy_mode == "warn":
+        os.environ["INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES"] = "warn"
+    else:
+        os.environ.pop("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", None)
 
     # Build the phase budget pct dict from CLI flags; ``None`` values
     # fall back to library defaults inside Coordinator. See KB_design
@@ -2730,6 +2741,37 @@ def _build_parser() -> argparse.ArgumentParser:
              "dispatch entirely (degrades to M3 LLM-direct grid); 1 is "
              "the M5 default; 6 is the M6 default. Range [0, 32]. "
              "Locked at session start.",
+    )
+    # ------------------------------------------------------------------
+    # v0.8 §3.9 — drop scoreboard (KB_design §3.9 §7)
+    # ------------------------------------------------------------------
+    # v0.8 retires the v0.6 ``action_scores`` decision system. The
+    # flag below controls how a resumed v0.6 session's leftover
+    # scoreboard data is handled:
+    #
+    # * ``drop`` (default): silently strip ``action_scores`` /
+    #   ``params_no_promote_streak`` / ``score_violation`` etc. from
+    #   the loaded state.json. The Coordinator never writes them
+    #   again so subsequent saves are clean.
+    # * ``warn``: same drop behaviour PLUS a ``WARNING`` log line +
+    #   a ``breakdown.warnings`` entry so the operator sees the
+    #   migration even on a fresh dashboard.
+    #
+    # No third "keep" mode is offered: §3.9 §7 explicitly forbids
+    # carrying the field forward (the prompt builder no longer reads
+    # it; keeping the bytes only inflates state.json).
+    opt.add_argument(
+        "--legacy-action-scores",
+        dest="legacy_action_scores",
+        type=str,
+        choices=("drop", "warn"),
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", "drop",
+        ).strip() or "drop",
+        help="Resume-mode handling of the v0.6 scoreboard "
+             "(``action_scores`` and friends). 'drop' (default) "
+             "silently discards. 'warn' logs a WARNING + adds a "
+             "breakdown.warnings entry. KB_design §3.9 §7.",
     )
     # ------------------------------------------------------------------
     # v0.8 M7 — plateau threshold tuning (KB_design §3.8 §5 + §3.13 M7 §4)
