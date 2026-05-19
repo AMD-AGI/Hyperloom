@@ -192,7 +192,7 @@ def test_gate_orchestration_delegate_normal_action_ok(gate):
 def test_gate_orchestration_request_to_kernel_ok(gate):
     gate.validate_intent("orchestration", Intent(
         type=IntentType.REQUEST,
-        payload={"target_agent": "kernel", "kind": "select_kernels"},
+        payload={"target_agent": "kernel", "kind": "trace_analyze"},
     ))
 
 
@@ -208,7 +208,7 @@ def test_gate_orchestration_request_to_critic_rejected(gate):
 def test_gate_kernel_response_ok(gate):
     gate.validate_intent("kernel", Intent(
         type=IntentType.RESPONSE,
-        payload={"in_reply_to": "msg-abc", "kind": "select_kernels_done"},
+        payload={"in_reply_to": "msg-abc", "kind": "trace_analyze_done"},
     ))
 
 
