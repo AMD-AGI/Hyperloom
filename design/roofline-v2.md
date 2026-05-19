@@ -413,20 +413,55 @@ v1 sub-agent 实施"。
 
 ---
 
-## 8. C4 实施细化（按文档定义代码边界）
+## 8. N1-N7 实施细化（按文档定义代码边界）
 
-### 8.1 新增文件清单
+> **v1 §8 全段废弃** — sub-agent 实施细化（roofline_analyzer.md prompt
+> 模板、RooflineExecutor sub-agent 伪代码、record_roofline_analysis
+> 集成）已 §6.1 整体否决；具体代码会在 §15.1 的 6 个 revert commits
+> 里移除。下面是 v2.0 的 N1-N7 实施细化。
+
+### 8.1 N1 — `select_kernels → trace_analyze` rename（跨 repo）
+
+**目标**：`select_kernels` 这个名字暗示"选 kernel"，但它实际是"调
+TraceLens 跑 trace_split + kernel_candidates + 写 analysis.md +
+summary.json"。改名为 `trace_analyze` 更准确反映语义。
+
+**影响范围 — inference_optimizer**：
+
+| 文件 | 关键字 |
+|---|---|
+| `orchestrator/kernel_request_handlers.py` | `select_kernels_handler` 函数 + dispatcher dict key |
+| `orchestrator/coordinator.py` | `_sequence_denial_for_request` 中的 `req_kind == "select_kernels"` 分支 |
+| `orchestrator/shared_state.py` | `record_select_kernels` 函数（保留为兼容 alias `record_trace_analyze`，废弃旧名） |
+| `orchestrator/system_prompts/orchestration.md` | 提到 `select_kernels` 的描述句 |
+| `tests/test_p2_2_profile_and_handlers.py` 等 | 测试名 / handler 调用 / fixture |
+| `actions/_meta/select_kernels.yaml` → `trace_analyze.yaml` | 文件 rename + 内容更新 |
+
+**影响范围 — kernel-agent**（如有引用）：
+
+| 文件 | 关键字 |
+|---|---|
+| `tools/tracelens_analysis.py` 入口约定 | 检查是否硬编码 "select_kernels" 关键字（通常通过 payload routing 不会有） |
+| `runtime/cli.py` request 路由 | request kind dispatch |
+| 文档 / README | mentions |
+
+**实施方式**：单一 commit (N1)，机械 grep + replace 所有
+`select_kernels` 字面出现，**不改任何语义**。保留 SharedState
+`record_select_kernels` 作为 `record_trace_analyze` 的 alias 防止
+旧 state.json 反序列化失败。
+
+**测试**：现有 51 个 select_kernels 相关测试全部 rename，确保零回归。
+
+### 8.2 N2 — RooflineExecutor 复合 action 新增文件
 
 | 路径 | 用途 | 行数 |
 |---|---|---|
-| `inference_optimizer/actions/_meta/roofline.yaml` | ActionMetadata（family=`analysis`, prerequisites=`[select_kernels]`, prior 7.5, sub_agent backend hint） | ~25 |
-| `inference_optimizer/actions/roofline.md` | 主 LLM 看到的 action playbook（说明何时 propose、产物含义） | ~60 |
-| `inference_optimizer/orchestrator/action_executors/roofline.py` | `RooflineExecutor`：spawn sub-agent backend → analyze → return result | ~200 |
-| `inference_optimizer/orchestrator/system_prompts/roofline_analyzer.md` | sub-agent system prompt：读 analysis.md → 输出 JSON | ~80 |
-| `inference_optimizer/tests/test_roofline_action_executor.py` | mock backend fixture → executor → result 形状校验 | ~180 |
-| `inference_optimizer/tests/test_roofline_sequence_denial.py` | propose roofline 不满足前置 → Coordinator 拒绝 | ~100 |
+| `inference_optimizer/actions/_meta/roofline.yaml` | ActionMetadata：family=`analysis`, prerequisites=`[baseline]`（注意不是 `[select_kernels]`，因为 roofline 自己内部跑 trace_analyze），prior 7.5，cost_minutes_p50=8, p75=15（含 profile + trace_analyze 两步时长） | ~25 |
+| `inference_optimizer/actions/roofline.md` | 主 LLM 看到的 action playbook：(a) 复合 action 语义说明（编排 profile + trace_analyze）；(b) 何时 propose（baseline 后 + 每次 cumulative_gain 跳 +3% 后）；(c) 产物（last_profile_trace + last_select_kernels.analysis_md_text + snapshot_id 自增）；(d) 失败语义（任一子步骤失败 → 整体失败，无 fallback） | ~80 |
+| `inference_optimizer/orchestrator/action_executors/roofline.py` | `RooflineExecutor` 顺序编排 profile + trace_analyze 的纯 Python 协程；不调任何 LLM；不写 RooflineAnalysis dict | ~180 |
+| `inference_optimizer/tests/test_roofline_executor_v2.py` | 测试 fixture mock profile + trace_analyze 子任务的成功/失败/中间状态 | ~180 |
 
-### 8.2 修改文件清单
+### 8.3 N2 — RooflineExecutor 修改文件清单
 
 | 路径 | 修改 | 行数 |
 |---|---|---|
@@ -447,176 +482,375 @@ executor 仅返回 `primary="unknown"` 安全 fallback；C4b 提供真正的 LLM
 分析；C4c 把执行结果 wire 回 SharedState 并加门禁。三步串联后才形成
 完整闭环。
 
-### 8.3 sub-agent prompt 模板（roofline_analyzer.md 草案）
+| 路径 | 修改 | 行数 |
+|---|---|---|
+| `inference_optimizer/cli.py` | `_REAL_EXECUTORS_FULL` 增加 `"roofline": RooflineExecutor(...)`；新 executor 需要 access 到 coordinator.shared_state（参考 v1 N4 的 closure 模式）+ access 到 SubAgentRunner（用于内部 enqueue profile / trace_analyze 子任务） | +20 |
+| `inference_optimizer/orchestrator/scoring.py` | `MODEL_CLASS_ACTION_PRIORS` 四个 model_class 各加一行 `"roofline": 7.5`（D1 决策保留） | +4 |
+| `inference_optimizer/actions/_meta/select_kernels.yaml` → `trace_analyze.yaml` | N1 rename 的一部分 | 0 |
 
-```
-# Roofline Analyzer Sub-Agent
-
-You are a roofline analyzer sub-agent for Hyperloom. Your only job is to
-read a TraceLens `analysis.md` report and output a structured JSON
-decision so the main Orchestration LLM can prune useless action
-families and focus on high-ceiling actions.
-
-## Input format
-
-You will receive in the user message:
-
-- `analysis_md`: full text of the TraceLens report (Executive Summary,
-  Top Operations, Recommendations, etc.)
-- `cumulative_gain_validated_pct`: current gain since baseline
-- `optimization_stack`: list of already-promoted variants
-- `pruned_families`: action families already pruned (do NOT recommend
-  pruning these again; do NOT recommend actions in these families)
-
-## Output format
-
-Respond with a single JSON object exactly matching this schema (no
-prose, no markdown fences):
-
-{
-  "primary_bottleneck": "comm" | "compute" | "memory" | "latency" | "idle" | "unknown",
-  "bottleneck_distribution": {"comm": float, "compute": float,
-                              "memory": float, "latency": float,
-                              "idle": float},
-  "suggested_prunes": [
-    {"family": "<action_family_name>",
-     "reason": "<short justification grounded in analysis.md>",
-     "confidence": "high" | "medium" | "low"}
-  ],
-  "suggested_next_actions": [
-    {"kind": "<action_kind>",
-     "rationale": "<short justification>",
-     "priority": "high" | "medium" | "low"}
-  ],
-  "reprofile_recommended": bool,
-  "reprofile_reason": "<reason or empty when false>"
-}
-
-## Decision guidelines
-
-- Base every recommendation on quotes / numbers from analysis.md
-- A family is "saturated" if its dominant kernel's efficiency >85% AND
-  there is no reusable_native_kernel in Top Operations
-- Prune `kernel_opt` / `deep_kernel_analysis` when compute saturated +
-  no reusable native kernel
-- Prune `comm_optimization` when comm < 10% AND not in top-3
-- Suggest `params` with specific flag categories that match the primary
-  bottleneck (comm → overlap/allreduce flags; latency → graph/compile
-  flags; memory → cache/fraction flags; idle → scheduling flags)
-- Suggest `reprofile_recommended=true` only when there's a hypothesis
-  that the bottleneck distribution has shifted (e.g. gain > 3% since
-  last roofline + no new optimization succeeded in last 3 attempts)
-- When data is insufficient, prefer "unknown" + empty lists over
-  hallucinated recommendations
-```
-
-### 8.4 Executor 伪代码
+### 8.4 RooflineExecutor 伪代码（v2.0）
 
 ```python
 class RooflineExecutor:
-    def __init__(self, backend_factory: Callable[[], Backend]):
-        # backend_factory lets tests inject a mock backend
-        self._make_backend = backend_factory
-        self._analyzer_sp = (asset_system_prompts_dir() /
-                             "roofline_analyzer.md").read_text()
+    def __init__(self, *, shared_state, tasks, sub_runner):
+        # No backend, no LLM, no JSON parsing — pure orchestration.
+        self.shared_state = shared_state
+        self.tasks = tasks
+        self.sub_runner = sub_runner
 
     async def __call__(self, ctx: RunnerContext) -> dict:
-        state = ctx.extra.get("shared_state")  # injected by cli wiring
-        cached = state.last_select_kernels or {}
-        analysis_md = cached.get("analysis_md_text", "")
-        if not analysis_md:
-            return {"status": "failed",
-                    "error": "no analysis.md cached; run select_kernels first",
-                    "degraded": True}
-
-        snapshot_id = cached.get("roofline_snapshot_id", 0)
-        # Idempotency: skip when we already analyzed this snapshot
-        prev = state.last_roofline_analysis or {}
-        if prev.get("snapshot_id") == snapshot_id and snapshot_id > 0:
-            return {"status": "succeeded",
-                    "snapshot_id": snapshot_id,
-                    "idempotency_hit": True,
-                    "primary_bottleneck": prev.get("primary_bottleneck"),
-                    # ... pass-through to make the result self-describing
-                    }
-
-        backend = self._make_backend()
-        user_prompt = self._compose_user_prompt(
-            analysis_md=analysis_md,
-            gain=state.cumulative_gain_validated,
-            stack=state.optimization_stack,
-            pruned=list(state.pruned_families),
+        # Step 1: profile (reuse existing ProfileExecutor)
+        profile_task = await self.tasks.create(
+            kind="profile",
+            params=self._derive_profile_params(),
+            idempotency_key=f"roofline_profile:{ctx.task.task_id}",
         )
-        try:
-            turn = await asyncio.wait_for(
-                backend.run(prompt=user_prompt,
-                            system_prompt=self._analyzer_sp,
-                            tools=None, max_turns=1),
-                timeout=60.0,
-            )
-        except (BackendError, asyncio.TimeoutError) as exc:
-            return self._fallback_result(snapshot_id, error=repr(exc))
+        profile_result = await self.sub_runner.run_task(profile_task)
+        if profile_result.state != "succeeded":
+            return {
+                "status": "failed",
+                "error_class": "profile_failed",
+                "error": profile_result.error or "profile sub-step failed",
+                "phase": "profile",
+            }
 
-        parsed = self._parse_json_safely(turn.raw_text)
-        if parsed is None:
-            return self._fallback_result(
-                snapshot_id, error="json_parse_failed",
-                raw=turn.raw_text)
+        # Step 2: trace_analyze (reuse select_kernels handler directly)
+        # Note: call the handler function, NOT via SubAgentRunner (avoid
+        # double-task accounting). trace_analyze writes
+        # last_select_kernels cache as side effect.
+        from ..kernel_request_handlers import trace_analyze_handler
+        ta_result = await trace_analyze_handler(
+            payload={"trace_input": self.shared_state.last_profile_trace},
+            session_dir=ctx.extra.get("session_dir"),
+        )
+        if ta_result.get("status") != "ok":
+            return {
+                "status": "failed",
+                "error_class": "trace_analyze_failed",
+                "error": ta_result.get("error") or "trace_analyze sub-step failed",
+                "phase": "trace_analyze",
+            }
 
-        parsed["snapshot_id"] = snapshot_id
-        parsed["analyzed_at_iso"] = _now_iso()
-        parsed["analyzed_at_gain_pct"] = state.cumulative_gain_validated
-        parsed["based_on_analysis_md"] = cached.get("analysis_md_path", "")
-        parsed["raw_llm_response"] = turn.raw_text
-        parsed["status"] = "succeeded"
-        return parsed
+        # All success — return summary. The actual data went into
+        # last_profile_trace and last_select_kernels via the sub-step
+        # promote paths; this result is just status / audit.
+        return {
+            "status": "succeeded",
+            "profile_task_id": profile_task.task_id,
+            "snapshot_id": self.shared_state.last_select_kernels.get(
+                "roofline_snapshot_id"
+            ),
+        }
 ```
 
-### 8.5 Coordinator 集成
+### 8.5 N3 — Coordinator integration + sequence_denial
+
+**`_promote_to_shared_state`**：
 
 ```python
-# coordinator.py _handle_request_response (附近 line 2040)
-elif kind == "roofline" and status == "ok":
-    self.shared_state.record_roofline_analysis(result)
-    self.shared_state.save(self.session_dir)
+# Roofline-v2 N3:
+# roofline 本身的 task completion 不需要新 promote 分支 —— profile +
+# trace_analyze 子步骤已经分别走自己的 promote 路径 (record_profile /
+# record_select_kernels)。Roofline 自身的 result 只携带 status +
+# snapshot_id，audit-trail (record_action_attempt) 走 _AUDIT_ACTIONS
+# 标准流程即可。
+elif task_kind == "roofline":
+    # No state mutation — sub-steps already wrote last_profile_trace +
+    # last_select_kernels. record_action_attempt fires via the standard
+    # post-completion path for audit / scoring.
+    changed = False
 ```
 
-注：roofline 是 `PROPOSE_ACTION` 走 SubAgentRunner 路径，不是 REQUEST，
-所以集成点可能不是 `_handle_request_response` 而是 task completion
-hook。具体集成点在 C4 实现时根据真实 task lifecycle 决定，但语义不变：
-**executor 返回 result → SharedState.record_roofline_analysis(result)**。
+**`_sequence_denial_for_action`**：
 
-### 8.6 测试策略
+```python
+# Roofline-v2 N3: 4 个优化 action 必须有 fresh roofline snapshot
+_ROOFLINE_REQUIRED = {"backends", "params", "kernel_opt", "comm_optimization"}
+if action in _ROOFLINE_REQUIRED:
+    cached = self.shared_state.last_select_kernels or {}
+    if not cached.get("analysis_md_text"):
+        return PolicyDenied(
+            f"action={action!r} denied: roofline must run first "
+            "(no cached TraceLens analysis.md)",
+            rule="execution_order",
+            hint="propose/delegate `roofline` (a composite action that "
+                 "internally runs profile + trace_analyze; do NOT call "
+                 "profile / trace_analyze directly)",
+        )
+```
 
-| 测试 | 验证内容 |
+**`sequence_actions` set 增加 `"roofline"`** —— 走标准 sequence-action
+路径（target_analysis / baseline / closing_phase 等 gate 仍然按既有
+顺序生效）。
+
+### 8.6 N4 — 分层 `_format_discovered_flags`（Z 方案）
+
+```python
+def _format_discovered_flags(self) -> str:
+    if not self.discovered_flags:
+        return "(none — first backends/params round will populate)"
+    out_lines: list[str] = []
+    for fw, entry in sorted(self.discovered_flags.items()):
+        if not isinstance(entry, dict):
+            continue
+        for action_kind in ("backends", "params"):
+            flags = entry.get(f"{action_kind[:-1]}_flags") or []
+            if not flags:
+                continue
+            out_lines.append(f"  {fw}.{action_kind} ({len(flags)} flags):")
+            for flag in sorted(flags):
+                # cross-ref params_search.tested / backends_search.tested
+                # to mark "tested: +X% / -X% / N variants best +X%"
+                tag = self._tested_tag_for_flag(flag, action_kind, fw)
+                out_lines.append(f"    {flag:42s} {tag}")
+    return "\n" + "\n".join(out_lines)
+
+def _tested_tag_for_flag(self, flag: str, action_kind: str, fw: str) -> str:
+    search = self.params_search if action_kind == "params" else self.backends_search
+    tested = search.get("tested") or {}
+    # Find all fingerprints whose extra_sglang_args contains this flag
+    matched_gains: list[float] = []
+    for fp_key, snap in tested.items():
+        if not isinstance(snap, dict):
+            continue
+        if flag in str(snap.get("extra_sglang_args") or ""):
+            gain = snap.get("gain_pct")
+            if isinstance(gain, (int, float)):
+                matched_gains.append(float(gain))
+    if not matched_gains:
+        return "[untested]"
+    n = len(matched_gains)
+    best = max(matched_gains)
+    if n == 1:
+        return f"[tested: {best:+.1f}%]"
+    return f"[tested {n} vars, best {best:+.1f}%]"
+```
+
+主 LLM 看到的 prompt 输出（示例）：
+
+```
+discovered_flags=
+  sglang.backends (42 flags):
+    --enable-two-batch-overlap                 [untested]
+    --enable-aiter-allreduce-fusion            [tested: +1.2%]
+    --moe-a2a-backend                          [tested: -0.5%]
+    ...
+  sglang.params (58 flags):
+    --cuda-graph-max-bs                        [tested 8 vars, best +0.8%]
+    --enable-torch-compile                     [untested]
+    --mem-fraction-static                      [tested 3 vars, best +0.1%]
+    ...
+```
+
+### 8.7 N5 — analysis.md 全文注入 + orchestration prompt 指导段
+
+**shared_state.py 新增**：
+
+```python
+def _format_analysis_md_full(self) -> str:
+    """Inject TraceLens analysis.md verbatim per TraceLens team
+    instruction (v2 §6.2 reason 1). Snapshot-stable; cached by Claude
+    Code automatic prompt caching within a snapshot."""
+    cached = self.last_select_kernels or {}
+    md = cached.get("analysis_md_text") or ""
+    if not md:
+        return "(no TraceLens snapshot yet — propose `roofline` to produce one)"
+    snap = cached.get("roofline_snapshot_id", "?")
+    gain = cached.get("roofline_baseline_gain_at_snapshot", 0.0)
+    return (
+        f"\n=== TraceLens Analysis (snapshot #{snap}, "
+        f"gain at snapshot = {gain:.2f}%) ===\n"
+        f"{md}\n"
+        f"=== End TraceLens Analysis ===\n"
+    )
+```
+
+`to_prompt_summary` 加入 `f"analysis_md={self._format_analysis_md_full()}"`
+（注意：这一段会很大，依赖 Claude Code automatic caching 命中）。
+
+**orchestration.md 新增指导段**（取代 v1 `_format_roofline_decision`）：
+
+```
+### How to consume the TraceLens Analysis above
+
+You will see a full `analysis.md` report under the
+`analysis_md=...` block on every tick after roofline runs. Read it as
+you would read a human-written perf analysis: Executive Summary tells
+you the dominant bottleneck, Top Operations gives per-kernel efficiency
+numbers, Recommendations explicitly lists what to try next.
+
+When deciding the next action:
+
+1. **PRUNE_BRANCH a family** only when the report directly supports it
+   AND you've already tried that family at this snapshot. Example:
+   "compute saturated 92%, no reusable_native_kernel in Top Operations"
+   → emit `prune_branch{family='kernel_opt', reason='analysis.md says
+   compute saturated 92%, no reusable_native'}` ONLY if at least one
+   `kernel_opt` attempt already failed since the snapshot was taken.
+
+2. **PROPOSE backends / params with specific flags** by cross-checking
+   `discovered_flags` (rendered above as
+   `sglang.backends (N flags): --flag-1 [untested], --flag-2 [tested: +X%], ...`):
+   - Pick a flag whose name matches the report's bottleneck (comm
+     bottleneck → `--enable-two-batch-overlap` / `--enable-aiter-allreduce-fusion`;
+     latency → `--cuda-graph-max-bs`; compute → `--enable-torch-compile`).
+   - PREFER `[untested]` flags over previously tried ones.
+   - Construct `params.grid=[{name, extra_sglang_args, ...}]` explicitly;
+     do NOT rely on the executor's default grid alone — it covers only
+     ~30% of the flag namespace.
+
+3. **PROPOSE roofline again** when ANY of:
+   - cumulative_gain_validated_pct has increased ≥ 3% since the
+     snapshot was taken (bottleneck distribution likely shifted)
+   - all non-pruned families have been tried at this snapshot with no
+     new gain in the last 3 attempts
+   - the report itself notes "data may be stale" / similar
+```
+
+### 8.8 N6 — prompt 三段切分 + cache hit metric
+
+**目标**：让 Claude Code automatic prompt caching 把"稳定 prefix"做大，
+让 cache hit rate 接近上限；同时把 cache metric 从 ResultMessage.usage
+提取出来暴露给 audit。
+
+**ClaudeBackend `_invoke_and_collect` 改动**：
+
+```python
+async def _invoke_and_collect(
+    self, prompt: str, options: Any
+) -> tuple[list[Intent], str, int, dict]:  # 返回值加 usage dict
+    intents: list[Intent] = []
+    text_chunks: list[str] = []
+    tool_block_count = 0
+    last_usage: dict[str, Any] = {}
+    async for message in self.sdk_query_factory(prompt=prompt, options=options):
+        for block in self._iter_blocks(message):
+            # ... existing logic ...
+        # NEW: extract usage from ResultMessage
+        msg_usage = getattr(message, "usage", None)
+        if isinstance(msg_usage, dict):
+            last_usage = msg_usage
+    return intents, "".join(text_chunks), tool_block_count, last_usage
+```
+
+`BackendTurnResult.metadata` 加 `cache_creation_input_tokens` /
+`cache_read_input_tokens` 字段；Coordinator 在 tick post-processing
+里累加到 SharedState 新字段 `tick_cache_metrics` 供 audit 脚本统计。
+
+**prompt 结构改动**（在 Coordinator `_compose_prompt` 里）：
+
+```python
+def _compose_prompt(self, role: str) -> str:
+    # SECTION-A (cache-target: stable prefix)
+    section_a = "\n".join([
+        self._load_system_prompt(role),
+        self.shared_state.format_static_section(),  # baseline_tput / model /
+                                                      # baseline_acc / discovered_flags
+                                                      # (含 tested 状态)
+    ])
+    # SECTION-B (cache-target: snapshot-stable)
+    section_b = self.shared_state._format_analysis_md_full()
+    # SECTION-C (per-tick)
+    section_c = self.shared_state.format_dynamic_section()  # optimization_stack /
+                                                              # attempts_history /
+                                                              # last_action_failures / ...
+    return f"{section_a}\n\n{section_b}\n\n{section_c}"
+```
+
+注：Claude Code automatic caching 根据 prefix 哈希命中，所以 A 段必须
+在 B 段之前、B 必须在 C 之前；这样 A 命中（session 级别）→ B 也命中
+（snapshot 级别）→ 只有 C 需要重新计算。
+
+### 8.9 N7 — verify / audit 脚本更新
+
+**`verify_roofline_v2.py`**（在 v1 C6 基础上增加列）：
+
+| 指标 | 来源 |
 |---|---|
-| `test_roofline_executor_happy_path` | mock backend 返回 well-formed JSON → result 字段完整、snapshot_id 正确 |
-| `test_roofline_executor_idempotency` | 同一 snapshot 第二次调用 → 跳过 LLM call、返回 idempotency_hit |
-| `test_roofline_executor_no_analysis_md` | 没有 last_select_kernels → status=failed + degraded |
-| `test_roofline_executor_backend_timeout` | mock backend.run 抛 timeout → fallback dict 写入 |
-| `test_roofline_executor_malformed_json` | mock 返回非 JSON → fallback dict、raw_llm_response 保留 |
-| `test_roofline_executor_schema_validation` | mock 返回 partial JSON → C2 的 record_roofline_analysis 处理缺失字段 |
-| `test_roofline_sequence_denial_no_select_kernels` | 没有 select_kernels → policy 拒绝 propose |
-| `test_roofline_sequence_denial_closing_phase` | closing 时 → policy 拒绝 |
+| `cumulative_gain_validated_pct` baseline vs exp | state.json |
+| `wall_clock_min` baseline vs exp | session metadata |
+| `roofline_action_count` baseline vs exp | task_attempts (`roofline` kind) |
+| **`cache_hit_rate`** baseline vs exp | sum(cache_read_tokens) / sum(cache_read_tokens + cache_creation_tokens) per session |
+| `prune_branch_count(source=orchestration)` baseline vs exp | bus event log |
+| `tested_flag_count` exp | `params_search.tested` + `backends_search.tested` |
+| `analysis_md_referenced_count` exp | 主 LLM emit 的 PRUNE_BRANCH reason 字段或 propose notes 字段含 analysis.md 关键短语（如 "saturated"/"comm-bound"/"efficiency"）的次数 |
+
+**`audit_roofline_decisions.py`**（改为 "decision audit"）：
+
+| 维度 | 内容 |
+|---|---|
+| roofline 调用次数与时机 | 每次的 task_id / 时间戳 / 触发时 cumulative_gain |
+| Cache hit rate 趋势 | 每个 tick 的 cache_creation vs cache_read 比例 |
+| LLM 决策对照 | PRUNE_BRANCH 的 reason 是否引用 analysis.md 实际句段；propose 的 flag 是否在 discovered_flags 列表里 + 是否标记为 untested |
+| 失败模式 | 主 LLM propose 了 discovered_flags 之外的 flag 名（幻觉） / propose 了已 tested 失败的组合（不读 tested 状态） / 没在 +3% 后 re-propose roofline（不读 guidance） |
+
+### 8.10 整体文件清单（v2.0 实施合计）
+
+| Phase | 新增文件 | 修改文件 | 测试新增 |
+|---|---|---|---|
+| **D1** (revert) | 0 | 0 (revert 操作) | 0 |
+| **N1** (rename) | 0 (.yaml rename) | ~15 (跨 repo 机械替换) | 0 (现有测试也 rename) |
+| **N2** (RooflineExecutor) | 4 (yaml + md + .py + 测试) | 0 | 1 |
+| **N3** (Coordinator) | 0 | 1 (coordinator.py) | 1 |
+| **N4** (分层 flags) | 0 | 1 (shared_state.py) | 1 |
+| **N5** (analysis.md 注入 + 指导段) | 0 | 2 (shared_state.py + orchestration.md) | 1 |
+| **N6** (cache metric) | 0 | 2 (claude.py + coordinator.py) | 1 |
+| **N7** (verify/audit) | 0 | 2 (scripts) | 1 |
+| **N8** (GPU + 文档 §13) | 0 | 1 (本文档) | 0 |
+| **合计** | **4 新** | **~24 改**（N1 占大头） | **6 测试** |
 
 ---
 
-## 9. C5 prompt 渲染设计（提前文档化便于 C4 实施时校对接口）
+## 9. prompt 渲染设计（v2.0 — 直接注入 analysis.md + 分层 flags）
 
-`shared_state.py` 新增 `_format_roofline_decision(self) -> str`，在
-`to_prompt_summary()` 末尾追加（位置紧跟 `_format_last_select_kernels`
-之后）。条件渲染：
+v1 §9 全段废弃。v2.0 prompt 渲染的具体接口已在 §8.6 / §8.7 / §8.8
+详细列出（分层 flags / analysis.md 全文注入 / 三段切分 + cache metric）。
+本节只补充三段切分的**位置约束**和**渲染顺序**：
 
-- `last_roofline_analysis == {}` → 返回 `""`（什么都不加）
-- 否则渲染上述 §5 T4 段格式
+### 9.1 渲染顺序（cache 友好）
 
-`prompt_builder.py` 在主 Orchestration system prompt 增加两段静态文本：
-"Roofline-driven Pruning Rules" + "Re-Profile Guidance"（§5 T4 已展示），
-仅在 `last_roofline_analysis` 非空时显示。
+```
+[SECTION-A — stable prefix, session 级 cache target]
+  <orchestration.md system_prompt 全文>
+  <SharedState 静态段>:
+    session_id / model / model_class / baseline_tput / baseline_acc /
+    framework / gpu_type / target_gap_pct / ...
+  <discovered_flags 分层渲染 (Z 方案，§8.6)>
+
+[SECTION-B — snapshot 级 cache target]
+  <analysis_md full content (§8.7 _format_analysis_md_full)>
+
+[SECTION-C — per-tick, not cached]
+  <SharedState 动态段>:
+    current_best / optimization_stack / cumulative_gain* /
+    params_search / backends_search / attempts_history /
+    last_action_failures / pruned_families / tick / closing_phase / ...
+  <Roofline-driven decisions guidance (orchestration.md 内静态段
+   但 logically per-tick 因为引用 SECTION-A/B 内容)>
+```
+
+### 9.2 渲染顺序约束的硬要求
+
+* SECTION-A 必须**完全独立于** roofline / TraceLens 状态（否则
+  roofline #1 完成后会破坏 A 段 cache，整 session 命中率崩盘）
+* SECTION-B 内 analysis.md 是**逐字符**注入（不 reshape / 不截断
+  / 不加 markdown wrapper），以保证同 snapshot 内文本完全一致 →
+  cache 命中
+* SECTION-C 内的所有 SharedState 渲染必须**不影响** A / B 段；
+  特别是 `discovered_flags` 留在 A 段（虽然 tested 状态会变，但
+  整体 framework flag 列表稳定，cache miss 频率可接受）
+
+### 9.3 渲染失败降级
+
+* `analysis_md_text == ""` → SECTION-B 渲染 `(no TraceLens snapshot
+  yet — propose roofline to produce one)`，提示主 LLM 下一步该
+  propose roofline
+* discovered_flags 字段缺失 → SECTION-A 渲染 `(none — first
+  backends/params round will populate)`，retain v0 兼容文案
 
 ---
 
-## 10. 验证（C7）
+## 10. 验证（N8）
 
 ### 10.1 对照实验
 
@@ -638,71 +872,104 @@ nohup hyperloom_opt run \
   --session-dir /tmp/roofline-v2/qwen3-exp \
   > /tmp/roofline-v2/qwen3-exp.log 2>&1 &
 
-# 验证（C6 脚本）
-python scripts/verify_roofline_v2.py \
+# 验证（N7 脚本）
+python -m inference_optimizer.scripts.verify_roofline_v2 \
   --baseline /tmp/roofline-v2/qwen3-baseline \
   --exp /tmp/roofline-v2/qwen3-exp
+
+# 决策审计（N7 脚本）
+python -m inference_optimizer.scripts.audit_roofline_decisions \
+  --session /tmp/roofline-v2/qwen3-exp
 ```
 
-### 10.2 成功标准
+### 10.2 主成功标准
 
 | 指标 | 阈值 | 来源 |
 |---|---|---|
 | `delta cumulative_gain_validated_pct` | **≥ +5%** | 主硬指标 |
-| roofline action 实际跑过 ≥ 1 次 | True | session metadata |
+| roofline action 实际跑过 ≥ 1 次 | True | task_attempts (kind=roofline) |
 | 至少 1 次 PRUNE_BRANCH（source=orchestration） | True | bus event log |
-| 至少 1 次 re-profile（gain trigger 之后） | True | session metadata |
+| 至少 1 次 roofline re-propose（gain trigger 之后） | True | task_attempts 时间序列 |
 
-### 10.3 通用性验证
+### 10.3 v2 新增 cache 与决策质量标准
+
+| 指标 | 阈值 | 解释 |
+|---|---|---|
+| `cache_hit_rate` (exp session) | **≥ 50%** | sum(cache_read) / (sum(cache_read) + sum(cache_creation))；低于阈值说明 prompt 结构没生效，需进一步优化或考虑下个 PR 换 backend |
+| `analysis_md_referenced_count` (exp) | **≥ 3** | LLM 的 PRUNE_BRANCH reason / propose notes 引用 analysis.md 关键短语次数；为 0 说明 LLM 在忽略 analysis.md |
+| `hallucinated_flag_count` (exp) | **= 0** | propose 的 flag 不在 discovered_flags 里的次数；> 0 说明分层 flags 渲染没生效 |
+| `retested_flag_count` (exp) | **≤ 2** | propose 已 tested 且失败的 flag 组合的次数；表示 LLM 不读 tested 状态 |
+
+### 10.4 通用性验证
 
 ```bash
 # 同样的对比，model 换 Llama-70B
-# 成功标准：delta >= -1% (不劣化)
+for model in DeepSeek-R1-0528 Llama-3.1-70B-Instruct; do
+  for branch in main feature/xiaofei/roofline-v2; do
+    # ... 同 §10.1 的命令模板
+  done
+done
+# 成功标准：每个 model 上 delta >= -1% (不劣化)；
+# 至少有 1 个 model 上 delta >= +5% (v2 不要求每个 model 都到 +5%)
 ```
 
-### 10.4 C6 audit 脚本输出表
+### 10.5 verify / audit 输出表（N7 渲染）
 
 | 指标 | baseline | exp | delta |
 |---|---|---|---|
 | `cumulative_gain_validated_pct` | 0.0 | 5.X | +5.X |
 | `wall_clock_min` | 60 | 60 | 0 |
-| `profile_count` | 1 | 2-3 | +1-2 |
 | `roofline_action_count` | 0 | 2-3 | +2-3 |
+| `cache_hit_rate` | 30%-50% (Claude Code 默认) | ≥ 50% (v2 优化结构) | +X% |
 | `prune_branch_count(source=orchestration)` | 0 | 2-5 | +2-5 |
-| `action_seq` | [params, params, kernel_opt, ...] | [params(comm), comm_opt, params(compute), ...] | (路径变化可视化) |
+| `analysis_md_referenced_count` | 0 | 3-10 | +3-10 |
+| `hallucinated_flag_count` | unknown (v0 没度量) | 0 (v2 目标) | -X |
+| `action_seq` | [params, params, kernel_opt, ...] | [roofline, backends(comm-overlap), comm_opt, roofline, params(compute), ...] | (路径变化可视化) |
 
 ---
 
-## 11. 风险 与 回退
+## 11. 风险 与 回退（v2.0 更新）
 
-| 风险 | 触发 | 回退（增量加码，不推翻） |
+| 风险 | 触发 | 回退（增量加码，不推翻 v2 方向） |
 |---|---|---|
-| sub-agent JSON 格式不稳定 | C4 跑后 ≥30% fallback rate | (a) prompt 强化 few-shot 示例；(b) 加 JSON repair lib（如 json5）；(c) 极端情况 fallback 到 §6.1 选项 C 的 heuristic（已设计可降级） |
-| 主 LLM 看到结论后行为没变 | C7 跑出 delta < +2% | (a) C5 强化 Pruning Rules 语言；(b) `score_mult` 钩子（已有，不改公式）；(c) 极端 fallback：roofline action 直接 enqueue 推荐的 params task（仿 `_maybe_enqueue_pmc_roofline`） |
-| sub-agent token 成本超预算 | 实测每 session > $5 | (a) 截断 analysis.md 到 50KB（保留 Executive Summary + Top Ops + Recommendations 三段）；(b) 用更便宜的 LLM（如 Haiku） |
-| Qwen3-32B 拿不到 +5% 但 Llama-70B 拿到 | C7 主指标失败但通用性成立 | 反推 Qwen3 trace 是否被 idle gate 清空；考虑 PR #226 idle gate 阈值（已是 80% 默认） |
-| re-profile 节奏不对（太频繁/太少） | C7 audit 看到 profile_count = 1 或 = 6 | C5 Re-Profile Guidance 段微调阈值（3% → 5% 或加 wall-clock guard） |
-| sub-agent 误剪关键 family | audit 看到某次 prune 之后 LLM 想用该 family 但被拦截 | 当前 PR 不修；下个 PR 引入 UNPRUNE_BRANCH（已知 trade-off） |
+| automatic prompt caching hit rate < 50% | N8 audit 看到 cache_hit_rate 偏低 | (a) 检查 prompt 结构是否真的 A→B→C 顺序、是否有不稳定字段污染 SECTION-A；(b) 微调 §8.6 _format_discovered_flags 的 tested 状态更新频率（如改为只在 roofline 后刷新而非每 tick）；(c) 仍不行 → 下个 PR 用网关侧 `x-auto-prompt-caching: true` 方案 (Primus-Claw TS agent-loop.ts:642 范本) |
+| 主 LLM 看到 analysis.md 后行为没变 | N8 跑出 delta < +2% AND analysis_md_referenced_count < 3 | (a) §8.7 orchestration.md 指导段强化 few-shot 示例（"如果 analysis.md 说 X，emit PRUNE_BRANCH{reason='...analysis.md X段...'}"）；(b) `score_mult` 钩子按 bottleneck 临时提升（已有钩子，不改公式形状）；(c) 极端 fallback：roofline executor 在 trace_analyze 后**自动 enqueue 1 个 params task**带 analysis.md 推荐的 flag (仿现有 `_maybe_enqueue_pmc_roofline` 模式) |
+| 主 LLM 幻觉 flag 名 | N8 audit 看到 hallucinated_flag_count > 0 | (a) 检查分层 flags 渲染是否真的进了 prompt、SECTION-A 是否被截断；(b) orchestration.md 指导段加 hard rule "ONLY use flags listed under discovered_flags above; rejected with policy_denied otherwise"；(c) 在 BackendsExecutor / ParamsExecutor 加 strict validation：grid 中含未 discovered 的 flag → 失败并 surface 给 LLM |
+| Qwen3-32B 拿不到 +5% 但 Llama-70B 拿到 | N8 主指标失败但通用性成立 | 反推 Qwen3 trace 是否被 idle gate 清空 (PR #226 idle gate 阈值已是 80% 默认)；如确认是 idle 主导 → 在 §8.6 / §8.7 加 idle-specific 引导 (建议 propose `cuda_graph_*` 类 flag) |
+| re-profile 节奏不对 | N8 audit 看到 roofline_action_count = 1 或 = 6 | §8.7 orchestration.md re-profile guidance 段微调阈值（3% → 5% 或加 wall-clock guard） |
+| roofline 复合 action 子步骤失败率高 | N8 audit 看到 roofline.status=failed 多次 | (a) 区分是 profile 失败还是 trace_analyze 失败，定位 root cause；(b) v2.1 加 subset retry（profile 已成功时直接重跑 trace_analyze） |
+| sub-step 同时跑导致 lane 冲突 | N8 跑挂或 resource lock timeout | RooflineExecutor 内部串行（profile 完成才启动 trace_analyze），不并行；profile 已 require `profile_lane`，trace_analyze 不 require lane，理论上无冲突 |
 
 ---
 
-## 12. 红线 — 不做的事
+## 12. 红线 — 不做的事（v2.0）
 
-- ❌ 不写 1306 行 `identify_gaps.py` 等价物（sub-agent + ~200 行 executor + ~80 行 sp 共 ~280 行）
-- ❌ 不硬编码任何 model 名 / family
-- ❌ 不动 `effective_score` 公式
-- ❌ 不引入 PMC 或任何新测量手段
-- ❌ 不引入新 SharedState 顶层字段（C2 已遵守：`last_roofline_analysis` 是顶层字段，但**不算新概念**——跟 `last_select_kernels` / `last_kernel_opt` 同级，是"per-action snapshot dict"的标准 pattern）
-- ❌ 不动 `closing_phase` / install gate / ledger 数据结构
-- ❌ 不引入 UNPRUNE（已知 trade-off，下个 PR）
-- ❌ 不让 Coordinator 强制 re-profile（仍由主 LLM 触发，prompt 引导）
-- ❌ 不写其他 design 文档（本文档是唯一事实来源；C7 完成后追加一段 §13 数字记录就足够，不另起文件）
+* ❌ 不引入任何 **analysis.md 二次解读层**（sub-agent / parser /
+  heuristic / classifier 都不行）— 这是 §6.1 v1 失误的根本教训，
+  TraceLens 团队明确反对
+* ❌ 不写 1306 行 `identify_gaps.py` 等价物
+* ❌ 不硬编码任何 model 名 / family
+* ❌ 不动 `effective_score` 公式（只用已有 `score_mult` 钩子兜底）
+* ❌ 不引入 PMC 或任何新测量手段
+* ❌ 不引入新 SharedState 顶层字段（保留 v0 已有的 `last_select_kernels`
+  dict 内添加；`last_roofline_analysis` 字段在 D1 revert 后会消失）
+* ❌ 不动 `closing_phase` / install gate / ledger 数据结构
+* ❌ 不引入 UNPRUNE_BRANCH intent（已知 trade-off，下个 PR）
+* ❌ 不让 Coordinator 强制 re-profile / 强制 propose roofline（仍由
+  主 LLM 主动 emit，orchestration.md 指导段引导）
+* ❌ 不引入 manual `cache_control` 字段（claude-agent-sdk 0.2.82 不暴露，
+  依赖 Claude Code automatic caching；如 N8 hit rate < 50% 才考虑下个
+  PR 换 backend）
+* ❌ 不在本 PR 做 trace_analyze rename 之外的 cross-repo 改名
+* ❌ 不写其他 design 文档（本文档是唯一事实来源；N8 完成后追加
+  §13 数字记录就足够）
 
 ---
 
-## 13. C7 实测结果（待 GPU 跑完追加）
+## 13. N8 实测结果（待 GPU 跑完追加）
 
-_C7 完成后在此追加 baseline / exp 数字、prompt diff 截图引用、audit 输出表。本节占位。_
+_N8 完成后在此追加 baseline / exp 数字、prompt diff 截图引用、verify
++ audit 输出表（含 §10.3 cache hit rate 与决策质量四项）。本节占位。_
 
 ---
 
