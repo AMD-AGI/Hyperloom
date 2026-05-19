@@ -449,8 +449,8 @@ def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
 
 def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
     kernels = (
-        (state.last_select_kernels or {}).get("hot_kernels_top15")
-        or (state.last_select_kernels or {}).get("hot_kernels")
+        (state.last_trace_analyze or {}).get("hot_kernels_top15")
+        or (state.last_trace_analyze or {}).get("hot_kernels")
         or []
     )
     for item in kernels:
@@ -466,7 +466,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
 
     Orchestration often knows only ``kernel_id`` after a successful
     ``run_optimization``. The concrete artifact path lives in
-    ``last_kernel_opt`` and the source target lives in ``last_select_kernels``.
+    ``last_kernel_opt`` and the source target lives in ``last_trace_analyze``.
     Resolve them here so integrate applies the optimized source before
     re-baselining; never silently run an E2E benchmark without applying a patch.
     """
@@ -542,7 +542,7 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
 
 
 # ---------------------------------------------------------------------------
-async def select_kernels_handler(
+async def trace_analyze_handler(
     payload: dict, *, session_dir: Path,
 ) -> HandlerResult:
     """Run Hyperloom/kernel-agent's tracelens_analysis.py on a trace dir.
@@ -976,7 +976,7 @@ async def _run_optimization_single(
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
-    # Same convention as :func:`select_kernels_handler`: pass the session
+    # Same convention as :func:`trace_analyze_handler`: pass the session
     # root so ``kernel_optimization.py`` lands its run artefacts at
     # ``<session_dir>/kernel-agent/runs/<session_id>/`` while still reading
     # ``<session_dir>/kernel-agent-workspace/<kernel_id>/`` for the
@@ -1263,7 +1263,7 @@ async def integrate_handler(
 
 # ---------------------------------------------------------------------------
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
-    "select_kernels":   select_kernels_handler,
+    "trace_analyze":   trace_analyze_handler,
     "run_optimization": run_optimization_handler,
     "integrate":        integrate_handler,
     "apply_patch":      integrate_handler,   # alias — same flow
@@ -1285,5 +1285,5 @@ __all__ = [
     "has_handler",
     "integrate_handler",
     "run_optimization_handler",
-    "select_kernels_handler",
+    "trace_analyze_handler",
 ]

@@ -27,7 +27,7 @@ v0.6 fields:
     max_minutes         int   — wall-clock budget (0 = unlimited)
     last_profile_trace  str   — set by Coordinator when `profile` returns a
                                 trace path; consumed by Orch to populate
-                                `select_kernels` REQUEST `trace_input` param
+                                `trace_analyze` REQUEST `trace_input` param
 """
 
 from __future__ import annotations
@@ -185,10 +185,10 @@ class SharedState:
     last_profile_pmc_summary: str = ""
     last_profile_roofline: str = ""
     last_profile_kernel_breakdown: str = ""
-    # Cached result of the most recent `select_kernels` request keyed by
+    # Cached result of the most recent `trace_analyze` request keyed by
     # `trace_input`. Coordinator short-circuits subsequent identical requests
     # so Orchestration does not waste budget re-analysing the same trace.
-    last_select_kernels: dict[str, Any] = field(default_factory=dict)
+    last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
@@ -1019,9 +1019,9 @@ class SharedState:
         self.last_action_failures = history
         return entry
 
-    def record_select_kernels(self, payload: dict[str, Any],
+    def record_trace_analyze(self, payload: dict[str, Any],
                               result: dict[str, Any]) -> None:
-        """Cache the latest select_kernels output keyed by trace_input.
+        """Cache the latest trace_analyze output keyed by trace_input.
 
         We persist a wider window than the prompt-visible top5 so that when
         the very top GPU consumers are vendor-binary kernels (Tensile / CK)
@@ -1106,12 +1106,12 @@ class SharedState:
         # lets the prompt show "report taken at gain=X%" and lets the
         # re-profile guidance trigger when ``cumulative_gain_validated``
         # has moved by ≥3% since the snapshot was taken. The counter
-        # lives inside ``last_select_kernels`` (not as a new top-level
+        # lives inside ``last_trace_analyze`` (not as a new top-level
         # field) so we do not widen the SharedState surface — every
         # call reads the previous snapshot_id and bumps it by one.
         prev_snapshot_id = 0
-        if isinstance(self.last_select_kernels, dict):
-            prev_raw = self.last_select_kernels.get("roofline_snapshot_id")
+        if isinstance(self.last_trace_analyze, dict):
+            prev_raw = self.last_trace_analyze.get("roofline_snapshot_id")
             if isinstance(prev_raw, int):
                 prev_snapshot_id = prev_raw
         snapshot_id = prev_snapshot_id + 1
@@ -1136,7 +1136,7 @@ class SharedState:
                 # read_artifact intent fetch it on demand.
                 analysis_md_text = ""
 
-        self.last_select_kernels = {
+        self.last_trace_analyze = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
             "hot_kernels_top15": summary,
@@ -1664,7 +1664,7 @@ class SharedState:
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
             f"last_profile_roofline={self.last_profile_roofline or '(none)'}",
             f"last_profile_kernel_breakdown={self.last_profile_kernel_breakdown or '(none)'}",
-            f"last_select_kernels={self._format_last_select_kernels()}",
+            f"last_trace_analyze={self._format_last_trace_analyze()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"params_search={self._format_params_search()}",
             f"backends_search={self._format_backends_search()}",
@@ -1958,20 +1958,20 @@ class SharedState:
             )
         return parts or "(none)"
 
-    def _format_last_select_kernels(self) -> str:
-        if not self.last_select_kernels:
+    def _format_last_trace_analyze(self) -> str:
+        if not self.last_trace_analyze:
             return "(none)"
         ids = [
             str(e.get("kernel_id"))
-            for e in self.last_select_kernels.get("hot_kernels_top15", [])
+            for e in self.last_trace_analyze.get("hot_kernels_top15", [])
             if isinstance(e, dict) and e.get("kernel_id")
         ]
         reusable = list(
-            self.last_select_kernels.get("reusable_native_kernel_ids", [])
+            self.last_trace_analyze.get("reusable_native_kernel_ids", [])
         )
         base = (
-            f"trace={self.last_select_kernels.get('trace_input','?')} "
-            f"candidates_path={self.last_select_kernels.get('candidates_path','?')} "
+            f"trace={self.last_trace_analyze.get('trace_input','?')} "
+            f"candidates_path={self.last_trace_analyze.get('candidates_path','?')} "
             f"top={ids or []} reusable_native={reusable or []}"
         )
         # T3 / T4 finishing-touches: when TraceLens emitted a routing
@@ -1984,7 +1984,7 @@ class SharedState:
         # and omit the suffix entirely in the steady-state (no
         # warnings) so existing prompt-format-stable tests don't see
         # gratuitous additions.
-        warnings = self.last_select_kernels.get("trace_health_warnings") or []
+        warnings = self.last_trace_analyze.get("trace_health_warnings") or []
         if not warnings:
             return base
         rendered: list[str] = []
