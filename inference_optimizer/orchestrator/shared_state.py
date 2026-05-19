@@ -112,8 +112,19 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 }
 
 
+#: v0.8 §3.10 §5.1 — top-level state.json schema version. v0.6 did
+#: not write a value; ``from_dict`` treats an absent key as
+#: ``schema_version=1`` and runs the §3.10 §5.2 migration step,
+#: bumping to ``LATEST_STATE_SCHEMA_VERSION`` on the first save.
+LATEST_STATE_SCHEMA_VERSION: int = 2
+
+
 @dataclass
 class SharedState:
+    # v0.8 §3.10 §5.1 — versioned state.json schema. Bumped by the
+    # migration step in :meth:`from_dict` whenever a v0.6 payload is
+    # loaded. Fresh sessions are born at the latest version.
+    schema_version: int = LATEST_STATE_SCHEMA_VERSION
     session_id: str = ""
     # Primus-Claw session UUID (when Hyperloom runs inside the claw
     # sandbox); empty when running standalone. Wired into the manifest +
@@ -536,6 +547,17 @@ class SharedState:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
+        # v0.8 §3.10 §5 — unified migration entry point. A v0.6 state.json
+        # has no top-level ``schema_version`` field; treat the absence as
+        # ``schema_version=1`` and run the §3.10 §5.2 field-mapping step.
+        # The function is idempotent (Inv-10.3): re-loading a v0.8
+        # state.json (``schema_version == LATEST_STATE_SCHEMA_VERSION``)
+        # short-circuits the migration logging without touching the
+        # fact-layer payload (Inv-10.1).
+        incoming_version = int(raw.get("schema_version") or 1)
+        needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
+        migration_events: list[str] = []
+
         # Filter to known fields so older / newer state.json shapes don't
         # crash. Unknown keys are dropped; missing keys fall back to defaults.
         known = {f for f in cls.__dataclass_fields__}
@@ -577,6 +599,9 @@ class SharedState:
             import logging as _logging
             log = _logging.getLogger(__name__)
             summary = ", ".join(f"{k}={n}" for k, n in legacy_seen)
+            migration_events.append(
+                f"§3.9 dropped scoreboard fields ({summary})"
+            )
             if mode == "warn":
                 log.warning(
                     "v0.8 §3.9: dropped legacy scoreboard fields from "
@@ -611,6 +636,7 @@ class SharedState:
         # legacy backends/params executors continue to write to the old
         # ledgers — the merge function is idempotent under repeated calls,
         # so an interleaved v0.6 fallback + v0.8 resume picks up cleanly.
+        explore_before = filtered.get("explore_search") or {}
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
             backends_search=filtered.get("backends_search"),
@@ -619,6 +645,80 @@ class SharedState:
             params_winner_history=filtered.get("params_winner_history"),
             synergy_attempted=filtered.get("synergy_attempted"),
         )
+        if needs_migration:
+            tested_before = (
+                len(explore_before.get("tested") or {})
+                if isinstance(explore_before, dict) else 0
+            )
+            tested_after = len(
+                filtered["explore_search"].get("tested") or {},
+            )
+            if tested_after > tested_before:
+                migration_events.append(
+                    "§3.4 merged backends_search/params_search → "
+                    f"explore_search (tested={tested_after})"
+                )
+
+        # v0.8 §3.10 §5.3 — fact-layer integrity check. ``strict``
+        # (the default) aborts when a fact-layer key was present in a
+        # *non-empty* legacy state.json but couldn't be loaded into
+        # the dataclass (caller dropped it / type mismatch). ``lenient``
+        # downgrades to WARNING and continues. Fresh sessions
+        # (``raw == {}``) skip the check entirely. Inv-10.1.
+        if needs_migration and raw:
+            mode = os.environ.get(
+                "INFERENCE_OPTIMIZER_MIGRATION_MODE", "strict",
+            ).strip().lower()
+            fact_layer_keys = (
+                "baseline_tput", "baseline_accuracy", "current_best",
+                "cumulative_gain", "cumulative_gain_validated",
+                "optimization_stack",
+            )
+            missing: list[str] = []
+            for key in fact_layer_keys:
+                if key in raw and key not in filtered:
+                    missing.append(key)
+            if missing:
+                import logging as _logging
+                log = _logging.getLogger(__name__)
+                fmt = (
+                    "v0.8 §3.10: fact-layer field(s) %s present in "
+                    "state.json but not loaded into SharedState "
+                    "(Inv-10.1 violation)."
+                )
+                if mode == "lenient":
+                    log.warning(
+                        fmt + " --migration-mode=lenient → continuing.",
+                        ", ".join(missing),
+                    )
+                else:
+                    log.error(fmt, ", ".join(missing))
+                    raise ValueError(
+                        f"v0.8 §3.10 strict migration failed: fact-layer "
+                        f"field(s) {missing!r} lost. Re-run with "
+                        f"--migration-mode=lenient to continue."
+                    )
+
+        # v0.8 §3.10 §5.1 — bump schema_version once migrations finish.
+        # Idempotent: a v0.8 payload already at the latest version
+        # short-circuits the helper at the top of this function.
+        filtered["schema_version"] = LATEST_STATE_SCHEMA_VERSION
+
+        # v0.8 §3.10 §5.3 — operator-visible migration log. ``strict``
+        # (default) is silent on info-level events but surfaces fatal
+        # fact-layer errors elsewhere (e.g. CLI bootstrap); ``lenient``
+        # downgrades any fact-layer error logged downstream. Here we
+        # only emit the migration summary so resume traces are
+        # self-describing.
+        if needs_migration:
+            import logging as _logging
+            log = _logging.getLogger(__name__)
+            event_str = "; ".join(migration_events) or "(no field changes)"
+            log.info(
+                "v0.8 §3.10: state.json migrated v%d → v%d. Events: %s",
+                incoming_version, LATEST_STATE_SCHEMA_VERSION, event_str,
+            )
+
         return cls(**filtered)
 
     @staticmethod
