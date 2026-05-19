@@ -180,24 +180,56 @@ class ClaudeBackend:
             max_turns=max_turns_use,
             system_prompt=system_prompt,
         )
-        intents, raw_text, tool_block_count = await self._invoke_and_collect(
-            full_prompt, options
+        intents, raw_text, tool_block_count, usage = (
+            await self._invoke_and_collect(full_prompt, options)
         )
+        # N6: stash the per-tick cache metric on backend.calls so the
+        # audit scripts (N7) can compute session-level cache_hit_rate
+        # without needing a separate Coordinator wiring path.
+        cache_creation = self._safe_int(
+            usage.get("cache_creation_input_tokens") if usage else None
+        )
+        cache_read = self._safe_int(
+            usage.get("cache_read_input_tokens") if usage else None
+        )
+        input_tokens = self._safe_int(usage.get("input_tokens") if usage else None)
+        output_tokens = self._safe_int(usage.get("output_tokens") if usage else None)
         self.calls.append({
             "prompt_chars": len(full_prompt),
             "tool_blocks": tool_block_count,
             "intents": len(intents),
             "max_turns": max_turns_use,
+            "cache_creation_input_tokens": cache_creation,
+            "cache_read_input_tokens": cache_read,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
         })
         if not intents:
             raise NoIntentEmitted(
                 f"claude reply contained no parseable emit_intent tool_use "
                 f"blocks (raw_text_len={len(raw_text)}, tool_blocks={tool_block_count})"
             )
+        # N6: expose cache metrics on metadata too so a Coordinator-side
+        # post-tick hook (future / N7+) can read them off the
+        # BackendTurnResult without scanning backend.calls.
         return BackendTurnResult(
             intents=intents, raw_text=raw_text,
-            metadata={"tool_blocks": tool_block_count, "model": self.model},
+            metadata={
+                "tool_blocks": tool_block_count,
+                "model": self.model,
+                "cache_creation_input_tokens": cache_creation,
+                "cache_read_input_tokens": cache_read,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            },
         )
+
+    @staticmethod
+    def _safe_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
 
     # ------------------------------------------------------------------
     # Internals
@@ -242,11 +274,26 @@ class ClaudeBackend:
 
     async def _invoke_and_collect(
         self, prompt: str, options: Any
-    ) -> tuple[list[Intent], str, int]:
-        """Stream messages from the SDK, collect intents + raw text + tool counts."""
+    ) -> tuple[list[Intent], str, int, dict[str, Any]]:
+        """Stream messages from the SDK, collect intents + raw text +
+        tool counts + the most recent `ResultMessage.usage` dict.
+
+        Roofline-v2 N6: extract `usage` so the Coordinator (or audit
+        scripts via `backend.calls`) can read
+        `cache_creation_input_tokens` / `cache_read_input_tokens`
+        and measure how effective Claude Code's automatic prompt
+        caching is at hitting our SECTION-A/B stable-prefix design
+        (§5.1, §8.8).
+
+        `usage` mirrors what task_manager.py in Primus-Claw/OOB reads
+        (lines 152-153) — the field shape is fixed by the Anthropic
+        Messages API response and surfaces here because Claude Code
+        forwards it on its terminal `ResultMessage`.
+        """
         intents: list[Intent] = []
         text_chunks: list[str] = []
         tool_block_count = 0
+        last_usage: dict[str, Any] = {}
         async for message in self.sdk_query_factory(prompt=prompt, options=options):
             for block in self._iter_blocks(message):
                 if self._is_tool_use_for_emit_intent(block):
@@ -262,7 +309,15 @@ class ClaudeBackend:
             result_text = getattr(message, "result", None)
             if isinstance(result_text, str):
                 text_chunks.append(result_text)
-        return intents, "".join(text_chunks), tool_block_count
+            # N6: ResultMessage carries .usage on terminal messages
+            # (Anthropic Messages API response schema). The SDK
+            # propagates this dict verbatim. We overwrite (not
+            # accumulate) because the last message of a multi-turn
+            # session reports the cumulative session usage.
+            msg_usage = getattr(message, "usage", None)
+            if isinstance(msg_usage, dict) and msg_usage:
+                last_usage = dict(msg_usage)
+        return intents, "".join(text_chunks), tool_block_count, last_usage
 
     @staticmethod
     def _iter_blocks(message: Any):
