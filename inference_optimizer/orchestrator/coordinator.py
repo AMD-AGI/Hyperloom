@@ -1371,7 +1371,6 @@ class Coordinator:
         sequence_actions = {
             "target_analysis",
             "baseline", "profile", "pmc_roofline",
-            "roofline",
             "backends", "params", "sweep", "report",
             "integrate", "validate_stack",
         }
@@ -1482,27 +1481,6 @@ class Coordinator:
                     "before any further explore or report"
                 ),
             )
-        # Roofline-v2 C4c: ``roofline`` action requires a cached
-        # ``analysis.md`` — the sub-agent has no useful input otherwise.
-        # The executor itself degrades gracefully (returns the fallback
-        # with ``error="no_cached_analysis_md"``) but gating at the
-        # propose layer avoids burning the LLM tick on a guaranteed-
-        # degraded outcome and surfaces a concrete actionable hint the
-        # main Orchestration LLM can self-correct on.
-        if action == "roofline":
-            cached = self.shared_state.last_select_kernels or {}
-            if not cached.get("analysis_md_text"):
-                return PolicyDenied(
-                    f"action={action!r} denied: select_kernels must run first",
-                    rule="execution_order",
-                    hint=(
-                        "roofline analyzer requires a cached TraceLens "
-                        "analysis.md; emit request{target_agent='kernel', "
-                        "kind='select_kernels', params={trace_input: "
-                        "last_profile_trace}} so last_select_kernels."
-                        "analysis_md_text is populated"
-                    ),
-                )
         return None
 
     def _sequence_denial_for_request(
@@ -2743,16 +2721,6 @@ class Coordinator:
             if result.get("kernel_breakdown_path"):
                 self.shared_state.last_profile_kernel_breakdown = str(result["kernel_breakdown_path"])
                 changed = True
-        elif task_kind == "roofline":
-            # Roofline-v2 C4c: persist the structured RooflineAnalysis
-            # output (or the degraded fallback) on SharedState so the
-            # prompt renderer added in C5 can surface the conclusion
-            # section on every subsequent tick. ``record_roofline_analysis``
-            # (C2) normalises the dict to the documented schema and
-            # silently no-ops on a non-dict result, so we can call it
-            # unconditionally without guarding ``status``.
-            self.shared_state.record_roofline_analysis(result)
-            changed = True
         elif task_kind == "validate_stack":
             # Phase 3 — apply the rebenched throughput from the
             # ValidateStackExecutor as the *only* source of truth for
