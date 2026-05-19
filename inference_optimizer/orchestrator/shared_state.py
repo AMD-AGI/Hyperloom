@@ -196,6 +196,16 @@ class SharedState:
     # `run_optimization_done` so Orch sees what's been tried and doesn't
     # re-dispatch the same kernel_id every tick.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
+    # Roofline-v2 C2: most recent structured output of the ``roofline``
+    # action (defined in C4). The roofline-analyzer LLM reads the cached
+    # TraceLens analysis.md from ``last_select_kernels`` and emits a
+    # structured decision dict; we cache it here so the prompt renderer
+    # (C5) can inject the ~800-char conclusion section on every tick
+    # without re-invoking the analyzer. Schema is documented on
+    # :meth:`record_roofline_analysis`. Empty dict = roofline action
+    # not yet run for the current snapshot, or analyzer output was
+    # malformed and was rejected by the recorder.
+    last_roofline_analysis: dict[str, Any] = field(default_factory=dict)
     # ---------------------------------------------------------------
     # Per-action audit (kernel parity for non-kernel actions). Each
     # ``last_<action>`` mirrors :attr:`last_kernel_opt`: a single snapshot
@@ -1149,6 +1159,145 @@ class SharedState:
                 self.cumulative_gain_validated,
             ),
             "ts": _now_iso(),
+        }
+
+    def record_roofline_analysis(self, result: dict[str, Any]) -> None:
+        """Cache the most recent ``roofline`` action result.
+
+        The ``roofline`` action (defined in C4) invokes a dedicated
+        roofline-analyzer LLM call that reads the cached TraceLens
+        ``analysis.md`` (populated by :meth:`record_select_kernels`),
+        produces a structured decision dict, and returns it as the
+        action result. This recorder normalizes the dict into the
+        schema documented below so the prompt renderer (C5) can render
+        it deterministically without per-tick None-guards.
+
+        Result schema (all fields documented; any missing field
+        degrades to a safe default — empty list / empty string / 0.0 /
+        False — so a malformed analyzer response cannot crash the
+        recorder or the downstream prompt):
+
+        * ``snapshot_id`` (int): the
+          :attr:`last_select_kernels.roofline_snapshot_id` the analyzer
+          read. Lets C5 detect "new TraceLens snapshot available but
+          roofline action not yet re-run" and lets audit (C6) pair
+          every roofline invocation with the exact analysis.md.
+        * ``analyzed_at_iso`` (str): timestamp the analysis was
+          produced; defaults to :func:`_now_iso` when missing.
+        * ``analyzed_at_gain_pct`` (float):
+          :attr:`cumulative_gain_validated` captured by the executor
+          when the analysis was produced; lets C5 render
+          "gain since this analysis: current − analyzed_at_gain_pct".
+        * ``based_on_analysis_md`` (str): path to the analysis.md the
+          analyzer actually read; matches the cached
+          ``last_select_kernels.analysis_md_path`` at the time the
+          executor ran. Kept verbatim so an operator can re-open the
+          exact report.
+        * ``primary_bottleneck`` (str): one of ``"comm"`` / ``"compute"``
+          / ``"memory"`` / ``"latency"`` / ``"idle"`` / ``"unknown"`` —
+          the dominant constraint the analyzer identified.
+        * ``bottleneck_distribution`` (dict[str, float]): per-category
+          share, e.g. ``{"comm": 0.45, "compute": 0.30,
+          "memory": 0.15, "idle": 0.10}``. Values are not required to
+          sum to 1.0; the recorder coerces but does not normalize so
+          analyzer self-reported confidence stays intact.
+        * ``suggested_prunes`` (list[dict]): each entry has ``family``
+          (str — action kind to PRUNE_BRANCH against), ``reason``
+          (str — short justification grounded in the report), and
+          ``confidence`` (``"high"`` / ``"medium"`` / ``"low"``).
+          Orchestration is **not** auto-emitting PRUNE_BRANCH from
+          these — the main LLM still has to decide via the prompt
+          rendered in C5. C4 design red-line: roofline only advises.
+        * ``suggested_next_actions`` (list[dict]): each entry has
+          ``kind`` (str — action kind to propose), ``rationale`` (str),
+          and ``priority`` (``"high"`` / ``"medium"`` / ``"low"``).
+        * ``reprofile_recommended`` (bool): whether the analyzer thinks
+          a re-profile would change the bottleneck distribution.
+        * ``reprofile_reason`` (str): short justification (empty when
+          ``reprofile_recommended`` is False).
+        * ``raw_llm_response`` (str): the verbatim analyzer-LLM
+          response, kept for audit (C6) so operators can re-grade the
+          analyzer's reasoning offline. Truncated to 8 KB on store —
+          the structured fields above are the canonical form, the
+          raw text is forensic only.
+        """
+        if not isinstance(result, dict):
+            return
+
+        def _coerce_str(value: Any) -> str:
+            return "" if value is None else str(value)
+
+        def _coerce_float(value: Any) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _coerce_int(value: Any) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return 0
+
+        # Bottleneck distribution: filter to numeric values, coerce
+        # both keys (str) and values (float). Non-dict input degrades
+        # to {} so C5 can render "distribution unavailable".
+        raw_dist = result.get("bottleneck_distribution") or {}
+        distribution: dict[str, float] = {}
+        if isinstance(raw_dist, dict):
+            for k, v in raw_dist.items():
+                try:
+                    distribution[str(k)] = float(v)
+                except (TypeError, ValueError):
+                    continue
+
+        def _clean_advice_list(
+            raw: Any,
+            required_keys: tuple[str, ...],
+        ) -> list[dict[str, Any]]:
+            cleaned: list[dict[str, Any]] = []
+            if not isinstance(raw, list):
+                return cleaned
+            for entry in raw:
+                if not isinstance(entry, dict):
+                    continue
+                # An advice entry is "well-formed enough" if the first
+                # required key (family / kind) is present — the rest
+                # can degrade to empty strings without losing the
+                # signal the LLM needs to render the conclusion.
+                anchor_key = required_keys[0]
+                if not entry.get(anchor_key):
+                    continue
+                cleaned.append({key: entry.get(key, "") for key in required_keys})
+            return cleaned
+
+        suggested_prunes = _clean_advice_list(
+            result.get("suggested_prunes"),
+            ("family", "reason", "confidence"),
+        )
+        suggested_next = _clean_advice_list(
+            result.get("suggested_next_actions"),
+            ("kind", "rationale", "priority"),
+        )
+
+        # Cap raw_llm_response to 8 KB; the structured fields above
+        # are the canonical signal, the raw text is forensic only.
+        raw_response = _coerce_str(result.get("raw_llm_response"))
+        if len(raw_response) > 8192:
+            raw_response = raw_response[:8192] + "...[truncated]"
+
+        self.last_roofline_analysis = {
+            "snapshot_id": _coerce_int(result.get("snapshot_id")),
+            "analyzed_at_iso": _coerce_str(result.get("analyzed_at_iso")) or _now_iso(),
+            "analyzed_at_gain_pct": _coerce_float(result.get("analyzed_at_gain_pct")),
+            "based_on_analysis_md": _coerce_str(result.get("based_on_analysis_md")),
+            "primary_bottleneck": _coerce_str(result.get("primary_bottleneck")) or "unknown",
+            "bottleneck_distribution": distribution,
+            "suggested_prunes": suggested_prunes,
+            "suggested_next_actions": suggested_next,
+            "reprofile_recommended": bool(result.get("reprofile_recommended", False)),
+            "reprofile_reason": _coerce_str(result.get("reprofile_reason")),
+            "raw_llm_response": raw_response,
         }
 
     def record_sweep(self, result: dict[str, Any]) -> None:
