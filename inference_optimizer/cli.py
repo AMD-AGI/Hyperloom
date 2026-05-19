@@ -48,7 +48,7 @@ from .orchestrator.action_executors import (
     TargetAnalysisExecutor,
     backends_executor,
     baseline_executor,
-    make_roofline_executor,
+    make_roofline_stub_executor,
     params_executor,
     pmc_roofline_executor,
     profile_executor,
@@ -628,24 +628,18 @@ def _register_executors(
         ),
     )
 
-    # Roofline-v2 C4b: wire the ``roofline`` action with the real
-    # sub-agent LLM executor. ``RooflineExecutor`` lazily constructs a
-    # fresh ``ClaudeBackend`` per invocation (default
-    # ``backend_factory``), reads the cached TraceLens ``analysis.md``
-    # via ``shared_state.last_select_kernels``, and produces a
-    # structured ``RooflineAnalysis`` dict that C4c's Coordinator
-    # integration writes back via ``record_roofline_analysis``.
-    #
-    # All failure branches (timeout, backend error, malformed JSON)
-    # degrade to ``build_roofline_fallback_result`` so the optimisation
-    # loop never sees a failed task — the analyzer being unavailable
-    # is a soft signal ("primary_bottleneck=unknown"), not a hard
-    # failure. See design/roofline-v2.md §6 / §8.4 / §11 for the
-    # sub-agent vs direct-injection decision and the failure
-    # mitigation matrix.
+    # Roofline-v2 C4a: wire the ``roofline`` action with a stub executor
+    # that returns ``primary_bottleneck="unknown"`` + empty advice
+    # (``build_roofline_fallback_result``). The stub holds a reference to
+    # ``coordinator.shared_state`` so it can read the cached
+    # ``last_select_kernels.roofline_snapshot_id`` and surface it in the
+    # result — that lets C4c's Coordinator integration + C5's prompt
+    # renderer be wired and exercised against C4a output before C4b
+    # replaces the stub with the real sub-agent LLM analyzer. See
+    # design/roofline-v2.md §7 / §8 for the C4a/b/c split rationale.
     coordinator.sub.register_executor(
         "roofline",
-        make_roofline_executor(shared_state=coordinator.shared_state),
+        make_roofline_stub_executor(shared_state=coordinator.shared_state),
     )
 
     if no_kernel:
