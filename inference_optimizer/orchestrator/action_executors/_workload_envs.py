@@ -52,6 +52,12 @@ from ._server_patcher import (
 
 log = logging.getLogger(__name__)
 
+# Module-level flag — the RUN_EVAL=false default is the expected steady
+# state on most checkouts (see docstring at materialize_config_with_envs);
+# the warning is for first-time awareness, not per-variant noise. Emit it
+# once per process to keep the log readable.
+_RUN_EVAL_DEFAULT_WARN_EMITTED = False
+
 
 def _tracelens_patch_enabled() -> bool:
     """Read the ``HYPERLOOM_ENABLE_PATCH`` kill switch (default on).
@@ -348,11 +354,17 @@ def materialize_config_with_envs(
             envs["RUN_EVAL"] = env_run_eval
         else:
             envs["RUN_EVAL"] = "false"
-            log.warning(
-                "RUN_EVAL defaulted to false: Magpie main / InferenceX main "
-                "disagree on `run_eval --concurrent-requests`. Export "
-                "RUN_EVAL=true once your InferenceX checkout accepts that flag."
-            )
+            global _RUN_EVAL_DEFAULT_WARN_EMITTED
+            if not _RUN_EVAL_DEFAULT_WARN_EMITTED:
+                log.warning(
+                    "RUN_EVAL defaulted to false (no per-variant accuracy "
+                    "gate): Magpie main / InferenceX main disagree on "
+                    "`run_eval --concurrent-requests`. Export RUN_EVAL=true "
+                    "(or pass extra_envs={'RUN_EVAL': 'true'}) once your "
+                    "InferenceX checkout accepts that flag. This warning "
+                    "fires once per process."
+                )
+                _RUN_EVAL_DEFAULT_WARN_EMITTED = True
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:
