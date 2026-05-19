@@ -1275,9 +1275,41 @@ def collect_capability_summary(
         state.get("cumulative_gain_validated")
     )
 
+    # v0.8 M3 — merged explore action capability row (KB_design §3.4 +
+    # §3.12 §4.2 "兼容 alias"). The backends / params / validate_stack
+    # rows stay alongside to keep v0.6 resume reports readable. On a
+    # pure v0.8 session those legacy rows will be ``not_attempted`` while
+    # ``explore`` carries the activity.
+    explore = _capability_for_action(state, "explore")
+    explore_search = state.get("explore_search") or {}
+    if isinstance(explore_search, dict):
+        explore["tested"] = len(explore_search.get("tested") or {})
+        accepted_entries = [
+            v for v in (explore_search.get("accepted") or [])
+            if isinstance(v, dict)
+        ]
+        if accepted_entries:
+            explore["best_gain_pct"] = max(
+                (_to_float(v.get("gain_pct")) or 0.0 for v in accepted_entries),
+                default=None,
+            )
+        keep_unstable_count = sum(
+            1 for entry in (explore_search.get("rejected") or [])
+            if isinstance(entry, dict)
+            and entry.get("reason") == "stack_unstable"
+        )
+        if keep_unstable_count:
+            explore["keep_unstable_count"] = keep_unstable_count
+        explore["winners_history"] = len(
+            explore_search.get("winners_history") or []
+        )
+
     return {
         "geak":           geak_cap,
         "oob":            oob_cap,
+        # v0.8 M3 — primary row; backends/params/validate_stack are
+        # kept as compatibility aliases.
+        "explore":        explore,
         "backends":       backends,
         "params":         params,
         "sweep":          sweep_cap,
@@ -2403,6 +2435,11 @@ def _action_family(action: str) -> str:
         return "sweep"
     if s == "validate_stack":
         return "validate"
+    # v0.8 M3 — merged explore action (KB_design §3.4). Bucketed into
+    # its own ``explore`` family so the attribution table can show a
+    # single row that subsumes the legacy backends + params buckets.
+    if s == "explore":
+        return "explore"
     return "other"
 
 
@@ -2450,6 +2487,9 @@ def collect_attribution(
     family_totals: dict[str, float] = {
         "kernel": 0.0, "backends": 0.0, "params": 0.0,
         "sweep": 0.0, "validate": 0.0, "other": 0.0,
+        # v0.8 M3 — explore family (subsumes backends+params on v0.8
+        # sessions; legacy buckets stay populated on v0.6 resume).
+        "explore": 0.0,
     }
     for e in entries:
         if not isinstance(e, dict):
@@ -2490,6 +2530,9 @@ def collect_attribution(
         "source_breakdown": {
             "geak_pct_of_total":     round(geak_total, 2),
             "oob_pct_of_total":      round(oob_total, 2),
+            # v0.8 M3 — primary row.
+            "explore_pct_of_total":  round(family_totals.get("explore", 0.0), 2),
+            # Legacy bucket aliases — preserved for v0.6 resume reports.
             "backends_pct_of_total": round(family_totals.get("backends", 0.0), 2),
             "params_pct_of_total":   round(family_totals.get("params", 0.0), 2),
             "sweep_pct_of_total":    round(family_totals.get("sweep", 0.0), 2),
@@ -2571,15 +2614,215 @@ def collect_source_files(
     return out
 
 
+# ---------------------------------------------------------------------------
+# §16 Phase segments — v0.8 M2 phase state machine (KB_design §3.2 + §3.12)
+# ---------------------------------------------------------------------------
+def collect_phase_segments(
+    state: dict[str, Any],
+    phase_timeline: list[dict[str, Any]],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Group action events by phase using ``phase_history`` boundaries.
+
+    Returns a list of segments shaped like::
+
+        {
+            "phase":            "EXPLORE",
+            "entered_ts":       "...iso...",
+            "exit_ts":          "...iso..." | "",
+            "exit_reason":      "plateau_explore",
+            "evidence":         {...},
+            "actions":          [<events from phase_timeline within window>...],
+            "elapsed_seconds":  float | None,
+        }
+
+    Ordering matches ``phase_history`` (chronological insertion order).
+    Empty when ``phase_history`` is missing — readers fall back to the
+    flat ``phase_timeline`` (v1 shape).
+    """
+    history = state.get("phase_history") or []
+    if not isinstance(history, list) or not history:
+        return []
+    segments: list[dict[str, Any]] = []
+    for idx, row in enumerate(history):
+        if not isinstance(row, dict):
+            continue
+        entered_ts = str(row.get("ts") or "")
+        entered_unix = row.get("ts_unix")
+        if not isinstance(entered_unix, (int, float)):
+            entered_unix = None
+        # Exit info comes from the *next* row (its ``ts`` is when we
+        # left the current segment). The last segment is open.
+        exit_ts = ""
+        exit_unix: float | None = None
+        exit_reason = ""
+        if idx + 1 < len(history) and isinstance(history[idx + 1], dict):
+            nxt = history[idx + 1]
+            exit_ts = str(nxt.get("ts") or "")
+            exit_reason = str(nxt.get("reason") or "")
+            nxt_unix = nxt.get("ts_unix")
+            if isinstance(nxt_unix, (int, float)):
+                exit_unix = float(nxt_unix)
+        elapsed: float | None = None
+        if entered_unix is not None and exit_unix is not None:
+            elapsed = max(0.0, float(exit_unix) - float(entered_unix))
+        # Bucket the flat ``phase_timeline`` events by ``ts`` window.
+        actions_in_window: list[dict[str, Any]] = []
+        for ev in phase_timeline or []:
+            if not isinstance(ev, dict):
+                continue
+            ts = str(ev.get("ts") or "")
+            if not ts:
+                continue
+            if entered_ts and ts < entered_ts:
+                continue
+            if exit_ts and ts >= exit_ts:
+                continue
+            actions_in_window.append(ev)
+        segments.append({
+            "phase":           str(row.get("to_phase") or ""),
+            "from_phase":      str(row.get("from_phase") or ""),
+            "entered_ts":      entered_ts,
+            "entered_unix":    float(entered_unix) if entered_unix is not None else None,
+            "exit_ts":         exit_ts,
+            "exit_reason":     exit_reason,
+            "evidence":        dict(row.get("evidence") or {}),
+            "actions":         actions_in_window,
+            "elapsed_seconds": elapsed,
+        })
+    return segments
+
+
+# ---------------------------------------------------------------------------
+# §15 KB Provenance — Cortex KB integration audit (v0.8 M1)
+# ---------------------------------------------------------------------------
+def collect_kb_provenance(
+    session_dir: Path,
+    state: dict[str, Any],
+    manifest: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Collect the Cortex KB integration audit for ``session_breakdown.json``.
+
+    Three sources merged into one section:
+
+    1. SharedState (``state.json``) — ``cortex_session_id``,
+       ``cortex_session_summary`` (T4 result), ``warm_start_*``
+       snapshots, ``pending_kb_edges`` (T2 hypothesize edges not yet
+       verified).
+    2. NDJSON queues (``runtime/cortex/.kb_*.ndjson``) — counts of
+       drained / dead-letter rows. The flusher daemon writes one
+       ``drain_bookmark`` per round; we just sum the deltas.
+    3. Synchronous audit log (``runtime/cortex/.kb_audit.jsonl``) — per
+       Cortex CLI call status. Useful for diagnosing T0 / T4 sync
+       failures from the breakdown JSON alone.
+
+    Returns a stable shape (always the same keys, even on a `--no-cortex`
+    session) so downstream readers (claw-stats-service) don't have to
+    branch.
+    """
+    from ..session_paths import (
+        cortex_audit_jsonl as _audit_path,
+        cortex_dead_letter_ndjson as _dl_path,
+        cortex_flushed_ndjson as _flushed_path,
+        cortex_pending_ndjson as _pending_path,
+        cortex_sid_file as _sid_path,
+    )
+
+    def _count_lines(p: Path) -> int:
+        try:
+            if not p.exists():
+                return 0
+            with p.open("r", encoding="utf-8") as f:
+                return sum(1 for line in f if line.strip())
+        except OSError as exc:
+            warnings.append(f"kb_provenance: failed to count {p}: {exc!r}")
+            return 0
+
+    def _read_last_n_audit(p: Path, n: int = 50) -> list[dict[str, Any]]:
+        try:
+            if not p.exists():
+                return []
+            with p.open("r", encoding="utf-8") as f:
+                rows = [
+                    json.loads(line) for line in f
+                    if line.strip()
+                ]
+            return rows[-n:]
+        except (OSError, json.JSONDecodeError) as exc:
+            warnings.append(f"kb_provenance: failed to read audit {p}: {exc!r}")
+            return []
+
+    pending_path = _pending_path(session_dir)
+    flushed_path = _flushed_path(session_dir)
+    dl_path = _dl_path(session_dir)
+    audit_path = _audit_path(session_dir)
+    sid_path = _sid_path(session_dir)
+
+    audit_tail = _read_last_n_audit(audit_path, n=50)
+    # Status counts aggregated across the audit tail.
+    status_counts: dict[str, int] = {}
+    for row in audit_tail:
+        st = str(row.get("status") or "unknown")
+        status_counts[st] = status_counts.get(st, 0) + 1
+
+    cortex_sid = (state.get("cortex_session_id") or "").strip()
+    if not cortex_sid and sid_path.exists():
+        try:
+            cortex_sid = sid_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            cortex_sid = ""
+
+    commit_summary = state.get("cortex_session_summary") or {}
+    pending_edges = state.get("pending_kb_edges") or []
+    warm = state.get("warm_start_recipe") or {}
+    pitfalls = state.get("warm_start_pitfalls") or []
+
+    out: dict[str, Any] = {
+        "cortex_session_id":      cortex_sid,
+        "warm_start_ts":          state.get("warm_start_ts") or "",
+        "warm_start_recipe_seen": bool(warm and warm.get("raw")),
+        "warm_start_pitfall_count": len(pitfalls) if isinstance(pitfalls, list) else 0,
+        "stack_fingerprint":      manifest.get("stack_fingerprint") or {},
+        "pending_edges": [
+            {
+                "proposal_msg_id": row.get("proposal_msg_id", ""),
+                "edge_id":         row.get("edge_id", ""),
+                "action":          row.get("action", ""),
+                "ts":              row.get("ts", ""),
+            }
+            for row in pending_edges if isinstance(row, dict)
+        ],
+        "queue": {
+            "pending_lines":     _count_lines(pending_path),
+            "flushed_bookmarks": _count_lines(flushed_path),
+            "dead_letter_lines": _count_lines(dl_path),
+        },
+        "audit_tail_count":     len(audit_tail),
+        "audit_status_counts":  status_counts,
+        "commit_summary": {
+            "status":             str(commit_summary.get("status") or "")
+                if isinstance(commit_summary, dict) else "",
+            "promoted_edges":     list(commit_summary.get("promoted_edges") or [])
+                if isinstance(commit_summary, dict) else [],
+            "derived_summary_id": str(commit_summary.get("derived_summary_id") or "")
+                if isinstance(commit_summary, dict) else "",
+        },
+    }
+    return out
+
+
 __all__ = [
     "collect_attribution",
     "collect_baseline",
     "collect_capability_summary",
     "collect_critic_robustness",
     "collect_final",
+    "collect_kb_provenance",
     "collect_kernel_invocations",
     "collect_kernel_lifecycle",
     "collect_param_search",
+    "collect_phase_segments",
     "collect_phase_timeline",
     "collect_session",
     "collect_source_files",
