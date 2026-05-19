@@ -537,26 +537,26 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
 _KERNEL_OPT_PIPELINE_BODY: str = """\
 ## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)
 
-The three kernel-owned actions (`select_kernels`, `kernel_opt`,
+The three kernel-owned actions (`trace_analyze`, `kernel_opt`,
 `integrate`) are scored on the `Action scores` board like every other
 action. Pick them by `eff_score` per the DECISION FRAMEWORK; the blocks
 below are only **payload templates** describing how to build the REQUEST
 once you have selected the action. The Coordinator hard-gates the
 obvious prerequisites (TODO 3/4 fires after a `kernel_opt` KEEP forces
-`integrate`); `select_kernels` itself is enforced only at the REQUEST
+`integrate`); `trace_analyze` itself is enforced only at the REQUEST
 layer for `run_optimization`, and explore actions like `params` /
 `backends` / `sweep` are NEVER gated on it. Everything else flows
 through the scoreboard.
 
-### `select_kernels` — payload (Coordinator gates `run_optimization` until cache is fresh)
+### `trace_analyze` — payload (Coordinator gates `run_optimization` until cache is fresh)
 
-  request{target_agent: 'kernel', kind: 'select_kernels',
+  request{target_agent: 'kernel', kind: 'trace_analyze',
           params: {trace_input: <verbatim last_profile_trace>, top_k: 10}}
 
-  STRICT: if `last_select_kernels.trace_input` already equals
+  STRICT: if `last_trace_analyze.trace_input` already equals
   `last_profile_trace`, the candidate list is cached — do NOT re-emit.
-  `select_kernels` must precede every `run_optimization` request — the
-  Coordinator denies kernel_opt requests with `select_kernels must run
+  `trace_analyze` must precede every `run_optimization` request — the
+  Coordinator denies kernel_opt requests with `trace_analyze must run
   first` when the cache is stale, but `params` / `backends` / `sweep` /
   `report` are NEVER gated on it. Re-emit only after a fresh `profile`
   action invalidates the cache.
@@ -564,7 +564,7 @@ through the scoreboard.
 ### `kernel_opt` — payload for `run_optimization`
 
 When the scoreboard surfaces `kernel_opt`, pick the next reusable
-native kernel from `last_select_kernels.reusable_native_kernel_ids`,
+native kernel from `last_trace_analyze.reusable_native_kernel_ids`,
 in order, skipping any kernel_id already present in
 `last_kernel_opt.kernel_id`.
 
@@ -580,7 +580,7 @@ HARD RULES (applied at REQUEST build time, NOT at action-selection time):
   request{target_agent: 'kernel', kind: 'run_optimization',
           params: {kernel_id: <picked kernel_id>,
                    source_file: <hot_kernels[i].source_file>,
-                   candidates_path: <select_kernels_done.candidates_path>,
+                   candidates_path: <trace_analyze_done.candidates_path>,
                    budget_minutes: 60}}
 
   HARD RULE — backend selection: DO NOT add a `backends` field unless the
@@ -618,7 +618,7 @@ gate fires; obey it before resuming any explore / deep round.
 
 ### KERNEL TARGETING (native vs torch.compile)
 
-`select_kernels` profiles the *final* serving mode (with or without
+`trace_analyze` profiles the *final* serving mode (with or without
 torch.compile / CUDAGraph), but kernel-opt may only rewrite reusable
 native sources that still appear in that trace. NEVER optimize
 `/tmp/torchinductor*`, Inductor cache, or `triton_poi_*` /
