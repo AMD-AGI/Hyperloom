@@ -78,6 +78,12 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     # v0.8 M3 — merged explore action (KB_design §3.4). Coexists with
     # the legacy backends/params/validate_stack names during M3.
     "explore",
+    # v0.8 M5 — LLM specialist sub-agent (KB_design §3.5). Has no yaml
+    # meta (parameterised by ``params.domain``); SubAgentRunner /
+    # SpecialistRunner write workspace files under
+    # ``runs/specialist/<task_id>/`` (prompt.md / transcript.jsonl /
+    # heartbeat.json / tool_calls.jsonl / specialist_done.json).
+    "specialist",
     "integrate", "kernel_opt", "deep_kernel_analysis",
     "operator_tuning", "vendor_kernel_config",
     "validate_stack",
@@ -104,10 +110,13 @@ def _runs_actions() -> frozenset[str]:
         registry = ActionRegistry().load()
     except Exception:
         return _RUNS_ACTIONS_FALLBACK
+    # v0.8 M5 (KB_design §3.5 §10) — ``specialist`` is a synthetic action
+    # with no yaml meta (parameterised by ``params.domain``); the
+    # registry-derived path can't see it, so we always add it explicitly.
     return frozenset(
         a.name for a in registry.all()
         if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
-    )
+    ) | frozenset({"specialist"})
 
 
 def _validate_action(action: str) -> str:
