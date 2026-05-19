@@ -392,7 +392,8 @@ v1 sub-agent 实施"。
 | Commit | 内容 | 文件数 | 行数 | 状态 |
 |---|---|---|---|---|
 | **D1** revert sequence | git revert C6/C5/C4c/C4b/C4a/C2（共 6 个 revert commits） | 0 净代码 | -3400 (回吐之前的实施) | 📝 待执行 |
-| **N1** `select_kernels → trace_analyze` rename | 跨 inference_optimizer + kernel-agent 两 repo 改名（action_registry / handler / scoring / cli / tests / kernel-agent tool 入口）；不改语义 | ~15-20 文件（机械替换） | ~50 净改动 | 📝 待执行 |
+| **N1a** `select_kernels → trace_analyze` rename (inference_optimizer 一侧) | 30 文件机械替换：(a) `actions/_meta/select_kernels.yaml` → `trace_analyze.yaml` rename + 内容更新；(b) `select_kernels_handler` → `trace_analyze_handler`；(c) `record_select_kernels` → `record_trace_analyze`；(d) `last_select_kernels` → `last_trace_analyze`（旧 state.json 多余字段会被现有 load 路径默默忽略，等于 cache miss → 下次 trace_analyze 重做，可接受降级）；(e) request dispatcher key；(f) 所有测试 rename | 30 文件 | ~250 净 occurrence | 📝 待执行 |
+| **N1b** `select_kernels → trace_analyze` rename (kernel-agent 一侧) | kernel-agent repo 内匹配的 request kind 路由 + tool 入口约定 + 文档 mentions；与 N1a 协调一致后才能合 | 未知（待 N1b 开始时 grep 量化） | ~待量化 | 📝 待执行 |
 | **N2** RooflineExecutor 复合 action | (a) `actions/_meta/roofline.yaml`（family=analysis, prerequisites=[baseline]）；(b) `actions/roofline.md` playbook（说明复合 action 语义）；(c) `orchestrator/action_executors/roofline.py` 顺序编排 profile + trace_analyze 协程；(d) `cli.py` 注册；(e) scoring prior=7.5；(f) 单测 | 6 新 + 2 改 | ~250 | 📝 待执行 |
 | **N3** Coordinator wire + sequence_denial | (a) `_promote_to_shared_state` 不需要新分支（profile + trace_analyze 子任务的 promote 各自走原路径）；(b) `_sequence_denial_for_action` 加 4 个优化 action 对 analysis.md_text 的依赖检查；(c) 单测 | 1 改 + 1 测试 | ~150 | 📝 待执行 |
 | **N4** 分层 flags 渲染 (Z 方案) | (a) `shared_state.py` `_format_discovered_flags` 重写按 `<framework>.<action>` 分组 × tested 状态标记；(b) 单测覆盖典型 / 空 / 大量 flag 场景 | 1 改 + 1 测试 | ~200 |  📝 待执行 |
@@ -420,37 +421,71 @@ v1 sub-agent 实施"。
 > 集成）已 §6.1 整体否决；具体代码会在 §15.1 的 6 个 revert commits
 > 里移除。下面是 v2.0 的 N1-N7 实施细化。
 
-### 8.1 N1 — `select_kernels → trace_analyze` rename（跨 repo）
+### 8.1 N1a — `select_kernels → trace_analyze` rename (inference_optimizer 一侧)
 
 **目标**：`select_kernels` 这个名字暗示"选 kernel"，但它实际是"调
 TraceLens 跑 trace_split + kernel_candidates + 写 analysis.md +
 summary.json"。改名为 `trace_analyze` 更准确反映语义。
 
-**影响范围 — inference_optimizer**：
+**实测影响范围**（用 grep 量化，2026-05-19）：
 
-| 文件 | 关键字 |
+inference_optimizer 内 **30 个文件 / ~250 个 occurrence**：
+
+| 类型 | 文件数 | 关键改动 |
+|---|---|---|
+| **核心代码（必须语义改）** | 4 | `kernel_request_handlers.py`（handler 函数名 + dispatcher dict key）；`coordinator.py`（`_sequence_denial_for_request` 分支 + `_handle_request_response` kind 比较）；`shared_state.py`（`record_select_kernels` 函数 + `last_select_kernels` dataclass 字段）；`system_prompts/prompt_builder.py`（grid hint 文本提到的 kind） |
+| **system prompt（LLM 可见层）** | 1 | `system_prompts/orchestration.md`（提到 `select_kernels` 的描述句） |
+| **action meta YAML** | 1 | `actions/_meta/select_kernels.yaml` → `trace_analyze.yaml` rename + name 字段更新 |
+| **backend mock / 示例** | 2 | `backends/kernel_mock.py`（mock 路由）；`examples/p*_demo.py`（demo 调用） |
+| **breakdown / collectors（旁路）** | 5 | `breakdown/schema.py`、`breakdown/collectors.py`、`breakdown/reporters/_renderers/kernel_lifecycle.py`、`breakdown/SKILL.md`（report 时引用 kind 名） |
+| **测试 / fixture** | 17 | `tests/test_p*` 全套测试中提到 select_kernels 的所有断言、fixture、注释 |
+
+**实施方式**：单一 commit (N1a)，机械 grep + replace 所有
+`select_kernels` 字面出现 → `trace_analyze`；`SelectKernels` → `TraceAnalyze`
+（CamelCase）；测试函数名 `test_select_kernels_*` → `test_trace_analyze_*`；
+**不改任何语义**。
+
+**SharedState 字段迁移策略**：`last_select_kernels` → `last_trace_analyze`，
+**不保留 alias**。理由：shared_state.py 现有 `load_or_init` 路径已经
+通过 dataclass field 过滤未知字段（shared_state.py:356 注释明确说明），
+旧 state.json 里的 `last_select_kernels` 会被默默忽略 → 下次
+trace_analyze 重做 → 等价 cache miss，可接受降级。这避免引入命名空间
+污染，未来不会有人疑惑为什么 SharedState 有两个相似字段。
+
+**已知 pre-existing failures**：N1a 后跑全测试套件需 deselect 2 个
+pre-existing failures（`test_action_scoring::test_seed_action_scores_uses_model_class_priors_when_available`、
+`test_p1_2_full_action_catalogue::test_every_action_has_non_empty_description`），
+这两个都在 D1 之前就存在，与 rename 无关。
+
+### 8.1.1 N1b — `select_kernels → trace_analyze` rename (kernel-agent 一侧)
+
+**触发条件**：N1a 落地后，跑 kernel-agent 端的 request dispatcher（如
+真实 sub-agent 服务），确认 `select_kernels` 请求是否被识别。
+
+**预期范围**：
+
+| 路径 | 关键字 |
 |---|---|
-| `orchestrator/kernel_request_handlers.py` | `select_kernels_handler` 函数 + dispatcher dict key |
-| `orchestrator/coordinator.py` | `_sequence_denial_for_request` 中的 `req_kind == "select_kernels"` 分支 |
-| `orchestrator/shared_state.py` | `record_select_kernels` 函数（保留为兼容 alias `record_trace_analyze`，废弃旧名） |
-| `orchestrator/system_prompts/orchestration.md` | 提到 `select_kernels` 的描述句 |
-| `tests/test_p2_2_profile_and_handlers.py` 等 | 测试名 / handler 调用 / fixture |
-| `actions/_meta/select_kernels.yaml` → `trace_analyze.yaml` | 文件 rename + 内容更新 |
+| `kernel-agent/tools/tracelens_analysis.py` 入口约定 | 文件名 / 函数名 / CLI flag（grep "select_kernels" 看是否硬编码） |
+| `kernel-agent/runtime/cli.py` / `runtime/dispatcher.py` | request kind → handler 的映射表 |
+| `kernel-agent/agents/skill_descriptors/*.yaml` | skill 暴露 request kind 的元数据 |
+| `kernel-agent/README*.md` / `docs/*.md` | mentions |
 
-**影响范围 — kernel-agent**（如有引用）：
+**实施前必做**：开始 N1b 前先用 Grep 量化 kernel-agent 实际改动文件数；
+如 > 30 文件再次更新本节拆为 N1b.1 / N1b.2 / ...
 
-| 文件 | 关键字 |
-|---|---|
-| `tools/tracelens_analysis.py` 入口约定 | 检查是否硬编码 "select_kernels" 关键字（通常通过 payload routing 不会有） |
-| `runtime/cli.py` request 路由 | request kind dispatch |
-| 文档 / README | mentions |
+**协调风险**：kernel-agent 是独立 repo，本 PR 的 N1b commit 实际是
+"在 N1a 落地后同步改 kernel-agent"，可能需要单独 PR 走 kernel-agent
+仓库的 review 流程。如果 kernel-agent 那边 review 慢，N1a + N1b 之间
+会存在一个时间窗 inference_optimizer 用新 kind 但 kernel-agent 还在
+旧 kind → 实际跑会失败。
 
-**实施方式**：单一 commit (N1)，机械 grep + replace 所有
-`select_kernels` 字面出现，**不改任何语义**。保留 SharedState
-`record_select_kernels` 作为 `record_trace_analyze` 的 alias 防止
-旧 state.json 反序列化失败。
-
-**测试**：现有 51 个 select_kernels 相关测试全部 rename，确保零回归。
+**降级**：如果 N1b 因外部原因（如 kernel-agent 团队 review block）无法
+本 PR 内合入，**N1a 可以独立合**——前提是 inference_optimizer 在发往
+kernel-agent 的 request kind 上**保留 `"select_kernels"` 线协议字符串
+不变**，只在 inference_optimizer 内部把 handler / 字段 / 测试 rename。
+这等价于 §B 选项的"线协议层保留 alias"。决定权在 N1b 实施前看 kernel-
+agent 那边反应。
 
 ### 8.2 N2 — RooflineExecutor 复合 action 新增文件
 
