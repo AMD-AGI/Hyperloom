@@ -20,7 +20,13 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-SCHEMA_VERSION = "hyperloom.session_breakdown.v1"
+#: v0.8 §3.12 §6 — breakdown schema version. v2 adds the
+#: ``specialist_runs`` section, ``capability_summary.specialist``
+#: row, ``critic_robustness.kb_writes_summary`` sub-block, and the
+#: top-level ``action_timeline`` / ``explore_search`` v1-reader
+#: aliases. Inv-12.1 guarantees a v0.6 / v0.7 reader can still
+#: consume the file because v2 only *adds* fields.
+SCHEMA_VERSION = "hyperloom.session_breakdown.v2"
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +184,10 @@ class CapabilitySummary(TypedDict, total=False):
     params: CapabilityEntry
     sweep: CapabilityEntry
     validate_stack: CapabilityEntry
+    # v0.8 §3.12 §4.2 — specialist sub-agent capability row. ``tested``
+    # = total proposals_total across all rounds; ``keeps`` =
+    # proposals_kept; ``attempts`` = number of dispatch rounds.
+    specialist: CapabilityEntry
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +376,10 @@ class RobustnessSignal(TypedDict, total=False):
 class CriticRobustness(TypedDict, total=False):
     critic_iterations: list[CriticIteration]
     robustness_signals: list[RobustnessSignal]
+    # v0.8 §3.12 §4.4 — counts of KB writes proxied through the
+    # critic agent's ``commit-review`` protocol (Coordinator
+    # actually performs the writes; the critic only authors them).
+    kb_writes_summary: "CriticKBWritesSummary"
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +551,62 @@ class KBProvenance(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
+# v0.8 §3.12 §4.3 — specialist_runs section
+# ---------------------------------------------------------------------------
+class SpecialistDomainBreakdown(TypedDict, total=False):
+    """Per-domain attribution for one ``specialist_rounds`` entry.
+
+    Mirror of ``SharedState.specialist_rounds[i].domain_breakdown[domain]``
+    contents (KB_design §3.5 §10).
+    """
+    dispatched: int
+    proposals_total: int
+    proposals_kept: int
+    proposals_rejected: int
+
+
+class SpecialistTranscriptRef(TypedDict, total=False):
+    """Reference to a specialist transcript on disk.
+
+    Default behaviour (``--breakdown-include-transcripts=false``) is
+    to record only the relative path; ``true`` inlines the raw
+    transcript bytes under ``body``.
+    """
+    task_id: str
+    domain: str
+    path: str
+    body: str   # only set when CLI flag enabled
+
+
+class SpecialistRound(TypedDict, total=False):
+    """One element of ``specialist_runs`` (KB_design §3.12 §4.3)."""
+    round_id: int
+    dispatched_at: str
+    completed_at: str
+    domains: list[str]
+    parallelism: int
+    proposals_total: int
+    proposals_kept: int
+    proposals_rejected: int
+    proposals_skipped: int
+    kb_edge_ids: list[str]
+    confidence_avg: float | None
+    domain_breakdown: dict[str, SpecialistDomainBreakdown]
+    transcripts: list[SpecialistTranscriptRef]
+    notes: list[str]
+
+
+# ---------------------------------------------------------------------------
+# v0.8 §3.12 §4.4 — critic_robustness.kb_writes_summary sub-block
+# ---------------------------------------------------------------------------
+class CriticKBWritesSummary(TypedDict, total=False):
+    """Summary of critic-agent ``commit-review`` outputs (Coordinator
+    proxies these into ``kb_provenance``)."""
+    total: int
+    by_verdict: dict[str, int]   # KEEP / REVERT / NEEDS_INFO / ...
+
+
+# ---------------------------------------------------------------------------
 # Top-level shape
 # ---------------------------------------------------------------------------
 class SourceFiles(TypedDict, total=False):
@@ -559,18 +629,31 @@ class SessionBreakdown(TypedDict, total=False):
     workload: Workload
     baseline: Baseline
     final: Final
+    # v0.8 §3.12 §4.2 — ``phase_timeline`` retained for v1-reader
+    # compat as the flat per-action timeline (``action_timeline`` is
+    # the canonical v2 name; see below). ``phase_segments`` carries
+    # the phase-boundary view (M2).
     phase_timeline: list[PhaseEvent]
-    phase_segments: list[PhaseSegment]      # v0.8 M2 — phase boundaries
+    phase_segments: list[PhaseSegment]
+    # v0.8 §3.12 §4.2 / §5 — top-level action_timeline alias used by
+    # v0.6 readers that still expect a flat per-action list.
+    action_timeline: list[PhaseEvent]
     capability_summary: CapabilitySummary
     geak_invocations: list[Invocation]
     oob_invocations: list[Invocation]
     kernel_lifecycle: KernelLifecycle
+    # v0.8 §3.12 §5 — ``param_search`` is the v1-reader compat alias
+    # for the merged ``explore_search`` ledger; both fields carry
+    # identical data so an old reader doesn't see a missing key.
     param_search: ParamSearch
+    explore_search: ParamSearch
     sweep: Sweep
     critic_robustness: CriticRobustness
     telemetry: Telemetry
     attribution: Attribution
     kb_provenance: KBProvenance      # v0.8 M1 — Cortex KB audit
+    # v0.8 §3.12 §4.3 — specialist sub-agent dispatch records.
+    specialist_runs: list[SpecialistRound]
 
     warnings: list[str]
     source_files: SourceFiles
@@ -586,6 +669,7 @@ __all__ = [
     "CapabilityEntry",
     "CapabilitySummary",
     "CriticIteration",
+    "CriticKBWritesSummary",
     "CriticRobustness",
     "DetectedKernel",
     "Final",
@@ -610,6 +694,9 @@ __all__ = [
     "RobustnessSignal",
     "SessionBreakdown",
     "SessionMeta",
+    "SpecialistDomainBreakdown",
+    "SpecialistRound",
+    "SpecialistTranscriptRef",
     "PhaseBreakdown",
     "PhaseBreakdownExplore",
     "PhaseBreakdownKernel",
