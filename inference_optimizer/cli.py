@@ -519,6 +519,20 @@ def _seed_shared_state(
     *,
     session_id: str,
 ) -> SharedState:
+    # v0.8 M5 — research_lane capacity is locked here for the lifetime
+    # of the session (KB_design §3.7 §4.4). Clamp to [0, 32]; emit a
+    # warning when the operator opts into the high end (LLM quota +
+    # PR Monitor load risk per §3.14 R-07).
+    research_lane_capacity = int(
+        getattr(args, "research_lane_capacity", 1) or 1
+    )
+    research_lane_capacity = max(0, min(32, research_lane_capacity))
+    if research_lane_capacity > 6:
+        log.warning(
+            "research_lane_capacity=%d above M6 default 6; LLM quota / "
+            "PR Monitor load may spike. See KB_design §3.14 R-07.",
+            research_lane_capacity,
+        )
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -533,6 +547,7 @@ def _seed_shared_state(
         baseline_tput=0.0,
         cumulative_gain=0.0,
         max_minutes=int((args.max_hours or 0) * 60),
+        research_lane_capacity=research_lane_capacity,
     )
     state.save(session_dir)
     return state
@@ -2552,6 +2567,32 @@ def _build_parser() -> argparse.ArgumentParser:
              "stack_fingerprint does not match the current pod (recorded "
              "in manifest.json). Default: lenient (M1 records the flag "
              "in manifest only; consumed by M5 specialist assembly).",
+    )
+    # ------------------------------------------------------------------
+    # v0.8 M5/M6 — specialist research_lane capacity (KB_design §3.7 §4.4)
+    # ------------------------------------------------------------------
+    # ``--research-lane-capacity`` locks the number of LLM specialists
+    # that may run concurrently on the research_lane:
+    #   * 0   → degrade to M3 (no specialist dispatch; EXPLORE uses the
+    #           default_grid path).
+    #   * 1   → M5 default (single specialist at a time).
+    #   * 6   → M6 default (six concurrent specialists across domains).
+    #   * 32  → hard upper bound; CLI warns but accepts.
+    # Locked at session start (mirrored into manifest + SharedState);
+    # PolicyGate denies mid-flight mutation via CORE_STATE_FIELDS.
+    opt.add_argument(
+        "--research-lane-capacity",
+        dest="research_lane_capacity",
+        type=int,
+        default=int(
+            os.environ.get("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", "1")
+            or "1"
+        ),
+        help="Max concurrent LLM specialist sub-agents on the "
+             "research_lane (KB_design §3.7). 0 disables specialist "
+             "dispatch entirely (degrades to M3 LLM-direct grid); 1 is "
+             "the M5 default; 6 is the M6 default. Range [0, 32]. "
+             "Locked at session start.",
     )
     # ------------------------------------------------------------------
     # v0.8 M2 — phase budget percentages (KB_design §3.2 §8.5, §3.8 §5.3)
