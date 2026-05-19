@@ -59,12 +59,18 @@ def test_orchestration_no_kernel_md_was_removed():
 
 
 def test_critic_md_is_rules_fragment():
-    """``critic.md`` is a small rules fragment, not a full system prompt."""
+    """``critic.md`` is a concise rules fragment, not a full system prompt.
+
+    v0.8 §3.3 added a per-phase review-contract section to the
+    fragment, which roughly doubled the line count; the assertion now
+    caps at 60 non-empty lines to accommodate the new content while
+    still flagging accidental bloat.
+    """
     p = asset_system_prompts_dir() / "critic.md"
     assert p.is_file(), f"missing critic rules fragment: {p}"
     text = p.read_text(encoding="utf-8")
     lines = [ln for ln in text.splitlines() if ln.strip()]
-    assert len(lines) <= 30, (
+    assert len(lines) <= 60, (
         f"critic.md should be a concise fragment, got {len(lines)} non-empty lines"
     )
     assert "judge_bundle" in text
