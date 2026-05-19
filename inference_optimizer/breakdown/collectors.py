@@ -2632,6 +2632,14 @@ def collect_attribution(
             "attribution reconstructed best-effort from optimization_stack."
         )
 
+    # v0.8 M7 (KB_design §3.12 §4.6 + §3.13 M7 §6) — per-phase gain
+    # breakdown. Cross-references the optimization_stack with the
+    # phase_history timestamps so each KEEP'd entry is bucketed into
+    # the phase that was active at its acceptance time. EXPLORE
+    # entries further break down by specialist domain (when
+    # winners_history carries a ``provenance`` field).
+    phase_breakdown = _collect_phase_breakdown(state, entries, warnings)
+
     return {
         "gain_per_stack_entry": entries,
         "method":               method,
@@ -2646,8 +2654,170 @@ def collect_attribution(
             "sweep_pct_of_total":    round(family_totals.get("sweep", 0.0), 2),
             "validated_total_pct":   round(validated_total, 2),
         },
+        "phase_breakdown": phase_breakdown,
         "notes": notes,
     }
+
+
+def _collect_phase_breakdown(
+    state: dict[str, Any],
+    entries: list[dict[str, Any]],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """KB_design §3.12 §4.6 + §3.13 M7 §6 — per-phase gain attribution.
+
+    Walks ``optimization_stack`` / ``gain_per_stack_entry`` and assigns
+    each KEEP entry to the phase that owned its acceptance timestamp.
+    Returns a shape compatible with the §3.13 M7 §6 example::
+
+        {
+            "prelude": 0.0,
+            "explore": {
+                "total_gain_pct": 18.4,
+                "by_domain": {
+                    "framework_specialist": 9.7,
+                    "default_grid":         2.5,
+                    ...
+                },
+            },
+            "kernel": {
+                "total_gain_pct": 7.1,
+                "by_kernel_id": {
+                    "fmoe_fp8_blockscale_g1u1": 4.3,
+                    ...
+                },
+            },
+            "sweep": 0.0,
+            "close":  0.0,
+        }
+
+    When phase_history is missing (legacy resume), every entry lands
+    under ``unattributed`` so the dashboard can call attention to
+    the gap.
+    """
+    # Build a phase timeline → bucket lookup once. Each row of
+    # ``phase_history`` has ``to_phase`` + ``ts_unix``; entries are
+    # ordered. For a given entry timestamp we pick the latest row
+    # whose ``ts_unix`` is ≤ entry ts.
+    history = state.get("phase_history") or []
+    if not isinstance(history, list):
+        history = []
+    timeline: list[tuple[float, str]] = []
+    for row in history:
+        if not isinstance(row, dict):
+            continue
+        try:
+            ts = float(row.get("ts_unix") or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        phase = str(row.get("to_phase") or "").strip().upper()
+        if phase:
+            timeline.append((ts, phase))
+    timeline.sort(key=lambda r: r[0])
+
+    def _phase_for(ts_unix: float) -> str:
+        if not timeline:
+            return ""
+        current = ""
+        for ts, ph in timeline:
+            if ts <= ts_unix:
+                current = ph
+            else:
+                break
+        return current
+
+    # winners_history (explore) gives us per-entry provenance; map
+    # fingerprint → provenance for the explore bucket.
+    explore_search = state.get("explore_search") or {}
+    provenance_by_fp: dict[str, str] = {}
+    if isinstance(explore_search, dict):
+        for w in explore_search.get("winners_history") or []:
+            if not isinstance(w, dict):
+                continue
+            fp = str(w.get("fingerprint") or "")
+            prov = str(w.get("provenance") or "").strip()
+            if fp and prov:
+                provenance_by_fp[fp] = prov
+
+    phase_buckets: dict[str, dict[str, Any]] = {
+        "prelude": {"total_gain_pct": 0.0},
+        "explore": {"total_gain_pct": 0.0, "by_domain": {}},
+        "kernel":  {"total_gain_pct": 0.0, "by_kernel_id": {}},
+        "sweep":   {"total_gain_pct": 0.0},
+        "close":   {"total_gain_pct": 0.0},
+        "unattributed": {"total_gain_pct": 0.0},
+    }
+
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        delta = _to_float(e.get("delta_pct"))
+        if delta is None or delta <= 0:
+            continue
+        ts = e.get("ts_unix")
+        if ts is None:
+            ts_str = str(e.get("ts") or "")
+            if ts_str:
+                try:
+                    # Best-effort parse — strip trailing 'Z' / TZ offsets.
+                    from datetime import datetime as _dt
+                    ts = _dt.fromisoformat(
+                        ts_str.replace("Z", "+00:00")
+                    ).timestamp()
+                except (TypeError, ValueError):
+                    ts = 0.0
+        try:
+            ts_f = float(ts or 0.0)
+        except (TypeError, ValueError):
+            ts_f = 0.0
+        phase = _phase_for(ts_f).lower()
+        action = str(e.get("action") or "").lower()
+        # When phase_history isn't usable, fall back to the action
+        # family so we still bucket something usefully.
+        if phase not in phase_buckets:
+            fam = _action_family(action)
+            if fam in ("explore", "backends", "params"):
+                phase = "explore"
+            elif fam == "kernel":
+                phase = "kernel"
+            elif fam == "sweep":
+                phase = "sweep"
+            else:
+                phase = "unattributed"
+        bucket = phase_buckets[phase]
+        bucket["total_gain_pct"] = round(
+            float(bucket["total_gain_pct"]) + float(delta), 2,
+        )
+        if phase == "explore":
+            by_domain = bucket.setdefault("by_domain", {})
+            fp = str(e.get("fingerprint") or e.get("variant_fingerprint") or "")
+            prov = (
+                provenance_by_fp.get(fp)
+                or str(e.get("provenance") or "")
+                or "default_grid"
+            )
+            by_domain[prov] = round(
+                float(by_domain.get(prov, 0.0)) + float(delta), 2,
+            )
+        elif phase == "kernel":
+            by_kid = bucket.setdefault("by_kernel_id", {})
+            kid = str(e.get("kernel_id") or e.get("action_kernel_id") or "?")
+            by_kid[kid] = round(
+                float(by_kid.get(kid, 0.0)) + float(delta), 2,
+            )
+
+    # Drop the empty-by-default unattributed bucket when nothing
+    # landed there — keeps the JSON clean.
+    if phase_buckets["unattributed"]["total_gain_pct"] == 0.0:
+        phase_buckets.pop("unattributed", None)
+
+    if not timeline:
+        warnings.append(
+            "attribution.phase_breakdown: phase_history empty; gains "
+            "bucketed via action family fallback"
+        )
+
+    return phase_buckets
 
 
 def _reconstruct_gain_ledger(
