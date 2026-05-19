@@ -52,12 +52,12 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 
 
 def _mute_action_scoring(coordinator: Coordinator) -> None:
-    """Clear the seeded ``action_scores`` to short-circuit the scoring
-    helpers. These tests focus on audit-trail wiring, not the scoring
-    matrix; bypassing it avoids tripping pre-existing
-    ``_score_action_no_promote`` paths that aren't part of this plan.
+    """v0.8 §3.9 — scoreboard retired (KB_design §3.9 Inv-9.1). The
+    old helper used to clear the seeded ``action_scores`` map; the
+    map no longer exists so this is a no-op kept for back-compat
+    with the test surface.
     """
-    coordinator.shared_state.action_scores = {}
+    return None
 
 
 def _mk_task(kind: str, task_id: str = "t-aud-1") -> Task:
