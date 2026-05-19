@@ -795,6 +795,42 @@ cache state also lands in the boot `Preflight diagnostics:` block. If
 COLD_START repeats across retries, JIT was killed mid-`hipcc`; bump
 `INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC=5400` instead of relaunching.
 
+## Pre-GEAK Unittest Harness (`unittest_agent`)
+
+Before every `backend=geak` attempt, `kernel-agent/tools/kernel_optimization.py`
+calls `tools/unittest_agent.py::generate_unittest()` to materialise an
+[AgentKernelArena](/wekafs/zihao/2026/geak_cc/AgentKernelArena)-style
+unittest right next to the GEAK run dir. The harness pins the
+**live vLLM/SGLang runtime context** the kernel was profiled in
+(source-file symlink into `/sgl-workspace/...`, captured
+TraceLens input shapes/dtypes, `SGLANG_* / VLLM_* / AITER_* / TRITON_*`
+env vars, golden-bytes snapshot under `source/_baseline_snapshot/`) so
+GEAK can iterate against a real correctness gate instead of inventing
+its own surrogate `bench_<kernel>.py`.
+
+The generator self-verifies (compile + correctness MUST pass on the
+unmodified source) before declaring success. The artefact tree lives at:
+
+```text
+$USER_DATA_PATH/kernel-agent/unittests/<session_id>/<prompt_stem>/
+├── config.yaml                       # AgentKernelArena task config
+├── scripts/task_runner.py            # compile / correctness / performance
+├── source/<kernel_name>.py           # symlink to the live framework src
+├── source/_baseline_snapshot/<kernel_name>.py   # frozen golden bytes
+└── unittest_meta.json                # generator manifest + self_verify
+```
+
+The Coordinator does NOT need to drive this step — it runs implicitly
+inside `invoke_backend(backend="geak", ...)`. Observability shows up as
+`unittest_status` / `unittest_out_dir` / `unittest_test_command` keys in
+`optimization_attempts.jsonl[].backend_paths`; full audit lives in
+`unittest_meta.json` per harness.
+
+Bypass with `HYPERLOOM_DISABLE_UNITTEST_AGENT=1` only when debugging
+GEAK behaviour against its legacy in-house harness; production runs
+should leave it on. See `kernel-agent/SKILL.md` § *Auto-generated unittest
+harness (GEAK pre-step)* for the full manifest schema and status semantics.
+
 ## Kernel Apply Safety
 
 Kernel optimization may modify `/sgl-workspace/aiter`, `/sgl-workspace/sglang`,
