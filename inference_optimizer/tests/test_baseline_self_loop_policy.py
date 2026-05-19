@@ -54,7 +54,8 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 
 
 def _mute_action_scoring(coordinator: Coordinator) -> None:
-    coordinator.shared_state.action_scores = {}
+    """v0.8 §3.9 — scoreboard retired. No-op back-compat shim."""
+    return None
 
 
 def _seed_target_analysis_marker(sd: Path) -> None:
