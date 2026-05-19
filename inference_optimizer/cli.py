@@ -1893,6 +1893,75 @@ def _bootstrap_cortex_kb(
     return client
 
 
+# ---------------------------------------------------------------------------
+# v0.8 M4 — PR Monitor + KnowledgePlane wiring (KB_design §3.6 + §3.13 M4)
+# ---------------------------------------------------------------------------
+def _bootstrap_knowledge_plane(
+    args: argparse.Namespace,
+    *,
+    cortex_client: "CortexKBClient | None",
+) -> "KnowledgePlane":
+    """Construct the :class:`KnowledgePlane` facade for one session.
+
+    Wires the (optional) PR Monitor REST client + the (already
+    bootstrapped) Cortex KB client into a single read/write surface.
+    Both backends fail-soft: if either is unreachable the facade
+    returns empty / disabled-status responses so prompt assembly +
+    breakdown collectors don't have to branch on availability.
+
+    ``--no-pr-monitor`` short-circuits the REST probe and yields a
+    disabled :class:`PRMonitorClient` (which also strips the
+    ``mcp__pr_monitor__*`` tool block on the specialist side via
+    :meth:`SpecialistRunner._resolve_tools`).
+    """
+    from .orchestrator.knowledge_plane import (
+        KnowledgePlane,
+        load_domain_repos,
+    )
+    from .orchestrator.pr_monitor import (
+        DEFAULT_PR_FEED_WINDOW_DAYS,
+        DEFAULT_PR_MONITOR_MCP_URL,
+        PRMonitorClient,
+    )
+
+    pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
+    pr_url = (getattr(args, "pr_monitor_url", None) or "").strip() or None
+    pr_mcp_url = (
+        (getattr(args, "pr_monitor_mcp_url", None) or "").strip()
+        or DEFAULT_PR_MONITOR_MCP_URL
+    )
+    window_days = int(
+        getattr(args, "pr_feed_window_days", DEFAULT_PR_FEED_WINDOW_DAYS)
+        or DEFAULT_PR_FEED_WINDOW_DAYS
+    )
+
+    pr_client = PRMonitorClient.from_args(url=pr_url, enabled=pr_enabled)
+    if not pr_enabled:
+        print("PR Monitor       : DISABLED (--no-pr-monitor)")
+    elif not pr_client.healthz():
+        # Fail-soft: keep the client around (the specialist tool list
+        # already accommodates the MCP layer staying up even when REST
+        # is flaky), but warn so the operator sees the diagnostic.
+        print(
+            f"PR Monitor       : REST unreachable at {pr_client.base_url} "
+            f"(continuing; prompt PR feed section will render "
+            f"(unavailable))"
+        )
+    else:
+        print(
+            f"PR Monitor       : REST {pr_client.base_url} (window="
+            f"{window_days}d, mcp={pr_mcp_url})"
+        )
+
+    return KnowledgePlane.from_clients(
+        cortex_kb=cortex_client,
+        pr_monitor=pr_client,
+        domain_repos=load_domain_repos(),
+        pr_feed_window_days=window_days,
+        pr_monitor_mcp_url=pr_mcp_url,
+    )
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     proxy_urls = _preflight()
 
@@ -2567,6 +2636,55 @@ def _build_parser() -> argparse.ArgumentParser:
              "stack_fingerprint does not match the current pod (recorded "
              "in manifest.json). Default: lenient (M1 records the flag "
              "in manifest only; consumed by M5 specialist assembly).",
+    )
+    # ------------------------------------------------------------------
+    # v0.8 M4 — PR Monitor REST + MCP (KB_design §3.6 §5.2 + §3.13 M4)
+    # ------------------------------------------------------------------
+    # ``--pr-monitor-url`` overrides the in-cluster default; the
+    # marathon pod is typically in a different cluster from
+    # primus-cortex, so an operator running outside the primus-cortex
+    # k8s namespace must port-forward + pass a localhost URL.
+    # ``--no-pr-monitor`` switches the KnowledgePlane.pr_feed_warm
+    # path to a no-op and strips ``mcp__pr_monitor__*`` from the
+    # specialist tool whitelist (Inv-6.3 degrade-to-empty).
+    opt.add_argument(
+        "--pr-monitor-url",
+        dest="pr_monitor_url",
+        type=str,
+        default=None,
+        help="Override PR Monitor REST URL for this run. Default: "
+             "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local"
+             "/v1 (env: PR_MONITOR_URL). Pair with --pr-monitor-mcp-url "
+             "when port-forwarding for local debug.",
+    )
+    opt.add_argument(
+        "--pr-monitor-mcp-url",
+        dest="pr_monitor_mcp_url",
+        type=str,
+        default=None,
+        help="Override PR Monitor MCP URL handed to specialist LLM "
+             "backends. Default mirrors --pr-monitor-url with /mcp/ "
+             "suffix; the trailing slash is mandatory.",
+    )
+    opt.add_argument(
+        "--no-pr-monitor",
+        dest="pr_monitor_enabled",
+        action="store_false",
+        default=True,
+        help="Disable the PR Monitor integration entirely. "
+             "pr_feed_warm returns empty; the specialist tool "
+             "whitelist drops mcp__pr_monitor__* tools. Useful for "
+             "offline / debug runs (KB_design §3.13 M4 §10).",
+    )
+    opt.add_argument(
+        "--pr-feed-window-days",
+        dest="pr_feed_window_days",
+        type=int,
+        default=int(
+            os.environ.get("PR_FEED_WINDOW_DAYS", "30") or "30"
+        ),
+        help="Look-back window for the PR feed warmup (days). "
+             "Default: 30 (KB_design §3.6 §5.2).",
     )
     # ------------------------------------------------------------------
     # v0.8 M5/M6 — specialist research_lane capacity (KB_design §3.7 §4.4)
