@@ -246,6 +246,17 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # and mirrored into SharedState. Locking it as CORE prevents an LLM
     # from raising capacity mid-flight (KB_design §3.7 §4.4).
     "research_lane_capacity",
+    # v0.8 M7 — phase-machine escalation plumbing (KB_design §3.8 §7.3 /
+    # §3.13 M7). Coordinator's ``_handle_escalate_strategy_change``
+    # writes ``pending_escalate_hint`` via the validated
+    # ``SharedState.set_pending_escalate_hint`` helper; LLM
+    # ``update_state`` is blocked here as a defense-in-depth measure
+    # so an arbitrary intent can't drop the phase machine into
+    # ``skip_to_close``.
+    "pending_escalate_hint",
+    "last_consumed_escalate_hint",
+    "last_consumed_escalate_hint_ts",
+    "plateau_overrides",
 })
 
 
