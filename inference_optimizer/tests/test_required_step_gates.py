@@ -90,17 +90,20 @@ def _seed_post_baseline(coord: Coordinator) -> None:
 
     Includes writing the target_baseline.json marker — the
     ``target_analysis`` gate now fires unconditionally and would otherwise
-    mask the downstream gates these tests target.
+    mask the downstream gates these tests target. Also populates
+    ``last_select_kernels`` matching the trace so the P3 analyze gate
+    (TODO 3/5) is open by default; tests targeting integrate / validate_stack
+    don't care about the analyze gate and would otherwise be masked by it.
     """
     _write_baseline_json(coord.session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_profile_pmc_summary = "/tmp/pmc.json"
     s.last_select_kernels = {
         "trace_input": "/tmp/profile.tar.gz",
         "candidates_path": "/tmp/x.json",
     }
+    s.last_profile_pmc_summary = "/tmp/pmc.json"
 
 
 # ===========================================================================
@@ -112,7 +115,7 @@ def test_target_analysis_gate_fires_when_compare_unset_and_json_missing(session_
     writes a 'no_target_gpu_configured' marker JSON."""
     coord = Coordinator(session_dir, backends=_backends_full())
     todo = coord._required_next_step()
-    assert "TODO 0/4" in todo
+    assert "TODO 0/5" in todo
     assert "target_analysis is required now" in todo
     assert "no_target_gpu_configured" in todo
     assert "baseline is required now" not in todo
@@ -124,7 +127,7 @@ def test_target_analysis_gate_fires_when_compare_set_and_json_missing(session_di
         compare_against_gpu="b300",
     )
     todo = coord._required_next_step()
-    assert "TODO 0/4" in todo
+    assert "TODO 0/5" in todo
     assert "target_analysis is required now" in todo
     assert "b300" in todo
 
@@ -211,15 +214,22 @@ def test_pmc_roofline_gate_does_not_fire_when_pmc_missing(session_dir):
     empty, ``_required_next_step()`` must NOT mention ``pmc_roofline``.
     The PMC hard-gate has been removed. With no ``kernel_opt`` KEEP
     pending and no unvalidated stack KEEPs, the chain has reached its
-    end and the required step is empty."""
+    end and the required step is empty.
+
+    P3 note: also populate last_select_kernels so the analyze gate is
+    open; this test is about PMC and should not be coupled to analyze.
+    """
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_select_kernels = {
+        "trace_input": "/tmp/profile.tar.gz",
+        "candidates_path": "/tmp/x.json",
+    }
     todo = coord._required_next_step()
     assert "pmc_roofline" not in todo
-    assert "select_kernels" not in todo
     assert todo == ""
 
 
@@ -246,12 +256,20 @@ def test_pmc_roofline_gate_does_not_block_explore_actions(session_dir):
 def test_pmc_summary_present_does_not_change_required_next_step(session_dir):
     """Sanity: setting ``last_profile_pmc_summary`` to a value must NOT
     change ``_required_next_step()`` because PMC is no longer part of
-    the TODO chain. The chain is empty either way."""
+    the TODO chain. The chain is empty either way.
+
+    P3 note: also populate last_select_kernels so the analyze gate is
+    open; this test is about PMC and should not be coupled to analyze.
+    """
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_select_kernels = {
+        "trace_input": "/tmp/profile.tar.gz",
+        "candidates_path": "/tmp/x.json",
+    }
     todo_without_pmc = coord._required_next_step()
     s.last_profile_pmc_summary = "/tmp/pmc.json"
     todo_with_pmc = coord._required_next_step()
@@ -314,7 +332,10 @@ def test_integrate_gate_fires_when_keep_pending(session_dir):
     }
     assert coord._kernel_opt_keep_pending() == "k-rmsnorm"
     todo = coord._required_next_step()
-    assert "TODO 3/4" in todo
+    # P3 renumbered the integrate gate from 3/4 to 4/5 (analyze is the
+    # new 3/5). `_seed_post_baseline` populates last_select_kernels so
+    # the analyze gate is satisfied; the integrate gate is what fires.
+    assert "TODO 4/5" in todo
     assert "integrate is required now" in todo
     assert "k-rmsnorm" in todo
 
@@ -396,9 +417,18 @@ def test_select_kernels_gate_does_not_block_explore_actions(session_dir):
         )
 
 
-def test_select_kernels_gate_does_not_appear_in_required_next_step(session_dir):
-    """``_required_next_step()`` must not surface a select_kernels TODO
-    even when ``last_select_kernels`` is stale."""
+def test_analyze_gate_surfaces_select_kernels_todo_when_cache_stale(session_dir):
+    """When ``last_profile_trace`` is set but ``last_select_kernels`` is
+    empty/stale, ``_required_next_step()`` surfaces a TODO 3/5 (analyze)
+    guidance prompt telling the LLM to emit a `select_kernels` REQUEST
+    before any kernel_opt cycle.
+
+    NB: This is a GUIDANCE-only gate. ``_sequence_denial_for_action``
+    still does NOT block explore actions (params/backends/sweep) on a
+    stale cache — see ``test_select_kernels_gate_does_not_block_explore_actions``
+    which remains valid. The TODO only adds an LLM-visible prompt; it
+    does not add a new action-layer denial.
+    """
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
@@ -406,7 +436,28 @@ def test_select_kernels_gate_does_not_appear_in_required_next_step(session_dir):
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_select_kernels = {}
     todo = coord._required_next_step()
-    assert "select_kernels" not in todo
+    assert "TODO 3/5" in todo
+    assert "analyze is required now" in todo
+    assert "select_kernels" in todo
+    assert "trace_input" in todo
+
+
+def test_analyze_gate_clears_when_cache_matches_trace(session_dir):
+    """Once ``last_select_kernels.trace_input`` matches the current
+    ``last_profile_trace``, the P3 analyze gate clears and the chain
+    falls through to the next guard (integrate / validate_stack /
+    empty)."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_select_kernels = {
+        "trace_input": "/tmp/profile.tar.gz",
+        "candidates_path": "/tmp/cands.json",
+    }
+    todo = coord._required_next_step()
+    assert "analyze is required now" not in todo
     # No other gate is open in this state, so the chain is empty.
     assert todo == ""
 
