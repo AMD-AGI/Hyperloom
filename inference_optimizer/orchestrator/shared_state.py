@@ -80,6 +80,11 @@ _DEFAULT_LAST_FAILURES = 10
 # helpers so adding a new audit action is a one-line change.
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "baseline", "profile", "backends", "params", "sweep", "validate_stack",
+    # Roofline-v2 N10: roofline composite action audit so each
+    # invocation lands in `roofline_attempts` (counted by N7
+    # verify/audit scripts as roofline_action_count). See
+    # coordinator.py _AUDIT_ACTIONS for the matching counterpart.
+    "roofline",
 })
 
 # Mapping from audit-action name to (result-dict key, prompt-display label).
@@ -90,6 +95,9 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset({
 _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
     "baseline":       ("output_throughput", "output_throughput"),
     "profile":        ("output_throughput", "output_throughput"),
+    # N10: roofline composite action — `snapshot_id` is the natural
+    # progress metric (each successful run produces a fresh snapshot).
+    "roofline":       ("snapshot_id",       "snapshot_id"),
     "backends":       ("gain_pct",          "gain_pct"),
     "params":         ("gain_pct",          "gain_pct"),
     "sweep":          ("output_throughput", "output_throughput"),
@@ -210,12 +218,19 @@ class SharedState:
     last_backends: dict[str, Any] = field(default_factory=dict)
     last_params: dict[str, Any] = field(default_factory=dict)
     last_validate_stack: dict[str, Any] = field(default_factory=dict)
+    # Roofline-v2 N10: composite roofline action audit snapshot +
+    # rolling history. Mirrors the v0 per-action audit pattern (one
+    # dict snapshot for "what was the most recent run", one capped
+    # list for "what was the per-tick history"). Counted by N7's
+    # verify_roofline_v2 / audit_roofline_decisions scripts.
+    last_roofline: dict[str, Any] = field(default_factory=dict)
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
     backends_attempts: list[dict[str, Any]] = field(default_factory=list)
     params_attempts: list[dict[str, Any]] = field(default_factory=list)
     sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
     validate_stack_attempts: list[dict[str, Any]] = field(default_factory=list)
+    roofline_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Global rolling log of unpromotable task results, capped at
     # ``_DEFAULT_LAST_FAILURES``. Carries the rich failure context
     # (error_class / error_excerpt / stderr_tail / workspace /
