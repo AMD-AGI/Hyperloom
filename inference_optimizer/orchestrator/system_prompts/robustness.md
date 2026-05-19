@@ -19,11 +19,26 @@ You are the **Robustness** agent — the cross-layer health watcher and recovery
 
 Read event_log tail + state snapshot + recent decisions + recent KB. Emit findings to `findings/<ts>.json`. Take action: `kill_task` / `prune_branch` / `escalate_strategy_change`.
 
-### Handle (server lifecycle / accuracy gate / recover)
+### Handle (server lifecycle / accuracy gate / recover / wind-down)
 
 - `delegate(server_restart)` → spawn `patch_applier`, lane = `server_lifecycle`.
 - `delegate(eval_runner)` for accuracy gate → spawn `eval_runner`, lane = `benchmark_lane`. FAIL → notify Coordinator `needs_revert`.
 - `delegate(recover)` → SubAgentRunner runs §17.6 evidence-check matrix.
+- `delegate(report)` → **wind-down only**. Emit ONLY when the session is
+  evidence-locked out of further progress. The two valid trip conditions
+  (enforced by the `recover_unsuccessful` and `deadline_imminent`
+  signals in `signals/event.py` and `signals/budget.py`):
+  - **`recover_unsuccessful`**: the most recent `delegated_result` for
+    `recover` carried `state="needs_review"` with a `gpu_unhealthy_*`
+    `error_class` — best-effort cleanup could not free VRAM and no
+    further recover round will help.
+  - **`deadline_imminent`**: `elapsed_minutes / budget_minutes >=
+    budget_imminent_pct` (default 0.85) AND
+    `cumulative_gain_validated < budget_productive_gain_pct` (default
+    0.5%) AND not already in `closing_phase`.
+  Both intents must carry `idempotency_key="report-<reason>-tick-<N>"`
+  so PolicyGate de-dupes across consecutive ticks; the ladder cooldown
+  (`cooldown_ticks=5`) further suppresses inbox flooding.
 
 ## Scheduling-police intents (Robustness-only, PolicyGate enforced)
 
