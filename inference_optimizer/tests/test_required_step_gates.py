@@ -282,6 +282,11 @@ def test_pmc_roofline_gate_skipped_in_no_kernel_mode(session_dir):
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
+    # Roofline-v2 N3: backends now requires fresh analysis_md_text.
+    s.last_trace_analyze = {
+        "trace_input": "/tmp/profile.tar.gz",
+        "analysis_md_text": "FAKE_REPORT",
+    }
     assert coord._required_next_step() == ""
     assert coord._sequence_denial_for_action("backends") is None
 
