@@ -48,6 +48,7 @@ from .orchestrator.action_executors import (
     TargetAnalysisExecutor,
     backends_executor,
     baseline_executor,
+    make_roofline_stub_executor,
     params_executor,
     pmc_roofline_executor,
     profile_executor,
@@ -625,6 +626,20 @@ def _register_executors(
             compare_against_gpu=(compare_against_gpu or "").strip(),
             session_dir=session_dir,
         ),
+    )
+
+    # Roofline-v2 C4a: wire the ``roofline`` action with a stub executor
+    # that returns ``primary_bottleneck="unknown"`` + empty advice
+    # (``build_roofline_fallback_result``). The stub holds a reference to
+    # ``coordinator.shared_state`` so it can read the cached
+    # ``last_select_kernels.roofline_snapshot_id`` and surface it in the
+    # result — that lets C4c's Coordinator integration + C5's prompt
+    # renderer be wired and exercised against C4a output before C4b
+    # replaces the stub with the real sub-agent LLM analyzer. See
+    # design/roofline-v2.md §7 / §8 for the C4a/b/c split rationale.
+    coordinator.sub.register_executor(
+        "roofline",
+        make_roofline_stub_executor(shared_state=coordinator.shared_state),
     )
 
     if no_kernel:

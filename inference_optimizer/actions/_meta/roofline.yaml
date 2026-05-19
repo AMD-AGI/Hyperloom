@@ -1,0 +1,23 @@
+name: roofline
+family: analysis
+cost_minutes_p50: 1.0
+cost_minutes_p75: 2.0
+expected_gain_pct: [0.0, 0.0]
+accuracy_risk: 0.0
+crash_risk: 0.01
+prerequisites:
+  - select_kernels
+requires_lanes: []
+allowed_tools:
+  - emit_intent
+side_effects:
+  - reads_artifacts
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 1
+lease_ttl_sec: 120
+description: "Run roofline sub-agent against the cached TraceLens analysis.md; produces structured suggested_prunes / suggested_next_actions / reprofile_recommended so the main Orchestration LLM can decide which action families to PRUNE_BRANCH and which to PROPOSE."
+pipeline_phase: analysis
+typical_runtime_min: 1.0
+applicable_when:
+  - "last_select_kernels.analysis_md_text != ''"
