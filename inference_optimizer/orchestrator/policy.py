@@ -35,6 +35,17 @@ from typing import TYPE_CHECKING, Any
 from .framework_paths import resolve_source_file_allowlist
 from .intent_parser import Intent, IntentType
 from .message_bus import TOPIC_ALLOWLIST
+from .phase_state import (
+    PHASE_ALLOWED_ACTIONS,
+    PHASE_EXPLORE,
+    PHASE_NAMES,
+    allowed_actions_for,
+    is_action_allowed_in_phase,
+)
+from .specialist_domains import (
+    SPECIALIST_DOMAIN_KEYS,
+    SPECIALIST_MAX_TURNS_HARD_CAP,
+)
 
 if TYPE_CHECKING:  # pragma: no cover — type-only
     from .agent_role import AgentRole
@@ -74,6 +85,43 @@ KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
     "operator_tuning",
     "vendor_kernel_config",
 })
+
+
+# ---------------------------------------------------------------------------
+# v0.8 M5 — specialist sub-agent action (KB_design §3.5 + §3.13 M5).
+#
+# ``specialist`` is a synthetic action_name that the Orchestration role
+# uses to delegate work to an LLM specialist (research_lane, capacity-1
+# in M5). It does NOT have a yaml meta under ``actions/_meta/`` —
+# domain-specific behaviour is parameterised via ``params.domain``
+# instead (see ``specialist_domains.SPECIALIST_DOMAINS``).
+#
+# PolicyGate accepts ``delegate{action_name='specialist'}`` from
+# Orchestration only (R2 ``specialist_dispatch_source``) regardless of
+# whether the action is in ActionRegistry; this constant tells the
+# generic ``_validate_delegate`` unknown_action gate to skip the
+# registry lookup. R2's sub-rules then enforce the param contract.
+# ---------------------------------------------------------------------------
+SPECIALIST_ACTION_NAME: str = "specialist"
+
+# Source roles allowed to dispatch a specialist via
+# ``delegate{action='specialist'}``. KB_design §3.5 §11 / §3.11 §4.2.
+SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration"})
+
+# Prefix the SubAgentRunner stamps on every emit-intent originating
+# from a specialist task. ``from_agent='specialist:<task_id>'``.
+SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
+
+
+# Synthetic dataclass-ish stub used as ``role`` argument when validating
+# path containment for specialist intents. We only need ``name`` for the
+# error messages; specialist intents go through ``_validate_specialist_*``
+# directly so the conventional role.allowed_intents matrix doesn't fire.
+class _SpecialistPseudoRole:
+    name = "specialist"
+
+
+_SPECIALIST_PSEUDO_ROLE = _SpecialistPseudoRole()
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +219,33 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "model_class",
     "start_ts",
     "max_minutes",
+    # v0.8 M1 — Cortex KB integration fields (KB_design §3.6, §3.10,
+    # §3.13 M1). Coordinator-only writes; LLM agents reading is fine.
+    "cortex_session_id",
+    "cortex_session_summary",
+    "pending_kb_edges",
+    "warm_start_recipe",
+    "warm_start_pitfalls",
+    "warm_start_ts",
+    # v0.8 M2 — phase state machine fields (KB_design §3.2, §3.10,
+    # §3.13 M2). All managed by ``Coordinator._advance_phase_if_needed``;
+    # LLM update_state never reaches these.
+    "phase",
+    "phase_started_ts",
+    "phase_started_unix",
+    "phase_history",
+    "phase_budget_pct",
+    # v0.8 M5 — specialist sub-agent ledger (KB_design §3.5 §10 / §3.10
+    # §4.1 / §3.11). Coordinator-only writes; LLM cannot inject
+    # arbitrary entries via update_state (specialist_done carries
+    # proposals through the dedicated R3 path instead).
+    "specialist_rounds",
+    "specialist_domain_empty_streak",
+    "last_specialist",
+    # v0.8 M5 — research_lane capacity is set once at CLI/manifest time
+    # and mirrored into SharedState. Locking it as CORE prevents an LLM
+    # from raising capacity mid-flight (KB_design §3.7 §4.4).
+    "research_lane_capacity",
 })
 
 
@@ -200,6 +275,12 @@ class PolicyGate:
     session_dir: Path | None = None
     strict_paths: bool = False
     shared_state: Any | None = None
+    # v0.8 M2 — phase-incompatible R1 enforcement mode.  When False
+    # (default) the rule only emits a warning entry into the audit log;
+    # production CLI flips this on via ``INFERENCE_OPTIMIZER_STRICT_PHASE=1``
+    # to fail-closed.  Two-stage rollout matches the v0.6 →
+    # v0.8 transition strategy in KB_design §3.13 M2.
+    strict_phase: bool = False
 
     def __post_init__(self) -> None:  # noqa: D401 — dataclass hook
         # Allow env to enable strict mode without threading a constructor
@@ -210,6 +291,10 @@ class PolicyGate:
             "INFERENCE_OPTIMIZER_STRICT_PATHS", ""
         ).strip() in ("1", "true", "yes"):
             self.strict_paths = True
+        if not self.strict_phase and _os.environ.get(
+            "INFERENCE_OPTIMIZER_STRICT_PHASE", ""
+        ).strip() in ("1", "true", "yes"):
+            self.strict_phase = True
 
     # ------------------------------------------------------------------
     # Public API
@@ -219,12 +304,25 @@ class PolicyGate:
 
         Order of checks (cheapest first):
 
-            1. Agent must be a known role
+            1. Agent must be a known role (or a ``specialist:<task_id>``
+               ephemeral identity)
             2. ``intent.type`` must be in ``role.allowed_intents``
             3. Per-intent type structural rules
             4. Cross-source allowlists (review_verdict / kill_task /
                robustness-only)
         """
+        # v0.8 M5 — specialist sub-agents emit intents under an ephemeral
+        # ``specialist:<task_id>`` identity (KB_design §3.5 §7). They get
+        # routed to a synthetic role with a tightly-scoped intent set
+        # (specialist_done + base inbox intents) and the R3 from-agent
+        # contract is enforced against the task_id suffix.
+        if from_agent.startswith(SPECIALIST_FROM_AGENT_PREFIX):
+            self._validate_specialist_intent(from_agent, intent)
+            self._validate_payload_paths(
+                _SPECIALIST_PSEUDO_ROLE, intent.type, intent.payload or {},
+            )
+            return
+
         role = self.role_registry.get(from_agent)
         if role is None:
             raise PolicyDenied(f"unknown agent {from_agent!r}", rule="role")
@@ -341,6 +439,15 @@ class PolicyGate:
                 f"of delegate(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
             )
+        # v0.8 M5 — R2 ``specialist`` is a synthetic action that bypasses
+        # ActionRegistry (KB_design §3.5 §10 "specialist 没有 yaml"). The
+        # per-payload contract (domain / gap / max_turns) is enforced by
+        # ``_validate_specialist_dispatch`` instead of the generic
+        # registry path.
+        if action_name == SPECIALIST_ACTION_NAME:
+            self._validate_specialist_dispatch(role, payload)
+            self._validate_phase_action(role, action_name, intent_kind="delegate")
+            return
         # If an ActionRegistry is wired, refuse delegate for unknown action names.
         # No registry → fall through (P0 / dev-mode where registry isn't loaded).
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
@@ -349,6 +456,10 @@ class PolicyGate:
                 rule="unknown_action",
                 hint="register a yaml under inference_optimizer/actions/_meta/<name>.yaml",
             )
+        # v0.8 M2 — R1 phase_incompatible. Runs **after** the role +
+        # kernel-ownership + unknown_action checks so the cheaper /
+        # structural denials win when both apply (Inv-11.3 orthogonality).
+        self._validate_phase_action(role, action_name, intent_kind="delegate")
 
     def _validate_propose_action(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         action_name = str(payload.get("action_name", "")).strip()
@@ -367,6 +478,8 @@ class PolicyGate:
                 f"(not in ActionRegistry)",
                 rule="unknown_action",
             )
+        # v0.8 M2 — R1 phase_incompatible (KB_design §3.11 §4.1).
+        self._validate_phase_action(role, action_name, intent_kind="propose_action")
 
     def _validate_state_transition(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         changes = payload.get("changes")
@@ -413,6 +526,12 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
+        # v0.8 M2 — R1 phase_incompatible (KB_design §3.11 §4.1). For
+        # orchestration → kernel REQUEST we treat the request *kind* as
+        # the action name (kernel-owned actions named identically to
+        # their REQUEST kind: kernel_opt / integrate / etc.).
+        if target == "kernel" and kind in KERNEL_OWNED_ACTIONS:
+            self._validate_phase_action(role, kind, intent_kind="request")
 
     def _validate_response(self, payload: dict[str, Any]) -> None:
         in_reply_to = str(payload.get("in_reply_to", "")).strip()
@@ -442,6 +561,316 @@ class PolicyGate:
                 rule="payload",
                 hint="use one of approve/reject/redirect/advise/needs_review",
             )
+
+    # ------------------------------------------------------------------
+    # v0.8 M2 — R1 phase_incompatible (KB_design §3.11 §4.1)
+    # ------------------------------------------------------------------
+    def _validate_phase_action(
+        self,
+        role: "AgentRole",
+        action_name: str,
+        *,
+        intent_kind: str,
+    ) -> None:
+        """Reject an action that isn't legal in the current phase.
+
+        Behaviour matrix (mode flipping via ``strict_phase``):
+
+        * ``strict_phase=True`` (production) → raise PolicyDenied with
+          ``rule='phase_incompatible'`` so the LLM self-corrects via
+          the inbox ``policy_denied`` event.
+        * ``strict_phase=False`` (legacy / tests) → swallow the denial
+          but bump :attr:`policy_denial_streak` so the audit trail
+          surfaces the would-be denial. Returns silently.
+
+        Cheap path: when SharedState is missing / phase isn't
+        initialised, the rule is a no-op (Inv-2.1 doesn't apply to a
+        run that hasn't entered the machine yet — Coordinator sets
+        phase before the first reactor tick anyway).
+        """
+        state = self.shared_state
+        if state is None:
+            return
+        phase = (getattr(state, "phase", "") or "").strip().upper()
+        if not phase or phase not in PHASE_NAMES:
+            return
+        if is_action_allowed_in_phase(action_name, phase):
+            return
+        allowed = allowed_actions_for(phase)
+        hint = (
+            f"you are in phase={phase}; action {action_name!r} is not in "
+            f"the allowed set {list(allowed)!r}. Either propose an "
+            f"action from that list, or wait for the Coordinator to "
+            f"advance the phase. See KB_design §3.2 for the per-phase "
+            f"action contract."
+        )
+        if not self.strict_phase:
+            # Warn-only: keep the run flowing for legacy tests but make
+            # the audit trail visible via policy_denial_streak.
+            try:
+                state.record_policy_denial(
+                    action_name=action_name,
+                    rule="phase_incompatible",
+                    hint=hint,
+                    intent_type=intent_kind,
+                    tick=int(getattr(state, "tick", 0) or 0),
+                    intent_payload={"phase": phase},
+                )
+            except Exception:  # noqa: BLE001 — best-effort audit
+                pass
+            return
+        raise PolicyDenied(
+            f"action {action_name!r} not allowed in phase={phase}",
+            rule="phase_incompatible",
+            hint=hint,
+        )
+
+    # ------------------------------------------------------------------
+    # v0.8 M5 — R2 ``specialist_dispatch_source`` (KB_design §3.11 §4.2)
+    # ------------------------------------------------------------------
+    def _validate_specialist_dispatch(
+        self, role: "AgentRole", payload: dict[str, Any],
+    ) -> None:
+        """Enforce the specialist-delegate contract.
+
+        Single rule ``specialist_dispatch_source`` with several sub-rules
+        surfaced in the ``hint`` so the LLM gets actionable feedback
+        (Inv-11.2). Order matches §3.5 §11 / §3.13 M5 §4.
+
+        - source role must be Orchestration (R2 main).
+        - ``params.domain`` ∈ SPECIALIST_DOMAIN_KEYS.
+        - ``params.gap_canonical_id`` non-empty.
+        - ``params.max_turns`` (if set) ≤ SPECIALIST_MAX_TURNS_HARD_CAP.
+        """
+        if role.name not in SPECIALIST_DISPATCH_SOURCE_ALLOWLIST:
+            raise PolicyDenied(
+                f"role={role.name!r} cannot dispatch specialists "
+                f"(allowed: {sorted(SPECIALIST_DISPATCH_SOURCE_ALLOWLIST)!r})",
+                rule="specialist_dispatch_source",
+                hint=(
+                    "Only the Orchestration role may dispatch specialists. "
+                    "Robustness should escalate via "
+                    "escalate_strategy_change with "
+                    "hint='need_specialist:<domain>'; the orchestration "
+                    "tick will pick it up."
+                ),
+            )
+        params = payload.get("params") or {}
+        if not isinstance(params, dict):
+            raise PolicyDenied(
+                "delegate{action='specialist'}: params must be a dict",
+                rule="specialist_dispatch_source",
+                hint="pass params={domain, gap_canonical_id, ...} per §3.5 §6",
+            )
+        domain = str(params.get("domain") or "").strip()
+        if not domain:
+            raise PolicyDenied(
+                "delegate{action='specialist'}: params.domain is required",
+                rule="specialist_dispatch_source",
+                hint=(
+                    f"set params.domain to one of "
+                    f"{sorted(SPECIALIST_DOMAIN_KEYS)!r}"
+                ),
+            )
+        if domain not in SPECIALIST_DOMAIN_KEYS:
+            raise PolicyDenied(
+                f"delegate{{action='specialist'}}: unknown domain={domain!r}",
+                rule="specialist_dispatch_source",
+                hint=(
+                    f"params.domain must be one of "
+                    f"{sorted(SPECIALIST_DOMAIN_KEYS)!r} "
+                    f"(KB_design §3.5 §5)"
+                ),
+            )
+        gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
+        if not gap:
+            raise PolicyDenied(
+                "delegate{action='specialist'}: params.gap_canonical_id required",
+                rule="specialist_dispatch_source",
+                hint=(
+                    "Provide a canonical gap id (e.g. "
+                    "'gap.attention.fp8_kv_cache.session-<sid>') so the "
+                    "specialist can anchor its KB traversal."
+                ),
+            )
+        max_turns_raw = params.get("max_turns")
+        if max_turns_raw is not None:
+            try:
+                max_turns = int(max_turns_raw)
+            except (TypeError, ValueError) as exc:
+                raise PolicyDenied(
+                    f"delegate{{action='specialist'}}: max_turns must be "
+                    f"int, got {max_turns_raw!r}",
+                    rule="specialist_dispatch_source",
+                ) from exc
+            if max_turns <= 0 or max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
+                raise PolicyDenied(
+                    f"delegate{{action='specialist'}}: max_turns={max_turns} "
+                    f"outside (0, {SPECIALIST_MAX_TURNS_HARD_CAP}]",
+                    rule="specialist_dispatch_source",
+                    hint=(
+                        f"max_turns must be in (0, {SPECIALIST_MAX_TURNS_HARD_CAP}]; "
+                        f"the prompt default is 8."
+                    ),
+                )
+
+    # ------------------------------------------------------------------
+    # v0.8 M5 — R3 ``specialist_done_source`` (KB_design §3.11 §4.3)
+    # ------------------------------------------------------------------
+    def _validate_specialist_intent(
+        self, from_agent: str, intent: Intent,
+    ) -> None:
+        """Validate any intent emitted under a ``specialist:<task_id>`` identity.
+
+        Specialists are tightly scoped (Inv-5.2): they may emit
+        SEND_MESSAGE (heartbeat / advice), ALERT, and exactly one
+        SPECIALIST_DONE. Anything else fires R3
+        ``specialist_done_source`` (the rule label covers the whole
+        specialist intent surface — sub-rule reported in hint).
+        """
+        task_id = from_agent.removeprefix(SPECIALIST_FROM_AGENT_PREFIX).strip()
+        if not task_id:
+            raise PolicyDenied(
+                "specialist from_agent missing task_id suffix "
+                f"(got {from_agent!r})",
+                rule="specialist_done_source",
+                hint=(
+                    "Specialist sub-agents must stamp "
+                    "from_agent='specialist:<task_id>' where <task_id> "
+                    "matches the dispatched task."
+                ),
+            )
+        if intent.type == IntentType.SPECIALIST_DONE:
+            self._validate_specialist_done_payload(task_id, intent.payload or {})
+            return
+        # Allowed ancillary intents (heartbeat / advice / alert).
+        if intent.type in (
+            IntentType.SEND_MESSAGE,
+            IntentType.ALERT,
+        ):
+            return
+        raise PolicyDenied(
+            f"specialist={from_agent!r} cannot emit "
+            f"intent_type={intent.type.value!r}",
+            rule="specialist_done_source",
+            hint=(
+                "Specialists may only emit specialist_done (exit), "
+                "send_message (heartbeat/advice), or alert. Use "
+                "specialist_done with proposal_set + summary instead."
+            ),
+        )
+
+    def _validate_specialist_done_payload(
+        self, task_id: str, payload: dict[str, Any],
+    ) -> None:
+        """Per-field R3 checks for the ``specialist_done`` payload.
+
+        Schema (KB_design §3.5 §7):
+
+        * gap_canonical_id: str (matches dispatch task_id's gap)
+        * domain: str ∈ SPECIALIST_DOMAIN_KEYS
+        * proposal_set: list of variant dicts (may be empty when empty=true)
+        * empty: bool (true → proposal_set must be []; reason required)
+        * summary: str (≤ 500 chars per design; we cap at 4096 defensively)
+        * confidence?: float ∈ [0, 1]
+        * new_findings?: list
+        * residual_questions?: list
+
+        The dispatch-side gap/domain match (R3
+        ``specialist_done_gap_mismatch`` / ``_domain_mismatch``) is
+        delegated to the SharedState-aware caller path; PolicyGate
+        here checks the structural shape so a malformed envelope
+        never reaches the Coordinator dispatcher.
+        """
+        gap = str(payload.get("gap_canonical_id") or "").strip()
+        if not gap:
+            raise PolicyDenied(
+                "specialist_done missing gap_canonical_id",
+                rule="specialist_done_source",
+                hint=(
+                    "Payload must echo the gap_canonical_id that was "
+                    "passed to delegate{action='specialist'} so "
+                    "Coordinator can cross-check the dispatch."
+                ),
+            )
+        domain = str(payload.get("domain") or "").strip()
+        if not domain:
+            raise PolicyDenied(
+                "specialist_done missing domain",
+                rule="specialist_done_source",
+            )
+        if domain not in SPECIALIST_DOMAIN_KEYS:
+            raise PolicyDenied(
+                f"specialist_done: unknown domain={domain!r}",
+                rule="specialist_done_source",
+                hint=(
+                    f"domain must be one of {sorted(SPECIALIST_DOMAIN_KEYS)!r}"
+                ),
+            )
+        proposal_set = payload.get("proposal_set")
+        if not isinstance(proposal_set, list):
+            raise PolicyDenied(
+                "specialist_done.proposal_set must be a list",
+                rule="specialist_done_source",
+                hint="set proposal_set=[] when empty=true",
+            )
+        empty_flag = bool(payload.get("empty"))
+        if empty_flag:
+            if proposal_set:
+                raise PolicyDenied(
+                    "specialist_done: empty=true implies proposal_set=[]",
+                    rule="specialist_done_source",
+                )
+            reason_field = str(
+                payload.get("reason") or payload.get("summary") or ""
+            ).strip()
+            if not reason_field:
+                raise PolicyDenied(
+                    "specialist_done: empty=true requires a reason / summary "
+                    "describing why no proposals were emitted",
+                    rule="specialist_done_source",
+                )
+        else:
+            for i, variant in enumerate(proposal_set):
+                if not isinstance(variant, dict):
+                    raise PolicyDenied(
+                        f"specialist_done.proposal_set[{i}] must be a dict",
+                        rule="specialist_done_source",
+                    )
+                if not str(variant.get("name") or "").strip():
+                    raise PolicyDenied(
+                        f"specialist_done.proposal_set[{i}].name required",
+                        rule="specialist_done_source",
+                        hint=(
+                            "Every variant needs a unique name "
+                            "(round-scoped). See §3.4 §5.1 for the full "
+                            "variant schema."
+                        ),
+                    )
+        summary = str(payload.get("summary") or "")
+        if len(summary) > 4096:
+            raise PolicyDenied(
+                "specialist_done.summary too long "
+                f"({len(summary)} > 4096 chars)",
+                rule="specialist_done_source",
+                hint="KB_design §3.5 §7 caps summary at ~500 chars; "
+                     "4096 is the defensive hard limit.",
+            )
+        confidence_raw = payload.get("confidence")
+        if confidence_raw is not None:
+            try:
+                confidence = float(confidence_raw)
+            except (TypeError, ValueError) as exc:
+                raise PolicyDenied(
+                    f"specialist_done.confidence must be float, "
+                    f"got {confidence_raw!r}",
+                    rule="specialist_done_source",
+                ) from exc
+            if not 0.0 <= confidence <= 1.0:
+                raise PolicyDenied(
+                    f"specialist_done.confidence={confidence} not in [0, 1]",
+                    rule="specialist_done_source",
+                )
 
     def _validate_kill_task(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         if role.name not in KILL_TASK_SOURCE_ALLOWLIST:

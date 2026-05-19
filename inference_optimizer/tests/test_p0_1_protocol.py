@@ -232,13 +232,26 @@ async def test_message_bus_replay_for_returns_ascending(db):
 # ===========================================================================
 # resource_lock
 # ===========================================================================
-def test_known_lanes_are_exactly_four():
+def test_known_lanes_v08_includes_research_lane():
+    """v0.8 M5 (KB_design §3.7) adds ``research_lane`` for LLM specialist
+    sub-agents. The four v0.6 serving lanes remain unchanged."""
     assert set(KNOWN_LANES) == {
         "server_lifecycle",
         "workspace_mutation",
         "benchmark_lane",
         "profile_lane",
+        "research_lane",
     }
+
+
+def test_research_lane_has_no_conflicts():
+    """Inv-7.2: research_lane is conflict-free vs. the serving lanes."""
+    assert LANE_CONFLICTS["research_lane"] == frozenset()
+    for lane, conflicts in LANE_CONFLICTS.items():
+        assert "research_lane" not in conflicts, (
+            f"lane={lane!r} unexpectedly lists research_lane as a "
+            f"conflict (Inv-7.2 says research_lane is conflict-free)"
+        )
 
 
 def test_lane_conflicts_symmetric_for_bench_profile_server():
