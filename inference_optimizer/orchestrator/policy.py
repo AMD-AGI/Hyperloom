@@ -113,6 +113,99 @@ SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration
 SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
 
 
+# ---------------------------------------------------------------------------
+# v0.8 §3.11 R4 / R5 — external tool whitelist registry
+#
+# Tool names live here (the *policy* layer) so PolicyGate AND the
+# SpecialistRunner share a single source of truth. The runner builds
+# its per-task tool list from the role-whitelist table below; PolicyGate
+# uses these constants for the intent-level R4 + R5 second pass
+# (KB_design §3.11 §5 "PolicyGate 仅作 *intent 层面* 的二次校验").
+#
+# Naming convention follows the Claude / Cursor tool surface.
+# ---------------------------------------------------------------------------
+
+#: KB *write* surfaces. R4 ``kb_write_unauthorized`` denies any
+#: intent that tries to invoke one — directly or via an action_name /
+#: request.kind collision.
+KB_WRITE_TOOL_NAMES: frozenset[str] = frozenset({
+    "mcp__cortex_kb__propose_point",
+    "mcp__cortex_kb__propose_edge",
+    "mcp__cortex_kb__hypothesize",
+    "mcp__cortex_kb__ingest_attempt",
+    "mcp__cortex_kb__verify",
+    "mcp__cortex_kb__commit",
+})
+
+#: KB *readonly* surfaces. R5 ``tool_whitelist_role`` requires the
+#: caller to be a specialist sub-agent.
+CORTEX_KB_READ_TOOL_NAMES: frozenset[str] = frozenset({
+    "mcp__cortex_kb__traverse",
+    "mcp__cortex_kb__find_recipe",
+    "mcp__cortex_kb__query",
+})
+
+#: PR Monitor *readonly* surfaces. R5 same role gating.
+PR_MONITOR_TOOL_NAMES: frozenset[str] = frozenset({
+    "mcp__pr_monitor__pr_repos_list",
+    "mcp__pr_monitor__pr_repo_stats",
+    "mcp__pr_monitor__pr_list",
+    "mcp__pr_monitor__pr_get",
+    "mcp__pr_monitor__pr_files",
+    "mcp__pr_monitor__pr_file_patch",
+    "mcp__pr_monitor__pr_patches",
+    "mcp__pr_monitor__pr_blob",
+    "mcp__pr_monitor__pr_commit_files",
+    "mcp__pr_monitor__pr_commit_file",
+    "mcp__pr_monitor__pr_pr_file_baseline",
+    "mcp__pr_monitor__pr_search",
+})
+
+#: Web tools. R5 — specialist-only AND EXPLORE-phase-only (KB_design
+#: §3.11 §4.5 table). Other roles / phases get
+#: ``tool_whitelist_role`` / ``tool_whitelist_phase``.
+WEB_TOOL_NAMES: frozenset[str] = frozenset({"WebSearch", "WebFetch"})
+
+#: Role-→-allowed-toolset map (R5). The default agents (orchestration /
+#: kernel / critic / robustness) never touch external knowledge tools;
+#: only the specialist sub-agent does. Keep this map flat and explicit
+#: so PolicyGate can do an O(1) membership check.
+TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
+    "specialist": (
+        WEB_TOOL_NAMES
+        | PR_MONITOR_TOOL_NAMES
+        | CORTEX_KB_READ_TOOL_NAMES
+    ),
+    # Empty sets — listing the roles explicitly so a typo
+    # (``"orchestrator"`` vs ``"orchestration"``) becomes a key
+    # error instead of a silent allow.
+    "orchestration": frozenset(),
+    "kernel": frozenset(),
+    "critic": frozenset(),
+    "robustness": frozenset(),
+}
+
+#: Phase whitelist for tools that are time-sensitive. Currently only
+#: the ``WebSearch`` / ``WebFetch`` block carries a phase restriction;
+#: KB readonly + PR Monitor are allowed in any phase (KB_design §3.11
+#: §4.5 table).
+PHASE_RESTRICTED_TOOLS: dict[str, frozenset[str]] = {
+    "WebSearch": frozenset({"EXPLORE"}),
+    "WebFetch": frozenset({"EXPLORE"}),
+}
+
+#: Convenience superset — every tool name PolicyGate knows about
+#: (read or write). Useful for the R4 collision check on
+#: ``propose_action.action_name`` so an LLM can't smuggle a tool
+#: invocation through the action registry.
+ALL_KNOWN_EXTERNAL_TOOL_NAMES: frozenset[str] = (
+    KB_WRITE_TOOL_NAMES
+    | CORTEX_KB_READ_TOOL_NAMES
+    | PR_MONITOR_TOOL_NAMES
+    | WEB_TOOL_NAMES
+)
+
+
 # Synthetic dataclass-ish stub used as ``role`` argument when validating
 # path containment for specialist intents. We only need ``name`` for the
 # error messages; specialist intents go through ``_validate_specialist_*``
@@ -481,6 +574,14 @@ class PolicyGate:
         # kernel-ownership + unknown_action checks so the cheaper /
         # structural denials win when both apply (Inv-11.3 orthogonality).
         self._validate_phase_action(role, action_name, intent_kind="delegate")
+        # v0.8 §3.11 R4 / R5 — block any ``delegate`` whose action_name
+        # tries to invoke an external tool via the intent channel.
+        self._validate_no_kb_write_collision(
+            action_name, intent_kind="delegate",
+        )
+        self._validate_tool_whitelist_collision(
+            role.name, action_name, intent_kind="delegate",
+        )
 
     def _validate_propose_action(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         action_name = str(payload.get("action_name", "")).strip()
@@ -501,6 +602,13 @@ class PolicyGate:
             )
         # v0.8 M2 — R1 phase_incompatible (KB_design §3.11 §4.1).
         self._validate_phase_action(role, action_name, intent_kind="propose_action")
+        # v0.8 §3.11 R4 / R5 — defense in depth on propose_action.
+        self._validate_no_kb_write_collision(
+            action_name, intent_kind="propose_action",
+        )
+        self._validate_tool_whitelist_collision(
+            role.name, action_name, intent_kind="propose_action",
+        )
 
     def _validate_state_transition(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         changes = payload.get("changes")
@@ -553,6 +661,12 @@ class PolicyGate:
         # their REQUEST kind: kernel_opt / integrate / etc.).
         if target == "kernel" and kind in KERNEL_OWNED_ACTIONS:
             self._validate_phase_action(role, kind, intent_kind="request")
+        # v0.8 §3.11 R4 / R5 — defense in depth: a REQUEST.kind cannot
+        # smuggle a KB write / external tool invocation either.
+        self._validate_no_kb_write_collision(kind, intent_kind="request")
+        self._validate_tool_whitelist_collision(
+            role.name, kind, intent_kind="request",
+        )
 
     def _validate_response(self, payload: dict[str, Any]) -> None:
         in_reply_to = str(payload.get("in_reply_to", "")).strip()
@@ -645,6 +759,192 @@ class PolicyGate:
             rule="phase_incompatible",
             hint=hint,
         )
+
+    # ------------------------------------------------------------------
+    # v0.8 §3.11 R4 — kb_write_unauthorized (KB_design §3.11 §4.4)
+    # ------------------------------------------------------------------
+    def _validate_no_kb_write_collision(
+        self,
+        action_name: str,
+        *,
+        intent_kind: str,
+    ) -> None:
+        """Reject any intent whose ``action_name`` / ``request.kind``
+        equals a Cortex KB *write* tool name.
+
+        Defense in depth — none of the canonical actions in
+        ``ActionRegistry`` ever collide with these names, so a real
+        v0.8 run will never reach this branch via a valid registry
+        entry. The rule fires when an LLM tries to smuggle a KB write
+        via the propose / delegate / request channels (or an
+        operator extension accidentally registers an action with a
+        cortex_kb name). KB_design §3.11 §4.4 / Inv-11.3.
+        """
+        if not action_name:
+            return
+        if action_name not in KB_WRITE_TOOL_NAMES:
+            return
+        raise PolicyDenied(
+            f"intent={intent_kind!r} cannot invoke KB write surface "
+            f"{action_name!r}",
+            rule="kb_write_unauthorized",
+            hint=(
+                "Direct KB writes are not allowed (KB_design §3.11 R4). "
+                "The Coordinator owns all KB writes. Express your "
+                "intent via propose_action / delegate / "
+                "specialist_done.proposal_set / review_verdict / "
+                "kb_writes (critic-agent commit-review) instead."
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # v0.8 §3.11 R5 — tool_whitelist_role / tool_whitelist_phase
+    # (KB_design §3.11 §4.5)
+    # ------------------------------------------------------------------
+    def _validate_tool_whitelist_collision(
+        self,
+        role_name: str,
+        action_name: str,
+        *,
+        intent_kind: str,
+    ) -> None:
+        """Reject any intent whose ``action_name`` / ``request.kind``
+        equals an external tool name not on the caller's role
+        whitelist.
+
+        Read-only Cortex KB / PR Monitor / Web tools are specialist-
+        only; the four primary agents (orchestration / kernel /
+        critic / robustness) never reach for them through an intent.
+        KB_design §3.11 §4.5.
+        """
+        if not action_name:
+            return
+        # Only externally-known tool names trigger R5. The R4 check
+        # already covers KB write names — keep them out of this
+        # branch so a write attempt produces ``kb_write_unauthorized``
+        # (R4) rather than a less-specific ``tool_whitelist_role`` (R5).
+        if action_name in KB_WRITE_TOOL_NAMES:
+            return
+        if action_name not in ALL_KNOWN_EXTERNAL_TOOL_NAMES:
+            return
+        allowed_for_role = TOOL_WHITELIST_BY_ROLE.get(role_name, frozenset())
+        if action_name in allowed_for_role:
+            # Role allows it — check the phase restriction if any.
+            phase = ""
+            if self.shared_state is not None:
+                phase = (
+                    getattr(self.shared_state, "phase", "") or ""
+                ).strip().upper()
+            phase_allowed = PHASE_RESTRICTED_TOOLS.get(action_name)
+            if phase and phase_allowed and phase not in phase_allowed:
+                raise PolicyDenied(
+                    f"tool {action_name!r} is restricted to "
+                    f"phase={sorted(phase_allowed)!r}; current "
+                    f"phase={phase!r}",
+                    rule="tool_whitelist_phase",
+                    hint=(
+                        f"{action_name} is restricted to "
+                        f"{sorted(phase_allowed)} phase(s). Wait for "
+                        f"the phase transition or use a phase-allowed "
+                        f"alternative (e.g. KB readonly / PR Monitor "
+                        f"are any-phase). KB_design §3.11 §4.5."
+                    ),
+                )
+            return
+        raise PolicyDenied(
+            f"role={role_name!r} cannot invoke tool {action_name!r}",
+            rule="tool_whitelist_role",
+            hint=(
+                f"Tool {action_name!r} is restricted to "
+                f"specialist sub-agents (KB_design §3.11 §4.5). The "
+                f"primary agents (orchestration / kernel / critic / "
+                f"robustness) consult KB / PR Monitor via the "
+                f"Coordinator-mediated KnowledgePlane facade instead."
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # v0.8 §3.11 R4 / R5 public helper — pure validator usable by the
+    # SpecialistRunner per-task tool-list builder.
+    # ------------------------------------------------------------------
+    def validate_tool_invocation(
+        self,
+        tool_name: str,
+        *,
+        source_role: str,
+        phase: str | None = None,
+    ) -> None:
+        """Raise :class:`PolicyDenied` if ``tool_name`` is not
+        allowed for ``source_role`` (and optional ``phase``).
+
+        Pure function — Inv-11.1. Returns ``None`` when the tool is
+        allowed. Intended for tool-list builders that need a single
+        source of truth: the SpecialistRunner can call this on each
+        candidate tool before passing the list to the LLM backend.
+
+        ``phase`` overrides the live ``shared_state.phase`` — handy in
+        unit tests that don't wire a SharedState.
+        """
+        tool_name = (tool_name or "").strip()
+        if not tool_name:
+            raise PolicyDenied(
+                "validate_tool_invocation: tool_name is empty",
+                rule="payload",
+                hint="caller must pass the canonical tool name",
+            )
+        # R4 — KB writes are categorically off-limits.
+        if tool_name in KB_WRITE_TOOL_NAMES:
+            raise PolicyDenied(
+                f"KB write tool {tool_name!r} cannot be invoked by "
+                f"role={source_role!r}",
+                rule="kb_write_unauthorized",
+                hint=(
+                    "Direct KB writes are not allowed (KB_design §3.11 "
+                    "R4). The Coordinator owns all KB writes."
+                ),
+            )
+        # R5 — role + phase whitelist for the known external tools.
+        if tool_name in ALL_KNOWN_EXTERNAL_TOOL_NAMES:
+            allowed_for_role = TOOL_WHITELIST_BY_ROLE.get(
+                source_role, frozenset(),
+            )
+            if tool_name not in allowed_for_role:
+                raise PolicyDenied(
+                    f"role={source_role!r} cannot invoke tool "
+                    f"{tool_name!r}",
+                    rule="tool_whitelist_role",
+                    hint=(
+                        f"{tool_name} is restricted to specialist "
+                        f"sub-agents. KB_design §3.11 §4.5."
+                    ),
+                )
+            phase_value = (
+                (phase or "").strip().upper()
+                if phase is not None
+                else (
+                    (getattr(self.shared_state, "phase", "") or "")
+                    .strip().upper()
+                    if self.shared_state is not None else ""
+                )
+            )
+            phase_allowed = PHASE_RESTRICTED_TOOLS.get(tool_name)
+            if phase_value and phase_allowed and phase_value not in phase_allowed:
+                raise PolicyDenied(
+                    f"tool {tool_name!r} is restricted to "
+                    f"phase={sorted(phase_allowed)!r}; current "
+                    f"phase={phase_value!r}",
+                    rule="tool_whitelist_phase",
+                    hint=(
+                        f"{tool_name} is restricted to "
+                        f"{sorted(phase_allowed)} phase(s). KB_design "
+                        f"§3.11 §4.5."
+                    ),
+                )
+        # Anything else is implicitly allowed — PolicyGate doesn't
+        # try to enumerate every internal tool (Read / Grep / Glob /
+        # emit_intent / Bash). The SpecialistRunner still filters
+        # against its own ``SPECIALIST_TOOL_DENYLIST`` for the local
+        # tools that don't pass through PolicyGate.
 
     # ------------------------------------------------------------------
     # v0.8 M5 — R2 ``specialist_dispatch_source`` (KB_design §3.11 §4.2)
