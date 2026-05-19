@@ -26,6 +26,7 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 import httpx
 
 from ..signals import Symptom, SymptomSeverity
+from ..state_store import DetectorStateView
 
 
 log = logging.getLogger(__name__)
@@ -69,15 +70,39 @@ class RcaThrottle:
     the engine should actually contact the LLM.
     """
 
-    def __init__(self, config: RcaThrottleConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: RcaThrottleConfig | None = None,
+        *,
+        state_view: "DetectorStateView | None" = None,
+    ) -> None:
         self._config = config or RcaThrottleConfig()
-        self._last_called_unix: dict[tuple[str, ...], float] = {}
+        self._state_view = state_view
+        # Disk-backed per-key cooldown timestamps — the 60s default
+        # cooldown is meaningless without persistence under M1
+        # subprocess-per-tick transport (every subprocess sees an
+        # empty dict and calls the LLM again). ``_tick_calls`` /
+        # ``_tick_id`` deliberately stay in-memory: they're per-tick
+        # budget counters, not cross-tick state.
+        loaded = state_view.load() if state_view is not None else {}
+        self._last_called_unix: dict[tuple[str, ...], float] = (
+            _decode_throttle_keys(loaded.get("last_called_unix"))
+        )
         self._tick_calls = 0
         self._tick_id: int | None = None
 
     @property
     def config(self) -> RcaThrottleConfig:
         return self._config
+
+    def _persist(self) -> None:
+        if self._state_view is None:
+            return
+        self._state_view.save({
+            "last_called_unix": _encode_throttle_keys(
+                self._last_called_unix
+            ),
+        })
 
     def begin_tick(self, tick_id: int) -> None:
         if self._tick_id != tick_id:
@@ -98,6 +123,7 @@ class RcaThrottle:
     def record(self, sym: Symptom, *, now_unix: float) -> None:
         self._last_called_unix[sym.dedup_key()] = now_unix
         self._tick_calls += 1
+        self._persist()
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +310,47 @@ def _truncate(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max_chars - 3].rstrip() + "..."
+
+
+# ---------------------------------------------------------------------------
+# Throttle state (de)serialisation helpers
+# ---------------------------------------------------------------------------
+
+# ASCII unit separator — same scheme as the ActionLadder cooldown
+# encoder; keeps tuple keys round-trippable through JSON object keys.
+_THROTTLE_KEY_SEP: str = "\x1f"
+
+
+def _encode_throttle_keys(
+    last_called: dict[tuple[str, ...], float],
+) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for key, ts in last_called.items():
+        try:
+            encoded = _THROTTLE_KEY_SEP.join(str(part) for part in key)
+        except Exception:  # noqa: BLE001
+            continue
+        try:
+            out[encoded] = float(ts)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _decode_throttle_keys(payload: Any) -> dict[tuple[str, ...], float]:
+    if not isinstance(payload, dict):
+        return {}
+    out: dict[tuple[str, ...], float] = {}
+    for raw_key, raw_ts in payload.items():
+        if not isinstance(raw_key, str):
+            continue
+        try:
+            ts = float(raw_ts)
+        except (TypeError, ValueError):
+            continue
+        parts = tuple(raw_key.split(_THROTTLE_KEY_SEP))
+        out[parts] = ts
+    return out
 
 
 __all__ = [
