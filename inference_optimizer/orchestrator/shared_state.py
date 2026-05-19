@@ -111,7 +111,7 @@ _GAPS_ATTEMPTS_HISTORY = 20
 # helpers so adding a new audit action is a one-line change.
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "baseline", "profile", "sweep", "explore",
-    # F1-3 (Roofline-v2 / plan_roofline_framework): the composite
+    # F1-3 (Roofline-v2 / plan_roofline_framework) + N10: the composite
     # ``roofline`` action runs profile + trace_analyze atomically.
     # Audit each attempt so the prompt's RECENT ACTION ATTEMPTS block
     # surfaces the snapshot id + analysis_md_path the executor produced
@@ -129,8 +129,9 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
     "profile":  ("output_throughput", "output_throughput"),
     "sweep":    ("output_throughput", "output_throughput"),
     "explore":  ("best_gain_pct",     "gain_pct"),
-    # F1-3: ``roofline`` is an analysis composite, not a benchmark — its
-    # key metric is the monotonic snapshot id, not a throughput number.
+    # F1-3 + N10: ``roofline`` is an analysis composite, not a
+    # benchmark — its key metric is the monotonic snapshot id, not a
+    # throughput number.
     "roofline": ("snapshot_id",       "snapshot_id"),
 }
 
@@ -437,6 +438,12 @@ class SharedState:
     # v0.8 M3 — merged explore action snapshot (KB_design §3.4). Same
     # schema as the other ``last_<action>`` mirrors.
     last_explore: dict[str, Any] = field(default_factory=dict)
+    # Roofline-v2 N10: composite roofline action audit snapshot +
+    # rolling history. Mirrors the v0 per-action audit pattern (one
+    # dict snapshot for "what was the most recent run", one capped
+    # list for "what was the per-tick history"). Counted by N7's
+    # verify_roofline_v2 / audit_roofline_decisions scripts.
+    last_roofline: dict[str, Any] = field(default_factory=dict)
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
     sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
@@ -449,6 +456,9 @@ class SharedState:
     validate_stack_attempts: list[dict[str, Any]] = field(default_factory=list)
     # v0.8 M3 — explore audit log. Capped per _DEFAULT_ATTEMPTS_HISTORY.
     explore_attempts: list[dict[str, Any]] = field(default_factory=list)
+    # Roofline-v2 N10: per-tick roofline audit log (capped). Records the
+    # snapshot_id / analysis_md_path each successful invocation produced.
+    roofline_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Global rolling log of unpromotable task results, capped at
     # ``_DEFAULT_LAST_FAILURES``. Carries the rich failure context
     # (error_class / error_excerpt / stderr_tail / workspace /
