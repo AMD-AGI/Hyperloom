@@ -46,6 +46,12 @@ class IntentType(str, Enum):
     FORCE_DISPATCH = "force_dispatch"
     PRUNE_BRANCH = "prune_branch"
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
+    # v0.8 M5 — specialist sub-agent exit protocol (KB_design §3.5 §7).
+    # specialist tasks (LLM sub-agents on the research_lane) close their
+    # lifecycle with exactly one SPECIALIST_DONE intent. PolicyGate R3
+    # checks from_agent prefix + gap/domain match + payload schema; see
+    # ``policy._validate_specialist_done`` for the full contract.
+    SPECIALIST_DONE = "specialist_done"
 
 
 _ALL_INTENT_VALUES: tuple[str, ...] = tuple(t.value for t in IntentType)
@@ -111,6 +117,12 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.FORCE_DISPATCH:  ("task_id", "reason"),
     IntentType.PRUNE_BRANCH:    ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
+    # v0.8 M5 — specialist exit envelope. ``proposal_set`` is a list (may
+    # be empty when ``empty=true``); per-variant schema is enforced by
+    # PolicyGate R3 (``policy._validate_specialist_done``) since the
+    # intent_parser sees only the envelope skeleton.
+    IntentType.SPECIALIST_DONE: ("gap_canonical_id", "domain",
+                                  "proposal_set", "empty", "summary"),
 }
 
 
@@ -146,7 +158,11 @@ EMIT_INTENT_TOOL_SCHEMA: dict[str, Any] = {
                     "verdict ∈ approve/reject/redirect/advise/needs_review, "
                     "reasoning, kb_evidence?} — Critic-only; "
                     "kill_task / force_dispatch / prune_branch / "
-                    "escalate_strategy_change — Robustness-only (PolicyGate)."
+                    "escalate_strategy_change — Robustness-only (PolicyGate); "
+                    "specialist_done: {gap_canonical_id, domain, "
+                    "proposal_set: [variant...], empty, summary, "
+                    "confidence?, new_findings?, residual_questions?} — "
+                    "specialist-only, exactly one per task (KB_design §3.5 §7)."
                 ),
             },
         },
