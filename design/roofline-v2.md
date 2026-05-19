@@ -347,16 +347,33 @@ v1 把 sub-agent 这一层强行插在 TraceLens 报告和主 LLM 之间，**本
 | **超时** | profile + trace_analyze 各自的现有 timeout；roofline 整体没有额外 timeout |
 | **错误处理** | 子步骤失败 → roofline.status=failed + error_class 透传；不写 fallback cache（v1 的 fallback 设计被废） |
 
-### 6.5 sequence_denial 集成（v2.0）
+### 6.5 sequence_denial 集成（v2.0 — N3 + N9 修订）
 
 `roofline` 自身没有前置（baseline 完成后即可 propose）；但 `roofline`
-是 **4 个优化 action 的前置依赖**：
+是 **3 个 propose 路径优化 action + 1 个 REQUEST 路径** 的前置依赖：
 
-- `backends` / `params` / `kernel_opt` / `comm_optimization` 必须有
-  `last_select_kernels.analysis_md_text` 非空（即 roofline 至少跑过 1
+- `backends` / `params` / `comm_optimization`（propose 路径）必须有
+  `last_trace_analyze.analysis_md_text` 非空（即 roofline 至少跑过 1
   次），否则 sequence_denial 拒绝 propose。
+- `kernel_opt`（REQUEST kind="run_optimization" 路径）由
+  `_sequence_denial_for_request` 检查
+  `last_trace_analyze.trace_input == last_profile_trace`。
 - `sweep` / `validate_stack` / `report` / `integrate` 不要求 roofline
   前置（它们不依赖瓶颈分析）。
+
+**N9 修订（GPU 实测后追加）**：v2 原本设计"profile 仍可直接 propose 作为
+roofline 的 legacy alternative"，N3 用 hint 引导 LLM 优先 roofline。
+但 Qwen3-32B GPU 实测显示 LLM **仍然第一步 propose 了 profile**（基于
+v0 训练分布的惯性），导致 roofline 内部又跑一次 profile，浪费 ~10 min
+wall-clock。N9 把 hint 改为硬拒绝：LLM 直接 propose `profile` 时
+sequence_denial 返回 `PolicyDenied(rule="execution_order")` + hint
+建议用 roofline。`profile_executor` 仍存在并被 RooflineExecutor 内部
+调用（不走 propose 路径），所以 profile action 功能不丢失，只是 LLM
+看不到它作为可独立提议的选项。
+
+逃生阀：`INFERENCE_OPTIMIZER_ALLOW_DIRECT_PROFILE=1` 环境变量让 N9
+gate 退化为 N3 软引导（用于 debug / robustness 恢复路径 / v2.1 可能
+需要的 subset-retry 场景）。
 
 不在 closing_phase；closing 后所有 action 走现有 `_closing_phase_denial`
 拦截。
@@ -399,7 +416,8 @@ v1 sub-agent 实施"。
 | **N5** analysis.md 全文注入 + orchestration prompt 指导段 | (a) `shared_state.py` `_format_analysis_md_full()` 渲染整段；(b) `to_prompt_summary` 加入；(c) `orchestration.md` 写 "How to consume analysis.md + discovered_flags + tested" 指导段（取代 C5 的 _format_roofline_decision）；(d) 单测 | 2 改 + 1 测试 | ~250 | 📝 待执行 |
 | **N6** cache hit rate 度量（务实简化）| 经 Anthropic prompt-caching 文档复核：automatic caching 已基于 system_prompt + tools + messages prefix 哈希工作，无需应用层"三段切分"。N6 范围缩到：(a) `claude.py` `_invoke_and_collect` 返回 `usage` dict，`run()` 把 `cache_creation_input_tokens` / `cache_read_input_tokens` / `input_tokens` / `output_tokens` 写入 `backend.calls` + `BackendTurnResult.metadata`；(b) 单测覆盖 metric 提取（含 usage 缺失 / 非 dict / SDK 没传 usage 各种降级路径）；(c) 三段切分推到 N6b/下个 PR（实测 cache_hit_rate 若 < 50% 才做） | 1 改 + 1 测试 | ~120 | 📝 待执行 |
 | **N7** verify + audit 脚本更新 | (a) `verify_roofline_v2.py` 加 cache hit rate 列 + roofline action 调用次数（替代 sub-agent advice 统计）；(b) `audit_roofline_decisions.py` 改为 "decision audit"：统计 LLM PRUNE_BRANCH 是否引用了 analysis.md 段、propose 的 flag 是否在 discovered_flags 中、cache hit rate；(c) 测试 fixture 更新 | 2 改 + 1 测试 | ~150 | 📝 待执行 |
-| **N8** Qwen3-32B 真实 GPU 跑 + RATIONALE | C7 等价；填充本文档 §13 | 0 代码 | 0 + 文档追加 | 📝 待 GPU |
+| **N9** profile 从 LLM propose 路径下架（GPU 实测发现的修正） | 实测 N3 留下的"profile preferred=roofline / legacy=profile"软引导失效——LLM 第一步 propose 了 profile，导致 roofline 内部又跑一次 profile（浪费 ~10 min wall-clock / session）。N9：(a) `_sequence_denial_for_action` 硬拒绝 LLM 直接 propose profile，建议改用 roofline；(b) 提供 `INFERENCE_OPTIMIZER_ALLOW_DIRECT_PROFILE=1` 逃生阀（debugging / robustness 路径）；(c) orchestration.md 加 hard rule "禁止直接 propose profile，必须 propose roofline"；(d) 测试 fixture 更新 (`baseline_self_loop` / `p1_4_resume` / 等 5 个 pre-existing 测试) | 1 改 + 1 测试 | ~150 | 📝 待执行 |
+| **N8** Qwen3-32B 真实 GPU 跑 + RATIONALE | C7 等价；填充本文档 §13 | 0 代码 | 0 + 文档追加 | 📝 进行中 |
 
 **N1-N7 累计估算**：~1250 行新代码（含 ~600 行测试 + ~50 行 yaml/md +
 ~150 行脚本），核心 Python ~450 行；外加 N1 rename 的 ~50 行机械改动。
