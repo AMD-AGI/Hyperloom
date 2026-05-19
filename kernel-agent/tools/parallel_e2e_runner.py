@@ -367,9 +367,9 @@ def main() -> int:
                              "soon as they hit >=1.50x with passing correctness; "
                              "otherwise they iterate up to ~85%% of this budget "
                              "and SIGTERM at 100%%.")
-    parser.add_argument("--geak-budget-min", type=float, default=90,
+    parser.add_argument("--geak-budget-min", type=float, default=120,
                         help="Per-attempt wall-clock budget for GEAK only "
-                             "(default 90 min). GEAK runs N sub-agent tasks "
+                             "(default 120 min). GEAK runs N sub-agent tasks "
                              "serially + a select_patch round; 60 min "
                              "consistently SIGTERMs the select_patch round "
                              "(observed r38/r39).")
