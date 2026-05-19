@@ -287,7 +287,9 @@ C 之所以被否决：sub-agent 推理能力是 LLM 最大的复用收益，砍
 | **C1** | SharedState 缓存 analysis.md 全文 + snapshot 元数据 | 1 + 1 测试 | +283 | ✅ `23cb52b` |
 | **C2** | RooflineAnalysis schema + `record_roofline_analysis` | 1 + 1 测试 | +393 | ✅ `9683ea0` |
 | **C3** | Orchestration 获 PRUNE_BRANCH intent 权限 | 2 + 2 测试 | +180 | ✅ `15804ce` |
-| **C4** | `roofline` action：meta yaml + markdown + sub-agent executor + scoring prior + cli 注册 + sequence_denial + coordinator 集成 + 单测（含 mock backend fixture） | 6-7 + 2-3 测试 | ~400 | 📝 待写 |
+| **C4a** | action 注册基础：meta yaml + markdown + scoring prior + cli 注册（stub executor 占位，返回 `primary="unknown"` 安全 fallback） | 4 + 1 测试 | ~120 | 📝 待写 |
+| **C4b** | sub-agent executor 实现：roofline.py 完整逻辑（替换 stub）+ analyzer system prompt + 单测（mock backend fixture，覆盖 happy / timeout / malformed JSON / idempotency） | 3 + 1 测试 | ~280 | 📝 待写 |
+| **C4c** | coordinator 集成：`task_kind == "roofline"` 分支调 record_roofline_analysis + sequence_denial 加 roofline 前置（必须有 analysis_md_text）+ 单测 | 1 改 + 1 测试 | ~120 | 📝 待写 |
 | **C5** | prompt 渲染 `_format_roofline_decision` 结论段 + "Pruning Rules" 段 + "Re-Profile Guidance" 段 + 单测 | 2 + 1 测试 | ~150 | 📝 待写 |
 | **C6** | `scripts/verify_roofline_v2.py` + `scripts/audit_roofline_decisions.py` | 2 | ~250 | 📝 待写 |
 | **C7** | Qwen3-32B baseline vs exp 真实 GPU 跑（用 nohup 后台，每 5 min 进度汇报）+ 数字记录追加进本文档 §11 | 0 代码 / 本文档追加 | 0 | 📝 待 GPU |
@@ -317,8 +319,18 @@ C 之所以被否决：sub-agent 推理能力是 LLM 最大的复用收益，砍
 | `inference_optimizer/orchestrator/scoring.py` | `MODEL_CLASS_ACTION_PRIORS` 每个 model_class 加 `"roofline": 7.5`（D1 决策） | +N 行（每个 dict 一条） |
 | `inference_optimizer/orchestrator/coordinator.py` | (a) `_handle_request_response` 在 kind=roofline 时调 `record_roofline_analysis`；(b) `_sequence_denial_for_action` 加 roofline 前置检查 | +30 |
 
-**主文件数 = 9（6 新 + 3 改）**，超出 5 文件红线。按用户"单 PR 单 worktree"
-指示允许，但本 commit 内需要严控行数。
+**主文件数 = 9（6 新 + 3 改）**。按"超过 5 文件要分解"红线，C4 在
+§7 实施跟踪表里拆为 **C4a + C4b + C4c** 三个 sub-commit，每个 sub-commit
+≤5 文件、独立可测试、独立可回滚：
+
+- **C4a**（4 文件）：meta yaml + markdown + scoring + cli 注册 stub executor
+- **C4b**（3 文件）：替换 stub 为完整 sub-agent executor + analyzer sp + 测试
+- **C4c**（2 文件）：coordinator task_kind 分支 + sequence_denial + 测试
+
+C4a 完成后 action 已被识别（propose_action 不会被拒绝为 unknown），但
+executor 仅返回 `primary="unknown"` 安全 fallback；C4b 提供真正的 LLM
+分析；C4c 把执行结果 wire 回 SharedState 并加门禁。三步串联后才形成
+完整闭环。
 
 ### 8.3 sub-agent prompt 模板（roofline_analyzer.md 草案）
 
@@ -584,3 +596,4 @@ _C7 完成后在此追加 baseline / exp 数字、prompt diff 截图引用、aud
 | 日期 | 改动 | 作者 |
 |---|---|---|
 | 2026-05-19 | v1 初稿，C1-C3 已实施，C4-C7 待写 | xiaofei + 助手 |
+| 2026-05-19 | v1.1 拆 C4 为 C4a/C4b/C4c（每 sub-commit ≤5 文件），调研 ClaudeBackend / scoring / cli 集成点后微调 §8.2 | xiaofei + 助手 |
