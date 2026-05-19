@@ -2335,6 +2335,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # session starts blank. Done BEFORE Coordinator is constructed.
     if getattr(args, "reset_state", False):
         _reset_state_file(session_dir)
+    # v0.8 §3.12 — propagate ``--breakdown-include-transcripts`` so
+    # any end-of-session breakdown emitted from this run picks up the
+    # inline / path-only choice (KB_design §3.12 §7 step 5).
+    transcripts_flag = str(
+        getattr(args, "breakdown_include_transcripts", "false") or "false",
+    ).strip().lower()
+    if transcripts_flag == "true":
+        os.environ["INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS"] = "1"
+    else:
+        os.environ.pop(
+            "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS", None,
+        )
 
     # Build the phase budget pct dict from CLI flags; ``None`` values
     # fall back to library defaults inside Coordinator. See KB_design
@@ -2859,6 +2871,27 @@ def _build_parser() -> argparse.ArgumentParser:
              "``state.json.preReset.<unix_ts>`` and start the session "
              "from a blank SharedState. Cortex KB is NOT touched. "
              "KB_design §3.10 §5.3.",
+    )
+    # ------------------------------------------------------------------
+    # v0.8 §3.12 — observability (KB_design §3.12 §7 step 5)
+    # ------------------------------------------------------------------
+    # ``--breakdown-include-transcripts`` controls whether the per-task
+    # specialist transcript bodies are inlined under
+    # ``specialist_runs[i].transcripts[j].body`` (true) or only
+    # referenced by path (false, default). Default false keeps the
+    # ``session_breakdown.json`` payload small for the cluster
+    # dashboards; operators can flip it on for offline replay.
+    opt.add_argument(
+        "--breakdown-include-transcripts",
+        dest="breakdown_include_transcripts",
+        type=str,
+        choices=("true", "false"),
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS", "false",
+        ).strip().lower() or "false",
+        help="Inline specialist transcript bodies into "
+             "``specialist_runs`` (true) or reference them by path "
+             "only (false, default). KB_design §3.12 §7.",
     )
     # ------------------------------------------------------------------
     # v0.8 M7 — plateau threshold tuning (KB_design §3.8 §5 + §3.13 M7 §4)
