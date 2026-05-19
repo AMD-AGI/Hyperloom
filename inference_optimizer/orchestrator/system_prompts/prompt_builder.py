@@ -490,40 +490,41 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
             "4. (No-kernel run.) Skip profile — the Kernel agent is disabled in this run.",
         )
     lines.extend([
-        "5. **Consult the `Action scores` block** (`=== Action scores (top 12 by",
-        "   eff_score, tick=N) ===`). The Coordinator pre-sorts the action catalogue",
-        "   by `eff_score` (descending). Pick the **highest-`eff_score`** row whose",
-        "   `applicable_when` is satisfied and which has no `[cooldown N]` or",
-        "   `[locked: ...]` tag. Top-1 is the default; you MAY skip down to a",
-        "   lower row when you have a one-line justification in the proposal",
-        "   `notes`, but NEVER propose a row that is on cooldown or locked.",
-        "6. **Trust the scoreboard, don't hand-roll priorities**. Coordinator-side",
-        "   updates already apply marathon-style rules to `score_mult`: KEEP decays",
-        "   the same action (diminishing returns), DISCARD dampens it by 30%,",
-        "   aging + UCB bonuses revive starved actions. Do NOT alternate",
-        "   `backends`/`params` by hand — cooldown on KEEP enforces alternation;",
-        "   do not invent your own ordering on top of the scoreboard.",
-        "7. **Sweep / report**: when every explore-family row sits at low",
-        "   `eff_score` (or is locked), propose `sweep` once to validate gains",
-        "   across (CONC, ISL, OSL), then `report`.",
+        "5. **Phase-aware action selection (KB_design §3.9 Inv-9.1)**. v0.8",
+        "   retired the v0.6 ``Action scores`` block. There is no system-side",
+        "   priority list. Pick the next action by reading FACTS in this order:",
         "",
-        "### How scoring updates",
+        "   a. **Phase + allowed actions** (the `=== Phase ===` /",
+        "      `=== Phase-allowed actions ===` blocks). PolicyGate denies",
+        "      anything outside the allowed set.",
+        "   b. **Current gaps** (`SharedState.gaps[]` once §3.6 fills it; in",
+        "      the meantime use `last_action_failures` + ",
+        "      `explore_search.winners_history` as the gap surface). The LLM",
+        "      decides which gap to tackle next based on layer / symptom /",
+        "      KB sub-graph history.",
+        "   c. **KB sub-graphs + warm-start recipe** when present —",
+        "      cross-session priors carry "
+        "*qualitative* hints (what worked / what failed last time).",
+        "   d. **specialist proposal_set** (M5+) — when an explore round just",
+        "      finished, the proposal_set drives the next `explore` grid.",
+        "   e. **Mandatory MUST-FIRST rules**: baseline before anything else;",
+        "      profile before kernel_opt (when kernel_enabled).",
+        "6. **Phase budget awareness**. The `=== Phase ===` block carries",
+        "   ``phase_budget_remaining_pct``. As that number falls below 0.2,",
+        "   prefer lower-cost / known-good actions (explore over kernel_opt).",
+        "   Plateau judgments fire when the system thinks you're stalled;",
+        "   they auto-advance the phase. Don't fight them — drive the",
+        "   current phase's signal in the right direction or emit",
+        "   ``escalate_strategy_change{hint='skip_to_kernel'}`` via",
+        "   robustness if you know it's time to move on.",
+        "7. **Sweep / report tail**: when EXPLORE plateau fires, the",
+        "   Coordinator routes EXPLORE → KERNEL (kernel_enabled) or →",
+        "   SWEEP (--no-kernel). When SWEEP completes, propose `report`",
+        "   for the LLM narrative (Coordinator also auto-enqueues one at",
+        "   the deadline).",
         "",
-        "* Every completed action sets a per-action cooldown so the next tick",
-        "  prefers a different family (anti-loop).",
-        "* KEEP: `score_mult *= max(0.5, 1 - 0.1*gain_pct)` — strong wins decay",
-        "  faster than marginal ones.",
-        "* DISCARD: `score_mult *= 0.7` — repeated DISCARDs push the row out of",
-        "  the top quickly.",
-        "* Aging + UCB bonuses bubble under-sampled rows up so deep / support",
-        "  actions (operator_tuning / compiler_tuning / dream) eventually get a",
-        "  turn even when their base score is low.",
-        "* `[locked: grid_exhausted]` means the search grid is depleted; do not",
-        "  propose the action until the Coordinator re-unlocks it (e.g. after",
-        "  `re_explore` refreshes the candidate set).",
-        "",
-        "If you cannot move forward (everything cooldown'd or locked / new failures),",
-        "emit `send_message{topic='heartbeat', body_md='blocked: <reason>'}` and let",
+        "If you cannot move forward, emit",
+        "`send_message{topic='heartbeat', body_md='blocked: <reason>'}` and let",
         "Robustness escalate. NEVER stay silent.",
         "",
         "### FAILURE RECOVERY (apply BEFORE re-proposing an action that just failed)",
@@ -573,15 +574,17 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "  repeatedly nonzero <action>'` and let Robustness intervene. Do NOT",
         "  switch action families just to dodge the failure; Robustness'",
         "  escalation policy needs the heartbeat to fire its RCA.",
-        "* **RULE F4 — `policy_denial_streak` ≥ 2 locks the action.** When the",
-        "  per-tick `Policy denials` block shows `streak≥2` for an action, the",
-        "  Coordinator tags it `[locked: policy_loop:<rule>]`. Re-trying the",
-        "  SAME params will keep colliding. Omit `idempotency_key` (Coordinator",
-        "  derives a fresh tick+content fingerprint) AND change at least one",
-        "  substantive param — e.g. a new `params.grid` variant, different",
-        "  `benchmark_script`, or switch to a sibling action family. At streak≥5",
-        "  the family is auto-pruned; at streak≥10 the run stops with",
-        "  `stop_reason='policy_loop'`.",
+        "* **RULE F4 — `policy_denial_streak` is a fact, not a lock.** When the",
+        "  per-tick `Recent policy denials` block shows `streak≥2` for an",
+        "  (action, rule) pair, the SAME params will keep colliding.",
+        "  v0.8 §3.9 retired the v0.6 ``locked_reason`` mirror, but the",
+        "  underlying anti-loop is unchanged: at streak≥5 the family is",
+        "  auto-pruned; at streak≥10 the run stops with",
+        "  ``stop_reason='policy_loop'``. Recover by omitting",
+        "  ``idempotency_key`` (Coordinator derives a fresh tick+content",
+        "  fingerprint) AND changing at least one substantive param —",
+        "  a new ``params.grid`` variant, different ``benchmark_script``,",
+        "  or a sibling action family.",
         "",
         "Example (baseline failed twice with `error_class='no_report'`):",
         "",
@@ -666,15 +669,15 @@ _KERNEL_OPT_PIPELINE_BODY: str = """\
 ## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)
 
 The three kernel-owned actions (`select_kernels`, `kernel_opt`,
-`integrate`) are scored on the `Action scores` board like every other
-action. Pick them by `eff_score` per the DECISION FRAMEWORK; the blocks
-below are only **payload templates** describing how to build the REQUEST
-once you have selected the action. The Coordinator hard-gates the
-obvious prerequisites (TODO 3/4 fires after a `kernel_opt` KEEP forces
-`integrate`); `select_kernels` itself is enforced only at the REQUEST
-layer for `run_optimization`, and explore actions like `params` /
-`backends` / `sweep` are NEVER gated on it. Everything else flows
-through the scoreboard.
+`integrate`) are picked by the LLM per the DECISION FRAMEWORK (phase
+allowed-set + gaps + KB priors); v0.8 §3.9 retired the
+`Action scores` board so there is no system-side priority ranking.
+The blocks below are only **payload templates** describing how to
+build the REQUEST once you have selected the action. The Coordinator
+still hard-gates the obvious prerequisites (TODO 3/4 fires after a
+`kernel_opt` KEEP forces `integrate`); `select_kernels` itself is
+enforced only at the REQUEST layer for `run_optimization`, and explore
+actions are NEVER gated on it.
 
 ### `select_kernels` — payload (Coordinator gates `run_optimization` until cache is fresh)
 

@@ -75,7 +75,9 @@ from .shared_state import SharedState
 from .sub_agent_runner import SubAgentResult, SubAgentRunner
 from .task_registry import Task, TaskRegistry
 from .action_executors.benchmark_result import is_valid_measurement
-from . import scoring as _scoring
+# v0.8 §3.9 — orchestrator.scoring is retired; the legacy
+# ``_scoring`` alias is gone. Action-scoring methods on Coordinator
+# are now no-op stubs (KB_design §3.9 Inv-9.1).
 from .system_prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
     NO_KERNEL_ENABLED_ACTIONS,
@@ -596,68 +598,30 @@ class Coordinator:
             log.exception("cortex T4 SharedState.save after commit failed")
 
     # ==================================================================
-    # Action scoring
+    # v0.8 §3.9 — scoreboard retired (KB_design §3.9 Inv-9.1)
     # ==================================================================
-    def _score_action_keep(self, action_name: str, *, gain_pct: float) -> None:
-        """Apply a KEEP score update for one action and persist."""
-        raw = self.shared_state.action_scores.get(action_name)
-        if not isinstance(raw, dict):
-            return
-        a = _scoring.ActionScore.from_dict(raw)
-        _scoring.apply_keep(
-            a,
-            gain_pct=float(gain_pct or 0.0),
-            tick=int(self.shared_state.tick or 0),
-            action_name=action_name,
-        )
-        self.shared_state.action_scores[action_name] = a.to_dict()
+    # The v0.6 ``_score_action_*`` / ``_apply_action_score_update``
+    # surface was deleted. The Coordinator no longer maintains a
+    # per-action numeric priority; the LLM decides by reading facts
+    # (phase / gaps / KB sub-graphs / specialist proposal_set / recent
+    # winners). The stubs below keep the *callable surface* so the
+    # existing in-tree call sites (and tests) compile without a
+    # rewrite, but every method is a no-op. New code should not call
+    # them at all.
+    def _score_action_keep(self, action_name: str, *, gain_pct: float = 0.0) -> None:
+        return None
 
     def _score_action_discard(self, action_name: str) -> None:
-        """Deprecated thin wrapper — prefer :meth:`_score_action_failure` or
-        :meth:`_score_action_no_promote` so the streak counter for each
-        pathology evolves independently. Retained for archived call sites
-        that don't yet distinguish the two.
-        """
-        self._score_action_failure(action_name)
+        return None
 
     def _score_action_failure(self, action_name: str) -> None:
-        """Streak-aware penalty for a task that returned failed/error."""
-        raw = self.shared_state.action_scores.get(action_name)
-        if not isinstance(raw, dict):
-            return
-        a = _scoring.ActionScore.from_dict(raw)
-        _scoring.apply_failure(
-            a,
-            tick=int(self.shared_state.tick or 0),
-            action_name=action_name,
-        )
-        self.shared_state.action_scores[action_name] = a.to_dict()
+        return None
 
     def _score_action_no_promote(self, action_name: str) -> None:
-        """Streak-aware penalty for a task that succeeded but did not
-        promote ``current_best``. Tracked on a streak distinct from
-        :meth:`_score_action_failure` so diagnostics can distinguish a
-        crashing action from a stalled one.
-        """
-        raw = self.shared_state.action_scores.get(action_name)
-        if not isinstance(raw, dict):
-            return
-        a = _scoring.ActionScore.from_dict(raw)
-        _scoring.apply_no_promote(
-            a,
-            tick=int(self.shared_state.tick or 0),
-            action_name=action_name,
-        )
-        self.shared_state.action_scores[action_name] = a.to_dict()
+        return None
 
     def _score_action_lock(self, action_name: str, reason: str) -> None:
-        raw = self.shared_state.action_scores.get(action_name)
-        if not isinstance(raw, dict):
-            return
-        a = _scoring.ActionScore.from_dict(raw)
-        if not a.locked_reason:
-            _scoring.apply_lock(a, reason)
-            self.shared_state.action_scores[action_name] = a.to_dict()
+        return None
 
     def _apply_action_score_update(
         self,
@@ -667,58 +631,14 @@ class Coordinator:
         promoted: bool | None = None,
         gain_vs_cb: float | None = None,
     ) -> None:
-        """Single hook called by ``_promote_to_shared_state`` once the
-        existing task-kind branch has decided whether to promote / lift.
+        """No-op stub retained for back-compat with v0.6 call sites.
 
-        ``promoted`` and ``gain_vs_cb`` are only meaningful for the
-        ``backends`` / ``params`` / ``sweep`` family; other branches pass
-        ``None`` and the helper decides what to do from ``task_kind`` alone.
-
-        The helper is a no-op when ``action_scores`` has not been seeded
-        (e.g. early sessions where ActionRegistry failed to load).
+        Real ``params_grid_exhausted`` / ``backends_search_exhausted``
+        signals still flow through ``explore_search`` / breakdown —
+        the LLM consumes those facts directly without a scoreboard
+        intermediary (KB_design §3.9 §6).
         """
-        if not self.shared_state.action_scores:
-            return
-        if not task_kind:
-            return
-        if task_kind == "baseline":
-            # Treated as a gate; do not score it. baseline_failure_streak
-            # already tracks repeated failures.
-            return
-        status = ""
-        error_class = None
-        if isinstance(result, dict):
-            status = str(result.get("status") or "")
-            error_class = result.get("error_class")
-        failed = status in {"failed", "error"} or bool(error_class)
-        if task_kind in {"profile", "pmc_roofline", "validate_stack"}:
-            if failed:
-                self._score_action_failure(task_kind)
-            else:
-                self._score_action_keep(task_kind, gain_pct=0.0)
-            return
-        if task_kind in {"backends", "params", "sweep"}:
-            if failed:
-                self._score_action_failure(task_kind)
-            elif promoted:
-                self._score_action_keep(
-                    task_kind, gain_pct=float(gain_vs_cb or 0.0),
-                )
-            else:
-                self._score_action_no_promote(task_kind)
-            # Lock the grid when it is fully exhausted so the LLM sees
-            # the row as unavailable. Only applies to params today
-            # (the only family with a deterministic exhaustion check).
-            if task_kind == "params" and self._params_grid_exhausted():
-                self._score_action_lock("params", "grid_exhausted")
-            return
-        # Fallback for any future deep / support action that doesn't have
-        # explicit promote semantics — split on result.status so the
-        # failure streak still gets exercised.
-        if failed:
-            self._score_action_failure(task_kind)
-        else:
-            self._score_action_keep(task_kind, gain_pct=0.0)
+        return None
 
     # ==================================================================
     # v0.8 M2 — phase state machine
@@ -852,42 +772,13 @@ class Coordinator:
             log.exception("Coordinator: phase_transition event bus write failed")
 
     def _ensure_action_scores_seeded(self) -> None:
-        """Populate ``shared_state.action_scores`` once per session.
+        """v0.8 §3.9 — no-op stub.
 
-        Idempotent: if any scores are already present (resume case) we skip.
-        Otherwise we seed from the action registry, biased by ``model_class``
-        marathon priors (default ``moe_mla`` when classify hasn't run yet).
-        Persistence is best-effort: any save failure is logged but does not
-        block construction.
+        The Coordinator no longer maintains a scoreboard. Kept as a
+        callable so the boot path (which used to invoke it) doesn't
+        need a separate guard.
         """
-        if self.action_registry is None:
-            return
-        if self.shared_state.action_scores:
-            return
-        kernel_enabled = "kernel" in self.role_registry
-        enabled = FULL_ENABLED_ACTIONS if kernel_enabled else NO_KERNEL_ENABLED_ACTIONS
-        model_class = (self.shared_state.model_class or "moe_mla").strip()
-        try:
-            seeded = _scoring.seed_action_scores(
-                self.action_registry,
-                model_class=model_class,
-                enabled=enabled,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "Coordinator: scoring.seed_action_scores failed; "
-                "action_scores stay empty for this session.",
-            )
-            return
-        if not seeded:
-            return
-        self.shared_state.action_scores = seeded
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "Coordinator: failed to persist seeded action_scores",
-            )
+        return None
 
     # ==================================================================
     # Bounded test interface
@@ -1507,11 +1398,12 @@ class Coordinator:
         sections.append("=== Shared session state ===")
         sections.append(self.shared_state.to_prompt_summary())
         if agent_name == "orchestration":
-            # Refresh target_gap_pct from the live objective so the rendered
-            # scoreboard reflects the *current* remaining gap (objective is
-            # already cached on the Coordinator after Coordinator.run set
-            # the budget). Non-``gain_pct`` objectives leave the value at 0
-            # which maps to a 1.0 multiplier inside scoring.target_gap_multiplier.
+            # v0.8 §3.9 — ``target_gap_pct`` is a *fact* (how much
+            # gain is still needed for ``--target-gain``), not a
+            # scoring multiplier. Keep refreshing it so the prompt's
+            # Mission-progress line stays current. The Action-scores
+            # block has been retired (Inv-9.1); the LLM consumes
+            # phase / gaps / KB / specialist_rounds instead.
             obj = getattr(self, "_current_objective", None)
             obj_kind = getattr(obj, "kind", "") if obj is not None else ""
             if obj_kind == "gain_pct":
@@ -1522,15 +1414,6 @@ class Coordinator:
                 )
             else:
                 self.shared_state.target_gap_pct = 0.0
-            if (
-                self.action_registry is not None
-                and self.shared_state.action_scores
-            ):
-                sections.append(
-                    self.shared_state.to_action_scores_summary(
-                        registry=self.action_registry, top_k=12,
-                    )
-                )
             denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
             if denial_summary:
                 sections.append(denial_summary)
@@ -2946,11 +2829,11 @@ class Coordinator:
             tick=int(self.shared_state.tick or 0),
             intent_payload=intent.payload,
         )
-        if resolved_action and streak >= 2:
-            score = self.shared_state.get_action_score(resolved_action)
-            if score is not None:
-                score.locked_reason = f"policy_loop:{denied.rule}"
-                self.shared_state.put_action_score(resolved_action, score)
+        # v0.8 §3.9 — the streak counter is still a fact (LLM sees it
+        # via policy_denial_history), but we no longer mirror it onto
+        # a scoreboard ``locked_reason``. The phase machine's
+        # ``policy_loop`` stop_reason at streak ≥ 10 (below) remains
+        # the only system-side reaction.
         if resolved_action and streak >= 5:
             self.shared_state.prune_family(resolved_action)
             await self._record_observation(
