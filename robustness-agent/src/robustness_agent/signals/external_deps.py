@@ -39,6 +39,7 @@ from typing import Any
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
+from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
 
@@ -61,10 +62,31 @@ class ExternalDepsConfig:
 
 
 class TraceLensCliFiredOnce:
-    """One-shot latch helper used by :class:`ExternalDepsDetector`."""
+    """One-shot latch helper used by :class:`ExternalDepsDetector`.
 
-    def __init__(self) -> None:
-        self.value = False
+    Backed by a :class:`DetectorStateView` when supplied so the latch
+    survives subprocess restarts; M1 transport would otherwise re-fire
+    the J3 symptom every tick.
+    """
+
+    def __init__(
+        self,
+        *,
+        state_view: "DetectorStateView | None" = None,
+    ) -> None:
+        self._state_view = state_view
+        loaded = state_view.load() if state_view is not None else {}
+        self._value: bool = bool(loaded.get("fired", False))
+
+    @property
+    def value(self) -> bool:
+        return self._value
+
+    @value.setter
+    def value(self, new_value: bool) -> None:
+        self._value = bool(new_value)
+        if self._state_view is not None:
+            self._state_view.save({"fired": self._value})
 
 
 def evaluate_external_deps_signals(

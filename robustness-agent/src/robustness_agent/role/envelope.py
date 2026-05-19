@@ -137,6 +137,13 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "current_best",
     "stop_reason",
     "cumulative_gain",
+    # Coordinator-owned validated cumulative gain trio. Coordinator
+    # writes these together each time a kernel/integrate verdict
+    # lands; Robustness must not touch them but does need to mirror
+    # the names so the policy-equivalence contract test passes.
+    "cumulative_gain_validated",
+    "cumulative_gain_validated_ts",
+    "cumulative_gain_validated_stack_len",
     "baseline_tput",
     "baseline_accuracy",
     "session_id",
