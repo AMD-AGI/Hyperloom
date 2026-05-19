@@ -380,6 +380,20 @@ class GpuMonitorAggregate(TypedDict, total=False):
     avg_clock_mhz: float
 
 
+class LaneTimelineEntry(TypedDict, total=False):
+    """One row of the v0.8 M6 lane occupancy summary (KB_design §3.12 §4.5).
+
+    Surfaces resource_lock state (per-lane capacity vs. live holders +
+    lifetime expired-lease count) into the breakdown's ``telemetry``
+    section so cross-cluster dashboards can chart lane usage alongside
+    GPU power / temperature.
+    """
+    lane: str
+    capacity: int
+    live_holders: int
+    lease_expired_count: int
+
+
 class Telemetry(TypedDict, total=False):
     baseline_report_path: str | None
     profile_report_paths: list[str]
@@ -387,6 +401,8 @@ class Telemetry(TypedDict, total=False):
     system_profile_paths: list[str]
     server_log_paths: list[str]
     gpu_monitor_aggregate: GpuMonitorAggregate
+    # v0.8 M6 — per-lane capacity / occupancy summary.
+    lane_timeline: list[LaneTimelineEntry]
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +566,7 @@ __all__ = [
     "KBPointCreated",
     "KBProvenance",
     "KBQueueStats",
+    "LaneTimelineEntry",
     "KernelLifecycle",
     "KernelMetadata",
     "OptimizedKernel",
