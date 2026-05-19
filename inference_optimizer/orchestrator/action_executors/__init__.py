@@ -42,12 +42,8 @@ from .profile import (
 from .pmc_roofline import PMCRooflineExecutor, pmc_roofline_executor
 from .report import ReportExecutor, report_executor
 from .roofline import (
-    ROOFLINE_ANALYSIS_MD_MAX_BYTES,
-    ROOFLINE_SUBAGENT_TIMEOUT_SEC,
-    RooflineExecutor,
     RooflineStubExecutor,
     build_roofline_fallback_result,
-    make_roofline_executor,
     make_roofline_stub_executor,
 )
 from .session_breakdown import SessionBreakdownExecutor, session_breakdown_executor
@@ -81,12 +77,8 @@ __all__ = [
     "PMCRooflineExecutor",
     "ProfileExecutor",
     "ReportExecutor",
-    "ROOFLINE_ANALYSIS_MD_MAX_BYTES",
-    "ROOFLINE_SUBAGENT_TIMEOUT_SEC",
-    "RooflineExecutor",
     "RooflineStubExecutor",
     "build_roofline_fallback_result",
-    "make_roofline_executor",
     "make_roofline_stub_executor",
     "SYNERGY_GROUPS",
     "SessionBreakdownExecutor",
