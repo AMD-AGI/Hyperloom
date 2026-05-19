@@ -372,6 +372,23 @@ class SharedState:
     # M6 raises to 6 (concurrent). PolicyGate denies mid-session
     # mutation because it's listed in CORE_STATE_FIELDS.
     research_lane_capacity: int = 1
+    # v0.8 M7 — escalate_strategy_change carry-over field
+    # (KB_design §3.8 §7.3 + §3.13 M7 §5.3). The Coordinator's
+    # ``_handle_escalate_strategy_change`` writes the validated
+    # ``next_action_hint`` here so the phase_state machine can see it
+    # on the next ``compute_next_phase`` pass; the field is cleared
+    # by the Coordinator once the hint has been acted on (so the
+    # phase machine doesn't re-trigger on the same hint).
+    pending_escalate_hint: str = ""
+    # v0.8 M7 — last cleared escalate hint (audit only). Useful for
+    # the breakdown to surface "we honored a llm_escalation here".
+    last_consumed_escalate_hint: str = ""
+    last_consumed_escalate_hint_ts: str = ""
+    # v0.8 M7 — per-phase plateau threshold overrides locked at
+    # session start (CLI flags, KB_design §3.13 M7 §4). Empty dict
+    # means "use library defaults"; phase_state reads these fields
+    # for the dispatcher's phase-decision call.
+    plateau_overrides: dict[str, Any] = field(default_factory=dict)
     # E2E integrate bookkeeping keyed by kernel_id + patch_path + args. This
     # prevents Orchestration from spending hours re-validating the same patch
     # after repeated NEEDS_REVIEW/REVERT outcomes.
@@ -1034,6 +1051,96 @@ class SharedState:
             for k, v in (self.policy_denial_streak or {}).items()
             if not k.startswith(prefix)
         }
+
+    # ------------------------------------------------------------------
+    # v0.8 M7 — stop_reason ENUM validator (KB_design §3.8 §6 + §10)
+    # ------------------------------------------------------------------
+    def set_stop_reason(
+        self,
+        value: str,
+        *,
+        strict: bool | None = None,
+    ) -> str:
+        """Validated writer for :attr:`stop_reason`.
+
+        Inv-8.3 (stop_reason vocab closed): anything outside the
+        ``STOP_REASON_VOCAB`` in ``phase_state`` is mapped to
+        ``"unknown"`` in lenient mode (default) and emits a warning
+        so the breakdown can surface the migration. ``strict=True``
+        raises ``ValueError`` instead — used by the test path that
+        wants fail-fast behaviour.
+
+        ``strict`` defaults to the
+        ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON`` env var (``"1"`` /
+        ``"true"`` enables strict). The CLI flips the env on for
+        production runs once the vocab has been dogfooded.
+
+        Returns the value actually written (normalised + clipped to
+        the vocab).
+        """
+        from .phase_state import STOP_REASON_VOCAB, is_valid_stop_reason
+        text = str(value or "").strip()
+        if not text:
+            self.stop_reason = ""
+            return ""
+        if is_valid_stop_reason(text):
+            self.stop_reason = text
+            return text
+        if strict is None:
+            strict_env = os.environ.get(
+                "INFERENCE_OPTIMIZER_STRICT_STOP_REASON", "",
+            ).strip().lower()
+            strict = strict_env in ("1", "true", "yes")
+        if strict:
+            raise ValueError(
+                f"stop_reason={text!r} not in STOP_REASON_VOCAB "
+                f"({sorted(STOP_REASON_VOCAB)!r})"
+            )
+        # Lenient: map to "unknown" and surface a warning. Callers can
+        # still observe the original via the warnings log.
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "stop_reason=%r not in STOP_REASON_VOCAB; mapped to 'unknown' "
+            "(KB_design §3.8 Inv-8.3). Set "
+            "INFERENCE_OPTIMIZER_STRICT_STOP_REASON=1 to fail-fast.",
+            text,
+        )
+        self.stop_reason = "unknown"
+        return "unknown"
+
+    # ------------------------------------------------------------------
+    # v0.8 M7 — escalate hint plumbing (KB_design §3.8 §7.3)
+    # ------------------------------------------------------------------
+    def set_pending_escalate_hint(self, hint: str) -> str:
+        """Stash the LLM-supplied hint for the next phase compute pass.
+
+        Returns the value actually written. Unknown hints are
+        silently dropped (Inv-8.2 — phase decisions only react to a
+        closed vocabulary; arbitrary robustness payloads should not
+        steer the state machine).
+        """
+        from .phase_state import is_valid_escalate_hint
+        text = str(hint or "").strip()
+        if text and not is_valid_escalate_hint(text):
+            return ""
+        self.pending_escalate_hint = text
+        return text
+
+    def consume_pending_escalate_hint(self) -> str:
+        """Pop the pending hint, recording the consumption in audit fields.
+
+        The phase machine calls this *after* it acted on the hint so
+        the next tick doesn't re-trigger the same transition. Returns
+        the hint that was cleared (empty string when nothing was
+        pending).
+        """
+        hint = (self.pending_escalate_hint or "").strip()
+        if not hint:
+            return ""
+        self.pending_escalate_hint = ""
+        self.last_consumed_escalate_hint = hint
+        self.last_consumed_escalate_hint_ts = _now_iso()
+        return hint
 
     # ------------------------------------------------------------------
     # v0.8 M2 — phase machine writer (Coordinator-only, Inv-1 + Inv-8.1)

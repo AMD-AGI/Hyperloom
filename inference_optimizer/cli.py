@@ -533,6 +533,24 @@ def _seed_shared_state(
             "PR Monitor load may spike. See KB_design §3.14 R-07.",
             research_lane_capacity,
         )
+    # v0.8 M7 — collect plateau threshold overrides into a single dict
+    # (KB_design §3.8 §5 + §3.13 M7 §4). Only non-None CLI overrides
+    # land in the dict; absent keys fall through to the
+    # ``DEFAULT_PLATEAU_*`` library constants at phase-compute time.
+    plateau_overrides: dict[str, Any] = {}
+    if getattr(args, "plateau_explore_keep_gain", None) is not None:
+        plateau_overrides["explore_keep_gain_pct"] = float(args.plateau_explore_keep_gain)
+    if getattr(args, "plateau_explore_empty_streak", None) is not None:
+        plateau_overrides["explore_empty_streak"] = int(args.plateau_explore_empty_streak)
+    if getattr(args, "plateau_explore_lookback", None) is not None:
+        plateau_overrides["explore_lookback"] = int(args.plateau_explore_lookback)
+    if getattr(args, "plateau_kernel_revert_streak", None) is not None:
+        plateau_overrides["kernel_revert_streak"] = int(args.plateau_kernel_revert_streak)
+    if getattr(args, "plateau_kernel_keep_gain", None) is not None:
+        plateau_overrides["kernel_keep_gain_pct"] = float(args.plateau_kernel_keep_gain)
+    if getattr(args, "plateau_kernel_lookback", None) is not None:
+        plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
+
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -548,6 +566,7 @@ def _seed_shared_state(
         cumulative_gain=0.0,
         max_minutes=int((args.max_hours or 0) * 60),
         research_lane_capacity=research_lane_capacity,
+        plateau_overrides=plateau_overrides,
     )
     state.save(session_dir)
     return state
@@ -2711,6 +2730,66 @@ def _build_parser() -> argparse.ArgumentParser:
              "dispatch entirely (degrades to M3 LLM-direct grid); 1 is "
              "the M5 default; 6 is the M6 default. Range [0, 32]. "
              "Locked at session start.",
+    )
+    # ------------------------------------------------------------------
+    # v0.8 M7 — plateau threshold tuning (KB_design §3.8 §5 + §3.13 M7 §4)
+    # ------------------------------------------------------------------
+    # These flags swap the library default plateau thresholds for the
+    # ``compute_plateau_explore`` / ``compute_plateau_kernel`` pure
+    # functions. They land in :attr:`SharedState.plateau_overrides`
+    # at session boot; ``phase_state.compute_next_phase`` consults
+    # the overrides every tick. Locked at session start so resume
+    # uses the same threshold the original run picked.
+    opt.add_argument(
+        "--plateau-explore-keep-gain",
+        dest="plateau_explore_keep_gain",
+        type=float,
+        default=None,
+        help="EXPLORE plateau: max cumulative KEEP-gain (%%) across the "
+             "lookback window below which the AND condition fires. "
+             "Default 0.5 (KB_design §3.8 §5.1).",
+    )
+    opt.add_argument(
+        "--plateau-explore-empty-streak",
+        dest="plateau_explore_empty_streak",
+        type=int,
+        default=None,
+        help="EXPLORE plateau: required count of *consecutive* specialist "
+             "rounds with empty proposal_set before the AND condition "
+             "fires. Default 3.",
+    )
+    opt.add_argument(
+        "--plateau-explore-lookback",
+        dest="plateau_explore_lookback",
+        type=int,
+        default=None,
+        help="EXPLORE plateau: number of trailing rounds the gain sum is "
+             "computed over. Default 5.",
+    )
+    opt.add_argument(
+        "--plateau-kernel-revert-streak",
+        dest="plateau_kernel_revert_streak",
+        type=int,
+        default=None,
+        help="KERNEL plateau: consecutive REVERT / NEEDS_REVIEW integrate "
+             "attempts to count as plateau (one half of the OR). "
+             "Default 3 (KB_design §3.8 §5.2).",
+    )
+    opt.add_argument(
+        "--plateau-kernel-keep-gain",
+        dest="plateau_kernel_keep_gain",
+        type=float,
+        default=None,
+        help="KERNEL plateau: max cumulative KEEP-gain (%%) across the "
+             "lookback window below which the OR fires. Default 0.5.",
+    )
+    opt.add_argument(
+        "--plateau-kernel-lookback",
+        dest="plateau_kernel_lookback",
+        type=int,
+        default=None,
+        help="KERNEL plateau: number of trailing integrate attempts the "
+             "gain sum is computed over. Default 5.",
     )
     # ------------------------------------------------------------------
     # v0.8 M2 — phase budget percentages (KB_design §3.2 §8.5, §3.8 §5.3)
