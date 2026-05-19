@@ -60,40 +60,25 @@ from .system_prompts.specialist_prompt_builder import (
 log = logging.getLogger(__name__)
 
 
-# PR Monitor MCP tool whitelist (KB_design §3.13 M4 §6 — 12 readonly
-# tools mirroring ``primus-cortex-pr-monitor-access.md``). Specialists
-# get these alongside the Cortex KB readonly MCP surface and the
-# stdlib tools below. The set is gated by
-# ``KnowledgePlane.pr_monitor_enabled`` at runtime: when PR Monitor
-# is disabled (``--no-pr-monitor``), the SpecialistRunner strips
-# every ``mcp__pr_monitor__*`` from the per-task whitelist so the
-# LLM doesn't try to call an absent endpoint.
-PR_MONITOR_MCP_TOOLS: tuple[str, ...] = (
-    "mcp__pr_monitor__pr_repos_list",
-    "mcp__pr_monitor__pr_repo_stats",
-    "mcp__pr_monitor__pr_list",
-    "mcp__pr_monitor__pr_get",
-    "mcp__pr_monitor__pr_files",
-    "mcp__pr_monitor__pr_file_patch",
-    "mcp__pr_monitor__pr_patches",
-    "mcp__pr_monitor__pr_blob",
-    "mcp__pr_monitor__pr_commit_files",
-    "mcp__pr_monitor__pr_commit_file",
-    "mcp__pr_monitor__pr_pr_file_baseline",
-    "mcp__pr_monitor__pr_search",
+# v0.8 §3.11 R4 / R5 — canonical external tool registry lives in
+# :mod:`policy`. We re-export the tuples below so legacy importers
+# (and the runner itself) still see the historical names without a
+# code rewrite, but PolicyGate and SpecialistRunner now share a
+# single source of truth (KB_design §3.11 §4.4 / §4.5).
+from .policy import (
+    CORTEX_KB_READ_TOOL_NAMES as _CORTEX_KB_READ,
+    KB_WRITE_TOOL_NAMES as _KB_WRITE,
+    PR_MONITOR_TOOL_NAMES as _PR_MONITOR,
+    WEB_TOOL_NAMES as _WEB,
 )
 
+#: Back-compat tuple alias for the PR Monitor MCP readonly tools.
+#: Kept tuple-typed because the original constant was a tuple; some
+#: external scripts iterate it positionally.
+PR_MONITOR_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_PR_MONITOR))
 
-# Cortex KB readonly MCP tools (KB_design §3.5 §10 / §3.11 R5). Write
-# endpoints (propose_*, hypothesize, ingest_attempt, verify, commit)
-# are explicitly **not** in this set and additionally appear in
-# :data:`SPECIALIST_TOOL_DENYLIST` so any operator extension that
-# tries to include them gets stripped at build time.
-CORTEX_KB_READONLY_MCP_TOOLS: tuple[str, ...] = (
-    "mcp__cortex_kb__traverse",
-    "mcp__cortex_kb__find_recipe",
-    "mcp__cortex_kb__query",
-)
+#: Back-compat tuple alias for the Cortex KB readonly MCP tools.
+CORTEX_KB_READONLY_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_CORTEX_KB_READ))
 
 
 # Default tool whitelist for specialists (KB_design §3.5 §10 / §3.11 R5).
@@ -108,22 +93,16 @@ DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
     # the runner's per-call hook (TODO M6) will block destructive
     # invocations.
     "Bash",
-    "WebSearch", "WebFetch",
-) + PR_MONITOR_MCP_TOOLS + CORTEX_KB_READONLY_MCP_TOOLS
+) + tuple(sorted(_WEB)) + PR_MONITOR_MCP_TOOLS + CORTEX_KB_READONLY_MCP_TOOLS
 
 
 # Tools explicitly denied even if the operator extends the whitelist —
-# guard against accidental inclusion of write paths.
+# guard against accidental inclusion of write paths. The Cortex write
+# surfaces are sourced from :data:`policy.KB_WRITE_TOOL_NAMES` so we
+# never drift between the policy and runner layers.
 SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset({
     "Edit", "Write", "MultiEdit",
-    # Cortex write surfaces (KB_design §3.11 R4).
-    "mcp__cortex_kb__propose_point",
-    "mcp__cortex_kb__propose_edge",
-    "mcp__cortex_kb__hypothesize",
-    "mcp__cortex_kb__ingest_attempt",
-    "mcp__cortex_kb__verify",
-    "mcp__cortex_kb__commit",
-})
+}) | _KB_WRITE
 
 
 def _now_iso() -> str:
