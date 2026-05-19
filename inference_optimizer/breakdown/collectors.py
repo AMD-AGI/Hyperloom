@@ -2392,6 +2392,109 @@ def _aggregate_gpu_monitor(
     }
 
 
+def _collect_lane_timeline(
+    session_dir: Path,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """v0.8 M6 (KB_design §3.12 §4.5) — per-lane capacity / occupancy
+    summary derived from ``storage/coordinator.db``.
+
+    Returns one row per known lane with:
+
+    * ``lane``                — lane name
+    * ``capacity``            — current capacity (from ``lane_capacity``,
+                                falling back to defaults)
+    * ``live_holders``        — distinct holders currently below their
+                                expiration ts at collection time
+    * ``lease_expired_count`` — total ``lease_expired`` events emitted
+                                this session (from the events table)
+
+    The per-second / per-tick ``holders_timeline`` slice the design also
+    describes is deferred — it requires a dedicated sampler, which
+    Robustness will land in a follow-up. The aggregate numbers above
+    are enough for the breakdown's ``benchmark_lane.peak ≤ 1``
+    invariant check.
+    """
+    db_path = session_dir / "storage" / "coordinator.db"
+    if not db_path.exists():
+        return []
+    import sqlite3 as _sqlite3
+    try:
+        conn = _sqlite3.connect(str(db_path), timeout=2.0)
+        conn.row_factory = _sqlite3.Row
+    except _sqlite3.Error as exc:
+        warnings.append(f"lane_timeline: open {db_path} failed: {exc!r}")
+        return []
+    try:
+        try:
+            cur = conn.execute(
+                "SELECT lane, capacity FROM lane_capacity ORDER BY lane",
+            )
+            capacities = {r["lane"]: int(r["capacity"]) for r in cur.fetchall()}
+        except _sqlite3.OperationalError:
+            # Pre-M6 DB without lane_capacity — fall back to defaults so
+            # resume on an old session still produces a stable shape.
+            from ..storage.schema import DEFAULT_LANE_CAPACITIES as _DEFAULT
+            capacities = dict(_DEFAULT)
+        try:
+            cur = conn.execute(
+                "SELECT lane, COUNT(*) AS n FROM leases "
+                "WHERE expires_at > datetime('now') GROUP BY lane",
+            )
+            holders = {r["lane"]: int(r["n"]) for r in cur.fetchall()}
+        except _sqlite3.OperationalError as exc:
+            warnings.append(f"lane_timeline: leases query failed: {exc!r}")
+            holders = {}
+        try:
+            cur = conn.execute(
+                "SELECT COUNT(*) AS n FROM events WHERE topic = 'lease_expired'",
+            )
+            row = cur.fetchone()
+            expired_total = int(row["n"]) if row else 0
+        except _sqlite3.OperationalError:
+            expired_total = 0
+        # Per-lane expired count breakdown (lease_expired events carry
+        # the lane in their JSON payload).
+        per_lane_expired: dict[str, int] = {}
+        try:
+            cur = conn.execute(
+                "SELECT payload FROM events WHERE topic = 'lease_expired'",
+            )
+            for r in cur.fetchall():
+                try:
+                    p = json.loads(r["payload"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                lane = str(p.get("lane") or "")
+                if lane:
+                    per_lane_expired[lane] = per_lane_expired.get(lane, 0) + 1
+        except _sqlite3.OperationalError:
+            pass
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    rows: list[dict[str, Any]] = []
+    for lane in sorted(set(capacities) | set(holders)):
+        rows.append({
+            "lane":                lane,
+            "capacity":            int(capacities.get(lane, 1)),
+            "live_holders":        int(holders.get(lane, 0)),
+            "lease_expired_count": int(per_lane_expired.get(lane, 0)),
+        })
+    # Append totals row for breakdown consumers that aggregate across.
+    if rows:
+        rows.append({
+            "lane":                "__total__",
+            "capacity":            sum(r["capacity"] for r in rows),
+            "live_holders":        sum(r["live_holders"] for r in rows),
+            "lease_expired_count": int(expired_total),
+        })
+    return rows
+
+
 def collect_telemetry(
     session_dir: Path,
     state: dict[str, Any],
@@ -2416,6 +2519,11 @@ def collect_telemetry(
         "system_profile_paths": [_rel(p, session_dir) or str(p) for p in _scan_system_profiles(session_dir)],
         "server_log_paths":     [_rel(p, session_dir) or str(p) for p in _scan_server_logs(session_dir)],
         "gpu_monitor_aggregate": _aggregate_gpu_monitor(all_reports, warnings),
+        # v0.8 M6 (KB_design §3.7 + §3.12 §4.5) — per-lane occupancy
+        # / capacity summary derived from the leases DB. Sits in the
+        # telemetry section so cross-cluster dashboards can chart
+        # lane usage alongside GPU power / temperature.
+        "lane_timeline": _collect_lane_timeline(session_dir, warnings),
     }
 
 
