@@ -121,6 +121,14 @@ COOLDOWN_TICKS: dict[str, int] = {
 # numbers in gain%/min units and doesn't compete with the 6-9 curated
 # rows. Keys are snake_case so :func:`seed_action_scores` can look them up
 # directly against ``ActionRegistry`` names.
+#
+# Roofline-v2 N2a: `roofline` is added at prior 7.5 in every model_class.
+# Sits between explore actions (params/backends ≥8.4) and operator_tuning
+# (≤7.0) so the LLM willingly proposes it once baseline lands but does not
+# crowd out actual optimisation work. The action is a sequence_denial
+# prerequisite for backends/params/kernel_opt/comm_optimization (see
+# §6.5/§8.5 in design/roofline-v2.md), so the LLM has to propose it
+# anyway — the prior just shapes the proposal ordering.
 MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
     "dense": {
         "deep_kernel_analysis": 2.0,
@@ -131,6 +139,7 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "compiler_tuning": 6.0,
         "backends": 9.0,
         "params": 9.0,
+        "roofline": 7.5,
         "sweep": 1.0,
     },
     "moe_mla": {
@@ -142,6 +151,7 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "compiler_tuning": 3.0,
         "backends": 8.4,
         "params": 9.5,
+        "roofline": 7.5,
         "sweep": 1.0,
     },
     "moe_swa": {
@@ -153,6 +163,7 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "compiler_tuning": 3.0,
         "backends": 9.0,
         "params": 9.0,
+        "roofline": 7.5,
         "sweep": 1.0,
     },
     "moe_mla_nsa": {
@@ -164,6 +175,7 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "compiler_tuning": 3.0,
         "backends": 9.0,
         "params": 9.0,
+        "roofline": 7.5,
         "sweep": 1.0,
     },
 }
