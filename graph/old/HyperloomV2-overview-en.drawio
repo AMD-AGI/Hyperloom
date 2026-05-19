@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" modified="2026-05-18T19:23:00.000Z" type="device" version="24.7.17">
+  <diagram id="hyperloom-v2-overview-en" name="Hyperloom v0.6 Architecture Overview">
+    <mxGraphModel dx="1800" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="880" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="header" value="&lt;b&gt;Hyperloom Inference Optimizer — Architecture Overview&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#BFD9F2;strokeColor=#0B3D91;strokeWidth=2;fontColor=#000000;fontSize=22;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1320" height="56" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lane_entry" value="&lt;b&gt;Entry&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F2F2F2;strokeColor=#999999;fontColor=#000000;fontSize=15;align=center;verticalAlign=middle;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="92" width="80" height="76" as="geometry" />
+        </mxCell>
+        <mxCell id="user" value="&lt;b&gt;User&lt;/b&gt;&lt;br&gt;inference_optimizer optimize" style="ellipse;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontColor=#000000;fontSize=14;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="140" y="92" width="260" height="76" as="geometry" />
+        </mxCell>
+        <mxCell id="cli" value="&lt;b&gt;cli.py — preflight + boot Coordinator&lt;/b&gt;&lt;br&gt;9 steps: auth · ROCm · Ray/Magpie · model-gate · runtime probe" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontColor=#000000;fontSize=14;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="420" y="92" width="720" height="76" as="geometry" />
+        </mxCell>
+        <mxCell id="auth_proxy" value="&lt;b&gt;auth-proxy :4002&lt;/b&gt;&lt;br&gt;x-api-key → Bearer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#888888;fontColor=#000000;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1160" y="92" width="200" height="76" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lane_agents" value="&lt;b&gt;Agents&lt;/b&gt;&lt;br&gt;4 independent&lt;br&gt;reactor roles&lt;br&gt;&lt;br&gt;isolation is&lt;br&gt;NOT uniform" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F2F2F2;strokeColor=#999999;fontColor=#000000;fontSize=14;align=center;verticalAlign=middle;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="184" width="80" height="240" as="geometry" />
+        </mxCell>
+
+        <mxCell id="R_orch" value="&lt;b style=&quot;font-size:16px&quot;&gt;orchestration&lt;/b&gt;&lt;br&gt;Claude · tool-using&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;Role&lt;/b&gt;&lt;br&gt;propose · delegate&lt;br&gt;the only role that can emit REQUEST (→ kernel)&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b style=&quot;color:#1F6AA8&quot;&gt;in-process&lt;/b&gt;&lt;br&gt;runs inside the Coordinator process&lt;br&gt;no separate sub-repo" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;strokeWidth=2;fontColor=#000000;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="140" y="184" width="305" height="240" as="geometry" />
+        </mxCell>
+
+        <mxCell id="R_kernel" value="&lt;b style=&quot;font-size:16px&quot;&gt;kernel&lt;/b&gt;&lt;br&gt;Claude · responder-only&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;Role&lt;/b&gt;&lt;br&gt;owns 5 kernel-owned actions&lt;br&gt;(kernel_opt / integrate / ...)&lt;br&gt;emits RESPONSE only&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b style=&quot;color:#1F6AA8&quot;&gt;in-process&lt;/b&gt;&lt;br&gt;calls &lt;b style=&quot;color:#B47A1A&quot;&gt;kernel-agent/tools/&lt;/b&gt; (107KB&lt;br&gt;tools library, in-process import; &lt;b&gt;NOT a subprocess&lt;/b&gt;)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;strokeWidth=2;fontColor=#000000;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="450" y="184" width="305" height="240" as="geometry" />
+        </mxCell>
+
+        <mxCell id="R_critic" value="&lt;b style=&quot;font-size:16px&quot;&gt;critic ★&lt;/b&gt;&lt;br&gt;Codex · no-tools&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;Role&lt;/b&gt;&lt;br&gt;owns review_verdict&lt;br&gt;(approve / reject / redirect / advise)&lt;br&gt;Pending Proposal Gate&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b style=&quot;color:#D14B4B&quot;&gt;subprocess&lt;/b&gt; (spawned by Coordinator Popen)&lt;br&gt;python -m &lt;b&gt;critic-agent.runtime.cli&lt;/b&gt;&lt;br&gt;decision_reviewer · kb_writer · session_memory" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D14B4B;strokeWidth=2;fontColor=#000000;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="760" y="184" width="305" height="240" as="geometry" />
+        </mxCell>
+
+        <mxCell id="R_robust" value="&lt;b style=&quot;font-size:16px&quot;&gt;robustness ★&lt;/b&gt;&lt;br&gt;Claude · always-on&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;Role&lt;/b&gt;&lt;br&gt;owns scheduling-police&lt;br&gt;(kill_task · prune · force_dispatch · escalate)&lt;br&gt;+ health monitor + RCA + recover&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b style=&quot;color:#D14B4B&quot;&gt;subprocess&lt;/b&gt; (spawned by Coordinator Popen)&lt;br&gt;python -m &lt;b&gt;robustness-agent.main&lt;/b&gt;&lt;br&gt;checks · monitors · providers · rca · signals" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D14B4B;strokeWidth=2;fontColor=#000000;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1070" y="184" width="305" height="240" as="geometry" />
+        </mxCell>
+
+        <mxCell id="coord_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6F2FF;strokeColor=#1F6AA8;strokeWidth=2;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="130" y="440" width="1245" height="280" as="geometry" />
+        </mxCell>
+        <mxCell id="coord_title" value="&lt;b&gt;Coordinator&lt;/b&gt; · single asyncio process&lt;br&gt;&lt;span style=&quot;font-size:12px&quot;&gt;Owns: SharedState · MessageBus · TaskRegistry · CursorStore · ResourceLockManager · ActionRegistry · SubAgentRunner · Objective&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#BFD9F2;strokeColor=#10497F;fontColor=#000000;fontSize=15;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="146" y="454" width="1213" height="58" as="geometry" />
+        </mxCell>
+
+        <mxCell id="policy" value="&lt;b&gt;IntentParser + PolicyGate — single chokepoint&lt;/b&gt;&lt;br&gt;role permission · source allowlists · REQUEST routing · kernel-owned actions not delegatable · core-state guard · session_dir path containment  →  on failure, policy_denied is written to the offending agent&apos;s inbox" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE4E4;strokeColor=#D14B4B;strokeWidth=2;fontColor=#000000;fontSize=14;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="146" y="524" width="1213" height="74" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exec" value="&lt;b&gt;Action Executors&lt;/b&gt; (Python async fns · in-process · unit-tested)&lt;br&gt;10 executors: baseline · profile · backends · params · sweep · pmc_roofline · target_analysis · validate_stack · report · session_breakdown&lt;br&gt;&lt;b&gt;Kernel path&lt;/b&gt; (REQUEST → 4 kinds): select_kernels · run_optimization · integrate · apply_patch  →  in-process call into kernel-agent/tools/*" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D6E9FF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="146" y="610" width="1213" height="96" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lane_persist" value="&lt;b&gt;Persist&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F2F2F2;strokeColor=#999999;fontColor=#000000;fontSize=14;align=center;verticalAlign=middle;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="736" width="80" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="persist" value="&lt;b&gt;Persistence&lt;/b&gt; — $SESSION_DIR (default /workspace/hyperloom): state.json · SQLite WAL (events / tasks / leases / cursors) · agents/{role}/{inbox,outbox} · runs/ · critic-workdir/" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D6E9FF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="140" y="736" width="1235" height="56" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lane_ext" value="&lt;b&gt;External&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F2F2F2;strokeColor=#999999;fontColor=#000000;fontSize=14;align=center;verticalAlign=middle;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="804" width="80" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="hw" value="&lt;b&gt;External&lt;/b&gt; — GPU pod (sglang / vllm via Magpie) · GEAK + OOB (Ray-scheduled) · TraceLens · InferenceX (GSM8K accuracy gate + B200 comparison)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D9D9D9;strokeColor=#5A5A5A;fontColor=#000000;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="140" y="804" width="1235" height="56" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_user_cli" style="endArrow=classic;html=1;rounded=0;strokeColor=#1F6AA8;strokeWidth=2;" edge="1" parent="1" source="user" target="cli">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_cli_proxy" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;dashed=1;" edge="1" parent="1" source="cli" target="auth_proxy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_cli_coord" style="endArrow=classic;html=1;rounded=0;strokeColor=#1F6AA8;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="cli" target="coord_title">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_orch_p" style="endArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.1;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="R_orch" target="policy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_kernel_p" style="endArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.37;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="R_kernel" target="policy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_critic_p" style="endArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.63;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="R_critic" target="policy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_robust_p" style="endArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.9;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="R_robust" target="policy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_p_exec" style="endArrow=classic;html=1;rounded=0;strokeColor=#1F6AA8;strokeWidth=2;" edge="1" parent="1" source="policy" target="exec">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_exec_persist" style="endArrow=classic;html=1;rounded=0;strokeColor=#1F6AA8;" edge="1" parent="1" source="exec" target="persist">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_persist_hw" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;" edge="1" parent="1" source="persist" target="hw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

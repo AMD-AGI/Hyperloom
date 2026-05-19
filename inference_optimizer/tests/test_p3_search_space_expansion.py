@@ -459,7 +459,9 @@ def test_prompt_includes_idea_generation_block(registry, rules_path):
 
 def test_prompt_section_count_unchanged(registry, rules_path):
     """IR-26 must be appended INSIDE section 5, not as a new top-level
-    section — the seven-section contract is a hard public contract."""
+    section. v0.8 §3.3 wedges §3a PHASE CONTRACT between §3 and §4 but
+    keeps the rest of the 1-7 numbering identical — so IR-26 content
+    inside §5 is still verifiable by this regression."""
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
@@ -477,6 +479,7 @@ def test_prompt_section_count_unchanged(registry, rules_path):
         "## 1. MISSION",
         "## 2. SESSION CONTEXT",
         "## 3. PIPELINE & TIME BUDGET",
+        "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "## 4. ACTIONS YOU MAY USE",
         "## 5. DECISION FRAMEWORK (apply EVERY tick BEFORE emitting)",
         "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",

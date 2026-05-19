@@ -74,7 +74,51 @@ def _section_run_context(
         "",
         "Per-tick dynamic context (inbox, proposals, KB priors) arrives in",
         "the user message as a judge bundle — not in this system prompt.",
+        "",
+        "Every `judge_bundle` you receive carries a `phase` field",
+        "(PRELUDE / EXPLORE / KERNEL / SWEEP / CLOSE). Use the phase-",
+        "specific review rules in §6 to interpret each proposal in",
+        "context. Reject proposals that mutate kernel source while the",
+        "run is in EXPLORE phase (rule = 'kernel-source-in-explore').",
     ]
+
+
+def _section_phase_review_contract() -> list[str]:
+    """Static phase-aware verdict contract (v0.8 §3.3 §4.3).
+
+    Mirrors the per-phase allowed-action map in
+    ``phase_state.PHASE_ALLOWED_ACTIONS`` so the Critic verdict
+    process stays aligned with PolicyGate R1's phase_incompatible
+    rule. The dynamic *current* phase is in ``judge_bundle.phase``
+    each tick.
+    """
+    from ..phase_state import PHASE_ALLOWED_ACTIONS, PHASE_NAMES
+
+    lines: list[str] = [
+        "## 5. PHASE REVIEW CONTRACT (v0.8 §3.3)",
+        "",
+        "Each `judge_bundle` carries a `phase` (PRELUDE / EXPLORE /",
+        "KERNEL / SWEEP / CLOSE). Phase-allowed action sets:",
+        "",
+    ]
+    for phase in PHASE_NAMES:
+        allowed = sorted(PHASE_ALLOWED_ACTIONS.get(phase, frozenset()))
+        lines.append(f"- **{phase}**: {', '.join(allowed)}")
+    lines.extend([
+        "",
+        "If the proposal's `action_name` is NOT in the bundle's phase",
+        "allowlist, return `reject` with",
+        "`reasoning='phase_incompatible: action <name> not allowed in",
+        "<phase>'`. PolicyGate R1 will have already blocked most such",
+        "proposals before they reach you, but the verdict closes the",
+        "loop and surfaces the denial in `policy_denial_history`.",
+        "",
+        "Specialist proposal_set packets (M5+) arrive bundled as a",
+        "single `propose_action='explore'` whose `payload.variants` is",
+        "a K-entry list. Respond with one verdict per variant; missing",
+        "entries are treated as `needs_review`.",
+    ])
+    return lines
 
 
 def _actions_by_family(actions: list[ActionMetadata]) -> list[tuple[str, list[ActionMetadata]]]:
@@ -140,7 +184,7 @@ def _section_default_verdict(actions: list[ActionMetadata]) -> list[str]:
 def _section_kernel_owned_carveout() -> list[str]:
     owned = ", ".join(sorted(KERNEL_OWNED_ACTIONS))
     return [
-        "## 5. KERNEL-OWNED CARVE-OUT",
+        "## 5b. KERNEL-OWNED CARVE-OUT",
         "",
         "These actions use `request{target_agent='kernel', kind=...}`, not",
         "`propose_action`. Your job is to OK the proposal flow:",
@@ -225,6 +269,9 @@ def build_critic_prompt(
         ),
         _section_known_actions(actions),
         _section_default_verdict(actions),
+        # v0.8 §3.3 — phase review contract (per-phase allowlist +
+        # specialist batch verdict shape).
+        _section_phase_review_contract(),
     ]
     if kernel_enabled:
         sections.append(_section_kernel_owned_carveout())

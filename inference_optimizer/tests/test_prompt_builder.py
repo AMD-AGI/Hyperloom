@@ -163,6 +163,12 @@ def _section_headers(prompt: str) -> list[str]:
 
 
 def test_full_prompt_has_seven_sections(registry, rules_path):
+    """v0.8 §3.3 — original v0.6 seven-section contract is now eight
+    sections because the PHASE CONTRACT (§3a) is wedged between
+    PIPELINE & TIME BUDGET and ACTIONS YOU MAY USE. The legacy 1-7
+    headers are preserved verbatim so downstream LLM prompts that key
+    on the original numbering keep working.
+    """
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
@@ -177,6 +183,7 @@ def test_full_prompt_has_seven_sections(registry, rules_path):
         "## 1. MISSION",
         "## 2. SESSION CONTEXT",
         "## 3. PIPELINE & TIME BUDGET",
+        "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "## 4. ACTIONS YOU MAY USE",
         "## 5. DECISION FRAMEWORK (apply EVERY tick BEFORE emitting)",
         "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
