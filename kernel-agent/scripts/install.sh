@@ -64,6 +64,10 @@ _resolve_magpie_python() {
 MAGPIE_PYTHON="$(_resolve_magpie_python)"
 PYTHONPATH="${MAGPIE_DIR}:${PYTHONPATH:-}"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
+# TraceLens checkout root. Expected to point at a checkout of the
+# AMD-AGI/TraceLens-internal repo at tag `Hyperloom_integration_v0.3.1`
+# (or newer release/hyperloom_integration_v0.3.1 branch). Older v0.3
+# flat-layout checkouts still work via _server_patcher backward-compat.
 TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 # Writable mirror for TraceLens when $TRACELENS_ROOT is on a read-only mount
 # (e.g. /wekafs/...). Mirrors the OOB pattern: cp -r the read-only source into

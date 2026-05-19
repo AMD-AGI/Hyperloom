@@ -1295,3 +1295,252 @@ def test_sglang_e2e_manifest_admits_version_outside_default_allowlist(
         "0.7.0 should have been patched because the manifest admits it — "
         "the default 0.5.x allowlist alone would have rejected"
     )
+
+
+# ===========================================================================
+# TraceLens Hyperloom_integration_v0.3.1: per-version patch subdirs
+# (sglang_0_5_9/, sglang_0_5_11/, ...) replace the previous flat
+# sglang_roofline_patches/*.patch layout. Hyperloom must resolve the
+# correct subdir for the running sglang version and stop applying the
+# v0.3 ``optional_missing`` shim once the upstream per-version set is
+# in use (since the per-version set is authored against that release).
+# ===========================================================================
+def _write_versioned_sglang_patches(
+    tracelens_root: Path, subdir: str, *, count: int = 1,
+) -> list[Path]:
+    """Write minimal v0.3.1-style patches into a per-version subdir.
+    Reuses the flat-layout fixture body but lands under
+    ``sglang_roofline_patches/<subdir>/`` rather than the root."""
+    base = (
+        tracelens_root / "examples" / "custom_workflows"
+        / "inference_analysis" / "sglang_roofline_patches" / subdir
+    )
+    base.mkdir(parents=True, exist_ok=True)
+    patches: list[Path] = []
+    p1 = base / "kernel_shape_profiler.patch"
+    p1.write_text(
+        textwrap.dedent(
+            """\
+            diff --git a/python/sglang/srt/utils/kernel_shape_profiler.py b/python/sglang/srt/utils/kernel_shape_profiler.py
+            new file mode 100644
+            index 000000000..1111111
+            --- /dev/null
+            +++ b/python/sglang/srt/utils/kernel_shape_profiler.py
+            @@ -0,0 +1,3 @@
+            +# kernel_shape_profiler stub — TraceLens patch fixture.
+            +def hello():
+            +    return "kernel_shape_profiler"
+            """
+        ),
+        encoding="utf-8",
+    )
+    patches.append(p1)
+    for i in range(len(patches), count):
+        p = base / f"misc_{i}.patch"
+        target = f"python/sglang/srt/utils/extra_{i}.py"
+        p.write_text(
+            textwrap.dedent(
+                f"""\
+                diff --git a/{target} b/{target}
+                new file mode 100644
+                index 000000000..2222222
+                --- /dev/null
+                +++ b/{target}
+                @@ -0,0 +1 @@
+                +# extra_{i} stub
+                """
+            ),
+            encoding="utf-8",
+        )
+        patches.append(p)
+    return patches
+
+
+def test_versioned_patches_subdir_name_helper():
+    """Dotted numeric versions map to ``sglang_<underscored>`` subdir
+    names; non-numeric or empty inputs return None so the caller
+    fail-softs to the flat layout."""
+    assert _server_patcher._versioned_patches_subdir_name("0.5.11") == "sglang_0_5_11"
+    assert _server_patcher._versioned_patches_subdir_name("0.5.9") == "sglang_0_5_9"
+    assert _server_patcher._versioned_patches_subdir_name("1.2.3.4") == "sglang_1_2_3_4"
+    # Dev / rc / local suffixes are stripped to the numeric head.
+    assert _server_patcher._versioned_patches_subdir_name("0.5.11-rc1") == "sglang_0_5_11"
+    assert _server_patcher._versioned_patches_subdir_name("0.5.11+local") == "sglang_0_5_11"
+    # Bad input → None (caller falls back to flat).
+    assert _server_patcher._versioned_patches_subdir_name("") is None
+    assert _server_patcher._versioned_patches_subdir_name("not-a-version") is None
+    assert _server_patcher._versioned_patches_subdir_name(None) is None  # type: ignore[arg-type]
+
+
+def test_resolve_sglang_patches_dir_prefers_versioned_subdir(tmp_path):
+    """When ``sglang_0_5_11/`` is present and non-empty, the resolver
+    must return it with ``versioned=True``, ignoring any flat patches
+    at the root."""
+    root = tmp_path / "sglang_roofline_patches"
+    root.mkdir()
+    # Plant a flat patch to make sure the versioned branch wins anyway.
+    (root / "decoy.patch").write_text("placeholder\n", encoding="utf-8")
+    subdir = root / "sglang_0_5_11"
+    subdir.mkdir()
+    (subdir / "kernel_shape_profiler.patch").write_text("p\n", encoding="utf-8")
+    result = _server_patcher._resolve_sglang_patches_dir(root, "0.5.11")
+    assert result is not None
+    patches_dir, versioned = result
+    assert patches_dir == subdir
+    assert versioned is True
+
+
+def test_resolve_sglang_patches_dir_falls_back_to_flat(tmp_path):
+    """v0.3 checkouts have flat ``*.patch`` at the root and no
+    versioned subdirs — the resolver must return the root with
+    ``versioned=False`` so the legacy optional-skip shim runs."""
+    root = tmp_path / "sglang_roofline_patches"
+    root.mkdir()
+    (root / "kernel_shape_profiler.patch").write_text("p\n", encoding="utf-8")
+    result = _server_patcher._resolve_sglang_patches_dir(root, "0.5.11")
+    assert result is not None
+    patches_dir, versioned = result
+    assert patches_dir == root
+    assert versioned is False
+
+
+def test_resolve_sglang_patches_dir_returns_none_when_empty(tmp_path):
+    """Neither versioned subdir nor flat *.patch at root → None.
+    Caller then logs + skips patching entirely."""
+    root = tmp_path / "sglang_roofline_patches"
+    root.mkdir()
+    (root / "sglang_0_5_11").mkdir()  # subdir exists but is empty
+    assert _server_patcher._resolve_sglang_patches_dir(root, "0.5.11") is None
+
+
+def test_resolve_sglang_patches_dir_skips_empty_versioned_subdir(tmp_path):
+    """An empty ``sglang_0_5_11/`` must not shadow the flat fallback
+    when flat patches actually exist at the root."""
+    root = tmp_path / "sglang_roofline_patches"
+    root.mkdir()
+    (root / "sglang_0_5_11").mkdir()
+    (root / "kernel_shape_profiler.patch").write_text("p\n", encoding="utf-8")
+    result = _server_patcher._resolve_sglang_patches_dir(root, "0.5.11")
+    assert result is not None
+    patches_dir, versioned = result
+    assert patches_dir == root
+    assert versioned is False
+
+
+@_REQUIRES_GIT
+def test_sglang_e2e_versioned_layout_applies_from_subdir(tmp_path, monkeypatch):
+    """End-to-end: sglang 0.5.11 + a TraceLens checkout that ships
+    ``sglang_roofline_patches/sglang_0_5_11/`` (no flat fallback). The
+    patcher must pick the versioned subdir and apply its patches."""
+    tracelens_root = _make_fake_tracelens(tmp_path)
+    apply_root = _make_fake_sglang_install(tmp_path)
+    sgl_init = apply_root / "python" / "sglang" / "__init__.py"
+    sgl_init.write_text('__version__ = "0.5.11"\n', encoding="utf-8")
+    _write_versioned_sglang_patches(tracelens_root, "sglang_0_5_11", count=1)
+
+    fake_mod = types.ModuleType("sglang")
+    fake_mod.__version__ = "0.5.11"  # type: ignore[attr-defined]
+    fake_mod.__file__ = str(sgl_init)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sglang", fake_mod)
+    monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
+
+    assert ensure_sglang_patched_for_tracelens() is True
+    sentinel = (
+        apply_root / "python" / "sglang" / "srt" / "utils"
+        / "kernel_shape_profiler.py"
+    )
+    assert sentinel.exists(), (
+        "0.5.11 should pick sglang_0_5_11/ subdir and apply its patches"
+    )
+
+
+def test_discover_sglang_plan_marks_versioned_layout(tmp_path, monkeypatch):
+    """The discovered ``_PatchPlan``'s patches must point inside the
+    versioned subdir when that layout is present — guards against
+    accidentally regressing to flat resolution and double-checks that
+    versioned discovery short-circuits before flat is even consulted."""
+    tracelens_root = _make_fake_tracelens(tmp_path)
+    apply_root = _make_fake_sglang_install(tmp_path)
+    sgl_init = apply_root / "python" / "sglang" / "__init__.py"
+    sgl_init.write_text('__version__ = "0.5.11"\n', encoding="utf-8")
+    _write_versioned_sglang_patches(tracelens_root, "sglang_0_5_11", count=1)
+
+    fake_mod = types.ModuleType("sglang")
+    fake_mod.__version__ = "0.5.11"  # type: ignore[attr-defined]
+    fake_mod.__file__ = str(sgl_init)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sglang", fake_mod)
+    monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
+
+    plan = _server_patcher._discover_sglang_plan(None)
+    assert plan is not None
+    for p in plan.patches:
+        assert "sglang_0_5_11" in p.parts, (
+            f"versioned layout should be selected, got patch path {p}"
+        )
+
+
+@_REQUIRES_GIT
+def test_sglang_versioned_layout_does_not_filter_optional(tmp_path, monkeypatch):
+    """Under the versioned layout the patcher must NOT drop a patch
+    just because its target file is absent on disk — v0.3.1 ships
+    a complete per-version set, so a missing target indicates a
+    deployment problem, not a "skip-and-continue" case."""
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
+    tracelens_root = _make_fake_tracelens(tmp_path)
+    apply_root = _make_fake_sglang_install(tmp_path)
+    sgl_init = apply_root / "python" / "sglang" / "__init__.py"
+    sgl_init.write_text('__version__ = "0.5.11"\n', encoding="utf-8")
+    # Land a benign patch + a patch named like one of the v0.3 optional
+    # entries. Under flat fallback the latter would be dropped because
+    # its target doesn't exist; under versioned it must stay in the set.
+    versioned_dir = (
+        tracelens_root / "examples" / "custom_workflows"
+        / "inference_analysis" / "sglang_roofline_patches" / "sglang_0_5_11"
+    )
+    versioned_dir.mkdir(parents=True)
+    (versioned_dir / "kernel_shape_profiler.patch").write_text(
+        textwrap.dedent(
+            """\
+            diff --git a/python/sglang/srt/utils/kernel_shape_profiler.py b/python/sglang/srt/utils/kernel_shape_profiler.py
+            new file mode 100644
+            index 000000000..1111111
+            --- /dev/null
+            +++ b/python/sglang/srt/utils/kernel_shape_profiler.py
+            @@ -0,0 +1,1 @@
+            +# kernel_shape_profiler stub
+            """
+        ),
+        encoding="utf-8",
+    )
+    # Name matches the legacy optional list; target is a file path that
+    # would not be present in the synthetic install. Versioned branch
+    # should keep this patch in the set, so the plan must contain it.
+    (versioned_dir / "fused_moe_triton_kernels.patch").write_text(
+        textwrap.dedent(
+            """\
+            diff --git a/python/sglang/srt/utils/extra_marker.py b/python/sglang/srt/utils/extra_marker.py
+            new file mode 100644
+            index 000000000..3333333
+            --- /dev/null
+            +++ b/python/sglang/srt/utils/extra_marker.py
+            @@ -0,0 +1,1 @@
+            +# extra marker stub
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    fake_mod = types.ModuleType("sglang")
+    fake_mod.__version__ = "0.5.11"  # type: ignore[attr-defined]
+    fake_mod.__file__ = str(sgl_init)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sglang", fake_mod)
+    monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
+
+    plan = _server_patcher._discover_sglang_plan(None)
+    assert plan is not None
+    patch_names = {p.name for p in plan.patches}
+    assert "fused_moe_triton_kernels.patch" in patch_names, (
+        "versioned layout must not drop patches by name even when the "
+        "legacy optional_missing dict would have"
+    )

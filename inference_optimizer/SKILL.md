@@ -74,7 +74,10 @@ in `.env.template`).
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): `$TRACELENS_ROOT` (default `/wekafs/hyperloom/
-TraceLens-internal`), `$OOB_SRC` / `$HYPERLOOM_BUNDLE`,
+TraceLens-internal`; expected at tag `Hyperloom_integration_v0.3.1` or
+the matching `release/hyperloom_integration_v0.3.1` branch — older v0.3
+flat checkouts still work via the patcher's backward-compat fallback),
+`$OOB_SRC` / `$HYPERLOOM_BUNDLE`,
 `/sgl-workspace/{aiter,sglang,vllm}/`, `~/.claude/config.json` +
 `~/.codex/auth.json`, `~/.cache/amd-ai-devtool/semantic-index/`
 (GEAK RAG embedding cache), `/wekafs/hyperloom/geak-memory/memory.db`

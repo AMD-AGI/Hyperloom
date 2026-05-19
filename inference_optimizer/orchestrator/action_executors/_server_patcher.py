@@ -230,6 +230,56 @@ def _sglang_version_accepted(
 _PATCH_TREE_REL = ("examples", "custom_workflows", "inference_analysis")
 
 
+def _versioned_patches_subdir_name(version: str) -> str | None:
+    """Map ``sglang.__version__`` to the per-version patch subdir name
+    TraceLens ``Hyperloom_integration_v0.3.1`` introduced (e.g.
+    ``0.5.11`` -> ``sglang_0_5_11``). Returns ``None`` when ``version``
+    has no recognisable dotted numeric head (so the caller fail-softs
+    to the legacy flat layout)."""
+    text = (version or "").strip()
+    if not text:
+        return None
+    # Strip dev/local suffixes (e.g. ``0.5.11-rc1`` -> ``0.5.11``) so
+    # point-release tags still resolve to a versioned subdir.
+    head = text.split("-", 1)[0].split("+", 1)[0]
+    parts = head.split(".") if head else []
+    if not parts or not all(p.isdigit() for p in parts):
+        return None
+    return "sglang_" + "_".join(parts)
+
+
+def _resolve_sglang_patches_dir(
+    patches_root: Path, version: str,
+) -> tuple[Path, bool] | None:
+    """Locate the SGLang patches dir for the running ``sglang`` version.
+
+    TraceLens ``Hyperloom_integration_v0.3.1`` split the previously-flat
+    ``sglang_roofline_patches/`` into per-version subdirs
+    (``sglang_0_5_9/``, ``sglang_0_5_11/``, ...). Resolution order:
+
+    1. Versioned subdir matching the installed sglang (e.g.
+       ``sglang_0_5_11/``) when it exists AND contains at least one
+       ``*.patch`` file.
+    2. Flat ``sglang_roofline_patches/`` itself when it directly
+       contains ``*.patch`` files (the v0.3 layout) — kept as a
+       backward-compat fallback so checkouts pinned at v0.3 keep
+       working without code changes.
+
+    Returns ``(patches_dir, versioned)`` where ``versioned`` lets the
+    caller skip the v0.3 ``optional_missing`` shim (v0.3.1+ ships a
+    complete per-version patch set, so no patch should be optional).
+    Returns ``None`` when neither layout yields any patches.
+    """
+    subdir_name = _versioned_patches_subdir_name(version)
+    if subdir_name is not None:
+        candidate = patches_root / subdir_name
+        if candidate.is_dir() and any(candidate.glob("*.patch")):
+            return candidate, True
+    if any(patches_root.glob("*.patch")):
+        return patches_root, False
+    return None
+
+
 # ---------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------
@@ -393,14 +443,27 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
 
     # Resolve the patches dir BEFORE the version check so the gate
     # can consult the TraceLens-shipped manifest (PR-D §5). If the
-    # patches dir itself is missing, no point checking the version.
-    patches_dir = _patch_tree(tracelens_root, "sglang_roofline_patches")
-    if not patches_dir.is_dir():
+    # patches root itself is missing, no point checking the version.
+    patches_root = _patch_tree(tracelens_root, "sglang_roofline_patches")
+    if not patches_root.is_dir():
         log.info(
-            "_server_patcher: SGLang patches directory missing (%s); skip",
-            patches_dir,
+            "_server_patcher: SGLang patches root missing (%s); skip",
+            patches_root,
         )
         return None
+
+    # TraceLens v0.3.1 introduced per-version subdirs; v0.3 was flat.
+    # Prefer the versioned subdir, fall back to flat for backward compat.
+    patches_resolution = _resolve_sglang_patches_dir(patches_root, version)
+    if patches_resolution is None:
+        log.info(
+            "_server_patcher: no SGLang patches found under %s for "
+            "version %s (looked for %s/ then flat layout); skip",
+            patches_root, version,
+            _versioned_patches_subdir_name(version) or "<unknown>",
+        )
+        return None
+    patches_dir, versioned_layout = patches_resolution
 
     if not _sglang_version_accepted(version, patches_dir=patches_dir):
         log.info(
@@ -429,32 +492,41 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     #   modified in place — no symlinks, no tmpdirs, no copies, so
     #   ``git apply``'s symlink-safety check never trips.
     sglang_module = Path(sglang.__file__).resolve()
-    resolution = _resolve_sglang_apply_root(sglang_module)
-    if resolution is None:
+    apply_resolution = _resolve_sglang_apply_root(sglang_module)
+    if apply_resolution is None:
         return None
-    apply_root, apply_strip = resolution
+    apply_root, apply_strip = apply_resolution
 
-    optional_missing = {
-        # Dense inference and SGLang 0.5.11 do not have this legacy path.
-        "fused_moe_triton_kernels.patch":
-            "python/sglang/srt/layers/moe/fused_moe_triton/"
-            "fused_moe_triton_kernels.py",
-        # The old mixin was folded/renamed in newer SGLang. http_server.py
-        # and io_struct.py cover the /start_profile request path we use.
-        "tokenizer_communicator_mixin.patch":
-            "python/sglang/srt/managers/tokenizer_communicator_mixin.py",
-    }
-    filtered_patches: list[Path] = []
-    for patch_file in patches:
-        optional_target = optional_missing.get(patch_file.name)
-        if optional_target and not (apply_root / optional_target).exists():
-            log.info(
-                "_server_patcher: skipping optional SGLang patch %s because "
-                "target %s is absent in installed SGLang %s",
-                patch_file.name, optional_target, version,
-            )
-            continue
-        filtered_patches.append(patch_file)
+    if versioned_layout:
+        # TraceLens v0.3.1 per-version subdirs ship a complete patch
+        # set authored against that exact sglang release, so every
+        # patch must apply. No legacy optional-skip needed.
+        filtered_patches: list[Path] = list(patches)
+    else:
+        # v0.3 flat layout was authored against 0.5.9. On newer point
+        # releases some target files moved or were dropped — skip those
+        # patches when the target is absent so the rest still apply.
+        optional_missing = {
+            # Dense inference and SGLang 0.5.11 do not have this legacy path.
+            "fused_moe_triton_kernels.patch":
+                "python/sglang/srt/layers/moe/fused_moe_triton/"
+                "fused_moe_triton_kernels.py",
+            # The old mixin was folded/renamed in newer SGLang. http_server.py
+            # and io_struct.py cover the /start_profile request path we use.
+            "tokenizer_communicator_mixin.patch":
+                "python/sglang/srt/managers/tokenizer_communicator_mixin.py",
+        }
+        filtered_patches = []
+        for patch_file in patches:
+            optional_target = optional_missing.get(patch_file.name)
+            if optional_target and not (apply_root / optional_target).exists():
+                log.info(
+                    "_server_patcher: skipping optional SGLang patch %s because "
+                    "target %s is absent in installed SGLang %s",
+                    patch_file.name, optional_target, version,
+                )
+                continue
+            filtered_patches.append(patch_file)
 
     # Sentinel: the kernel_shape_profiler patch creates an entirely
     # new file. In both layouts it lands at the wheel-side path
@@ -541,6 +613,13 @@ def _ensure_sglang_tokenizer_control_profile_args(plan: _PatchPlan) -> bool:
     patch, HTTP /start_profile accepts ``shape_discovery`` in the request model
     but raises ``unexpected keyword argument`` before the scheduler ever sees
     the flag, so no execution-step trace is recorded.
+
+    Status note: TraceLens ``Hyperloom_integration_v0.3.1`` ships an upstream
+    ``sglang_0_5_11/tokenizer_communicator_mixin.patch`` that targets the same
+    file with the same fields, so when the versioned patch layout is in use
+    the idempotency short-circuit below returns True without mutating anything.
+    This shim only does real work for users still pinned at the v0.3 flat
+    layout where the upstream 0.5.11 patch isn't available.
     """
     sglang_pkg = plan.sentinel_file.parents[2]
     target = sglang_pkg / "srt" / "managers" / "tokenizer_control_mixin.py"
