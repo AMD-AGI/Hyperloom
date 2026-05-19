@@ -225,8 +225,12 @@ def test_shared_state_prompt_summary_mentions_new_fields():
     assert "discovered_flags=" in summary
     assert "backend_winners_history=" in summary
     assert "synergy_attempted=" in summary
-    # Counts surface, not full lists
-    assert "sglang:backend=1/param=0" in summary
+    # Roofline-v2 N4: replaced the per-framework count summary with
+    # a layered listing that surfaces every real flag name + tested
+    # status tag. See design §8.6 / test_format_discovered_flags_layered.
+    assert "sglang.backends (1 flags):" in summary
+    assert "--enable-aiter" in summary
+    assert "[untested]" in summary
 
 
 # ---------------------------------------------------------------------------
