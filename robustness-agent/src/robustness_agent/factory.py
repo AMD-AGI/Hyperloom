@@ -46,6 +46,7 @@ from .finalize.postmortem import (
 )
 from .findings.sink import FindingSink, FindingSinkConfig
 from .role.reactor import Reactor, ReactorComponents
+from .state_store import DetectorStateStore
 from .signals import Classifier, SymptomSeverity
 from .signals.aiter_jit import AiterJitConfig
 from .signals.budget import BudgetConfig
@@ -191,7 +192,19 @@ def build_reactor_components(
         recheck_interval_s=config.source_recheck_interval_s,
     )
 
+    # Disk-backed state store — single source of truth for any
+    # subsystem that needs to survive a subprocess restart (detectors,
+    # ladder cooldown, RCA throttle). Built before the classifier so
+    # we can pass it in once and Classifier wires it to all stateful
+    # sub-detectors.
+    state_store: DetectorStateStore | None = (
+        DetectorStateStore(session_dir=config.session_dir)
+        if config.state_store_enabled
+        else None
+    )
+
     classifier = Classifier(
+        state_store=state_store,
         stall_config=StallConfig(
             stall_timeout_s=config.agent_stall_timeout_s,
         ),
@@ -308,6 +321,9 @@ def build_reactor_components(
 
     ladder = ActionLadder(
         config=ActionLadderConfig(cooldown_ticks=config.cooldown_ticks),
+        state_view=(
+            state_store.view("action_ladder") if state_store else None
+        ),
     )
 
     sink_session_id = session_id or config.session_dir.name or "default"
@@ -315,7 +331,9 @@ def build_reactor_components(
         FindingSinkConfig(session_dir=config.session_dir, session_id=sink_session_id)
     )
 
-    rca_engine: RcaEngine = rca if rca is not None else _build_rca_engine(config)
+    rca_engine: RcaEngine = rca if rca is not None else _build_rca_engine(
+        config, state_store=state_store,
+    )
 
     finalizer = (
         PostmortemFinalizer(
@@ -339,6 +357,7 @@ def build_reactor_components(
         sink=sink,
         rca=rca_engine,
         finalizer=finalizer,
+        state_store=state_store,
     )
     return ReactorBundle(
         reactor=Reactor(components),
@@ -348,7 +367,11 @@ def build_reactor_components(
     )
 
 
-def _build_rca_engine(config: Config) -> RcaEngine:
+def _build_rca_engine(
+    config: Config,
+    *,
+    state_store: DetectorStateStore | None = None,
+) -> RcaEngine:
     """Choose between Noop and Llm based on config + env override."""
     if os.environ.get("ROBUSTNESS_LLM_RCA_DISABLED", "").lower() in {"1", "true", "yes"}:
         log.info("LLM RCA disabled via ROBUSTNESS_LLM_RCA_DISABLED env override")
@@ -366,7 +389,10 @@ def _build_rca_engine(config: Config) -> RcaEngine:
             severity_min=severity_min,
             cooldown_seconds=config.llm_rca_cooldown_s,
             max_calls_per_tick=config.llm_rca_max_calls_per_tick,
-        )
+        ),
+        state_view=(
+            state_store.view("rca_throttle") if state_store else None
+        ),
     )
     log.info(
         "LLM RCA enabled: model=%s severity_min=%s cooldown=%.1fs max_per_tick=%d",
