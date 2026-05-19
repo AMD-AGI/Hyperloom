@@ -2022,6 +2022,7 @@ def _bootstrap_knowledge_plane(
     args: argparse.Namespace,
     *,
     cortex_client: "CortexKBClient | None",
+    session_dir: Path | None = None,
 ) -> "KnowledgePlane":
     """Construct the :class:`KnowledgePlane` facade for one session.
 
@@ -2058,22 +2059,53 @@ def _bootstrap_knowledge_plane(
     )
 
     pr_client = PRMonitorClient.from_args(url=pr_url, enabled=pr_enabled)
+    pr_reachable = True
     if not pr_enabled:
-        print("PR Monitor       : DISABLED (--no-pr-monitor)")
+        status_text = "disabled (--no-pr-monitor)"
+        print(f"PR Monitor       : DISABLED (--no-pr-monitor)")
+        pr_reachable = False
     elif not pr_client.healthz():
         # Fail-soft: keep the client around (the specialist tool list
         # already accommodates the MCP layer staying up even when REST
         # is flaky), but warn so the operator sees the diagnostic.
+        status_text = f"unreachable at {pr_client.base_url}"
         print(
             f"PR Monitor       : REST unreachable at {pr_client.base_url} "
             f"(continuing; prompt PR feed section will render "
             f"(unavailable))"
         )
+        pr_reachable = False
     else:
+        status_text = f"REST {pr_client.base_url} (window={window_days}d)"
         print(
             f"PR Monitor       : REST {pr_client.base_url} (window="
             f"{window_days}d, mcp={pr_mcp_url})"
         )
+
+    # v0.8 §3.6 + KB_gaps/Gap-02 — record a one-shot status marker so
+    # ``breakdown.warnings`` can surface ``pr_monitor:disabled`` /
+    # ``pr_monitor:unreachable`` without scraping logs. Best-effort: a
+    # write failure here only loses the breakdown row, not the
+    # KnowledgePlane bootstrap itself.
+    if session_dir is not None:
+        try:
+            from .session_paths import pr_monitor_status_json
+            from .paths import asset_actions_dir  # noqa: F401 (unused import warning suppress)
+            marker = pr_monitor_status_json(session_dir)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(json.dumps({
+                "enabled":      bool(pr_enabled),
+                "url":          (pr_client.base_url if pr_enabled else ""),
+                "reachable":    bool(pr_reachable),
+                "mcp_url":      pr_mcp_url if pr_enabled else "",
+                "window_days":  int(window_days),
+                "status_text":  status_text,
+            }, sort_keys=True, indent=2))
+        except OSError as exc:  # noqa: BLE001 — defensive
+            log.warning(
+                "pr_monitor_status marker write failed: %r "
+                "(breakdown.warnings will miss pr_monitor row)", exc,
+            )
 
     return KnowledgePlane.from_clients(
         cortex_kb=cortex_client,
@@ -2222,7 +2254,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # kb_subgraph and continue. ``None`` only when --no-cortex.
         knowledge_plane = (
             None if getattr(args, "no_cortex", False)
-            else _bootstrap_knowledge_plane(args, cortex_client=cortex_client)
+            else _bootstrap_knowledge_plane(
+                args,
+                cortex_client=cortex_client,
+                session_dir=session_dir,
+            )
         )
     else:
         # Resolve model path from --model first, then $MODEL_PATH env. Without
@@ -2321,7 +2357,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # dispatch always has a non-None plane to consult.
         knowledge_plane = (
             None if getattr(args, "no_cortex", False)
-            else _bootstrap_knowledge_plane(args, cortex_client=cortex_client)
+            else _bootstrap_knowledge_plane(
+                args,
+                cortex_client=cortex_client,
+                session_dir=session_dir,
+            )
         )
 
     objective = build_objective({
