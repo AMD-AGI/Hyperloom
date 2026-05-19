@@ -27,6 +27,12 @@ from .baseline import (
     BaselineExecutor,
     baseline_executor,
 )
+from .explore import (
+    DEFAULT_KEEP_THRESHOLD_PCT,
+    DEFAULT_STACK_STABLE_PCT,
+    ExploreExecutor,
+    explore_executor,
+)
 from .params import (
     DEFAULT_NCCL_GRID,
     DEFAULT_PARAMS_GRID,
@@ -62,11 +68,14 @@ __all__ = [
     "DEFAULT_BACKENDS_GRID",
     "DEFAULT_CONC_VALUES",
     "DEFAULT_ISL_OSL",
+    "DEFAULT_KEEP_THRESHOLD_PCT",
     "DEFAULT_NCCL_GRID",
     "DEFAULT_PARAMS_GRID",
     "DEFAULT_SGLANG_SERVER_ARGS",
+    "DEFAULT_STACK_STABLE_PCT",
     "DEFAULT_VLLM_ARG_UTILS",
     "DEFAULT_VLLM_BACKENDS_GRID",
+    "ExploreExecutor",
     "PROFILE_DEFAULT_CONFIG",
     "ParamsExecutor",
     "PMCRooflineExecutor",
@@ -83,6 +92,7 @@ __all__ = [
     "discover_backend_flags",
     "discover_param_flags",
     "discover_vllm_backend_flags",
+    "explore_executor",
     "params_executor",
     "pmc_roofline_executor",
     "profile_executor",
