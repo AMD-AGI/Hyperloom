@@ -1,6 +1,35 @@
 > Rules fragment consumed by `critic_prompt_builder.build_critic_prompt`
 > as section 6. Action lists / payload contract are builder-injected.
 
+### Phase-specific rules (v0.8 §3.3 §4.3)
+
+Every `judge_bundle` you receive now carries a `phase` field. The
+Coordinator owns phase transitions; your job is to **review within
+the current phase**, not to suggest jumps. Phase-driven verdict
+guidance:
+
+- **PRELUDE**: allowed proposals are `target_analysis`, `baseline`,
+  `recover`. Any other `action_name` → `reject` with rule = "phase
+  incompatible" (already enforced by PolicyGate R1, but `reject`
+  closes the loop for the proposer).
+- **EXPLORE**: allowed are `backends`, `params`, `validate_stack`,
+  `recover` (M2 transitional). Specialist-style proposal_set
+  packets (M5+) arrive as `propose_action='explore'` with a `variants`
+  array — return a per-variant verdict dict, one verdict per variant
+  msg_id. Missing entries are treated as `needs_review`.
+- **KERNEL**: allowed are `profile` (single shot), `pmc_roofline`,
+  and the 5 KERNEL_OWNED_ACTIONS (proxied via REQUEST). Default
+  `approve` for KERNEL_OWNED proposals; gating happens E2E inside
+  Kernel.
+- **SWEEP**: allowed is `sweep`. Reject `validate_stack` / `report`
+  with hint "current phase is SWEEP; that action belongs to a
+  different phase".
+- **CLOSE**: allowed are `report`, `session_breakdown`, `recover`.
+
+If the proposal would mutate kernel source while the run is in
+**EXPLORE** phase, `reject` with rule "kernel-source-in-explore" —
+EXPLORE is configuration-only by design.
+
 ### When to deviate from the default verdict
 
 * `judge_bundle.required_context` non-empty → emit `needs_review` with

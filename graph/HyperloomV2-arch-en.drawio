@@ -1,0 +1,323 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" modified="2026-05-19T08:58:00.000Z" type="device" version="24.7.17">
+  <diagram id="hyperloom-v08-arch-en" name="Hyperloom v0.8 Architecture">
+    <mxGraphModel dx="3000" dy="2400" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2300" pageHeight="2080" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="header" value="&lt;b&gt;Hyperloom Inference Optimizer — v0.8 Designed Architecture (KB_design.MD §3, 2026-05-19)&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:13px&quot;&gt;Single asyncio Coordinator · 4 reactor roles + Specialist pool (NEW) · 5-phase fixed pipeline · Cortex KB / PR Monitor / local mirrors knowledge plane (NEW) · 5 lanes (incl. research_lane NEW) · PolicyGate-enforced&lt;/span&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#BFD9F2;strokeColor=#0B3D91;strokeWidth=2;fontColor=#000000;fontSize=18;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="2220" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="user" value="&lt;b&gt;User&lt;/b&gt;&lt;br&gt;inference_optimizer optimize&lt;br&gt;--model · --framework · --gpu-type&lt;br&gt;--model-class · --max-hours · --resume&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;v0.8 new flags:&lt;/b&gt;&lt;br&gt;--cortex-kb-url · --no-cortex&lt;br&gt;--pr-monitor-url · --no-pr-monitor&lt;br&gt;--specialist-concurrency (default 6)&lt;br&gt;--pr-feed-window-days" style="ellipse;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontColor=#000000;fontSize=12;align=center;" vertex="1" parent="1">
+          <mxGeometry x="40" y="108" width="330" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cli" value="&lt;b&gt;cli.py · _preflight() — 9 steps + v0.8 Knowledge Plane probes&lt;/b&gt;&lt;br&gt;① credentials  ② auth aliases  ③ Python SDK auto-install  ④ auth_proxy bootstrap  ⑤ auth-proxy + ~/.claude/config.json (force :4002)&lt;br&gt;⑥ ROCm hygiene  ⑦ Ray + Magpie + InferenceX  ⑧ node/claude/codex CLI probe  ⑨ diagnostics&lt;br&gt;&lt;b&gt;_run_optimize:&lt;/b&gt; model-gate (claude-opus-4-7 → 4-6 fallback) · gpu-type detect · critic/robustness runtime probe&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;v0.8 additions:&lt;/b&gt; ⑩ cortex-kb HTTP probe (fail → NDJSON-only mode) · ⑪ primus-cortex-pr-api probe (fail → empty pr_feed) · ⑫ cortex_kb_flusher daemon spawn (robustness child)&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;Phase init:&lt;/b&gt; SharedState.phase = &quot;PRELUDE&quot; · phase_started_ts written" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontColor=#000000;fontSize=12;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="390" y="108" width="1670" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="auth_proxy" value="&lt;b&gt;auth-proxy :4002&lt;/b&gt;&lt;br&gt;x-api-key →&lt;br&gt;Bearer rewrite&lt;br&gt;(primus-safe gateway&lt;br&gt;only takes Bearer;&lt;br&gt;Claude SDK sends&lt;br&gt;x-api-key)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#888888;fontColor=#000000;fontSize=11;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="2080" y="108" width="180" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="phase_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8E1;strokeColor=#B47A1A;strokeWidth=2;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="280" width="2220" height="118" as="geometry" />
+        </mxCell>
+        <mxCell id="phase_title" value="&lt;b style=&quot;color:#B47A1A&quot;&gt;Phase State Machine (NEW v0.8) — Coordinator is the sole writer; PolicyGate enforces phase_change permissions&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:11px&quot;&gt;Each phase has an allowed action subset + entry/exit predicates. LLM roles cannot set phase directly — only emit escalate_strategy_change as advisory. recover is out-of-band at any phase (does not count toward phase progress).&lt;/span&gt;" style="text;html=1;align=center;verticalAlign=middle;fontColor=#000000;fontSize=12;fontStyle=4;" vertex="1" parent="1">
+          <mxGeometry x="50" y="288" width="2200" height="38" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ph_prelude" value="&lt;b&gt;Phase 0 PRELUDE&lt;/b&gt;&lt;br&gt;━━━━━━━━━━&lt;br&gt;Allowed: target_analysis, baseline, recover&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;Cortex T0&lt;/b&gt; find-recipe → warm_start_recipe / pitfalls&lt;br&gt;Exit: baseline_tput &gt; 0" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B47A1A;strokeWidth=2;fontColor=#000000;fontSize=11;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="50" y="332" width="400" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="ph_explore" value="&lt;b&gt;Phase 1 EXPLORE&lt;/b&gt;&lt;br&gt;━━━━━━━━━━&lt;br&gt;Allowed: explore (merged), specialist, recover&lt;br&gt;N specialists in parallel → propose → serial integrate&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;Cortex T1&lt;/b&gt; traverse → prompt · &lt;b style=&quot;color:#7A1F8C&quot;&gt;T2&lt;/b&gt; hypothesize · &lt;b style=&quot;color:#7A1F8C&quot;&gt;T3&lt;/b&gt; verify&lt;br&gt;Exit: plateau / empty proposal / explore budget hit" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B47A1A;strokeWidth=2;fontColor=#000000;fontSize=11;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="460" y="332" width="480" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="ph_kernel" value="&lt;b&gt;Phase 2 KERNEL&lt;/b&gt;&lt;br&gt;━━━━━━━━━━&lt;br&gt;Allowed: profile (1×), kernel_opt, integrate, deep_kernel_analysis,&lt;br&gt;operator_tuning, vendor_kernel_config, recover&lt;br&gt;Exit: plateau / retry budget exhausted" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B47A1A;strokeWidth=2;fontColor=#000000;fontSize=11;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="950" y="332" width="480" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="ph_sweep" value="&lt;b&gt;Phase 3 SWEEP&lt;/b&gt;&lt;br&gt;━━━━━━━━━━&lt;br&gt;Allowed: sweep, recover&lt;br&gt;Cross-workload validation of current_best&lt;br&gt;CONC / ISL / OSL grid · Exit: complete / budget" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B47A1A;strokeWidth=2;fontColor=#000000;fontSize=11;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1440" y="332" width="390" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="ph_close" value="&lt;b&gt;Phase 4 CLOSE&lt;/b&gt;&lt;br&gt;━━━━━━━━━━&lt;br&gt;Allowed: report, session_breakdown, recover&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;Cortex T4&lt;/b&gt; commit + flusher drain&lt;br&gt;breakdown v2 + cortex_session_id" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B47A1A;strokeWidth=2;fontColor=#000000;fontSize=11;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1840" y="332" width="410" height="66" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_p0_p1" style="endArrow=classic;html=1;rounded=0;strokeColor=#B47A1A;strokeWidth=2;" edge="1" parent="1" source="ph_prelude" target="ph_explore">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_p1_p2" style="endArrow=classic;html=1;rounded=0;strokeColor=#B47A1A;strokeWidth=2;" edge="1" parent="1" source="ph_explore" target="ph_kernel">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_p2_p3" style="endArrow=classic;html=1;rounded=0;strokeColor=#B47A1A;strokeWidth=2;" edge="1" parent="1" source="ph_kernel" target="ph_sweep">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_p3_p4" style="endArrow=classic;html=1;rounded=0;strokeColor=#B47A1A;strokeWidth=2;" edge="1" parent="1" source="ph_sweep" target="ph_close">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="coord_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6F2FF;strokeColor=#1F6AA8;strokeWidth=2;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="416" width="2220" height="990" as="geometry" />
+        </mxCell>
+
+        <mxCell id="coord_label" value="&lt;b&gt;Coordinator — orchestrator/coordinator.py · single asyncio process · canonical order orchestration → kernel → critic → robustness · specialist runner has per-lane concurrency&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#BFD9F2;strokeColor=#10497F;fontColor=#000000;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="60" y="430" width="2180" height="34" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_label" value="&lt;b&gt;Coordinator-owned components&lt;/b&gt;" style="text;html=1;align=center;verticalAlign=middle;fontColor=#000000;fontSize=13;fontStyle=4;" vertex="1" parent="1">
+          <mxGeometry x="60" y="472" width="2180" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_state" value="&lt;b&gt;SharedState (state.json)&lt;/b&gt;&lt;br&gt;atomic tmp+rename, sole writer&lt;br&gt;&lt;b&gt;CORE_STATE_FIELDS guard:&lt;/b&gt;&lt;br&gt;current_best · stop_reason ·&lt;br&gt;baseline_tput/accuracy · session_id&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;v0.8 added:&lt;/b&gt;&lt;br&gt;phase · phase_started_ts · phase_history&lt;br&gt;warm_start_recipe · warm_start_pitfalls&lt;br&gt;explore_search (merged backends/params)&lt;br&gt;specialist_rounds[] · cortex_session_id&lt;br&gt;pending_kb_edges[]&lt;br&gt;&lt;b style=&quot;color:#D14B4B&quot;&gt;v0.8 removed:&lt;/b&gt; action_scores ·&lt;br&gt;backends_search · params_search ·&lt;br&gt;all scoring-derived fields" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="60" y="500" width="350" height="176" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_bus" value="&lt;b&gt;MessageBus (events table)&lt;/b&gt;&lt;br&gt;source of truth&lt;br&gt;seq AUTOINCREMENT (replay-safe)&lt;br&gt;&lt;b&gt;TOPIC_ALLOWLIST:&lt;/b&gt;&lt;br&gt;proposal · question · answer · alert ·&lt;br&gt;request · response · review_verdict ·&lt;br&gt;kill · heartbeat ...&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;v0.8 new intent_type:&lt;/b&gt;&lt;br&gt;&lt;b&gt;specialist_done&lt;/b&gt; — specialist exit&lt;br&gt;{proposal_set, kb_evidence,&lt;br&gt; pr_evidence, source_evidence,&lt;br&gt; confidence, residual_questions}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="420" y="500" width="350" height="176" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_tasks" value="&lt;b&gt;TaskRegistry (tasks table)&lt;/b&gt;&lt;br&gt;DelegatedTask FSM&lt;br&gt;queued → running →&lt;br&gt;succeeded / failed / cancelled /&lt;br&gt;needs_manual_review&lt;br&gt;idempotency_key UNIQUE (de-dup)&lt;br&gt;requires_lanes · allowed_tools · history&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;v0.8 additions:&lt;/b&gt;&lt;br&gt;task kind: &lt;b&gt;specialist&lt;/b&gt; (LLM-driven)&lt;br&gt;dual-mode dispatch&lt;br&gt;robustness scans specialist&lt;br&gt;stale-heartbeat → kill_task" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="780" y="500" width="350" height="176" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_cursor" value="&lt;b&gt;CursorStore (cursors table)&lt;/b&gt;&lt;br&gt;per-agent: last_processed_seq +&lt;br&gt;last_processed_msg_id +&lt;br&gt;processed_at&lt;br&gt;→ idempotent replay, no double-consume&lt;br&gt;Each reactor tick advances its own&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;v0.8:&lt;/b&gt;&lt;br&gt;specialist agents also hold cursors" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1140" y="500" width="350" height="176" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_lock" value="&lt;b&gt;ResourceLockManager (leases)&lt;/b&gt;&lt;br&gt;lane=PK + BEGIN IMMEDIATE&lt;br&gt;&lt;b&gt;KNOWN_LANES v0.8 = 5:&lt;/b&gt;&lt;br&gt;• server_lifecycle (cap=1)&lt;br&gt;• workspace_mutation (cap=1)&lt;br&gt;• benchmark_lane (cap=1)&lt;br&gt;• profile_lane (cap=1)&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;• research_lane (cap=N, default 6) NEW&lt;/b&gt;&lt;br&gt;LANE_CONFLICTS: bench ↔ profile ↔&lt;br&gt;server_lifecycle (busy → ROLLBACK)&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;research_lane has no conflict with above 4&lt;/b&gt;&lt;br&gt;research ↔ workspace_mutation: mutex" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1500" y="500" width="370" height="176" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_obj" value="&lt;b&gt;Objective&lt;/b&gt; (objective.py)&lt;br&gt;Coordinator stop-decider&lt;br&gt;━━━━━━━&lt;br&gt;TimeOnlyObjective (default)&lt;br&gt;or GainObjective&lt;br&gt;━━━━━━━&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;v0.8 new stop_reason:&lt;/b&gt;&lt;br&gt;plateau_explore /&lt;br&gt;plateau_kernel&lt;br&gt;(traceable from Cortex)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1880" y="500" width="360" height="176" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_reg" value="&lt;b&gt;ActionRegistry&lt;/b&gt; — scans actions/_meta/*.yaml → ActionMetadata&lt;br&gt;Fields: family · cost_p50/p75 · expected_gain_pct · accuracy_risk · crash_risk · requires_lanes · allowed_tools · side_effects · max_turns · lease_ttl_sec · pipeline_phase&lt;br&gt;&lt;b style=&quot;color:#D14B4B&quot;&gt;v0.8:&lt;/b&gt; pipeline_phase kept for display but &lt;b&gt;no longer drives decisions&lt;/b&gt; (decision moved to Phase state machine + LLM)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="60" y="690" width="740" height="84" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_runner" value="&lt;b&gt;SubAgentRunner (dual-mode)&lt;/b&gt;&lt;br&gt;&lt;b style=&quot;color:#1F6AA8&quot;&gt;deterministic mode:&lt;/b&gt; calls action_executors async fn · acquires benchmark/profile/server lane&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;specialist mode (NEW):&lt;/b&gt; spawns LLM child call (Claude/Codex) with specialist prompt · acquires research_lane · multi-turn until specialist_done · robustness watches stale-heartbeat&lt;br&gt;On success → tasks.state=running → run → succeeded/failed · On failure release leases + emit alert + audit_trail" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="810" y="690" width="900" height="84" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_kreq" value="&lt;b&gt;KERNEL_REQUEST_HANDLERS&lt;/b&gt;&lt;br&gt;&lt;b&gt;4 kinds:&lt;/b&gt; select_kernels · run_optimization · integrate · apply_patch&lt;br&gt;&lt;b style=&quot;color:#B47A1A&quot;&gt;In-process import&lt;/b&gt; of kernel-agent/tools/*&lt;br&gt;&lt;b style=&quot;color:#D14B4B&quot;&gt;PolicyGate phase-compat:&lt;/b&gt; REQUEST only accepted in Phase 2 (KERNEL)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1720" y="690" width="520" height="84" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_kp" value="&lt;b style=&quot;color:#7A1F8C&quot;&gt;KnowledgePlane facade (NEW v0.8)&lt;/b&gt; — orchestrator/knowledge_plane/&lt;br&gt;Unified abstraction over 3 backends: ① &lt;b&gt;CortexKBClient&lt;/b&gt; (HTTP / cortex-kb CLI subprocess) ② &lt;b&gt;PRMonitorClient&lt;/b&gt; (REST pre-warm + MCP forward) ③ &lt;b&gt;LocalSourceMirrors&lt;/b&gt; (path-containment-guarded Read/Grep)&lt;br&gt;Read API: find_recipe / traverse / pr_feed_warm / read_source · Write API (Coordinator-only proxy): propose_point / propose_edge / hypothesize / ingest_attempt / verify_promote / commit_session&lt;br&gt;Fallback: empty result + breakdown.warnings (non-blocking) · 5-min LRU per-gap cache for traverse" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4ECFB;strokeColor=#7A1F8C;strokeWidth=2;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="60" y="786" width="2180" height="96" as="geometry" />
+        </mxCell>
+
+        <mxCell id="agents_label" value="&lt;b&gt;Reactor roles (4) + Specialist Pool (NEW)&lt;/b&gt; — agent_role.py · default_role_registry" style="text;html=1;align=center;verticalAlign=middle;fontColor=#000000;fontSize=13;fontStyle=4;" vertex="1" parent="1">
+          <mxGeometry x="60" y="892" width="2180" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="R_orch" value="&lt;b&gt;orchestration&lt;/b&gt;&lt;br&gt;Claude opus-4-7 · tool-using&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;allowed_intents:&lt;/b&gt; base + propose_action ·&lt;br&gt;delegate · request · update_state&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;v0.8 decision surface:&lt;/b&gt;&lt;br&gt;no scoreboard (removed)&lt;br&gt;cannot call cortex-kb directly&lt;br&gt;prompt fields injected by Coordinator:&lt;br&gt;warm_start · traverse subgraph · pitfalls · pr_feed&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;Phase 1 EXPLORE:&lt;/b&gt; partition gaps → N specialists&lt;br&gt;&lt;b&gt;aggregate specialist_done:&lt;/b&gt; dedup → propose_action&lt;br&gt;━━━━━━━━━━&lt;br&gt;system_prompts/orchestration.md + builder" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="60" y="918" width="430" height="220" as="geometry" />
+        </mxCell>
+
+        <mxCell id="R_kernel" value="&lt;b&gt;kernel&lt;/b&gt;&lt;br&gt;Claude opus-4-7 · responder-only&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;allowed_intents:&lt;/b&gt; base + response (only)&lt;br&gt;+ update_state (its own metric fields only)&lt;br&gt;━━━━━━━━━━&lt;br&gt;Owns 5 &lt;b&gt;KERNEL_OWNED_ACTIONS:&lt;/b&gt;&lt;br&gt;kernel_opt · integrate · deep_kernel_analysis&lt;br&gt;operator_tuning · vendor_kernel_config&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b style=&quot;color:#D14B4B&quot;&gt;v0.8 phase scope:&lt;/b&gt;&lt;br&gt;Active only in Phase 2 (KERNEL)&lt;br&gt;Other phases: REQUEST → policy_denied&lt;br&gt;━━━━━━━━━━&lt;br&gt;system_prompts/kernel.md (IR-1~7)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="500" y="918" width="430" height="220" as="geometry" />
+        </mxCell>
+
+        <mxCell id="R_critic" value="&lt;b&gt;critic ★&lt;/b&gt; Codex no-tools&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;allowed_intents:&lt;/b&gt; base + review_verdict (only)&lt;br&gt;verdict ∈ approve · reject · redirect · advise · needs_review&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b style=&quot;color:#D14B4B&quot;&gt;v0.8 review surface expanded:&lt;/b&gt;&lt;br&gt;① reviews propose_action (existing)&lt;br&gt;② reviews specialist hypotheses (NEW)&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;Layer 1 in-process:&lt;/b&gt; critic.md smoke-grade thin&lt;br&gt;&lt;b&gt;Layer 2 subprocess:&lt;/b&gt; CriticAgentBackend → python -m&lt;br&gt;critic-agent.runtime.cli (prepare-review · commit-review)&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;commit-review → Coordinator-proxied Cortex verify&lt;/b&gt;&lt;br&gt;(confirmed → promoted-authority EXPERIENTIAL,&lt;br&gt; refuted → negation edge auto-mint)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D14B4B;fontColor=#000000;fontSize=11;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="940" y="918" width="430" height="220" as="geometry" />
+        </mxCell>
+
+        <mxCell id="R_robust" value="&lt;b&gt;robustness ★&lt;/b&gt; Claude opus-4-7 · always-on&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;allowed_intents:&lt;/b&gt; base + alert + update_state&lt;br&gt;(crash_count) + delegate (limited) + kill_task ·&lt;br&gt;force_dispatch · prune_branch · escalate_strategy_change&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b style=&quot;color:#D14B4B&quot;&gt;v0.8 watch surface expanded:&lt;/b&gt;&lt;br&gt;① specialist stale-heartbeat scan (timeout → kill_task)&lt;br&gt;② cortex_kb_flusher process supervision (reuses&lt;br&gt;robustness_monitor.sh.example pattern)&lt;br&gt;③ pending_kb_edges leak detection&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;Subprocess runtime:&lt;/b&gt; RobustnessAgentBackend&lt;br&gt;→ python -m robustness-agent.main" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D14B4B;fontColor=#000000;fontSize=11;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1380" y="918" width="430" height="220" as="geometry" />
+        </mxCell>
+
+        <mxCell id="R_spec" value="&lt;b style=&quot;color:#7A1F8C&quot;&gt;specialist (NEW)&lt;/b&gt; LLM-driven sub-agent&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;6 domains:&lt;/b&gt; kernel · framework · comm ·&lt;br&gt;compiler · system · pr_intel&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;allowed_intents:&lt;/b&gt; base + &lt;b&gt;specialist_done&lt;/b&gt;&lt;br&gt;PolicyGate: from_agent must be specialist:&amp;lt;task_id&amp;gt;&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;Tool whitelist (PolicyGate tiered):&lt;/b&gt;&lt;br&gt;Read · Grep · Glob · Bash (sub-allowlist)&lt;br&gt;&lt;b&gt;WebSearch · WebFetch&lt;/b&gt; (EXPLORE only)&lt;br&gt;&lt;b&gt;mcp__pr_monitor__*&lt;/b&gt; (any phase)&lt;br&gt;&lt;b&gt;mcp__cortex__ read-only&lt;/b&gt; (traverse/find-recipe)&lt;br&gt;━━━━━━━━━━&lt;br&gt;Holds research_lane · does NOT touch serving GPU&lt;br&gt;No patches · no E2E · no direct KB writes" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4ECFB;strokeColor=#7A1F8C;strokeWidth=2;fontColor=#000000;fontSize=11;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1820" y="918" width="420" height="220" as="geometry" />
+        </mxCell>
+
+        <mxCell id="policy" value="&lt;b&gt;IntentParser + PolicyGate v0.8 — single chokepoint&lt;/b&gt;&lt;br&gt;Transports: Claude emit_intent MCP tool_call · Codex validated_json_output single JSON envelope (all intent_types enumerated, &lt;b style=&quot;color:#7A1F8C&quot;&gt;v0.8 adds specialist_done&lt;/b&gt;)&lt;br&gt;Checks (v0.6 carry-over): ① role allowed_intents admission  ② source allowlist (REVIEW_VERDICT={critic} / KILL/FORCE_DISPATCH/PRUNE/ESCALATE={robustness})&lt;br&gt;③ REQUEST_ROUTING (orchestration→{kernel} only)  ④ kernel-owned non-delegatable  ⑤ CORE_STATE_FIELDS guard  ⑥ session_dir path containment  ⑦ baseline self-loop dampener&lt;br&gt;&lt;b style=&quot;color:#D14B4B&quot;&gt;v0.8 new rules:&lt;/b&gt;&lt;br&gt;⑧ &lt;b&gt;phase compatibility&lt;/b&gt;: any propose_action / delegate / request must be in SharedState.phase&apos;s allowed set → policy_denied(rule=phase_incompat)&lt;br&gt;⑨ &lt;b&gt;Specialist source&lt;/b&gt;: delegate{action=&apos;specialist&apos;} only orchestration may emit + params.domain ∈ known domain set&lt;br&gt;⑩ &lt;b&gt;Specialist output&lt;/b&gt;: specialist_done only the specialist itself may emit (from_agent must be specialist:&amp;lt;task_id&amp;gt;)&lt;br&gt;⑪ &lt;b&gt;KB-write role matrix&lt;/b&gt;: hypothesize/propose-point/propose-edge/ingest-attempt/verify-promote only via Coordinator proxy; any LLM role calling cortex-kb directly → denied&lt;br&gt;⑫ &lt;b&gt;Web/PR/Cortex MCP tier&lt;/b&gt;: WebSearch/WebFetch specialist + EXPLORE only; PR Monitor MCP specialist any phase; Cortex MCP read-only traverse/find-recipe specialist only&lt;br&gt;&lt;b&gt;On failure:&lt;/b&gt; policy_denied written to offending agent inbox + rule tag → next-tick self-correct" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE4E4;strokeColor=#D14B4B;strokeWidth=2;fontColor=#000000;fontSize=11;align=left;spacingLeft=12;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1150" width="2180" height="200" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exec_label" value="&lt;b&gt;Action Executors&lt;/b&gt; (Python async fns · in-process · unit-tested)" style="text;html=1;align=center;verticalAlign=middle;fontColor=#000000;fontSize=13;fontStyle=4;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1360" width="2180" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exec_files" value="&lt;b&gt;action_executors/*.py&lt;/b&gt;&lt;br&gt;baseline · profile · &lt;b style=&quot;color:#7A1F8C&quot;&gt;explore (NEW · merges backends+params)&lt;/b&gt; · sweep · pmc_roofline · target_analysis · report · session_breakdown · recover&lt;br&gt;Helpers: _accuracy_gate · _grid_runner · _inferencex_patcher · _server_patcher · _workload_envs · benchmark_result.is_valid_measurement&lt;br&gt;&lt;b style=&quot;color:#D14B4B&quot;&gt;v0.8 removed:&lt;/b&gt; scoring.py / MARATHON_PRIORS / streak penalty · validate_stack (absorbed into explore serial integrate)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D6E9FF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1386" width="1330" height="48" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exec_meta" value="&lt;b&gt;actions/_meta/*.yaml&lt;/b&gt;&lt;br&gt;kernel-owned (5): kernel_opt · integrate · deep_kernel_analysis · operator_tuning · vendor_kernel_config&lt;br&gt;non-kernel: baseline · profile · &lt;b style=&quot;color:#7A1F8C&quot;&gt;explore (NEW)&lt;/b&gt; · sweep · pmc_roofline · target_analysis · report · session_breakdown · recover&lt;br&gt;&lt;b style=&quot;color:#D14B4B&quot;&gt;v0.8 yaml deletions:&lt;/b&gt; backends.yaml · params.yaml (demoted to explore internal modes) · validate_stack.yaml" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D6E9FF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1400" y="1386" width="840" height="48" as="geometry" />
+        </mxCell>
+
+        <mxCell id="backends_label" value="&lt;b&gt;Backends adapter layer&lt;/b&gt; (orchestrator/backends/) — thin shells between roles and LLM / subprocesses" style="text;html=1;align=center;verticalAlign=middle;fontColor=#000000;fontSize=13;fontStyle=4;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1450" width="2220" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="back_claude" value="&lt;b&gt;claude.py&lt;/b&gt;&lt;br&gt;Anthropic SDK tool-using&lt;br&gt;orch/kernel/robustness share&lt;br&gt;+ emit_intent tool" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1476" width="340" height="74" as="geometry" />
+        </mxCell>
+
+        <mxCell id="back_codex" value="&lt;b&gt;codex.py&lt;/b&gt; + &lt;b&gt;mcp_emit_intent.py&lt;/b&gt;&lt;br&gt;Codex no-tools transport&lt;br&gt;critic emits validated_json_output&lt;br&gt;through this path" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="390" y="1476" width="340" height="74" as="geometry" />
+        </mxCell>
+
+        <mxCell id="back_critic" value="&lt;b&gt;critic_agent.py&lt;/b&gt;&lt;br&gt;CriticAgentBackend&lt;br&gt;Popen → critic-agent/runtime/cli.py&lt;br&gt;(prepare-review · commit-review)&lt;br&gt;Cortex KB_BASE_URL backend" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D14B4B;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="740" y="1476" width="340" height="74" as="geometry" />
+        </mxCell>
+
+        <mxCell id="back_robust" value="&lt;b&gt;robustness_agent.py&lt;/b&gt;&lt;br&gt;RobustnessAgentBackend&lt;br&gt;Popen → robustness-agent.main&lt;br&gt;Long-running · health + RCA&lt;br&gt;+ &lt;b style=&quot;color:#7A1F8C&quot;&gt;flusher supervision&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D14B4B;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1090" y="1476" width="340" height="74" as="geometry" />
+        </mxCell>
+
+        <mxCell id="back_spec" value="&lt;b style=&quot;color:#7A1F8C&quot;&gt;specialist_backend.py (NEW)&lt;/b&gt;&lt;br&gt;SpecialistBackend · multi-turn LLM until&lt;br&gt;specialist_done or max_specialist_turns&lt;br&gt;Claude/Codex child call (per-domain tools + KB prompt)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4ECFB;strokeColor=#7A1F8C;strokeWidth=2;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1440" y="1476" width="360" height="74" as="geometry" />
+        </mxCell>
+
+        <mxCell id="back_mocks" value="&lt;b&gt;Mocks&lt;/b&gt;&lt;br&gt;mock_backend · critic_mock · kernel_mock&lt;br&gt;robustness_mock · &lt;b style=&quot;color:#7A1F8C&quot;&gt;specialist_mock&lt;/b&gt;&lt;br&gt;Fixed fixtures · unit tests" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#888888;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1810" y="1476" width="270" height="74" as="geometry" />
+        </mxCell>
+
+        <mxCell id="back_aux" value="&lt;b&gt;backends/base.py&lt;/b&gt;&lt;br&gt;Backend protocol +&lt;br&gt;BackendError + BackendTurnResult" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="2090" y="1476" width="170" height="74" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sub_label" value="&lt;b&gt;Sub-agent repos&lt;/b&gt; — isolation is non-uniform: critic / robustness are subprocesses; kernel-agent is an in-process tools library; specialist is an in-process LLM child call" style="text;html=1;align=center;verticalAlign=middle;fontColor=#000000;fontSize=13;fontStyle=4;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1568" width="2220" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sub_critic" value="&lt;b&gt;critic-agent/&lt;/b&gt; ★ true subprocess&lt;br&gt;runtime/cli.py · decision_reviewer.py · kb_writer.py · session_memory.py&lt;br&gt;in_memory_kb_client · inbox_parser · intent_envelope · request_models&lt;br&gt;actions/{draft_kb · objection_signal · review_*.md} + references/ + SKILL.md&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;v0.8:&lt;/b&gt; live KB_BASE_URL = Cortex backend; prepare-review pulls kb_priors_by_proposal · commit-review writes kb_writes (merged into Coordinator-proxied verify)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D14B4B;fontColor=#000000;fontSize=11;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1594" width="540" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sub_robust" value="&lt;b&gt;robustness-agent/&lt;/b&gt; ★ true subprocess&lt;br&gt;src/robustness_agent/{main · agent · conductor · rca · factory · config · models}.py&lt;br&gt;sub-packages: checks · decision · findings · monitors · providers ·&lt;br&gt;role · runtime · signals · sources&lt;br&gt;SKILL.md + pyproject.toml (standalone package)&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;v0.8 new children:&lt;/b&gt; cortex_kb_flusher supervision · specialist heartbeat scan" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D14B4B;fontColor=#000000;fontSize=11;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="590" y="1594" width="540" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sub_kernel" value="&lt;b&gt;kernel-agent/&lt;/b&gt; — &lt;b style=&quot;color:#B47A1A&quot;&gt;in-process tools library, NOT a subprocess&lt;/b&gt;&lt;br&gt;tools/kernel_optimization.py · tracelens_analysis.py · tracelens_skill_runner.py&lt;br&gt;parallel_e2e_runner.py · apply_kernel_patch.py · geak_prompt_patcher.py&lt;br&gt;tools/backends/ (GEAK / OOB · Ray-scheduled)&lt;br&gt;&lt;b&gt;Caller:&lt;/b&gt; orchestrator/kernel_request_handlers.py imports directly&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;v0.8:&lt;/b&gt; unchanged (Phase 2 only)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF4E6;strokeColor=#B47A1A;fontColor=#000000;fontSize=11;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1140" y="1594" width="540" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sub_spec" value="&lt;b style=&quot;color:#7A1F8C&quot;&gt;specialist/ (NEW v0.8 · in-process LLM child call)&lt;/b&gt;&lt;br&gt;orchestrator/specialist_runner.py · prompt_builder · domain registry&lt;br&gt;Prompt fields: Identity · Hardware context · Gap statement · &lt;b&gt;Cortex KB subgraph&lt;/b&gt;&lt;br&gt;Recipe summary · &lt;b&gt;PR feed&lt;/b&gt; · Local source nav hint · Output protocol · Iron rules&lt;br&gt;Output: specialist_done {proposal_set, *_evidence, confidence, residual_questions}&lt;br&gt;Domain registry: 6 specialist types (kernel/framework/comm/compiler/system/pr_intel)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4ECFB;strokeColor=#7A1F8C;strokeWidth=2;fontColor=#000000;fontSize=11;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1690" y="1594" width="570" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="kp_label" value="&lt;b style=&quot;color:#7A1F8C&quot;&gt;Knowledge Plane (NEW v0.8)&lt;/b&gt; — 3 independent sources unified by KnowledgePlane facade · fallback non-blocking" style="text;html=1;align=center;verticalAlign=middle;fontColor=#000000;fontSize=13;fontStyle=4;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1734" width="2220" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="kp_cortex" value="&lt;b style=&quot;color:#7A1F8C&quot;&gt;Cortex KB Client&lt;/b&gt;&lt;br&gt;cortex_kb_client.py (~200 LoC subprocess wrapper)&lt;br&gt;HTTP/CLI dual-mode → kb-service.primus-cortex&lt;br&gt;&lt;b&gt;Timing hooks:&lt;/b&gt; T0 find-recipe · T1 traverse (5min LRU)&lt;br&gt;T2 propose-point/edge + hypothesize&lt;br&gt;T3 ingest-attempt + verify (confirmed/refuted)&lt;br&gt;T4 commit-session&lt;br&gt;&lt;b&gt;canonical_id&lt;/b&gt; = idempotency key (reuses idempotency_key)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4ECFB;strokeColor=#7A1F8C;strokeWidth=2;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1760" width="430" height="160" as="geometry" />
+        </mxCell>
+
+        <mxCell id="kp_flusher" value="&lt;b style=&quot;color:#7A1F8C&quot;&gt;cortex_kb_flusher.py (NEW · ~150 LoC daemon)&lt;/b&gt;&lt;br&gt;NDJSON fallback queue:&lt;br&gt;runtime/cortex/.kb_pending.ndjson + .kb_flushed.ndjson&lt;br&gt;Batch POST every 5s / 50 lines&lt;br&gt;T2/T3 non-blocking when Cortex unreachable&lt;br&gt;Crash recovery: read .kb_sid → resume + drain pending&lt;br&gt;&lt;b&gt;Supervised by robustness&lt;/b&gt; (reuses robustness_monitor.sh.example pattern)&lt;br&gt;CLOSE phase must wait flusher drain or explicit abort" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4ECFB;strokeColor=#7A1F8C;strokeWidth=2;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="480" y="1760" width="490" height="160" as="geometry" />
+        </mxCell>
+
+        <mxCell id="kp_pr" value="&lt;b style=&quot;color:#7A1F8C&quot;&gt;PR Monitor Client&lt;/b&gt;&lt;br&gt;knowledge_plane/pr_monitor_client.py (urllib stdlib · no new deps)&lt;br&gt;REST: pr_list / pr_get / pr_search (Coordinator pre-warms pr_feed)&lt;br&gt;Backend: primus-cortex-pr-api (REST + MCP)&lt;br&gt;6 repos pre-indexed · 50Gi PVC cache · no GitHub API hits&lt;br&gt;ROCm/aiter · FlyDSL · hip · vllm · sglang · triton&lt;br&gt;commit-level file tree + PR baseline (cherry-pick analysis)&lt;br&gt;&lt;b&gt;specialist&lt;/b&gt; mounts MCP server with 12 readonly tools" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4ECFB;strokeColor=#7A1F8C;strokeWidth=2;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="980" y="1760" width="640" height="160" as="geometry" />
+        </mxCell>
+
+        <mxCell id="kp_local" value="&lt;b&gt;Local Source Mirrors&lt;/b&gt;&lt;br&gt;framework_source_roots:&lt;br&gt;/sgl-workspace/{aiter,sglang,vllm}/&lt;br&gt;runtime/source-mirrors/&lt;br&gt;{geak,OOB,TraceLens-internal}/&lt;br&gt;━━━━━━━&lt;br&gt;Specialist tools Read/Grep/Glob read-only&lt;br&gt;PolicyGate source_file path-containment check&lt;br&gt;research ↔ workspace_mutation lane mutex&lt;br&gt;(prevents reading inconsistent source during kernel apply)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7A1F8C;strokeWidth=2;fontColor=#000000;fontSize=11;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1630" y="1760" width="630" height="160" as="geometry" />
+        </mxCell>
+
+        <mxCell id="persist" value="&lt;b&gt;Persistence — $SESSION_DIR&lt;/b&gt; (default /workspace/hyperloom, flat layout; env: USER_DATA_PATH)&lt;br&gt;&lt;b&gt;state.json&lt;/b&gt; (atomic tmp+rename, Coordinator-only writer; v0.8 adds phase / phase_history / warm_start_* / explore_search / specialist_rounds / cortex_session_id / pending_kb_edges) · &lt;b&gt;storage/coordinator.db&lt;/b&gt; (SQLite WAL · events / tasks / leases [5 lanes] / cursors + schema_version)&lt;br&gt;&lt;b&gt;agents/{role}/{inbox,outbox}.jsonl&lt;/b&gt; · personas/ · checkpoints/ · findings/&amp;lt;ts&amp;gt;.json (RCA) · kb/ (Critic writes) · runs/&amp;lt;kind&amp;gt;/&amp;lt;task_id&amp;gt;/ · critic-workdir/&amp;lt;turn&amp;gt;/&lt;br&gt;&lt;b style=&quot;color:#7A1F8C&quot;&gt;v0.8 additions:&lt;/b&gt; runtime/cortex/.kb_pending.ndjson · .kb_flushed.ndjson · .kb_sid · specialist-workdir/&amp;lt;task_id&amp;gt;/{prompt, kb_snapshot, pr_feed, transcript, specialist_done}.json&lt;br&gt;&lt;b&gt;Auxiliary module outputs:&lt;/b&gt; baseline_comparison/ · &lt;b&gt;breakdown v2&lt;/b&gt; (phase_timeline / specialist_runs / capability_summary(explore) / kb_provenance / attribution-by-phase) · roofline_integration.py" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D6E9FF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=11;align=left;spacingLeft=12;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1940" width="2220" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="hw" value="&lt;b&gt;External resources&lt;/b&gt; · GPU pod (sglang / vllm — Magpie-wrapped, IR-4 kill+check_gpu_memory + IR-5 safe kill) · GEAK + OOB (claude / codex / cursor, Ray-scheduled via kernel-agent/tools/backends) · TraceLens CLI · InferenceX (GSM8K accuracy gate + B200 comparison) · &lt;b style=&quot;color:#7A1F8C&quot;&gt;primus-cortex cluster: kb-service (Cortex KB graph DB) + primus-cortex-pr-api (6-repo index · 50Gi PVC) · cross-cluster ingress / sidecar forwarder&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D9D9D9;strokeColor=#5A5A5A;fontColor=#000000;fontSize=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="2050" width="2220" height="44" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_user_cli" style="endArrow=classic;html=1;rounded=0;strokeColor=#1F6AA8;" edge="1" parent="1" source="user" target="cli">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_cli_proxy" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;dashed=1;" edge="1" parent="1" source="cli" target="auth_proxy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_cli_phase" style="endArrow=classic;html=1;rounded=0;strokeColor=#B47A1A;dashed=1;" edge="1" parent="1" source="cli" target="phase_title">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_orch_policy" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;" edge="1" parent="1" source="R_orch" target="policy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_kernel_policy" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;" edge="1" parent="1" source="R_kernel" target="policy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_critic_policy" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;" edge="1" parent="1" source="R_critic" target="policy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_robust_policy" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;" edge="1" parent="1" source="R_robust" target="policy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_spec_policy" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeColor=#7A1F8C;strokeWidth=2;" edge="1" parent="1" source="R_spec" target="policy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_orch_spec" value="delegate(specialist)" style="endArrow=classic;html=1;rounded=0;strokeColor=#7A1F8C;dashed=1;fontSize=10;" edge="1" parent="1" source="R_orch" target="R_spec">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_policy_exec" style="endArrow=classic;html=1;rounded=0;strokeColor=#1F6AA8;" edge="1" parent="1" source="policy" target="exec_files">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_critic_back" style="endArrow=classic;html=1;rounded=0;strokeColor=#1F6AA8;dashed=1;" edge="1" parent="1" source="R_critic" target="back_critic">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_robust_back" style="endArrow=classic;html=1;rounded=0;strokeColor=#1F6AA8;dashed=1;" edge="1" parent="1" source="R_robust" target="back_robust">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_spec_back" style="endArrow=classic;html=1;rounded=0;strokeColor=#7A1F8C;dashed=1;" edge="1" parent="1" source="R_spec" target="back_spec">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_back_critic_sub" style="endArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;" edge="1" parent="1" source="back_critic" target="sub_critic">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_back_robust_sub" style="endArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;" edge="1" parent="1" source="back_robust" target="sub_robust">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_back_spec_sub" style="endArrow=classic;html=1;rounded=0;strokeColor=#7A1F8C;" edge="1" parent="1" source="back_spec" target="sub_spec">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_kreq_kernelagent" style="endArrow=classic;html=1;rounded=0;strokeColor=#B47A1A;" edge="1" parent="1" source="comp_kreq" target="sub_kernel">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_kp_cortex" style="endArrow=classic;html=1;rounded=0;strokeColor=#7A1F8C;" edge="1" parent="1" source="comp_kp" target="kp_cortex">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_kp_pr" style="endArrow=classic;html=1;rounded=0;strokeColor=#7A1F8C;" edge="1" parent="1" source="comp_kp" target="kp_pr">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_kp_local" style="endArrow=classic;html=1;rounded=0;strokeColor=#7A1F8C;" edge="1" parent="1" source="comp_kp" target="kp_local">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_cortex_flusher" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeColor=#7A1F8C;dashed=1;" edge="1" parent="1" source="kp_cortex" target="kp_flusher">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_exec_persist" style="endArrow=classic;html=1;rounded=0;strokeColor=#1F6AA8;" edge="1" parent="1" source="exec_files" target="persist">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_persist_hw" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;" edge="1" parent="1" source="persist" target="hw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_subkernel_hw" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;" edge="1" parent="1" source="sub_kernel" target="hw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_kp_hw" style="endArrow=classic;html=1;rounded=0;strokeColor=#7A1F8C;dashed=1;" edge="1" parent="1" source="kp_pr" target="hw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_kpcortex_hw" style="endArrow=classic;html=1;rounded=0;strokeColor=#7A1F8C;dashed=1;" edge="1" parent="1" source="kp_flusher" target="hw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
