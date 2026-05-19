@@ -14,6 +14,7 @@ from typing import Callable
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
+from ..state_store import DetectorStateStore
 from .aiter_jit import AiterJitConfig, AiterJitDetector
 from .budget import BudgetConfig, evaluate_budget_signals
 from .cluster_fault import ClusterFaultConfig, evaluate_cluster_fault_signals
@@ -113,6 +114,11 @@ class Classifier:
         default_factory=ExternalDepsConfig
     )
     extra_evaluators: list[SignalEvaluator] = field(default_factory=list)
+    # Cross-tick persistence for stateful sub-detectors. When the
+    # caller wires this in (factory always does), each detector below
+    # receives a slot view it uses to survive subprocess restarts.
+    # ``None`` (e.g. ad-hoc tests) keeps everything in-memory only.
+    state_store: "DetectorStateStore | None" = None
     _gpu_leak_detector: GpuLeakDetector = field(init=False, repr=False)
     _aiter_jit_detector: AiterJitDetector = field(init=False, repr=False)
     _progress_detector: ProgressDetector = field(init=False, repr=False)
@@ -124,19 +130,34 @@ class Classifier:
     _tracelens_cli_latch: TraceLensCliFiredOnce = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._gpu_leak_detector = GpuLeakDetector(self.gpu_leak_config)
-        self._aiter_jit_detector = AiterJitDetector(self.aiter_jit_config)
-        self._progress_detector = ProgressDetector(self.progress_config)
+        store = self.state_store
+        self._gpu_leak_detector = GpuLeakDetector(
+            self.gpu_leak_config,
+            state_view=store.view("gpu_leak") if store else None,
+        )
+        self._aiter_jit_detector = AiterJitDetector(
+            self.aiter_jit_config,
+            state_view=store.view("aiter_jit") if store else None,
+        )
+        self._progress_detector = ProgressDetector(
+            self.progress_config,
+            state_view=store.view("progress") if store else None,
+        )
         self._model_gpu_fit_detector = ModelGpuFitDetector(
-            self.model_gpu_fit_config
+            self.model_gpu_fit_config,
+            state_view=store.view("preflight_model_gpu_fit") if store else None,
         )
         self._amdahl_ceiling_detector = AmdahlCeilingDetector(
-            self.amdahl_ceiling_config
+            self.amdahl_ceiling_config,
+            state_view=store.view("preflight_amdahl") if store else None,
         )
         self._ray_pending_detector = RayPendingDetector(
-            self.kernel_pipeline_config
+            self.kernel_pipeline_config,
+            state_view=store.view("ray_pending") if store else None,
         )
-        self._tracelens_cli_latch = TraceLensCliFiredOnce()
+        self._tracelens_cli_latch = TraceLensCliFiredOnce(
+            state_view=store.view("tracelens_cli_latch") if store else None,
+        )
 
     def classify(self, data: SourceData, ctx: ReactorContext) -> list[Symptom]:
         symptoms: list[Symptom] = []

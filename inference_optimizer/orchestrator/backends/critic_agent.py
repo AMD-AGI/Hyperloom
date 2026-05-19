@@ -641,6 +641,17 @@ class CriticAgentBackend:
         env.setdefault("CRITIC_SESSION_MEMORY_DIR", str(memory_dir))
         env["CRITIC_KB_CLIENT_MODE"] = self.kb_mode
 
+        # L4 — let the critic-agent runtime locate the sibling robustness
+        # agent's findings JSONL via ``ROBUSTNESS_AGENT_SESSION_DIR``.
+        # The robustness CLI also setdefault's this var, but its env
+        # never reaches us (siblings spawned by the Coordinator inherit
+        # os.environ at backend-construction time, not at the moment
+        # robustness writes its file). Setting it here closes the L4
+        # learning loop in real deployments.
+        env.setdefault(
+            "ROBUSTNESS_AGENT_SESSION_DIR", str(self.session_dir),
+        )
+
         # Make the dead-letter dir live under the session by default so
         # operator cron can replay it without cross-session interference.
         dlq_dir = self.session_dir / "critic-kb-dead-letter"
