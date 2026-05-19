@@ -29,7 +29,11 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # analysis (2)
     "profile":              "analysis",
     "pmc_roofline":         "analysis",
-    # shallow (5) — report + session_breakdown live here per DESIGN §16.1
+    # shallow (6) — report + session_breakdown live here per DESIGN §16.1.
+    # v0.8 M3 adds ``explore`` (KB_design §3.4) as the merged
+    # backends+params action; the legacy names remain registered
+    # during the M3 transition for v0.6 resume compatibility.
+    "explore":              "shallow",
     "backends":             "shallow",
     "params":               "shallow",
     "sweep":                "shallow",

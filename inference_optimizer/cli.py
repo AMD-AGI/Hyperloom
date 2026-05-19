@@ -44,13 +44,21 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .cortex_kb_client import (
+    CortexBinaryNotFound,
+    CortexKBClient,
+    CortexKBError,
+    workload_canonical_id,
+)
 from .orchestrator.action_executors import (
     TargetAnalysisExecutor,
     backends_executor,
     baseline_executor,
+    explore_executor,
     params_executor,
     pmc_roofline_executor,
     profile_executor,
@@ -584,6 +592,13 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline":       baseline_executor,
     "backends":       backends_executor,
     "params":         params_executor,
+    # v0.8 M3 — unified explore action (KB_design §3.4). Coexists with
+    # the legacy backends/params/validate_stack registrations during
+    # the M3 transitional period so a v0.6 resume that has queued
+    # backends/params tasks still finds a runner; new Orchestration
+    # prompts steer the LLM toward ``explore`` (see prompt_builder
+    # FULL_ENABLED_ACTIONS).
+    "explore":        explore_executor,
     "sweep":          sweep_executor,
     "report":            report_executor,
     "session_breakdown": session_breakdown_executor,
@@ -1693,6 +1708,176 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     return options
 
 
+# ---------------------------------------------------------------------------
+# v0.8 M1 — Cortex KB T0 hook (KB_design §3.6 / §3.13 M1 §5.1)
+# ---------------------------------------------------------------------------
+def _bootstrap_cortex_kb(
+    args: argparse.Namespace,
+    *,
+    session_dir: Path,
+    manifest: dict[str, Any],
+    resume: bool,
+) -> CortexKBClient:
+    """Construct the :class:`CortexKBClient` and run the T0 anchor.
+
+    T0 (PRELUDE entry) sequence per KB_design §3.13 M1 §5.1:
+
+    1. ``session begin`` (sync, must succeed unless ``--no-cortex``).
+    2. ``propose-point workload_node`` (canonical: ``workload.<model>.<hw>``)
+       — idempotent across sessions for the same pair.
+    3. ``find-recipe`` snapshot to ``.kb_warm.json`` (M5 will consume).
+    4. ``traps`` snapshot to ``.kb_pitfalls.json`` (M5).
+    5. Persist sid to SharedState + ``.kb_sid``.
+
+    Resume rules (M1 §7): if ``.kb_sid`` exists, reuse the sid without
+    re-begin. The other T0 steps still run so the warm-start snapshots
+    stay fresh for M5 consumers.
+
+    Failure handling:
+
+    - ``--no-cortex`` → returns a disabled client; never raises.
+    - sync ``session begin`` failure → ``sys.exit(2)``; resume can pick
+      up the partial session_dir once Cortex comes back.
+    - propose_point / find_recipe / traps failures fall through to NDJSON
+      / warning; PRELUDE proceeds.
+
+    Returns the constructed (possibly disabled) :class:`CortexKBClient`
+    so the caller can thread it into the Coordinator.
+    """
+    enabled = bool(getattr(args, "cortex_enabled", True))
+    kb_url = (getattr(args, "cortex_kb_url", None) or "").strip() or None
+    client = CortexKBClient(
+        session_dir=session_dir,
+        kb_url=kb_url,
+        enabled=enabled,
+    )
+    if not enabled:
+        print("Cortex KB        : DISABLED (--no-cortex)")
+        return client
+
+    state = SharedState.load_or_init(session_dir)
+    sid = (state.cortex_session_id or "").strip()
+    sid_file = client.sid_path
+    if not sid and sid_file.exists():
+        try:
+            sid = sid_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            sid = ""
+
+    workload = (
+        state.model_name
+        or manifest.get("model_name", "")
+        or Path(manifest.get("model_path", "") or "").name
+        or "unknown_model"
+    )
+    hw = state.gpu_type or manifest.get("gpu_type", "") or "unknown_gpu"
+    stack_fp = manifest.get("stack_fingerprint") or {}
+    image_digest = manifest.get("image") or ""
+    workload_canonical = workload_canonical_id(workload, hw)
+
+    if not sid:
+        try:
+            task_text = (
+                f"hyperloom marathon {workload} on {hw} "
+                f"(dispatch={manifest.get('session_id', '')})"
+            )
+            sid = client.session_begin(
+                task=task_text,
+                workload=workload,
+                hw=hw,
+                image_digest=image_digest,
+                stack_fingerprint=stack_fp,
+                extra_attrs={
+                    "marathon_dispatch_id": manifest.get("session_id", ""),
+                    "framework":            state.framework or manifest.get("framework", ""),
+                    "model_class":          state.model_class or "",
+                    "claw_session_id":      manifest.get("claw_session_id") or "",
+                },
+            )
+        except CortexBinaryNotFound as exc:
+            print(
+                f"ERROR: Cortex KB requested but cortex-kb binary missing: "
+                f"{exc}.\nPass --no-cortex to skip KB integration, or "
+                f"install the cortex-kb CLI (see "
+                f"/wekafs/haiskong/cortex-for-hyperloom-2026-05-18.md §2.2).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        except CortexKBError as exc:
+            print(
+                f"ERROR: T0 Cortex `session begin` failed: {exc}\n"
+                f"This is fail-fast per KB_design §3.13 M1. Pass "
+                f"--no-cortex to skip KB integration this run.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        state.cortex_session_id = sid
+        state.warm_start_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    elif resume:
+        print(f"Cortex KB        : resumed session_id={sid}")
+        state.cortex_session_id = sid
+
+    # Mint the workload_node (best-effort; falls back to NDJSON).
+    try:
+        client.propose_point(
+            canonical_id=workload_canonical,
+            kind="workload_node",
+            authority="EXPERIENTIAL",
+            attrs={
+                "model":   workload,
+                "hw":      hw,
+                "isl":     state.last_profile_args or None,  # placeholder; M5 enriches
+            },
+            evidence=[f"log:hyperloom-session-{manifest.get('session_id', '')}"],
+        )
+    except CortexKBError as exc:  # propose_point catches its own; defensive
+        log.warning("propose_point workload_node failed: %s", exc)
+
+    # Snapshot warm-start (best-effort; consumed by M5).
+    warm_text = ""
+    try:
+        warm_text = client.find_recipe(workload=workload, hw=hw)
+    except CortexKBError as exc:
+        log.info("find_recipe non-fatal failure: %s", exc)
+    try:
+        cortex_warm_json_path = client.session_dir / "runtime" / "cortex" / ".kb_warm.json"
+        cortex_warm_json_path.write_text(
+            json.dumps({"workload": workload, "hw": hw, "raw": warm_text}, indent=2),
+            encoding="utf-8",
+        )
+        state.warm_start_recipe = {
+            "workload": workload, "hw": hw, "raw": warm_text,
+        }
+    except OSError as exc:
+        log.warning("warm_start snapshot write failed: %s", exc)
+
+    traps_text = ""
+    try:
+        traps_text = client.traps(symptom=f"{workload} {hw}")
+    except CortexKBError as exc:
+        log.info("traps non-fatal failure: %s", exc)
+    try:
+        pit_path = client.session_dir / "runtime" / "cortex" / ".kb_pitfalls.json"
+        pit_path.write_text(
+            json.dumps({"workload": workload, "hw": hw, "raw": traps_text}, indent=2),
+            encoding="utf-8",
+        )
+        # warm_start_pitfalls is a list (M5 contract); the raw text is
+        # parked under a single-row "raw" entry until M5 adds a parser.
+        if traps_text.strip():
+            state.warm_start_pitfalls = [{"raw": traps_text}]
+    except OSError as exc:
+        log.warning("warm_start_pitfalls snapshot write failed: %s", exc)
+
+    state.save(session_dir)
+    print(
+        f"Cortex KB        : session_id={sid} workload={workload_canonical} "
+        f"(warm={'hit' if warm_text.strip() else 'empty'}, "
+        f"traps={'hit' if traps_text.strip() else 'empty'})"
+    )
+    return client
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     proxy_urls = _preflight()
 
@@ -1784,6 +1969,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 f"(was {prior_crash}) for fresh resume"
             )
             print(f"  → reset start_ts to {state.start_ts} (resume budget)")
+        # v0.8 M1 — re-bootstrap (or pick up existing) Cortex KB session.
+        # Same call as the fresh-session branch; the resume rules inside
+        # ``_bootstrap_cortex_kb`` (.kb_sid + state.cortex_session_id)
+        # decide whether to begin a new session or reuse the prior one.
+        cortex_client = _bootstrap_cortex_kb(
+            args, session_dir=session_dir, manifest=manifest, resume=True,
+        )
     else:
         # Resolve model path from --model first, then $MODEL_PATH env. Without
         # either, fail fast: silently falling back to the YAML's hardcoded
@@ -1866,6 +2058,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _print_session_skeleton(session_dir)
         _seed_shared_state(
             session_dir, args, session_id=manifest["session_id"],
+        )
+        # v0.8 M1 — Cortex KB T0 anchor. Must run after the SharedState
+        # seed (so model_name / gpu_type / framework are populated for
+        # workload_canonical_id derivation) but before Coordinator is
+        # constructed (the Coordinator stores the client + threads it
+        # into T2/T3/T4 hooks). Fails fast unless --no-cortex.
+        cortex_client = _bootstrap_cortex_kb(
+            args, session_dir=session_dir, manifest=manifest, resume=False,
         )
 
     objective = build_objective({
@@ -1965,6 +2165,30 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # as `policy_denied` in its inbox. Tests omit this and keep the
     # legacy lenient mode for fixture paths under /tmp.
     os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
+    # v0.8 M2 — flip on PolicyGate R1 phase_incompatible enforcement
+    # for production runs (matches the v0.6→v0.8 strict_paths
+    # rollout). Tests construct PolicyGate directly with strict_phase
+    # left at the dataclass default (False) so legacy fixtures aren't
+    # broken; this env var only affects the cli boot path.
+    if getattr(args, "strict_phase", True):
+        os.environ["INFERENCE_OPTIMIZER_STRICT_PHASE"] = "1"
+    else:
+        os.environ.pop("INFERENCE_OPTIMIZER_STRICT_PHASE", None)
+
+    # Build the phase budget pct dict from CLI flags; ``None`` values
+    # fall back to library defaults inside Coordinator. See KB_design
+    # §3.13 M2 §7 + §3.8 §5.3.
+    phase_budget_pct: dict[str, float] = {}
+    for cli_field, phase_name in (
+        ("phase_budget_prelude_pct", "PRELUDE"),
+        ("phase_budget_explore_pct", "EXPLORE"),
+        ("phase_budget_kernel_pct",  "KERNEL"),
+        ("phase_budget_sweep_pct",   "SWEEP"),
+        ("phase_budget_close_pct",   "CLOSE"),
+    ):
+        val = getattr(args, cli_field, None)
+        if val is not None:
+            phase_budget_pct[phase_name] = float(val)
 
     # When kernel is disabled, strip it from the role registry so
     # Coordinator does not tick a non-existent agent and PolicyGate does
@@ -1984,6 +2208,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             or os.environ.get("MODEL_CLASS")
             or ""
         ),
+        cortex_kb=cortex_client,
+        phase_budget_pct=phase_budget_pct or None,
     )
     framework_for_prompt = (
         os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
@@ -2289,6 +2515,103 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Override Orchestration system prompt (file path or inline)")
     opt.add_argument("--kernel-prompt", type=str, default=None,
                       help="Override Kernel system prompt")
+    # ------------------------------------------------------------------
+    # v0.8 M1 — Cortex KB integration flags (KB_design §3.13 M1, §3.6)
+    # ------------------------------------------------------------------
+    # The defaults wire Cortex *on* (matches the "Loop 1" expectation in
+    # the cortex hand-off doc). ``--no-cortex`` is a debug escape hatch
+    # that fully bypasses T0/T2/T3/T4 so a fresh sandbox can reproduce
+    # the v0.6 behaviour without any KB writes. ``--cortex-kb-url``
+    # overrides the env value (``CORTEX_KB_URL``) without exporting one
+    # process-wide. ``--cortex-strict-fingerprint`` enforces the
+    # manifest stack_fingerprint matches a recipe before warm_start is
+    # consumed (M5 consumer; M1 records the flag into manifest only).
+    opt.add_argument(
+        "--cortex-kb-url",
+        dest="cortex_kb_url",
+        type=str,
+        default=None,
+        help="Override CORTEX_KB_URL for this run (default: env value or "
+             "http://kb-service.primus-cortex.svc.cluster.local).",
+    )
+    opt.add_argument(
+        "--no-cortex",
+        dest="cortex_enabled",
+        action="store_false",
+        default=True,
+        help="Skip the Cortex KB integration entirely (T0/T2/T3/T4 become "
+             "no-ops). Use only for offline smoke tests / debugging the "
+             "v0.6 path in isolation.",
+    )
+    opt.add_argument(
+        "--cortex-strict-fingerprint",
+        dest="cortex_strict_fingerprint",
+        action="store_true",
+        default=False,
+        help="When set, T0 refuses warm_start_recipe rows whose "
+             "stack_fingerprint does not match the current pod (recorded "
+             "in manifest.json). Default: lenient (M1 records the flag "
+             "in manifest only; consumed by M5 specialist assembly).",
+    )
+    # ------------------------------------------------------------------
+    # v0.8 M2 — phase budget percentages (KB_design §3.2 §8.5, §3.8 §5.3)
+    # ------------------------------------------------------------------
+    # Each phase claims a fraction of the total wall-clock budget. The
+    # numbers below are caps — the Coordinator may exit a phase earlier
+    # if the plateau judge fires. Defaults follow §3.8 §5.3.  Sum need
+    # not equal 1.0 (a deliberate padding is encouraged).
+    opt.add_argument(
+        "--max-minutes-prelude-pct",
+        dest="phase_budget_prelude_pct",
+        type=float,
+        default=None,
+        help="Wall-clock budget cap for PRELUDE as a fraction of "
+             "--max-hours. Default: 0.05.",
+    )
+    opt.add_argument(
+        "--max-minutes-explore-pct",
+        dest="phase_budget_explore_pct",
+        type=float,
+        default=None,
+        help="Wall-clock budget cap for EXPLORE. Default: 0.60.",
+    )
+    opt.add_argument(
+        "--max-minutes-kernel-pct",
+        dest="phase_budget_kernel_pct",
+        type=float,
+        default=None,
+        help="Wall-clock budget cap for KERNEL. Default: 0.25.",
+    )
+    opt.add_argument(
+        "--max-minutes-sweep-pct",
+        dest="phase_budget_sweep_pct",
+        type=float,
+        default=None,
+        help="Wall-clock budget cap for SWEEP. Default: 0.08.",
+    )
+    opt.add_argument(
+        "--max-minutes-close-pct",
+        dest="phase_budget_close_pct",
+        type=float,
+        default=None,
+        help="Wall-clock budget cap for CLOSE. Default: 0.02.",
+    )
+    opt.add_argument(
+        "--strict-phase",
+        dest="strict_phase",
+        action="store_true",
+        default=True,
+        help="(v0.8 M2 default) Enforce PolicyGate R1 phase_incompatible. "
+             "Action proposals outside the current phase's allowlist "
+             "return policy_denied so the LLM self-corrects.",
+    )
+    opt.add_argument(
+        "--no-strict-phase",
+        dest="strict_phase",
+        action="store_false",
+        help="Disable R1 enforcement (warn-only). Useful for "
+             "back-compat smoke tests; production should stay strict.",
+    )
 
     return p
 

@@ -75,6 +75,9 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "baseline", "profile", "pmc_roofline",
     "backends", "params", "sweep",
+    # v0.8 M3 — merged explore action (KB_design §3.4). Coexists with
+    # the legacy backends/params/validate_stack names during M3.
+    "explore",
     "integrate", "kernel_opt", "deep_kernel_analysis",
     "operator_tuning", "vendor_kernel_config",
     "validate_stack",
@@ -293,6 +296,86 @@ def target_analysis_report_md(session_dir: Path) -> Path:
     return target_analysis_dir(session_dir) / "target_analysis_report.md"
 
 
+# ---------------------------------------------------------------------------
+# Cortex KB integration paths (v0.8 M1 — KB_design §3.6, §3.13 M1)
+# ---------------------------------------------------------------------------
+# Single source of truth for every file under ``<sd>/runtime/cortex/``. The
+# directory itself is created by :func:`paths.make_session_dir`; the helpers
+# below only compute the well-known file names.  Callers MUST go through
+# these helpers (no ad-hoc string concatenation) so the v0.8 NDJSON
+# protocol stays homogeneous across producers / consumers (CortexKBClient,
+# flusher daemon, breakdown collector, robustness monitor).
+def cortex_dir(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/`` — Cortex KB per-session bookkeeping root."""
+    return Path(session_dir) / "runtime" / "cortex"
+
+
+def cortex_sid_file(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_sid`` — single-line file holding the Cortex
+    session id returned by T0 ``session begin``.
+
+    Used by resume to skip re-begin and continue draining
+    :func:`cortex_pending` / committing the existing session. Absent file
+    means either ``--no-cortex`` was selected or T0 has not yet run.
+    """
+    return cortex_dir(session_dir) / ".kb_sid"
+
+
+def cortex_warm_json(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_warm.json`` — T0 snapshot of
+    ``find-recipe`` output. Read by §3.5 specialist assembly (M5).
+    """
+    return cortex_dir(session_dir) / ".kb_warm.json"
+
+
+def cortex_pitfalls_json(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_pitfalls.json`` — T0 snapshot of
+    ``traps`` output. Read by §3.5 specialist assembly (M5).
+    """
+    return cortex_dir(session_dir) / ".kb_pitfalls.json"
+
+
+def cortex_pending_ndjson(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_pending.ndjson`` — append-only async write
+    queue for T2 / T3 operations.
+
+    Producers: CortexKBClient enqueue on synchronous CLI failure (or for
+    always-async ops). Consumer: ``cortex_kb_flusher`` daemon (5s / 50 line
+    batch). Drained synchronously at T4 before ``session commit``.
+    """
+    return cortex_dir(session_dir) / ".kb_pending.ndjson"
+
+
+def cortex_flushed_ndjson(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_flushed.ndjson`` — successfully-POSTed
+    rows, kept around for offline audit / breakdown collection.
+    """
+    return cortex_dir(session_dir) / ".kb_flushed.ndjson"
+
+
+def cortex_dead_letter_ndjson(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_dead_letter.ndjson`` — rows that failed
+    permanently (HTTP 4xx business-logic rejects); robustness HIGH alert.
+    """
+    return cortex_dir(session_dir) / ".kb_dead_letter.ndjson"
+
+
+def cortex_audit_jsonl(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_audit.jsonl`` — append-only synchronous
+    audit of every Cortex CLI invocation (success or failure) the
+    Coordinator made directly, independent of NDJSON fan-out. Source of
+    truth for ``breakdown.kb_provenance``.
+    """
+    return cortex_dir(session_dir) / ".kb_audit.jsonl"
+
+
+def cortex_flusher_pid(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_flusher.pid`` — flusher daemon pid file
+    (one line). Robustness reads this to detect a dead flusher.
+    """
+    return cortex_dir(session_dir) / ".kb_flusher.pid"
+
+
 __all__ = [
     "agent_dir",
     "agent_inbox",
@@ -300,6 +383,15 @@ __all__ = [
     "agent_outbox",
     "agent_persona",
     "agent_prompt_snapshot",
+    "cortex_audit_jsonl",
+    "cortex_dead_letter_ndjson",
+    "cortex_dir",
+    "cortex_flushed_ndjson",
+    "cortex_flusher_pid",
+    "cortex_pending_ndjson",
+    "cortex_pitfalls_json",
+    "cortex_sid_file",
+    "cortex_warm_json",
     "kernel_agent_runs_dir",
     "kernel_workspace",
     "logs_dir",

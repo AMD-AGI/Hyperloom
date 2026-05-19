@@ -160,14 +160,20 @@ class CapabilityEntry(TypedDict, total=False):
     status: str                   # kept / tried / attempted / not_attempted / not_configured / failed / completed
     attempts: int
     keeps: int
-    tested: int                   # for backends/params: distinct variants tested
+    tested: int                   # for backends/params/explore: distinct variants tested
     best_gain_pct: float | None
     reason: str                   # human readable, e.g. "kernel-claude only this run"
+    # v0.8 M3 explore-specific (KB_design §3.4 + §3.12 §4.2):
+    keep_unstable_count: int      # KEEP'd variants evicted by inlined stack rebench
+    winners_history: int          # cumulative explore_search.winners_history length
 
 
 class CapabilitySummary(TypedDict, total=False):
     geak: CapabilityEntry
     oob: CapabilityEntry
+    # v0.8 M3 — primary explore row; ``backends`` / ``params`` /
+    # ``validate_stack`` are kept as compatibility aliases (§3.12 §4.2).
+    explore: CapabilityEntry
     backends: CapabilityEntry
     params: CapabilityEntry
     sweep: CapabilityEntry
@@ -417,6 +423,56 @@ class Attribution(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
+# §16 Phase segments — v0.8 M2 phase state machine (KB_design §3.2 + §3.12)
+# ---------------------------------------------------------------------------
+class PhaseSegment(TypedDict, total=False):
+    phase: str                 # PRELUDE / EXPLORE / KERNEL / SWEEP / CLOSE
+    from_phase: str            # previous phase (empty for first segment)
+    entered_ts: str            # iso UTC of entry
+    entered_unix: float | None
+    exit_ts: str               # iso UTC of next transition; "" for current segment
+    exit_reason: str           # KB_design §3.2 §6 vocab entry; "" for current segment
+    evidence: dict[str, Any]   # entry evidence (snapshot at transition time)
+    actions: list[PhaseEvent]  # events from phase_timeline whose ts ∈ [entered, exit)
+    elapsed_seconds: float | None
+
+
+# ---------------------------------------------------------------------------
+# §15 KB Provenance — Cortex KB integration (v0.8 M1)
+# ---------------------------------------------------------------------------
+class KBPendingEdge(TypedDict, total=False):
+    proposal_msg_id: str
+    edge_id: str
+    action: str
+    ts: str
+
+
+class KBQueueStats(TypedDict, total=False):
+    pending_lines: int             # current depth of .kb_pending.ndjson
+    flushed_bookmarks: int         # rows in .kb_flushed.ndjson (drain bookmarks)
+    dead_letter_lines: int         # rows in .kb_dead_letter.ndjson
+
+
+class KBCommitSummary(TypedDict, total=False):
+    status: str                    # committed / commit_failed / skip_disabled / ...
+    promoted_edges: list[str]
+    derived_summary_id: str
+
+
+class KBProvenance(TypedDict, total=False):
+    cortex_session_id: str
+    warm_start_ts: str
+    warm_start_recipe_seen: bool
+    warm_start_pitfall_count: int
+    stack_fingerprint: dict[str, str]
+    pending_edges: list[KBPendingEdge]
+    queue: KBQueueStats
+    audit_tail_count: int
+    audit_status_counts: dict[str, int]
+    commit_summary: KBCommitSummary
+
+
+# ---------------------------------------------------------------------------
 # Top-level shape
 # ---------------------------------------------------------------------------
 class SourceFiles(TypedDict, total=False):
@@ -440,6 +496,7 @@ class SessionBreakdown(TypedDict, total=False):
     baseline: Baseline
     final: Final
     phase_timeline: list[PhaseEvent]
+    phase_segments: list[PhaseSegment]      # v0.8 M2 — phase boundaries
     capability_summary: CapabilitySummary
     geak_invocations: list[Invocation]
     oob_invocations: list[Invocation]
@@ -449,6 +506,7 @@ class SessionBreakdown(TypedDict, total=False):
     critic_robustness: CriticRobustness
     telemetry: Telemetry
     attribution: Attribution
+    kb_provenance: KBProvenance      # v0.8 M1 — Cortex KB audit
 
     warnings: list[str]
     source_files: SourceFiles
@@ -469,6 +527,10 @@ __all__ = [
     "Final",
     "GpuMonitorAggregate",
     "Invocation",
+    "KBCommitSummary",
+    "KBPendingEdge",
+    "KBProvenance",
+    "KBQueueStats",
     "KernelLifecycle",
     "KernelMetadata",
     "OptimizedKernel",
@@ -476,6 +538,7 @@ __all__ = [
     "ParamSearchEntry",
     "ParamSearchLedger",
     "PhaseEvent",
+    "PhaseSegment",
     "RecommendedKernel",
     "RejectedKernel",
     "RobustnessSignal",
