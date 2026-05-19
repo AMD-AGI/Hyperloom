@@ -1440,11 +1440,56 @@ class Coordinator:
         #   only. ``params`` / ``backends`` / ``sweep`` / ``report`` are
         #   never gated on a fresh ``last_trace_analyze`` cache — those
         #   actions don't need kernel candidates to make progress.
+        # Roofline-v2 N9: hard-block direct LLM propose of `profile`.
+        # Rationale (GPU-empirical, see design §6.5 N9 amendment):
+        # N3 left `profile` as a permitted-but-deprecated direct propose
+        # path via prompt hint. Qwen3-32B GPU run showed the LLM falls
+        # back to v0 training-distribution behaviour and proposes
+        # `profile` directly, which then forces `roofline` to redo the
+        # profile internally — wasting ~10 min wall-clock/session.
+        # N9 blocks the direct LLM proposal; `profile_executor` is
+        # still invoked by `RooflineExecutor._wrap_profile_ctx +
+        # _call_profile_sub_step` (does NOT pass through this gate
+        # because that path bypasses SubAgentRunner's intent layer
+        # entirely — see action_executors/roofline.py).
+        #
+        # Escape hatch: ``INFERENCE_OPTIMIZER_ALLOW_DIRECT_PROFILE=1``
+        # restores N3 soft-hint behaviour for:
+        # (a) debug sessions where an operator wants to manually drive
+        #     profile + trace_analyze in two steps;
+        # (b) robustness recovery paths that may need to force-reprofile
+        #     when roofline's atomic semantics get in the way;
+        # (c) v2.1 subset-retry feature (deferred).
+        _direct_profile_allowed = (
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_ALLOW_DIRECT_PROFILE", "",
+            ).strip().lower() in {"1", "true", "yes", "on"}
+        )
+        if action == "profile" and not _direct_profile_allowed:
+            return PolicyDenied(
+                "action='profile' denied: use `roofline` instead "
+                "(composite action that runs profile + trace_analyze "
+                "atomically; design/roofline-v2.md §6.5 N9)",
+                rule="execution_order",
+                hint=(
+                    "propose/delegate `roofline` — the composite action "
+                    "internally invokes profile_executor as sub-step 1 "
+                    "and trace_analyze_handler as sub-step 2, producing "
+                    "a fresh TraceLens snapshot atomically. Direct "
+                    "`profile` propose duplicates the work and is "
+                    "blocked. Set INFERENCE_OPTIMIZER_ALLOW_DIRECT_PROFILE=1 "
+                    "to bypass for debug/recovery."
+                ),
+            )
         if "kernel" in self.role_registry:
-            # Roofline-v2 N3: `roofline` composite action internally runs
-            # profile as its first sub-step, so it must be allowed through
-            # the profile gate (otherwise the LLM has no way to ever
-            # produce last_profile_trace via the new path).
+            # Roofline-v2 N3+N9: `roofline` composite action internally
+            # runs profile as its first sub-step (via direct executor
+            # call, not via SubAgentRunner — so it bypasses the N9 gate
+            # above). The pre-existing "profile must run first" gate
+            # must therefore exempt `roofline` so the LLM has a way to
+            # ever produce last_profile_trace. `profile` itself remains
+            # in the exempt set so the escape-hatch + Robustness paths
+            # still work.
             if (
                 self.shared_state.baseline_tput > 0
                 and not self.shared_state.last_profile_trace
@@ -1454,9 +1499,9 @@ class Coordinator:
                     f"action={action!r} denied: profile must run before {action!r}",
                     rule="execution_order",
                     hint=(
-                        "propose/delegate `roofline` (preferred — composite "
-                        "action that runs profile + trace_analyze atomically) "
-                        "or `profile` (legacy path); last_profile_trace is empty"
+                        "propose/delegate `roofline` (composite action that "
+                        "runs profile + trace_analyze atomically); "
+                        "last_profile_trace is empty"
                     ),
                 )
             # integrate gate: kernel_opt KEEP awaiting integrate. Allow
