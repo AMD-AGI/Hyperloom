@@ -72,6 +72,13 @@ _DEFAULT_ATTEMPTS_HISTORY = 20
 # prompt; older failures stay in the event log but drop from the prompt.
 _DEFAULT_LAST_FAILURES = 10
 
+# v0.8 M2 — phase_history cap. There are only 5 phases in the line
+# (PRELUDE/EXPLORE/KERNEL/SWEEP/CLOSE) so 100 rows is wildly generous;
+# the only realistic path to hitting it is repeated escalate/recover
+# loops, which we'd want surfaced as a warning anyway. Cap is enforced
+# in :meth:`SharedState.record_phase_transition`.
+_PHASE_HISTORY_CAP = 100
+
 # Set of action kinds that participate in the kernel-equivalent per-action
 # audit trail (Plan: SharedState audit-trail). Kernel-owned actions are
 # intentionally excluded — they already have richer dedicated structures
@@ -80,6 +87,9 @@ _DEFAULT_LAST_FAILURES = 10
 # helpers so adding a new audit action is a one-line change.
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "baseline", "profile", "backends", "params", "sweep", "validate_stack",
+    # v0.8 M3 — merged EXPLORE action. Coexists with legacy
+    # backends/params/validate_stack until M3 §PR9 deletes the old yaml.
+    "explore",
 })
 
 # Mapping from audit-action name to (result-dict key, prompt-display label).
@@ -94,6 +104,10 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
     "params":         ("gain_pct",          "gain_pct"),
     "sweep":          ("output_throughput", "output_throughput"),
     "validate_stack": ("gain_pct",          "validated_gain_pct"),
+    # M3 explore reports the *batch best* gain_pct (max across its
+    # per-variant winners) so the audit summary line matches what the
+    # operator sees in breakdown.capability_summary.
+    "explore":        ("best_gain_pct",     "gain_pct"),
 }
 
 
@@ -210,12 +224,21 @@ class SharedState:
     last_backends: dict[str, Any] = field(default_factory=dict)
     last_params: dict[str, Any] = field(default_factory=dict)
     last_validate_stack: dict[str, Any] = field(default_factory=dict)
+    # v0.8 M3 — merged explore action snapshot (KB_design §3.4). Same
+    # schema as the other ``last_<action>`` mirrors. Coexists with
+    # ``last_backends`` / ``last_params`` / ``last_validate_stack``
+    # during the M3 transitional period; once M3 §PR9 lands the legacy
+    # snapshots become dormant (never updated for new explore runs).
+    last_explore: dict[str, Any] = field(default_factory=dict)
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
     backends_attempts: list[dict[str, Any]] = field(default_factory=list)
     params_attempts: list[dict[str, Any]] = field(default_factory=list)
     sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
     validate_stack_attempts: list[dict[str, Any]] = field(default_factory=list)
+    # v0.8 M3 — explore audit log (parity with backends_attempts /
+    # params_attempts). Capped per _DEFAULT_ATTEMPTS_HISTORY.
+    explore_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Global rolling log of unpromotable task results, capped at
     # ``_DEFAULT_LAST_FAILURES``. Carries the rich failure context
     # (error_class / error_excerpt / stderr_tail / workspace /
@@ -267,6 +290,49 @@ class SharedState:
     # the executor's pre-filter to also reject explicit renames that the
     # LLM might submit in a fresh ``params.grid``.
     backends_search: dict[str, Any] = field(default_factory=dict)
+    # v0.8 M3 — unified explore ledger (KB_design §3.4 Inv-4.1 "single
+    # ledger"). Merges the v0.6 ``backends_search`` + ``params_search``
+    # ledgers into one persistent DFS state for the merged ``explore``
+    # action. ``tested`` is keyed by canonical_fingerprint (content-based,
+    # see ``action_executors._canonical_fingerprint``), same hashing as
+    # ``variant_fingerprint`` so the v0.6 ledgers migrate losslessly.
+    #
+    # Schema (M3, may grow in M5/M6 with specialist provenance):
+    #
+    #   {
+    #     "schema_version": 1,
+    #     "tested": {
+    #       fingerprint: {name, extra_sglang_args, extra_envs, outcome,
+    #                     round_id, ts, gain_pct, tput, provenance,
+    #                     workload_signature}
+    #     },
+    #     "accepted": [
+    #       {fingerprint, name, extra_sglang_args, extra_envs,
+    #        gain_pct, stack_index, accepted_at_round, ts}
+    #     ],
+    #     "rejected": [
+    #       {fingerprint, name, extra_sglang_args, extra_envs,
+    #        reason, gain_pct, tput, round_id, ts}
+    #     ],
+    #     "winners_history": [
+    #       {round_id, variant_name, fingerprint, gain_pct,
+    #        extra_args, extra_envs}
+    #     ],
+    #     "discovered_flags": [
+    #       {flag, source, first_seen_round}
+    #     ],
+    #     "synergy_attempted": [["name1", "name2"], ...],
+    #     "domains_round_summary": [...],   # M5/M6 fills, M3 leaves []
+    #     "name_index": {name: fingerprint},
+    #     "cursor": int,
+    #     "last_round": {...},
+    #   }
+    #
+    # ``accepted`` outcomes include the inlined stack-rebench result —
+    # entries that landed in optimization_stack and survived the
+    # subsequent stack rebench. Items the rebench evicted live in
+    # ``rejected`` with ``reason='stack_unstable'``.
+    explore_search: dict[str, Any] = field(default_factory=dict)
     # E2E integrate bookkeeping keyed by kernel_id + patch_path + args. This
     # prevents Orchestration from spending hours re-validating the same patch
     # after repeated NEEDS_REVIEW/REVERT outcomes.
@@ -315,6 +381,78 @@ class SharedState:
     target_gap_pct: float = 0.0
 
     # ------------------------------------------------------------------
+    # v0.8 M2 — Phase state machine fields (KB_design §3.2 + §3.10)
+    # ------------------------------------------------------------------
+    # ``phase`` is the run-level pipeline phase (PRELUDE / EXPLORE /
+    # KERNEL / SWEEP / CLOSE).  Coordinator is the only writer
+    # (PolicyGate adds it to CORE_STATE_FIELDS); LLM agents can read
+    # via prompt injection but cannot update_state. Empty string
+    # signals "phase machine not yet initialised" — Coordinator
+    # initialises on construction. v0.6 resume infers a value via
+    # :func:`phase_state.infer_phase_from_state`.
+    phase: str = ""
+    # ISO UTC timestamp the current phase was entered. Used by
+    # observability (breakdown.phase_segments) and the budget judge.
+    phase_started_ts: str = ""
+    # Monotonic-ish unix epoch matching ``phase_started_ts`` so the
+    # phase budget judge can compute elapsed seconds without
+    # re-parsing ISO strings every tick.
+    phase_started_unix: float = 0.0
+    # Append-only log of phase transitions; each row is built by
+    # :func:`phase_state.make_history_row` and conforms to KB_design
+    # §3.2 §6 (reason must be in ``PHASE_EXIT_REASONS``).  Capped at
+    # ``_PHASE_HISTORY_CAP`` so a runaway transition never bloats
+    # state.json (unlikely — there are only 5 phases — but defensive).
+    phase_history: list[dict[str, Any]] = field(default_factory=list)
+    # Wall-clock budget percentages per phase (KB_design §3.8 §5.3).
+    # Coordinator populates from CLI flags / defaults at construction
+    # time; persisted so resume picks up the exact split the original
+    # run used. Empty dict means "use library defaults".
+    phase_budget_pct: dict[str, float] = field(default_factory=dict)
+
+    # ------------------------------------------------------------------
+    # v0.8 M1 — Cortex KB integration fields (KB_design §3.6 / §3.10)
+    # ------------------------------------------------------------------
+    # Coordinator-only writers. Listed in PolicyGate.CORE_STATE_FIELDS so
+    # any LLM ``update_state`` intent that touches these is denied
+    # (Inv-1 single writer). LLM consumers read them indirectly via
+    # prompt injection.
+    #
+    # ``cortex_session_id`` is the sid returned by the Cortex
+    # ``session begin`` call at T0. Empty string means either
+    # ``--no-cortex`` was selected for this run or the session has not
+    # yet reached T0. Written **once** in PRELUDE; never overwritten.
+    cortex_session_id: str = ""
+    # T4 ``session commit`` payload snapshot: ``{"status": "committed",
+    # "promoted_edges": [...], "negation_edges": [...],
+    # "derived_summary_id": "..."}``. Empty dict until commit succeeds.
+    # Drives the ``breakdown.kb_provenance.commit`` section and the
+    # operator-visible "what survived this session" summary.
+    cortex_session_summary: dict[str, Any] = field(default_factory=dict)
+    # Tentative edge_ids created by T2 ``session hypothesize`` that have
+    # not yet been ``verify``-d by T3. Crash-recovery rule (KB_design
+    # §3.13 M1 §7 "resume"): on resume the Coordinator inspects this
+    # list and routes orphans through ``propose-edge + late_verified``
+    # rather than ``verify`` (avoids 404 from a stale edge that never
+    # made it past the NDJSON queue). Capped indirectly by the in-flight
+    # proposal count — proposals removed from ``pending_proposals`` also
+    # drop their edge_id here.
+    pending_kb_edges: list[dict[str, Any]] = field(default_factory=list)
+    # T0 snapshot of ``find-recipe`` raw output (CLI ``--format text``,
+    # one entry per recipe row). v0.8 M1 only **records** this — it is
+    # not yet injected into the orchestration prompt; that happens in M5
+    # specialist assembly. Kept as ``dict`` (parsed) so M5 can read
+    # without re-parsing. Empty dict on first-ever session for a
+    # (workload, hw) pair.
+    warm_start_recipe: dict[str, Any] = field(default_factory=dict)
+    # T0 snapshot of ``traps`` output (known pitfalls list). Same
+    # injection-deferral story as ``warm_start_recipe``.
+    warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
+    # Iso UTC timestamp of the T0 snapshot. Empty when Cortex was
+    # bypassed (``--no-cortex``) or T0 failed.
+    warm_start_ts: str = ""
+
+    # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
     @classmethod
@@ -361,6 +499,23 @@ class SharedState:
         )
         filtered["backends_search"] = cls._migrate_search_ledger(
             filtered.get("backends_search"), schema_target=1,
+        )
+        # v0.8 M3 — merge the v0.6 backends_search + params_search ledgers
+        # into the unified ``explore_search`` ledger (KB_design §3.4 §4.3).
+        # The merge is one-shot at load: subsequent ExploreExecutor runs
+        # only touch ``explore_search``; the legacy ledgers stay around
+        # (deprecated, read-only) so an emergency rollback to v0.6 still
+        # has its data. ``record_*_accepted`` / executor updates from the
+        # legacy backends/params executors continue to write to the old
+        # ledgers — the merge function is idempotent under repeated calls,
+        # so an interleaved v0.6 fallback + v0.8 resume picks up cleanly.
+        filtered["explore_search"] = cls._build_explore_search(
+            existing=filtered.get("explore_search"),
+            backends_search=filtered.get("backends_search"),
+            params_search=filtered.get("params_search"),
+            backend_winners_history=filtered.get("backend_winners_history"),
+            params_winner_history=filtered.get("params_winner_history"),
+            synergy_attempted=filtered.get("synergy_attempted"),
         )
         return cls(**filtered)
 
@@ -457,6 +612,310 @@ class SharedState:
         out["schema_version"] = max(int(out.get("schema_version") or 0), schema_target)
         return out
 
+    @staticmethod
+    def _build_explore_search(
+        *,
+        existing: Any,
+        backends_search: Any,
+        params_search: Any,
+        backend_winners_history: Any,
+        params_winner_history: Any,
+        synergy_attempted: Any,
+    ) -> dict[str, Any]:
+        """Merge v0.6 backends_search + params_search into explore_search.
+
+        Idempotent: if ``existing`` already carries ``schema_version >= 1``
+        and the legacy ledgers haven't grown new fingerprints since the
+        last merge (tracked via ``existing.merged_from_legacy_sig``),
+        the call is a no-op other than re-stamping defensive defaults.
+
+        Conflict resolution (KB_design §3.4 §4.3 §"resume 迁移"):
+
+        * ``tested`` — union by fingerprint; outcome rank
+          ``KEEP > REVERT > SKIPPED`` wins the row.
+        * ``accepted`` — union by fingerprint; later entries win
+          (newer KEEPs reflect the latest evidence).
+        * ``rejected`` — union by fingerprint; entries already in
+          ``accepted`` are dropped (a re-promote supersedes a prior
+          reject).
+        * ``winners_history`` — append of legacy ``backend_winners_history``
+          + ``params_winner_history``, sorted by ``round_id`` / ``ts``.
+        * ``discovered_flags`` — empty in M3 (filled by M5 specialists).
+        * ``synergy_attempted`` — copied from legacy field.
+        * ``domains_round_summary`` — empty (M5/M6 fills).
+        """
+        from .action_executors._grid_runner import variant_fingerprint as _fp
+
+        existing = existing if isinstance(existing, dict) else {}
+        merged_sig = str(existing.get("merged_from_legacy_sig") or "")
+
+        # Legacy ledger normalization (already migrated to v2/v1 by
+        # _migrate_search_ledger so tested is fingerprint-keyed).
+        b = backends_search if isinstance(backends_search, dict) else {}
+        p = params_search if isinstance(params_search, dict) else {}
+
+        # Compose a cheap signature of the source ledgers so we can
+        # short-circuit when nothing changed since the last merge.
+        legacy_sig = json.dumps(
+            {
+                "b_tested": sorted(list((b.get("tested") or {}).keys())),
+                "p_tested": sorted(list((p.get("tested") or {}).keys())),
+                "b_accepted": len(b.get("accepted") or []),
+                "p_accepted": len(p.get("accepted") or []),
+                "b_rejected": len(b.get("rejected") or []),
+                "p_rejected": len(p.get("rejected") or []),
+            },
+            sort_keys=True, separators=(",", ":"),
+        )
+        if (
+            existing
+            and existing.get("schema_version")
+            and merged_sig == legacy_sig
+        ):
+            # Idempotent re-load with no upstream changes; preserve
+            # whatever ExploreExecutor wrote since the last merge.
+            existing.setdefault("tested", {})
+            existing.setdefault("accepted", [])
+            existing.setdefault("rejected", [])
+            existing.setdefault("winners_history", [])
+            existing.setdefault("discovered_flags", [])
+            existing.setdefault("synergy_attempted", [])
+            existing.setdefault("domains_round_summary", [])
+            existing.setdefault("name_index", {})
+            existing.setdefault("cursor", 0)
+            return existing
+
+        _RANK = {"KEEP": 3, "REVERT": 2, "SKIPPED": 1, "FAILED": 1,
+                 "KEEP_UNSTABLE": 2, "": 0}
+
+        def _outcome_for(entry: dict[str, Any]) -> str:
+            """Map a legacy ledger entry to the v0.8 outcome vocabulary."""
+            outcome = str(entry.get("outcome") or "").upper().strip()
+            if outcome:
+                return outcome
+            # Legacy entries didn't stamp ``outcome``; infer from the
+            # bucket the entry sat in. Reject/accept buckets handled by
+            # caller via the explicit code paths below.
+            status = str(entry.get("status") or "").lower()
+            if status == "failed":
+                return "FAILED"
+            return "REVERT"
+
+        # tested: union by fingerprint with outcome-rank precedence.
+        tested: dict[str, dict[str, Any]] = {}
+        name_index: dict[str, str] = {}
+
+        def _ingest_tested(source: dict[str, Any], legacy_action: str) -> None:
+            src_tested = source.get("tested") or {}
+            if not isinstance(src_tested, dict):
+                return
+            for fp_key, entry in src_tested.items():
+                if not isinstance(entry, dict):
+                    continue
+                fp = (
+                    str(fp_key)
+                    if (isinstance(fp_key, str)
+                        and len(fp_key) == 16
+                        and all(c in "0123456789abcdef" for c in fp_key))
+                    else str(entry.get("fingerprint")
+                             or _fp(
+                                 str(entry.get("extra_sglang_args") or ""),
+                                 dict(entry.get("extra_envs") or {}),
+                             ))
+                )
+                outcome = _outcome_for(entry)
+                row = {
+                    "fingerprint": fp,
+                    "name": str(entry.get("name") or ""),
+                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                    "extra_envs": dict(entry.get("extra_envs") or {}),
+                    "note": str(entry.get("note") or ""),
+                    "outcome": outcome,
+                    "round_id": str(entry.get("round_id") or ""),
+                    "ts": str(entry.get("ts") or ""),
+                    "gain_pct": entry.get("gain_pct"),
+                    "tput": entry.get("tput") or entry.get("output_throughput"),
+                    "provenance": str(entry.get("provenance")
+                                       or f"legacy:{legacy_action}"),
+                    "workload_signature": str(entry.get("workload_signature") or ""),
+                }
+                prev = tested.get(fp)
+                if prev is None or _RANK.get(outcome, 0) >= _RANK.get(
+                    str(prev.get("outcome") or ""), 0,
+                ):
+                    tested[fp] = row
+                if row["name"]:
+                    name_index[row["name"]] = fp
+
+        _ingest_tested(b, "backends")
+        _ingest_tested(p, "params")
+
+        # accepted: union by fingerprint, later entries win.
+        accepted_by_fp: dict[str, dict[str, Any]] = {}
+
+        def _ingest_accepted(source: dict[str, Any], legacy_action: str) -> None:
+            for entry in source.get("accepted") or []:
+                if not isinstance(entry, dict):
+                    continue
+                fp = str(entry.get("fingerprint") or _fp(
+                    str(entry.get("extra_sglang_args") or ""),
+                    dict(entry.get("extra_envs") or {}),
+                ))
+                row = {
+                    "fingerprint": fp,
+                    "name": str(entry.get("name") or ""),
+                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                    "extra_envs": dict(entry.get("extra_envs") or {}),
+                    "note": str(entry.get("note") or ""),
+                    "gain_pct": entry.get("gain_pct"),
+                    "tput": entry.get("tput") or entry.get("output_throughput"),
+                    "stack_index": entry.get("stack_index"),
+                    "accepted_at_round": str(entry.get("accepted_at_round") or ""),
+                    "ts": str(entry.get("ts") or ""),
+                    "provenance": str(entry.get("provenance")
+                                       or f"legacy:{legacy_action}"),
+                }
+                accepted_by_fp[fp] = row
+                if row["name"]:
+                    name_index[row["name"]] = fp
+
+        _ingest_accepted(b, "backends")
+        _ingest_accepted(p, "params")
+        # Also pull from ``existing`` so a re-load preserves ExploreExecutor's
+        # own writes since the last merge.
+        for entry in existing.get("accepted") or []:
+            if not isinstance(entry, dict):
+                continue
+            fp = str(entry.get("fingerprint") or "")
+            if fp:
+                accepted_by_fp[fp] = dict(entry)
+
+        # rejected: union by fingerprint; drop fingerprints already in
+        # accepted (re-promote wins).
+        accepted_fps = set(accepted_by_fp.keys())
+        rejected_by_fp: dict[str, dict[str, Any]] = {}
+
+        def _ingest_rejected(source: dict[str, Any], legacy_action: str) -> None:
+            for entry in source.get("rejected") or []:
+                if not isinstance(entry, dict):
+                    continue
+                fp = str(entry.get("fingerprint") or _fp(
+                    str(entry.get("extra_sglang_args") or ""),
+                    dict(entry.get("extra_envs") or {}),
+                ))
+                if fp in accepted_fps:
+                    continue
+                row = {
+                    "fingerprint": fp,
+                    "name": str(entry.get("name") or ""),
+                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                    "extra_envs": dict(entry.get("extra_envs") or {}),
+                    "note": str(entry.get("note") or ""),
+                    "reason": str(entry.get("reason") or "not_keep"),
+                    "gain_pct": entry.get("gain_pct"),
+                    "tput": entry.get("tput") or entry.get("output_throughput"),
+                    "round_id": str(entry.get("round_id") or ""),
+                    "ts": str(entry.get("ts") or ""),
+                    "provenance": str(entry.get("provenance")
+                                       or f"legacy:{legacy_action}"),
+                }
+                rejected_by_fp[fp] = row
+                if row["name"]:
+                    name_index[row["name"]] = fp
+
+        _ingest_rejected(b, "backends")
+        _ingest_rejected(p, "params")
+        for entry in existing.get("rejected") or []:
+            if not isinstance(entry, dict):
+                continue
+            fp = str(entry.get("fingerprint") or "")
+            if fp and fp not in accepted_fps:
+                rejected_by_fp[fp] = dict(entry)
+
+        # winners_history: append legacy lists + preserve any prior
+        # explore-side rows, then sort by (round_id, ts).
+        wh: list[dict[str, Any]] = []
+        for source_list, legacy_action in (
+            (backend_winners_history, "backends"),
+            (params_winner_history, "params"),
+            (existing.get("winners_history") or [], "explore"),
+        ):
+            if not isinstance(source_list, list):
+                continue
+            for entry in source_list:
+                if not isinstance(entry, dict):
+                    continue
+                fp_val = entry.get("fingerprint")
+                if not fp_val:
+                    fp_val = _fp(
+                        str(entry.get("extra_sglang_args") or ""),
+                        dict(entry.get("extra_envs") or {}),
+                    )
+                wh.append({
+                    "round_id": str(entry.get("round_id") or ""),
+                    "variant_name": str(entry.get("variant_name")
+                                          or entry.get("name") or ""),
+                    "fingerprint": str(fp_val),
+                    "gain_pct": entry.get("gain_pct"),
+                    "extra_args": str(entry.get("extra_args")
+                                       or entry.get("extra_sglang_args") or ""),
+                    "extra_envs": dict(entry.get("extra_envs") or {}),
+                    "provenance": str(entry.get("provenance")
+                                       or f"legacy:{legacy_action}"),
+                    "ts": str(entry.get("ts") or ""),
+                })
+
+        def _sort_key(row: dict[str, Any]) -> tuple[str, str]:
+            return (str(row.get("round_id") or ""), str(row.get("ts") or ""))
+
+        wh.sort(key=_sort_key)
+
+        # synergy_attempted: copy from legacy field; preserve any
+        # ExploreExecutor-side additions.
+        sa_raw = synergy_attempted if isinstance(synergy_attempted, list) else []
+        sa_set: set[tuple[str, ...]] = set()
+
+        def _normalize_combo(c: Any) -> tuple[str, ...] | None:
+            if isinstance(c, list):
+                items = tuple(sorted(str(x) for x in c if isinstance(x, str)))
+                return items if items else None
+            if isinstance(c, str) and c.strip():
+                # Legacy synergy_attempted entries were "+"-joined strings.
+                parts = tuple(sorted(p for p in c.split("+") if p))
+                return parts if parts else None
+            return None
+
+        for c in sa_raw:
+            norm = _normalize_combo(c)
+            if norm:
+                sa_set.add(norm)
+        for c in existing.get("synergy_attempted") or []:
+            norm = _normalize_combo(c)
+            if norm:
+                sa_set.add(norm)
+
+        # discovered_flags: M3 leaves empty; preserve any existing rows.
+        df_existing = existing.get("discovered_flags") or []
+        df: list[dict[str, Any]] = [
+            d for d in df_existing if isinstance(d, dict)
+        ]
+
+        return {
+            "schema_version": 1,
+            "tested": tested,
+            "accepted": list(accepted_by_fp.values()),
+            "rejected": list(rejected_by_fp.values()),
+            "winners_history": wh,
+            "discovered_flags": df,
+            "synergy_attempted": [list(c) for c in sorted(sa_set)],
+            "domains_round_summary": list(existing.get("domains_round_summary") or []),
+            "name_index": name_index,
+            "cursor": len(tested),
+            "last_round": dict(existing.get("last_round") or {}),
+            # Sentinel so a re-load with unchanged legacy data short-circuits.
+            "merged_from_legacy_sig": legacy_sig,
+        }
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -536,6 +995,56 @@ class SharedState:
             for k, v in (self.policy_denial_streak or {}).items()
             if not k.startswith(prefix)
         }
+
+    # ------------------------------------------------------------------
+    # v0.8 M2 — phase machine writer (Coordinator-only, Inv-1 + Inv-8.1)
+    # ------------------------------------------------------------------
+    def record_phase_transition(
+        self,
+        *,
+        to_phase: str,
+        reason: str,
+        evidence: dict[str, Any] | None = None,
+        ts: str | None = None,
+        ts_unix: float | None = None,
+    ) -> dict[str, Any]:
+        """Append a phase_history row and atomically update ``phase`` fields.
+
+        The Coordinator calls this from ``_advance_phase_if_needed`` at
+        the end of each tick (also once during ``__init__`` for the
+        initial "phase_entered" row). LLM roles cannot reach this code
+        path — PolicyGate adds ``phase`` / ``phase_history`` to
+        :data:`policy.CORE_STATE_FIELDS`, so any ``update_state`` intent
+        touching them is rejected first.
+
+        Returns the inserted row (so callers don't have to re-read the
+        list to log it).
+        """
+        from datetime import datetime as _dt, timezone as _tz
+        import time as _time
+        # Lazy import to avoid an import-time cycle with the orchestrator
+        # package (phase_state itself imports nothing from SharedState).
+        from .phase_state import make_history_row
+
+        now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
+        now_unix = float(ts_unix if ts_unix is not None else _time.time())
+        row = make_history_row(
+            from_phase=self.phase or "",
+            to_phase=to_phase,
+            reason=reason,
+            evidence=evidence,
+            ts=now_ts,
+            ts_unix=now_unix,
+        )
+        history = list(self.phase_history or [])
+        history.append(row)
+        if len(history) > _PHASE_HISTORY_CAP:
+            history = history[-_PHASE_HISTORY_CAP:]
+        self.phase_history = history
+        self.phase = row["to_phase"]
+        self.phase_started_ts = now_ts
+        self.phase_started_unix = now_unix
+        return row
 
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
         if not self.policy_denial_history:
@@ -1161,6 +1670,128 @@ class SharedState:
             return
         self.params_search = dict(update)
 
+    def apply_explore_search_update(self, update: dict[str, Any]) -> None:
+        """Merge an ExploreExecutor search update into persistent state.
+
+        v0.8 M3 (KB_design §3.4). The executor returns a ledger
+        increment containing ``tested`` (full fingerprint-keyed map),
+        ``rejected`` (list), ``winners_history`` increment,
+        ``synergy_attempted`` increment, ``last_round``, etc. The
+        executor never writes ``accepted`` directly —
+        :meth:`record_explore_accepted` is the single writer for that
+        bucket (Coordinator calls it on promote).
+        """
+        if not isinstance(update, dict):
+            return
+        prior = self.explore_search if isinstance(self.explore_search, dict) else {}
+        merged = dict(prior)
+        merged["schema_version"] = int(update.get("schema_version") or 1)
+        merged["tested"] = dict(update.get("tested") or prior.get("tested") or {})
+        merged["rejected"] = list(update.get("rejected") or prior.get("rejected") or [])
+        merged["name_index"] = dict(
+            update.get("name_index") or prior.get("name_index") or {}
+        )
+        merged["cursor"] = int(update.get("cursor") or len(merged["tested"]))
+        merged["last_round"] = dict(update.get("last_round") or {})
+        # Append-only history fields — merge instead of overwrite.
+        wh = list(prior.get("winners_history") or [])
+        for entry in update.get("winners_history") or []:
+            if isinstance(entry, dict):
+                wh.append(dict(entry))
+        merged["winners_history"] = wh
+        sa: set[tuple[str, ...]] = set()
+        for src in (prior.get("synergy_attempted"), update.get("synergy_attempted")):
+            for c in src or []:
+                if isinstance(c, list):
+                    items = tuple(sorted(str(x) for x in c if isinstance(x, str)))
+                    if items:
+                        sa.add(items)
+                elif isinstance(c, str) and c:
+                    items = tuple(sorted(c.split("+")))
+                    if items:
+                        sa.add(items)
+        merged["synergy_attempted"] = [list(c) for c in sorted(sa)]
+        merged["discovered_flags"] = list(
+            update.get("discovered_flags") or prior.get("discovered_flags") or []
+        )
+        merged["domains_round_summary"] = list(
+            update.get("domains_round_summary")
+            or prior.get("domains_round_summary") or []
+        )
+        # Preserve any accepted bucket from prior runs; executor never
+        # writes accepted directly (record_explore_accepted does).
+        merged["accepted"] = list(prior.get("accepted") or [])
+        # Drop the merged_from_legacy_sig sentinel on each update so a
+        # subsequent SharedState load re-runs the legacy union (defensive
+        # against an interleaved v0.6 fallback session writing into the
+        # old ledgers between save/load cycles).
+        merged.pop("merged_from_legacy_sig", None)
+        self.explore_search = merged
+
+    def record_explore_accepted(self, variant: dict[str, Any]) -> None:
+        """Append one promoted variant to ``explore_search.accepted``.
+
+        Called by Coordinator after an explore winner survives both the
+        per-variant KEEP gate and the inlined stack rebench. Dedupes by
+        ``fingerprint`` so repeated promotes of the same content don't
+        bloat the list; also removes a matching entry from
+        ``rejected`` so a previously-rejected variant that later
+        promotes doesn't appear in both buckets.
+        """
+        if not isinstance(variant, dict) or not variant:
+            return
+        from .action_executors._canonical_fingerprint import canonical_fingerprint
+        args = str(
+            variant.get("candidate_extra_sglang_args")
+            or variant.get("extra_sglang_args") or ""
+        )
+        envs = dict(variant.get("extra_envs") or {})
+        fp = str(variant.get("fingerprint") or canonical_fingerprint(args, envs))
+        entry = {
+            "fingerprint": fp,
+            "name": str(variant.get("name") or ""),
+            "extra_sglang_args": args,
+            "extra_envs": envs,
+            "note": str(variant.get("note") or ""),
+            "tput": variant.get("output_throughput") or variant.get("tput"),
+            "gain_pct": variant.get("gain_pct"),
+            "stack_index": variant.get("stack_index"),
+            "accepted_at_round": str(variant.get("accepted_at_round") or ""),
+            "ts": str(variant.get("ts") or _now_iso()),
+            "provenance": str(variant.get("provenance") or "llm_direct"),
+        }
+        search = dict(self.explore_search or {})
+        search.setdefault("schema_version", 1)
+        accepted = [
+            v for v in (search.get("accepted") or [])
+            if not (isinstance(v, dict) and v.get("fingerprint") == fp)
+        ]
+        accepted.append(entry)
+        search["accepted"] = accepted
+        search["rejected"] = [
+            v for v in (search.get("rejected") or [])
+            if not (isinstance(v, dict) and v.get("fingerprint") == fp)
+        ]
+        name_index = dict(search.get("name_index") or {})
+        if entry["name"]:
+            name_index[entry["name"]] = fp
+        search["name_index"] = name_index
+        # Append a winners_history row so plateau judges can read this
+        # without crawling the optimization_stack.
+        wh = list(search.get("winners_history") or [])
+        wh.append({
+            "round_id": entry["accepted_at_round"],
+            "variant_name": entry["name"],
+            "fingerprint": fp,
+            "gain_pct": entry["gain_pct"],
+            "extra_args": args,
+            "extra_envs": envs,
+            "provenance": entry["provenance"],
+            "ts": entry["ts"],
+        })
+        search["winners_history"] = wh
+        self.explore_search = search
+
     def apply_backends_search_update(self, update: dict[str, Any]) -> None:
         """Merge a BackendsExecutor search update into persistent state.
 
@@ -1557,6 +2188,168 @@ class SharedState:
             f"tput={self.current_best.get('tput','?')} "
             f"variant={self.current_best.get('variant_name','?')}"
         )
+
+    def to_phase_status_summary(
+        self,
+        *,
+        budget_pct: dict[str, float] | None = None,
+        now_unix: float | None = None,
+    ) -> str:
+        """Render the per-tick ``=== Phase ===`` block (v0.8 §3.3).
+
+        The Coordinator pipes this into every agent's per-tick prompt.
+        Output stays compact (≤ 4 lines) because every reactor reads
+        it; we keep the human-readable form here and let
+        :func:`phase_state.phase_budget_remaining_seconds` carry the
+        budget math.
+        """
+        from .phase_state import (
+            allowed_actions_for,
+            normalize_budget_pct,
+            phase_budget_remaining_seconds,
+            phase_elapsed_seconds,
+        )
+
+        phase = (self.phase or "").strip().upper() or "UNSET"
+        elapsed = int(phase_elapsed_seconds(self, now_unix=now_unix))
+        budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
+        budget_pct_for_phase = budget.get(phase, 0.0)
+        remaining = phase_budget_remaining_seconds(
+            self, budget_pct=budget, now_unix=now_unix,
+        )
+        budget_line: str
+        if remaining is None:
+            budget_line = (
+                f"budget    : pct={budget_pct_for_phase:.2f} (unlimited run; "
+                f"no per-phase cap)"
+            )
+        else:
+            budget_line = (
+                f"budget    : pct={budget_pct_for_phase:.2f} "
+                f"elapsed_sec={elapsed} remaining_sec={int(remaining)}"
+            )
+        allowed = allowed_actions_for(phase)
+        allowed_line = (
+            f"allowed   : {', '.join(allowed) if allowed else '(none)'}"
+        )
+        return (
+            f"phase     : {phase}\n"
+            f"entered   : {self.phase_started_ts or '(unset)'}\n"
+            f"{budget_line}\n"
+            f"{allowed_line}"
+        )
+
+    def to_phase_budget_telemetry(
+        self,
+        *,
+        budget_pct: dict[str, float] | None = None,
+        now_unix: float | None = None,
+    ) -> str:
+        """Render the per-phase budget telemetry block for Robustness.
+
+        Lists each phase that appears in ``phase_history`` plus the
+        current phase. Each line shows ``phase: elapsed=Xs cap=Ys (Z%)``
+        so Robustness can spot a phase that's blown past its budget.
+        """
+        from .phase_state import (
+            DEFAULT_PHASE_BUDGET_PCT,
+            normalize_budget_pct,
+            phase_elapsed_seconds,
+        )
+
+        budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
+        # Aggregate elapsed per phase using phase_history.
+        elapsed_per_phase: dict[str, float] = {}
+        history = self.phase_history or []
+        for idx, row in enumerate(history):
+            if not isinstance(row, dict):
+                continue
+            phase = str(row.get("to_phase") or "").upper()
+            entered = float(row.get("ts_unix") or 0.0)
+            if not phase or entered <= 0:
+                continue
+            if idx + 1 < len(history) and isinstance(history[idx + 1], dict):
+                exited = float(history[idx + 1].get("ts_unix") or entered)
+            else:
+                # Currently-active segment — measure to now.
+                elapsed_now = phase_elapsed_seconds(self, now_unix=now_unix)
+                exited = entered + elapsed_now
+            elapsed_per_phase[phase] = (
+                elapsed_per_phase.get(phase, 0.0) + max(0.0, exited - entered)
+            )
+        if not elapsed_per_phase:
+            return "(no phase history yet)"
+        mm = float(self.max_minutes or 0.0)
+        total_budget_sec = mm * 60.0
+        lines: list[str] = []
+        # Stable order — by PHASE_INDEX so the operator sees the chain.
+        for phase in ("PRELUDE", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
+            if phase not in elapsed_per_phase:
+                continue
+            elapsed = elapsed_per_phase[phase]
+            pct = budget.get(phase, DEFAULT_PHASE_BUDGET_PCT.get(phase, 0.0))
+            cap_sec = total_budget_sec * pct if total_budget_sec > 0 else 0.0
+            used_pct = (elapsed / cap_sec * 100.0) if cap_sec > 0 else 0.0
+            cap_line = f"cap={int(cap_sec)}s" if cap_sec > 0 else "cap=unlimited"
+            lines.append(
+                f"  {phase}: elapsed={int(elapsed)}s {cap_line} used={used_pct:.0f}%"
+            )
+        return "\n".join(lines) or "(no phase history yet)"
+
+    def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
+        """Render T0 warm-start snapshot for Orchestration prompt injection.
+
+        Produces a compact block fed into ``Coordinator._compose_prompt``'s
+        ``=== Warm start ===`` section (v0.8 §3.3 §4.1). Returns empty
+        string when both ``warm_start_recipe`` and ``warm_start_pitfalls``
+        are absent (M1 ``--no-cortex`` mode / first-ever session for a
+        (workload, hw) pair).
+
+        Lines are capped so a recipe blob never bloats the prompt; the
+        full JSON snapshot lives at
+        ``runtime/cortex/.kb_warm.json`` / ``.kb_pitfalls.json`` for any
+        agent willing to Read it directly.
+        """
+        recipe = self.warm_start_recipe or {}
+        pitfalls = self.warm_start_pitfalls or []
+        if not recipe and not pitfalls:
+            return ""
+        out: list[str] = []
+        workload = str(recipe.get("workload") or "") if isinstance(recipe, dict) else ""
+        hw = str(recipe.get("hw") or "") if isinstance(recipe, dict) else ""
+        if workload or hw:
+            out.append(f"recipe: workload={workload or '?'} hw={hw or '?'}")
+        raw = str(recipe.get("raw") or "") if isinstance(recipe, dict) else ""
+        # Trim recipe raw text — at most 5 lines, 240 chars each.
+        if raw.strip():
+            kept = 0
+            for line in raw.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                out.append(f"  · {stripped[:240]}")
+                kept += 1
+                if kept >= 5:
+                    break
+            if kept == 0:
+                out.append("  · (recipe present but text was empty)")
+        else:
+            out.append("  · (no recipe text — first session for this workload/hw)")
+        if pitfalls:
+            out.append(f"pitfalls ({len(pitfalls)}):")
+            for entry in pitfalls[:5]:
+                if not isinstance(entry, dict):
+                    continue
+                snippet = str(entry.get("raw") or entry.get("symptom") or "")
+                if not snippet.strip():
+                    continue
+                first_line = snippet.splitlines()[0].strip()
+                out.append(f"  · {first_line[:240]}")
+        if max_lines and len(out) > max_lines:
+            out = out[:max_lines]
+            out.append(f"  · (truncated to {max_lines} lines; "
+                       f"see runtime/cortex/.kb_warm.json for full snapshot)")
+        return "\n".join(out)
 
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection (DESIGN §8.3)."""
