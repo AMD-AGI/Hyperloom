@@ -566,6 +566,116 @@ The backend prunes everything older than the latest 50 turn workdirs
 on every tick to avoid unbounded growth.
 
 
+## Optional: Framework-Agent Pre-stage
+
+Before baseline runs, an *optional* one-shot can fetch an upstream
+framework PR and apply it to the sglang source tree, so the rest of
+the run (baseline -> params -> backends -> sweep -> kernel) executes
+against that PR instead of the upstream HEAD. Use this when you want
+to measure whether a specific PR or class of perf PRs actually moves
+the end-to-end inference numbers IO measures.
+
+Two modes:
+
+```bash
+# A. Auto-discover via framework-agent (Primus Cortex / GitHub search)
+inference_optimizer optimize \
+    --model "$MODEL_PATH" \
+    --framework sglang \
+    --framework-pr-discover \
+    --framework-gap "improve sglang fp8 MoE on MI300X" \
+    --max-hours 2
+
+# B. Explicit PR ref (skips fa discover; resolves head_sha via git ls-remote)
+inference_optimizer optimize \
+    --model "$MODEL_PATH" \
+    --framework sglang \
+    --framework-pr PR:25748 \
+    --max-hours 2
+```
+
+What the pre-stage does (see
+`orchestrator/framework_pr_discover.py`):
+
+1. **A only**: runs `fa explore` (Primus Cortex + GitHub) and picks
+   the first candidate. The `fa` binary comes from
+   `framework-agent/scripts/install.sh`, which is chained from
+   `inference_optimizer/scripts/install.sh` (skip via
+   `--skip-framework-agent` at install time).
+2. Resolves the PR `head_sha` (via the fa enrichment, or
+   `git ls-remote origin refs/pull/N/head` as a fallback).
+3. If `--framework-sglang-path` has dirty tracked files,
+   `git stash push -u` first (default; disable with
+   `--framework-no-auto-stash`). The standard sandbox image ships
+   sglang already-dirty (modified pyproject.toml, extra quant
+   configs), so the stash is required for `git checkout` to
+   succeed.
+4. `git fetch origin refs/pull/N/head` into the sglang dir
+   (`--framework-sglang-path`, default `/sgl-workspace/sglang`).
+5. `git checkout --detach <head_sha>`.
+6. **Optional** `pip install -e python/ --no-deps
+   --no-build-isolation` if `--framework-pip-reinstall` is set.
+   Off by default: the sandbox image already has sglang installed
+   in editable mode, so `git checkout` alone is enough for the new
+   code to be picked up on next `import sglang`. The full build
+   pulls in sgl-kernel which needs a Rust toolchain not present in
+   standard images, so leave this off unless you know your image
+   has rustc.
+7. Logs `winner_ref` / `head_sha` to stderr; baseline runs next.
+
+Errors abort the run with exit code 2 (`FrameworkPRError`):
+fa binary not on PATH, no candidate from Primus, git checkout
+conflict, pip install failure. None of the failures fall back
+silently - the operator decides whether to retry with a different
+`--framework-gap` or skip the pre-stage entirely.
+
+### Overriding the keyword extractor (`--framework-keywords`)
+
+By default, fa runs `extract_keywords()` against `--framework-gap` and
+uses the whitelist-filtered tokens as the Primus Cortex search query.
+The whitelist is opinionated; if it drops a term the service-side
+word-AND search needs (or includes terms that filter too tightly),
+pass `--framework-keywords` to override:
+
+```bash
+# Wider single-term: pick any MoE-related PR (whatever's most recent,
+# then client-side reranked)
+inference_optimizer optimize \
+    --framework-pr-discover \
+    --framework-keywords "moe" \
+    --max-hours 0.5
+
+# Two-term: fp8 quant + moe (service-side AND)
+inference_optimizer optimize \
+    --framework-pr-discover \
+    --framework-keywords "fp8,moe"
+
+# Hardware-specific (term not in fa's default whitelist)
+inference_optimizer optimize \
+    --framework-pr-discover \
+    --framework-keywords "mi300x throughput"
+```
+
+`--framework-gap` becomes optional when `--framework-keywords` is set
+(at least one of the two must be provided). Explicit keywords bypass
+the whitelist + CamelCase filter entirely; they're sent to Primus
+Cortex verbatim and used for the client-side rerank too.
+
+Discover vs Kernel role boundary:
+
+| | framework-agent (pre-stage) | kernel-agent (in-loop) |
+|---|---|---|
+| When | Once, before baseline | Many times, inside the optimize loop |
+| Granularity | Whole PR (cross-file change set) | Single kernel function |
+| Effect on session | New source baseline | KEEP'd patches per kernel |
+| IO integration | `--framework-pr*` CLI flag | Coordinator Kernel role + REQUEST kinds |
+| Hand-off | git checkout sglang to PR head | `apply_kernel_patch.py` per-kernel |
+
+The pre-stage and the kernel role are independent: you can run
+`--framework-pr-discover` with or without `--no-kernel`, and vice
+versa. The pre-stage is a no-op when neither `--framework-pr` nor
+`--framework-pr-discover` is set.
+
 ## Framework Selection
 
 A session is single-framework. Pick `sglang` (default) or `vllm` via
