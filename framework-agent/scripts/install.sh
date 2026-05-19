@@ -28,6 +28,14 @@ if [[ -z "$PYTHON" ]]; then
     exit 1
 fi
 
+# Editable install via PEP 660 requires pip >= 23. The Ubuntu 22.04 system
+# pip in many Claw sandbox base images is 22.0.2 which fails with:
+#   "build backend is missing the 'build_editable' hook"
+# Upgrading is cheap and idempotent. We tolerate failures (|| true) so a
+# locked-down environment without internet can still proceed if pip is
+# already >= 23 (pip just no-ops the upgrade).
+"$PYTHON" -m pip install --upgrade --quiet "pip>=23" || true
+
 cd "$FRAMEWORK_AGENT_ROOT"
 
 # 1. Editable install with test extra

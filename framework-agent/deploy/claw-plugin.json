@@ -1,6 +1,6 @@
 {
   "name": "Hyperloom-framework-agent",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Standalone PR/ref exploration agent for serving framework backends (sglang / vllm). Discovers candidate PRs via Primus Cortex + GitHub, runs them in isolated worktrees on MI300X, contributes findings to the KB. Mirrors the Hyperloom plugin shape so it inherits the same sglang image, the same wekafs mount, and the same GPU resource quota.",
   "image": "harbor.core42.primus-safe.amd.com/proxy/lmsysorg/sglang:v0.5.9-rocm700-mi30x",
   "is_public": true,
@@ -8,7 +8,7 @@
     {
       "id": 0,
       "type": "prompt",
-      "version": "0.1.2"
+      "version": "0.1.3"
     }
   ],
   "resource": {

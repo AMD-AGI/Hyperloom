@@ -1,6 +1,6 @@
 {
   "name": "framework-agent-prompt",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "display_name": "Framework Agent",
   "description": "Drives `fa explore` against a serving framework with a free-form gap description; reads UI panel inputs, materialises an ExploreRequest, runs plan + optionally execute, surfaces winner_ref + kb_contribution.",
   "tags": [
