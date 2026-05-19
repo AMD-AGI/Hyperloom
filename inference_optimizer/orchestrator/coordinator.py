@@ -940,7 +940,7 @@ class Coordinator:
         }
 
     def _all_reusable_kernels_rejected(self) -> bool:
-        select = self.shared_state.last_select_kernels or {}
+        select = self.shared_state.last_trace_analyze or {}
         reusable = {
             str(k) for k in (select.get("reusable_native_kernel_ids") or [])
             if k
@@ -1182,13 +1182,13 @@ class Coordinator:
     def _required_next_step(self) -> str:
         """Return the coordinator-enforced next step, or empty if flexible.
 
-        The Orchestration prompt says baseline -> profile -> select_kernels,
+        The Orchestration prompt says baseline -> profile -> trace_analyze,
         but the LLM can still skip to backends/params. This guard makes that
         sequence deterministic and visible in the prompt every tick.
 
         Pipeline (after the deletion of the in-loop ``setup`` / ``classify``
         actions, the deletion of the PMC hard-gate, and the deletion of
-        the action-layer ``select_kernels`` hard-gate — ``select_kernels``
+        the action-layer ``trace_analyze`` hard-gate — ``trace_analyze``
         is now only enforced as a prerequisite for ``run_optimization``
         REQUESTs at the request layer, never for explore actions like
         ``params`` / ``backends`` / ``sweep`` / ``report``):
@@ -1237,7 +1237,7 @@ class Coordinator:
         # * ``pmc_roofline`` is opt-in advisory enrichment for
         #   ``kernel_opt`` via ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1`` and
         #   never a prerequisite for any other action.
-        # * ``select_kernels`` is a prerequisite ONLY for ``run_optimization``
+        # * ``trace_analyze`` is a prerequisite ONLY for ``run_optimization``
         #   REQUESTs (enforced in ``_sequence_denial_for_request``); it is
         #   NOT a prerequisite for ``params`` / ``backends`` / ``sweep`` /
         #   ``report``.
@@ -1429,10 +1429,10 @@ class Coordinator:
         #   ``kernel_opt`` via ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1`` and
         #   never blocks any other action. A platform that cannot run
         #   rocprof must not deadlock the explore / kernel pipeline.
-        # * ``select_kernels`` is enforced at the REQUEST layer
+        # * ``trace_analyze`` is enforced at the REQUEST layer
         #   (``_sequence_denial_for_request``) for ``run_optimization``
         #   only. ``params`` / ``backends`` / ``sweep`` / ``report`` are
-        #   never gated on a fresh ``last_select_kernels`` cache — those
+        #   never gated on a fresh ``last_trace_analyze`` cache — those
         #   actions don't need kernel candidates to make progress.
         if "kernel" in self.role_registry:
             if (
@@ -1491,11 +1491,11 @@ class Coordinator:
         req_kind = str(kind or "").strip()
         if target != "kernel" or self.shared_state.stop_reason:
             return None
-        # select_kernels is the prerequisite request itself. It is also used
+        # trace_analyze is the prerequisite request itself. It is also used
         # directly by tests/tools that pass an explicit trace_input, so allow it
         # through; later backends/params/sweep are guarded until the result is
         # cached in SharedState.
-        if req_kind == "select_kernels":
+        if req_kind == "trace_analyze":
             return None
         if get_handler(req_kind) is None:
             return None
@@ -1509,15 +1509,15 @@ class Coordinator:
             return PolicyDenied(
                 f"request kind={req_kind!r} denied: profile must run first",
                 rule="execution_order",
-                hint="propose/delegate `profile` before select_kernels/run_optimization",
+                hint="propose/delegate `profile` before trace_analyze/run_optimization",
             )
-        select = self.shared_state.last_select_kernels or {}
+        select = self.shared_state.last_trace_analyze or {}
         needs_select = select.get("trace_input") != self.shared_state.last_profile_trace
-        if needs_select and req_kind != "select_kernels":
+        if needs_select and req_kind != "trace_analyze":
             return PolicyDenied(
-                f"request kind={req_kind!r} denied: select_kernels must run first",
+                f"request kind={req_kind!r} denied: trace_analyze must run first",
                 rule="execution_order",
-                hint="emit request kind='select_kernels' for last_profile_trace",
+                hint="emit request kind='trace_analyze' for last_profile_trace",
             )
         return None
 
@@ -1976,7 +1976,7 @@ class Coordinator:
                 params = intent.payload.get("params") or {}
                 merged_payload = {**intent.payload, **params}
                 if (
-                    kind == "select_kernels"
+                    kind == "trace_analyze"
                     and self.shared_state.last_profile_roofline
                     and not merged_payload.get("roofline_json")
                 ):
@@ -2034,15 +2034,15 @@ class Coordinator:
                     },
                     in_reply_to=request_msg.msg_id, priority=1,
                 ))
-                # Cache select_kernels output so subsequent identical
+                # Cache trace_analyze output so subsequent identical
                 # requests are short-circuited next tick. Only cache real
                 # successful runs, not failures, to avoid sticky errors.
                 if (
-                    kind == "select_kernels"
+                    kind == "trace_analyze"
                     and cache_hit_source is None
                     and result.get("status") in ("ok", "succeeded")
                 ):
-                    self.shared_state.record_select_kernels(merged_payload, result)
+                    self.shared_state.record_trace_analyze(merged_payload, result)
                     await self._maybe_enqueue_pmc_roofline()
                     self.shared_state.save(self.session_dir)
                 # Mirror kernel-opt outcomes into SharedState so Orch
@@ -2123,9 +2123,9 @@ class Coordinator:
 
     def _cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         """Return a cached programmatic_handler result if applicable."""
-        if kind != "select_kernels":
+        if kind != "trace_analyze":
             return None
-        cached = self.shared_state.last_select_kernels or {}
+        cached = self.shared_state.last_trace_analyze or {}
         if not isinstance(cached, dict) or not cached:
             return None
         trace_input = payload.get("trace_input") or payload.get("trace_dir")
@@ -2142,7 +2142,7 @@ class Coordinator:
                 "reusable_native_kernel_ids", []
             ),
             "cached_at": cached.get("ts"),
-            "note": "served from shared_state.last_select_kernels cache",
+            "note": "served from shared_state.last_trace_analyze cache",
         }
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
@@ -2659,7 +2659,7 @@ class Coordinator:
             }
             # Bug C fix: surface the trace path produced by ProfileExecutor
             # to SharedState so Orch can pass a real path to the kernel
-            # `select_kernels` REQUEST instead of fabricating one.
+            # `trace_analyze` REQUEST instead of fabricating one.
             trace_path = (
                 result.get("main_trace_path")
                 or (result.get("trace_files") or [None])[0]
@@ -2681,8 +2681,8 @@ class Coordinator:
                         (task.params or {}).get("base_extra_args") or ""
                     )
                 self.shared_state.last_profile_args = profile_args
-                # Stale select_kernels cache no longer matches this trace.
-                self.shared_state.last_select_kernels = {}
+                # Stale trace_analyze cache no longer matches this trace.
+                self.shared_state.last_trace_analyze = {}
                 changed = True
                 audit_extras["trace_path"] = str(trace_path)
                 audit_extras["profile_args"] = profile_args
@@ -2716,7 +2716,7 @@ class Coordinator:
                 changed = True
             if result.get("roofline_path"):
                 self.shared_state.last_profile_roofline = str(result["roofline_path"])
-                self.shared_state.last_select_kernels = {}
+                self.shared_state.last_trace_analyze = {}
                 changed = True
             if result.get("kernel_breakdown_path"):
                 self.shared_state.last_profile_kernel_breakdown = str(result["kernel_breakdown_path"])

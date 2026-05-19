@@ -403,7 +403,7 @@ ensure_tracelens() {
   # $TRACELENS_ROOT is on a read-only mount (the WekaFS default), pip
   # install -e fails because it must write *.egg-info into the source
   # tree, and at runtime tools/tracelens_analysis.py re-runs the same
-  # editable install in a subprocess on every select_kernels request,
+  # editable install in a subprocess on every trace_analyze request,
   # producing a tight failure loop. Detecting unwritable source up front
   # and mirroring to ${HYPERLOOM_ROOT}/TraceLens-internal (parallel to
   # ${HYPERLOOM_ROOT}/geak / ${HYPERLOOM_ROOT}/OOB/oob_cli) lets both
