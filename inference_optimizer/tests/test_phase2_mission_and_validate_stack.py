@@ -254,7 +254,7 @@ def test_required_next_step_validate_stack_after_unvalidated_keep(session_dir):
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_profile_pmc_summary = "/tmp/pmc.json"
-    s.last_select_kernels = {
+    s.last_trace_analyze = {
         "trace_input": "/tmp/profile.tar.gz", "candidates_path": "/tmp/x.json",
     }
     # No KEEPs yet — no TODO
@@ -281,7 +281,7 @@ def test_required_next_step_no_kernel_skips_profile_select(tmp_path, monkeypatch
     _seed_target_analysis_marker(sd)
     s = coord.shared_state
     s.baseline_tput = 100.0
-    # No-kernel mode: profile/select_kernels should not be required.
+    # No-kernel mode: profile/trace_analyze should not be required.
     assert coord._required_next_step() == ""
     # validate_stack TODO still fires once a KEEP lands.
     s.optimization_stack = [{"action": "backends", "variant_name": "aiter"}]
@@ -309,7 +309,7 @@ def test_sequence_denial_blocks_explore_after_unvalidated_keep(session_dir):
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_profile_pmc_summary = "/tmp/pmc.json"
-    s.last_select_kernels = {
+    s.last_trace_analyze = {
         "trace_input": "/tmp/profile.tar.gz", "candidates_path": "/tmp/x.json",
     }
     s.optimization_stack = [{"action": "backends", "variant_name": "aiter"}]
@@ -333,7 +333,7 @@ def test_sequence_denial_clears_after_validation(session_dir):
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_profile_pmc_summary = "/tmp/pmc.json"
-    s.last_select_kernels = {
+    s.last_trace_analyze = {
         "trace_input": "/tmp/profile.tar.gz", "candidates_path": "/tmp/x.json",
     }
     s.optimization_stack = [{"action": "backends", "variant_name": "aiter"}]

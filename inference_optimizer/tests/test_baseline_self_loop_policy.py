@@ -248,7 +248,7 @@ async def test_sequence_denial_returns_self_loop_for_baseline(session_dir):
 async def test_sequence_denial_no_self_loop_for_other_actions(session_dir):
     """``backends`` (and other non-baseline kinds) skip the self-loop guard.
 
-    We pre-satisfy the unrelated ``profile``/``select_kernels`` prerequisite
+    We pre-satisfy the unrelated ``profile``/``trace_analyze`` prerequisite
     gates so the only remaining denial source is the self-loop helper —
     which is baseline-only, so a backends proposal must pass cleanly.
     """
@@ -259,7 +259,7 @@ async def test_sequence_denial_no_self_loop_for_other_actions(session_dir):
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.last_profile_trace = "/tmp/fake-trace"
         c.shared_state.last_profile_pmc_summary = "/tmp/fake-pmc.json"
-        c.shared_state.last_select_kernels = {
+        c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/fake-trace",
         }
         # Pretend the user tried a backends proposal with the same params
