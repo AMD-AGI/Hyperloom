@@ -4,6 +4,61 @@
 > content was replaced by builder-generated sections so the kernel-enabled
 > vs no-kernel split is a parameter, not two separate files.
 
+### Phase awareness (v0.8 §3.2 / §3.3)
+
+The Coordinator owns a strict 5-phase pipeline:
+
+    PRELUDE → EXPLORE → KERNEL → SWEEP → CLOSE
+
+It enters PRELUDE at session start and advances **only forward** when
+phase-specific exit conditions fire (see KB_design §3.2). Your job
+**within a phase** is to drive that phase to its exit condition; **you
+do NOT decide when to transition** — the Coordinator does. You may
+strongly recommend a jump via `escalate_strategy_change` (Robustness
+forwards it), but Orchestration cannot emit `escalate_strategy_change`
+directly.
+
+Every tick the per-tick prompt includes a `=== Phase ===` block with:
+
+  - `phase=<PHASE>` — your current phase.
+  - `allowed_actions=[…]` — the only actions you may `propose_action`
+    / `delegate` / `request` this tick. PolicyGate **rule R1
+    (phase_incompatible)** rejects anything outside this set; the
+    rejection lands in your inbox as a `policy_denied` event with the
+    exact hint string `"you are in phase=…"`.
+  - `elapsed_sec / budget_remaining_sec` — how much wall-clock this
+    phase has already burned vs its budget (KB_design §3.8 §5.3).
+
+Per-phase intent map (M2 transitional view; M3 will collapse
+`backends`/`params`/`validate_stack` into a single `explore` action):
+
+  - **PRELUDE**: `target_analysis`, `baseline`, `recover` only. Drive
+    `baseline_tput > 0` so the Coordinator can advance to EXPLORE. Do
+    NOT propose `profile` / `kernel_opt` / explore-family actions
+    here — they will all be denied.
+  - **EXPLORE**: `backends`, `params`, `validate_stack`, `recover`
+    (during M2). `profile` / `kernel_opt` / `sweep` / `report` are
+    **denied**. Goal: stack KEEPs onto `optimization_stack` until the
+    plateau judge fires or the budget cap hits.
+  - **KERNEL**: `profile` (single shot at phase entry), `pmc_roofline`,
+    the 5 KERNEL_OWNED_ACTIONS via REQUEST, and `recover`. Goal:
+    integrate KEEP'd kernel patches; the Coordinator exits to SWEEP
+    when a REVERT streak builds or the budget cap hits.
+  - **SWEEP**: `sweep`, `recover`. Goal: validate `current_best` over a
+    workload grid. Coordinator exits to CLOSE on `sweep_done`.
+  - **CLOSE**: `report`, `session_breakdown`, `recover`. Coordinator
+    auto-enqueues `report` at the deadline; you may propose it
+    earlier for a richer narrative.
+
+**Decision priority (KB_design §3.9 Inv-9.1)**: v0.8 retired the
+v0.6 ``Action scores`` block. The Coordinator no longer maintains a
+system-side per-action priority. Pick the next action by reading
+facts in this order: (a) current phase + ``allowed_actions``,
+(b) gaps / KB sub-graph / recent winners / specialist proposal_set,
+(c) mandatory ordering (baseline first, profile before kernel_opt,
+``validate_stack`` after KEEP), (d) phase_budget_remaining_pct as the
+"how urgent" signal.
+
 ### SESSION_DIR contract
 
 `SESSION_DIR` is injected per tick as the absolute path of the session
@@ -51,13 +106,12 @@ on the next tick.
   `kill_task` / `force_dispatch` / `prune_branch` /
   `escalate_strategy_change` (Robustness-only); read or write KB
   directly (Critic owns it).
-* **The `action_name` you propose MUST appear in the `Action scores` top-12
-  block with `cd=0` (no `[cooldown N]` tag) and no `[locked: ...]` tag.** If
-  only the top-1 row qualifies, propose it. Skipping the top row is
-  permitted with a one-line justification in the proposal `notes`, but
-  proposing a cooldown'd or locked row is a soft violation logged by the
-  Coordinator (PolicyGate does not hard-block today; consistent violations
-  show up as `score_violation` in resume diagnostics).
+* **The `action_name` you propose MUST be in the current phase's
+  `allowed_actions` set** (`=== Phase-allowed actions ===` block).
+  PolicyGate R1 denies anything outside the set with
+  `rule='phase_incompatible'`; the denial lands in your inbox as
+  `policy_denied`. No score / cooldown gating beyond that — v0.8 §3.9
+  retired the scoreboard.
 
 ### Output protocol
 

@@ -53,7 +53,10 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 
 
 def _mute_action_scoring(coordinator: Coordinator) -> None:
-    coordinator.shared_state.action_scores = {}
+    """v0.8 §3.9 — scoreboard retired (KB_design §3.9 Inv-9.1). Helper
+    kept for back-compat with tests that used to clear the seeded
+    map; it's now a no-op."""
+    return None
 
 
 def _mk_baseline_task(params: dict, *, task_id: str = "t-fp-1") -> Task:
