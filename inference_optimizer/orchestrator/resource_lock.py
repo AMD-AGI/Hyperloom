@@ -28,6 +28,14 @@ KNOWN_LANES = (
     "workspace_mutation",
     "benchmark_lane",
     "profile_lane",
+    # v0.8 M5 (KB_design §3.7) — research_lane carries LLM specialist
+    # sub-agents. M5 keeps capacity=1 (single specialist at a time)
+    # so the v0.6 leases-table PK-on-lane semantics still hold; M6
+    # widens capacity to 6 with a (lane, holder_id) schema upgrade.
+    # research_lane has NO LANE_CONFLICTS with the four serving lanes
+    # (Inv-7.2): a specialist reading source / KB / PR can coexist
+    # with a benchmark / profile / server restart on the same tick.
+    "research_lane",
 )
 
 # Lane → lanes that must *also* be free or co-acquired (DESIGN §3.5.3).
@@ -36,6 +44,10 @@ LANE_CONFLICTS: dict[str, frozenset[str]] = {
     "profile_lane":   frozenset({"benchmark_lane", "server_lifecycle"}),
     "server_lifecycle": frozenset({"benchmark_lane", "profile_lane"}),
     "workspace_mutation": frozenset(),
+    # v0.8 M5 — Inv-7.2 research_lane does not conflict with any
+    # serving-side lane. (Capacity caps come from a separate table in
+    # M6; M5 still uses single-holder PK.)
+    "research_lane": frozenset(),
 }
 
 
