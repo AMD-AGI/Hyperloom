@@ -333,6 +333,45 @@ class SharedState:
     # subsequent stack rebench. Items the rebench evicted live in
     # ``rejected`` with ``reason='stack_unstable'``.
     explore_search: dict[str, Any] = field(default_factory=dict)
+    # v0.8 M5 — specialist sub-agent rolling state (KB_design §3.5 +
+    # §3.10 §4.1). Each entry summarises one EXPLORE round of specialist
+    # dispatch (M5: 1 entry per round; M6 grows to N when 6 domains run
+    # concurrently). Schema (per round):
+    #
+    #   {
+    #     "round_id": str,                 # explore-round-N
+    #     "dispatched_at": iso,
+    #     "completed_at": iso,
+    #     "domains": [domain_key, ...],
+    #     "parallelism": int,              # actual concurrent specialists
+    #     "tasks": [{task_id, domain, status, gap_canonical_id,
+    #                turns_used, workspace, transcript_path, done_path,
+    #                proposals_count, confidence}],
+    #     "proposals_total": int,
+    #     "proposals_kept": int,           # filled by Coordinator after
+    #                                      # explore round finishes
+    #     "proposals_rejected": int,
+    #     "proposals_skipped": int,
+    #     "kb_edge_ids": [str, ...],       # M5 simplified; M6 per-variant
+    #     "confidence_avg": float | None,
+    #     "domain_breakdown": {domain_key: {...}},
+    #     "notes": [str, ...],
+    #   }
+    specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
+    # Per-domain "empty proposal_set" streak. Reset on a non-empty
+    # specialist_done; Robustness reads this to escalate when a
+    # specialist domain consistently fails to produce ideas
+    # (KB_design §3.5 §13 / §3.9).
+    specialist_domain_empty_streak: dict[str, int] = field(default_factory=dict)
+    # v0.8 M5 — last specialist task snapshot (parity with other
+    # ``last_<action>`` mirrors; useful for the orchestration prompt
+    # to surface "last round's specialist outcome").
+    last_specialist: dict[str, Any] = field(default_factory=dict)
+    # v0.8 M5 — research_lane capacity locked at session start
+    # (KB_design §3.7 §4.4). M5 default is 1 (single-specialist series);
+    # M6 raises to 6 (concurrent). PolicyGate denies mid-session
+    # mutation because it's listed in CORE_STATE_FIELDS.
+    research_lane_capacity: int = 1
     # E2E integrate bookkeeping keyed by kernel_id + patch_path + args. This
     # prevents Orchestration from spending hours re-validating the same patch
     # after repeated NEEDS_REVIEW/REVERT outcomes.
@@ -1669,6 +1708,53 @@ class SharedState:
         if not isinstance(update, dict):
             return
         self.params_search = dict(update)
+
+    # ------------------------------------------------------------------
+    # v0.8 M5 — specialist round bookkeeping (KB_design §3.5 / §3.10)
+    # ------------------------------------------------------------------
+    def record_specialist_round(self, entry: dict[str, Any]) -> None:
+        """Append one round summary to ``specialist_rounds``.
+
+        Coordinator calls this once all dispatched specialists in a
+        round have terminated (either via specialist_done or empty
+        synthesise). Idempotent on ``round_id``: a re-record with the
+        same id overwrites the latest entry rather than duplicating.
+        """
+        if not isinstance(entry, dict) or not entry:
+            return
+        round_id = str(entry.get("round_id") or "").strip()
+        if not round_id:
+            self.specialist_rounds.append(dict(entry))
+            return
+        existing = self.specialist_rounds
+        for i, prev in enumerate(existing):
+            if isinstance(prev, dict) and str(prev.get("round_id") or "") == round_id:
+                existing[i] = dict(entry)
+                return
+        existing.append(dict(entry))
+
+    def bump_specialist_domain_empty_streak(
+        self, domain: str, *, empty: bool,
+    ) -> int:
+        """Increment / reset the per-domain empty-proposal streak.
+
+        Returns the new streak value (0 when reset). The streak
+        threshold for escalation is read by Robustness from
+        ``KB_design §3.9`` and is not encoded here.
+        """
+        d = str(domain or "").strip() or "unknown"
+        if empty:
+            self.specialist_domain_empty_streak[d] = int(
+                self.specialist_domain_empty_streak.get(d, 0) or 0
+            ) + 1
+        else:
+            self.specialist_domain_empty_streak[d] = 0
+        return self.specialist_domain_empty_streak[d]
+
+    def update_last_specialist(self, snapshot: dict[str, Any]) -> None:
+        """Snapshot the most recent specialist task (parity with last_*)."""
+        if isinstance(snapshot, dict):
+            self.last_specialist = dict(snapshot)
 
     def apply_explore_search_update(self, update: dict[str, Any]) -> None:
         """Merge an ExploreExecutor search update into persistent state.
