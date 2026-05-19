@@ -459,6 +459,21 @@ class KBCommitSummary(TypedDict, total=False):
     derived_summary_id: str
 
 
+class KBPointCreated(TypedDict, total=False):
+    """One row in ``kb_provenance.points_created`` (v0.8 M4).
+
+    ``kind`` ∈ {workload_node / issue_node / optimization_node /
+    pr_node / attempt_node / ...}. ``pr_node`` rows are the M4
+    contribution; everything else came from M1/M3 path.
+    """
+    canonical_id: str
+    kind: str
+    authority: str
+    source: str
+    status: str
+    ts: str
+
+
 class KBProvenance(TypedDict, total=False):
     cortex_session_id: str
     warm_start_ts: str
@@ -469,6 +484,9 @@ class KBProvenance(TypedDict, total=False):
     queue: KBQueueStats
     audit_tail_count: int
     audit_status_counts: dict[str, int]
+    # v0.8 M4 (KB_design §3.12 §4.4) — points created during this session.
+    points_created: list[KBPointCreated]
+    points_by_kind: dict[str, int]
     commit_summary: KBCommitSummary
 
 
@@ -529,6 +547,7 @@ __all__ = [
     "Invocation",
     "KBCommitSummary",
     "KBPendingEdge",
+    "KBPointCreated",
     "KBProvenance",
     "KBQueueStats",
     "KernelLifecycle",

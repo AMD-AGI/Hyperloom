@@ -2766,6 +2766,52 @@ def collect_kb_provenance(
         st = str(row.get("status") or "unknown")
         status_counts[st] = status_counts.get(st, 0) + 1
 
+    # v0.8 M4 — ``points_created[]`` aggregation (KB_design §3.12 §4.4 +
+    # §3.13 M4 §4). We walk the *full* audit log (not just the tail) so
+    # one entry per (canonical_id, kind) is exposed even on long
+    # sessions; ``set`` dedups in case the same point was re-proposed
+    # mid-session. Only rows with op='propose_point' and a non-empty
+    # canonical_id qualify; we surface kind/authority/source so the
+    # ``pr_node`` rows (M4) are distinguishable from
+    # ``optimization_node`` / ``workload_node`` / ``issue_node``.
+    points_created: list[dict[str, Any]] = []
+    points_by_kind: dict[str, int] = {}
+    try:
+        if audit_path.exists():
+            seen: set[tuple[str, str]] = set()
+            with audit_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    if str(row.get("op") or "") != "propose_point":
+                        continue
+                    canonical = str(row.get("canonical_id") or "").strip()
+                    kind = str(row.get("kind") or "").strip()
+                    if not canonical or not kind:
+                        continue
+                    key = (canonical, kind)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    points_created.append({
+                        "canonical_id": canonical,
+                        "kind":         kind,
+                        "authority":    str(row.get("authority") or ""),
+                        "source":       str(row.get("source") or ""),
+                        "status":       str(row.get("status") or ""),
+                        "ts":           str(row.get("ts") or ""),
+                    })
+                    points_by_kind[kind] = points_by_kind.get(kind, 0) + 1
+    except OSError as exc:
+        warnings.append(f"kb_provenance: failed to scan {audit_path}: {exc!r}")
+
     cortex_sid = (state.get("cortex_session_id") or "").strip()
     if not cortex_sid and sid_path.exists():
         try:
@@ -2800,6 +2846,12 @@ def collect_kb_provenance(
         },
         "audit_tail_count":     len(audit_tail),
         "audit_status_counts":  status_counts,
+        # v0.8 M4 — full session points-created roll-up (KB_design §3.12
+        # §4.4). Sorted by canonical_id for stable diffing.
+        "points_created":        sorted(
+            points_created, key=lambda r: r.get("canonical_id", ""),
+        ),
+        "points_by_kind":        points_by_kind,
         "commit_summary": {
             "status":             str(commit_summary.get("status") or "")
                 if isinstance(commit_summary, dict) else "",
