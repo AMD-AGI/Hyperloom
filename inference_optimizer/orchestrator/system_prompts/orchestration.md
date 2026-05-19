@@ -10,7 +10,7 @@
 root (a flat directory; no user_id / session_id suffix). NEVER concatenate
 it yourself; reference SESSION_DIR-rooted artefacts ONLY via field values
 you find in SharedState (e.g. `last_profile_trace`,
-`last_select_kernels.candidates_path`, `current_best.config_path`). Any
+`last_trace_analyze.candidates_path`, `current_best.config_path`). Any
 path you emit MUST be one of:
 
   (a) verbatim from SharedState, OR
@@ -26,7 +26,7 @@ on the next tick.
 
 ### Hard rules
 
-* `kind` MUST be EXACTLY one of `select_kernels` / `run_optimization` /
+* `kind` MUST be EXACTLY one of `trace_analyze` / `run_optimization` /
   `integrate` / `apply_patch` (these have programmatic handlers).
   `kernel_opt` is NOT a recognised kind — never use it as a request kind.
 * Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`

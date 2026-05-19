@@ -1067,7 +1067,7 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
 # kernel_request_handlers — direct unit
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_select_kernels_handler_dry_run_returns_structured_result(session_dir):
+async def test_trace_analyze_handler_dry_run_returns_structured_result(session_dir):
     """Tracelens tool always emits structured JSON (even on validation
     failure). Our handler must surface it verbatim — including ``status``
     + run_id + session_id — so callers can debug without parsing logs."""
@@ -1082,7 +1082,7 @@ async def test_select_kernels_handler_dry_run_returns_structured_result(session_
         "dry_run": True,
         "budget_minutes": 1,
     }
-    res = await krh.select_kernels_handler(payload, session_dir=session_dir)
+    res = await krh.trace_analyze_handler(payload, session_dir=session_dir)
     # The tool will return failed because the dir has no trace files,
     # but the response must be structured (not generic returncode-only).
     assert res["status"] in ("ok", "succeeded", "failed")
@@ -1091,7 +1091,7 @@ async def test_select_kernels_handler_dry_run_returns_structured_result(session_
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_surfaces_candidates_path(session_dir, monkeypatch):
+async def test_trace_analyze_handler_surfaces_candidates_path(session_dir, monkeypatch):
     captured: dict = {}
 
     async def fake_run_subprocess(cmd, *, timeout_sec):
@@ -1106,7 +1106,7 @@ async def test_select_kernels_handler_surfaces_candidates_path(session_dir, monk
         return 0, json.dumps(payload), ""
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {
             "trace_input": str(session_dir),
             "dry_run": True,
@@ -1123,7 +1123,7 @@ async def test_select_kernels_handler_surfaces_candidates_path(session_dir, monk
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_backfills_workload_context_from_state(
+async def test_trace_analyze_handler_backfills_workload_context_from_state(
     session_dir, monkeypatch,
 ):
     """When the payload omits framework/gpu_type/model, the handler must
@@ -1146,7 +1146,7 @@ async def test_select_kernels_handler_backfills_workload_context_from_state(
         return 0, json.dumps({"status": "ok"}), ""
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
@@ -1159,7 +1159,7 @@ async def test_select_kernels_handler_backfills_workload_context_from_state(
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_surfaces_trace_report_path(
+async def test_trace_analyze_handler_surfaces_trace_report_path(
     session_dir, monkeypatch,
 ):
     """The handler must forward the TraceLens v0.3 analysis.md path."""
@@ -1179,7 +1179,7 @@ async def test_select_kernels_handler_surfaces_trace_report_path(
         return 0, json.dumps(payload), ""
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
@@ -1187,7 +1187,7 @@ async def test_select_kernels_handler_surfaces_trace_report_path(
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_persists_trace_report_to_candidates(
+async def test_trace_analyze_handler_persists_trace_report_to_candidates(
     session_dir, tmp_path, monkeypatch,
 ):
     """Disk candidates must carry the TraceLens report path for GEAK prompts."""
@@ -1219,7 +1219,7 @@ async def test_select_kernels_handler_persists_trace_report_to_candidates(
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
 
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
@@ -1233,7 +1233,7 @@ async def test_select_kernels_handler_persists_trace_report_to_candidates(
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_backfills_runtime_metadata_from_config(
+async def test_trace_analyze_handler_backfills_runtime_metadata_from_config(
     session_dir, tmp_path, monkeypatch,
 ):
     """GEAK candidates must inherit the materialized Magpie workload config."""
@@ -1286,7 +1286,7 @@ benchmark:
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
 
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
@@ -1349,7 +1349,7 @@ benchmark:
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_uses_artifact_trace_report_path(
+async def test_trace_analyze_handler_uses_artifact_trace_report_path(
     session_dir, monkeypatch,
 ):
     """TraceLens now surfaces the upstream analysis.md as trace_report_path."""
@@ -1364,7 +1364,7 @@ async def test_select_kernels_handler_uses_artifact_trace_report_path(
         return 0, json.dumps(payload), ""
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
@@ -1372,16 +1372,16 @@ async def test_select_kernels_handler_uses_artifact_trace_report_path(
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_missing_trace_input(session_dir):
-    res = await krh.select_kernels_handler({}, session_dir=session_dir)
+async def test_trace_analyze_handler_missing_trace_input(session_dir):
+    res = await krh.trace_analyze_handler({}, session_dir=session_dir)
     assert res["status"] == "failed"
     assert "trace_input" in res["error"]
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_requires_kernel_agent_root(session_dir, monkeypatch):
+async def test_trace_analyze_handler_requires_kernel_agent_root(session_dir, monkeypatch):
     monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", None)
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir)},
         session_dir=session_dir,
     )
@@ -1400,7 +1400,7 @@ async def test_select_kernels_handler_requires_kernel_agent_root(session_dir, mo
 # see the upstream rc / error / stderr.
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_t4_keeps_tool_failure_failed(
+async def test_trace_analyze_handler_t4_keeps_tool_failure_failed(
     session_dir, monkeypatch,
 ):
     """When tracelens_analysis.py returns ``status=failed`` the handler must
@@ -1423,7 +1423,7 @@ async def test_select_kernels_handler_t4_keeps_tool_failure_failed(
         return 1, json.dumps(payload), "stderr noise"
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
@@ -1442,7 +1442,7 @@ async def test_select_kernels_handler_t4_keeps_tool_failure_failed(
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_t4_passes_through_idle_warning(
+async def test_trace_analyze_handler_t4_passes_through_idle_warning(
     session_dir, monkeypatch,
 ):
     """When tracelens_analysis emits a ``trace_health_warnings`` from
@@ -1468,7 +1468,7 @@ async def test_select_kernels_handler_t4_passes_through_idle_warning(
         return 0, json.dumps(payload), ""
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
@@ -1478,7 +1478,7 @@ async def test_select_kernels_handler_t4_passes_through_idle_warning(
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_t4_defaults_warnings_to_empty_list(
+async def test_trace_analyze_handler_t4_defaults_warnings_to_empty_list(
     session_dir, monkeypatch,
 ):
     """When the tool emits no ``trace_health_warnings`` (steady state),
@@ -1494,7 +1494,7 @@ async def test_select_kernels_handler_t4_defaults_warnings_to_empty_list(
         return 0, json.dumps(payload), ""
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
@@ -1507,13 +1507,13 @@ async def test_select_kernels_handler_t4_defaults_warnings_to_empty_list(
 # ===========================================================================
 # Handler-boundary plumbing alone is not enough: the Orchestration LLM
 # only sees what ``SharedState._format_*`` renders into its prompt. Pin
-# that record_select_kernels keeps the warning list AND that
-# _format_last_select_kernels surfaces it inline so the LLM grounds its
+# that record_trace_analyze keeps the warning list AND that
+# _format_last_trace_analyze surfaces it inline so the LLM grounds its
 # next ACTION on the routing signal (params vs kernel-opt vs re-profile).
 
-def test_record_select_kernels_persists_trace_health_warnings(session_dir):
-    """``record_select_kernels`` must keep ``trace_health_warnings`` from
-    the handler result verbatim in ``last_select_kernels`` so prompt
+def test_record_trace_analyze_persists_trace_health_warnings(session_dir):
+    """``record_trace_analyze`` must keep ``trace_health_warnings`` from
+    the handler result verbatim in ``last_trace_analyze`` so prompt
     rendering can see it on the next tick."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
@@ -1526,7 +1526,7 @@ def test_record_select_kernels_persists_trace_health_warnings(session_dir):
         "source": "/tmp/x/analysis.md",
         "message": "high idle",
     }
-    state.record_select_kernels(
+    state.record_trace_analyze(
         {"trace_input": "/tmp/trace"},
         {
             "status": "ok",
@@ -1534,10 +1534,10 @@ def test_record_select_kernels_persists_trace_health_warnings(session_dir):
             "trace_health_warnings": [warning],
         },
     )
-    assert state.last_select_kernels["trace_health_warnings"] == [warning]
+    assert state.last_trace_analyze["trace_health_warnings"] == [warning]
 
 
-def test_record_select_kernels_defaults_warnings_to_empty_list(session_dir):
+def test_record_trace_analyze_defaults_warnings_to_empty_list(session_dir):
     """Steady-state (no warnings emitted) — the cached entry must still
     expose ``trace_health_warnings`` as an empty list rather than the
     field being absent, so iteration code in renderers / consumers
@@ -1545,25 +1545,25 @@ def test_record_select_kernels_defaults_warnings_to_empty_list(session_dir):
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
-    state.record_select_kernels(
+    state.record_trace_analyze(
         {"trace_input": "/tmp/trace"},
         {
             "status": "ok",
             "hot_kernels": [{"kernel_id": "k1", "reusable_native_kernel": True}],
         },
     )
-    assert state.last_select_kernels["trace_health_warnings"] == []
+    assert state.last_trace_analyze["trace_health_warnings"] == []
 
 
-def test_record_select_kernels_filters_invalid_warning_entries(session_dir):
+def test_record_trace_analyze_filters_invalid_warning_entries(session_dir):
     """Defensive: a buggy tool emitting non-dict entries or dicts
-    missing the ``code`` field shouldn't poison ``last_select_kernels``.
+    missing the ``code`` field shouldn't poison ``last_trace_analyze``.
     We accept only well-formed dicts with at least a ``code`` key so
     the prompt renderer never has to defensively coerce types."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
-    state.record_select_kernels(
+    state.record_trace_analyze(
         {"trace_input": "/tmp/trace"},
         {
             "status": "ok",
@@ -1577,19 +1577,19 @@ def test_record_select_kernels_filters_invalid_warning_entries(session_dir):
             ],
         },
     )
-    warnings = state.last_select_kernels["trace_health_warnings"]
+    warnings = state.last_trace_analyze["trace_health_warnings"]
     assert len(warnings) == 1
     assert warnings[0]["code"] == "high_gpu_idle_pct"
 
 
-def test_format_last_select_kernels_renders_idle_warning_inline(session_dir):
+def test_format_last_trace_analyze_renders_idle_warning_inline(session_dir):
     """Prompt rendering: when an idle warning was persisted, the
     Orchestration prompt line must surface it with the numeric context
     so the LLM can ground its routing on the actual percentages."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
-    state.record_select_kernels(
+    state.record_trace_analyze(
         {"trace_input": "/tmp/trace.json.gz"},
         {
             "status": "ok",
@@ -1606,21 +1606,21 @@ def test_format_last_select_kernels_renders_idle_warning_inline(session_dir):
             ],
         },
     )
-    rendered = state._format_last_select_kernels()
+    rendered = state._format_last_trace_analyze()
     assert "high_gpu_idle_pct" in rendered
     assert "60.5%" in rendered
     assert "20.0%" in rendered
     assert "warnings=[" in rendered
 
 
-def test_format_last_select_kernels_renders_failure_warning_with_rc(session_dir):
+def test_format_last_trace_analyze_renders_failure_warning_with_rc(session_dir):
     """Tool-failure warning carries ``returncode``; the prompt must
     surface that too so an operator-or-LLM can distinguish 'TraceLens
     crashed' (rc=1) from a benign skip."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
-    state.record_select_kernels(
+    state.record_trace_analyze(
         {"trace_input": "/tmp/trace"},
         {
             "status": "ok",
@@ -1636,12 +1636,12 @@ def test_format_last_select_kernels_renders_failure_warning_with_rc(session_dir)
             ],
         },
     )
-    rendered = state._format_last_select_kernels()
+    rendered = state._format_last_trace_analyze()
     assert "tracelens_analysis_failed" in rendered
     assert "rc=1" in rendered
 
 
-def test_format_last_select_kernels_omits_warnings_suffix_in_steady_state(session_dir):
+def test_format_last_trace_analyze_omits_warnings_suffix_in_steady_state(session_dir):
     """Format-stability guard: when no warnings were recorded (the
     common case), the prompt line MUST NOT gain a gratuitous
     ``warnings=[]`` suffix. Prompt format stability matters because
@@ -1650,14 +1650,14 @@ def test_format_last_select_kernels_omits_warnings_suffix_in_steady_state(sessio
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
-    state.record_select_kernels(
+    state.record_trace_analyze(
         {"trace_input": "/tmp/trace"},
         {
             "status": "ok",
             "hot_kernels": [{"kernel_id": "k1", "reusable_native_kernel": True}],
         },
     )
-    rendered = state._format_last_select_kernels()
+    rendered = state._format_last_trace_analyze()
     assert "warnings=" not in rendered, (
         "no warnings → no warnings= suffix; this keeps existing prompt "
         "snapshots stable"
@@ -1670,7 +1670,7 @@ async def test_t5_handler_to_sharedstate_e2e_idle_warning_reaches_prompt(
 ):
     """End-to-end pinning of the routing signal path:
        tracelens_analysis (T3)  →  handler result.trace_health_warnings
-                                →  SharedState.last_select_kernels (this PR)
+                                →  SharedState.last_trace_analyze (this PR)
                                 →  Orchestration prompt line  (this PR)
     Without ALL three steps the LLM cannot route on idle %, and the
     upstream T3 work is wasted."""
@@ -1695,7 +1695,7 @@ async def test_t5_handler_to_sharedstate_e2e_idle_warning_reaches_prompt(
         return 0, json.dumps(payload), ""
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
@@ -1704,11 +1704,11 @@ async def test_t5_handler_to_sharedstate_e2e_idle_warning_reaches_prompt(
 
     # Step 2: SharedState persists it.
     state = SharedState.load_or_init(session_dir)
-    state.record_select_kernels({"trace_input": str(session_dir)}, res)
-    assert state.last_select_kernels["trace_health_warnings"][0]["code"] == "high_gpu_idle_pct"
+    state.record_trace_analyze({"trace_input": str(session_dir)}, res)
+    assert state.last_trace_analyze["trace_health_warnings"][0]["code"] == "high_gpu_idle_pct"
 
     # Step 3: prompt rendering surfaces it.
-    rendered = state._format_last_select_kernels()
+    rendered = state._format_last_trace_analyze()
     assert "high_gpu_idle_pct" in rendered
     assert "42.0%" in rendered
 
@@ -1733,19 +1733,19 @@ async def test_t5_handler_to_sharedstate_e2e_failure_warning_reaches_prompt(
         return 1, json.dumps(payload), "stderr"
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
     state = SharedState.load_or_init(session_dir)
-    state.record_select_kernels({"trace_input": str(session_dir)}, res)
-    rendered = state._format_last_select_kernels()
+    state.record_trace_analyze({"trace_input": str(session_dir)}, res)
+    rendered = state._format_last_trace_analyze()
     assert "tracelens_analysis_failed" in rendered
     assert "rc=1" in rendered
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_t4_failure_appends_to_existing_warnings(
+async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
     session_dir, monkeypatch,
 ):
     """Edge case: the tool emits BOTH ``status=failed`` AND a pre-
@@ -1773,7 +1773,7 @@ async def test_select_kernels_handler_t4_failure_appends_to_existing_warnings(
         return 2, json.dumps(payload), ""
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
@@ -1862,9 +1862,9 @@ def test_run_optimization_handler_backfills_target_platform_from_state(session_d
 
 
 def test_handlers_dispatch_table():
-    """P2-2 only registered select_kernels + run_optimization. P2-4
+    """P2-2 only registered trace_analyze + run_optimization. P2-4
     added apply_patch + integrate (covered in test_p2_4_integrate_report)."""
-    assert krh.has_handler("select_kernels")
+    assert krh.has_handler("trace_analyze")
     assert krh.has_handler("run_optimization")
     assert not krh.has_handler("totally_unknown_kind")
 
@@ -1997,8 +1997,8 @@ def test_batch_kernel_candidates_legacy_path_unchanged_without_task_groups(tmp_p
 # Coordinator — REQUEST programmatic handler integration
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_coordinator_request_select_kernels_uses_handler(session_dir):
-    """When Orchestration emits REQUEST{kind=select_kernels}, the Coordinator
+async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
+    """When Orchestration emits REQUEST{kind=trace_analyze}, the Coordinator
     should run the registered handler programmatically and emit RESPONSE
     on the bus *without* waiting for the Kernel LLM."""
     c = Coordinator(session_dir, backends=_backends_silent())
@@ -2011,13 +2011,13 @@ async def test_coordinator_request_select_kernels_uses_handler(session_dir):
         return {"status": "ok", "hot_kernels": ["kernel_a", "kernel_b"]}
 
     with patch.dict(krh.KERNEL_REQUEST_HANDLERS,
-                     {"select_kernels": fake_handler}):
+                     {"trace_analyze": fake_handler}):
         try:
             await c._handle_intent("orchestration", Intent(
                 type=IntentType.REQUEST,
                 payload={
                     "target_agent": "kernel",
-                    "kind": "select_kernels",
+                    "kind": "trace_analyze",
                     "params": {"trace_input": "/tmp/fake-trace.json.gz"},
                 },
             ))
@@ -2029,7 +2029,7 @@ async def test_coordinator_request_select_kernels_uses_handler(session_dir):
             assert resp_msgs, "handler must emit RESPONSE without LLM"
             r = resp_msgs[0]
             assert r.from_agent == "kernel"
-            assert r.payload["kind"] == "select_kernels_done"
+            assert r.payload["kind"] == "trace_analyze_done"
             assert r.payload["status"] == "ok"
             assert r.payload["result"]["hot_kernels"] == ["kernel_a", "kernel_b"]
             assert r.payload["in_reply_to"] == req_id
@@ -2073,11 +2073,11 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
         raise RuntimeError("boom")
 
     with patch.dict(krh.KERNEL_REQUEST_HANDLERS,
-                     {"select_kernels": bad_handler}):
+                     {"trace_analyze": bad_handler}):
         try:
             await c._handle_intent("orchestration", Intent(
                 type=IntentType.REQUEST,
-                payload={"target_agent": "kernel", "kind": "select_kernels"},
+                payload={"target_agent": "kernel", "kind": "trace_analyze"},
             ))
             resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")
             assert resp_msgs

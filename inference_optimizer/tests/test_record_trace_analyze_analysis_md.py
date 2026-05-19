@@ -1,10 +1,10 @@
-"""Roofline-v2 C1: ``record_select_kernels`` caches TraceLens analysis.md.
+"""Roofline-v2 C1: ``record_trace_analyze`` caches TraceLens analysis.md.
 
 These tests pin the contract the downstream ``roofline`` action (C4) and
 the prompt renderer (C5) depend on:
 
 * When the kernel handler surfaces ``trace_report_path`` in its result,
-  ``SharedState.last_select_kernels`` must contain the **full** text of
+  ``SharedState.last_trace_analyze`` must contain the **full** text of
   that file under ``analysis_md_text`` (Decision A3: no truncation).
 * ``analysis_md_path`` must always be a string (never ``None``) so prompt
   formatters can render it verbatim without a ``None`` guard.
@@ -17,7 +17,7 @@ the prompt renderer (C5) depend on:
   so the prompt can show "gain since snapshot: current − baseline".
 * Read failures (missing file, permission denied, decode error) must
   degrade silently — empty ``analysis_md_text`` signals "no report
-  available" without breaking the existing select_kernels path.
+  available" without breaking the existing trace_analyze path.
 """
 
 from __future__ import annotations
@@ -49,10 +49,10 @@ def test_caches_analysis_md_full_text(tmp_path: Path) -> None:
     )
 
     state = SharedState()
-    state.record_select_kernels(_payload(tmp_path / "trace.json"),
+    state.record_trace_analyze(_payload(tmp_path / "trace.json"),
                                 _result_with_report(analysis_md))
 
-    cached = state.last_select_kernels
+    cached = state.last_trace_analyze
     assert cached["analysis_md_path"] == str(analysis_md)
     assert "Executive Summary" in cached["analysis_md_text"]
     assert "Compute 51.6%" in cached["analysis_md_text"]
@@ -62,11 +62,11 @@ def test_caches_analysis_md_full_text(tmp_path: Path) -> None:
 def test_missing_trace_report_path_yields_empty_text() -> None:
     """No ``trace_report_path`` field → ``analysis_md_text`` is ``""``."""
     state = SharedState()
-    state.record_select_kernels(
+    state.record_trace_analyze(
         {"trace_input": "x"},
         {"hot_kernels": [], "trace_health_warnings": []},
     )
-    cached = state.last_select_kernels
+    cached = state.last_trace_analyze
     assert cached["analysis_md_path"] == ""
     assert cached["analysis_md_text"] == ""
 
@@ -76,7 +76,7 @@ def test_unreadable_analysis_md_degrades_silently(tmp_path: Path) -> None:
     missing = tmp_path / "does_not_exist.md"
 
     state = SharedState()
-    state.record_select_kernels(
+    state.record_trace_analyze(
         {"trace_input": "x"},
         {
             "hot_kernels": [],
@@ -84,7 +84,7 @@ def test_unreadable_analysis_md_degrades_silently(tmp_path: Path) -> None:
             "trace_health_warnings": [],
         },
     )
-    cached = state.last_select_kernels
+    cached = state.last_trace_analyze
     assert cached["analysis_md_path"] == str(missing)
     assert cached["analysis_md_text"] == ""
 
@@ -102,7 +102,7 @@ def test_caches_large_analysis_md_without_truncation(tmp_path: Path) -> None:
     analysis_md.write_text(big_content, encoding="utf-8")
 
     state = SharedState()
-    state.record_select_kernels(
+    state.record_trace_analyze(
         {"trace_input": "x"},
         {
             "hot_kernels": [],
@@ -110,7 +110,7 @@ def test_caches_large_analysis_md_without_truncation(tmp_path: Path) -> None:
             "trace_health_warnings": [],
         },
     )
-    cached_text = state.last_select_kernels["analysis_md_text"]
+    cached_text = state.last_trace_analyze["analysis_md_text"]
     assert len(cached_text) > 200_000
     assert cached_text.startswith("# Analysis\n")
     assert cached_text.endswith("filler line\n")
@@ -119,38 +119,38 @@ def test_caches_large_analysis_md_without_truncation(tmp_path: Path) -> None:
 def test_snapshot_id_monotonically_increases(tmp_path: Path) -> None:
     """Every successful call bumps ``roofline_snapshot_id`` by exactly 1.
 
-    The counter lives inside ``last_select_kernels`` itself (rather than
-    a new top-level SharedState field) so a stale ``last_select_kernels``
-    is reset implicitly by the next ``record_select_kernels`` call.
+    The counter lives inside ``last_trace_analyze`` itself (rather than
+    a new top-level SharedState field) so a stale ``last_trace_analyze``
+    is reset implicitly by the next ``record_trace_analyze`` call.
     """
     analysis_md = tmp_path / "analysis.md"
     analysis_md.write_text("first", encoding="utf-8")
 
     state = SharedState()
-    state.record_select_kernels(_payload(tmp_path / "t1"),
+    state.record_trace_analyze(_payload(tmp_path / "t1"),
                                 _result_with_report(analysis_md))
-    assert state.last_select_kernels["roofline_snapshot_id"] == 1
+    assert state.last_trace_analyze["roofline_snapshot_id"] == 1
 
     analysis_md.write_text("second", encoding="utf-8")
-    state.record_select_kernels(_payload(tmp_path / "t2"),
+    state.record_trace_analyze(_payload(tmp_path / "t2"),
                                 _result_with_report(analysis_md))
-    assert state.last_select_kernels["roofline_snapshot_id"] == 2
+    assert state.last_trace_analyze["roofline_snapshot_id"] == 2
 
     analysis_md.write_text("third", encoding="utf-8")
-    state.record_select_kernels(_payload(tmp_path / "t3"),
+    state.record_trace_analyze(_payload(tmp_path / "t3"),
                                 _result_with_report(analysis_md))
-    assert state.last_select_kernels["roofline_snapshot_id"] == 3
+    assert state.last_trace_analyze["roofline_snapshot_id"] == 3
 
 
 def test_snapshot_id_starts_at_one_after_empty_state() -> None:
-    """Fresh SharedState (empty ``last_select_kernels``) → snapshot 1."""
+    """Fresh SharedState (empty ``last_trace_analyze``) → snapshot 1."""
     state = SharedState()
-    assert state.last_select_kernels == {}
-    state.record_select_kernels(
+    assert state.last_trace_analyze == {}
+    state.record_trace_analyze(
         {"trace_input": "x"},
         {"hot_kernels": [], "trace_health_warnings": []},
     )
-    assert state.last_select_kernels["roofline_snapshot_id"] == 1
+    assert state.last_trace_analyze["roofline_snapshot_id"] == 1
 
 
 def test_baseline_gain_captured_at_snapshot_time() -> None:
@@ -163,21 +163,21 @@ def test_baseline_gain_captured_at_snapshot_time() -> None:
     """
     state = SharedState()
     state.cumulative_gain_validated = 0.0
-    state.record_select_kernels(
+    state.record_trace_analyze(
         {"trace_input": "x"},
         {"hot_kernels": [], "trace_health_warnings": []},
     )
-    assert state.last_select_kernels["roofline_baseline_gain_at_snapshot"] == 0.0
+    assert state.last_trace_analyze["roofline_baseline_gain_at_snapshot"] == 0.0
 
     state.cumulative_gain_validated = 3.2
-    state.record_select_kernels(
+    state.record_trace_analyze(
         {"trace_input": "x2"},
         {"hot_kernels": [], "trace_health_warnings": []},
     )
-    assert state.last_select_kernels["roofline_baseline_gain_at_snapshot"] == 3.2
+    assert state.last_trace_analyze["roofline_baseline_gain_at_snapshot"] == 3.2
 
     state.cumulative_gain_validated = 7.5
-    assert state.last_select_kernels["roofline_baseline_gain_at_snapshot"] == 3.2
+    assert state.last_trace_analyze["roofline_baseline_gain_at_snapshot"] == 3.2
 
 
 def test_non_dict_result_is_ignored() -> None:
@@ -187,8 +187,8 @@ def test_non_dict_result_is_ignored() -> None:
     accidentally regress the type-guard while wiring in the new fields.
     """
     state = SharedState()
-    state.record_select_kernels({"trace_input": "x"}, None)  # type: ignore[arg-type]
-    assert state.last_select_kernels == {}
+    state.record_trace_analyze({"trace_input": "x"}, None)  # type: ignore[arg-type]
+    assert state.last_trace_analyze == {}
 
 
 def test_existing_fields_still_populated(tmp_path: Path) -> None:
@@ -197,7 +197,7 @@ def test_existing_fields_still_populated(tmp_path: Path) -> None:
     analysis_md.write_text("# hi", encoding="utf-8")
 
     state = SharedState()
-    state.record_select_kernels(
+    state.record_trace_analyze(
         {"trace_input": "/some/trace.json"},
         {
             "hot_kernels": [
@@ -223,7 +223,7 @@ def test_existing_fields_still_populated(tmp_path: Path) -> None:
         },
     )
 
-    cached = state.last_select_kernels
+    cached = state.last_trace_analyze
     assert cached["trace_input"] == "/some/trace.json"
     assert cached["candidates_path"] == "/some/kc.json"
     assert len(cached["hot_kernels_top15"]) == 2

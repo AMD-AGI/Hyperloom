@@ -1570,7 +1570,7 @@ def _read_kernel_candidates(
     kernel agent uses to decide what to optimize.
 
     Resolves the file via:
-      1. ``state.last_select_kernels.candidates_path`` — orchestrator-recorded path
+      1. ``state.last_trace_analyze.candidates_path`` — orchestrator-recorded path
       2. ``session_dir / kernel-agent / runs / <session_id> / kernel_candidates.json``
          (new layout after the all-artefacts-under-USER_DATA_PATH migration)
       3. ``session_dir / kernel-agent / **/kernel_candidates.json`` glob fallback (new)
@@ -1579,7 +1579,7 @@ def _read_kernel_candidates(
          sessions, kept for breakdown replay of historical runs)
       5. ``session_dir / kernel-agent-workspace / **/kernel_candidates.json`` glob fallback
     """
-    sk = state.get("last_select_kernels") or {}
+    sk = state.get("last_trace_analyze") or {}
     raw_path = sk.get("candidates_path") if isinstance(sk, dict) else None
     candidate_paths: list[Path] = []
     if raw_path:
@@ -1620,7 +1620,7 @@ def _read_kernel_candidates(
             hk = data.get("hot_kernels")
             if isinstance(hk, list):
                 return hk
-    # Final fallback: state.last_select_kernels.hot_kernels_top15.
+    # Final fallback: state.last_trace_analyze.hot_kernels_top15.
     # This is what the orchestrator actually copied out of
     # kernel_candidates.json — usually the same shape, just truncated to
     # 15. Used when the on-disk file is missing (e.g. test fixtures or
@@ -1805,7 +1805,7 @@ def _collect_detected_kernels(
     # 3) lifecycle stamps (selected / geak / oob / adopted_by / final_decision)
     selected_ids = {
         str(e.get("kernel_id") or "")
-        for e in ((state.get("last_select_kernels") or {}).get("hot_kernels_top15") or [])
+        for e in ((state.get("last_trace_analyze") or {}).get("hot_kernels_top15") or [])
         if isinstance(e, dict)
     }
     geak_idx = _index_invocations_by_kernel(geak)
@@ -1878,7 +1878,7 @@ def _collect_detected_kernels(
 
 
 def _collect_recommended_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
-    sk = state.get("last_select_kernels") or {}
+    sk = state.get("last_trace_analyze") or {}
     if not isinstance(sk, dict):
         return []
     out: list[dict[str, Any]] = []
