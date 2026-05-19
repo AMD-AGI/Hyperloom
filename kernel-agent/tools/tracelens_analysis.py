@@ -1823,7 +1823,9 @@ def main() -> int:
             # TRACELENS_ROOT / --tracelens-root for older release branches.
             skill = tl_root / "TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md"
             if not skill.exists():
-                raise FileNotFoundError(f"TraceLens standalone skill not found: {skill}")
+                skill = tl_root / "TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
+            if not skill.exists():
+                raise FileNotFoundError(f"TraceLens standalone skill not found (tried Agent/Analysis and AgenticMode/Standalone paths): {skill}")
             append_log(log_path, f"TraceLens skill: {skill}")
 
             tracelens_dir = run_dir / "tracelens"
