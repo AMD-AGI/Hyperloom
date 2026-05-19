@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Print recent action / proposal / kernel counts from a session's coordinator.db.
+"""Print action / proposal / kernel counts from a session's coordinator.db.
 
 Usage:
-    event_counts.py [SESSION_DIR]
+    event_counts.py [SESSION_DIR] [--all] [--limit N]
 
 SESSION_DIR defaults to $USER_DATA_PATH or /workspace/hyperloom.
-Reads at most the last 500 events from $SESSION_DIR/storage/coordinator.db and
-emits a JSON object of {category: count}.
+By default reads the last 500 events to mirror the legacy behaviour; pass
+``--all`` for full history or ``--limit N`` for a custom window. The
+500-event default rotates older rounds out and silently undercounts on
+long runs — use ``--all`` when comparing totals against the run report.
 """
 from __future__ import annotations
 
+import argparse
 import json
-import os
 import pathlib
 import sqlite3
 import sys
@@ -19,8 +21,30 @@ from collections import Counter
 
 
 def main() -> int:
-    if len(sys.argv) > 1:
-        session_dir = pathlib.Path(sys.argv[1])
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "session_dir",
+        nargs="?",
+        default=None,
+        help="Session directory (default: $USER_DATA_PATH or "
+             "/workspace/hyperloom)",
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--all",
+        action="store_true",
+        help="Scan the entire events table (no window).",
+    )
+    group.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="Window size for the most-recent events (default: 500).",
+    )
+    args = parser.parse_args()
+
+    if args.session_dir is not None:
+        session_dir = pathlib.Path(args.session_dir)
     else:
         # Defer to inference_optimizer.paths so resolution rules
         # (env > default) stay in one place.
@@ -31,13 +55,22 @@ def main() -> int:
         print(f"coordinator.db not found at {db}", file=sys.stderr)
         return 2
 
+    if args.all:
+        query = (
+            "SELECT from_agent, to_agent, topic, payload FROM events "
+            "ORDER BY seq DESC"
+        )
+        params: tuple = ()
+    else:
+        query = (
+            "SELECT from_agent, to_agent, topic, payload FROM events "
+            "ORDER BY seq DESC LIMIT ?"
+        )
+        params = (int(args.limit),)
+
     counts: Counter[str] = Counter()
     with sqlite3.connect(str(db)) as con:
-        rows = con.execute(
-            "SELECT from_agent, to_agent, topic, payload FROM events "
-            "ORDER BY seq DESC LIMIT 500"
-        )
-        for fa, ta, topic, payload in rows:
+        for fa, ta, topic, payload in con.execute(query, params):
             try:
                 p = json.loads(payload)
             except Exception:
