@@ -65,6 +65,7 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 # ``tests/test_p1_2_full_action_catalogue.py`` enforces this.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "baseline", "profile", "pmc_roofline",
+    "roofline",
     "backends", "params", "sweep",
     "integrate", "kernel_opt", "deep_kernel_analysis",
     "operator_tuning", "vendor_kernel_config",
