@@ -9,8 +9,17 @@
 
 set -euo pipefail
 
+# When invoked as `bash /path/to/framework-agent/scripts/install.sh`, the
+# script lives at <FRAMEWORK_AGENT_ROOT>/scripts/install.sh, so its
+# parent directory IS the framework-agent root. This makes the default
+# work both inside a Claw sandbox (which mounts wekafs at an arbitrary
+# path) and in any other checkout location; callers can still override
+# via the FRAMEWORK_AGENT_ROOT env var.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FRAMEWORK_AGENT_ROOT_DEFAULT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
-FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${WORKSPACE_PATH}/framework-agent}"
+FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${FRAMEWORK_AGENT_ROOT_DEFAULT}}"
 FRAMEWORK_AGENT_KB_DIR="${FRAMEWORK_AGENT_KB_DIR:-${FRAMEWORK_AGENT_ROOT}/kb}"
 
 PYTHON="${PYTHON:-$(command -v python3)}"
