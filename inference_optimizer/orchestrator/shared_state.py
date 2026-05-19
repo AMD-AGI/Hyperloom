@@ -1665,6 +1665,7 @@ class SharedState:
             f"last_profile_roofline={self.last_profile_roofline or '(none)'}",
             f"last_profile_kernel_breakdown={self.last_profile_kernel_breakdown or '(none)'}",
             f"last_trace_analyze={self._format_last_trace_analyze()}",
+            f"analysis_md={self._format_analysis_md_full()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"params_search={self._format_params_search()}",
             f"backends_search={self._format_backends_search()}",
@@ -2080,6 +2081,65 @@ class SharedState:
             else:
                 rendered.append(code)
         return f"{base} warnings=[{'; '.join(rendered)}]"
+
+    def _format_analysis_md_full(self) -> str:
+        """Roofline-v2 N5: inject TraceLens analysis.md verbatim into
+        the main Orchestration prompt.
+
+        This is the "directly give the report to the orchestrator"
+        contract the TraceLens team mandated and v1 violated by
+        introducing a sub-agent interpretation layer (see design §6.1).
+        The full report is read as-is — no truncation, no
+        reformatting, no markdown wrapper — so the main LLM sees the
+        same Executive Summary / Top Operations / Recommendations
+        sections a human engineer would consume.
+
+        Snapshot-stable: the underlying ``analysis_md_text`` only
+        changes when a new ``roofline`` action completes
+        (``record_trace_analyze`` overwrites the cache). Within one
+        snapshot every tick produces identical SECTION-B prompt
+        content, which is what lets Claude Code automatic prompt
+        caching (N6) cache this section verbatim across ticks. See
+        design §5.1.
+
+        Render modes:
+
+        * **No cache** (`last_trace_analyze` empty or
+          ``analysis_md_text`` missing) — emit a one-line hint asking
+          the LLM to propose `roofline`. Bookends absent so the
+          surrounding prompt summary stays compact when there's no
+          report to render.
+        * **Cache populated** — emit the full report between explicit
+          `=== TraceLens Analysis ... ===` bookends so the LLM can
+          syntactically distinguish report-content from surrounding
+          SharedState dump lines.
+
+        The header line includes ``snapshot=N`` and
+        ``gain_at_snapshot=X.XX%`` so the LLM can detect "report is
+        stale; gain has moved by ≥3% since snapshot" without parsing
+        the body. The re-profile guidance in orchestration.md
+        references these two fields directly.
+        """
+        cached = self.last_trace_analyze or {}
+        md_text = cached.get("analysis_md_text") or ""
+        if not md_text:
+            return (
+                "(no TraceLens snapshot yet — propose `roofline` to "
+                "produce one; roofline is a composite action that "
+                "runs profile + trace_analyze atomically)"
+            )
+        snap = cached.get("roofline_snapshot_id", "?")
+        gain = cached.get("roofline_baseline_gain_at_snapshot", 0.0)
+        try:
+            gain_str = f"{float(gain):.2f}"
+        except (TypeError, ValueError):
+            gain_str = "?"
+        return (
+            f"\n=== TraceLens Analysis (snapshot #{snap}, "
+            f"gain at snapshot = {gain_str}%) ===\n"
+            f"{md_text}\n"
+            f"=== End TraceLens Analysis ===\n"
+        )
 
     def _format_last_sweep(self) -> str:
         if not self.last_sweep:
