@@ -31,6 +31,7 @@ from typing import Any
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
+from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
 
@@ -57,11 +58,45 @@ class AiterJitConfig:
 class AiterJitDetector:
     """Stateful per-tick rule for aiter JIT cache health."""
 
-    def __init__(self, config: AiterJitConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: AiterJitConfig | None = None,
+        *,
+        state_view: "DetectorStateView | None" = None,
+    ) -> None:
         self._config = config or AiterJitConfig()
-        self._last_so_count: int | None = None
-        self._last_build_count: int = 0
-        self._stale_build_streak: int = 0
+        self._state_view = state_view
+        # Disk-backed cross-tick state: ``last_so_count`` is the
+        # baseline used for the regression comparison; ``last_build_count``
+        # and ``stale_build_streak`` track the build-dir staling rule.
+        # Without persistence the regression check never has a prior
+        # value to compare against under M1 subprocess transport.
+        loaded = state_view.load() if state_view is not None else {}
+        last_so = loaded.get("last_so_count")
+        self._last_so_count: int | None = (
+            int(last_so) if isinstance(last_so, (int, float)) else None
+        )
+        try:
+            self._last_build_count: int = max(
+                0, int(loaded.get("last_build_count", 0))
+            )
+        except (TypeError, ValueError):
+            self._last_build_count = 0
+        try:
+            self._stale_build_streak: int = max(
+                0, int(loaded.get("stale_build_streak", 0))
+            )
+        except (TypeError, ValueError):
+            self._stale_build_streak = 0
+
+    def _persist(self) -> None:
+        if self._state_view is None:
+            return
+        self._state_view.save({
+            "last_so_count": self._last_so_count,
+            "last_build_count": self._last_build_count,
+            "stale_build_streak": self._stale_build_streak,
+        })
 
     def evaluate(
         self, ctx: ReactorContext, data: SourceData,
@@ -105,6 +140,7 @@ class AiterJitDetector:
         # references even if no symptom fired this tick.
         self._last_so_count = so_count
         self._last_build_count = int(build_count)
+        self._persist()
         return symptoms
 
     def _regression_symptom(

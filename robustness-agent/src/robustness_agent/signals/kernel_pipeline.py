@@ -46,6 +46,7 @@ from typing import Any
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
+from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
 
@@ -112,10 +113,38 @@ class RayPendingDetector:
     threshold means the dispatcher is wedged.
     """
 
-    def __init__(self, config: KernelPipelineConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: KernelPipelineConfig | None = None,
+        *,
+        state_view: "DetectorStateView | None" = None,
+    ) -> None:
         self._config = config or KernelPipelineConfig()
-        self._consecutive_hits: int = 0
-        self._last_pending: int = 0
+        self._state_view = state_view
+        # Disk-backed counter — see GpuLeakDetector for the same
+        # reasoning. Without this, F1 (≥3 consecutive ticks) cannot
+        # fire under M1 subprocess-per-tick transport.
+        loaded = state_view.load() if state_view is not None else {}
+        try:
+            self._consecutive_hits: int = max(
+                0, int(loaded.get("consecutive_hits", 0))
+            )
+        except (TypeError, ValueError):
+            self._consecutive_hits = 0
+        try:
+            self._last_pending: int = max(
+                0, int(loaded.get("last_pending", 0))
+            )
+        except (TypeError, ValueError):
+            self._last_pending = 0
+
+    def _persist(self) -> None:
+        if self._state_view is None:
+            return
+        self._state_view.save({
+            "consecutive_hits": self._consecutive_hits,
+            "last_pending": self._last_pending,
+        })
 
     def evaluate(
         self, ctx: ReactorContext, data: SourceData,
@@ -124,19 +153,23 @@ class RayPendingDetector:
         if not isinstance(ray_info, dict) or not ray_info:
             # No Ray data this tick → don't accumulate.
             self._consecutive_hits = 0
+            self._persist()
             return []
         if not ray_info.get("healthy"):
             # Ray head dead is its own signal (A6); we don't pile
             # pending-starvation on top.
             self._consecutive_hits = 0
+            self._persist()
             return []
         pending = ray_info.get("pending_tasks")
         if not isinstance(pending, int) or pending <= self._config.pending_count_threshold:
             self._consecutive_hits = 0
             self._last_pending = 0
+            self._persist()
             return []
         self._consecutive_hits += 1
         self._last_pending = pending
+        self._persist()
         if self._consecutive_hits < self._config.min_pending_ticks:
             return []
         return [
