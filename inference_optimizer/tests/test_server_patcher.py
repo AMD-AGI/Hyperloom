@@ -45,12 +45,21 @@ _FAKE_SGLANG_VERSION = "0.5.9"  # must match one of _SGLANG_SUPPORTED_VERSIONS
 
 def _make_fake_tracelens(tmp_path: Path) -> Path:
     """Build the ``<root>/examples/custom_workflows/inference_analysis/``
-    skeleton the patcher expects to find patches under."""
+    skeleton the patcher expects to find patches under. v0.3.1+ layout:
+    SGLang patches live under per-version subdirs (``sglang_0_5_9/``)."""
     root = tmp_path / "TraceLens-internal"
     base = root / "examples" / "custom_workflows" / "inference_analysis"
     (base / "vllm_patches").mkdir(parents=True)
-    (base / "sglang_roofline_patches").mkdir(parents=True)
+    (
+        base / "sglang_roofline_patches"
+        / _versioned_subdir_for_fake_sglang()
+    ).mkdir(parents=True)
     return root
+
+
+def _versioned_subdir_for_fake_sglang() -> str:
+    """Subdir name TraceLens v0.3.1 ships for ``_FAKE_SGLANG_VERSION``."""
+    return _server_patcher._versioned_patches_subdir_name(_FAKE_SGLANG_VERSION) or ""
 
 
 def _make_fake_vllm_install(tmp_path: Path) -> Path:
@@ -160,7 +169,7 @@ def _make_fake_sglang_install(tmp_path: Path) -> Path:
 def _write_fake_sglang_patches(
     tracelens_root: Path, *, count: int = 1, include_new_file: bool = True,
 ) -> list[Path]:
-    """Write ``count`` minimal patches into the sglang patches dir.
+    """Write ``count`` minimal patches into the v0.3.1 per-version subdir.
 
     The first patch always creates ``kernel_shape_profiler.py``
     (matching the real patch set's sentinel file). Additional patches
@@ -170,6 +179,7 @@ def _write_fake_sglang_patches(
     base = (
         tracelens_root / "examples" / "custom_workflows"
         / "inference_analysis" / "sglang_roofline_patches"
+        / _versioned_subdir_for_fake_sglang()
     )
     patches: list[Path] = []
     if include_new_file:
@@ -421,10 +431,12 @@ def test_sglang_precheck_failure_skips_all(tmp_path, monkeypatch):
     # First patch is fine.
     _write_fake_sglang_patches(tracelens_root, count=1)
     # Add a corrupt patch that won't apply (refers to a file that
-    # doesn't exist in our fake install).
+    # doesn't exist in our fake install). Land it in the per-version
+    # subdir so the simplified resolver sees it.
     bad = (
         tracelens_root / "examples" / "custom_workflows"
-        / "inference_analysis" / "sglang_roofline_patches" / "zzz_bad.patch"
+        / "inference_analysis" / "sglang_roofline_patches"
+        / _versioned_subdir_for_fake_sglang() / "zzz_bad.patch"
     )
     bad.write_text(
         textwrap.dedent(
@@ -1010,56 +1022,6 @@ def test_sglang_plan_keeps_single_marker_sentinel(fake_sglang_world):
     assert plan.sentinel_text == ("kernel_shape_profiler",), plan.sentinel_text
 
 
-def test_sglang_tokenizer_control_profile_args_patch(tmp_path):
-    """SGLang 0.5.11 moved start_profile to tokenizer_control_mixin.py.
-
-    Hyperloom must inject the two TraceLens profile args there or
-    /start_profile rejects PROFILE_EXTRA_BODY before the scheduler sees it.
-    """
-    sglang_pkg = tmp_path / "python" / "sglang"
-    target = sglang_pkg / "srt" / "managers" / "tokenizer_control_mixin.py"
-    target.parent.mkdir(parents=True)
-    target.write_text(
-        textwrap.dedent(
-            """\
-            class TokenizerControlMixin:
-                async def start_profile(
-                    self,
-                    output_dir=None,
-                    profile_prefix: Optional[str] = None,
-                    profile_stages: Optional[List[str]] = None,
-                ):
-                    req = ProfileReq(
-                        profile_prefix=profile_prefix,
-                        profile_stages=profile_stages,
-                    )
-                    return await self._execute_profile(req)
-            """
-        ),
-        encoding="utf-8",
-    )
-    sentinel = sglang_pkg / "srt" / "utils" / "kernel_shape_profiler.py"
-    sentinel.parent.mkdir(parents=True)
-    sentinel.write_text("kernel_shape_profiler", encoding="utf-8")
-    plan = _server_patcher._PatchPlan(
-        framework="sglang",
-        version="0.5.11",
-        apply_root=tmp_path,
-        patches=(),
-        sentinel_file=sentinel,
-        sentinel_text=("kernel_shape_profiler",),
-    )
-
-    assert _server_patcher._ensure_sglang_tokenizer_control_profile_args(plan)
-    text = target.read_text(encoding="utf-8")
-    assert "shape_discovery: bool = False" in text
-    assert "roofline_annotations: bool = False" in text
-    assert "shape_discovery=shape_discovery" in text
-    assert "roofline_annotations=roofline_annotations" in text
-    # Idempotent second call.
-    assert _server_patcher._ensure_sglang_tokenizer_control_profile_args(plan)
-
-
 # ===========================================================================
 # PR-D §5: TraceLens-shipped SUPPORTED_VERSIONS manifest takes precedence
 # over the hardcoded minor allowlist. The day TraceLens starts shipping
@@ -1067,15 +1029,19 @@ def test_sglang_tokenizer_control_profile_args_patch(tmp_path):
 # the decoupling intent of the #194 §5 follow-up recommendation.
 # ===========================================================================
 def _write_sglang_versions_manifest(
-    tracelens_root: Path, body: str, *, filename: str = "SUPPORTED_VERSIONS.txt",
+    tracelens_root: Path, body: str, *,
+    version: str = _FAKE_SGLANG_VERSION,
+    filename: str = "SUPPORTED_VERSIONS.txt",
 ) -> Path:
-    """Write a TraceLens-style version manifest into the SGLang patches
-    dir. Tests use this fixture to simulate TraceLens shipping the
-    decoupling manifest before it actually does."""
+    """Write a TraceLens-style version manifest into the per-version
+    SGLang patches subdir (v0.3.1 layout). The TraceLens-shipped
+    manifest is consulted by ``_sglang_version_accepted``."""
+    subdir = _server_patcher._versioned_patches_subdir_name(version) or ""
     patches_dir = (
         tracelens_root / "examples" / "custom_workflows"
-        / "inference_analysis" / "sglang_roofline_patches"
+        / "inference_analysis" / "sglang_roofline_patches" / subdir
     )
+    patches_dir.mkdir(parents=True, exist_ok=True)
     manifest = patches_dir / filename
     manifest.write_text(body, encoding="utf-8")
     return manifest
@@ -1277,8 +1243,8 @@ def test_sglang_e2e_manifest_admits_version_outside_default_allowlist(
     # injected module and the on-disk __init__.py.
     sgl_init = apply_root / "python" / "sglang" / "__init__.py"
     sgl_init.write_text('__version__ = "0.7.0"\n', encoding="utf-8")
-    _write_fake_sglang_patches(tracelens_root, count=1)
-    _write_sglang_versions_manifest(tracelens_root, "0.7.0\n")
+    _write_versioned_sglang_patches(tracelens_root, "sglang_0_7_0", count=1)
+    _write_sglang_versions_manifest(tracelens_root, "0.7.0\n", version="0.7.0")
 
     fake_mod = types.ModuleType("sglang")
     fake_mod.__version__ = "0.7.0"  # type: ignore[attr-defined]
@@ -1372,59 +1338,36 @@ def test_versioned_patches_subdir_name_helper():
     assert _server_patcher._versioned_patches_subdir_name(None) is None  # type: ignore[arg-type]
 
 
-def test_resolve_sglang_patches_dir_prefers_versioned_subdir(tmp_path):
-    """When ``sglang_0_5_11/`` is present and non-empty, the resolver
-    must return it with ``versioned=True``, ignoring any flat patches
-    at the root."""
+def test_resolve_sglang_patches_dir_returns_versioned_subdir(tmp_path):
+    """The resolver returns the per-version subdir when it exists AND
+    contains at least one ``*.patch`` file."""
     root = tmp_path / "sglang_roofline_patches"
     root.mkdir()
-    # Plant a flat patch to make sure the versioned branch wins anyway.
-    (root / "decoy.patch").write_text("placeholder\n", encoding="utf-8")
     subdir = root / "sglang_0_5_11"
     subdir.mkdir()
     (subdir / "kernel_shape_profiler.patch").write_text("p\n", encoding="utf-8")
-    result = _server_patcher._resolve_sglang_patches_dir(root, "0.5.11")
-    assert result is not None
-    patches_dir, versioned = result
-    assert patches_dir == subdir
-    assert versioned is True
+    assert (
+        _server_patcher._resolve_sglang_patches_dir(root, "0.5.11") == subdir
+    )
 
 
-def test_resolve_sglang_patches_dir_falls_back_to_flat(tmp_path):
-    """v0.3 checkouts have flat ``*.patch`` at the root and no
-    versioned subdirs — the resolver must return the root with
-    ``versioned=False`` so the legacy optional-skip shim runs."""
+def test_resolve_sglang_patches_dir_returns_none_when_subdir_missing(tmp_path):
+    """No ``sglang_0_5_11/`` subdir → ``None`` (flat layout is no longer
+    supported; users must upgrade to Hyperloom_integration_v0.3.1+)."""
     root = tmp_path / "sglang_roofline_patches"
     root.mkdir()
-    (root / "kernel_shape_profiler.patch").write_text("p\n", encoding="utf-8")
-    result = _server_patcher._resolve_sglang_patches_dir(root, "0.5.11")
-    assert result is not None
-    patches_dir, versioned = result
-    assert patches_dir == root
-    assert versioned is False
-
-
-def test_resolve_sglang_patches_dir_returns_none_when_empty(tmp_path):
-    """Neither versioned subdir nor flat *.patch at root → None.
-    Caller then logs + skips patching entirely."""
-    root = tmp_path / "sglang_roofline_patches"
-    root.mkdir()
-    (root / "sglang_0_5_11").mkdir()  # subdir exists but is empty
+    # Even with a flat *.patch present, the simplified resolver ignores
+    # it and reports no patches available.
+    (root / "decoy.patch").write_text("placeholder\n", encoding="utf-8")
     assert _server_patcher._resolve_sglang_patches_dir(root, "0.5.11") is None
 
 
-def test_resolve_sglang_patches_dir_skips_empty_versioned_subdir(tmp_path):
-    """An empty ``sglang_0_5_11/`` must not shadow the flat fallback
-    when flat patches actually exist at the root."""
+def test_resolve_sglang_patches_dir_returns_none_when_subdir_empty(tmp_path):
+    """An empty ``sglang_0_5_11/`` is not a valid patch set."""
     root = tmp_path / "sglang_roofline_patches"
     root.mkdir()
     (root / "sglang_0_5_11").mkdir()
-    (root / "kernel_shape_profiler.patch").write_text("p\n", encoding="utf-8")
-    result = _server_patcher._resolve_sglang_patches_dir(root, "0.5.11")
-    assert result is not None
-    patches_dir, versioned = result
-    assert patches_dir == root
-    assert versioned is False
+    assert _server_patcher._resolve_sglang_patches_dir(root, "0.5.11") is None
 
 
 @_REQUIRES_GIT
@@ -1478,69 +1421,3 @@ def test_discover_sglang_plan_marks_versioned_layout(tmp_path, monkeypatch):
             f"versioned layout should be selected, got patch path {p}"
         )
 
-
-@_REQUIRES_GIT
-def test_sglang_versioned_layout_does_not_filter_optional(tmp_path, monkeypatch):
-    """Under the versioned layout the patcher must NOT drop a patch
-    just because its target file is absent on disk — v0.3.1 ships
-    a complete per-version set, so a missing target indicates a
-    deployment problem, not a "skip-and-continue" case."""
-    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
-    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
-    tracelens_root = _make_fake_tracelens(tmp_path)
-    apply_root = _make_fake_sglang_install(tmp_path)
-    sgl_init = apply_root / "python" / "sglang" / "__init__.py"
-    sgl_init.write_text('__version__ = "0.5.11"\n', encoding="utf-8")
-    # Land a benign patch + a patch named like one of the v0.3 optional
-    # entries. Under flat fallback the latter would be dropped because
-    # its target doesn't exist; under versioned it must stay in the set.
-    versioned_dir = (
-        tracelens_root / "examples" / "custom_workflows"
-        / "inference_analysis" / "sglang_roofline_patches" / "sglang_0_5_11"
-    )
-    versioned_dir.mkdir(parents=True)
-    (versioned_dir / "kernel_shape_profiler.patch").write_text(
-        textwrap.dedent(
-            """\
-            diff --git a/python/sglang/srt/utils/kernel_shape_profiler.py b/python/sglang/srt/utils/kernel_shape_profiler.py
-            new file mode 100644
-            index 000000000..1111111
-            --- /dev/null
-            +++ b/python/sglang/srt/utils/kernel_shape_profiler.py
-            @@ -0,0 +1,1 @@
-            +# kernel_shape_profiler stub
-            """
-        ),
-        encoding="utf-8",
-    )
-    # Name matches the legacy optional list; target is a file path that
-    # would not be present in the synthetic install. Versioned branch
-    # should keep this patch in the set, so the plan must contain it.
-    (versioned_dir / "fused_moe_triton_kernels.patch").write_text(
-        textwrap.dedent(
-            """\
-            diff --git a/python/sglang/srt/utils/extra_marker.py b/python/sglang/srt/utils/extra_marker.py
-            new file mode 100644
-            index 000000000..3333333
-            --- /dev/null
-            +++ b/python/sglang/srt/utils/extra_marker.py
-            @@ -0,0 +1,1 @@
-            +# extra marker stub
-            """
-        ),
-        encoding="utf-8",
-    )
-
-    fake_mod = types.ModuleType("sglang")
-    fake_mod.__version__ = "0.5.11"  # type: ignore[attr-defined]
-    fake_mod.__file__ = str(sgl_init)  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "sglang", fake_mod)
-    monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
-
-    plan = _server_patcher._discover_sglang_plan(None)
-    assert plan is not None
-    patch_names = {p.name for p in plan.patches}
-    assert "fused_moe_triton_kernels.patch" in patch_names, (
-        "versioned layout must not drop patches by name even when the "
-        "legacy optional_missing dict would have"
-    )
