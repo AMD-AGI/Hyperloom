@@ -78,6 +78,10 @@ log = logging.getLogger(__name__)
 # (record_kernel_opt / record_kernel_integrate_result).
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "baseline", "profile", "backends", "params", "sweep", "validate_stack",
+    # Roofline-v2 N10: roofline composite action enters the audit set
+    # so each invocation is visible in `roofline_attempts` (the same
+    # pattern used by N7's verify/audit scripts to count snapshots).
+    "roofline",
 })
 
 # ---------------------------------------------------------------------------
@@ -2755,6 +2759,36 @@ class Coordinator:
                     task.params if task is not None else None
                 ),
             }
+        elif task_kind == "roofline":
+            # Roofline-v2 N10 (GPU-empirical fix): the RooflineExecutor
+            # mutates `self.shared_state.last_profile_trace` +
+            # `last_profile_status` + `last_profile_args` +
+            # `last_trace_analyze` inline during its sub-step
+            # orchestration (see action_executors/roofline.py). The
+            # mutations land on the in-memory SharedState object so
+            # the next-tick LLM prompt reflects them, BUT _promote_to_
+            # shared_state previously had no `roofline` branch so
+            # `changed` stayed False and `state.json` was never
+            # persisted — leaving the disk view stale (snapshot_id=0
+            # while in-memory snapshot_id was actually >=1).
+            #
+            # This branch flips `changed=True` so the standard
+            # `if changed: self.shared_state.save(...)` tail at the
+            # end of the method persists the mutations the executor
+            # already made. It does NOT re-mutate any field; the
+            # executor remains the single writer.
+            audit_decision = "promoted"
+            audit_extras = {
+                "snapshot_id": (self.shared_state.last_trace_analyze or {}).get(
+                    "roofline_snapshot_id"
+                ),
+                "analysis_md_path": (self.shared_state.last_trace_analyze or {}).get(
+                    "analysis_md_path"
+                ),
+                "trace_path": self.shared_state.last_profile_trace or None,
+                "profile_workspace": result.get("profile_workspace"),
+            }
+            changed = True
         elif task_kind == "profile":
             audit_decision = "promoted"
             audit_extras = {
