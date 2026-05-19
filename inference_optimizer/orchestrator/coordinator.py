@@ -253,6 +253,7 @@ class Coordinator:
         model_class: str | None = None,
         cortex_kb: CortexKBClient | None = None,
         phase_budget_pct: dict[str, float] | None = None,
+        knowledge_plane: Any = None,
     ):
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
@@ -263,6 +264,14 @@ class Coordinator:
         # from the per-session NDJSON queue, so it can be shared across
         # threads (the Coordinator is single-event-loop anyway).
         self.cortex_kb: CortexKBClient | None = cortex_kb
+        # v0.8 M4 + KB_gaps/Gap-01/Gap-02 — KnowledgePlane facade.
+        # When non-None, ``_handle_delegate`` pre-warms ``pr_feed`` +
+        # ``kb_subgraph`` for ``delegate{action='specialist'}`` tasks
+        # before enqueue, so the SpecialistRunner prompt assembly sees
+        # the latest knowledge.  ``None`` keeps the legacy code path
+        # (no warmup; specialist still runs but sees empty knowledge
+        # surface).
+        self.knowledge_plane: Any = knowledge_plane
         # v0.8 M2 — phase budget percentages (KB_design §3.8 §5.3 +
         # §3.13 M2 §7). ``None`` means library defaults; CLI flags
         # populate this dict from ``--max-minutes-<phase>-pct``. We
@@ -2318,6 +2327,15 @@ class Coordinator:
             params.setdefault(
                 "config_path", self.shared_state.baseline_config_path
             )
+        # v0.8 §3.5 + KB_gaps/Gap-01 — specialist pre-dispatch warmup.
+        # When the Orchestration role delegates a specialist task, the
+        # Coordinator is the only place with the KnowledgePlane facade
+        # in scope. Warm the prompt's external-knowledge sections here
+        # so SpecialistRunner's prompt assembly sees them via task
+        # params. ``setdefault`` lets the caller (Orchestration) pre-
+        # supply values; we only fill the gaps.
+        if action_name == "specialist":
+            self._warm_specialist_params(params)
         # T2 — same synergy-dedup + per-round cap plumbing as the
         # proposal-review path. Dedup against previously-tested variants
         # rides on the shared ``backends_search`` ledger (Phase 2 of the
@@ -2408,6 +2426,112 @@ class Coordinator:
             "coordinator", "*", "event",
             {"kind": "task_queued", "task_id": task.task_id, "source": source, "action": action_name},
         ))
+
+    # ------------------------------------------------------------------
+    # v0.8 §3.5 + KB_gaps/Gap-01 — specialist pre-dispatch warmup
+    # ------------------------------------------------------------------
+    def _warm_specialist_params(self, params: dict[str, Any]) -> None:
+        """Fill the specialist task params with KnowledgePlane data
+        before the task is enqueued.
+
+        Mutates ``params`` in place. The caller (``_handle_delegate``)
+        always passes a fresh dict copy, so we don't risk mutating the
+        original intent.payload.
+
+        Sources, all best-effort (specialist still runs even if every
+        warmup call fails — SpecialistRunner sees empty fields and
+        SpecialistPromptBuilder renders ``(none)``):
+
+        * ``pr_feed`` — :meth:`KnowledgePlane.pr_feed_warm` for the
+          delegate's ``params.domain``. PRSummary objects are flattened
+          to dicts so the prompt builder can render them uniformly.
+        * ``pr_monitor_available`` — boolean mirror of
+          ``plane.pr_monitor_enabled``.
+        * ``warm_start_recipe`` / ``warm_start_pitfalls`` — mirror of
+          ``SharedState.warm_start_*`` (already T0'd by cli).
+        * ``framework_source_roots`` — picked up from
+          :func:`resolve_source_file_allowlist` so the LLM has a stable
+          local-source navigation hint without needing
+          ``$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`` propagated by
+          hand.
+        * GPU hardware hints (``gpu_type`` / ``tp``) from SharedState.
+
+        Gap-09 (gaps[] field) will later expose ``gap_symptom`` /
+        ``gap_layer`` / ``gap_attempts`` / ``kb_subgraph`` from a real
+        gap ledger; until then those stay empty (PromptBuilder
+        gracefully degrades).
+        """
+        state = self.shared_state
+        plane = self.knowledge_plane
+
+        domain = str(params.get("domain") or "").strip()
+
+        # PR feed (Gap-02 ↔ Gap-01 contract): if the plane is wired and
+        # PR Monitor is enabled, fetch the per-domain warm cache. Any
+        # exception falls back to an empty list + non-fatal warning.
+        if plane is not None and "pr_feed" not in params:
+            try:
+                prs, _warnings = plane.pr_feed_warm(domain=domain)
+                params["pr_feed"] = [
+                    self._pr_summary_to_dict(p) for p in prs
+                ]
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "specialist warmup: pr_feed_warm(domain=%r) failed: %r",
+                    domain, exc,
+                )
+                params.setdefault("pr_feed", [])
+        else:
+            params.setdefault("pr_feed", [])
+
+        if "pr_monitor_available" not in params:
+            params["pr_monitor_available"] = bool(
+                plane is not None and getattr(plane, "pr_monitor_enabled", True)
+            )
+
+        # Warm-start recipe + pitfalls from T0 anchor (KB_design §3.6).
+        if state.warm_start_recipe and "warm_start_recipe" not in params:
+            params["warm_start_recipe"] = dict(state.warm_start_recipe)
+        if state.warm_start_pitfalls and "warm_start_pitfalls" not in params:
+            params["warm_start_pitfalls"] = list(state.warm_start_pitfalls)
+
+        # Local-source navigation hint — same source the kernel agent
+        # uses for ``source_file`` containment.
+        if "framework_source_roots" not in params:
+            try:
+                from .framework_paths import resolve_source_file_allowlist
+                roots = resolve_source_file_allowlist()
+                if roots:
+                    params["framework_source_roots"] = list(roots)
+            except Exception as exc:  # noqa: BLE001
+                log.debug(
+                    "specialist warmup: framework_source_roots lookup "
+                    "failed: %r", exc,
+                )
+
+        # Hardware hints (cheap; pulled from SharedState which T0
+        # populates from manifest).
+        params.setdefault("gpu_type", state.gpu_type or "")
+        # tp lives on baseline_config when seeded; otherwise the prompt
+        # builder is fine with the dataclass default of 1.
+
+    @staticmethod
+    def _pr_summary_to_dict(pr: Any) -> dict[str, Any]:
+        """Flatten a :class:`PRSummary` (or any object with the same
+        attribute names) into the dict shape SpecialistPromptBuilder
+        expects (``{title, url, labels, repo, number, state, author}``).
+        Defensive against any future field additions in
+        :mod:`pr_monitor`.
+        """
+        return {
+            "repo":   str(getattr(pr, "repo", "")),
+            "number": int(getattr(pr, "number", 0) or 0),
+            "title":  str(getattr(pr, "title", "")),
+            "url":    str(getattr(pr, "url", "")),
+            "state":  str(getattr(pr, "state", "")),
+            "labels": list(getattr(pr, "labels", ()) or ()),
+            "author": str(getattr(pr, "author", "")),
+        }
 
     # ------------------------------------------------------------------
     # REQUEST / RESPONSE (Plan A)
