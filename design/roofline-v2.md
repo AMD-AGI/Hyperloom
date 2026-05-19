@@ -2,38 +2,61 @@
 
 | 字段 | 值 |
 |---|---|
-| Status | Draft v1（实施进行中，C1/C2/C3 已合入） |
+| Status | Draft v2.0（**v1 sub-agent 方向作废，回退后重做**） |
 | Owner | xiaofei |
 | Branch | `feature/xiaofei/roofline-v2` |
 | Worktree | `/wekafs/xiaofei/Hyperloom-roofline-v2` |
 | Base | `main` @ `550d24f` |
-| Last updated | 2026-05-19 |
+| Last updated | 2026-05-19（v2.0 重写） |
 | 强制规则 | **任何方案改动必须先修改本文档再改代码**；本文档是单一事实来源 |
+| v1 → v2 关键变更 | (a) roofline 改为**复合 action**（profile + trace_analyze），**不再调 LLM 二次解读**；(b) analysis.md 直接全文注入主 Orchestration prompt（TraceLens 团队明确反馈的正确用法）；(c) `select_kernels` rename → `trace_analyze`；(d) `discovered_flags` 改为**分层渲染**（按 action × tested 状态），让主 LLM 看到真实 flag 名而非统计行；(e) 接入 Anthropic prompt caching（Claude Code SDK 自动 caching 已在工作，本 PR 优化 prompt 结构 + 度量 hit rate） |
 
 ---
 
 ## 1. TL;DR
 
-Hyperloom 当前的 Orchestration LLM 只在 prompt 里看到一行
-`last_select_kernels: top=[k001,...] reusable=[...]`，看不到 TraceLens
-已经写好的逐 kernel 瓶颈 / efficiency / 推荐建议；同时
-`MODEL_CLASS_ACTION_PRIORS` 是 model_class-keyed 的静态先验，无法反映
-"当前 trace 已经把 comm 从 50% 降到 15% 了，应该转去做 compute" 这种
-**优化栈推进过程中的瓶颈漂移**。结果是 LLM 在 ~60 个 framework flag 里
-盲扫，60 min session 普遍只跑 1 次 profile，`cumulative_gain_validated`
-≈ 0。
+Hyperloom 当前的 Orchestration LLM 在 prompt 里看到的关于 trace 与 flag
+的信息**严重残缺**：
 
-**Roofline-v2** 把 `roofline` 做成一个**独立 action**，由主 LLM 主动
-`PROPOSE_ACTION`，executor 内部 spawn 一个 **sub-agent LLM**
-（Claude，独立 system prompt）专门读 TraceLens `analysis.md` 全文，
-输出结构化决策 dict（`primary_bottleneck` / `suggested_prunes` /
-`suggested_next_actions` / `reprofile_recommended`）回写
-`SharedState.last_roofline_analysis`；主 LLM 在后续 tick 的 prompt 里
-看到 ~800 字符的结构化结论段，据此 emit `PRUNE_BRANCH` + `PROPOSE_ACTION`，
-PolicyGate / Coordinator 现有路径硬剪枝并集中尝试推荐 flag。
-60 min session 内 `roofline` action 跑 2-3 次，每次跟随一次 re-profile
-（由 `cumulative_gain` 跳 +3% 触发），让 LLM 始终基于当前优化栈下的
-最新 roofline 报告决策。
+* `last_select_kernels=...` 只一行字符串（`top=[k001,...] reusable=[...]`），
+  TraceLens `analysis.md` 全文从未被注入；
+* `discovered_flags=sglang:backend=42/param=58` **只有数字统计**，58 个真实
+  flag 名 LLM 完全看不到 —— 当前 LLM "选" flag 完全是靠 prior knowledge
+  + `params_search.tested[fp]` 反推，**幻觉率高**；
+* `MODEL_CLASS_ACTION_PRIORS` 是静态 model-class 先验，不反映"当前优化栈
+  下 comm 已从 50% 降到 15%、应转 compute" 这种**瓶颈漂移**。
+
+结果是 LLM 60 min session 普遍只跑 1 次 profile、盲推荐 flag 名、
+`cumulative_gain_validated` ≈ 0。
+
+### Roofline-v2（v2.0 重写后的方案）
+
+**核心思路 — TraceLens 团队明确反馈的"正确用法"**：
+
+> "应该直接把分析文档（analysis.md）给到 orchestrator，**不要二次解读**"
+
+落地为三件事：
+
+1. **`roofline` 是一个复合 action**（macro / pipeline），其 executor 内部
+   按顺序编排 `profile → trace_analyze`（rename 自 `select_kernels`），
+   atomic 产出一份新 TraceLens snapshot（`last_profile_trace` +
+   `last_select_kernels.analysis_md_text` + `roofline_snapshot_id`）。
+   **executor 不调任何 LLM**，不写结构化的 RooflineAnalysis dict。
+2. **analysis.md 全文直接注入** 主 Orchestration prompt（snapshot 内
+   缓存，B2 决策语义）；同时 `_format_discovered_flags` 重写为**分层
+   Z 方案**（按 `sglang.backends` / `sglang.params` × `tested 状态`），
+   让主 LLM 看到完整 flag 列表 + 命中率/gain。主 LLM 在自己上下文里直接
+   完成 "analysis.md → 选 flag → emit PRUNE_BRANCH / PROPOSE_ACTION" 决策。
+3. **接入 Anthropic prompt caching**：claude-agent-sdk 内部已 automatic
+   caching（OOB `task_manager.py` 已在读 `cache_creation_input_tokens`
+   作为证据），本 PR 优化 prompt 结构最大化 cache hit + 暴露 hit rate 给
+   audit。
+
+`roofline` action 是 `backends` / `params` / `kernel_opt` /
+`comm_optimization` 这 4 个优化 action 的 **sequence_denial 前置依赖**
+（没有 fresh snapshot 不允许开始优化）；60 min session 内 `roofline`
+被主 LLM 主动 propose 2-3 次（首次 + 每次 `cumulative_gain_validated`
+跳 +3% 后 LLM 决定 refresh），让决策始终基于当前优化栈下的最新报告。
 
 **硬指标**：Qwen3-32B + TP=8 + ISL/OSL=1024/1024 + CONC=64 上
 `cumulative_gain_validated_pct` **≥ +5%**；Llama-70B 同 workload
@@ -100,18 +123,28 @@ PolicyGate / Coordinator 现有路径硬剪枝并集中尝试推荐 flag。
 
 ## 4. 设计原则
 
-1. **roofline 作为独立 action**（用户决策）：有 `MODEL_CLASS_ACTION_PRIORS`
-   先验、有 sequence_denial 依赖、可被 PRUNE_BRANCH 硬剪枝、可被 audit
-2. **sub-agent 推理**：roofline action 内部 spawn 一个轻量 sub-agent LLM
-   读 `analysis.md` 全文产出结构化 JSON，不把 200 KB 报告塞主 LLM 上下文
-3. **roofline 只建议，不执行**：sub-agent 输出 `suggested_prunes` /
-   `suggested_next_actions`；**主 LLM 仍然要自己 emit** PRUNE_BRANCH /
-   PROPOSE_ACTION。roofline 不直接写 `pruned_families`、不直接 enqueue task
-4. **数据驱动、零硬编码 model**：所有判断基于 trace 实际瓶颈分布
-5. **降级安全**：每个新模块在 unknown / 缺失 / 失败时退化为现状
+1. **TraceLens 报告作为 LLM-ready artifact 直接消费，零二次解读**：
+   `analysis.md` 是 TraceLens 团队为 LLM/工程师写好的人类可读报告，
+   任何 sub-agent / parser / heuristic 在它和主 LLM 之间插一层都是
+   信息有损。主 Orchestration LLM 直接读全文，靠它自己的推理能力
+   把"瓶颈 → flag → action"链条走完。
+2. **`roofline` 是复合 action（macro / pipeline），不是 LLM 解读层**：
+   它的 executor 只做编排 `profile → trace_analyze` 这两步原子动作，
+   产出 cached snapshot；不调任何 LLM、不写结构化 RooflineAnalysis dict、
+   不替主 LLM 做任何决策。
+3. **数据驱动、零硬编码 model**：所有判断基于 trace 实际瓶颈分布；
+   不引入 model-name / family-name 专用 flag grid。
+4. **完整 flag 可见性**：分层渲染 `discovered_flags`（按 action 类型 ×
+   tested 状态），让主 LLM 在自己上下文里完成"看到 analysis.md →
+   挑没试过的、跟瓶颈匹配的 flag → emit propose"决策链，**杜绝幻觉
+   flag 名**（当前 v0 主 LLM 只看到统计行的根本缺陷）。
+5. **降级安全**：每个新模块在 unknown / 缺失 / 失败时退化为现状；
+   `roofline` executor 中任一子步骤失败 → task 失败但不污染 SharedState。
 6. **可验证**：每个 commit 都要有 prompt diff / 数字 / fixture 证据，
-   每个 PR 都要在真实 GPU 跑出 +5%（不只是 "基建可见"）
-7. **小步快走**：每 commit ≤5 主文件、单测 +20-100 行、零回归
+   每个 PR 都要在真实 GPU 跑出 +5%（不只是"基建可见"）；prompt
+   caching hit rate 通过 `ResultMessage.usage` 度量并暴露到 audit。
+7. **小步快走 + 文档先行**：每 commit ≤5 主文件、单测 +20-100 行、
+   零回归；任何方案改动必须先修本文档再改代码（见 v1 → v2 教训）。
 
 ---
 
