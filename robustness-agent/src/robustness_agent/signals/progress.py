@@ -26,6 +26,7 @@ from typing import Any
 
 from ..role.prompt_inputs import ReactorContext, SharedStateSnapshot
 from ..sources.base import SourceData
+from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
 
@@ -62,10 +63,43 @@ class ProgressDetector:
     snapshots on a degraded tick (an empty history short-circuits).
     """
 
-    def __init__(self, config: ProgressConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: ProgressConfig | None = None,
+        *,
+        state_view: "DetectorStateView | None" = None,
+    ) -> None:
         self._config = config or ProgressConfig()
-        self._gain_history: list[float] = []
-        self._last_tick: int = -1
+        self._state_view = state_view
+        # Disk-backed rolling history — B2 ``gain_plateau`` requires
+        # ``gain_window_ticks`` samples (default 6) and B3
+        # ``no_levers_found`` cross-references ``last_tick``. Without
+        # persistence neither rule can ever fire under M1 subprocess
+        # transport.
+        loaded = state_view.load() if state_view is not None else {}
+        raw_history = loaded.get("gain_history") or []
+        if isinstance(raw_history, list):
+            self._gain_history: list[float] = [
+                float(v) for v in raw_history
+                if isinstance(v, (int, float))
+            ]
+        else:
+            self._gain_history = []
+        # Cap on load to keep memory bounded across restarts.
+        if len(self._gain_history) > 32:
+            self._gain_history = self._gain_history[-32:]
+        try:
+            self._last_tick: int = int(loaded.get("last_tick", -1))
+        except (TypeError, ValueError):
+            self._last_tick = -1
+
+    def _persist(self) -> None:
+        if self._state_view is None:
+            return
+        self._state_view.save({
+            "gain_history": list(self._gain_history),
+            "last_tick": self._last_tick,
+        })
 
     @property
     def gain_history(self) -> list[float]:
@@ -87,6 +121,7 @@ class ProgressDetector:
             self._last_tick = int(snap.tick)
             if len(self._gain_history) > max(self._config.gain_window_ticks, 32):
                 self._gain_history = self._gain_history[-32:]
+            self._persist()
 
         out: list[Symptom] = []
         sym = self._gain_plateau_symptom(snap)
