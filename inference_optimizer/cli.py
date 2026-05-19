@@ -1981,6 +1981,38 @@ def _bootstrap_knowledge_plane(
     )
 
 
+def _reset_state_file(session_dir: Path) -> None:
+    """v0.8 §3.10 — back up the existing ``state.json`` and start fresh.
+
+    The backup name is ``state.json.preReset.<unix_ts>`` so multiple
+    resets in the same session_dir don't clobber each other. Symbolic
+    of the operator's nuclear option (KB_design §3.10 §5.3 bottom):
+    the Cortex KB cross-session knowledge is *not* touched here — only
+    the per-session fact-layer is reset. ``Coordinator`` will reseed
+    its dataclass defaults on the next ``load_or_init`` call.
+    """
+    state_path = session_dir / "state.json"
+    if not state_path.exists():
+        return
+    import time as _time
+    ts = int(_time.time())
+    backup_path = session_dir / f"state.json.preReset.{ts}"
+    try:
+        state_path.replace(backup_path)
+    except OSError as exc:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "v0.8 §3.10 --reset-state: could not move %s → %s: %s",
+            state_path, backup_path, exc,
+        )
+        return
+    import logging as _logging
+    _logging.getLogger(__name__).info(
+        "v0.8 §3.10 --reset-state: backed up state.json to %s; "
+        "session starts blank.", backup_path.name,
+    )
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     proxy_urls = _preflight()
 
@@ -2288,6 +2320,21 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         os.environ["INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES"] = "warn"
     else:
         os.environ.pop("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", None)
+    # v0.8 §3.10 — propagate ``--migration-mode``. SharedState.from_dict
+    # consults this env var to decide whether a fact-layer
+    # discrepancy is fatal (strict) or a downgraded WARNING (lenient).
+    migration_mode = str(
+        getattr(args, "migration_mode", "strict") or "strict",
+    ).strip().lower()
+    if migration_mode == "lenient":
+        os.environ["INFERENCE_OPTIMIZER_MIGRATION_MODE"] = "lenient"
+    else:
+        os.environ.pop("INFERENCE_OPTIMIZER_MIGRATION_MODE", None)
+    # v0.8 §3.10 — ``--reset-state`` nukes the existing state.json
+    # (backing it up to ``state.json.preReset.<unix_ts>``) so the
+    # session starts blank. Done BEFORE Coordinator is constructed.
+    if getattr(args, "reset_state", False):
+        _reset_state_file(session_dir)
 
     # Build the phase budget pct dict from CLI flags; ``None`` values
     # fall back to library defaults inside Coordinator. See KB_design
@@ -2772,6 +2819,46 @@ def _build_parser() -> argparse.ArgumentParser:
              "(``action_scores`` and friends). 'drop' (default) "
              "silently discards. 'warn' logs a WARNING + adds a "
              "breakdown.warnings entry. KB_design §3.9 §7.",
+    )
+    # ------------------------------------------------------------------
+    # v0.8 §3.10 — SharedState evolution (KB_design §3.10 §5.3, §7.6)
+    # ------------------------------------------------------------------
+    # ``--migration-mode`` controls how non-fatal v0.6 → v0.8 migration
+    # discrepancies are surfaced:
+    #
+    # * ``strict`` (default): a missing fact-layer field (baseline_tput
+    #   / current_best / cumulative_gain / optimization_stack) inside
+    #   a non-empty state.json is fatal — CLI exits 1 so the operator
+    #   can investigate before any new write corrupts the audit trail.
+    # * ``lenient``: same discrepancies are downgraded to WARNING and
+    #   the run continues with default values. Useful when an operator
+    #   is intentionally salvaging a partially-corrupted session.
+    #
+    # ``--reset-state`` is the nuclear option: when set, the existing
+    # ``state.json`` is backed up to ``state.json.preReset.<ts>`` and
+    # the session starts fresh. Cortex KB cross-session knowledge is
+    # untouched (KB_design §3.10 §5.3 bottom).
+    opt.add_argument(
+        "--migration-mode",
+        dest="migration_mode",
+        type=str,
+        choices=("strict", "lenient"),
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_MIGRATION_MODE", "strict",
+        ).strip() or "strict",
+        help="Strictness of the v0.6 → v0.8 state.json migration. "
+             "'strict' (default) aborts on fact-layer field loss; "
+             "'lenient' logs WARNING and continues. KB_design §3.10 §5.3.",
+    )
+    opt.add_argument(
+        "--reset-state",
+        dest="reset_state",
+        action="store_true",
+        default=False,
+        help="Back up the existing ``state.json`` (if any) to "
+             "``state.json.preReset.<unix_ts>`` and start the session "
+             "from a blank SharedState. Cortex KB is NOT touched. "
+             "KB_design §3.10 §5.3.",
     )
     # ------------------------------------------------------------------
     # v0.8 M7 — plateau threshold tuning (KB_design §3.8 §5 + §3.13 M7 §4)
