@@ -3082,7 +3082,35 @@ def collect_kb_provenance(
         cortex_flushed_ndjson as _flushed_path,
         cortex_pending_ndjson as _pending_path,
         cortex_sid_file as _sid_path,
+        pr_monitor_status_json as _pr_status_path,
     )
+
+    # v0.8 §3.6 + KB_gaps/Gap-02 — surface PR Monitor reachability
+    # snapshot written at cli boot. We use ``warnings`` (top-level
+    # breakdown.warnings) rather than a dedicated section so the
+    # operator can grep for ``pr_monitor`` regardless of the schema
+    # version they expect. KB_design §3.14 R-03 探测信号.
+    pr_status_path = _pr_status_path(session_dir)
+    if pr_status_path.exists():
+        try:
+            with pr_status_path.open("r", encoding="utf-8") as f:
+                pr_status = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            warnings.append(
+                f"pr_monitor:status_marker_unreadable:{exc!r}"[:240]
+            )
+        else:
+            if not pr_status.get("enabled"):
+                warnings.append("pr_monitor:disabled")
+            elif not pr_status.get("reachable"):
+                # KB_design §3.14 R-03 探测信号 — operator dashboard
+                # uses this exact string to light up the "PR Monitor
+                # cross-cluster ingress" alert.
+                url = str(pr_status.get("url") or "")
+                warnings.append(
+                    f"pr_monitor:unreachable:{url}"[:240] if url
+                    else "pr_monitor:unreachable"
+                )
 
     def _count_lines(p: Path) -> int:
         try:
