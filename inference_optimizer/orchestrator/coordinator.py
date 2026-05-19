@@ -62,6 +62,7 @@ from .policy import (
     REQUEST_ROUTING,
     REVIEW_VERDICT_SOURCE_ALLOWLIST,
     ROBUSTNESS_ONLY_SOURCE_ALLOWLIST,
+    SPECIALIST_FROM_AGENT_PREFIX,
 )
 from .resource_lock import (
     LaneBusy,
@@ -2079,6 +2080,18 @@ class Coordinator:
             await self._handle_alert(source, intent)
         elif it == IntentType.UPDATE_STATE:
             await self._handle_update_state(source, intent)
+        elif it == IntentType.SPECIALIST_DONE:
+            # v0.8 §3.5 §10 + KB_gaps/Gap-03 — terminal intent of a
+            # specialist task. PolicyGate R3 has already validated the
+            # ``from_agent='specialist:<task_id>'`` prefix + payload
+            # schema + gap/domain match; the handler only does
+            # bookkeeping.  The current SpecialistRunner architecture
+            # captures the done intent inside the runner instead of
+            # routing it via the bus, so this branch is mostly
+            # defense-in-depth + future-proofing (an out-of-band path
+            # — e.g. an operator script replaying a transcript — still
+            # converges on the same handler).
+            await self._handle_specialist_done(source, intent)
         else:
             # ASK_QUESTION / ANSWER / UPDATE_PERSONA — record for replay
             await self._record_observation(
@@ -2601,6 +2614,216 @@ class Coordinator:
             "state":  str(getattr(pr, "state", "")),
             "labels": list(getattr(pr, "labels", ()) or ()),
             "author": str(getattr(pr, "author", "")),
+        }
+
+    # ------------------------------------------------------------------
+    # v0.8 §3.5 §10 + KB_gaps/Gap-03 — specialist_done bookkeeping
+    # ------------------------------------------------------------------
+    async def _handle_specialist_done(
+        self, source: str, intent: Intent,
+    ) -> None:
+        """Handle a ``specialist_done`` intent (KB_design §3.5 §10).
+
+        Source format is ``specialist:<task_id>`` per Inv-5.3 / R3
+        (PolicyGate already validated this when called via
+        :meth:`_handle_intent`; defense in depth re-asserts the
+        prefix here so direct callers — e.g. the dispatcher exit
+        hook — get the same task lookup logic for free).
+
+        The bookkeeping itself is in :meth:`_record_specialist_result`
+        so the runner-internal path (Gap-01 adapter) and the
+        intent-routing path (this method) converge on the same writer.
+
+        Note: the current SpecialistRunner captures the done intent
+        internally and surfaces it via :class:`SubAgentResult`. The
+        dispatcher result hook is therefore the primary entry point
+        for production. The intent-routing branch (above) handles
+        the future case where an operator replay / out-of-band
+        emitter routes a done through the bus.
+        """
+        payload = dict(intent.payload or {})
+        task_id = self._task_id_from_specialist_source(source)
+        task: Task | None = None
+        if task_id:
+            try:
+                task = await self.tasks.get(task_id)
+            except Exception:  # noqa: BLE001 — TaskNotFound and friends
+                task = None
+        if task is None:
+            # PolicyGate R3 should have caught this. Log defensively
+            # but don't crash — the audit trail (transcript on disk +
+            # the runner-internal path's delegated_result) is still
+            # intact.
+            log.warning(
+                "specialist_done from source=%r references unknown "
+                "task_id=%r; skipping bookkeeping (R3 should have "
+                "denied; defense in depth)",
+                source, task_id,
+            )
+            return
+        await self._record_specialist_result(
+            task=task, done_payload=payload, source=source,
+        )
+
+    @staticmethod
+    def _task_id_from_specialist_source(source: str) -> str:
+        """Extract the task_id from a ``specialist:<task_id>`` source.
+
+        Returns an empty string when the source doesn't carry the
+        expected prefix (the caller treats that as an unknown-task
+        miss and bails out).
+        """
+        if not source:
+            return ""
+        if source.startswith(SPECIALIST_FROM_AGENT_PREFIX):
+            return source[len(SPECIALIST_FROM_AGENT_PREFIX):]
+        return ""
+
+    async def _record_specialist_result(
+        self,
+        *,
+        task: Task,
+        done_payload: dict[str, Any],
+        source: str,
+    ) -> None:
+        """Common bookkeeping for any specialist task termination.
+
+        Called from two paths:
+
+        * The dispatcher's result loop (production), once the
+          SpecialistRunner returns a :class:`SubAgentResult` with
+          ``result.specialist_done`` populated (Gap-01 adapter).
+        * The intent routing table (defense in depth), when an
+          out-of-band emitter sends a ``SPECIALIST_DONE`` intent
+          through the bus.
+
+        Both paths converge on the same SharedState writes so the
+        ledger / streak / ``last_specialist`` mirror stay coherent
+        regardless of where the trigger came from. Idempotent on
+        ``round_id`` (delegated to :meth:`SharedState.record_specialist_round`).
+
+        Failures inside the bookkeeping are logged but not re-raised:
+        the runner has already produced an on-disk transcript +
+        ``specialist_done.json`` artifact, so the audit trail
+        survives even if SharedState persistence hiccups.
+
+        T2 per-variant hypothesize (KB_design §3.13 M5 §5 step 6) is
+        intentionally **not** triggered here — it belongs to
+        :ref:`Gap-07` which up-shifts the existing per-proposal
+        ``_cortex_t2_hook`` to per-variant. Threading a stub call
+        site now would silently no-op (the per-variant edge map
+        ``PendingProposal.kb_edge_ids`` doesn't exist yet); the
+        Gap-07 PR will add the call.
+        """
+        domain = str(done_payload.get("domain") or "").strip()
+        proposals = done_payload.get("proposal_set") or []
+        if not isinstance(proposals, list):
+            proposals = []
+        is_empty = bool(done_payload.get("empty")) or len(proposals) == 0
+
+        round_entry = self._build_specialist_round_entry(
+            task=task, done_payload=done_payload, source=source,
+        )
+        try:
+            self.shared_state.record_specialist_round(round_entry)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "specialist bookkeeping: record_specialist_round failed for "
+                "task=%s", task.task_id,
+            )
+
+        try:
+            self.shared_state.bump_specialist_domain_empty_streak(
+                domain, empty=is_empty,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "specialist bookkeeping: bump_specialist_domain_empty_streak "
+                "failed for task=%s", task.task_id,
+            )
+
+        try:
+            self.shared_state.update_last_specialist({
+                "task_id": task.task_id,
+                "domain": domain,
+                "gap_canonical_id": str(
+                    done_payload.get("gap_canonical_id") or ""
+                ),
+                "empty": is_empty,
+                "proposals_total": len(proposals),
+                "confidence": done_payload.get("confidence"),
+                "summary": str(done_payload.get("summary") or "")[:480],
+                "reason": str(done_payload.get("reason") or "")[:480],
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "specialist bookkeeping: update_last_specialist failed for "
+                "task=%s", task.task_id,
+            )
+
+        # Persist + audit observation so a resume picks up the
+        # bookkeeping without re-running the specialist.
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "specialist bookkeeping: SharedState.save failed for task=%s",
+                task.task_id,
+            )
+
+        await self._record_observation(
+            source or "coordinator", "observation",
+            {
+                "kind": "specialist_done_recorded",
+                "task_id": task.task_id,
+                "domain": domain,
+                "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
+                "proposals_total": len(proposals),
+                "empty": is_empty,
+            },
+        )
+
+    def _build_specialist_round_entry(
+        self,
+        *,
+        task: Task,
+        done_payload: dict[str, Any],
+        source: str,
+    ) -> dict[str, Any]:
+        """Translate a specialist done payload into a row for
+        ``SharedState.specialist_rounds[]`` (KB_design §3.12 §4.3).
+
+        ``round_id`` defaults to the task_id so re-recording the same
+        task overwrites idempotently (M5 single-specialist case).
+        M6 batch dispatch will override this with the orchestration-
+        emitted round_id (e.g. ``round-12``).
+        """
+        proposals = done_payload.get("proposal_set") or []
+        if not isinstance(proposals, list):
+            proposals = []
+        round_id = str(
+            (task.params or {}).get("round_id")
+            or task.task_id
+        )
+        return {
+            "round_id":          round_id,
+            "task_id":           task.task_id,
+            "source":            source or "coordinator",
+            "completed_at":      datetime.now(timezone.utc).isoformat(),
+            "domain":            str(done_payload.get("domain") or ""),
+            "gap_canonical_id":  str(done_payload.get("gap_canonical_id") or ""),
+            "empty":             bool(done_payload.get("empty"))
+                                  or len(proposals) == 0,
+            "proposals_total":   len(proposals),
+            "proposal_set":      list(proposals),
+            "summary":           str(done_payload.get("summary") or "")[:480],
+            "reason":            str(done_payload.get("reason") or "")[:480],
+            "confidence":        done_payload.get("confidence"),
+            "new_findings":      list(done_payload.get("new_findings") or []),
+            "residual_questions": list(
+                done_payload.get("residual_questions") or []
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -3307,6 +3530,32 @@ class Coordinator:
                  "state": result.state, "result": result.result,
                  "error": result.error},
             ))
+            # v0.8 §3.5 §10 + KB_gaps/Gap-03 — specialist bookkeeping.
+            # SpecialistRunner returns the done payload under
+            # ``result.result['specialist_done']`` (Gap-01 adapter
+            # contract). We always run the bookkeeping pass for a
+            # specialist task — including the empty-synthesised
+            # path — so the per-domain streak / last_specialist
+            # mirror / specialist_rounds ledger stay coherent
+            # whether the LLM emitted a real done or the runner
+            # synthesised one.
+            if task.kind == "specialist":
+                result_dict = result.result if isinstance(result.result, dict) else {}
+                done_payload = result_dict.get("specialist_done") or {}
+                if isinstance(done_payload, dict):
+                    try:
+                        await self._record_specialist_result(
+                            task=task,
+                            done_payload=done_payload,
+                            source=(
+                                f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"
+                            ),
+                        )
+                    except Exception:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "specialist bookkeeping hook failed for task=%s",
+                            task.task_id,
+                        )
             # Auto-promote certain succeeded results into SharedState core
             # fields (Coordinator is the only writer of CORE_STATE_FIELDS;
             # see DESIGN §14.5 / §17.2).
