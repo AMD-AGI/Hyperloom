@@ -277,6 +277,15 @@ class Config:
     finalize_max_findings_in_report: int = 20
     finalize_max_tasks_per_action: int = 50
 
+    # -- cross-tick state persistence (2026-05-19) --
+    # M1 transport spawns a fresh subprocess per Coordinator tick, so
+    # any consecutive-tick rule (``gpu_memory_leaked`` ≥2 ticks,
+    # ``ray_pending_starvation`` ≥3 ticks, ``gain_plateau`` 6-tick
+    # window, ladder cooldown, RCA per-key cooldown, ...) is broken
+    # without disk-backed state. ``state_store_enabled=False`` reverts
+    # to in-memory only (for unit tests / single-process drivers).
+    state_store_enabled: bool = True
+
     # -- ring buffer (local mode only) --
     local_metrics_history_s: int = 3600
     local_metrics_sample_interval: int = 5

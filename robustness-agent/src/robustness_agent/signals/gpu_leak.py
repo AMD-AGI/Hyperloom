@@ -30,6 +30,7 @@ from typing import Any
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
+from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
 
@@ -86,14 +87,34 @@ class GpuLeakDetector:
     accumulate toward a false positive.
     """
 
-    def __init__(self, config: GpuLeakConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: GpuLeakConfig | None = None,
+        *,
+        state_view: "DetectorStateView | None" = None,
+    ) -> None:
         self._config = config or GpuLeakConfig()
-        self._consecutive_hits: int = 0
+        self._state_view = state_view
+        # Disk-backed counter — survives subprocess-per-tick (M1
+        # default transport). Persists `consecutive_hits` so a leak
+        # crossing the 2-tick threshold is detected even when the
+        # reactor is rebuilt every tick.
+        loaded = state_view.load() if state_view is not None else {}
+        raw_hits = loaded.get("consecutive_hits", 0)
+        try:
+            self._consecutive_hits: int = max(0, int(raw_hits))
+        except (TypeError, ValueError):
+            self._consecutive_hits = 0
 
     @property
     def consecutive_hits(self) -> int:
         """Visible for tests; production code should not rely on this."""
         return self._consecutive_hits
+
+    def _persist(self) -> None:
+        if self._state_view is None:
+            return
+        self._state_view.save({"consecutive_hits": self._consecutive_hits})
 
     def evaluate(self, ctx: ReactorContext, data: SourceData) -> list[Symptom]:
         gpus = self._extract_gpu_snapshots(data)
@@ -101,21 +122,25 @@ class GpuLeakDetector:
             # No GPU data → can't conclude anything; reset so partial
             # data on the next tick doesn't accumulate stale state.
             self._consecutive_hits = 0
+            self._persist()
             return []
 
         full_gpus = [snap for snap in gpus if self._is_full(snap)]
         all_full = len(full_gpus) == len(gpus)
         if not all_full:
             self._consecutive_hits = 0
+            self._persist()
             return []
 
         live_owners = self._live_owners(data)
         if live_owners:
             # Legitimate owner present — memory pressure isn't a leak.
             self._consecutive_hits = 0
+            self._persist()
             return []
 
         self._consecutive_hits += 1
+        self._persist()
         if self._consecutive_hits < self._config.min_consecutive_ticks:
             return []
 
