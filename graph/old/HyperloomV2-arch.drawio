@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" modified="2026-05-18T18:54:00.000Z" type="device" version="24.7.17">
+  <diagram id="hyperloom-v2-arch-cn" name="Hyperloom v0.6 实际架构">
+    <mxGraphModel dx="2600" dy="2000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2200" pageHeight="1700" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="header" value="&lt;b&gt;Hyperloom Inference Optimizer — v0.6 实际架构 (代码 @ 2026-05-18)&lt;/b&gt;&lt;br&gt;单 asyncio Coordinator (2949 行) · 4 reactor 角色 · PolicyGate 强制式校验 · SQLite WAL 事件流 · canonical 顺序 orchestration → kernel → critic → robustness, 单 tick_interval" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#BFD9F2;strokeColor=#0B3D91;strokeWidth=2;fontColor=#000000;fontSize=20;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="2120" height="64" as="geometry" />
+        </mxCell>
+
+        <mxCell id="user" value="&lt;b&gt;User&lt;/b&gt;&lt;br&gt;inference_optimizer optimize&lt;br&gt;--model / --framework / --gpu-type&lt;br&gt;--model-class / --compare-against-gpu&lt;br&gt;--isl/--osl / --max-hours&lt;br&gt;--no-kernel / --resume / --critic-* / --robustness-*" style="ellipse;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontColor=#000000;fontSize=13;align=center;" vertex="1" parent="1">
+          <mxGeometry x="40" y="104" width="320" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cli" value="&lt;b&gt;cli.py · _preflight() — 9 步顺序执行&lt;/b&gt;&lt;br&gt;① credentials fallback (env &gt; .env)  ② auth aliases (SAFE_API_KEY → OPENAI/ANTHROPIC/OOB/GEAK/LLM)  ③ Python SDK 自动装  ④ auth_proxy.py 源码 bootstrap&lt;br&gt;⑤ auth-proxy 监管 + ~/.claude/config.json (强写 ANTHROPIC/OPENAI_BASE_URL → :4002)  ⑥ ROCm 卫生  ⑦ Ray + Magpie + InferenceX  ⑧ node/claude/codex CLI 探测  ⑨ diagnostics&lt;br&gt;&lt;b&gt;额外 (_run_optimize 内):&lt;/b&gt; model-gate catalog probe (claude-opus-4-7 → 4-6 fallback) · gpu-type 自动探测 · critic-agent runtime probe" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontColor=#000000;fontSize=13;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="380" y="104" width="1530" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="auth_proxy" value="&lt;b&gt;auth-proxy :4002&lt;/b&gt;&lt;br&gt;x-api-key → Bearer 改写&lt;br&gt;(AMD primus-safe 网关&lt;br&gt;只认 Bearer; Claude SDK&lt;br&gt;走 x-api-key)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#888888;fontColor=#000000;fontSize=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1930" y="104" width="230" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="coord_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6F2FF;strokeColor=#1F6AA8;strokeWidth=2;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="246" width="2120" height="1080" as="geometry" />
+        </mxCell>
+
+        <mxCell id="coord_label" value="&lt;b&gt;Coordinator — orchestrator/coordinator.py (2949 行 · 单 asyncio 进程)&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#BFD9F2;strokeColor=#10497F;fontColor=#000000;fontSize=15;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="60" y="260" width="2080" height="36" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_label" value="&lt;b&gt;Coordinator-owned 组件&lt;/b&gt;" style="text;html=1;align=center;verticalAlign=middle;fontColor=#000000;fontSize=14;fontStyle=4;" vertex="1" parent="1">
+          <mxGeometry x="60" y="304" width="2080" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_state" value="&lt;b&gt;SharedState&lt;/b&gt; (1842 行)&lt;br&gt;state.json 唯一写入&lt;br&gt;atomic tmp+rename&lt;br&gt;CORE_STATE_FIELDS 守门:&lt;br&gt;current_best · stop_reason ·&lt;br&gt;cumulative_gain* · baseline_*&lt;br&gt;session_id · model_path" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="60" y="332" width="335" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_bus" value="&lt;b&gt;MessageBus&lt;/b&gt;&lt;br&gt;events 表 = source of truth&lt;br&gt;seq AUTOINCREMENT (replay-safe)&lt;br&gt;TOPIC_ALLOWLIST 23 项:&lt;br&gt;proposal · question · answer ·&lt;br&gt;alert · request · response ·&lt;br&gt;review_verdict · kill · heartbeat ..." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="405" y="332" width="335" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_tasks" value="&lt;b&gt;TaskRegistry&lt;/b&gt;&lt;br&gt;tasks 表 + DelegatedTask FSM&lt;br&gt;queued → running →&lt;br&gt;succeeded / failed / cancelled /&lt;br&gt;needs_manual_review&lt;br&gt;idempotency_key UNIQUE (天然去重)&lt;br&gt;requires_lanes · allowed_tools · history" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="750" y="332" width="335" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_cursor" value="&lt;b&gt;CursorStore&lt;/b&gt;&lt;br&gt;cursors 表 (per-agent):&lt;br&gt;last_processed_seq +&lt;br&gt;last_processed_msg_id +&lt;br&gt;processed_at&lt;br&gt;→ 幂等回放, 重启不重复消费&lt;br&gt;每个 reactor tick 推进自己的 cursor" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1095" y="332" width="335" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_lock" value="&lt;b&gt;ResourceLockManager&lt;/b&gt;&lt;br&gt;leases 表 (lane=PK) + BEGIN IMMEDIATE&lt;br&gt;KNOWN_LANES (4):&lt;br&gt;server_lifecycle · workspace_mutation&lt;br&gt;benchmark_lane · profile_lane&lt;br&gt;LANE_CONFLICTS: bench ↔ profile ↔&lt;br&gt;server_lifecycle (busy → ROLLBACK)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1440" y="332" width="350" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_obj" value="&lt;b&gt;Objective&lt;/b&gt; (objective.py)&lt;br&gt;Coordinator 判 stop&lt;br&gt;&lt;br&gt;TimeOnlyObjective (默认)&lt;br&gt;或 GainObjective&lt;br&gt;(target_gain / target_tput /&lt;br&gt;target_baseline_dir)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1800" y="332" width="360" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_reg" value="&lt;b&gt;ActionRegistry&lt;/b&gt; — 扫描 actions/_meta/*.yaml (20 条) → ActionMetadata&lt;br&gt;字段: family · cost_p50/p75 · expected_gain_pct[low,high] · accuracy_risk · crash_risk · requires_lanes · allowed_tools · side_effects · max_turns · lease_ttl_sec · pipeline_phase&lt;br&gt;&lt;b&gt;VALID_FAMILIES (7):&lt;/b&gt; prep · analysis · shallow · deep_kernel · long · creative · resilience&lt;br&gt;&lt;b&gt;VALID_PIPELINE_PHASES (8):&lt;/b&gt; prep · measure · explore · analysis · deep · validate · finalize · support" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="60" y="478" width="1030" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_runner" value="&lt;b&gt;SubAgentRunner&lt;/b&gt;&lt;br&gt;消费 TaskRegistry → 调对应 action_executors async fn&lt;br&gt;先 ResourceLockManager.acquire_many(requires_lanes)&lt;br&gt;成功 → tasks.state=running → 跑 → succeeded/failed&lt;br&gt;失败 → 释放 leases + alert + audit_trail" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1100" y="478" width="555" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="comp_kreq" value="&lt;b&gt;KERNEL_REQUEST_HANDLERS&lt;/b&gt; (52KB)&lt;br&gt;&lt;b&gt;4 kind:&lt;/b&gt; select_kernels · run_optimization · integrate · apply_patch&lt;br&gt;⚠ kernel_opt 不是 request kind&lt;br&gt;同进程 import kernel-agent/tools/*" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1665" y="478" width="495" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="agents_label" value="&lt;b&gt;4 个 Reactor 角色&lt;/b&gt; (agent_role.py · default_role_registry)" style="text;html=1;align=center;verticalAlign=middle;fontColor=#000000;fontSize=14;fontStyle=4;" vertex="1" parent="1">
+          <mxGeometry x="60" y="590" width="2080" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="R_orch" value="&lt;b&gt;orchestration&lt;/b&gt;&lt;br&gt;backend: Claude opus-4-7 · tool-using&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;allowed_intents:&lt;/b&gt;&lt;br&gt;base + &lt;b&gt;propose_action&lt;/b&gt; · &lt;b&gt;delegate&lt;/b&gt;&lt;br&gt;&lt;b&gt;request&lt;/b&gt; · &lt;b&gt;update_state&lt;/b&gt;&lt;br&gt;━━━━━━━━━━&lt;br&gt;唯一可发 REQUEST 的角色&lt;br&gt;(routing target → kernel only)&lt;br&gt;can_delegate_side_effects = True&lt;br&gt;can_mutate_core_state = False&lt;br&gt;━━━━━━━━━━&lt;br&gt;system_prompts/orchestration.md&lt;br&gt;+ prompt_builder.py (36KB 动态拼接)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="60" y="618" width="510" height="250" as="geometry" />
+        </mxCell>
+
+        <mxCell id="R_kernel" value="&lt;b&gt;kernel&lt;/b&gt;&lt;br&gt;backend: Claude opus-4-7 · responder-only&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;allowed_intents:&lt;/b&gt; base +&lt;br&gt;&lt;b&gt;response&lt;/b&gt; (only) + update_state&lt;br&gt;(限自己 action 的 metric 字段)&lt;br&gt;━━━━━━━━━━&lt;br&gt;独占 5 个 &lt;b&gt;KERNEL_OWNED_ACTIONS:&lt;/b&gt;&lt;br&gt;kernel_opt · integrate · deep_kernel_analysis&lt;br&gt;operator_tuning · vendor_kernel_config&lt;br&gt;━━━━━━━━━━&lt;br&gt;只响应 request{target_agent=&apos;kernel&apos;}&lt;br&gt;不 propose / 不 delegate / 不 request&lt;br&gt;system_prompts/kernel.md (IR-1~7)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="580" y="618" width="510" height="250" as="geometry" />
+        </mxCell>
+
+        <mxCell id="R_critic" value="&lt;b&gt;critic&lt;/b&gt; ★ Codex no-tools (gpt-5.4)&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;allowed_intents:&lt;/b&gt; base + &lt;b&gt;review_verdict&lt;/b&gt; (only)&lt;br&gt;verdict ∈ approve · reject · redirect · advise · needs_review&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;Layer 1 (同进程):&lt;/b&gt; critic.md 极薄 (17 行 smoke-grade,&lt;br&gt;多数 auto-approve, 仅 accuracy_risk &gt; 0.3 / 名字未知 → reject)&lt;br&gt;&lt;b&gt;Layer 2 (子进程):&lt;/b&gt; CriticAgentBackend → python -m&lt;br&gt;critic-agent.runtime.cli (prepare-review · commit-review),&lt;br&gt;真正的 KB / judge bundle / session memory 在这层&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;Pending Proposal Gate:&lt;/b&gt;&lt;br&gt;orch.propose → critic.verdict → 落 task" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D14B4B;fontColor=#000000;fontSize=12;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1100" y="618" width="525" height="250" as="geometry" />
+        </mxCell>
+
+        <mxCell id="R_robust" value="&lt;b&gt;robustness&lt;/b&gt; ★ Claude opus-4-7 · always-on&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;allowed_intents:&lt;/b&gt; base + &lt;b&gt;alert&lt;/b&gt; +&lt;br&gt;&lt;b&gt;update_state&lt;/b&gt; (crash_count / current_action) +&lt;br&gt;&lt;b&gt;delegate&lt;/b&gt; (限 accuracy_gate / recover /&lt;br&gt;server_lifecycle handle action) +&lt;br&gt;&lt;b&gt;kill_task&lt;/b&gt; · &lt;b&gt;force_dispatch&lt;/b&gt; · &lt;b&gt;prune_branch&lt;/b&gt; ·&lt;br&gt;&lt;b&gt;escalate_strategy_change&lt;/b&gt;&lt;br&gt;━━━━━━━━━━&lt;br&gt;Robustness 文档 60s tick (实际 Coordinator&lt;br&gt;单 tick_interval, 60s 是文档自律)&lt;br&gt;━━━━━━━━━━&lt;br&gt;&lt;b&gt;子进程 runtime:&lt;/b&gt; RobustnessAgentBackend → python -m&lt;br&gt;robustness-agent.src.robustness_agent.main" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D14B4B;fontColor=#000000;fontSize=12;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1635" y="618" width="525" height="250" as="geometry" />
+        </mxCell>
+
+        <mxCell id="policy" value="&lt;b&gt;IntentParser + PolicyGate — 唯一 chokepoint (policy.py 504 行)&lt;/b&gt;&lt;br&gt;Transports: Claude emit_intent MCP tool_call · Codex validated_json_output 单 JSON envelope (14 个 intent_type 全枚举)&lt;br&gt;校验: ① 角色 allowed_intents 准入  ② source allowlist (REVIEW_VERDICT={critic} / KILL_TASK / FORCE_DISPATCH / PRUNE_BRANCH / ESCALATE = {robustness})&lt;br&gt;③ REQUEST_ROUTING (orchestration→{kernel} 唯一)  ④ kernel-owned 不可 delegate  ⑤ CORE_STATE_FIELDS 守门  ⑥ session_dir 路径包含 (source_file 例外 → framework_source_roots)  ⑦ baseline self-loop 防抖&lt;br&gt;&lt;b&gt;失败:&lt;/b&gt; policy_denied 写回对应 agent inbox + rule 标签 (role_permission · kernel_owned_by_kernel_agent · request_target · kill_task_source · review_verdict_source · payload · baseline_self_loop) → 下一 tick self-correct" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE4E4;strokeColor=#D14B4B;strokeWidth=2;fontColor=#000000;fontSize=13;align=left;spacingLeft=12;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="60" y="884" width="2100" height="124" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exec_label" value="&lt;b&gt;Action Executors&lt;/b&gt; (Python async fn · 同进程 · 单测覆盖)" style="text;html=1;align=center;verticalAlign=middle;fontColor=#000000;fontSize=14;fontStyle=4;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1018" width="2080" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exec_files" value="&lt;b&gt;action_executors/*.py — 10 个执行器&lt;/b&gt;&lt;br&gt;baseline · profile · backends · params · sweep · pmc_roofline · target_analysis · validate_stack · report · session_breakdown&lt;br&gt;辅助: _accuracy_gate · _grid_runner (33KB) · _inferencex_patcher · _server_patcher (38KB) · _workload_envs · benchmark_result.is_valid_measurement (守门)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D6E9FF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1046" width="1340" height="86" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exec_meta" value="&lt;b&gt;actions/_meta/*.yaml — 20 条注册项&lt;/b&gt;&lt;br&gt;kernel-owned (5): kernel_opt · integrate · deep_kernel_analysis · operator_tuning · vendor_kernel_config&lt;br&gt;非 kernel (10 + 5 新): baseline · profile · backends · params · sweep · pmc_roofline · target_analysis · validate_stack · report · session_breakdown&lt;br&gt;+ &lt;b&gt;新增:&lt;/b&gt; comm_optimization · compiler_tuning · dream · recover · re_explore" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D6E9FF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1410" y="1046" width="750" height="86" as="geometry" />
+        </mxCell>
+
+        <mxCell id="backends_label" value="&lt;b&gt;Backends 适配层&lt;/b&gt; (orchestrator/backends/) — 角色 ↔ LLM / 子进程 之间的薄壳" style="text;html=1;align=center;verticalAlign=middle;fontColor=#000000;fontSize=14;fontStyle=4;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1142" width="2080" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="back_claude" value="&lt;b&gt;claude.py&lt;/b&gt; (12KB)&lt;br&gt;Anthropic SDK tool-using&lt;br&gt;orch / kernel / robustness 共用&lt;br&gt;+ emit_intent 工具" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1170" width="335" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="back_codex" value="&lt;b&gt;codex.py&lt;/b&gt; (8KB) + &lt;b&gt;mcp_emit_intent.py&lt;/b&gt;&lt;br&gt;Codex no-tools transport&lt;br&gt;critic 发 validated_json_output&lt;br&gt;走这条" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="405" y="1170" width="335" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="back_critic" value="&lt;b&gt;critic_agent.py&lt;/b&gt; (31KB)&lt;br&gt;CriticAgentBackend&lt;br&gt;Popen → critic-agent/runtime/cli.py&lt;br&gt;(prepare-review + commit-review)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D14B4B;fontColor=#000000;fontSize=12;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="750" y="1170" width="335" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="back_robust" value="&lt;b&gt;robustness_agent.py&lt;/b&gt; (12KB)&lt;br&gt;RobustnessAgentBackend&lt;br&gt;Popen → robustness-agent.main&lt;br&gt;长驻, 健康监控 + RCA" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D14B4B;fontColor=#000000;fontSize=12;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1095" y="1170" width="335" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="back_mocks" value="&lt;b&gt;Mocks&lt;/b&gt; (dry-run / 单测)&lt;br&gt;mock_backend · critic_mock&lt;br&gt;kernel_mock · robustness_mock&lt;br&gt;固定 fixture envelope, 无 LLM" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#888888;fontColor=#000000;fontSize=12;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1440" y="1170" width="370" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="back_aux" value="&lt;b&gt;backends/base.py&lt;/b&gt;&lt;br&gt;Backend protocol +&lt;br&gt;BackendError +&lt;br&gt;BackendTurnResult" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1820" y="1170" width="340" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sub_label" value="&lt;b&gt;Sub-agent 仓库&lt;/b&gt; — 隔离方式&lt;b&gt;不一致&lt;/b&gt;: critic / robustness 是真子进程; kernel-agent 是同进程工具库" style="text;html=1;align=center;verticalAlign=middle;fontColor=#000000;fontSize=14;fontStyle=4;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1338" width="2080" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sub_critic" value="&lt;b&gt;critic-agent/&lt;/b&gt; ★ 真子进程&lt;br&gt;runtime/cli.py · decision_reviewer.py (27KB) · kb_writer.py (24KB) ·&lt;br&gt;session_memory.py (14KB) · in_memory_kb_client · inbox_parser ·&lt;br&gt;intent_envelope · request_models · scope_builder · dead_letter&lt;br&gt;actions/{draft_kb · objection_signal · review_coordinator_inbox ·&lt;br&gt;review_decision · review_patch}.md + references/ + SKILL.md" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D14B4B;fontColor=#000000;fontSize=12;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1366" width="700" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sub_robust" value="&lt;b&gt;robustness-agent/&lt;/b&gt; ★ 真子进程&lt;br&gt;src/robustness_agent/main.py · agent.py · conductor.py · rca.py ·&lt;br&gt;factory.py · config.py · models.py&lt;br&gt;子包: checks · decision · findings · monitors · providers ·&lt;br&gt;role · runtime · signals · sources&lt;br&gt;SKILL.md + pyproject.toml (独立包)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D14B4B;fontColor=#000000;fontSize=12;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="750" y="1366" width="700" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sub_kernel" value="&lt;b&gt;kernel-agent/&lt;/b&gt; — &lt;b style=&quot;color:#B47A1A&quot;&gt;同进程工具库, 非子进程&lt;/b&gt;&lt;br&gt;tools/kernel_optimization.py (107KB) · tracelens_analysis.py (98KB) ·&lt;br&gt;tracelens_skill_runner.py (55KB) · parallel_e2e_runner.py ·&lt;br&gt;apply_kernel_patch.py · geak_prompt_patcher.py ·&lt;br&gt;tools/backends/ (GEAK / OOB Ray 调度)&lt;br&gt;&lt;b&gt;调用方:&lt;/b&gt; orchestrator/kernel_request_handlers.py 直接 import" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF4E6;strokeColor=#B47A1A;fontColor=#000000;fontSize=12;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1460" y="1366" width="700" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="persist" value="&lt;b&gt;Persistence — $SESSION_DIR&lt;/b&gt; (默认 /workspace/hyperloom, 扁平; env: USER_DATA_PATH)&lt;br&gt;&lt;b&gt;state.json&lt;/b&gt; (atomic tmp+rename, Coordinator 唯一写) · &lt;b&gt;storage/coordinator.db&lt;/b&gt; (SQLite WAL · 4 表: events / tasks / leases / cursors + schema_version)&lt;br&gt;&lt;b&gt;agents/{role}/{inbox,outbox}.jsonl&lt;/b&gt; · personas/ · checkpoints/ · &lt;b&gt;findings/&amp;lt;ts&amp;gt;.json&lt;/b&gt; (RCA) · kb/ (Critic 写) · runs/&amp;lt;kind&amp;gt;/&amp;lt;task_id&amp;gt;/ · &lt;b&gt;critic-workdir/&amp;lt;turn&amp;gt;/&lt;/b&gt;{request, judge_bundle, review, emit}.json&lt;br&gt;&lt;b&gt;辅助模块输出:&lt;/b&gt; baseline_comparison/ (InferenceX 对标 + target_analyzer) · breakdown/ (collectors.py 110KB + reporters + SKILL.md) · roofline_integration.py (36KB · PMC roofline)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D6E9FF;strokeColor=#1F6AA8;fontColor=#000000;fontSize=12;align=left;spacingLeft=12;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1504" width="2120" height="108" as="geometry" />
+        </mxCell>
+
+        <mxCell id="hw" value="&lt;b&gt;外部资源&lt;/b&gt; · GPU pod (sglang / vllm — Magpie 包装, IR-4 kill+check_gpu_memory + IR-5 安全 kill + SERVER_KILL_WAIT_S) · GEAK + OOB (claude / codex / cursor, Ray 调度 via kernel-agent/tools/backends) · TraceLens CLI · InferenceX (GSM8K accuracy gate + B200 对比)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D9D9D9;strokeColor=#5A5A5A;fontColor=#000000;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1624" width="2120" height="56" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_user_cli" style="endArrow=classic;html=1;rounded=0;strokeColor=#1F6AA8;" edge="1" parent="1" source="user" target="cli">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_cli_proxy" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;dashed=1;" edge="1" parent="1" source="cli" target="auth_proxy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_cli_coord" style="endArrow=classic;html=1;rounded=0;strokeColor=#1F6AA8;" edge="1" parent="1" source="cli" target="coord_label">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_orch_policy" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;" edge="1" parent="1" source="R_orch" target="policy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_kernel_policy" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;" edge="1" parent="1" source="R_kernel" target="policy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_critic_policy" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;" edge="1" parent="1" source="R_critic" target="policy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_robust_policy" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;" edge="1" parent="1" source="R_robust" target="policy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_policy_exec" style="endArrow=classic;html=1;rounded=0;strokeColor=#1F6AA8;" edge="1" parent="1" source="policy" target="exec_files">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_critic_back" style="endArrow=classic;html=1;rounded=0;strokeColor=#1F6AA8;dashed=1;" edge="1" parent="1" source="R_critic" target="back_critic">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_robust_back" style="endArrow=classic;html=1;rounded=0;strokeColor=#1F6AA8;dashed=1;" edge="1" parent="1" source="R_robust" target="back_robust">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_back_critic_sub" style="endArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;" edge="1" parent="1" source="back_critic" target="sub_critic">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_back_robust_sub" style="endArrow=classic;html=1;rounded=0;strokeColor=#D14B4B;" edge="1" parent="1" source="back_robust" target="sub_robust">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_kreq_kernelagent" style="endArrow=classic;html=1;rounded=0;strokeColor=#B47A1A;" edge="1" parent="1" source="comp_kreq" target="sub_kernel">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_exec_persist" style="endArrow=classic;html=1;rounded=0;strokeColor=#1F6AA8;" edge="1" parent="1" source="exec_files" target="persist">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_persist_hw" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;" edge="1" parent="1" source="persist" target="hw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_subkernel_hw" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;" edge="1" parent="1" source="sub_kernel" target="hw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
