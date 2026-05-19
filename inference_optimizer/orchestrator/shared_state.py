@@ -1096,12 +1096,58 @@ class SharedState:
                 if isinstance(entry, dict) and entry.get("code"):
                     warnings_cleaned.append(dict(entry))
 
+        # Roofline-v2 C1: surface the TraceLens analysis.md full text on
+        # SharedState so the downstream ``roofline`` action (added in C4)
+        # can read the per-category bottleneck breakdown without re-hitting
+        # the filesystem on every tick, and so Orchestration can ground
+        # PRUNE_BRANCH / propose_action decisions on the actual report.
+        #
+        # Snapshot accounting (snapshot_id + baseline_gain_at_snapshot)
+        # lets the prompt show "report taken at gain=X%" and lets the
+        # re-profile guidance trigger when ``cumulative_gain_validated``
+        # has moved by ≥3% since the snapshot was taken. The counter
+        # lives inside ``last_select_kernels`` (not as a new top-level
+        # field) so we do not widen the SharedState surface — every
+        # call reads the previous snapshot_id and bumps it by one.
+        prev_snapshot_id = 0
+        if isinstance(self.last_select_kernels, dict):
+            prev_raw = self.last_select_kernels.get("roofline_snapshot_id")
+            if isinstance(prev_raw, int):
+                prev_snapshot_id = prev_raw
+        snapshot_id = prev_snapshot_id + 1
+
+        analysis_md_path = result.get("trace_report_path") or ""
+        analysis_md_text = ""
+        if analysis_md_path:
+            try:
+                # Decision A3: no truncation — typical analysis.md is
+                # 10-20 KB, worst-case (long-ISL Case A-D) ~200 KB; even
+                # 100+ ticks against a 200 KB cached report stays well
+                # within the 200K-token Orchestration context budget once
+                # ``_format_roofline_decision`` (C5) replaces verbatim
+                # injection with the structured roofline-action output.
+                analysis_md_text = Path(analysis_md_path).read_text(
+                    encoding="utf-8", errors="replace",
+                )
+            except (OSError, ValueError):
+                # Degrade silently — empty text signals "no report
+                # available" to downstream prompt rendering, and the
+                # ``analysis_md_path`` field still lets a future
+                # read_artifact intent fetch it on demand.
+                analysis_md_text = ""
+
         self.last_select_kernels = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
             "hot_kernels_top15": summary,
             "reusable_native_kernel_ids": reusable_ids,
             "trace_health_warnings": warnings_cleaned,
+            "analysis_md_path": str(analysis_md_path),
+            "analysis_md_text": analysis_md_text,
+            "roofline_snapshot_id": snapshot_id,
+            "roofline_baseline_gain_at_snapshot": float(
+                self.cumulative_gain_validated,
+            ),
             "ts": _now_iso(),
         }
 
