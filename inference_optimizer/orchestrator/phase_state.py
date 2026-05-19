@@ -1,0 +1,1060 @@
+"""Phase state machine — v0.8 M2 (KB_design §3.2 + §3.8 + §3.10).
+
+The Coordinator owns the run-level phase ("where are we in the optimization
+lifecycle") so that LLM-side decisions stay scoped to one phase at a time
+and Cortex KB entries carry phase provenance.
+
+This module is **pure**: every public function takes a frozen SharedState
+view (a ``Any`` typed shim — we deliberately avoid importing SharedState
+to keep this module side-effect free and trivially testable) and returns
+either a string sentinel / dict, never mutating its inputs. The
+Coordinator is the only writer of SharedState; this module just decides
+*what* to write.
+
+Design intent reference: ``KB_design/3.2_pipeline_phases/README.md``,
+``KB_design/3.8_phase_state_machine/README.md``, ``KB_design/3.10_shared_state_evolution/README.md``.
+
+The five phases form a strictly monotonic chain (Inv-2.1 phase
+monotonicity):
+
+::
+
+    PRELUDE → EXPLORE → KERNEL → SWEEP → CLOSE
+                   ↘ (no_kernel) ↗
+                   ↘──── any phase ────→ CLOSE  (terminal / abort)
+
+``recover`` is *phase-orthogonal* and not modeled as a transition.
+
+Vocabularies are closed enums; PolicyGate cross-checks any write of
+``stop_reason`` or any ``phase_history.reason`` against them.
+
+M2-transitional notes
+---------------------
+The §3.2 design talks about ``explore`` (single merged action) and
+``specialist`` (LLM sub-agent) — both arrive in M3 / M5. During M2 we
+still run v0.6 ``backends`` / ``params`` / ``validate_stack``, so the
+EXPLORE allowed-action set lists those legacy names. ``sweep`` /
+``profile`` likewise get a strict assignment that matches §3.2; if a
+running test relies on the v0.6 "any action any time" behaviour, set
+``phase_strict=False`` (the default) so PolicyGate R1 only logs a
+warning instead of denying.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Phase identifiers + ordering (Inv-2.1: monotonic chain)
+# ---------------------------------------------------------------------------
+PHASE_PRELUDE = "PRELUDE"
+PHASE_EXPLORE = "EXPLORE"
+PHASE_KERNEL  = "KERNEL"
+PHASE_SWEEP   = "SWEEP"
+PHASE_CLOSE   = "CLOSE"
+
+PHASE_NAMES: tuple[str, ...] = (
+    PHASE_PRELUDE,
+    PHASE_EXPLORE,
+    PHASE_KERNEL,
+    PHASE_SWEEP,
+    PHASE_CLOSE,
+)
+PHASE_INDEX: dict[str, int] = {name: i for i, name in enumerate(PHASE_NAMES)}
+
+
+def phase_index(phase: str) -> int:
+    """Return monotonic index of ``phase`` (used by Inv-2.1 check).
+
+    Unknown phases return ``-1`` so legacy data fails the
+    monotonicity check cleanly instead of pretending to advance.
+    """
+    return PHASE_INDEX.get((phase or "").strip().upper(), -1)
+
+
+# ---------------------------------------------------------------------------
+# Phase ↔ allowed action set (KB_design §3.2 §5)
+# ---------------------------------------------------------------------------
+# M2 transitional view: v0.6 action names live here until M3 folds
+# backends/params into ``explore`` and M5 introduces ``specialist``.
+#
+# ``recover`` is in *every* set — phase-orthogonal per design.
+# ``session_breakdown`` is a CLOSE action (it materializes the report
+# bundle). ``pmc_roofline`` is a KERNEL-side analysis aid, kept with the
+# kernel-owned set.  ``validate_stack`` is currently EXPLORE (re-bench
+# the stack at the end of an explore round); M3 will inline it.
+PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
+    PHASE_PRELUDE: frozenset({
+        "target_analysis", "baseline", "recover",
+    }),
+    PHASE_EXPLORE: frozenset({
+        # v0.8 EXPLORE merged target (arrives in M3); falls through to
+        # the legacy v0.6 action names for the M2 transition.
+        "explore", "specialist",
+        # v0.6 legacy names still active during M2.
+        "backends", "params", "validate_stack",
+        "recover",
+    }),
+    PHASE_KERNEL: frozenset({
+        # Profile is allowed but the §3.2 contract says it fires
+        # at most **once per phase**, at KERNEL entry; the per-phase
+        # call counter lives in SharedState.phase_history evidence.
+        "profile", "pmc_roofline",
+        # KERNEL_OWNED_ACTIONS from policy.py.
+        "kernel_opt", "integrate", "deep_kernel_analysis",
+        "operator_tuning", "vendor_kernel_config",
+        "recover",
+    }),
+    PHASE_SWEEP: frozenset({
+        "sweep", "recover",
+    }),
+    PHASE_CLOSE: frozenset({
+        "report", "session_breakdown", "recover",
+    }),
+}
+
+
+def is_action_allowed_in_phase(action_name: str, phase: str) -> bool:
+    """Return True iff ``action_name`` is in the phase allowlist.
+
+    Used by PolicyGate R1 phase_incompatible. Unknown phase defaults to
+    *deny* so a corrupted state.json doesn't silently let anything pass.
+    """
+    allowed = PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper())
+    if allowed is None:
+        return False
+    return (action_name or "").strip() in allowed
+
+
+def allowed_actions_for(phase: str) -> tuple[str, ...]:
+    """Return ``PHASE_ALLOWED_ACTIONS[phase]`` as a sorted tuple.
+
+    Stable order so prompt rendering / R1 hints are deterministic.
+    """
+    return tuple(sorted(PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper(), frozenset())))
+
+
+# ---------------------------------------------------------------------------
+# phase_exit_reasons vocab (KB_design §3.2 §6)
+# ---------------------------------------------------------------------------
+PHASE_EXIT_REASONS: frozenset[str] = frozenset({
+    # Normal exits
+    "prelude_done",
+    "plateau_explore",
+    "plateau_kernel",
+    "explore_phase_budget_exhausted",
+    "kernel_phase_budget_exhausted",
+    "sweep_done",
+    "sweep_budget_exhausted",
+    "no_kernel_skipped",                # EXPLORE → SWEEP when kernel disabled
+    "kernel_phase_aborted_no_trace",    # KERNEL → SWEEP when profile fails
+
+    # Terminal exits (any phase → CLOSE)
+    "robustness_escalated",
+    "target_reached",
+    "no_more_leverage",
+    "time_exhausted",
+    "time_exhausted_during_prelude",
+    "user_stop_requested",
+    "cortex_t0_failed",
+    "cortex_drain_failed",
+    "cortex_commit_failed",
+    "prelude_baseline_failed",
+    "prelude_policy_loop",
+    "policy_loop",
+    "crash_threshold_exceeded",
+    "baseline_failed",                  # v0.6 sentinel; left for resume parity
+    "emergency",
+    "max_ticks",
+    "signal",
+
+    # Construction sentinel — the first entry written when a fresh
+    # session enters PRELUDE.  Not a transition reason proper, but
+    # surfacing it in the same vocab keeps phase_history homogeneous
+    # for breakdown collection.
+    "phase_entered",
+
+    # v0.6 resume inference (lenient mapping).
+    "resumed_from_v06_inferred",
+})
+
+
+# ---------------------------------------------------------------------------
+# stop_reason vocab (KB_design §3.8 §6, closed enum)
+# ---------------------------------------------------------------------------
+STOP_REASON_VOCAB: frozenset[str] = frozenset({
+    # v0.6 sentinels — kept for backward compat (resume from old sessions).
+    "target_reached",
+    "no_more_leverage",
+    "time_exhausted",
+    "max_ticks",
+    "policy_loop",
+    "baseline_failed",
+    "emergency",
+    "signal",
+    "unknown",
+    "custom",
+
+    # v0.8 additions.
+    "crash_threshold_exceeded",
+    "robustness_escalated",
+    "user_stop_requested",
+    "prelude_baseline_failed",
+    "prelude_policy_loop",
+    "time_exhausted_during_prelude",
+    "cortex_t0_failed",
+    "cortex_drain_failed",
+    "cortex_commit_failed",
+    "plateau_explore",
+    "plateau_kernel",
+    "no_kernel_skipped",
+    "sweep_done",
+})
+
+
+def is_valid_stop_reason(value: str) -> bool:
+    return (value or "").strip() in STOP_REASON_VOCAB
+
+
+def is_valid_phase_exit_reason(value: str) -> bool:
+    return (value or "").strip() in PHASE_EXIT_REASONS
+
+
+# ---------------------------------------------------------------------------
+# Default phase budgets (% of total wall-clock) — KB_design §3.8 §5.3
+# ---------------------------------------------------------------------------
+DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
+    PHASE_PRELUDE: 0.05,
+    PHASE_EXPLORE: 0.60,
+    PHASE_KERNEL:  0.25,
+    PHASE_SWEEP:   0.08,
+    PHASE_CLOSE:   0.02,
+}
+
+
+# ---------------------------------------------------------------------------
+# Plateau judgment defaults (KB_design §3.8 §5.1 / §5.2 + §3.13 M7 §5)
+# ---------------------------------------------------------------------------
+# Default thresholds the CLI exposes via --plateau-* flags. Kept here
+# (not in cli.py) so pure-function callers + tests can introspect the
+# canonical default set without importing argparse.
+DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT:    float = 0.5
+DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK:     int   = 3
+DEFAULT_PLATEAU_EXPLORE_LOOKBACK:         int   = 5
+DEFAULT_PLATEAU_KERNEL_REVERT_STREAK:     int   = 3
+DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT:     float = 0.5
+DEFAULT_PLATEAU_KERNEL_LOOKBACK:          int   = 5
+
+
+# ---------------------------------------------------------------------------
+# escalate_strategy_change hint vocabulary (KB_design §3.8 §7.3 / §3.13 M7 §5.3)
+# ---------------------------------------------------------------------------
+# Closed enum so the Coordinator + phase_state agree on which hints can
+# influence phase transitions / budgets. Unknown hints are logged but
+# do NOT change phase (defensive — prevents an arbitrary
+# robustness-emitted string from steering the state machine).
+ESCALATE_HINT_SKIP_TO_KERNEL:      str = "skip_to_kernel"
+ESCALATE_HINT_SKIP_TO_CLOSE:       str = "skip_to_close"
+ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
+ESCALATE_HINT_EXTEND_KERNEL_BUDGET:  str = "extend_kernel_budget"
+ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX: str = "pause_specialist_"
+
+ESCALATE_HINT_VOCAB: frozenset[str] = frozenset({
+    ESCALATE_HINT_SKIP_TO_KERNEL,
+    ESCALATE_HINT_SKIP_TO_CLOSE,
+    ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
+    ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
+})
+
+# Cap that ``extend_*_budget`` hints can lift the per-phase budget to
+# (relative ratio, not absolute). 0.80 means: EXPLORE budget can grow to
+# at most 80% of total wall-clock budget, no matter how many
+# ``extend_explore_budget`` hints fire. Mirrors KB_design §3.13 M7 §5.3
+# "上限 80%".
+ESCALATE_HINT_BUDGET_BUMP_DELTA: float = 0.05   # +5 percentage points per hint
+ESCALATE_HINT_BUDGET_BUMP_CAP:   float = 0.80   # absolute ceiling
+
+# Whether a hint string is structurally a pause-specialist directive.
+# ``pause_specialist_kernel_specialist`` etc.; the suffix is the domain
+# key (specialist_domains.SPECIALIST_DOMAIN_KEYS membership is checked
+# by the Coordinator handler, not here, so this module stays pure).
+def is_pause_specialist_hint(hint: str) -> bool:
+    h = (hint or "").strip()
+    return h.startswith(ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX) and len(h) > len(
+        ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX,
+    )
+
+
+def is_valid_escalate_hint(hint: str) -> bool:
+    """Return True for any hint Coordinator should act on.
+
+    The closed vocab + the ``pause_specialist_<domain>`` family form
+    the full surface. Anything else is dropped to log.
+    """
+    return (hint or "").strip() in ESCALATE_HINT_VOCAB or is_pause_specialist_hint(hint)
+
+
+def apply_escalate_budget_bump(
+    current_budget_pct: dict[str, float] | None,
+    *,
+    phase: str,
+    delta: float = ESCALATE_HINT_BUDGET_BUMP_DELTA,
+    cap: float = ESCALATE_HINT_BUDGET_BUMP_CAP,
+) -> dict[str, float]:
+    """Return a budget map with ``phase`` raised by ``delta`` (capped).
+
+    Pure helper that the Coordinator can call when it pops an
+    ``extend_explore_budget`` / ``extend_kernel_budget`` hint. The
+    resulting dict is suitable for assigning back into
+    :attr:`SharedState.phase_budget_pct`.
+
+    KB_design §3.13 M7 §5.3 — "上限 80% (绝对值)".
+    """
+    phase_key = (phase or "").strip().upper()
+    if phase_key not in PHASE_NAMES:
+        return dict(current_budget_pct or {})
+    out = normalize_budget_pct(current_budget_pct)
+    new_val = float(out.get(phase_key, 0.0)) + float(delta or 0.0)
+    new_val = min(float(cap), max(0.0, new_val))
+    out[phase_key] = new_val
+    return out
+
+
+def normalize_budget_pct(
+    budget: dict[str, float] | None,
+) -> dict[str, float]:
+    """Return a sanitized ``phase -> pct`` mapping.
+
+    Missing phases fall back to defaults; obviously bad values (negative
+    or > 1.0) get clamped to the default. The total is *not* renormalized
+    to 1.0 — phase budgets are *upper bounds*, not a probability dist.
+    """
+    out = dict(DEFAULT_PHASE_BUDGET_PCT)
+    if not budget:
+        return out
+    for phase, val in budget.items():
+        canon = (phase or "").strip().upper()
+        if canon not in PHASE_NAMES:
+            continue
+        try:
+            f = float(val)
+        except (TypeError, ValueError):
+            continue
+        if not (0.0 < f <= 1.0):
+            continue
+        out[canon] = f
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Pure judgment helpers (used by Coordinator at each tick end)
+# ---------------------------------------------------------------------------
+def _now_unix(state: Any) -> float:
+    """Resolve the "now" timestamp; tests can inject a stub via
+    ``state._now_unix`` for determinism."""
+    if hasattr(state, "_now_unix") and callable(state._now_unix):
+        return float(state._now_unix())  # type: ignore[attr-defined]
+    import time as _time
+    return _time.time()
+
+
+def _phase_started_unix(state: Any) -> float:
+    raw = getattr(state, "phase_started_unix", 0.0)
+    try:
+        return float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _pending_escalate_hint(state: Any) -> str:
+    """Return a pending escalate hint to act on this tick.
+
+    Coordinator's ``_handle_escalate_strategy_change`` writes the
+    incoming ``next_action_hint`` into ``SharedState.pending_escalate_hint``;
+    phase_state checks the field here when computing the exit
+    decision. The Coordinator clears it once the phase write lands.
+
+    Unknown hints are surfaced as empty so the state machine ignores
+    them (defensive — prevents arbitrary robustness payloads from
+    steering phases).
+    """
+    raw = str(getattr(state, "pending_escalate_hint", "") or "").strip()
+    if not raw:
+        return ""
+    if is_valid_escalate_hint(raw):
+        return raw
+    return ""
+
+
+def _max_minutes(state: Any) -> float:
+    try:
+        return float(getattr(state, "max_minutes", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float:
+    """Return wall-clock seconds spent in current phase. 0 if not started."""
+    started = _phase_started_unix(state)
+    if started <= 0:
+        return 0.0
+    now = float(now_unix if now_unix is not None else _now_unix(state))
+    return max(0.0, now - started)
+
+
+def phase_budget_remaining_seconds(
+    state: Any,
+    *,
+    budget_pct: dict[str, float] | None = None,
+    now_unix: float | None = None,
+) -> float | None:
+    """Return seconds remaining in the current phase's budget.
+
+    Returns ``None`` when ``max_minutes`` is 0 (unlimited run) — caller
+    interprets that as "budget never exhausted".
+    """
+    mm = _max_minutes(state)
+    if mm <= 0:
+        return None
+    budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
+    pct = budget.get((getattr(state, "phase", "") or "").upper(), 0.0)
+    if pct <= 0:
+        return None
+    budget_seconds = mm * 60.0 * pct
+    return max(0.0, budget_seconds - phase_elapsed_seconds(state, now_unix=now_unix))
+
+
+# ----------------------- plateau pure functions (KB_design §3.8 §5) --------
+def compute_plateau_explore(
+    state: Any,
+    *,
+    lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
+    keep_gain_threshold_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
+    empty_streak_threshold: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
+) -> tuple[bool, dict[str, Any]]:
+    """Real plateau_explore (KB_design §3.8 §5.1 + §3.13 M7 §5.1).
+
+    Returns ``(triggered, evidence)``. ``evidence`` always contains the
+    decision inputs so phase_history can audit the call (even when
+    ``triggered=False``).
+
+    Inputs (all read from :class:`SharedState`, pure):
+
+    * ``explore_search.winners_history``: last K KEEP'd variants
+      (KB_design §3.4); ``gain_pct`` per row drives the
+      "recent_keep_gain" sum.
+    * ``specialist_rounds``: last K specialist rounds (KB_design §3.5);
+      ``proposals_total`` + ``proposals_kept`` per row drive the
+      empty-round detection.
+
+    Trigger (AND of two signals, KB_design §3.8 §5.1):
+
+        recent_keep_gain    < ``keep_gain_threshold_pct``  AND
+        recent_empty_streak >= ``empty_streak_threshold``
+
+    The AND semantics intentionally avoid false positives — "we tried
+    but it didn't help" alone or "specialist returned empty" alone is
+    not enough; both must hold.
+    """
+    if lookback <= 0:
+        return False, {"reason": "lookback_disabled"}
+    keep_gain_threshold_pct = float(keep_gain_threshold_pct or 0.0)
+    empty_streak_threshold = int(empty_streak_threshold or 0)
+
+    explore_search = getattr(state, "explore_search", None) or {}
+    if not isinstance(explore_search, dict):
+        explore_search = {}
+    winners_history = explore_search.get("winners_history") or []
+    if not isinstance(winners_history, list):
+        winners_history = []
+    recent_winners = list(winners_history[-lookback:])
+    recent_keep_gain = 0.0
+    for w in recent_winners:
+        if not isinstance(w, dict):
+            continue
+        gain = w.get("gain_pct")
+        try:
+            recent_keep_gain += float(gain or 0.0)
+        except (TypeError, ValueError):
+            continue
+
+    specialist_rounds = getattr(state, "specialist_rounds", None) or []
+    if not isinstance(specialist_rounds, list):
+        specialist_rounds = []
+
+    def _round_is_empty(row: Any) -> bool:
+        if not isinstance(row, dict):
+            return False
+        # Designed shape (KB_design §3.5): ``proposals_total`` /
+        # ``proposals_kept`` (M5+); fall back to ``proposal_count``
+        # for forward-compat with older round summaries.
+        try:
+            proposals = int(
+                row.get("proposals_total")
+                if row.get("proposals_total") is not None
+                else row.get("proposal_count") or 0,
+            )
+        except (TypeError, ValueError):
+            proposals = 0
+        try:
+            kept = int(
+                row.get("proposals_kept")
+                if row.get("proposals_kept") is not None
+                else row.get("kept_count") or 0,
+            )
+        except (TypeError, ValueError):
+            kept = 0
+        return proposals == 0 and kept == 0
+
+    # Walk from newest to oldest counting the trailing-empty streak.
+    streak = 0
+    for row in reversed(specialist_rounds):
+        if _round_is_empty(row):
+            streak += 1
+        else:
+            break
+
+    triggered = (
+        recent_keep_gain < keep_gain_threshold_pct
+        and streak >= empty_streak_threshold
+    )
+    return triggered, {
+        "recent_keep_gain_pct":     round(recent_keep_gain, 4),
+        "keep_gain_threshold_pct":  keep_gain_threshold_pct,
+        "empty_streak":             int(streak),
+        "empty_streak_threshold":   empty_streak_threshold,
+        "lookback":                 int(lookback),
+        "winners_seen":             len(recent_winners),
+        "specialist_rounds_seen":   len(specialist_rounds),
+    }
+
+
+def compute_plateau_kernel(
+    state: Any,
+    *,
+    lookback: int = DEFAULT_PLATEAU_KERNEL_LOOKBACK,
+    revert_streak_threshold: int = DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
+    keep_gain_threshold_pct: float = DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
+) -> tuple[bool, dict[str, Any]]:
+    """Real plateau_kernel (KB_design §3.8 §5.2 + §3.13 M7 §5.2).
+
+    Returns ``(triggered, evidence)``. Inputs (all SharedState):
+
+    * ``kernel_opt_attempts``: per-kernel_id history dicts (KB_design
+      §3.10 §4.2). Each entry typically carries
+      ``{attempts, partial_count, last_decision, last_ts, history}``.
+    * ``kernel_integrate_attempts``: per-(kernel_id+patch) integrate
+      attempts; each entry carries an ``attempts`` list of
+      ``{decision, ts}``.
+    * ``rejected_kernel_ids``: cross-session retired kernels.
+
+    Trigger (OR — KB_design §3.8 §5.2 deliberately weaker than the
+    explore AND because kernel attempts are expensive):
+
+        recent_revert_streak >= ``revert_streak_threshold``
+        OR recent_keep_gain  <  ``keep_gain_threshold_pct``
+    """
+    lookback = int(lookback or 0)
+    revert_streak_threshold = int(revert_streak_threshold or 0)
+    keep_gain_threshold_pct = float(keep_gain_threshold_pct or 0.0)
+    if lookback <= 0 or revert_streak_threshold <= 0:
+        return False, {"reason": "thresholds_disabled"}
+
+    integ_attempts = getattr(state, "kernel_integrate_attempts", None) or {}
+    if not isinstance(integ_attempts, dict):
+        integ_attempts = {}
+
+    # Flatten the integrate attempt log into a single time-ordered list
+    # (relying on the embedded ts), then take the last ``lookback`` rows.
+    flat: list[tuple[str, str, float]] = []   # (decision, ts, gain_pct)
+    for ent in integ_attempts.values():
+        if not isinstance(ent, dict):
+            continue
+        for a in ent.get("attempts") or []:
+            if not isinstance(a, dict):
+                continue
+            decision = str(a.get("decision") or "").upper().strip()
+            if not decision:
+                continue
+            ts = str(a.get("ts") or "")
+            try:
+                gain = float(a.get("gain_pct") or a.get("validated_gain_pct") or 0.0)
+            except (TypeError, ValueError):
+                gain = 0.0
+            flat.append((decision, ts, gain))
+    # Sort by ts (lexicographic on ISO works); fall back to insertion order.
+    flat.sort(key=lambda r: r[1])
+    recent = flat[-lookback:]
+
+    # REVERT streak from the tail.
+    revert_streak = 0
+    for decision, _ts, _g in reversed(recent):
+        if decision in ("REVERT", "NEEDS_REVIEW"):
+            revert_streak += 1
+        else:
+            break
+    # KEEP-gain sum across the same lookback window.
+    recent_keep_gain = sum(g for d, _t, g in recent if d == "KEEP")
+
+    triggered = (
+        revert_streak >= revert_streak_threshold
+        or recent_keep_gain < keep_gain_threshold_pct
+    )
+    return triggered, {
+        "revert_streak":            int(revert_streak),
+        "revert_streak_threshold":  int(revert_streak_threshold),
+        "recent_keep_gain_pct":     round(recent_keep_gain, 4),
+        "keep_gain_threshold_pct":  keep_gain_threshold_pct,
+        "lookback":                 int(lookback),
+        "attempts_seen":            len(recent),
+    }
+
+
+# ----------------------- terminal / abort (global) -------------------------
+def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
+    """Return ``(stop_reason, evidence)`` if a phase-orthogonal stop has
+    fired.  Caller routes this to CLOSE regardless of current phase.
+
+    Priority order:
+
+    1. ``escalate_strategy_change`` hint of ``skip_to_close`` →
+       ``robustness_escalated`` (KB_design §3.8 §7.3 / §3.13 M7 §5.3).
+    2. Coordinator-set ``stop_reason`` (any phase, any reason).
+
+    Note: ``time_exhausted`` is signalled by the existing Coordinator
+    closing-phase mechanism (`run()` writes ``stop_reason`` on
+    deadline); we read SharedState to detect it here so phase_history
+    has a final row.
+    """
+    hint = _pending_escalate_hint(state)
+    if hint == ESCALATE_HINT_SKIP_TO_CLOSE:
+        return "robustness_escalated", {
+            "evidence": "llm_escalation",
+            "hint": hint,
+        }
+    sr = (getattr(state, "stop_reason", "") or "").strip()
+    if sr:
+        # Coordinator-set stop_reason takes precedence over phase exits.
+        if not is_valid_stop_reason(sr):
+            # PolicyGate enforces vocab; unknown values reaching here
+            # are tolerated for resume parity but flagged via evidence.
+            return sr, {"reason_origin": "shared_state.stop_reason", "vocab": "unknown"}
+        return sr, {"reason_origin": "shared_state.stop_reason"}
+    return None
+
+
+# ----------------------- per-phase judgments -------------------------------
+def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
+    """``baseline_tput > 0`` → reason=``prelude_done``, target=EXPLORE.
+
+    Returns ``(reason, evidence)`` when ready to transition, ``None``
+    otherwise. Evidence is later spliced into ``phase_history``.
+    """
+    try:
+        tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if tput > 0.0:
+        return "prelude_done", {"baseline_tput": tput}
+    return None
+
+
+def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
+    streak = int(getattr(state, "baseline_failure_streak", 0) or 0)
+    if streak >= 3:
+        return "prelude_baseline_failed", {"baseline_failure_streak": streak}
+    return None
+
+
+def abort_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
+    # Cortex T0 failure already wrote stop_reason; treat
+    # cortex_t0_failed / time_exhausted_during_prelude as PRELUDE abort
+    # so phase_history captures the boundary.
+    sr = (getattr(state, "stop_reason", "") or "").strip()
+    if sr in ("cortex_t0_failed", "time_exhausted_during_prelude",
+              "prelude_policy_loop", "user_stop_requested"):
+        return sr, {"reason_origin": "shared_state.stop_reason"}
+    return None
+
+
+def exit_normal_explore(
+    state: Any,
+    *,
+    budget_pct: dict[str, float] | None = None,
+    now_unix: float | None = None,
+    plateau_keep_gain_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
+    plateau_empty_streak: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
+    plateau_lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
+) -> tuple[str, dict[str, Any]] | None:
+    """EXPLORE normal exit (KB_design §3.8 §5.1 + §3.13 M7).
+
+    Priority order (highest first):
+
+    1. ``escalate_strategy_change`` hint of ``skip_to_kernel`` →
+       force ``plateau_explore`` with evidence stamping
+       ``llm_escalation``. The Coordinator pops the hint after it
+       fires so subsequent ticks don't re-trigger.
+    2. Real ``plateau_explore`` per :func:`compute_plateau_explore`
+       (KB_design §3.8 §5.1 AND-of clauses). Has a *M2 transitional
+       proxy fallback* — when ``explore_search`` is empty (legacy
+       resume or M3-not-yet) we still consult
+       ``params_no_promote_streak`` so M2 sessions keep working.
+    3. Phase budget exhausted (wall-clock).
+
+    Returns ``None`` if no trigger fires.
+    """
+    # 1. LLM escalate hint takes precedence (KB_design §3.8 §7.3).
+    hint = _pending_escalate_hint(state)
+    if hint == ESCALATE_HINT_SKIP_TO_KERNEL:
+        return "plateau_explore", {
+            "evidence": "llm_escalation",
+            "hint": hint,
+        }
+    # 2. Real plateau_explore (KB_design §3.8 §5.1).
+    explore_search = getattr(state, "explore_search", None) or {}
+    has_v08_signals = (
+        isinstance(explore_search, dict)
+        and (explore_search.get("winners_history") or [])
+    ) or bool(getattr(state, "specialist_rounds", None) or [])
+    if has_v08_signals:
+        triggered, evidence = compute_plateau_explore(
+            state,
+            lookback=plateau_lookback,
+            keep_gain_threshold_pct=plateau_keep_gain_pct,
+            empty_streak_threshold=plateau_empty_streak,
+        )
+        if triggered:
+            return "plateau_explore", {
+                "evidence": "plateau_judgment",
+                **evidence,
+            }
+    else:
+        # M2 transitional fallback for legacy / resume sessions that
+        # don't yet have ``explore_search`` / ``specialist_rounds``
+        # populated. Mirrors the original M2 proxy so the run still
+        # makes forward progress.
+        params_streak = int(getattr(state, "params_no_promote_streak", 0) or 0)
+        backends_search = getattr(state, "backends_search", None) or {}
+        backends_accepted = 0
+        if isinstance(backends_search, dict):
+            accepted = backends_search.get("accepted") or []
+            backends_accepted = len(accepted) if isinstance(accepted, list) else 0
+        optimization_stack = getattr(state, "optimization_stack", None) or []
+        has_results = bool(
+            isinstance(optimization_stack, list) and optimization_stack
+        )
+        if params_streak >= 5 and backends_accepted == 0 and has_results:
+            return "plateau_explore", {
+                "evidence": "m2_proxy",
+                "params_no_promote_streak": params_streak,
+                "backends_accepted": backends_accepted,
+                "note": "M2 transitional heuristic; see KB_design §3.13 M2 §5.3",
+            }
+    # 3. Phase budget exhausted.
+    remaining = phase_budget_remaining_seconds(
+        state, budget_pct=budget_pct, now_unix=now_unix,
+    )
+    if remaining is not None and remaining <= 0:
+        return "explore_phase_budget_exhausted", {
+            "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+        }
+    return None
+
+
+def exit_normal_kernel(
+    state: Any,
+    *,
+    budget_pct: dict[str, float] | None = None,
+    now_unix: float | None = None,
+    plateau_revert_streak: int = DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
+    plateau_keep_gain_pct: float = DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
+    plateau_lookback: int = DEFAULT_PLATEAU_KERNEL_LOOKBACK,
+) -> tuple[str, dict[str, Any]] | None:
+    """KERNEL normal exit (KB_design §3.8 §5.2 + §3.13 M7).
+
+    Priority:
+
+    1. ``escalate_strategy_change`` hint of ``skip_to_close`` →
+       defer to the global terminal handler (caller writes
+       ``stop_reason=robustness_escalated``). Returns ``None`` here so
+       the global path wins.
+    2. Real :func:`compute_plateau_kernel` (KB_design §3.8 §5.2
+       OR-of clauses).
+    3. Phase budget exhausted.
+    """
+    rejected = getattr(state, "rejected_kernel_ids", None) or []
+    rejected_count = len(rejected) if isinstance(rejected, list) else 0
+    triggered, evidence = compute_plateau_kernel(
+        state,
+        lookback=plateau_lookback,
+        revert_streak_threshold=plateau_revert_streak,
+        keep_gain_threshold_pct=plateau_keep_gain_pct,
+    )
+    if triggered:
+        return "plateau_kernel", {
+            "evidence": "plateau_judgment",
+            "rejected_kernel_count": rejected_count,
+            **evidence,
+        }
+    remaining = phase_budget_remaining_seconds(
+        state, budget_pct=budget_pct, now_unix=now_unix,
+    )
+    if remaining is not None and remaining <= 0:
+        return "kernel_phase_budget_exhausted", {
+            "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "rejected_kernel_count": rejected_count,
+        }
+    return None
+
+
+def exit_normal_sweep(
+    state: Any,
+    *,
+    budget_pct: dict[str, float] | None = None,
+    now_unix: float | None = None,
+) -> tuple[str, dict[str, Any]] | None:
+    """SWEEP normal exit. sweep_done OR budget exhausted."""
+    last_sweep = getattr(state, "last_sweep", None) or {}
+    if isinstance(last_sweep, dict):
+        status = str(last_sweep.get("status") or "").lower()
+        if status in ("succeeded", "partial", "completed"):
+            return "sweep_done", {"sweep_status": status}
+    remaining = phase_budget_remaining_seconds(
+        state, budget_pct=budget_pct, now_unix=now_unix,
+    )
+    if remaining is not None and remaining <= 0:
+        return "sweep_budget_exhausted", {
+            "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+        }
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Transition decision (the only function the Coordinator calls each tick)
+# ---------------------------------------------------------------------------
+def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
+    """Pull operator-tuned plateau thresholds off SharedState.
+
+    KB_design §3.13 M7 §4: CLI flags lock plateau thresholds at
+    session start; phase_state reads them on every tick via
+    :attr:`SharedState.plateau_overrides`. Empty / missing → library
+    defaults.
+    """
+    overrides = getattr(state, "plateau_overrides", None) or {}
+    return dict(overrides) if isinstance(overrides, dict) else {}
+
+
+def compute_next_phase(
+    state: Any,
+    *,
+    kernel_enabled: bool = True,
+    budget_pct: dict[str, float] | None = None,
+    now_unix: float | None = None,
+) -> tuple[str, str, dict[str, Any]] | None:
+    """Return ``(next_phase, reason, evidence)`` or ``None``.
+
+    The Coordinator calls this at the end of each tick. When it returns
+    non-None, the Coordinator writes the transition to phase_history,
+    updates ``state.phase`` + ``phase_started_*`` and persists. Priority
+    order (Inv-8.2 + §3.8 §7.1): ``abort > exit_terminal > exit_normal``.
+    Any global terminal stop_reason fires first regardless of phase.
+    """
+    current = (getattr(state, "phase", "") or "").strip().upper() or PHASE_PRELUDE
+    overrides = _resolve_plateau_overrides(state)
+
+    # Global terminal stop_reason overrides phase-local judgments.
+    terminal = _global_terminal(state)
+    if terminal is not None and current != PHASE_CLOSE:
+        reason, evidence = terminal
+        return PHASE_CLOSE, reason, {"terminal": True, **evidence}
+
+    if current == PHASE_PRELUDE:
+        ab = abort_prelude(state)
+        if ab is not None:
+            return PHASE_CLOSE, ab[0], {"terminal": True, **ab[1]}
+        term = exit_terminal_prelude(state)
+        if term is not None:
+            return PHASE_CLOSE, term[0], {"terminal": True, **term[1]}
+        norm = exit_normal_prelude(state)
+        if norm is not None:
+            return PHASE_EXPLORE, norm[0], norm[1]
+        return None
+
+    if current == PHASE_EXPLORE:
+        norm = exit_normal_explore(
+            state,
+            budget_pct=budget_pct,
+            now_unix=now_unix,
+            plateau_keep_gain_pct=float(overrides.get(
+                "explore_keep_gain_pct",
+                DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
+            )),
+            plateau_empty_streak=int(overrides.get(
+                "explore_empty_streak",
+                DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
+            )),
+            plateau_lookback=int(overrides.get(
+                "explore_lookback",
+                DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
+            )),
+        )
+        if norm is not None:
+            if kernel_enabled:
+                return PHASE_KERNEL, norm[0], norm[1]
+            return PHASE_SWEEP, "no_kernel_skipped", {
+                "passed_through_reason": norm[0], **norm[1],
+            }
+        return None
+
+    if current == PHASE_KERNEL:
+        norm = exit_normal_kernel(
+            state,
+            budget_pct=budget_pct,
+            now_unix=now_unix,
+            plateau_revert_streak=int(overrides.get(
+                "kernel_revert_streak",
+                DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
+            )),
+            plateau_keep_gain_pct=float(overrides.get(
+                "kernel_keep_gain_pct",
+                DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
+            )),
+            plateau_lookback=int(overrides.get(
+                "kernel_lookback",
+                DEFAULT_PLATEAU_KERNEL_LOOKBACK,
+            )),
+        )
+        if norm is not None:
+            return PHASE_SWEEP, norm[0], norm[1]
+        return None
+
+    if current == PHASE_SWEEP:
+        norm = exit_normal_sweep(state, budget_pct=budget_pct, now_unix=now_unix)
+        if norm is not None:
+            return PHASE_CLOSE, norm[0], norm[1]
+        return None
+
+    # PHASE_CLOSE — terminal, no further transitions.
+    return None
+
+
+# ---------------------------------------------------------------------------
+# v0.6 → v0.8 resume inference (KB_design §3.2 §8.4, §3.10 §5.2)
+# ---------------------------------------------------------------------------
+def infer_phase_from_state(state: Any) -> tuple[str, dict[str, Any]]:
+    """Best-effort inference for v0.6 sessions that lack a ``phase`` field.
+
+    Returns ``(phase, evidence)`` where evidence captures the inference
+    inputs so phase_history surfaces an audit row.
+
+    Inference rules (precedence top-down):
+
+    1. ``stop_reason`` is set → CLOSE
+    2. ``baseline_tput <= 0`` → PRELUDE
+    3. ``last_sweep`` present + non-empty → SWEEP
+    4. ``last_kernel_opt`` present + ``kernel_enabled`` → KERNEL
+    5. ``optimization_stack`` non-empty → EXPLORE
+    6. Fallback → EXPLORE
+    """
+    sr = (getattr(state, "stop_reason", "") or "").strip()
+    if sr:
+        return PHASE_CLOSE, {"inferred_from": "stop_reason", "stop_reason": sr}
+    try:
+        tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        tput = 0.0
+    if tput <= 0:
+        return PHASE_PRELUDE, {"inferred_from": "baseline_tput=0"}
+    last_sweep = getattr(state, "last_sweep", None) or {}
+    if isinstance(last_sweep, dict) and last_sweep:
+        return PHASE_SWEEP, {"inferred_from": "last_sweep_present"}
+    last_kernel_opt = getattr(state, "last_kernel_opt", None) or {}
+    kernel_enabled = bool(getattr(state, "kernel_enabled", True))
+    if isinstance(last_kernel_opt, dict) and last_kernel_opt and kernel_enabled:
+        return PHASE_KERNEL, {"inferred_from": "last_kernel_opt_present"}
+    opt_stack = getattr(state, "optimization_stack", None) or []
+    if isinstance(opt_stack, list) and opt_stack:
+        return PHASE_EXPLORE, {"inferred_from": "optimization_stack_nonempty"}
+    return PHASE_EXPLORE, {"inferred_from": "fallback"}
+
+
+# ---------------------------------------------------------------------------
+# phase_history helper (shape used by SharedState.record_phase_transition)
+# ---------------------------------------------------------------------------
+def make_history_row(
+    *,
+    from_phase: str,
+    to_phase: str,
+    reason: str,
+    evidence: dict[str, Any] | None,
+    ts: str,
+    ts_unix: float,
+) -> dict[str, Any]:
+    """Construct a canonical phase_history row.
+
+    PolicyGate / breakdown collectors share this exact shape (Inv-2.2 +
+    KB_design §3.2 §6). ``reason`` is *not* validated here — callers
+    that want the strict check go through
+    :func:`is_valid_phase_exit_reason` first; we keep the constructor
+    lenient so resume tools can emit synthetic rows during recovery.
+    """
+    return {
+        "from_phase": (from_phase or "").strip().upper(),
+        "to_phase":   (to_phase or "").strip().upper(),
+        "reason":     (reason or "").strip(),
+        "evidence":   dict(evidence or {}),
+        "ts":         ts,
+        "ts_unix":    float(ts_unix or 0.0),
+    }
+
+
+__all__ = [
+    "DEFAULT_PHASE_BUDGET_PCT",
+    "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
+    "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",
+    "DEFAULT_PLATEAU_EXPLORE_LOOKBACK",
+    "DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT",
+    "DEFAULT_PLATEAU_KERNEL_LOOKBACK",
+    "DEFAULT_PLATEAU_KERNEL_REVERT_STREAK",
+    "ESCALATE_HINT_BUDGET_BUMP_CAP",
+    "ESCALATE_HINT_BUDGET_BUMP_DELTA",
+    "ESCALATE_HINT_EXTEND_EXPLORE_BUDGET",
+    "ESCALATE_HINT_EXTEND_KERNEL_BUDGET",
+    "ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX",
+    "ESCALATE_HINT_SKIP_TO_CLOSE",
+    "ESCALATE_HINT_SKIP_TO_KERNEL",
+    "ESCALATE_HINT_VOCAB",
+    "PHASE_ALLOWED_ACTIONS",
+    "PHASE_CLOSE",
+    "PHASE_EXIT_REASONS",
+    "PHASE_EXPLORE",
+    "PHASE_INDEX",
+    "PHASE_KERNEL",
+    "PHASE_NAMES",
+    "PHASE_PRELUDE",
+    "PHASE_SWEEP",
+    "STOP_REASON_VOCAB",
+    "abort_prelude",
+    "allowed_actions_for",
+    "apply_escalate_budget_bump",
+    "compute_next_phase",
+    "compute_plateau_explore",
+    "compute_plateau_kernel",
+    "exit_normal_explore",
+    "exit_normal_kernel",
+    "exit_normal_prelude",
+    "exit_normal_sweep",
+    "exit_terminal_prelude",
+    "infer_phase_from_state",
+    "is_action_allowed_in_phase",
+    "is_pause_specialist_hint",
+    "is_valid_escalate_hint",
+    "is_valid_phase_exit_reason",
+    "is_valid_stop_reason",
+    "make_history_row",
+    "normalize_budget_pct",
+    "phase_budget_remaining_seconds",
+    "phase_elapsed_seconds",
+    "phase_index",
+]

@@ -565,7 +565,7 @@ class Coordinator:
         except Exception as exc:  # noqa: BLE001 — defensive
             log.exception("cortex T4 drain_pending failed")
             if not self.shared_state.stop_reason:
-                self.shared_state.stop_reason = "cortex_drain_failed"
+                self.shared_state.set_stop_reason("cortex_drain_failed")
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001
@@ -578,7 +578,7 @@ class Coordinator:
                 drain_report,
             )
             if not self.shared_state.stop_reason:
-                self.shared_state.stop_reason = "cortex_drain_failed"
+                self.shared_state.set_stop_reason("cortex_drain_failed")
         # 2. Commit (sync). On failure we record commit_failed so resume
         #    can re-attempt; we do NOT delete cortex_session_id so the
         #    next coordinator wake-up picks up the same sid.
@@ -587,7 +587,7 @@ class Coordinator:
         except CortexKBError as exc:
             log.warning("cortex T4 session_commit failed: %s", exc)
             if not self.shared_state.stop_reason:
-                self.shared_state.stop_reason = "cortex_commit_failed"
+                self.shared_state.set_stop_reason("cortex_commit_failed")
             summary = {"status": "commit_failed", "error": str(exc)[:512]}
         self.shared_state.cortex_session_summary = dict(summary)
         try:
@@ -800,6 +800,30 @@ class Coordinator:
         if target == (state.phase or "").upper():
             return  # already there
         prior = state.phase
+        # v0.8 M7 — when the transition was driven by an escalate
+        # hint, consume it so the next tick re-evaluates against
+        # fresh signals (KB_design §3.8 §7.3). The phase_state module
+        # already wrote the hint into ``evidence["hint"]`` if it
+        # mattered, so this is just a cleanup step.
+        if isinstance(evidence, dict) and (
+            evidence.get("evidence") == "llm_escalation"
+            or "hint" in evidence
+        ):
+            state.consume_pending_escalate_hint()
+        # When a terminal transition (target=CLOSE) fires from a
+        # vocab stop_reason that isn't already on the state, mirror
+        # it onto state.stop_reason via the ENUM-validated writer so
+        # the next run() tick winds the loop down (KB_design §3.8
+        # §6 + §3.13 M7 §5.3 skip_to_close path).
+        if (
+            target == _phase_state.PHASE_CLOSE
+            and isinstance(evidence, dict)
+            and evidence.get("terminal")
+            and reason
+            and _phase_state.is_valid_stop_reason(reason)
+            and not state.stop_reason
+        ):
+            state.set_stop_reason(reason)
         state.record_phase_transition(
             to_phase=target,
             reason=reason,
@@ -1051,7 +1075,7 @@ class Coordinator:
         finally:
             if self.shared_state.closing_phase:
                 self.shared_state.closing_phase = False
-            self.shared_state.stop_reason = stop_reason or "unknown"
+            self.shared_state.set_stop_reason(stop_reason or "unknown")
             self.shared_state.save(self.session_dir)
             log.info(
                 "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
@@ -2775,11 +2799,85 @@ class Coordinator:
         ))
 
     async def _handle_escalate_strategy_change(self, source: str, intent: Intent) -> None:
-        # Priority-0 broadcast — non-destructive (DESIGN §19.3.4).
+        """Process ``escalate_strategy_change`` (KB_design §3.8 §7.3 +
+        §3.13 M7 §5.3).
+
+        Two responsibilities:
+
+        1. **Always** broadcast a priority-0 ``strategy_change`` event
+           so other reactors / breakdown see the LLM's intent (kept
+           verbatim from v0.6 for back-compat).
+        2. When ``next_action_hint`` is in the closed ESCALATE_HINT
+           vocab, stash the hint onto
+           :attr:`SharedState.pending_escalate_hint` so the next phase
+           compute call can act on it. ``extend_*_budget`` hints
+           directly bump :attr:`SharedState.phase_budget_pct` (no
+           pending state needed — the budget map is consulted on
+           every tick). ``pause_specialist_<domain>`` hints bump the
+           per-domain empty-streak so the next EXPLORE round skips
+           that domain.
+
+        Unknown hints are silently dropped (only logged at debug) —
+        Inv-8.2 says phase decisions only act on a closed vocab.
+        """
+        payload = dict(intent.payload or {})
+        # Always emit the broadcast first (back-compat with v0.6 tests
+        # that just count strategy_change events).
         await self.bus.append_and_seq(Message.new(
             source, "*", "strategy_change",
-            dict(intent.payload), priority=0,
+            payload, priority=0,
         ))
+        from .phase_state import (
+            ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
+            ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
+            ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX,
+            PHASE_EXPLORE,
+            PHASE_KERNEL,
+            apply_escalate_budget_bump,
+            is_pause_specialist_hint,
+            is_valid_escalate_hint,
+        )
+        hint = str(payload.get("next_action_hint") or "").strip()
+        if not hint or not is_valid_escalate_hint(hint):
+            return
+        # ``extend_*_budget`` mutates phase_budget_pct directly (no
+        # pending hint needed — the budget map is consulted every
+        # tick by phase_state).
+        now_ts = datetime.now(timezone.utc).isoformat()
+        if hint == ESCALATE_HINT_EXTEND_EXPLORE_BUDGET:
+            self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
+                self.shared_state.phase_budget_pct, phase=PHASE_EXPLORE,
+            )
+            self.shared_state.last_consumed_escalate_hint = hint
+            self.shared_state.last_consumed_escalate_hint_ts = now_ts
+            self.shared_state.save(self.session_dir)
+            return
+        if hint == ESCALATE_HINT_EXTEND_KERNEL_BUDGET:
+            self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
+                self.shared_state.phase_budget_pct, phase=PHASE_KERNEL,
+            )
+            self.shared_state.last_consumed_escalate_hint = hint
+            self.shared_state.last_consumed_escalate_hint_ts = now_ts
+            self.shared_state.save(self.session_dir)
+            return
+        # ``pause_specialist_<domain>``: bump the per-domain
+        # empty-streak counter so the next EXPLORE round won't pick
+        # the domain (KB_design §3.5 / §3.9). Unknown domain suffixes
+        # are tolerated (the counter is just incremented; if the
+        # domain doesn't match a real specialist nothing happens).
+        if is_pause_specialist_hint(hint):
+            domain = hint[len(ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX):]
+            self.shared_state.bump_specialist_domain_empty_streak(
+                domain, empty=True,
+            )
+            self.shared_state.last_consumed_escalate_hint = hint
+            self.shared_state.last_consumed_escalate_hint_ts = now_ts
+            self.shared_state.save(self.session_dir)
+            return
+        # ``skip_to_kernel`` / ``skip_to_close`` are deferred — stash
+        # them; the next ``compute_next_phase`` will pick them up.
+        self.shared_state.set_pending_escalate_hint(hint)
+        self.shared_state.save(self.session_dir)
 
     # ------------------------------------------------------------------
     # SEND_MESSAGE / ALERT / UPDATE_STATE — minimal persistence
@@ -2865,7 +2963,7 @@ class Coordinator:
                 },
             )
         if streak >= 10:
-            self.shared_state.stop_reason = "policy_loop"
+            self.shared_state.set_stop_reason("policy_loop")
 
     async def _record_observation(self, source: str, topic: str, payload: dict) -> None:
         await self.bus.append_and_seq(Message.new(source, "*", topic, payload))
@@ -3017,7 +3115,7 @@ class Coordinator:
         if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
             self.shared_state.baseline_failure_streak += 1
             if self.shared_state.baseline_failure_streak >= 3:
-                self.shared_state.stop_reason = "baseline_failed"
+                self.shared_state.set_stop_reason("baseline_failed")
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
