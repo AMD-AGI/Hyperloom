@@ -148,168 +148,218 @@ Hyperloom 当前的 Orchestration LLM 在 prompt 里看到的关于 trace 与 fl
 
 ---
 
-## 5. 完整数据流（含 Re-Profile 触发）
+## 5. 完整数据流（v2.0 — roofline=复合 action，analysis.md 全文注入）
 
 ```
-T0  baseline                                                        [必跑，不变]
-T1  profile #1                                                      [必跑]
-T2  select_kernels #1
-    ├─ TraceLens 写 analysis.md #1 (~15-200 KB)
-    └─ ★ C1: SharedState.last_select_kernels 缓存 {
-          analysis_md_path, analysis_md_text (全文，A3 决策),
-          roofline_snapshot_id=1,
-          roofline_baseline_gain_at_snapshot=0%,
-          ...                                                        }
+T0  baseline                                                  [必跑，不变]
 
-T3  ★ roofline action #1（C4: 主 LLM 主动 PROPOSE_ACTION）
-    ├─ sequence_denial: 必须有 last_select_kernels.analysis_md_text 否则拒绝
-    ├─ idempotency: 同一 snapshot_id 内 1 次（D2 决策）
-    ├─ executor 内 spawn sub-agent backend (Claude, 独立 sp)
-    │     ↓
-    │  sub-agent prompt = roofline_analyzer.md + analysis.md 全文 +
-    │     当前 cumulative_gain_validated + 当前 pruned_families
-    │     ↓
-    │  sub-agent 输出 JSON（含 schema 校验，C2 文档化的 schema）
-    │     ↓
-    │  解析为 RooflineAnalysis dict（失败 → 安全 fallback）
-    └─ 回调 SharedState.record_roofline_analysis(result)            ← C2 已就绪
+T1  ★ roofline #1（主 LLM 主动 PROPOSE_ACTION）            ← 复合 action
+    └─ RooflineExecutor 顺序执行：
+       (a) profile (复用现有 ProfileExecutor)
+              ↓ 产出 last_profile_trace
+       (b) trace_analyze (rename 自 select_kernels)
+              ↓ 调 kernel-agent/tracelens_analysis.py
+              ↓ TraceLens 内部跑 trace_split → kernel_candidates →
+                 analysis.md → summary.json
+              ↓ 缓存 last_select_kernels {
+                   analysis_md_path, analysis_md_text (全文，B2),
+                   roofline_snapshot_id=N,
+                   roofline_baseline_gain_at_snapshot=<当前 gain>%, ...
+                 }
+       ※ executor 不调任何 LLM；任一步失败 → task 失败，cache 不写
 
-T4  后续每个 tick 的主 LLM prompt（C5）:
-    === Roofline Decision (snapshot #N, analyzed at gain=X%) ===
-    Primary bottleneck: comm (45%) > compute (30%) > memory (15%) > idle (10%)
+T2  后续每个 tick 的主 LLM prompt（结构按 prompt caching 优化）:
 
-    Suggested action families to prune:
-    - kernel_opt (HIGH): compute saturated 92%, no reusable_native in top-5
-    - deep_kernel_analysis (MED): comm >40%
+    [SECTION-A: stable prefix — Claude Code automatic-cached]
+      <system_prompt: orchestration.md + 静态 SharedState fields>
+      <discovered_flags 分层渲染（Z 方案）>:
+        sglang.backends (42 flags):
+          --enable-two-batch-overlap            [untested]
+          --enable-aiter-allreduce-fusion       [tested: +1.2%]
+          --moe-a2a-backend                     [tested: -0.5%]
+          ...
+        sglang.params (58 flags):
+          --cuda-graph-max-bs                   [tested 8 vars, best +0.8%]
+          --enable-torch-compile                [untested]
+          ...
 
-    Suggested next actions:
-    - HIGH params: try enable_two_batch_overlap / aiter_allreduce_fusion
-    - HIGH comm_optimization: rccl Allreduce dominates
-    - MED  backends: try moe_a2a_backend=deepep
+    [SECTION-B: snapshot-stable — Claude Code automatic-cached within snapshot]
+      === TraceLens Analysis (snapshot #N, gain at snapshot = X.XX%) ===
+      <analysis.md 全文 verbatim — TraceLens 团队反馈的"正确用法"，
+       LLM 在自己上下文里直接读 Executive Summary / Top Operations /
+       Recommendations 段，零中间解读层>
 
-    Full analysis.md: <path>
-    Re-profile suggested: no (no gain delta to compare yet)
+    [SECTION-C: per-tick — not cached]
+      <变化的 SharedState fields: optimization_stack, params_search.tested,
+       attempts_history, ...>
+      <Roofline-driven decisions guidance (orchestration.md 内静态段)：
+        - 看 analysis.md 后如何决策的指南
+        - 何时 emit PRUNE_BRANCH（基于报告 + 已试过的 attempts）
+        - 何时 propose params/backends 带 analysis.md Recommendations
+          提到的具体 flag（cross-check with discovered_flags）
+        - 何时 propose roofline 再来一次（cumulative_gain 跳 +3% 等）>
 
-    === Roofline-driven Pruning Rules ===                            (静态文本)
-    Based on the above, you SHOULD emit PRUNE_BRANCH when:
-    - the listed family has confidence=HIGH AND
-    - no action in that family has succeeded since the snapshot was taken
-    Do NOT prune families you haven't tried yet at this snapshot.
-
-    === Re-Profile Guidance ===                                       (静态文本)
-    Re-profile (PROPOSE_ACTION profile) when ANY of:
-    - cumulative_gain_validated_pct increased ≥ 3% since snapshot #N
-    - All non-pruned families tried since snapshot #N with no new gain
-    - You suspect the bottleneck has shifted (explain why)
-
-T5  主 LLM 按 prompt 引导决策：
-    ├─ emit PRUNE_BRANCH(kernel_opt)                                 ← C3 已开权限
+T3  主 LLM 在自己上下文里直接整合：
+    analysis.md (SECTION-B) + discovered_flags (SECTION-A) +
+    tested 历史 (SECTION-C) → 决策：
+    ├─ emit PRUNE_BRANCH(kernel_opt)            ← C3 已开权限
     ├─ emit PRUNE_BRANCH(deep_kernel_analysis)
-    └─ emit PROPOSE_ACTION(params, with enable_two_batch_overlap, ...)
+    └─ emit PROPOSE_ACTION{
+           kind=backends, grid=[{name='roofline_advised',
+             extra_sglang_args='--enable-two-batch-overlap',
+             ...}, ...]
+       }
 
-T6  优化循环（params/backends/comm_opt 等）
+T4  优化循环（backends / params / kernel_opt / comm_optimization 等）
     被 prune 的 family 在 _handle_delegate 现有路径硬拦截
-    LLM 集中试 suggested_next_actions 列出的方向
+    LLM 集中试 analysis.md 提到的 flag 方向
     cumulative_gain_validated_pct 累积上升 (0% → 1.2% → 2.5% → 3.2%)
 
-T7  ★ Re-Profile 触发：cumulative_gain - snapshot_baseline ≥ +3%
-    主 LLM 看到 Re-Profile Guidance 段 → emit PROPOSE_ACTION(profile)
+T5  ★ Re-Profile 触发：cumulative_gain - snapshot_baseline ≥ +3%
+    主 LLM 看到 SECTION-C guidance 段 → emit PROPOSE_ACTION(roofline)
+                                            (注意是 roofline 不是 profile，
+                                             因为 v2.0 是复合 action)
 
-T8  profile #2
-T9  select_kernels #2
-    └─ C1 缓存覆盖 (snapshot_id=2, baseline_gain=3.2%)
+T6  ★ roofline #2 — 同样的 profile + trace_analyze 编排
+    └─ snapshot_id 自增到 2
+       SECTION-B 缓存自动失效（analysis.md 内容变了）→ 触发 Claude Code
+          重新 cache_creation；SECTION-A 仍 cache hit
+       baseline_gain_at_snapshot = 3.2%
 
-T10 ★ roofline action #2（主 LLM 主动 propose；snapshot_id 变了，
-    idempotency key 不同 → 允许新跑）
-    └─ sub-agent 看到新的 analysis.md（瓶颈可能已转移）
-       产出新的 RooflineAnalysis：例如 primary=compute (50%)
-       suggested_prunes=[comm_optimization]（反过来了）
-       suggested_next=[params w/ enable_torch_compile, operator_tuning, ...]
+T7  主 LLM 看新 SECTION-B（瓶颈可能已转移 e.g. comm → compute）
+    → 新一轮 prune + propose
 
-T11 主 LLM 看新 prompt 段 → 新一轮 prune + propose
-    注：现有 pruned 没过期机制，之前 prune 的 kernel_opt 仍被拦截；
-    这是已知 trade-off（unprune 留给下个 PR）
+T8  优化循环 2 ... gain → 4.5% → 5.X%
 
-T12 优化循环 2 ... gain → 4.5% → 5.X%
-
-T13 closing phase（_closing_phase_denial 拦截新 action，只跑 report）
+T9  closing phase（_closing_phase_denial 拦截新 action，只跑 report）
 ```
 
-### 5.1 频率估算（60 min Qwen3-32B session）
+### 5.1 prompt 结构与 cache 命中
 
-| 阶段 | wall-clock | profile/TraceLens | roofline action |
+| Section | 内容 | 变化频率 | Cache 命中（Claude Code automatic） |
+|---|---|---|---|
+| **A** stable prefix | system_prompt + 静态 SharedState + discovered_flags (含 tested 状态) | 跨整个 session（tested 增量更新时变） | 高（数十次/session 命中，每次只算 read price = 10% write） |
+| **B** snapshot-stable | analysis.md 全文（snapshot 内不变） | 每次 roofline action 完成时变 (~2-3 次/session) | 高（snapshot 内 ~30-50 ticks 命中） |
+| **C** per-tick | 变化的 SharedState (optimization_stack, attempts_history) + guidance 静态段 | 每 tick 变 | 不 cache（按 write price 算，但 size 小 ~5-10 KB） |
+
+**重要**：本 PR 不引入 manual `cache_control` 字段（claude-agent-sdk
+0.2.82 不暴露该接口）；依赖 Claude Code CLI 内部的 **automatic prompt
+caching**（OOB `task_manager.py:152-153` 证据：`cache_creation_input_tokens`
+/ `cache_read_input_tokens` 已在 response 里返回）。本 PR 做的是**优化
+prompt 结构最大化 automatic caching 命中率** + **暴露 hit rate 给 audit**。
+如果 C7 跑出来 hit rate < 50%，再考虑下个 PR 换 backend 用网关侧的
+`x-auto-prompt-caching: true` 方案（Primus-Claw TS `agent-loop.ts:642`
+范本）。
+
+### 5.2 频率估算（60 min Qwen3-32B session）
+
+| 阶段 | wall-clock | roofline 调用 | profile/trace_analyze 调用 |
 |---|---|---|---|
 | baseline | 3-5 min | 0 | 0 |
-| profile #1 + select_kernels #1 | 8-12 min | 1 | 0 |
-| **roofline action #1** | 30-60 s | 0 | **1**（消耗 sub-agent LLM token） |
-| 优化循环 1 | 10-15 min | 0 | 0 |
-| **roofline-triggered profile #2 + select_kernels #2** | 8-12 min | 1 | 0 |
-| **roofline action #2** | 30-60 s | 0 | **1** |
+| **roofline #1**（profile + trace_analyze） | 8-12 min | **1** | profile 1 + trace_analyze 1 |
+| 优化循环 1（backends / params / kernel_opt） | 10-15 min | 0 | 0 |
+| **roofline #2**（gain ≥ +3% 触发） | 8-12 min | **1** | profile 1 + trace_analyze 1 |
 | 优化循环 2 | 10-15 min | 0 | 0 |
-| (可选) profile #3 + roofline action #3 | 8-12 min | 0-1 | 0-1 |
+| (可选) roofline #3 | 8-12 min | 0-1 | 0-1 |
 | closing | ~3 min | 0 | 0 |
 | **合计** | **60 min** | **2-3** | **2-3** |
 
+对比 v0（无 roofline action）：profile 通常只跑 1 次，trace_analyze
+（select_kernels）也只跑 1 次，且需要 LLM 手动依次 propose 两个 action
+（多浪费 1-2 个 tick）。v2.0 复合 action **每次 roofline = 1 个 propose
++ 一次性产出 snapshot**，编排成本压到最低。
+
 ---
 
-## 6. C4 关键架构决策：sub-agent vs 直接注入
+## 6. 关键架构决策 — v1 sub-agent 失误回顾 + v2 改回直接注入
 
-用户提出两个候选：(a) orchestrator 启动 sub-agent 读分析；(b) 把整个文档给 orchestrator。下面对比并定档。
+### 6.1 v1 选 sub-agent 是错的（教训）
 
-### 6.1 三个候选对比
+v1 文档 §6 推荐 **sub-agent in executor** 方案，理由三条：(a) token 经济
+（200KB × 100 tick 太贵）；(b) 结构化 JSON 输出；(c) 跟"roofline 作为
+独立 action"语义对齐。基于这个推荐，v1 实施了：
 
-| 维度 | A. sub-agent in executor ★推荐 | B. 直接给主 orchestrator 上下文 | C. heuristic only (无 LLM) |
+- C2 `RooflineAnalysis` schema（150 行 + 393 行测试）
+- C4a/b/c `RooflineExecutor` sub-agent 编排 + Claude backend + JSON 解析
+  + sequence_denial gate（~1450 行）
+- C5 `_format_roofline_decision` 结构化结论段渲染（~500 行）
+
+**v1 落地后被发现三个根本缺陷**（讨论时间戳 2026-05-19 18:01）：
+
+1. **schema 是凭空设计的，不基于 analysis.md 实际字段**：
+   `primary_bottleneck` 6 个枚举 + `bottleneck_distribution` + 启发式
+   阈值（>85% saturated / <30% memory_bound）是从 design 目标反推出来的
+   猜测，**v1 实施时没打开过任何一份真实 analysis.md**。TraceLens 团队
+   早期就反馈过"我们没有正确使用他们的 analysis.md"，v1 的 sub-agent
+   schema 不但没纠正这个问题，反而是变本加厉地"我们决定 LLM 应该看到
+   analysis.md 的哪些抽象"。
+2. **sub-agent prompt 缺关键上下文**：v1 `_compose_analyzer_user_prompt`
+   只传 4 段（analysis.md / cumulative_gain / optimization_stack /
+   pruned_families），**没传 `discovered_flags`**。结果 sub-agent 推荐
+   "try `enable_two_batch_overlap`" 时不知道这个 flag 在 SGLang 当前
+   版本是否存在 → **幻觉 flag 名**。同样没传 `params_search.tested` /
+   `backends_search.tested` → **推荐已试过的组合**。
+3. **token 担忧本身是错判**：v1 拿 "200KB × 100 tick × $3/M token =
+   $15/session" 吓退选项 B，**忽略了 Anthropic prompt caching 已经在
+   Claude Code SDK 里 automatic 工作**（OOB `task_manager.py:152-153`
+   读 `cache_creation_input_tokens` 即证）。真实成本是 1 次 write +
+   99 次 read (10% 价) = ~10% × 100 = ~10x write price，**比 sub-agent
+   多调一次完整 LLM 的成本反而便宜**。
+
+**最关键 — TraceLens 团队的原话**（用户转述于讨论时间戳 18:06）：
+
+> "他们的反馈就是我们应该**直接**把他们的分析文档给到 orchestrator，
+> 咱们之前不也是这样定的，然后加了份缓存吗？"
+
+v1 把 sub-agent 这一层强行插在 TraceLens 报告和主 LLM 之间，**本质上是
+在"未授权地代替 LLM 解读 TraceLens"**，违背了 TraceLens 团队对"应该
+怎么用 analysis.md"的明确意见。
+
+### 6.2 v2 改回直接注入 — 三个理由
+
+| 理由 | 说明 |
+|---|---|
+| **TraceLens 团队意见对齐** | analysis.md 是给 LLM/工程师直接读的人类可读报告，任何二次解读都是 fidelity loss。主 Orchestration LLM 直接读全文，靠它自己的推理能力把"瓶颈 → flag → action"链条走完 |
+| **Token 担忧是误判** | Claude Code SDK 内部已 automatic caching；snapshot 内 analysis.md cache hit；v2 只需优化 prompt 结构（A/B/C 三段切分）让 cache 命中最大化，不引入新 LLM 调用 |
+| **主 LLM 上下文里有完整 framework 知识** | 当 v2 同时落地"分层渲染 discovered_flags"（让 LLM 看到真实 flag 名 + tested 状态），主 LLM 一个上下文里就能完成 "analysis.md → 选 flag → cross-check tested" — sub-agent 因为隔离上下文反而做不到这种 cross-check |
+
+### 6.3 v2 三个候选重审（v1 表格内容已废，重列）
+
+| 维度 | A. sub-agent 解读（v1 已废） | B. 直接注入主 LLM ★v2 采用 | C. heuristic（无 LLM） |
 |---|---|---|---|
-| 主 LLM 上下文负担 | 仅 ~800 字符结论段 | +15-200 KB analysis.md / tick | 仅 ~800 字符 |
-| 解读质量 | 高（专精 sub-agent） | 高（同一 LLM 完整推理） | 中（关键字+lookup） |
-| Token 成本 / session | 每次 roofline action 1 次 LLM call (~15KB↑ + ~1KB↓) × 2-3 次 | 每 tick 100+ 次注入大 prompt (×100 ticks = 1.5MB-20MB) | 0 新 token |
-| 主 LLM 决策可解释性 | 高（看到结构化建议） | 中（要自己消化大段文本） | 高 |
-| sub-agent 实施复杂度 | 中（需 spawn backend + new sp + JSON 校验） | 低（只改 prompt 渲染） | 低 |
-| 与 D2 决策(每 snapshot 1次)的契合度 | 完美（task idempotency 天然成立） | 不契合（每 tick 都注入） | N/A |
-| 测试可控性 | 高（mock backend.run） | 高（mock prompt input） | 高（pure func） |
-| 与"action 化"语义一致 | 完全一致 | 不一致（退回隐式注入） | 一致 |
+| 跟 TraceLens 团队意见对齐 | ❌ 违背 | ✅ 完全对齐 | ❌ 违背（解读层换成关键字匹配，仍是二次解读） |
+| 主 LLM 看到 framework flag 真名 | ❌ sub-agent 看不到 discovered_flags | ✅ 主 LLM 上下文里直接有 | ❌ heuristic 不用 LLM |
+| Token 成本（含 caching） | 中（sub-agent 调用 + 主 LLM 注入结论）| 中（automatic caching 后主 LLM 注入接近免费） | 低（无 LLM） |
+| 实施复杂度 | 高（sub-agent 框架 + JSON schema + 错误处理）| 低（prompt 渲染 + 静态指导段） | 中（关键字 lookup + 误分类风险） |
+| 与"action 化"语义一致 | 假对齐（action 内部又调 LLM）| ✅ 真对齐（action 是编排，不是 LLM）| ✅ 对齐 |
+| 决策可追溯性 | 中（sub-agent 输出 JSON 可 audit） | 高（主 LLM 决策直接对照 analysis.md） | 高（lookup 表确定） |
+| 解读质量 | 中（sub-agent 幻觉 flag）| 高（主 LLM 有完整上下文） | 低（关键字匹配漏报） |
 
-### 6.2 推荐 A：sub-agent in executor
-
-**决策**：选 A。理由三条：
-
-1. **Token 经济性**：B 每 tick 注入 200KB × 100 tick = 20MB，按 Claude
-   Sonnet 计算 session token 费用 ~$30；A 仅 2-3 次 ×15KB ≈ 45KB，约 $0.5
-2. **解读结构化**：A 的输出是 schema-validated JSON，主 LLM 看到的是
-   `Primary: comm (45%); suggested_prunes: kernel_opt (HIGH);
-   ...` 这种已经被推理压缩的结论，不需要再消化原始文本；B 让主 LLM
-   每 tick 重读全文，结果可能不一致
-3. **与 action 化语义对齐**：用户已选定 roofline 做成独立 action，A 是
-   "action 内部委托 sub-agent 完成" 的标准模式；B 退化为隐式注入，让
-   action 失去意义
-
-C 之所以被否决：sub-agent 推理能力是 LLM 最大的复用收益，砍掉它去做
-关键字 lookup 会让 RooflineAnalysis 质量大幅下降，C7 验证 +5% 概率显著
-降低；如果只想"先验证基建"，C 是过渡方案而不是终态。
-
-### 6.3 sub-agent 的具体形态
+### 6.4 RooflineExecutor 的具体形态（v2.0）
 
 | 项 | 设计 |
 |---|---|
-| **Backend** | 直接构造 `ClaudeBackend`（同主 Orchestration LLM，按 D3 决策），独立的 client 实例（不复用主 LLM session） |
-| **System prompt** | 新增 `inference_optimizer/orchestrator/system_prompts/roofline_analyzer.md`（~80 行），单一职责：读 analysis.md → 输出 schema JSON |
-| **User prompt 组成** | (a) analysis.md 全文；(b) 当前 `cumulative_gain_validated_pct`；(c) `pruned_families`（避免建议已 prune 的）；(d) `optimization_stack` 长度（让 sub-agent 知道走过多少步） |
-| **Tools** | 不给任何 tool；要求 sub-agent 仅输出 JSON（用 `tools=None, max_turns=1`） |
-| **输出格式** | 严格 JSON，符合 C2 文档化的 schema；JSON 解析失败 → 写一个 `primary="unknown"` 的安全 fallback 进 SharedState，标记 `raw_llm_response` 含错误，executor 返回 status=succeeded 但 result.degraded=true |
-| **Idempotency** | task idempotency_key = `f"roofline:{snapshot_id}"`，同一 snapshot 多次 propose 直接复用上次结果 |
-| **超时** | 60s（sub-agent 看 200KB analysis.md + 1 turn 输出 JSON 充足） |
-| **错误处理** | (1) backend 调用失败 → executor 返回 status=failed 但写入 fallback RooflineAnalysis 含 error 字段；(2) JSON schema 失败 → 同上 |
+| **执行体** | 顺序编排 `profile → trace_analyze`（rename 自 `select_kernels`）的纯 Python 协程；不调任何 LLM；不写 RooflineAnalysis dict |
+| **profile 子步骤** | 复用现有 `ProfileExecutor`（`profile_executor`），通过 `tasks.create(kind="profile", ...)` 入队并 await 完成 |
+| **trace_analyze 子步骤** | 复用现有 `select_kernels` REQUEST handler 的 handler 函数（直接调，不走 SubAgentRunner，避免双层任务），跑完写 last_select_kernels 缓存 |
+| **Atomicity** | profile 失败 → roofline task 失败，cache 不写；profile 成功但 trace_analyze 失败 → roofline task 失败，**但 last_profile_trace 保留**（profile 产物本身有价值，下次 roofline 可以跳过 profile 直接 trace_analyze——v2.1 优化，本 PR 不做） |
+| **Idempotency** | task idempotency_key = `f"roofline:{baseline_gain_at_propose}"`；主 LLM 在同一 gain 区间重复 propose 直接复用之前的 task |
+| **超时** | profile + trace_analyze 各自的现有 timeout；roofline 整体没有额外 timeout |
+| **错误处理** | 子步骤失败 → roofline.status=failed + error_class 透传；不写 fallback cache（v1 的 fallback 设计被废） |
 
-### 6.4 sequence_denial 集成
+### 6.5 sequence_denial 集成（v2.0）
 
-`roofline` action 必须满足：
+`roofline` 自身没有前置（baseline 完成后即可 propose）；但 `roofline`
+是 **4 个优化 action 的前置依赖**：
 
-- `last_select_kernels.analysis_md_text` 非空（否则没数据可分析）
-- 当前 snapshot_id 还没有对应的 last_roofline_analysis（idempotency）
-- 不在 closing_phase
+- `backends` / `params` / `kernel_opt` / `comm_optimization` 必须有
+  `last_select_kernels.analysis_md_text` 非空（即 roofline 至少跑过 1
+  次），否则 sequence_denial 拒绝 propose。
+- `sweep` / `validate_stack` / `report` / `integrate` 不要求 roofline
+  前置（它们不依赖瓶颈分析）。
 
-不满足 → Coordinator 拒绝 propose（参考现有 `_sequence_denial_for_action`
-对 `select_kernels` 的拒绝模式）。
+不在 closing_phase；closing 后所有 action 走现有 `_closing_phase_denial`
+拦截。
 
 ---
 
