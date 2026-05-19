@@ -219,6 +219,16 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "model_class",
     "start_ts",
     "max_minutes",
+    # v0.8 §3.10 §6.2 — the fact-layer KEEP ledger. Coordinator is the
+    # sole writer (Inv-1 / Inv-10.2); LLM update_state can never
+    # rewrite the stack, even though the LLM proposes the entries that
+    # land in it via emit_intent → execute → promote flows.
+    "optimization_stack",
+    "gain_per_stack_entry",
+    # v0.8 §3.10 §5.1 — schema_version is a migration breadcrumb; an
+    # LLM update_state must not be able to roll the state.json back to
+    # a v0.6 reader by setting ``schema_version=1``.
+    "schema_version",
     # v0.8 M1 — Cortex KB integration fields (KB_design §3.6, §3.10,
     # §3.13 M1). Coordinator-only writes; LLM agents reading is fine.
     "cortex_session_id",
