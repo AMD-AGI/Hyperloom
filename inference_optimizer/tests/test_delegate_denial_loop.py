@@ -108,13 +108,15 @@ async def test_delegate_fallback_key_uses_tick_and_content_fingerprint(session_d
 
 
 @pytest.mark.asyncio
-async def test_policy_denial_streak_locks_action_at_two(session_dir):
+async def test_policy_denial_streak_records_streak_at_two(session_dir):
+    """v0.8 §3.9 — the v0.6 scoreboard's ``locked_reason`` was retired.
+    The denial streak is still tracked via
+    :attr:`SharedState.policy_denial_streak` (a pure fact); the LLM
+    sees it as a count, not a priority lock."""
     c = _silent_coordinator(session_dir)
     try:
         from inference_optimizer.orchestrator.policy import PolicyDenied
-        from inference_optimizer.orchestrator.scoring import ActionScore
 
-        c.shared_state.put_action_score("backends", ActionScore())
         intent = _delegate(action="backends", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
         await c._record_policy_denied(
@@ -123,9 +125,10 @@ async def test_policy_denial_streak_locks_action_at_two(session_dir):
         await c._record_policy_denied(
             "orchestration", intent, pd, action_name="backends",
         )
-        score = c.shared_state.get_action_score("backends")
-        assert score is not None
-        assert score.locked_reason == "policy_loop:duplicate_idempotency_key"
+        streak = c.shared_state.policy_denial_streak.get(
+            "backends:duplicate_idempotency_key", 0,
+        )
+        assert streak >= 2
     finally:
         await c.stop()
 
