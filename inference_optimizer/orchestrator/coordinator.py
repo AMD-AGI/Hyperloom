@@ -36,6 +36,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from ..cortex_kb_client import (
+    CortexKBClient,
+    CortexKBError,
+    attempt_canonical_id,
+    optimization_canonical_id,
+)
+from . import phase_state as _phase_state
 from ..paths import db_path_for, make_session_dir
 from ..storage.connection import SqliteConnection
 from .action_registry import ActionRegistry
@@ -56,9 +63,16 @@ from .policy import (
     REVIEW_VERDICT_SOURCE_ALLOWLIST,
     ROBUSTNESS_ONLY_SOURCE_ALLOWLIST,
 )
-from .resource_lock import ResourceLockManager, SqliteLeaseBackend
+from .resource_lock import (
+    LaneBusy,
+    LaneFull,
+    Lease,
+    ResourceLockManager,
+    SqliteLeaseBackend,
+    _expand_lanes,
+)
 from .shared_state import SharedState
-from .sub_agent_runner import SubAgentRunner
+from .sub_agent_runner import SubAgentResult, SubAgentRunner
 from .task_registry import Task, TaskRegistry
 from .action_executors.benchmark_result import is_valid_measurement
 from . import scoring as _scoring
@@ -130,6 +144,28 @@ def effective_closing_grace_sec(
     return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
 
 
+def _parse_iso_unix(ts: str) -> float:
+    """Parse an ISO 8601 UTC timestamp into unix seconds.
+
+    Returns ``0.0`` on any parse failure so callers can treat a missing
+    timestamp as "no information"; never raises. Used by the v0.8 §3.3
+    stale-specialist scanner to compute task-running duration without
+    plumbing a separate ``started_unix`` column through TaskRegistry.
+    """
+    s = (ts or "").strip()
+    if not s:
+        return 0.0
+    try:
+        # ``fromisoformat`` accepts microsecond / timezone-aware strings.
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if dt.tzinfo is None:
+        # Treat naive timestamps as UTC for consistency with _now_iso().
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
 def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any]:
     """Project ``params`` to the keys that determine baseline behavior.
 
@@ -173,6 +209,15 @@ class PendingProposal:
     payload: dict[str, Any]
     decided: bool = False
     verdict: str | None = None  # approve / reject / redirect / advise / needs_review
+    # v0.8 M1 — tentative_edge_id returned by Cortex T2
+    # ``session hypothesize`` (KB_design §3.6.6 / §3.13 M1 §5.2).
+    # Empty when T2 failed sync and went to NDJSON; T3 then falls back
+    # to ``propose-edge + late_verified`` rather than ``verify``.
+    kb_edge_id: str = ""
+    # The opt_canonical id minted at T2 (``opt.session-{sid}.proposal-{msg_id}``).
+    # Stored on the proposal so the T3 verify path can still emit a
+    # ``propose-edge`` even when the sync hypothesize failed.
+    kb_opt_canonical: str = ""
 
 
 @dataclass
@@ -204,9 +249,39 @@ class Coordinator:
         bus_class: type[MessageBus] = MessageBus,
         compare_against_gpu: str | None = None,
         model_class: str | None = None,
+        cortex_kb: CortexKBClient | None = None,
+        phase_budget_pct: dict[str, float] | None = None,
     ):
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
+        # v0.8 M1 — Cortex KB client (KB_design §3.6 + §3.13 M1).  When
+        # ``None`` (legacy v0.6 cli path or ``--no-cortex``) all T2/T3/T4
+        # hooks become no-ops; the rest of the Coordinator behaves
+        # identically to v0.6.  The client itself is stateless apart
+        # from the per-session NDJSON queue, so it can be shared across
+        # threads (the Coordinator is single-event-loop anyway).
+        self.cortex_kb: CortexKBClient | None = cortex_kb
+        # v0.8 M2 — phase budget percentages (KB_design §3.8 §5.3 +
+        # §3.13 M2 §7). ``None`` means library defaults; CLI flags
+        # populate this dict from ``--max-minutes-<phase>-pct``. We
+        # normalise once at construction so downstream judges can
+        # rely on a complete dict.
+        self._phase_budget_pct: dict[str, float] = _phase_state.normalize_budget_pct(
+            phase_budget_pct
+        )
+        # v0.8 §3.3 §4.4 — specialist stale scan threshold (seconds).
+        # M5 wires real specialist sub-agents; M2 only ships the
+        # scanner so the Robustness prompt block lights up the moment
+        # M5 lands. Env override mirrors the rest of the v0.8 knobs.
+        try:
+            self._specialist_stale_sec: float = max(
+                0.0,
+                float(os.environ.get(
+                    "INFERENCE_OPTIMIZER_SPECIALIST_STALE_SEC", "600",
+                )),
+            )
+        except ValueError:
+            self._specialist_stale_sec = 600.0
         # External-SKILL-driven configuration. Both replace the deleted
         # `setup` / `classify` orchestration actions: the SKILL caller is
         # expected to supply --model-class (or MODEL_CLASS env) and
@@ -245,6 +320,20 @@ class Coordinator:
         # Persistent session state (state.json) — load existing for resume;
         # save() is called whenever the Coordinator mutates a persistent field.
         self.shared_state = SharedState.load_or_init(self.session_dir)
+        # v0.8 M6 — sync research_lane capacity from SharedState into
+        # the lane_capacity table (KB_design §3.7 §4.4). CLI/manifest
+        # flow already pinned the value onto SharedState at session
+        # start; this propagates it into the SQLite source of truth so
+        # ``acquire_many`` honours the operator-set cap. Idempotent:
+        # the default is already 1 from ``ensure_schema``; we only
+        # overwrite when the operator picked something non-default.
+        try:
+            from ..storage.schema import set_lane_capacity as _set_lane_capacity
+            cap = int(self.shared_state.research_lane_capacity or 0)
+            if cap >= 0:
+                _set_lane_capacity(self.db.raw, "research_lane", cap)
+        except Exception:  # noqa: BLE001 — non-fatal; default seed wins
+            log.exception("failed to sync research_lane_capacity to leases DB")
         # `strict_paths` defers to the env flag (CLI flips this on for
         # production; tests omit the env so the path check stays off and
         # legacy `/tmp/<fixture>` payload values still pass).
@@ -333,6 +422,11 @@ class Coordinator:
         self._resumed_from = self._detect_resume_state()
         # Seed per-action scoring now that resume status is locked in.
         self._ensure_action_scores_seeded()
+        # v0.8 M2 — initialise phase machine. Fresh session enters
+        # PRELUDE; resume from v0.6 (no phase field) infers a phase via
+        # :func:`phase_state.infer_phase_from_state`.  Always idempotent:
+        # second construction on the same session_dir is a no-op.
+        self._ensure_phase_initialised()
 
     # ==================================================================
     # Resume
@@ -441,7 +535,65 @@ class Coordinator:
                 pass
             except Exception:  # noqa: BLE001
                 log.exception("reactor task raised on shutdown")
+        # v0.8 M1 — T4 anchor (KB_design §3.13 M1 §5.4). Drains the
+        # NDJSON queue (timeout 60s) then commits the Cortex session.
+        # Failures are recorded on SharedState.stop_reason so the
+        # operator sees ``cortex_drain_failed`` / ``cortex_commit_failed``
+        # in the final summary; the SQLite close still runs so we don't
+        # leak fds.
+        await self._cortex_t4_hook()
         self.db.close()
+
+    async def _cortex_t4_hook(self) -> None:
+        """T4 — drain NDJSON pending + ``session commit``.
+
+        Called from :meth:`stop` once the reactor / dispatcher loops
+        have torn down. Idempotent: a second invocation with an empty
+        queue + already-committed session is a no-op (cortex-kb commit
+        is itself idempotent for a given sid).
+        """
+        if self.cortex_kb is None or not self.cortex_kb.enabled:
+            return
+        sid = (self.shared_state.cortex_session_id or "").strip()
+        if not sid:
+            return
+        # 1. Drain async queue. NDJSON drains *can* take meaningful time
+        #    when Cortex was unreachable mid-run; 60s is the documented
+        #    upper bound (KB_design §3.13 M1 §5.4).
+        try:
+            drain_report = self.cortex_kb.drain_pending(timeout_sec=60.0)
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception("cortex T4 drain_pending failed")
+            if not self.shared_state.stop_reason:
+                self.shared_state.stop_reason = "cortex_drain_failed"
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001
+                log.exception("cortex T4 SharedState.save after drain failed")
+            return
+        if drain_report.get("remaining", 0) > 0:
+            log.warning(
+                "cortex T4 drain incomplete: %s remaining; commit will reflect "
+                "queued state. flusher daemon should drain on next pickup.",
+                drain_report,
+            )
+            if not self.shared_state.stop_reason:
+                self.shared_state.stop_reason = "cortex_drain_failed"
+        # 2. Commit (sync). On failure we record commit_failed so resume
+        #    can re-attempt; we do NOT delete cortex_session_id so the
+        #    next coordinator wake-up picks up the same sid.
+        try:
+            summary = self.cortex_kb.session_commit(sid)
+        except CortexKBError as exc:
+            log.warning("cortex T4 session_commit failed: %s", exc)
+            if not self.shared_state.stop_reason:
+                self.shared_state.stop_reason = "cortex_commit_failed"
+            summary = {"status": "commit_failed", "error": str(exc)[:512]}
+        self.shared_state.cortex_session_summary = dict(summary)
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.exception("cortex T4 SharedState.save after commit failed")
 
     # ==================================================================
     # Action scoring
@@ -568,6 +720,113 @@ class Coordinator:
         else:
             self._score_action_keep(task_kind, gain_pct=0.0)
 
+    # ==================================================================
+    # v0.8 M2 — phase state machine
+    # ==================================================================
+    def _ensure_phase_initialised(self) -> None:
+        """Set ``phase`` + persist ``phase_budget_pct`` once per session.
+
+        Idempotent: resume / re-construction skips both writes when the
+        phase machine has already been initialised. Persists immediately
+        so a crash between construction and the first tick still leaves
+        a usable phase_history.
+        """
+        state = self.shared_state
+        # Phase budget always normalised so the judge has a complete map.
+        # Persisted regardless because the operator-passed CLI flags need
+        # to land in state.json for resume parity.
+        if not state.phase_budget_pct:
+            state.phase_budget_pct = dict(self._phase_budget_pct)
+        current = (state.phase or "").strip().upper()
+        if current in _phase_state.PHASE_NAMES:
+            # Already initialised. Keep CLI-side budget override the
+            # latest authoritative value.
+            state.phase_budget_pct = dict(self._phase_budget_pct)
+            try:
+                state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: save after phase budget refresh failed")
+            return
+        # Fresh OR v0.6 resume.
+        if self._resumed_from.get("is_resume"):
+            inferred, evidence = _phase_state.infer_phase_from_state(state)
+            reason = "resumed_from_v06_inferred"
+            evidence = {**evidence, "resume_path": True}
+        else:
+            inferred = _phase_state.PHASE_PRELUDE
+            reason = "phase_entered"
+            evidence = {"trigger": "fresh_session"}
+        state.record_phase_transition(
+            to_phase=inferred,
+            reason=reason,
+            evidence=evidence,
+        )
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("Coordinator: save after phase init failed")
+
+    def _kernel_enabled(self) -> bool:
+        # Mirror the persisted ``kernel_enabled`` flag — CLI's
+        # ``--no-kernel`` removes the kernel role; resume picks the
+        # value from state.json.
+        return "kernel" in self.role_registry and bool(
+            getattr(self.shared_state, "kernel_enabled", True)
+        )
+
+    async def _advance_phase_if_needed(self) -> None:
+        """Scan exit conditions and transition phase at most once per tick.
+
+        Priority order is encoded in :func:`phase_state.compute_next_phase`:
+        ``abort > exit_terminal > exit_normal`` (Inv-8.2).  When a
+        transition fires we:
+
+        1. Append a phase_history row (built via
+           :meth:`SharedState.record_phase_transition`).
+        2. Mirror the transition onto the bus as an ``event`` so resume
+           replays it and Cortex-side observers (M5+) see it.
+        3. Save state.json atomically so a crash between two ticks
+           doesn't lose the boundary.
+        """
+        state = self.shared_state
+        next_phase = _phase_state.compute_next_phase(
+            state,
+            kernel_enabled=self._kernel_enabled(),
+            budget_pct=self._phase_budget_pct,
+        )
+        if next_phase is None:
+            return
+        target, reason, evidence = next_phase
+        if target == (state.phase or "").upper():
+            return  # already there
+        prior = state.phase
+        state.record_phase_transition(
+            to_phase=target,
+            reason=reason,
+            evidence=evidence,
+        )
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("Coordinator: save after phase transition failed")
+        log.info(
+            "Coordinator.phase: %s → %s (reason=%s)",
+            prior or "<unset>", target, reason,
+        )
+        try:
+            await self.bus.append_and_seq(Message.new(
+                "coordinator", "*", "event",
+                {
+                    "kind":       "phase_transition",
+                    "from_phase": prior or "",
+                    "to_phase":   target,
+                    "reason":     reason,
+                    "evidence":   evidence,
+                },
+            ))
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("Coordinator: phase_transition event bus write failed")
+
     def _ensure_action_scores_seeded(self) -> None:
         """Populate ``shared_state.action_scores`` once per session.
 
@@ -628,6 +887,8 @@ class Coordinator:
             for name in self._tick_roles:
                 await self._reactor_pass(name)
             await self._pump_dispatcher_once()
+            # v0.8 M2 — phase machine advance at tick boundary.
+            await self._advance_phase_if_needed()
 
     # ==================================================================
     # Long-run interface (DESIGN §9 + §21)
@@ -714,6 +975,11 @@ class Coordinator:
                         await self._reactor_pass(name)
                 if not self._stop.is_set():
                     await self._pump_dispatcher_once()
+                # v0.8 M2 — phase machine advance at tick boundary.
+                # Runs even when ``in_closing`` so CLOSE phase still gets
+                # recorded into phase_history when the final breakdown
+                # writer transitions us in.
+                await self._advance_phase_if_needed()
 
                 # ---- check stop conditions ----
                 if self._stop.is_set():
@@ -1087,6 +1353,49 @@ class Coordinator:
                 },
             )
 
+    async def _scan_stale_specialists(self) -> list[dict[str, Any]]:
+        """Return TaskRegistry rows for ``kind='specialist'`` tasks whose
+        wall-clock running duration exceeds ``self._specialist_stale_sec``.
+
+        Wired through ``_compose_prompt`` so Robustness can decide to
+        emit ``kill_task``. v0.8 §3.3 §4.4 contract; M5 lands the actual
+        ``specialist`` task kind so the registry stays empty until then —
+        the scanner returns ``[]`` and Robustness shows ``count=0``.
+
+        Each row is ``{"task_id": str, "running_seconds": float,
+        "kind": "specialist"}`` (a deliberately small projection so the
+        prompt block stays narrow). Failures (registry unreachable, etc.)
+        return ``[]`` and log; **never** raise — the prompt assembly
+        cannot block on an audit query.
+        """
+        try:
+            running = await self.tasks.running()
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("Coordinator: tasks.running() failed during stale scan")
+            return []
+        if not running:
+            return []
+        stale: list[dict[str, Any]] = []
+        now_unix = time.time()
+        for t in running:
+            if (t.kind or "").strip() != "specialist":
+                continue
+            # ``updated_at`` is the last state-transition timestamp; for a
+            # ``running`` task that's when the dispatcher promoted it
+            # (no later transition touches ``updated_at`` until
+            # completion). Parse it as the start of the running window.
+            started_unix = _parse_iso_unix(t.updated_at)
+            if started_unix <= 0:
+                continue
+            running_sec = max(0.0, now_unix - started_unix)
+            if running_sec >= self._specialist_stale_sec:
+                stale.append({
+                    "task_id":         t.task_id,
+                    "kind":            t.kind,
+                    "running_seconds": running_sec,
+                })
+        return stale
+
     async def _compose_prompt(self, agent_name: str) -> str:
         """v0.6 §8.3 prompt: SharedState summary + inbox tail.
 
@@ -1107,6 +1416,21 @@ class Coordinator:
         # path so they reference it instead of fabricating one. This pairs
         # with PolicyGate's path-containment guard.
         sections.append(f"SESSION_DIR={self.session_dir}")
+
+        # v0.8 §3.3 — per-tick phase block injected for **every** agent.
+        # Comes high in the prompt (right after SESSION_DIR) because R1
+        # rejection is driven by the current phase; the LLM should see
+        # phase context before anything else.
+        try:
+            phase_block = self.shared_state.to_phase_status_summary(
+                budget_pct=self._phase_budget_pct,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("Coordinator: phase status summary failed")
+            phase_block = ""
+        if phase_block:
+            sections.append("=== Phase ===")
+            sections.append(phase_block)
 
         # 0a. Mission progress (Orchestration only). Phase 2 — this is the
         # *outcome-shaped* projection of SharedState (raw vs validated
@@ -1203,6 +1527,55 @@ class Coordinator:
             if kb_text.strip():
                 sections.append("=== Knowledge base hints ===")
                 sections.append(kb_text)
+            # v0.8 §3.3 §4.1 — Cortex T0 warm-start snapshot. Empty when
+            # `--no-cortex` was set or it's the first session for this
+            # (workload, hw) pair. The full JSON snapshot remains on disk
+            # at runtime/cortex/.kb_warm.json for Read-tool access.
+            try:
+                warm_block = self.shared_state.to_warm_start_summary()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: warm_start_summary failed")
+                warm_block = ""
+            if warm_block:
+                sections.append("=== Warm start (Cortex T0) ===")
+                sections.append(warm_block)
+
+        # v0.8 §3.3 §4.4 — Robustness gets a phase budget telemetry +
+        # specialist health block so it can fire the medium-severity
+        # alerts described in the role prompt.
+        if agent_name == "robustness":
+            try:
+                budget_block = self.shared_state.to_phase_budget_telemetry(
+                    budget_pct=self._phase_budget_pct,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: phase budget telemetry failed")
+                budget_block = ""
+            if budget_block:
+                sections.append("=== Phase budget telemetry ===")
+                sections.append(budget_block)
+            try:
+                stale = await self._scan_stale_specialists()
+                running = await self.tasks.running()
+                specialist_running = sum(
+                    1 for t in (running or [])
+                    if (t.kind or "").strip() == "specialist"
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: specialist health scan failed")
+                stale, specialist_running = [], 0
+            stale_lines = [
+                f"  - task_id={row['task_id']} running_sec={int(row['running_seconds'])}"
+                for row in stale
+            ]
+            sections.append("=== Specialist health ===")
+            sections.append(
+                f"running={specialist_running} stale={len(stale)} "
+                f"stale_threshold_sec={int(self._specialist_stale_sec)}"
+            )
+            if stale_lines:
+                sections.append("stale specialists (consider kill_task):")
+                sections.extend(stale_lines)
 
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
@@ -1754,13 +2127,131 @@ class Coordinator:
             priority=1,
         )
         await self.bus.append_and_seq(msg)
-        self.state.pending_proposals[msg.msg_id] = PendingProposal(
+        pending = PendingProposal(
             proposal_msg_id=msg.msg_id,
             from_agent=source,
             action_name=action_name,
             predicted_gain_pct=float(intent.payload.get("predicted_gain_pct", 0.0)),
             payload=dict(intent.payload),
         )
+        # v0.8 M1 — T2 anchor: mint optimization_node + hypothesize edge.
+        # Best-effort + isolated so a KB hiccup never blocks the
+        # Critic-review pipeline (Inv-6.2 + KB_design §3.13 M1 §5.2).
+        await self._cortex_t2_hook(pending)
+        self.state.pending_proposals[msg.msg_id] = pending
+
+    async def _cortex_t2_hook(self, pending: PendingProposal) -> None:
+        """Mint optimization_node + hypothesize edge for a propose_action.
+
+        Best-effort: every Cortex KB failure is downgraded to an NDJSON
+        enqueue by the client itself; the only thing we own here is the
+        ``tentative_edge_id`` plumb-through onto the PendingProposal.
+
+        Gap-anchor selection (M1 simplification): the workload_node
+        canonical id is used as the ``from`` side. M5 will replace it
+        with a real issue_node once the specialist framework can emit
+        gap-annotated proposals.
+        """
+        if self.cortex_kb is None or not self.cortex_kb.enabled:
+            return
+        sid = (self.shared_state.cortex_session_id or "").strip()
+        if not sid:
+            return
+        opt_canonical = optimization_canonical_id(sid, pending.proposal_msg_id)
+        gap_canonical = self._gap_anchor_canonical_id()
+        try:
+            self.cortex_kb.propose_point(
+                canonical_id=opt_canonical,
+                kind="optimization_node",
+                authority="HYPOTHESIZED",
+                attrs={
+                    "action":              pending.action_name,
+                    "from_agent":          pending.from_agent,
+                    "predicted_gain_pct":  pending.predicted_gain_pct,
+                    "proposal_msg_id":     pending.proposal_msg_id,
+                },
+                evidence=[f"log:proposal-{pending.proposal_msg_id}"],
+            )
+        except CortexKBError as exc:  # defensive (client already swallows)
+            log.warning("cortex T2 propose_point failed: %s", exc)
+        pending.kb_opt_canonical = opt_canonical
+        try:
+            outcome = self.cortex_kb.hypothesize(
+                sid=sid,
+                from_canonical=gap_canonical,
+                to_canonical=opt_canonical,
+                edge_type="hypothetical",
+                reason=str(pending.payload.get("reasoning") or "")[:512],
+                attrs={
+                    "role":   pending.from_agent,
+                    "action": pending.action_name,
+                    "proposal_msg_id": pending.proposal_msg_id,
+                    # v0.8 M2 — phase provenance on every edge so
+                    # cross-session reachability queries can filter
+                    # by phase (KB_design §3.6.5.1 / §3.2 §7).
+                    "phase":  (self.shared_state.phase or "").upper() or "UNKNOWN",
+                },
+                evidence=[f"log:proposal-{pending.proposal_msg_id}"],
+            )
+        except CortexKBError as exc:
+            log.warning("cortex T2 hypothesize failed: %s", exc)
+            outcome = {}
+        edge_id = str(outcome.get("tentative_edge_id") or "").strip()
+        pending.kb_edge_id = edge_id
+        pending_edges = list(self.shared_state.pending_kb_edges or [])
+        pending_edges.append({
+            "proposal_msg_id": pending.proposal_msg_id,
+            "opt_canonical":   opt_canonical,
+            "gap_canonical":   gap_canonical,
+            "edge_id":         edge_id,
+            "action":          pending.action_name,
+            "ts":              datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+        # Cap to a reasonable size so resume doesn't pay quadratic costs.
+        if len(pending_edges) > 256:
+            pending_edges = pending_edges[-256:]
+        self.shared_state.pending_kb_edges = pending_edges
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive; T2 must not crash.
+            log.exception("cortex T2 SharedState.save failed")
+
+    def _gap_anchor_canonical_id(self) -> str:
+        """M1 placeholder for the gap anchor.
+
+        Per KB_design §3.13 M1: "M1 simplification — use
+        ``workload_node.canonical_id`` as the from side of every
+        hypothesize edge". M5 specialist framework will introduce real
+        ``issue_node`` anchors keyed by gap descriptors. Centralising
+        the derivation here keeps the migration to M5 a single-line
+        change.
+        """
+        from ..cortex_kb_client import workload_canonical_id
+        workload = self.shared_state.model_name or "unknown_model"
+        hw = self.shared_state.gpu_type or "unknown_gpu"
+        return workload_canonical_id(workload, hw)
+
+    def _pop_pending_kb_edge(self, proposal_msg_id: str) -> dict[str, Any] | None:
+        """Remove + return the pending edge entry for a proposal_msg_id.
+
+        Used by T3 (KEEP/REVERT) to confirm or refute the matching
+        hypothetical edge. ``None`` when the entry is missing (resume
+        from a stale state.json, or the T2 hook was skipped).
+        """
+        edges = list(self.shared_state.pending_kb_edges or [])
+        found: dict[str, Any] | None = None
+        rest: list[dict[str, Any]] = []
+        for row in edges:
+            if not isinstance(row, dict):
+                continue
+            if found is None and row.get("proposal_msg_id") == proposal_msg_id:
+                found = row
+            else:
+                rest.append(row)
+        if found is None:
+            return None
+        self.shared_state.pending_kb_edges = rest
+        return found
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
         target = intent.payload["target_proposal_msg_id"]
@@ -2544,13 +3035,97 @@ class Coordinator:
             ))
 
     async def _pump_dispatcher_once(self) -> None:
+        """Dispatch queued tasks, respecting per-lane capacity.
+
+        v0.8 M6 (KB_design §3.7 §4.3) — concurrent dispatch path:
+
+        1. Read the current lane-holder snapshot + per-lane capacities
+           up front so the same tick can decide locally whether each
+           queued task fits without re-querying SQLite per task.
+        2. For each queued task: if the *expanded* lane set (incl.
+           cross-lane conflicts) still has headroom in our local view,
+           pre-acquire the lease via :meth:`try_acquire_many` and
+           spawn an asyncio task that runs the work + collects the
+           result. Update the local holder view so subsequent tasks
+           in the same tick see the bump.
+        3. ``asyncio.gather`` all spawned tasks before returning so
+           the tick semantics stay compatible with the original
+           serial dispatcher (one ``_pump_dispatcher_once`` call →
+           every dispatchable queued task has finished or stayed
+           queued).
+
+        With the default capacity=1 everywhere this is behaviourally
+        equivalent to v0.6 serial dispatch (one task per conflict
+        group runs at a time). When ``research_lane.capacity > 1``
+        (M6 default 6), N specialist tasks fan out in parallel.
+
+        Inv-7.3 (atomic acquire / release per task) holds because the
+        pre-acquired lease is bound to the task's ``task_id`` and the
+        runner releases it in its own ``finally`` block.
+        """
         queued = await self.tasks.queued()
+        if not queued:
+            return
+        holders = await self.locks.lane_holders()
+        capacities = await self.locks.lane_capacities()
+        spawned: list[tuple[Task, asyncio.Task[SubAgentResult]]] = []
         for task in queued:
-            try:
-                result = await self.sub.run_task(task)
-            except Exception as exc:  # noqa: BLE001
-                log.exception("dispatcher: failed to run task %s", task.task_id)
+            lanes_needed = list(task.requires_lanes or [])
+            if lanes_needed:
+                try:
+                    expanded = _expand_lanes(lanes_needed)
+                except ValueError:
+                    log.warning(
+                        "dispatcher: task %s has unknown lane in %r; "
+                        "skipping until resolved",
+                        task.task_id, lanes_needed,
+                    )
+                    continue
+                if not self._lanes_fit(expanded, holders, capacities):
+                    # Stays queued; next tick re-evaluates after
+                    # other holders release.
+                    continue
+                lease = await self.locks.try_acquire_many(
+                    lanes_needed,
+                    holder_id=task.task_id,
+                    task_id=task.task_id,
+                    action=task.kind,
+                    ttl_sec=task.lease_ttl_sec or 60,
+                )
+                if lease is None:
+                    # Race: another holder grabbed the lane between
+                    # our local read and the acquire. Leave queued.
+                    continue
+                # Reflect the bump in our local view so the next task
+                # in this tick sees the holder.
+                for lane in lease.lanes:
+                    holders[lane] = int(holders.get(lane, 0)) + 1
+            else:
+                lease = None
+            spawned.append((
+                task,
+                asyncio.create_task(
+                    self.sub.run_task(task, prebound_lease=lease),
+                ),
+            ))
+        if not spawned:
+            return
+        # Gather; we want to surface per-task results in the order the
+        # tasks finished but keep tick semantics simple by awaiting
+        # all of them. Exceptions are folded into SubAgentResult
+        # (run_task catches inside its body) but defensively absorb
+        # anything that leaks here too.
+        results = await asyncio.gather(
+            *(t for _, t in spawned), return_exceptions=True,
+        )
+        for (task, _), maybe_result in zip(spawned, results):
+            if isinstance(maybe_result, BaseException):
+                log.exception(
+                    "dispatcher: spawned task %s raised: %r",
+                    task.task_id, maybe_result,
+                )
                 continue
+            result: SubAgentResult = maybe_result
             await self.bus.append_and_seq(Message.new(
                 "coordinator", "*", "delegated_result",
                 {"task_id": task.task_id, "kind": task.kind,
@@ -2564,15 +3139,152 @@ class Coordinator:
             # executor didn't throw. Promotion is tied to task-specific
             # invariants: baseline/profile require a real measurement, while
             # grid actions require at least one successful variant.
-            if (
+            kept = (
                 result.state == "succeeded"
                 and self._is_promotable_result(task.kind, result.result or {})
-            ):
+            )
+            if kept:
                 await self._promote_to_shared_state(
                     task.kind, result.result, task=task,
                 )
             else:
                 await self._handle_unpromotable_result(task, result.result)
+            # v0.8 M1 — T3 anchor (KB_design §3.13 M1 §5.3). Always called
+            # so KEEP / REVERT each get a corresponding ingest-attempt +
+            # verify pair. Best-effort: failures are absorbed into the
+            # NDJSON queue by the client.
+            await self._cortex_t3_hook(task=task, result=result, kept=kept)
+
+    @staticmethod
+    def _lanes_fit(
+        expanded_lanes: list[str],
+        holders: dict[str, int],
+        capacities: dict[str, int],
+    ) -> bool:
+        """Local-view headroom check used by the concurrent dispatcher.
+
+        Returns True iff every lane in ``expanded_lanes`` has at least
+        one open slot in our point-in-time snapshot. This is a hint —
+        the authoritative gate is :meth:`ResourceLockManager.try_acquire_many`
+        which re-checks under ``BEGIN IMMEDIATE``.
+        """
+        for lane in expanded_lanes:
+            cap = int(capacities.get(lane, 1))
+            used = int(holders.get(lane, 0))
+            if cap <= 0 or used >= cap:
+                return False
+        return True
+
+    # ------------------------------------------------------------------
+    # v0.8 M1 — Cortex KB T3 hook (KEEP / REVERT mirror)
+    # ------------------------------------------------------------------
+    def _proposal_msg_id_for_task(self, task: "Task") -> str:
+        """Recover the original ``proposal_msg_id`` from a task.
+
+        ``_materialize_approved_proposal`` writes the task with
+        ``idempotency_key=f"approved-{proposal_msg_id}"`` (DESIGN §18,
+        also referenced by the resume path). Tasks created via direct
+        delegate (no review) carry a different idempotency_key shape;
+        for those we return ``""`` and the T3 hook falls back to
+        propose-edge (``late_verified``).
+        """
+        key = (task.idempotency_key or "").strip()
+        if key.startswith("approved-"):
+            return key[len("approved-"):]
+        return ""
+
+    async def _cortex_t3_hook(
+        self,
+        *,
+        task: "Task",
+        result: Any,
+        kept: bool,
+    ) -> None:
+        if self.cortex_kb is None or not self.cortex_kb.enabled:
+            return
+        sid = (self.shared_state.cortex_session_id or "").strip()
+        if not sid:
+            return
+        result_dict = result.result if hasattr(result, "result") else (result or {})
+        if not isinstance(result_dict, dict):
+            result_dict = {}
+        # Mint per-task attempt_node for cross-session reachability.
+        attempt_canonical = attempt_canonical_id(sid, task.task_id)
+        outcome_label = "PASS" if kept else "FAIL"
+        if not kept:
+            status = str(result_dict.get("status", "")).lower()
+            if status in ("partial", "needs_review"):
+                outcome_label = "PARTIAL"
+        metrics: dict[str, Any] = {}
+        for key in (
+            "output_throughput", "gain_pct", "validated_gain_pct",
+            "accuracy", "ttft_mean_ms", "e2el_mean_ms", "decision",
+            "variant_name", "error_class",
+        ):
+            if key in result_dict and result_dict[key] is not None:
+                metrics[key] = result_dict[key]
+        metrics.setdefault("task_kind", task.kind)
+        metrics.setdefault("task_id",   task.task_id)
+        try:
+            self.cortex_kb.propose_point(
+                canonical_id=attempt_canonical,
+                kind="attempt_node",
+                authority="EXPERIENTIAL",
+                attrs={
+                    "task_kind": task.kind,
+                    "task_id":   task.task_id,
+                    "outcome":   outcome_label,
+                },
+                evidence=[f"log:task-{task.task_id}"],
+            )
+        except CortexKBError as exc:
+            log.warning("cortex T3 propose_point attempt failed: %s", exc)
+        proposal_msg_id = self._proposal_msg_id_for_task(task)
+        edge_entry = (
+            self._pop_pending_kb_edge(proposal_msg_id) if proposal_msg_id else None
+        )
+        edge_id = (edge_entry or {}).get("edge_id", "") if edge_entry else ""
+        plan_edge = edge_id or ""
+        try:
+            self.cortex_kb.ingest_attempt(
+                sid=sid,
+                iter_id=int(self.shared_state.tick or 0),
+                outcome=outcome_label,
+                metrics=metrics,
+                plan_edge=plan_edge,
+                evidence=[
+                    f"log:task-{task.task_id}",
+                    f"point_id:{attempt_canonical}",
+                ],
+            )
+        except CortexKBError as exc:
+            log.warning("cortex T3 ingest_attempt failed: %s", exc)
+        if edge_entry and edge_id:
+            verify_outcome = "confirmed" if kept else "refuted"
+            promote_authority = "EXPERIENTIAL" if kept else None
+            try:
+                self.cortex_kb.verify(
+                    sid=sid,
+                    edge_id=edge_id,
+                    outcome=verify_outcome,
+                    evidence=[f"log:task-{task.task_id}"],
+                    promote_authority=promote_authority,
+                )
+            except CortexKBError as exc:
+                log.warning("cortex T3 verify failed: %s", exc)
+        elif edge_entry and not edge_id:
+            # T2 fell through to NDJSON without a sync edge id. Fall back
+            # to a late propose-edge: signal the verdict via attempt
+            # outcome only; the flusher will eventually replay the
+            # hypothesize NDJSON row and Cortex will dedup by canonical_id.
+            log.info(
+                "cortex T3 late_verified (no edge_id for proposal %s)",
+                proposal_msg_id or "(no msg_id)",
+            )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive; T3 must not crash.
+            log.exception("cortex T3 SharedState.save failed")
 
     def _lift_to_current_best(
         self, task_kind: str, best_tput: float, bv: dict[str, Any],
