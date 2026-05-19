@@ -261,6 +261,8 @@ async def test_sequence_denial_no_self_loop_for_other_actions(session_dir):
         c.shared_state.last_profile_pmc_summary = "/tmp/fake-pmc.json"
         c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/fake-trace",
+            # Roofline-v2 N3: backends now requires fresh analysis_md_text.
+            "analysis_md_text": "FAKE_REPORT",
         }
         # Pretend the user tried a backends proposal with the same params
         # as a doomed baseline — self-loop rule must NOT fire on
