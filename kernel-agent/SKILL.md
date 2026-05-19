@@ -234,7 +234,7 @@ mirrors the source tree to `${HYPERLOOM_ROOT}/TraceLens-internal` (parallel
 to `${HYPERLOOM_ROOT}/geak` / `${HYPERLOOM_ROOT}/OOB/oob_cli`) via `cp -r`,
 runs `pip install -e` against the writable mirror, and `write_env_file`
 re-exports `TRACELENS_ROOT` pointing at the mirror so subsequent CLI
-subprocesses inherit it. This prevents the `select_kernels` failure loop
+subprocesses inherit it. This prevents the `trace_analyze` failure loop
 caused by `tools/tracelens_analysis.py` re-running `pip install -e .`
 inside `cwd=$TRACELENS_ROOT` on every request. No manual `rsync` is
 needed for the single-node read-only case.
@@ -281,7 +281,7 @@ legacy `standalone_analysis.md` / `tracelens_report.md` copies and the
 `--compat-report-path` argument; the `${USER_DATA_PATH:-/workspace/hyperloom}/`
 compatibility output is gone with them). Downstream consumers read the
 canonical upstream path returned in `analysis_report_path` from
-`select_kernels_handler`.
+`trace_analyze_handler`.
 
 ## Backend Selection
 
