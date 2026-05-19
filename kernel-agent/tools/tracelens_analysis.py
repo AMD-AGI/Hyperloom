@@ -76,7 +76,7 @@ def _build_high_idle_warning(
 ) -> dict[str, Any]:
     """Build the structured ``trace_health_warnings[]`` entry for a high-idle trace.
 
-    The entry is consumed by ``kernel_request_handlers.select_kernels_handler``
+    The entry is consumed by ``kernel_request_handlers.trace_analyze_handler``
     (T4) which uses it to route to parameter optimization instead of
     GEAK kernel rewriting. The shape is deliberately minimal and
     JSON-serializable so it can be written verbatim into the audit
@@ -2176,7 +2176,7 @@ def main() -> int:
             "orchestrator_mode": orchestrator_mode,
             "orchestrator_error": orchestrator_error,
             # T3: structured trace-quality findings (high GPU idle, …) that
-            # the handler (``select_kernels_handler``, T4) surfaces upward
+            # the handler (``trace_analyze_handler``, T4) surfaces upward
             # so the Coordinator can decide between kernel-rewrite and
             # parameter-optimization routes. Empty list is the steady-state
             # ("nothing wrong") signal.

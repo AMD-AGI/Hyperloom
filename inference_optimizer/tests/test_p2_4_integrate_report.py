@@ -274,7 +274,7 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
             "kernel_id": "k006",
             "best_artifact_path": str(patch_file),
         },
-        last_select_kernels={
+        last_trace_analyze={
             "hot_kernels_top15": [{
                 "kernel_id": "k006",
                 "source_file": str(target),
@@ -499,7 +499,7 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
     try:
         c.shared_state.baseline_tput = 800.0
         c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
-        c.shared_state.last_select_kernels = {
+        c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/profile.trace.json.gz",
             "reusable_native_kernel_ids": ["k1"],
         }
@@ -566,7 +566,7 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
     try:
         c.shared_state.baseline_tput = 800.0
         c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
-        c.shared_state.last_select_kernels = {
+        c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/profile.trace.json.gz",
             "reusable_native_kernel_ids": ["k_repeat"],
         }
