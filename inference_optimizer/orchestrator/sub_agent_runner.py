@@ -87,13 +87,25 @@ class SubAgentRunner:
         ws.mkdir(parents=True, exist_ok=True)
         return ws
 
-    async def run_task(self, task: Task) -> SubAgentResult:
+    async def run_task(
+        self,
+        task: Task,
+        *,
+        prebound_lease: Lease | None = None,
+    ) -> SubAgentResult:
         """Acquire required lanes, transition queued→running, execute, transition out.
 
         Note: task state machine only allows ``queued → running`` then
         ``running → failed/succeeded/...``, so we always transition to
         ``running`` first — even on the "no runner" failure path —
         otherwise IllegalTransition fires.
+
+        v0.8 M6 (KB_design §3.7): when the Coordinator's concurrent
+        dispatcher pre-acquires the lease via ``try_acquire_many``
+        (non-blocking), it passes the resulting :class:`Lease` via
+        ``prebound_lease`` and the runner skips its own acquire step.
+        The runner still owns the release in its finally block — so
+        the dispatcher doesn't have to thread the release path.
         """
         # queued → running first (state machine constraint)
         await self.tasks.transition(task.task_id, "running")
@@ -104,13 +116,16 @@ class SubAgentRunner:
                 task.task_id, "failed",
                 evidence={"reason": "no_executor", "kind": task.kind},
             )
+            if prebound_lease is not None:
+                await self.locks.release(prebound_lease)
             return SubAgentResult(
                 task_id=task.task_id, state="failed",
                 result={}, error=f"no runner registered for kind={task.kind!r}",
             )
 
-        lease: Lease | None = None
-        if task.requires_lanes:
+        lease: Lease | None = prebound_lease
+        owned_lease = prebound_lease is None
+        if owned_lease and task.requires_lanes:
             lease = await self.locks.acquire_many(
                 list(task.requires_lanes),
                 holder_id=task.task_id,
@@ -143,6 +158,9 @@ class SubAgentRunner:
                 task_id=task.task_id, state="succeeded", result=result_payload,
             )
         finally:
+            # Always release whoever acquired the lease — pre-bound or
+            # owned. The dispatcher passes the lease in but trusts the
+            # runner's finally to release it (Inv-7.3 atomic release).
             if lease is not None:
                 await self.locks.release(lease)
 
