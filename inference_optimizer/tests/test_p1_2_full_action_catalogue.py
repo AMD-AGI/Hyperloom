@@ -26,9 +26,12 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     "target_analysis":      "prep",
     "baseline":             "prep",
     "validate_stack":       "prep",
-    # analysis (2)
+    # analysis (3 — `roofline` is the composite that orchestrates
+    # profile + trace_analyze; added in Roofline-v2 N2a, see
+    # design/roofline-v2.md §8.2)
     "profile":              "analysis",
     "pmc_roofline":         "analysis",
+    "roofline":             "analysis",
     # shallow (5) — report + session_breakdown live here per DESIGN §16.1
     "backends":             "shallow",
     "params":               "shallow",
