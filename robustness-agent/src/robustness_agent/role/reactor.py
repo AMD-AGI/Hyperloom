@@ -29,6 +29,7 @@ from ..finalize.postmortem import PostmortemFinalizer
 from ..findings.sink import FindingSink
 from ..signals import Classifier, Symptom
 from ..sources.base import DegradeRouter
+from ..state_store import DetectorStateStore
 from .envelope import Intent
 from .prompt_inputs import ReactorContext
 
@@ -57,6 +58,12 @@ class ReactorComponents:
     # per-instance ``_finalize_fired`` latch. Idempotency at disk
     # level is enforced by the finalizer's marker file.
     finalizer: PostmortemFinalizer | None = None
+    # Cross-tick state persistence. M1 subprocess transport spawns a
+    # fresh Python per tick — without this store, every detector /
+    # ladder / throttle starts empty each tick and consecutive-tick
+    # rules can never fire. The reactor flushes the store at the end
+    # of every successful tick. ``None`` disables persistence (tests).
+    state_store: DetectorStateStore | None = None
 
 
 class Reactor:
@@ -75,6 +82,7 @@ class Reactor:
         self._sink = components.sink
         self._rca: RcaEngine = components.rca or NoopRcaEngine()
         self._finalizer = components.finalizer
+        self._state_store = components.state_store
         self._tick_index = 0
         self._last_symptoms: list[Symptom] = []
         self._last_data_summary: dict[str, Any] = {}
@@ -97,9 +105,16 @@ class Reactor:
 
         data = await self._router.collect(ctx)
         symptoms = self._classifier.classify(data, ctx)
+        # ``ctx.shared_state.tick`` (set by the Coordinator prompt
+        # parser) is the authoritative tick index across subprocess
+        # restarts; ``self._tick_index`` only counts ticks within this
+        # Python process. Prefer the Coordinator value when present so
+        # ladder cooldowns and finding tick_index stamps match the
+        # session-wide timeline.
+        authoritative_tick = self._resolve_authoritative_tick(ctx)
         result = await self._ladder.decide(
             symptoms,
-            tick_index=self._tick_index,
+            tick_index=authoritative_tick,
             now_unix=now_unix,
             rca_provider=self._rca,
         )
@@ -134,9 +149,41 @@ class Reactor:
         # the postmortem corpus.
         await self._maybe_finalize(ctx)
 
+        # Flush any detector / ladder / throttle state mutated this
+        # tick. Done last so even if downstream raises, we record
+        # what we observed. Off the event loop because fsync blocks.
+        await self._flush_state_store()
+
         self._last_symptoms = symptoms
         self._last_data_summary = _summarise(data, symptoms, result.findings)
         return validated_intents
+
+    def _resolve_authoritative_tick(self, ctx: ReactorContext) -> int:
+        """Pick the most reliable tick index for this turn.
+
+        Order of preference:
+
+        1. ``ctx.shared_state.tick`` — the Coordinator's session-wide
+           tick counter, propagated through the prompt. Survives
+           subprocess restarts so cooldowns stay coherent.
+        2. ``self._tick_index`` — in-memory counter incremented per
+           ``tick()`` call. Used by ad-hoc tests and the first tick of
+           a session before the Coordinator has written the prompt.
+        """
+        shared_tick = getattr(ctx.shared_state, "tick", 0) or 0
+        if shared_tick > 0:
+            return int(shared_tick)
+        return self._tick_index
+
+    async def _flush_state_store(self) -> None:
+        if self._state_store is None:
+            return
+        try:
+            await asyncio.to_thread(self._state_store.flush_atomic)
+        except Exception:  # noqa: BLE001 — best-effort, never crash tick
+            log.exception(
+                "reactor tick=%d state_store flush failed", self._tick_index,
+            )
 
     async def _maybe_finalize(self, ctx: ReactorContext) -> None:
         if self._finalizer is None or self._finalize_fired:

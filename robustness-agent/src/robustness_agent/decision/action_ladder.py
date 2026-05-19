@@ -26,6 +26,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from ..state_store import DetectorStateView
 from ..role.envelope import (
     Intent,
     build_alert,
@@ -81,14 +82,34 @@ class ActionLadder:
     and falls back to a heartbeat when the symptom set is empty.
     """
 
-    def __init__(self, *, config: ActionLadderConfig | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        config: ActionLadderConfig | None = None,
+        state_view: "DetectorStateView | None" = None,
+    ) -> None:
         self._config = config or ActionLadderConfig()
-        self._last_emitted_tick: dict[tuple[str, ...], int] = {}
+        self._state_view = state_view
+        # Cooldown bookkeeping — persisted across subprocess restarts.
+        # Without persistence the ladder re-emits the same intent every
+        # tick because the in-memory dict resets, defeating the
+        # cooldown contract advertised in :class:`ActionLadderConfig`.
+        loaded = state_view.load() if state_view is not None else {}
+        self._last_emitted_tick: dict[tuple[str, ...], int] = (
+            _decode_last_emitted(loaded.get("last_emitted"))
+        )
         # Updated at the top of each :meth:`decide` call so per-symptom
         # branches (notably ``gpu_memory_leaked``) can stamp a stable
         # tick-indexed ``idempotency_key`` onto the intents they emit
         # without threading the tick through every helper.
         self._last_tick_index: int = 0
+
+    def _persist_cooldown(self) -> None:
+        if self._state_view is None:
+            return
+        self._state_view.save({
+            "last_emitted": _encode_last_emitted(self._last_emitted_tick),
+        })
 
     async def decide(
         self,
@@ -125,6 +146,7 @@ class ActionLadder:
                 continue
             any_emit = True
             self._last_emitted_tick[key] = tick_index
+            self._persist_cooldown()
             rca_text = await _safe_rca(rca_provider, sym)
             findings.append(
                 _build_finding(
@@ -962,6 +984,58 @@ async def _safe_rca(provider: Any | None, sym: Symptom) -> str:
     except Exception:
         log.exception("rca provider raised; continuing without RCA text")
         return ""
+
+
+# ---------------------------------------------------------------------------
+# State-store (de)serialisation helpers
+# ---------------------------------------------------------------------------
+
+# Separator used to pack ``tuple[str, ...]`` dedup keys into a single
+# JSON-safe string. A vertical-bar is unlikely to appear in symptom
+# names / subject IDs and keeps the encoded key human-readable in the
+# detector_state.json file (useful when debugging cooldown behaviour).
+_LADDER_KEY_SEP: str = "\x1f"  # ASCII unit separator — safe inside JSON strings
+
+
+def _encode_last_emitted(
+    last_emitted: dict[tuple[str, ...], int],
+) -> dict[str, int]:
+    """Serialise a tuple-keyed cooldown dict to a JSON-safe dict.
+
+    JSON object keys must be strings; we join the ``Symptom.dedup_key``
+    tuple components with ``_LADDER_KEY_SEP`` so reads can recover the
+    original tuple verbatim.
+    """
+    out: dict[str, int] = {}
+    for key, tick in last_emitted.items():
+        try:
+            encoded = _LADDER_KEY_SEP.join(str(part) for part in key)
+        except Exception:  # noqa: BLE001 — best-effort, skip bad keys
+            continue
+        try:
+            out[encoded] = int(tick)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _decode_last_emitted(
+    payload: Any,
+) -> dict[tuple[str, ...], int]:
+    """Inverse of :func:`_encode_last_emitted`; tolerant of bad input."""
+    if not isinstance(payload, dict):
+        return {}
+    out: dict[tuple[str, ...], int] = {}
+    for raw_key, raw_tick in payload.items():
+        if not isinstance(raw_key, str):
+            continue
+        try:
+            tick = int(raw_tick)
+        except (TypeError, ValueError):
+            continue
+        parts = tuple(raw_key.split(_LADDER_KEY_SEP))
+        out[parts] = tick
+    return out
 
 
 __all__ = ["ActionLadder", "ActionLadderConfig", "Finding"]
