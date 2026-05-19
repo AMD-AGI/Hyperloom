@@ -1371,8 +1371,14 @@ class Coordinator:
         sequence_actions = {
             "target_analysis",
             "baseline", "profile", "pmc_roofline",
+            "roofline",
             "backends", "params", "sweep", "report",
             "integrate", "validate_stack",
+            # Roofline-v2 N3: comm_optimization joins so the roofline-
+            # required gate below can catch its propose. (kernel_opt
+            # is kernel-owned + routed through _sequence_denial_for_request,
+            # not here.)
+            "comm_optimization",
         }
         if action not in sequence_actions:
             return None
@@ -1435,15 +1441,23 @@ class Coordinator:
         #   never gated on a fresh ``last_trace_analyze`` cache — those
         #   actions don't need kernel candidates to make progress.
         if "kernel" in self.role_registry:
+            # Roofline-v2 N3: `roofline` composite action internally runs
+            # profile as its first sub-step, so it must be allowed through
+            # the profile gate (otherwise the LLM has no way to ever
+            # produce last_profile_trace via the new path).
             if (
                 self.shared_state.baseline_tput > 0
                 and not self.shared_state.last_profile_trace
-                and action not in {"profile", "validate_stack"}
+                and action not in {"profile", "roofline", "validate_stack"}
             ):
                 return PolicyDenied(
                     f"action={action!r} denied: profile must run before {action!r}",
                     rule="execution_order",
-                    hint="propose/delegate `profile`; last_profile_trace is empty",
+                    hint=(
+                        "propose/delegate `roofline` (preferred — composite "
+                        "action that runs profile + trace_analyze atomically) "
+                        "or `profile` (legacy path); last_profile_trace is empty"
+                    ),
                 )
             # integrate gate: kernel_opt KEEP awaiting integrate. Allow
             # integrate / validate_stack / report through; recover is not
@@ -1481,6 +1495,47 @@ class Coordinator:
                     "before any further explore or report"
                 ),
             )
+        # Roofline-v2 N3: 3 propose-path optimization actions require a
+        # fresh roofline snapshot (i.e. last_trace_analyze.analysis_md_text
+        # is populated). See design/roofline-v2.md §6.5 / §8.5. This is
+        # what makes the `roofline` composite action a real prerequisite —
+        # without this gate the LLM could go straight from baseline to
+        # params and never see analysis.md.
+        #
+        # Why these three specifically (on the propose path):
+        # * backends / params  — flag-tuning actions whose decisions
+        #   benefit most from knowing the bottleneck distribution.
+        # * comm_optimization  — only worth running when comm shows up
+        #   as a real bottleneck in the report.
+        # NOT in this list:
+        # * kernel_opt         — KERNEL_OWNED_ACTIONS path: routed via
+        #   _sequence_denial_for_request (REQUEST kind="run_optimization")
+        #   which has its own analysis_md_text check.
+        # * sweep              — frontier sweep across CONC/ISL/OSL, not
+        #   kernel-bottleneck-driven.
+        # * validate_stack     — measurement, not exploration.
+        # * report             — closing artefact.
+        # * integrate          — handles KEEP'd kernel_opt outputs.
+        # * roofline           — the prerequisite producer itself.
+        _ROOFLINE_REQUIRED_ACTIONS = {
+            "backends", "params", "comm_optimization",
+        }
+        if action in _ROOFLINE_REQUIRED_ACTIONS:
+            cached = self.shared_state.last_trace_analyze or {}
+            if not cached.get("analysis_md_text"):
+                return PolicyDenied(
+                    f"action={action!r} denied: roofline must run first "
+                    "(no cached TraceLens analysis.md)",
+                    rule="execution_order",
+                    hint=(
+                        "propose/delegate `roofline` (composite action that "
+                        "internally runs profile + trace_analyze). Do NOT "
+                        "call profile / trace_analyze separately — roofline "
+                        "atomically produces the snapshot all 4 optimisation "
+                        f"actions ({sorted(_ROOFLINE_REQUIRED_ACTIONS)!r}) "
+                        "depend on."
+                    ),
+                )
         return None
 
     def _sequence_denial_for_request(
@@ -1509,7 +1564,11 @@ class Coordinator:
             return PolicyDenied(
                 f"request kind={req_kind!r} denied: profile must run first",
                 rule="execution_order",
-                hint="propose/delegate `profile` before trace_analyze/run_optimization",
+                hint=(
+                    "propose/delegate `roofline` (composite action that "
+                    "runs profile + trace_analyze atomically) before "
+                    "trace_analyze/run_optimization"
+                ),
             )
         select = self.shared_state.last_trace_analyze or {}
         needs_select = select.get("trace_input") != self.shared_state.last_profile_trace
@@ -1517,7 +1576,11 @@ class Coordinator:
             return PolicyDenied(
                 f"request kind={req_kind!r} denied: trace_analyze must run first",
                 rule="execution_order",
-                hint="emit request kind='trace_analyze' for last_profile_trace",
+                hint=(
+                    "propose/delegate `roofline` (preferred — composite "
+                    "action) or emit request kind='trace_analyze' for "
+                    "last_profile_trace (legacy path)"
+                ),
             )
         return None
 
