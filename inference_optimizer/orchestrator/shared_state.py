@@ -67,16 +67,6 @@ _DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
 # action without unbounded growth.
 _DEFAULT_ATTEMPTS_HISTORY = 20
 
-# Roofline-v2 C5: cap the number of suggestions surfaced in the
-# rendered Roofline Decision section so the prompt-summary stays
-# compact (the analyzer system prompt's <=180-char rationale budget
-# means each entry is ~1 line). Top-3 covers ≥95% of useful signal
-# (analyzer is trained to prioritise high-confidence advice first);
-# the rest are still in the cached dict and can be inspected via
-# state.json on disk.
-_MAX_PRUNES_RENDERED = 3
-_MAX_NEXT_ACTIONS_RENDERED = 3
-
 # Global ``last_action_failures`` rolling-log cap. 10 entries covers the
 # typical "what blew up in the last few ticks" view without bloating the
 # prompt; older failures stay in the event log but drop from the prompt.
@@ -1824,7 +1814,6 @@ class SharedState:
             f"last_profile_roofline={self.last_profile_roofline or '(none)'}",
             f"last_profile_kernel_breakdown={self.last_profile_kernel_breakdown or '(none)'}",
             f"last_select_kernels={self._format_last_select_kernels()}",
-            f"last_roofline_analysis={self._format_roofline_decision()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"params_search={self._format_params_search()}",
             f"backends_search={self._format_backends_search()}",
@@ -2163,144 +2152,6 @@ class SharedState:
             else:
                 rendered.append(code)
         return f"{base} warnings=[{'; '.join(rendered)}]"
-
-    def _format_roofline_decision(self) -> str:
-        """Render the structured roofline-analyzer output (C5).
-
-        The :class:`RooflineExecutor` (C4b) writes a fixed-schema dict
-        into :attr:`last_roofline_analysis` after the main LLM proposes
-        ``roofline`` against a fresh ``select_kernels`` snapshot. This
-        renderer surfaces the result in the prompt so the main LLM can
-        consume the structured ``suggested_prunes`` /
-        ``suggested_next_actions`` / ``reprofile_recommended`` advice
-        on **every** subsequent tick (until a new TraceLens snapshot
-        arrives and the roofline action is re-proposed).
-
-        Three rendering modes:
-
-        * **Empty** — ``last_roofline_analysis`` is the default empty
-          dict (analyzer not yet run for the current snapshot, or
-          ``select_kernels`` hasn't produced anything). Returns
-          ``"(not yet run)"`` so the LLM clearly sees a missing
-          decision rather than an absent prompt section.
-        * **Degraded** — sub-agent backend failed / returned
-          unparseable JSON / cache was empty; the executor wrote the
-          fallback dict with ``primary_bottleneck="unknown"`` and
-          empty suggestion lists. We render a one-liner with the
-          recorded error so operators can see why no advice is
-          available without digging into ``raw_llm_response``.
-        * **Healthy** — render full structured advice: distribution +
-          numbered prune list + numbered next-action list +
-          re-profile suggestion (when set) + analysis.md path footer.
-
-        Format intentionally favours single-line items inside a
-        multi-line block so the prompt-summary join("\\n") preserves
-        readable structure without exploding line count. Capped at
-        the top-3 suggestions per list per :data:`_MAX_PRUNES_RENDERED`
-        / :data:`_MAX_NEXT_ACTIONS_RENDERED` constants below.
-        """
-        cached = self.last_roofline_analysis or {}
-        if not cached:
-            return "(not yet run)"
-
-        snapshot_id = cached.get("snapshot_id") or 0
-        gain = cached.get("analyzed_at_gain_pct")
-        gain_str = (
-            f"{float(gain):.2f}"
-            if isinstance(gain, (int, float)) else "?"
-        )
-        ts = cached.get("analyzed_at_iso") or "?"
-        header = f"snapshot={snapshot_id} analyzed_at_gain={gain_str}% ts={ts}"
-
-        # Degraded path: analyzer didn't produce useful output. Surface
-        # the error code so operators can debug; keep the section short
-        # so the main LLM doesn't waste budget on a no-advice section.
-        primary = str(cached.get("primary_bottleneck") or "unknown")
-        suggested_prunes = cached.get("suggested_prunes") or []
-        suggested_next = cached.get("suggested_next_actions") or []
-        if (
-            primary == "unknown"
-            and not suggested_prunes
-            and not suggested_next
-        ):
-            err = cached.get("error") or "no_advice_available"
-            return (
-                f"DEGRADED ({header})  error={err}  "
-                "(LLM should still operate from action_scores priors; "
-                "re-propose roofline only after a new select_kernels)"
-            )
-
-        # Healthy path: render the full decision.
-        dist = cached.get("bottleneck_distribution") or {}
-        dist_str = self._format_bottleneck_distribution(dist, primary)
-        out: list[str] = [
-            f"  {header}",
-            f"  primary_bottleneck={primary}  distribution=[{dist_str}]",
-        ]
-
-        if suggested_prunes:
-            out.append("  suggested_prunes (emit PRUNE_BRANCH only after "
-                       "a failed attempt in that family at this snapshot):")
-            for entry in list(suggested_prunes)[:_MAX_PRUNES_RENDERED]:
-                if not isinstance(entry, dict):
-                    continue
-                conf = str(entry.get("confidence") or "low").upper()
-                fam = str(entry.get("family") or "?")
-                reason = str(entry.get("reason") or "")
-                out.append(f"    - {conf:4s} {fam}: {reason}")
-
-        if suggested_next:
-            out.append("  suggested_next_actions "
-                       "(prefer when proposing the next explore action):")
-            for entry in list(suggested_next)[:_MAX_NEXT_ACTIONS_RENDERED]:
-                if not isinstance(entry, dict):
-                    continue
-                prio = str(entry.get("priority") or "low").upper()
-                kind = str(entry.get("kind") or "?")
-                rationale = str(entry.get("rationale") or "")
-                out.append(f"    - {prio:4s} {kind}: {rationale}")
-
-        if cached.get("reprofile_recommended"):
-            reason = str(cached.get("reprofile_reason") or "")
-            out.append(
-                f"  reprofile_recommended=true  reason={reason}  "
-                "(emit PROPOSE_ACTION 'profile' to refresh snapshot)"
-            )
-        else:
-            out.append("  reprofile_recommended=false")
-
-        path = cached.get("based_on_analysis_md") or ""
-        if path:
-            out.append(f"  full_analysis_md={path}")
-
-        return "\n" + "\n".join(out)
-
-    @staticmethod
-    def _format_bottleneck_distribution(
-        dist: dict[str, float], primary: str,
-    ) -> str:
-        """Render distribution as ``primary=X.XX, others=...`` sorted by share.
-
-        Filter then sort: non-numeric values are dropped silently so a
-        malformed analyzer output cached around the C2 recorder cannot
-        crash the prompt renderer. We coerce once at filter time and
-        sort the coerced floats — no second float() in the sort key.
-        """
-        if not isinstance(dist, dict) or not dist:
-            return "unavailable"
-        coerced: list[tuple[str, float]] = []
-        for k, v in dist.items():
-            try:
-                coerced.append((str(k), float(v)))
-            except (TypeError, ValueError):
-                continue
-        if not coerced:
-            return "unavailable"
-        coerced.sort(key=lambda kv: -kv[1])
-        return ", ".join(
-            f"{k}={value * 100.0:.0f}%" + ("*" if k == primary else "")
-            for k, value in coerced
-        )
 
     def _format_last_sweep(self) -> str:
         if not self.last_sweep:
