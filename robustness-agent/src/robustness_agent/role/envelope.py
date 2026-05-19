@@ -112,10 +112,21 @@ KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
 
 
 # Handle actions the robustness role is allowed to delegate. Upstream
-# documents the trio in ``system_prompts/robustness.md``.
+# documents the quartet in ``system_prompts/robustness.md``.
+#
+# ``report`` is an exception to the "handle action" pattern of the other
+# three: it is the deterministic session-finalize action owned by
+# Orchestration. Robustness is allowed to delegate it ONLY as a
+# last-resort wind-down lever, when the evidence shows the session is
+# locked out from making further progress on the remaining time budget
+# (deadline_imminent with zero validated gain, or recover_failed_finalize
+# after a GPU leak recovery returned needs_review and the leak re-fires).
+# Action-ladder ``_recommend`` is the single source-of-truth for those
+# guard conditions; ``build_delegate`` here only enforces the allowlist.
 ROBUSTNESS_DELEGATE_ACTIONS: frozenset[str] = frozenset({
     "accuracy_gate",
     "recover",
+    "report",
     "server_lifecycle",
 })
 
