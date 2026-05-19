@@ -1782,16 +1782,93 @@ class SharedState:
         ] or "(none)"
 
     def _format_discovered_flags(self) -> str:
+        """Roofline-v2 N4: layered Z-scheme rendering of discovered flags.
+
+        Before N4 this method emitted only the per-framework count
+        summary (``sglang:backend=42/param=58, ...``). The 58 real
+        flag names were never visible to the main LLM, which left
+        flag selection to either prior knowledge (hallucination risk)
+        or implicit pattern-matching against ``params_search.tested``
+        fingerprints. Both routes are documented failure modes in
+        design §6.1.
+
+        N4 renders every discovered flag grouped by
+        ``<framework>.<action_kind>`` with a per-flag ``tested``
+        status tag derived from cross-referencing
+        ``params_search.tested`` / ``backends_search.tested``:
+
+        * ``[untested]`` — no fingerprint in tested[] contains this flag
+        * ``[tested: ±X.XX%]`` — exactly one variant tried, surface its gain
+        * ``[tested N vars, best ±X.XX%]`` — multiple variants tried
+
+        The status tags let the main LLM pick "untested + matches
+        bottleneck" flags directly (per §8.7 orchestration prompt
+        guidance) without needing to reverse-engineer the tested
+        ledger fingerprints.
+
+        Empty input degrades to the v0 placeholder message; missing
+        framework entries / non-dict children skip silently so a
+        malformed dict cannot crash the renderer.
+        """
         if not self.discovered_flags:
             return "(none — first backends/params round will populate)"
-        parts: list[str] = []
+        out_lines: list[str] = []
         for fw, entry in sorted(self.discovered_flags.items()):
             if not isinstance(entry, dict):
                 continue
-            n_b = len(entry.get("backend_flags") or [])
-            n_p = len(entry.get("param_flags") or [])
-            parts.append(f"{fw}:backend={n_b}/param={n_p}")
-        return ", ".join(parts) or "(none)"
+            for action_kind, key in (
+                ("backends", "backend_flags"),
+                ("params", "param_flags"),
+            ):
+                flags = entry.get(key) or []
+                if not isinstance(flags, (list, tuple)) or not flags:
+                    continue
+                out_lines.append(
+                    f"  {fw}.{action_kind} ({len(flags)} flags):"
+                )
+                for flag in sorted(str(f) for f in flags):
+                    tag = self._tested_tag_for_flag(flag, action_kind)
+                    out_lines.append(f"    {flag:42s} {tag}")
+        if not out_lines:
+            return "(none)"
+        return "\n" + "\n".join(out_lines)
+
+    def _tested_tag_for_flag(self, flag: str, action_kind: str) -> str:
+        """Cross-reference ``params_search.tested`` / ``backends_search.tested``
+        for variants whose extra_sglang_args contains ``flag`` and surface
+        the gain summary.
+
+        ``flag`` is a CLI-style string like ``--enable-two-batch-overlap``.
+        Matching is substring containment in ``extra_sglang_args`` —
+        accurate enough to catch the common case (single-flag variant)
+        and the multi-flag case (synergy combo includes this flag).
+        """
+        if action_kind == "params":
+            search = self.params_search or {}
+        elif action_kind == "backends":
+            search = self.backends_search or {}
+        else:
+            return "[untested]"
+        tested = search.get("tested") if isinstance(search, dict) else None
+        if not isinstance(tested, dict) or not tested:
+            return "[untested]"
+        matched_gains: list[float] = []
+        for snap in tested.values():
+            if not isinstance(snap, dict):
+                continue
+            args = str(snap.get("extra_sglang_args") or "")
+            if not args or flag not in args:
+                continue
+            gain = snap.get("gain_pct")
+            if isinstance(gain, (int, float)):
+                matched_gains.append(float(gain))
+        if not matched_gains:
+            return "[untested]"
+        n = len(matched_gains)
+        best = max(matched_gains)
+        if n == 1:
+            return f"[tested: {best:+.2f}%]"
+        return f"[tested {n} vars, best {best:+.2f}%]"
 
     @staticmethod
     def _format_variant_line(entry: dict[str, Any]) -> str:
