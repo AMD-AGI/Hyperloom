@@ -121,6 +121,14 @@ COOLDOWN_TICKS: dict[str, int] = {
 # numbers in gain%/min units and doesn't compete with the 6-9 curated
 # rows. Keys are snake_case so :func:`seed_action_scores` can look them up
 # directly against ``ActionRegistry`` names.
+#
+# Roofline-v2 D1: ``roofline`` is added at prior=7.5 in every model_class.
+# Sits between ``backends``/``params`` (≥8.4) and ``operator_tuning`` (≤7.0)
+# so the LLM willingly proposes it once ``select_kernels`` lands but does
+# not crowd out actual optimisation actions. Idempotency (D2) plus the
+# sequence_denial gate added in C4c ensure roofline runs at most once per
+# TraceLens snapshot — repeated propose attempts at the same snapshot are
+# short-circuited inside the executor as ``idempotency_hit=True``.
 MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
     "dense": {
         "deep_kernel_analysis": 2.0,
@@ -131,6 +139,7 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "compiler_tuning": 6.0,
         "backends": 9.0,
         "params": 9.0,
+        "roofline": 7.5,
         "sweep": 1.0,
     },
     "moe_mla": {
@@ -142,6 +151,7 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "compiler_tuning": 3.0,
         "backends": 8.4,
         "params": 9.5,
+        "roofline": 7.5,
         "sweep": 1.0,
     },
     "moe_swa": {
@@ -153,6 +163,7 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "compiler_tuning": 3.0,
         "backends": 9.0,
         "params": 9.0,
+        "roofline": 7.5,
         "sweep": 1.0,
     },
     "moe_mla_nsa": {
@@ -164,6 +175,7 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "compiler_tuning": 3.0,
         "backends": 9.0,
         "params": 9.0,
+        "roofline": 7.5,
         "sweep": 1.0,
     },
 }
