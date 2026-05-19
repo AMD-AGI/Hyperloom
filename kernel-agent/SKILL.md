@@ -201,6 +201,59 @@ If a requested backend is missing after `install.sh` succeeded, this is a
 real bug; record the missing backend attempt in `optimization_attempts.jsonl`
 and report it instead of crashing the resident session.
 
+#### Auto-generated unittest harness (GEAK pre-step)
+
+Before each `backend=geak` attempt, `invoke_backend` calls
+`tools/unittest_agent.py::generate_unittest(candidate, ...)` to materialise
+an [AgentKernelArena](/wekafs/zihao/2026/geak_cc/AgentKernelArena)-style
+unittest task right next to the GEAK run dir. The harness reflects the
+**live vLLM/SGLang runtime** the kernel was profiled in:
+
+| Field                | Source                                                                                  |
+|----------------------|-----------------------------------------------------------------------------------------|
+| `source/<kernel>.py` | Symlink to the live `/sgl-workspace/{aiter,sglang,vllm}/...` source GEAK will rewrite. |
+| `_baseline_snapshot/`| Frozen copy of the original bytes — the **golden reference** for `correctness`.        |
+| `TEST_SHAPES`        | `candidate["input_shapes"]` (TraceLens-resolved per-arg shapes from real traffic).      |
+| `TEST_DTYPES`        | `candidate["input_dtypes"]` with `float16` fallback (warned in `unittest_meta.json`).   |
+| `RUNTIME_ENV`        | `candidate["env_vars"]` ∪ `os.environ` matching `SGLANG_* / VLLM_* / AITER_* / TRITON_* / HIP_* / ROCR_* / CUDA_*` (KEY/TOKEN/SECRET-redacted). |
+| `HOST_ENTRY`         | First non-`@triton.jit` top-level def whose name matches `kernel_name` / `<base>_triton` / `<base>_launcher` / `run_<base>`. |
+
+The harness lands at
+`$USER_DATA_PATH/kernel-agent/unittests/<session_id>/<prompt_stem>/` with the
+canonical AgentKernelArena layout (`config.yaml`, `scripts/task_runner.py`,
+`source/`, `source/_baseline_snapshot/`, `unittest_meta.json`). The runner
+exposes `compile` / `correctness` / `performance` modes; correctness imports
+*both* the live source and the snapshot under distinct module names and
+asserts tensor equality within natural fp tolerance
+(`fp8 → 5e-2`, `bf16/fp16 → 1e-2`, `fp32 → 1e-4`).
+
+After generation we **self-verify** on the unmodified source (compile +
+correctness MUST both pass). The manifest's `status` field reports:
+
+* `ok` — both passed; harness becomes GEAK's `--test-command`
+  (single-GPU compute kernels only; multi-GPU collectives still take the
+  legacy `torchrun` path because the in-process harness can't drive
+  `init_process_group`).
+* `degraded` — compile passed but correctness was skipped (e.g. shapes
+  weren't captured) OR self-verify failed; the manifest is still pasted
+  into the GEAK prompt so the agent knows the workspace + golden snapshot
+  paths, but `--test-command` falls back to `candidate.benchmark_files`.
+* `skipped` — non-Python source (HIP `.cu` / `.cuh`); GEAK takes its
+  legacy in-house harness path.
+* `failed` — missing source file or unparseable; fall through without a
+  harness.
+
+Env override: set `HYPERLOOM_DISABLE_UNITTEST_AGENT=1` to bypass the whole
+pre-step (debugging only — GEAK then reverts to inventing its own
+`bench_<kernel>.py` shim, which historically wastes the first 10 min of
+the budget on `torchrun exit 2`).
+
+Result surfaces (visible in `optimization_attempts.jsonl[].backend_paths`):
+
+* `unittest_status`        — `ok` / `degraded` / `skipped` / `failed`.
+* `unittest_out_dir`       — the harness workspace (inspect on debug).
+* `unittest_test_command`  — the exact `correctness` command GEAK ran.
+
 ## TraceLens Requirements
 
 TraceLens runs through its CLI and its own skill.
@@ -321,7 +374,7 @@ than a silent skip.
   rms_norm 1.18x.)
 - **Default budget**:
   - claude / codex / cursor: **60 minutes** per attempt (`--backend-budget-min 60`)
-  - GEAK: **90 minutes** per attempt (`--geak-budget-min 90`)
+  - GEAK: **120 minutes** per attempt (`--geak-budget-min 120`)
 - **GEAK task parameters** (prompt-injected, align with GEAK team defaults):
   - `max_rounds`: **5** (multi-round heterogeneous optimization)
   - `step_limit`: **200** (GEAK recommended; 100 limits multi-round runs)
@@ -331,14 +384,15 @@ than a silent skip.
   runner SIGTERMs at 100%. `parallel_e2e_runner` will still extract whatever
   `optimization_report.md` / `optimized_versions/*` were on disk at SIGTERM
   time and promote the attempt to `partial` (see Proposal Rules).
-- **Why GEAK budget is 90 min, not 60**: GEAK runs N sub-agent tasks serially
+- **Why GEAK budget is 120 min, not 60**: GEAK runs N sub-agent tasks serially
   (each 5-10 min: baseline measurement + LLM patch generation + per-patch
   benchmark) + a final `select_patch` round that LLM-judges all patches and
   writes `final_report.json`. With a 60 min budget, the select_patch round
   consistently gets SIGTERM'd before it finishes (observed r38/r39: driver
-  had to fall back to per-task `best_results.json` salvage). 90 min lets the
-  select_patch round run, producing `final_report.json` with the canonical
-  best_speedup. Do not drop GEAK budget below 60 min or it will return
+  had to fall back to per-task `best_results.json` salvage). 120 min gives the
+  optimizer room for multi-round patch attempts plus the select_patch round,
+  producing `final_report.json` with the canonical best_speedup. Do not drop
+  GEAK budget below 60 min or it will return
   `partial` with an empty patch.
 
 ## Artifacts
