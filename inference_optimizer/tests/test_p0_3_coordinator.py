@@ -186,6 +186,110 @@ async def test_coordinator_starts_with_silent_backends(session_dir):
         await c.stop()
 
 
+# ---------------------------------------------------------------------------
+# Backend-error streak (K4 — robustness/critic subprocess health)
+# ---------------------------------------------------------------------------
+
+class _AlwaysFailingBackend(Backend):
+    """Backend that always raises BackendError. Used to exercise the
+    Coordinator's consecutive-error counter without spinning up real
+    subprocess transports."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls = 0
+
+    async def run(self, prompt, system_prompt, tools, max_turns):  # noqa: D401
+        from inference_optimizer.orchestrator.backends.base import BackendError
+        self.calls += 1
+        raise BackendError(f"simulated {self.name} subprocess crash #{self.calls}")
+
+
+@pytest.mark.asyncio
+async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
+    session_dir, monkeypatch,
+):
+    """5 consecutive BackendErrors on the robustness backend should
+    promote the per-call ``backend_error`` events into a single
+    structured ``backend_unhealthy`` observation. Subsequent ticks must
+    NOT re-fire the alarm until a successful turn re-arms it."""
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", "3",
+    )
+    backends = _build_backends({})
+    # Swap robustness with a broken backend; leave the other three silent.
+    backends["robustness"] = _AlwaysFailingBackend("robustness")
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        # 4 ticks: streak grows to 4 → alarm fires once at tick 3 (the
+        # threshold crossing) and stays silent at tick 4.
+        await c.tick(4)
+        observations = await c.bus.tail(n=50, topic="observation")
+        backend_errors = [
+            o for o in observations
+            if (o.payload or {}).get("kind") == "backend_error"
+            and (o.payload or {}).get("agent") == "robustness"
+        ]
+        backend_unhealthy = [
+            o for o in observations
+            if (o.payload or {}).get("kind") == "backend_unhealthy"
+            and (o.payload or {}).get("agent") == "robustness"
+        ]
+        # Per-call backend_error event recorded every tick.
+        assert len(backend_errors) == 4
+        # Streak alarm fires once — exactly when the counter crossed 3.
+        assert len(backend_unhealthy) == 1
+        promoted = backend_unhealthy[0].payload
+        assert promoted["consecutive_errors"] == 3
+        assert promoted["threshold"] == 3
+        assert promoted["severity"] == "high"
+        assert promoted["agent"] == "robustness"
+        assert "subprocess backend has failed" in promoted["hint"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_backend_error_streak_resets_after_successful_turn(
+    session_dir, monkeypatch,
+):
+    """A successful turn must reset the streak counter AND re-arm the
+    alarm so a future streak can fire again."""
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", "2",
+    )
+    backends = _build_backends({})
+    # Start with a failing backend, swap it after the alarm fires.
+    failing = _AlwaysFailingBackend("robustness")
+    backends["robustness"] = failing
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c.tick(2)
+        assert c._backend_error_streak["robustness"] == 2
+        assert c._backend_error_alarm_armed["robustness"] is False
+
+        # Swap in a healthy backend → next reactor pass succeeds → reset.
+        backends_silent = _build_backends({})
+        c.backends["robustness"] = backends_silent["robustness"]
+        await c.tick(1)
+        assert c._backend_error_streak["robustness"] == 0
+        assert c._backend_error_alarm_armed["robustness"] is True
+
+        # Re-arm: swap failing backend back in for >= threshold ticks →
+        # alarm fires again with consecutive_errors==2.
+        c.backends["robustness"] = failing
+        await c.tick(2)
+        observations = await c.bus.tail(n=50, topic="observation")
+        backend_unhealthy = [
+            o for o in observations
+            if (o.payload or {}).get("kind") == "backend_unhealthy"
+        ]
+        assert len(backend_unhealthy) == 2
+        assert backend_unhealthy[-1].payload["consecutive_errors"] == 2
+    finally:
+        await c.stop()
+
+
 @pytest.mark.asyncio
 async def test_coordinator_stops_when_no_more_leverage(session_dir):
     backends = _build_backends({})
