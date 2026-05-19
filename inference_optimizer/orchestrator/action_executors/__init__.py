@@ -41,7 +41,12 @@ from .profile import (
 )
 from .pmc_roofline import PMCRooflineExecutor, pmc_roofline_executor
 from .report import ReportExecutor, report_executor
-from .roofline import RooflineStubExecutor, make_roofline_stub_executor
+from .roofline import (
+    RooflineExecutor,
+    RooflineStubExecutor,
+    make_roofline_executor,
+    make_roofline_stub_executor,
+)
 from .session_breakdown import SessionBreakdownExecutor, session_breakdown_executor
 from .sweep import (
     DEFAULT_CONC_VALUES,
@@ -73,7 +78,9 @@ __all__ = [
     "PMCRooflineExecutor",
     "ProfileExecutor",
     "ReportExecutor",
+    "RooflineExecutor",
     "RooflineStubExecutor",
+    "make_roofline_executor",
     "make_roofline_stub_executor",
     "SYNERGY_GROUPS",
     "SessionBreakdownExecutor",
