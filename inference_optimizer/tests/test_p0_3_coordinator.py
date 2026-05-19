@@ -348,6 +348,11 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
         c.shared_state.baseline_tput = 100.0
         c.shared_state.baseline_config_path = "/tmp/baseline.yaml"
         c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
+        # Roofline-v2 N3: params delegate requires fresh roofline snapshot.
+        c.shared_state.last_trace_analyze = {
+            "trace_input": "/tmp/trace.json.gz",
+            "analysis_md_text": "FAKE_REPORT",
+        }
         c.shared_state.save(session_dir)
         await c.tick(1)
         assert captured["idempotency_key"] == "params-round-2"

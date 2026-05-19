@@ -335,6 +335,9 @@ def test_sequence_denial_clears_after_validation(session_dir):
     s.last_profile_pmc_summary = "/tmp/pmc.json"
     s.last_trace_analyze = {
         "trace_input": "/tmp/profile.tar.gz", "candidates_path": "/tmp/x.json",
+        # Roofline-v2 N3: backends / params now require a fresh
+        # analysis_md_text (see design §6.5 / §8.5 + test_roofline_sequence_denial).
+        "analysis_md_text": "FAKE_REPORT",
     }
     s.optimization_stack = [{"action": "backends", "variant_name": "aiter"}]
     s.cumulative_gain_validated_stack_len = 1
