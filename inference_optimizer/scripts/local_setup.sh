@@ -21,7 +21,7 @@ LOCAL_SETUP_ENV="${LOCAL_SETUP_ENV:-${HYPERLOOM_RUNTIME_DIR}/local-setup.env.sh}
 PRIMUS_CLAW_REPO="${PRIMUS_CLAW_REPO:-https://github.com/AMD-AGI/Primus-Claw.git}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
 TRACELENS_REPO="${TRACELENS_REPO:-https://github.com/AMD-AGI/TraceLens-internal.git}"
-TRACELENS_REF="${TRACELENS_REF:-release/hyperloom_integration_v0.3.1}"
+TRACELENS_REF="${TRACELENS_REF:-release/hyperloom_integration_0.3.1}"
 
 usage() {
   cat <<'EOF'

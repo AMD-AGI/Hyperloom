@@ -142,3 +142,4 @@ def test_local_setup_session_dir_rebases_default_deps_root(tmp_path: Path) -> No
     assert result.returncode == 0, result.stderr + result.stdout
     assert f"HYPERLOOM_DEPS_ROOT={expected_deps}" in result.stdout
     assert str(expected_deps / "Primus-Claw") in result.stdout
+    assert "release/hyperloom_integration_0.3.1" in result.stdout
