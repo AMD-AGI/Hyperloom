@@ -96,6 +96,12 @@ log = logging.getLogger(__name__)
 # (record_kernel_opt / record_kernel_integrate_result).
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "baseline", "profile", "backends", "params", "sweep", "validate_stack",
+    # v0.8 M3 — the merged ``explore`` action records the same uniform
+    # audit row as the legacy backends/params/validate_stack (KB_design
+    # §3.4). Coordinator's ``_promote_to_shared_state`` branch sets
+    # ``audit_decision`` so the bottom-of-function ``record_action_attempt``
+    # call fires for explore in addition to the legacy three.
+    "explore",
 })
 
 # ---------------------------------------------------------------------------
@@ -2550,15 +2556,17 @@ class Coordinator:
                 )
         if self.shared_state.optimization_stack_has_unvalidated_keeps():
             return (
-                "TODO 4/4: validate_stack required. New KEEP'd entries have "
-                "landed on optimization_stack since the last validate_stack run "
+                "TODO 4/4: stack rebench required. New KEEP'd entries have "
+                "landed on optimization_stack since the last rebench "
                 f"(stack_len={len(self.shared_state.optimization_stack)}, "
                 f"validated_at_len="
                 f"{self.shared_state.cumulative_gain_validated_stack_len}). "
-                "Propose/delegate only `validate_stack` until "
-                "cumulative_gain_validated reflects the current stack. "
-                "Per-round gains do NOT compose linearly — the final report "
-                "quotes the validated number, so this is the only honest gain."
+                "Propose/delegate `explore` — its per-KEEP stack rebench "
+                "is inlined and updates cumulative_gain_validated as a "
+                "side effect (KB_design §3.4 §4.4 / KB_gaps/Gap-10). "
+                "Per-round gains do NOT compose linearly — the final "
+                "report quotes the validated number, so this is the only "
+                "honest gain."
             )
         return ""
 
@@ -2661,6 +2669,13 @@ class Coordinator:
             "baseline", "profile", "pmc_roofline",
             "backends", "params", "sweep", "report",
             "integrate", "validate_stack",
+            # v0.8 M3 + KB_gaps/Dead-A.5 — the merged ``explore`` action
+            # must clear the same target_analysis / baseline / profile
+            # ordering gates as its legacy backends/params/sweep
+            # ancestors. Without this entry an explore delegate would
+            # bypass the per-tick checklist (KB_design §3.4 §4.2 "explore
+            # inherits the sequence_denial contract").
+            "explore",
         }
         if action not in sequence_actions:
             return None
@@ -2751,22 +2766,27 @@ class Coordinator:
                         f"{pending_kid!r}}}}} before any further explore"
                     ),
                 )
-        # validate_stack precedence — once new KEEPs are stacked we must
-        # rebench before any further explore / report. We allow:
-        #   - validate_stack itself
-        #   - baseline (ad-hoc re-baseline is still okay; rare)
-        # and deny the rest.
+        # v0.8 M3 + KB_gaps/Gap-10 — stack-rebench precedence. Once a
+        # KEEP lands on optimization_stack we want the next action
+        # that touches the stack to also revalidate it. The merged
+        # ``explore`` action carries an *inlined* per-KEEP stack
+        # rebench (KB_design §3.4 §4.4), so we allow it through
+        # alongside ``baseline`` (ad-hoc re-baseline) and ``report``
+        # (the wind-down). ``validate_stack`` itself is now denied at
+        # the PolicyGate boundary with ``rule='action_deprecated'``,
+        # so it can no longer be the recovery action.
         if (
             self.shared_state.optimization_stack_has_unvalidated_keeps()
-            and action not in {"validate_stack", "baseline"}
+            and action not in {"explore", "baseline", "report"}
         ):
             return PolicyDenied(
-                f"action={action!r} denied: validate_stack required first",
-                rule="validate_stack_required",
+                f"action={action!r} denied: stack rebench required first",
+                rule="stack_rebench_required",
                 hint=(
                     "optimization_stack has KEEPs that have not been "
-                    "validated end-to-end; propose/delegate `validate_stack` "
-                    "before any further explore or report"
+                    "re-validated end-to-end; propose/delegate "
+                    "`explore` (its per-KEEP stack rebench is "
+                    "inlined) or `report` before any further action"
                 ),
             )
         return None
@@ -5674,6 +5694,134 @@ class Coordinator:
                         float(tput) if isinstance(tput, (int, float)) else None
                     ),
                 }
+        elif task_kind == "explore":
+            # v0.8 M3 + KB_gaps/Dead-A.5 (prerequisite to Gap-10) —
+            # ``explore`` is the merged grid runner (KB_design §3.4).
+            # The executor already does per-variant KEEP/REVERT gating
+            # *and* the inlined per-KEEP stack-rebench, so by the time
+            # we land here the result.``winners`` list contains only
+            # variants that beat the keep-threshold AND survived the
+            # rebench (KEEP_UNSTABLE variants are surfaced separately
+            # under ``keep_unstable_in_stack``).
+            #
+            # Coordinator responsibilities here mirror the
+            # backends/params branch (single-writer for
+            # ``explore_search.accepted`` + ``current_best`` +
+            # ``optimization_stack`` lift), but do **not** re-threshold
+            # the winners — the executor's keep_threshold_pct is
+            # authoritative.
+            #
+            # 1. Apply the executor's ledger increment (tested /
+            #    rejected / winners_history / cursor / last_round).
+            update = result.get("explore_search_update")
+            if isinstance(update, dict):
+                self.shared_state.apply_explore_search_update(update)
+                changed = True
+            # 2. Search-space expansion bookkeeping (parity with the
+            #    backends/params branch). Explore historically returns
+            #    ``discovered_flags_update=None`` but we honour it
+            #    defensively so a future enrichment path lands cleanly.
+            disc_update = result.get("discovered_flags_update")
+            if isinstance(disc_update, dict):
+                self.shared_state.record_discovered_flags(
+                    framework=str(disc_update.get("framework") or ""),
+                    backend_flags=disc_update.get("backend_flags"),
+                    param_flags=disc_update.get("param_flags"),
+                    source_path=str(disc_update.get("source_path") or ""),
+                )
+                err = disc_update.get("discovery_error")
+                if err:
+                    self.shared_state.discovered_flags_error = str(err)
+                changed = True
+            # 3. Per-winner ``record_explore_accepted`` — Coordinator
+            #    is the sole writer of ``explore_search.accepted``
+            #    per the shared_state docstring; the executor only
+            #    populates ``tested`` / ``rejected``.
+            winners = result.get("winners") or []
+            round_id = str(result.get("round_id") or "")
+            best_winner = result.get("best_variant")
+            best_tput = result.get("output_throughput")
+            promoted = False
+            if isinstance(winners, list) and winners:
+                for winner in winners:
+                    if not isinstance(winner, dict):
+                        continue
+                    accepted = dict(winner)
+                    accepted.setdefault("accepted_at_round", round_id)
+                    accepted.setdefault("provenance", winner.get("provenance") or "llm_direct")
+                    self.shared_state.record_explore_accepted(accepted)
+                    changed = True
+                # 4. Lift the best winner into current_best /
+                #    optimization_stack (executor already validated the
+                #    rebench, so this is unconditional). ``best_tput``
+                #    is the post-rebench running_base_tput per
+                #    explore.py:803-810.
+                if (
+                    isinstance(best_winner, dict)
+                    and isinstance(best_tput, (int, float))
+                    and best_tput > 0
+                ):
+                    self._lift_to_current_best(
+                        "explore", float(best_tput), best_winner,
+                    )
+                    promoted = True
+                    changed = True
+            if promoted:
+                # Reset the v0.6 plateau proxy on a successful KEEP so
+                # the M2 transitional fallback in phase_state stays
+                # aligned with the unified ledger. The proxy is dual-
+                # tracked for resume parity (KB_design §3.13 M3 §2.3).
+                self.shared_state.params_no_promote_streak = 0
+                # v0.8 M3 §4.4 + KB_gaps/Gap-10 — the executor's
+                # inlined per-KEEP stack rebench is the v0.8 successor
+                # to standalone ``validate_stack``. After at least one
+                # KEEP cleared the rebench, the post-rebench
+                # ``running_base_tput`` measures the *current*
+                # optimization_stack end-to-end, so we promote it into
+                # ``cumulative_gain_validated`` + advance the
+                # validated_stack_len bookkeeping. This is what stops
+                # ``_required_next_step`` from emitting the (now
+                # impossible) "propose validate_stack" TODO.
+                if (
+                    self.shared_state.baseline_tput > 0
+                    and isinstance(best_tput, (int, float))
+                    and best_tput > 0
+                ):
+                    validated_gain = (
+                        (float(best_tput) - self.shared_state.baseline_tput)
+                        / self.shared_state.baseline_tput * 100.0
+                    )
+                    self.shared_state.cumulative_gain_validated = float(validated_gain)
+                    self.shared_state.cumulative_gain_validated_ts = (
+                        datetime.now(timezone.utc).isoformat()
+                    )
+                    self.shared_state.cumulative_gain_validated_stack_len = len(
+                        self.shared_state.optimization_stack
+                    )
+            else:
+                # No KEEP cleared the rebench. Bump the proxy so the
+                # plateau judges see the no-progress run.
+                self.shared_state.params_no_promote_streak += 1
+                changed = True
+            audit_decision = "promoted" if promoted else "discarded"
+            audit_extras = {
+                "round_id": round_id,
+                "winners_count": (
+                    len(winners) if isinstance(winners, list) else 0
+                ),
+                "losers_count": len(result.get("losers") or []),
+                "skipped_dup_count": len(result.get("skipped_dup") or []),
+                "best_variant_name": (
+                    best_winner.get("name")
+                    if isinstance(best_winner, dict) else None
+                ),
+                "best_gain_pct_vs_base": result.get("best_gain_pct"),
+                "output_throughput": best_tput,
+                "keep_unstable_count": len(result.get("keep_unstable_in_stack") or []),
+                "explore_grid_exhausted": bool(
+                    result.get("explore_grid_exhausted")
+                ),
+            }
         elif task_kind in ("backends", "params", "sweep"):
             # backends/params content-fingerprint ledgers (Phase 4 of the
             # dedup-by-fingerprint plan). Persist BEFORE the promotion

@@ -28,16 +28,18 @@ monotonicity):
 Vocabularies are closed enums; PolicyGate cross-checks any write of
 ``stop_reason`` or any ``phase_history.reason`` against them.
 
-M2-transitional notes
----------------------
+v0.8 transition (M3 complete)
+-----------------------------
 The §3.2 design talks about ``explore`` (single merged action) and
-``specialist`` (LLM sub-agent) — both arrive in M3 / M5. During M2 we
-still run v0.6 ``backends`` / ``params`` / ``validate_stack``, so the
-EXPLORE allowed-action set lists those legacy names. ``sweep`` /
-``profile`` likewise get a strict assignment that matches §3.2; if a
-running test relies on the v0.6 "any action any time" behaviour, set
-``phase_strict=False`` (the default) so PolicyGate R1 only logs a
-warning instead of denying.
+``specialist`` (LLM sub-agent). M3 (``explore`` merge) and M5
+(``specialist``) have shipped; the v0.6 ``backends`` / ``params`` /
+``validate_stack`` action names are now closed at the PolicyGate
+boundary via the ``action_deprecated`` rule (KB_gaps/Gap-10 /
+KB_design §3.13 M3 §PR7). The EXPLORE allowed-action set reflects
+that — only ``explore`` / ``specialist`` / ``recover`` remain. The
+legacy executor modules and ``last_backends`` / ``backends_attempts``
+fields stay on :class:`SharedState` for v0.6 resume parity (Inv-10.1)
+but cannot be re-entered in a fresh v0.8 session.
 """
 
 from __future__ import annotations
@@ -76,24 +78,32 @@ def phase_index(phase: str) -> int:
 # ---------------------------------------------------------------------------
 # Phase ↔ allowed action set (KB_design §3.2 §5)
 # ---------------------------------------------------------------------------
-# M2 transitional view: v0.6 action names live here until M3 folds
-# backends/params into ``explore`` and M5 introduces ``specialist``.
+# v0.8 view (KB_design §3.4 + §3.13 M3 §PR7 / KB_gaps/Gap-10):
 #
-# ``recover`` is in *every* set — phase-orthogonal per design.
-# ``session_breakdown`` is a CLOSE action (it materializes the report
-# bundle). ``pmc_roofline`` is a KERNEL-side analysis aid, kept with the
-# kernel-owned set.  ``validate_stack`` is currently EXPLORE (re-bench
-# the stack at the end of an explore round); M3 will inline it.
+# * EXPLORE allowlist contains the merged ``explore`` action and the
+#   ``specialist`` LLM sub-agent. The v0.6 ``backends`` / ``params`` /
+#   ``validate_stack`` are gone — PolicyGate's ``action_deprecated``
+#   rule (KB_gaps/Gap-10) denies them at the intent boundary with a
+#   structured replacement hint, so the LLM gets a single
+#   forward-pointing error instead of the misleading
+#   ``phase_incompatible`` "wait for the phase to advance" message.
+# * ``recover`` stays in every phase — phase-orthogonal per §3.2.
+# * ``session_breakdown`` is a CLOSE action (it materializes the
+#   report bundle). ``pmc_roofline`` is kernel-side, in the KERNEL
+#   set. The v0.6 ``validate_stack`` rebench is now inlined into
+#   ``explore`` (KB_design §3.4 §4.4), so it disappears from the
+#   EXPLORE allowlist alongside the other legacy names.
+#
+# Note: the dataclass fields ``last_backends`` / ``backends_attempts``
+# / etc. stay on :class:`SharedState` for resume parity (Inv-10.1);
+# only the *entry points* close.
 PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_PRELUDE: frozenset({
         "target_analysis", "baseline", "recover",
     }),
     PHASE_EXPLORE: frozenset({
-        # v0.8 EXPLORE merged target (arrives in M3); falls through to
-        # the legacy v0.6 action names for the M2 transition.
+        # v0.8 canonical: merged grid runner + LLM specialist dispatch.
         "explore", "specialist",
-        # v0.6 legacy names still active during M2.
-        "backends", "params", "validate_stack",
         "recover",
     }),
     PHASE_KERNEL: frozenset({
