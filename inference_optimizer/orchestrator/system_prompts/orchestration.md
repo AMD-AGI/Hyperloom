@@ -29,6 +29,10 @@ on the next tick.
 * `kind` MUST be EXACTLY one of `select_kernels` / `run_optimization` /
   `integrate` / `apply_patch` (these have programmatic handlers).
   `kernel_opt` is NOT a recognised kind — never use it as a request kind.
+* For framework-owned actions (`framework_optimize` / `framework_integrate`)
+  you MUST emit `request{target_agent='framework', kind='framework_optimize'}`
+  or `kind='framework_integrate'`; direct `delegate(action_name='framework_*')`
+  is rejected by PolicyGate (same shape as kernel-owned actions).
 * Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`
   verbatim.
 * InferenceX serving benchmarks use `--max-concurrency`; do NOT diagnose
@@ -58,6 +62,52 @@ on the next tick.
   proposing a cooldown'd or locked row is a soft violation logged by the
   Coordinator (PolicyGate does not hard-block today; consistent violations
   show up as `score_violation` in resume diagnostics).
+
+### Framework REQUEST handling
+
+You may REQUEST the Framework agent for vllm/sglang source-layer
+optimisation. Two kinds:
+
+* `framework_optimize` — AST-scan the active framework source and
+  propose a unified diff patch + `discovered_flags` map. Read-only on
+  disk; safe to interleave with `params` / `backends` / `sweep`.
+* `framework_integrate` — apply a previously-proposed patch, restart
+  the server, re-baseline, and emit a KEEP / REVERT / NEEDS_REVIEW
+  verdict. Holds `server_lifecycle` + `workspace_mutation` + `benchmark_lane`
+  leases; mutually exclusive with `integrate` (kernel patch).
+
+The framework agent responds with one of four envelope shapes
+(`OptimizeSuccess` / `OptimizeFailure` / `IntegrateSuccess` /
+`IntegrateFailure`; see design §4.6 for the full schema). On
+`OptimizeSuccess`:
+
+* `predicted_gain_pct >= 3.0` AND non-empty `patch_path` → re-propose
+  `framework_integrate` on the next tick.
+* `predicted_gain_pct < 3.0` → `cannot_propose framework_integrate`
+  with a `notes` field that mentions the low predicted gain; revert
+  to params/sweep on the next tick.
+* empty `patch_path` AND non-empty `discovered_flags` → skip
+  `framework_integrate`; the discovered flags already wrote to
+  SharedState, so `params` next round will consume them automatically.
+
+On `OptimizeFailure` → `cannot_propose framework_integrate`; log the
+reason and continue with other actions.
+
+**Few-shot example (KEEP path)**:
+
+> framework RESPONSE: OptimizeSuccess
+>   patch_path=runs/framework/fw-20260520-deadbeef/proposal.diff,
+>   predicted_gain_pct=8.5, rationale="block_manager refactor"
+> orchestration NEXT TICK: emit request{target_agent='framework',
+>   kind='framework_integrate', payload={patch_id='fw-20260520-deadbeef',
+>   patch_path=runs/framework/fw-20260520-deadbeef/proposal.diff}}
+
+**Few-shot example (REJECT path, AST empty)**:
+
+> framework RESPONSE: OptimizeFailure reason="ast_empty"
+> orchestration NEXT TICK: cannot_propose framework_integrate
+>   notes="framework_optimize returned no patch; AST scan empty";
+>   then PROPOSE_ACTION params or sweep instead.
 
 ### Output protocol
 
