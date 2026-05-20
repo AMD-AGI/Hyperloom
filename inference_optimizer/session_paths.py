@@ -60,35 +60,20 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 
 # Hardcoded fallback used only when ActionRegistry can't be loaded
 # (broken yaml / partial install / very early bootstrap). MUST stay in
-# sync with the union of actions whose pipeline_phase is in
+# sync with the union of action names whose ``pipeline_phase`` is in
 # ``_RUNS_WORKSPACE_PHASES``; the regression test in
-# ``tests/test_p1_2_full_action_catalogue.py`` enforces this.
-#
-# ``support`` was added in 2026-05 alongside the real ``recover``
-# executor (Change C of the gpu-leak-robustness-fix plan). The other
-# four ``support`` actions (``dream`` / ``re_explore`` /
-# ``comm_optimization`` / ``compiler_tuning``) are still un-registered
-# stubs — including their names here is harmless because SubAgentRunner
-# only consults this set inside ``_pre_mkdir_workspace``, which is only
-# reached when a task with that kind actually lands; un-registered kinds
-# never get that far.
+# ``tests/test_p1_2_full_action_catalogue.py`` enforces alignment.
+# ``specialist`` is yaml-less (v0.8 M5, parameterised by
+# ``params.domain``) so it is added explicitly.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "baseline", "profile", "pmc_roofline",
     "backends", "params", "sweep",
-    # v0.8 M3 — merged explore action (KB_design §3.4). Coexists with
-    # the legacy backends/params/validate_stack names during M3.
     "explore",
-    # v0.8 M5 — LLM specialist sub-agent (KB_design §3.5). Has no yaml
-    # meta (parameterised by ``params.domain``); SubAgentRunner /
-    # SpecialistRunner write workspace files under
-    # ``runs/specialist/<task_id>/`` (prompt.md / transcript.jsonl /
-    # heartbeat.json / tool_calls.jsonl / specialist_done.json).
     "specialist",
     "integrate", "kernel_opt", "deep_kernel_analysis",
     "operator_tuning", "vendor_kernel_config",
     "validate_stack",
-    "recover", "dream", "re_explore",
-    "comm_optimization", "compiler_tuning",
+    "recover",
 })
 
 
