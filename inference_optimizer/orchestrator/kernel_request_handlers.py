@@ -1172,6 +1172,48 @@ async def integrate_handler(
     )
     ctx = RunnerContext(task=fake_task, lease=None)
 
+    # Multi-node: apply_kernel_patch has just fanned the new source
+    # files to every pod. sglang must be FULLY restarted (not resume-
+    # pathed) so it re-imports the patched modules; otherwise the
+    # re-baseline measures the pre-patch process and integrate decisions
+    # become noise. We do the restart HERE (not inside BaselineExecutor)
+    # and set ctx.extra["mn_round_restarted"] so BaselineExecutor does
+    # NOT restart a second time. force_full_restart=True scopes the env
+    # override (MULTI_NODE_RESTART_RESUME_RUNNING=0) for this call only;
+    # subsequent non-integrate rounds keep their resume savings.
+    from .action_executors._multi_node_env import is_multi_node
+    if is_multi_node():
+        from .action_executors._multi_node_server_lifecycle import (
+            ServerRestartFailed,
+            restart_server_for_round,
+        )
+        try:
+            await restart_server_for_round(
+                extra_sglang_args=extra_args,
+                framework=os.environ.get("FRAMEWORK") or None,
+                model_path=(
+                    str(payload.get("model_path") or "").strip()
+                    or os.environ.get("MODEL_PATH") or None
+                ),
+                tp=int(os.environ.get("TP") or 0) or None,
+                ep=int(os.environ.get("EP") or 0) or None,
+                force_full_restart=True,
+            )
+            ctx.extra = {**(getattr(ctx, "extra", None) or {}),
+                         "mn_round_restarted": True}
+        except ServerRestartFailed as exc:
+            revert_result = _maybe_revert_kernel_patch(apply_result)
+            return {
+                "status": "failed",
+                "error_class": "mn_server_restart_failed_post_patch",
+                "error": str(exc),
+                "kernel_id": kernel_id,
+                "patch_path": patch_path,
+                "apply_result": apply_result,
+                "revert_result": revert_result,
+                "decision": "REVERT",
+            }
+
     try:
         bench_result = await BaselineExecutor(session_dir=session_dir)(ctx)
     except Exception as exc:  # noqa: BLE001

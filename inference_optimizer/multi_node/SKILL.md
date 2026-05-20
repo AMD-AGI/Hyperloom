@@ -108,6 +108,25 @@ turn; never cache across actions.
   Always fix orchestrator env propagation; never `pip install sglang`
   in the sandbox. (`/etc/profile.d/hyperloom.sh` global export is a
   shell-level backstop only — head pod IP changes per RayJob recreate.)
+* **ADDENDUM-15** (kernel-agent fan-out): kernel-agent runs in the
+  sandbox but writes to source under `/sgl-workspace/{aiter,sglang,vllm}/`
+  which is per-pod local fs — sandbox edits do NOT reach the RayJob
+  pods. Use the three multi-node subcommands instead:
+  * `apply-patch` — fan-out a kernel patch to every pod (head + workers)
+    via `kernel_patch_multinode.py`; per-host backups are written under
+    `--backup-dir` and returned to the caller for revert.
+  * `revert-patch` — inverse of apply, takes the per-host backup map.
+  * `kernel-bench` — run a kernel micro-benchmark on a GPU-bearing pod
+    (the sandbox is CPU-only in multi-node mode); stages helper files
+    + bench script onto the pod, runs `bash --bench-command`, reads
+    back result artifacts. Used by kernel_optimization.py prompt
+    template; not invoked directly by the agent.
+  After every `apply-patch` the integrate path calls
+  `restart_server_for_round(force_full_restart=True)` so sglang
+  re-imports the patched modules — resume fast-path is bypassed for
+  this one call only. RayJob recreate replays applied patches
+  automatically (see `_replay_kernel_patches_for_multi_node` in
+  inference_optimizer/cli.py).
 
 ## Exit Codes (for the controller / agent)
 
