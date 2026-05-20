@@ -150,32 +150,274 @@ async def framework_optimize_handler(
     return envelope
 
 
+# Hook-injection points for the P3 PR-H real path. Production wires
+# these to IO's server lifecycle + Magpie + accuracy gate; tests inject
+# fixtures so the 20-cell fault matrix is exercisable without GPU.
+#
+# Signatures (all sync; handler offloads via asyncio.to_thread):
+#   server_restart_hook(session_dir, patch_id) -> None | raises ServerRestartError
+#   bench_hook(session_dir, patch_id) -> {"tput": float, "ok": bool,
+#                                          "reason": str (when not ok)}
+#   accuracy_gate_hook(session_dir, patch_id) -> float | None
+_SERVER_RESTART_HOOK: Any = None
+_BENCH_HOOK: Any = None
+_ACCURACY_GATE_HOOK: Any = None
+
+
+class ServerRestartError(RuntimeError):
+    """Raised by the server-restart hook to signal a hard failure."""
+
+
+def set_integrate_hooks(
+    *,
+    server_restart: Any | None = None,
+    bench: Any | None = None,
+    accuracy_gate: Any | None = None,
+) -> None:
+    """Inject the 3 hooks used by the real integrate flow.
+
+    ``None`` keeps the previous binding (so the CLI can wire only the
+    pieces it has ready). Tests pass all 3 fixtures explicitly.
+    """
+    global _SERVER_RESTART_HOOK, _BENCH_HOOK, _ACCURACY_GATE_HOOK
+    if server_restart is not None:
+        _SERVER_RESTART_HOOK = server_restart
+    if bench is not None:
+        _BENCH_HOOK = bench
+    if accuracy_gate is not None:
+        _ACCURACY_GATE_HOOK = accuracy_gate
+
+
+def reset_integrate_hooks() -> None:
+    """Drop all hooks. Used by test teardown + the P1 mock branch."""
+    global _SERVER_RESTART_HOOK, _BENCH_HOOK, _ACCURACY_GATE_HOOK
+    _SERVER_RESTART_HOOK = None
+    _BENCH_HOOK = None
+    _ACCURACY_GATE_HOOK = None
+
+
 async def framework_integrate_handler(
     payload: dict[str, Any],
     *,
     session_dir: Path,
 ) -> dict[str, Any]:
-    """P1 mock IntegrateSuccess(KEEP) envelope.
+    """Apply a KEEP'd patch -> restart server -> bench + accuracy gate
+    -> KEEP / REVERT / NEEDS_REVIEW verdict.
 
-    PR-H upgrades to apply patch + restart server + Magpie + accuracy
-    gate + verdict decision.
+    Two operating modes:
+
+    * **P1 mock branch** (no hooks injected via
+      :func:`set_integrate_hooks`): returns a canned IntegrateSuccess
+      (KEEP) envelope so the 5-role protocol smoke keeps green
+      without real server / bench / gate plumbing.
+    * **P3 real branch** (hooks injected): runs the full lifecycle
+      from :mod:`._patch_lifecycle` (backup -> apply -> restart ->
+      bench -> gate -> verdict -> rollback-if-REVERT) and returns
+      IntegrateSuccess / IntegrateFailure per design §4.8 fault tree.
     """
-    patch_id = str(payload.get("patch_id") or "fw-mock")
-    log.info(
-        "framework_integrate_handler[P1 mock] session=%s patch_id=%s",
-        Path(session_dir).name, patch_id,
+    started_ms = int(asyncio.get_event_loop().time() * 1000) if False else 0
+    import time as _time
+    started = _time.monotonic()
+
+    patch_id_in = str(payload.get("patch_id") or "").strip()
+    if (
+        _SERVER_RESTART_HOOK is None
+        or _BENCH_HOOK is None
+        or _ACCURACY_GATE_HOOK is None
+    ):
+        # P1 mock branch -- behave like the original canned response.
+        log.info(
+            "framework_integrate_handler[P1 mock] session=%s patch_id=%s",
+            Path(session_dir).name, patch_id_in or "fw-mock",
+        )
+        return {
+            "status": "succeeded",
+            "payload_kind": "IntegrateSuccess",
+            "verdict": "KEEP",
+            "patch_id": patch_id_in or "fw-mock",
+            "tput_before": 0.0,
+            "tput_after": 0.0,
+            "accuracy_before": 0.0,
+            "accuracy_after": 0.0,
+            "accuracy_drop": 0.0,
+            "stage_b_elapsed_ms": 200,
+        }
+
+    # ----- P3 real path -----
+    from ._patch_lifecycle import (
+        BackupRef,
+        PatchApplyError,
+        VerdictInputs,
+        apply_patch,
+        backup_files,
+        decide_verdict,
+        generate_patch_id,
+        rollback_backup,
     )
+
+    patch_path = str(payload.get("patch_path") or "").strip()
+    if not patch_path:
+        return _integrate_failure(
+            patch_id_in or "fw-unknown", started, "missing_patch_path",
+            "framework_integrate payload missing patch_path",
+        )
+    patch_pp = Path(patch_path).expanduser()
+    if not patch_pp.is_file():
+        return _integrate_failure(
+            patch_id_in or "fw-unknown", started, "patch_not_found",
+            f"patch file does not exist: {patch_pp}",
+        )
+
+    patch_id = patch_id_in or generate_patch_id("fw")
+    files_touched = _extract_files_touched(patch_pp)
+    if not files_touched:
+        return _integrate_failure(
+            patch_id, started, "patch_empty",
+            "patch contains no +++ b/<file> entries -- nothing to back up",
+        )
+    baseline_tput = float(payload.get("baseline_tput") or 0.0)
+    baseline_accuracy = float(payload.get("baseline_accuracy") or 0.0)
+
+    # Stage 1: backup. Hard fail -> IntegrateFailure(backup_failed).
+    try:
+        ref = await asyncio.to_thread(
+            backup_files, patch_id, files_touched, session_dir=session_dir,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        return _integrate_failure(
+            patch_id, started, "backup_failed", repr(exc),
+        )
+
+    # Stage 2: apply. ``cwd=/`` so ``+++ b/<absolute-rel>`` resolves to
+    # ``/<absolute-rel>`` -- matches how the test fixtures + production
+    # patches (with /sgl-workspace/... paths) are anchored. Failure ->
+    # IntegrateFailure(patch_apply_failed).
+    try:
+        await asyncio.to_thread(apply_patch, patch_pp, cwd=Path("/"))
+    except PatchApplyError as exc:
+        # No need to rollback -- apply failed before mutation.
+        return _integrate_failure(
+            patch_id, started, "patch_apply_failed", str(exc),
+        )
+
+    # Stage 3: server restart. Failure -> rollback + fail.
+    try:
+        await asyncio.to_thread(
+            _SERVER_RESTART_HOOK, session_dir, patch_id,
+        )
+    except ServerRestartError as exc:
+        _ = await asyncio.to_thread(rollback_backup, ref)
+        return _integrate_failure(
+            patch_id, started, "server_restart_failed", str(exc),
+        )
+
+    # Stage 4: bench + accuracy gate -> verdict.
+    bench: dict[str, Any] = {}
+    try:
+        bench = await asyncio.to_thread(_BENCH_HOOK, session_dir, patch_id)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("bench_hook crashed")
+        _ = await asyncio.to_thread(rollback_backup, ref)
+        return _integrate_failure(
+            patch_id, started, "bench_failed", repr(exc),
+        )
+    bench_ok = bool(bench.get("ok", True))
+    tput_after = float(bench.get("tput") or 0.0)
+    bench_reason = str(bench.get("reason") or "")
+
+    accuracy_after: float | None = None
+    try:
+        accuracy_after = await asyncio.to_thread(
+            _ACCURACY_GATE_HOOK, session_dir, patch_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("accuracy_gate_hook crashed")
+        # Treat as missing accuracy -> NEEDS_REVIEW unless other gates fail.
+        accuracy_after = None
+        bench_reason = (bench_reason + "; " if bench_reason else "") + (
+            f"accuracy_gate_exception: {exc!r}"
+        )
+
+    verdict = decide_verdict(VerdictInputs(
+        baseline_tput=baseline_tput,
+        baseline_accuracy=baseline_accuracy,
+        tput_after=tput_after,
+        accuracy_after=accuracy_after,
+        bench_ok=bench_ok,
+        bench_reason=bench_reason,
+    ))
+    if verdict.verdict == "REVERT":
+        _ = await asyncio.to_thread(rollback_backup, ref)
+
+    elapsed_ms = int((_time.monotonic() - started) * 1000)
     return {
         "status": "succeeded",
         "payload_kind": "IntegrateSuccess",
-        "verdict": "KEEP",
+        "verdict": verdict.verdict,
         "patch_id": patch_id,
-        "tput_before": 0.0,
-        "tput_after": 0.0,
-        "accuracy_before": 0.0,
-        "accuracy_after": 0.0,
-        "accuracy_drop": 0.0,
-        "stage_b_elapsed_ms": 200,
+        "tput_before": baseline_tput,
+        "tput_after": tput_after,
+        "accuracy_before": baseline_accuracy,
+        "accuracy_after": accuracy_after if accuracy_after is not None else 0.0,
+        "accuracy_drop": verdict.accuracy_drop_pct,
+        "gain_pct": verdict.gain_pct,
+        "reason": verdict.reason,
+        "stage_b_elapsed_ms": elapsed_ms,
+    }
+
+
+def _extract_files_touched(patch_path: Path) -> list[Path]:
+    """Read +++ b/<rel> entries from a unified diff and return absolute
+    paths.
+
+    Path resolution order (first hit wins):
+
+    1. Treat ``rel`` (with ``b/`` prefix stripped) as a filesystem-root
+       relative path: ``/`` + ``rel``. Apply_patch runs with cwd=``/``
+       in tests so this matches how the diff's hunks are anchored.
+    2. Resolve against ``patch_path.parent`` (fixture-style relative diff).
+    3. Resolve against the current working directory.
+    """
+    files: list[Path] = []
+    try:
+        text = patch_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    base = patch_path.parent
+    for line in text.splitlines():
+        if not line.startswith("+++ "):
+            continue
+        rel = line[4:].strip()
+        if rel.startswith("b/"):
+            rel = rel[2:]
+        if not rel or rel == "/dev/null":
+            continue
+        candidates = [
+            Path("/" + rel),
+            (base / rel).resolve(),
+            Path(rel).resolve(),
+        ]
+        for cand in candidates:
+            if cand.is_file():
+                files.append(cand)
+                break
+    return files
+
+
+def _integrate_failure(
+    patch_id: str,
+    started: float,
+    reason: str,
+    detail: str,
+) -> dict[str, Any]:
+    import time as _time
+    return {
+        "status": "failed",
+        "payload_kind": "IntegrateFailure",
+        "reason": reason,
+        "detail": detail,
+        "patch_id": patch_id,
+        "stage_b_elapsed_ms": int((_time.monotonic() - started) * 1000),
     }
 
 
@@ -192,7 +434,11 @@ def get_framework_handler(kind: str) -> HandlerFn | None:
 
 __all__ = [
     "FRAMEWORK_REQUEST_HANDLERS",
+    "ServerRestartError",
     "framework_integrate_handler",
     "framework_optimize_handler",
     "get_framework_handler",
+    "reset_integrate_hooks",
+    "set_framework_backend",
+    "set_integrate_hooks",
 ]
