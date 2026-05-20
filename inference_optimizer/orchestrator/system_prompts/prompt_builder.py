@@ -44,14 +44,16 @@ from ..action_registry import (
 FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
-    # analysis — three independent actions, each with its own executor:
-    # `profile` (torch.profiler trace capture only), `pmc_roofline`
-    # (RayJob-mode hardware-counter + roofline-chart sweep), and
-    # `roofline` (D1/N2 composite that chains profile + trace_analyze
-    # in one shot to produce the TraceLens analysis.md the orchestrator
-    # consumes). All three remain propose-able by the LLM; priors in
-    # scoring.py shape which one the scorer surfaces first.
-    "profile", "pmc_roofline", "roofline", "deep_kernel_analysis",
+    # analysis — `roofline` is the composite action (profile + trace_analyze
+    # in one shot), replacing the standalone `profile` + `pmc_roofline`
+    # actions per roofline-v2 D1/N2. The latter two executors remain
+    # registered for stale-state.json resume compatibility (cli.py
+    # _REAL_EXECUTORS_KERNEL_ONLY) and to let RooflineExecutor invoke
+    # `profile` internally, but they MUST NOT be proposed directly by
+    # the LLM — surface only `roofline` in the catalogue + critic
+    # approve list + scoring priors so the orchestration loop has a
+    # single canonical entry point.
+    "roofline", "deep_kernel_analysis",
     # explore
     "backends", "params", "sweep",
     # deep — kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
@@ -71,12 +73,10 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
 NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
-    # analysis — roofline only (the composite snapshot is still useful
-    # in --no-kernel mode for cheap actions to consume discovered_flags;
-    # the standalone profile/pmc_roofline actions only feed kernel-opt
-    # which is disabled here so they stay off the no-kernel catalogue).
+    # analysis — roofline is still useful in no-kernel mode for the
+    # snapshot it provides (cheap actions consume it via discovered_flags)
     "roofline",
-    # explore (no profile — it only feeds kernel-opt)
+    # explore
     "backends", "params", "sweep",
     # validate (still useful — bench the stacked backends/params)
     "validate_stack",
@@ -287,14 +287,28 @@ def _format_grid_injection_hint(name: str) -> str | None:
     """Return a per-action one-liner showing the LLM how to override grid."""
     if name == "backends":
         return (
-            "GRID OVERRIDE (T1/T2): emit "
+            "TWO GRID-CONTROL SURFACES (pick the one that fits your "
+            "intent):\n"
+            "  (A) SUBSET (N20-A, recommended for roofline-driven runs): "
+            "emit `delegate{action_name='backends', params={variants: "
+            "['attn_aiter','sched_lpm', ...]}}` — names must come from "
+            "the registered DEFAULT_BACKENDS_GRID listed in the "
+            "BACKENDS GRID CATALOGUE block below. Use this when the "
+            "roofline analysis.md points at specific kernel categories "
+            "(e.g. attention-heavy -> only try `attn_*` variants; "
+            "AllReduce-heavy -> only `custom_ar`). Cheaper + safer "
+            "than full grid; no flag hallucination risk.\n"
+            "  (B) FULL CUSTOM (T1/T2): emit "
             "`delegate{action_name='backends', params={grid: [{name, "
             "extra_sglang_args, extra_envs, note}, ...], "
-            "synergy_groups?: [[name1,name2], ...] | synergy_mode?: 'auto'}}` "
-            "to add candidates beyond the shipped DEFAULT_BACKENDS_GRID. "
-            "See SharedState.discovered_flags for the live framework's "
-            "full flag namespace and SharedState.backend_winners_history "
-            "for prior-round winners worth combining."
+            "synergy_groups?: [[name1,name2], ...] | "
+            "synergy_mode?: 'auto'}}` to add candidates beyond the "
+            "shipped DEFAULT_BACKENDS_GRID. Use this when "
+            "SharedState.discovered_flags surfaces a flag the registered "
+            "grid doesn't carry yet, or when you want to combine winners "
+            "from prior rounds (backend_winners_history).\n"
+            "If both `variants` and `grid` are passed, `grid` wins "
+            "(full control mode)."
         )
     if name == "params":
         return (
@@ -521,26 +535,22 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "An explore round that produces zero new ideas is a bug — heartbeat",
         "with body_md='idea-pipeline-empty' so Robustness can intervene.",
         "",
-        "### PMC roofline (dual mode)",
+        "### Roofline analysis (composite action)",
         "",
-        "Use `pmc_roofline` after `profile` when you need hardware counters /",
-        "roofline charts. Two deployment modes:",
+        "Propose `roofline` whenever you need a fresh TraceLens snapshot:",
+        "right after baseline (snapshot #1), then between every interleaved",
+        "round of cheap exploration (backends + params) so kernel_opt sees",
+        "the post-exploration hot-kernel distribution rather than the",
+        "baseline one. The executor internally runs `profile` + `trace_analyze`",
+        "in one shot; do NOT propose `profile` or the legacy `pmc_roofline`",
+        "directly — they are kept registered for back-compat only and the",
+        "PolicyGate hard-blocks direct profile proposals (N9, see",
+        "design/roofline-v2.md §6.5/§6.5.1 for the full enforcement chain).",
         "",
-        "**RayJob mode (production)** — omit `server_cmd`; Coordinator derives",
-        "it from `baseline_config_path` / materialized Magpie YAML. Set",
-        "`params.ray_worker=true` inside the Ray job so GPU allocation is",
-        "owned by Ray.",
-        "",
-        "    delegate{action_name='pmc_roofline',",
-        "        params={ray_worker: true,",
-        "                config_path: <SharedState.baseline_config_path>,",
-        "                output_dir: '<SESSION_DIR>/runs/pmc_roofline/<round>'},",
+        "    delegate{action_name='roofline',",
+        "        params={notes: 'baseline snapshot' | 'post-backends-N snapshot' | ...},",
         "        predicted_gain_pct: 0,",
-        "        notes: 'PMC roofline via Ray — server_cmd auto-derived'}",
-        "",
-        "**Local debug mode** — set `allow_direct_gpu=true` (or export",
-        "`HYPERLOOM_ALLOW_DIRECT_PMC_ROOFLINE=1`) and pass explicit",
-        "`server_cmd` + `health_url` when no Ray worker is available.",
+        "        notes: 'TraceLens analysis.md will appear in shared_state.last_trace_analyze'}",
     ])
     return lines
 
@@ -648,6 +658,107 @@ def _read_rules_fragment(path: Path | None) -> str:
         return ""
 
 
+def _section_backends_grid_catalogue(*, framework: str) -> list[str]:
+    """N20-A: render the registered backends grid as a catalogue so the
+    LLM can name a SUBSET when proposing the `backends` action.
+
+    Each row shows: variant name, the flag(s) it sets, a one-line
+    trigger hint ("when roofline shows X is hot, try me"). The names
+    are stable identifiers the executor matches against in
+    DEFAULT_BACKENDS_GRID / DEFAULT_VLLM_BACKENDS_GRID.
+
+    Framework-aware: SGLang grid for sglang, vLLM grid for vllm. We
+    keep the full registered set visible (no Tier 1 filter at prompt
+    time) — the LLM decides which subset to try based on hot-kernel
+    analysis, not based on a pre-baked heuristic.
+    """
+    # Lazy import to avoid a circular dep (action_executors -> prompt_builder
+    # is fine, prompt_builder -> action_executors at module load is not).
+    from inference_optimizer.orchestrator.action_executors.backends import (
+        DEFAULT_BACKENDS_GRID,
+        DEFAULT_VLLM_BACKENDS_GRID,
+    )
+
+    fw = (framework or "sglang").strip().lower()
+    grid = DEFAULT_VLLM_BACKENDS_GRID if "vllm" in fw else DEFAULT_BACKENDS_GRID
+    fw_label = "vLLM" if "vllm" in fw else "SGLang"
+
+    # Per-variant trigger hint. The LLM reads roofline analysis.md to
+    # find which kernel category dominates GPU time; then maps that to
+    # a variant whose `note` tag matches. We keep this map small +
+    # explicit (no auto-generation) so the prompt stays deterministic.
+    HINT_BY_NOTE: dict[str, str] = {
+        "tier1_attention":     "attention-heavy traces (FlashAttn/AITER bound)",
+        "tier1_decode_attn":   "decode-bound traces (long decode chains)",
+        "tier2_schedule":      "queue-bound traces (high prefill queue depth)",
+        "tier2_overlap":       "overlap conflicts (decode stalls on prefill)",
+        "tier3_fusion":        "fused-MoE or chunked-prefill candidates",
+        "tier4_moe":           "MoE-dominant traces (expert dispatch hot)",
+        "tier5_comm":          "AllReduce-heavy traces (TP comm bound)",
+        "kv_cache":            "KV-cache memory bound traces",
+        "memory":              "GPU-memory ceiling pressure",
+        "scheduling":          "request-batching bound traces",
+        "compile":             "graph-capture / compile bound",
+        "compile_off":         "compile causing regressions (eager-only test)",
+        "cuda_graph":          "CUDA-graph capture bound",
+        "rocm_aiter":          "AITER toggle (rocm general)",
+        "rocm_aiter_linear":   "linear ops AITER bound",
+        "rocm_aiter_rmsnorm":  "rmsnorm-hot traces",
+        "rocm_aiter_fp8bmm":   "FP8 BMM hot in attention",
+        "rocm_fp4":            "FP4 GEMM workloads",
+        "rocm_rope":           "RoPE-bound traces (long context)",
+        "rocm_collectives":    "AllReduce / collectives bound (ROCm path)",
+        "rocm_buffer":         "buffer-op corruption suspected (regression test)",
+        "rocm_scratch":        "scratch-reclaim caused stalls",
+        "rocm_kv_layout":      "KV-layout shuffle experiment",
+        "attention_backend":   "attention backend swap (vLLM ROCM_AITER_FA)",
+        "cache":               "prefix-cache off (some MoE workloads)",
+        "cache_mla":           "block-size 1 (MLA-specific cache)",
+        "prefill":             "prefill-throughput bound (long prompts)",
+    }
+
+    lines: list[str] = [
+        f"## BACKENDS GRID CATALOGUE ({fw_label})",
+        "",
+        "Registered variants you may name in "
+        "`params.variants=[...]` when proposing `backends`. The "
+        "executor will run only the ones you list, in order. Pick "
+        "variants whose trigger hint matches the dominant pattern "
+        "in the roofline analysis.md (e.g. if analysis says "
+        "attention is 40% of GPU time, name only `attn_*` variants).",
+        "",
+        f"{'name':28s}  {'flag(s) / env(s)':50s}  trigger hint",
+        f"{'-' * 28}  {'-' * 50}  {'-' * 60}",
+    ]
+    for v in grid:
+        # Truncate long flag strings so the catalogue stays readable.
+        flag = (v.extra_sglang_args or "").strip()
+        if v.extra_envs:
+            env_repr = " ".join(
+                f"{k}={v}" for k, v in sorted(v.extra_envs.items())
+            )
+            flag = (
+                f"{flag} {env_repr}" if flag else f"env: {env_repr}"
+            )
+        if len(flag) > 50:
+            flag = flag[:47] + "..."
+        hint = HINT_BY_NOTE.get(v.note or "", v.note or "(generic)")
+        lines.append(f"{v.name:28s}  {flag:50s}  {hint}")
+
+    lines.extend([
+        "",
+        "Example (roofline shows attention 38% + AllReduce 22%):",
+        "  delegate{action_name='backends', params={variants: "
+        "['attn_aiter','attn_triton','custom_ar']}, "
+        "predicted_gain_pct: 1.5}",
+        "",
+        "When in doubt, name 3-5 variants; running all 10 wastes "
+        "wall-clock when the roofline already tells you which "
+        "categories to focus on.",
+    ])
+    return lines
+
+
 def _section_rules(rules_md: str) -> list[str]:
     body = rules_md.strip() or (
         "(orchestration.md rules fragment not found — Coordinator will still"
@@ -718,6 +829,15 @@ def build_orchestration_prompt(
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled),
     ]
+    # N20-A: render the registered backends grid catalogue so the LLM
+    # can name a SUBSET (params.variants=['name', ...]) when proposing
+    # the `backends` action. Only emit when backends is in this run's
+    # enabled-action set; otherwise the catalogue is dead weight in
+    # the prompt.
+    if any(a.name == "backends" for a in actions):
+        sections.append(
+            _section_backends_grid_catalogue(framework=framework_norm),
+        )
     if kernel_enabled and any(a.name == "kernel_opt" for a in actions):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
     sections.append(_section_rules(rules_md))

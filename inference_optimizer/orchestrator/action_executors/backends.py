@@ -586,6 +586,32 @@ class BackendsExecutor:
         base_extra_args = params.get("base_extra_args", "")
         base_tput = float(params.get("base_tput", 0.0))
         grid_override = params.get("grid")
+        # N20-A: roofline-driven variant subset selection. The LLM has
+        # read analysis.md (hot kernel distribution + system findings)
+        # and can name a SUBSET of the registered backends grid to
+        # try, instead of the executor blindly running all 10 variants.
+        # Two orthogonal LLM-controlled fields:
+        #   * `grid`    — list[{name, extra_sglang_args, extra_envs,
+        #                  note}]: full custom variants (Option B,
+        #                  pre-N20). Implies complete control + the
+        #                  LLM owns the search space.
+        #   * `variants`— list[str]: subset of registered grid variant
+        #                  names (Option A, N20). Safer surface — LLM
+        #                  cannot hallucinate flags / hit unsupported
+        #                  combos; executor filters self.default_grid
+        #                  (or vllm grid) by name. Empty / None means
+        #                  "no subset request, run the full registered
+        #                  grid" (backward compat).
+        # If BOTH are supplied, `grid` wins (LLM took full control;
+        # `variants` is silently ignored). If only `variants` is
+        # supplied, the executor narrows the registered grid before
+        # auto-discovery augmentation (so LLM doesn't accidentally
+        # subset away discovered flags it didn't know about).
+        variants_subset_raw = params.get("variants") or []
+        variants_subset: list[str] = [
+            str(v).strip() for v in variants_subset_raw
+            if isinstance(v, str) and str(v).strip()
+        ] if isinstance(variants_subset_raw, list) else []
         # Resolve framework once — needed for both grid selection and the
         # AST-discovery augmentation path below.
         import yaml
@@ -618,6 +644,39 @@ class BackendsExecutor:
                 if is_vllm
                 else list(self.default_grid)
             )
+            # N20-A: narrow to LLM-requested subset BEFORE auto-discovery
+            # augmentation. The auto-discovery step is meant to surface
+            # flags the LLM didn't know about (newly-added SGLang/vLLM
+            # CLI flags discovered via AST scan); applying a subset
+            # filter after augmentation would discard those exact
+            # newly-discovered flags. Subset filtering is silent on
+            # missing names (LLM may pass stale names from an earlier
+            # session) but logs the resolved cardinality for debug.
+            if variants_subset:
+                requested = set(variants_subset)
+                grid_by_name = {v.name: v for v in grid}
+                missing = sorted(requested - set(grid_by_name))
+                resolved = [grid_by_name[n] for n in variants_subset
+                            if n in grid_by_name]
+                if not resolved:
+                    return {
+                        "status": "failed",
+                        "error_class": "bad_param",
+                        "error": (
+                            f"none of variants={variants_subset!r} matched "
+                            f"the registered {'vllm' if is_vllm else 'sglang'} "
+                            f"backends grid; "
+                            f"available names: "
+                            f"{sorted(grid_by_name)}"
+                        ),
+                    }
+                log.info(
+                    "backends: LLM requested %d variants from registered "
+                    "grid of %d (resolved=%d, missing=%s)",
+                    len(requested), len(grid_by_name), len(resolved),
+                    missing or "none",
+                )
+                grid = resolved
             # T1: AST-discover boolean flags from the live framework's
             # server_args / arg_utils and append them as auto-probes. The
             # heuristic in `_augment_grid_with_discovered_flags` skips
