@@ -162,10 +162,11 @@ def _layout_mode() -> str:
     return "per_model_ts"
 
 
-def _sanitize_model_basename(model_name: str) -> str:
-    """Reduce ``model_name`` (may be a full filesystem path or HF id) to a
-    filename-safe basename. Empty / all-invalid input -> ``"session"``."""
-    stem = (model_name or "").strip()
+def _sanitize_model_basename(model_name: str | os.PathLike[str]) -> str:
+    """Reduce ``model_name`` (may be a full filesystem path, HF id, or
+    a Path object) to a filename-safe basename. Empty / all-invalid
+    input -> ``"session"``."""
+    stem = ("" if model_name is None else str(model_name)).strip()
     if not stem:
         return "session"
     # Treat ``/wekafs/models/DeepSeek-R1-0528`` -> ``DeepSeek-R1-0528``
@@ -198,7 +199,7 @@ def session_dir() -> Path:
     return workspace_root()
 
 
-def make_session_dir(model_name: str | None = None) -> Path:
+def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
     """Create the session directory + per-session subdirectory skeleton.
 
     Layout is governed by :func:`_layout_mode`. When mode is
