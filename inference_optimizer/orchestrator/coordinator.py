@@ -478,6 +478,15 @@ class Coordinator:
         # :func:`phase_state.infer_phase_from_state`.  Always idempotent:
         # second construction on the same session_dir is a no-op.
         self._ensure_phase_initialised()
+        # v0.8 KB_gaps/Gap-12 — Cortex T0 defensive fallback. The cli
+        # is the canonical T0 entry point (fail-fast banner +
+        # sys.exit on Cortex outage); this hook only fires for
+        # SDK / integration-test callers that constructed the
+        # Coordinator directly. No-op when cortex_kb is None /
+        # disabled / sid already set. Best-effort: helper logs a
+        # warning + leaves warm_start empty on Cortex failure rather
+        # than crashing the long-running reactor.
+        self._ensure_cortex_t0_anchored()
 
     # ==================================================================
     # Resume
@@ -756,6 +765,76 @@ class Coordinator:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: save after phase init failed")
+
+    def _ensure_cortex_t0_anchored(self) -> None:
+        """v0.8 KB_gaps/Gap-12 — defensive T0 anchor for SDK callers.
+
+        The cli is the canonical T0 entry point (see
+        ``cli._bootstrap_cortex_kb``); it runs T0 *before* the
+        Coordinator is constructed and threads the resulting
+        :class:`CortexKBClient` (with its sid + warm_start already on
+        SharedState) into our constructor. This method is a *fallback*
+        — it does the same T0 ritual when an SDK / integration-test
+        caller constructs a :class:`Coordinator` directly without the
+        cli plumbing.
+
+        The hook is intentionally narrow:
+
+        * Skip when ``cortex_kb`` is ``None`` (legacy v0.6 callers
+          who don't even pass a client).
+        * Skip when ``cortex_kb.enabled is False`` (``--no-cortex``).
+        * Skip when ``shared_state.cortex_session_id`` is already
+          non-empty (the cli already ran T0, or a resume picked up
+          the prior sid).
+
+        On Cortex failure (``CortexKBError`` / binary missing),
+        :func:`run_t0_anchor` with ``fail_fast=False`` logs a warning
+        and leaves warm_start empty — the Coordinator never blocks
+        its boot on Cortex availability when it's running outside
+        cli's fail-fast contract.
+        """
+        client = self.cortex_kb
+        if client is None or not getattr(client, "enabled", False):
+            return
+        state = self.shared_state
+        if (state.cortex_session_id or "").strip():
+            # Either cli already T0'd or resume picked up the sid.
+            # The helper's `skipped_already` short-circuit would
+            # behave the same, but we gate up here so we don't even
+            # import the helper for the common cli path.
+            return
+        # Derive workload / hw from SharedState (cli has the same
+        # fallback chain, but SDK callers are expected to seed
+        # ``model_name`` + ``gpu_type`` themselves before
+        # constructing the Coordinator).
+        workload = (
+            getattr(state, "model_name", "") or "unknown_model"
+        )
+        hw = getattr(state, "gpu_type", "") or "unknown_gpu"
+        extra_attrs = {
+            "framework":   getattr(state, "framework", "") or "",
+            "model_class": getattr(state, "model_class", "") or "",
+            "claw_session_id": getattr(state, "claw_session_id", "") or "",
+            "boot_origin": "coordinator_fallback",
+        }
+        try:
+            from .cortex_t0 import run_t0_anchor
+            run_t0_anchor(
+                client,
+                state,
+                workload=workload,
+                hw=hw,
+                extra_attrs=extra_attrs,
+                fail_fast=False,
+                session_dir=self.session_dir,
+                save_state=True,
+            )
+        except Exception:  # noqa: BLE001 — defensive; helper is itself best-effort
+            log.exception(
+                "Coordinator T0 fallback: run_t0_anchor raised "
+                "(workload=%s, hw=%s); warm_start stays empty",
+                workload, hw,
+            )
 
     def _kernel_enabled(self) -> bool:
         # Mirror the persisted ``kernel_enabled`` flag — CLI's
