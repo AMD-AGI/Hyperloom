@@ -28,6 +28,7 @@ from typing import Any
 
 import yaml
 
+from ._robustness_pulse import pulse as _robustness_pulse
 from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
@@ -1028,6 +1029,18 @@ async def run_grid(
     if not magpie_python:
         magpie_python = _resolve_magpie_python()
     results: list[VariantResult] = []
+    # Variant-boundary robustness pulse — runs a bounded deterministic
+    # robustness tick after every variant (success OR failure) so that a
+    # mid-grid GPU leak, SGLang crash, or ROCm error spike surfaces
+    # between variants instead of waiting for the whole grid (often
+    # 30+ minutes) to finish. Best-effort, ≤ ``_PULSE_TIMEOUT_SEC``;
+    # see ``_robustness_pulse.py`` for the contract.
+    async def _pulse_after_variant(idx: int) -> None:
+        try:
+            await _robustness_pulse(tick_index=idx)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("robustness pulse swallowed: %r", exc)
+
     for i, variant in enumerate(grid):
         slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
         try:
@@ -1044,6 +1057,7 @@ async def run_grid(
                 status="failed", error=f"yaml_build_error: {exc!r}",
                 note=variant.note,
             ))
+            await _pulse_after_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -1127,6 +1141,7 @@ async def run_grid(
                     for src, _ in to_harvested
                 ],
             ))
+            await _pulse_after_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -1167,6 +1182,7 @@ async def run_grid(
                 nonfatal_warnings=harvest_tags,
                 note=variant.note,
             ))
+            await _pulse_after_variant(i)
             if rc != 0 and not keep_going_on_failure:
                 break
             continue
@@ -1204,6 +1220,7 @@ async def run_grid(
                 error=error,
                 note=variant.note,
             ))
+            await _pulse_after_variant(i)
             if rc != 0 and not keep_going_on_failure:
                 break
             continue
@@ -1232,6 +1249,7 @@ async def run_grid(
             "grid_runner: variant %s tput=%.1f tok/s",
             variant.name, results[-1].output_throughput or 0.0,
         )
+        await _pulse_after_variant(i)
     return results
 
 
