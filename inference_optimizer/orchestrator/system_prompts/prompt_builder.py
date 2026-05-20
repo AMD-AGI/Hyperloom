@@ -752,6 +752,49 @@ def _section_params_grid_catalogue(*, framework: str) -> list[str]:
         "to over-include 8-10 relevant variants than miss a category "
         "the analysis flagged; only skip variants whose trigger hint "
         "is clearly orthogonal to what analysis.md surfaces.",
+        "",
+        "### N22 ENFORCED MAPPINGS (analysis.md keyword -> required variants)",
+        "",
+        "The PolicyGate runs a non-blocking advisory check on every "
+        "params proposal: if analysis.md mentions a keyword below and "
+        "your `variants` list omits the implied variant, an advisory "
+        "lands in SharedState.last_proposal_advice (you'll see it on "
+        "the NEXT tick). The propose still goes through — but you should "
+        "self-correct on the follow-up cheap-action propose by adding "
+        "the missing variant. The map below is the canonical contract;",
+        "consult `_analysis_keyword_map.py` for the full machine-readable "
+        "version (~50 keys covering compile, cuda-graph, KV cache, attn, "
+        "moe, scheduling, host-bound, fusion, radix cache).",
+        "",
+        "  analysis.md mentions ...     -> include variant(s)",
+        "  -----------------------       -------------------",
+        "  'torch.compile'              -> torch_compile_on",
+        "  'cuda graph(s)'              -> cuda_graph_max_bs_8/16/32/64",
+        "  'kv cache' / 'kv-cache'      -> mem_fraction_0_85/0_90/0_80",
+        "  'decode bound' / 'long decode' -> decode_steps_8/16/32",
+        "  'long prompt(s)' / 'prefill' -> chunked_prefill_32k/64k/128k,",
+        "                                  max_prefill_tokens_32k/64k",
+        "  'queue depth' / 'scheduling' / 'concurrency' / 'batching'",
+        "                               -> max_running_requests_128/256,",
+        "                                  sched_lpm, sched_dfs",
+        "  'host-bound' / 'host-side'   -> torch_compile_on,",
+        "                                  cuda_graph_max_bs_32/64,",
+        "                                  decode_steps_16/32",
+        "  'gpu idle' / 'underutilization' -> torch_compile_on,",
+        "                                  cuda_graph_max_bs_64,",
+        "                                  decode_steps_32",
+        "  'overlap' / 'multi-stream'   -> sglang_multi_stream_overlap",
+        "  'kernel fusion'              -> enable_fused_moe, enable_mixed",
+        "  'radix cache'                -> disable_radix_cache",
+        "  'MoE' / 'expert routing'     -> moe_aiter, enable_fused_moe",
+        "  'attention backend'          -> attn_aiter, attn_triton,",
+        "                                  decode_aiter",
+        "  'AllReduce' / 'NCCL' / 'RCCL'-> custom_ar",
+        "",
+        "(Mapping is case-insensitive substring match. False positives "
+        "are tolerable — the LLM may trim genuinely-orthogonal ones; "
+        "false negatives — i.e. silently skipping a clearly-implied "
+        "variant — is what this catalogue is here to prevent.)",
     ])
     return lines
 
@@ -857,6 +900,30 @@ def _section_backends_grid_catalogue(*, framework: str) -> list[str]:
         "every relevant variant across all flagged categories. Only "
         "skip variants whose trigger hint is clearly orthogonal to "
         "what analysis.md surfaces.",
+        "",
+        "### N22 ENFORCED MAPPINGS (analysis.md keyword -> required variants)",
+        "",
+        "Same PolicyGate advisory applies to `backends` proposals. The",
+        "machine-readable map lives in `_analysis_keyword_map.py`; the "
+        "backends-relevant subset:",
+        "",
+        "  analysis.md mentions ...     -> include variant(s)",
+        "  -----------------------       -------------------",
+        "  'attention backend' /        -> attn_aiter, attn_triton,",
+        "  'flash attention' / 'aiter'     decode_aiter",
+        "  'decode bound' / 'long decode' -> decode_aiter",
+        "  'MoE' / 'mixture of experts' /-> moe_aiter, enable_fused_moe",
+        "  'expert routing/dispatch'",
+        "  'kernel fusion' / 'fusion'   -> enable_fused_moe, enable_mixed",
+        "  'scheduling' / 'schedule'    -> sched_lpm, sched_dfs",
+        "  'overlap' / 'multi-stream'   -> sglang_multi_stream_overlap",
+        "                                  (params-side, but listed for",
+        "                                   completeness across catalogues)",
+        "  'AllReduce' / 'NCCL' / 'RCCL' -> custom_ar",
+        "  'collective communication'   -> custom_ar",
+        "",
+        "(Same false-positive-tolerable, false-negative-blocking contract",
+        "as the params catalogue.)",
     ])
     return lines
 
