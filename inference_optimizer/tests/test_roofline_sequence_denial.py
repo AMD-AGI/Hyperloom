@@ -220,9 +220,19 @@ def test_run_optimization_request_denied_without_analysis_md(session_dir):
     assert denied.hint and "roofline" in denied.hint
 
 
-def test_run_optimization_request_allowed_with_matching_cache(session_dir):
-    """run_optimization passes when last_trace_analyze.trace_input
-    matches last_profile_trace (the existing invariant)."""
+def test_run_optimization_request_allowed_with_matching_cache(
+    session_dir, monkeypatch,
+):
+    """run_optimization passes the trace_analyze cache check when
+    last_trace_analyze.trace_input matches last_profile_trace (the
+    pre-N13 invariant).
+
+    Roofline-v2 N13 adds a separate ordering gate (cheap actions +
+    snapshot >= 2). Use the escape hatch to keep this test focused
+    on the trace_analyze cache check; the N13 ordering gate has
+    dedicated coverage in test_n13_kernel_opt_ordering.py.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "1")
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
     coord.shared_state.last_profile_trace = "/tmp/profile.gz"

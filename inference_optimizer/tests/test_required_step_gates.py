@@ -446,10 +446,20 @@ def test_trace_analyze_request_itself_passes(session_dir):
     assert coord._sequence_denial_for_request("kernel", "trace_analyze") is None
 
 
-def test_trace_analyze_gate_clears_run_opt_request_when_cache_fresh(session_dir):
+def test_trace_analyze_gate_clears_run_opt_request_when_cache_fresh(
+    session_dir, monkeypatch,
+):
     """Once ``last_trace_analyze.trace_input`` matches the current
-    ``last_profile_trace``, the request-layer gate clears and
-    ``run_optimization`` is allowed through."""
+    ``last_profile_trace``, the request-layer trace_analyze gate
+    clears and ``run_optimization`` is allowed through.
+
+    Roofline-v2 N13 added a separate ordering check (cheap
+    exploration + snapshot >= 2 must precede kernel_opt). This test
+    is about the trace_analyze cache check specifically, so we use
+    the N13 escape hatch to isolate it; the N13 ordering check has
+    dedicated coverage in test_n13_kernel_opt_ordering.py.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "1")
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state

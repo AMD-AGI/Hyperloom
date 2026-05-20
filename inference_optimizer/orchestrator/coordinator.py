@@ -1631,7 +1631,77 @@ class Coordinator:
                     "last_profile_trace (legacy path)"
                 ),
             )
+        # Roofline-v2 N13 (GPU-empirical): kernel_opt requests
+        # (REQUEST kind="run_optimization") must come AFTER cheap
+        # exploration + re-roofline. See design/roofline-v2.md §6.5.1
+        # for the full rationale; short version: backend/param changes
+        # shift the kernel distribution (e.g. enabling
+        # --enable-torch-compile or different attention backends
+        # replaces or restructures the hot kernels), so kernel_opt
+        # against the baseline snapshot would target kernels no
+        # longer on the critical path. The fresh snapshot (#2 or
+        # later) is what kernel_opt should consume.
+        #
+        # Three prerequisites, all checked at the REQUEST layer:
+        #   1. backends_attempts >= 1 (at least one backends grid run)
+        #   2. params_attempts >= 1   (at least one params grid run)
+        #   3. snapshot_id >= 2       (re-roofline after cheap actions)
+        #
+        # Escape hatch: INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1
+        # restores pre-N13 behaviour (snapshot_id >= 1 only). Use cases:
+        # v0 baseline comparison; workloads known to have no leverage
+        # in cheap actions; debug / unit-test paths.
+        if req_kind == "run_optimization" and not self._allow_early_kernel_opt():
+            backends_attempts = len(self.shared_state.backends_attempts or [])
+            params_attempts = len(self.shared_state.params_attempts or [])
+            snapshot_id = (
+                (self.shared_state.last_trace_analyze or {}).get(
+                    "roofline_snapshot_id", 0
+                )
+            )
+            missing: list[str] = []
+            if backends_attempts < 1:
+                missing.append(
+                    f"backends_attempts={backends_attempts} (need >= 1)"
+                )
+            if params_attempts < 1:
+                missing.append(
+                    f"params_attempts={params_attempts} (need >= 1)"
+                )
+            if not isinstance(snapshot_id, int) or snapshot_id < 2:
+                missing.append(
+                    f"snapshot_id={snapshot_id} (need >= 2; re-propose "
+                    "roofline after the cheap exploration round)"
+                )
+            if missing:
+                return PolicyDenied(
+                    f"request kind={req_kind!r} denied: "
+                    f"kernel_opt requires post-cheap-exploration snapshot; "
+                    f"missing: {', '.join(missing)}",
+                    rule="execution_order",
+                    hint=(
+                        "Per design/roofline-v2.md §6.5.1, kernel_opt is "
+                        "the LAST optimisation stage. First propose at "
+                        "least one `backends` round + one `params` round, "
+                        "then propose `roofline` AGAIN to capture the "
+                        "post-cheap kernel distribution (snapshot_id "
+                        ">= 2). Cheap actions shift which kernels are "
+                        "hot — running kernel_opt against snapshot #1 "
+                        "may target a kernel no longer on the critical "
+                        "path. Override with "
+                        "INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1 "
+                        "for debug / v0-baseline-comparison paths."
+                    ),
+                )
         return None
+
+    @staticmethod
+    def _allow_early_kernel_opt() -> bool:
+        """N13 escape hatch — `INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1`
+        restores pre-N13 behaviour (no cheap-action prerequisites)."""
+        return os.environ.get(
+            "INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "",
+        ).strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
     def _pmc_roofline_enabled() -> bool:
