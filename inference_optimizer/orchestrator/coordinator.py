@@ -720,6 +720,11 @@ class Coordinator:
             return
         kernel_enabled = "kernel" in self.role_registry
         enabled = FULL_ENABLED_ACTIONS if kernel_enabled else NO_KERNEL_ENABLED_ACTIONS
+        # Strip framework_pr when the framework-agent toggle is off so the
+        # scoreboard never surfaces an arm the bandit cannot pull. Defaults
+        # to True for older state.json files (see SharedState.framework_enabled).
+        if not getattr(self.shared_state, "framework_enabled", True):
+            enabled = tuple(a for a in enabled if a != "framework_pr")
         model_class = (self.shared_state.model_class or "moe_mla").strip()
         try:
             seeded = _scoring.seed_action_scores(
