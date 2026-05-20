@@ -1,36 +1,42 @@
-"""Framework-Agent pre-stage hook for inference_optimizer.
+"""Framework-Agent integration glue for inference_optimizer.
 
-Drives the standalone ``fa`` CLI (framework-agent) as a *one-shot
-precursor* to the IO baseline. The contract is:
+Originally a *one-shot precursor* invoked from ``cli.py`` before
+``_run_optimize``; the architecture was migrated (plan
+``fa-as-io-arm-design``) so that PR discovery + apply runs as a
+regular bandit arm (:mod:`framework_pr` executor) instead of a
+session-killing pre-stage.
 
-    1. fa explore --execute  -> winner_ref + winner_dir/pr.patches
-    2. resolve PR head_sha   -> git fetch refs/pull/N/head + checkout
-    3. pip install -e python/ in sglang source so the new code becomes
-       the new baseline that IO runs against
+This module retained two roles after the migration:
 
-This module is the IO-side glue; framework-agent itself stays
-standalone. Calls are subprocess-based (same isolation pattern as
-``orchestrator/kernel_request_handlers.py`` uses for the
-kernel-agent shell tools).
+1. **Helpers** consumed by the ``framework_pr`` executor:
 
-Public API
-----------
-* :func:`discover_pr` - run fa, return the hand-off dict.
-* :func:`apply_to_sglang` - resolve head_sha + checkout + pip install.
-* :func:`explicit_pr_apply` - skip discover, apply a user-supplied
-  ``PR:N`` ref directly; symmetric return shape.
-* :func:`run` - top-level orchestrator used from cli.py; takes argparse
-  namespace, decides which mode (discover vs explicit), executes,
-  returns the hand-off dict.
+   * :func:`discover_pr` — run ``fa candidates`` (no side effects),
+     return the top-1 candidate hand-off dict.
+   * :func:`apply_to_sglang` — resolve head_sha + checkout + (opt) pip
+     install.
+   * :func:`rollback_to` — checkout the sglang worktree back to a
+     previously stashed git ref (used on arm DISCARD path).
+   * :func:`current_head_sha` — read ``HEAD`` so the executor can stash
+     the pre-arm ref for rollback.
+   * :func:`_resolve_head_sha` — ``git ls-remote`` fallback for PRs
+     whose head_sha did not come back populated from fa.
+
+2. **Deprecated** legacy CLI hooks consumed by ``cli.py:_run_optimize``:
+
+   * :func:`run` / :func:`explicit_pr_apply` — invoked when the user
+     still passes ``--framework-pr`` / ``--framework-pr-discover``.
+     Phase 3 of the migration repointed those flags to inject
+     ``framework_pr`` task params instead; the helpers stay here only
+     so unit tests + any external caller still importing them keep
+     working until the next release.
 
 Error policy
 ------------
-All public functions raise :class:`FrameworkPRError` on any failure
-that should abort the IO run (fa exited non-zero, no winner picked,
-git checkout failed, pip install failed). The CLI layer maps this
-to exit code 2 so the operator sees the original cause and decides
-whether to retry with different ``--framework-gap`` or skip
-framework-pr entirely.
+Helper functions raise :class:`FrameworkPRError` on any operational
+failure. The new arm executor catches this and turns it into a soft
+``status='failed'`` result with ``error_class`` set; **the IO session
+keeps running**. Legacy CLI :func:`run` still surfaces the exception
+to the operator (cli.py maps it to exit code 2) for backward compat.
 """
 
 from __future__ import annotations
@@ -282,6 +288,67 @@ def discover_pr(
     }
 
 
+def enumerate_candidates_via_fa(
+    *,
+    gap_description: str,
+    repo_url: str,
+    primus_cortex_url: str = _DEFAULT_PRIMUS_URL,
+    framework: str = "sglang",
+    work_dir: Path | None = None,
+    max_candidates: int = 5,
+    keywords: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Run ``fa candidates`` (read-only) and return the full ranked list.
+
+    Side-effect free: no git fetch, no worktree, no pip install. Used by the
+    :mod:`framework_pr` arm executor so a single tick can cheaply probe the
+    candidate set, filter out refs already tried this session, and apply the
+    survivor on the IO side via :func:`apply_to_sglang`. Returns the raw
+    ``candidates`` list straight out of fa's JSON envelope; each entry is the
+    asdict(Candidate) form so ``score`` / ``ref`` / ``head_sha`` / ``title``
+    are all available to the executor's selection logic.
+
+    Raises :class:`FrameworkPRError` on fa subprocess failure / empty result
+    so the arm executor can treat that as a soft DISCARD with a real
+    ``error_class`` and the bandit cooldown can kick in.
+    """
+    fa_bin = _resolve_fa_binary()
+    if work_dir is None:
+        work_dir = Path(tempfile.mkdtemp(prefix="io-fa-cands-"))
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    req = _build_explore_request(
+        gap_description=gap_description,
+        repo_url=repo_url,
+        primus_cortex_url=primus_cortex_url,
+        work_dir=work_dir,
+        framework=framework,
+        max_candidates=max_candidates,
+        keywords=keywords,
+    )
+    req_path = work_dir / "req.json"
+    req_path.write_text(json.dumps(req, indent=2), encoding="utf-8")
+
+    out_path = work_dir / "candidates.json"
+    _run(
+        [fa_bin, "candidates", "--request", str(req_path), "--out", str(out_path)],
+        timeout_sec=_FA_EXECUTE_TIMEOUT_SEC,
+        label="fa candidates",
+    )
+    if not out_path.is_file():
+        raise FrameworkPRError(
+            f"fa candidates did not produce {out_path}; check logs"
+        )
+    payload = json.loads(out_path.read_text(encoding="utf-8"))
+    cands = payload.get("candidates") or []
+    if not isinstance(cands, list):
+        raise FrameworkPRError(
+            f"fa candidates returned malformed payload (candidates not a list): "
+            f"{type(cands).__name__}"
+        )
+    return cands
+
+
 # ---------------------------------------------------------------------------
 # git checkout + pip install
 # ---------------------------------------------------------------------------
@@ -311,6 +378,62 @@ def _resolve_head_sha(sglang_path: Path, pr_number: int) -> str:
             f"git ls-remote produced unexpected output: {out!r}"
         )
     return head_sha
+
+
+def current_head_sha(sglang_path: Path | None = None) -> str:
+    """Return ``git rev-parse HEAD`` for the sglang worktree.
+
+    Used by the framework_pr arm BEFORE attempting a PR checkout so the
+    DISCARD path can roll back to this exact commit. Returns "" on any
+    git error (caller should treat empty as "rollback disabled / unsafe").
+    """
+    sglang_path = sglang_path or _DEFAULT_SGLANG_PATH
+    if not (sglang_path / ".git").is_dir():
+        return ""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(sglang_path),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log.warning("current_head_sha: git rev-parse failed: %s", exc)
+        return ""
+    if result.returncode != 0:
+        return ""
+    return (result.stdout or "").strip()
+
+
+def rollback_to(
+    target_sha: str,
+    *,
+    sglang_path: Path | None = None,
+) -> None:
+    """``git checkout --detach <target_sha>`` to undo a prior PR apply.
+
+    Used by the framework_pr arm DISCARD path. ``target_sha`` should
+    be the value returned by :func:`current_head_sha` BEFORE the
+    arm's :func:`apply_to_sglang` call. Raises :class:`FrameworkPRError`
+    on git failure so the executor can record ``rollback_done=False``
+    and the operator can intervene before the next arm runs against a
+    dirty worktree.
+    """
+    sglang_path = sglang_path or _DEFAULT_SGLANG_PATH
+    target_sha = (target_sha or "").strip()
+    if not target_sha:
+        raise FrameworkPRError("rollback_to: empty target_sha")
+    if not (sglang_path / ".git").is_dir():
+        raise FrameworkPRError(
+            f"rollback_to: {sglang_path} is not a git checkout"
+        )
+    _run(
+        ["git", "checkout", "--detach", target_sha],
+        cwd=sglang_path,
+        timeout_sec=120,
+        label=f"git checkout (rollback) {target_sha[:12]}",
+    )
 
 
 def _worktree_is_dirty(sglang_path: Path) -> bool:
@@ -595,8 +718,11 @@ def run(args, *, sglang_path: Path | None = None) -> dict[str, Any]:
 
 __all__ = [
     "FrameworkPRError",
-    "discover_pr",
     "apply_to_sglang",
+    "current_head_sha",
+    "discover_pr",
+    "enumerate_candidates_via_fa",
     "explicit_pr_apply",
+    "rollback_to",
     "run",
 ]

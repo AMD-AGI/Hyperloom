@@ -5,7 +5,11 @@ Hermetic - pure-Python, no network/GPU/disk.
 
 from __future__ import annotations
 
-from framework_agent.keywords import extract_keywords, score_title_against_keywords
+from framework_agent.keywords import (
+    extract_keywords,
+    score_title_against_keywords,
+    score_title_with_anti_signal,
+)
 
 
 def test_extract_whitelist_hits_are_lowercase_and_sorted() -> None:
@@ -140,3 +144,125 @@ def test_score_title_snake_case_token() -> None:
     assert score_title_against_keywords(
         "tensor_parallel optimisation", ["tensor_parallel"]
     ) == 1
+
+
+# ---------------------------------------------------------------------------
+# score_title_with_anti_signal (B3 anti-correlation reranker).
+#
+# Anti pairs are gated on the gap keyword being present so the behaviour is
+# strictly additive: a gap with no anti-trigger reduces to the same ordering
+# as score_title_against_keywords. The tests below cover the four orthogonal
+# axes that surfaced in session f219629b (dense vs MoE, AMD vs NVIDIA,
+# bf16 vs low-bit), plus the trigger-gating, the zero-clamp floor, and the
+# bug-driven PR:25769 regression.
+# ---------------------------------------------------------------------------
+
+
+def test_score_anti_dense_vs_moe_pr_demoted() -> None:
+    """gap=['dense',...] should penalise a PR whose title screams MoE."""
+    gap = ["sglang", "bf16", "dense", "throughput"]
+    moe_title = "Enable MegaMoE for NextN with TP attn A2A scatter padding"
+    dense_title = "optimize sglang dense attention prefill throughput"
+    moe_score = score_title_with_anti_signal(moe_title, gap)
+    dense_score = score_title_with_anti_signal(dense_title, gap)
+    assert dense_score > moe_score, (
+        f"dense PR must rank above MoE PR under dense gap "
+        f"(got dense={dense_score} vs moe={moe_score})"
+    )
+
+
+def test_score_anti_mi300x_vs_nvidia_pr_demoted() -> None:
+    """gap=['mi300x',...] should penalise NVIDIA-uarch PR titles."""
+    gap = ["mi300x", "throughput", "sglang"]
+    nv_title = "H100 fast moe kernel sm90 hopper"
+    amd_title = "sglang mi300x throughput attention path"
+    nv_score = score_title_with_anti_signal(nv_title, gap)
+    amd_score = score_title_with_anti_signal(amd_title, gap)
+    assert amd_score > nv_score
+
+
+def test_score_anti_bf16_vs_low_bit_pr_demoted() -> None:
+    """gap=['bf16',...] should penalise PRs targeting fp8/awq/gptq quant schemes."""
+    gap = ["bf16", "throughput"]
+    quant_title = "fp8 awq moe gptq throughput"
+    bf16_title = "bf16 throughput improvement attention"
+    quant_score = score_title_with_anti_signal(quant_title, gap)
+    bf16_score = score_title_with_anti_signal(bf16_title, gap)
+    assert bf16_score > quant_score
+
+
+def test_score_anti_inactive_when_trigger_absent() -> None:
+    """Anti is gated on the gap keyword being present.
+
+    A gap of just ['throughput'] does NOT carry the ``dense`` trigger, so a
+    MoE-heavy PR title must score the same as it would under the legacy
+    positive-only scorer (no demotion fires).
+    """
+    gap = ["throughput"]
+    moe_title = "MegaMoE throughput optimization"
+    score = score_title_with_anti_signal(moe_title, gap)
+    legacy = score_title_against_keywords(moe_title, gap)
+    assert score == float(legacy), (
+        f"anti must not activate without a trigger keyword in the gap "
+        f"(got new={score} vs legacy={legacy})"
+    )
+
+
+def test_score_anti_clamps_at_zero_never_negative() -> None:
+    """When anti penalty exceeds positive overlap, score is clamped to 0.0."""
+    gap = ["dense", "mi300x", "bf16"]
+    # Title overlaps once on dense-anti (moe), once on mi300x-anti (h100),
+    # once on bf16-anti (fp8) but matches no gap keyword positively.
+    title = "fp8 moe on h100"
+    score = score_title_with_anti_signal(title, gap)
+    assert score == 0.0, f"score must clamp to 0.0, not go negative (got {score})"
+
+
+def test_score_anti_bidirectional_nvidia_gap_demotes_amd_pr() -> None:
+    """Reverse direction: gap=['h100',...] should penalise AMD-only PR titles."""
+    gap = ["h100", "throughput"]
+    amd_title = "rocm mi300x cdna3 throughput"
+    nv_title = "h100 throughput improvement"
+    amd_score = score_title_with_anti_signal(amd_title, gap)
+    nv_score = score_title_with_anti_signal(nv_title, gap)
+    assert nv_score > amd_score
+
+
+def test_score_anti_returns_float_and_handles_empty_inputs() -> None:
+    """Type contract: float return; empty title or empty keywords yields 0.0."""
+    assert score_title_with_anti_signal("", ["fp8"]) == 0.0
+    assert score_title_with_anti_signal("fp8 stuff", []) == 0.0
+    score = score_title_with_anti_signal("fp8 moe perf", ["fp8", "moe"])
+    assert isinstance(score, float)
+    assert score == 2.0
+
+
+def test_score_anti_penalty_coefficient_tunable() -> None:
+    """anti_penalty kwarg lets callers tune the demotion strength."""
+    gap = ["dense", "throughput"]
+    title = "MoE throughput improvement"  # +1 positive (throughput), +1 anti (moe)
+    default_score = score_title_with_anti_signal(title, gap)  # 1 - 2*1 -> 0.0
+    soft_score = score_title_with_anti_signal(title, gap, anti_penalty=0.5)  # 1-0.5 -> 0.5
+    hard_score = score_title_with_anti_signal(title, gap, anti_penalty=5.0)  # 1-5 -> 0.0
+    assert default_score == 0.0
+    assert soft_score == 0.5
+    assert hard_score == 0.0
+
+
+def test_score_anti_pr25769_regression_session_f219629b() -> None:
+    """Bug-driven: session f219629b on Qwen-Qwen3-32B (dense, bf16, mi300x).
+
+    fa picked PR:25769 ("Enable MegaMoE for NextN with TP attn A2A scatter
+    padding") because positive-only overlap matched ``throughput``. With the
+    anti-signal fix, the MegaMoE PR must rank below a hypothetical dense /
+    mi300x PR that targets the correct axis.
+    """
+    gap = ["sglang", "bf16", "dense", "mi300x", "throughput"]
+    pr25769 = "Enable MegaMoE for NextN with TP attn A2A scatter padding"
+    relevant = "optimize sglang bf16 attention prefill on mi300x"
+    pr25769_score = score_title_with_anti_signal(pr25769, gap)
+    relevant_score = score_title_with_anti_signal(relevant, gap)
+    assert relevant_score > pr25769_score, (
+        f"PR:25769-class MegaMoE PR must rank below dense+mi300x PR "
+        f"(got pr25769={pr25769_score} vs relevant={relevant_score})"
+    )

@@ -117,7 +117,16 @@ class CommandSpec:
 
 @dataclass(frozen=True)
 class Candidate:
-    """A single PR or git ref candidate (explicit, primus_cortex, or github)."""
+    """A single PR or git ref candidate (explicit, primus_cortex, or github).
+
+    ``score`` carries the gap-relevance score produced by the dispatcher's
+    anti-aware reranker (:func:`framework_agent.keywords.score_title_with_anti_signal`).
+    It is 0.0 when no gap-driven ranking happened (e.g. ``source='explicit'``
+    or label-only listing). Downstream consumers (notably the IO
+    ``framework_pr`` arm) use it to log why a candidate won and to drive
+    a "best vs second" gap in their bandit history; the field is non-load-
+    bearing in fa itself (sort order is preserved by the dataclass list).
+    """
 
     ref: str
     repo: str
@@ -129,6 +138,7 @@ class Candidate:
     changed_files: tuple[str, ...] = ()
     updated_at: str = ""
     html_url: str = ""
+    score: float = 0.0
 
     @property
     def slug(self) -> str:

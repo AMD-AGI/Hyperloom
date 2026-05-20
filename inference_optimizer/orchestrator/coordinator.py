@@ -516,7 +516,7 @@ class Coordinator:
             else:
                 self._score_action_keep(task_kind, gain_pct=0.0)
             return
-        if task_kind in {"backends", "params", "sweep"}:
+        if task_kind in {"backends", "params", "sweep", "framework_pr"}:
             if failed:
                 self._score_action_failure(task_kind)
             elif promoted:
@@ -1805,6 +1805,39 @@ class Coordinator:
                 params.setdefault("max_candidates_per_round", 5)
                 if isinstance(cb, dict) and cb.get("variant_name"):
                     params.setdefault("base_variant_name", str(cb["variant_name"]))
+        if pending.action_name == "framework_pr":
+            # Plumb the context the framework_pr arm needs from SharedState
+            # so the executor stays stateless. ``base_tput`` is the gate
+            # the arm compares PR-applied throughput against (KEEP only if
+            # delta_pct >= min_gain_pct); ``base_extra_args`` keeps the
+            # sub-baseline server flags identical to current_best so we
+            # measure the PR effect, not a flag regression. ``framework``
+            # / ``gpu_type`` / ``model_class`` feed the gap composer
+            # (replaces the legacy hand-typed ``--framework-gap`` flag).
+            # ``last_profile_kernel_breakdown`` enriches the composer
+            # with a bottleneck keyword when a recent profile is on disk.
+            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
+                else self.shared_state.baseline_tput
+            params.setdefault("base_tput", float(base or 0.0))
+            params.setdefault("base_extra_args", cb_args)
+            if self.shared_state.baseline_config_path:
+                params.setdefault(
+                    "config_path", self.shared_state.baseline_config_path
+                )
+            if self.shared_state.framework:
+                params.setdefault("framework", self.shared_state.framework)
+            if self.shared_state.gpu_type:
+                params.setdefault("gpu_type", self.shared_state.gpu_type)
+            if self.shared_state.model_class:
+                params.setdefault("model_class", self.shared_state.model_class)
+            if self.shared_state.last_profile_kernel_breakdown:
+                params.setdefault(
+                    "last_profile_kernel_breakdown",
+                    self.shared_state.last_profile_kernel_breakdown,
+                )
+            if self.shared_state.model_path:
+                params.setdefault("model_path", self.shared_state.model_path)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=pending.action_name,
             params=params,
@@ -3141,6 +3174,66 @@ class Coordinator:
                     if isinstance(gain_vs_cb, (int, float)) else None
                 ),
             }
+        elif task_kind == "framework_pr":
+            # framework_pr arm: executor returns ``decision='kept'`` with a
+            # PR-applied ``output_throughput`` when the new throughput beat
+            # ``base_tput`` by ``min_gain_pct`` (the bench gate is INSIDE
+            # the executor, not here, because rollback on DISCARD has to
+            # happen synchronously with the sub-baseline result). KEEP
+            # → lift into current_best like backends/params does; DISCARD
+            # → score_no_promote so the bandit cools the arm down. Failure
+            # / rollback paths fall through to the fallback score handler
+            # below.
+            decision = str(result.get("decision") or "")
+            new_tput = result.get("output_throughput")
+            promoted = False
+            gain_vs_cb_fpr: float | None = None
+            if decision == "kept" and isinstance(new_tput, (int, float)) and new_tput > 0:
+                cb = self.shared_state.current_best or {}
+                cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+                cur_best = (
+                    float(cb_tput)
+                    if isinstance(cb_tput, (int, float)) and cb_tput > 0
+                    else float(self.shared_state.baseline_tput or 0.0)
+                )
+                if cur_best > 0:
+                    gain_vs_cb_fpr = (float(new_tput) - cur_best) / cur_best * 100.0
+                bv_fpr: dict[str, Any] = {
+                    "name": result.get("applied_ref"),
+                    "candidate_extra_sglang_args": "",
+                    "extra_sglang_args": (
+                        str((task.params or {}).get("base_extra_args") or "")
+                        if task is not None else ""
+                    ),
+                    "extra_envs": {},
+                    "workspace": result.get("workspace"),
+                    "ttft_mean_ms": (
+                        result.get("sub_baseline_result", {}).get("ttft_mean_ms")
+                        if isinstance(result.get("sub_baseline_result"), dict)
+                        else None
+                    ),
+                    "e2el_mean_ms": (
+                        result.get("sub_baseline_result", {}).get("e2el_mean_ms")
+                        if isinstance(result.get("sub_baseline_result"), dict)
+                        else None
+                    ),
+                }
+                self._lift_to_current_best("framework_pr", float(new_tput), bv_fpr)
+                promoted = True
+                changed = True
+                log.info(
+                    "framework_pr promoted: ref=%s new_tput=%.1f gain_vs_cb=%.2f%%",
+                    result.get("applied_ref"), float(new_tput),
+                    gain_vs_cb_fpr if gain_vs_cb_fpr is not None else 0.0,
+                )
+            self._apply_action_score_update(
+                "framework_pr", result,
+                promoted=promoted,
+                gain_vs_cb=(
+                    float(gain_vs_cb_fpr) if gain_vs_cb_fpr is not None else 0.0
+                ),
+            )
+            changed = True
         # Out-of-band score updates for the task_kinds that don't have a
         # promoted-vs-discard notion (profile / pmc_roofline / validate_stack
         # bump runs + cooldown; baseline is treated as a gate and skipped

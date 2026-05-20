@@ -27,7 +27,11 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from ..keywords import extract_keywords, score_title_against_keywords
+from ..keywords import (
+    extract_keywords,
+    score_title_against_keywords,
+    score_title_with_anti_signal,
+)
 from ..models import Candidate, ExploreRequest
 from ._shared import GitHubPr
 from . import github as github_backend
@@ -55,14 +59,26 @@ def _dedupe(items: Iterable[Candidate]) -> list[Candidate]:
     return out
 
 
-def _pr_to_candidate(pr: GitHubPr, repo_url: str, source: str) -> Candidate:
-    """Convert a GitHubPr (any backend) into a downstream Candidate."""
+def _pr_to_candidate(
+    pr: GitHubPr,
+    repo_url: str,
+    source: str,
+    *,
+    score: float = 0.0,
+) -> Candidate:
+    """Convert a GitHubPr (any backend) into a downstream Candidate.
+
+    ``score`` carries the gap-relevance value produced by
+    :func:`_rank_by_keyword_overlap`; defaults to 0.0 for code paths that
+    skip ranking (explicit refs, label-only listing with no keywords).
+    """
     return Candidate(
         ref=pr.ref,
         repo=repo_url,
         source=source,
         title=pr.title,
         html_url=pr.html_url,
+        score=float(score),
     )
 
 
@@ -130,18 +146,30 @@ def _resolve_keywords(request: ExploreRequest) -> list[str]:
 def _rank_by_keyword_overlap(
     prs: list[GitHubPr], keywords: list[str]
 ) -> list[GitHubPr]:
-    """Stable-rerank PRs by keyword overlap with the title.
+    """Stable-rerank PRs by anti-aware keyword score (B3 anti-correlation fix).
 
-    Higher overlap first; ties preserve the upstream order (Python's
-    sort is stable). PRs with zero overlap drop to the tail rather
-    than getting filtered out, so the caller still has *something* to
-    work with when the keyword extractor misses the gap's vocabulary.
+    Uses :func:`score_title_with_anti_signal` so PRs whose titles contain
+    tokens *opposite* to the gap (e.g. ``MegaMoE`` when gap calls for
+    ``dense``, NVIDIA Hopper signals when gap targets ``mi300x``,
+    ``fp8`` quant when gap targets ``bf16``) are demoted below relevant
+    PRs that score positive on the correct axis.
+
+    Higher score first; ties preserve upstream order (Python's sort is
+    stable). PRs that score zero (no positive overlap, or positive
+    fully erased by anti penalty) drop to the tail but are NOT
+    filtered out — callers that want to drop them can post-filter on
+    score themselves.
+
+    Anti-signal activation is gated per-gap-keyword (see
+    :data:`framework_agent.keywords._ANTI_KEYWORDS`), so when the gap
+    has no orthogonal-axis trigger the behaviour is identical to the
+    prior positive-overlap-only scoring.
     """
     if not keywords:
         return list(prs)
     return sorted(
         prs,
-        key=lambda pr: score_title_against_keywords(pr.title or "", keywords),
+        key=lambda pr: score_title_with_anti_signal(pr.title or "", keywords),
         reverse=True,
     )
 
@@ -226,8 +254,20 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
             timeout_sec=cfg.timeout_sec,
         )
 
-    prs = _rank_by_keyword_overlap(prs, keywords)[:requested]
-    return [_pr_to_candidate(pr, request.repo_url, "primus_cortex") for pr in prs]
+    # Rank then trim. Compute scores alongside the sort so the dispatcher
+    # can transport the per-candidate relevance value over to IO via the
+    # Candidate.score field (downstream framework_pr arm logs them in
+    # state.arms[framework_pr].history).
+    ranked = _rank_by_keyword_overlap(prs, keywords)[:requested]
+    return [
+        _pr_to_candidate(
+            pr,
+            request.repo_url,
+            "primus_cortex",
+            score=score_title_with_anti_signal(pr.title or "", keywords),
+        )
+        for pr in ranked
+    ]
 
 
 __all__ = [

@@ -48,6 +48,7 @@ from .orchestrator.action_executors import (
     TargetAnalysisExecutor,
     backends_executor,
     baseline_executor,
+    framework_pr_executor,
     params_executor,
     pmc_roofline_executor,
     profile_executor,
@@ -554,6 +555,7 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "backends":       backends_executor,
     "params":         params_executor,
     "sweep":          sweep_executor,
+    "framework_pr":   framework_pr_executor,
     "report":            report_executor,
     "session_breakdown": session_breakdown_executor,
     "validate_stack":    validate_stack_executor,
@@ -2350,27 +2352,34 @@ def main(argv: list[str] | None = None) -> int:
             v = getattr(args, attr)
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))
-        # Framework-agent pre-stage: optional one-shot PR
-        # discover-and-apply before baseline kicks off. Surfaces fatal
-        # errors as exit code 2 so the operator sees the original
-        # cause (missing fa CLI / no candidate / git checkout fail).
-        if getattr(args, "framework_pr", "") or getattr(
-            args, "framework_pr_discover", False
-        ):
-            from .orchestrator import framework_pr_discover as _fa_prestage
-
-            sglang_path = Path(
-                getattr(args, "framework_sglang_path", "/sgl-workspace/sglang")
-            )
-            try:
-                handoff = _fa_prestage.run(args, sglang_path=sglang_path)
-            except _fa_prestage.FrameworkPRError as exc:
-                print(f"ERROR: framework-pr pre-stage failed: {exc}", file=sys.stderr)
-                return 2
+        # Framework-agent legacy pre-stage hook: REMOVED (plan
+        # ``fa-as-io-arm-design``). PR discovery + apply now runs as a
+        # regular bandit arm (``framework_pr`` action executor) so PR
+        # selection participates in the Coordinator's cooldown / streak /
+        # observability machinery instead of mutating sglang source
+        # before the first tick. Operators who still pass the legacy
+        # flags get a deprecation notice; the values are dropped because
+        # the new arm composes its own gap from SharedState (model_class
+        # + gpu_type + framework + last_profile_kernel_breakdown) and
+        # picks candidates per tick.
+        deprecated_used = (
+            bool(getattr(args, "framework_pr", ""))
+            or bool(getattr(args, "framework_pr_discover", False))
+            or bool(getattr(args, "framework_gap", ""))
+            or bool(getattr(args, "framework_keywords", ""))
+        )
+        if deprecated_used:
             print(
-                "framework-pr pre-stage: applied "
-                f"{handoff['winner_ref']} (head_sha={handoff['head_sha'][:12]}) "
-                f"to {sglang_path}; IO baseline will run against this commit.",
+                "WARNING: --framework-pr / --framework-pr-discover / "
+                "--framework-gap / --framework-keywords are DEPRECATED and "
+                "will be removed in a future release. PR discovery + apply "
+                "now runs as a regular ``framework_pr`` bandit arm (see "
+                "inference_optimizer/actions/_meta/framework_pr.yaml); the "
+                "Orchestration agent decides when to propose it and the "
+                "Coordinator manages cooldown / rollback. To override the "
+                "auto-composed gap or keywords for a specific arm tick, "
+                "use ``proposal.params.gap_override`` / "
+                "``proposal.params.keyword_override`` from the prompt.",
                 file=sys.stderr,
             )
         return asyncio.run(_run_optimize(args))

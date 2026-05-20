@@ -311,3 +311,170 @@ def test_rank_by_keyword_overlap_empty_keywords_is_identity() -> None:
     ]
     out = src._rank_by_keyword_overlap(prs, [])
     assert out == prs
+
+
+# ---------------------------------------------------------------------------
+# B3 fix: anti-correlation rerank lands at the dispatcher boundary.
+#
+# These tests pin the end-to-end behaviour through enumerate_candidates so a
+# regression in _rank_by_keyword_overlap or the keywords.py scorer surfaces
+# in the dispatcher's contract test, not just in the keywords unit tests.
+# ---------------------------------------------------------------------------
+
+
+def test_pr25769_megamoe_demoted_at_dispatcher_for_dense_mi300x_gap(monkeypatch) -> None:
+    """Regression for session f219629b on Qwen-Qwen3-32B (dense, bf16, mi300x).
+
+    Before the anti-correlation fix, fa picked PR:25769 ("Enable MegaMoE for
+    NextN with TP attn A2A scatter padding") because positive-only overlap
+    matched ``throughput`` while the PR's MoE / NVIDIA-H20 signals were
+    invisible to the ranker. With the fix, a relevant dense+mi300x PR must
+    rank ahead at the enumerate_candidates boundary.
+    """
+
+    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
+        # Return the real PR:25769 title alongside a hypothetical relevant PR.
+        return [
+            GitHubPr(
+                number=25769,
+                title="Enable MegaMoE for NextN with TP attn A2A scatter padding",
+                html_url="u25769",
+            ),
+            GitHubPr(
+                number=99999,
+                title="optimize sglang bf16 attention prefill on mi300x throughput",
+                html_url="u99999",
+            ),
+        ]
+
+    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "list_perf_prs", lambda *a, **kw: [])
+
+    req = _minimal_request(
+        search_perf_prs=True,
+        search_modes=["primus_cortex"],
+        max_search_candidates=2,
+        primus_cortex={"base_url": "http://x"},
+        gap_description="improve sglang bf16 dense throughput on mi300x",
+    )
+    out = src.enumerate_candidates(req)
+    refs = [c.ref for c in out]
+    assert refs[0] == "PR:99999", (
+        f"dense+mi300x+bf16 gap must promote relevant PR over PR:25769 MegaMoE PR; "
+        f"got order={refs}"
+    )
+    # The MegaMoE PR is not filtered, just demoted.
+    assert "PR:25769" in refs
+
+
+# ---------------------------------------------------------------------------
+# Phase-1 (fa-as-io-arm): Candidate.score field must carry the rerank score
+# across the subprocess JSON boundary so the IO framework_pr arm can log it.
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_score_field_populated_for_primus_path(monkeypatch) -> None:
+    """The dispatcher must transport the anti-aware rerank score on every
+    Candidate it returns from the primus_cortex path with non-empty keywords.
+
+    This is the data plane that lets the downstream framework_pr arm
+    (inference_optimizer) persist "why we picked this PR" into state.json
+    without re-running the scorer. Order of candidates must match score
+    descending (stable on ties).
+    """
+
+    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
+        return [
+            GitHubPr(number=10, title="optimize sglang bf16 dense attention on mi300x", html_url="u10"),
+            GitHubPr(number=11, title="MegaMoE NextN A2A", html_url="u11"),
+            GitHubPr(number=12, title="random doc edit", html_url="u12"),
+        ]
+
+    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "list_perf_prs", lambda *a, **kw: [])
+
+    req = _minimal_request(
+        search_perf_prs=True,
+        search_modes=["primus_cortex"],
+        max_search_candidates=3,
+        primus_cortex={"base_url": "http://x"},
+        gap_description="improve sglang bf16 dense throughput on mi300x",
+    )
+    out = src.enumerate_candidates(req)
+    scores = [(c.ref, c.score) for c in out]
+    # PR:10 best (dense+sglang+bf16+mi300x positive hits, no anti); PR:12 worst (0).
+    assert scores[0][0] == "PR:10"
+    assert scores[0][1] > 0.0, f"top candidate must carry a positive score; got {scores}"
+    # PR:11 MegaMoE has anti hits (dense trigger fires moe penalty) so its score
+    # should be <= top candidate.
+    assert scores[1][1] <= scores[0][1]
+    # Sort order must match score desc (already stable from _rank_by_keyword_overlap).
+    assert scores == sorted(scores, key=lambda x: -x[1])
+
+
+def test_candidate_score_defaults_to_zero_for_label_only_path(monkeypatch) -> None:
+    """When gap_description / keywords are empty, the dispatcher takes the
+    label-only cheap path. Candidate.score must default to 0.0 then — the
+    field is opt-in semantics: 0.0 means "no gap-driven ranking happened".
+    """
+
+    def fake_search(*a, **kw):  # would never be called when keywords empty
+        raise AssertionError("search must not be called on the no-keyword path")
+
+    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec):  # noqa: ARG001
+        return [GitHubPr(number=30, title="generic PR", html_url="u30")]
+
+    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "list_perf_prs", fake_list)
+
+    req = _minimal_request(
+        search_perf_prs=True,
+        search_modes=["primus_cortex"],
+        max_search_candidates=1,
+        primus_cortex={"base_url": "http://x"},
+        # gap_description omitted; keywords too
+    )
+    out = src.enumerate_candidates(req)
+    assert len(out) == 1
+    assert out[0].score == 0.0
+    assert out[0].ref == "PR:30"
+
+
+def test_anti_signal_inactive_at_dispatcher_when_no_trigger_in_gap(monkeypatch) -> None:
+    """Anti rerank must be a no-op when the gap has no anti-trigger keyword.
+
+    Pins the ``additive only`` contract at the dispatcher boundary so this
+    fix can never regress callers whose gaps happen to not carry any of the
+    orthogonal-axis triggers (dense / mi300x / bf16 / ...).
+    """
+
+    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
+        return [
+            GitHubPr(number=10, title="fp8 moe perf improvement", html_url="u10"),
+            GitHubPr(number=11, title="fp8 attention fusion", html_url="u11"),
+            GitHubPr(number=12, title="random doc edit", html_url="u12"),
+        ]
+
+    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "list_perf_prs", lambda *a, **kw: [])
+
+    # Gap with NO anti-trigger (no dense / no mi300x / no bf16 / no rocm / ...).
+    # extract_keywords("improve fp8 attention") -> ['attention', 'fp8'].
+    req = _minimal_request(
+        search_perf_prs=True,
+        search_modes=["primus_cortex"],
+        max_search_candidates=3,
+        primus_cortex={"base_url": "http://x"},
+        gap_description="improve fp8 attention",
+    )
+    out = src.enumerate_candidates(req)
+    refs = [c.ref for c in out]
+    # Positive-only scoring (no anti-trigger fires):
+    #   PR:11 "fp8 attention fusion"   -> 2 (fp8 + attention)
+    #   PR:10 "fp8 moe perf improvement" -> 1 (fp8 only; moe not penalised
+    #     because gap has no ``dense`` trigger to activate the anti set)
+    #   PR:12 "random doc edit"        -> 0
+    # The key contract pinned here is: PR:10 keeps its positive overlap
+    # of 1 even though it contains ``moe``, proving anti is fully gated
+    # on the gap-side trigger.
+    assert refs == ["PR:11", "PR:10", "PR:12"]
