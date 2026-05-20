@@ -249,6 +249,17 @@ class PendingProposal:
     # T3 hook can rebuild ``propose-edge`` fallbacks per variant
     # (Gap-08) even when the synchronous T2 hypothesize failed.
     kb_opt_canonicals: dict[str, str] = field(default_factory=dict)
+    # v0.8 M5 §5 step 5 / KB_gaps/Gap-11 — per-variant verdicts
+    # surfaced by the Critic agent's batch review (``verdict_map``).
+    # Keyed by variant_name, value carries ``{verdict, rationale}``.
+    # Empty for single-verdict (kernel_opt / integrate / report /
+    # ...) proposals; the Coordinator's ``_handle_verdict_map`` writer
+    # filters the grid down to the ``approve`` subset before
+    # materializing the explore task and fires KB ``refuted`` for
+    # every reject (so the Cortex view captures the
+    # critic-rejected edge in addition to the v0.8 KEEP/REVERT
+    # signal the explore executor produces).
+    verdict_map: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -510,9 +521,21 @@ class Coordinator:
         verdict_by_target: dict[str, str] = {}
         for v in verdicts:
             target = v.payload.get("target_proposal_msg_id")
-            if target:
-                verdict_by_target[target] = v.payload.get("verdict", "")
-                decided_ids.add(target)
+            if not target:
+                continue
+            # v0.8 KB_gaps/Gap-11 — ``_handle_verdict_map`` always
+            # mirrors a *summary* ``verdict`` alongside the per-
+            # variant ``verdict_map`` so this rebuild stays
+            # backward-compatible. A verdict_map-only event with no
+            # summary string still marks the proposal as decided
+            # (the Critic spoke on every variant, no further round
+            # needed) — we synthesise a ``needs_review`` placeholder
+            # so the prompt's /status surface still shows something.
+            summary = v.payload.get("verdict") or ""
+            if not summary and isinstance(v.payload.get("verdict_map"), dict):
+                summary = "needs_review"
+            verdict_by_target[target] = summary
+            decided_ids.add(target)
         for d in decisions:
             if d.payload.get("kind") == "approved_proposal":
                 # The coordinator stores task_id, not the original proposal_msg_id,
@@ -3326,36 +3349,295 @@ class Coordinator:
         return found
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
+        """Route a Critic ``review_verdict`` to the per-variant or
+        legacy single-verdict handler.
+
+        v0.8 KB_gaps/Gap-11 (KB_design §3.5 §5 / M5 §5 step 5): the
+        intent_parser already validated that exactly one of
+        ``verdict`` / ``verdict_map`` is present. We branch on
+        ``verdict_map`` first so the batch Explore path takes
+        precedence; everything else (kernel_opt / integrate /
+        report / specialist dispatch) falls through to the v0.6
+        single-verdict path.
+        """
         target = intent.payload["target_proposal_msg_id"]
-        verdict = intent.payload["verdict"]
         pending = self.state.pending_proposals.get(target)
+        verdict_map = intent.payload.get("verdict_map")
+        single_verdict = intent.payload.get("verdict")
         if pending is None:
             await self._record_observation(
                 "coordinator", "observation",
-                {"kind": "verdict_for_unknown_proposal", "target": target, "verdict": verdict},
+                {
+                    "kind":         "verdict_for_unknown_proposal",
+                    "target":       target,
+                    "verdict":      single_verdict or "",
+                    "verdict_map":  bool(verdict_map),
+                },
             )
             return
+        if isinstance(verdict_map, dict) and verdict_map:
+            await self._handle_verdict_map(
+                source=source,
+                pending=pending,
+                verdict_map=verdict_map,
+                rationale=str(intent.payload.get("reasoning") or ""),
+            )
+            return
+        await self._handle_single_verdict(
+            source=source,
+            pending=pending,
+            verdict=str(single_verdict or ""),
+            reasoning=str(intent.payload.get("reasoning") or ""),
+        )
+
+    async def _handle_single_verdict(
+        self,
+        *,
+        source: str,
+        pending: "PendingProposal",
+        verdict: str,
+        reasoning: str,
+    ) -> None:
+        """Legacy v0.6 single-verdict handler.
+
+        Used for one-proposal reviews (kernel_opt / integrate /
+        report / specialist dispatch / any non-grid action). The
+        ``approve`` branch materialises the whole proposal as-is.
+        """
         pending.decided = True
         pending.verdict = verdict
-        # Mirror the verdict onto the bus so the original proposer's reactor
-        # picks it up next tick.
         await self.bus.append_and_seq(Message.new(
             source, pending.from_agent, "review_verdict",
-            {"target_proposal_msg_id": target, "verdict": verdict,
-             "reasoning": intent.payload.get("reasoning", "")},
+            {
+                "target_proposal_msg_id": pending.proposal_msg_id,
+                "verdict":                verdict,
+                "reasoning":              reasoning,
+            },
             priority=0 if verdict == "reject" else 1,
-            in_reply_to=target,
+            in_reply_to=pending.proposal_msg_id,
         ))
         if verdict == "approve":
             await self._materialize_approved_proposal(pending)
 
-    async def _materialize_approved_proposal(self, pending: PendingProposal) -> None:
+    async def _handle_verdict_map(
+        self,
+        *,
+        source: str,
+        pending: "PendingProposal",
+        verdict_map: dict[str, dict[str, Any]],
+        rationale: str,
+    ) -> None:
+        """v0.8 KB_gaps/Gap-11 per-variant Critic verdict handler.
+
+        Splits a batch ``verdict_map`` into approved / rejected
+        partitions and:
+
+        1. Pins the full map on the :class:`PendingProposal` so
+           subsequent reactor passes (resume rebuild,
+           ``decided`` checks) can see the per-variant decisions
+           without re-parsing the bus.
+        2. Mirrors the map back onto the bus as a single
+           ``review_verdict`` event carrying both the per-variant
+           detail *and* a summary single ``verdict`` (``approve``
+           when any variant survived; ``reject`` when all are
+           rejected; ``needs_review`` otherwise) so legacy
+           consumers (resume's verdict_by_target rebuild,
+           breakdown.kb_writes_summary) keep their meaning.
+        3. Fires KB ``refuted`` for every rejected variant via
+           :meth:`_cortex_t3_critic_rejected` (Gap-11 §5.4) — the
+           critic's reject is itself negative KB evidence; we
+           don't need to wait for explore to run.
+        4. Materialises an ``explore`` task whose ``grid`` is the
+           approved subset (passes the names down via
+           :meth:`_materialize_approved_proposal`).
+
+        Non-``explore`` proposals never reach this method
+        (``_handle_review_verdict`` routes them through the legacy
+        single-verdict path); we still defend against operator
+        misuse by short-circuiting with an observation when
+        somehow we land here on a non-grid proposal.
+        """
+        if pending.action_name != "explore":
+            await self._record_observation(
+                "coordinator", "observation",
+                {
+                    "kind":             "verdict_map_for_non_explore",
+                    "target":           pending.proposal_msg_id,
+                    "action_name":      pending.action_name,
+                    "variants_in_map":  sorted(verdict_map.keys()),
+                },
+            )
+            return
+
+        # Index the proposal's original grid by variant_name so we can
+        # (a) drop ``verdict_map`` keys that don't match a real
+        # variant, (b) carry the variant's payload (extra_args,
+        # extra_envs, ...) through to the materialised task, and
+        # (c) report a structured "unknown_variants" observation
+        # for the operator audit log.
+        original_grid: list[dict[str, Any]] = []
+        raw_grid = (pending.payload.get("params") or {}).get("grid")
+        if isinstance(raw_grid, list):
+            for v in raw_grid:
+                if isinstance(v, dict) and v.get("name"):
+                    original_grid.append(v)
+        original_names = {str(v.get("name")): v for v in original_grid}
+        approved_names: list[str] = []
+        rejected: list[tuple[str, str]] = []
+        unknown: list[str] = []
+        for vname, entry in verdict_map.items():
+            name = str(vname)
+            sub_verdict = str((entry or {}).get("verdict") or "").strip()
+            sub_rationale = str((entry or {}).get("rationale") or "")
+            if name not in original_names:
+                unknown.append(name)
+                continue
+            if sub_verdict == "approve":
+                approved_names.append(name)
+            elif sub_verdict == "reject":
+                rejected.append((name, sub_rationale))
+            # ``redirect`` / ``advise`` / ``needs_review`` neither
+            # land in the executor grid nor fire a KB refute — they
+            # surface in the audit log via the bus mirror below.
+
+        summary_verdict = (
+            "approve" if approved_names
+            else "reject" if rejected and not approved_names
+            else "needs_review"
+        )
+
+        # 1. Pin on the pending proposal.
+        pending.decided = True
+        pending.verdict = summary_verdict
+        pending.verdict_map = {
+            str(k): dict(v) if isinstance(v, dict) else {"verdict": str(v)}
+            for k, v in verdict_map.items()
+        }
+
+        # 2. Bus mirror — single event carrying the full map AND a
+        #    summary verdict so legacy consumers keep working.
+        await self.bus.append_and_seq(Message.new(
+            source, pending.from_agent, "review_verdict",
+            {
+                "target_proposal_msg_id": pending.proposal_msg_id,
+                "verdict":                summary_verdict,
+                "verdict_map":            pending.verdict_map,
+                "approved_variants":      sorted(approved_names),
+                "rejected_variants":      sorted(n for n, _ in rejected),
+                "unknown_variants":       sorted(unknown),
+                "reasoning":              rationale,
+            },
+            priority=0 if summary_verdict == "reject" else 1,
+            in_reply_to=pending.proposal_msg_id,
+        ))
+
+        # 3. KB refuted for critic-rejected variants (Gap-11 §5.4).
+        for vname, sub_rationale in rejected:
+            try:
+                await self._cortex_t3_critic_rejected(
+                    pending=pending,
+                    variant_name=vname,
+                    rationale=sub_rationale,
+                )
+            except Exception:  # noqa: BLE001 — best-effort KB write
+                log.exception(
+                    "cortex T3 critic-rejected failed for proposal=%s "
+                    "variant=%s", pending.proposal_msg_id, vname,
+                )
+
+        # 4. Materialise only the approved subset.
+        if approved_names:
+            await self._materialize_approved_proposal(
+                pending,
+                approved_variant_names=set(approved_names),
+            )
+        else:
+            # Whole grid rejected — observation only; downstream
+            # plateau judges + breakdown reads the bus mirror to
+            # surface "critic rejected K of K".
+            await self._record_observation(
+                "coordinator", "observation",
+                {
+                    "kind":              "verdict_map_all_rejected",
+                    "target":            pending.proposal_msg_id,
+                    "rejected_variants": sorted(n for n, _ in rejected),
+                    "unknown_variants":  sorted(unknown),
+                },
+            )
+
+    async def _cortex_t3_critic_rejected(
+        self,
+        *,
+        pending: "PendingProposal",
+        variant_name: str,
+        rationale: str,
+    ) -> None:
+        """KB ``refuted`` mirror for a critic-rejected variant.
+
+        KB_gaps/Gap-11 §5.4: when the Critic rejects a variant at
+        the verdict_map stage we record an immediate ``verify``
+        with ``outcome='refuted'`` on the matching T2 edge so the
+        Cortex view distinguishes "critic refused" from "executor
+        ran and failed". Depends on Gap-07's per-variant
+        ``kb_edge_ids`` map — a noop when the proposal predates
+        the T2 hook (no edge to refute).
+        """
+        if not variant_name:
+            return
+        edge_id = (pending.kb_edge_ids or {}).get(variant_name) or ""
+        if not edge_id:
+            # No per-variant edge — Gap-07 didn't fire (e.g. --no-
+            # cortex, or T2 hook was skipped). Skip; the explore
+            # executor never runs this variant either, so there's
+            # nothing to refute.
+            return
+        cortex = getattr(self, "cortex_kb", None)
+        if cortex is None or not getattr(cortex, "enabled", False):
+            return
+        sid = (self.shared_state.cortex_session_id or "").strip()
+        if not sid:
+            return
+        try:
+            cortex.verify(
+                sid=sid,
+                edge_id=edge_id,
+                outcome="refuted",
+                evidence=[
+                    f"proposal:{pending.proposal_msg_id}",
+                    f"variant:{variant_name}",
+                    "stage:critic",
+                    (f"rationale:{rationale[:200]}" if rationale else "rationale:none"),
+                ],
+                promote_authority=None,
+                idempotency_key=(
+                    f"verify_critic_reject:{sid}:{edge_id}:{variant_name}"
+                ),
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "cortex T3 critic-rejected verify failed for variant=%s",
+                variant_name,
+            )
+
+    async def _materialize_approved_proposal(
+        self,
+        pending: PendingProposal,
+        *,
+        approved_variant_names: set[str] | None = None,
+    ) -> None:
         """Promote an approved proposal into a TaskRegistry entry.
 
         For grid-style executors (backends / params / sweep) we inject the
         current best throughput as ``base_tput`` so they can compute
         gain%; otherwise the runner's default of 0.0 makes
         best_gain_pct uninformative (DESIGN §16 baseline_tput parameter).
+
+        ``approved_variant_names`` (v0.8 KB_gaps/Gap-11): when set,
+        filter the ``explore`` grid down to the named subset before
+        materialising. Used by the per-variant Critic verdict_map
+        path so a 4-variant proposal with 2 approved + 2 rejected
+        dispatches only the 2 approved variants to the executor.
+        ``None`` (legacy single-verdict path) keeps the full grid.
         """
         params = dict(pending.payload.get("params") or {})
         # v0.8 KB_gaps/Gap-07 — stamp per-variant kb_edge_id into the
@@ -3366,21 +3648,48 @@ class Coordinator:
         # hook didn't populate the map (e.g. ``--no-cortex`` runs).
         if (
             pending.action_name == "explore"
-            and pending.kb_edge_ids
             and isinstance(params.get("grid"), list)
         ):
             stamped_grid: list[dict[str, Any]] = []
             for variant in params["grid"]:
                 if not isinstance(variant, dict):
-                    stamped_grid.append(variant)
+                    # v0.8 KB_gaps/Gap-11: non-dict slots can't carry
+                    # a name, so they are *always* dropped when a
+                    # variant filter is in effect (no way to match
+                    # them); pass-through otherwise so legacy
+                    # callers keep working.
+                    if approved_variant_names is None:
+                        stamped_grid.append(variant)
+                    continue
+                vname = str(variant.get("name") or "").strip()
+                # v0.8 KB_gaps/Gap-11 — drop variants the Critic
+                # rejected before they ever hit the executor.
+                if (
+                    approved_variant_names is not None
+                    and vname not in approved_variant_names
+                ):
                     continue
                 variant_copy = dict(variant)
-                vname = str(variant_copy.get("name") or "").strip()
-                edge_id = pending.kb_edge_ids.get(vname, "")
-                if edge_id and not variant_copy.get("kb_edge_id"):
-                    variant_copy["kb_edge_id"] = edge_id
+                if pending.kb_edge_ids:
+                    edge_id = pending.kb_edge_ids.get(vname, "")
+                    if edge_id and not variant_copy.get("kb_edge_id"):
+                        variant_copy["kb_edge_id"] = edge_id
                 stamped_grid.append(variant_copy)
             params["grid"] = stamped_grid
+            # Audit hint for the executor: how many variants the
+            # Critic filtered. Useful for the breakdown to surface
+            # "critic_filtered_count" alongside the explore round
+            # row without re-walking the bus.
+            if approved_variant_names is not None:
+                original_grid_len = len(
+                    [
+                        v for v in (pending.payload.get("params") or {}).get("grid", [])
+                        if isinstance(v, dict)
+                    ]
+                )
+                params["critic_filtered_count"] = max(
+                    0, original_grid_len - len(approved_variant_names),
+                )
         cb = self.shared_state.current_best or {}
         cb_args = (
             str(cb.get("extra_sglang_args") or "")
