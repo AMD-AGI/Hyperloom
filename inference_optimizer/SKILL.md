@@ -566,115 +566,74 @@ The backend prunes everything older than the latest 50 turn workdirs
 on every tick to avoid unbounded growth.
 
 
-## Optional: Framework-Agent Pre-stage
+## Framework-Agent as Bandit Arm (`framework_pr` action)
 
-Before baseline runs, an *optional* one-shot can fetch an upstream
-framework PR and apply it to the sglang source tree, so the rest of
-the run (baseline -> params -> backends -> sweep -> kernel) executes
-against that PR instead of the upstream HEAD. Use this when you want
-to measure whether a specific PR or class of perf PRs actually moves
-the end-to-end inference numbers IO measures.
+Framework-agent (fa) integration moved from a CLI pre-stage hook to a
+regular bandit arm called `framework_pr` (DESIGN doc:
+`claw-dev/docs-zh/fa-as-io-arm-design.md`). PR discovery and apply
+now happen *inside* the Coordinator tick loop, alongside `baseline` /
+`backends` / `params` / `sweep`, so PR selection participates in
+cooldown + streak penalties + observability exactly like every other
+arm. There is no longer any session-killing irreversible git side
+effect at CLI startup.
 
-Two modes:
+What each `framework_pr` tick does (see
+`orchestrator/action_executors/framework_pr.py`):
 
-```bash
-# A. Auto-discover via framework-agent (Primus Cortex / GitHub search)
-inference_optimizer optimize \
-    --model "$MODEL_PATH" \
-    --framework sglang \
-    --framework-pr-discover \
-    --framework-gap "improve sglang fp8 MoE on MI300X" \
-    --max-hours 2
+1. Compose `(gap, keywords)` from SharedState (`framework` /
+   `gpu_type` / `model_class` / `last_profile_kernel_breakdown`) +
+   manifest `precision`. Operator-supplied `proposal.params.gap_override`
+   or `keyword_override` win when present.
+2. Call `fa candidates` (read-only) to enumerate top-K PRs. No git
+   fetch, no worktree.
+3. Filter candidates: drop refs whose head_sha already matches the
+   sglang HEAD (= already KEEP'd this session, or shipped in the
+   base image).
+4. Stash the current `git rev-parse HEAD`; `git fetch` +
+   `git checkout --detach` the PR head.
+5. Run a sub-baseline benchmark against
+   `base_tput = current_best.tput || baseline_tput`, re-using the
+   same materialized YAML (`baseline_config_path`) + server flags
+   (`base_extra_args`) so we measure the PR delta, not a flag
+   regression.
+6. **KEEP** when `delta_pct >= min_gain_pct` (default 1.0): leave
+   the worktree on the PR head, return `status='succeeded'` +
+   `output_throughput=new_tput` so the Coordinator promotes the
+   PR into `current_best` via the normal `_lift_to_current_best`
+   path.
+7. **DISCARD** otherwise: `git checkout --detach <prev_head>` to
+   undo the apply, return `status='succeeded'` + `decision='discarded'`
+   so the bandit records a `no_promote` on the streak counter.
+8. Subprocess / git / sub-baseline failures return `status='failed'`
+   with an `error_class`, triggering the bandit's failure streak
+   penalty. The arm cools down on its own; the session continues.
 
-# B. Explicit PR ref (skips fa discover; resolves head_sha via git ls-remote)
-inference_optimizer optimize \
-    --model "$MODEL_PATH" \
-    --framework sglang \
-    --framework-pr PR:25748 \
-    --max-hours 2
-```
+Operator-tunable `proposal.params`:
 
-What the pre-stage does (see
-`orchestrator/framework_pr_discover.py`):
-
-1. **A only**: runs `fa explore` (Primus Cortex + GitHub) and picks
-   the first candidate. The `fa` binary comes from
-   `framework-agent/scripts/install.sh`, which is chained from
-   `inference_optimizer/scripts/install.sh` (skip via
-   `--skip-framework-agent` at install time).
-2. Resolves the PR `head_sha` (via the fa enrichment, or
-   `git ls-remote origin refs/pull/N/head` as a fallback).
-3. If `--framework-sglang-path` has dirty tracked files,
-   `git stash push -u` first (default; disable with
-   `--framework-no-auto-stash`). The standard sandbox image ships
-   sglang already-dirty (modified pyproject.toml, extra quant
-   configs), so the stash is required for `git checkout` to
-   succeed.
-4. `git fetch origin refs/pull/N/head` into the sglang dir
-   (`--framework-sglang-path`, default `/sgl-workspace/sglang`).
-5. `git checkout --detach <head_sha>`.
-6. **Optional** `pip install -e python/ --no-deps
-   --no-build-isolation` if `--framework-pip-reinstall` is set.
-   Off by default: the sandbox image already has sglang installed
-   in editable mode, so `git checkout` alone is enough for the new
-   code to be picked up on next `import sglang`. The full build
-   pulls in sgl-kernel which needs a Rust toolchain not present in
-   standard images, so leave this off unless you know your image
-   has rustc.
-7. Logs `winner_ref` / `head_sha` to stderr; baseline runs next.
-
-Errors abort the run with exit code 2 (`FrameworkPRError`):
-fa binary not on PATH, no candidate from Primus, git checkout
-conflict, pip install failure. None of the failures fall back
-silently - the operator decides whether to retry with a different
-`--framework-gap` or skip the pre-stage entirely.
-
-### Overriding the keyword extractor (`--framework-keywords`)
-
-By default, fa runs `extract_keywords()` against `--framework-gap` and
-uses the whitelist-filtered tokens as the Primus Cortex search query.
-The whitelist is opinionated; if it drops a term the service-side
-word-AND search needs (or includes terms that filter too tightly),
-pass `--framework-keywords` to override:
-
-```bash
-# Wider single-term: pick any MoE-related PR (whatever's most recent,
-# then client-side reranked)
-inference_optimizer optimize \
-    --framework-pr-discover \
-    --framework-keywords "moe" \
-    --max-hours 0.5
-
-# Two-term: fp8 quant + moe (service-side AND)
-inference_optimizer optimize \
-    --framework-pr-discover \
-    --framework-keywords "fp8,moe"
-
-# Hardware-specific (term not in fa's default whitelist)
-inference_optimizer optimize \
-    --framework-pr-discover \
-    --framework-keywords "mi300x throughput"
-```
-
-`--framework-gap` becomes optional when `--framework-keywords` is set
-(at least one of the two must be provided). Explicit keywords bypass
-the whitelist + CamelCase filter entirely; they're sent to Primus
-Cortex verbatim and used for the client-side rerank too.
+| key | default | meaning |
+|---|---|---|
+| `max_candidates` | 5 | top-K returned by `fa candidates` |
+| `min_gain_pct` | 1.0 | KEEP threshold (PR-applied tput vs base_tput) |
+| `gap_override` | "" | bypass the auto-composer (raw gap_description) |
+| `keyword_override` | [] | bypass extract_keywords (verbatim list) |
+| `dry_run` | false | only enumerate + pick, skip apply + bench |
 
 Discover vs Kernel role boundary:
 
-| | framework-agent (pre-stage) | kernel-agent (in-loop) |
+| | framework-agent (`framework_pr` arm) | kernel-agent (in-loop) |
 |---|---|---|
-| When | Once, before baseline | Many times, inside the optimize loop |
+| When | Many times per session, scheduled by bandit | Many times, inside the optimize loop |
 | Granularity | Whole PR (cross-file change set) | Single kernel function |
-| Effect on session | New source baseline | KEEP'd patches per kernel |
-| IO integration | `--framework-pr*` CLI flag | Coordinator Kernel role + REQUEST kinds |
-| Hand-off | git checkout sglang to PR head | `apply_kernel_patch.py` per-kernel |
+| Effect on session | New `current_best` source baseline | KEEP'd patches per kernel |
+| IO integration | `framework_pr` action executor (bandit arm) | Coordinator Kernel role + REQUEST kinds |
+| Hand-off | git checkout sglang to PR head + auto-rollback on DISCARD | `apply_kernel_patch.py` per-kernel |
+| Cooldown | Bandit streak counter (`consecutive_no_promote`) | Per-kernel `kernel_opt_attempts` |
 
-The pre-stage and the kernel role are independent: you can run
-`--framework-pr-discover` with or without `--no-kernel`, and vice
-versa. The pre-stage is a no-op when neither `--framework-pr` nor
-`--framework-pr-discover` is set.
+The legacy CLI flags (`--framework-pr` / `--framework-pr-discover` /
+`--framework-gap` / `--framework-keywords`) are **deprecated**: the
+flags still parse for backward compat but no longer perform a
+pre-stage. Passing any of them prints a deprecation notice and
+otherwise has no effect. Use the bandit arm instead.
 
 ## Framework Selection
 
@@ -792,20 +751,22 @@ setsid nohup inference_optimizer --verbose optimize \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
   --kernel-claude \
-  --framework-pr-discover \
-  --framework-gap "${FRAMEWORK_GAP:-improve ${FRAMEWORK:-sglang} ${PRECISION:-bf16} ${MODEL_CLASS:-dense} throughput on ${GPU_TYPE:-mi300x}}" \
   > "$RUN_LOG" 2>&1 < /dev/null &
 echo $! > "$PID_FILE"
 ```
 
-`--framework-pr-discover` runs the fa pre-stage before baseline (see
-[Optional: Framework-Agent Pre-stage](#optional-framework-agent-pre-stage)).
-Override the default gap via `export FRAMEWORK_GAP="..."` when the workload
-is not dense throughput (e.g. `"latency on prefill"`, `"fp8 moe accuracy"`).
-**Skip the pre-stage** by removing the two `--framework-*` lines when:
-(a) `--framework vllm` (fa is sglang-only),
-(b) sandbox image lacks `/opt/venv/bin/fa`,
-(c) resuming an existing session (pre-stage is single-shot, not re-entrant).
+framework-agent PR discovery is now a regular bandit arm (`framework_pr`,
+see [Framework-Agent as Bandit Arm](#framework-agent-as-bandit-arm-framework_pr-action)) —
+no startup flags needed. The Orchestration agent decides per tick when
+to propose the arm; the Coordinator composes the search gap from
+SharedState (`framework` / `gpu_type` / `model_class` / latest
+profile bottleneck). Override the auto-composed gap for an individual
+tick via `proposal.params.gap_override` from the Orchestration prompt.
+The arm self-disables when (a) `framework=vllm` (returns
+`unsupported_framework`), (b) `fa` binary is missing from PATH
+(returns `fa_candidates_failed`), or (c) the candidate set is empty
+(returns `no_applicable_candidate`); in all three cases the bandit
+streak counter cools the arm down and the session keeps running.
 
 `setsid nohup ... &` is required for runs > 5 min — Cursor's background
 shell can die on SSH disconnect.
