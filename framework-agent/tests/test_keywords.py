@@ -9,7 +9,13 @@ from framework_agent.keywords import extract_keywords, score_title_against_keywo
 
 
 def test_extract_whitelist_hits_are_lowercase_and_sorted() -> None:
-    """Whitelist hits should be returned sorted in lowercase."""
+    """Whitelist hits should be returned sorted in lowercase.
+
+    ``mi300x`` is asserted explicitly to guard the GPU-hardware codename
+    extension (without it the primus_cortex search drops the hardware
+    constraint and picks unrelated NVIDIA PRs; see fa-keywords-hardware
+    fix rationale in _TECHNICAL_TERMS).
+    """
     out = extract_keywords("improve vLLM fp8 MoE attention on ROCm AMD MI300X")
     assert out == sorted(out)
     assert "vllm" in out
@@ -17,6 +23,57 @@ def test_extract_whitelist_hits_are_lowercase_and_sorted() -> None:
     assert "moe" in out
     assert "attention" in out
     assert "rocm" in out
+    assert "mi300x" in out
+
+
+# ---------------------------------------------------------------------------
+# GPU hardware codename coverage (regression guard for the relevance bug
+# where ``mi300x`` / ``gfx942`` / ``sm90`` etc. fell through the whitelist
+# and Primus search lost the hardware dimension).
+# ---------------------------------------------------------------------------
+
+
+def test_extract_amd_cdna_codenames() -> None:
+    """AMD CDNA accelerator codenames must survive extract_keywords()."""
+    out = extract_keywords(
+        "improve sglang bf16 throughput on mi300x; also gfx942 cdna3"
+    )
+    assert "mi300x" in out
+    assert "gfx942" in out
+    assert "cdna3" in out
+    # baseline sanity: existing whitelist terms still recognised
+    assert "sglang" in out
+    assert "bf16" in out
+
+
+def test_extract_nvidia_codenames() -> None:
+    """NVIDIA Ampere/Hopper/Blackwell codenames must survive extract_keywords()."""
+    out = extract_keywords(
+        "port mega moe to sm90 hopper h100 from sm80 ampere a100"
+    )
+    assert "sm90" in out
+    assert "sm80" in out
+    assert "hopper" in out
+    assert "ampere" in out
+    assert "h100" in out
+    assert "a100" in out
+    assert "moe" in out  # existing whitelist term preserved
+
+
+def test_extract_realistic_io_framework_gap() -> None:
+    """End-to-end check on the actual IO ``--framework-gap`` template.
+
+    Mirrors the gap inference_optimizer's SKILL.md Launch template renders
+    by default (``improve {fw} {prec} {model_class} throughput on {gpu}``).
+    Before the hardware-codename extension, ``mi300x`` was silently dropped,
+    which caused the primus_cortex search query to collapse to
+    ``"bf16 sglang"`` and surface NVIDIA SM90 PRs as the winner.
+    """
+    out = extract_keywords("improve sglang bf16 dense throughput on mi300x")
+    # All four salient dimensions must be present.
+    assert "sglang" in out, "framework token must be kept"
+    assert "bf16" in out, "precision token must be kept"
+    assert "mi300x" in out, "hardware codename must be kept"
 
 
 def test_extract_keeps_camelcase_identifiers() -> None:

@@ -27,6 +27,21 @@ _TECHNICAL_TERMS = frozenset({
     "vllm", "sglang", "trtllm", "tensorrt", "lora", "qlora", "awq", "gptq",
     "marlin", "w4a16", "w8a8", "smoothquant", "activation_order",
     "custom_all_reduce", "custom_ar", "radix", "scheduler",
+    # GPU hardware codenames. Critical for relevance ranking: a gap such as
+    # "improve sglang bf16 throughput on mi300x" must keep ``mi300x`` so the
+    # downstream primus_cortex / github search can scope to AMD-validated PRs
+    # instead of e.g. a freshly-merged SM90 (NVIDIA Hopper) MoE kernel. Listed
+    # in lowercase since extract_keywords() lowercases the gap before lookup.
+    # AMD CDNA accelerators (MI200/300/350 families + gfx IDs + uarch labels):
+    "mi200", "mi210", "mi250", "mi250x",
+    "mi300", "mi300a", "mi300x", "mi325x",
+    "mi350x", "mi355x",
+    "gfx90a", "gfx940", "gfx941", "gfx942", "gfx950",
+    "cdna", "cdna2", "cdna3", "cdna4",
+    # NVIDIA datacenter accelerators (Ampere -> Blackwell + SM IDs + uarch labels):
+    "a100", "h100", "h200", "b100", "b200",
+    "sm80", "sm86", "sm89", "sm90", "sm100",
+    "ampere", "hopper", "blackwell",
 })
 
 
