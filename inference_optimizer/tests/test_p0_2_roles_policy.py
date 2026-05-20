@@ -35,6 +35,7 @@ from inference_optimizer.orchestrator.intent_parser import (
 )
 from inference_optimizer.orchestrator.policy import (
     CORE_STATE_FIELDS,
+    FRAMEWORK_OWNED_ACTIONS,
     KERNEL_OWNED_ACTIONS,
     KILL_TASK_SOURCE_ALLOWLIST,
     PolicyDenied,
@@ -51,13 +52,17 @@ from inference_optimizer.paths import asset_system_prompts_dir
 # ===========================================================================
 # agent_role
 # ===========================================================================
-def test_default_role_registry_has_4_v06_agents():
+def test_default_role_registry_has_5_v07_agents():
     reg = default_role_registry()
-    assert set(reg.keys()) == {"orchestration", "kernel", "critic", "robustness"}
+    assert set(reg.keys()) == {
+        "orchestration", "kernel", "framework", "critic", "robustness",
+    }
 
 
 def test_roles_for_run_deterministic_order():
-    assert roles_for_run() == ("orchestration", "kernel", "critic", "robustness")
+    assert roles_for_run() == (
+        "orchestration", "kernel", "framework", "critic", "robustness",
+    )
 
 
 def test_orchestration_permissions():
@@ -85,6 +90,22 @@ def test_kernel_responder_only():
     assert IntentType.PROPOSE_ACTION not in role.allowed_intents
     assert IntentType.DELEGATE not in role.allowed_intents
     assert IntentType.REQUEST not in role.allowed_intents
+
+
+def test_framework_responder_only():
+    """Framework role mirrors kernel — responder-only with UPDATE_STATE
+    scoped to discovered_flags by PolicyGate (design §5 / §6.5)."""
+    role = default_role_registry()["framework"]
+    assert role.backend_type == BackendType.CLAUDE
+    assert role.can_delegate_side_effects is False
+    assert role.can_mutate_core_state is False
+    assert IntentType.RESPONSE in role.allowed_intents
+    assert IntentType.UPDATE_STATE in role.allowed_intents
+    # Cannot initiate — same constraints as kernel.
+    assert IntentType.PROPOSE_ACTION not in role.allowed_intents
+    assert IntentType.DELEGATE not in role.allowed_intents
+    assert IntentType.REQUEST not in role.allowed_intents
+    assert IntentType.REVIEW_VERDICT not in role.allowed_intents
 
 
 def test_critic_review_only_codex_no_tools():
@@ -125,9 +146,18 @@ def test_kernel_owned_actions_v06_five():
     })
 
 
-def test_request_routing_v06_only_orchestration_to_kernel():
+def test_request_routing_v07_orchestration_to_kernel_and_framework():
     assert set(REQUEST_ROUTING.keys()) == {"orchestration"}
-    assert REQUEST_ROUTING["orchestration"] == frozenset({"kernel"})
+    assert REQUEST_ROUTING["orchestration"] == frozenset({"kernel", "framework"})
+
+
+def test_framework_owned_actions_v07_two():
+    """Framework agent owns 2 actions; same enforcement shape as kernel."""
+    assert FRAMEWORK_OWNED_ACTIONS == frozenset({
+        "framework_optimize", "framework_integrate",
+    })
+    # Kernel and framework sets must be disjoint — no action is shared.
+    assert FRAMEWORK_OWNED_ACTIONS.isdisjoint(KERNEL_OWNED_ACTIONS)
 
 
 def test_review_verdict_critic_only():
@@ -356,7 +386,10 @@ def test_allowed_tools_unknown_agent_returns_empty(gate):
 # ===========================================================================
 # system_prompts assets
 # ===========================================================================
-@pytest.mark.parametrize("name", ["orchestration", "kernel", "critic", "robustness"])
+@pytest.mark.parametrize(
+    "name",
+    ["orchestration", "kernel", "framework", "critic", "robustness"],
+)
 def test_system_prompt_files_exist_and_nonempty(name):
     p = asset_system_prompts_dir() / f"{name}.md"
     assert p.is_file(), f"missing system prompt: {p}"

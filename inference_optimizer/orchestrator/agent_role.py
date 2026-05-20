@@ -30,8 +30,9 @@ Removed in v0.6:
     * triage role (renamed to robustness — alignment with arch diagram)
     * OBJECTION / VOTE intents (parliament removed entirely — ADR-38)
 
-Framework / Comm layer experts (DESIGN §7.7) are **not implemented** in
-v0.6; they're architecturally placeholders.
+Framework expert (DESIGN §7.7) added in v0.7 as the 5th role — owns
+``framework_optimize`` / ``framework_integrate`` actions on vllm/sglang
+source. Comm-layer expert remains an architectural placeholder.
 
 References:
     - DESIGN v0.6 §7.1-7.4   Per-role responsibilities
@@ -94,6 +95,16 @@ _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
 _KERNEL_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
     IntentType.RESPONSE,
     IntentType.UPDATE_STATE,  # only its own action's metric fields (§7.6 ※5)
+})
+
+
+# Framework — responder-only persistent reactor for vllm/sglang source-layer
+# PRs + AST flag discovery. Mirror of _KERNEL_INTENTS with UPDATE_STATE
+# scoped to `discovered_flags` only (gated by PolicyGate). See
+# hyperloom-framework-agent-design.md §5 / §6.5.
+_FRAMEWORK_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
+    IntentType.RESPONSE,
+    IntentType.UPDATE_STATE,
 })
 
 
@@ -171,6 +182,19 @@ def default_role_registry() -> dict[str, AgentRole]:
             can_mutate_core_state=False,
             no_tools=False,
         ),
+        # Framework — 5th role for vllm/sglang source-layer optimisation.
+        # Responder-only like kernel; UPDATE_STATE is allowed for the
+        # discovered_flags field (gated by PolicyGate per design §6.5).
+        "framework": AgentRole(
+            name="framework",
+            backend_type=BackendType.CLAUDE,
+            model=DEFAULT_CLAUDE_MODEL,
+            api_key_env=DEFAULT_CLAUDE_API_KEY_ENV,
+            allowed_intents=_FRAMEWORK_INTENTS,
+            can_delegate_side_effects=False,
+            can_mutate_core_state=False,
+            no_tools=False,
+        ),
         "critic": AgentRole(
             name="critic",
             backend_type=BackendType.CODEX,
@@ -197,7 +221,7 @@ def default_role_registry() -> dict[str, AgentRole]:
 @lru_cache(maxsize=1)
 def roles_for_run() -> tuple[str, ...]:
     """Stable, deterministic ordering for reactor loop iteration."""
-    return ("orchestration", "kernel", "critic", "robustness")
+    return ("orchestration", "kernel", "framework", "critic", "robustness")
 
 
 __all__ = [

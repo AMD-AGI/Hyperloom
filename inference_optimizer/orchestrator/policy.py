@@ -77,13 +77,26 @@ KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
 
 
 # ---------------------------------------------------------------------------
+# Framework-owned actions (hyperloom-framework-agent-design.md §6.1).
+#
+# These 2 actions are owned end-to-end by the Framework agent. As with
+# kernel-owned actions, direct delegate is forbidden — the only valid
+# initiation path is REQUEST(target_agent="framework", kind="...") + RESPONSE.
+# ---------------------------------------------------------------------------
+FRAMEWORK_OWNED_ACTIONS: frozenset[str] = frozenset({
+    "framework_optimize",
+    "framework_integrate",
+})
+
+
+# ---------------------------------------------------------------------------
 # REQUEST/RESPONSE routing matrix (DESIGN §7.6 / §13.4)
 #
-# Maps source role → set of allowed target_agent names. v0.6: only
-# orchestration→kernel is allowed.
+# Maps source role → set of allowed target_agent names. v0.7: orchestration
+# may REQUEST kernel or framework (the two responder roles).
 # ---------------------------------------------------------------------------
 REQUEST_ROUTING: dict[str, frozenset[str]] = {
-    "orchestration": frozenset({"kernel"}),
+    "orchestration": frozenset({"kernel", "framework"}),
 }
 
 
@@ -341,6 +354,14 @@ class PolicyGate:
                 f"of delegate(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
             )
+        # Framework-owned actions follow the same rule as kernel-owned.
+        if action_name in FRAMEWORK_OWNED_ACTIONS:
+            raise PolicyDenied(
+                f"action={action_name!r} is owned by the framework agent; "
+                f"emit REQUEST(target_agent='framework', kind='...') instead "
+                f"of delegate(action_name={action_name!r})",
+                rule="framework_owned_by_framework_agent",
+            )
         # If an ActionRegistry is wired, refuse delegate for unknown action names.
         # No registry → fall through (P0 / dev-mode where registry isn't loaded).
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
@@ -552,6 +573,7 @@ class PolicyGate:
 
 __all__ = [
     "CORE_STATE_FIELDS",
+    "FRAMEWORK_OWNED_ACTIONS",
     "KERNEL_OWNED_ACTIONS",
     "KILL_TASK_ALLOWED_SCOPES",
     "KILL_TASK_SOURCE_ALLOWLIST",

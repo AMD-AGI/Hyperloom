@@ -29,6 +29,9 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # analysis (2)
     "profile":              "analysis",
     "pmc_roofline":         "analysis",
+    # framework_optimize (5th-role: vllm/sglang source AST scan + patch
+    # propose) is analysis-family per design §4.1 yaml.
+    "framework_optimize":   "analysis",
     # shallow (6) — report + session_breakdown live here per DESIGN §16.1;
     # framework_pr (fa-as-arm migration, plan ``fa-as-io-arm-design``) is
     # also shallow because each tick is one PR apply + one A/B bench, not
@@ -39,12 +42,14 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     "framework_pr":         "shallow",
     "report":               "shallow",
     "session_breakdown":    "shallow",
-    # deep_kernel (5)
+    # deep_kernel (5 + 1 framework_integrate which mirrors `integrate`
+    # shape: apply patch → bench → KEEP/REVERT, just on framework source).
     "kernel_opt":           "deep_kernel",
     "integrate":            "deep_kernel",
     "deep_kernel_analysis": "deep_kernel",
     "operator_tuning":      "deep_kernel",
     "vendor_kernel_config": "deep_kernel",
+    "framework_integrate":  "deep_kernel",
     # long (2)
     "comm_optimization":    "long",
     "compiler_tuning":      "long",

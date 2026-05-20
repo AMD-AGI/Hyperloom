@@ -114,6 +114,13 @@ class SharedState:
     framework: str = ""
     gpu_type: str = ""
     kernel_enabled: bool = True
+    # 5th Framework role toggle (hyperloom-framework-agent-design.md §5).
+    # Gates the agent that owns ``framework_optimize`` /
+    # ``framework_integrate`` actions on vllm/sglang source. Default False
+    # during PR-A1 dead-path; PR-B will flip via CLI to enable mock e2e.
+    # Older state.json files lacking this field decode as False via the
+    # dataclass default — backward-compatible resume.
+    framework_role_enabled: bool = False
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0

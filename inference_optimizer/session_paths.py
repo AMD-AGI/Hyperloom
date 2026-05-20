@@ -69,6 +69,7 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "integrate", "kernel_opt", "deep_kernel_analysis",
     "operator_tuning", "vendor_kernel_config",
     "validate_stack",
+    "framework_optimize", "framework_integrate",
 })
 
 

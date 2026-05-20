@@ -220,6 +220,17 @@ class Coordinator:
         self._compare_against_gpu: str = (compare_against_gpu or "").strip()
         self._model_class_override: str = (model_class or "").strip()
 
+        # Framework role is dead-path in PR-A1 until PR-B wires handlers +
+        # mock backend. Symmetric to how --no-kernel callers drop "kernel"
+        # from role_registry: when the caller does not supply a framework
+        # backend, we drop "framework" from role_registry so legacy 4-role
+        # tests keep working without mocking a 5th backend. PR-B will pass
+        # framework_mock / framework_agent backend explicitly to opt in.
+        if "framework" in self.role_registry and "framework" not in backends:
+            self.role_registry = {
+                n: r for n, r in self.role_registry.items() if n != "framework"
+            }
+
         # Validate every reactor we expect actually has a backend wired.
         for name in self.role_registry:
             if name not in backends:
@@ -272,7 +283,10 @@ class Coordinator:
         # Stable tick order derived from the live role_registry. Must NOT
         # use the module-level `roles_for_run()` which is a cached hardcoded
         # tuple containing "kernel" even when --no-kernel stripped it.
-        _CANONICAL_ORDER = ("orchestration", "kernel", "critic", "robustness")
+        # Framework role inserted between kernel and critic per design §5.2.
+        _CANONICAL_ORDER = (
+            "orchestration", "kernel", "framework", "critic", "robustness",
+        )
         self._tick_roles: tuple[str, ...] = tuple(
             r for r in _CANONICAL_ORDER if r in self.role_registry
         )
