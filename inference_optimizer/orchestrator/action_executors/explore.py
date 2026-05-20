@@ -719,6 +719,52 @@ class ExploreExecutor:
                 continue
             rejected_dedup[fp] = entry
 
+        # KB_gaps/Gap-08 / KB_design §3.13 M5 §5 step 7 — flat
+        # per-variant outcomes for the Coordinator's per-variant T3
+        # hook. Built from ``tested_update`` (this round only) plus
+        # ``skipped_dup`` so KEEP / REVERT / FAILED / KEEP_UNSTABLE /
+        # SKIPPED_DEDUP are all exposed. The Coordinator iterates
+        # this list and calls ``cortex_kb.verify`` once per variant.
+        # Stays JSON-friendly so v0.6 readers stay happy.
+        reasons_by_fp: dict[str, str] = {
+            str(r.get("fingerprint") or ""): str(r.get("reason") or "")
+            for r in rejected_update
+            if r.get("round_id") == round_id
+        }
+        per_variant_outcomes: list[dict[str, Any]] = []
+        for fp_key, te in tested_update.items():
+            if te.get("round_id") != round_id:
+                continue
+            outcome = str(te.get("outcome") or "")
+            if outcome not in ("KEEP", "REVERT", "FAILED", "KEEP_UNSTABLE"):
+                continue
+            metrics: dict[str, Any] = {}
+            if te.get("tput") is not None:
+                metrics["tput"] = te.get("tput")
+            if te.get("gain_pct") is not None:
+                metrics["gain_pct"] = te.get("gain_pct")
+            if te.get("stack_rebench_tput") is not None:
+                metrics["stack_rebench_tput"] = te.get("stack_rebench_tput")
+            per_variant_outcomes.append({
+                "variant_name": str(te.get("name") or ""),
+                "outcome":      outcome,
+                "fingerprint":  fp_key,
+                "kb_edge_id":   str(te.get("kb_edge_id") or ""),
+                "provenance":   str(te.get("provenance") or ""),
+                "metrics":      metrics,
+                "reason":       reasons_by_fp.get(fp_key, ""),
+            })
+        for sd in skipped_dup:
+            per_variant_outcomes.append({
+                "variant_name": str(sd.get("name") or ""),
+                "outcome":      "SKIPPED_DEDUP",
+                "fingerprint":  str(sd.get("fingerprint") or ""),
+                "kb_edge_id":   "",
+                "provenance":   "",
+                "metrics":      {},
+                "reason":       str(sd.get("reason") or ""),
+            })
+
         # ``last_round`` summary for the prompt / breakdown.
         last_round_summary = {
             "round_id": round_id,
@@ -783,6 +829,8 @@ class ExploreExecutor:
             "losers": losers,
             "keep_unstable_in_stack": keep_unstable,
             "skipped_dup": skipped_dup,
+            # KB_gaps/Gap-08 — flat per-variant outcomes for T3.
+            "per_variant_outcomes": per_variant_outcomes,
             "explore_search_update": search_update,
             "discovered_flags_update": None,
             "round_id": round_id,
