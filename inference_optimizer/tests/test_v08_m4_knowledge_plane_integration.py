@@ -484,3 +484,101 @@ def test_collect_kb_provenance_no_warning_when_marker_missing(
         warnings=warnings_list,
     )
     assert not any(w.startswith("pr_monitor:") for w in warnings_list)
+
+
+# ===========================================================================
+# 4. KB_gaps/Gap-16 — CLI flag plumbing reaches _bootstrap_knowledge_plane
+# ===========================================================================
+def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:
+    """Run the cli argparse on a minimal ``optimize`` invocation so we
+    can pin the dest-name + default contract the bootstrap reads."""
+    from inference_optimizer.cli import _build_parser
+    parser = _build_parser()
+    return parser.parse_args(["optimize", "--no-cortex", *extra])
+
+
+def test_cli_pr_monitor_flags_have_expected_dest_and_defaults():
+    """KB_gaps/Gap-16 — ``--pr-monitor-url`` / ``--no-pr-monitor`` /
+    ``--pr-monitor-mcp-url`` / ``--pr-feed-window-days`` MUST land
+    under the dest names that :func:`_bootstrap_knowledge_plane`
+    reads. A regression that renames the dest would silently
+    decouple the help text from runtime behaviour."""
+    args = _parse_optimize_args([])
+    assert args.pr_monitor_enabled is True
+    assert args.pr_monitor_url is None
+    assert args.pr_monitor_mcp_url is None
+    assert isinstance(args.pr_feed_window_days, int)
+    assert args.pr_feed_window_days > 0
+
+
+def test_cli_no_pr_monitor_sets_enabled_false():
+    args = _parse_optimize_args(["--no-pr-monitor"])
+    assert args.pr_monitor_enabled is False
+
+
+def test_cli_pr_monitor_url_override_reaches_namespace():
+    args = _parse_optimize_args([
+        "--pr-monitor-url", "https://localhost:8080/v1",
+    ])
+    assert args.pr_monitor_url == "https://localhost:8080/v1"
+
+
+def test_cli_pr_monitor_mcp_url_override_reaches_namespace():
+    args = _parse_optimize_args([
+        "--pr-monitor-mcp-url", "https://localhost:8080/mcp/",
+    ])
+    assert args.pr_monitor_mcp_url == "https://localhost:8080/mcp/"
+
+
+def test_cli_pr_feed_window_days_override_reaches_namespace():
+    args = _parse_optimize_args(["--pr-feed-window-days", "7"])
+    assert args.pr_feed_window_days == 7
+
+
+def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
+    tmp_path: Path, monkeypatch,
+):
+    """End-to-end pin: argparse-built ``args`` flow into
+    :func:`_bootstrap_knowledge_plane` and the values it reads
+    propagate to the resulting :class:`KnowledgePlane` instance
+    (URL → client, window_days → plane). Closes KB_gaps/Gap-16's
+    "help text ↔ runtime behaviour" contract."""
+    from inference_optimizer.cli import _bootstrap_knowledge_plane
+    from inference_optimizer.orchestrator import pr_monitor as pr_mod
+
+    constructed_urls: list[str] = []
+
+    class _Stub:
+        def __init__(self, url: str, enabled: bool):
+            self.base_url = url or "https://default.test"
+            self.enabled = enabled
+            constructed_urls.append(self.base_url)
+
+        def healthz(self) -> bool:
+            return True
+
+        def reset_cache(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        pr_mod.PRMonitorClient,
+        "from_args",
+        classmethod(
+            lambda cls, **kw: _Stub(
+                url=kw.get("url") or "",
+                enabled=kw.get("enabled", True),
+            ),
+        ),
+    )
+
+    args = _parse_optimize_args([
+        "--pr-monitor-url", "https://my-pr-monitor.example/v1",
+        "--pr-monitor-mcp-url", "https://my-pr-monitor.example/mcp/",
+        "--pr-feed-window-days", "14",
+    ])
+    plane = _bootstrap_knowledge_plane(
+        args, cortex_client=None, session_dir=tmp_path,
+    )
+    assert "my-pr-monitor.example" in constructed_urls[-1]
+    assert plane.pr_feed_window_days == 14
+    assert plane.pr_monitor_mcp_url == "https://my-pr-monitor.example/mcp/"
