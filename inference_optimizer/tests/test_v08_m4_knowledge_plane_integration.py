@@ -235,9 +235,9 @@ async def test_on_enter_explore_swallows_warmup_exceptions(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path):
     """The dispatcher table fires PR-feed warmup on EXPLORE and *only*
-    EXPLORE. KERNEL has its own side effect (Gap-04 auto-profile) but
-    must not call into the KnowledgePlane; SWEEP / CLOSE stay no-op
-    until Gap-05 / Gap-06.
+    EXPLORE. KERNEL / SWEEP / CLOSE each have their own side effects
+    (Gap-04 auto-profile / Gap-05 auto-sweep / Gap-06 5-step
+    sequencer) but none of them must call into the KnowledgePlane.
 
     Specifically guards against accidentally wiring
     ``pr_feed_warm_all_domains`` into a non-EXPLORE branch — that
@@ -246,23 +246,57 @@ async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
     plane = _FakePlane()
     coord.knowledge_plane = plane
 
-    # KERNEL branch now exists (Gap-04). Give the coord enough state
-    # for the hook to early-return on ``kernel_enabled=False`` — the
-    # assertion below is "plane.warm_calls stays 0", not "hook is a
-    # complete no-op".
+    # All non-EXPLORE branches now exist (Gap-04 / Gap-05 / Gap-06).
+    # Give the coord enough state for the hooks to short-circuit on
+    # ``kernel_enabled=False`` (KERNEL skip) / empty
+    # phase_history (close_step / evidence helpers no-op) / no cortex_kb
+    # (CLOSE sequencer skips steps 3 + 4). The assertion is
+    # "plane.warm_calls stays 0 for non-EXPLORE", not "hooks are
+    # complete no-ops".
     @dataclass
     class _BareState:
         kernel_enabled: bool = False
         last_profile_trace: str = ""
         baseline_config_path: str = ""
+        warm_start_recipe: dict | None = None
+        cortex_session_id: str = ""
+        cortex_session_summary: dict = field(default_factory=dict)
+        stop_reason: str = ""
         current_best: dict = field(default_factory=dict)
         last_baseline: dict = field(default_factory=dict)
         phase_history: list = field(default_factory=list)
+        close_sequence_done: bool = False
+
+        def save(self, _session_dir: Path | None) -> None:
+            return None
     coord.shared_state = _BareState()
     coord.role_registry = {}   # _kernel_enabled() reads role_registry
+    coord.cortex_kb = None
+    # CLOSE sequencer enqueues real tasks; give it a tasks double so
+    # the steps run + we can still assert plane.warm_calls.
+    class _StubTaskRegistry:
+        async def create_or_return_existing(self, **kwargs):
+            from inference_optimizer.orchestrator.task_registry import Task
+            import uuid as _uuid
+            return Task(
+                task_id=_uuid.uuid4().hex,
+                kind=kwargs["kind"],
+                state="succeeded",  # terminal so _wait_for_task_terminal short-circuits
+                params=kwargs["params"],
+                idempotency_key=kwargs["idempotency_key"],
+            ), False
+
+        async def get(self, task_id):
+            from inference_optimizer.orchestrator.task_registry import Task
+            return Task(
+                task_id=task_id, kind="report", state="succeeded",
+                params={}, idempotency_key="",
+            )
+    coord.tasks = _StubTaskRegistry()
 
     await coord._on_phase_entered(from_phase="PRELUDE", to_phase="KERNEL")
     await coord._on_phase_entered(from_phase="PRELUDE", to_phase="SWEEP")
