@@ -7,16 +7,16 @@ LLM may still emit `request{kind="run_optimization"}` prematurely
 (empirical N9 lesson: profile direct-propose was N3-soft-deprecated
 and the LLM still did it; only the N9 PolicyGate hard-block worked).
 
-N13 enforces the ordering in `_sequence_denial_for_request` for
+N13 + N14 enforce the ordering in `_sequence_denial_for_request` for
 `req_kind == "run_optimization"`: rejects unless
-   backends_attempts >= 1 AND
-   params_attempts   >= 1 AND
-   snapshot_id       >= 2
+   backends_attempts >= 2 AND
+   params_attempts   >= 2 AND
+   snapshot_id       >= 3
 
-The 3rd prerequisite is the most important: snapshot #1 is the
-baseline trace; snapshot #2 (or later) must be a fresh roofline
-re-run after cheap exploration, capturing the post-cheap kernel
-distribution. Running kernel_opt against snapshot #1 after enabling
+N14 upgraded the thresholds from (1, 1, 2) to (2, 2, 3) to enforce
+"multi-round interleaved cheap exploration" (the design intent the
+user articulated post-N13: "multiple roofline runs choosing the best
+backend + param, THEN kernel_opt"). See design §6.5.1 + §6.5.2. Running kernel_opt against snapshot #1 after enabling
 `--enable-torch-compile` or a different attention backend would
 target kernels that may no longer be on the critical path.
 
@@ -80,7 +80,7 @@ def _write_baseline_marker(sd: Path) -> Path:
 
 def _seed_through_roofline_snapshot_1(coord: Coordinator) -> None:
     """Open every prerequisite up to snapshot #1 — kernel_opt should
-    still be denied (need snapshot >= 2)."""
+    still be denied (N14 needs snapshot >= 3)."""
     _write_baseline_marker(coord.session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
@@ -94,7 +94,7 @@ def _seed_through_roofline_snapshot_1(coord: Coordinator) -> None:
 
 def _seed_cheap_exploration_done(coord: Coordinator) -> None:
     """After backends + params each ran once (still snapshot #1).
-    Should still be denied — snapshot must advance to >= 2 too."""
+    Should still be denied — N14 needs each >= 2 AND snapshot >= 3."""
     _seed_through_roofline_snapshot_1(coord)
     s = coord.shared_state
     s.backends_attempts = [{"status": "succeeded"}]
@@ -102,10 +102,22 @@ def _seed_cheap_exploration_done(coord: Coordinator) -> None:
 
 
 def _seed_post_re_roofline(coord: Coordinator) -> None:
-    """All 3 prerequisites met — kernel_opt should be allowed."""
-    _seed_cheap_exploration_done(coord)
+    """All 3 N14 prerequisites met — kernel_opt should be allowed."""
+    _write_baseline_marker(coord.session_dir)
     s = coord.shared_state
-    s.last_trace_analyze["roofline_snapshot_id"] = 2
+    s.baseline_tput = 100.0
+    s.last_profile_trace = "/tmp/profile.trace.json.gz"
+    s.last_trace_analyze = {
+        "trace_input": "/tmp/profile.trace.json.gz",
+        "analysis_md_text": "FAKE",
+        "roofline_snapshot_id": 3,  # N14 needs >= 3
+    }
+    s.backends_attempts = [
+        {"status": "succeeded"}, {"status": "succeeded"},  # N14 needs >= 2
+    ]
+    s.params_attempts = [
+        {"status": "succeeded"}, {"status": "succeeded"},  # N14 needs >= 2
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -121,33 +133,58 @@ def test_kernel_opt_denied_before_any_cheap_exploration(session_dir, monkeypatch
     denied = coord._sequence_denial_for_request("kernel", "run_optimization")
     assert isinstance(denied, PolicyDenied)
     assert denied.rule == "execution_order"
-    assert "kernel_opt requires post-cheap-exploration snapshot" in str(denied)
-    # All 3 prereqs surfaced in the error
+    assert "kernel_opt requires multi-round cheap-exploration" in str(denied)
+    # All 3 prereqs surfaced in the error (N14 thresholds)
     assert "backends_attempts=0" in str(denied)
+    assert "params_attempts=0" in str(denied)
+    assert "snapshot_id=1" in str(denied)
+    assert "need >= 2" in str(denied)  # backends/params N14 threshold
+    assert "need >= 3" in str(denied)  # snapshot N14 threshold
+
+
+def test_kernel_opt_denied_when_only_backends_done(session_dir, monkeypatch):
+    """Even 2 backends attempts is not enough — params + snapshot still
+    missing. N14 requires 2/2/3."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", raising=False)
+    coord = Coordinator(session_dir, backends=_silent_backends())
+    _seed_through_roofline_snapshot_1(coord)
+    coord.shared_state.backends_attempts = [
+        {"status": "succeeded"}, {"status": "succeeded"},
+    ]
+
+    denied = coord._sequence_denial_for_request("kernel", "run_optimization")
+    assert isinstance(denied, PolicyDenied)
+    # backends pre-req met (2 >= 2), but params + snapshot still missing
+    assert "backends_attempts" not in str(denied)
     assert "params_attempts=0" in str(denied)
     assert "snapshot_id=1" in str(denied)
 
 
-def test_kernel_opt_denied_when_only_backends_done(session_dir, monkeypatch):
-    """backends done, params missing, snapshot still 1."""
+def test_kernel_opt_denied_when_only_one_backends_round(session_dir, monkeypatch):
+    """N14 specifically: 1 backends attempt is NOT enough (N13 used to
+    accept this; the upgraded threshold rejects it)."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", raising=False)
     coord = Coordinator(session_dir, backends=_silent_backends())
     _seed_through_roofline_snapshot_1(coord)
     coord.shared_state.backends_attempts = [{"status": "succeeded"}]
+    coord.shared_state.params_attempts = [
+        {"status": "succeeded"}, {"status": "succeeded"},
+    ]
+    coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 3
 
     denied = coord._sequence_denial_for_request("kernel", "run_optimization")
     assert isinstance(denied, PolicyDenied)
-    # backends pre-req met, but params + snapshot still missing
-    assert "backends_attempts" not in str(denied)
-    assert "params_attempts=0" in str(denied)
-    assert "snapshot_id=1" in str(denied)
+    assert "backends_attempts=1" in str(denied)
+    assert "need >= 2" in str(denied)
 
 
 def test_kernel_opt_denied_when_only_params_done(session_dir, monkeypatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", raising=False)
     coord = Coordinator(session_dir, backends=_silent_backends())
     _seed_through_roofline_snapshot_1(coord)
-    coord.shared_state.params_attempts = [{"status": "succeeded"}]
+    coord.shared_state.params_attempts = [
+        {"status": "succeeded"}, {"status": "succeeded"},
+    ]
 
     denied = coord._sequence_denial_for_request("kernel", "run_optimization")
     assert isinstance(denied, PolicyDenied)
@@ -156,33 +193,51 @@ def test_kernel_opt_denied_when_only_params_done(session_dir, monkeypatch):
     assert "snapshot_id=1" in str(denied)
 
 
+def test_kernel_opt_denied_when_snapshot_only_2_after_cheap_rounds(
+    session_dir, monkeypatch,
+):
+    """N14: snapshot==2 still NOT enough; need >= 3 (1 baseline + at
+    least 2 re-rooflines after cheap rounds)."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", raising=False)
+    coord = Coordinator(session_dir, backends=_silent_backends())
+    _seed_through_roofline_snapshot_1(coord)
+    s = coord.shared_state
+    s.backends_attempts = [{"status": "succeeded"}, {"status": "succeeded"}]
+    s.params_attempts = [{"status": "succeeded"}, {"status": "succeeded"}]
+    s.last_trace_analyze["roofline_snapshot_id"] = 2
+
+    denied = coord._sequence_denial_for_request("kernel", "run_optimization")
+    assert isinstance(denied, PolicyDenied)
+    assert "backends_attempts" not in str(denied)
+    assert "params_attempts" not in str(denied)
+    assert "snapshot_id=2" in str(denied)
+    assert "need >= 3" in str(denied)
+
+
 def test_kernel_opt_denied_when_snapshot_still_1_after_cheap_round(
     session_dir, monkeypatch,
 ):
-    """backends + params done but didn't re-roofline → snapshot
-    stays at 1; still denied. This is the central N13 insight: the
-    LLM must re-propose roofline AFTER cheap actions, not just rely
-    on the first snapshot."""
+    """backends + params done (1 round each) and no re-roofline →
+    multiple prereqs missing under N14. Central insight: the LLM must
+    do MULTIPLE rounds of cheap actions + re-roofline between them."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", raising=False)
     coord = Coordinator(session_dir, backends=_silent_backends())
     _seed_cheap_exploration_done(coord)
-    # snapshot still 1
+    # snapshot still 1, attempts==1 each — N14 requires 2/2/3
     assert coord.shared_state.last_trace_analyze["roofline_snapshot_id"] == 1
 
     denied = coord._sequence_denial_for_request("kernel", "run_optimization")
     assert isinstance(denied, PolicyDenied)
-    # Only snapshot prereq missing now
-    assert "backends_attempts" not in str(denied)
-    assert "params_attempts" not in str(denied)
+    assert "backends_attempts=1" in str(denied)
+    assert "params_attempts=1" in str(denied)
     assert "snapshot_id=1" in str(denied)
-    assert "re-propose roofline" in str(denied)
 
 
-def test_kernel_opt_denial_hint_mentions_re_roofline_and_escape_hatch(
+def test_kernel_opt_denial_hint_mentions_multi_round_and_escape_hatch(
     session_dir, monkeypatch,
 ):
-    """Hint must be actionable: tell the LLM to re-propose roofline +
-    document the escape hatch for operators."""
+    """Hint must be actionable: tell the LLM to run multi-round
+    cheap + re-roofline + document the escape hatch for operators."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", raising=False)
     coord = Coordinator(session_dir, backends=_silent_backends())
     _seed_cheap_exploration_done(coord)
@@ -191,7 +246,8 @@ def test_kernel_opt_denial_hint_mentions_re_roofline_and_escape_hatch(
     assert denied is not None and denied.hint is not None
     hint = denied.hint
     assert "roofline" in hint
-    assert "snapshot_id" in hint
+    assert "2 rounds" in hint
+    assert "snapshot_id >= 3" in hint
     assert "INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT" in hint
     assert "§6.5.1" in hint  # design doc reference
 
@@ -266,7 +322,7 @@ def test_pre_n13_gates_fire_before_n13_layer(session_dir, monkeypatch):
     denied = coord._sequence_denial_for_request("kernel", "run_optimization")
     assert isinstance(denied, PolicyDenied)
     assert "baseline must run first" in str(denied)
-    assert "kernel_opt requires" not in str(denied)
+    assert "kernel_opt requires multi-round" not in str(denied)
 
 
 def test_n13_fires_after_trace_analyze_gate(session_dir, monkeypatch):
@@ -284,7 +340,7 @@ def test_n13_fires_after_trace_analyze_gate(session_dir, monkeypatch):
     denied = coord._sequence_denial_for_request("kernel", "run_optimization")
     assert isinstance(denied, PolicyDenied)
     assert "trace_analyze must run first" in str(denied)
-    assert "kernel_opt requires" not in str(denied)
+    assert "kernel_opt requires multi-round" not in str(denied)
 
 
 # ---------------------------------------------------------------------------

@@ -129,6 +129,12 @@ def test_strip_reduces_real_r1_report_by_90pct_plus():
         pytest.skip(f"sample analysis.md not present at {p}")
     with open(p, encoding="utf-8") as f:
         md = f.read()
+    if "data:image/" not in md:
+        pytest.skip(
+            "sample analysis.md no longer contains base64 data URLs "
+            "(file overwritten by a later session); can't validate "
+            "the ≥80% reduction claim without the original artefact"
+        )
     before = len(md)
     stripped = SharedState._strip_base64_data_urls(md)
     after = len(stripped)
