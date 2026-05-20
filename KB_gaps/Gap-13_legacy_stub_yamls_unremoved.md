@@ -97,20 +97,37 @@ for removed in ("dream", "re_explore", "comm_optimization", "compiler_tuning"):
 
 ## 6. 验收口径
 
-- [ ] 4 个 yaml 文件物理删除
-- [ ] ActionRegistry.list() 不含 dream/re_explore/comm_optimization/compiler_tuning
-- [ ] `tests/test_p1_2_full_action_catalogue.py` 断言反向: 这些 action
-      *不在* registry
-- [ ] fresh session breakdown.capability_summary 无 dream/re_explore 等
-      family 行
+- [x] 4 个 yaml 文件物理删除
+- [x] ActionRegistry.list() 不含 dream/re_explore/comm_optimization/compiler_tuning
+- [x] `tests/test_p1_2_full_action_catalogue.py` 断言反向: 这些 action
+      *不在* registry (`test_removed_legacy_actions_not_in_registry`)
+- [x] `tests/test_prompt_builder.py::test_removed_noop_actions_are_absent_from_registry`
+      同步翻转
+- [x] fresh session breakdown.capability_summary 无 dream/re_explore 等
+      family 行 (`_action_family` 从未引用过这些名字)
 
-## 7. 风险 / 回退
+## 7. 实际落地 (2026-05-20)
 
-- **回退**: 把 yaml 加回, 测试断言改回. 无功能影响.
+1. yaml 删除: `actions/_meta/{dream,re_explore,comm_optimization,compiler_tuning}.yaml`.
+2. 测试改向: `test_p1_2_full_action_catalogue.py::test_dream_zero_gain_creative`
+   删除, 新增 `test_removed_legacy_actions_not_in_registry`;
+   `test_prompt_builder.py` 翻转 metadata 反向断言.
+3. `session_paths._RUNS_ACTIONS_FALLBACK` 移除 4 项 + 精简 narrative
+   comment.
+4. `examples/p2_full_optimize_demo.py` 移除 stub executor 注册;
+   `examples/p1_7_three_agents_e2e_demo.py` 删除 prompt 里的
+   ``dream``.
+5. cli / prompt_builder / action_registry 注释清理 — 不再提及
+   ``dream`` / ``re_explore`` / ``comm_optimization`` /
+   ``compiler_tuning``.
+
+## 8. 风险 / 回退
+
+- **回退**: 把 4 个 yaml 加回, 测试断言改回原状, 无功能影响.
 - **resume**: 老 session_dir 中可能有 `dream/` 等子目录, fallback 路
   径不读这些目录后, 现有 artifact 仍存在不影响 session.
 
-## 8. 关联 gap
+## 9. 关联 gap
 
 - 关联 `Dead-A.4` (同一项, 不同视角)
-- 无依赖, 可独立做
+- 无依赖, 独立完成
