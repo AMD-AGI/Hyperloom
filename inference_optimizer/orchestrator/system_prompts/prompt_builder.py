@@ -97,35 +97,22 @@ KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
     "operator_tuning", "vendor_kernel_config",
 })
 
-# Actions that accept LLM-injected grid candidates via ``params.grid``
-# (see backends.py / params.py / sweep.py for the schema). The catalogue
-# section appends a grid-override hint for these so the LLM knows it can
-# expand the search space beyond the shipped DEFAULT_*_GRID — this is the
-# T1/T2 "search-space expansion" hook (see SKILL.md). Without this, the
-# LLM only sees the action name and may never realize it can synthesize
-# new variants from the discovered_flags surface.
+# Actions that accept LLM-injected grid candidates via ``params.grid``.
+# The catalogue section appends a grid-override hint for these so the
+# LLM knows it can expand the search space beyond the shipped defaults.
 GRID_INJECTABLE_ACTIONS: frozenset[str] = frozenset({
-    "explore", "backends", "params", "sweep",
+    "explore", "sweep",
 })
 
-# v0.8 M3 — actions that have been superseded by ``explore`` (KB_design
-# §3.4). The catalogue marks these with a DEPRECATED tag and a one-line
-# replacement hint so the LLM gravitates to the new action without us
-# having to remove the legacy executors mid-flight (deletion lands in
-# M3 §PR9, after the dogfood window closes).
+# v0.8 M3 + KB_gaps/Dead-A — names PolicyGate's ``action_deprecated``
+# rule denies. Catalogue tag + denial hint share the same map. The
+# executors / yamls were physically deleted; the names persist only
+# in this denial surface so a v0.6 resume that emits one of these
+# gets a structured replacement hint instead of ``no_executor``.
 DEPRECATED_ACTIONS: dict[str, str] = {
-    "backends": (
-        "Use `explore` instead — KB_design §3.4 merged backends/params into "
-        "one action with per-KEEP stack rebench inlined."
-    ),
-    "params": (
-        "Use `explore` instead — same flag namespace, same dedup ledger "
-        "(`explore_search` supersedes `params_search`)."
-    ),
-    "validate_stack": (
-        "Use `explore` instead — every `explore` KEEP triggers an automatic "
-        "stack rebench, so standalone validate_stack is no longer needed."
-    ),
+    "backends":       "Use `explore` instead (v0.8 M3 merged it in).",
+    "params":         "Use `explore` instead (v0.8 M3 merged it in).",
+    "validate_stack": "Use `explore` instead (per-KEEP stack rebench is inlined).",
 }
 
 # Phase ordering for the catalogue section. Any action whose pipeline_phase
@@ -380,26 +367,6 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "SharedState.explore_search by canonical_fingerprint, so a "
             "rename of an already-tested (args, envs) collapses to the "
             "same row."
-        )
-    if name == "backends":
-        return (
-            "GRID OVERRIDE (T1/T2): emit "
-            "`delegate{action_name='backends', params={grid: [{name, "
-            "extra_sglang_args, extra_envs, note}, ...], "
-            "synergy_groups?: [[name1,name2], ...] | synergy_mode?: 'auto'}}` "
-            "to add candidates beyond the shipped DEFAULT_BACKENDS_GRID. "
-            "See SharedState.discovered_flags for the live framework's "
-            "full flag namespace and SharedState.backend_winners_history "
-            "for prior-round winners worth combining."
-        )
-    if name == "params":
-        return (
-            "GRID OVERRIDE (T1/T2): emit "
-            "`delegate{action_name='params', params={grid: [{name, "
-            "extra_sglang_args, extra_envs, note}, ...]}}` to add value-"
-            "filled parameter candidates. SharedState.discovered_flags "
-            "lists the param flag namespace (--max-num-seqs, "
-            "--cuda-graph-max-bs, etc.) you can fill in."
         )
     if name == "sweep":
         return (
