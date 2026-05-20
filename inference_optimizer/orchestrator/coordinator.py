@@ -162,6 +162,68 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
     return out
 
 
+def _dedupe_extra_sglang_args(args_str: str) -> str:
+    """Collapse repeated ``--flag value`` pairs into a unique launch string.
+
+    SGLang / vLLM argparse uses ``action="store"`` for almost every
+    knob, so if ``--cuda-graph-max-bs 32 --cuda-graph-max-bs 128
+    --cuda-graph-max-bs 256`` end up on the same command line, only the
+    last value is honored. The original cmdline still works, but
+    ``final.extra_sglang_args`` exists for dashboard / replay use and
+    looking at it with the same flag repeated 3-15 times is misleading
+    (it reads as "this run actually used N values" when really only the
+    last won).
+
+    Promote / validate_stack rounds previously fed each ``candidate_args``
+    block into ``previous + candidate`` concatenation; when the next
+    round's candidate kept the same multi-value combo, the whole block
+    was re-appended verbatim. Dedupe is a sane normalization: keep each
+    flag once, with the value of its last occurrence — same semantics
+    argparse would have applied at launch.
+
+    Bare flags (no value, e.g. ``--enable-prefix-caching``) are also
+    deduped (kept once, position preserved by first appearance).
+
+    Args:
+        args_str: space-separated ``--flag value`` pairs.
+
+    Returns:
+        Deduped equivalent. Empty input → empty output.
+    """
+    if not args_str:
+        return ""
+    tokens = args_str.split()
+    # Track each flag's last-seen pair, plus its first-seen position so
+    # we emit in stable order (last-wins-for-value, first-wins-for-order).
+    pair_by_flag: dict[str, list[str]] = {}
+    order: list[str] = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t.startswith("--"):
+            flag = t
+            if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                pair = [flag, tokens[i + 1]]
+                i += 2
+            else:
+                pair = [flag]
+                i += 1
+            if flag not in pair_by_flag:
+                order.append(flag)
+            pair_by_flag[flag] = pair
+        else:
+            # Stray positional token; preserve as-is, in order. Use a
+            # synthetic key so it doesn't collide with anything.
+            key = f"__positional_{len(order)}__"
+            order.append(key)
+            pair_by_flag[key] = [t]
+            i += 1
+    out: list[str] = []
+    for k in order:
+        out.extend(pair_by_flag[k])
+    return " ".join(out)
+
+
 @dataclass
 class PendingProposal:
     """A propose_action intent waiting for Critic Review (§18)."""
@@ -2568,19 +2630,19 @@ class Coordinator:
         }
         if key not in existing:
             self.shared_state.optimization_stack.append(entry)
-            # Per-entry incremental gain (current_best vs. baseline at the
-            # moment this integrate KEEP landed). Keeps
-            # ``gain_per_stack_entry`` index-aligned with
-            # ``optimization_stack`` for session_breakdown's
-            # capability_summary attribution.
-            gain_pct_entry: float | None = None
-            try:
-                bt = float(self.shared_state.baseline_tput or 0.0)
-                if bt > 0:
-                    gain_pct_entry = (float(new_tput) - bt) / bt * 100.0
-            except (TypeError, ValueError):
-                gain_pct_entry = None
-            self.shared_state.gain_per_stack_entry.append(gain_pct_entry)
+            # Mirror ``optimization_stack`` into the V1-schema
+            # ``gain_per_stack_entry`` ledger so session_breakdown's
+            # attribution + capability_summary can attribute "how much of
+            # the validated cumulative gain came from this entry" without
+            # re-walking the event log. Helper computes cum_gain_after
+            # (vs baseline) + delta_pct (vs previous entry) internally.
+            self.shared_state.append_stack_gain_entry(
+                action="integrate",
+                variant_name=entry.get("kernel_id"),
+                new_tput=new_tput,
+                extra_sglang_args=extra_args,
+                ts=entry["ts"],
+            )
 
         self.shared_state.current_best = {
             "action": "integrate",
@@ -2752,6 +2814,15 @@ class Coordinator:
             full_args = " ".join(
                 part for part in (base_args, candidate_args) if part
             )
+        # Dedupe repeated ``--flag value`` pairs so the cumulative
+        # extra_sglang_args reflects what argparse will actually honor
+        # (last value wins). Without this, every promote that re-applies
+        # a multi-value combo candidate (e.g.
+        # ``--cuda-graph-max-bs 32 --cuda-graph-max-bs 128 --cuda-graph-max-bs 256``)
+        # leaves multiple copies of the same flag in the final args
+        # string, which breaks reproduce-launch dashboards and the
+        # final.extra_sglang_args field surfaced by session_breakdown.
+        full_args = _dedupe_extra_sglang_args(full_args)
 
         variant_name = bv.get("name") if isinstance(bv, dict) else None
         if candidate_args or variant_name:
@@ -2778,15 +2849,13 @@ class Coordinator:
                 })
                 # Mirror append into ``gain_per_stack_entry`` so indexes
                 # stay aligned across the two parallel lists. See the
-                # SharedState docstring for the contract.
-                gain_pct_entry: float | None = None
-                try:
-                    bt = float(self.shared_state.baseline_tput or 0.0)
-                    if bt > 0:
-                        gain_pct_entry = (float(best_tput) - bt) / bt * 100.0
-                except (TypeError, ValueError):
-                    gain_pct_entry = None
-                self.shared_state.gain_per_stack_entry.append(gain_pct_entry)
+                # SharedState docstring for the V1 StackGainEntry contract.
+                self.shared_state.append_stack_gain_entry(
+                    action=task_kind,
+                    variant_name=variant_name,
+                    new_tput=best_tput,
+                    extra_sglang_args=full_args,
+                )
 
         self.shared_state.current_best = {
             "action": task_kind,
