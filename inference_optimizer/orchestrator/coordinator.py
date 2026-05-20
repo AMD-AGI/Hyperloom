@@ -30,6 +30,7 @@ import os
 import shlex
 import signal
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,7 +43,6 @@ from .agent_role import AgentRole, default_role_registry
 from .backends.base import Backend, BackendError, BackendTurnResult
 from .cursor_store import CursorStore
 from .intent_parser import Intent, IntentType, NoIntentEmitted
-from .kb_digest import format_kb_digest_for_orchestration
 from .kernel_request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from .message_bus import Message, MessageBus
 from .objective import Objective, TimeOnlyObjective
@@ -111,6 +111,22 @@ _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
     "disable_run_eval",
 )
 _BASELINE_SELF_LOOP_THRESHOLD: int = 2
+
+
+def effective_closing_grace_sec(
+    max_minutes: float | None,
+    closing_grace_sec: float | None,
+) -> float:
+    """Resolve the closing-phase grace window after the wall-clock deadline.
+
+    When ``closing_grace_sec`` is explicitly set (including ``0`` to disable
+    closing), that value wins. Otherwise default to
+    ``min(120, max_minutes * 60 * 0.02)`` so short smoke runs do not burn
+  2 minutes on report flush.
+    """
+    if closing_grace_sec is not None:
+        return float(closing_grace_sec)
+    return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
 
 
 def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any]:
@@ -221,13 +237,6 @@ class Coordinator:
         self.locks = ResourceLockManager(SqliteLeaseBackend(self.db))
         self.tasks = TaskRegistry(self.db)
         self.cursors = CursorStore(self.db)
-        # `strict_paths` defers to the env flag (CLI flips this on for
-        # production; tests omit the env so the path check stays off and
-        # legacy `/tmp/<fixture>` payload values still pass).
-        self.policy = PolicyGate(
-            role_registry=self.role_registry,
-            session_dir=self.session_dir,
-        )
         self.sub = sub_agent_runner or SubAgentRunner(
             self.locks, self.tasks, session_dir=self.session_dir,
         )
@@ -235,6 +244,14 @@ class Coordinator:
         # Persistent session state (state.json) — load existing for resume;
         # save() is called whenever the Coordinator mutates a persistent field.
         self.shared_state = SharedState.load_or_init(self.session_dir)
+        # `strict_paths` defers to the env flag (CLI flips this on for
+        # production; tests omit the env so the path check stays off and
+        # legacy `/tmp/<fixture>` payload values still pass).
+        self.policy = PolicyGate(
+            role_registry=self.role_registry,
+            session_dir=self.session_dir,
+            shared_state=self.shared_state,
+        )
         # External SKILL fills `model_class` via --model-class / MODEL_CLASS
         # (the deleted `classify` action used to do this from inside the loop).
         # Only overwrite a blank value so a resumed session keeps whatever was
@@ -272,6 +289,9 @@ class Coordinator:
             log.exception("Coordinator: failed to load ActionRegistry; "
                           "scoring will be disabled this session.")
             self.action_registry = None
+        # Wall-clock budget tracking for per-tick Time-budget prompt injection.
+        self._run_deadline: float | None = None
+        self._run_started_monotonic: float | None = None
         # Latest objective wired by ``Coordinator.run()``. Used by
         # ``_compose_prompt`` to refresh ``shared_state.target_gap_pct`` on
         # every Orchestration tick. None outside a run (e.g. bounded tick()
@@ -593,6 +613,7 @@ class Coordinator:
         stop_when: Callable[["Coordinator"], Awaitable[bool] | bool] | None = None,
         install_signal_handlers: bool = False,
         crash_emergency_threshold: int = 25,
+        closing_grace_sec: float | None = None,
     ) -> str:
         """Run reactor + dispatcher in a long-running loop until a stop
         condition fires.
@@ -603,7 +624,8 @@ class Coordinator:
             → ``stop_reason="signal"``
         * objective.reached(shared_state)  → ``"target_reached"``
         * no remaining automated levers     → ``"no_more_leverage"``
-        * wall-clock budget exceeded        → ``"time_exhausted"``
+        * wall-clock budget exceeded        → enter closing phase, then
+            ``"time_exhausted"`` after report flush or grace elapses
         * crash_count >= ``crash_emergency_threshold`` → ``"emergency"``
         * custom ``stop_when`` callback returns True → ``"custom"``
         * ``max_ticks`` reached (test guard) → ``"max_ticks"``
@@ -614,9 +636,12 @@ class Coordinator:
         objective = objective or TimeOnlyObjective()
         # Stash so ``_compose_prompt`` can update target_gap_pct.
         self._current_objective = objective
+        grace_sec = effective_closing_grace_sec(max_minutes, closing_grace_sec)
         deadline = (
             time.monotonic() + max_minutes * 60.0 if max_minutes else None
         )
+        self._run_started_monotonic = time.monotonic()
+        self._run_deadline = deadline
         max_minutes_value = max_minutes if max_minutes is not None else 0
         # Persist budget so prompts and Resume can see it.
         if max_minutes is not None:
@@ -642,6 +667,7 @@ class Coordinator:
 
         tick_n = 0
         stop_reason = ""
+        closing_deadline: float | None = None
         try:
             while not stop_reason:
                 tick_n += 1
@@ -649,11 +675,14 @@ class Coordinator:
                 # math in orchestrator/scoring.py. Persisted on the next
                 # save() (after _promote_to_shared_state or stop).
                 self.shared_state.increment_tick()
-                # Run one reactor + dispatcher pass.
-                for name in self._tick_roles:
-                    if self._stop.is_set():
-                        break
-                    await self._reactor_pass(name)
+                in_closing = self.shared_state.closing_phase
+                # Run one reactor + dispatcher pass. During closing, skip
+                # LLM reactor passes and only pump the deterministic report.
+                if not in_closing:
+                    for name in self._tick_roles:
+                        if self._stop.is_set():
+                            break
+                        await self._reactor_pass(name)
                 if not self._stop.is_set():
                     await self._pump_dispatcher_once()
 
@@ -661,7 +690,7 @@ class Coordinator:
                 if self._stop.is_set():
                     stop_reason = "signal"
                     break
-                if self.shared_state.stop_reason:
+                if self.shared_state.stop_reason and not in_closing:
                     stop_reason = self.shared_state.stop_reason
                     break
                 if objective.reached(self.shared_state):
@@ -670,9 +699,34 @@ class Coordinator:
                 if await self._has_no_more_leverage():
                     stop_reason = "no_more_leverage"
                     break
-                if deadline is not None and time.monotonic() >= deadline:
-                    stop_reason = "time_exhausted"
-                    break
+                if (
+                    deadline is not None
+                    and time.monotonic() >= deadline
+                    and not in_closing
+                ):
+                    if grace_sec <= 0:
+                        stop_reason = "time_exhausted"
+                        break
+                    closing_deadline = await self._enter_closing_phase(
+                        grace_sec=grace_sec,
+                    )
+                    continue
+                if in_closing:
+                    report_terminal = await self._closing_report_terminal()
+                    grace_blown = (
+                        closing_deadline is not None
+                        and time.monotonic() >= closing_deadline
+                    )
+                    if report_terminal or grace_blown:
+                        if grace_blown and not report_terminal:
+                            log.warning(
+                                "Coordinator: closing-grace exhausted (%.0fs) "
+                                "before report task %s finished",
+                                grace_sec,
+                                self.shared_state.closing_report_task_id,
+                            )
+                        stop_reason = "time_exhausted"
+                        break
                 if self.shared_state.crash_count >= crash_emergency_threshold:
                     stop_reason = "emergency"
                     break
@@ -700,6 +754,8 @@ class Coordinator:
                     except asyncio.TimeoutError:
                         pass
         finally:
+            if self.shared_state.closing_phase:
+                self.shared_state.closing_phase = False
             self.shared_state.stop_reason = stop_reason or "unknown"
             self.shared_state.save(self.session_dir)
             log.info(
@@ -807,6 +863,82 @@ class Coordinator:
             or rejected_count >= grid_size
         )
 
+    async def _enter_closing_phase(self, *, grace_sec: float) -> float:
+        """Enter report-flush phase after the wall-clock deadline.
+
+        Skips Orchestration→Critic; enqueues a deterministic ``report`` task
+        directly into the TaskRegistry. Returns the monotonic closing deadline.
+        """
+        closing_started = time.time()
+        closing_deadline = time.monotonic() + float(grace_sec)
+        self.shared_state.closing_phase = True
+        self.shared_state.closing_started_unix = closing_started
+        self.shared_state.save(self.session_dir)
+
+        log.info(
+            "Coordinator: entering closing phase (grace=%.0fs); "
+            "enqueueing deterministic report task",
+            grace_sec,
+        )
+
+        try:
+            for q in await self.tasks.queued():
+                if q.kind == "report":
+                    continue
+                await self.tasks.transition(
+                    q.task_id,
+                    "cancelled",
+                    evidence={"reason": "closing_phase"},
+                )
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "closing_phase: cancel of queued tasks failed (non-fatal)",
+            )
+
+        idempotency_key = (
+            f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
+        )
+        task, _existing = await self.tasks.create_or_return_existing(
+            kind="report",
+            params={
+                "session_dir": str(self.session_dir),
+                "max_highlights": 50,
+            },
+            idempotency_key=idempotency_key,
+            requires_lanes=[],
+            allowed_tools=["Read"],
+            side_effects=["writes_results"],
+            lease_ttl_sec=120,
+        )
+        self.shared_state.closing_report_task_id = task.task_id
+        self.shared_state.save(self.session_dir)
+
+        await self.bus.append_and_seq(Message.new(
+            "coordinator", "*", "event",
+            {
+                "kind": "closing_phase_entered",
+                "task_id": task.task_id,
+                "grace_sec": float(grace_sec),
+                "closing_started_unix": closing_started,
+            },
+        ))
+        return closing_deadline
+
+    async def _closing_report_terminal(self) -> bool:
+        """True when the closing-phase report task reached a terminal state."""
+        task_id = self.shared_state.closing_report_task_id
+        if not task_id:
+            return False
+        from .task_registry import TaskNotFound
+
+        try:
+            task = await self.tasks.get(task_id)
+        except TaskNotFound:
+            return True
+        return task.state in {
+            "succeeded", "failed", "cancelled", "needs_manual_review",
+        }
+
     def _all_reusable_kernels_rejected(self) -> bool:
         select = self.shared_state.last_select_kernels or {}
         reusable = {
@@ -908,6 +1040,26 @@ class Coordinator:
         if agent_name == "orchestration":
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
+            if self._run_deadline is not None and self._run_started_monotonic is not None:
+                remaining_min = max(
+                    0.0, (self._run_deadline - time.monotonic()) / 60.0,
+                )
+                elapsed_min = (
+                    time.monotonic() - self._run_started_monotonic
+                ) / 60.0
+                budget_min = self.shared_state.max_minutes or 0
+                sections.append("=== Time budget ===")
+                sections.append(
+                    f"elapsed={elapsed_min:.1f}min  remaining={remaining_min:.1f}min  "
+                    f"budget={budget_min}min  "
+                    f"closing_phase={self.shared_state.closing_phase}"
+                )
+                if remaining_min <= 5.0 and not self.shared_state.closing_phase:
+                    sections.append(
+                        "WARNING: < 5 min remaining. Prefer `report` next; new "
+                        "explore rounds or validate_stack will likely be cut "
+                        "by the deadline."
+                    )
 
         # 1. Shared session state — gives the agent goal + progress context
         # even on tick 1 when the inbox is empty.
@@ -945,19 +1097,6 @@ class Coordinator:
             if required_step:
                 sections.append("=== Execution checklist (Coordinator-enforced) ===")
                 sections.append(required_step)
-
-        # 1b. Marathon KB retrieval — curated lessons (validated stacks).
-        if agent_name == "orchestration":
-            # Framework is resolved at CLI start time and re-exported as
-            # $FRAMEWORK so the KB digest reads the right partition. Fall
-            # back to sglang for parity with the CLI default.
-            kb_text = format_kb_digest_for_orchestration(
-                model_name=getattr(self.shared_state, "model_name", "") or "",
-                framework=os.environ.get("FRAMEWORK", "sglang").strip().lower() or "sglang",
-            )
-            if kb_text.strip():
-                sections.append("=== Knowledge base hints ===")
-                sections.append(kb_text)
 
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
@@ -1043,22 +1182,28 @@ class Coordinator:
     def _required_next_step(self) -> str:
         """Return the coordinator-enforced next step, or empty if flexible.
 
-        The Orchestration prompt says baseline -> profile -> select_kernels,
-        but the LLM can still skip to backends/params. This guard makes that
-        sequence deterministic and visible in the prompt every tick.
+        The Orchestration prompt says baseline -> profile -> analyze ->
+        kernel_opt -> integrate -> validate_stack, but the LLM can still
+        skip ahead. This guard makes that sequence deterministic and
+        visible in the prompt every tick.
 
-        Pipeline (after the deletion of the in-loop ``setup`` / ``classify``
-        actions, the deletion of the PMC hard-gate, and the deletion of
-        the action-layer ``select_kernels`` hard-gate — ``select_kernels``
-        is now only enforced as a prerequisite for ``run_optimization``
-        REQUESTs at the request layer, never for explore actions like
-        ``params`` / ``backends`` / ``sweep`` / ``report``):
+        Pipeline (the ``analyze`` step sits between profile and integrate
+        so the TraceLens ``analysis.md`` contract is honored before
+        kernel_opt fires. The TODO is purely guidance —
+        `_sequence_denial_for_action` still does NOT block explore actions
+        (params/backends/sweep) on a stale `last_select_kernels` cache;
+        that demoted gate stays demoted. Only
+        `_sequence_denial_for_request` enforces it for `run_optimization`
+        REQUESTs, as before):
 
             TODO 0  target_analysis  (only when --compare-against-gpu set)
             TODO 1  baseline
             TODO 2  profile          (kernel mode only)
-            TODO 3  integrate        (kernel mode only, after kernel_opt KEEP)
-            TODO 4  validate_stack   (when unvalidated KEEPs landed)
+            TODO 3  analyze          (kernel mode only, when
+                                      last_profile_trace is fresh but
+                                      last_select_kernels is stale)
+            TODO 4  integrate        (kernel mode only, after kernel_opt KEEP)
+            TODO 5  validate_stack   (when unvalidated KEEPs landed)
 
         ``validate_stack`` precedence is critical: once at least one KEEP
         has been added to ``optimization_stack`` since the last successful
@@ -1071,7 +1216,7 @@ class Coordinator:
         if not self._target_analysis_baseline_exists():
             if self._compare_against_gpu:
                 return (
-                    f"TODO 0/4: target_analysis is required now. "
+                    f"TODO 0/5: target_analysis is required now. "
                     f"--compare-against-gpu="
                     f"{self._compare_against_gpu!r} was set but "
                     "$SESSION_DIR/target_analysis/target_baseline.json is "
@@ -1079,7 +1224,7 @@ class Coordinator:
                     "the external InferenceX reference has been fetched."
                 )
             return (
-                "TODO 0/4: target_analysis is required now. "
+                "TODO 0/5: target_analysis is required now. "
                 "$SESSION_DIR/target_analysis/target_baseline.json is "
                 "missing; propose/delegate only `target_analysis` so a "
                 "reason='no_target_gpu_configured' marker JSON is written "
@@ -1088,31 +1233,54 @@ class Coordinator:
             )
         if self.shared_state.baseline_tput <= 0:
             return (
-                "TODO 1/4: baseline is required now. Propose/delegate only "
+                "TODO 1/5: baseline is required now. Propose/delegate only "
                 "`baseline` until baseline_tput > 0."
             )
-        # Profile / integrate guards only apply when the kernel agent is
-        # alive — no-kernel runs have no way to service the request and
-        # the mandate would be meaningless. Two related gates are NOT
-        # surfaced here:
+        # Profile / analyze / integrate guards only apply when the kernel
+        # agent is alive — no-kernel runs have no way to service the
+        # request and the mandate would be meaningless. Two related
+        # gates are NOT surfaced here:
         # * ``pmc_roofline`` is opt-in advisory enrichment for
         #   ``kernel_opt`` via ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1`` and
         #   never a prerequisite for any other action.
         # * ``select_kernels`` is a prerequisite ONLY for ``run_optimization``
-        #   REQUESTs (enforced in ``_sequence_denial_for_request``); it is
-        #   NOT a prerequisite for ``params`` / ``backends`` / ``sweep`` /
-        #   ``report``.
+        #   REQUESTs (enforced in ``_sequence_denial_for_request``); the
+        #   action-layer hard-gate stays demoted (explore actions are not
+        #   blocked).
         if "kernel" in self.role_registry:
             if not self.shared_state.last_profile_trace:
                 return (
-                    "TODO 2/4: profile is required now. Baseline exists but "
+                    "TODO 2/5: profile is required now. Baseline exists but "
                     "last_profile_trace is empty; propose/delegate only `profile`. "
                     "Do not run backends/params/sweep yet."
+                )
+            # analysis.md contract: require `select_kernels` to have
+            # run against the current trace so analysis.md exists on disk
+            # before any kernel_opt / integrate cycle can fire.  Guidance
+            # only -- explore actions (params/backends/sweep/report) are
+            # not blocked; only run_optimization is hard-gated on the
+            # same cache by `_sequence_denial_for_request`.
+            cached = self.shared_state.last_select_kernels or {}
+            current_trace = self.shared_state.last_profile_trace
+            cache_matches_trace = (
+                isinstance(cached, dict)
+                and cached.get("trace_input") == current_trace
+            )
+            if not cache_matches_trace:
+                return (
+                    "TODO 3/5: analyze is required now. last_profile_trace "
+                    f"={current_trace!r} but last_select_kernels is "
+                    "empty/stale; TraceLens has not yet produced "
+                    "analysis.md for this trace. Emit "
+                    "request{target_agent='kernel', kind='select_kernels', "
+                    "params={trace_input: <last_profile_trace>, top_k: 10}}. "
+                    "Do NOT propose kernel_opt / run_optimization / "
+                    "integrate until this cache populates."
                 )
             pending_kid = self._kernel_opt_keep_pending()
             if pending_kid:
                 return (
-                    f"TODO 3/4: integrate is required now. kernel_opt "
+                    f"TODO 4/5: integrate is required now. kernel_opt "
                     f"returned KEEP for kernel_id={pending_kid!r} but the "
                     "patch has not been integrated into optimization_stack. "
                     "Emit request{target_agent='kernel', kind='integrate', "
@@ -1123,7 +1291,7 @@ class Coordinator:
                 )
         if self.shared_state.optimization_stack_has_unvalidated_keeps():
             return (
-                "TODO 4/4: validate_stack required. New KEEP'd entries have "
+                "TODO 5/5: validate_stack required. New KEEP'd entries have "
                 "landed on optimization_stack since the last validate_stack run "
                 f"(stack_len={len(self.shared_state.optimization_stack)}, "
                 f"validated_at_len="
@@ -1132,6 +1300,40 @@ class Coordinator:
                 "cumulative_gain_validated reflects the current stack. "
                 "Per-round gains do NOT compose linearly — the final report "
                 "quotes the validated number, so this is the only honest gain."
+            )
+        # TODO 5/5 (current_best path): params/backends can advance
+        # ``current_best.tput`` without populating ``optimization_stack``
+        # (e.g. when the executor's best_variant lacks an explicit
+        # variant_name + candidate_args pair, the lift updates tput but
+        # appends nothing to the stack). The final report otherwise
+        # reads ``cumulative_gain_validated=0.0%`` with no validation on
+        # record. Surface a guidance TODO once the per-round gain crosses
+        # a small but meaningful threshold so Orchestration can fire one
+        # validate_stack and put an honest number into the report.
+        # Guidance only — no PolicyGate denial (the explore loop is not
+        # locked) since opt_stack-based unvalidated-KEEP detection still
+        # owns that.
+        _CB_VALIDATE_THRESHOLD_PCT = 0.5
+        cum_gain = float(self.shared_state.cumulative_gain or 0.0)
+        already_validated = bool(
+            self.shared_state.cumulative_gain_validated_ts
+        )
+        if (
+            cum_gain >= _CB_VALIDATE_THRESHOLD_PCT
+            and not self.shared_state.optimization_stack
+            and not already_validated
+        ):
+            cb_action = (self.shared_state.current_best or {}).get(
+                "action", "?",
+            )
+            return (
+                f"TODO 5/5: validate_stack recommended. current_best "
+                f"advanced to +{cum_gain:.2f}% via "
+                f"{cb_action!r} but optimization_stack is empty (no "
+                "kernel-opt KEEPs landed). Emit `validate_stack` so "
+                "cumulative_gain_validated reflects the current "
+                "configuration end-to-end before the final report. "
+                "Guidance only — explore actions remain unlocked."
             )
         return ""
 
@@ -1664,6 +1866,12 @@ class Coordinator:
             )
             return
         params = dict(intent.payload.get("params") or {})
+        # The schema says delegate idempotency_key is top-level, but LLMs
+        # sometimes place it inside params (especially when following older
+        # examples like params={grid: ..., idempotency_key: ...}). Treat the
+        # nested value as a compatibility alias and remove it from executor
+        # params so downstream action runners never see this control field.
+        nested_idempotency_key = params.pop("idempotency_key", None)
         # Plumb baseline's materialized YAML into grid-style delegated tasks
         # so they inherit the workload contract (CONC/ISL/OSL/TP/...) baseline
         # ran. See `_materialize_approved_proposal` for the same logic on the
@@ -1689,7 +1897,23 @@ class Coordinator:
             params.setdefault(
                 "backends_search", self.shared_state.backends_search,
             )
-        raw_key = intent.payload.get("idempotency_key")
+        # Idempotency-key resolution chain (most-explicit first):
+        #   1. ``intent.payload.idempotency_key`` — schema-correct top-level
+        #      placement.
+        #   2. ``nested_idempotency_key`` — compatibility for LLM outputs that
+        #      accidentally nest the field under ``params={...}`` (HEAD
+        #      commit 56840aa; LLMs follow stale prompt examples).
+        #   3. Content-fingerprint auto-generated key
+        #      ``<source>:<action>:t<tick>:<sha1[:10]>`` — only when neither
+        #      explicit form is supplied. Hashing ``params`` keeps the same
+        #      operation+inputs collapsing to one task across re-emissions.
+        # When the resolved key collides with an existing task in a
+        # *terminal* state, the retry loop below re-tries up to 5 times with
+        # ``-retry<N>`` suffixes so the operator can resubmit identical
+        # params without manual bumping. Collisions with non-terminal tasks
+        # are surfaced as policy_denied so the LLM waits for the existing
+        # delegated_result instead of spinning.
+        raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
         if not raw_key:
             content_fp = hashlib.sha1(
                 json.dumps(params, sort_keys=True, default=str).encode()

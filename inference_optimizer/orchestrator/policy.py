@@ -220,6 +220,7 @@ class PolicyGate:
     action_registry: Any | None = None
     session_dir: Path | None = None
     strict_paths: bool = False
+    shared_state: Any | None = None
 
     def __post_init__(self) -> None:  # noqa: D401 — dataclass hook
         # Allow env to enable strict mode without threading a constructor
@@ -255,6 +256,10 @@ class PolicyGate:
                 rule="role",
             )
 
+        closing_denied = self._closing_phase_denial(from_agent, intent)
+        if closing_denied is not None:
+            raise closing_denied
+
         payload = intent.payload or {}
 
         # Per-intent structural validators
@@ -283,6 +288,31 @@ class PolicyGate:
         # the bus is scanned for `_PATH_LIKE_FIELDS`; offending paths
         # raise PolicyDenied(rule="path_outside_session_dir").
         self._validate_payload_paths(role, intent.type, payload)
+
+    def _closing_phase_denial(
+        self, source: str, intent: Intent,
+    ) -> PolicyDenied | None:
+        """During closing phase, only harmless intents and ``report`` proposals."""
+        state = self.shared_state
+        if state is None or not getattr(state, "closing_phase", False):
+            return None
+        if intent.type in (
+            IntentType.SEND_MESSAGE,
+            IntentType.UPDATE_PERSONA,
+            IntentType.ALERT,
+            IntentType.ASK_QUESTION,
+            IntentType.ANSWER,
+        ):
+            return None
+        if intent.type == IntentType.PROPOSE_ACTION:
+            if (intent.payload or {}).get("action_name") == "report":
+                return None
+        return PolicyDenied(
+            f"closing_phase: {intent.type.value} denied "
+            f"(only `report` proposals allowed during wind-down)",
+            rule="closing_phase_only_report",
+            hint="run is winding down; new tasks are dropped",
+        )
 
     def allowed_tools_for_agent(self, agent_name: str) -> list[str]:
         """Return the Claude tool list a reactor may use.

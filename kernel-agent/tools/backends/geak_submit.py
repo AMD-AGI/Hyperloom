@@ -62,6 +62,18 @@ def _build_cmd(prompt_file: Path, output_dir: Path, kernel_path: str, gpu_ids: s
         cmd.extend(["--repo", kernel_repo])
     if test_command:
         cmd.extend(["--test-command", test_command])
+    # cost_limit semantics (matches GEAK's ``-l/--cost-limit`` option):
+    #   * ``None``  — caller did not pass a value; do NOT add the flag, so
+    #                 GEAK falls back to its config-file value. For Hyperloom
+    #                 callers this branch is unreachable today because
+    #                 ``kernel_optimization.py`` defaults to ``0.0`` (see the
+    #                 long comment there). Kept for direct CLI users.
+    #   * ``0.0``   — explicitly disable the cap. GEAK's ``mini.py:194-195``
+    #                 writes ``config["agent"]["cost_limit"] = 0`` which is
+    #                 honoured by every child agent spawned from that config;
+    #                 this is the only way to defeat the sub-agent path that
+    #                 silently falls back to ``AgentConfig.cost_limit = 3.0``.
+    #   * ``> 0.0`` — finite per-attempt budget in USD (CI guardrail).
     if cost_limit is not None:
         cmd.extend(["--cost-limit", str(cost_limit)])
     return cmd
@@ -154,6 +166,11 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
             cmd.extend(["--repo", kernel_repo])
         if test_command:
             cmd.extend(["--test-command", test_command])
+        # Mirrors ``_build_cmd``: only emit ``--cost-limit`` when the
+        # caller specified one. Hyperloom's default (0.0) means we
+        # always pass the flag and disable GEAK's $3 sub-agent
+        # fallback; see the cost_limit semantics comment in
+        # ``_build_cmd`` above for the full rationale.
         if cost_limit is not None:
             cmd.extend(["--cost-limit", str(cost_limit)])
         started = _t.time()
