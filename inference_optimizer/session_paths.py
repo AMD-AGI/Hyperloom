@@ -384,6 +384,22 @@ def cortex_flusher_pid(session_dir: Path) -> Path:
     return cortex_dir(session_dir) / ".kb_flusher.pid"
 
 
+def cortex_flusher_status_json(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_flusher_status.json`` — one-shot marker
+    written by ``cli._maybe_spawn_kb_flusher`` (KB_gaps/Dead-E) with the
+    boot-time flusher spawn decision. Breakdown collector merges this
+    with the live pid-file check to populate
+    ``kb_provenance.flusher_status``.
+
+    Schema (JSON):
+
+    ``{enabled: bool, spawned: bool, pid: int | None, cmd: list[str],
+       cortex_kb_url: str | None, interval_sec: float, batch_size: int,
+       reason: str, ts: str}``
+    """
+    return cortex_dir(session_dir) / ".kb_flusher_status.json"
+
+
 __all__ = [
     "agent_dir",
     "agent_inbox",
@@ -396,6 +412,7 @@ __all__ = [
     "cortex_dir",
     "cortex_flushed_ndjson",
     "cortex_flusher_pid",
+    "cortex_flusher_status_json",
     "cortex_pending_ndjson",
     "cortex_pitfalls_json",
     "cortex_sid_file",
