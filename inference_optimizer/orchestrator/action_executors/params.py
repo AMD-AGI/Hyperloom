@@ -196,6 +196,18 @@ DEFAULT_PARAMS_GRID: list[GridVariant] = [
     GridVariant("sglang_tilelang_indexer",
                  extra_envs={"SGLANG_OPT_USE_TILELANG_INDEXER": "true"},
                  note="indexer"),
+    # N22 (May 2026): explicitly register torch_compile_on so the
+    # catalogue lists it + the keyword map can reference it. Previously
+    # this lever was only surfaced via AST auto-discovery
+    # (`_augment_grid_with_discovered_flags`), which means it appeared
+    # in the LLM-visible grid AT RUNTIME but never showed up in the
+    # static prompt catalogue. Result: LLM that didn't read auto-
+    # discovery output (e.g. Qwen3-30B-A3B N20c session) skipped it
+    # even when analysis.md explicitly mentioned `torch.compile`. Now
+    # it's a first-class entry — both prompt catalogue and N22 keyword
+    # advisory point at the same name.
+    GridVariant("torch_compile_on", "--enable-torch-compile",
+                 note="compile"),
 ]
 
 
