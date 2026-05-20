@@ -896,15 +896,11 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "  search inside the repo, scope to the repo root: `find <repo> -name ...`\n"
         "  or `rg ... <repo>`, NEVER `find /`.\n"
         "\n"
-        "GOAL & EARLY-EXIT:\n"
-        "- Target speedup: >= 1.50x on the dominant inference shape(s).\n"
-        f"- Hard wall-clock budget: ~{budget_min} minutes. If you reach >=1.50x with\n"
-        "  passing correctness BEFORE the budget expires, STOP immediately, write the\n"
-        "  final `optimization_report.md` with `speedup: X.XXx` and exit (don't keep\n"
-        "  squeezing for marginal gains).\n"
-        f"- Otherwise iterate up to minute {int(budget_min*0.85)}, then STOP iterating\n"
-        "  and finalize the report with your best so-far measured speedup. The runner\n"
-        "  will SIGTERM at minute "
+        "GOAL & TIME BUDGET:\n"
+        f"- Hard wall-clock budget: ~{budget_min} minutes. Iterate up to minute "
+        f"{int(budget_min*0.85)},\n"
+        "  then STOP iterating and finalize the report with your best so-far measured\n"
+        "  speedup. The runner will SIGTERM at minute "
         f"{budget_min}; any in-flight work not on disk is lost.\n"
         "- Always print the final number in the form `speedup: X.XXx` (lowercase `x`)\n"
         "  at the END of `optimization_report.md` so the runner can extract it; if you\n"
@@ -1033,9 +1029,6 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "```json",
         json.dumps(kernel_metadata, indent=2, sort_keys=True),
         "```",
-        "",
-        "GEAK configuration (ignored by non-GEAK backends):",
-        "- Use homogeneous mode. Set max_rounds to 5.",
         "",
         hardware_notes,
         hypothesis_block,
