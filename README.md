@@ -90,12 +90,6 @@ docker run -d \
 
 If Hyperloom is already cloned on the host, you can mount that checkout directly into the container, for example by replacing `-v /path/to/workspace:/workspace` with `-v /path/on/host/Hyperloom:/workspace/Hyperloom`. Then open `/workspace/Hyperloom` after attaching Cursor to the container; you do not need to clone Hyperloom again inside the container.
 
-> If HTTPS requests to `core42.primus-safe.amd.com` or the AMD LLM Gateway fail with a certificate verification error inside the container, install the AMD certificate bundle manually. This is most common when running on your own GPU server or a custom container image:
->
-> ```bash
-> curl -fsSL https://raw.githubusercontent.com/AMD-AGI/Primus-SaFE/main/Scripts/setup-certs/setup.sh | bash
-> ```
-
 #### 2. Connect Cursor to the Runtime Environment
 
 - **SaFE Authoring Pod**: when the Pod is ready, check the connection instructions in the SaFE Authoring page and follow them to connect with Cursor Remote SSH.
@@ -140,6 +134,12 @@ Edit `.env`:
 SAFE_API_KEY=ak-your-safe-apikey
 OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
 ```
+
+> If HTTPS requests to `core42.primus-safe.amd.com` or the AMD LLM Gateway fail with a certificate verification error inside the container, install the AMD certificate bundle manually. This is most common when running on your own GPU server or a custom container image:
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/AMD-AGI/Primus-SaFE/main/Scripts/setup-certs/setup.sh | bash
+> ```
 
 | Variable | Description | Example |
 |----------|-------------|---------|
