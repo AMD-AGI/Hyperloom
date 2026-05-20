@@ -188,7 +188,17 @@ ensure_inferencex() {
     log "INFERENCEX_PATH = $INFERENCEX_PATH (preserved from env)"
     return 0
   fi
+  # Candidate order (highest precedence first). `/wekafs/InferenceX` is
+  # the workspace-private clone we patch via _inferencex_patcher and
+  # pin Magpie to via MAGPIE_INFERENCEX_PATH (see fix #210 commit
+  # 60dbb4e). Prefer it over the shared `/wekafs/hyperloom/InferenceX`
+  # checkout — that one is a multi-tenant scratchpad where other agents
+  # may have stale modifications, and patching there causes
+  # cross-session interference. The hyperloom + opt + fully-local
+  # paths remain as fallbacks for hosts that don't mount the
+  # private workspace clone.
   for candidate in \
+      "/wekafs/InferenceX" \
       "$MAGPIE_DIR/InferenceX" \
       "${HYPERLOOM_RUNTIME_DIR}/InferenceX" \
       "/wekafs/hyperloom/InferenceX" \
