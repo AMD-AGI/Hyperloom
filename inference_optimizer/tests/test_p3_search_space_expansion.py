@@ -483,6 +483,11 @@ def test_prompt_section_count_unchanged(registry, rules_path):
         "## 3. PIPELINE & TIME BUDGET",
         "## 4. ACTIONS YOU MAY USE",
         "## 5. DECISION FRAMEWORK (apply EVERY tick BEFORE emitting)",
+        # N20-A: unnumbered auxiliary catalogue, emitted whenever the
+        # `backends` action is in the run's enabled-action set so the
+        # LLM has the registered variant names + trigger hints to
+        # cite when proposing params.variants=[...].
+        "## BACKENDS GRID CATALOGUE (SGLang)",
         "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
         "## 7. RULES & OUTPUT PROTOCOL",
     ]
