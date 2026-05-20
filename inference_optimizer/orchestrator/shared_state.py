@@ -167,18 +167,21 @@ class SharedState:
     # entries (e.g. on resumed sessions) are treated as ``None``.
     gain_per_stack_entry: list[float | None] = field(default_factory=list)
     cumulative_gain: float = 0.0
-    # Cumulative gain measured by the `validate_stack` action — i.e. by
-    # actually re-baselining a fresh server with EVERY KEEP'd entry of
-    # ``optimization_stack`` applied. The plain ``cumulative_gain`` field
-    # only sums per-round gains (which do not compose linearly), so the
-    # validated number is what the final report quotes. Stays 0.0 until the
-    # first successful validate_stack run.
+    # Cumulative gain measured by re-baselining a fresh server with
+    # EVERY KEEP'd entry of ``optimization_stack`` applied end-to-end.
+    # The plain ``cumulative_gain`` field only sums per-round gains
+    # (which do not compose linearly), so the validated number is
+    # what the final report quotes. v0.8 M3 + KB_gaps/Gap-10 — the
+    # rebench runs inline inside the merged ``explore`` action's
+    # per-KEEP loop; the standalone v0.6 ``validate_stack`` action
+    # is denied by PolicyGate. Stays 0.0 until the first KEEP
+    # cleared its inline rebench.
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
     # Length of ``optimization_stack`` at the time of the last successful
-    # validate_stack run; used by the Coordinator to decide whether the
-    # current stack still matches the validated number, or whether a
-    # re-validation is required after new KEEPs landed.
+    # inline stack rebench; used by the Coordinator to decide whether
+    # the current stack still matches the validated number, or whether
+    # the TODO 4 stack-rebench guard should fire after new KEEPs landed.
     cumulative_gain_validated_stack_len: int = 0
     stop_reason: str = ""
     # Closing phase — set when the wall-clock deadline fires. While True,
@@ -241,23 +244,28 @@ class SharedState:
     # symmetry.
     last_baseline: dict[str, Any] = field(default_factory=dict)
     last_profile: dict[str, Any] = field(default_factory=dict)
+    # v0.8 M3 + KB_gaps/Dead-A/Dead-C — ``last_backends`` / ``last_params``
+    # / ``last_validate_stack`` are v0.6 resume-parity zombies: the
+    # legacy actions are denied at PolicyGate so new sessions never
+    # write to them, but the field shape must stay so a resumed v0.6
+    # ``state.json`` round-trips (Inv-10.1 fact-layer compatibility).
     last_backends: dict[str, Any] = field(default_factory=dict)
     last_params: dict[str, Any] = field(default_factory=dict)
     last_validate_stack: dict[str, Any] = field(default_factory=dict)
     # v0.8 M3 — merged explore action snapshot (KB_design §3.4). Same
-    # schema as the other ``last_<action>`` mirrors. Coexists with
-    # ``last_backends`` / ``last_params`` / ``last_validate_stack``
-    # during the M3 transitional period; once M3 §PR9 lands the legacy
-    # snapshots become dormant (never updated for new explore runs).
+    # schema as the other ``last_<action>`` mirrors.
     last_explore: dict[str, Any] = field(default_factory=dict)
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
+    sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
+    # v0.8 M3 + KB_gaps/Dead-A/Dead-C — ``backends_attempts`` /
+    # ``params_attempts`` / ``validate_stack_attempts`` are kept as
+    # zero-write resume-parity zombies for the same Inv-10.1 reason
+    # as the snapshot mirrors above.
     backends_attempts: list[dict[str, Any]] = field(default_factory=list)
     params_attempts: list[dict[str, Any]] = field(default_factory=list)
-    sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
     validate_stack_attempts: list[dict[str, Any]] = field(default_factory=list)
-    # v0.8 M3 — explore audit log (parity with backends_attempts /
-    # params_attempts). Capped per _DEFAULT_ATTEMPTS_HISTORY.
+    # v0.8 M3 — explore audit log. Capped per _DEFAULT_ATTEMPTS_HISTORY.
     explore_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Global rolling log of unpromotable task results, capped at
     # ``_DEFAULT_LAST_FAILURES``. Carries the rich failure context
@@ -2547,12 +2555,15 @@ class SharedState:
         return max(0.0, float(self.max_minutes) - self.elapsed_minutes(now=now))
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
-        """True iff a new KEEP has landed since the last validate_stack.
+        """True iff a new KEEP has landed since the last inline stack rebench.
 
-        Used by Coordinator to surface the ``validate_stack required`` TODO
-        in the per-tick checklist. The check is purely on stack *length*:
-        every successful validate_stack records ``cumulative_gain_validated_stack_len``,
-        so a longer stack means at least one new KEEP came in.
+        Used by Coordinator to surface the TODO 4 ``stack rebench
+        required`` guard in the per-tick checklist. The check is purely
+        on stack *length*: every successful inline rebench (v0.8 M3
+        explore per-KEEP loop) records
+        ``cumulative_gain_validated_stack_len``, so a longer stack means
+        at least one new KEEP (e.g. from ``integrate``) came in without
+        an end-to-end revalidation.
         """
         return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len)
 
@@ -2578,7 +2589,8 @@ class SharedState:
             validated_age = f" (ts={self.cumulative_gain_validated_ts})"
         unvalidated = self.optimization_stack_has_unvalidated_keeps()
         unvalidated_tag = (
-            " ⚠ stack changed since last validate_stack — RUN validate_stack"
+            " ⚠ stack changed since last rebench — RUN `explore` "
+            "(per-KEEP stack rebench is inlined)"
             if unvalidated else ""
         )
         return (
