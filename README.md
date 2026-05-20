@@ -68,16 +68,16 @@ Image examples:
 - vLLM MI300X: `vllm/vllm-openai-rocm:v0.18.0`
 - vLLM MI355X: `vllm/vllm-openai-rocm:v0.18.0`
 
-#### Step 2 — Prepare Source Trees and Configure Environment Variables
+#### Step 2 — Bootstrap Dependencies and Configure Environment
 
-Prepare Hyperloom and its dependency source trees on the GPU node, then set the path environment variables explicitly. Hyperloom does not pin these internal source repositories to fixed paths; runtime uses the repo paths you provide through the environment.
+Prepare the Hyperloom checkout and credentials, then let the Local Mode bootstrap script clone dependency repositories, wire path environment variables, and run the installer. Users do not need to manually set `OOB_SRC`, `INFERENCEX_PATH`, or `TRACELENS_ROOT` for the default flow.
 
 **Required credentials:**
 
 Hyperloom can read credentials from `$REPO_ROOT/.env`. The recommended setup is to copy the template and fill in your key:
 
 ```bash
-cd "$REPO_ROOT"
+cd /path/to/Hyperloom
 cp .env.template .env
 ```
 
@@ -95,6 +95,15 @@ OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
 
 Shell environment variables take precedence over values in `.env`, so advanced users can still export these variables directly.
 
+Run the bootstrap from the Hyperloom checkout:
+
+```bash
+export USER_DATA_PATH=/path/to/hyperloom-run
+bash inference_optimizer/scripts/local_setup.sh
+```
+
+`USER_DATA_PATH` is Hyperloom's runtime directory for dependency checkouts, logs, state, and optimization results. It is not the Hyperloom source checkout, and you can point it at any location with enough space. The script derives `REPO_ROOT` from its own location, clones and wires OOB, InferenceX, and TraceLens, and writes `$USER_DATA_PATH/runtime/local-setup.env.sh`. When it finishes, it prints the Cursor workspace path, the env file the agent should source, and a Cursor Chat prompt template to start optimization.
+
 **Optional (Cursor kernel-opt backend):**
 
 | Variable | Description | Example |
@@ -102,32 +111,13 @@ Shell environment variables take precedence over values in `.env`, so advanced u
 | `CURSOR_API_KEY` | Cursor SDK key for the OOB cursor backend; independent issuer (Cursor account, prefix `crsr_...`). When unset, Hyperloom auto-skips cursor from default backend selection and only races claude/codex/geak. | `crsr_xxxxxxxxxxxx` |
 | `CURSOR_DEFAULT_MODEL` | Override the default Cursor model id. | `claude-opus-4-7` (default) |
 
-**Path configuration:**
-
-These paths are used by the agent and installer to wire together the local Hyperloom stack:
-
-| Path | Why it is needed |
-|------|------------------|
-| `REPO_ROOT` | Locates this Hyperloom repo, including `inference_optimizer/`, `kernel-agent/`, skills, scripts, and runtime assets. |
-| `OOB_SRC` | Provides the OOB CLI and auth-proxy used by kernel optimization backends. |
-| `INFERENCEX_PATH` | Provides InferenceX benchmark/evaluation code and reference data used during baseline and target analysis. |
-| `TRACELENS_ROOT` | Provides TraceLens profiling tooling for bottleneck analysis and kernel selection. |
-| `USER_DATA_PATH` | Session directory root for logs, runs, source mirrors, and all per-session artefacts. Optional, defaults to `/workspace/hyperloom`. |
-
-Prepare the source trees from the corresponding repositories:
-
-- Hyperloom: this repository; clone it and point `REPO_ROOT` at the repo root.
-- OOB: clone the [AMD-AGI/Primus-Claw](https://github.com/AMD-AGI/Primus-Claw) repository, then point `OOB_SRC` at its `OOB/` subdirectory.
-- InferenceX: [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX); point `INFERENCEX_PATH` at the local repo root.
-- TraceLens-internal: [AMD-AGI/TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal/); checkout `release/hyperloom_integration_v0.3.1` (or the matching `Hyperloom_integration_v0.3.1` tag) and point `TRACELENS_ROOT` at that checkout. The per-version `sglang_roofline_patches/sglang_<minor>_<patch>/` layout is required; pre-v0.3.1 flat checkouts are no longer supported.
-
-> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway). GEAK and OOB (claude/codex) API Key / Base URL are automatically inherited from `SAFE_API_KEY` / `OPENAI_BASE_URL`. You can place these values in `$REPO_ROOT/.env`; no separate GEAK or OOB configuration is needed. The OOB **cursor** backend is the exception: it talks to Cursor's own gateway and requires a separate `CURSOR_API_KEY`. If `CURSOR_API_KEY` is unset, cursor is silently skipped from default kernel-opt selection.
+> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway). GEAK and OOB (claude/codex) API Key / Base URL are automatically inherited from `SAFE_API_KEY` / `OPENAI_BASE_URL`. You can place these values in `$REPO_ROOT/.env`; no separate GEAK, OOB, InferenceX, or TraceLens configuration is needed. The OOB **cursor** backend is the exception: it talks to Cursor's own gateway and requires a separate `CURSOR_API_KEY`. If `CURSOR_API_KEY` is unset, cursor is silently skipped from default kernel-opt selection.
 
 #### Step 3 — Connect via Cursor Remote SSH
 
 1. Connect to the GPU node via Remote SSH in Cursor
-2. Open the Hyperloom directory pointed to by `$REPO_ROOT`
-3. `cd "$REPO_ROOT"` to ensure skill files load correctly
+2. Open the Hyperloom checkout
+3. `cd` to the Hyperloom checkout to ensure skill files load correctly
 
 #### Step 4 — Launch Inference Optimization in Cursor Chat
 
@@ -226,7 +216,7 @@ The chat examples use user-facing field names. The agent maps them to the optimi
 | OOB source | `OOB_SRC` | OOB source root. | set in Step 2 |
 | InferenceX repo | `INFERENCEX_PATH` | InferenceX repository root. | set in Step 2 |
 | TraceLens repo | `TRACELENS_ROOT` | TraceLens-internal repository root. | set in Step 2 |
-| Session directory | `USER_DATA_PATH` | Session directory for state, logs, runs, reports, and resume. To override, set `USER_DATA_PATH` in the shell or specify the path in your prompt. | `/workspace/hyperloom` |
+| Session directory | `USER_DATA_PATH` | Runtime directory for state, logs, runs, reports, and resume. Set it in the shell before running `local_setup.sh`; if requesting via Cursor chat, ask the agent to export it before launch. This is not the Hyperloom source directory. | `/workspace/hyperloom-run` |
 | Resume | `--resume` | Resume the existing session from the session directory; requires `manifest.json` and `state.json`. | disabled |
 
 > Training and MLPerf-training skills have been retired from this repo. Only inference optimization is supported here.
