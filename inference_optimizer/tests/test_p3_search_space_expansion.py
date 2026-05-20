@@ -430,13 +430,19 @@ def test_prompt_includes_grid_injection_hints_for_grid_actions(
         max_minutes=120,
         rules_fragment_path=rules_path,
     )
-    assert "GRID OVERRIDE" in text
-    # All three grid-injectable actions get a hint
-    assert "delegate{action_name='backends'" in text
-    assert "delegate{action_name='params'" in text
+    # v0.8 M3 + KB_gaps/Gap-10 — the merged ``explore`` action is the
+    # canonical grid-injection surface; sweep keeps its own hint.
+    # ``backends`` / ``params`` are no longer in the enabled set
+    # (PolicyGate denies them with ``rule='action_deprecated'``) so
+    # their hints don't render in the catalogue.
+    assert "GRID INPUT" in text or "GRID OVERRIDE" in text
+    assert "delegate{action_name='explore'" in text
     assert "delegate{action_name='sweep'" in text
-    # Sanity: GRID_INJECTABLE_ACTIONS frozen for upstream callers
-    assert {"backends", "params", "sweep"} <= GRID_INJECTABLE_ACTIONS
+    # Sanity: GRID_INJECTABLE_ACTIONS keeps ``explore`` + ``sweep``
+    # so callers (e.g. specialist proposals) can still consult the
+    # set; the constant continues to mention the legacy names so
+    # introspection of v0.6 resume payloads doesn't crash.
+    assert {"explore", "sweep"} <= GRID_INJECTABLE_ACTIONS
 
 
 def test_prompt_includes_idea_generation_block(registry, rules_path):

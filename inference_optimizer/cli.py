@@ -56,16 +56,13 @@ from .cortex_kb_client import (
 )
 from .orchestrator.action_executors import (
     TargetAnalysisExecutor,
-    backends_executor,
     baseline_executor,
     explore_executor,
-    params_executor,
     pmc_roofline_executor,
     profile_executor,
     report_executor,
     session_breakdown_executor,
     sweep_executor,
-    validate_stack_executor,
 )
 from .orchestrator.action_executors.recover import recover_executor
 from .orchestrator.backends import (
@@ -622,21 +619,27 @@ def _default_target_summary(args: argparse.Namespace) -> str:
 # these tables and ``session_paths._runs_actions()``.
 
 # Real executors enabled in every run mode (kernel + no-kernel).
+#
+# v0.8 M3 + KB_gaps/Gap-10: the legacy ``backends`` / ``params`` /
+# ``validate_stack`` registrations have been removed alongside
+# PolicyGate's ``action_deprecated`` rule. The merged ``explore``
+# action subsumes the per-variant KEEP/REVERT plus the per-KEEP stack
+# rebench (KB_design §3.4 §4.4); validate_stack is no longer a
+# standalone action.
+#
+# The executor Python modules (``action_executors/backends.py`` etc.)
+# stay in the tree so unit tests that exercise them directly via
+# ``SubAgentRunner.register_executor`` still pass, and the v0.6
+# resume audit trails (``backends_attempts`` etc.) keep their
+# meaning. New sessions never see these names because PolicyGate
+# denies them with ``rule='action_deprecated'`` before a task is
+# ever queued.
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
-    "baseline":       baseline_executor,
-    "backends":       backends_executor,
-    "params":         params_executor,
-    # v0.8 M3 — unified explore action (KB_design §3.4). Coexists with
-    # the legacy backends/params/validate_stack registrations during
-    # the M3 transitional period so a v0.6 resume that has queued
-    # backends/params tasks still finds a runner; new Orchestration
-    # prompts steer the LLM toward ``explore`` (see prompt_builder
-    # FULL_ENABLED_ACTIONS).
-    "explore":        explore_executor,
-    "sweep":          sweep_executor,
+    "baseline":          baseline_executor,
+    "explore":           explore_executor,
+    "sweep":             sweep_executor,
     "report":            report_executor,
     "session_breakdown": session_breakdown_executor,
-    "validate_stack":    validate_stack_executor,
     # ``recover`` re-enabled in 2026-05 alongside the robustness-agent
     # ``gpu_memory_leaked`` signal (Change A/B): a real executor now
     # cleans up leaked VRAM owners and, behind
