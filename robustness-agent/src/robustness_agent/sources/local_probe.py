@@ -150,6 +150,13 @@ class LocalProbeConfig:
         "runs/*/*/server.log",
         "runs/*/*/server_log",
         "runs/*/server.log",
+        # 2026-05 grid_runner layout — ``runs/<action>/<task_id>/<variant>/
+        # <benchmark_dir>/server.log``. Without these depth-3/4 patterns
+        # the F-pattern log scanner sees zero live server logs while a
+        # grid is running, because Magpie/SGLang's per-variant log lives
+        # two directories deeper than the legacy single-run layout.
+        "runs/*/*/*/server.log",
+        "runs/*/*/*/*/server.log",
     )
     # Max number of additional log files scanned per tick (sorted by
     # mtime desc). 5 is enough to cover the most-recent grid variants
@@ -642,6 +649,22 @@ def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
     for k in sorted(by_id):
         snap = by_id[k]
         if len(snap) > 1:  # at least one parsed metric beyond ``gpu_id``
+            # Derive ``util_mem_pct`` from VRAM used/total when rocm-smi
+            # didn't emit the percentage column (it's optional on older
+            # rocm releases). Without this the GpuLeakDetector's primary
+            # trigger ``util_mem_pct ≥ 99%`` never fires on AMD hosts,
+            # leaving only the very strict ``free_mb ≤ 500MB`` path —
+            # 500 MB is 0.25% of an MI300X (192 GiB), so legitimate
+            # multi-GB leaks slipped past the detector in B2 testing.
+            if "util_mem_pct" not in snap:
+                used = snap.get("vram_used_mb")
+                total = snap.get("vram_total_mb")
+                if (
+                    isinstance(used, (int, float))
+                    and isinstance(total, (int, float))
+                    and total > 0
+                ):
+                    snap["util_mem_pct"] = used / total * 100.0
             out.append(snap)
     return out
 

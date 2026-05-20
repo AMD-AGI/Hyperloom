@@ -250,6 +250,15 @@ class Config:
     # operators didn't configure it explicitly.
     auto_probe_auth_proxy: bool = True
     auth_proxy_health_url: str = "http://127.0.0.1:4002/health"
+    # Mirror of ``auto_probe_auth_proxy`` but for the local inference
+    # server (sglang / vLLM / Magpie). Without this default, B1 testing
+    # showed that sglang SIGSTOP fires no symptom because operators must
+    # remember to put the URL into ``health_probe_targets`` manually.
+    # 127.0.0.1:8888 is the Hyperloom Magpie wrapper default; if the
+    # operator runs on a different port they can override via Config
+    # without touching factory wiring.
+    auto_probe_inference_server: bool = True
+    inference_server_health_url: str = "http://127.0.0.1:8888/health"
 
     # -- I state-integrity signals (2026-05-19) --
     state_integrity_enabled: bool = True
