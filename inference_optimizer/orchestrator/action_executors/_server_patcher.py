@@ -230,6 +230,46 @@ def _sglang_version_accepted(
 _PATCH_TREE_REL = ("examples", "custom_workflows", "inference_analysis")
 
 
+def _versioned_patches_subdir_name(version: str) -> str | None:
+    """Map ``sglang.__version__`` to the per-version patch subdir name
+    TraceLens ``Hyperloom_integration_v0.3.1`` introduced (e.g.
+    ``0.5.11`` -> ``sglang_0_5_11``). Returns ``None`` when ``version``
+    has no recognisable dotted numeric head (so the caller fail-softs
+    to the legacy flat layout)."""
+    text = (version or "").strip()
+    if not text:
+        return None
+    # Strip dev/local suffixes (e.g. ``0.5.11-rc1`` -> ``0.5.11``) so
+    # point-release tags still resolve to a versioned subdir.
+    head = text.split("-", 1)[0].split("+", 1)[0]
+    parts = head.split(".") if head else []
+    if not parts or not all(p.isdigit() for p in parts):
+        return None
+    return "sglang_" + "_".join(parts)
+
+
+def _resolve_sglang_patches_dir(
+    patches_root: Path, version: str,
+) -> Path | None:
+    """Locate the SGLang patches dir for the running ``sglang`` version.
+
+    TraceLens ``Hyperloom_integration_v0.3.1`` split the previously-flat
+    ``sglang_roofline_patches/`` into per-version subdirs
+    (``sglang_0_5_9/``, ``sglang_0_5_11/``, ...). Hyperloom requires
+    this layout; the flat v0.3 layout is no longer supported.
+
+    Returns the versioned subdir when it exists AND contains at least
+    one ``*.patch`` file, else ``None`` (caller fail-softs).
+    """
+    subdir_name = _versioned_patches_subdir_name(version)
+    if subdir_name is None:
+        return None
+    candidate = patches_root / subdir_name
+    if candidate.is_dir() and any(candidate.glob("*.patch")):
+        return candidate
+    return None
+
+
 # ---------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------
@@ -259,7 +299,7 @@ def ensure_sglang_patched_for_tracelens(
     plan = _discover_sglang_plan(tracelens_root)
     if plan is None:
         return False
-    return _ensure_patched(plan) and _ensure_sglang_tokenizer_control_profile_args(plan)
+    return _ensure_patched(plan)
 
 
 # ---------------------------------------------------------------------
@@ -393,12 +433,26 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
 
     # Resolve the patches dir BEFORE the version check so the gate
     # can consult the TraceLens-shipped manifest (PR-D §5). If the
-    # patches dir itself is missing, no point checking the version.
-    patches_dir = _patch_tree(tracelens_root, "sglang_roofline_patches")
-    if not patches_dir.is_dir():
+    # patches root itself is missing, no point checking the version.
+    patches_root = _patch_tree(tracelens_root, "sglang_roofline_patches")
+    if not patches_root.is_dir():
         log.info(
-            "_server_patcher: SGLang patches directory missing (%s); skip",
-            patches_dir,
+            "_server_patcher: SGLang patches root missing (%s); skip",
+            patches_root,
+        )
+        return None
+
+    # TraceLens v0.3.1+ ships per-version subdirs (sglang_0_5_11/, ...);
+    # Hyperloom requires this layout. Pre-v0.3.1 flat checkouts must
+    # be upgraded — see README "Prepare Source Trees".
+    patches_dir = _resolve_sglang_patches_dir(patches_root, version)
+    if patches_dir is None:
+        log.info(
+            "_server_patcher: no SGLang patches found under %s/%s/ for "
+            "version %s; upgrade TraceLens to Hyperloom_integration_v0.3.1+",
+            patches_root,
+            _versioned_patches_subdir_name(version) or "<unknown>",
+            version,
         )
         return None
 
@@ -429,32 +483,14 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     #   modified in place — no symlinks, no tmpdirs, no copies, so
     #   ``git apply``'s symlink-safety check never trips.
     sglang_module = Path(sglang.__file__).resolve()
-    resolution = _resolve_sglang_apply_root(sglang_module)
-    if resolution is None:
+    apply_resolution = _resolve_sglang_apply_root(sglang_module)
+    if apply_resolution is None:
         return None
-    apply_root, apply_strip = resolution
+    apply_root, apply_strip = apply_resolution
 
-    optional_missing = {
-        # Dense inference and SGLang 0.5.11 do not have this legacy path.
-        "fused_moe_triton_kernels.patch":
-            "python/sglang/srt/layers/moe/fused_moe_triton/"
-            "fused_moe_triton_kernels.py",
-        # The old mixin was folded/renamed in newer SGLang. http_server.py
-        # and io_struct.py cover the /start_profile request path we use.
-        "tokenizer_communicator_mixin.patch":
-            "python/sglang/srt/managers/tokenizer_communicator_mixin.py",
-    }
-    filtered_patches: list[Path] = []
-    for patch_file in patches:
-        optional_target = optional_missing.get(patch_file.name)
-        if optional_target and not (apply_root / optional_target).exists():
-            log.info(
-                "_server_patcher: skipping optional SGLang patch %s because "
-                "target %s is absent in installed SGLang %s",
-                patch_file.name, optional_target, version,
-            )
-            continue
-        filtered_patches.append(patch_file)
+    # v0.3.1+ per-version subdirs ship a complete patch set authored
+    # against that exact sglang release; every patch must apply.
+    filtered_patches: list[Path] = list(patches)
 
     # Sentinel: the kernel_shape_profiler patch creates an entirely
     # new file. In both layouts it lands at the wheel-side path
@@ -530,80 +566,6 @@ def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
         sglang_module, sglang_dir.name,
     )
     return None
-
-
-def _ensure_sglang_tokenizer_control_profile_args(plan: _PatchPlan) -> bool:
-    """Adapt TraceLens's legacy tokenizer communicator patch to SGLang 0.5.11.
-
-    TraceLens ships ``tokenizer_communicator_mixin.patch`` for older SGLang
-    layouts. In 0.5.11 the relevant ``start_profile`` method lives in
-    ``tokenizer_control_mixin.py`` instead. Without this small compatibility
-    patch, HTTP /start_profile accepts ``shape_discovery`` in the request model
-    but raises ``unexpected keyword argument`` before the scheduler ever sees
-    the flag, so no execution-step trace is recorded.
-    """
-    sglang_pkg = plan.sentinel_file.parents[2]
-    target = sglang_pkg / "srt" / "managers" / "tokenizer_control_mixin.py"
-    if not target.is_file():
-        # Older layouts use tokenizer_communicator_mixin.py; the TraceLens
-        # patch set handles that file directly.
-        return True
-    try:
-        text = target.read_text(encoding="utf-8")
-    except OSError as exc:
-        log.warning(
-            "_server_patcher: cannot read %s to patch profile args: %s",
-            target, exc,
-        )
-        return False
-    if "shape_discovery: bool = False" in text and "roofline_annotations: bool = False" in text:
-        return True
-    sig_old = (
-        "        profile_prefix: Optional[str] = None,\n"
-        "        profile_stages: Optional[List[str]] = None,\n"
-        "    ):\n"
-    )
-    sig_new = (
-        "        profile_prefix: Optional[str] = None,\n"
-        "        profile_stages: Optional[List[str]] = None,\n"
-        "        shape_discovery: bool = False,\n"
-        "        roofline_annotations: bool = False,\n"
-        "    ):\n"
-    )
-    req_old = (
-        "            profile_prefix=profile_prefix,\n"
-        "            profile_stages=profile_stages,\n"
-        "        )\n"
-    )
-    req_new = (
-        "            profile_prefix=profile_prefix,\n"
-        "            profile_stages=profile_stages,\n"
-        "            shape_discovery=shape_discovery,\n"
-        "            roofline_annotations=roofline_annotations,\n"
-        "        )\n"
-    )
-    if sig_old not in text or req_old not in text:
-        log.warning(
-            "_server_patcher: tokenizer_control_mixin.py layout changed; "
-            "cannot inject shape_discovery / roofline_annotations into %s",
-            target,
-        )
-        return False
-    patched = text.replace(sig_old, sig_new, 1).replace(req_old, req_new, 1)
-    try:
-        target.write_text(patched, encoding="utf-8")
-    except OSError as exc:
-        log.warning(
-            "_server_patcher: cannot write patched profile args to %s: %s",
-            target, exc,
-        )
-        return False
-    log.info(
-        "_server_patcher: patched %s to forward shape_discovery / "
-        "roofline_annotations to ProfileReq",
-        target,
-    )
-    return True
 
 
 # ---------------------------------------------------------------------
