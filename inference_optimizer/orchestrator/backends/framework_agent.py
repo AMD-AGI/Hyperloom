@@ -49,12 +49,18 @@ class FrameworkAgentBackend(Backend):
         framework_agent_root: Path,
         session_dir: Path,
         options: dict[str, Any] | None = None,
+        proposer_driver: Any | None = None,
     ) -> None:
         self._root = Path(framework_agent_root)
         self._session_dir = Path(session_dir)
         self._options: dict[str, Any] = dict(options or {})
         self._fa_python = self._options.get("python") or sys.executable
         self._fa_module = "framework_agent.runtime.cli"
+        # Pluggable LLM driver for the PR-G patch proposer. None ->
+        # backend stays in PR-F mode (AST scan only, empty patch_path).
+        # Tests inject a deterministic driver; production wires a
+        # Claude/Codex driver in a follow-up.
+        self._proposer_driver = proposer_driver
 
     async def run(
         self,
@@ -121,15 +127,16 @@ class FrameworkAgentBackend(Backend):
         except BackendError as exc:
             return self._failure(tid, started, "prepare_task_failed", str(exc))
 
-        # PR-F runs AST scan in-process for now. PR-G swaps this with
-        # the patch_proposer LLM loop (which itself consumes AST
-        # findings). Importing here avoids a hard libcst dependency
-        # at IO import time.
+        # PR-F runs AST scan in-process. PR-G adds the patch_proposer
+        # LLM loop when a driver is configured (production wires Claude/
+        # Codex; tests inject a deterministic driver). Importing here
+        # avoids a hard libcst / proposer dependency at IO import time.
         discovered_flags: dict[str, list[str]] = {}
         ast_mode = "skipped"
+        ast_result = None
         if ast_scan_enabled:
             try:
-                discovered_flags, ast_mode = self._run_ast_scan(
+                discovered_flags, ast_mode, ast_result = self._run_ast_scan(
                     target_framework=target_framework,
                     ast_frameworks=tuple(ast_frameworks),
                 )
@@ -143,17 +150,36 @@ class FrameworkAgentBackend(Backend):
                     tid, started, "ast_scan_failed", repr(exc),
                 )
 
-        # PR-F envelope: flags-only OptimizeSuccess (no patch yet).
-        # PR-G upgrades the path with a real patch_proposer.diff.
+        # PR-G patch proposer (optional path). When no driver is
+        # configured, behaviour matches PR-F: flag-discovery-only with
+        # empty patch_path.
+        patch_path = ""
+        rationale = (
+            f"AST scan ({ast_mode}) surfaced "
+            f"{sum(len(v) for v in discovered_flags.values())} flags"
+        )
+        predicted_gain_pct = 0.0
+        if self._proposer_driver is not None and ast_result is not None:
+            try:
+                patch_path, rationale, predicted_gain_pct = (
+                    self._run_patch_proposer(
+                        task_id=tid,
+                        session_dir=Path(session_dir),
+                        target_framework=target_framework,
+                        ast_result=ast_result,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.exception("patch_proposer failed for task=%s", tid)
+                return self._failure(
+                    tid, started, "patch_propose_failed", repr(exc),
+                )
+
         envelope = {
             "payload_kind": "OptimizeSuccess",
-            "patch_path": "",  # PR-G fills with proposal.diff path
-            "predicted_gain_pct": 0.0,
-            "rationale": (
-                f"PR-F: AST scan ({ast_mode}) surfaced "
-                f"{sum(len(v) for v in discovered_flags.values())} flags; "
-                "patch proposer lands in PR-G"
-            ),
+            "patch_path": patch_path,
+            "predicted_gain_pct": float(predicted_gain_pct),
+            "rationale": rationale,
             "discovered_flags": discovered_flags,
             "target_framework": target_framework,
             "stage_a_elapsed_ms": int((time.monotonic() - started) * 1000),
@@ -221,9 +247,19 @@ class FrameworkAgentBackend(Backend):
         *,
         target_framework: str,
         ast_frameworks: tuple[str, ...],
-    ) -> tuple[dict[str, list[str]], str]:
-        """Run AST scan via the agent package; return (flags_by_fw, mode)."""
-        from framework_agent.agent.ast_scanner import scan_framework_args
+    ) -> tuple[dict[str, list[str]], str, Any]:
+        """Run AST scan via the agent package.
+
+        Returns (flags_by_fw, aggregate_mode, primary_ast_result). The
+        third value is the :class:`AstScanResult` for the
+        ``target_framework`` framework (or the first resolved one when
+        target_framework wasn't requested) -- needed by
+        :meth:`_run_patch_proposer` for the full flag dataclasses.
+        """
+        from framework_agent.agent.ast_scanner import (
+            AstScanResult,
+            scan_framework_args,
+        )
         from framework_agent.agent.flag_discovery import cli_flag_names
         from framework_agent.agent.source_resolver import (
             FrameworkSourceMissing,
@@ -242,12 +278,52 @@ class FrameworkAgentBackend(Backend):
             )
         flags_by_fw: dict[str, list[str]] = {}
         agg_mode = "libcst"
+        primary: AstScanResult | None = None
         for fw, root in resolved.items():
             result = scan_framework_args(fw, root)
             flags_by_fw[fw] = cli_flag_names(result.flags)
             if result.mode == "grep_fallback":
                 agg_mode = "grep_fallback"
-        return flags_by_fw, agg_mode
+            if fw == target_framework.lower() or primary is None:
+                primary = result
+        return flags_by_fw, agg_mode, primary
+
+    def _run_patch_proposer(
+        self,
+        *,
+        task_id: str,
+        session_dir: Path,
+        target_framework: str,
+        ast_result: Any,
+    ) -> tuple[str, str, float]:
+        """Invoke the PR-G patch proposer.
+
+        Returns (patch_path, rationale, predicted_gain_pct). Empty
+        ``patch_path`` indicates a flag-discovery-only outcome.
+        """
+        from framework_agent.agent.kb_priors import read_priors
+        from framework_agent.agent.patch_proposer import (
+            ProposerInput,
+            propose_patch,
+        )
+
+        priors = read_priors(target_framework=target_framework)
+        proposed = propose_patch(
+            ProposerInput(
+                ast_findings=ast_result,
+                kb_priors=priors,
+                target_framework=target_framework,
+                task_id=task_id,
+                session_dir=session_dir,
+                max_turns=int(self._options.get("max_turns", 16)),
+            ),
+            driver=self._proposer_driver,
+        )
+        return (
+            proposed.path,
+            proposed.rationale,
+            proposed.predicted_gain_pct,
+        )
 
     @staticmethod
     def _failure(
