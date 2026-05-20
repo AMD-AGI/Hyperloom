@@ -226,6 +226,13 @@ async def test_run_optimization_response_records_to_shared_state(
 ):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
+        # Roofline-v2 N13: run_optimization REQUEST now requires
+        # backends_attempts>=1 + params_attempts>=1 + snapshot_id>=2.
+        # Use the escape hatch to keep this test focused on the
+        # response-recording behaviour (orthogonal to the ordering
+        # rule). The escape-hatch path is itself covered by
+        # test_n13_kernel_opt_ordering.py.
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "1")
         c.shared_state.baseline_tput = 800.0
         c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
         c.shared_state.last_trace_analyze = {
