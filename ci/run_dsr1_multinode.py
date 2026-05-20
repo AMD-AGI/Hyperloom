@@ -50,7 +50,7 @@ MODEL_CFG: dict = {
     "ep":                  1,
     "gpu_type":            "MI300X",
     "target_gpu":          "mi300x",
-    "inferencex_path":     "/wekafs/InferenceX",
+    "inferencex_path":     "/wekafs/hyperloom/InferenceX",
     "rayjob_image":        "harbor.core42.example-internal-host.invalid/custom/sync/sglang:202604290707",
     "kernel_opt_backends": "claude",
     "kernel_opt_image":    "harbor.core42.example-internal-host.invalid/proxy/lmsysorg/sglang-rocm:v0.5.10rc0-rocm720-mi35x-20260413",
