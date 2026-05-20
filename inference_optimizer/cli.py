@@ -1308,12 +1308,15 @@ def _validate_and_resolve_claude_model(
     if not base_url:
         base_url = os.environ.get("OPENAI_BASE_URL", "")
 
-    # Catalog probe goes through the OOB auth-proxy URL to the upstream
-    # LiteLLM gateway, which expects a virtual key (sk-...). SAFE_API_KEY
-    # is the SaFE control-plane key (ak-...) and is used by the OOB proxy
-    # itself to upstream-rewrite, NOT by this client. Use the sk- keys
-    # first; SAFE_API_KEY only as last-resort fallback (e.g. when running
-    # outside the multi-node sandbox where only ak- is provisioned).
+    # Catalog probe targets the SaFE LLM proxy
+    # (default ``OPENAI_BASE_URL=https://<safe-host>/api/v1/llm-proxy/v1``).
+    # In the current SaFE deployment all three env keys below are
+    # provisioned with the SAME SaFE-issued ``ak-*`` token; the proxy
+    # path itself accepts ``ak-*`` directly (no client-side ``sk-*``
+    # virtual-key exchange required). The OPENAI/ANTHROPIC > SAFE
+    # preference order is kept only for portability — should a future
+    # deployment ever distinguish them (e.g. distinct per-vendor keys),
+    # this chain still picks the more specific one first.
     api_key = (
         os.environ.get("OPENAI_API_KEY", "")
         or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -1856,6 +1859,111 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
                 keep=rid,
             )
 
+    # RayJob recreate path: when an existing session's RayJob was killed
+    # (OOM, manual recreate, SaFE rescheduling) and we provisioned a
+    # fresh one above, any kernel-agent patches previously applied to
+    # the OLD pods are gone from the new pods' filesystems (the pod
+    # local fs is destroyed with the old pod). The sandbox-side
+    # SharedState.optimization_stack still records every promoted patch
+    # though, so we replay them here before any executor's first
+    # restart_server_for_round. Best-effort; failures degrade to
+    # warnings — the orchestrator will notice missing speedups in the
+    # next baseline and re-run kernel-agent on the affected kernels.
+    _replay_kernel_patches_for_multi_node(args)
+
+
+def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
+    """Replay every applied kernel-agent patch onto the (possibly new)
+    RayJob pods.
+
+    Scans the session's ``kernel-agent-workspace`` tree for manifest
+    files with ``status="applied"`` and a ``multinode`` block, then
+    invokes ``python3 -m inference_optimizer.multi_node apply-patch``
+    once per patch. The fan-out is idempotent — re-running apply on
+    pods that already have the new file produces a fresh backup of
+    the (now-current) source and overwrites with the same bytes.
+
+    Run only when ``--nodes >= 2``. Best-effort: stdout/stderr from
+    each replay is mirrored verbatim; per-patch failures emit a
+    warning but do not raise so a single broken patch doesn't block
+    other replays or the subsequent optimize loop.
+    """
+    nodes = max(1, int(getattr(args, "nodes", 1) or 1))
+    if nodes < 2:
+        return
+    session_dir = _session_dir_resolve()
+    workspace_root = session_dir / "kernel-agent-workspace"
+    if not workspace_root.is_dir():
+        return
+
+    manifests: list[Path] = sorted(workspace_root.rglob("manifest.json"))
+    if not manifests:
+        return
+
+    replayed = 0
+    skipped = 0
+    failed = 0
+    for mpath in manifests:
+        try:
+            data = json.loads(mpath.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(
+                f"WARN multi-node patch replay: skipping unreadable "
+                f"manifest {mpath}: {exc}",
+                file=sys.stderr,
+            )
+            skipped += 1
+            continue
+        if str(data.get("status", "")).lower() != "applied":
+            continue
+        mn = data.get("multinode") or {}
+        if not mn:
+            continue
+        target_file = data.get("target_file") or ""
+        patch_path = data.get("patch_path") or ""
+        kernel_id = data.get("kernel_id") or ""
+        backup_dir_on_pod = mn.get("backup_dir_on_pod") or "/var/kernel_patch_backups"
+        if not target_file or not patch_path:
+            skipped += 1
+            continue
+        if not Path(patch_path).is_file():
+            print(
+                f"WARN multi-node patch replay: source patch missing for "
+                f"{target_file} (manifest={mpath} patch_path={patch_path}); "
+                f"skipping",
+                file=sys.stderr,
+            )
+            skipped += 1
+            continue
+        cmd = [
+            sys.executable, "-m", "inference_optimizer.multi_node",
+            "apply-patch",
+            "--patch-file", str(patch_path),
+            "--target-path", str(target_file),
+            "--backup-dir", str(backup_dir_on_pod),
+            "--kernel-id", str(kernel_id),
+        ]
+        print(
+            f"multi-node patch replay: target={target_file} kernel_id={kernel_id!r} "
+            f"(from {mpath})",
+        )
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if proc.returncode != 0:
+            failed += 1
+            print(
+                f"WARN multi-node patch replay failed for {target_file} "
+                f"rc={proc.returncode} stderr={(proc.stderr or '')[-1000:]!r}",
+                file=sys.stderr,
+            )
+            continue
+        replayed += 1
+    if replayed or failed or skipped:
+        print(
+            f"multi-node patch replay: applied={replayed} "
+            f"skipped={skipped} failed={failed} "
+            f"(scanned {len(manifests)} manifest(s) under {workspace_root})"
+        )
+
 
 async def _run_optimize(args: argparse.Namespace) -> int:
     # Surface --nodes to the rest of the process (preflight diagnostics
@@ -2394,7 +2502,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument(
         "--nodes", type=int,
-        default=int(os.environ.get("INFERENCE_OPTIMIZER_NODES", "1") or 1),
+        # Resolution: --nodes (CLI) > $INFERENCE_OPTIMIZER_NODES > $NODES > 1.
+        # Brain / SaFE sandbox prompts conventionally export ``NODES=2`` in
+        # ``optimizer.env`` (not the ``INFERENCE_OPTIMIZER_NODES`` form), so
+        # without the ``NODES`` fallback the optimizer silently fell back to
+        # single-node mode and the brain-supplied nodes value never reached
+        # ``args.nodes``. The downstream ``nodes_resolved >= 2`` gate in
+        # ``_run_optimize`` (and ``is_multi_node()`` in
+        # ``_multi_node_env.py``) still hard-requires >= 2 before any
+        # multi-node code path runs, so falling through to ``NODES=1``
+        # produces the same single-pod behaviour as before this fallback
+        # existed.
+        default=int(
+            os.environ.get("INFERENCE_OPTIMIZER_NODES")
+            or os.environ.get("NODES")
+            or "1"
+        ),
         help="Total number of GPU nodes for the inference RayJob. "
              "1 (default) keeps the legacy single-pod path. "
              ">=2: `optimize` provisions the SaFE RayJob before preflight "
@@ -2403,7 +2526,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "RayJob on exit; run `python3 -m inference_optimizer.multi_node "
              "stop-rayjob` when you want to release it. Requires "
              "--rayjob-image or INFERENCE_OPTIMIZER_RAYJOB_IMAGE. "
-             "Resolution: --nodes > $INFERENCE_OPTIMIZER_NODES env > 1.",
+             "Resolution: --nodes > $INFERENCE_OPTIMIZER_NODES > $NODES > 1.",
     )
     opt.add_argument(
         "--rayjob-image",
