@@ -2227,13 +2227,11 @@ class Coordinator:
             sections.append("=== Phase ===")
             sections.append(phase_block)
 
-        # 0a. Mission progress (Orchestration only). Phase 2 — this is the
-        # *outcome-shaped* projection of SharedState (raw vs validated
-        # gain, time spent vs budget, validate_stack staleness) that the
-        # decision framework in the system prompt expects to see at the
-        # very top of every tick. Crucially, it surfaces the
-        # ``validate_stack required`` signal *before* the verbose
-        # SharedState dump so the LLM doesn't miss it.
+        # 0a. Mission progress (Orchestration only). Outcome-shaped
+        # projection of SharedState (raw vs validated gain, time spent
+        # vs budget, optimization-stack rebench freshness) shown before
+        # the verbose SharedState dump so the LLM cannot miss the
+        # ``stack rebench required`` signal (v0.8 M3 / KB_gaps/Gap-10).
         if agent_name == "orchestration":
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
@@ -2269,8 +2267,8 @@ class Coordinator:
             ):
                 sections.append(
                     "WARNING: < 5 min remaining. Prefer `report` next; new "
-                    "explore rounds or validate_stack will likely be cut "
-                    "by the deadline."
+                    "`explore` rounds (which inline the stack rebench) "
+                    "will likely be cut by the deadline."
                 )
 
         # 1. Shared session state — gives the agent goal + progress context
@@ -2473,13 +2471,16 @@ class Coordinator:
             TODO 1  baseline
             TODO 2  profile          (kernel mode only)
             TODO 3  integrate        (kernel mode only, after kernel_opt KEEP)
-            TODO 4  validate_stack   (when unvalidated KEEPs landed)
+            TODO 4  stack rebench    (when unvalidated KEEPs landed)
 
-        ``validate_stack`` precedence is critical: once at least one KEEP
-        has been added to ``optimization_stack`` since the last successful
-        ``validate_stack``, skipping it would let the LLM keep stacking
-        per-round gains that don't compose linearly and therefore over-
-        report ``cumulative_gain`` in the final report.
+        The stack-rebench TODO is critical: once at least one KEEP has
+        been added to ``optimization_stack`` since the last rebench,
+        skipping it would let the LLM keep stacking per-round gains
+        that don't compose linearly and therefore over-report
+        ``cumulative_gain`` in the final report. v0.8 M3 + KB_gaps/Gap-10
+        inlined the rebench into ``explore`` (the legacy standalone
+        ``validate_stack`` action is denied at PolicyGate), so the
+        TODO surfaces with a "propose explore" hint.
         """
         if self.shared_state.stop_reason:
             return ""
@@ -2532,9 +2533,8 @@ class Coordinator:
                     "patch has not been integrated into optimization_stack. "
                     "Emit request{target_agent='kernel', kind='integrate', "
                     f"params={{kernel_id: {pending_kid!r}}} (or "
-                    "propose/delegate `integrate` / `recover` / "
-                    "`validate_stack` / `report`) before any further "
-                    "explore."
+                    "propose/delegate `integrate` / `recover` / `report`) "
+                    "before any further explore."
                 )
         if self.shared_state.optimization_stack_has_unvalidated_keeps():
             return (
@@ -2646,18 +2646,15 @@ class Coordinator:
         loop guards) can plug in without further call-site churn.
         """
         action = str(action_name or "").strip()
+        # v0.8 M3 + KB_gaps/Dead-A/Dead-C — the legacy
+        # ``backends`` / ``params`` / ``validate_stack`` names are
+        # already denied by PolicyGate with ``rule='action_deprecated'``
+        # before reaching this function, so they intentionally do not
+        # appear in the sequence-gate allow-list.
         sequence_actions = {
             "target_analysis",
             "baseline", "profile", "pmc_roofline",
-            "backends", "params", "sweep", "report",
-            "integrate", "validate_stack",
-            # v0.8 M3 + KB_gaps/Dead-A.5 — the merged ``explore`` action
-            # must clear the same target_analysis / baseline / profile
-            # ordering gates as its legacy backends/params/sweep
-            # ancestors. Without this entry an explore delegate would
-            # bypass the per-tick checklist (KB_design §3.4 §4.2 "explore
-            # inherits the sequence_denial contract").
-            "explore",
+            "sweep", "report", "integrate", "explore",
         }
         if action not in sequence_actions:
             return None
@@ -2723,7 +2720,7 @@ class Coordinator:
             if (
                 self.shared_state.baseline_tput > 0
                 and not self.shared_state.last_profile_trace
-                and action not in {"profile", "validate_stack"}
+                and action != "profile"
             ):
                 return PolicyDenied(
                     f"action={action!r} denied: profile must run before {action!r}",
@@ -2731,13 +2728,11 @@ class Coordinator:
                     hint="propose/delegate `profile`; last_profile_trace is empty",
                 )
             # integrate gate: kernel_opt KEEP awaiting integrate. Allow
-            # integrate / validate_stack / report through; recover is not
-            # in `sequence_actions` and therefore already bypasses this
+            # integrate / report through; recover is not in
+            # ``sequence_actions`` and therefore already bypasses this
             # function (no-op early return).
             pending_kid = self._kernel_opt_keep_pending()
-            if pending_kid and action not in {
-                "integrate", "validate_stack", "report",
-            }:
+            if pending_kid and action not in {"integrate", "report"}:
                 return PolicyDenied(
                     f"action={action!r} denied: integrate must run first",
                     rule="execution_order",
@@ -4171,9 +4166,7 @@ class Coordinator:
             return ("kernel", "kernel_specialist")
         if a in {"profile", "pmc_roofline"}:
             return ("kernel", "kernel_specialist")
-        if a in {"sweep"}:
-            return ("framework", "framework_specialist")
-        if a in {"backends", "params", "validate_stack", "explore"}:
+        if a in {"sweep", "explore"}:
             return ("framework", "framework_specialist")
         if a in {"baseline"}:
             return ("system", "system_specialist")
@@ -4951,8 +4944,8 @@ class Coordinator:
           :attr:`SharedState.last_action_failures` via
           :meth:`SharedState.record_action_failure` — that's the rich
           rolling log Orchestration consults after the inbox rotates.
-        * For the 6 audit kinds (baseline/profile/backends/params/sweep/
-          validate_stack) also append a ``status="failed"`` entry to
+        * For the kinds in :data:`_AUDIT_ACTIONS` (baseline / profile /
+          sweep / explore) also append a ``status="failed"`` entry to
           ``<kind>_attempts`` via
           :meth:`SharedState.record_action_attempt`, mirroring the
           kernel-equivalent per-action history.
@@ -4968,12 +4961,10 @@ class Coordinator:
             audit_extras: dict[str, Any] = {}
             # Stamp the baseline-params fingerprint so the prompt's
             # FAILURE RECOVERY block + the self-loop denial helper can
-            # detect "same params failed twice; refuse a third
-            # attempt". Only baseline is fingerprinted today
-            # (validate_stack uses the same surface but its own audit
-            # branch sits in ``_promote_to_shared_state``); other
-            # actions would need their own per-action fingerprint key
-            # set before this stamp is meaningful.
+            # detect "same params failed twice; refuse a third attempt".
+            # Only baseline is fingerprinted today; other actions would
+            # need their own per-action fingerprint key set before this
+            # stamp is meaningful.
             if task.kind == "baseline":
                 audit_extras["fingerprint"] = _baseline_params_fingerprint(
                     task.params
@@ -5860,16 +5851,14 @@ class Coordinator:
                 # aligned with the unified ledger. The proxy is dual-
                 # tracked for resume parity (KB_design §3.13 M3 §2.3).
                 self.shared_state.params_no_promote_streak = 0
-                # v0.8 M3 §4.4 + KB_gaps/Gap-10 — the executor's
-                # inlined per-KEEP stack rebench is the v0.8 successor
-                # to standalone ``validate_stack``. After at least one
-                # KEEP cleared the rebench, the post-rebench
+                # v0.8 M3 §4.4 + KB_gaps/Gap-10 — explore inlines the
+                # per-KEEP stack rebench, so the post-rebench
                 # ``running_base_tput`` measures the *current*
-                # optimization_stack end-to-end, so we promote it into
+                # optimization_stack end-to-end. Promote it into
                 # ``cumulative_gain_validated`` + advance the
-                # validated_stack_len bookkeeping. This is what stops
-                # ``_required_next_step`` from emitting the (now
-                # impossible) "propose validate_stack" TODO.
+                # validated_stack_len bookkeeping so the TODO 4
+                # stack-rebench guard clears immediately after the
+                # KEEP is recorded.
                 if (
                     self.shared_state.baseline_tput > 0
                     and isinstance(best_tput, (int, float))
