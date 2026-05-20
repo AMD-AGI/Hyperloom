@@ -121,7 +121,9 @@ def test_local_setup_dry_run_does_not_write_or_leak_secret(tmp_path: Path) -> No
     assert not (tmp_path / "session" / "runtime" / "local-setup.env.sh").exists()
     assert "install.sh" not in result.stdout
     assert "Open this folder in Cursor" in result.stdout
-    assert f"source {tmp_path / 'session' / 'runtime' / 'local-setup.env.sh'}" in result.stdout
+    assert "source ${" not in result.stdout
+    assert f"source '{tmp_path / 'session' / 'runtime' / 'local-setup.env.sh'}'" in result.stdout
+    assert f"export USER_DATA_PATH='{tmp_path / 'session'}'" in result.stdout
     assert "@inference_optimizer/SKILL.md" in result.stdout
     assert "Optimize inference for this workload" in result.stdout
 

@@ -213,14 +213,21 @@ write_local_env() {
 }
 
 print_next_steps() {
+  local quoted_env quoted_user_data
+  quoted_env="$(shell_quote "$LOCAL_SETUP_ENV")"
+  quoted_user_data="$(shell_quote "$USER_DATA_PATH")"
   cat <<EOF
 [local-setup] local setup complete
 
 Open this folder in Cursor as the workspace:
   ${REPO_ROOT}
 
-Before launching Hyperloom from Cursor Chat, ask the agent to source:
-  source ${LOCAL_SETUP_ENV}
+Before launching Hyperloom from Cursor Chat, ask the agent to run exactly:
+
+\`\`\`bash
+source ${quoted_env}
+export USER_DATA_PATH=${quoted_user_data}
+\`\`\`
 
 Paste this into Cursor Chat and fill in your workload:
 
@@ -238,9 +245,11 @@ Optimize inference for this workload:
 - Goal: improve throughput by at least 10%
 - Budget: 24 hours
 
-Before launch:
-1. Source ${LOCAL_SETUP_ENV}
-2. Use USER_DATA_PATH=${USER_DATA_PATH}
+Before launch, run exactly:
+\`\`\`bash
+source ${quoted_env}
+export USER_DATA_PATH=${quoted_user_data}
+\`\`\`
 
 Requirements:
 1. Report the session ID, log path, PID, and initial health check result.

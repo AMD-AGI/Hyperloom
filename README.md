@@ -161,12 +161,16 @@ bash inference_optimizer/scripts/local_setup.sh
 
 Example output snippet:
 
-```text
+````text
 Open this folder in Cursor as the workspace:
   /path/to/Hyperloom
 
-Before launching Hyperloom from Cursor Chat, ask the agent to source:
-  source /path/to/hyperloom-run/runtime/local-setup.env.sh
+Before launching Hyperloom from Cursor Chat, ask the agent to run exactly:
+
+```bash
+source '/path/to/hyperloom-run/runtime/local-setup.env.sh'
+export USER_DATA_PATH='/path/to/hyperloom-run'
+```
 
 Paste this into Cursor Chat and fill in your workload:
 
@@ -184,14 +188,16 @@ Optimize inference for this workload:
 - Goal: improve throughput by at least 10%
 - Budget: 24 hours
 
-Before launch:
-1. Source /path/to/hyperloom-run/runtime/local-setup.env.sh
-2. Use USER_DATA_PATH=/path/to/hyperloom-run
+Before launch, run exactly:
+```bash
+source '/path/to/hyperloom-run/runtime/local-setup.env.sh'
+export USER_DATA_PATH='/path/to/hyperloom-run'
+```
 
 Requirements:
 1. Report the session ID, log path, PID, and initial health check result.
 2. Monitor the process every 300s until the optimization is complete or failed.
-```
+````
 
 Follow the script output. In the default flow, users do not need to manually configure GEAK, OOB, InferenceX, or TraceLens.
 
