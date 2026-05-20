@@ -188,6 +188,15 @@ class SharedState:
     closing_phase: bool = False
     closing_started_unix: float = 0.0
     closing_report_task_id: str = ""
+    # v0.8 §3.2 §5.5 / KB_gaps/Gap-06 — set to True at the END of the
+    # CLOSE phase 5-step sequencer (after step 5). cli.finally reads
+    # this to short-circuit its emergency ``session_breakdown.json``
+    # write so the sequencer's artifact isn't overwritten by a
+    # duplicate post-stop() pass. Resume clears it back to False so
+    # a subsequent resumed CLOSE can re-run the sequence (idempotent
+    # by design — every step uses fixed idempotency keys / set-once
+    # writes).
+    close_sequence_done: bool = False
     current_action: str = ""
     crash_count: int = 0
     pruned_families: list[str] = field(default_factory=list)
