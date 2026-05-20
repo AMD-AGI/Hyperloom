@@ -4687,6 +4687,18 @@ class Coordinator:
         result: Any,
         kept: bool,
     ) -> None:
+        """T3 dispatcher — KB_design §3.13 M5 §5 step 7 / KB_gaps/Gap-08.
+
+        When the task is an ``explore`` action that returned a non-empty
+        ``per_variant_outcomes`` list, fan out to the per-variant path:
+        one ``ingest_attempt`` + ``verify`` per variant, keyed by the
+        per-variant ``kb_edge_id`` minted in T2 (Gap-07).
+
+        Everything else (kernel_opt, integrate, baseline, profile,
+        backends, params, sweep, ...) keeps the legacy per-task path:
+        a single attempt + single verify against the representative
+        edge_id (still recorded by T2 for back-compat).
+        """
         if self.cortex_kb is None or not self.cortex_kb.enabled:
             return
         sid = (self.shared_state.cortex_session_id or "").strip()
@@ -4695,6 +4707,37 @@ class Coordinator:
         result_dict = result.result if hasattr(result, "result") else (result or {})
         if not isinstance(result_dict, dict):
             result_dict = {}
+        per_variant = result_dict.get("per_variant_outcomes")
+        if (
+            task.kind == "explore"
+            and isinstance(per_variant, list)
+            and per_variant
+        ):
+            await self._cortex_t3_per_variant(
+                task=task, sid=sid, outcomes=per_variant,
+            )
+        else:
+            await self._cortex_t3_per_task(
+                task=task, sid=sid, result_dict=result_dict, kept=kept,
+            )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive; T3 must not crash.
+            log.exception("cortex T3 SharedState.save failed")
+
+    async def _cortex_t3_per_task(
+        self,
+        *,
+        task: "Task",
+        sid: str,
+        result_dict: dict[str, Any],
+        kept: bool,
+    ) -> None:
+        """Legacy per-task T3 — one attempt + one verify per task.
+
+        Used by all non-explore actions (kernel_opt / integrate /
+        baseline / profile / backends / params / sweep / ...).
+        """
         # Mint per-task attempt_node for cross-session reachability.
         attempt_canonical = attempt_canonical_id(sid, task.task_id)
         outcome_label = "PASS" if kept else "FAIL"
@@ -4768,10 +4811,192 @@ class Coordinator:
                 "cortex T3 late_verified (no edge_id for proposal %s)",
                 proposal_msg_id or "(no msg_id)",
             )
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive; T3 must not crash.
-            log.exception("cortex T3 SharedState.save failed")
+
+    async def _cortex_t3_per_variant(
+        self,
+        *,
+        task: "Task",
+        sid: str,
+        outcomes: list[dict[str, Any]],
+    ) -> None:
+        """Per-variant T3 — one attempt + one verify per variant.
+
+        KB_design §3.13 M5 §5 step 7 / KB_gaps/Gap-08. Iterates
+        ``per_variant_outcomes`` from the explore executor result and
+        binds each entry to the matching edge_id minted by T2 (Gap-07,
+        stored under ``pending_kb_edges[].variant_edges``).
+
+        Per-variant outcome → KB encoding:
+
+        * ``KEEP``           → attempt PASS + verify ``confirmed``
+                               (promote_authority=EXPERIENTIAL).
+        * ``REVERT`` /
+          ``FAILED`` /
+          ``KEEP_UNSTABLE``  → attempt FAIL + verify ``refuted``
+                               (no promotion).
+        * ``SKIPPED_DEDUP``  → no KB activity (no edge was minted).
+
+        Partial failures: a single variant's ``verify`` or
+        ``ingest_attempt`` exception is logged but does not abort the
+        remaining variants. The pending_kb_edges row is popped once
+        up front so resume + idempotency stay clean.
+        """
+        proposal_msg_id = self._proposal_msg_id_for_task(task)
+        edge_entry = (
+            self._pop_pending_kb_edge(proposal_msg_id) if proposal_msg_id else None
+        )
+        variant_edges_map: dict[str, str] = {}
+        if isinstance(edge_entry, dict):
+            raw = edge_entry.get("variant_edges") or {}
+            if isinstance(raw, dict):
+                variant_edges_map = {
+                    str(k): str(v or "") for k, v in raw.items()
+                }
+        if not edge_entry and not variant_edges_map:
+            # T2 hook never ran (e.g. --no-cortex during materialize) or
+            # the row was already popped on a resume — fall back to the
+            # per-variant ``kb_edge_id`` stamped on the executor's
+            # result, which mirrors the same map.
+            for vo in outcomes:
+                name = str(vo.get("variant_name") or "")
+                edge_id = str(vo.get("kb_edge_id") or "")
+                if name and edge_id:
+                    variant_edges_map[name] = edge_id
+        if not variant_edges_map and isinstance(edge_entry, dict):
+            # Last-resort: only a single edge_id was recorded (e.g. the
+            # proposal pre-dates Gap-07). Map every KEEP/REVERT variant
+            # to it so we at least confirm/refute *something* — matches
+            # the per-task fallback behaviour.
+            single = str(edge_entry.get("edge_id") or "")
+            if single:
+                for vo in outcomes:
+                    name = str(vo.get("variant_name") or "")
+                    if name and vo.get("outcome") in (
+                        "KEEP", "REVERT", "FAILED", "KEEP_UNSTABLE",
+                    ):
+                        variant_edges_map[name] = single
+
+        any_terminal = False  # at least one KEEP/REVERT processed
+        for vo in outcomes:
+            variant_name = str(vo.get("variant_name") or "")
+            outcome = str(vo.get("outcome") or "")
+            if outcome == "SKIPPED_DEDUP":
+                continue
+            if not variant_name:
+                # Nameless variants slip through if the executor mutates
+                # the list — skip rather than mint a phantom attempt.
+                continue
+            any_terminal = True
+            if outcome == "KEEP":
+                attempt_outcome = "PASS"
+                verify_outcome = "confirmed"
+                promote_authority: str | None = "EXPERIENTIAL"
+            else:  # REVERT / FAILED / KEEP_UNSTABLE
+                attempt_outcome = "FAIL"
+                verify_outcome = "refuted"
+                promote_authority = None
+
+            # 1. Per-variant attempt_node — canonical id encodes the
+            #    variant name so cross-session diffs stay precise.
+            variant_attempt_canonical = (
+                f"{attempt_canonical_id(sid, task.task_id)}.variant-{variant_name}"
+            )
+            attempt_attrs = {
+                "task_kind":    task.kind,
+                "task_id":      task.task_id,
+                "variant_name": variant_name,
+                "outcome":      attempt_outcome,
+            }
+            if vo.get("provenance"):
+                attempt_attrs["provenance"] = str(vo.get("provenance"))
+            try:
+                self.cortex_kb.propose_point(
+                    canonical_id=variant_attempt_canonical,
+                    kind="attempt_node",
+                    authority="EXPERIENTIAL",
+                    attrs=attempt_attrs,
+                    evidence=[
+                        f"log:task-{task.task_id}",
+                        f"variant:{variant_name}",
+                    ],
+                )
+            except CortexKBError as exc:
+                log.warning(
+                    "cortex T3 propose_point attempt failed for variant=%s: %s",
+                    variant_name, exc,
+                )
+
+            # 2. ingest_attempt — carries per-variant metrics + plan_edge.
+            edge_id = variant_edges_map.get(variant_name, "")
+            metrics: dict[str, Any] = {
+                "task_kind":    task.kind,
+                "task_id":      task.task_id,
+                "variant_name": variant_name,
+            }
+            raw_metrics = vo.get("metrics") or {}
+            if isinstance(raw_metrics, dict):
+                for mk, mv in raw_metrics.items():
+                    if mv is not None:
+                        metrics[mk] = mv
+            if vo.get("reason"):
+                metrics["reason"] = str(vo.get("reason"))
+            try:
+                self.cortex_kb.ingest_attempt(
+                    sid=sid,
+                    iter_id=int(self.shared_state.tick or 0),
+                    outcome=attempt_outcome,
+                    metrics=metrics,
+                    plan_edge=edge_id,
+                    evidence=[
+                        f"log:task-{task.task_id}",
+                        f"variant:{variant_name}",
+                        f"point_id:{variant_attempt_canonical}",
+                    ],
+                    idempotency_key=(
+                        f"ingest_attempt:{sid}:{task.task_id}:{variant_name}"
+                    ),
+                )
+            except CortexKBError as exc:
+                log.warning(
+                    "cortex T3 ingest_attempt failed for variant=%s: %s",
+                    variant_name, exc,
+                )
+
+            # 3. verify — only when we have a real edge_id; otherwise
+            #    fall through (T2 NDJSON replay covers it eventually).
+            if edge_id:
+                try:
+                    self.cortex_kb.verify(
+                        sid=sid,
+                        edge_id=edge_id,
+                        outcome=verify_outcome,
+                        evidence=[
+                            f"log:task-{task.task_id}",
+                            f"variant:{variant_name}",
+                        ],
+                        promote_authority=promote_authority,
+                        idempotency_key=(
+                            f"verify:{sid}:{edge_id}:{variant_name}"
+                        ),
+                    )
+                except CortexKBError as exc:
+                    log.warning(
+                        "cortex T3 verify failed for variant=%s: %s",
+                        variant_name, exc,
+                    )
+            else:
+                log.info(
+                    "cortex T3 late_verified (no edge_id for variant=%s"
+                    " proposal=%s)",
+                    variant_name, proposal_msg_id or "(no msg_id)",
+                )
+
+        if not any_terminal and edge_entry:
+            log.info(
+                "cortex T3 per-variant: all variants skipped for proposal=%s"
+                " (round was 100%% dedup); pending edge row dropped",
+                proposal_msg_id or "(no msg_id)",
+            )
 
     def _lift_to_current_best(
         self, task_kind: str, best_tput: float, bv: dict[str, Any],
