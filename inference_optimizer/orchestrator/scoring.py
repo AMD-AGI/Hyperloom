@@ -141,6 +141,12 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "params": 9.0,
         "roofline": 7.5,
         "sweep": 1.0,
+        # `profile` + `pmc_roofline` are deprecated direct-propose
+        # paths (D1/N2: replaced by composite `roofline`). Pinned to
+        # 0.0 so the scorer never surfaces them, even on a stale
+        # state.json resume that still references the old names.
+        "profile": 0.0,
+        "pmc_roofline": 0.0,
     },
     "moe_mla": {
         "deep_kernel_analysis": 8.0,
@@ -153,6 +159,8 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "params": 9.5,
         "roofline": 7.5,
         "sweep": 1.0,
+        "profile": 0.0,
+        "pmc_roofline": 0.0,
     },
     "moe_swa": {
         "deep_kernel_analysis": 2.0,
@@ -165,6 +173,8 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "params": 9.0,
         "roofline": 7.5,
         "sweep": 1.0,
+        "profile": 0.0,
+        "pmc_roofline": 0.0,
     },
     "moe_mla_nsa": {
         "deep_kernel_analysis": 2.0,
@@ -177,6 +187,8 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "params": 9.0,
         "roofline": 7.5,
         "sweep": 1.0,
+        "profile": 0.0,
+        "pmc_roofline": 0.0,
     },
 }
 
