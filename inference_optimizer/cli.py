@@ -52,7 +52,6 @@ from .cortex_kb_client import (
     CortexBinaryNotFound,
     CortexKBClient,
     CortexKBError,
-    workload_canonical_id,
 )
 from .orchestrator.action_executors import (
     TargetAnalysisExecutor,
@@ -76,6 +75,7 @@ from .orchestrator.backends import (
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
+from .orchestrator.cortex_t0 import run_t0_anchor
 from .orchestrator.framework_paths import resolve_source_file_allowlist
 from .orchestrator.objective import Objective, build_objective
 from .orchestrator.shared_state import SharedState
@@ -1895,15 +1895,13 @@ def _bootstrap_cortex_kb(
         print("Cortex KB        : DISABLED (--no-cortex)")
         return client
 
+    # v0.8 KB_gaps/Gap-12 — the cli is the *canonical* T0 entry point
+    # (fail-fast banner + sys.exit on Cortex outage), but the actual
+    # T0 ritual lives in :mod:`orchestrator.cortex_t0` so an SDK /
+    # integration-test caller that constructs the Coordinator
+    # directly can run the same sequence as a defensive fallback
+    # (see :meth:`Coordinator._ensure_cortex_t0_anchored`).
     state = SharedState.load_or_init(session_dir)
-    sid = (state.cortex_session_id or "").strip()
-    sid_file = client.sid_path
-    if not sid and sid_file.exists():
-        try:
-            sid = sid_file.read_text(encoding="utf-8").strip()
-        except OSError:
-            sid = ""
-
     workload = (
         state.model_name
         or manifest.get("model_name", "")
@@ -1913,108 +1911,49 @@ def _bootstrap_cortex_kb(
     hw = state.gpu_type or manifest.get("gpu_type", "") or "unknown_gpu"
     stack_fp = manifest.get("stack_fingerprint") or {}
     image_digest = manifest.get("image") or ""
-    workload_canonical = workload_canonical_id(workload, hw)
-
-    if not sid:
-        try:
-            task_text = (
-                f"hyperloom marathon {workload} on {hw} "
-                f"(dispatch={manifest.get('session_id', '')})"
-            )
-            sid = client.session_begin(
-                task=task_text,
-                workload=workload,
-                hw=hw,
-                image_digest=image_digest,
-                stack_fingerprint=stack_fp,
-                extra_attrs={
-                    "marathon_dispatch_id": manifest.get("session_id", ""),
-                    "framework":            state.framework or manifest.get("framework", ""),
-                    "model_class":          state.model_class or "",
-                    "claw_session_id":      manifest.get("claw_session_id") or "",
-                },
-            )
-        except CortexBinaryNotFound as exc:
-            print(
-                f"ERROR: Cortex KB requested but cortex-kb binary missing: "
-                f"{exc}.\nPass --no-cortex to skip KB integration, or "
-                f"install the cortex-kb CLI (see "
-                f"/wekafs/haiskong/cortex-for-hyperloom-2026-05-18.md §2.2).",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        except CortexKBError as exc:
-            print(
-                f"ERROR: T0 Cortex `session begin` failed: {exc}\n"
-                f"This is fail-fast per KB_design §3.13 M1. Pass "
-                f"--no-cortex to skip KB integration this run.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        state.cortex_session_id = sid
-        state.warm_start_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    elif resume:
-        print(f"Cortex KB        : resumed session_id={sid}")
-        state.cortex_session_id = sid
-
-    # Mint the workload_node (best-effort; falls back to NDJSON).
-    try:
-        client.propose_point(
-            canonical_id=workload_canonical,
-            kind="workload_node",
-            authority="EXPERIENTIAL",
-            attrs={
-                "model":   workload,
-                "hw":      hw,
-                "isl":     state.last_profile_args or None,  # placeholder; M5 enriches
-            },
-            evidence=[f"log:hyperloom-session-{manifest.get('session_id', '')}"],
-        )
-    except CortexKBError as exc:  # propose_point catches its own; defensive
-        log.warning("propose_point workload_node failed: %s", exc)
-
-    # Snapshot warm-start (best-effort; consumed by M5).
-    warm_text = ""
-    try:
-        warm_text = client.find_recipe(workload=workload, hw=hw)
-    except CortexKBError as exc:
-        log.info("find_recipe non-fatal failure: %s", exc)
-    try:
-        cortex_warm_json_path = client.session_dir / "runtime" / "cortex" / ".kb_warm.json"
-        cortex_warm_json_path.write_text(
-            json.dumps({"workload": workload, "hw": hw, "raw": warm_text}, indent=2),
-            encoding="utf-8",
-        )
-        state.warm_start_recipe = {
-            "workload": workload, "hw": hw, "raw": warm_text,
-        }
-    except OSError as exc:
-        log.warning("warm_start snapshot write failed: %s", exc)
-
-    traps_text = ""
-    try:
-        traps_text = client.traps(symptom=f"{workload} {hw}")
-    except CortexKBError as exc:
-        log.info("traps non-fatal failure: %s", exc)
-    try:
-        pit_path = client.session_dir / "runtime" / "cortex" / ".kb_pitfalls.json"
-        pit_path.write_text(
-            json.dumps({"workload": workload, "hw": hw, "raw": traps_text}, indent=2),
-            encoding="utf-8",
-        )
-        # warm_start_pitfalls is a list (M5 contract); the raw text is
-        # parked under a single-row "raw" entry until M5 adds a parser.
-        if traps_text.strip():
-            state.warm_start_pitfalls = [{"raw": traps_text}]
-    except OSError as exc:
-        log.warning("warm_start_pitfalls snapshot write failed: %s", exc)
-
-    state.save(session_dir)
-    print(
-        f"Cortex KB        : session_id={sid} workload={workload_canonical} "
-        f"(warm={'hit' if warm_text.strip() else 'empty'}, "
-        f"traps={'hit' if traps_text.strip() else 'empty'})"
+    task_text = (
+        f"hyperloom marathon {workload} on {hw} "
+        f"(dispatch={manifest.get('session_id', '')})"
     )
+    extra_attrs = {
+        "marathon_dispatch_id": manifest.get("session_id", ""),
+        "framework":            state.framework or manifest.get("framework", ""),
+        "model_class":          state.model_class or "",
+        "claw_session_id":      manifest.get("claw_session_id") or "",
+    }
+    try:
+        run_t0_anchor(
+            client,
+            state,
+            workload=workload,
+            hw=hw,
+            image_digest=image_digest,
+            stack_fingerprint=stack_fp,
+            extra_attrs=extra_attrs,
+            task_text=task_text,
+            resume=resume,
+            fail_fast=True,
+            on_status=print,
+            session_dir=session_dir,
+            save_state=True,
+        )
+    except CortexBinaryNotFound as exc:
+        print(
+            f"ERROR: Cortex KB requested but cortex-kb binary missing: "
+            f"{exc}.\nPass --no-cortex to skip KB integration, or "
+            f"install the cortex-kb CLI (see "
+            f"/wekafs/haiskong/cortex-for-hyperloom-2026-05-18.md §2.2).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    except CortexKBError as exc:
+        print(
+            f"ERROR: T0 Cortex `session begin` failed: {exc}\n"
+            f"This is fail-fast per KB_design §3.13 M1. Pass "
+            f"--no-cortex to skip KB integration this run.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     return client
 
 
