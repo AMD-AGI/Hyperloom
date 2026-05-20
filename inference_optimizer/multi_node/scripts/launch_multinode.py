@@ -317,7 +317,19 @@ def _subprocess_env() -> dict[str, str]:
     them via inherited env (KubeRay env injection wins).
     """
     env = dict(os.environ)
-    # Prevent sglang crash with fused decode MLA on MI300X (aiter ForwardMetadata mismatch)
+    # Ray sets *_VISIBLE_DEVICES='' on actors spawned with num_gpus=0; that
+    # empty string masks ALL physical GPUs for the detached framework child,
+    # which then dies with "No accelerator (CUDA, XPU, HPU, NPU, MUSA, MPS)
+    # is available." Strip the mask so the framework re-discovers all 8 GPUs
+    # on the pod (it manages its own per-rank pinning via TP/EP). Honour an
+    # explicit non-empty override (set deliberately by the caller).
+    for _vis in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES",
+                 "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"):
+        if _vis in env and env[_vis].strip() == "":
+            env.pop(_vis, None)
+    # Prevent sglang crash with fused decode MLA on MI300X (aiter
+    # ForwardMetadata mismatch). Restored after an earlier edit dropped
+    # this line while adding the ROCR_VISIBLE_DEVICES cleanup above.
     env["SGLANG_ROCM_FUSED_DECODE_MLA"] = "0"
     env.setdefault("SGLANG_USE_AITER", "1")
     env.setdefault("SGLANG_AITER_MLA_PERSIST", "1")
@@ -534,9 +546,82 @@ def _rank0_pid_from_log(log_dir: str) -> int | None:
         return None
 
 
-def _wait_health(timeout_s: int, rank0_pid: int | None = None) -> bool:
+# Fatal patterns to scan rank_0.log for. Triggered even when the rank-0
+# wrapper PID is still alive (e.g. nohup lingers after the python sglang
+# child has traceback-exited). Without this scan, a real framework crash
+# such as `KeyError: 'glm_moe_dsa'` (sglang transformers version too old
+# for GLM-4.5/4.6 MoE-DSA) would silently consume the full 1800s /health
+# budget before the Ray Dashboard job flips to FAILED.
+# Patterns are anchored to line start to reduce false positives from
+# benign mentions inside JSON / tracebacks of unrelated frames.
+_FATAL_LOG_PATTERNS: tuple[str, ...] = (
+    "Traceback (most recent call last):",
+    "KeyError:",
+    "ValueError:",
+    "RuntimeError:",
+    "AssertionError:",
+    "TypeError:",
+    "ImportError:",
+    "ModuleNotFoundError:",
+    "FileNotFoundError:",
+    "OSError:",
+    "AttributeError:",
+    "torch.cuda.OutOfMemoryError",
+    "CUDA out of memory",
+    "HIP out of memory",
+    "RCCL error",
+    "NCCL error",
+    "CUDA error",
+    "HSA_STATUS_ERROR",
+    "abort()",
+    "Segmentation fault",
+)
+# How far back from end-of-file we scan. Large enough to catch a full
+# Python traceback (typically <8KB) but bounded to keep this cheap.
+_FATAL_SCAN_TAIL_BYTES = 256 * 1024
+
+
+def _scan_rank0_log_for_fatal(log_dir: str) -> str | None:
+    """Scan rank_0.log tail for a fatal traceback / framework error.
+
+    Returns the matched line (stripped) on hit, ``None`` otherwise.
+    Used by ``_wait_health`` to bail out of the 1800s health wait the
+    moment sglang / vllm has clearly crashed, and by ``main()`` after a
+    health timeout to distinguish "still loading weights" from a silent
+    framework error masked by a lingering wrapper PID.
+    """
+    try:
+        lf = Path(log_dir) / "rank_0.log"
+        if not lf.is_file():
+            return None
+        size = lf.stat().st_size
+        if size == 0:
+            return None
+        with lf.open("rb") as f:
+            if size > _FATAL_SCAN_TAIL_BYTES:
+                f.seek(size - _FATAL_SCAN_TAIL_BYTES)
+                f.readline()  # discard partial line
+            tail = f.read().decode("utf-8", errors="replace")
+        for raw in tail.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            for pat in _FATAL_LOG_PATTERNS:
+                if pat in line:
+                    return line
+        return None
+    except OSError:
+        return None
+
+
+def _wait_health(
+    timeout_s: int,
+    rank0_pid: int | None = None,
+    log_dir: str | None = None,
+) -> bool:
     """Poll http://127.0.0.1:8888/health on rank 0 (this pod). Returns
-    True on first 200, False on timeout / rank 0 process death."""
+    True on first 200, False on timeout / rank 0 process death / fatal
+    error detected in ``rank_0.log``."""
     import urllib.request
     import urllib.error
     started = time.monotonic()
@@ -561,6 +646,17 @@ def _wait_health(timeout_s: int, rank0_pid: int | None = None) -> bool:
                 return False
             except OSError:
                 pass  # permission etc; don't kill the wait
+        # Bail early on fatal traceback in rank_0.log. The wrapper PID
+        # (nohup) often outlives the actual python framework child, so
+        # os.kill above misses the crash. Scanning the log catches
+        # framework errors (e.g. KeyError on unsupported model_type)
+        # in seconds rather than burning the full 1800s budget.
+        if log_dir:
+            fatal_line = _scan_rank0_log_for_fatal(log_dir)
+            if fatal_line:
+                _log(f"ERROR rank 0 fatal in rank_0.log: {fatal_line[:300]}; "
+                     f"aborting health wait (was: silent 1800s stall)")
+                return False
         time.sleep(5)
     return False
 
@@ -870,7 +966,9 @@ def main() -> int:
 
     _log(f"polling rank 0 /health for up to {_HEALTH_PROBE_TIMEOUT_SEC}s")
     _r0_pid = _rank0_pid_from_log(args.log_dir)
-    if _wait_health(_HEALTH_PROBE_TIMEOUT_SEC, rank0_pid=_r0_pid):
+    if _wait_health(
+        _HEALTH_PROBE_TIMEOUT_SEC, rank0_pid=_r0_pid, log_dir=args.log_dir,
+    ):
         _log("rank 0 /health OK")
         return 0
     # _wait_health returned False on either /health timeout OR early rank-0
@@ -925,6 +1023,31 @@ def main() -> int:
              f"so the Ray Dashboard job reports FAILED and hyperloom "
              f"surfaces ServerRestartFailed immediately (was: silent "
              f"1800s /health stall).")
+        return 2
+    # Even when the rank-0 wrapper PID is technically alive (typically
+    # `nohup`/`setsid` lingers after the framework child has exited), a
+    # fatal traceback in rank_0.log proves the framework already crashed.
+    # Catches e.g. `KeyError: 'glm_moe_dsa'` (sglang transformers too old
+    # for GLM-4.5/4.6 MoE-DSA), `CUDA out of memory`, RCCL init failures,
+    # ImportError on a missing wheel, etc. — every one of which would
+    # otherwise silently consume the full 1800s health-wait budget and
+    # then be reported as SUCCEEDED to the caller (the bug this patch
+    # closes; see /wekafs/.../sandbox-65ad7ec0629801-9k9ct incident).
+    _fatal_line = _scan_rank0_log_for_fatal(args.log_dir)
+    if _fatal_line:
+        snap = {
+            "kind": "framework_error",
+            "rank0_pid": _r0_pid,
+            "rank0_alive": _r0_alive,
+            "hint": f"rank_0.log contains fatal: {_fatal_line[:500]}",
+        }
+        sys.stderr.write(
+            f"MULTI_NODE_FAILURE_SNAPSHOT={json.dumps(snap)}\n"
+        )
+        sys.stderr.flush()
+        _log(f"ERROR rank 0 framework error in rank_0.log (pid={_r0_pid} "
+             f"alive={_r0_alive}); returning 2 so Ray Dashboard job reports "
+             f"FAILED in seconds instead of 1800s silent stall.")
         return 2
     _log(f"WARN rank 0 /health did not pass within {_HEALTH_PROBE_TIMEOUT_SEC}s; "
          f"rank-0 pid={_r0_pid} alive={_r0_alive} (None=pid unknown) — "

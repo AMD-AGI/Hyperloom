@@ -179,9 +179,68 @@ def magpie_remote_env() -> dict[str, str]:
     }
 
 
+def log_mn_banner(
+    component: str,
+    target_log: logging.Logger,
+    **extra: Any,
+) -> None:
+    """Print a one-line ``[MN ...]`` banner when multi-node, no-op single-node.
+
+    Why this helper exists: executors (baseline/profile/grid_runner) and
+    server lifecycle code all log a generic "launching X" line that does
+    NOT tell the operator whether the run is single-pod or multi-node
+    RayJob. Without this signal an operator tailing the optimizer log
+    cannot tell which code path the round is taking — especially
+    important when triaging restart loops where multi-node restart
+    failures look indistinguishable from single-pod magpie failures.
+
+    Single-node path is preserved bit-for-bit: the helper short-circuits
+    via ``is_multi_node()`` before touching the logger, so callers get
+    zero added output when ``nodes < 2``.
+
+    Multi-node path: prints
+    ``[MN component=<name> nodes=N head=<ip> service_url=<url> key=value ...]``
+    The ``head_pod_ip`` and ``service_url`` come from
+    ``/tmp/multi_node_state.json`` (best-effort; both default to empty
+    string when the state file is missing or partial). ``**extra``
+    keys are appended in insertion order so callers can surface
+    round-specific context (e.g. ``trace_dir=...`` for profile rounds,
+    ``variant=...`` for grid rows) without each call site having to
+    format the banner itself.
+    """
+    if not is_multi_node():
+        return
+    state = _read_state()
+    try:
+        nodes = int(state.get("nodes") or 0)
+    except (TypeError, ValueError):
+        nodes = 0
+    if nodes < 2:
+        try:
+            nodes = int(os.environ.get("INFERENCE_OPTIMIZER_NODES", "2") or 2)
+        except ValueError:
+            nodes = 2
+    head = str(state.get("head_pod_ip") or "").strip()
+    service_url = str(state.get("service_url") or "").strip()
+    pairs = [
+        f"component={component}",
+        f"nodes={nodes}",
+    ]
+    if head:
+        pairs.append(f"head={head}")
+    if service_url:
+        pairs.append(f"service_url={service_url}")
+    for k, v in extra.items():
+        if v is None or v == "":
+            continue
+        pairs.append(f"{k}={v}")
+    target_log.info("[MN %s]", " ".join(pairs))
+
+
 __all__ = [
     "export_ray_address_to_os",
     "is_multi_node",
+    "log_mn_banner",
     "magpie_remote_env",
     "ray_gcs_address_from_state",
 ]
