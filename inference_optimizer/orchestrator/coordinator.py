@@ -806,10 +806,14 @@ class Coordinator:
           (KB_design §3.6 + KB_gaps/Gap-02). The first specialist
           dispatch after EXPLORE entry then sees a populated cache
           rather than a cold ``pr_monitor`` fetch.
+        * ``KERNEL`` — auto-enqueue ``profile`` so KERNEL phase always
+          has a fresh ``last_profile_trace`` for ``select_kernels``
+          (KB_design §3.2 §5.3 step 1 + KB_gaps/Gap-04). Idempotent
+          via a fixed-suffix idempotency_key; skipped on resume when
+          a trace already exists or when ``--no-kernel``.
 
         Future:
 
-        * ``KERNEL`` — auto-enqueue ``profile`` (KB_gaps/Gap-04).
         * ``SWEEP`` — auto-enqueue ``sweep`` with recipe-driven grid
           (KB_gaps/Gap-05).
         * ``CLOSE`` — 5-step sequencer (KB_gaps/Gap-06).
@@ -817,7 +821,9 @@ class Coordinator:
         target = (to_phase or "").upper()
         if target == _phase_state.PHASE_EXPLORE:
             await self._on_enter_explore(from_phase=from_phase)
-        # Other phases land here without effects until KB_gaps/Gap-04/05/06.
+        elif target == _phase_state.PHASE_KERNEL:
+            await self._on_enter_kernel(from_phase=from_phase)
+        # SWEEP / CLOSE land here without effects until KB_gaps/Gap-05/06.
 
     async def _on_enter_explore(self, *, from_phase: str) -> None:
         """KB_gaps/Gap-02 PR 5.4 — warm the PR feed across every
@@ -850,6 +856,174 @@ class Coordinator:
             "(total PRs cached=%d)",
             from_phase or "<unknown>", len(results), total_prs,
         )
+
+    async def _on_enter_kernel(self, *, from_phase: str) -> None:
+        """KB_gaps/Gap-04 — auto-enqueue ``profile`` on KERNEL entry.
+
+        KB_design §3.2 §5.3 step 1: "进入 KERNEL 即跑一次 ``profile``
+        (固定动作, 不需要 LLM propose). 该次 profile 写入
+        ``last_profile_trace``, 锚定 KERNEL 阶段所有 ``select_kernels``
+        的 trace_input." Without this, the LLM has to remember to
+        propose profile itself; missing it would silently block every
+        subsequent ``select_kernels`` / ``kernel_opt`` (sequence gate
+        denies them when ``last_profile_trace == ""``).
+
+        Skipped when:
+
+        * ``--no-kernel`` (defense in depth: ``compute_next_phase``
+          should already route to SWEEP, but a corrupt resume might
+          still land us here).
+        * Resume scenario with a fresh ``last_profile_trace`` already
+          on disk. Re-profiling would waste 5–10 min of bench time
+          on a trace we already have.
+
+        Idempotent via a phase-scoped ``idempotency_key`` so a phase
+        flap (which Inv-2.1 monotonic guard forbids in practice, but
+        we still defend against) doesn't double-enqueue.
+
+        After enqueue, mutates ``phase_history[-1].evidence`` to
+        record ``auto_profile_enqueued=True`` so the breakdown
+        collector (KB_design §3.12 §4 / KB_gaps/Gap-04 acceptance
+        criterion 3) can verify the hook fired.
+        """
+        state = self.shared_state
+        if not self._kernel_enabled():
+            # Should not happen — compute_next_phase routes
+            # --no-kernel runs straight EXPLORE → SWEEP. Defensive log:
+            log.info(
+                "KERNEL entry hook fired with kernel_enabled=False "
+                "(from=%s); skipping auto-profile",
+                from_phase or "<unknown>",
+            )
+            return
+        if (state.last_profile_trace or "").strip():
+            log.info(
+                "KERNEL entry hook (from=%s): last_profile_trace already "
+                "set; skipping auto-profile (resume path)",
+                from_phase or "<unknown>",
+            )
+            self._record_phase_entry_evidence(auto_profile_skipped="trace_exists")
+            return
+        try:
+            task = await self._enqueue_internal_profile_task(
+                reason="kernel_phase_entry",
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception(
+                "KERNEL entry hook: failed to enqueue auto-profile: %r", exc,
+            )
+            self._record_phase_entry_evidence(auto_profile_error=repr(exc)[:240])
+            return
+        log.info(
+            "KERNEL entry (from=%s): auto-enqueued profile task=%s",
+            from_phase or "<unknown>", task.task_id,
+        )
+        self._record_phase_entry_evidence(
+            auto_profile_enqueued=True,
+            auto_profile_task_id=task.task_id,
+        )
+
+    async def _enqueue_internal_profile_task(
+        self, *, reason: str,
+    ) -> Task:
+        """Build + enqueue a Coordinator-internal ``profile`` task.
+
+        Used by :meth:`_on_enter_kernel` (KB_gaps/Gap-04) and any
+        future phase entry that needs a deterministic profile anchor.
+        Routes through :meth:`TaskRegistry.create_or_return_existing`
+        so the standard dispatcher / audit / lease machinery applies
+        unchanged — the only thing this method is responsible for is
+        building a coherent params dict + a stable idempotency_key.
+
+        Params seeded:
+
+        * ``source='coordinator_internal'`` so downstream consumers
+          (breakdown collector, robustness alerting) can distinguish
+          auto-enqueued from LLM-proposed profiles.
+        * ``reason`` mirrored verbatim into the task params and the
+          idempotency_key suffix so a re-entry to KERNEL (defended
+          against by Inv-2.1 but possible in tests) deduplicates.
+        * ``config_path`` from :attr:`SharedState.baseline_config_path`
+          when set, so profile inherits the workload contract
+          (CONC / ISL / OSL / TP / ...) baseline already pinned.
+          Without this, the profile executor would render the
+          shipped default smoke YAML and produce a useless trace.
+        * ``base_extra_args`` from current_best (consistent with the
+          existing ``_materialize_approved_proposal`` profile branch).
+
+        Idempotency key: ``internal-profile-<reason>`` (phase-scoped;
+        ``reason`` is currently only ``"kernel_phase_entry"`` but the
+        suffix slot is reserved for future phase entries that might
+        also need a profile).
+
+        Returns the freshly-created (or returned-existing) Task. The
+        caller can read ``task.task_id`` for logging or the
+        ``phase_history`` evidence stamp.
+        """
+        state = self.shared_state
+        params: dict[str, Any] = {
+            "source": "coordinator_internal",
+            "reason": str(reason),
+        }
+        if state.baseline_config_path:
+            params["config_path"] = state.baseline_config_path
+        cb = state.current_best or {}
+        if isinstance(cb, dict):
+            cb_args = str(cb.get("extra_sglang_args") or "")
+            if cb_args:
+                params["base_extra_args"] = cb_args
+        # Last-baseline benchmark_script feeds the executor's preflight
+        # path when set; falling back to the default is fine when not.
+        last_bl = state.last_baseline or {}
+        if isinstance(last_bl, dict):
+            bs = str(last_bl.get("benchmark_script") or "").strip()
+            if bs:
+                params["benchmark_script"] = bs
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="profile",
+            params=params,
+            idempotency_key=f"internal-profile-{reason}",
+        )
+        if was_existing:
+            log.info(
+                "internal-profile task already exists (idempotent: "
+                "task_id=%s, state=%s)",
+                task.task_id, task.state,
+            )
+        return task
+
+    def _record_phase_entry_evidence(self, **kvs: Any) -> None:
+        """Merge ``kvs`` into the latest ``phase_history`` row's
+        ``evidence`` dict.
+
+        Used by phase-entry hooks (Gap-04 / future Gap-05/06) to
+        record what the hook actually did *after* the transition row
+        was already committed by ``record_phase_transition``. Pure
+        in-memory mutation + a single state.save; SharedState
+        ``phase_history`` is a list of dicts so the reference held
+        by ``self.shared_state.phase_history[-1]`` is the live row.
+
+        No-op when ``phase_history`` is empty (defensive).
+        """
+        history = self.shared_state.phase_history or []
+        if not history:
+            return
+        row = history[-1]
+        if not isinstance(row, dict):
+            return
+        evidence = row.get("evidence")
+        if not isinstance(evidence, dict):
+            evidence = {}
+            row["evidence"] = evidence
+        for k, v in kvs.items():
+            evidence[k] = v
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "phase entry evidence: SharedState.save failed for kvs=%r",
+                kvs,
+            )
 
     def _ensure_action_scores_seeded(self) -> None:
         """v0.8 §3.9 — no-op stub.

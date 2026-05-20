@@ -233,15 +233,36 @@ async def test_on_enter_explore_swallows_warmup_exceptions(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_on_phase_entered_only_explore_fires_warmup(tmp_path: Path):
-    """The dispatcher table currently wires only EXPLORE. Transitions
-    to KERNEL / SWEEP / CLOSE must not call into the plane (Gap-04/05/06
-    will add their own branches)."""
+async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path):
+    """The dispatcher table fires PR-feed warmup on EXPLORE and *only*
+    EXPLORE. KERNEL has its own side effect (Gap-04 auto-profile) but
+    must not call into the KnowledgePlane; SWEEP / CLOSE stay no-op
+    until Gap-05 / Gap-06.
+
+    Specifically guards against accidentally wiring
+    ``pr_feed_warm_all_domains`` into a non-EXPLORE branch — that
+    would burn LLM quota / PR Monitor budget for no reason.
+    """
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
     plane = _FakePlane()
     coord.knowledge_plane = plane
+
+    # KERNEL branch now exists (Gap-04). Give the coord enough state
+    # for the hook to early-return on ``kernel_enabled=False`` — the
+    # assertion below is "plane.warm_calls stays 0", not "hook is a
+    # complete no-op".
+    @dataclass
+    class _BareState:
+        kernel_enabled: bool = False
+        last_profile_trace: str = ""
+        baseline_config_path: str = ""
+        current_best: dict = field(default_factory=dict)
+        last_baseline: dict = field(default_factory=dict)
+        phase_history: list = field(default_factory=list)
+    coord.shared_state = _BareState()
+    coord.role_registry = {}   # _kernel_enabled() reads role_registry
 
     await coord._on_phase_entered(from_phase="PRELUDE", to_phase="KERNEL")
     await coord._on_phase_entered(from_phase="PRELUDE", to_phase="SWEEP")
