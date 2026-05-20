@@ -312,12 +312,29 @@ def _format_grid_injection_hint(name: str) -> str | None:
         )
     if name == "params":
         return (
-            "GRID OVERRIDE (T1/T2): emit "
+            "TWO GRID-CONTROL SURFACES (pick the one that fits your "
+            "intent):\n"
+            "  (A) SUBSET (N20-A, recommended for roofline-driven runs): "
+            "emit `delegate{action_name='params', params={variants: "
+            "['cuda_graph_max_bs_64','mem_fraction_0_90', ...]}}` — "
+            "names must come from the registered DEFAULT_PARAMS_GRID "
+            "listed in the PARAMS GRID CATALOGUE block below. Use this "
+            "when the roofline analysis.md points at specific bottlenecks "
+            "(e.g. cuda-graph misses high -> try the cuda_graph_max_bs_* "
+            "family; KV-cache pressure -> mem_fraction_* + chunked_prefill_*; "
+            "queue depth growing -> max_running_requests_* + scheduling). "
+            "Safer + cheaper than full grid; no flag-value hallucination "
+            "risk (the values come from the registered grid).\n"
+            "  (B) FULL CUSTOM (T1/T2): emit "
             "`delegate{action_name='params', params={grid: [{name, "
-            "extra_sglang_args, extra_envs, note}, ...]}}` to add value-"
-            "filled parameter candidates. SharedState.discovered_flags "
-            "lists the param flag namespace (--max-num-seqs, "
-            "--cuda-graph-max-bs, etc.) you can fill in."
+            "extra_sglang_args, extra_envs, note}, ...]}}` to synthesize "
+            "value-filled parameter candidates beyond the registered "
+            "grid (e.g. when SharedState.discovered_flags surfaces a new "
+            "param flag and you want to pick a specific value). "
+            "SharedState.discovered_flags lists the param flag namespace "
+            "(--max-num-seqs, --cuda-graph-max-bs, etc.) you can fill in.\n"
+            "If both `variants` and `grid` are passed, `grid` wins "
+            "(full control mode)."
         )
     if name == "sweep":
         return (
@@ -658,6 +675,80 @@ def _read_rules_fragment(path: Path | None) -> str:
         return ""
 
 
+def _section_params_grid_catalogue(*, framework: str) -> list[str]:
+    """N20-A: render the registered params grid as a catalogue so the
+    LLM can name a SUBSET when proposing the `params` action.
+
+    Mirror of _section_backends_grid_catalogue. params grid is bigger
+    (~28 SGLang variants vs ~10 backends) so the LLM benefit from
+    subset selection is larger here — running all 28 is ~4-5h on
+    R1 / 30-45min on Qwen3-32B, vs ~30-60min if the LLM picks 3-5
+    relevant ones based on the roofline analysis.
+    """
+    from inference_optimizer.orchestrator.action_executors.params import (
+        DEFAULT_PARAMS_GRID,
+        DEFAULT_VLLM_PARAMS_GRID,
+    )
+
+    fw = (framework or "sglang").strip().lower()
+    grid = DEFAULT_VLLM_PARAMS_GRID if "vllm" in fw else DEFAULT_PARAMS_GRID
+    fw_label = "vLLM" if "vllm" in fw else "SGLang"
+
+    HINT_BY_NOTE: dict[str, str] = {
+        "cuda_graph":  "high cuda-graph miss rate / decode under-utilised",
+        "decode_steps":"long decode chains (raise step batching)",
+        "memory":      "KV-cache pressure / OOM near-misses",
+        "scheduling":  "queue depth growing / request batching",
+        "prefill":     "long prompts / prefill-throughput bound",
+        "cache":       "radix-cache hit rate low / hurts MoE throughput",
+        "tokenizer":   "tokenizer CPU bound (rare; high-concurrency only)",
+        "streaming":   "client streaming-interval pressure",
+        "overlap":     "decode/prefill overlap stalls (CPU sync hot)",
+        "attention":   "attention backend swap (advanced; for hot attn)",
+        "indexer":     "MLA indexer kernel hot",
+        "comm":        "NCCL/RCCL tuning (rare; comm-bound only)",
+    }
+
+    lines: list[str] = [
+        f"## PARAMS GRID CATALOGUE ({fw_label})",
+        "",
+        "Registered variants you may name in `params.variants=[...]` "
+        "when proposing `params`. The executor will run only the ones "
+        "you list. Pick variants whose trigger hint matches the "
+        "dominant pattern in the roofline analysis.md.",
+        "",
+        f"{'name':32s}  {'flag(s) / env(s)':46s}  trigger hint",
+        f"{'-' * 32}  {'-' * 46}  {'-' * 60}",
+    ]
+    for v in grid:
+        flag = (v.extra_sglang_args or "").strip()
+        if v.extra_envs:
+            env_repr = " ".join(
+                f"{k}={vv}" for k, vv in sorted(v.extra_envs.items())
+            )
+            flag = (
+                f"{flag} {env_repr}" if flag else f"env: {env_repr}"
+            )
+        if len(flag) > 46:
+            flag = flag[:43] + "..."
+        hint = HINT_BY_NOTE.get(v.note or "", v.note or "(generic)")
+        lines.append(f"{v.name:32s}  {flag:46s}  {hint}")
+
+    lines.extend([
+        "",
+        "Example (roofline shows cuda-graph miss 30% + KV pressure):",
+        "  delegate{action_name='params', params={variants: "
+        "['cuda_graph_max_bs_64','cuda_graph_max_bs_32',"
+        "'mem_fraction_0_90']}, predicted_gain_pct: 1.0}",
+        "",
+        "Same advice as backends — name 3-5 variants tied to the "
+        "roofline finding; running all "
+        f"{len(grid)} wastes wall-clock when the analysis already "
+        "points at specific levers.",
+    ])
+    return lines
+
+
 def _section_backends_grid_catalogue(*, framework: str) -> list[str]:
     """N20-A: render the registered backends grid as a catalogue so the
     LLM can name a SUBSET when proposing the `backends` action.
@@ -837,6 +928,13 @@ def build_orchestration_prompt(
     if any(a.name == "backends" for a in actions):
         sections.append(
             _section_backends_grid_catalogue(framework=framework_norm),
+        )
+    # N20-A params: same conditional render, separate catalogue. The
+    # params grid is ~3x larger than backends so subset selection
+    # has larger leverage here.
+    if any(a.name == "params" for a in actions):
+        sections.append(
+            _section_params_grid_catalogue(framework=framework_norm),
         )
     if kernel_enabled and any(a.name == "kernel_opt" for a in actions):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
