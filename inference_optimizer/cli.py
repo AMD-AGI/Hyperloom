@@ -29,9 +29,6 @@ Env vars consumed (besides the standard backend creds):
   CODEX_MODEL                                  — default gpt-5.4
   USER_DATA_PATH                               — override session dir
                                                  (default: /workspace/hyperloom).
-  INFERENCE_OPTIMIZER_KB_ROOT                  — marathon KB dir (kb_query.py +
-                                                 entries.jsonl); default:
-                                                 Hyperloom/marathon/skills/kb
 """
 
 from __future__ import annotations
@@ -474,7 +471,7 @@ def _build_backends(
         if kernel_codex:
             backends["kernel"] = CodexBackend(model=codex_model)
         else:
-            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=32)
+            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=20)
     return backends
 
 
@@ -2159,6 +2156,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         prior_crash = state.crash_count
         if prior_stop or prior_crash >= 3:
             state.stop_reason = ""
+            state.closing_phase = False
+            state.closing_started_unix = 0.0
+            state.closing_report_task_id = ""
             # Reset persisted crash_count so a fresh resume isn't immediately
             # tripped into "emergency" by accumulated failures from prior runs
             # (e.g. authentication errors before .env was loaded).
@@ -2448,6 +2448,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             tick_interval_sec=args.tick_interval_sec,
             max_ticks=args.max_ticks,
             install_signal_handlers=True,
+            closing_grace_sec=args.closing_grace_sec,
         )
     finally:
         await coordinator.stop()
@@ -2627,6 +2628,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--max-hours", type=float, default=2.0,
                       help="Wall-clock budget in hours (default 2.0)")
+    opt.add_argument(
+        "--closing-grace-sec",
+        type=float,
+        default=None,
+        help=(
+            "Extra seconds after the wall-clock deadline for Coordinator to "
+            "flush a deterministic report task (no LLM). Default: "
+            "min(120, max_hours * 60 * 0.02). Pass 0 to disable closing phase."
+        ),
+    )
     opt.add_argument("--isl", type=int, default=int(os.environ.get("ISL", "256")),
                       help="Input sequence length (default $ISL or 256)")
     opt.add_argument("--osl", type=int, default=int(os.environ.get("OSL", "256")),
@@ -2653,14 +2664,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model-class", type=str,
         default=os.environ.get("MODEL_CLASS", None),
         help=(
-            "Model class hint consumed by orchestrator/scoring marathon "
-            "priors. Recognised values (case-insensitive, with -/+/space "
-            "tolerated): dense / moe_mla / moe_swa / moe_mla_nsa. The "
-            "deleted `classify` action used to discover this from the "
-            "model files; the external SKILL caller is now expected to "
-            "supply it via this flag (or the MODEL_CLASS env var). "
-            "Unset / unknown values fall back to the `moe_mla` marathon "
-            "priors so DeepSeek-shaped sessions keep working."
+            "Model class hint consumed by "
+            "``orchestrator/scoring.MODEL_CLASS_ACTION_PRIORS`` to seed "
+            "per-action base scores. Recognised values (case-insensitive, "
+            "with -/+/space tolerated): dense / moe_mla / moe_swa / "
+            "moe_mla_nsa. The deleted ``classify`` action used to discover "
+            "this from the model files; the external SKILL caller is now "
+            "expected to supply it via this flag (or the MODEL_CLASS env "
+            "var). Unset / unknown values fall back to the ``moe_mla`` "
+            "curated priors so DeepSeek-shaped sessions keep working."
         ),
     )
     opt.add_argument("--target-summary", type=str, default=None,

@@ -302,6 +302,17 @@ class BaselineExecutor:
         )
         return self.default_timeout_sec
 
+    def _after_materialize_config(
+        self, config_path: Path, output_dir: Path,
+    ) -> dict[str, Any] | None:
+        """Hook for subclasses after YAML materialization, before launch.
+
+        ProfileExecutor uses this to patch/validate the exact InferenceX
+        checkout named by the rendered YAML. Baseline/params/backends keep the
+        no-op default so their launch path is unchanged.
+        """
+        return None
+
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         params = ctx.task.params or {}
         config_path = Path(
@@ -363,6 +374,11 @@ class BaselineExecutor:
         # Stash for the result so Coordinator can plumb it forward to
         # downstream params/backends/sweep tasks (workload-contract reuse).
         materialized_config_path = config_path
+        hook_result = self._after_materialize_config(config_path, output_dir)
+        if hook_result is not None:
+            hook_result.setdefault("materialized_config", str(config_path))
+            hook_result.setdefault("output_dir", str(output_dir))
+            return hook_result
 
         cmd = [
             self.magpie_python, "-m", "Magpie", "-v", "benchmark",
