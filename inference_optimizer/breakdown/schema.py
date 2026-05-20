@@ -131,6 +131,9 @@ class Final(TypedDict, total=False):
     e2el_mean_ms: float | None
     ttft_e2el_source: str         # current_best / validate_stack_disk / stack_top_disk / unavailable
     invocation: BenchmarkInvocation
+    closing_phase_entered: bool
+    closing_started_unix: float
+    closing_report_task_id: str
 
 
 # ---------------------------------------------------------------------------
