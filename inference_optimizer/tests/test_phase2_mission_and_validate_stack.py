@@ -1,9 +1,12 @@
-"""Phase 2 — SharedState extensions + Coordinator mission/time/validate-stack.
+"""Phase 2 — SharedState extensions + Coordinator mission/time/stack-rebench.
 
-These tests pin the new public surface introduced when Orchestration
-gained an explicit Mission progress section, time-budget awareness, and
-a ``validate_stack`` requirement after each KEEP'd entry on
-``optimization_stack``.
+These tests pin the public surface introduced when Orchestration gained
+an explicit Mission progress section, time-budget awareness, and a
+TODO 4 stack-rebench requirement after each KEEP'd entry on
+``optimization_stack``. v0.8 M3 + KB_gaps/Gap-10/Dead-C inlines the
+rebench into the merged ``explore`` action; the legacy standalone
+``validate_stack`` action is denied at PolicyGate, so this file
+exercises the v0.8 (``explore``-driven) checklist semantics only.
 """
 
 from __future__ import annotations
@@ -165,7 +168,11 @@ def test_to_mission_summary_shape_and_unvalidated_flag():
     assert "remaining=90.0min" in text
     assert "budget=120min" in text
     # Stack has 2 entries, validated at len=1 → unvalidated flag fires
+    # and now points at ``explore`` (KB_gaps/Dead-C), never at the
+    # retired v0.6 ``validate_stack`` action.
     assert "stack changed" in text
+    assert "RUN `explore`" in text
+    assert "validate_stack" not in text
 
 
 def test_to_mission_summary_unbounded_budget():
