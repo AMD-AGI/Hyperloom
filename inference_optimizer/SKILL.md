@@ -782,9 +782,20 @@ setsid nohup inference_optimizer --verbose optimize \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
   --kernel-claude \
+  --framework-pr-discover \
+  --framework-gap "${FRAMEWORK_GAP:-improve ${FRAMEWORK:-sglang} ${PRECISION:-bf16} ${MODEL_CLASS:-dense} throughput on ${GPU_TYPE:-mi300x}}" \
   > "$RUN_LOG" 2>&1 < /dev/null &
 echo $! > "$PID_FILE"
 ```
+
+`--framework-pr-discover` runs the fa pre-stage before baseline (see
+[Optional: Framework-Agent Pre-stage](#optional-framework-agent-pre-stage)).
+Override the default gap via `export FRAMEWORK_GAP="..."` when the workload
+is not dense throughput (e.g. `"latency on prefill"`, `"fp8 moe accuracy"`).
+**Skip the pre-stage** by removing the two `--framework-*` lines when:
+(a) `--framework vllm` (fa is sglang-only),
+(b) sandbox image lacks `/opt/venv/bin/fa`,
+(c) resuming an existing session (pre-stage is single-shot, not re-entrant).
 
 `setsid nohup ... &` is required for runs > 5 min — Cursor's background
 shell can die on SSH disconnect.
