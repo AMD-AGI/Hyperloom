@@ -19,6 +19,7 @@ Output:
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import re
@@ -32,10 +33,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from optimize_submit import HuggingFaceClient   # noqa: E402
 
 DEFAULT_CRON_CANDIDATES_FILE = "ci/candidates/top2000_2026-05-15.json"
-LEADERBOARD_URL = (
-    "https://core42.example-internal-host.invalid/model-leaderboard/api/v1/"
-    "leaderboard?sort_by=gain&order=desc&limit=5000&offset=0"
-)
 
 
 def slugify(repo_id: str) -> str:
@@ -50,20 +47,146 @@ def _truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+_LB_BASE = "https://core42.example-internal-host.invalid/model-leaderboard"
+
+
+def _paginate_models(api_path: str) -> tuple[set[str], set[str]]:
+    """Walk a paginated list endpoint, returning ``(models, task_ids)``.
+
+    The service caps each response at 500 rows even when a larger ``limit`` is
+    supplied, so we follow ``pagination.has_more`` / ``next_offset`` until the
+    cursor is exhausted, with a paranoid 50-page / offset 10000 safety stop.
+    """
+    models: set[str] = set()
+    task_ids: set[str] = set()
+    offset = 0
+    pages = 0
+    sep = "&" if "?" in api_path else "?"
+    while True:
+        url = f"{_LB_BASE}{api_path}{sep}limit=500&offset={offset}"
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                data = json.load(r)
+        except Exception as e:
+            raise RuntimeError(
+                f"failed to query {api_path} page offset={offset}: {e}"
+            ) from e
+        rows = data.get("results") if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            raise RuntimeError(f"{api_path} response did not contain a results list")
+        if not rows:
+            break
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            if item.get("model"):
+                models.add(str(item["model"]).strip().lower())
+            if item.get("task_id"):
+                task_ids.add(str(item["task_id"]))
+            for sub in item.get("tasks") or []:
+                if isinstance(sub, dict) and sub.get("task_id"):
+                    task_ids.add(str(sub["task_id"]))
+        pages += 1
+        pg = data.get("pagination") if isinstance(data, dict) else None
+        if not isinstance(pg, dict) or not pg.get("has_more"):
+            break
+        next_off = pg.get("next_offset")
+        offset = int(next_off) if isinstance(next_off, int) else offset + len(rows)
+        if offset >= 10000 or pages >= 50:
+            break
+    return models, task_ids
+
+
+def _resolve_task_models(task_ids: list[str], max_workers: int = 16) -> set[str]:
+    """Fetch ``/api/v1/tasks/{tid}`` for each id and collect the ``model`` field.
+
+    Single-GET still returns the row even when the list filter hides it, so we
+    use this to recover entries (typically gain >200% rows) that the public
+    list endpoints suppress.
+    """
+    if not task_ids:
+        return set()
+
+    def _one(tid: str) -> str | None:
+        try:
+            with urllib.request.urlopen(
+                f"{_LB_BASE}/api/v1/tasks/{tid}", timeout=15,
+            ) as r:
+                d = json.load(r)
+        except Exception as e:
+            print(
+                f"WARN: single-GET task {tid} failed: {e}", file=sys.stderr,
+            )
+            return None
+        if isinstance(d, dict) and isinstance(d.get("model"), str):
+            return d["model"].strip().lower()
+        return None
+
+    out: set[str] = set()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for m in ex.map(_one, task_ids):
+            if m:
+                out.add(m)
+    return out
+
+
+def _dashboard_task_ids() -> set[str]:
+    """Scrape every ``api/v1/tasks/<tid>`` href from the public dashboard HTML.
+
+    The server-side dashboard exposes rows that the list APIs hide (gain
+    >200% etc). We use it purely as a discovery source for hidden task ids.
+    """
+    tids: set[str] = set()
+    pages_seen = 0
+    offset = 0
+    while True:
+        url = f"{_LB_BASE}/dashboard?limit=500&offset={offset}"
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                html = r.read().decode("utf-8", errors="replace")
+        except Exception as e:
+            print(
+                f"WARN: dashboard scrape page offset={offset} failed: {e}",
+                file=sys.stderr,
+            )
+            break
+        page_tids = set(re.findall(r"api/v1/tasks/([A-Za-z0-9_-]+)", html))
+        if not page_tids:
+            break
+        new_count = len(page_tids - tids)
+        tids.update(page_tids)
+        pages_seen += 1
+        # 500-row pages; stop when we've drained
+        if new_count == 0 or pages_seen >= 20:
+            break
+        offset += 500
+    return tids
+
+
 def _leaderboard_models() -> set[str]:
-    try:
-        with urllib.request.urlopen(LEADERBOARD_URL, timeout=30) as r:
-            data = json.load(r)
-    except Exception as e:
-        raise RuntimeError(f"failed to query leaderboard for exclusion: {e}") from e
-    rows = data.get("results") if isinstance(data, dict) else data
-    if not isinstance(rows, list):
-        raise RuntimeError("leaderboard response did not contain a results list")
-    return {
-        str(item.get("model") or "").strip().lower()
-        for item in rows
-        if isinstance(item, dict) and item.get("model")
-    }
+    """Return the full set of model ids already known to the leaderboard.
+
+    Combines three sources to bypass the public list filters:
+
+    * Paginated ``/api/v1/leaderboard`` — the parent-row aggregation.
+    * Paginated ``/api/v1/tasks`` — covers tasks the leaderboard collapses.
+    * ``/dashboard`` HTML scrape + single-GET — recovers ~24 rows the list
+      APIs hide (typically gain >200%); single-GET still returns them.
+    """
+    models, lb_tids = _paginate_models("/api/v1/leaderboard?sort_by=gain&order=desc")
+    task_models, task_tids = _paginate_models("/api/v1/tasks")
+    models |= task_models
+    visible_tids = lb_tids | task_tids
+    hidden_tids = sorted(_dashboard_task_ids() - visible_tids)
+    if hidden_tids:
+        recovered = _resolve_task_models(hidden_tids)
+        models |= recovered
+        print(
+            f"leaderboard exclusion: recovered {len(recovered)} hidden models "
+            f"from {len(hidden_tids)} dashboard-only task ids",
+            file=sys.stderr,
+        )
+    return models
 
 
 def _active_workflow_slugs() -> set[str]:
