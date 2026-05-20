@@ -198,6 +198,30 @@ class SharedState:
     # `trace_input`. Coordinator short-circuits subsequent identical requests
     # so Orchestration does not waste budget re-analysing the same trace.
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
+    # Roofline-v2 N19c (May 2026): "gain-driven kernel_opt unlock" +
+    # "flags-conditional roofline" replace the N14 counter-driven
+    # (>=2/>=2/>=3) hard requirements. Two new fields drive the gates.
+    #
+    # `last_cheap_delta_gain` — delta_gain_pct of the last completed
+    # backends/params attempt vs SharedState.current_best (NOT vs
+    # baseline_tput; we care about marginal improvement from this round
+    # alone, not the cumulative gain). The Coordinator writes this in
+    # `_promote_to_shared_state` for task_kind in ("backends","params")
+    # using the same `gain_vs_cb` calculation it already does for
+    # promotion. None / 0.0 means "this round found no improvement",
+    # which is the signal N19 reads to unlock kernel_opt (cheap
+    # exhausted) and N21 reads to deny redundant roofline re-runs.
+    #
+    # `discovered_flags_at_last_snapshot` — frozen snapshot of
+    # `discovered_flags` at the moment a roofline action completes.
+    # The Coordinator writes this in `_promote_to_shared_state` for
+    # task_kind == "roofline" by deep-copying the current
+    # `discovered_flags`. N21 compares against the current
+    # `discovered_flags` to detect "flags unchanged since snapshot",
+    # in which case re-running roofline would produce a byte-equivalent
+    # trace (sglang launch args identical).
+    last_cheap_delta_gain: float | None = None
+    discovered_flags_at_last_snapshot: dict[str, Any] = field(default_factory=dict)
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)

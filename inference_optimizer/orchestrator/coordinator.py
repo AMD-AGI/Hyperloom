@@ -117,6 +117,28 @@ _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
 _BASELINE_SELF_LOOP_THRESHOLD: int = 2
 
 
+def _cheap_exhausted_epsilon() -> float:
+    """Marginal-gain threshold below which a cheap-action round is
+    considered "exhausted" for N19c kernel_opt unlock + N21 roofline
+    redenial. Default 0.3% sits comfortably above the empirical noise
+    floor (~0.1% session-to-session jitter on a stable workload) but
+    below the smallest typical real cheap-action gain (~0.5%). Override
+    via INFERENCE_OPTIMIZER_CHEAP_EXHAUSTED_EPSILON env, e.g.
+    "0.1" for low-noise workloads or "1.0" to require a substantial
+    cheap-action win before declaring exhaustion.
+    """
+    raw = os.environ.get(
+        "INFERENCE_OPTIMIZER_CHEAP_EXHAUSTED_EPSILON", "",
+    ).strip()
+    if not raw:
+        return 0.3
+    try:
+        v = float(raw)
+        return v if v >= 0.0 else 0.3
+    except ValueError:
+        return 0.3
+
+
 def effective_closing_grace_sec(
     max_minutes: float | None,
     closing_grace_sec: float | None,
@@ -1432,6 +1454,32 @@ class Coordinator:
             self_loop = self._baseline_self_loop_denial(proposed_params)
             if self_loop is not None:
                 return self_loop
+        # Roofline-v2 N21 (May 2026): a roofline proposal is denied
+        # when discovered_flags has NOT changed since the previous
+        # snapshot. Re-running the composite roofline action in that
+        # state would launch sglang with byte-identical args, produce
+        # a byte-equivalent trace, and emit an analysis.md whose hot
+        # kernel distribution is mathematically identical to the
+        # cached one — burning ~20-35min of wall-clock for zero new
+        # information. The "flags didn't change" signal is itself
+        # produced upstream by the cheap-action grid runner writing
+        # `last_cheap_delta_gain ~= 0` (no variant beat current_best,
+        # so no new flag was promoted), so this gate is the symmetric
+        # complement of the N19c kernel_opt unlock — together they
+        # implement the user's roofline-driven flow:
+        #   - flags changed (cheap found gain) -> roofline allowed
+        #     (snapshot will differ + tells LLM what to try next)
+        #   - flags unchanged (cheap exhausted) -> roofline denied,
+        #     hint to propose backends/params (try the other cheap
+        #     lever) or request kernel_opt (unlocked by N19c)
+        #
+        # The very first roofline (snapshot_id absent) is always
+        # allowed — that's the baseline analysis snapshot. The gate
+        # only fires from the 2nd roofline onward.
+        if action == "roofline":
+            denied = self._proposal_denial_for_roofline()
+            if denied is not None:
+                return denied
         # Profile / integrate guards only apply when kernel agent is in
         # the role registry — no-kernel mode skips them. Two related gates
         # are intentionally NOT enforced at the action layer:
@@ -1631,73 +1679,108 @@ class Coordinator:
                     "last_profile_trace (legacy path)"
                 ),
             )
-        # Roofline-v2 N13 + N14 (GPU-empirical): kernel_opt requests
-        # (REQUEST kind="run_optimization") must come AFTER multiple
-        # rounds of cheap exploration + multiple re-roofline snapshots.
-        # See design/roofline-v2.md §6.5.1 + §6.5.2 for the full
-        # rationale; short version: backend changes the kernel SET,
-        # param changes kernel CONFIG/scheduling — both can shift the
-        # hot-kernel distribution, and the "best" param value depends
-        # on which backend is active. So a single backend + a single
-        # param round can't claim "cheap is exhausted". N14 upgrades
-        # the N13 thresholds from (>=1, >=1, >=2) to (>=2, >=2, >=3)
-        # to enforce at least two interleaved cheap rounds (and three
-        # roofline snapshots in between).
+        # Roofline-v2 N19c (May 2026, GPU+empirical-history evidence-driven):
+        # kernel_opt unlock is now GAIN-DRIVEN, not counter-driven (N14).
+        # The previous N14 enforcement (backends_attempts >= 2 AND
+        # params_attempts >= 2 AND snapshot_id >= 3) wasted hours on
+        # workloads where the first cheap round already exhausted the
+        # leverage:
         #
-        # Three prerequisites, all checked at the REQUEST layer:
-        #   1. backends_attempts >= 2  (at least two backends rounds)
-        #   2. params_attempts   >= 2  (at least two params rounds)
-        #   3. snapshot_id       >= 3  (baseline + 2 re-rooflines)
+        # * R1 N12 (10h, 12 tasks)  : cumulative_gain = 0.81%,
+        #   ~0.07%/round avg — N14 would force 2x more cheap rounds
+        #   on top, ~3h wasted.
+        # * Qwen3 N18b today        : params_2 base_tput=0.0 (no new
+        #   variant beat current_best) — flags didn't change, so re-
+        #   rooflining would produce a byte-equivalent trace, AND
+        #   continuing to backends_2 + roofline_3 is pure waste because
+        #   the cheap-action search space is already exhausted.
+        # * 202 historical reports  : 165 sessions (82%) had no clear
+        #   single-action winner > 0.5% — N14 would burn 2+h of cheap
+        #   exploration on each of those sessions before unlocking
+        #   kernel_opt, where the actual leverage lives (top session
+        #   qwen1-5-7b got 66.56% all from kernel_opt).
         #
-        # Ideal workflow this enforces:
-        #   roofline_1 -> backends_1 -> params_1 -> roofline_2
-        #                -> backends_2 -> params_2 -> roofline_3
-        #                                              -> kernel_opt
+        # New rule (replaces N14):
+        #   kernel_opt UNLOCK iff:
+        #     snapshot_id >= 1                  (baseline + 1 roofline done)
+        #     AND last_cheap_delta_gain < EPS   (last cheap round exhausted)
+        #
+        # EPS default = 0.3% (above the empirical noise floor ~0.1% but
+        # below the smallest typical real gain ~0.5%; override via
+        # INFERENCE_OPTIMIZER_CHEAP_EXHAUSTED_EPSILON env). If no cheap
+        # round has run yet, last_cheap_delta_gain is None and we
+        # require at least one cheap attempt (backends OR params) to
+        # have been recorded — otherwise the LLM could jump straight
+        # to kernel_opt from baseline without learning anything from
+        # the flag space.
         #
         # Escape hatch: INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1
-        # restores pre-N13 behaviour (snapshot_id >= 1 only). Use cases:
-        # v0 baseline comparison; workloads known to have no leverage
-        # in cheap actions; debug / unit-test paths.
+        # restores pre-N13 behaviour (snapshot_id >= 1 only, no cheap
+        # exhaustion check). Use cases: v0 baseline comparison;
+        # workloads known to have no leverage in cheap actions;
+        # debug / unit-test paths.
         if req_kind == "run_optimization" and not self._allow_early_kernel_opt():
-            backends_attempts = len(self.shared_state.backends_attempts or [])
-            params_attempts = len(self.shared_state.params_attempts or [])
             snapshot_id = (
                 (self.shared_state.last_trace_analyze or {}).get(
                     "roofline_snapshot_id", 0
                 )
             )
+            backends_attempts = len(self.shared_state.backends_attempts or [])
+            params_attempts = len(self.shared_state.params_attempts or [])
+            any_cheap_attempt = backends_attempts + params_attempts >= 1
+            last_delta = self.shared_state.last_cheap_delta_gain
+            eps = _cheap_exhausted_epsilon()
+
             missing: list[str] = []
-            if backends_attempts < 2:
+            if not isinstance(snapshot_id, int) or snapshot_id < 1:
                 missing.append(
-                    f"backends_attempts={backends_attempts} (need >= 2)"
+                    f"snapshot_id={snapshot_id} (need >= 1; "
+                    "propose `roofline` to capture the baseline snapshot)"
                 )
-            if params_attempts < 2:
+            if not any_cheap_attempt:
                 missing.append(
-                    f"params_attempts={params_attempts} (need >= 2)"
+                    "no cheap exploration yet (need >= 1 backends OR params "
+                    "attempt; propose one before kernel_opt so the search "
+                    "space is at least probed)"
                 )
-            if not isinstance(snapshot_id, int) or snapshot_id < 3:
+            elif last_delta is None:
+                # Cheap attempts exist but no delta recorded — this is a
+                # legacy / corrupted state.json situation. Reject defensively;
+                # the operator can re-run a cheap action to populate the field.
                 missing.append(
-                    f"snapshot_id={snapshot_id} (need >= 3; baseline + "
-                    "at least 2 re-rooflines after cheap rounds)"
+                    "last_cheap_delta_gain not recorded; re-run a cheap "
+                    "action (backends/params) so the gate can read the "
+                    "marginal-gain signal"
+                )
+            elif last_delta >= eps:
+                missing.append(
+                    f"last_cheap_delta_gain={last_delta:.3f}% "
+                    f">= EPSILON={eps:.3f}% (cheap exploration still finding "
+                    "gain; continue with another backends/params round, "
+                    "then re-evaluate)"
                 )
             if missing:
                 return PolicyDenied(
                     f"request kind={req_kind!r} denied: "
-                    f"kernel_opt requires multi-round cheap-exploration "
-                    f"convergence; missing: {', '.join(missing)}",
+                    f"kernel_opt requires either (a) cheap exploration "
+                    f"exhausted (last_cheap_delta_gain < {eps:.3f}%), or "
+                    f"(b) escape hatch enabled; missing: "
+                    f"{', '.join(missing)}",
                     rule="execution_order",
                     hint=(
-                        "Per design/roofline-v2.md §6.5.1 (N13+N14), "
-                        "kernel_opt is the LAST optimisation stage. "
-                        "Run at least 2 rounds of `backends` + 2 rounds "
-                        "of `params`, interleaved with `roofline` re-runs "
-                        "so each round sees an updated kernel distribution "
-                        "(target snapshot_id >= 3). Backend changes the "
-                        "kernel SET (attention/MoE/sampling backend "
-                        "swaps); param changes kernel CONFIG and the "
-                        "'best' param value depends on which backend is "
-                        "active. A single cheap round can't claim cheap "
-                        "is exhausted. Override with "
+                        "Per design/roofline-v2.md §6.5.3 (N19c, replaces "
+                        "N14 counter-driven), kernel_opt unlocks as soon "
+                        "as cheap-action exploration stops finding "
+                        "marginal gain (delta vs current_best < EPSILON, "
+                        "default 0.3%, override via "
+                        "INFERENCE_OPTIMIZER_CHEAP_EXHAUSTED_EPSILON). "
+                        "If you just ran a cheap round that did improve "
+                        "current_best, run it again or switch to the "
+                        "other cheap action (backends<->params) until "
+                        "marginal gain settles. The roofline snapshot "
+                        "you have is enough — N21 will deny re-running "
+                        "roofline as long as discovered_flags hasn't "
+                        "changed since the last snapshot. Override with "
                         "INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1 "
                         "for debug / v0-baseline-comparison paths."
                     ),
@@ -1711,6 +1794,91 @@ class Coordinator:
         return os.environ.get(
             "INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "",
         ).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _proposal_denial_for_roofline(self) -> PolicyDenied | None:
+        """N21: deny re-running roofline when discovered_flags hasn't
+        changed since the previous snapshot. See the call site in
+        `_sequence_denial_for_action` for the rationale.
+
+        Returns None (allow) when:
+        * No snapshot exists yet (this is the first roofline -> always
+          let it run to capture the baseline analysis).
+        * `INFERENCE_OPTIMIZER_FORCE_ROOFLINE_RERUN=1` escape hatch is
+          set (operator debugging / regression-pinning a known trace).
+        * `discovered_flags` actually differs from the frozen snapshot
+          (some cheap action promoted a new flag — sglang launch args
+          will change, so the new trace will differ).
+
+        Returns PolicyDenied when flags are unchanged AND a prior
+        snapshot exists. The hint points the LLM at the two productive
+        alternatives.
+        """
+        if os.environ.get(
+            "INFERENCE_OPTIMIZER_FORCE_ROOFLINE_RERUN", "",
+        ).strip().lower() in {"1", "true", "yes", "on"}:
+            return None
+        snapshot = self.shared_state.last_trace_analyze or {}
+        snapshot_id = snapshot.get("roofline_snapshot_id", 0)
+        if not isinstance(snapshot_id, int) or snapshot_id < 1:
+            # First roofline — always allowed.
+            return None
+        current = self.shared_state.discovered_flags or {}
+        frozen = self.shared_state.discovered_flags_at_last_snapshot or {}
+        if self._flags_equivalent(current, frozen):
+            return PolicyDenied(
+                f"action='roofline' denied: discovered_flags unchanged "
+                f"since snapshot #{snapshot_id}; a re-run would produce "
+                f"a byte-equivalent trace and identical analysis.md "
+                f"(sglang launch args derive from discovered_flags). "
+                f"Wasted wall-clock budget ~20-35min.",
+                rule="execution_order",
+                hint=(
+                    "Per design/roofline-v2.md §6.5.3 (N19c+N21), "
+                    "roofline only makes sense when at least one new "
+                    "cheap-action flag has been applied since the last "
+                    "snapshot. Two productive next moves: "
+                    "(a) propose the OTHER cheap action (if last was "
+                    "`backends`, try `params`, or vice versa) to keep "
+                    "exploring the flag space, OR (b) if both cheap "
+                    "lanes are exhausted (last_cheap_delta_gain<EPSILON), "
+                    "the kernel_opt REQUEST is already unlocked (N19c) "
+                    "— go straight to kernel optimisation. Override "
+                    "this gate with "
+                    "INFERENCE_OPTIMIZER_FORCE_ROOFLINE_RERUN=1 for "
+                    "debug / regression-pinning."
+                ),
+            )
+        return None
+
+    @staticmethod
+    def _flags_equivalent(
+        a: dict[str, Any], b: dict[str, Any],
+    ) -> bool:
+        """Compare two `discovered_flags` dicts for N21 equivalence.
+
+        The schema is two-level: framework -> {backend_flags: [...],
+        param_flags: [...], source_path: str, ...}. We compare only the
+        sets of backend_flags + param_flags per framework — source_path
+        and other metadata fields are infrastructural and shouldn't
+        gate roofline re-runs.
+        """
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            return a == b
+        if set(a.keys()) != set(b.keys()):
+            return False
+        for fw in a:
+            av = a.get(fw) or {}
+            bv = b.get(fw) or {}
+            if not isinstance(av, dict) or not isinstance(bv, dict):
+                if av != bv:
+                    return False
+                continue
+            for key in ("backend_flags", "param_flags"):
+                aval = set(av.get(key) or [])
+                bval = set(bv.get(key) or [])
+                if aval != bval:
+                    return False
+        return True
 
     @staticmethod
     def _pmc_roofline_enabled() -> bool:
@@ -2867,6 +3035,21 @@ class Coordinator:
                 "trace_path": self.shared_state.last_profile_trace or None,
                 "profile_workspace": result.get("profile_workspace"),
             }
+            # N21 / N19c: freeze current discovered_flags into
+            # `discovered_flags_at_last_snapshot` so the next-tick
+            # `_proposal_denial_for_roofline` gate can compare and
+            # deny redundant roofline re-runs when flags haven't
+            # changed (which would produce a byte-equivalent trace
+            # — same sglang launch args, same hot kernel distribution).
+            # Deep-copy via json round-trip is overkill; a shallow
+            # dict() + per-framework dict() is enough because the
+            # discovered_flags schema is two-level (framework ->
+            # {backend_flags, param_flags}).
+            current = self.shared_state.discovered_flags or {}
+            self.shared_state.discovered_flags_at_last_snapshot = {
+                k: dict(v) if isinstance(v, dict) else v
+                for k, v in current.items()
+            }
             changed = True
         elif task_kind == "profile":
             audit_decision = "promoted"
@@ -3159,6 +3342,15 @@ class Coordinator:
                 (best_tput - cur_best) / cur_best * 100.0
                 if isinstance(best_tput, (int, float)) and best_tput > 0 and cur_best > 0
                 else None
+            )
+            # N19c: record marginal gain for the gain-driven kernel_opt
+            # unlock + flags-conditional roofline gates. Cheap rounds that
+            # don't improve over current_best signal "cheap exhausted",
+            # at which point kernel_opt becomes proposable (snapshot >= 1
+            # floor still applies) and redundant roofline re-runs get
+            # denied. Always write — None / 0.0 are valid signals too.
+            self.shared_state.last_cheap_delta_gain = (
+                float(gain_vs_cb) if gain_vs_cb is not None else 0.0
             )
             # Always record this round to the rolling history regardless
             # of whether it promotes — `consistent_winner` consults it.
