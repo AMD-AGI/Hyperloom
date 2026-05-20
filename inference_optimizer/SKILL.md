@@ -187,6 +187,20 @@ user later passes `--no-kernel` at runtime, the installer still prepares
 kernel-agent / TraceLens / GEAK / OOB / auth-proxy; `--no-kernel` only means
 that this `optimize` run skips the kernel optimization phase.
 
+The kernel agent and the framework agent (fa, surfaced as the `framework_pr`
+arm) are independent and each have a dedicated CLI toggle:
+
+* `--no-kernel`    → strips kernel-owned arms (`kernel_opt`, `integrate`,
+  `deep_kernel_analysis`, `operator_tuning`, `vendor_kernel_config`) plus
+  `profile` / `pmc_roofline`.
+* `--no-framework` → strips the `framework_pr` arm so the bandit never
+  invokes fa.
+
+Combining both yields a pure parameter-search run (baseline + params +
+backends + sweep + validate_stack + report). The toggles are persisted in
+`state.json` (`kernel_enabled`, `framework_enabled`) so resumes honour the
+original session's agent topology.
+
 `install.sh` installs everything in one shot (no `--with-*` flags to
 remember). Direct steps in `inference_optimizer/scripts/install.sh`:
 

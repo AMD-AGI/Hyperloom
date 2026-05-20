@@ -114,8 +114,16 @@ class SharedState:
     framework: str = ""
     gpu_type: str = ""
     kernel_enabled: bool = True
+    # Legacy framework-agent (fa) bandit-arm toggle. When False the
+    # ``framework_pr`` arm is unregistered + stripped from the orchestration
+    # prompt so the bandit can never pull it. Default True (fa is on by
+    # default; mirrors ``kernel_enabled``). Older state.json files lacking
+    # this field decode as True via the dataclass default — see
+    # ``SharedState.load``.
+    framework_enabled: bool = True
     # 5th Framework role toggle (hyperloom-framework-agent-design.md §5).
-    # Gates the agent that owns ``framework_optimize`` /
+    # Distinct from ``framework_enabled`` above: this flag gates the
+    # 5th agent role that owns ``framework_optimize`` /
     # ``framework_integrate`` actions on vllm/sglang source. Default False
     # during PR-A1 dead-path; PR-B will flip via CLI to enable mock e2e.
     # Older state.json files lacking this field decode as False via the
