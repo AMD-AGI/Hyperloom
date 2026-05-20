@@ -86,7 +86,7 @@ _ORCH_PROMPT = (
 _CRITIC_PROMPT = (
     "You are the Critic. Approve every well-formed proposal whose\n"
     "action_name is one of: baseline, profile, backends, params, sweep,\n"
-    "integrate, report, dream. Reject anything else with a brief reason.\n"
+    "integrate, report. Reject anything else with a brief reason.\n"
     "REQUIRED payload: target_proposal_msg_id, verdict, reasoning."
 )
 
@@ -130,9 +130,7 @@ async def _run(ticks: int, target_gain: float) -> int:
     coordinator.sub.register_executor("params",   params_executor)
     coordinator.sub.register_executor("sweep",    sweep_executor)
     coordinator.sub.register_executor("report",   report_executor)
-    for kind in ("target_analysis",
-                  "dream", "re_explore", "recover",
-                  "comm_optimization", "compiler_tuning"):
+    for kind in ("target_analysis", "recover"):
         coordinator.sub.register_executor(kind, _noop_prep)
 
     coordinator.system_prompt_overrides = {
