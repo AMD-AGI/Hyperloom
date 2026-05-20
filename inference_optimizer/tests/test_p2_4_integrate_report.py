@@ -49,7 +49,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     # running pytest. ``krh`` is already imported at module top — no
     # inline reimport. Same convention as test_p2_2_profile_and_handlers.py.
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
-    monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", kernel_agent_root)
+    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     # Skip the ``python3 -c "import Magpie"`` probe inside
     # _resolve_magpie_python so subprocess.run mocks only see the actual
     # Magpie launch command (origin/main behaviour).
