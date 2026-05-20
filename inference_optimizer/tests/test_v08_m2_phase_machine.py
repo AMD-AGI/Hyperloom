@@ -355,9 +355,15 @@ def test_policy_gate_phase_strict_blocks_explore_action_in_prelude():
         shared_state=state,
         strict_phase=True,
     )
+    # v0.8 M3 + KB_gaps/Gap-10: ``params`` is now denied with
+    # ``action_deprecated`` *before* the phase check, so the legacy
+    # assertion no longer reaches phase_incompatible. We pick
+    # ``profile`` instead — a non-deprecated action that is allowed
+    # in KERNEL but never in PRELUDE — to keep exercising the R1
+    # phase gate.
     intent = Intent(
         type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "params", "predicted_gain_pct": 1.0},
+        payload={"action_name": "profile", "predicted_gain_pct": 1.0},
     )
     with pytest.raises(PolicyDenied) as excinfo:
         gate.validate_intent("orchestration", intent)

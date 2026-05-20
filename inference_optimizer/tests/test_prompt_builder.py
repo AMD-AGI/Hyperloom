@@ -42,7 +42,10 @@ def rules_path() -> Path:
 def test_default_enabled_actions_full_includes_kernel_actions():
     full = default_enabled_actions(no_kernel=False)
     assert set(KERNEL_OWNED_ACTIONS) <= set(full)
-    assert "validate_stack" in full
+    # v0.8 M3 + KB_gaps/Gap-10: ``validate_stack`` is deprecated; the
+    # merged ``explore`` action carries the per-KEEP stack rebench
+    # inline, so the enabled set advertises ``explore`` instead.
+    assert "explore" in full
     assert "report" in full
     assert "baseline" in full
 
@@ -51,7 +54,9 @@ def test_default_enabled_actions_no_kernel_excludes_all_kernel_actions():
     bare = default_enabled_actions(no_kernel=True)
     assert set(KERNEL_OWNED_ACTIONS).isdisjoint(set(bare))
     assert "profile" not in bare  # profile only feeds kernel-opt
-    assert "validate_stack" in bare
+    # v0.8 M3 + KB_gaps/Gap-10: ``explore`` replaces the v0.6
+    # backends/params/validate_stack grid-runner triple.
+    assert "explore" in bare
     assert "baseline" in bare
 
 
@@ -296,9 +301,11 @@ def test_emit_hints_use_request_for_kernel_actions(registry, rules_path):
         max_minutes=120,
         rules_fragment_path=rules_path,
     )
-    # propose_action hint format for non-kernel
+    # propose_action hint format for non-kernel.
+    # v0.8 M3 + KB_gaps/Gap-10: ``backends`` was deprecated; the
+    # canonical grid-runner is ``explore``.
     assert "propose_action{action_name='baseline'" in text
-    assert "propose_action{action_name='backends'" in text
+    assert "propose_action{action_name='explore'" in text
     # REQUEST hint for kernel-owned
     assert "REQUEST{target_agent='kernel'" in text
 
@@ -369,9 +376,13 @@ def test_explicit_kernel_enabled_override_wins(registry, rules_path):
 # ---------------------------------------------------------------------------
 # Mission / time budget content
 # ---------------------------------------------------------------------------
-def test_mission_section_emphasises_cumulative_gain_and_validate_stack(
+def test_mission_section_emphasises_cumulative_gain_and_stack_rebench(
     registry, rules_path,
 ):
+    """v0.8 M3 + KB_gaps/Gap-10: the mission section emphasises the
+    cumulative gain story; the standalone ``validate_stack`` keyword
+    is gone (the rebench is inlined into ``explore``). We check for
+    the new keyword ``stack rebench`` instead."""
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
@@ -383,7 +394,7 @@ def test_mission_section_emphasises_cumulative_gain_and_validate_stack(
     )
     mission_block = text.split("## 2.")[0]
     assert "cumulative_gain" in mission_block
-    assert "validate_stack" in mission_block
+    assert "stack rebench" in mission_block
 
 
 def test_time_budget_section_lists_all_enabled_phases(registry, rules_path):

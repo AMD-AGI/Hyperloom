@@ -644,7 +644,7 @@ async def test_report_executor_writes_md_and_json(session_dir):
         ))
         await c._handle_intent("orchestration", Intent(
             type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": "backends", "predicted_gain_pct": 5.0},
+            payload={"action_name": "explore", "predicted_gain_pct": 5.0},
         ))
         await c._handle_intent("robustness", Intent(
             type=IntentType.ALERT,
