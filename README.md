@@ -87,6 +87,8 @@ docker run -d \
   tail -f /dev/null
 ```
 
+If Hyperloom is already cloned on the host, you can mount that checkout directly into the container, for example by replacing `-v /path/to/workspace:/workspace` with `-v /path/on/host/Hyperloom:/workspace/Hyperloom`. Then open `/workspace/Hyperloom` after attaching Cursor to the container; you do not need to clone Hyperloom again inside the container.
+
 After the container starts, confirm that you can enter it and see the GPU:
 
 ```bash
@@ -111,11 +113,19 @@ rocm-smi
 
 #### 3. Clone Hyperloom and Bootstrap Local Mode
 
-In the remote environment, first make sure GitHub authentication and AMD-AGI repository access are available. `local_setup.sh` will use the same access to clone dependency repositories. Then clone Hyperloom:
+In the remote environment, first make sure GitHub authentication and AMD-AGI repository access are available. `local_setup.sh` will use the same access to clone dependency repositories.
+
+If the remote environment does not already have a Hyperloom checkout, clone this repository:
 
 ```bash
 git clone https://github.com/AMD-AGI/Hyperloom.git
 cd Hyperloom
+```
+
+If Hyperloom was mounted into the container through a Docker volume, enter the mounted checkout directly:
+
+```bash
+cd /workspace/Hyperloom
 ```
 
 Prepare Hyperloom credentials:
