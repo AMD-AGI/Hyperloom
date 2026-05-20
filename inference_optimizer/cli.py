@@ -2649,12 +2649,32 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # for downstream consumers (claw-stats-service / hyperloom-results-
         # service / offline analysis). Best-effort — a failure here MUST NOT
         # mask the actual stop_reason, so we swallow exceptions and log.
-        try:
-            from .breakdown import write_breakdown_json
-            breakdown_path = write_breakdown_json(session_dir)
-            print(f"Session breakdown : {breakdown_path}")
-        except Exception:  # noqa: BLE001
-            log.exception("session_breakdown finalize failed (non-fatal)")
+        #
+        # v0.8 §3.2 §5.5 / KB_gaps/Gap-06: when the CLOSE phase sequencer
+        # ran to completion, step 2 already wrote the same artifact via
+        # the standard session_breakdown executor. Skip the duplicate
+        # write here so the cli.finally path doesn't clobber the
+        # sequencer's output (which includes the full CLOSE-step
+        # evidence the sequencer stamped on phase_history). The flag
+        # is locked in CORE_STATE_FIELDS so an LLM can't trick us
+        # into skipping the safety net for a non-CLOSE termination.
+        sequencer_done = getattr(
+            coordinator.shared_state, "close_sequence_done", False,
+        )
+        if sequencer_done:
+            print(
+                "Session breakdown : (already written by CLOSE phase "
+                "sequencer; skipping cli.finally safety-net write)"
+            )
+        else:
+            try:
+                from .breakdown import write_breakdown_json
+                breakdown_path = write_breakdown_json(session_dir)
+                print(f"Session breakdown : {breakdown_path}")
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "session_breakdown finalize failed (non-fatal)"
+                )
 
     _print_final_summary(coordinator.shared_state, stop_reason)
     return 0 if stop_reason in (
