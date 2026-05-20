@@ -100,19 +100,51 @@ resume v0.6 session 在 winners_history 短时, 真 plateau 可能不触发 →
 
 ## 6. 验收口径
 
-- [ ] fresh session plateau_explore 触发由真 plateau 函数驱动 (不走 proxy)
-- [ ] resume v0.6 session: breakdown.warnings 含 `plateau_proxy_provisional`
-      (R-09 探测信号)
-- [ ] `INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1` 启动时, proxy 路径
-      不触发
+- [x] fresh session plateau_explore 触发由真 plateau 函数驱动 (不走 proxy)
+      — 当 `explore_search.winners_history` 或 `specialist_rounds`
+      非空时, `exit_normal_explore` 走 `compute_plateau_explore`,
+      proxy 分支只在 v0.8 信号均空时考虑.
+- [x] resume v0.6 session: `breakdown.warnings` 含
+      `plateau_proxy_provisional` (R-09 探测信号) —
+      `collect_phase_segments` 检测 `evidence={evidence: m2_proxy}`
+      或 `r09_provisional: True` 时注入 session 级 warning.
+- [x] `INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1` 启动时, proxy 路径
+      不触发 — Coordinator 读 env → `_legacy_plateau_proxy_disabled` →
+      传给 `compute_next_phase(disable_legacy_proxy=True)`.
 
-## 7. 风险 / 回退
+## 7. 实际落地 (2026-05-20)
 
-- **R-09 自身**: 灰度期 phase 退出时机不一致. 选项 A 保留 fallback 减
-  小风险.
-- **回退**: 删除 env flag check, fallback 永远启用 = 当前状态.
+1. `phase_state.exit_normal_explore` 新增 `disable_legacy_proxy: bool`
+   参数; m2_proxy evidence 加 `r09_provisional` 探测信号 + 操作员
+   可见 note. `compute_next_phase` 透传参数.
+2. `Coordinator.__init__` 读 `INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY`
+   env (1/true/yes 任一即启用), 存到 `_legacy_plateau_proxy_disabled`;
+   `_advance_phase_if_needed` 透传到 `compute_next_phase`.
+3. `breakdown.collectors.collect_phase_segments` 扫 phase_history
+   evidence, 一次性向 session warnings 注入
+   `plateau_proxy_provisional: ...` 标记.
+4. 测试新增: `test_exit_normal_explore_proxy_can_be_disabled_via_kwarg`
+   + `test_compute_next_phase_threads_disable_legacy_proxy` +
+   `test_coordinator_reads_disable_plateau_proxy_env` (参数化 env 值)
+   + `test_collect_phase_segments_emits_proxy_provisional_warning` +
+   `test_collect_phase_segments_no_proxy_warning_for_clean_session`.
+   现有 `test_exit_normal_explore_falls_back_to_m2_proxy_when_explore_search_empty`
+   补 `r09_provisional` 断言.
+5. 注释精简: phase_state docstring 4 句话覆盖优先级 + R-09 说明.
 
-## 8. 关联 gap
+灰度结束后 (1-2 个月观察期), 选项 B (直接删 proxy 分支) 是一次性
+revert: 删除 `exit_normal_explore` 的 `elif not disable_legacy_proxy`
+分支 + 删 env flag, 其余 plumbing 留作历史. 现状默认仍保留 fallback,
+新部署可立即用 env flag fail-closed.
+
+## 8. 风险 / 回退
+
+- **R-09 自身**: 灰度期 phase 退出时机不一致. 选项 A 保留 fallback +
+  探测信号双轨, 降低风险.
+- **回退**: 移除 env flag check + 删除 r09_provisional 探测, 回到 M7
+  原状.
+
+## 9. 关联 gap
 
 - 关联 §3.14 R-09 (设计已识别)
 - 独立, 与其他 gap 无依赖
