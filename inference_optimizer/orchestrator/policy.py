@@ -408,6 +408,15 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # write. LLM update_state must not be able to toggle this and
     # trick the cli into skipping its safety net.
     "close_sequence_done",
+    # v0.8 KB_gaps/Gap-14 — explore / backends / params search ledgers
+    # (KB_design §3.10 §6.2). Coordinator's
+    # ``apply_{explore,backends,params}_search_update`` /
+    # ``record_explore_accepted`` / ``record_backends_accepted`` are the
+    # sole writers; LLM ``update_state`` must not rewrite the ledger
+    # directly (would bypass dedup-by-fingerprint + Inv-1).
+    "explore_search",
+    "backends_search",
+    "params_search",
     # v0.8 KB_gaps/Gap-09 — structured gaps ledger (KB_design §3.3 /
     # §3.5 / §3.9 §6). Coordinator's ``_refresh_gaps`` is the sole
     # writer; LLM agents read via prompt injection. Locking the field
