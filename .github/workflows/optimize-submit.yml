@@ -139,6 +139,7 @@ on:
             $RESULT_DIR/optimization_report.md
             $RESULT_DIR/ci_metrics.json
               {"baseline_throughput": <float>, "optimized_throughput": <float>, "gain_pct": <float>, "tok_per_gpu_baseline": <float>, "tok_per_gpu_optimized": <float>, "actions_taken": ["..."]}
+            $RESULT_DIR/session_breakdown.json   (optional but recommended — emitted by inference_optimizer; preserved alongside the two contract files for post-run audit)
 
           If the pipeline aborts (kernel apply failed / server failed to start / optimization tooling crash):
           - Set optimized_throughput = baseline_throughput, gain_pct = 0.0.
@@ -209,6 +210,7 @@ on:
               mkdir -p "$PERSIST_DIR"
               cp -f "$RESULT_DIR/ci_metrics.json"          "$PERSIST_DIR/ci_metrics.json"         2>/dev/null && echo "[PERSIST] $PERSIST_DIR/ci_metrics.json"
               cp -f "$RESULT_DIR/optimization_report.md"  "$PERSIST_DIR/optimization_report.md"  2>/dev/null && echo "[PERSIST] $PERSIST_DIR/optimization_report.md"
+              cp -f "$RESULT_DIR/session_breakdown.json"  "$PERSIST_DIR/session_breakdown.json"  2>/dev/null && echo "[PERSIST] $PERSIST_DIR/session_breakdown.json"
               ls -la "$PERSIST_DIR/"
             else
               echo "[ERR] /hyperloom/users/<uid>/ not mounted — cannot persist to wekafs"
