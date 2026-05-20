@@ -156,6 +156,12 @@ class SharedState:
     # re-validation is required after new KEEPs landed.
     cumulative_gain_validated_stack_len: int = 0
     stop_reason: str = ""
+    # Closing phase — set when the wall-clock deadline fires. While True,
+    # Coordinator skips reactor passes and only pumps the dispatcher to
+    # drain a Coordinator-enqueued ``report`` task. Cleared on resume.
+    closing_phase: bool = False
+    closing_started_unix: float = 0.0
+    closing_report_task_id: str = ""
     current_action: str = ""
     crash_count: int = 0
     pruned_families: list[str] = field(default_factory=list)
@@ -1022,6 +1028,26 @@ class SharedState:
         Orchestration still sees lower-ranked but **reusable native** entries
         (e.g. AITER RMSNorm) and can dispatch ``run_optimization`` against
         them instead of looping on rejected ones.
+
+        We also persist ``trace_health_warnings`` so Orchestration's prompt
+        surfaces the structured routing signals produced by the TraceLens
+        analyzer (Hyperloom v0.4 finishing-touches T3 / T4):
+
+        * ``high_gpu_idle_pct`` — Executive Summary's ``Idle %`` exceeded
+          the gate threshold; per Report_Interfacing.docx §2 (idle-gate
+          sanity check) the LLM should pivot to parameter optimization
+          rather than kernel rewriting in this regime.
+        * ``tracelens_analysis_failed`` — the TraceLens subprocess crashed
+          permanently (perf-CLI missing, ``analysis.md`` not produced,
+          timeout, …); Coordinator already demoted this to ``status=ok``
+          + empty ``hot_kernels`` at the handler boundary, but the LLM
+          still needs to *see* the failure so it picks parameter
+          optimization explicitly instead of inferring "TraceLens is
+          still running" from the empty list.
+
+        Without this pass-through the warnings produced upstream are
+        dropped at the SharedState boundary and Orchestration cannot
+        ground its routing decisions on them.
         """
         if not isinstance(result, dict):
             return
@@ -1056,11 +1082,26 @@ class SharedState:
             })
             if reusable and kid:
                 reusable_ids.append(str(kid))
+
+        # T3 / T4: keep the structured warning list verbatim — handler
+        # already shaped each entry into the documented form (code,
+        # severity, message, plus code-specific extras like idle_pct or
+        # returncode). We filter to ``dict`` to be defensive against a
+        # buggy tool emitting non-dict junk, but otherwise pass through
+        # untouched so the LLM sees the full diagnostic.
+        raw_warnings = result.get("trace_health_warnings") or []
+        warnings_cleaned: list[dict[str, Any]] = []
+        if isinstance(raw_warnings, list):
+            for entry in raw_warnings:
+                if isinstance(entry, dict) and entry.get("code"):
+                    warnings_cleaned.append(dict(entry))
+
         self.last_select_kernels = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
             "hot_kernels_top15": summary,
             "reusable_native_kernel_ids": reusable_ids,
+            "trace_health_warnings": warnings_cleaned,
             "ts": _now_iso(),
         }
 
@@ -1597,6 +1638,9 @@ class SharedState:
             f"tick={int(self.tick or 0)}  "
             f"target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
             f"stop_reason={self.stop_reason or '(none)'}",
+            f"closing_phase={self.closing_phase}  "
+            f"closing_started_unix={self.closing_started_unix or 0.0}  "
+            f"closing_report_task_id={self.closing_report_task_id or '(none)'}",
         ]
         return "\n".join(lines)
 
@@ -1703,29 +1747,113 @@ class SharedState:
             parts.append(f"{fw}:backend={n_b}/param={n_p}")
         return ", ".join(parts) or "(none)"
 
+    @staticmethod
+    def _format_variant_line(entry: dict[str, Any]) -> str:
+        """One-line render of a search variant for prompt blocks.
+
+        Format: ``{name:28s} {±gain%:>9} (tput=...) <flags> <K=V envs>``.
+        Used by :meth:`_format_backend_winners_history` and
+        :meth:`_format_search_state` so the LLM sees the same numerical
+        signal everywhere the explore ledger surfaces.
+        """
+        name = str(entry.get("name") or "?")
+        gain = entry.get("gain_pct")
+        tput = entry.get("tput") or entry.get("output_throughput")
+        gain_s = (
+            f"{gain:+.2f}%" if isinstance(gain, (int, float)) else " no_meas"
+        )
+        tput_s = (
+            f" (tput={tput:.1f})"
+            if isinstance(tput, (int, float)) and tput > 0
+            else ""
+        )
+        args = (
+            str(entry.get("extra_sglang_args") or "").strip()
+            or "(no-flag)"
+        )
+        envs = entry.get("extra_envs") or {}
+        envs_s = (
+            " " + " ".join(f"{k}={v}" for k, v in sorted(envs.items()))
+            if envs else ""
+        )
+        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}"
+
+    @staticmethod
+    def _enrich_with_tested_gain(
+        entry: dict[str, Any], tested: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Backfill ``gain_pct``/``tput`` from the matching ``tested[fp]``.
+
+        ``params_search.accepted`` is built from ``_variant_to_dict()`` and
+        does NOT persist ``gain_pct``; the matching ``tested[fingerprint]``
+        entry does. ``backends_search.accepted`` already stamps gain on
+        promote (see :meth:`record_backends_accepted`), so this is a no-op
+        there. Pulling the value across at render time keeps the renderer
+        symmetric and avoids a second writer for accepted entries.
+        """
+        if (
+            entry.get("gain_pct") is not None
+            and entry.get("tput") is not None
+        ):
+            return entry
+        fp = str(entry.get("fingerprint") or "")
+        snap = tested.get(fp) if fp else None
+        if not isinstance(snap, dict):
+            return entry
+        out = dict(entry)
+        if out.get("gain_pct") is None:
+            out["gain_pct"] = snap.get("gain_pct")
+        if out.get("tput") is None:
+            result = (
+                snap.get("result")
+                if isinstance(snap.get("result"), dict) else {}
+            )
+            out["tput"] = (
+                snap.get("tput") or (result or {}).get("output_throughput")
+            )
+        return out
+
     def _format_backend_winners_history(self) -> str:
+        """Multi-line render of the explore-round winners history.
+
+        Surfaces per-winner ``gain_pct`` + ``tput`` + resolved flags/envs
+        for the last 5 rounds so the IDEA GENERATION step (SKILL.md) has
+        real signal to rank retries / synergy combos by, not just names.
+        Older rounds collapse to a ``[+N earlier rounds elided]`` line.
+        """
         if not self.backend_winners_history:
             return "(no explore rounds completed)"
-        last = self.backend_winners_history[-3:]
-        parts: list[str] = []
+        last = self.backend_winners_history[-5:]
+        out: list[str] = [""]
         for r in last:
             if not isinstance(r, dict):
                 continue
-            wn = [w.get("name") for w in (r.get("winners") or [])
-                  if isinstance(w, dict)]
-            best = r.get("best") or {}
-            best_name = (
-                best.get("name") if isinstance(best, dict) else None
+            best = r.get("best") if isinstance(r.get("best"), dict) else None
+            best_gain = best.get("gain_pct") if best else None
+            gain_tag = (
+                f" {best_gain:+.2f}%"
+                if isinstance(best_gain, (int, float)) else ""
             )
-            parts.append(
-                f"{r.get('round_id','?')}({r.get('action','?')}): "
-                f"winners={wn or []} best={best_name or '(none)'}"
+            base = float(r.get("base_tput", 0.0) or 0.0)
+            out.append(
+                f"    {r.get('round_id','?')} ({r.get('action','?')}): "
+                f"base_tput={base:.1f}  "
+                f"best={(best.get('name') if best else '(none)')}{gain_tag}"
             )
-        suffix = (
-            f" [+{len(self.backend_winners_history) - 3} earlier rounds]"
-            if len(self.backend_winners_history) > 3 else ""
-        )
-        return " | ".join(parts) + suffix
+            winners = [
+                w for w in (r.get("winners") or []) if isinstance(w, dict)
+            ]
+            if not winners:
+                out.append("      (no winners this round)")
+                continue
+            for w in winners:
+                out.append("      • " + SharedState._format_variant_line(w))
+        if len(self.backend_winners_history) > 5:
+            out.append(
+                f"    [+{len(self.backend_winners_history) - 5} "
+                f"earlier rounds elided]"
+            )
+        return "\n".join(out)
 
     def _format_params_search(self) -> str:
         return self._format_search_state(self.params_search)
@@ -1735,21 +1863,42 @@ class SharedState:
 
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:
-        """Compact one-liner for a *_search dedup ledger (prompt-friendly)."""
+        """Multi-line render of a ``*_search`` dedup ledger.
+
+        Each accepted/rejected entry surfaces its real ``gain_pct`` so the
+        LLM ranks retries by observed impact instead of guessing from
+        names alone. Counts go on the head line; bodies show only the
+        most recent 5 entries per bucket (older rows are still in the
+        ledger; only the prompt body is truncated).
+        """
         if not search:
             return "(none)"
-        accepted = search.get("accepted") or []
-        rejected = search.get("rejected") or []
+        accepted = list(search.get("accepted") or [])
+        rejected = list(search.get("rejected") or [])
         tested = search.get("tested") or {}
         cursor = search.get("cursor", 0)
-        acc_names = [
-            str(v.get("name", "")) for v in accepted
-            if isinstance(v, dict) and v.get("name")
+        out: list[str] = [
+            "",
+            f"    cursor={cursor}  accepted={len(accepted)}  "
+            f"rejected={len(rejected)}  tested={len(tested)}",
         ]
-        return (
-            f"accepted={acc_names or []} rejected={len(rejected)} "
-            f"tested={len(tested)} cursor={cursor}"
-        )
+        if accepted:
+            out.append("    accepted:")
+            for entry in accepted[-5:]:
+                if not isinstance(entry, dict):
+                    continue
+                out.append("      • " + SharedState._format_variant_line(
+                    SharedState._enrich_with_tested_gain(entry, tested)
+                ))
+        if rejected:
+            out.append("    rejected (last 5):")
+            for entry in rejected[-5:]:
+                if not isinstance(entry, dict):
+                    continue
+                out.append("      • " + SharedState._format_variant_line(
+                    entry
+                ))
+        return "\n".join(out)
 
     def _format_optimization_stack(self) -> str:
         if not self.optimization_stack:
@@ -1774,11 +1923,40 @@ class SharedState:
         reusable = list(
             self.last_select_kernels.get("reusable_native_kernel_ids", [])
         )
-        return (
+        base = (
             f"trace={self.last_select_kernels.get('trace_input','?')} "
             f"candidates_path={self.last_select_kernels.get('candidates_path','?')} "
             f"top={ids or []} reusable_native={reusable or []}"
         )
+        # T3 / T4 finishing-touches: when TraceLens emitted a routing
+        # signal (high GPU idle → prefer params; permanent failure →
+        # don't keep waiting on kernel candidates), surface it inline
+        # so the Orchestration LLM grounds the next ACTION on this
+        # signal rather than re-trying TraceLens or guessing why
+        # ``top=[]``. We render compactly:
+        #   warnings=[high_gpu_idle_pct(idle=35.0%,threshold=20.0%); …]
+        # and omit the suffix entirely in the steady-state (no
+        # warnings) so existing prompt-format-stable tests don't see
+        # gratuitous additions.
+        warnings = self.last_select_kernels.get("trace_health_warnings") or []
+        if not warnings:
+            return base
+        rendered: list[str] = []
+        for w in warnings:
+            if not isinstance(w, dict):
+                continue
+            code = str(w.get("code") or "unknown")
+            extras: list[str] = []
+            if "idle_pct" in w and "threshold_pct" in w:
+                extras.append(f"idle={w['idle_pct']}%")
+                extras.append(f"threshold={w['threshold_pct']}%")
+            if "returncode" in w:
+                extras.append(f"rc={w['returncode']}")
+            if extras:
+                rendered.append(f"{code}({','.join(extras)})")
+            else:
+                rendered.append(code)
+        return f"{base} warnings=[{'; '.join(rendered)}]"
 
     def _format_last_sweep(self) -> str:
         if not self.last_sweep:
