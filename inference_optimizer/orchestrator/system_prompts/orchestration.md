@@ -70,6 +70,72 @@ on the next tick.
   Coordinator (PolicyGate does not hard-block today; consistent violations
   show up as `score_violation` in resume diagnostics).
 
+### Roofline-v2 action ordering (HARD RULES — PolicyGate enforced)
+
+Optimisation is staged. The order is **NOT** a preference — PolicyGate
+hard-rejects out-of-order proposals.
+
+1. **baseline** (mandatory first measurement).
+2. **roofline** (composite action: profile + trace_analyze). Required
+   prerequisite for every optimisation action below.
+3. **Cheap exploration**, in any order you want:
+   * `params` (CUDA graph / torch_compile / decode steps / etc.)
+   * `backends` (attention backend / sampling / MoE a2a / etc.)
+   * `comm_optimization` (when `analysis.md` flags comm-bound)
+4. **`roofline` again** (REQUIRED after a round of cheap exploration).
+   The previous snapshot reflects the **baseline** kernel
+   distribution. After CUDA graph capture / torch_compile / different
+   attention backend, the kernel-level top operations change
+   completely — `fmoe_fp8_blockscale_g1u1` may no longer be top,
+   `aiter::fmha_v3_varlen_fwd` may be replaced by a fused variant,
+   etc. **Do not propose `kernel_opt` until you have a fresh
+   snapshot.** PolicyGate rejects
+   `request{kind="run_optimization"}` when `snapshot_id < 2` OR
+   `backends_attempts < 1` OR `params_attempts < 1`
+   (`INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1` overrides).
+5. **`kernel_opt`** (deep, expensive — operates on the **post-cheap**
+   kernel distribution). Use the kernel names from snapshot ≥2's
+   `analysis.md` Top Operations, NOT snapshot #1's.
+
+Why this ordering: backend/param changes shift the kernel
+distribution. The 🔴 P1 in snapshot #1 might be a kernel that's no
+longer in the top-10 of snapshot #2. Running `kernel_opt` against
+snapshot #1's hot kernel after enabling CUDA graph is roughly
+equivalent to optimising a function that's not on the new critical
+path.
+
+### Roofline-v2 analysis.md → action mapping (HARD RULES)
+
+The TraceLens `analysis.md` injected below uses 🔴 (P1, critical) /
+🟡 (P2, secondary) / 🟢 (P1/P2, opportunity) markers. **You MUST
+follow them**:
+
+* **🔴 / 🟡 markers under `## Compute Kernel Optimizations`** →
+  these are the kernels that need `kernel_opt`. Each entry names a
+  specific kernel (e.g. `aiter::fmoe_fp8_blockscale_g1u1`) and
+  rationale (e.g. "29.69% of FP8 matrix peak"). Once the ordering
+  rule (above) allows kernel_opt, emit
+  `request{target_agent='kernel', kind='run_optimization',
+  params={kernel_id: <id from snapshot.candidates>, target_kernel: <name>}}`
+  for the highest-priority entry (🔴 before 🟡).
+* **🔴 / 🟢 markers under `## Kernel Fusion Opportunities`** →
+  same kernel_opt path, but ask the kernel agent for a fused
+  rewrite (e.g. AllReduce + Add + RMSNorm fusion = 115 ms savings).
+  Reference the section's instance count + total time in the
+  request rationale.
+* **🔴 / 🟡 markers under `## System-Level Optimizations`** → these
+  map to `params` / `backends` flags. The section text usually
+  names the flag explicitly (e.g. "graph capture" → `--cuda-graph-max-bs`).
+  Cross-check against `discovered_flags` and pick an `[untested]`
+  flag that targets the bottleneck.
+* **"GPU idle %" > 30%** → idle-bound; prioritise scheduling /
+  speculative decoding / graph-capture flags in your next
+  `params` propose.
+* **"Exposed Communication %" > 10%** → comm-bound; propose
+  `comm_optimization` (a dedicated action). Do NOT just guess at
+  `--moe-a2a-backend` flag values — `comm_optimization` is the
+  right surface.
+
 ### How to consume the TraceLens Analysis
 
 When `roofline` has run at least once, the prompt's SharedState dump
