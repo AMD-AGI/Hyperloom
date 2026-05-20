@@ -131,16 +131,36 @@ class SharedState:
     # records the incremental candidate that was accepted; current_best keeps
     # the materialized full args/env for execution.
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
-    # Parallel to ``optimization_stack``: per-entry incremental gain in
-    # percent (current_best vs. baseline at the moment that stack entry
-    # was promoted). Index ``i`` here aligns with index ``i`` in
-    # ``optimization_stack``. session_breakdown's capability_summary uses
-    # this to attribute "how much of the validated cumulative gain came
-    # from this action / capability" without re-walking the event log.
-    # Coordinator appends to this list at the same time it appends to
-    # ``optimization_stack`` (see ``_lift_to_current_best``); missing
-    # entries (e.g. on resumed sessions) are treated as ``None``.
-    gain_per_stack_entry: list[float | None] = field(default_factory=list)
+    # Parallel ledger to ``optimization_stack``: one rich entry per KEEP
+    # event with both the cumulative gain (vs baseline) AT the moment the
+    # entry was promoted AND the incremental contribution this entry alone
+    # added (``delta_pct = cum_gain_after - cum_gain_after_of_prev``).
+    # Index ``i`` aligns with index ``i`` in ``optimization_stack``.
+    #
+    # Each entry conforms to ``breakdown.schema.StackGainEntry``::
+    #     {
+    #       "ts": iso8601,
+    #       "action": "params" | "backends" | "integrate" | "validate_stack",
+    #       "variant_name": str | None,
+    #       "stack_len_before": int,
+    #       "stack_len_after": int,
+    #       "cum_gain_before": float,
+    #       "cum_gain_after": float | None,
+    #       "delta_pct": float | None,        # None on resumed/seeded entries
+    #       "extra_sglang_args": str,
+    #     }
+    #
+    # Coordinator appends here at the same time it appends to
+    # ``optimization_stack`` via :meth:`append_stack_gain_entry`; the
+    # helper computes cum_gain_after + delta_pct from
+    # ``self.baseline_tput`` and the previous entry's ``cum_gain_after``
+    # so call sites only pass action / variant_name / new_tput.
+    #
+    # Pre-v0.7 sessions wrote ``list[float | None]`` (the cum_gain_after
+    # number only); ``breakdown/collectors.py:collect_attribution`` has a
+    # promotion shim that lifts the old shape into this rich one when it
+    # detects non-dict entries.
+    gain_per_stack_entry: list[dict[str, Any]] = field(default_factory=list)
     cumulative_gain: float = 0.0
     # Cumulative gain measured by the `validate_stack` action — i.e. by
     # actually re-baselining a fresh server with EVERY KEEP'd entry of
@@ -1497,12 +1517,88 @@ class SharedState:
             "workspace": self.current_best.get("workspace"),
             "source": "seeded_from_current_best",
         }]
-        # Keep ``gain_per_stack_entry`` aligned with ``optimization_stack``
-        # (None == we don't know the per-entry gain for seeded entries).
+        # Keep ``gain_per_stack_entry`` aligned with ``optimization_stack``.
+        # Seeded entries carry ``cum_gain_after = delta_pct = None`` so
+        # ``breakdown.attribution.method`` correctly classifies as
+        # ``reconstructed`` rather than ``validated``.
         if len(self.gain_per_stack_entry) < len(self.optimization_stack):
-            self.gain_per_stack_entry.extend(
-                [None] * (len(self.optimization_stack) - len(self.gain_per_stack_entry))
-            )
+            for i in range(len(self.gain_per_stack_entry), len(self.optimization_stack)):
+                stk = self.optimization_stack[i] if i < len(self.optimization_stack) else {}
+                if not isinstance(stk, dict):
+                    stk = {}
+                self.gain_per_stack_entry.append({
+                    "ts": stk.get("ts") or "",
+                    "action": stk.get("action") or "unknown",
+                    "variant_name": stk.get("variant_name"),
+                    "stack_len_before": i,
+                    "stack_len_after": i + 1,
+                    "cum_gain_before": None,
+                    "cum_gain_after": None,
+                    "delta_pct": None,
+                    "extra_sglang_args": (
+                        stk.get("extra_sglang_args")
+                        or stk.get("candidate_extra_sglang_args")
+                        or ""
+                    ),
+                })
+
+    def append_stack_gain_entry(
+        self,
+        *,
+        action: str,
+        variant_name: str | None,
+        new_tput: float | int | None,
+        extra_sglang_args: str = "",
+        ts: str | None = None,
+    ) -> None:
+        """Append one V1-schema :class:`StackGainEntry` aligned with the
+        last ``optimization_stack`` push.
+
+        Computes ``cum_gain_after = (new_tput - baseline_tput) / baseline_tput * 100``
+        and ``delta_pct = cum_gain_after - prev_cum_gain_after`` so call
+        sites only need to pass action / variant_name / new_tput. Falls
+        back to ``None`` (for both cum_gain_after and delta_pct) when
+        ``baseline_tput`` is missing or ``new_tput`` isn't a finite
+        number; the entry is still emitted so index-alignment with
+        ``optimization_stack`` is preserved.
+        """
+        cum_after: float | None = None
+        try:
+            bt = float(self.baseline_tput or 0.0)
+            nt = float(new_tput) if new_tput is not None else None
+            if bt > 0 and nt is not None:
+                cum_after = (nt - bt) / bt * 100.0
+        except (TypeError, ValueError):
+            cum_after = None
+
+        # Find the previous entry's cum_gain_after to compute this entry's
+        # incremental delta. Skip seeded / unknown entries (cum_after=None).
+        prev_cum: float = 0.0
+        for prev in reversed(self.gain_per_stack_entry):
+            if not isinstance(prev, dict):
+                # legacy [float, ...] state: treat the number itself as
+                # the prior cum_gain_after.
+                if isinstance(prev, (int, float)):
+                    prev_cum = float(prev)
+                break
+            prior = prev.get("cum_gain_after")
+            if isinstance(prior, (int, float)):
+                prev_cum = float(prior)
+                break
+
+        delta = (cum_after - prev_cum) if cum_after is not None else None
+        stack_len_after = len(self.optimization_stack)
+        self.gain_per_stack_entry.append({
+            "ts": ts or datetime.now(timezone.utc).isoformat(),
+            "action": action,
+            "variant_name": variant_name,
+            "stack_len_before": stack_len_after - 1,
+            "stack_len_after": stack_len_after,
+            "cum_gain_before": prev_cum,
+            "cum_gain_after": cum_after,
+            "delta_pct": delta,
+            "extra_sglang_args": extra_sglang_args,
+        })
 
     # ------------------------------------------------------------------
     # Time-budget helpers (Phase 2 — consumed by Coordinator._compose_prompt)
