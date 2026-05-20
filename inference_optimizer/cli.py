@@ -1220,6 +1220,82 @@ def _load_dotenv_fallback() -> None:
         print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
 
 
+def _load_kernel_agent_env_fallback() -> None:
+    """If ``HYPERLOOM_KERNEL_AGENT_ROOT`` is unset, auto-source the
+    kernel-agent env file produced by ``inference_optimizer/scripts/
+    install.sh`` (default location ``$USER_DATA_PATH/runtime/
+    kernel-agent.env.sh``, overridable via ``$KERNEL_AGENT_ENV``).
+
+    Background: the May 2026 R1 N14 run stalled for 1h 12min because
+    the launcher only sourced the user's basic ``.env`` (3 vars) and
+    missed kernel-agent.env.sh. ``RooflineExecutor``'s trace_analyze
+    sub-step imports
+    ``kernel_request_handlers.HYPERLOOM_KERNEL_AGENT_ROOT`` at module
+    load — that read happens before any user code can fix the env, so
+    the only way to recover without a restart is to source the file
+    here, before any orchestrator import. Setting the env in this
+    process also propagates to all subprocesses launched by Magpie /
+    TraceLens / GEAK runners.
+
+    The function is best-effort: missing file or unparseable lines do
+    NOT abort preflight; they're WARN-only so a barebones dev sandbox
+    (no install.sh yet) can still boot. Env always wins over file.
+    """
+    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
+        return
+    candidate = os.environ.get("KERNEL_AGENT_ENV")
+    if not candidate:
+        user_data = os.environ.get("USER_DATA_PATH")
+        if user_data:
+            candidate = str(Path(user_data) / "runtime" / "kernel-agent.env.sh")
+    if not candidate:
+        return
+    env_path = Path(candidate)
+    if not env_path.is_file():
+        print(
+            f"Preflight: kernel-agent env file not found at {env_path}; "
+            "trace_analyze will fail until inference_optimizer/scripts/"
+            "install.sh has been run"
+        )
+        return
+    loaded = 0
+    try:
+        text = env_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"Preflight: WARNING — failed to read {env_path}: {exc}")
+        return
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key not in os.environ:
+            os.environ[key] = value
+            loaded += 1
+    if loaded:
+        print(
+            f"Preflight: loaded {loaded} kernel-agent var(s) from "
+            f"{env_path} (env wins, HYPERLOOM_KERNEL_AGENT_ROOT="
+            f"{os.environ.get('HYPERLOOM_KERNEL_AGENT_ROOT', '<still unset>')})"
+        )
+    elif "HYPERLOOM_KERNEL_AGENT_ROOT" not in os.environ:
+        print(
+            f"Preflight: WARNING — {env_path} parsed 0 vars and "
+            "HYPERLOOM_KERNEL_AGENT_ROOT is still unset; re-run "
+            "inference_optimizer/scripts/install.sh"
+        )
+
+
 def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
     """Install Python SDKs that ``inference_optimizer`` imports at runtime.
 
@@ -1870,6 +1946,7 @@ def _preflight(
     (``_run_optimize``) can route the catalog probe through the proxy.
     """
     _load_dotenv_fallback()
+    _load_kernel_agent_env_fallback()
 
     # --- Auth alias export ---
     safe_key = os.environ.get("SAFE_API_KEY", "")
