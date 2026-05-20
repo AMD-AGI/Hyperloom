@@ -45,15 +45,19 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     "deep_kernel_analysis": "deep_kernel",
     "operator_tuning":      "deep_kernel",
     "vendor_kernel_config": "deep_kernel",
-    # long (2)
-    "comm_optimization":    "long",
-    "compiler_tuning":      "long",
-    # creative (2)
-    "dream":                "creative",
-    "re_explore":           "creative",
     # resilience (1)
     "recover":              "resilience",
 }
+
+# v0.8 KB_gaps/Gap-13 — actions removed in KB_design §3.15 §2.3 (the
+# specialist sub-agent framework replaces them). Locked here so a
+# future re-introduction of one of these yamls is loud.
+_REMOVED_LEGACY_ACTIONS: tuple[str, ...] = (
+    "comm_optimization",
+    "compiler_tuning",
+    "dream",
+    "re_explore",
+)
 
 
 @pytest.fixture
@@ -99,11 +103,17 @@ def test_recover_owned_by_robustness_handle(registry):
     assert m.family == "resilience"
 
 
-def test_dream_zero_gain_creative(registry):
-    m = registry.get("dream")
-    assert m is not None
-    assert m.family == "creative"
-    assert m.expected_gain_pct == (0.0, 0.0)
+@pytest.mark.parametrize("name", _REMOVED_LEGACY_ACTIONS)
+def test_removed_legacy_actions_not_in_registry(registry, name):
+    """v0.8 KB_gaps/Gap-13 — KB_design §3.15 §2.3 retired
+    ``dream`` / ``re_explore`` / ``comm_optimization`` /
+    ``compiler_tuning`` in favour of specialist sub-agents.
+    The yaml meta files were deleted; a regression that re-adds
+    one of them must fail loudly here before it can leak into the
+    Orchestration prompt catalogue."""
+    assert registry.get(name) is None, (
+        f"{name!r} is removed in v0.8; restore via specialist domain instead"
+    )
 
 
 def test_every_action_has_valid_family(registry):
