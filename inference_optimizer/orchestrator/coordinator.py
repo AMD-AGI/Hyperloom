@@ -333,6 +333,16 @@ class Coordinator:
             )
         except ValueError:
             self._specialist_stale_sec = 600.0
+        # KB_gaps/Gap-15 (KB_design §3.14 R-09) — opt-out switch for
+        # the legacy ``params_no_promote_streak`` plateau proxy.
+        # When set, ``compute_next_phase`` skips the m2_proxy branch
+        # entirely; v0.6 resume sessions without v0.8 signals fall
+        # through to the wall-clock budget exhaustion exit.
+        self._legacy_plateau_proxy_disabled: bool = (
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY", "",
+            ).strip().lower() in ("1", "true", "yes")
+        )
         # External-SKILL-driven configuration. Both replace the deleted
         # `setup` / `classify` orchestration actions: the SKILL caller is
         # expected to supply --model-class (or MODEL_CLASS env) and
@@ -863,6 +873,7 @@ class Coordinator:
             state,
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
+            disable_legacy_proxy=self._legacy_plateau_proxy_disabled,
         )
         if next_phase is None:
             return
