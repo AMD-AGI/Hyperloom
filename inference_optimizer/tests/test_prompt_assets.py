@@ -190,8 +190,11 @@ def test_build_is_deterministic(registry):
     assert a == b
 
 
-def test_build_includes_validate_stack_in_both_modes(registry):
-    """validate_stack must be advertised in both kernel-on and no-kernel runs."""
+def test_build_includes_explore_action_in_both_modes(registry):
+    """v0.8 M3 + KB_gaps/Gap-10: ``explore`` is the canonical
+    grid-runner advertised in both kernel-on and no-kernel runs.
+    The v0.6 standalone ``validate_stack`` action / phase header
+    has been retired (the rebench is inlined into ``explore``)."""
     for no_kernel in (False, True):
         text = _build_orchestration_prompt(
             no_kernel=no_kernel,
@@ -200,10 +203,13 @@ def test_build_includes_validate_stack_in_both_modes(registry):
             max_minutes=60,
             action_registry=registry,
         )
-        assert "validate_stack" in text, (
-            f"validate_stack missing in prompt (no_kernel={no_kernel})"
+        assert "explore" in text, (
+            f"explore missing in prompt (no_kernel={no_kernel})"
         )
-        assert "### validate" in text, (
-            f"validate phase header missing (no_kernel={no_kernel})"
+        # The deprecated ``validate_stack`` action must not appear as
+        # an enabled catalogue entry — only as historical / DEPRECATED
+        # tag references inside the v0.8 transition explainer.
+        assert "### validate" not in text, (
+            f"unexpected validate phase header (no_kernel={no_kernel})"
         )
 
