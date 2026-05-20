@@ -76,6 +76,30 @@ warm_start 写到 SharedState。
 3. `baseline` (现有, 不动)。
 4. 若 baseline 成功且 `baseline_tput > 0` → 触发退出。
 
+**T0 位置约定 (v0.8 KB_gaps/Gap-12 — 落地)**:
+
+T0 在 session boot 时跑, 而不是在 Coordinator reactor 的第一次 tick
+内. 两条入口都通过同一个 helper
+(`inference_optimizer.orchestrator.cortex_t0.run_t0_anchor`) 跑同样的
+4 步, 区别仅在失败语义:
+
+| 入口 | 触发时机 | 失败语义 | banner 输出 |
+|---|---|---|---|
+| **CLI** (canonical, `cli._bootstrap_cortex_kb`) | `Coordinator(...)` 构造**前**, 在 `_seed_shared_state` 之后 | fail-fast (`sys.exit(2)`) — 操作员立即看到 Cortex 故障 | `print(...)` 到 stdout, 操作员可见 boot banner |
+| **Coordinator fallback** (`Coordinator._ensure_cortex_t0_anchored`) | `Coordinator.__init__` 内, `_ensure_phase_initialised` **之后** | fail-soft (warning + 空 warm_start) — 长时 reactor 不会因 Cortex 故障崩 | `log.info` 写 session 日志, 不污染 stdout |
+
+Coordinator fallback 仅在以下条件**全部满足**时实际跑:
+
+- `cortex_kb` 非 None (构造时传入了 client)
+- `cortex_kb.enabled` (非 `--no-cortex`)
+- `shared_state.cortex_session_id` 为空 (CLI 没 T0 过, resume 也没
+  pick 到 sid)
+
+设计意图: CLI 路径是**生产**入口, fail-fast 保留. Coordinator
+fallback 服务于 SDK / 集成测 / 直接构造 `Coordinator(...)` 的场景,
+保证 warm_start 字段不会因为绕过 CLI 而永空 (此前 KB_gaps/Gap-12
+描述的 P2 表现).
+
 **退出条件 (任一即转 EXPLORE)**:
 
 - `baseline_tput > 0 ∧ stop_reason == None` → 正常退出, reason =
