@@ -50,7 +50,7 @@ from inference_optimizer.storage import SqliteConnection
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
-    monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", kernel_agent_root)
+    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     return make_session_dir()
 
 
@@ -1380,7 +1380,9 @@ async def test_select_kernels_handler_missing_trace_input(session_dir):
 
 @pytest.mark.asyncio
 async def test_select_kernels_handler_requires_kernel_agent_root(session_dir, monkeypatch):
-    monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", None)
+    # N15 made HYPERLOOM_KERNEL_AGENT_ROOT a lazy env read; delenv is
+    # the correct way to exercise the "not configured" branch.
+    monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
     res = await krh.select_kernels_handler(
         {"trace_input": str(session_dir)},
         session_dir=session_dir,
