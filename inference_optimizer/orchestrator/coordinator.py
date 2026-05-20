@@ -1182,22 +1182,28 @@ class Coordinator:
     def _required_next_step(self) -> str:
         """Return the coordinator-enforced next step, or empty if flexible.
 
-        The Orchestration prompt says baseline -> profile -> select_kernels,
-        but the LLM can still skip to backends/params. This guard makes that
-        sequence deterministic and visible in the prompt every tick.
+        The Orchestration prompt says baseline -> profile -> analyze ->
+        kernel_opt -> integrate -> validate_stack, but the LLM can still
+        skip ahead. This guard makes that sequence deterministic and
+        visible in the prompt every tick.
 
-        Pipeline (after the deletion of the in-loop ``setup`` / ``classify``
-        actions, the deletion of the PMC hard-gate, and the deletion of
-        the action-layer ``select_kernels`` hard-gate — ``select_kernels``
-        is now only enforced as a prerequisite for ``run_optimization``
-        REQUESTs at the request layer, never for explore actions like
-        ``params`` / ``backends`` / ``sweep`` / ``report``):
+        Pipeline (the ``analyze`` step sits between profile and integrate
+        so the TraceLens ``analysis.md`` contract is honored before
+        kernel_opt fires. The TODO is purely guidance —
+        `_sequence_denial_for_action` still does NOT block explore actions
+        (params/backends/sweep) on a stale `last_select_kernels` cache;
+        that demoted gate stays demoted. Only
+        `_sequence_denial_for_request` enforces it for `run_optimization`
+        REQUESTs, as before):
 
             TODO 0  target_analysis  (only when --compare-against-gpu set)
             TODO 1  baseline
             TODO 2  profile          (kernel mode only)
-            TODO 3  integrate        (kernel mode only, after kernel_opt KEEP)
-            TODO 4  validate_stack   (when unvalidated KEEPs landed)
+            TODO 3  analyze          (kernel mode only, when
+                                      last_profile_trace is fresh but
+                                      last_select_kernels is stale)
+            TODO 4  integrate        (kernel mode only, after kernel_opt KEEP)
+            TODO 5  validate_stack   (when unvalidated KEEPs landed)
 
         ``validate_stack`` precedence is critical: once at least one KEEP
         has been added to ``optimization_stack`` since the last successful
@@ -1210,7 +1216,7 @@ class Coordinator:
         if not self._target_analysis_baseline_exists():
             if self._compare_against_gpu:
                 return (
-                    f"TODO 0/4: target_analysis is required now. "
+                    f"TODO 0/5: target_analysis is required now. "
                     f"--compare-against-gpu="
                     f"{self._compare_against_gpu!r} was set but "
                     "$SESSION_DIR/target_analysis/target_baseline.json is "
@@ -1218,7 +1224,7 @@ class Coordinator:
                     "the external InferenceX reference has been fetched."
                 )
             return (
-                "TODO 0/4: target_analysis is required now. "
+                "TODO 0/5: target_analysis is required now. "
                 "$SESSION_DIR/target_analysis/target_baseline.json is "
                 "missing; propose/delegate only `target_analysis` so a "
                 "reason='no_target_gpu_configured' marker JSON is written "
@@ -1227,31 +1233,54 @@ class Coordinator:
             )
         if self.shared_state.baseline_tput <= 0:
             return (
-                "TODO 1/4: baseline is required now. Propose/delegate only "
+                "TODO 1/5: baseline is required now. Propose/delegate only "
                 "`baseline` until baseline_tput > 0."
             )
-        # Profile / integrate guards only apply when the kernel agent is
-        # alive — no-kernel runs have no way to service the request and
-        # the mandate would be meaningless. Two related gates are NOT
-        # surfaced here:
+        # Profile / analyze / integrate guards only apply when the kernel
+        # agent is alive — no-kernel runs have no way to service the
+        # request and the mandate would be meaningless. Two related
+        # gates are NOT surfaced here:
         # * ``pmc_roofline`` is opt-in advisory enrichment for
         #   ``kernel_opt`` via ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1`` and
         #   never a prerequisite for any other action.
         # * ``select_kernels`` is a prerequisite ONLY for ``run_optimization``
-        #   REQUESTs (enforced in ``_sequence_denial_for_request``); it is
-        #   NOT a prerequisite for ``params`` / ``backends`` / ``sweep`` /
-        #   ``report``.
+        #   REQUESTs (enforced in ``_sequence_denial_for_request``); the
+        #   action-layer hard-gate stays demoted (explore actions are not
+        #   blocked).
         if "kernel" in self.role_registry:
             if not self.shared_state.last_profile_trace:
                 return (
-                    "TODO 2/4: profile is required now. Baseline exists but "
+                    "TODO 2/5: profile is required now. Baseline exists but "
                     "last_profile_trace is empty; propose/delegate only `profile`. "
                     "Do not run backends/params/sweep yet."
+                )
+            # analysis.md contract: require `select_kernels` to have
+            # run against the current trace so analysis.md exists on disk
+            # before any kernel_opt / integrate cycle can fire.  Guidance
+            # only -- explore actions (params/backends/sweep/report) are
+            # not blocked; only run_optimization is hard-gated on the
+            # same cache by `_sequence_denial_for_request`.
+            cached = self.shared_state.last_select_kernels or {}
+            current_trace = self.shared_state.last_profile_trace
+            cache_matches_trace = (
+                isinstance(cached, dict)
+                and cached.get("trace_input") == current_trace
+            )
+            if not cache_matches_trace:
+                return (
+                    "TODO 3/5: analyze is required now. last_profile_trace "
+                    f"={current_trace!r} but last_select_kernels is "
+                    "empty/stale; TraceLens has not yet produced "
+                    "analysis.md for this trace. Emit "
+                    "request{target_agent='kernel', kind='select_kernels', "
+                    "params={trace_input: <last_profile_trace>, top_k: 10}}. "
+                    "Do NOT propose kernel_opt / run_optimization / "
+                    "integrate until this cache populates."
                 )
             pending_kid = self._kernel_opt_keep_pending()
             if pending_kid:
                 return (
-                    f"TODO 3/4: integrate is required now. kernel_opt "
+                    f"TODO 4/5: integrate is required now. kernel_opt "
                     f"returned KEEP for kernel_id={pending_kid!r} but the "
                     "patch has not been integrated into optimization_stack. "
                     "Emit request{target_agent='kernel', kind='integrate', "
@@ -1262,7 +1291,7 @@ class Coordinator:
                 )
         if self.shared_state.optimization_stack_has_unvalidated_keeps():
             return (
-                "TODO 4/4: validate_stack required. New KEEP'd entries have "
+                "TODO 5/5: validate_stack required. New KEEP'd entries have "
                 "landed on optimization_stack since the last validate_stack run "
                 f"(stack_len={len(self.shared_state.optimization_stack)}, "
                 f"validated_at_len="
@@ -1271,6 +1300,40 @@ class Coordinator:
                 "cumulative_gain_validated reflects the current stack. "
                 "Per-round gains do NOT compose linearly — the final report "
                 "quotes the validated number, so this is the only honest gain."
+            )
+        # TODO 5/5 (current_best path): params/backends can advance
+        # ``current_best.tput`` without populating ``optimization_stack``
+        # (e.g. when the executor's best_variant lacks an explicit
+        # variant_name + candidate_args pair, the lift updates tput but
+        # appends nothing to the stack). The final report otherwise
+        # reads ``cumulative_gain_validated=0.0%`` with no validation on
+        # record. Surface a guidance TODO once the per-round gain crosses
+        # a small but meaningful threshold so Orchestration can fire one
+        # validate_stack and put an honest number into the report.
+        # Guidance only — no PolicyGate denial (the explore loop is not
+        # locked) since opt_stack-based unvalidated-KEEP detection still
+        # owns that.
+        _CB_VALIDATE_THRESHOLD_PCT = 0.5
+        cum_gain = float(self.shared_state.cumulative_gain or 0.0)
+        already_validated = bool(
+            self.shared_state.cumulative_gain_validated_ts
+        )
+        if (
+            cum_gain >= _CB_VALIDATE_THRESHOLD_PCT
+            and not self.shared_state.optimization_stack
+            and not already_validated
+        ):
+            cb_action = (self.shared_state.current_best or {}).get(
+                "action", "?",
+            )
+            return (
+                f"TODO 5/5: validate_stack recommended. current_best "
+                f"advanced to +{cum_gain:.2f}% via "
+                f"{cb_action!r} but optimization_stack is empty (no "
+                "kernel-opt KEEPs landed). Emit `validate_stack` so "
+                "cumulative_gain_validated reflects the current "
+                "configuration end-to-end before the final report. "
+                "Guidance only — explore actions remain unlocked."
             )
         return ""
 
