@@ -329,11 +329,14 @@ def test_integrate_gate_clears_when_already_in_optimization_stack(session_dir):
         {"action": "integrate", "kernel_id": "k-rmsnorm"},
     ]
     assert coord._kernel_opt_keep_pending() == ""
-    # The integrate entry counts as an unvalidated KEEP -> validate_stack
-    # gate fires next, not integrate.
+    # The integrate entry counts as an unvalidated KEEP -> the
+    # stack-rebench gate fires next, not integrate. v0.8 M3 +
+    # KB_gaps/Gap-10: the rebench is inlined into ``explore``; the
+    # TODO surfaces with that wording instead of the deprecated
+    # ``validate_stack``.
     todo = coord._required_next_step()
     assert "integrate is required now" not in todo
-    assert "validate_stack required" in todo
+    assert "stack rebench required" in todo
 
 
 def test_integrate_gate_clears_when_kernel_already_rejected(session_dir):

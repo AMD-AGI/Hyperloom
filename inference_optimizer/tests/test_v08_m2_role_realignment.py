@@ -130,8 +130,11 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     assert "elapsed_sec=120" in out
     # 60 min × 60s × 0.5 = 1800s cap; elapsed 120s → 1680s remaining.
     assert "remaining_sec=1680" in out
-    # Allowed actions for EXPLORE include backends/params/validate_stack.
-    assert "backends" in out and "params" in out
+    # v0.8 M3 + KB_gaps/Gap-10 — EXPLORE allowlist now only carries
+    # the merged ``explore`` action plus ``specialist`` and ``recover``.
+    # The legacy backends/params/validate_stack are closed at the
+    # PolicyGate boundary with ``rule='action_deprecated'``.
+    assert "explore" in out and "specialist" in out
 
 
 def test_shared_state_phase_status_summary_no_max_minutes_marks_unlimited():
