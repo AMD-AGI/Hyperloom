@@ -42,22 +42,46 @@ _MN_POD_BACKUP_DIR_DEFAULT = "/var/kernel_patch_backups"
 # Presence of ``nodes >= 2`` is the multi-node signal used to decide
 # whether apply_kernel_patch.py should fan-out the patch to RayJob pods
 # via the multi_node CLI in addition to writing the sandbox-local copy.
-_MN_STATE_FILE = Path("/tmp/multi_node_state.json")
+#
+# Resolution mirrors ``inference_optimizer.orchestrator.action_executors
+# ._multi_node_env._state_path``: ``$MULTI_NODE_STATE_FILE`` wins,
+# default ``/tmp/multi_node_state.json``. Honouring the env var keeps
+# test runs isolated — pytest can point this at a non-existent path
+# so the fan-out branch is never taken, even on a sandbox whose
+# hardcoded ``/tmp`` file is left over from a prior real multi-node
+# session (without this override, an active inference_optimizer's
+# ``/tmp/multi_node_state.json`` would silently turn ``test_p2_4``
+# integrate fixtures into multi-node fan-out attempts that
+# mock-mismatch ``subprocess.run``).
+_MN_STATE_FILE_DEFAULT = "/tmp/multi_node_state.json"
+
+
+def _mn_state_path() -> Path:
+    """Resolve where ``inference_optimizer.multi_node`` dropped its state."""
+    return Path(os.environ.get("MULTI_NODE_STATE_FILE", _MN_STATE_FILE_DEFAULT))
+
+
+# Legacy module attribute. Kept for any caller / test that imports
+# ``_MN_STATE_FILE`` directly; runtime checks go through
+# :func:`_mn_state_path` so each call re-resolves the env override.
+_MN_STATE_FILE = Path(_MN_STATE_FILE_DEFAULT)
 
 
 def _is_multi_node() -> bool:
     """True iff a multi-node RayJob is active (nodes >= 2).
 
-    Reads ``/tmp/multi_node_state.json`` (the same checkpoint
-    inference_optimizer.multi_node.cli writes after create-rayjob).
-    Missing file / unreadable / nodes < 2 → False, so single-node and
-    standalone CLI use of this tool keep their pre-multinode behaviour
-    bit-for-bit.
+    Reads ``$MULTI_NODE_STATE_FILE`` (default
+    ``/tmp/multi_node_state.json``) — the same checkpoint
+    ``inference_optimizer.multi_node.cli`` writes after
+    ``create-rayjob``. Missing file / unreadable / ``nodes < 2`` →
+    ``False``, so single-node and standalone CLI use of this tool
+    keep their pre-multinode behaviour bit-for-bit.
     """
+    state_path = _mn_state_path()
     try:
-        if not _MN_STATE_FILE.is_file():
+        if not state_path.is_file():
             return False
-        data = json.loads(_MN_STATE_FILE.read_text(encoding="utf-8"))
+        data = json.loads(state_path.read_text(encoding="utf-8"))
         return int(data.get("nodes") or 0) >= 2
     except (OSError, ValueError):
         return False
