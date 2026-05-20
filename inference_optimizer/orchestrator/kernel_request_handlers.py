@@ -51,12 +51,31 @@ log = logging.getLogger(__name__)
 
 # Where Hyperloom/kernel-agent's shell tools live. Env is set by
 # inference_optimizer/scripts/install.sh -> pod-local kernel-agent env.
+#
+# Why lazy: in May 2026 the R1 N14 GPU run stalled for 1h 12min because
+# this module was imported BEFORE the cli preflight had a chance to
+# source $USER_DATA_PATH/runtime/kernel-agent.env.sh (the launcher only
+# pre-sourced the user-level .env with 3 vars). A frozen module-level
+# snapshot meant HYPERLOOM_KERNEL_AGENT_ROOT was permanently None even
+# after preflight injected it into os.environ. Reading via a function
+# at each call site lets cli.py's late env injection win; the snapshot
+# constant is preserved (re-exported below) for backward compat.
 _KERNEL_AGENT_ROOT_ENV = "HYPERLOOM_KERNEL_AGENT_ROOT"
-HYPERLOOM_KERNEL_AGENT_ROOT = (
-    Path(os.environ[_KERNEL_AGENT_ROOT_ENV])
-    if os.environ.get(_KERNEL_AGENT_ROOT_ENV)
-    else None
-)
+
+
+def _kernel_agent_root_from_env() -> Path | None:
+    raw = os.environ.get(_KERNEL_AGENT_ROOT_ENV)
+    if not raw:
+        return None
+    return Path(raw)
+
+
+# Backward-compat re-export (NOT used by internal logic — kept as a
+# module-level alias for any external caller still doing `from
+# kernel_request_handlers import HYPERLOOM_KERNEL_AGENT_ROOT`).
+# Internal logic must use `_kernel_agent_root_from_env()` so a late
+# env injection still wins.
+HYPERLOOM_KERNEL_AGENT_ROOT = _kernel_agent_root_from_env()
 
 
 HandlerResult = dict[str, Any]
@@ -122,14 +141,15 @@ _SENSITIVE_ENV_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
 
 def _kernel_agent_root_error() -> str | None:
-    if HYPERLOOM_KERNEL_AGENT_ROOT is None:
+    root = _kernel_agent_root_from_env()
+    if root is None:
         return (
             f"{_KERNEL_AGENT_ROOT_ENV} is not set; run "
             "inference_optimizer/scripts/install.sh and source $KERNEL_AGENT_ENV "
             "(default: $USER_DATA_PATH/runtime/kernel-agent.env.sh)"
         )
-    if not HYPERLOOM_KERNEL_AGENT_ROOT.is_dir():
-        return f"{_KERNEL_AGENT_ROOT_ENV} does not exist: {HYPERLOOM_KERNEL_AGENT_ROOT}"
+    if not root.is_dir():
+        return f"{_KERNEL_AGENT_ROOT_ENV} does not exist: {root}"
     return None
 
 
@@ -137,8 +157,9 @@ def _kernel_agent_tool_path(tool_name: str) -> Path:
     err = _kernel_agent_root_error()
     if err:
         raise RuntimeError(err)
-    assert HYPERLOOM_KERNEL_AGENT_ROOT is not None
-    path = HYPERLOOM_KERNEL_AGENT_ROOT / "tools" / tool_name
+    root = _kernel_agent_root_from_env()
+    assert root is not None
+    path = root / "tools" / tool_name
     if not path.is_file():
         raise RuntimeError(f"kernel-agent tool not found: {path}")
     return path
