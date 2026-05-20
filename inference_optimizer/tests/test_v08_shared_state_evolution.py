@@ -427,3 +427,44 @@ def test_policy_blocks_llm_optimization_stack_write():
     )
     with pytest.raises(PolicyDenied):
         gate.validate_intent("orchestration", intent)
+
+
+# ===========================================================================
+# 9. KB_gaps/Gap-14 — search ledgers locked under CORE_STATE_FIELDS
+# ===========================================================================
+def test_search_ledgers_in_core_state_fields():
+    """KB_design §3.10 §6.2 — ``explore_search`` and the legacy
+    ``backends_search`` / ``params_search`` ledgers are
+    Coordinator-only fact-layer writes. Locking them as CORE
+    closes the Inv-10.2 defense surface KB_gaps/Gap-14 flagged."""
+    from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
+    for field_name in ("explore_search", "backends_search", "params_search"):
+        assert field_name in CORE_STATE_FIELDS, (
+            f"{field_name!r} must be in CORE_STATE_FIELDS so LLM "
+            "update_state cannot rewrite the search ledger"
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name", ["explore_search", "backends_search", "params_search"],
+)
+def test_policy_blocks_llm_search_ledger_write(field_name):
+    """LLM ``update_state{changes: {<ledger>: ...}}`` must surface a
+    ``state_field`` denial."""
+    from inference_optimizer.orchestrator.agent_role import (
+        default_role_registry,
+    )
+    from inference_optimizer.orchestrator.intent_parser import (
+        Intent, IntentType,
+    )
+    from inference_optimizer.orchestrator.policy import (
+        PolicyDenied, PolicyGate,
+    )
+    gate = PolicyGate(role_registry=default_role_registry())
+    intent = Intent(
+        type=IntentType.UPDATE_STATE,
+        payload={"changes": {field_name: {"tested": {}}}},
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", intent)
+    assert exc.value.rule == "state_field"
