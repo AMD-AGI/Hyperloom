@@ -123,6 +123,7 @@ def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | st
 def _build_orchestration_prompt(
     *,
     no_kernel: bool,
+    no_framework: bool = False,
     framework: str,
     objective: Objective,
     max_minutes: int,
@@ -132,13 +133,18 @@ def _build_orchestration_prompt(
 
     The legacy ``_load_orchestration_prompt(no_kernel)`` returned a
     hand-maintained markdown file; this replacement assembles the prompt
-    from typed inputs so kernel-enabled / no-kernel split is just a
-    parameter and every enabled action carries a 1-line description.
+    from typed inputs so the kernel/framework-agent toggles are parameters
+    and every enabled action carries a 1-line description.
+
+    ``no_framework=True`` strips ``framework_pr`` from the enabled set so
+    the bandit cannot pull the framework-agent arm.
 
     Callers may still pass ``--orch-prompt`` to fully override the result.
     """
     registry = action_registry or ActionRegistry().load()
-    enabled = default_enabled_actions(no_kernel=no_kernel)
+    enabled = default_enabled_actions(
+        no_kernel=no_kernel, no_framework=no_framework,
+    )
     kind, value = _objective_summary_for_prompt(objective)
     return build_orchestration_prompt(
         action_registry=registry,
@@ -520,6 +526,7 @@ def _seed_shared_state(
         framework=os.environ.get("FRAMEWORK", "sglang"),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         kernel_enabled=not getattr(args, "no_kernel", False),
+        framework_enabled=not getattr(args, "no_framework", False),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
         cumulative_gain=0.0,
@@ -640,6 +647,7 @@ def _register_executors(
     coordinator: Coordinator,
     *,
     no_kernel: bool = False,
+    no_framework: bool = False,
     compare_against_gpu: str | None = None,
     session_dir: Path | None = None,
 ) -> None:
@@ -654,6 +662,11 @@ def _register_executors(
     skipped, the kernel-only no-op stubs are skipped, and ``profile`` is
     also skipped (profiling only feeds kernel-opt).
 
+    When ``no_framework`` is True, the ``framework_pr`` executor is
+    skipped so any stale ``framework_pr`` task surfaces as
+    ``no_executor`` rather than silently invoking the framework-agent.
+    Combined with ``no_kernel`` this yields four agent-combinations.
+
     ``target_analysis`` is *always* registered with the real
     :class:`TargetAnalysisExecutor`. When ``compare_against_gpu`` is a
     non-empty string, the executor fetches the matching InferenceX
@@ -662,6 +675,8 @@ def _register_executors(
     section is rendered uniformly in both cases.
     """
     for kind, fn in _REAL_EXECUTORS_FULL.items():
+        if no_framework and kind == "framework_pr":
+            continue
         coordinator.sub.register_executor(kind, fn)
 
     coordinator.sub.register_executor(
@@ -2306,6 +2321,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if not state.kernel_enabled:
             args.no_kernel = True
             print("  kernel agent          : DISABLED (persisted from original run)")
+        # Mirror logic for framework-agent toggle. ``framework_enabled``
+        # defaults to True for older state.json files so legacy resumes keep
+        # the fa arm enabled; an explicit persisted False is honoured.
+        if not getattr(state, "framework_enabled", True):
+            args.no_framework = True
+            print("  framework agent       : DISABLED (persisted from original run)")
 
         # CRITICAL: a leftover stop_reason from the prior run (most often
         # "time_exhausted") fools Orchestration into thinking the work is
@@ -2428,6 +2449,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     })
     print(f"Objective       : kind={objective.kind()} {objective.describe()}")
     no_kernel = getattr(args, "no_kernel", False)
+    no_framework = getattr(args, "no_framework", False)
 
     # Resolve critic backend choice + critic-agent runtime root before
     # _build_backends (which constructs CriticAgentBackend immediately and
@@ -2544,6 +2566,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     prompts: dict[str, str] = {
         "orchestration": args.orch_prompt or _build_orchestration_prompt(
             no_kernel=no_kernel,
+            no_framework=no_framework,
             framework=framework_for_prompt,
             objective=objective,
             max_minutes=max_minutes_for_prompt,
@@ -2560,6 +2583,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     _register_executors(
         coordinator,
         no_kernel=no_kernel,
+        no_framework=no_framework,
         compare_against_gpu=getattr(args, "compare_against_gpu", None),
         session_dir=session_dir,
     )
@@ -2569,6 +2593,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     kernel_str = "DISABLED" if no_kernel else (
         f"{'Codex' if args.kernel_codex else 'Claude'}"
     )
+    framework_str = "DISABLED" if no_framework else "ENABLED"
     if critic_choice == "mock":
         critic_str = "mock"
     elif critic_choice == "codex_bare":
@@ -2588,6 +2613,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     print(f"Backends        : "
           f"orchestration=Claude({args.claude_model}), "
           f"kernel={kernel_str}, "
+          f"framework_pr={framework_str}, "
           f"critic={critic_str}, "
           f"robustness={robustness_str}")
     print(f"Max ticks       : {args.max_ticks or 'unlimited'} "
@@ -2869,10 +2895,20 @@ def _build_parser() -> argparse.ArgumentParser:
                       default=os.environ.get("CODEX_MODEL", "gpt-5.4"))
     opt.add_argument("--no-kernel", action="store_true", default=False,
                       help="Disable the Kernel agent entirely. The run will "
-                           "only do baseline + params + backends + sweep (pure "
-                           "parameter search). Useful when GEAK/OOB/GPU "
-                           "compile env is unavailable or you just want the "
-                           "quick-win parameter path. Default: kernel enabled.")
+                           "only do baseline + params + backends + sweep "
+                           "(+ framework_pr if not also --no-framework). "
+                           "Useful when GEAK/OOB/GPU compile env is "
+                           "unavailable or you just want the quick-win "
+                           "parameter path. Default: kernel enabled.")
+    opt.add_argument("--no-framework", action="store_true", default=False,
+                      help="Disable the Framework-agent (fa) integration: "
+                           "the `framework_pr` arm is unregistered and "
+                           "stripped from the orchestration prompt so the "
+                           "bandit never proposes a PR-import action. "
+                           "Combine with --no-kernel for a pure parameter-"
+                           "search run (baseline + params + backends + "
+                           "sweep + validate_stack + report). "
+                           "Default: framework agent enabled.")
     opt.add_argument("--kernel-codex", action="store_true", default=True,
                       help="Use Codex backend for Kernel agent (default — faster). "
                            "Pass --kernel-claude to switch.")
