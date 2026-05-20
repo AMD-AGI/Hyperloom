@@ -553,11 +553,13 @@ The three kernel-owned actions (`select_kernels`, `kernel_opt`,
 action. Pick them by `eff_score` per the DECISION FRAMEWORK; the blocks
 below are only **payload templates** describing how to build the REQUEST
 once you have selected the action. The Coordinator hard-gates the
-obvious prerequisites (TODO 3/4 fires after a `kernel_opt` KEEP forces
-`integrate`); `select_kernels` itself is enforced only at the REQUEST
-layer for `run_optimization`, and explore actions like `params` /
-`backends` / `sweep` are NEVER gated on it. Everything else flows
-through the scoreboard.
+obvious prerequisites (TODO 3/5 surfaces as guidance after a fresh
+`profile` until `select_kernels` populates the cache so TraceLens writes
+`analysis.md`; TODO 4/5 fires after a `kernel_opt` KEEP forces
+`integrate`). Explore actions like `params` / `backends` / `sweep` are
+NEVER gated on `select_kernels` at the action layer (only
+`run_optimization` REQUESTs are gated, by
+`_sequence_denial_for_request`).
 
 ### `select_kernels` — payload (Coordinator gates `run_optimization` until cache is fresh)
 
@@ -570,7 +572,10 @@ through the scoreboard.
   Coordinator denies kernel_opt requests with `select_kernels must run
   first` when the cache is stale, but `params` / `backends` / `sweep` /
   `report` are NEVER gated on it. Re-emit only after a fresh `profile`
-  action invalidates the cache.
+  action invalidates the cache.  TODO 3/5 surfaces in
+  `_required_next_step` as guidance whenever `last_profile_trace` is
+  fresh but the cache is still stale — emit the REQUEST yourself
+  before kernel_opt / integrate cycles.
 
 ### `kernel_opt` — payload for `run_optimization`
 
@@ -606,10 +611,10 @@ HARD RULES (applied at REQUEST build time, NOT at action-selection time):
   exact regression that closed #144's last comment Layer 2. Omit the field
   and let auto-pick fire.
 
-### `integrate` — payload (TODO 3/4 forces this immediately after a KEEP)
+### `integrate` — payload (TODO 4/5 forces this immediately after a KEEP)
 
 When `run_optimization_done` arrives with `result.proposal.decision='KEEP'`,
-the Coordinator's TODO 3/4 makes `integrate` the only allowed action
+the Coordinator's TODO 4/5 makes `integrate` the only allowed action
 until the patch lands on `optimization_stack`. Payload:
 
   request{target_agent: 'kernel', kind: 'integrate',
@@ -624,7 +629,7 @@ the previous KEEP/REVERT decayed only that kernel_id's branch), but is
 not required — the scoreboard decides.
 
 After every successful `integrate` (KEEP), the Coordinator records a
-new entry on `optimization_stack` and the TODO 4/4 `validate_stack`
+new entry on `optimization_stack` and the TODO 5/5 `validate_stack`
 gate fires; obey it before resuming any explore / deep round.
 
 ### KERNEL TARGETING (native vs torch.compile)

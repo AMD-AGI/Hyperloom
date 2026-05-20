@@ -498,7 +498,7 @@ def _build_backends(
         if kernel_codex:
             backends["kernel"] = CodexBackend(model=codex_model)
         else:
-            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=4)
+            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=20)
     return backends
 
 
