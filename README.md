@@ -77,6 +77,7 @@ Minimal Docker example for your own GPU machine:
 ```bash
 docker run -d \
   --name hyperloom-local \
+  --network host \
   --shm-size 64g \
   --device /dev/kfd \
   --device /dev/dri \
