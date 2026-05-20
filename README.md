@@ -90,6 +90,12 @@ docker run -d \
 
 If Hyperloom is already cloned on the host, you can mount that checkout directly into the container, for example by replacing `-v /path/to/workspace:/workspace` with `-v /path/on/host/Hyperloom:/workspace/Hyperloom`. Then open `/workspace/Hyperloom` after attaching Cursor to the container; you do not need to clone Hyperloom again inside the container.
 
+If HTTPS requests to Primus-SaFE fail with a certificate verification error inside the container, install the AMD/Primus-SaFE certificate bundle manually:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AMD-AGI/Primus-SaFE/main/Scripts/setup-certs/setup.sh | bash
+```
+
 #### 2. Connect Cursor to the Runtime Environment
 
 - **SaFE Authoring Pod**: when the Pod is ready, check the connection instructions in the SaFE Authoring page and follow them to connect with Cursor Remote SSH.
