@@ -741,10 +741,17 @@ def _section_params_grid_catalogue(*, framework: str) -> list[str]:
         "['cuda_graph_max_bs_64','cuda_graph_max_bs_32',"
         "'mem_fraction_0_90']}, predicted_gain_pct: 1.0}",
         "",
-        "Same advice as backends — name 3-5 variants tied to the "
-        "roofline finding; running all "
-        f"{len(grid)} wastes wall-clock when the analysis already "
-        "points at specific levers.",
+        "Same advice as backends — name ALL variants whose trigger hint "
+        "matches the dominant pattern(s) in analysis.md (no upper cap; "
+        "the executor has no max_candidates_per_round limit by default). "
+        "When analysis.md flags multiple bottleneck categories (e.g. "
+        "host-bound + KV-pressure), include every relevant variant "
+        "across all flagged categories. Skipping `torch_compile_on` "
+        "when analysis explicitly mentions `torch.compile` is the "
+        "kind of miss this catalogue is designed to prevent. Better "
+        "to over-include 8-10 relevant variants than miss a category "
+        "the analysis flagged; only skip variants whose trigger hint "
+        "is clearly orthogonal to what analysis.md surfaces.",
     ])
     return lines
 
@@ -843,9 +850,13 @@ def _section_backends_grid_catalogue(*, framework: str) -> list[str]:
         "['attn_aiter','attn_triton','custom_ar']}, "
         "predicted_gain_pct: 1.5}",
         "",
-        "When in doubt, name 3-5 variants; running all 10 wastes "
-        "wall-clock when the roofline already tells you which "
-        "categories to focus on.",
+        "When in doubt, name ALL variants whose trigger hint matches "
+        "the dominant pattern(s) in analysis.md (no upper cap; the "
+        "executor has no max_candidates_per_round limit by default). "
+        "When analysis.md flags multiple bottleneck categories include "
+        "every relevant variant across all flagged categories. Only "
+        "skip variants whose trigger hint is clearly orthogonal to "
+        "what analysis.md surfaces.",
     ])
     return lines
 
