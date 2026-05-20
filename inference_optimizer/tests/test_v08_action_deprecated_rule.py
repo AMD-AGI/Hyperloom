@@ -232,3 +232,76 @@ def test_cli_real_executors_still_contains_explore_and_sweep():
     assert "explore" in cli_mod._REAL_EXECUTORS_FULL
     assert "sweep" in cli_mod._REAL_EXECUTORS_FULL
     assert "baseline" in cli_mod._REAL_EXECUTORS_FULL
+
+
+# ===========================================================================
+# 5. KB_gaps/Dead-C — validate_stack dead-path residue
+# ===========================================================================
+def test_dead_c_sequence_actions_drops_validate_stack(tmp_path, monkeypatch):
+    """KB_gaps/Dead-C — the ``sequence_actions`` allow-list inside
+    ``_sequence_denial_for_action`` no longer enumerates the deprecated
+    ``backends`` / ``params`` / ``validate_stack`` names. They short-
+    circuit to ``None`` (PolicyGate ``action_deprecated`` already
+    denied them upstream)."""
+    from inference_optimizer.orchestrator.backends import (
+        MockBackend, MockCriticBackend, MockKernelBackend,
+        MockRobustnessBackend, ScriptedPlan,
+    )
+    from inference_optimizer.orchestrator.coordinator import Coordinator
+    from inference_optimizer.paths import make_session_dir
+
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    silent = ScriptedPlan(turns=[], default_intent=Intent(
+        type=IntentType.SEND_MESSAGE,
+        payload={"topic": "heartbeat", "body_md": "ok"},
+    ))
+    coord = Coordinator(
+        make_session_dir(),
+        backends={
+            "orchestration": MockBackend(silent, name="orch"),
+            "kernel": MockKernelBackend(),
+            "critic": MockCriticBackend(),
+            "robustness": MockRobustnessBackend(),
+        },
+    )
+    for legacy in ("backends", "params", "validate_stack"):
+        assert coord._sequence_denial_for_action(legacy) is None, (
+            f"legacy action {legacy!r} should short-circuit out of "
+            "_sequence_denial_for_action (denied earlier at PolicyGate)"
+        )
+
+
+def test_dead_c_mission_summary_tag_points_at_explore():
+    """KB_gaps/Dead-C — the mission-summary ``stack changed`` warning
+    must NOT name the retired ``validate_stack`` action; it points the
+    LLM at ``explore`` (which inlines the rebench)."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    s = SharedState(
+        baseline_tput=100.0,
+        optimization_stack=[{"action": "integrate", "kernel_id": "k1"}],
+    )
+    text = s.to_mission_summary()
+    assert "stack changed" in text
+    assert "RUN `explore`" in text
+    assert "validate_stack" not in text
+
+
+def test_dead_c_robustness_md_prune_branch_family_list():
+    """KB_gaps/Dead-C — the Robustness prompt's ``prune_branch`` family
+    enumeration drops the retired ``validate_stack`` family (and the
+    legacy ``backends`` / ``params`` aliases) and keeps the canonical
+    ``explore`` family."""
+    from inference_optimizer.paths import asset_system_prompts_dir
+
+    fragment = (asset_system_prompts_dir() / "robustness.md").read_text(
+        encoding="utf-8"
+    )
+    prune_lines = [ln for ln in fragment.splitlines() if "prune_branch" in ln]
+    assert prune_lines, "prune_branch row missing from robustness.md"
+    row = prune_lines[0]
+    for retired in ("validate_stack", "backends", "params"):
+        assert retired not in row, (
+            f"prune_branch family list still advertises retired {retired!r}"
+        )
+    assert "explore" in row
