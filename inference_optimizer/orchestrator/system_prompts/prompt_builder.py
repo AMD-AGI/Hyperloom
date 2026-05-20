@@ -44,8 +44,14 @@ from ..action_registry import (
 FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
-    # analysis
-    "profile", "pmc_roofline", "deep_kernel_analysis",
+    # analysis — three independent actions, each with its own executor:
+    # `profile` (torch.profiler trace capture only), `pmc_roofline`
+    # (RayJob-mode hardware-counter + roofline-chart sweep), and
+    # `roofline` (D1/N2 composite that chains profile + trace_analyze
+    # in one shot to produce the TraceLens analysis.md the orchestrator
+    # consumes). All three remain propose-able by the LLM; priors in
+    # scoring.py shape which one the scorer surfaces first.
+    "profile", "pmc_roofline", "roofline", "deep_kernel_analysis",
     # explore
     "backends", "params", "sweep",
     # deep — kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
@@ -65,6 +71,11 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
 NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
+    # analysis — roofline only (the composite snapshot is still useful
+    # in --no-kernel mode for cheap actions to consume discovered_flags;
+    # the standalone profile/pmc_roofline actions only feed kernel-opt
+    # which is disabled here so they stay off the no-kernel catalogue).
+    "roofline",
     # explore (no profile — it only feeds kernel-opt)
     "backends", "params", "sweep",
     # validate (still useful — bench the stacked backends/params)
