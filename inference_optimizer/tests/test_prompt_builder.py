@@ -152,6 +152,7 @@ def test_full_prompt_has_seven_sections(registry, rules_path):
         # reference when proposing `backends`. Not numbered because
         # it's a reference table, not a procedural section.
         "## BACKENDS GRID CATALOGUE (SGLang)",
+        "## PARAMS GRID CATALOGUE (SGLang)",
         "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
         "## 7. RULES & OUTPUT PROTOCOL",
     ]
