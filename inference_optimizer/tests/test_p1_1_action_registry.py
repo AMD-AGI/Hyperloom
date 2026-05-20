@@ -113,7 +113,7 @@ def registry() -> ActionRegistry:
 
 def test_registry_loads_p1_1_actions(registry):
     names = set(registry.names())
-    expected = {"baseline", "target_analysis", "profile", "backends", "report"}
+    expected = {"baseline", "target_analysis", "profile", "explore", "report"}
     assert expected.issubset(names)
 
 
@@ -143,7 +143,7 @@ def test_registry_by_family(registry):
     assert "profile" in analysis
     shallow = {a.name for a in registry.by_family("shallow")}
     assert "report" in shallow
-    assert "backends" in shallow
+    assert "explore" in shallow
 
 
 def test_registry_unknown_family_rejected(registry):
