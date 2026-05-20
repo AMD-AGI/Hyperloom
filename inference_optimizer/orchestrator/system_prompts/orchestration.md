@@ -29,17 +29,21 @@ Every tick the per-tick prompt includes a `=== Phase ===` block with:
   - `elapsed_sec / budget_remaining_sec` — how much wall-clock this
     phase has already burned vs its budget (KB_design §3.8 §5.3).
 
-Per-phase intent map (M2 transitional view; M3 will collapse
-`backends`/`params`/`validate_stack` into a single `explore` action):
+Per-phase intent map (v0.8 M3 + KB_gaps/Gap-10: legacy
+`backends`/`params`/`validate_stack` are removed; PolicyGate denies
+them with `rule='action_deprecated'` and the canonical replacement
+is the merged `explore` action):
 
   - **PRELUDE**: `target_analysis`, `baseline`, `recover` only. Drive
     `baseline_tput > 0` so the Coordinator can advance to EXPLORE. Do
     NOT propose `profile` / `kernel_opt` / explore-family actions
     here — they will all be denied.
-  - **EXPLORE**: `backends`, `params`, `validate_stack`, `recover`
-    (during M2). `profile` / `kernel_opt` / `sweep` / `report` are
-    **denied**. Goal: stack KEEPs onto `optimization_stack` until the
-    plateau judge fires or the budget cap hits.
+  - **EXPLORE**: `explore`, `specialist`, `recover`. `profile` /
+    `kernel_opt` / `sweep` / `report` are **denied**. Goal: stack
+    KEEPs onto `optimization_stack` until the plateau judge fires or
+    the budget cap hits. The `explore` action runs its per-KEEP
+    stack rebench inline, so the v0.6 standalone `validate_stack`
+    step is gone.
   - **KERNEL**: `profile` (single shot at phase entry), `pmc_roofline`,
     the 5 KERNEL_OWNED_ACTIONS via REQUEST, and `recover`. Goal:
     integrate KEEP'd kernel patches; the Coordinator exits to SWEEP
@@ -55,9 +59,9 @@ v0.6 ``Action scores`` block. The Coordinator no longer maintains a
 system-side per-action priority. Pick the next action by reading
 facts in this order: (a) current phase + ``allowed_actions``,
 (b) gaps / KB sub-graph / recent winners / specialist proposal_set,
-(c) mandatory ordering (baseline first, profile before kernel_opt,
-``validate_stack`` after KEEP), (d) phase_budget_remaining_pct as the
-"how urgent" signal.
+(c) mandatory ordering (baseline first, profile before kernel_opt;
+``explore`` revalidates the stack inline so no separate rebench step),
+(d) phase_budget_remaining_pct as the "how urgent" signal.
 
 ### SESSION_DIR contract
 
@@ -92,15 +96,19 @@ on the next tick.
 * Re-proposals are de-duped by `idempotency_key`, NOT by action name.
   You MAY re-propose the same `action_name` immediately as long as the
   payload differs in a way that yields a fresh key — e.g. emit
-  `delegate{action_name='backends', params={grid: [...new variants...],
-  idempotency_key: 'backends-round-<N+1>'}}` to start the next IR-26
-  round. Re-proposing with the SAME `idempotency_key` (or omitting it
-  while the previous identical task is still pending) is rejected as
+  `delegate{action_name='explore', params={grid: [...new variants...],
+  idempotency_key: 'explore-round-<N+1>'}}` to start the next round.
+  Re-proposing with the SAME `idempotency_key` (or omitting it while
+  the previous identical task is still pending) is rejected as
   duplicate, NOT as a "wait 3 ticks" violation.
-* **`validate_stack` is mandatory** after any explore / deep round
-  produces a KEEP'd entry on `optimization_stack`. The Coordinator
-  surfaces this as a TODO in the per-tick checklist; ignoring the TODO
-  triggers a `policy_denied` on the next non-`validate_stack` proposal.
+* **Stack rebench is inlined into `explore`** (v0.8 M3 / KB_gaps/Gap-10).
+  Every `explore` KEEP triggers a per-KEEP re-bench of the full
+  `optimization_stack`; `cumulative_gain_validated` advances as a
+  side effect. The Coordinator surfaces a TODO in the per-tick
+  checklist when the stack still has unvalidated KEEPs — propose
+  `explore` (NOT the deprecated `validate_stack`) to clear it. The
+  legacy `validate_stack` / `backends` / `params` names are denied
+  by PolicyGate with `rule='action_deprecated'`.
 * **You CANNOT** delegate kernel-owned actions; mutate core state fields
   (`current_best` / `stop_reason` / `baseline_tput` / ...); emit
   `kill_task` / `force_dispatch` / `prune_branch` /
