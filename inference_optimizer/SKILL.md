@@ -568,8 +568,8 @@ What this controls:
 - Which Magpie YAML the executors default to
   (`baseline_sglang.yaml` / `baseline_vllm.yaml`,
   `profile_sglang.yaml` / `profile_vllm.yaml`)
-- Which params grid `params` action runs (`DEFAULT_VLLM_PARAMS_GRID`
-  vs `DEFAULT_PARAMS_GRID`)
+- Which framework-specific seed grid the `explore` action falls
+  back to when no `params.grid` is supplied
 - Which extra-args env name `_grid_runner` writes
   (`EXTRA_VLLM_ARGS` vs `EXTRA_SGLANG_ARGS`)
 - Which Marathon KB partition orchestration reads for hints

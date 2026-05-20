@@ -119,15 +119,23 @@ async def test_promote_profile_records_success_attempt(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_promote_backends_records_success_attempt(session_dir):
+async def test_promote_explore_records_success_attempt(session_dir):
+    """v0.8 M3 + KB_gaps/Dead-A — ``explore`` replaces the v0.6
+    ``backends`` promote branch; the audit row carries the merged
+    grid runner's winner / loser bookkeeping."""
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
         c.shared_state.baseline_tput = 800.0
         c.shared_state.current_best = {"action": "baseline", "tput": 800.0}
-        task = _mk_task("backends", "t-be-1")
+        task = _mk_task("explore", "t-ex-1")
         result = {
-            "winners": [{"name": "v1"}],
+            "status": "succeeded",
+            "winners": [{
+                "name": "v1",
+                "extra_sglang_args": "--foo",
+                "extra_envs": {"K": "1"},
+            }],
             "best_variant": {
                 "name": "v1",
                 "extra_sglang_args": "--foo",
@@ -136,14 +144,14 @@ async def test_promote_backends_records_success_attempt(session_dir):
             "output_throughput": 900.0,
             "best_gain_pct": 12.5,
             "base_tput": 800.0,
+            "round_id": "round-1",
         }
-        await c._promote_to_shared_state("backends", result, task=task)
-        last = c.shared_state.last_backends
+        await c._promote_to_shared_state("explore", result, task=task)
+        last = c.shared_state.last_explore
         assert last["status"] == "succeeded"
-        # 900/800 = +12.5% — well above the 0.1% promote threshold.
         assert last["decision"] == "promoted"
         assert last["extras"]["best_variant_name"] == "v1"
-        assert last["extras"]["candidate_extra_sglang_args"] == "--foo"
+        assert last["extras"]["winners_count"] == 1
     finally:
         await c.stop()
 
@@ -170,25 +178,38 @@ async def test_promote_sweep_records_discarded_attempt(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_promote_validate_stack_records_success_attempt(session_dir):
+async def test_promote_explore_updates_validated_gain(session_dir):
+    """v0.8 M3 §4.4 + KB_gaps/Dead-A — explore's inlined per-KEEP
+    stack rebench is the v0.8 successor to ``validate_stack``;
+    promoting a winner advances ``cumulative_gain_validated_stack_len``
+    so ``_required_next_step`` no longer demands a separate
+    validate_stack call."""
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
         c.shared_state.baseline_tput = 1000.0
-        c.shared_state.optimization_stack = [
-            {"action": "backends", "variant_name": "v1"}
-        ]
-        task = _mk_task("validate_stack", "t-vs-1")
+        c.shared_state.current_best = {"action": "baseline", "tput": 1000.0}
+        task = _mk_task("explore", "t-ex-rebench")
         result = {
+            "status": "succeeded",
+            "winners": [{
+                "name": "kv_fp8",
+                "extra_sglang_args": "--kv-cache-fp8",
+                "extra_envs": {},
+            }],
+            "best_variant": {
+                "name": "kv_fp8",
+                "extra_sglang_args": "--kv-cache-fp8",
+                "extra_envs": {},
+            },
             "output_throughput": 1100.0,
-            "validated_stack_len": 1,
+            "best_gain_pct": 10.0,
+            "round_id": "round-rebench",
         }
-        await c._promote_to_shared_state("validate_stack", result, task=task)
-        last = c.shared_state.last_validate_stack
-        assert last["status"] == "succeeded"
-        assert last["decision"] == "promoted"
-        assert last["extras"]["gain_pct"] == pytest.approx(10.0)
-        assert last["extras"]["validated_stack_len"] == 1
+        await c._promote_to_shared_state("explore", result, task=task)
+        assert c.shared_state.cumulative_gain_validated == pytest.approx(10.0)
+        assert c.shared_state.cumulative_gain_validated_stack_len == \
+            len(c.shared_state.optimization_stack)
     finally:
         await c.stop()
 
@@ -253,20 +274,20 @@ async def test_handle_unpromotable_records_for_non_baseline_kinds(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        # backends failure — should hit both per-action attempts and the
+        # explore failure — should hit both per-action attempts and the
         # global failure log, but should NOT touch baseline_failure_streak.
         await c._handle_unpromotable_result(
-            _mk_task("backends", "t-be-fail"),
+            _mk_task("explore", "t-ex-fail"),
             {"status": "failed", "error_class": "subprocess_nonzero",
              "error": "rc=1\nstderr blob"},
         )
         assert c.shared_state.baseline_failure_streak == 0
         assert c.shared_state.stop_reason in ("", None)
-        assert len(c.shared_state.backends_attempts) == 1
-        assert c.shared_state.backends_attempts[-1]["status"] == "failed"
+        assert len(c.shared_state.explore_attempts) == 1
+        assert c.shared_state.explore_attempts[-1]["status"] == "failed"
         assert len(c.shared_state.last_action_failures) == 1
         fail = c.shared_state.last_action_failures[-1]
-        assert fail["action"] == "backends"
+        assert fail["action"] == "explore"
         assert fail["stderr_tail"] is not None  # subprocess class triggers tail
     finally:
         await c.stop()
