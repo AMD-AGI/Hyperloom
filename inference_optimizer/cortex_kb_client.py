@@ -305,9 +305,26 @@ class CortexKBClient:
                 # fsync is best-effort: tmpfs / certain wekafs mounts
                 # reject it but the write is still visible.
                 pass
+        # KB_gaps/Gap-08 — keep the enqueue audit row tiny but include
+        # the bits the breakdown collector needs to count promoted /
+        # negated edges and outcome distributions per variant without
+        # having to re-parse the NDJSON queue.
+        extras: dict[str, Any] = {}
+        if op in ("verify", "ingest_attempt"):
+            outcome = str(payload.get("outcome") or "")
+            if outcome:
+                extras["payload_outcome"] = outcome
+            if op == "verify":
+                edge = str(payload.get("edge") or "")
+                if edge:
+                    extras["payload_edge"] = edge
+                promoted = str(payload.get("promoted_authority") or "")
+                if promoted:
+                    extras["payload_promote"] = promoted
         self._audit_record(
             op="enqueue", status="ok",
             envelope_op=op, idempotency_key=idempotency_key,
+            **extras,
         )
 
     # ==================================================================
