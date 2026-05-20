@@ -32,10 +32,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from optimize_submit import HuggingFaceClient   # noqa: E402
 
 DEFAULT_CRON_CANDIDATES_FILE = "ci/candidates/top2000_2026-05-15.json"
-LEADERBOARD_URL = (
-    "https://core42.primus-safe.amd.com/model-leaderboard/api/v1/"
-    "leaderboard?sort_by=gain&order=desc&limit=5000&offset=0"
-)
 
 
 def slugify(repo_id: str) -> str:
@@ -51,19 +47,45 @@ def _truthy(value: str | None) -> bool:
 
 
 def _leaderboard_models() -> set[str]:
-    try:
-        with urllib.request.urlopen(LEADERBOARD_URL, timeout=30) as r:
-            data = json.load(r)
-    except Exception as e:
-        raise RuntimeError(f"failed to query leaderboard for exclusion: {e}") from e
-    rows = data.get("results") if isinstance(data, dict) else data
-    if not isinstance(rows, list):
-        raise RuntimeError("leaderboard response did not contain a results list")
-    return {
-        str(item.get("model") or "").strip().lower()
-        for item in rows
-        if isinstance(item, dict) and item.get("model")
-    }
+    """Return the full set of model ids already on the leaderboard.
+
+    The service caps each request at 500 rows even when a larger ``limit`` is
+    supplied, so we walk every page using ``pagination.has_more`` /
+    ``next_offset``. The legacy single-call path only saw the first 500 of the
+    564+ models and silently re-dispatched the rest on the next cron.
+    """
+    base = (
+        "https://core42.primus-safe.amd.com/model-leaderboard/api/v1/"
+        "leaderboard?sort_by=gain&order=desc&limit=500"
+    )
+    models: set[str] = set()
+    offset = 0
+    pages = 0
+    while True:
+        try:
+            with urllib.request.urlopen(f"{base}&offset={offset}", timeout=30) as r:
+                data = json.load(r)
+        except Exception as e:
+            raise RuntimeError(
+                f"failed to query leaderboard page offset={offset}: {e}"
+            ) from e
+        rows = data.get("results") if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            raise RuntimeError("leaderboard response did not contain a results list")
+        if not rows:
+            break
+        for item in rows:
+            if isinstance(item, dict) and item.get("model"):
+                models.add(str(item["model"]).strip().lower())
+        pages += 1
+        pg = data.get("pagination") if isinstance(data, dict) else None
+        if not isinstance(pg, dict) or not pg.get("has_more"):
+            break
+        next_off = pg.get("next_offset")
+        offset = int(next_off) if isinstance(next_off, int) else offset + len(rows)
+        if offset >= 10000 or pages >= 50:  # paranoid safety stop
+            break
+    return models
 
 
 def _active_workflow_slugs() -> set[str]:
