@@ -128,6 +128,34 @@ follow them**:
   names the flag explicitly (e.g. "graph capture" → `--cuda-graph-max-bs`).
   Cross-check against `discovered_flags` and pick an `[untested]`
   flag that targets the bottleneck.
+
+### Choosing `params` vs `backends` (action_name selection)
+
+`action_scores` carries a per-action prior tuned from past
+GLM-5 / R1 / similar workloads (e.g. on some `model_class` values
+`params` is curated above `backends`, on others they are tied).
+**The prior is a DEFAULT — analysis.md is the truth.** Read the
+roofline snapshot first, then:
+
+* If the dominant bottleneck category in `## Compute Kernel
+  Optimizations` / `## System-Level Optimizations` is **attention /
+  AllReduce / MoE expert dispatch / decode-attention backend**, the
+  best lever is a *kernel set swap* — propose `backends` FIRST,
+  even when the prior would surface `params` first. Reason: backends
+  change which kernels run; tuning params on top of an already-
+  swapped backend is the right sequencing.
+* If the dominant bottleneck is **host overhead / cuda graph misses
+  / KV-cache pressure / queue depth / `torch.compile` advice / GPU
+  idle %**, the best lever is a *kernel config knob* — propose
+  `params` FIRST. This matches what the prior typically encodes.
+* If analysis.md is inconclusive or both categories appear, **fall
+  back to the prior** (whichever `action_scores` ranks higher).
+
+In all cases, use the catalogue's `params.variants=[...]` /
+`params.grid=[...]` subset mechanism (N20-A) to name only the
+variants whose trigger hint matches the analysis-flagged category,
+and consult `last_proposal_advice` for keyword-implied variants
+the previous propose missed (N22).
 * **"GPU idle %" > 30%** → idle-bound; prioritise scheduling /
   speculative decoding / graph-capture flags in your next
   `params` propose.
