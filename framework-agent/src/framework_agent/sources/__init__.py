@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from ..logging_setup import get_logger
 from ..keywords import (
     extract_keywords,
     score_title_against_keywords,
@@ -82,6 +83,9 @@ def _pr_to_candidate(
     )
 
 
+_log = get_logger(__name__)
+
+
 def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
     """Enumerate candidates per ``request.search_modes`` and union the results.
 
@@ -100,17 +104,36 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
         out.append(Candidate(ref=ref, repo=request.repo_url, source="explicit"))
 
     if not request.search_perf_prs:
+        _log.info(
+            "enumerate_candidates: search_perf_prs=False; explicit_refs=%d",
+            len(request.candidate_refs),
+        )
         return _dedupe(out)
 
     for mode in request.search_modes:
         if mode == "primus_cortex":
-            out.extend(_run_primus_cortex(request))
+            found = _run_primus_cortex(request)
+            _log.info(
+                "enumerate_candidates: primus_cortex returned %d candidate(s)",
+                len(found),
+            )
+            out.extend(found)
         elif mode == "github":
-            out.extend(_run_github(request))
+            found = _run_github(request)
+            _log.info(
+                "enumerate_candidates: github returned %d candidate(s)",
+                len(found),
+            )
+            out.extend(found)
         else:
             raise SourceConfigError(f"unknown search_mode: {mode!r}")
 
-    return _dedupe(out)
+    deduped = _dedupe(out)
+    _log.info(
+        "enumerate_candidates: total=%d after dedup (explicit=%d, searched=%d)",
+        len(deduped), len(request.candidate_refs), len(out) - len(request.candidate_refs),
+    )
+    return deduped
 
 
 def _run_github(request: ExploreRequest) -> list[Candidate]:

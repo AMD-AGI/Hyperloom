@@ -213,6 +213,34 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="framework-agent",
         description="Explore serving framework PRs/refs in isolated worktrees.",
     )
+    # Global flags wired into logging_setup.configure_logging. Kept on the
+    # top-level parser so every subcommand picks them up uniformly.
+    parser.add_argument(
+        "--log-level",
+        default=None,
+        help=(
+            "Override log level (DEBUG/INFO/WARNING/ERROR). "
+            "Env fallback: FRAMEWORK_EXPLORER_LOG_LEVEL or "
+            "FRAMEWORK_AGENT_LOG_LEVEL. Default INFO."
+        ),
+    )
+    parser.add_argument(
+        "--log-json",
+        action="store_true",
+        default=False,
+        help=(
+            "Emit one JSON object per record (machine-friendly). "
+            "Env fallback: FRAMEWORK_AGENT_LOG_JSON=1."
+        ),
+    )
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        help=(
+            "Append log records to this path in addition to stderr. "
+            "Env fallback: FRAMEWORK_AGENT_LOG_FILE."
+        ),
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     schema_p = sub.add_parser("schema", help="Print the request schema summary")
@@ -327,14 +355,25 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point invoked by both `framework-agent` and `fa` scripts."""
     parser = _build_parser()
     args = parser.parse_args(argv)
+    from ..logging_setup import configure_logging, get_logger
+    configure_logging(
+        level=args.log_level,
+        json_output=args.log_json or None,
+        log_file=args.log_file,
+    )
+    log = get_logger("cli")
+    log.debug("fa cli start cmd=%s argv=%r", args.cmd, argv)
     try:
         args.func(args)
     except RuntimeAdapterError as exc:
+        log.error("RuntimeAdapterError: %s", exc)
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     except Exception as exc:  # noqa: BLE001 - top-level safety net
+        log.exception("unexpected framework-agent failure")
         print(f"ERROR: unexpected framework-agent failure: {exc}", file=sys.stderr)
         return 2
+    log.debug("fa cli done cmd=%s", args.cmd)
     return 0
 
 

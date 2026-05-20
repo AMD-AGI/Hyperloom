@@ -307,6 +307,24 @@ class ExploreRequest:
     search_modes: tuple[str, ...] = ("primus_cortex", "github")
     # KB integration (PR4); empty string disables the contribute hook.
     kb_domain: str = ""
+    # Merged-design §4.4.1 additions: ranking + cleanup + disk preflight.
+    # When True, ``explore()`` keeps going after the first winner and
+    # returns the full list sorted by ``candidate_score`` descending.
+    # When False (default — matches zhenggong v0.2), it short-circuits
+    # on the first winner.
+    ranking_mode: bool = False
+    # When True, ``explorer`` removes the worktree+venv directories of
+    # every non-winner candidate at the end of the run. The
+    # ``candidate_dir`` itself and the audit material inside it stay so
+    # reviewers can still diff the PRs that lost.
+    keep_winner_only: bool = False
+    # When > 0, ``explore()`` runs the build step of multiple candidates
+    # concurrently via ``asyncio.gather`` (bench/accuracy stay strictly
+    # serial to avoid GPU contention). 0 / 1 / negative => fully serial.
+    build_concurrency: int = 1
+    # Disk preflight threshold (GB). ``None`` falls back to the env var
+    # ``FRAMEWORK_EXPLORER_DISK_MIN_GB`` (default 20). Set 0 to bypass.
+    disk_min_free_gb: float | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "ExploreRequest":
@@ -362,6 +380,14 @@ class ExploreRequest:
             keywords=_parse_keywords(raw.get("keywords")),
             search_modes=_parse_search_modes(raw.get("search_modes")),
             kb_domain=str(raw.get("kb_domain") or "").strip(),
+            ranking_mode=bool(raw.get("ranking_mode", False)),
+            keep_winner_only=bool(raw.get("keep_winner_only", False)),
+            build_concurrency=max(1, int(raw.get("build_concurrency", 1) or 1)),
+            disk_min_free_gb=(
+                None
+                if raw.get("disk_min_free_gb") is None
+                else float(raw.get("disk_min_free_gb"))
+            ),
         )
 
 

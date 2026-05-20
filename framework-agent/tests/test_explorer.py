@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import framework_agent.explorer as ex
+from framework_agent.decision import winner_decision
 from framework_agent.models import (
     Baseline,
     Candidate,
@@ -22,7 +23,7 @@ from framework_agent.models import (
 )
 
 
-# _winner_decision -------------------------------------------------------
+# winner_decision (split into framework_agent.decision) ------------------
 
 
 def _req_for_gate(threshold_ratio: float = 1.05, max_drop: float = 0.05) -> ExploreRequest:
@@ -42,7 +43,7 @@ def _req_for_gate(threshold_ratio: float = 1.05, max_drop: float = 0.05) -> Expl
 def test_winner_decision_pass() -> None:
     """Both gates satisfied -> winner=True."""
     req = _req_for_gate()
-    winner, reason = ex._winner_decision(req, throughput=200.0, accuracy=0.9, completed="1/1")
+    winner, reason = winner_decision(req, throughput=200.0, accuracy=0.9, completed="1/1")
     assert winner is True
     assert "gates passed" in reason
 
@@ -50,7 +51,7 @@ def test_winner_decision_pass() -> None:
 def test_winner_decision_throughput_too_low() -> None:
     """Throughput below baseline*ratio -> rejected with ratio reason."""
     req = _req_for_gate()
-    winner, reason = ex._winner_decision(req, throughput=104.0, accuracy=0.9, completed="1/1")
+    winner, reason = winner_decision(req, throughput=104.0, accuracy=0.9, completed="1/1")
     assert winner is False
     assert "throughput ratio" in reason
 
@@ -58,7 +59,7 @@ def test_winner_decision_throughput_too_low() -> None:
 def test_winner_decision_accuracy_drop_too_large() -> None:
     """Accuracy drop above the max -> rejected."""
     req = _req_for_gate()
-    winner, reason = ex._winner_decision(req, throughput=200.0, accuracy=0.5, completed="1/1")
+    winner, reason = winner_decision(req, throughput=200.0, accuracy=0.5, completed="1/1")
     assert winner is False
     assert "accuracy drop" in reason
 
@@ -66,7 +67,7 @@ def test_winner_decision_accuracy_drop_too_large() -> None:
 def test_winner_decision_incomplete_benchmark() -> None:
     """completed=='50/100' triggers an incomplete-run rejection."""
     req = _req_for_gate()
-    winner, reason = ex._winner_decision(req, throughput=200.0, accuracy=0.9, completed="50/100")
+    winner, reason = winner_decision(req, throughput=200.0, accuracy=0.9, completed="50/100")
     assert winner is False
     assert "incomplete" in reason
 
@@ -74,7 +75,7 @@ def test_winner_decision_incomplete_benchmark() -> None:
 def test_winner_decision_missing_throughput() -> None:
     """Missing throughput is rejected immediately."""
     req = _req_for_gate()
-    winner, reason = ex._winner_decision(req, throughput=None, accuracy=0.9, completed="1/1")
+    winner, reason = winner_decision(req, throughput=None, accuracy=0.9, completed="1/1")
     assert winner is False
     assert "missing throughput" in reason
 

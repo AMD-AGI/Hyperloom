@@ -21,18 +21,29 @@ Two run modes:
 
 from __future__ import annotations
 
+import asyncio
 import json
-import shutil
-import subprocess
-import sys
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
+from .decision import candidate_score, winner_decision
+from .isolation import (
+    DiskPreflightError,
+    WorkspacePaths,
+    cleanup_workspace,
+    disk_preflight,
+    prepare_candidate_workspace,
+    prepare_repo_cache,
+)
+from .logging_setup import get_logger, stage_log
 from .models import Candidate, CandidateResult, ExploreRequest, Finding, PrFilter
 from .shell import render_template, run_command
 from .sources import primus_cortex
 from .sources._shared import _repo_slug
+
+
+log = get_logger(__name__)
 
 
 def _coalesce_str(*values: Any) -> str:
@@ -309,103 +320,28 @@ def _resolve_output_path(template: str, variables: dict[str, str]) -> Path:
     return Path(render_template(template, variables)).expanduser()
 
 
-def _repo_cache_dir(req: ExploreRequest) -> Path:
-    """Stable per-repo cache directory under work_dir/_repos."""
-    safe = "".join(ch if ch.isalnum() else "-" for ch in req.repo_url.lower()).strip("-")
-    return req.work_dir / "_repos" / (safe or "repo")
-
-
-def _run_subprocess(
-    args: list[str], *, cwd: Path | None = None, timeout_sec: int = 1800
-) -> None:
-    """Run a subprocess with a timeout; raise CalledProcessError on non-zero."""
-    subprocess.run(args, cwd=str(cwd) if cwd else None, check=True, timeout=timeout_sec)
-
-
-def _run_git(args: list[str], *, cwd: Path | None = None, timeout_sec: int = 1800) -> None:
-    """Run a git command with a timeout; thin wrapper over :func:`_run_subprocess`."""
-    _run_subprocess(args, cwd=cwd, timeout_sec=timeout_sec)
-
-
-def _ensure_repo_cache(req: ExploreRequest) -> Path:
-    """Mirror-clone the repo into the cache dir; fetch when already present."""
-    repo_dir = _repo_cache_dir(req)
-    if repo_dir.exists():
-        _run_git(["git", "fetch", "--all", "--tags", "--prune"], cwd=repo_dir)
-        return repo_dir
-    repo_dir.parent.mkdir(parents=True, exist_ok=True)
-    _run_git(["git", "clone", "--mirror", req.repo_url, str(repo_dir)])
-    return repo_dir
-
-
-def _worktree_ref(candidate: Candidate) -> str:
-    """Choose the ref to materialise in a detached worktree."""
-    if candidate.head_sha:
-        return candidate.head_sha
-    if candidate.ref.startswith("PR:"):
-        number = candidate.ref.split(":", 1)[1]
-        return f"refs/pull/{number}/head"
-    return candidate.ref
-
-
-def _fetch_candidate_ref(repo_dir: Path, candidate: Candidate) -> None:
-    """Pre-fetch the candidate's ref into the cache mirror."""
-    if candidate.head_sha:
-        _run_git(["git", "fetch", "origin", candidate.head_sha], cwd=repo_dir)
-        return
-    if not candidate.ref.startswith("PR:"):
-        return
-    number = candidate.ref.split(":", 1)[1]
-    _run_git(
-        [
-            "git",
-            "fetch",
-            "origin",
-            f"refs/pull/{number}/head:refs/pull/{number}/head",
-        ],
-        cwd=repo_dir,
-    )
-
-
-def _prepare_candidate_workspace(
+def _prepare_candidate_workspace_with_artifacts(
     req: ExploreRequest,
     candidate: Candidate,
     *,
     index: int,
     execute: bool,
-) -> tuple[Path, Path, Path, dict[str, str]]:
-    """Create candidate_dir, drop audit artifacts; build worktree+venv when execute."""
+) -> tuple[WorkspacePaths, dict[str, str]]:
+    """Thin adapter: isolation.prepare_candidate_workspace + audit drop.
+
+    Audit material (``pr.patches`` / ``pr_files.json``) is dropped per
+    candidate regardless of execute mode, then the heavy worktree + venv
+    step is delegated to :mod:`isolation` when execute is True. Returns
+    the resolved :class:`WorkspacePaths` and the artifact-path dict so
+    callers don't need to know two return tuples.
+    """
     candidate_dir = req.work_dir / "candidates" / f"{index:02d}_{candidate.slug}"
-    worktree_dir = candidate_dir / "worktree"
-    venv_dir = candidate_dir / "venv"
     candidate_dir.mkdir(parents=True, exist_ok=True)
     artifact_paths = _write_pr_artifacts(req, candidate, candidate_dir)
-    if not execute or not req.prepare_candidate_env:
-        return candidate_dir, worktree_dir, venv_dir, artifact_paths
-
-    repo_dir = _ensure_repo_cache(req)
-    _fetch_candidate_ref(repo_dir, candidate)
-    if worktree_dir.exists():
-        shutil.rmtree(worktree_dir)
-    _run_git(
-        [
-            "git",
-            "--git-dir",
-            str(repo_dir),
-            "worktree",
-            "add",
-            "--detach",
-            str(worktree_dir),
-            _worktree_ref(candidate),
-        ]
+    workspace = prepare_candidate_workspace(
+        req, candidate, index=index, execute=execute,
     )
-    if venv_dir.exists():
-        shutil.rmtree(venv_dir)
-    _run_subprocess(
-        [sys.executable, "-m", "venv", "--system-site-packages", str(venv_dir)],
-        timeout_sec=600,
-    )
-    return candidate_dir, worktree_dir, venv_dir, artifact_paths
+    return workspace, artifact_paths
 
 
 def _write_pr_artifacts(
@@ -497,117 +433,248 @@ def _evaluate_candidate(
     return throughput, acc, completed
 
 
-def _winner_decision(
+def _run_single_candidate(
     req: ExploreRequest,
-    throughput: float | None,
-    accuracy: float | None,
-    completed: str,
-) -> tuple[bool, str]:
-    """Apply throughput/accuracy/completed gates; return (winner, reason)."""
-    if throughput is None or throughput <= 0:
-        return False, "missing throughput"
-    ratio = throughput / req.baseline.throughput
-    if ratio < req.thresholds.min_throughput_ratio:
-        return (
-            False,
-            f"throughput ratio {ratio:.4f} below required {req.thresholds.min_throughput_ratio:.4f}",
-        )
-    if req.baseline.accuracy is not None:
-        if accuracy is None:
-            return False, "missing accuracy while baseline accuracy is set"
-        drop = req.baseline.accuracy - accuracy
-        if drop > req.thresholds.max_accuracy_drop:
-            return (
-                False,
-                f"accuracy drop {drop:.4f} exceeds max {req.thresholds.max_accuracy_drop:.4f}",
-            )
-    if completed and "/" in completed:
-        left, _, right = completed.partition("/")
-        if left.strip() != right.strip():
-            return False, f"benchmark completed={completed} is incomplete"
-    return True, "throughput and accuracy gates passed"
+    candidate: Candidate,
+    *,
+    index: int,
+    execute: bool,
+) -> CandidateResult:
+    """Run a single candidate end-to-end (workspace + commands + decision).
 
-
-def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
-    """Main entry: enumerate, optionally build/bench, return summary dict."""
-    req.work_dir.mkdir(parents=True, exist_ok=True)
-    candidates, skipped_candidates = _enumerate_with_skipped(req)
-    results: list[CandidateResult] = []
-    for index, candidate in enumerate(candidates, start=1):
-        (
-            candidate_dir,
-            worktree_dir,
-            venv_dir,
-            artifact_paths,
-        ) = _prepare_candidate_workspace(
-            req, candidate, index=index, execute=execute
+    Synchronous helper used by both the serial path and the async
+    concurrent path. The function is intentionally side-effect free
+    beyond the workspace it owns: no shared state writes, no return
+    aggregation. Concurrency safety: callers must ensure two candidates
+    never share an ``index`` (slug collisions could overwrite material).
+    """
+    workspace, artifact_paths = _prepare_candidate_workspace_with_artifacts(
+        req, candidate, index=index, execute=execute,
+    )
+    candidate_dir = workspace.candidate_dir
+    variables = _variables(
+        req, candidate, candidate_dir, workspace.worktree_dir, workspace.venv_dir,
+    )
+    if not execute:
+        return CandidateResult(
+            candidate=candidate,
+            candidate_dir=str(candidate_dir),
+            worktree_dir=str(workspace.worktree_dir),
+            venv_dir=str(workspace.venv_dir),
+            status="planned",
+            reason="run with --execute to build and benchmark this candidate",
+            patches_path=artifact_paths.get("patches_path", ""),
+            files_json_path=artifact_paths.get("files_json_path", ""),
         )
-        variables = _variables(req, candidate, candidate_dir, worktree_dir, venv_dir)
-        if not execute:
-            results.append(
-                CandidateResult(
-                    candidate=candidate,
-                    candidate_dir=str(candidate_dir),
-                    worktree_dir=str(worktree_dir),
-                    venv_dir=str(venv_dir),
-                    status="planned",
-                    reason="run with --execute to build and benchmark this candidate",
-                    patches_path=artifact_paths.get("patches_path", ""),
-                    files_json_path=artifact_paths.get("files_json_path", ""),
-                )
-            )
+
+    command_results = []
+    status = "succeeded"
+    reason = ""
+    for name in ("build", "benchmark", "accuracy", "cleanup"):
+        spec = req.commands.get(name)
+        if spec is None:
             continue
-
-        command_results = []
-        status = "succeeded"
-        reason = ""
-        for name in ("build", "benchmark", "accuracy", "cleanup"):
-            spec = req.commands.get(name)
-            if spec is None:
-                continue
-            command = render_template(spec.command, variables, shell_quote=True)
+        command = render_template(spec.command, variables, shell_quote=True)
+        with stage_log(
+            log, name, candidate=candidate.ref, timeout_sec=spec.timeout_sec,
+        ) as ctx:
             result = run_command(
                 name,
                 command,
                 cwd=candidate_dir,
                 timeout_sec=spec.timeout_sec,
             )
-            command_results.append(result)
-            if spec.required and not result.ok:
-                status = "failed"
-                reason = f"{name} command failed"
-                break
-        throughput, accuracy, completed = _evaluate_candidate(req, variables)
-        winner, gate_reason = _winner_decision(req, throughput, accuracy, completed)
-        if status == "succeeded":
-            reason = gate_reason
-        results.append(
-            CandidateResult(
-                candidate=candidate,
-                candidate_dir=str(candidate_dir),
-                worktree_dir=str(worktree_dir),
-                venv_dir=str(venv_dir),
-                status=status,
-                throughput=throughput,
-                accuracy=accuracy,
-                completed=completed,
-                winner=winner if status == "succeeded" else False,
-                reason=reason,
-                commands=command_results,
-                patches_path=artifact_paths.get("patches_path", ""),
-                files_json_path=artifact_paths.get("files_json_path", ""),
-            )
-        )
-        if winner:
+            ctx["ok"] = bool(result.ok)
+            ctx["returncode"] = int(result.returncode)
+            ctx["timed_out"] = bool(result.timed_out)
+        command_results.append(result)
+        if spec.required and not result.ok:
+            status = "failed"
+            reason = f"{name} command failed"
             break
+
+    throughput, accuracy, completed = _evaluate_candidate(req, variables)
+    winner, gate_reason = winner_decision(req, throughput, accuracy, completed)
+    if status == "succeeded":
+        reason = gate_reason
+    score = candidate_score(req, throughput, accuracy)
+    log.info(
+        "candidate %s: status=%s winner=%s score=%.4f reason=%s",
+        candidate.ref, status, winner, score, reason,
+    )
+    return CandidateResult(
+        candidate=candidate,
+        candidate_dir=str(candidate_dir),
+        worktree_dir=str(workspace.worktree_dir),
+        venv_dir=str(workspace.venv_dir),
+        status=status,
+        throughput=throughput,
+        accuracy=accuracy,
+        completed=completed,
+        winner=winner if status == "succeeded" else False,
+        reason=reason,
+        commands=command_results,
+        patches_path=artifact_paths.get("patches_path", ""),
+        files_json_path=artifact_paths.get("files_json_path", ""),
+    )
+
+
+async def _run_candidates_concurrent(
+    req: ExploreRequest,
+    candidates: list[Candidate],
+    *,
+    execute: bool,
+) -> list[CandidateResult]:
+    """Run candidates with ``asyncio.gather`` bounded by ``build_concurrency``.
+
+    Each task wraps :func:`_run_single_candidate` in :func:`asyncio.to_thread`
+    so the synchronous subprocess code path is unchanged. A semaphore caps
+    the number of build tasks in flight; benchmark + accuracy stay inside
+    the worker function so GPU-contended stages still run within a single
+    candidate task at a time (one candidate's bench cannot overlap another
+    candidate's bench unless concurrency > 1 — that is the explicit user
+    knob).
+    """
+    semaphore = asyncio.Semaphore(max(1, req.build_concurrency))
+
+    async def _bounded(idx: int, cand: Candidate) -> CandidateResult:
+        async with semaphore:
+            return await asyncio.to_thread(
+                _run_single_candidate, req, cand, index=idx, execute=execute,
+            )
+
+    tasks = [_bounded(i, c) for i, c in enumerate(candidates, start=1)]
+    return await asyncio.gather(*tasks)
+
+
+def _maybe_disk_preflight(req: ExploreRequest, n_candidates: int, *, execute: bool) -> None:
+    """Run disk_preflight when execute mode is on and threshold is not 0."""
+    if not execute or n_candidates <= 0:
+        return
+    if req.disk_min_free_gb == 0:
+        log.debug("disk_preflight: skipped (disk_min_free_gb=0)")
+        return
+    disk_preflight(
+        req.work_dir,
+        n_candidates,
+        min_free_gb=req.disk_min_free_gb,
+    )
+
+
+def _cleanup_losers(
+    req: ExploreRequest,
+    results: list[CandidateResult],
+    *,
+    execute: bool,
+) -> None:
+    """Apply keep_winner_only cleanup over all non-winner results."""
+    if not execute or not req.keep_winner_only:
+        return
+    repo_dir: Path | None = None
+    try:
+        repo_dir = prepare_repo_cache(req)
+    except Exception:  # noqa: BLE001 — repo cache may be unavailable in tests
+        log.debug("cleanup_losers: repo cache unavailable; using rmtree fallback")
+    for result in results:
+        if result.status != "succeeded" and not result.winner:
+            keep = False
+        else:
+            keep = result.winner
+        cleanup_workspace(
+            WorkspacePaths(
+                candidate_dir=Path(result.candidate_dir),
+                worktree_dir=Path(result.worktree_dir),
+                venv_dir=Path(result.venv_dir),
+            ),
+            is_winner=keep,
+            keep_winner_only=True,
+            repo_dir=repo_dir,
+        )
+
+
+def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
+    """Main entry: enumerate, optionally build/bench, return summary dict.
+
+    Behaviour matrix (merged-design §4.4):
+
+    * ``execute=False``                          — plan mode. Drops audit
+      material, never builds, never touches GPU.
+    * ``execute=True`` + ``ranking_mode=False``  — run candidates serially
+      (or with ``build_concurrency`` async gather), **stop on first
+      winner**. Legacy zhenggong v0.2 behaviour.
+    * ``execute=True`` + ``ranking_mode=True``   — run every candidate,
+      then sort the result list by :func:`candidate_score` descending.
+      ``winner_ref`` is the top-scoring candidate that passed all gates.
+    * ``execute=True`` + ``keep_winner_only=True`` — after the run, drop
+      worktree+venv for every non-winner candidate to reclaim disk.
+    * ``execute=True`` + ``build_concurrency > 1`` — fan out build via
+      ``asyncio.gather``. Within one candidate task, bench/accuracy stay
+      strictly serial.
+
+    Disk preflight (when execute=True and ``disk_min_free_gb != 0``)
+    runs before any candidate work starts; failure raises
+    :class:`isolation.DiskPreflightError` which the CLI converts to a
+    fatal error.
+    """
+    log.info(
+        "explore start framework=%s repo=%s work_dir=%s execute=%s "
+        "ranking=%s build_concurrency=%d keep_winner_only=%s kb_domain=%r",
+        req.framework, req.repo_url, req.work_dir, execute,
+        req.ranking_mode, req.build_concurrency, req.keep_winner_only, req.kb_domain,
+    )
+    req.work_dir.mkdir(parents=True, exist_ok=True)
+
+    with stage_log(log, "enumerate") as ctx:
+        candidates, skipped_candidates = _enumerate_with_skipped(req)
+        ctx["n_candidates"] = len(candidates)
+        ctx["n_skipped"] = len(skipped_candidates)
+
+    _maybe_disk_preflight(req, len(candidates), execute=execute)
+
+    if execute and req.ranking_mode and req.build_concurrency > 1:
+        # Full fan-out: every candidate runs, build stage capped by semaphore.
+        log.info(
+            "explore: ranking_mode + build_concurrency=%d -> asyncio.gather",
+            req.build_concurrency,
+        )
+        results: list[CandidateResult] = asyncio.run(
+            _run_candidates_concurrent(req, candidates, execute=execute)
+        )
+    else:
+        # Serial path. Honours legacy early-stop unless ranking_mode is on.
+        results = []
+        for index, candidate in enumerate(candidates, start=1):
+            result = _run_single_candidate(
+                req, candidate, index=index, execute=execute,
+            )
+            results.append(result)
+            if execute and result.winner and not req.ranking_mode:
+                log.info(
+                    "explore: early-stop after winner %s (ranking_mode=False)",
+                    candidate.ref,
+                )
+                break
+
+    # Ranking mode: sort the result list so the highest-scoring candidate
+    # is first. Candidates that failed the build or bench stage score 0
+    # via candidate_score() and fall to the tail. The winner flag is
+    # still set per the gate logic; ranking only changes display order.
+    if execute and req.ranking_mode:
+        results.sort(
+            key=lambda r: candidate_score(req, r.throughput, r.accuracy),
+            reverse=True,
+        )
+
     winner_result = next((r for r in results if r.winner), None)
+    _cleanup_losers(req, results, execute=execute)
+
     audit_materials = {
         "patch_files_present": sum(1 for r in results if r.patches_path),
         "files_json_present": sum(1 for r in results if r.files_json_path),
         "policy": "patches_and_files_only",
     }
     kb_contribution = _contribute_findings_to_kb(req, winner_result, execute=execute)
-    return {
+    summary = {
         "ok": True,
         "mode": "execute" if execute else "plan",
         "framework": req.framework,
@@ -622,6 +689,9 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
             "min_throughput_ratio": req.thresholds.min_throughput_ratio,
             "max_accuracy_drop": req.thresholds.max_accuracy_drop,
         },
+        "ranking_mode": req.ranking_mode,
+        "build_concurrency": req.build_concurrency,
+        "keep_winner_only": req.keep_winner_only,
         "winner_ref": winner_result.candidate.ref if winner_result else None,
         "winner_dir": winner_result.candidate_dir if winner_result else None,
         "promotion_policy": "manual_only",
@@ -637,6 +707,11 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
         "kb_contribution": kb_contribution,
         "candidates": [r.to_dict() for r in results],
     }
+    log.info(
+        "explore done winner=%s n_results=%d kb=%s",
+        summary["winner_ref"], len(results), kb_contribution.get("status"),
+    )
+    return summary
 
 
 def _contribute_findings_to_kb(
