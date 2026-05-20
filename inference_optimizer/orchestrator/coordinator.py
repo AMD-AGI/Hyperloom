@@ -563,8 +563,18 @@ class Coordinator:
         have torn down. Idempotent: a second invocation with an empty
         queue + already-committed session is a no-op (cortex-kb commit
         is itself idempotent for a given sid).
+
+        v0.8 §3.2 §5.5 / KB_gaps/Gap-06 — when the CLOSE phase
+        sequencer ran (``close_sequence_done=True``), steps 3 + 4
+        already drained + committed. We early-return so the hook is
+        a no-op in that case (and ``cortex_session_summary`` already
+        on SharedState is the authoritative one).
         """
         if self.cortex_kb is None or not self.cortex_kb.enabled:
+            return
+        if getattr(self.shared_state, "close_sequence_done", False):
+            # CLOSE phase sequencer already ran steps 3 + 4 inline; nothing
+            # left for stop() to do here.
             return
         sid = (self.shared_state.cortex_session_id or "").strip()
         if not sid:
@@ -815,10 +825,14 @@ class Coordinator:
           (or defaults-driven) grid so SWEEP doesn't degrade to
           "LLM 自觉发 sweep" (KB_design §3.2 §5.4 + KB_gaps/Gap-05).
           Same idempotency contract as KERNEL.
+        * ``CLOSE`` — run the 5-step closing sequencer (report →
+          session_breakdown → NDJSON drain → Cortex commit → mark
+          done; KB_design §3.2 §5.5 + KB_gaps/Gap-06). Sets the
+          ``state.close_sequence_done`` flag so ``cli.finally``
+          short-circuits its emergency breakdown write.
 
-        Future:
-
-        * ``CLOSE`` — 5-step sequencer (KB_gaps/Gap-06).
+        All four phases with side effects are wired. Hook additions
+        for new phases should slot into this dispatcher table.
         """
         target = (to_phase or "").upper()
         if target == _phase_state.PHASE_EXPLORE:
@@ -827,7 +841,8 @@ class Coordinator:
             await self._on_enter_kernel(from_phase=from_phase)
         elif target == _phase_state.PHASE_SWEEP:
             await self._on_enter_sweep(from_phase=from_phase)
-        # CLOSE lands here without effects until KB_gaps/Gap-06.
+        elif target == _phase_state.PHASE_CLOSE:
+            await self._on_enter_close(from_phase=from_phase)
 
     async def _on_enter_explore(self, *, from_phase: str) -> None:
         """KB_gaps/Gap-02 PR 5.4 — warm the PR feed across every
@@ -1269,6 +1284,359 @@ class Coordinator:
             "isl_osl_configs":    isl_osl_configs,
             "num_prompts_factor": num_prompts_factor,
         }
+
+    # ------------------------------------------------------------------
+    # v0.8 §3.2 §5.5 + KB_gaps/Gap-06 — CLOSE phase 5-step sequencer
+    # ------------------------------------------------------------------
+    # Class-level timeouts for the CLOSE sequencer's wait-for-task
+    # polls. Class attributes (rather than constants in the method)
+    # so tests can override per-instance with small values without
+    # patching method internals. Production defaults match KB_design
+    # §3.2 §5.5: report ≤ 10 min (matches ``BaselineExecutor`` cap);
+    # session_breakdown ≤ 5 min (tiny report, lots of headroom).
+    CLOSE_REPORT_TIMEOUT_SEC: float = 600.0
+    CLOSE_SESSION_BREAKDOWN_TIMEOUT_SEC: float = 300.0
+    CLOSE_NDJSON_DRAIN_TIMEOUT_SEC: float = 60.0
+
+    async def _on_enter_close(self, *, from_phase: str) -> None:
+        """KB_design §3.2 §5.5 — CLOSE phase 5-step sequencer.
+
+        Runs the fixed order the design contract requires:
+
+        1. ``report``                — generate markdown / json report
+        2. ``session_breakdown``     — write ``session_breakdown.json``
+        3. NDJSON drain              — flush async Cortex queue
+        4. Cortex ``session commit`` — promote hypothesize edges
+        5. mark ``close_sequence_done``
+
+        Each step records a row under
+        ``phase_history[-1].evidence.close_steps`` so the breakdown
+        collector (and operators) can verify the sequence completed.
+        Steps are best-effort: a failure in any step stamps
+        ``status='failed' / 'timeout'`` evidence but does not abort
+        the remaining steps. Step 5 always runs (so the cli.finally
+        short-circuit is consistent even when steps 1-4 partly
+        failed).
+
+        Idempotence: report / session_breakdown enqueue uses fixed
+        idempotency_keys (``internal-report-close_phase_entry`` /
+        ``internal-session_breakdown-close_phase_entry``) so a phase
+        re-entry (Inv-2.1 forbids in production, but resume from a
+        crash mid-sequencer counts) reuses existing tasks. NDJSON
+        drain + Cortex commit are themselves idempotent for a given
+        sid (KB_design §3.13 M1 §5.4).
+
+        The sequencer runs INLINE inside the hook — it doesn't wait
+        for the reactor / dispatcher tick boundary. Steps 1 and 2
+        enqueue tasks then poll ``_wait_for_task_terminal`` until the
+        dispatcher (which the same Coordinator.run() loop drives)
+        picks them up and finishes. Step 3 + 4 call the cortex_kb
+        client synchronously. Step 5 is a single SharedState write.
+        """
+        log.info("CLOSE entered (from=%s); starting 5-step close sequence",
+                 from_phase or "<unknown>")
+        await self._record_close_step("sequencer_started", status="running")
+
+        # ---------------- Step 1: report ----------------
+        try:
+            report_task = await self._enqueue_internal_report_task(
+                reason="close_phase_entry",
+            )
+            terminal_state = await self._wait_for_task_terminal(
+                report_task.task_id,
+                timeout_sec=self.CLOSE_REPORT_TIMEOUT_SEC,
+            )
+            if terminal_state in {"succeeded", None}:
+                await self._record_close_step(
+                    "report", status="done",
+                    task_id=report_task.task_id,
+                )
+            else:
+                await self._record_close_step(
+                    "report", status="failed",
+                    task_id=report_task.task_id,
+                    detail=f"task_state={terminal_state!r}",
+                )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception("CLOSE step 1 (report) failed")
+            await self._record_close_step(
+                "report", status="failed", detail=repr(exc)[:240],
+            )
+
+        # ---------------- Step 2: session_breakdown ----------------
+        try:
+            bd_task = await self._enqueue_internal_session_breakdown_task(
+                reason="close_phase_entry",
+            )
+            terminal_state = await self._wait_for_task_terminal(
+                bd_task.task_id,
+                timeout_sec=self.CLOSE_SESSION_BREAKDOWN_TIMEOUT_SEC,
+            )
+            if terminal_state in {"succeeded", None}:
+                await self._record_close_step(
+                    "session_breakdown", status="done",
+                    task_id=bd_task.task_id,
+                )
+            else:
+                await self._record_close_step(
+                    "session_breakdown", status="failed",
+                    task_id=bd_task.task_id,
+                    detail=f"task_state={terminal_state!r}",
+                )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception("CLOSE step 2 (session_breakdown) failed")
+            await self._record_close_step(
+                "session_breakdown", status="failed",
+                detail=repr(exc)[:240],
+            )
+
+        # ---------------- Step 3: NDJSON drain ----------------
+        if self.cortex_kb is not None and self.cortex_kb.enabled:
+            try:
+                drain_report = self.cortex_kb.drain_pending(
+                    timeout_sec=self.CLOSE_NDJSON_DRAIN_TIMEOUT_SEC,
+                )
+                remaining = int(drain_report.get("remaining", 0))
+                if remaining > 0:
+                    await self._record_close_step(
+                        "ndjson_drain",
+                        status="incomplete",
+                        detail=f"remaining={remaining}",
+                    )
+                else:
+                    await self._record_close_step(
+                        "ndjson_drain", status="done",
+                    )
+            except Exception as exc:  # noqa: BLE001 — defensive
+                log.exception("CLOSE step 3 (NDJSON drain) failed")
+                await self._record_close_step(
+                    "ndjson_drain", status="failed",
+                    detail=repr(exc)[:240],
+                )
+        else:
+            await self._record_close_step("ndjson_drain", status="skipped")
+
+        # ---------------- Step 4: Cortex session commit ----------------
+        sid = (self.shared_state.cortex_session_id or "").strip()
+        if (
+            self.cortex_kb is not None
+            and self.cortex_kb.enabled
+            and sid
+            and not self.shared_state.cortex_session_summary
+        ):
+            try:
+                summary = self.cortex_kb.session_commit(sid)
+                self.shared_state.cortex_session_summary = dict(summary)
+                await self._record_close_step("cortex_commit", status="done")
+            except Exception as exc:  # noqa: BLE001 — defensive
+                log.exception("CLOSE step 4 (Cortex commit) failed")
+                # Match _cortex_t4_hook's failure semantics so
+                # observability is consistent across the two paths.
+                self.shared_state.cortex_session_summary = {
+                    "status": "commit_failed",
+                    "error":  str(exc)[:512],
+                }
+                if not self.shared_state.stop_reason:
+                    self.shared_state.set_stop_reason("cortex_commit_failed")
+                await self._record_close_step(
+                    "cortex_commit", status="failed",
+                    detail=repr(exc)[:240],
+                )
+        else:
+            # No Cortex wired / already committed / no sid → skip without
+            # error. ``cortex_t4_hook`` (Coordinator.stop) also skips.
+            await self._record_close_step("cortex_commit", status="skipped")
+
+        # ---------------- Step 5: mark done ----------------
+        self.shared_state.close_sequence_done = True
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "CLOSE step 5 (close_sequence_done save) failed; cli.finally "
+                "will still write a safety-net breakdown"
+            )
+        await self._record_close_step("done", status="done")
+        log.info("CLOSE 5-step sequencer complete")
+
+    async def _enqueue_internal_report_task(
+        self, *, reason: str,
+    ) -> Task:
+        """Build + enqueue a Coordinator-internal ``report`` task.
+
+        Mirrors :meth:`_enqueue_internal_profile_task` /
+        :meth:`_enqueue_internal_sweep_task` shape. Idempotency_key
+        ``internal-report-<reason>``.
+
+        Reuses ``state.closing_report_task_id`` when set so the
+        wall-clock deadline path (``_enter_closing_phase``) and the
+        CLOSE phase sequencer don't race to insert two report tasks
+        with different ids. When the wall-clock path enqueued first,
+        the sequencer simply waits for that task instead.
+        """
+        existing_id = (self.shared_state.closing_report_task_id or "").strip()
+        if existing_id:
+            try:
+                task = await self.tasks.get(existing_id)
+                log.info(
+                    "internal-report task already enqueued by wall-clock "
+                    "deadline path (task_id=%s, state=%s); sequencer will "
+                    "wait for it", task.task_id, task.state,
+                )
+                return task
+            except Exception:  # noqa: BLE001 — TaskNotFound + friends
+                # Stale id (resume from a wiped-tasks-table session); fall
+                # through to fresh enqueue.
+                pass
+
+        params: dict[str, Any] = {
+            "source":         "coordinator_internal",
+            "reason":         str(reason),
+            "session_dir":    str(self.session_dir),
+            "max_highlights": 50,
+        }
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="report",
+            params=params,
+            idempotency_key=f"internal-report-{reason}",
+            requires_lanes=[],
+            allowed_tools=["Read"],
+            side_effects=["writes_results"],
+            lease_ttl_sec=120,
+        )
+        # Mirror onto state for back-compat with the existing wall-clock
+        # path inspectors (``closing_report_task_id`` is also used by
+        # robustness alerting + breakdown summary lines).
+        if not self.shared_state.closing_report_task_id:
+            self.shared_state.closing_report_task_id = task.task_id
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "internal-report: closing_report_task_id save failed"
+                )
+        if was_existing:
+            log.info(
+                "internal-report task reused (idempotent: task_id=%s, "
+                "state=%s)", task.task_id, task.state,
+            )
+        return task
+
+    async def _enqueue_internal_session_breakdown_task(
+        self, *, reason: str,
+    ) -> Task:
+        """Build + enqueue a Coordinator-internal ``session_breakdown``
+        task.
+
+        Same idempotency contract as the report helper. The
+        ``session_breakdown`` action is already registered in cli's
+        ``_REAL_EXECUTORS_FULL`` (action_executors/session_breakdown.py),
+        so the standard dispatcher picks it up without special-casing.
+        """
+        params: dict[str, Any] = {
+            "source":      "coordinator_internal",
+            "reason":      str(reason),
+            "session_dir": str(self.session_dir),
+        }
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="session_breakdown",
+            params=params,
+            idempotency_key=f"internal-session_breakdown-{reason}",
+            requires_lanes=[],
+            allowed_tools=["Read"],
+            side_effects=["writes_results"],
+            lease_ttl_sec=120,
+        )
+        if was_existing:
+            log.info(
+                "internal-session_breakdown task reused (idempotent: "
+                "task_id=%s, state=%s)", task.task_id, task.state,
+            )
+        return task
+
+    async def _wait_for_task_terminal(
+        self, task_id: str, *, timeout_sec: float,
+    ) -> str | None:
+        """Poll the TaskRegistry until ``task_id`` reaches a terminal
+        state, with a wall-clock timeout.
+
+        Returns the final ``task.state`` (``"succeeded"`` / ``"failed"``
+        / ``"cancelled"`` / ``"needs_manual_review"``) or ``None`` on
+        timeout (caller treats None as a soft "let's not block on this
+        forever" — the CLOSE sequencer records ``status='timeout'``).
+
+        Polling interval is 100ms — small relative to typical report /
+        session_breakdown wall time (5-30s); large enough to not
+        thrash sqlite under contention.
+        """
+        from .task_registry import TaskNotFound
+
+        deadline = asyncio.get_event_loop().time() + max(0.0, float(timeout_sec))
+        poll_interval = 0.1
+        terminal = {"succeeded", "failed", "cancelled", "needs_manual_review"}
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                task = await self.tasks.get(task_id)
+            except TaskNotFound:
+                return None
+            if task.state in terminal:
+                return task.state
+            await asyncio.sleep(poll_interval)
+        return None
+
+    async def _record_close_step(
+        self,
+        step: str,
+        *,
+        status: str,
+        task_id: str = "",
+        detail: str = "",
+    ) -> None:
+        """Append one row to ``phase_history[-1].evidence.close_steps``.
+
+        Concrete row shape::
+
+            {"step": "report", "status": "done",
+             "task_id": "abc123", "detail": "",
+             "ts": "2026-..."}
+
+        Best-effort: a malformed phase_history row (missing dict /
+        non-list close_steps) gets a fresh structure installed; a
+        SharedState.save failure is logged but doesn't abort the
+        sequencer. Mirrors the contract of
+        :meth:`_record_phase_entry_evidence` but persists per-step
+        rather than per-hook.
+        """
+        history = self.shared_state.phase_history or []
+        if not history:
+            return
+        row = history[-1]
+        if not isinstance(row, dict):
+            return
+        evidence = row.get("evidence")
+        if not isinstance(evidence, dict):
+            evidence = {}
+            row["evidence"] = evidence
+        steps = evidence.get("close_steps")
+        if not isinstance(steps, list):
+            steps = []
+            evidence["close_steps"] = steps
+        entry: dict[str, Any] = {
+            "step":   step,
+            "status": status,
+            "ts":     datetime.now(timezone.utc).isoformat(),
+        }
+        if task_id:
+            entry["task_id"] = task_id
+        if detail:
+            entry["detail"] = detail
+        steps.append(entry)
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "close_step save failed for step=%r status=%r", step, status,
+            )
 
     def _ensure_action_scores_seeded(self) -> None:
         """v0.8 §3.9 — no-op stub.

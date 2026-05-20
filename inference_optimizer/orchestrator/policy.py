@@ -360,6 +360,12 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "last_consumed_escalate_hint",
     "last_consumed_escalate_hint_ts",
     "plateau_overrides",
+    # v0.8 §3.2 §5.5 / KB_gaps/Gap-06 — CLOSE phase sequencer flag.
+    # Set by Coordinator at the end of the 5-step sequencer so
+    # ``cli.finally`` can short-circuit its emergency breakdown
+    # write. LLM update_state must not be able to toggle this and
+    # trick the cli into skipping its safety net.
+    "close_sequence_done",
 })
 
 
