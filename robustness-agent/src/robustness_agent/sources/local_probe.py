@@ -849,19 +849,48 @@ async def _probe_local_servers(
     return results
 
 
+_RAY_PENDING_RE = re.compile(
+    r"(?m)(?:^|:)\s*(\d+)\+?\s+pending\s+(?:task|actor)",
+    re.IGNORECASE,
+)
+
+
+def _parse_ray_pending_count(text: str) -> int:
+    """Sum the pending-task counts in the ``Demands:`` section of ``ray status``.
+
+    The regex anchors each digit to either a line start or a colon and
+    requires the ``pending task[s]`` / ``pending actor[s]`` suffix that
+    Ray's autoscaler emits for queued demands. This excludes hex digits
+    embedded inside node IDs (line ``1 node_<64-char-hex>``), which
+    never satisfy both the colon/line-start anchor *and* the
+    ``task|actor`` suffix.
+    """
+    if not text:
+        return 0
+    total = 0
+    for match in _RAY_PENDING_RE.finditer(text):
+        try:
+            total += int(match.group(1))
+        except ValueError:
+            continue
+    return total
+
+
 def _probe_ray_head(timeout_s: float) -> dict[str, Any]:
-    """Best-effort ``ray status`` probe.
+    """Best-effort ``ray status`` probe for liveness + queued demand.
 
-    Returns ``{"healthy": True, "pending_tasks": N, "stdout_head": ...}``
-    when ``ray status`` exits 0 within ``timeout_s``;
-    ``{"healthy": False, "reason": ...}`` otherwise. ``pending_tasks``
-    is parsed out of the textual ``Pending: N`` block ``ray status``
-    emits so F1 ``ray_pending_starvation`` can detect saturated
-    queues without importing the ray Python SDK.
+    Returns:
+        ``{}`` when ``ray`` is not on ``$PATH`` (silent on smoke-test pods).
+        ``{"healthy": False, "reason": str, "stderr": str,
+          "returncode": int|None}`` when ``ray status`` cannot be run or
+        exits non-zero.
+        ``{"healthy": True, "pending_tasks": int, "stdout_head": str,
+          "returncode": 0}`` on success.
 
-    Returns ``{}`` (empty dict; falsy) when ``ray`` isn't on PATH, so
-    the signal stays silent on pods without Ray installed (smoke tests,
-    CI runners).
+    ``pending_tasks`` is taken from the ``Demands:`` section only via
+    :func:`_parse_ray_pending_count`. This avoids the Ray dashboard /
+    state-API dependency (port 8265) which is not enabled in production
+    Hyperloom pods.
     """
     if not shutil.which("ray"):
         return {}
@@ -883,7 +912,7 @@ def _probe_ray_head(timeout_s: float) -> dict[str, Any]:
     except OSError as exc:
         return {
             "healthy": False,
-            "reason": f"ray status launch error: {exc.__class__.__name__}",
+            "reason": f"ray status launch error: {type(exc).__name__}",
             "stderr": str(exc)[:200],
             "returncode": None,
         }
@@ -894,43 +923,18 @@ def _probe_ray_head(timeout_s: float) -> dict[str, Any]:
             "stderr": (proc.stderr or "").strip()[:400],
             "returncode": proc.returncode,
         }
+    stdout = proc.stdout or ""
     head_line = ""
-    pending_tasks = _parse_ray_pending_count(proc.stdout or "")
-    for line in (proc.stdout or "").splitlines():
+    for line in stdout.splitlines():
         if line.strip():
             head_line = line.strip()
             break
     return {
         "healthy": True,
         "stdout_head": head_line[:200],
-        "pending_tasks": pending_tasks,
+        "pending_tasks": _parse_ray_pending_count(stdout),
         "returncode": 0,
     }
-
-
-# ``ray status`` text blocks we parse for F1:
-#
-#   Demands:
-#       {'CPU': 1.0, ...}: N pending tasks/actors
-#   Pending:
-#       ...
-#
-# We tolerate both Ray 2.x text formats by accumulating any
-# ``N pending`` integer we find.
-_RAY_PENDING_RE = re.compile(r"(\d+)\s+pending", re.IGNORECASE)
-
-
-def _parse_ray_pending_count(text: str) -> int:
-    """Sum up the ``N pending`` tokens emitted by ``ray status``."""
-    if not text:
-        return 0
-    total = 0
-    for match in _RAY_PENDING_RE.finditer(text):
-        try:
-            total += int(match.group(1))
-        except ValueError:
-            continue
-    return total
 
 
 def _sample_fd_usage(pid: int | None) -> dict[str, Any]:
