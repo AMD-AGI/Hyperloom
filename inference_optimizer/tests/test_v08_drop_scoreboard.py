@@ -265,6 +265,60 @@ def test_orchestration_prompt_has_no_scoreboard_block():
     assert "Phase-aware action selection" in prompt
 
 
+def test_kernel_opt_body_has_no_scoreboard_vocab():
+    """KB_gaps/Dead-D — the kernel-pipeline body injected into the
+    Orchestration prompt whenever KERNEL is enabled must NOT carry any
+    v0.6 scoreboard vocabulary."""
+    from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
+        _KERNEL_OPT_PIPELINE_BODY,
+    )
+
+    haystack = _KERNEL_OPT_PIPELINE_BODY.lower()
+    # ``Action scores`` may appear as a historical callout (the body
+    # explicitly tells the LLM the surface was retired); the *live*
+    # scoring vocab below must not.
+    forbidden = (
+        "scoreboard",
+        "score_mult",
+        "marathon_priors",
+        "effective_score",
+        "eff_score",
+        "cooldown_until_tick",
+        "scoreboard surfaces",
+        "scoreboard decides",
+        "action scores top-12",
+    )
+    for needle in forbidden:
+        assert needle not in haystack, (
+            f"_KERNEL_OPT_PIPELINE_BODY still references retired token "
+            f"{needle!r} (KB_gaps/Dead-D §5.1)"
+        )
+
+
+def test_kernel_opt_body_references_v08_decision_signals():
+    """KB_gaps/Dead-D §5.1 — the body must surface the v0.8 decision
+    facts (gaps[] / last_action_failures / last_kernel_opt / PARTIAL
+    cap / plateau_kernel) so KERNEL-phase action selection has a
+    concrete fact list instead of an implicit scoreboard."""
+    from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
+        _KERNEL_OPT_PIPELINE_BODY,
+    )
+
+    body = _KERNEL_OPT_PIPELINE_BODY
+    for signal in (
+        "state.gaps[]",
+        "last_action_failures",
+        "last_kernel_opt",
+        "plateau_kernel",
+        "rejected_kernel_ids",
+        "_DEFAULT_KERNEL_OPT_MAX_PARTIAL",
+    ):
+        assert signal in body, (
+            f"_KERNEL_OPT_PIPELINE_BODY missing v0.8 decision signal "
+            f"{signal!r} (KB_gaps/Dead-D §5.1)"
+        )
+
+
 def test_orchestration_md_has_no_score_view():
     """The rules fragment (``orchestration.md``) should also be free of
     score-view directives (KB_design §3.9 §8)."""
