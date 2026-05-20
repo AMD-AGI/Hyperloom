@@ -66,13 +66,11 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 # ``specialist`` is yaml-less (v0.8 M5, parameterised by
 # ``params.domain``) so it is added explicitly.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
-    "baseline", "profile", "pmc_roofline",
-    "backends", "params", "sweep",
+    "baseline", "profile", "pmc_roofline", "sweep",
     "explore",
     "specialist",
     "integrate", "kernel_opt", "deep_kernel_analysis",
     "operator_tuning", "vendor_kernel_config",
-    "validate_stack",
     "recover",
 })
 

@@ -176,11 +176,10 @@ def _join_args(*parts: str) -> str:
 class ExploreExecutor:
     """ActionRunner for the merged ``explore`` action.
 
-    Subsumes :class:`BackendsExecutor` + :class:`ParamsExecutor` +
-    :class:`ValidateStackExecutor`. The legacy executors remain
-    registered during M3 for backward-compat (so a v0.6 resume that
-    re-dispatches a queued backends task still has a runner); new
-    sessions hit this class via ``delegate{action_name='explore'}``.
+    Subsumes the retired v0.6 ``backends`` / ``params`` /
+    ``validate_stack`` executors (KB_design §3.4 / KB_gaps/Dead-A).
+    Per-variant KEEP/REVERT gating plus an inlined per-KEEP stack
+    rebench replace the standalone ``validate_stack`` step.
     """
 
     def __init__(
