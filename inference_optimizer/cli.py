@@ -3422,10 +3422,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print(f"Workload        : ISL={args.isl} OSL={args.osl} "
               f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision}")
 
-        # session_dir is fixed at /workspace/hyperloom (override:
-        # $USER_DATA_PATH). Each sandbox is single-use, so collision
-        # detection is unnecessary; mkdir -p is enough.
-        session_dir = make_session_dir()
+        # N17: session_dir is now <workspace_root>/<model>/<UTC ts>/
+        # by default (per-model + per-launch). Workspace_root is
+        # $USER_DATA_PATH (fallback /workspace/hyperloom). To restore
+        # the legacy flat layout, set INFERENCE_OPTIMIZER_SESSION_LAYOUT=
+        # flat. `make_session_dir(model_name=...)` does the layout
+        # decision + pins the result via $INFERENCE_OPTIMIZER_CURRENT_
+        # SESSION_DIR for every subprocess.
+        session_dir = make_session_dir(model_name=args.model)
         manifest = write_manifest(session_dir, args=args)
         print(f"Session dir     : {session_dir}")
         print(f"Session id      : {manifest['session_id']}  (manifest label only)")
