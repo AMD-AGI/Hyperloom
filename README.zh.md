@@ -87,7 +87,7 @@ docker run -d \
   tail -f /dev/null
 ```
 
-如果宿主机上已经 clone 了 Hyperloom，也可以直接把该目录挂载到容器，例如把 `-v /path/to/workspace:/workspace` 换成 `-v /path/on/host/Hyperloom:/workspace/Hyperloom`。之后在 Cursor Attach 到容器时打开 `/workspace/Hyperloom`，不需要在容器里重新 clone。
+如果宿主机上已经 clone 了 Hyperloom 源码仓库，也可以直接把该目录挂载到容器，例如把 `-v /path/to/workspace:/workspace` 换成 `-v /path/on/host/Hyperloom:/workspace/Hyperloom`。之后在 Cursor Attach 到容器时打开 `/workspace/Hyperloom`，不需要在容器里重新 clone。
 
 容器启动后，可以先确认容器可进入、GPU 可见：
 
@@ -122,7 +122,7 @@ git clone https://github.com/AMD-AGI/Hyperloom.git
 cd Hyperloom
 ```
 
-如果已经通过 Docker volume 挂载了 Hyperloom，直接进入挂载目录即可：
+如果已经通过 Docker volume 或 SaFE Authoring Pod 挂载了 Hyperloom，直接进入挂载目录即可：
 
 ```bash
 cd /workspace/Hyperloom

@@ -122,7 +122,7 @@ git clone https://github.com/AMD-AGI/Hyperloom.git
 cd Hyperloom
 ```
 
-If Hyperloom was mounted into the container through a Docker volume, enter the mounted checkout directly:
+If Hyperloom was mounted through a Docker volume or a SaFE Authoring Pod, enter the mounted checkout directly:
 
 ```bash
 cd /workspace/Hyperloom
