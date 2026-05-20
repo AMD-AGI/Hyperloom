@@ -2335,6 +2335,19 @@ class Coordinator:
             if warm_block:
                 sections.append("=== Warm start (Cortex T0) ===")
                 sections.append(warm_block)
+            # v0.8 KB_gaps/Gap-09 — surface the structured gaps[] ledger
+            # right after the warm-start block so the DECISION FRAMEWORK
+            # step "Current gaps" finds the canonical entries instead
+            # of falling back to ``last_action_failures`` +
+            # ``explore_search.winners_history`` proxies.
+            try:
+                gaps_block = self.shared_state.to_gaps_summary()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: gaps_summary failed")
+                gaps_block = ""
+            if gaps_block:
+                sections.append("=== Current gaps ===")
+                sections.append(gaps_block)
 
         # v0.8 §3.3 §4.4 — Robustness gets a phase budget telemetry +
         # specialist health block so it can fire the medium-severity
@@ -3661,6 +3674,41 @@ class Coordinator:
         # tp lives on baseline_config when seeded; otherwise the prompt
         # builder is fine with the dataclass default of 1.
 
+        # v0.8 KB_gaps/Gap-09 — fill gap-specific anchors from the
+        # gaps[] ledger. Orchestration carries a ``gap_canonical_id``
+        # via ``delegate.params`` (and also as the M5 ``gap`` field);
+        # we look up the matching gap row and stamp its symptom /
+        # layer / domain_hint / recent attempts onto the task so the
+        # SpecialistPromptBuilder section that renders ``gap_symptom``
+        # / ``gap_layer`` / ``gap_evidence`` has structured context
+        # instead of falling back to ``(none)``.
+        gap_cid = (
+            str(params.get("gap_canonical_id") or "").strip()
+            or str(params.get("gap") or "").strip()
+        )
+        if gap_cid:
+            gap = state.find_gap(gap_cid)
+            if gap is not None:
+                if not params.get("gap_symptom"):
+                    params["gap_symptom"] = str(gap.get("symptom") or "")
+                if not params.get("gap_layer"):
+                    params["gap_layer"] = str(gap.get("layer") or "")
+                if not params.get("domain"):
+                    # When the LLM omitted ``domain`` we let the gap's
+                    # ``domain_hint`` win — PolicyGate R2 still validates
+                    # the routing against SPECIALIST_DOMAIN_KEYS.
+                    hint = str(gap.get("domain_hint") or "")
+                    if hint:
+                        params["domain"] = hint
+                evidence = params.get("gap_evidence")
+                if not isinstance(evidence, dict) or not evidence:
+                    attempts = list(gap.get("attempts") or [])[-5:]
+                    if attempts:
+                        params["gap_evidence"] = {
+                            "recent_attempts": attempts,
+                            "severity": str(gap.get("severity") or ""),
+                        }
+
     @staticmethod
     def _pr_summary_to_dict(pr: Any) -> dict[str, Any]:
         """Flatten a :class:`PRSummary` (or any object with the same
@@ -3678,6 +3726,263 @@ class Coordinator:
             "labels": list(getattr(pr, "labels", ()) or ()),
             "author": str(getattr(pr, "author", "")),
         }
+
+    # ------------------------------------------------------------------
+    # v0.8 KB_gaps/Gap-09 — gaps[] ledger refresh (KB_design §3.3 / §3.5)
+    # ------------------------------------------------------------------
+    async def _refresh_gaps(self, *, reason: str) -> None:
+        """Refresh :attr:`SharedState.gaps` from observable signals.
+
+        Coordinator is the sole writer (Inv-1 single-writer +
+        PolicyGate ``CORE_STATE_FIELDS`` lock). Called at:
+
+        1. baseline completion          (``reason='baseline_done'``)
+        2. EXPLORE round KEEP / REVERT  (``reason='explore_round'``)
+        3. specialist_done bookkeeping  (``reason='specialist_done'``)
+        4. periodic Cortex refresh      (``reason='cortex_refresh'``)
+
+        The refresh is *additive*: each call upserts entries derived
+        from current observable signals (baseline, attempts log,
+        winners history, Cortex traverse) without nuking the existing
+        list. Dedup is keyed by ``canonical_id``; per-gap
+        ``attempts`` is capped at the most recent
+        :data:`_GAPS_ATTEMPTS_HISTORY` rows.
+
+        Best-effort: any exception is logged and absorbed so the
+        refresh never blocks the calling path (a stale gap list is
+        always preferable to a dead reactor).
+        """
+        state = self.shared_state
+        try:
+            for entry in self._extract_gaps_from_baseline():
+                state.upsert_gap(entry)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("gaps refresh: baseline extraction failed")
+        try:
+            for entry in self._extract_gaps_from_attempts():
+                state.upsert_gap(entry)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("gaps refresh: attempts extraction failed")
+
+        plane = getattr(self, "knowledge_plane", None)
+        if plane is not None and hasattr(plane, "cortex_traverse_issues"):
+            try:
+                traverse = getattr(plane, "cortex_traverse_issues")
+                rows = traverse(
+                    model_class=getattr(state, "model_class", "") or "",
+                    gpu_type=getattr(state, "gpu_type", "") or "",
+                )
+                if isinstance(rows, list):
+                    for entry in rows:
+                        if isinstance(entry, dict):
+                            entry = dict(entry)
+                            entry.setdefault("source", "cortex")
+                            state.upsert_gap(entry)
+            except Exception:  # noqa: BLE001 — defensive
+                log.warning(
+                    "gaps refresh: cortex_traverse_issues failed (reason=%s)",
+                    reason,
+                    exc_info=True,
+                )
+        log.debug(
+            "gaps refresh (reason=%s): %d gaps after merge",
+            reason, len(state.gaps),
+        )
+
+    def _extract_gaps_from_baseline(self) -> list[dict[str, Any]]:
+        """Derive initial gap rows from the baseline snapshot.
+
+        Two synthesised gaps when applicable:
+
+        * ``throughput_below_target`` — fires when ``target_gap_pct``
+          is positive (operator asked for a specific gain%, and we
+          haven't hit it yet). Severity scales with the gap.
+        * ``baseline_unstable`` — fires when ``baseline_failure_streak
+          > 0``. Tied to the kernel/system layer because that's where
+          most baseline crashes originate.
+
+        These are *anchor* gaps (the M1 fallback in
+        :meth:`_resolve_issue_canonical` already minted a workload
+        canonical_id; we reuse the same id so traverse rows align).
+        """
+        state = self.shared_state
+        gaps: list[dict[str, Any]] = []
+        if state.baseline_tput <= 0:
+            return gaps
+        anchor = self._gap_anchor_canonical_id()
+        target_gap = float(getattr(state, "target_gap_pct", 0.0) or 0.0)
+        if target_gap > 0.0:
+            severity = (
+                "high" if target_gap >= 10.0
+                else "medium" if target_gap >= 3.0
+                else "low"
+            )
+            gaps.append({
+                "canonical_id": f"{anchor}#throughput_below_target",
+                "symptom": (
+                    f"current_best is {target_gap:.1f}% short of "
+                    f"--target-gain"
+                ),
+                "layer": "framework",
+                "severity": severity,
+                "domain_hint": "framework_specialist",
+                "source": "baseline",
+            })
+        if state.baseline_failure_streak > 0:
+            gaps.append({
+                "canonical_id": f"{anchor}#baseline_unstable",
+                "symptom": (
+                    f"baseline crashed {state.baseline_failure_streak} "
+                    f"consecutive time(s)"
+                ),
+                "layer": "system",
+                "severity": (
+                    "high" if state.baseline_failure_streak >= 2 else "medium"
+                ),
+                "domain_hint": "system_specialist",
+                "source": "baseline",
+            })
+        return gaps
+
+    def _extract_gaps_from_attempts(self) -> list[dict[str, Any]]:
+        """Derive gaps from the rolling failures + winners history.
+
+        Walks ``last_action_failures`` to surface recurring (action,
+        error_class) failure patterns and ``explore_search.winners_history``
+        to surface a "stalled explore plateau" gap when several recent
+        rounds failed to produce a new ``current_best``.
+
+        Layer assignment is best-effort and uses the action family as
+        a proxy (kernel_opt → kernel; backends/params/explore →
+        framework; sweep → framework). ``domain_hint`` follows the
+        same mapping.
+        """
+        state = self.shared_state
+        anchor = self._gap_anchor_canonical_id()
+        gaps: list[dict[str, Any]] = []
+
+        failures = list(state.last_action_failures or [])[-10:]
+        seen_failures: dict[str, dict[str, Any]] = {}
+        for row in failures:
+            if not isinstance(row, dict):
+                continue
+            action = str(row.get("action") or "").strip() or "unknown"
+            err = str(row.get("error_class") or "").strip() or "unknown_error"
+            key = f"{action}::{err}"
+            layer, domain = self._gap_layer_for_action(action)
+            attempt = {
+                "action": action,
+                "variant_name": str(row.get("variant_name") or ""),
+                "outcome": "REVERT",
+                "error_class": err,
+                "ts": str(row.get("ts") or datetime.now(timezone.utc).isoformat()),
+            }
+            if key in seen_failures:
+                seen_failures[key]["attempts"].append(attempt)
+            else:
+                seen_failures[key] = {
+                    "canonical_id": f"{anchor}#fail:{action}:{err}",
+                    "symptom": f"{action} repeatedly fails with {err}",
+                    "layer": layer,
+                    "severity": "medium",
+                    "domain_hint": domain,
+                    "source": "attempts",
+                    "attempts": [attempt],
+                }
+        gaps.extend(seen_failures.values())
+
+        no_promote = int(state.params_no_promote_streak or 0)
+        explore_search = state.explore_search or {}
+        winners_hist = []
+        if isinstance(explore_search, dict):
+            winners_hist = list(explore_search.get("winners_history") or [])
+        recent_promotions = sum(
+            1 for w in winners_hist[-5:]
+            if isinstance(w, dict) and float(w.get("gain_pct") or 0.0) > 0.0
+        )
+        if no_promote >= 3 and recent_promotions == 0:
+            gaps.append({
+                "canonical_id": f"{anchor}#explore_plateau",
+                "symptom": (
+                    f"{no_promote} consecutive grid rounds without a new "
+                    f"current_best"
+                ),
+                "layer": "framework",
+                "severity": "high" if no_promote >= 6 else "medium",
+                "domain_hint": "framework_specialist",
+                "source": "attempts",
+            })
+        return gaps
+
+    @staticmethod
+    def _gap_layer_for_action(action: str) -> tuple[str, str]:
+        """Map an action name → (layer, domain_hint) for gap rows.
+
+        Centralised so the four call sites (baseline / attempts /
+        explore / specialist_done) agree on the routing. Falls back
+        to ``("framework", "framework_specialist")`` for unknown
+        action names — that's the broadest catch-all in the M5
+        specialist catalogue.
+        """
+        a = str(action or "").strip().lower()
+        if a in {"kernel_opt", "integrate", "select_kernels", "run_optimization"}:
+            return ("kernel", "kernel_specialist")
+        if a in {"profile", "pmc_roofline"}:
+            return ("kernel", "kernel_specialist")
+        if a in {"sweep"}:
+            return ("framework", "framework_specialist")
+        if a in {"backends", "params", "validate_stack", "explore"}:
+            return ("framework", "framework_specialist")
+        if a in {"baseline"}:
+            return ("system", "system_specialist")
+        return ("framework", "framework_specialist")
+
+    def _record_explore_round_gaps(
+        self, *, task: "Task | None", result: dict[str, Any],
+    ) -> None:
+        """Append per-variant KEEP/REVERT outcomes to the matching gap.
+
+        Called from :meth:`_promote_to_shared_state` after an explore
+        task settles. When the explore proposal carried a
+        ``gap_canonical_id`` (Orchestration routed the proposal to a
+        specific gap), we append every variant outcome as an attempt
+        on that gap; otherwise the attempts are folded under the
+        anchor gap so the velocity counter still moves.
+
+        Best-effort: a missing gap row is upserted with a minimal
+        symptom rather than dropped — the alternative would silently
+        lose the audit trail on cold-start sessions.
+        """
+        if task is None:
+            return
+        per_variant = result.get("per_variant_outcomes")
+        if not isinstance(per_variant, list) or not per_variant:
+            return
+        params = dict(task.params or {})
+        canonical = (
+            str(params.get("gap_canonical_id") or "").strip()
+            or self._gap_anchor_canonical_id()
+        )
+        state = self.shared_state
+        existing = state.find_gap(canonical)
+        if existing is None:
+            state.upsert_gap({
+                "canonical_id": canonical,
+                "symptom": "explore round outcomes",
+                "layer": "framework",
+                "severity": "medium",
+                "domain_hint": "framework_specialist",
+                "source": "attempts",
+            })
+        for outcome in per_variant:
+            if not isinstance(outcome, dict):
+                continue
+            state.append_gap_attempt(canonical, {
+                "action": "explore",
+                "variant_name": str(outcome.get("variant_name") or ""),
+                "outcome": str(outcome.get("outcome") or "").upper(),
+                "gain_pct": outcome.get("gain_pct"),
+            })
 
     # ------------------------------------------------------------------
     # v0.8 §3.5 §10 + KB_gaps/Gap-03 — specialist_done bookkeeping
@@ -3846,6 +4151,33 @@ class Coordinator:
                 "empty": is_empty,
             },
         )
+
+        # v0.8 KB_gaps/Gap-09 — refresh the gaps ledger after a
+        # specialist round closes. The dedupe-by-canonical-id keeps the
+        # list bounded; the per-gap attempt log captures the
+        # specialist's verdict (empty vs non-empty proposal_set) as a
+        # fresh attempt row on the gap that triggered the dispatch.
+        gap_cid = str(done_payload.get("gap_canonical_id") or "").strip()
+        if gap_cid:
+            try:
+                self.shared_state.append_gap_attempt(gap_cid, {
+                    "action": "specialist",
+                    "variant_name": domain,
+                    "outcome": "EMPTY" if is_empty else "PROPOSALS",
+                    "proposals_total": len(proposals),
+                })
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "specialist bookkeeping: append_gap_attempt failed for "
+                    "gap=%s", gap_cid,
+                )
+        try:
+            await self._refresh_gaps(reason="specialist_done")
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "specialist bookkeeping: _refresh_gaps failed for task=%s",
+                task.task_id,
+            )
 
     def _build_specialist_round_entry(
         self,
@@ -4641,6 +4973,32 @@ class Coordinator:
             # verify pair. Best-effort: failures are absorbed into the
             # NDJSON queue by the client.
             await self._cortex_t3_hook(task=task, result=result, kept=kept)
+            # v0.8 KB_gaps/Gap-09 — explore-round gap update.
+            # For explore tasks with per-variant outcomes, append each
+            # variant's KEEP/REVERT to the matching gap's attempts log
+            # (the canonical_id is plumbed via task.params, falling back
+            # to the workload anchor). Then re-run the global refresh
+            # so the failures/winners-history derived signals catch up.
+            if task.kind == "explore":
+                result_dict = (
+                    result.result if isinstance(result.result, dict) else {}
+                )
+                try:
+                    self._record_explore_round_gaps(
+                        task=task, result=result_dict,
+                    )
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "gaps refresh: explore-round update failed for "
+                        "task=%s", task.task_id,
+                    )
+                try:
+                    await self._refresh_gaps(reason="explore_round")
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "gaps refresh: _refresh_gaps after explore failed "
+                        "for task=%s", task.task_id,
+                    )
 
     @staticmethod
     def _lanes_fit(
@@ -5155,6 +5513,9 @@ class Coordinator:
                     task.params if task is not None else None
                 ),
             }
+            # v0.8 KB_gaps/Gap-09 — seed the gaps[] ledger from baseline.
+            # Best-effort; failure is logged + absorbed inside the helper.
+            await self._refresh_gaps(reason="baseline_done")
         elif task_kind == "profile":
             audit_decision = "promoted"
             audit_extras = {

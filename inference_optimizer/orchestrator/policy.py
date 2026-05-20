@@ -366,6 +366,13 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # write. LLM update_state must not be able to toggle this and
     # trick the cli into skipping its safety net.
     "close_sequence_done",
+    # v0.8 KB_gaps/Gap-09 — structured gaps ledger (KB_design §3.3 /
+    # §3.5 / §3.9 §6). Coordinator's ``_refresh_gaps`` is the sole
+    # writer; LLM agents read via prompt injection. Locking the field
+    # closes the proxy gap (last_action_failures + winners_history)
+    # against an arbitrary update_state that would inject fake gaps
+    # to bias specialist domain selection (Inv-1 / Inv-10.2).
+    "gaps",
 })
 
 
