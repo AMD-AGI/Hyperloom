@@ -222,6 +222,15 @@ class SharedState:
     # trace (sglang launch args identical).
     last_cheap_delta_gain: float | None = None
     discovered_flags_at_last_snapshot: dict[str, Any] = field(default_factory=dict)
+    # Roofline-v2 N22: advisory messages from the PolicyGate's keyword-
+    # implied variant check. Each entry is a self-contained block of
+    # operator-facing text describing what the LLM missed and which
+    # analysis.md keyword triggered the advisory. Capped FIFO so a
+    # long-running session doesn't grow this list unbounded; the
+    # rendered orchestration prompt shows the most recent N (see
+    # prompt_builder._section_session_context's last_proposal_advice
+    # block). Empty = no outstanding advisories.
+    last_proposal_advice: list[str] = field(default_factory=list)
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
@@ -1722,6 +1731,7 @@ class SharedState:
             f"last_validate_stack={self._format_attempt(self.last_validate_stack)}",
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
+            f"last_proposal_advice={self._format_last_proposal_advice()}",
             f"tick={int(self.tick or 0)}  "
             f"target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
             f"stop_reason={self.stop_reason or '(none)'}",
@@ -1735,6 +1745,24 @@ class SharedState:
     # Audit-trail renderers (kernel-parity per-action attempts + global
     # failure log). Compact one-liners so the prompt stays readable.
     # ------------------------------------------------------------------
+    def _format_last_proposal_advice(self) -> str:
+        """N22: render the FIFO of keyword-implied variant advisories
+        so the orchestration LLM sees them on the next tick and can
+        extend its variants list. Empty list -> '(none)' so the prompt
+        stays consistent across ticks (LLM doesn't have to guess
+        whether the field even exists). Each entry is a multi-line
+        block; we join with a blank line for readability and prepend
+        the index so the LLM can reference them by number."""
+        advisories = self.last_proposal_advice or []
+        if not advisories:
+            return "(none)"
+        lines = [""]
+        for i, msg in enumerate(advisories, 1):
+            lines.append(f"--- advisory #{i} ---")
+            lines.append(str(msg))
+            lines.append("")
+        return "\n".join(lines)
+
     @staticmethod
     def _format_attempt(entry: dict[str, Any] | None) -> str:
         """Render one ``last_<action>`` snapshot or attempts[-1] entry."""

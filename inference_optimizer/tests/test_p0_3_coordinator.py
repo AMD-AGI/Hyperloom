@@ -194,9 +194,15 @@ async def test_coordinator_stops_when_no_more_leverage(session_dir):
         c.shared_state.baseline_tput = 100.0
         c.shared_state.current_best = {"action": "backends", "tput": 101.0}
         c.shared_state.params_no_promote_streak = 5
+        # Use the actual registered grid length so adding a new variant
+        # (e.g. N22 added torch_compile_on) doesn't break this test.
+        from inference_optimizer.orchestrator.action_executors.params import (
+            DEFAULT_PARAMS_GRID,
+        )
+        _grid_size = len(DEFAULT_PARAMS_GRID)
         c.shared_state.params_search = {
-            "cursor": 29,
-            "tested": {f"v{i}": {} for i in range(29)},
+            "cursor": _grid_size,
+            "tested": {f"v{i}": {} for i in range(_grid_size)},
             "accepted": [],
             "rejected": [],
         }
