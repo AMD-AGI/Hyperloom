@@ -48,21 +48,17 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "profile", "pmc_roofline", "deep_kernel_analysis",
     # explore
     #
-    # ``explore`` is the v0.8 M3 unified action (KB_design §3.4): it
-    # subsumes v0.6 ``backends`` / ``params`` and inlines
-    # ``validate_stack``'s per-KEEP rebench. The legacy three are kept
-    # in this list for the M3 transitional period (so a v0.6 resume with
-    # queued backends/params/validate_stack tasks still has a runner);
-    # the catalogue marks them DEPRECATED and steers the LLM toward
-    # ``explore`` (see ``_format_action_deprecation_hint``).
+    # v0.8 M3 + KB_gaps/Gap-10: the merged ``explore`` action is the
+    # ONLY grid-runner entry. The v0.6 ``backends`` / ``params`` /
+    # ``validate_stack`` names have been removed — PolicyGate's
+    # ``action_deprecated`` rule denies them at the intent boundary
+    # with a structured replacement hint (KB_design §3.4 / §3.13 M3
+    # §PR7). The executor modules stay in the tree so v0.6 resume
+    # paths still find their per-action audit fields (Inv-10.1).
     "explore",
-    "backends", "params", "sweep",
+    "sweep",
     # deep — kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
     "kernel_opt", "integrate", "operator_tuning", "vendor_kernel_config",
-    # validate (Phase 3 — closes the loop on accumulated KEEPs). Listed
-    # here for M3 backward-compat; explore's inlined stack rebench
-    # supersedes the standalone action for v0.8 sessions.
-    "validate_stack",
     # finalize
     "report",
     # support
@@ -86,16 +82,17 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
     # explore (no profile — it only feeds kernel-opt)
+    #
+    # Legacy backends/params/validate_stack removed in v0.8 M3 /
+    # KB_gaps/Gap-10; merged into ``explore`` which carries an
+    # inlined per-KEEP stack rebench.
     "explore",
-    "backends", "params", "sweep",
-    # validate (still useful — bench the stacked backends/params on
-    # v0.6 resumes; explore inlines its own per-KEEP rebench)
-    "validate_stack",
+    "sweep",
     # finalize
     "report",
     # support — recover is needed even without kernel-opt because GPU
-    # leaks from baseline / explore / backends / params / sweep can
-    # still hang the session; the executor itself is kernel-agnostic.
+    # leaks from baseline / explore / sweep can still hang the session;
+    # the executor itself is kernel-agnostic.
     "recover",
 )
 
@@ -174,9 +171,11 @@ def _section_mission() -> list[str]:
         "   which next action gives the highest expected_gain / cost_minutes?\"",
         "",
         "An optimization is only \"real\" once it has been validated as part of the",
-        "full optimization_stack via the `validate_stack` action — sums of per-round",
-        "gains do NOT compose linearly. Drive the loop until you have at least one",
-        "validated cumulative_gain to report.",
+        "full optimization_stack. v0.8 M3 inlines that validation into every",
+        "``explore`` KEEP (per-KEEP stack rebench), so the validated cumulative",
+        "gain advances automatically — sums of per-round gains still do NOT",
+        "compose linearly, so drive the loop until ``explore`` has produced",
+        "at least one KEEP that survived the stack rebench.",
     ]
 
 
@@ -331,12 +330,13 @@ def _section_pipeline_and_budget(
         f"Sum of typical phase ETAs: ~{eta_total:.0f} min vs max_minutes={max_minutes}.",
         "If sum >> budget, prefer high-gain/low-cost actions and skip optional",
         "phases (analysis / support). If sum << budget, do an extra explore round",
-        "before validate_stack + report.",
+        "before report.",
         "",
-        "MANDATORY rule: after any backends / params / kernel round produces a",
-        "KEEP'd entry in optimization_stack, you MUST run `validate_stack` before",
-        "the next explore round or before `report`. The Coordinator surfaces a",
-        "TODO in the per-tick checklist when this trigger is active.",
+        "v0.8 M3 + KB_gaps/Gap-10: ``explore`` runs its per-KEEP stack rebench",
+        "inline — there is no standalone ``validate_stack`` action any more.",
+        "The v0.6 ``backends`` / ``params`` / ``validate_stack`` names are denied",
+        "by PolicyGate with ``rule='action_deprecated'`` if proposed; route every",
+        "grid attempt through ``delegate{action_name='explore', params={grid: ...}}``.",
         "",
         "At the wall-clock deadline the Coordinator auto-enqueues a deterministic",
         "`report` (no LLM) during closing phase — do not waste ticks re-proposing",
@@ -476,9 +476,12 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "   propose `report` once (if not already done) then heartbeat 'goal-reached'.",
         "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
         "   delegated_result; do NOT re-baseline on a positive result with warnings.",
-        "3. **Mandatory validation**: if the per-tick checklist contains a",
-        "   `validate_stack required` TODO, propose `validate_stack` immediately —",
-        "   no other action is allowed until cumulative_gain_validated is updated.",
+        "3. **Inlined stack-rebench (v0.8 M3 / KB_gaps/Gap-10)**: the merged",
+        "   ``explore`` action runs its own per-KEEP stack rebench, so there is",
+        "   no standalone ``validate_stack`` step to schedule. The legacy",
+        "   ``backends`` / ``params`` / ``validate_stack`` names are denied by",
+        "   PolicyGate (``rule='action_deprecated'``) — route every grid attempt",
+        "   through ``delegate{action_name='explore', params={grid: [...] }}``.",
     ]
     if kernel_enabled:
         lines.extend([
@@ -748,8 +751,11 @@ the previous KEEP/REVERT decayed only that kernel_id's branch), but is
 not required — the scoreboard decides.
 
 After every successful `integrate` (KEEP), the Coordinator records a
-new entry on `optimization_stack` and the TODO 4/4 `validate_stack`
-gate fires; obey it before resuming any explore / deep round.
+new entry on `optimization_stack`. v0.8 M3 + KB_gaps/Gap-10 inlines
+the rebench inside ``explore``; there is no standalone
+``validate_stack`` gate to obey any more — the next ``explore``
+round automatically reads the new stack and reruns the per-variant
+bench against it.
 
 ### KERNEL TARGETING (native vs torch.compile)
 
