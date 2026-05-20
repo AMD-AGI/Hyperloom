@@ -36,7 +36,9 @@ from ._grid_runner import (
     VariantResult,
     _resolve_session_dir,
     MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT,
+    apply_compatibility_filter,
     apply_multi_node_invalid_variants,
+    apply_single_node_invalid_variants,
     apply_user_skip_list,
     reorder_grid_for_multi_node,
     resolve_skip_spec,
@@ -533,7 +535,28 @@ class ParamsExecutor:
         for d in mn_dropped:
             log.info("params: multi-node-skipped variant %s (%s)",
                      d["name"], d["reason"])
-        dropped_variants = list(user_dropped) + list(mn_dropped)
+        # A+B filter step 1: single-node-side filter for
+        # ``note=multi_node_only_*`` variants (noop in multi-node).
+        # The default params grid currently ships zero multi-node-only
+        # variants — the helper is wired anyway so a future LLM
+        # grid-override injecting MN-only flags is silently filtered
+        # in single-node runs instead of crashing them.
+        grid, sn_dropped = apply_single_node_invalid_variants(grid)
+        for d in sn_dropped:
+            log.info("params: single-node-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        # A+B filter step 2: compatibility filter for model-class /
+        # sglang-version mismatches. Conservative — probe failures
+        # fall through, so bad-variant cost falls back to one wasted
+        # sglang restart (same as the no-filter baseline).
+        grid, compat_dropped = apply_compatibility_filter(grid)
+        for d in compat_dropped:
+            log.info("params: compatibility-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        dropped_variants = (
+            list(user_dropped) + list(mn_dropped)
+            + list(sn_dropped) + list(compat_dropped)
+        )
         # M2: multi-node grid reorder (single-node noop).
         # Surfaces likely-winners (cuda_graph_max_bs == CONC,
         # mem_fraction, max_num_seqs, ...) ahead of low-leverage tail
