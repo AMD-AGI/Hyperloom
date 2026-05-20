@@ -70,18 +70,11 @@ def test_full_enabled_actions_match_registry_minus_pmc_optional(registry):
         assert registry.get(name) is not None
 
 
-# The 4 noop-prep actions below remain suppressed from the enabled sets
-# so the Orchestration LLM no longer proposes them (see remain_todo.md
-# sections C / I / M for the missing executor work). The metadata yamls
-# still live in actions/_meta so future executors don't need to
-# re-introduce the action names; pin both halves of the contract here.
-#
-# ``recover`` was removed from this list in 2026-05 alongside the real
-# :class:`RecoverExecutor` (Change C of the gpu-leak-robustness-fix
-# plan); the dedicated regression at the bottom of this file
-# (``test_recover_is_enabled_and_has_real_executor``) now pins its
-# presence in both FULL/NO_KERNEL enabled sets and in
-# ``_REAL_EXECUTORS_FULL``.
+# v0.8 KB_gaps/Gap-13 — KB_design §3.15 §2.3 retired these four
+# ``support``-family actions. The yaml meta files are deleted and
+# the registry no longer carries them; the assertions below pin all
+# three halves of the contract (enabled set, no-kernel enabled set,
+# registry membership) so a regression re-adds a stub yaml is loud.
 _REMOVED_NOOP_ACTIONS: tuple[str, ...] = (
     "comm_optimization",
     "compiler_tuning",
@@ -93,8 +86,8 @@ _REMOVED_NOOP_ACTIONS: tuple[str, ...] = (
 @pytest.mark.parametrize("name", _REMOVED_NOOP_ACTIONS)
 def test_noop_actions_excluded_from_full_enabled(name: str):
     assert name not in FULL_ENABLED_ACTIONS, (
-        f"{name!r} is a noop-prep action and must not be visible to the "
-        "Orchestration LLM until a real executor lands"
+        f"{name!r} was retired in KB_design §3.15 §2.3 and must not "
+        "appear in the Orchestration enabled-action set"
     )
 
 
@@ -104,13 +97,15 @@ def test_noop_actions_excluded_from_no_kernel_enabled(name: str):
 
 
 @pytest.mark.parametrize("name", _REMOVED_NOOP_ACTIONS)
-def test_removed_noop_actions_still_have_registry_metadata(registry, name):
-    """We only suppressed the action from the enabled set; the yaml
-    metadata stays in the registry so re-enabling later is a one-line
-    revert in prompt_builder.py."""
-    assert registry.get(name) is not None, (
-        f"action metadata for {name!r} disappeared — re-enabling will be "
-        "harder than expected"
+def test_removed_noop_actions_are_absent_from_registry(registry, name):
+    """v0.8 KB_gaps/Gap-13 — KB_design §3.15 §2.3 retired the four
+    ``support``-family stub actions in favour of specialist sub-agents.
+    The yaml meta files are deleted, so the registry MUST NOT carry
+    them. Re-introducing requires a specialist domain, not a yaml."""
+    assert registry.get(name) is None, (
+        f"action metadata for {name!r} re-appeared in the registry — "
+        "KB_design §3.15 §2.3 retired it; restore via a specialist "
+        "domain instead"
     )
 
 

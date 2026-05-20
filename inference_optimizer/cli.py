@@ -656,32 +656,11 @@ _REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {
     "pmc_roofline": pmc_roofline_executor,
 }
 
-# Kernel-owned action kinds that the Orchestration loop dispatches via
-# ``request{target_agent='kernel', kind=...}`` but whose executor body
-# in this process is a no-op (the actual work happens inside the kernel
-# agent's request handlers). Kept as a tuple so SubAgentRunner doesn't
-# fail with "no_executor" when these names appear in stale tasks.
-#
-# `dream` / `re_explore` / `comm_optimization` / `compiler_tuning` were
-# removed from this list alongside the corresponding entries in
-# `prompt_builder.{FULL,NO_KERNEL}_ENABLED_ACTIONS`. Their executors
-# were `_noop_prep` (silent success) which produced misleading
-# "succeeded" outcomes; with them gone, any stale state.json resume
-# that still references one of these kinds will surface as
-# `no_executor` instead of a fake KEEP. Re-add only when real
-# executors land (see remain_todo.md sections C, I, M).
-#
-# `recover` was originally in that removed-stub list, but is now bound
-# above to :data:`recover_executor` (a real implementation that frees
-# leaked GPU VRAM). See the Change A/B/C plan
-# (``gpu-leak-robustness-fix``) for the design notes; the executor is
-# the SubAgentRunner-side counterpart of the robustness-agent
-# ``gpu_memory_leaked`` signal.
-#
-# `target_analysis` used to be a noop-when-unset stub here; it is now
-# wired unconditionally to the real :class:`TargetAnalysisExecutor`
-# below (which writes a structured ``reason='no_target_gpu_configured'``
-# marker JSON when ``--compare-against-gpu`` is unset).
+# Kernel-owned action kinds dispatched via
+# ``request{target_agent='kernel', kind=...}``. The executor body is a
+# no-op in this process — actual work happens inside the kernel agent's
+# request handlers — but the names must stay registered so SubAgentRunner
+# does not raise ``no_executor`` on a stale task.
 _NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = (
     "kernel_opt", "integrate", "deep_kernel_analysis",
     "operator_tuning", "vendor_kernel_config",

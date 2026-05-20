@@ -61,20 +61,12 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "kernel_opt", "integrate", "operator_tuning", "vendor_kernel_config",
     # finalize
     "report",
-    # support
-    #
-    # ``recover`` was re-enabled in 2026-05 alongside the robustness-agent
-    # ``gpu_memory_leaked`` signal. A real executor (see
-    # ``orchestrator/action_executors/recover.py``) now frees leaked
-    # VRAM and, when ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``, attempts
-    # ``rocm-smi --gpureset``. The Critic's default approve whitelist
-    # already includes ``recover``.
-    #
-    # ``comm_optimization`` / ``compiler_tuning`` / ``dream`` /
-    # ``re_explore`` remain disabled here — their executors are still
-    # ``_noop_prep`` stubs and would just produce silent "succeeded"
-    # spins. Re-add when real executors land (see remain_todo.md
-    # sections C, I, M).
+    # support — ``recover`` frees leaked VRAM and (when
+    # ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``) attempts
+    # ``rocm-smi --gpureset``. KB_design §3.15 §2.3 retired the
+    # other ``support``-family stubs (``dream`` / ``re_explore`` /
+    # ``comm_optimization`` / ``compiler_tuning``); the replacement
+    # path is a specialist sub-agent.
     "recover",
 )
 
