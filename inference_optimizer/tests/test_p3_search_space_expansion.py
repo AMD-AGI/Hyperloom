@@ -488,6 +488,7 @@ def test_prompt_section_count_unchanged(registry, rules_path):
         # LLM has the registered variant names + trigger hints to
         # cite when proposing params.variants=[...].
         "## BACKENDS GRID CATALOGUE (SGLang)",
+        "## PARAMS GRID CATALOGUE (SGLang)",
         "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
         "## 7. RULES & OUTPUT PROTOCOL",
     ]
