@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -2097,6 +2098,50 @@ class SharedState:
                 rendered.append(code)
         return f"{base} warnings=[{'; '.join(rendered)}]"
 
+    @staticmethod
+    def _strip_base64_data_urls(text: str) -> str:
+        """Roofline-v2 N11: replace `data:image/...;base64,...` blobs.
+
+        GPU-empirical context (DeepSeek-R1 session 16:06-02:00 of
+        2026-05-19): TraceLens analysis.md embeds a "Performance
+        Improvement" chart as a base64 PNG data URL inside a markdown
+        image (`![alt](data:image/png;base64,iVBOR...)`). For the R1
+        report the single line clocks in at 184530 chars / 184.5 KB
+        — i.e. 92% of the 200 KB analysis.md is base64 noise. The
+        main Orchestration LLM cannot see PNG pixels through base64,
+        so injecting it wholesale dilutes the prompt and obscures
+        the high-signal 🔴 P1 / 🟢 P1 recommendation sections (~16 KB
+        of pure text) that drive the entire roofline-v2 decision
+        loop.
+
+        This helper replaces every `data:image/...;base64,<payload>`
+        URL inside a markdown image with a short placeholder that
+        preserves the alt-text for context but drops the payload.
+        It is intentionally **not** TraceLens-specific — any
+        future report format that uses base64 data URLs gets the
+        same treatment automatically.
+
+        The strip is read-only relative to the source analysis.md
+        file on disk; only the in-memory string injected into the
+        LLM prompt is modified. The on-disk file remains intact for
+        operator inspection.
+        """
+        if not text or "data:image/" not in text:
+            return text
+        # Match `![<alt>](data:image/<type>;base64,<payload>)` greedily
+        # against the closing `)`. The payload itself is base64 so it
+        # only contains [A-Za-z0-9+/=] and never the closing paren,
+        # which makes the non-greedy `[^)]*` safe.
+        pattern = re.compile(
+            r"!\[(?P<alt>[^\]]*)\]\(data:image/[^;]+;base64,[^)]+\)"
+        )
+
+        def _sub(match: "re.Match[str]") -> str:
+            alt = match.group("alt") or "image"
+            return f"![{alt}](<<stripped: base64 image — {alt}>>)"
+
+        return pattern.sub(_sub, text)
+
     def _format_analysis_md_full(self) -> str:
         """Roofline-v2 N5: inject TraceLens analysis.md verbatim into
         the main Orchestration prompt.
@@ -2143,6 +2188,9 @@ class SharedState:
                 "produce one; roofline is a composite action that "
                 "runs profile + trace_analyze atomically)"
             )
+        # N11: strip base64 image payloads before injection so the
+        # prompt is not 92% noise (see _strip_base64_data_urls).
+        md_text = self._strip_base64_data_urls(md_text)
         snap = cached.get("roofline_snapshot_id", "?")
         gain = cached.get("roofline_baseline_gain_at_snapshot", 0.0)
         try:
