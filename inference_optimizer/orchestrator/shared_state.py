@@ -1028,6 +1028,26 @@ class SharedState:
         Orchestration still sees lower-ranked but **reusable native** entries
         (e.g. AITER RMSNorm) and can dispatch ``run_optimization`` against
         them instead of looping on rejected ones.
+
+        We also persist ``trace_health_warnings`` so Orchestration's prompt
+        surfaces the structured routing signals produced by the TraceLens
+        analyzer (Hyperloom v0.4 finishing-touches T3 / T4):
+
+        * ``high_gpu_idle_pct`` — Executive Summary's ``Idle %`` exceeded
+          the gate threshold; per Report_Interfacing.docx §2 (idle-gate
+          sanity check) the LLM should pivot to parameter optimization
+          rather than kernel rewriting in this regime.
+        * ``tracelens_analysis_failed`` — the TraceLens subprocess crashed
+          permanently (perf-CLI missing, ``analysis.md`` not produced,
+          timeout, …); Coordinator already demoted this to ``status=ok``
+          + empty ``hot_kernels`` at the handler boundary, but the LLM
+          still needs to *see* the failure so it picks parameter
+          optimization explicitly instead of inferring "TraceLens is
+          still running" from the empty list.
+
+        Without this pass-through the warnings produced upstream are
+        dropped at the SharedState boundary and Orchestration cannot
+        ground its routing decisions on them.
         """
         if not isinstance(result, dict):
             return
@@ -1062,11 +1082,26 @@ class SharedState:
             })
             if reusable and kid:
                 reusable_ids.append(str(kid))
+
+        # T3 / T4: keep the structured warning list verbatim — handler
+        # already shaped each entry into the documented form (code,
+        # severity, message, plus code-specific extras like idle_pct or
+        # returncode). We filter to ``dict`` to be defensive against a
+        # buggy tool emitting non-dict junk, but otherwise pass through
+        # untouched so the LLM sees the full diagnostic.
+        raw_warnings = result.get("trace_health_warnings") or []
+        warnings_cleaned: list[dict[str, Any]] = []
+        if isinstance(raw_warnings, list):
+            for entry in raw_warnings:
+                if isinstance(entry, dict) and entry.get("code"):
+                    warnings_cleaned.append(dict(entry))
+
         self.last_select_kernels = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
             "hot_kernels_top15": summary,
             "reusable_native_kernel_ids": reusable_ids,
+            "trace_health_warnings": warnings_cleaned,
             "ts": _now_iso(),
         }
 
@@ -1888,11 +1923,40 @@ class SharedState:
         reusable = list(
             self.last_select_kernels.get("reusable_native_kernel_ids", [])
         )
-        return (
+        base = (
             f"trace={self.last_select_kernels.get('trace_input','?')} "
             f"candidates_path={self.last_select_kernels.get('candidates_path','?')} "
             f"top={ids or []} reusable_native={reusable or []}"
         )
+        # T3 / T4 finishing-touches: when TraceLens emitted a routing
+        # signal (high GPU idle → prefer params; permanent failure →
+        # don't keep waiting on kernel candidates), surface it inline
+        # so the Orchestration LLM grounds the next ACTION on this
+        # signal rather than re-trying TraceLens or guessing why
+        # ``top=[]``. We render compactly:
+        #   warnings=[high_gpu_idle_pct(idle=35.0%,threshold=20.0%); …]
+        # and omit the suffix entirely in the steady-state (no
+        # warnings) so existing prompt-format-stable tests don't see
+        # gratuitous additions.
+        warnings = self.last_select_kernels.get("trace_health_warnings") or []
+        if not warnings:
+            return base
+        rendered: list[str] = []
+        for w in warnings:
+            if not isinstance(w, dict):
+                continue
+            code = str(w.get("code") or "unknown")
+            extras: list[str] = []
+            if "idle_pct" in w and "threshold_pct" in w:
+                extras.append(f"idle={w['idle_pct']}%")
+                extras.append(f"threshold={w['threshold_pct']}%")
+            if "returncode" in w:
+                extras.append(f"rc={w['returncode']}")
+            if extras:
+                rendered.append(f"{code}({','.join(extras)})")
+            else:
+                rendered.append(code)
+        return f"{base} warnings=[{'; '.join(rendered)}]"
 
     def _format_last_sweep(self) -> str:
         if not self.last_sweep:

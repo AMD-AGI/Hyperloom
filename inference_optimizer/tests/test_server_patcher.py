@@ -1010,6 +1010,56 @@ def test_sglang_plan_keeps_single_marker_sentinel(fake_sglang_world):
     assert plan.sentinel_text == ("kernel_shape_profiler",), plan.sentinel_text
 
 
+def test_sglang_tokenizer_control_profile_args_patch(tmp_path):
+    """SGLang 0.5.11 moved start_profile to tokenizer_control_mixin.py.
+
+    Hyperloom must inject the two TraceLens profile args there or
+    /start_profile rejects PROFILE_EXTRA_BODY before the scheduler sees it.
+    """
+    sglang_pkg = tmp_path / "python" / "sglang"
+    target = sglang_pkg / "srt" / "managers" / "tokenizer_control_mixin.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        textwrap.dedent(
+            """\
+            class TokenizerControlMixin:
+                async def start_profile(
+                    self,
+                    output_dir=None,
+                    profile_prefix: Optional[str] = None,
+                    profile_stages: Optional[List[str]] = None,
+                ):
+                    req = ProfileReq(
+                        profile_prefix=profile_prefix,
+                        profile_stages=profile_stages,
+                    )
+                    return await self._execute_profile(req)
+            """
+        ),
+        encoding="utf-8",
+    )
+    sentinel = sglang_pkg / "srt" / "utils" / "kernel_shape_profiler.py"
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_text("kernel_shape_profiler", encoding="utf-8")
+    plan = _server_patcher._PatchPlan(
+        framework="sglang",
+        version="0.5.11",
+        apply_root=tmp_path,
+        patches=(),
+        sentinel_file=sentinel,
+        sentinel_text=("kernel_shape_profiler",),
+    )
+
+    assert _server_patcher._ensure_sglang_tokenizer_control_profile_args(plan)
+    text = target.read_text(encoding="utf-8")
+    assert "shape_discovery: bool = False" in text
+    assert "roofline_annotations: bool = False" in text
+    assert "shape_discovery=shape_discovery" in text
+    assert "roofline_annotations=roofline_annotations" in text
+    # Idempotent second call.
+    assert _server_patcher._ensure_sglang_tokenizer_control_profile_args(plan)
+
+
 # ===========================================================================
 # PR-D §5: TraceLens-shipped SUPPORTED_VERSIONS manifest takes precedence
 # over the hardcoded minor allowlist. The day TraceLens starts shipping
