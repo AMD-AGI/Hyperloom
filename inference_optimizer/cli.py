@@ -486,12 +486,17 @@ def _build_backends(
         else:
             backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=20)
 
-    # 5th Framework role backend (P1 PR-B). ``framework_choice`` is one
-    # of {"off", "agent", "mock", "codex_bare"}; "off" is the dead-path
-    # default which leaves the role out of role_registry (Coordinator
-    # filters when backend is absent — see PR-A1).
+    # 5th Framework role backend. ``framework_choice`` is one of
+    # {"off", "agent", "mock", "codex_bare"}; "off" leaves the role out
+    # of role_registry (Coordinator filters when backend is absent --
+    # see PR-A1). Real-path backends are *also* registered with the
+    # framework_request_handlers module-level singleton so the P2 real
+    # handler path picks them up (mock backend not registered so the
+    # P1 mock branch keeps returning canned envelopes).
+    from .framework_request_handlers import set_framework_backend
+    fw_backend: Any = None
     if framework_choice == "mock":
-        backends["framework"] = FrameworkMockBackend(session_dir=session_dir)
+        fw_backend = FrameworkMockBackend(session_dir=session_dir)
     elif framework_choice == "agent":
         if framework_agent_root is None:
             raise ValueError(
@@ -499,17 +504,29 @@ def _build_backends(
                 "framework_agent_root (env FRAMEWORK_AGENT_ROOT or "
                 "auto-resolved)"
             )
-        backends["framework"] = FrameworkAgentBackend(
+        fw_backend = FrameworkAgentBackend(
             framework_agent_root=framework_agent_root,
             session_dir=session_dir,
         )
     elif framework_choice == "codex_bare":
-        backends["framework"] = CodexBackend(model=codex_model)
+        fw_backend = CodexBackend(model=codex_model)
     elif framework_choice != "off":
         raise ValueError(
             f"_build_backends: framework_choice={framework_choice!r} not "
             "in {'off','agent','mock','codex_bare'}"
         )
+    if fw_backend is not None:
+        backends["framework"] = fw_backend
+        # Real-path handler uses the FrameworkAgentBackend only (PR-F).
+        # Mock backend keeps the P1 canned-envelope path.
+        if framework_choice == "agent":
+            set_framework_backend(fw_backend)
+    else:
+        # Explicit reset so legacy 4-role tests (which never set
+        # framework backend) hit the P1 mock branch deterministically
+        # even when the test order leaks state from a previous
+        # framework-enabled fixture.
+        set_framework_backend(None)
     return backends
 
 

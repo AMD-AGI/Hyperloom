@@ -30,6 +30,7 @@ callers / tests can monkey-patch.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -41,38 +42,112 @@ log = logging.getLogger(__name__)
 HandlerFn = Callable[..., Awaitable[dict[str, Any]]]
 
 
+# Module-level singleton -- the Coordinator sets ``framework_backend``
+# in PR-B after constructing FrameworkAgentBackend / FrameworkMockBackend.
+# The handler reads it lazily so unit tests can monkey-patch a fixture
+# in without touching the Coordinator wiring. None means "P1 mock path"
+# -- handler returns canned envelopes directly.
+_FRAMEWORK_BACKEND: Any = None
+
+
+def set_framework_backend(backend: Any) -> None:
+    """Inject the framework backend used by the real-path handlers.
+
+    Called by the Coordinator after ``_build_backends`` selects which
+    concrete backend to use (FrameworkAgentBackend /
+    FrameworkMockBackend / CodexBackend). ``None`` disables the real
+    path so the handler stays on the P1 mock branch -- this is what
+    the legacy 4-role tests rely on.
+    """
+    global _FRAMEWORK_BACKEND
+    _FRAMEWORK_BACKEND = backend
+
+
 async def framework_optimize_handler(
     payload: dict[str, Any],
     *,
     session_dir: Path,
 ) -> dict[str, Any]:
-    """P1 mock OptimizeSuccess envelope (predicted_gain_pct=5% > 3%
-    threshold so orchestration re-proposes ``framework_integrate``
-    on the next tick — keeps the P1 e2e KEEP path testable).
+    """Drive Stage A: AST scan + envelope build.
 
-    PR-F upgrades this to invoke ``FrameworkAgentBackend.run_optimize``
-    via subprocess and emit ``UPDATE_STATE(discovered_flags)``.
-    PR-G upgrades the patch_path to point at a real unified diff.
+    P1 (no backend injected): returns the canned OptimizeSuccess
+    envelope so the protocol mesh keeps end-to-end testable.
+    P2 PR-F (backend injected): invokes
+    ``FrameworkAgentBackend.run_optimize`` which performs real AST
+    scan + envelope validation via ``fa agent commit-result``.
+    P3 PR-G upgrades the patch_path to a real proposal.diff.
     """
     target_fw = (str(payload.get("target_framework") or "sglang")
                  .strip().lower())
+    backend = _FRAMEWORK_BACKEND
+    if backend is None or not hasattr(backend, "run_optimize"):
+        log.info(
+            "framework_optimize_handler[P1 mock] session=%s target=%s",
+            Path(session_dir).name, target_fw,
+        )
+        return {
+            "status": "succeeded",
+            "payload_kind": "OptimizeSuccess",
+            "patch_path": str(
+                Path(session_dir) / "runs" / "framework"
+                / "fw-mock" / "proposal.diff"
+            ),
+            "predicted_gain_pct": 5.0,
+            "rationale": "P1 mock -- handler returns canned OptimizeSuccess",
+            "discovered_flags": {},
+            "target_framework": target_fw,
+            "stage_a_elapsed_ms": 100,
+        }
+
     log.info(
-        "framework_optimize_handler[P1 mock] session=%s target=%s",
+        "framework_optimize_handler[P2 real] session=%s target=%s "
+        "ast_scan_enabled=%s ast_frameworks=%r",
         Path(session_dir).name, target_fw,
+        payload.get("ast_scan_enabled", True),
+        payload.get("ast_frameworks") or (target_fw,),
     )
-    return {
-        "status": "succeeded",
-        "payload_kind": "OptimizeSuccess",
-        "patch_path": str(
-            Path(session_dir) / "runs" / "framework"
-            / "fw-mock" / "proposal.diff"
-        ),
-        "predicted_gain_pct": 5.0,
-        "rationale": "P1 mock — handler returns canned OptimizeSuccess",
-        "discovered_flags": {},
-        "target_framework": target_fw,
-        "stage_a_elapsed_ms": 100,
-    }
+    # FrameworkAgentBackend.run_optimize is a sync subprocess call --
+    # offload to a thread so the Coordinator reactor's event loop
+    # doesn't block on `fa agent prepare-task`.
+    try:
+        envelope: dict[str, Any] = await asyncio.to_thread(
+            backend.run_optimize,
+            session_dir=str(session_dir),
+            target_framework=target_fw,
+            kb_partition=str(payload.get("kb_partition")
+                             or "framework_optimization"),
+            ast_scan_enabled=bool(payload.get("ast_scan_enabled", True)),
+            ast_frameworks=tuple(payload.get("ast_frameworks") or ()),
+        )
+    except NotImplementedError as exc:
+        log.warning("framework backend not yet implemented: %s", exc)
+        return {
+            "status": "failed",
+            "payload_kind": "OptimizeFailure",
+            "reason": "backend_not_implemented",
+            "detail": str(exc),
+            "stage_a_elapsed_ms": 0,
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.exception("framework_optimize_handler[P2 real] crashed")
+        return {
+            "status": "failed",
+            "payload_kind": "OptimizeFailure",
+            "reason": "handler_exception",
+            "detail": repr(exc),
+            "stage_a_elapsed_ms": 0,
+        }
+    # Coordinator wrapping (kind/status/result) is added in the
+    # framework REQUEST routing branch; the handler just returns the
+    # envelope plus a top-level ``status`` so the reactor can pick a
+    # response priority. PR-F propagates the OptimizeFailure status as
+    # "failed", everything else as "succeeded".
+    kind = envelope.get("payload_kind")
+    envelope.setdefault(
+        "status",
+        "failed" if kind == "OptimizeFailure" else "succeeded",
+    )
+    return envelope
 
 
 async def framework_integrate_handler(
