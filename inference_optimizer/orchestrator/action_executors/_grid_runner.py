@@ -325,6 +325,204 @@ def reorder_grid_for_multi_node(
     return sorted(grid, key=_priority)
 
 
+# ---------------------------------------------------------------------------
+# Single-node + compatibility filters (companion to A1's multi-node filter).
+#
+# These two helpers protect single-node and incompatible-model paths from
+# wasted sglang restarts on variants whose flags either (a) only make sense
+# in multi-node, or (b) require a model class / sglang version that the
+# current run does not have. Each fires BEFORE the variant is dispatched
+# to a real benchmark, so a 5-10 min restart per filtered variant is saved.
+#
+# Both are conservative: probe failures (e.g. ``sglang --help`` not
+# importable in the sandbox) fall through to "no filtering" so the
+# downstream grid_runner's ``status="failed"`` + rejected-ledger path
+# still handles the bad variant gracefully. Net effect: in the best
+# case we save the time, in the worst case we waste one restart per
+# bad variant (same as the no-filter baseline).
+# ---------------------------------------------------------------------------
+
+
+def apply_single_node_invalid_variants(
+    grid: list["GridVariant"],
+) -> tuple[list["GridVariant"], list[dict]]:
+    """Drop variants whose ``note`` is ``multi_node_only_*`` when single-node.
+
+    Companion to :func:`apply_multi_node_invalid_variants`. Variants the
+    grid library has tagged with ``note="multi_node_only_..."`` (e.g.
+    DeepEP MoE, ep_moe — flags that NCCL-cross-node-distribute MoE
+    expert shards) are silently dropped in single-node mode where they
+    would either reject the flag or no-op silently. Multi-node path
+    returns ``(list(grid), [])`` so the multi-node grid is preserved
+    bit-for-bit.
+
+    The convention ``note="multi_node_only_*"`` is owned by the grid
+    library (``params.py`` / ``backends.py``); we never invent the
+    classification here.
+    """
+    from ._multi_node_env import is_multi_node
+    if is_multi_node():
+        return list(grid), []
+    kept: list[GridVariant] = []
+    dropped: list[dict] = []
+    for v in grid:
+        note_l = (v.note or "").lower()
+        if note_l.startswith("multi_node_only"):
+            dropped.append({
+                "name": v.name,
+                "source": "single_node_invalid",
+                "reason": (
+                    f"variant note={v.note!r} is multi-node-only "
+                    "(silently dropped in single-node path)"
+                ),
+            })
+        else:
+            kept.append(v)
+    return kept, dropped
+
+
+# Multi-node-hot sglang flags that depend on model class (MLA / MoE) or
+# sglang version. Each entry maps a substring of ``extra_sglang_args`` to
+# a compatibility predicate. Keep this list small and well-documented;
+# anything more dynamic should live in the action_registry's
+# ``applicable_when`` schema instead.
+_COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
+    ("--enable-flashinfer-mla", "mla"),
+    ("--enable-deepep-moe",      "moe"),
+    ("--enable-ep-moe",          "moe"),
+)
+
+
+# Cache for ``_probe_sglang_help_text`` — populated on first call so we
+# avoid spawning a subprocess per-variant. Cleared by ``importlib.reload``
+# during tests. Sentinel ``None`` = not yet probed.
+_SGLANG_HELP_CACHE: str | None = None
+
+
+def _probe_sglang_help_text() -> str:
+    """Best-effort fetch of ``sglang launch_server --help`` text.
+
+    Returns ``""`` on ANY failure (subprocess timeout, sglang not
+    importable in the current Python, sandbox without sglang installed,
+    test-time subprocess mocks that mis-handle this probe's argv shape,
+    ValueError from a too-strict mock side_effect, etc.). Callers MUST
+    treat empty as "I don't know what sglang supports" and fall through
+    to NOT filtering (defer to graceful runtime failure).
+
+    The broad ``except Exception`` is deliberate: this probe is purely
+    a perf optimisation (saves a wasted 10-min sglang restart per
+    incompatible variant). It must NEVER crash the optimizer or fail
+    a unit test that mocks ``subprocess.run`` for unrelated reasons.
+    """
+    global _SGLANG_HELP_CACHE
+    if _SGLANG_HELP_CACHE is not None:
+        return _SGLANG_HELP_CACHE
+    try:
+        proc = subprocess.run(
+            ["python3", "-c",
+             "from sglang.launch_server import parser; parser.print_help()"],
+            capture_output=True, text=True, timeout=10,
+        )
+        _SGLANG_HELP_CACHE = (proc.stdout or "") + (proc.stderr or "")
+    except Exception:  # noqa: BLE001 — best-effort, see docstring
+        _SGLANG_HELP_CACHE = ""
+    return _SGLANG_HELP_CACHE
+
+
+def _detect_model_class(model_path: str) -> tuple[bool, bool]:
+    """Heuristic detect of (is_mla_model, is_moe_model) from model path.
+
+    Uses lowercased substring match on the model path. This is a cheap
+    O(N) check intended to filter out an obviously-wrong variant before
+    spending 10 min on a doomed sglang restart. False negatives (model
+    we don't recognise) defer to graceful runtime failure; false
+    positives (we mis-classify a model as MLA/MoE) cost one restart
+    same as if we hadn't filtered.
+
+    Known MLA models: DeepSeek (V2/V3/R1), GLM-5, Kimi-K2 — all share
+    MLA-style multi-head latent attention. Known MoE models: anything
+    in the MLA set + Qwen3-MoE.
+    """
+    p = model_path.lower()
+    mla_keys = ("glm-5", "glm5", "deepseek", "kimi-k2", "kimi_k2", "kimi")
+    moe_keys = (
+        "glm-5", "glm5", "deepseek-v2", "deepseek-v3", "deepseek-r1",
+        "kimi", "qwen3-moe", "qwen3_moe", "mixtral",
+    )
+    is_mla = any(k in p for k in mla_keys)
+    is_moe = any(k in p for k in moe_keys)
+    return is_mla, is_moe
+
+
+def apply_compatibility_filter(
+    grid: list["GridVariant"],
+) -> tuple[list["GridVariant"], list[dict]]:
+    """Skip variants known to be incompatible with current model/sglang.
+
+    Two filter dimensions, each conservative on probe failure:
+
+    1. **Model class** — variants requiring MLA attention (e.g.
+       ``--enable-flashinfer-mla``) or expert-parallel MoE (e.g.
+       ``--enable-deepep-moe``) are dropped when ``$MODEL_PATH`` lacks
+       the corresponding model-family keyword. If ``$MODEL_PATH`` is
+       unset, both predicates are assumed True (let the variant try).
+    2. **sglang version** — variants whose flag literal does NOT appear
+       in ``sglang launch_server --help`` output are dropped. If the
+       help text can't be fetched (sglang not importable in sandbox),
+       both predicates are assumed True (defer to graceful failure).
+
+    Returns the same ``(kept, dropped)`` shape as
+    ``apply_user_skip_list`` so callers can merge dropped entries
+    uniformly.
+    """
+    model_path = os.environ.get("MODEL_PATH", "")
+    if model_path:
+        is_mla, is_moe = _detect_model_class(model_path)
+    else:
+        # No MODEL_PATH set -> can't detect -> assume compatible.
+        is_mla, is_moe = True, True
+
+    sglang_help = _probe_sglang_help_text()
+    sglang_help_available = bool(sglang_help)
+
+    kept: list[GridVariant] = []
+    dropped: list[dict] = []
+    for v in grid:
+        args = v.extra_sglang_args or ""
+        skip_reason: str | None = None
+        for flag, required_class in _COMPATIBILITY_FLAG_RULES:
+            if flag not in args:
+                continue
+            # Model-class predicate
+            class_ok = (
+                (required_class == "mla" and is_mla)
+                or (required_class == "moe" and is_moe)
+            )
+            if not class_ok:
+                skip_reason = (
+                    f"{flag} requires {required_class.upper()} model; "
+                    f"MODEL_PATH={model_path!r} not recognised as "
+                    f"{required_class.upper()}-class"
+                )
+                break
+            # sglang flag-support predicate (only when help is readable)
+            if sglang_help_available and flag not in sglang_help:
+                skip_reason = (
+                    f"{flag} not present in `sglang --help` output; "
+                    "current sglang version likely too old"
+                )
+                break
+        if skip_reason:
+            dropped.append({
+                "name": v.name,
+                "source": "compatibility_filter",
+                "reason": skip_reason,
+            })
+        else:
+            kept.append(v)
+    return kept, dropped
+
+
 def apply_user_skip_list(
     grid: list["GridVariant"],
     *,
