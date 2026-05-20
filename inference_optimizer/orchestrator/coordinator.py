@@ -111,6 +111,7 @@ _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
     "disable_run_eval",
 )
 _BASELINE_SELF_LOOP_THRESHOLD: int = 2
+_VALIDATE_STACK_FAIL_THRESHOLD: int = 10
 
 
 def effective_closing_grace_sec(
@@ -268,6 +269,7 @@ class Coordinator:
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
+        self._validate_stack_gate_skip_warned: bool = False
 
         # Stable tick order derived from the live role_registry. Must NOT
         # use the module-level `roles_for_run()` which is a cached hardcoded
@@ -1290,6 +1292,20 @@ class Coordinator:
                     "explore."
                 )
         if self.shared_state.optimization_stack_has_unvalidated_keeps():
+            if self._validate_stack_gate_skipped():
+                return (
+                    "TODO 5/5: validate_stack RECOMMENDED but not required. "
+                    f"The last {_VALIDATE_STACK_FAIL_THRESHOLD} validate_stack "
+                    "attempts failed in a row, so the mandatory gate is "
+                    "dropped and other actions are unlocked. "
+                    "cumulative_gain_validated will stay stale "
+                    f"(validated_at_len="
+                    f"{self.shared_state.cumulative_gain_validated_stack_len} "
+                    f"vs stack_len={len(self.shared_state.optimization_stack)}) "
+                    "until a validate_stack succeeds — fix the underlying "
+                    "failure (check workload_envs / TP / GPU visibility) and "
+                    "re-emit `validate_stack` when ready."
+                )
             return (
                 "TODO 5/5: validate_stack required. New KEEP'd entries have "
                 "landed on optimization_stack since the last validate_stack run "
@@ -1409,6 +1425,44 @@ class Coordinator:
             rule="baseline_self_loop",
             hint=hint,
         )
+
+    def _validate_stack_gate_skipped(self) -> bool:
+        """Drop the mandatory ``validate_stack`` gate after
+        ``_VALIDATE_STACK_FAIL_THRESHOLD`` consecutive failures.
+
+        Walks ``validate_stack_attempts`` from the tail; a single
+        ``status="succeeded"`` resets the streak. Returns ``True`` once
+        the threshold is reached, emitting one ``log.warning`` on the
+        transition (subsequent ticks return ``True`` silently).
+        """
+        attempts = list(self.shared_state.validate_stack_attempts or [])
+        consecutive_failures = 0
+        last_failure: dict[str, Any] | None = None
+        for entry in reversed(attempts):
+            if not isinstance(entry, dict):
+                break
+            if entry.get("status") == "succeeded":
+                break
+            consecutive_failures += 1
+            if last_failure is None:
+                last_failure = entry
+        if consecutive_failures < _VALIDATE_STACK_FAIL_THRESHOLD:
+            self._validate_stack_gate_skip_warned = False
+            return False
+        if not self._validate_stack_gate_skip_warned:
+            err_class = (last_failure or {}).get("error_class") or "unknown"
+            err_excerpt = (last_failure or {}).get("error_excerpt") or ""
+            log.warning(
+                "validate_stack gate SKIPPED after %d consecutive failures "
+                "(>= threshold %d). Other actions are now allowed; "
+                "cumulative_gain_validated will remain stale until a "
+                "validate_stack succeeds. Last failure: "
+                "error_class=%r error_excerpt=%r.",
+                consecutive_failures, _VALIDATE_STACK_FAIL_THRESHOLD,
+                err_class, err_excerpt,
+            )
+            self._validate_stack_gate_skip_warned = True
+        return True
 
     def _sequence_denial_for_action(
         self,
@@ -1530,10 +1584,12 @@ class Coordinator:
         # rebench before any further explore / report. We allow:
         #   - validate_stack itself
         #   - baseline (ad-hoc re-baseline is still okay; rare)
-        # and deny the rest.
+        # and deny the rest, unless validate_stack has hit its consecutive
+        # failure cap (``_validate_stack_gate_skipped``).
         if (
             self.shared_state.optimization_stack_has_unvalidated_keeps()
             and action not in {"validate_stack", "baseline"}
+            and not self._validate_stack_gate_skipped()
         ):
             return PolicyDenied(
                 f"action={action!r} denied: validate_stack required first",
