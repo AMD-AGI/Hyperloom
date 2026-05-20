@@ -90,16 +90,6 @@ docker run -d \
 
 If Hyperloom is already cloned on the host, you can mount that checkout directly into the container, for example by replacing `-v /path/to/workspace:/workspace` with `-v /path/on/host/Hyperloom:/workspace/Hyperloom`. Then open `/workspace/Hyperloom` after attaching Cursor to the container; you do not need to clone Hyperloom again inside the container.
 
-After the container starts, confirm that you can enter it, see the GPU, and reach the LLM gateway:
-
-```bash
-docker exec -it hyperloom-local bash
-rocm-smi
-curl -k -I https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1/models
-```
-
-For the `curl` check, an HTTP `401` response is expected before credentials are provided. It means DNS and HTTPS connectivity are working; the gateway is only rejecting the unauthenticated request.
-
 #### 2. Connect Cursor to the Runtime Environment
 
 - **SaFE Authoring Pod**: when the Pod is ready, check the connection instructions in the SaFE Authoring page and follow them to connect with Cursor Remote SSH.
