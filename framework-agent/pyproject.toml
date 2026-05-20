@@ -7,11 +7,14 @@ name = "framework-agent"
 version = "0.1.0"
 description = "Framework Agent - standalone PR/ref exploration agent for Hyperloom serving framework backends (vLLM / SGLang). Does NOT integrate with inference_optimizer's 5-role mesh."
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "jsonschema>=4.0",
+]
 
 [project.optional-dependencies]
 ast = [
     "libcst>=1.0",
+    "patch-ng>=1.18",
 ]
 claude = [
     "claude_agent_sdk>=0.1",
@@ -19,6 +22,9 @@ claude = [
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
+    "libcst>=1.0",
+    "patch-ng>=1.18",
+    "jsonschema>=4.0",
 ]
 
 [project.scripts]

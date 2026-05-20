@@ -246,6 +246,11 @@ def _build_parser() -> argparse.ArgumentParser:
     schema_p = sub.add_parser("schema", help="Print the request schema summary")
     schema_p.set_defaults(func=_cmd_schema)
 
+    # Sibling-skill `fa agent` subcommand -- P2 PR-D. Used by
+    # inference_optimizer's FrameworkAgentBackend.
+    from ..agent.cli import register_subparser as _register_agent_subparser
+    _register_agent_subparser(sub)
+
     cand_p = sub.add_parser(
         "candidates",
         help="Enumerate PR/ref candidates per request.search_modes (no build/bench)",
