@@ -47,7 +47,7 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # analysis
     "profile", "pmc_roofline", "deep_kernel_analysis",
     # explore
-    "backends", "params", "sweep",
+    "backends", "params", "sweep", "framework_pr",
     # deep — kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
     "kernel_opt", "integrate", "operator_tuning", "vendor_kernel_config",
     # validate (Phase 3 — closes the loop on accumulated KEEPs)
@@ -74,8 +74,10 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
 NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
-    # explore (no profile — it only feeds kernel-opt)
-    "backends", "params", "sweep",
+    # explore (no profile — it only feeds kernel-opt). framework_pr is
+    # safe to enable even without the kernel agent: it only mutates
+    # sglang source, never proposes per-kernel work.
+    "backends", "params", "sweep", "framework_pr",
     # validate (still useful — bench the stacked backends/params)
     "validate_stack",
     # finalize
