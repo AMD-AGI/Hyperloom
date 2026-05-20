@@ -572,13 +572,13 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "",
         "**Variant identity is content-based.** The executor hashes",
         "`(sorted(extra_sglang_args tokens), sorted(extra_envs pairs))` and",
-        "indexes `SharedState.{backends_search,params_search}.tested` by that",
+        "indexes `SharedState.explore_search.tested` by that",
         "fingerprint. Renaming an already-tested variant (e.g. `attn_aiter`",
         "→ `attn_aiter_v2`) does NOT bypass dedup — your grid entry will be",
         "dropped before launch. To re-test, change the actual `extra_sglang_args`",
-        "or `extra_envs`. Both `backends_search` and `params_search` are the",
-        "authoritative dedup ledgers and filter BOTH default grids and",
-        "LLM-supplied `params.grid` uniformly.",
+        "or `extra_envs`. The unified `explore_search` ledger (KB_design",
+        "§3.4 §4.3) is the authoritative dedup source and filters BOTH",
+        "default grids and LLM-supplied `params.grid` uniformly.",
         "",
         "**Use the numeric `gain_pct` on every row.** The `*_search` and",
         "`backend_winners_history` blocks now render `±x.xx%` per variant.",
@@ -595,7 +595,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "   `synergy_groups`); the executor de-duplicates against",
         "   `SharedState.synergy_attempted` so you can re-emit safely.",
         "3. **Retry-with-alternate-strategy (failure)** — for each variant",
-        "   listed in `params_search.rejected`, propose the same flag with a",
+        "   listed in `explore_search.rejected`, propose the same flag with a",
         "   different value or pair it with a complementary winner.",
         "4. **Synthetic fallback** — when `backend_winners_history` is empty for",
         "   the last 2 rounds, mine `discovered_flags.<framework>.backend_flags`",
@@ -636,8 +636,8 @@ _KERNEL_OPT_PIPELINE_BODY: str = """\
 
 The three kernel-owned actions (`select_kernels`, `kernel_opt`,
 `integrate`) are picked by the LLM per the DECISION FRAMEWORK (phase
-allowed-set + gaps + KB priors); v0.8 §3.9 retired the
-`Action scores` board so there is no system-side priority ranking.
+allowed-set + gaps + KB priors); v0.8 §3.9 retired the v0.6
+`Action scores` board, so there is no system-side priority ranking.
 The blocks below are only **payload templates** describing how to
 build the REQUEST once you have selected the action. The Coordinator
 still hard-gates the obvious prerequisites (TODO 3/4 fires after a
@@ -660,7 +660,7 @@ actions are NEVER gated on it.
 
 ### `kernel_opt` — payload for `run_optimization`
 
-When the scoreboard surfaces `kernel_opt`, pick the next reusable
+When the DECISION FRAMEWORK selects `kernel_opt`, pick the next reusable
 native kernel from `last_select_kernels.reusable_native_kernel_ids`,
 in order, skipping any kernel_id already present in
 `last_kernel_opt.kernel_id`.
@@ -703,11 +703,12 @@ until the patch lands on `optimization_stack`. Payload:
                    extra_sglang_args, config_path}}
 
 If `result.proposal.decision` is `PARTIAL` or `REVERT`, the patch is
-rejected — do NOT integrate. The Coordinator unlocks immediately; consult
-the scoreboard for the next action like normal. A second `kernel_opt`
-round on the next reusable kernel_id often surfaces as top-1 (because
-the previous KEEP/REVERT decayed only that kernel_id's branch), but is
-not required — the scoreboard decides.
+rejected — do NOT integrate. The Coordinator unlocks immediately; pick
+the next action via the DECISION FRAMEWORK like normal. A second
+`kernel_opt` round on the next reusable kernel_id is often the right
+move (when more reusable kernel_ids remain in
+`last_select_kernels.reusable_native_kernel_ids`), but is not required
+— the LLM decides.
 
 After every successful `integrate` (KEEP), the Coordinator records a
 new entry on `optimization_stack`. v0.8 M3 + KB_gaps/Gap-10 inlines
