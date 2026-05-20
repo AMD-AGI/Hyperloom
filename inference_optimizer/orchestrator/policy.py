@@ -762,14 +762,56 @@ class PolicyGate:
             raise PolicyDenied(
                 "review_verdict missing target_proposal_msg_id", rule="payload",
             )
-        verdict = str(payload.get("verdict", "")).strip()
-        if verdict not in REVIEW_VERDICTS:
+        # v0.8 KB_gaps/Gap-11 (KB_design §3.5 §5 / M5 §5 step 5) —
+        # accept either the legacy single ``verdict`` field or the
+        # per-variant ``verdict_map``. The intent_parser already
+        # enforced mutual exclusion + structural shape; here we
+        # validate the *content* (verdict strings must be in the
+        # closed REVIEW_VERDICTS vocab).
+        has_single = "verdict" in payload
+        verdict_map = payload.get("verdict_map")
+        has_map = isinstance(verdict_map, dict) and bool(verdict_map)
+        if has_single == has_map:
+            # Both or neither — defense in depth (intent_parser
+            # should have caught this already).
             raise PolicyDenied(
-                f"review_verdict.verdict={verdict!r} not in allowed set "
-                f"{sorted(REVIEW_VERDICTS)!r}",
+                "review_verdict: exactly one of 'verdict' or "
+                "'verdict_map' must be present",
                 rule="payload",
-                hint="use one of approve/reject/redirect/advise/needs_review",
+                hint=(
+                    "single-proposal review: emit {target_proposal_msg_id, "
+                    "verdict, reasoning}. Explore batch review: emit "
+                    "{target_proposal_msg_id, verdict_map: {variant_name: "
+                    "{verdict, rationale?}}}"
+                ),
             )
+        if has_single:
+            verdict = str(payload.get("verdict", "")).strip()
+            if verdict not in REVIEW_VERDICTS:
+                raise PolicyDenied(
+                    f"review_verdict.verdict={verdict!r} not in allowed set "
+                    f"{sorted(REVIEW_VERDICTS)!r}",
+                    rule="payload",
+                    hint="use one of approve/reject/redirect/advise/needs_review",
+                )
+            return
+        # verdict_map path — every entry's verdict string must be in
+        # the same closed vocab. variant_name vs original-grid
+        # membership is checked by Coordinator's
+        # ``_handle_verdict_map`` once the grid is in scope.
+        for vname, entry in verdict_map.items():
+            v = str((entry or {}).get("verdict") or "").strip()
+            if v not in REVIEW_VERDICTS:
+                raise PolicyDenied(
+                    f"review_verdict.verdict_map[{vname!r}].verdict="
+                    f"{v!r} not in allowed set "
+                    f"{sorted(REVIEW_VERDICTS)!r}",
+                    rule="payload",
+                    hint=(
+                        "every per-variant verdict must be one of "
+                        "approve/reject/redirect/advise/needs_review"
+                    ),
+                )
 
     # ------------------------------------------------------------------
     # v0.8 M3 / KB_gaps/Gap-10 — action_deprecated (KB_design §3.13 M3 §PR7)
