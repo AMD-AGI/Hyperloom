@@ -534,6 +534,26 @@ class KBPointCreated(TypedDict, total=False):
     ts: str
 
 
+class KBFlusherStatus(TypedDict, total=False):
+    """``kb_provenance.flusher_status`` (v0.8 KB_gaps/Dead-E).
+
+    Merge of the cli boot marker (``.kb_flusher_status.json``) and a
+    live ``kill -0 $pid`` probe at breakdown emit time. Populated even
+    for ``--no-cortex`` / ``--no-kb-flusher`` sessions so operators can
+    grep a single key.
+    """
+    enabled: bool                  # cli flag (false when --no-kb-flusher or --no-cortex)
+    spawned: bool                  # daemon was actually subprocess.Popen'd this boot
+    alive: bool                    # live pid probe at breakdown emit time
+    pid: int | None
+    cortex_kb_url: str | None
+    interval_sec: float
+    batch_size: int
+    reason: str                    # boot-time spawn decision text
+    ts: str                        # iso UTC of the boot marker
+    pid_path: str                  # absolute path to .kb_flusher.pid
+
+
 class KBProvenance(TypedDict, total=False):
     cortex_session_id: str
     warm_start_ts: str
@@ -548,6 +568,8 @@ class KBProvenance(TypedDict, total=False):
     points_created: list[KBPointCreated]
     points_by_kind: dict[str, int]
     commit_summary: KBCommitSummary
+    # v0.8 KB_gaps/Dead-E — Cortex KB flusher daemon lifecycle marker.
+    flusher_status: KBFlusherStatus
 
 
 # ---------------------------------------------------------------------------

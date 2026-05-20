@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -1937,6 +1938,169 @@ def _bootstrap_cortex_kb(
 
 
 # ---------------------------------------------------------------------------
+# v0.8 KB_gaps/Dead-E — Cortex KB flusher daemon lifecycle
+# ---------------------------------------------------------------------------
+def _maybe_spawn_kb_flusher(
+    args: argparse.Namespace,
+    *,
+    session_dir: Path,
+) -> tuple[subprocess.Popen | None, Path]:
+    """Spawn ``scripts.cortex_kb_flusher`` for this session and return the
+    handle + pid path.
+
+    KB_design §3.6 / §3.14 R-01/R-02 require a background NDJSON drainer
+    so the main loop never blocks on Cortex outages. Pre-Dead-E the
+    daemon code existed but the cli never launched it; this helper is
+    the missing link.
+
+    Returns ``(None, pid_path)`` when spawn is skipped (``--no-cortex``,
+    ``--no-kb-flusher``, or a healthy prior daemon is still bound to
+    ``pid_path``). A status marker is always written so the breakdown
+    collector can surface the boot-time decision.
+    """
+    from .session_paths import (
+        cortex_dir,
+        cortex_flusher_pid,
+        cortex_flusher_status_json,
+    )
+
+    pid_path = cortex_flusher_pid(session_dir)
+    status_path = cortex_flusher_status_json(session_dir)
+    cortex_root = cortex_dir(session_dir)
+    cortex_root.mkdir(parents=True, exist_ok=True)
+
+    cortex_enabled = bool(getattr(args, "cortex_enabled", True))
+    flusher_enabled = bool(getattr(args, "kb_flusher_enabled", True))
+    interval_sec = float(getattr(args, "kb_flusher_interval_sec", 5.0) or 5.0)
+    batch_size = int(getattr(args, "kb_flusher_batch_size", 50) or 50)
+    cortex_kb_url = (getattr(args, "cortex_kb_url", None) or "").strip() or None
+
+    def _write_status(
+        *,
+        spawned: bool,
+        pid: int | None,
+        cmd: list[str],
+        reason: str,
+    ) -> None:
+        payload = {
+            "enabled":       cortex_enabled and flusher_enabled,
+            "spawned":       spawned,
+            "pid":           pid,
+            "cmd":           cmd,
+            "cortex_kb_url": cortex_kb_url,
+            "interval_sec":  interval_sec,
+            "batch_size":    batch_size,
+            "reason":        reason,
+            "ts":            datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "pid_path":      str(pid_path),
+        }
+        try:
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            status_path.write_text(
+                json.dumps(payload, sort_keys=True, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            log.warning("kb_flusher status marker write failed: %s", exc)
+
+    if not cortex_enabled:
+        _write_status(spawned=False, pid=None, cmd=[], reason="cortex_disabled")
+        print("Cortex KB flusher: SKIPPED (--no-cortex)")
+        return None, pid_path
+    if not flusher_enabled:
+        _write_status(spawned=False, pid=None, cmd=[], reason="flag_disabled")
+        print("Cortex KB flusher: SKIPPED (--no-kb-flusher)")
+        return None, pid_path
+
+    if pid_path.exists():
+        try:
+            prior = int(pid_path.read_text(encoding="utf-8").strip().splitlines()[0])
+            os.kill(prior, 0)
+            _write_status(
+                spawned=False, pid=prior, cmd=[],
+                reason=f"prior_alive_pid={prior}",
+            )
+            print(f"Cortex KB flusher: REUSED (existing daemon pid={prior})")
+            return None, pid_path
+        except (OSError, ValueError, IndexError):
+            try:
+                pid_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    cmd: list[str] = [
+        sys.executable, "-m", "inference_optimizer.scripts.cortex_kb_flusher",
+        "--session-dir", str(session_dir),
+        "--interval-sec", str(interval_sec),
+        "--batch-size",   str(batch_size),
+    ]
+    if cortex_kb_url:
+        cmd.extend(["--cortex-kb-url", cortex_kb_url])
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+    except OSError as exc:
+        log.warning("kb_flusher spawn failed: %s", exc)
+        _write_status(
+            spawned=False, pid=None, cmd=cmd,
+            reason=f"spawn_failed:{exc!r}"[:240],
+        )
+        print(f"Cortex KB flusher: SPAWN FAILED ({exc!r})")
+        return None, pid_path
+
+    _write_status(spawned=True, pid=proc.pid, cmd=cmd, reason="spawned")
+    print(
+        f"Cortex KB flusher: SPAWNED pid={proc.pid} "
+        f"interval={interval_sec}s batch={batch_size}"
+    )
+    return proc, pid_path
+
+
+def _stop_kb_flusher(
+    proc: subprocess.Popen | None,
+    pid_path: Path,
+    *,
+    grace_sec: float = 10.0,
+) -> None:
+    """Graceful shutdown for the flusher daemon spawned by
+    :func:`_maybe_spawn_kb_flusher`. Best-effort: never raises.
+    """
+    if proc is None:
+        return
+    if proc.poll() is not None:
+        try:
+            pid_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+    try:
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=grace_sec)
+    except subprocess.TimeoutExpired:
+        log.warning(
+            "kb_flusher did not exit within %.1fs of SIGTERM; killing pid=%d",
+            grace_sec, proc.pid,
+        )
+        try:
+            proc.kill()
+            proc.wait(timeout=2.0)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("kb_flusher kill failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("kb_flusher graceful shutdown failed: %s", exc)
+    finally:
+        try:
+            pid_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # v0.8 M4 — PR Monitor + KnowledgePlane wiring (KB_design §3.6 + §3.13 M4)
 # ---------------------------------------------------------------------------
 def _bootstrap_knowledge_plane(
@@ -2167,6 +2331,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         cortex_client = _bootstrap_cortex_kb(
             args, session_dir=session_dir, manifest=manifest, resume=True,
         )
+        kb_flusher_proc, kb_flusher_pid_path = _maybe_spawn_kb_flusher(
+            args, session_dir=session_dir,
+        )
         # v0.8 M4 + KB_gaps/Gap-02 — KnowledgePlane facade. Bootstrapped
         # alongside the cortex client so a resumed session also gets the
         # PR Monitor + KB readonly tools wired into specialist dispatch.
@@ -2271,6 +2438,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # into T2/T3/T4 hooks). Fails fast unless --no-cortex.
         cortex_client = _bootstrap_cortex_kb(
             args, session_dir=session_dir, manifest=manifest, resume=False,
+        )
+        kb_flusher_proc, kb_flusher_pid_path = _maybe_spawn_kb_flusher(
+            args, session_dir=session_dir,
         )
         # v0.8 M4 + KB_gaps/Gap-02 — KnowledgePlane facade for specialist
         # sub-agents. Wraps cortex_client (already T0'd above) + a
@@ -2566,6 +2736,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     finally:
         await coordinator.stop()
+        # v0.8 KB_gaps/Dead-E — stop the flusher daemon (best-effort;
+        # graceful SIGTERM with 10s budget then SIGKILL fallback). Done
+        # before the breakdown safety-net so the final NDJSON drain
+        # numbers reflect a stable post-shutdown queue.
+        try:
+            _stop_kb_flusher(kb_flusher_proc, kb_flusher_pid_path)
+        except Exception:  # noqa: BLE001
+            log.exception("kb_flusher stop failed (non-fatal)")
         # End-of-session safety net: always materialize session_breakdown.json
         # for downstream consumers (claw-stats-service / hyperloom-results-
         # service / offline analysis). Best-effort — a failure here MUST NOT
@@ -2849,6 +3027,39 @@ def _build_parser() -> argparse.ArgumentParser:
              "stack_fingerprint does not match the current pod (recorded "
              "in manifest.json). Default: lenient (M1 records the flag "
              "in manifest only; consumed by M5 specialist assembly).",
+    )
+    # v0.8 KB_gaps/Dead-E — Cortex KB flusher daemon lifecycle. The cli
+    # spawns ``scripts.cortex_kb_flusher`` after the T0 anchor (so the
+    # NDJSON pending queue gets drained in the background while the
+    # main loop runs); ``--no-kb-flusher`` short-circuits the spawn for
+    # operators debugging the NDJSON path manually. ``--kb-flusher-*``
+    # overrides forward the same flags to the daemon CLI.
+    opt.add_argument(
+        "--no-kb-flusher",
+        dest="kb_flusher_enabled",
+        action="store_false",
+        default=True,
+        help="Skip spawning the Cortex KB flusher daemon. The NDJSON "
+             "pending queue still accumulates but only drains on the "
+             "next session start (or via manual ``python -m "
+             "inference_optimizer.scripts.cortex_kb_flusher`` run). "
+             "Implied by --no-cortex.",
+    )
+    opt.add_argument(
+        "--kb-flusher-interval-sec",
+        dest="kb_flusher_interval_sec",
+        type=float,
+        default=5.0,
+        help="Forwarded to the flusher daemon as --interval-sec "
+             "(default 5.0).",
+    )
+    opt.add_argument(
+        "--kb-flusher-batch-size",
+        dest="kb_flusher_batch_size",
+        type=int,
+        default=50,
+        help="Forwarded to the flusher daemon as --batch-size "
+             "(default 50).",
     )
     # ------------------------------------------------------------------
     # v0.8 M4 — PR Monitor REST + MCP (KB_design §3.6 §5.2 + §3.13 M4)

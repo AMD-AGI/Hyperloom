@@ -3095,6 +3095,8 @@ def collect_kb_provenance(
         cortex_audit_jsonl as _audit_path,
         cortex_dead_letter_ndjson as _dl_path,
         cortex_flushed_ndjson as _flushed_path,
+        cortex_flusher_pid as _flusher_pid_path,
+        cortex_flusher_status_json as _flusher_status_path,
         cortex_pending_ndjson as _pending_path,
         cortex_sid_file as _sid_path,
         pr_monitor_status_json as _pr_status_path,
@@ -3314,8 +3316,82 @@ def collect_kb_provenance(
             "derived_summary_id": str(commit_summary.get("derived_summary_id") or "")
                 if isinstance(commit_summary, dict) else "",
         },
+        "flusher_status": _collect_flusher_status(
+            session_dir,
+            status_path=_flusher_status_path(session_dir),
+            pid_path=_flusher_pid_path(session_dir),
+            warnings=warnings,
+        ),
     }
+    fs = out["flusher_status"]
+    # Only emit a warning when a boot marker was written (i.e. cli ran
+    # the spawn helper this session); a missing marker is treated as
+    # "legacy / pre-Dead-E session" rather than a misconfiguration.
+    if fs.get("reason") != "no_marker":
+        if not fs.get("enabled", True):
+            warnings.append("kb_flusher:disabled")
+        elif not fs.get("alive", False):
+            warnings.append("kb_flusher:not_alive")
     return out
+
+
+def _collect_flusher_status(
+    session_dir: Path,
+    *,
+    status_path: Path,
+    pid_path: Path,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Merge ``.kb_flusher_status.json`` (boot marker) with a live
+    ``kill -0 $pid`` probe so the breakdown reader sees one stable
+    shape (KB_gaps/Dead-E §6).
+    """
+    base: dict[str, Any] = {
+        "enabled":       False,
+        "spawned":       False,
+        "alive":         False,
+        "pid":           None,
+        "cortex_kb_url": None,
+        "interval_sec":  0.0,
+        "batch_size":    0,
+        "reason":        "no_marker",
+        "ts":            "",
+        "pid_path":      str(pid_path),
+    }
+    if status_path.exists():
+        try:
+            with status_path.open("r", encoding="utf-8") as f:
+                marker = json.load(f)
+            if isinstance(marker, dict):
+                for k in (
+                    "enabled", "spawned", "pid", "cortex_kb_url",
+                    "interval_sec", "batch_size", "reason", "ts", "pid_path",
+                ):
+                    if k in marker:
+                        base[k] = marker[k]
+        except (OSError, json.JSONDecodeError) as exc:
+            warnings.append(
+                f"kb_flusher:status_marker_unreadable:{exc!r}"[:240]
+            )
+
+    pid_alive = False
+    pid_from_file: int | None = None
+    if pid_path.exists():
+        try:
+            raw = pid_path.read_text(encoding="utf-8").strip().splitlines()
+            pid_from_file = int(raw[0]) if raw else None
+        except (OSError, ValueError):
+            pid_from_file = None
+        if pid_from_file:
+            try:
+                os.kill(pid_from_file, 0)
+                pid_alive = True
+            except (OSError, ProcessLookupError):
+                pid_alive = False
+    if pid_from_file and not base.get("pid"):
+        base["pid"] = pid_from_file
+    base["alive"] = pid_alive
+    return base
 
 
 # ---------------------------------------------------------------------------
