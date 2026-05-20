@@ -16,26 +16,18 @@ from inference_optimizer.orchestrator.action_registry import (
 from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
 
 
-# DESIGN §16.1 plus isolated PMC roofline analysis action and the Phase 3
-# ``validate_stack`` action introduced for cumulative-gain validation.
+# DESIGN §16.1 + v0.8 KB_design §3.4 (merged ``explore``).
 EXPECTED_ACTIONS_V06: dict[str, str] = {
-    # prep (3 — incl. validate_stack which lives in `prep` family because
-    # it's a measurement action that doesn't introduce new modifications;
-    # `setup` / `classify` are owned by the external SKILL caller, not
-    # the optimizer's action loop)
+    # prep (2)
     "target_analysis":      "prep",
     "baseline":             "prep",
-    "validate_stack":       "prep",
     # analysis (2)
     "profile":              "analysis",
     "pmc_roofline":         "analysis",
-    # shallow (6) — report + session_breakdown live here per DESIGN §16.1.
-    # v0.8 M3 adds ``explore`` (KB_design §3.4) as the merged
-    # backends+params action; the legacy names remain registered
-    # during the M3 transition for v0.6 resume compatibility.
+    # shallow (4) — v0.8 M3 + KB_gaps/Dead-A merged the v0.6
+    # ``backends`` / ``params`` / ``validate_stack`` actions into
+    # ``explore``; their yamls + executors were physically deleted.
     "explore":              "shallow",
-    "backends":             "shallow",
-    "params":               "shallow",
     "sweep":                "shallow",
     "report":               "shallow",
     "session_breakdown":    "shallow",
@@ -49,14 +41,20 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     "recover":              "resilience",
 }
 
-# v0.8 KB_gaps/Gap-13 — actions removed in KB_design §3.15 §2.3 (the
-# specialist sub-agent framework replaces them). Locked here so a
-# future re-introduction of one of these yamls is loud.
+# v0.8 KB_gaps/Gap-13 + Dead-A — actions removed in KB_design §3.15 §2.3
+# / §3.4. ``dream`` / ``re_explore`` / ``comm_optimization`` /
+# ``compiler_tuning`` are replaced by specialist sub-agents;
+# ``backends`` / ``params`` / ``validate_stack`` are merged into
+# ``explore``. All seven yamls were physically deleted; a future
+# regression re-introducing any of them fails loudly here.
 _REMOVED_LEGACY_ACTIONS: tuple[str, ...] = (
+    "backends",
     "comm_optimization",
     "compiler_tuning",
     "dream",
+    "params",
     "re_explore",
+    "validate_stack",
 )
 
 
@@ -165,7 +163,7 @@ def test_lease_ttl_sec_consistent_with_cost(registry):
 # Background: ``session_paths._runs_actions()`` (the whitelist for actions
 # that get a per-task ``runs/<kind>/<task_id>/`` workspace) used to be a
 # hand-maintained ``_RUNS_ACTIONS`` frozenset. Adding a new action
-# (``validate_stack``) without updating it caused the orchestrator to loop
+# (``explore``) without updating it caused the orchestrator to loop
 # forever proposing the action — every dispatch raised ``ValueError`` from
 # inside the executor's ``runs_dir()`` fallback, but mission TODOs never
 # cleared. The fix derives the whitelist from ``pipeline_phase`` in the
@@ -205,13 +203,13 @@ def test_runs_actions_match_pipeline_phases(registry):
     )
 
 
-def test_validate_stack_in_runs_actions():
-    """Explicit regression: ``validate_stack`` was the action that
-    triggered the historical drift bug. Lock it as a runs/<kind>/ owner.
-    """
+def test_explore_in_runs_actions():
+    """v0.8 M3 + KB_gaps/Dead-A — ``explore`` succeeded the retired
+    ``validate_stack`` as the per-action runs/<kind>/ owner that
+    originally triggered the drift bug this guard exists for."""
     from inference_optimizer.session_paths import _runs_actions
 
-    assert "validate_stack" in _runs_actions()
+    assert "explore" in _runs_actions()
 
 
 def test_runs_actions_fallback_matches_registry(registry):
@@ -315,18 +313,17 @@ def test_typical_runtime_min_positive_for_active_actions(registry):
         )
 
 
-def test_validate_stack_action_metadata(registry):
-    """The Phase 3 ``validate_stack`` action must be present and shaped right."""
-    m = registry.get("validate_stack")
-    assert m is not None, "validate_stack action missing from registry"
-    assert m.family == "prep"
-    assert m.pipeline_phase == "validate"
+def test_explore_action_metadata(registry):
+    """v0.8 M3 + KB_gaps/Dead-A — ``explore`` is the canonical merged
+    grid runner; verify it owns the explore pipeline_phase + grid
+    lanes the dispatcher expects."""
+    m = registry.get("explore")
+    assert m is not None, "explore action missing from registry"
+    assert m.family == "shallow"
+    assert m.pipeline_phase == "explore"
     assert "baseline" in m.prerequisites
     assert "server_lifecycle" in m.requires_lanes
     assert "benchmark_lane" in m.requires_lanes
-    # Risk-free measurement action — never introduces a new modification
-    assert m.expected_gain_pct == (0.0, 0.0)
-    assert m.accuracy_risk == 0.0
 
 
 def test_kernel_owned_actions_in_deep_pipeline_phase(registry):

@@ -95,10 +95,7 @@ _GAPS_ATTEMPTS_HISTORY = 20
 # rejected_kernel_*). Membership is consulted by Coordinator and renderer
 # helpers so adding a new audit action is a one-line change.
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
-    "baseline", "profile", "backends", "params", "sweep", "validate_stack",
-    # v0.8 M3 — merged EXPLORE action. Coexists with legacy
-    # backends/params/validate_stack until M3 §PR9 deletes the old yaml.
-    "explore",
+    "baseline", "profile", "sweep", "explore",
 })
 
 # Mapping from audit-action name to (result-dict key, prompt-display label).
@@ -107,16 +104,10 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset({
 # know how to interpret the number (e.g. ``output_throughput`` vs raw
 # ``gain_pct`` vs ``validated_gain_pct``).
 _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
-    "baseline":       ("output_throughput", "output_throughput"),
-    "profile":        ("output_throughput", "output_throughput"),
-    "backends":       ("gain_pct",          "gain_pct"),
-    "params":         ("gain_pct",          "gain_pct"),
-    "sweep":          ("output_throughput", "output_throughput"),
-    "validate_stack": ("gain_pct",          "validated_gain_pct"),
-    # M3 explore reports the *batch best* gain_pct (max across its
-    # per-variant winners) so the audit summary line matches what the
-    # operator sees in breakdown.capability_summary.
-    "explore":        ("best_gain_pct",     "gain_pct"),
+    "baseline": ("output_throughput", "output_throughput"),
+    "profile":  ("output_throughput", "output_throughput"),
+    "sweep":    ("output_throughput", "output_throughput"),
+    "explore":  ("best_gain_pct",     "gain_pct"),
 }
 
 
@@ -302,22 +293,11 @@ class SharedState:
     # this to nudge Orch off the params plateau. Reset to 0 whenever
     # current_best advances.
     params_no_promote_streak: int = 0
-    # Persistent params DFS state. ParamsExecutor owns the search mechanics,
-    # Coordinator is still the only writer to state.json.
+    # v0.6 DFS ledger (params / backends). Kept on the dataclass for
+    # v0.6 resume parity (Inv-10.1); v0.8 sessions read ``explore_search``
+    # below. ``tested`` is keyed by content fingerprint so two variants
+    # with identical args + envs under different names collapse.
     params_search: dict[str, Any] = field(default_factory=dict)
-    # Persistent backends DFS state — same schema as ``params_search``
-    # (``schema_version`` / ``accepted`` / ``rejected`` / ``tested`` /
-    # ``name_index`` / ``cursor`` / ``last_round``). Owned by
-    # BackendsExecutor; Coordinator merges via
-    # :meth:`apply_backends_search_update` after each round and appends to
-    # ``accepted`` on promote (see :meth:`record_backends_accepted`).
-    #
-    # ``tested`` is keyed by **content fingerprint** (see
-    # :func:`variant_fingerprint`) so two variants with identical
-    # ``extra_sglang_args`` + ``extra_envs`` under different names collapse
-    # to the same row. ``name_index`` is a name → fingerprint map used by
-    # the executor's pre-filter to also reject explicit renames that the
-    # LLM might submit in a fresh ``params.grid``.
     backends_search: dict[str, Any] = field(default_factory=dict)
     # v0.8 M3 — unified explore ledger (KB_design §3.4 Inv-4.1 "single
     # ledger"). Merges the v0.6 ``backends_search`` + ``params_search``
@@ -427,24 +407,20 @@ class SharedState:
     # run_optimization REVERTs and exhausted integrate attempts.
     rejected_kernel_ids: list[str] = field(default_factory=list)
 
-    # T1+T2 (search-space expansion) — see SKILL.md "Search-space expansion".
-    # Populated once per session by BackendsExecutor / ParamsExecutor on the
-    # first run after they AST-parse the live framework's server_args.py.
-    # Schema: {framework: {"backend_flags": [...], "param_flags": [...],
-    #                       "ts": iso, "source_path": str}}.
-    # The Orchestration prompt surfaces this so the LLM knows the full
-    # framework-version-correct flag namespace it can synthesize variants
-    # from (instead of being limited to the shipped DEFAULT_*_GRID).
+    # Search-space expansion ledger surfaced in the Orchestration
+    # prompt so the LLM sees the live framework's full flag namespace
+    # rather than the shipped seed grid. Schema:
+    # ``{framework: {"backend_flags": [...], "param_flags": [...],
+    # "ts": iso, "source_path": str}}``.
     discovered_flags: dict[str, Any] = field(default_factory=dict)
-    # Rolling per-action winners log used for IR-26 dynamic idea generation.
-    # Each entry: {action, round_id, base_tput, winners: [{name, tput,
-    # gain_pct, extra_sglang_args, extra_envs}], best: {...}, ts}.
-    # Capped at 20 rows to keep prompt context bounded.
+    # Rolling per-action winners log (cap 20) used by IR-26 idea
+    # generation. Schema: ``{action, round_id, base_tput,
+    # winners: [{name, tput, gain_pct, extra_sglang_args, extra_envs}],
+    # best: {...}, ts}``.
     backend_winners_history: list[dict[str, Any]] = field(default_factory=list)
-    # Set of synergy combo keys ("name1+name2+...") that have already been
-    # tested this session, so the IR-26 re-explore loop doesn't re-run the
-    # same combination after each new round of explore. Populated by
-    # BackendsExecutor when phase-2 combos run.
+    # Synergy combo keys (``"name1+name2+..."``) already tested this
+    # session — prevents re-running the same combination after each
+    # new explore round.
     synergy_attempted: list[str] = field(default_factory=list)
 
     # ---------------------------------------------------------------
@@ -1997,7 +1973,12 @@ class SharedState:
         return None
 
     def apply_params_search_update(self, update: dict[str, Any]) -> None:
-        """Merge a ParamsExecutor search update into persistent state."""
+        """Merge a v0.6 params DFS update into persistent state.
+
+        Kept for v0.6 resume parity (Inv-10.1); fresh v0.8 sessions
+        write the merged :attr:`explore_search` ledger instead via
+        :meth:`apply_explore_search_update`.
+        """
         if not isinstance(update, dict):
             return
         self.params_search = dict(update)
@@ -2316,15 +2297,11 @@ class SharedState:
         self.explore_search = search
 
     def apply_backends_search_update(self, update: dict[str, Any]) -> None:
-        """Merge a BackendsExecutor search update into persistent state.
+        """Merge a v0.6 backends DFS update into persistent state.
 
-        Mirror of :meth:`apply_params_search_update`. Coordinator calls
-        this once per backends round from
-        :meth:`Coordinator._promote_to_shared_state`. ``accepted`` writes
-        are NOT performed here — the executor only reports
-        ``tested`` / ``rejected`` / ``last_round`` increments;
-        :meth:`record_backends_accepted` is the single writer for
-        ``accepted`` (called by Coordinator on promote).
+        Kept for v0.6 resume parity (Inv-10.1); fresh v0.8 sessions
+        write the merged :attr:`explore_search` ledger instead.
+        Preserves any ``accepted`` already promoted.
         """
         if not isinstance(update, dict):
             return
@@ -2400,7 +2377,8 @@ class SharedState:
     ) -> None:
         """Persist the AST-discovered flag list for a framework.
 
-        Called by BackendsExecutor / ParamsExecutor when they first run
+        Called by ExploreExecutor (and historically by the v0.6
+        BackendsExecutor / ParamsExecutor) when they first run
         ``discover_*_flags()`` on a fresh session. The Orchestration prompt
         surfaces the union so the LLM can synthesize new GridVariant
         candidates that the shipped DEFAULT_*_GRID may not cover.
@@ -2897,9 +2875,8 @@ class SharedState:
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
             f"last_baseline={self._format_attempt(self.last_baseline)}",
             f"last_profile={self._format_attempt(self.last_profile)}",
-            f"last_backends={self._format_attempt(self.last_backends)}",
-            f"last_params={self._format_attempt(self.last_params)}",
-            f"last_validate_stack={self._format_attempt(self.last_validate_stack)}",
+            f"last_explore={self._format_attempt(self.last_explore)}",
+            f"last_sweep={self._format_attempt(self.last_sweep)}",
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
             f"tick={int(self.tick or 0)}  "
