@@ -1631,21 +1631,28 @@ class Coordinator:
                     "last_profile_trace (legacy path)"
                 ),
             )
-        # Roofline-v2 N13 (GPU-empirical): kernel_opt requests
-        # (REQUEST kind="run_optimization") must come AFTER cheap
-        # exploration + re-roofline. See design/roofline-v2.md §6.5.1
-        # for the full rationale; short version: backend/param changes
-        # shift the kernel distribution (e.g. enabling
-        # --enable-torch-compile or different attention backends
-        # replaces or restructures the hot kernels), so kernel_opt
-        # against the baseline snapshot would target kernels no
-        # longer on the critical path. The fresh snapshot (#2 or
-        # later) is what kernel_opt should consume.
+        # Roofline-v2 N13 + N14 (GPU-empirical): kernel_opt requests
+        # (REQUEST kind="run_optimization") must come AFTER multiple
+        # rounds of cheap exploration + multiple re-roofline snapshots.
+        # See design/roofline-v2.md §6.5.1 + §6.5.2 for the full
+        # rationale; short version: backend changes the kernel SET,
+        # param changes kernel CONFIG/scheduling — both can shift the
+        # hot-kernel distribution, and the "best" param value depends
+        # on which backend is active. So a single backend + a single
+        # param round can't claim "cheap is exhausted". N14 upgrades
+        # the N13 thresholds from (>=1, >=1, >=2) to (>=2, >=2, >=3)
+        # to enforce at least two interleaved cheap rounds (and three
+        # roofline snapshots in between).
         #
         # Three prerequisites, all checked at the REQUEST layer:
-        #   1. backends_attempts >= 1 (at least one backends grid run)
-        #   2. params_attempts >= 1   (at least one params grid run)
-        #   3. snapshot_id >= 2       (re-roofline after cheap actions)
+        #   1. backends_attempts >= 2  (at least two backends rounds)
+        #   2. params_attempts   >= 2  (at least two params rounds)
+        #   3. snapshot_id       >= 3  (baseline + 2 re-rooflines)
+        #
+        # Ideal workflow this enforces:
+        #   roofline_1 -> backends_1 -> params_1 -> roofline_2
+        #                -> backends_2 -> params_2 -> roofline_3
+        #                                              -> kernel_opt
         #
         # Escape hatch: INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1
         # restores pre-N13 behaviour (snapshot_id >= 1 only). Use cases:
@@ -1660,35 +1667,37 @@ class Coordinator:
                 )
             )
             missing: list[str] = []
-            if backends_attempts < 1:
+            if backends_attempts < 2:
                 missing.append(
-                    f"backends_attempts={backends_attempts} (need >= 1)"
+                    f"backends_attempts={backends_attempts} (need >= 2)"
                 )
-            if params_attempts < 1:
+            if params_attempts < 2:
                 missing.append(
-                    f"params_attempts={params_attempts} (need >= 1)"
+                    f"params_attempts={params_attempts} (need >= 2)"
                 )
-            if not isinstance(snapshot_id, int) or snapshot_id < 2:
+            if not isinstance(snapshot_id, int) or snapshot_id < 3:
                 missing.append(
-                    f"snapshot_id={snapshot_id} (need >= 2; re-propose "
-                    "roofline after the cheap exploration round)"
+                    f"snapshot_id={snapshot_id} (need >= 3; baseline + "
+                    "at least 2 re-rooflines after cheap rounds)"
                 )
             if missing:
                 return PolicyDenied(
                     f"request kind={req_kind!r} denied: "
-                    f"kernel_opt requires post-cheap-exploration snapshot; "
-                    f"missing: {', '.join(missing)}",
+                    f"kernel_opt requires multi-round cheap-exploration "
+                    f"convergence; missing: {', '.join(missing)}",
                     rule="execution_order",
                     hint=(
-                        "Per design/roofline-v2.md §6.5.1, kernel_opt is "
-                        "the LAST optimisation stage. First propose at "
-                        "least one `backends` round + one `params` round, "
-                        "then propose `roofline` AGAIN to capture the "
-                        "post-cheap kernel distribution (snapshot_id "
-                        ">= 2). Cheap actions shift which kernels are "
-                        "hot — running kernel_opt against snapshot #1 "
-                        "may target a kernel no longer on the critical "
-                        "path. Override with "
+                        "Per design/roofline-v2.md §6.5.1 (N13+N14), "
+                        "kernel_opt is the LAST optimisation stage. "
+                        "Run at least 2 rounds of `backends` + 2 rounds "
+                        "of `params`, interleaved with `roofline` re-runs "
+                        "so each round sees an updated kernel distribution "
+                        "(target snapshot_id >= 3). Backend changes the "
+                        "kernel SET (attention/MoE/sampling backend "
+                        "swaps); param changes kernel CONFIG and the "
+                        "'best' param value depends on which backend is "
+                        "active. A single cheap round can't claim cheap "
+                        "is exhausted. Override with "
                         "INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1 "
                         "for debug / v0-baseline-comparison paths."
                     ),
