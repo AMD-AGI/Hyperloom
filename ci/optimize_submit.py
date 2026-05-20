@@ -1125,6 +1125,12 @@ def process_model(
 DEFAULT_ARTIFACT_PATTERNS = (
     "optimization_report",   # matches optimization_report.md / *-optimization_report.md / etc.
     "ci_metrics.json",
+    # Optional but recommended audit artifact emitted by inference_optimizer
+    # (and consumed by claw-stats-service / the dashboard). Not part of the
+    # key-results gate in ``_KEY_RESULT_SUFFIXES`` — missing it must not
+    # trigger NFS fallback or retries — but we still want it copied when
+    # the agent / skill emits it.
+    "session_breakdown.json",
     "baseline_summary.json",
     "sweep_results.csv",
     "sweep_results.txt",
@@ -1421,6 +1427,14 @@ def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
         os.path.join(best_sess, "optimization_report.md"),
         os.path.join(best_sess, "phase10_report", "optimization_report.md"),
         os.path.join(best_sess, "reports", "final.md"),
+    ]:
+        if os.path.isfile(cand):
+            targets.append(cand)
+            break
+    # Optional audit artifact — pull it back when the agent emitted it.
+    for cand in [
+        os.path.join(best_sess, "session_breakdown.json"),
+        os.path.join(best_sess, "phase10_report", "session_breakdown.json"),
     ]:
         if os.path.isfile(cand):
             targets.append(cand)
