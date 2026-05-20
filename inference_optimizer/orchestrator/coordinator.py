@@ -271,6 +271,34 @@ class Coordinator:
         self._tasks_running: list[asyncio.Task] = []
         self._validate_stack_gate_skip_warned: bool = False
 
+        # Per-agent consecutive ``BackendError`` streak. Successful turns
+        # reset the counter for that agent; a streak crossing
+        # ``_backend_error_streak_threshold`` records a single
+        # ``backend_unhealthy`` observation so operators (and the
+        # robustness reactor, which tails Coordinator events) notice the
+        # subprocess transport is degraded — particularly relevant for
+        # the robustness-agent / critic-agent subprocess backends whose
+        # in-loop failures otherwise would only show up as scattered
+        # ``backend_error`` events. The escalation observation fires once
+        # per crossing, then the counter must reset and re-arm before it
+        # can fire again, so we never spam the inbox.
+        self._backend_error_streak: dict[str, int] = {
+            name: 0 for name in self.role_registry
+        }
+        self._backend_error_alarm_armed: dict[str, bool] = {
+            name: True for name in self.role_registry
+        }
+        try:
+            self._backend_error_streak_threshold: int = max(
+                1,
+                int(os.environ.get(
+                    "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
+                    "5",
+                )),
+            )
+        except ValueError:
+            self._backend_error_streak_threshold = 5
+
         # Stable tick order derived from the live role_registry. Must NOT
         # use the module-level `roles_for_run()` which is a cached hardcoded
         # tuple containing "kernel" even when --no-kernel stripped it.
@@ -982,6 +1010,7 @@ class Coordinator:
                 "coordinator", "observation",
                 {"kind": "backend_error", "agent": agent_name, "error": repr(exc)},
             )
+            await self._track_backend_error_streak(agent_name, exc)
             return
         except NoIntentEmitted as exc:
             # Reactor turn produced no parseable intents (LLM hiccup,
@@ -1008,8 +1037,56 @@ class Coordinator:
             self.shared_state.crash_count += 1
             self.shared_state.save(self.session_dir)
             return
+        # Reset the streak — a successful turn proves the backend is alive
+        # again; the next BackendError starts a fresh count.
+        if self._backend_error_streak.get(agent_name):
+            self._backend_error_streak[agent_name] = 0
+            self._backend_error_alarm_armed[agent_name] = True
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
+
+    async def _track_backend_error_streak(
+        self, agent_name: str, exc: BackendError,
+    ) -> None:
+        """Increment the per-agent ``BackendError`` streak and escalate once.
+
+        Coordinator already records a per-call ``backend_error``
+        observation; this helper layers a *streak* observation on top so
+        the inbox carries a single, structured ``backend_unhealthy``
+        event when an agent's subprocess (typically critic-agent or
+        robustness-agent) has been crashing or timing out for
+        consecutive ticks. Operators see one high-severity row instead
+        of N scattered backend_error rows.
+
+        The alarm re-arms only after the streak resets to zero (a
+        successful turn), so we never spam the inbox once the threshold
+        is crossed.
+        """
+        new_value = self._backend_error_streak.get(agent_name, 0) + 1
+        self._backend_error_streak[agent_name] = new_value
+        threshold = self._backend_error_streak_threshold
+        if (
+            new_value >= threshold
+            and self._backend_error_alarm_armed.get(agent_name, True)
+        ):
+            self._backend_error_alarm_armed[agent_name] = False
+            await self._record_observation(
+                "coordinator", "observation",
+                {
+                    "kind": "backend_unhealthy",
+                    "agent": agent_name,
+                    "consecutive_errors": new_value,
+                    "threshold": threshold,
+                    "latest_error": repr(exc)[:500],
+                    "severity": "high",
+                    "hint": (
+                        "subprocess backend has failed >= threshold times "
+                        "consecutively; consider switching to a mock "
+                        "backend (e.g. --robustness-mock / --critic-mock) "
+                        "while the underlying transport is repaired"
+                    ),
+                },
+            )
 
     async def _compose_prompt(self, agent_name: str) -> str:
         """v0.6 §8.3 prompt: SharedState summary + inbox tail.
@@ -1062,6 +1139,41 @@ class Coordinator:
                         "explore rounds or validate_stack will likely be cut "
                         "by the deadline."
                     )
+
+        # Time budget — emitted for **every** agent that needs it. Robustness
+        # consumes it to fire the ``deadline_imminent`` signal that escalates
+        # to a ``delegate(report)`` wind-down; Orchestration uses it as a
+        # heads-up so it stops proposing fresh explore rounds when the
+        # deadline is close. Kernel and Critic ignore the section; their
+        # prompt parsers don't subscribe to it.
+        if (
+            agent_name in ("orchestration", "robustness")
+            and self._run_deadline is not None
+            and self._run_started_monotonic is not None
+        ):
+            remaining_min = max(
+                0.0, (self._run_deadline - time.monotonic()) / 60.0,
+            )
+            elapsed_min = (
+                time.monotonic() - self._run_started_monotonic
+            ) / 60.0
+            budget_min = self.shared_state.max_minutes or 0
+            sections.append("=== Time budget ===")
+            sections.append(
+                f"elapsed={elapsed_min:.1f}min  remaining={remaining_min:.1f}min  "
+                f"budget={budget_min}min  "
+                f"closing_phase={self.shared_state.closing_phase}"
+            )
+            if (
+                agent_name == "orchestration"
+                and remaining_min <= 5.0
+                and not self.shared_state.closing_phase
+            ):
+                sections.append(
+                    "WARNING: < 5 min remaining. Prefer `report` next; new "
+                    "explore rounds or validate_stack will likely be cut "
+                    "by the deadline."
+                )
 
         # 1. Shared session state — gives the agent goal + progress context
         # even on tick 1 when the inbox is empty.
