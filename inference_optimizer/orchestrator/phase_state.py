@@ -696,32 +696,33 @@ def exit_normal_explore(
     plateau_keep_gain_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     plateau_empty_streak: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
     plateau_lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
+    disable_legacy_proxy: bool = False,
 ) -> tuple[str, dict[str, Any]] | None:
     """EXPLORE normal exit (KB_design §3.8 §5.1 + §3.13 M7).
 
-    Priority order (highest first):
+    Priority order:
 
-    1. ``escalate_strategy_change`` hint of ``skip_to_kernel`` →
-       force ``plateau_explore`` with evidence stamping
-       ``llm_escalation``. The Coordinator pops the hint after it
-       fires so subsequent ticks don't re-trigger.
-    2. Real ``plateau_explore`` per :func:`compute_plateau_explore`
-       (KB_design §3.8 §5.1 AND-of clauses). Has a *M2 transitional
-       proxy fallback* — when ``explore_search`` is empty (legacy
-       resume or M3-not-yet) we still consult
-       ``params_no_promote_streak`` so M2 sessions keep working.
-    3. Phase budget exhausted (wall-clock).
-
-    Returns ``None`` if no trigger fires.
+    1. ``escalate_strategy_change`` hint ``skip_to_kernel`` →
+       ``plateau_explore`` (``evidence='llm_escalation'``).
+    2. Real ``plateau_explore`` (:func:`compute_plateau_explore`)
+       when v0.8 signals are present (``explore_search.winners_history``
+       or ``specialist_rounds``).
+    3. KB_gaps/Gap-15 R-09 transitional proxy
+       (``params_no_promote_streak``) when v0.8 signals are absent
+       AND ``disable_legacy_proxy=False``. Evidence carries
+       ``r09_provisional=True`` so the breakdown collector surfaces
+       a ``plateau_proxy_provisional`` warning. Operators can set
+       ``INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1`` (Coordinator
+       reads + passes through) once their fleet is fully v0.8 to
+       fail closed.
+    4. Phase budget exhausted.
     """
-    # 1. LLM escalate hint takes precedence (KB_design §3.8 §7.3).
     hint = _pending_escalate_hint(state)
     if hint == ESCALATE_HINT_SKIP_TO_KERNEL:
         return "plateau_explore", {
             "evidence": "llm_escalation",
             "hint": hint,
         }
-    # 2. Real plateau_explore (KB_design §3.8 §5.1).
     explore_search = getattr(state, "explore_search", None) or {}
     has_v08_signals = (
         isinstance(explore_search, dict)
@@ -739,11 +740,7 @@ def exit_normal_explore(
                 "evidence": "plateau_judgment",
                 **evidence,
             }
-    else:
-        # M2 transitional fallback for legacy / resume sessions that
-        # don't yet have ``explore_search`` / ``specialist_rounds``
-        # populated. Mirrors the original M2 proxy so the run still
-        # makes forward progress.
+    elif not disable_legacy_proxy:
         params_streak = int(getattr(state, "params_no_promote_streak", 0) or 0)
         backends_search = getattr(state, "backends_search", None) or {}
         backends_accepted = 0
@@ -757,11 +754,15 @@ def exit_normal_explore(
         if params_streak >= 5 and backends_accepted == 0 and has_results:
             return "plateau_explore", {
                 "evidence": "m2_proxy",
+                "r09_provisional": True,
                 "params_no_promote_streak": params_streak,
                 "backends_accepted": backends_accepted,
-                "note": "M2 transitional heuristic; see KB_design §3.13 M2 §5.3",
+                "note": (
+                    "KB_design §3.14 R-09 — legacy params_no_promote_streak "
+                    "proxy fired (v0.8 signals empty); set "
+                    "INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1 to forbid"
+                ),
             }
-    # 3. Phase budget exhausted.
     remaining = phase_budget_remaining_seconds(
         state, budget_pct=budget_pct, now_unix=now_unix,
     )
@@ -861,6 +862,7 @@ def compute_next_phase(
     kernel_enabled: bool = True,
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
+    disable_legacy_proxy: bool = False,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
@@ -908,6 +910,7 @@ def compute_next_phase(
                 "explore_lookback",
                 DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
             )),
+            disable_legacy_proxy=disable_legacy_proxy,
         )
         if norm is not None:
             if kernel_enabled:
