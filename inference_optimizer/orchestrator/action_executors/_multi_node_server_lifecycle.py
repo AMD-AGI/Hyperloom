@@ -308,6 +308,7 @@ async def restart_server_for_round(
     pd_ib_device: str | None = None,
     health_timeout_s: int = DEFAULT_HEALTH_TIMEOUT_S,
     poll_interval_s: int = 6,
+    force_full_restart: bool = False,
 ) -> None:
     """Restart the multi-node inference server for the next Magpie round.
 
@@ -327,6 +328,15 @@ async def restart_server_for_round(
         ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` afterwards so a later round
         without a profile dir doesn't accidentally inherit this round's
         path.
+
+    ``force_full_restart``: when True, scopes
+    ``MULTI_NODE_RESTART_RESUME_RUNNING=0`` for this single invocation
+    so cmd_restart_server's resume fast-path is bypassed and a fresh
+    kill+launch always runs. Required by the kernel-agent integrate
+    path: after apply_kernel_patch fans new source files to every pod,
+    sglang must be fully restarted (not just /flush_cache resumed) to
+    re-import the patched modules. The previous env value is restored
+    in ``finally`` so non-kernel-opt callers keep their resume savings.
 
     Raises :class:`ServerRestartFailed` on any failure; callers should
     let it bubble so the round is marked failed.
@@ -405,6 +415,13 @@ async def restart_server_for_round(
             pd_bootstrap_port=8998,
             pd_vllm_router_cmd="",
         )
+        from ._multi_node_env import log_mn_banner
+        log_mn_banner(
+            "server_restart", log,
+            framework=fw, tp=tp_int, ep=ep_int,
+            pd_mode=pd.get("pd_mode"),
+            trace_dir=torch_profiler_dir or "",
+        )
         log.info(
             "restart_server_for_round: framework=%s tp=%d ep=%d pd_mode=%s "
             "pd_prefill=%dx tp%d pd_decode=%dx tp%d backend=%r ib=%r "
@@ -416,12 +433,27 @@ async def restart_server_for_round(
             extra_sglang_args, torch_profiler_dir,
         )
 
+        # When kernel-agent just patched sglang source on every pod, the
+        # resume fast-path (MULTI_NODE_RESTART_RESUME_RUNNING) would
+        # leave the still-running sglang process holding the OLD module
+        # imports and the patch would have no effect. Scope an env
+        # override for THIS invocation only so cmd_restart_server's
+        # prev_match check fails and a fresh kill+launch runs.
+        prev_resume = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING")
+        if force_full_restart:
+            os.environ["MULTI_NODE_RESTART_RESUME_RUNNING"] = "0"
         try:
             rc = await asyncio.to_thread(cmd_restart_server, ns)
         except Exception as exc:  # noqa: BLE001
             raise ServerRestartFailed(
                 f"cmd_restart_server raised: {exc!r}"
             ) from exc
+        finally:
+            if force_full_restart:
+                if prev_resume is None:
+                    os.environ.pop("MULTI_NODE_RESTART_RESUME_RUNNING", None)
+                else:
+                    os.environ["MULTI_NODE_RESTART_RESUME_RUNNING"] = prev_resume
 
         if rc != 0:
             raise ServerRestartFailed(

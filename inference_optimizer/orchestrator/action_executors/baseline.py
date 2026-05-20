@@ -436,6 +436,8 @@ class BaselineExecutor:
                     "output_dir": str(output_dir),
                 }
 
+        from ._multi_node_env import log_mn_banner
+        log_mn_banner("baseline_executor", log, output_dir=str(output_dir))
         log.info("baseline_executor: launching Magpie cmd=%s output_dir=%s",
                  cmd, output_dir)
 
