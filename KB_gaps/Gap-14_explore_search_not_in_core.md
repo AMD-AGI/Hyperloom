@@ -90,18 +90,33 @@ def test_policy_blocks_llm_explore_search_write():
 
 ## 6. 验收口径
 
-- [ ] `CORE_STATE_FIELDS` 含 `explore_search`, `backends_search`,
-      `params_search`
-- [ ] LLM `update_state{changes: {explore_search: ...}}` → policy_denied
-- [ ] 现有 `test_v08_shared_state_evolution.py` + `test_v08_drop_scoreboard.py`
+- [x] `CORE_STATE_FIELDS` 含 `explore_search`, `backends_search`,
+      `params_search` (`test_search_ledgers_in_core_state_fields`)
+- [x] LLM `update_state{changes: {explore_search: ...}}` → policy_denied
+      (`test_policy_blocks_llm_search_ledger_write[explore_search]`)
+      同测试覆盖 backends_search / params_search
+- [x] 现有 `test_v08_shared_state_evolution.py` + `test_v08_drop_scoreboard.py`
       仍全绿
 
-## 7. 风险 / 回退
+## 7. 实际落地 (2026-05-20)
 
-- 极低风险, 单字段加入
-- **回退**: 从 frozenset 移除 explore_search
+1. `policy.CORE_STATE_FIELDS` 加入 `explore_search`, `backends_search`,
+   `params_search` (Inv-10.2 防御补全).
+2. `tests/test_v08_shared_state_evolution.py` 加 2 个测试:
+   - `test_search_ledgers_in_core_state_fields` 锁字段成员
+   - `test_policy_blocks_llm_search_ledger_write` 参数化测试,
+     验证 LLM update_state 在 3 个 ledger 上都拿到
+     `rule='state_field'` 拒绝
+3. Coordinator 自己的 ledger 写仍走 dataclass 属性赋值
+   (`apply_*_search_update` / `record_*_accepted`), 不经 update_state,
+   所以锁定不影响 Coordinator 写路径.
 
-## 8. 关联 gap
+## 8. 风险 / 回退
 
-- 与 Gap-09 (gaps[] 字段) 同样应该加入 CORE_STATE_FIELDS
+- 极低风险, 单字段防御性 lock
+- **回退**: 从 frozenset 移除 3 个 ledger 名
+
+## 9. 关联 gap
+
+- 与 Gap-09 (gaps[] 字段) 同款 CORE_STATE_FIELDS 补漏 (Gap-09 已落)
 - 独立 PR, 无依赖
