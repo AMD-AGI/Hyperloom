@@ -378,7 +378,7 @@ gate 退化为 N3 软引导（用于 debug / robustness 恢复路径 / v2.1 可�
 不在 closing_phase；closing 后所有 action 走现有 `_closing_phase_denial`
 拦截。
 
-### 6.5.1 N13 修订：kernel_opt 强制放最后（GPU 实测后追加）
+### 6.5.1 N13 + N14：kernel_opt 强制放最后（GPU 实测后追加）
 
 DeepSeek-R1 实测发现：v2 当前只用 `MODEL_CLASS_ACTION_PRIORS` 的 prior
 排序（moe_mla 下 kernel_opt=6.0 排在 params/backends 之后）来引导
@@ -388,19 +388,33 @@ LLM 仍可能（在 backend/param 没找到 gain 时）尝试 kernel_opt，但�
 两个分布可能完全不同（例：fmoe_fp8_blockscale_g1u1 baseline 时是
 top，但启用 `--enable-torch-compile` 后可能换成别的 kernel）。
 
-N13 在 PolicyGate 层硬强制：
-`_sequence_denial_for_request("kernel", "run_optimization")` 增加
-3 条前置：
+**N13 初版**（已实施）在 PolicyGate 层硬强制 3 条前置：
+`backends_attempts ≥ 1 AND params_attempts ≥ 1 AND snapshot_id ≥ 2`。
+但这只确保"至少各试过一轮"，不能保证 cheap actions 真的探索充分。
 
-1. **`backends_attempts ≥ 1`** — 至少跑过一轮 backends grid（让
-   backend 层飞起的"sampling pytorch/triton"、"moe a2a deepep"等
-   能影响 kernel 调度）。
-2. **`params_attempts ≥ 1`** — 至少跑过一轮 params grid（让
-   `--enable-torch-compile`、`--cuda-graph-max-bs` 等 launch 路径
-   改完）。
-3. **`snapshot_id ≥ 2`** — roofline 至少跑了 2 次。第 1 次是
-   baseline 后的初始 snapshot；第 2 次必须是 cheap 探索后主动
-   re-roofline 拿到的新 snapshot（看 kernel 分布是否变化）。
+**N14 修订**（v2.1）— 用户实测后追加：精确表达"多次 roofline 选到
+最优 backend/param 后再 kernel_opt"的设计意图，把前置升级为：
+
+1. **`backends_attempts ≥ 2`** — 至少 2 轮 backends grid。理由：
+   backend 改变 kernel 种类（attention/MoE/sampling backend 互换），
+   第 1 轮换 backend 后的最优值可能在第 2 轮才被发现。
+2. **`params_attempts ≥ 2`** — 至少 2 轮 params grid。理由：第 1
+   轮 param 是基于初始 kernel 分布，第 2 轮是基于 backend 改完后
+   的分布，配置最优可能完全不同（如换 attention backend 后
+   cuda_graph_max_bs 的最优值不同）。
+3. **`snapshot_id ≥ 3`** — roofline 至少跑了 3 次。第 1 次是
+   baseline 初始；第 2、3 次是 cheap 探索后的 re-roofline，看
+   kernel 分布是否已稳定（如果第 3 次 snapshot 的 top kernel 跟
+   第 2 次基本一致，说明 cheap 已撞墙，可以进 kernel_opt）。
+
+理想工作流（N14 强制）：
+
+```
+roofline_1 → backends_1 → params_1 → roofline_2
+            → backends_2 → params_2 → roofline_3
+                                       ↓ (cheap 收益边际递减)
+                                       kernel_opt （现在 unlock）
+```
 
 逃生阀：`INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1` 退回 N3
 行为（仅 roofline 1 次 snapshot 即可 kernel_opt），用于：
@@ -408,6 +422,20 @@ N13 在 PolicyGate 层硬强制：
 - v0 baseline 复现（验证 v2 vs v0）
 - 已知不会从 cheap actions 获得 gain 的特殊 workload
 - debug / 单测路径
+
+### 6.5.2 为什么不要求"gain 边际递减"
+
+考虑过两个候选（design 讨论 v2.1）：
+
+* **X（gain-driven）**：要求 `last 2 round 增量 < 0.5%` 才解锁 kernel_opt
+* **Y（counter-driven，N14 采用）**：要求 attempts ≥ 2 + snapshot ≥ 3
+
+选 Y 不选 X 的理由：
+- gain 数字噪声大（某轮 grid 卡 noise 可能误判 "cheap 撞墙"）
+- counter 可证明、可单测、可 audit
+- gain 边际收敛交给 LLM 自主判断（orchestration.md 已指导）
+- 如果未来发现 Y 太弱（比如 LLM 跑了 2/2/3 还在涨），再加 X 作为
+  补充（"gain 还在涨时不强制 kernel_opt" 的 反向 guard）
 
 ---
 
@@ -451,7 +479,8 @@ v1 sub-agent 实施"。
 | **N10** RooflineExecutor SharedState 持久化（GPU 实测后追加） | 实测 N2b 的 inline-promote 不被 `_promote_to_shared_state` 持久化—— `changed` 始终为 False 导致 state.json 不更新。N10：(a) coordinator 加 `task_kind == "roofline"` 分支只翻 changed=True 触发 tail-save；(b) _AUDIT_ACTIONS 加 "roofline"；(c) shared_state _KEY_METRIC_MAP 加 ("roofline", "snapshot_id")；(d) dataclass 加 `last_roofline` / `roofline_attempts` 字段 | 2 改 + 1 测试 | ~360 | ✅ 已执行 (`92c4389`) |
 | **N11** strip base64 PNG 嵌入（GPU 实测发现的 4 号根因） | DeepSeek-R1 实测发现：analysis.md 200KB 里 184.5KB 是 base64 PNG (line 17 `![Performance Improvement](data:image/png;base64,...)`)，**LLM 看到 92% 噪声 / 8% 文本**，关键的 🔴 P1 建议（"propose kernel_opt for fmoe_fp8_blockscale_g1u1"、"comm_optimization for 61 allreduce+rmsnorm"）被淹没。N11：`shared_state.py` 在 `_format_analysis_md_full` 注入前用 regex 剥掉 `data:image/...;base64,...` 块（保留 alt-text + 注释 `[stripped: image ...]`）。预计 200KB → ~16KB（92% reduction） | 1 改 + 1 测试 | ~120 | 📝 待执行 |
 | **N12** orchestration.md 强化 analysis.md 决策映射（GPU 实测后追加） | 实测：LLM 在 N5/N9 都生效下 10h 12 task 仍然 0 个 kernel_opt / 0 个 comm_optimization request — 单 backend/param 盲扫无效。N12：(a) hard rule "analysis.md 里 🔴 P1 标注的 kernel 必须在合适时机 propose kernel_opt"；(b) action ordering hard rule "kernel_opt 必须在至少一轮 backend + param 试过 + re-roofline 之后 propose"；(c) few-shot 例子 | 1 改 + 1 测试 | ~80 | 📝 待执行 |
-| **N13** kernel_opt 强制前置 sequence_denial（GPU 实测后追加） | N12 是软引导（在 prompt），N13 是硬强制（在 PolicyGate）：`_sequence_denial_for_request("kernel", "run_optimization")` 增加前置 `backends_attempts ≥ 1 AND params_attempts ≥ 1 AND snapshot_id ≥ 2`。语义：kernel_opt 看到的 hot kernel 分布必须是"baseline 后做了 cheap 探索 + 重新 roofline 拿到 snapshot #2"的，而非 baseline 的初始分布——因为 backend/param 改完 kernel 分布会显著漂移（最早是 fmoe_fp8_blockscale_g1u1 是 top，cuda_graph 之后可能根本不是了）。`INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1` 逃生阀 | 1 改 + 1 测试 | ~150 | 📝 待执行 |
+| **N13** kernel_opt 强制前置 sequence_denial（GPU 实测后追加） | N12 是软引导（在 prompt），N13 是硬强制（在 PolicyGate）：`_sequence_denial_for_request("kernel", "run_optimization")` 增加前置 `backends_attempts ≥ 1 AND params_attempts ≥ 1 AND snapshot_id ≥ 2`。语义：kernel_opt 看到的 hot kernel 分布必须是"baseline 后做了 cheap 探索 + 重新 roofline 拿到 snapshot #2"的，而非 baseline 的初始分布——因为 backend/param 改完 kernel 分布会显著漂移（最早是 fmoe_fp8_blockscale_g1u1 是 top，cuda_graph 之后可能根本不是了）。`INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1` 逃生阀 | 1 改 + 1 测试 | ~150 | ✅ 已执行 (`be1044b`) |
+| **N14** kernel_opt 前置升级到"多轮 cheap + 多次 roofline"（v2.1，用户实测后追加） | N13 只要求 `各 ≥ 1 + snapshot ≥ 2`，不能保证 cheap 真正探索充分。N14 升级前置为 `backends_attempts ≥ 2 AND params_attempts ≥ 2 AND snapshot_id ≥ 3`，精确表达"多次 roofline 选到最优 backend/param 后再 kernel_opt"的设计意图（design §6.5.1 详细论证）。3 个测试 fixture 需把 escape-hatch monkeypatch 加到 attempts/snapshot 不够多的现有用例上 | 1 改 + 1 测试 | ~80 | 📝 待执行 |
 | **N8** Qwen3-32B 真实 GPU 跑 + RATIONALE | C7 等价；填充本文档 §13 | 0 代码 | 0 + 文档追加 | 📝 进行中（已 2 次试跑：N9-verify Qwen3 验 N9，N11-pre R1 暴露 N11/N12/N13 需求；下一次 Qwen3-32B 3h 跑验 N11/N12/N13） |
 
 **N1-N7 累计估算**：~1250 行新代码（含 ~600 行测试 + ~50 行 yaml/md +
