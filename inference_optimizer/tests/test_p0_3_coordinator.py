@@ -478,9 +478,16 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
 
 @pytest.mark.asyncio
 async def test_execution_order_denies_backends_before_profile(session_dir):
-    """After baseline, profile is mandatory before backends/params/sweep."""
+    """After baseline, profile is mandatory before explore/sweep.
+
+    v0.8 M3 + KB_gaps/Gap-10: ``backends`` was retired; PolicyGate
+    now denies it with ``rule='action_deprecated'`` before the
+    execution-order gate fires. We exercise the same sequence_denial
+    path using the canonical replacement ``explore`` which carries
+    the merged backends/params behaviour.
+    """
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
-        "action_name": "backends", "predicted_gain_pct": 5.0,
+        "action_name": "explore", "predicted_gain_pct": 5.0,
     })
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))

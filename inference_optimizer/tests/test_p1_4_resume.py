@@ -235,7 +235,7 @@ async def test_replay_mixed_pending_and_decided(session_dir):
         }
         c1.shared_state.save(session_dir)
         proposal_ids = []
-        for action in ("baseline", "profile", "backends"):
+        for action in ("baseline", "profile", "explore"):
             await c1._handle_intent("orchestration", Intent(
                 type=IntentType.PROPOSE_ACTION,
                 payload={"action_name": action, "predicted_gain_pct": 0.0},
@@ -265,7 +265,7 @@ async def test_replay_mixed_pending_and_decided(session_dir):
         stats = await c2.replay_for_resume()
         assert stats["pending_restored"] == 1
         restored = next(iter(c2.state.pending_proposals.values()))
-        assert restored.action_name == "backends"
+        assert restored.action_name == "explore"
     finally:
         await c2.stop()
 
