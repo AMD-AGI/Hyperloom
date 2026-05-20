@@ -129,6 +129,19 @@ if [ -z "${GEAK_RAG_INDEX_DEVICE:-}" ]; then
 else
   GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE}"
 fi
+# Operator-controlled bypass for the RAG index build (ensure_rag_index).
+# Set SKIP_RAG_INDEX=1 to skip; useful for fast iteration in test sandboxes
+# where the GEAK kernel-agent's RAG retrieval (tools.rag) is not under test.
+# Side effects when skipped:
+#   - GEAK kernel-agent calls relying on rag-mcp will degrade / fail at
+#     runtime; framework-agent (fa) pre-stage and other pipeline phases
+#     are unaffected (they do not consume the RAG index).
+#   - Operators can rebuild later by re-running install.sh without
+#     SKIP_RAG_INDEX set, or by invoking
+#       python3 ${HYPERLOOM_ROOT}/geak/scripts/build_index.py \
+#         --force --device ${GEAK_RAG_INDEX_DEVICE_VAL}
+#     manually.
+SKIP_RAG_INDEX_VAL="${SKIP_RAG_INDEX:-0}"
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
@@ -460,7 +473,19 @@ ensure_geak() {
     log "GEAK checkout already present: ${HYPERLOOM_ROOT}/geak"
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"
+    # --force-reinstall --no-deps: some sandbox base images (e.g. the
+    # sglang:v0.5.11-rocm720-mi30x plugin image) ship a stale
+    # ``mini-swe-agent==1.14.4`` .dist-info under
+    # /usr/local/lib/python3.10/dist-packages/ with the actual package
+    # files / entry scripts stripped. Plain ``pip install <local-src>``
+    # treats the metadata as "already satisfied" and silently no-ops,
+    # so /opt/venv/bin/geak (and every other entry script) never gets
+    # written and ``command -v geak`` below dies with
+    # ``geak CLI not found``. Forcing the local source reinstall
+    # always rebuilds the entry scripts; ``--no-deps`` keeps the
+    # install fast and avoids touching the heavy transitive deps that
+    # the venv image already provides.
+    run python3 -m pip install -q --no-cache-dir --force-reinstall --no-deps "${HYPERLOOM_ROOT}/geak"
     # GEAK v3.1.0 ships 5 MCP tools under mcp_tools/; all of them are
     # imported by the bundled ``minisweagent`` at preprocess time:
     #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
@@ -473,10 +498,13 @@ ensure_geak() {
     # other four ``ModuleNotFoundError`` at runtime — observed on the
     # 2026-05-15 Qwen3-32B GEAK attempts where ``profiler_mcp`` was
     # missing and every GEAK attempt aborted in ~4 minutes with a
-    # zero-byte baseline. Install all five together.
+    # zero-byte baseline. Install all five together. Same
+    # --force-reinstall --no-deps rationale as above: each mcp_tool
+    # subpackage may have a stale baked dist-info that would silently
+    # short-circuit the install.
     for _geak_mcp in rag-mcp profiler-mcp metrix-mcp \
                     cross-session-memory-mcp automated-test-discovery; do
-      run python3 -m pip install -q --no-cache-dir \
+      run python3 -m pip install -q --no-cache-dir --force-reinstall --no-deps \
         "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"
     done
     # Patch GEAK's bundled prompt YAML to remove the misleading
@@ -491,6 +519,20 @@ ensure_geak() {
     else
       warn "geak prompt patcher missing at $_geak_patcher; skip"
     fi
+    # GEAK's RAG index builder (scripts/build_index.py, invoked by
+    # ensure_rag_index below) needs the LangChain hybrid-retrieval stack
+    # plus FAISS. GEAK declares those in pyproject ``[project.optional-dependencies] langchain``,
+    # but the main install above runs with ``--force-reinstall --no-deps``
+    # (to dodge the stale-dist-info trap on the sglang sandbox image),
+    # so the extras would never get pulled in. Install the langchain
+    # stack explicitly here. Plain pip install (no --no-deps,
+    # no --force-reinstall) is safe for these remote PyPI wheels —
+    # the stale-dist-info trap is specific to local source installs.
+    run python3 -m pip install -q --no-cache-dir \
+      "langchain>=0.3.0" "langchain-community>=0.3.0" \
+      "langchain-huggingface>=0.1.0" "langchain-text-splitters>=0.3.0" \
+      "sentence-transformers>=2.2.0" "faiss-cpu>=1.7.4" \
+      "rank_bm25>=0.2.2"
   else
     log "check-only: skipping GEAK and mcp_tools installation"
   fi
@@ -538,6 +580,14 @@ EOF
 }
 
 ensure_rag_index() {
+  # Operator bypass: SKIP_RAG_INDEX=1 skips the RAG index build entirely
+  # (see top-of-file SKIP_RAG_INDEX_VAL block for rationale + side effects).
+  # Checked before the "already present" short-circuit so the bypass is
+  # observable in install logs regardless of cache state.
+  if [ "$SKIP_RAG_INDEX_VAL" -eq 1 ]; then
+    log "SKIP_RAG_INDEX=1 set; skipping RAG index build (GEAK tools.rag will be unavailable until rebuilt)"
+    return
+  fi
   if [ -d "$RAG_INDEX_DIR" ] && [ -n "$(ls -A "$RAG_INDEX_DIR" 2>/dev/null)" ]; then
     log "RAG index already present at $RAG_INDEX_DIR"
     return
@@ -563,7 +613,12 @@ ensure_oob() {
       if [ -f "${HYPERLOOM_ROOT}/OOB/oob_cli/requirements.txt" ]; then
         run python3 -m pip install -q --no-cache-dir -r "${HYPERLOOM_ROOT}/OOB/oob_cli/requirements.txt"
       fi
-      run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/OOB/oob_cli"
+      # --force-reinstall --no-deps: same baked stale-dist-info trap as
+      # ensure_geak (see comment there). The outer ``command -v oob``
+      # guard at the top of this branch already short-circuits when oob
+      # is already on PATH, so this only fires when we genuinely need
+      # the local source install to write entry scripts.
+      run python3 -m pip install -q --no-cache-dir --force-reinstall --no-deps "${HYPERLOOM_ROOT}/OOB/oob_cli"
     else
       warn "OOB source not found: $OOB_SRC"
     fi
@@ -797,6 +852,8 @@ PY
   fi
   if [ -d "$RAG_INDEX_DIR" ] && [ -n "$(ls -A "$RAG_INDEX_DIR" 2>/dev/null)" ]; then
     log "RAG index: present at $RAG_INDEX_DIR"
+  elif [ "$SKIP_RAG_INDEX_VAL" -eq 1 ]; then
+    log "RAG index: skipped (SKIP_RAG_INDEX=1; tools.rag will be unavailable)"
   else
     warn "RAG index missing at $RAG_INDEX_DIR"
   fi
