@@ -17,6 +17,8 @@ from .claude import ClaudeBackend
 from .codex import CodexBackend
 from .critic_agent import CriticAgentBackend, RuntimeCall, RuntimeCaller
 from .critic_mock import MockCriticBackend
+from .framework_agent import FrameworkAgentBackend
+from .framework_mock import FrameworkMockBackend
 from .kernel_mock import MockKernelBackend
 from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
@@ -38,6 +40,8 @@ __all__ = [
     "CriticAgentBackend",
     "EMIT_INTENT_TOOL_NAME",
     "EMIT_INTENT_TOOL_QUALIFIED",
+    "FrameworkAgentBackend",
+    "FrameworkMockBackend",
     "MCP_SERVER_NAME",
     "MockBackend",
     "MockCriticBackend",

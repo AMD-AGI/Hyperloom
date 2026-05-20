@@ -46,11 +46,15 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "target_analysis", "baseline",
     # analysis
     "profile", "pmc_roofline", "deep_kernel_analysis",
+    # framework agent analysis -- REQUEST{target_agent='framework', ...}
+    "framework_optimize",
     # explore
     "backends", "params", "sweep", "framework_pr",
-    # deep — kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
+    # deep -- kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
     "kernel_opt", "integrate", "operator_tuning", "vendor_kernel_config",
-    # validate (Phase 3 — closes the loop on accumulated KEEPs)
+    # deep -- framework-owned, emitted via REQUEST{target_agent='framework', ...}
+    "framework_integrate",
+    # validate (Phase 3 -- closes the loop on accumulated KEEPs)
     "validate_stack",
     # finalize
     "report",
@@ -65,11 +69,18 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
 NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
-    # explore (no profile — it only feeds kernel-opt). framework_pr is
+    # framework agent analysis -- safe in --no-kernel: only mutates
+    # framework source (vllm/sglang), never invokes the kernel agent.
+    "framework_optimize",
+    # explore (no profile -- it only feeds kernel-opt). framework_pr is
     # safe to enable even without the kernel agent: it only mutates
     # sglang source, never proposes per-kernel work.
     "backends", "params", "sweep", "framework_pr",
-    # validate (still useful — bench the stacked backends/params)
+    # deep -- framework_integrate is the framework-side counterpart of
+    # `integrate`; both are deep_kernel family but framework one only
+    # touches python/, not GPU kernel source, so it's --no-kernel-safe.
+    "framework_integrate",
+    # validate (still useful -- bench the stacked backends/params)
     "validate_stack",
     # finalize
     "report",
@@ -727,22 +738,33 @@ def build_orchestration_prompt(
 
 
 def default_enabled_actions(
-    *, no_kernel: bool, no_framework: bool = False,
+    *,
+    no_kernel: bool,
+    no_framework: bool = False,
+    no_framework_role: bool = False,
 ) -> tuple[str, ...]:
     """Return the canonical enabled-action set used by the CLI.
 
-    Two independent toggles select among 4 combinations:
+    Three independent toggles compose:
 
-    * ``no_kernel=False, no_framework=False`` (default) — full pipeline:
-      kernel-owned arms + ``framework_pr``.
-    * ``no_kernel=False, no_framework=True``  — kernel arms enabled, ``framework_pr`` stripped.
-    * ``no_kernel=True,  no_framework=False`` — kernel arms stripped, ``framework_pr`` kept.
-    * ``no_kernel=True,  no_framework=True``  — pure parameter-search
-      (baseline + params + backends + sweep + validate_stack + report).
+    * ``no_kernel``         — strip kernel-owned arms + ``profile`` /
+      ``pmc_roofline`` / ``deep_kernel_analysis`` (the kernel-feeders).
+    * ``no_framework``      — strip ``framework_pr`` (the legacy fa
+      bandit arm that imports external PRs via ``fa candidates``).
+    * ``no_framework_role`` — strip ``framework_optimize`` /
+      ``framework_integrate`` (the 5th Framework role's REQUEST kinds).
+      Set when the CLI was invoked without ``--framework-agent`` /
+      ``--framework-mock`` / ``--framework-codex-bare``, i.e. when no
+      framework backend will be spun up.
     """
     base = NO_KERNEL_ENABLED_ACTIONS if no_kernel else FULL_ENABLED_ACTIONS
     if no_framework:
-        return tuple(a for a in base if a != "framework_pr")
+        base = tuple(a for a in base if a != "framework_pr")
+    if no_framework_role:
+        base = tuple(
+            a for a in base
+            if a not in ("framework_optimize", "framework_integrate")
+        )
     return base
 
 

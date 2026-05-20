@@ -61,6 +61,8 @@ from .orchestrator.backends import (
     ClaudeBackend,
     CodexBackend,
     CriticAgentBackend,
+    FrameworkAgentBackend,
+    FrameworkMockBackend,
     MockCriticBackend,
     MockRobustnessBackend,
     RobustnessAgentBackend,
@@ -121,6 +123,7 @@ def _build_orchestration_prompt(
     *,
     no_kernel: bool,
     no_framework: bool = False,
+    no_framework_role: bool = True,
     framework: str,
     objective: Objective,
     max_minutes: int,
@@ -140,7 +143,9 @@ def _build_orchestration_prompt(
     """
     registry = action_registry or ActionRegistry().load()
     enabled = default_enabled_actions(
-        no_kernel=no_kernel, no_framework=no_framework,
+        no_kernel=no_kernel,
+        no_framework=no_framework,
+        no_framework_role=no_framework_role,
     )
     kind, value = _objective_summary_for_prompt(objective)
     return build_orchestration_prompt(
@@ -407,6 +412,8 @@ def _build_backends(
     robustness_agent_root: Path | None = None,
     robustness_options: dict[str, Any] | None = None,
     no_kernel: bool = False,
+    framework_choice: str = "off",
+    framework_agent_root: Path | None = None,
 ) -> dict[str, Any]:
     """Construct all per-role backends.
 
@@ -478,6 +485,31 @@ def _build_backends(
             backends["kernel"] = CodexBackend(model=codex_model)
         else:
             backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=20)
+
+    # 5th Framework role backend (P1 PR-B). ``framework_choice`` is one
+    # of {"off", "agent", "mock", "codex_bare"}; "off" is the dead-path
+    # default which leaves the role out of role_registry (Coordinator
+    # filters when backend is absent — see PR-A1).
+    if framework_choice == "mock":
+        backends["framework"] = FrameworkMockBackend(session_dir=session_dir)
+    elif framework_choice == "agent":
+        if framework_agent_root is None:
+            raise ValueError(
+                "_build_backends: framework_choice='agent' requires "
+                "framework_agent_root (env FRAMEWORK_AGENT_ROOT or "
+                "auto-resolved)"
+            )
+        backends["framework"] = FrameworkAgentBackend(
+            framework_agent_root=framework_agent_root,
+            session_dir=session_dir,
+        )
+    elif framework_choice == "codex_bare":
+        backends["framework"] = CodexBackend(model=codex_model)
+    elif framework_choice != "off":
+        raise ValueError(
+            f"_build_backends: framework_choice={framework_choice!r} not "
+            "in {'off','agent','mock','codex_bare'}"
+        )
     return backends
 
 
@@ -487,6 +519,24 @@ def _seed_shared_state(
     *,
     session_id: str,
 ) -> SharedState:
+    framework_env = os.environ.get("FRAMEWORK", "sglang")
+    framework_role_enabled = bool(
+        getattr(args, "framework_agent", False)
+        or getattr(args, "framework_mock", False)
+        or getattr(args, "framework_codex_bare", False)
+    )
+    # AST-scan subset: explicit CLI value wins; empty default derives
+    # from --framework so a typical sglang session does not waste 30s-2min
+    # scanning vllm sources.
+    ast_raw = (getattr(args, "framework_ast_frameworks", "") or "").strip()
+    if ast_raw:
+        ast_frameworks: tuple[str, ...] = tuple(
+            f.strip().lower() for f in ast_raw.split(",") if f.strip()
+        )
+    else:
+        fw_lower = (framework_env or "").strip().lower()
+        ast_frameworks = (fw_lower,) if fw_lower else ()
+
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -494,10 +544,13 @@ def _seed_shared_state(
         model_name=Path(args.model).name,
         model_path=str(args.model),
         model_class=args.model_class or "",
-        framework=os.environ.get("FRAMEWORK", "sglang"),
+        framework=framework_env,
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         kernel_enabled=not getattr(args, "no_kernel", False),
         framework_enabled=not getattr(args, "no_framework", False),
+        framework_role_enabled=framework_role_enabled,
+        framework_ast_scan_enabled=not getattr(args, "no_framework_ast", False),
+        framework_ast_frameworks=ast_frameworks,
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
         cumulative_gain=0.0,
@@ -1856,6 +1909,52 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     no_kernel = getattr(args, "no_kernel", False)
     no_framework = getattr(args, "no_framework", False)
 
+    # 5th Framework role backend selection. The three flags are
+    # argparse-mutually-exclusive; cross-check with --no-framework is
+    # enforced here (argparse mutex groups do not cross other groups).
+    framework_agent_on = bool(getattr(args, "framework_agent", False))
+    framework_mock = bool(getattr(args, "framework_mock", False))
+    framework_codex_bare = bool(getattr(args, "framework_codex_bare", False))
+    if no_framework and (
+        framework_agent_on or framework_mock or framework_codex_bare
+    ):
+        print(
+            "ERROR: --no-framework conflicts with --framework-agent / "
+            "--framework-mock / --framework-codex-bare; pick one.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if framework_agent_on:
+        framework_choice = "agent"
+    elif framework_mock:
+        framework_choice = "mock"
+    elif framework_codex_bare:
+        framework_choice = "codex_bare"
+    else:
+        framework_choice = "off"  # PR-A1 dead-path default
+    no_framework_role = framework_choice == "off"
+    framework_agent_root: Path | None = None
+    if framework_choice == "agent":
+        env_root = os.environ.get("FRAMEWORK_AGENT_ROOT", "").strip()
+        if env_root:
+            framework_agent_root = Path(env_root)
+        else:
+            # Fallback: sibling directory of inference_optimizer install.
+            try:
+                framework_agent_root = Path(
+                    __file__
+                ).resolve().parent.parent / "framework-agent"
+            except Exception:  # noqa: BLE001
+                framework_agent_root = None
+        if framework_agent_root is None or not framework_agent_root.exists():
+            print(
+                f"ERROR: --framework-agent selected but framework-agent "
+                f"root not found (FRAMEWORK_AGENT_ROOT={env_root or '(unset)'!r}; "
+                f"resolved {framework_agent_root}).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
     # Resolve critic backend choice + critic-agent runtime root before
     # _build_backends (which constructs CriticAgentBackend immediately and
     # would otherwise blow up on missing runtime). Fail-fast policy: if the
@@ -1934,6 +2033,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         robustness_agent_root=robustness_agent_root,
         robustness_options=robustness_options,
         no_kernel=no_kernel,
+        framework_choice=framework_choice,
+        framework_agent_root=framework_agent_root,
     )
     # Bug A fix: expose the active session_dir to in-process executors
     # (e.g. ReportExecutor) that don't get session_dir threaded through
@@ -1972,6 +2073,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         "orchestration": args.orch_prompt or _build_orchestration_prompt(
             no_kernel=no_kernel,
             no_framework=no_framework,
+            no_framework_role=no_framework_role,
             framework=framework_for_prompt,
             objective=objective,
             max_minutes=max_minutes_for_prompt,
@@ -1980,6 +2082,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     }
     if not no_kernel:
         prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
+    if framework_choice != "off":
+        # Load the framework.md system prompt from disk; the file is
+        # always present (PR-A1 ships a 30-line placeholder; PR-A2 the
+        # full v0.7 prompt). Coordinator will hand this to whichever
+        # backend was selected by --framework-{agent,mock,codex-bare}.
+        from .orchestrator.agent_role import default_role_registry
+        prompts["framework"] = default_role_registry()["framework"].load_system_prompt()
     coordinator.system_prompt_overrides = prompts
     _register_executors(
         coordinator,
@@ -2185,6 +2294,49 @@ def _build_parser() -> argparse.ArgumentParser:
                            "search run (baseline + params + backends + "
                            "sweep + validate_stack + report). "
                            "Default: framework agent enabled.")
+
+    # 5th Framework role backend selection (P1 PR-B).
+    # The three --framework-{agent,mock,codex-bare} flags are mutually
+    # exclusive; default (no flag) leaves the role disabled (dead-path,
+    # matching --no-framework-role semantics). See
+    # hyperloom-framework-agent-implementation-plan.md §1.3 / §3.3.
+    fw_group = opt.add_mutually_exclusive_group()
+    fw_group.add_argument("--framework-agent", action="store_true",
+                           default=False, dest="framework_agent",
+                           help="Enable the 5th Framework role with Claude "
+                                "tool-using backend (AST scan + patch "
+                                "propose on vllm/sglang source). Mutually "
+                                "exclusive with --framework-mock / "
+                                "--framework-codex-bare.")
+    fw_group.add_argument("--framework-mock", action="store_true",
+                           default=False, dest="framework_mock",
+                           help="Enable the 5th Framework role with a "
+                                "canned-response mock backend. Useful for "
+                                "CI / 5-role protocol smoke without API "
+                                "keys or vllm/sglang source mounts.")
+    fw_group.add_argument("--framework-codex-bare", action="store_true",
+                           default=False, dest="framework_codex_bare",
+                           help="Enable the 5th Framework role with Codex "
+                                "no-tools backend. Useful when Claude is "
+                                "rate-limited.")
+
+    # AST scan plumbing -- P1 only writes SharedState; P2 PR-E short-
+    # circuits the scanner; P2 PR-F threads the value into ExploreRequest.
+    opt.add_argument("--no-framework-ast", action="store_true",
+                      default=False, dest="no_framework_ast",
+                      help="Disable AST scanning inside framework_optimize. "
+                           "The handler still runs LLM patch propose using "
+                           "KB priors only; OptimizeSuccess.discovered_flags "
+                           "will be empty. Use when VLLM_SOURCE_ROOT / "
+                           "SGLANG_SOURCE_ROOT are not mounted or for "
+                           "AST-cost-budget tightening.")
+    opt.add_argument("--framework-ast-frameworks", default="",
+                      dest="framework_ast_frameworks",
+                      help="Comma-separated frameworks to AST-scan, e.g. "
+                           "'vllm,sglang' for cross-framework discovery. "
+                           "Empty (default) means scan ONLY the session's "
+                           "--framework value. Ignored when "
+                           "--no-framework-ast is set.")
     opt.add_argument("--kernel-codex", action="store_true", default=True,
                       help="Use Codex backend for Kernel agent (default — faster). "
                            "Pass --kernel-claude to switch.")

@@ -43,6 +43,10 @@ from .agent_role import AgentRole, default_role_registry
 from .backends.base import Backend, BackendError, BackendTurnResult
 from .cursor_store import CursorStore
 from .intent_parser import Intent, IntentType, NoIntentEmitted
+from .framework_request_handlers import (
+    FRAMEWORK_REQUEST_HANDLERS,
+    get_framework_handler,
+)
 from .kernel_request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from .message_bus import Message, MessageBus
 from .objective import Objective, TimeOnlyObjective
@@ -220,12 +224,16 @@ class Coordinator:
         self._compare_against_gpu: str = (compare_against_gpu or "").strip()
         self._model_class_override: str = (model_class or "").strip()
 
-        # Framework role is dead-path in PR-A1 until PR-B wires handlers +
-        # mock backend. Symmetric to how --no-kernel callers drop "kernel"
-        # from role_registry: when the caller does not supply a framework
-        # backend, we drop "framework" from role_registry so legacy 4-role
-        # tests keep working without mocking a 5th backend. PR-B will pass
-        # framework_mock / framework_agent backend explicitly to opt in.
+        # 5th Framework role gating. Two equivalent conditions drop it
+        # from role_registry:
+        #   1. The caller did not supply a framework backend -- legacy
+        #      4-role tests / --no-framework runs hit this path.
+        #   2. SharedState.framework_role_enabled is False -- PR-B's CLI
+        #      flips this to True when --framework-{agent,mock,codex-bare}
+        #      is set; resume reads the persisted value so a session
+        #      started without the role keeps the role off on restart.
+        # Reading shared_state via getattr because shared_state is loaded
+        # below (line ~270); we re-check after load and prune again.
         if "framework" in self.role_registry and "framework" not in backends:
             self.role_registry = {
                 n: r for n, r in self.role_registry.items() if n != "framework"
@@ -2079,6 +2087,63 @@ class Coordinator:
                 in_reply_to=request_msg.msg_id, priority=1,
             ))
             return
+
+        # Programmatic shortcut for framework REQUEST kinds
+        # (framework_optimize / framework_integrate). Same rationale as
+        # the kernel branch below -- skip an extra LLM turn when a
+        # deterministic handler exists. P1 PR-B handlers return canned
+        # envelopes; P2 PR-F invokes FrameworkAgentBackend; P3 PR-H
+        # runs apply + bench + accuracy gate.
+        if target_agent == "framework":
+            fw_handler = get_framework_handler(kind)
+            if fw_handler is not None:
+                params = intent.payload.get("params") or {}
+                fw_payload = {
+                    **intent.payload,
+                    **params,
+                    "target_framework": (
+                        self.shared_state.framework or "sglang"
+                    ),
+                    "ast_scan_enabled": getattr(
+                        self.shared_state,
+                        "framework_ast_scan_enabled",
+                        True,
+                    ),
+                    "ast_frameworks": tuple(
+                        getattr(
+                            self.shared_state,
+                            "framework_ast_frameworks",
+                            (),
+                        )
+                    ),
+                }
+                try:
+                    fw_result = await fw_handler(
+                        fw_payload,
+                        session_dir=self.session_dir,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.exception(
+                        "framework_request_handler[%s] crashed for source=%s",
+                        kind, source,
+                    )
+                    fw_result = {
+                        "status": "failed",
+                        "error_class": "handler_exception",
+                        "error": repr(exc),
+                    }
+                await self.bus.append_and_seq(Message.new(
+                    "framework", source, "response",
+                    {
+                        "in_reply_to": request_msg.msg_id,
+                        "kind": f"{kind}_done",
+                        "status": fw_result.get("status", "ok"),
+                        "result": fw_result,
+                        "source": "programmatic_handler",
+                    },
+                    in_reply_to=request_msg.msg_id, priority=1,
+                ))
+                return
 
         # Programmatic shortcut: if the kernel agent has a registered
         # handler for this `kind`, run it inline and emit RESPONSE on its

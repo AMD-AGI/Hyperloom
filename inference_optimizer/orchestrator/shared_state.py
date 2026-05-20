@@ -125,10 +125,21 @@ class SharedState:
     # Distinct from ``framework_enabled`` above: this flag gates the
     # 5th agent role that owns ``framework_optimize`` /
     # ``framework_integrate`` actions on vllm/sglang source. Default False
-    # during PR-A1 dead-path; PR-B will flip via CLI to enable mock e2e.
-    # Older state.json files lacking this field decode as False via the
-    # dataclass default — backward-compatible resume.
+    # in PR-A1 dead-path; PR-B flips it on when the CLI selects a
+    # framework backend (--framework-agent / --framework-mock /
+    # --framework-codex-bare). Older state.json files lacking this field
+    # decode as False via the dataclass default — backward-compatible.
     framework_role_enabled: bool = False
+    # AST-scan controls for framework_optimize (design §1.4 / §9.3).
+    # P2 PR-E short-circuits the scanner when this is False; P2 PR-F
+    # threads the value through ExploreRequest.
+    framework_ast_scan_enabled: bool = True
+    # Frameworks to AST-scan. Empty tuple at the dataclass level means
+    # "derive from --framework at CLI parse time" — Coordinator never
+    # sees an empty tuple in production. Resume reads whatever was
+    # persisted at session start, so a session started with
+    # --framework sglang stays sglang on resume even if the env changes.
+    framework_ast_frameworks: tuple[str, ...] = ()
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
