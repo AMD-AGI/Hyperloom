@@ -222,6 +222,7 @@ def _make_backend(
     runtime_calls: list[RuntimeCall] | None = None,
     kb_mode: str = "inmemory",
     kb_env: dict[str, str] | None = None,
+    known_actions: tuple[str, ...] = (),
 ) -> tuple[CriticAgentBackend, FakeOpenAIClient]:
     fake_client = FakeOpenAIClient(codex_replies)
     fake_caller = _make_fake_runtime(
@@ -237,6 +238,7 @@ def _make_backend(
         kb_mode=kb_mode,
         kb_env=kb_env,
         runtime_caller_factory=lambda: fake_caller,
+        known_actions=known_actions,
     )
     return backend, fake_client
 
@@ -265,6 +267,62 @@ def test_extract_review_json_bare():
 def test_extract_review_json_returns_none_on_empty():
     assert _extract_review_json("") is None
     assert _extract_review_json("just prose") is None
+
+
+@pytest.mark.asyncio
+async def test_run_writes_known_actions_into_request_options(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+) -> None:
+    runtime_calls: list[RuntimeCall] = []
+    judge_bundle = {
+        "kind": "coordinator_inbox",
+        "session_id": fake_session_dir.name,
+        "proposals": [],
+        "review_constraints": {},
+    }
+    backend, _ = _make_backend(
+        fake_critic_root,
+        fake_session_dir,
+        codex_replies=[],
+        judge_bundle=judge_bundle,
+        runtime_calls=runtime_calls,
+        known_actions=("baseline", "validate_stack"),
+    )
+    await backend.run(prompt="=== inbox ===\n", system_prompt="You are critic.")
+
+    assert runtime_calls
+    request = json.loads(
+        runtime_calls[0].request_path.read_text(encoding="utf-8"),
+    )
+    assert request["options"]["known_actions"] == ["baseline", "validate_stack"]
+
+
+@pytest.mark.asyncio
+async def test_run_omits_options_when_known_actions_empty(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+) -> None:
+    runtime_calls: list[RuntimeCall] = []
+    judge_bundle = {
+        "kind": "coordinator_inbox",
+        "session_id": fake_session_dir.name,
+        "proposals": [],
+        "review_constraints": {},
+    }
+    backend, _ = _make_backend(
+        fake_critic_root,
+        fake_session_dir,
+        codex_replies=[],
+        judge_bundle=judge_bundle,
+        runtime_calls=runtime_calls,
+    )
+    await backend.run(prompt="=== inbox ===\n", system_prompt="You are critic.")
+
+    request = json.loads(
+        runtime_calls[0].request_path.read_text(encoding="utf-8"),
+    )
+    assert "options" not in request
 
 
 def test_extract_review_json_returns_none_when_key_absent():

@@ -23,6 +23,7 @@ Out of scope for P1-5:
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import logging
 import os
@@ -114,6 +115,13 @@ class ClaudeBackend:
     # Larger = more retries on validation failure but more tokens.
     max_turns_default: int = 4
     enable_mcp_emit_intent: bool = True
+    # Wall-clock cap for one ``run()`` call. The claude-agent-sdk shells
+    # out to the ``claude`` CLI which talks to the AMD auth-proxy; if the
+    # proxy is stopped/unreachable the subprocess can hang on TCP for
+    # minutes, stalling the orchestrator reactor and preventing the
+    # robustness pass from publishing ``auth_proxy_unhealthy``. 120s is
+    # well above a normal turn (~10–30s) but bounds the worst case.
+    call_timeout_s: float = 120.0
 
     # Test seams — set these to bypass SDK import / network calls.
     sdk_query_factory: Callable[..., Any] | None = None
@@ -180,9 +188,22 @@ class ClaudeBackend:
             max_turns=max_turns_use,
             system_prompt=system_prompt,
         )
-        intents, raw_text, tool_block_count = await self._invoke_and_collect(
-            full_prompt, options
-        )
+        try:
+            intents, raw_text, tool_block_count = await asyncio.wait_for(
+                self._invoke_and_collect(full_prompt, options),
+                timeout=self.call_timeout_s,
+            )
+        except asyncio.TimeoutError as exc:
+            self.calls.append({
+                "warn": (
+                    f"claude SDK call timed out after {self.call_timeout_s:.0f}s; "
+                    "treating as no-intent so the reactor pass can proceed"
+                ),
+            })
+            raise BackendError(
+                f"Claude backend timed out after {self.call_timeout_s:.0f}s "
+                "(likely upstream proxy stall)"
+            ) from exc
         self.calls.append({
             "prompt_chars": len(full_prompt),
             "tool_blocks": tool_block_count,
