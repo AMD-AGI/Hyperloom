@@ -378,6 +378,37 @@ gate 退化为 N3 软引导（用于 debug / robustness 恢复路径 / v2.1 可�
 不在 closing_phase；closing 后所有 action 走现有 `_closing_phase_denial`
 拦截。
 
+### 6.5.1 N13 修订：kernel_opt 强制放最后（GPU 实测后追加）
+
+DeepSeek-R1 实测发现：v2 当前只用 `MODEL_CLASS_ACTION_PRIORS` 的 prior
+排序（moe_mla 下 kernel_opt=6.0 排在 params/backends 之后）来引导
+LLM 先做 cheap actions，但 prior 是软引导——R1 session 10h 12 task
+LLM 仍可能（在 backend/param 没找到 gain 时）尝试 kernel_opt，但这
+时 kernel 分布是"baseline 后的初始分布"而不是"cheap 探索后的"。
+两个分布可能完全不同（例：fmoe_fp8_blockscale_g1u1 baseline 时是
+top，但启用 `--enable-torch-compile` 后可能换成别的 kernel）。
+
+N13 在 PolicyGate 层硬强制：
+`_sequence_denial_for_request("kernel", "run_optimization")` 增加
+3 条前置：
+
+1. **`backends_attempts ≥ 1`** — 至少跑过一轮 backends grid（让
+   backend 层飞起的"sampling pytorch/triton"、"moe a2a deepep"等
+   能影响 kernel 调度）。
+2. **`params_attempts ≥ 1`** — 至少跑过一轮 params grid（让
+   `--enable-torch-compile`、`--cuda-graph-max-bs` 等 launch 路径
+   改完）。
+3. **`snapshot_id ≥ 2`** — roofline 至少跑了 2 次。第 1 次是
+   baseline 后的初始 snapshot；第 2 次必须是 cheap 探索后主动
+   re-roofline 拿到的新 snapshot（看 kernel 分布是否变化）。
+
+逃生阀：`INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1` 退回 N3
+行为（仅 roofline 1 次 snapshot 即可 kernel_opt），用于：
+
+- v0 baseline 复现（验证 v2 vs v0）
+- 已知不会从 cheap actions 获得 gain 的特殊 workload
+- debug / 单测路径
+
 ---
 
 ## 7. 模块 / Commit 分解（v2.0 实施跟踪表）
@@ -416,8 +447,12 @@ v1 sub-agent 实施"。
 | **N5** analysis.md 全文注入 + orchestration prompt 指导段 | (a) `shared_state.py` `_format_analysis_md_full()` 渲染整段；(b) `to_prompt_summary` 加入；(c) `orchestration.md` 写 "How to consume analysis.md + discovered_flags + tested" 指导段（取代 C5 的 _format_roofline_decision）；(d) 单测 | 2 改 + 1 测试 | ~250 | 📝 待执行 |
 | **N6** cache hit rate 度量（务实简化）| 经 Anthropic prompt-caching 文档复核：automatic caching 已基于 system_prompt + tools + messages prefix 哈希工作，无需应用层"三段切分"。N6 范围缩到：(a) `claude.py` `_invoke_and_collect` 返回 `usage` dict，`run()` 把 `cache_creation_input_tokens` / `cache_read_input_tokens` / `input_tokens` / `output_tokens` 写入 `backend.calls` + `BackendTurnResult.metadata`；(b) 单测覆盖 metric 提取（含 usage 缺失 / 非 dict / SDK 没传 usage 各种降级路径）；(c) 三段切分推到 N6b/下个 PR（实测 cache_hit_rate 若 < 50% 才做） | 1 改 + 1 测试 | ~120 | 📝 待执行 |
 | **N7** verify + audit 脚本更新 | (a) `verify_roofline_v2.py` 加 cache hit rate 列 + roofline action 调用次数（替代 sub-agent advice 统计）；(b) `audit_roofline_decisions.py` 改为 "decision audit"：统计 LLM PRUNE_BRANCH 是否引用了 analysis.md 段、propose 的 flag 是否在 discovered_flags 中、cache hit rate；(c) 测试 fixture 更新 | 2 改 + 1 测试 | ~150 | 📝 待执行 |
-| **N9** profile 从 LLM propose 路径下架（GPU 实测发现的修正） | 实测 N3 留下的"profile preferred=roofline / legacy=profile"软引导失效——LLM 第一步 propose 了 profile，导致 roofline 内部又跑一次 profile（浪费 ~10 min wall-clock / session）。N9：(a) `_sequence_denial_for_action` 硬拒绝 LLM 直接 propose profile，建议改用 roofline；(b) 提供 `INFERENCE_OPTIMIZER_ALLOW_DIRECT_PROFILE=1` 逃生阀（debugging / robustness 路径）；(c) orchestration.md 加 hard rule "禁止直接 propose profile，必须 propose roofline"；(d) 测试 fixture 更新 (`baseline_self_loop` / `p1_4_resume` / 等 5 个 pre-existing 测试) | 1 改 + 1 测试 | ~150 | 📝 待执行 |
-| **N8** Qwen3-32B 真实 GPU 跑 + RATIONALE | C7 等价；填充本文档 §13 | 0 代码 | 0 + 文档追加 | 📝 进行中 |
+| **N9** profile 从 LLM propose 路径下架（GPU 实测发现的修正） | 实测 N3 留下的"profile preferred=roofline / legacy=profile"软引导失效——LLM 第一步 propose 了 profile，导致 roofline 内部又跑一次 profile（浪费 ~10 min wall-clock / session）。N9：(a) `_sequence_denial_for_action` 硬拒绝 LLM 直接 propose profile，建议改用 roofline；(b) 提供 `INFERENCE_OPTIMIZER_ALLOW_DIRECT_PROFILE=1` 逃生阀（debugging / robustness 路径）；(c) orchestration.md 加 hard rule "禁止直接 propose profile，必须 propose roofline"；(d) 测试 fixture 更新 (`baseline_self_loop` / `p1_4_resume` / 等 5 个 pre-existing 测试) | 1 改 + 1 测试 | ~150 | ✅ 已执行 (`13d45b0`) |
+| **N10** RooflineExecutor SharedState 持久化（GPU 实测后追加） | 实测 N2b 的 inline-promote 不被 `_promote_to_shared_state` 持久化—— `changed` 始终为 False 导致 state.json 不更新。N10：(a) coordinator 加 `task_kind == "roofline"` 分支只翻 changed=True 触发 tail-save；(b) _AUDIT_ACTIONS 加 "roofline"；(c) shared_state _KEY_METRIC_MAP 加 ("roofline", "snapshot_id")；(d) dataclass 加 `last_roofline` / `roofline_attempts` 字段 | 2 改 + 1 测试 | ~360 | ✅ 已执行 (`92c4389`) |
+| **N11** strip base64 PNG 嵌入（GPU 实测发现的 4 号根因） | DeepSeek-R1 实测发现：analysis.md 200KB 里 184.5KB 是 base64 PNG (line 17 `![Performance Improvement](data:image/png;base64,...)`)，**LLM 看到 92% 噪声 / 8% 文本**，关键的 🔴 P1 建议（"propose kernel_opt for fmoe_fp8_blockscale_g1u1"、"comm_optimization for 61 allreduce+rmsnorm"）被淹没。N11：`shared_state.py` 在 `_format_analysis_md_full` 注入前用 regex 剥掉 `data:image/...;base64,...` 块（保留 alt-text + 注释 `[stripped: image ...]`）。预计 200KB → ~16KB（92% reduction） | 1 改 + 1 测试 | ~120 | 📝 待执行 |
+| **N12** orchestration.md 强化 analysis.md 决策映射（GPU 实测后追加） | 实测：LLM 在 N5/N9 都生效下 10h 12 task 仍然 0 个 kernel_opt / 0 个 comm_optimization request — 单 backend/param 盲扫无效。N12：(a) hard rule "analysis.md 里 🔴 P1 标注的 kernel 必须在合适时机 propose kernel_opt"；(b) action ordering hard rule "kernel_opt 必须在至少一轮 backend + param 试过 + re-roofline 之后 propose"；(c) few-shot 例子 | 1 改 + 1 测试 | ~80 | 📝 待执行 |
+| **N13** kernel_opt 强制前置 sequence_denial（GPU 实测后追加） | N12 是软引导（在 prompt），N13 是硬强制（在 PolicyGate）：`_sequence_denial_for_request("kernel", "run_optimization")` 增加前置 `backends_attempts ≥ 1 AND params_attempts ≥ 1 AND snapshot_id ≥ 2`。语义：kernel_opt 看到的 hot kernel 分布必须是"baseline 后做了 cheap 探索 + 重新 roofline 拿到 snapshot #2"的，而非 baseline 的初始分布——因为 backend/param 改完 kernel 分布会显著漂移（最早是 fmoe_fp8_blockscale_g1u1 是 top，cuda_graph 之后可能根本不是了）。`INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1` 逃生阀 | 1 改 + 1 测试 | ~150 | 📝 待执行 |
+| **N8** Qwen3-32B 真实 GPU 跑 + RATIONALE | C7 等价；填充本文档 §13 | 0 代码 | 0 + 文档追加 | 📝 进行中（已 2 次试跑：N9-verify Qwen3 验 N9，N11-pre R1 暴露 N11/N12/N13 需求；下一次 Qwen3-32B 3h 跑验 N11/N12/N13） |
 
 **N1-N7 累计估算**：~1250 行新代码（含 ~600 行测试 + ~50 行 yaml/md +
 ~150 行脚本），核心 Python ~450 行；外加 N1 rename 的 ~50 行机械改动。
