@@ -130,6 +130,12 @@ class SharedState:
     # --framework-codex-bare). Older state.json files lacking this field
     # decode as False via the dataclass default — backward-compatible.
     framework_role_enabled: bool = False
+    # Set of patch_id values whose REVERT was preceded by a server
+    # crash (PR-I robustness signal). Persisted so resume reads it +
+    # so subsequent framework_optimize / patch_proposer runs avoid
+    # patches with similar fingerprints. List instead of set so JSON
+    # round-trips cleanly.
+    framework_pitfall_set: list[str] = field(default_factory=list)
     # AST-scan controls for framework_optimize (design §1.4 / §9.3).
     # P2 PR-E short-circuits the scanner when this is False; P2 PR-F
     # threads the value through ExploreRequest.

@@ -348,6 +348,25 @@ async def framework_integrate_handler(
     ))
     if verdict.verdict == "REVERT":
         _ = await asyncio.to_thread(rollback_backup, ref)
+    elif verdict.verdict == "KEEP":
+        # PR-I: append the KEEP outcome to framework_optimization KB
+        # partition so subsequent runs see this lesson as a prior. Best
+        # effort -- KB write failure must not flip a KEEP into a
+        # failure envelope.
+        try:
+            from framework_agent.agent.kb_write import append_keep_lesson
+            await asyncio.to_thread(
+                append_keep_lesson,
+                framework=str(payload.get("target_framework") or "").strip(),
+                patch_id=patch_id,
+                summary=str(payload.get("summary") or
+                            f"patch {patch_id} gain={verdict.gain_pct:.2f}%"),
+                rationale=str(payload.get("rationale") or verdict.reason),
+                gain_pct=verdict.gain_pct,
+                session_id=Path(session_dir).name,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("append_keep_lesson failed -- KEEP verdict still stands")
 
     elapsed_ms = int((_time.monotonic() - started) * 1000)
     return {
