@@ -41,7 +41,9 @@ from ._grid_runner import (
     GridVariant,
     VariantResult,
     _resolve_session_dir,
+    apply_multi_node_invalid_variants,
     apply_user_skip_list,
+    reorder_grid_for_multi_node,
     pick_winners,
     resolve_skip_spec,
     run_grid,
@@ -681,6 +683,20 @@ class BackendsExecutor:
         for d in dropped_variants:
             log.info("backends: user-skipped variant %s (%s)",
                      d["name"], d["reason"])
+        grid, mn_dropped = apply_multi_node_invalid_variants(grid)
+        for d in mn_dropped:
+            log.info("backends: multi-node-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        dropped_variants = list(dropped_variants) + list(mn_dropped)
+        # M2: multi-node grid reorder (single-node noop).
+        # Surfaces high-leverage aiter variants (attn_aiter / decode_aiter
+        # / moe_aiter, historically +10-30%) ahead of the long-tail
+        # comm/fusion variants so multi-node runs plateau within budget.
+        # See _grid_runner._MN_BACKENDS_PRIORITY for the tag order.
+        from ._grid_runner import _MN_BACKENDS_PRIORITY
+        grid = reorder_grid_for_multi_node(
+            grid, priority_tags=_MN_BACKENDS_PRIORITY,
+        )
 
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))

@@ -189,6 +189,142 @@ def _parse_skip_spec(spec: str) -> list[str]:
     return out
 
 
+# Compiled here so callers don't re-compile per grid iteration.
+# Matches both ``--cuda-graph-max-bs 64`` (space-separated) and
+# ``--cuda_graph_max_bs=64`` (underscore + equals) so glob-style or
+# pep8-style flag strings both parse. Captures the integer value.
+_RE_CUDA_GRAPH_MAX_BS = re.compile(
+    r"--cuda[-_]graph[-_]max[-_]bs[= ]+(\d+)"
+)
+
+
+def apply_multi_node_invalid_variants(
+    grid: list["GridVariant"],
+) -> tuple[list["GridVariant"], list[dict]]:
+    """Drop variants known to underperform in multi-node mode.
+
+    Currently enforces one rule, which has been confirmed empirically
+    on the GLM-5 TP16 multi-node setup:
+
+      - ``--cuda-graph-max-bs N`` where ``N < $CONC`` is auto-skipped.
+        Justification: the cuda graph cache can hold only ``N`` distinct
+        batch sizes; when the bench runs with concurrency > N, every
+        cross-node decode tick misses the graph cache and falls back to
+        eager mode, costing ~50% throughput. Three runs at
+        ``max_bs`` ∈ {8, 16, 32} with CONC=64 produced ~245 tok/s vs the
+        baseline 549 tok/s — i.e. 35-40 min per variant of certain
+        regression. Single-node has the same theoretical issue but the
+        per-variant cost is small enough (~10 min) that empirical
+        confirmation is still useful, so the filter is multi-node-only.
+
+    Returns ``(kept, dropped)`` matching ``apply_user_skip_list``'s
+    shape. Single-node short-circuits to ``(list(grid), [])`` so the
+    call site stays branch-free; the per-variant ``log.info`` in callers
+    only fires for actual multi-node drops.
+    """
+    from ._multi_node_env import is_multi_node
+    if not is_multi_node():
+        return list(grid), []
+    try:
+        conc = int(os.environ.get("CONC", "64") or 64)
+    except ValueError:
+        conc = 64
+    if conc <= 0:
+        return list(grid), []
+    kept: list[GridVariant] = []
+    dropped: list[dict] = []
+    for v in grid:
+        m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_sglang_args or "")
+        if m and int(m.group(1)) < conc:
+            dropped.append({
+                "name": v.name,
+                "source": "multi_node_invalid",
+                "reason": (
+                    f"cuda_graph_max_bs={m.group(1)} < CONC={conc} "
+                    "(multi-node graph-cache miss → known regression)"
+                ),
+            })
+        else:
+            kept.append(v)
+    return kept, dropped
+
+
+# Multi-node likely-winner priority for grid reordering. Tags are matched
+# against ``GridVariant.name`` and ``GridVariant.note`` as case-insensitive
+# substrings; earlier tags win. Rationale per tag:
+#
+# Params (`_MN_PARAMS_PRIORITY`):
+#   * cuda_graph_max_bs — matches CONC is the empirical single best
+#     server-param lever in multi-node TP runs (24ldn implied +0.93%
+#     vs baseline; A1 already pre-filters bs<CONC, leaving only the
+#     viable cap as the leading candidate).
+#   * mem_fraction — bumping mem-fraction-static unlocks KV-cache
+#     headroom for long-context workloads; cheap to test, sometimes
+#     big.
+#   * max_num_seqs — marathon KB validated +84% on Kimi-K2.5; tier-1
+#     KV-cache class param.
+#   * decode_steps — continuous decode steps; modest leverage.
+#   * schedule / nccl — historically marginal or negative.
+#
+# Backends (`_MN_BACKENDS_PRIORITY`):
+#   * aiter — covers attn_aiter / decode_aiter / moe_aiter, the largest
+#     historical multi-node wins (+10-30%).
+#   * tier3_fusion — enable_fused_moe / enable_mixed_chunk.
+#   * tier2_schedule — lpm / dfs / overlap policies.
+#   * tier5_comm — custom_ar (small leverage, expensive to test).
+#
+# Names not matching any tag sort to the end in original order.
+_MN_PARAMS_PRIORITY: tuple[str, ...] = (
+    "cuda_graph_max_bs",
+    "mem_fraction",
+    "max_num_seqs",
+    "decode_steps",
+    "schedule",
+    "nccl",
+)
+_MN_BACKENDS_PRIORITY: tuple[str, ...] = (
+    "aiter",
+    "tier3_fusion",
+    "tier2_schedule",
+    "tier5_comm",
+)
+
+
+def reorder_grid_for_multi_node(
+    grid: list["GridVariant"],
+    *,
+    priority_tags: tuple[str, ...],
+) -> list["GridVariant"]:
+    """Reorder grid so likely-winners run first in multi-node mode.
+
+    Single-node short-circuits to ``list(grid)`` (preserves the original
+    DEFAULT_*_GRID order bit-for-bit). Multi-node sorts each variant
+    into a bucket by the first ``priority_tag`` that appears as a
+    case-insensitive substring of ``variant.name`` or ``variant.note``.
+    Variants matching no tag land at the end. Sort is stable so ties
+    preserve original grid order.
+
+    Why this matters for multi-node only: each variant costs ~35-40 min
+    (cmd_restart_server + bench + cleanup), so a 5-6 hr grid easily
+    hits the run's ``--max-hours`` cap before the likely winners get a
+    chance. Reordering surfaces empirically-strong candidates in the
+    first 1-3 rounds, leaving the long-tail variants to optional later
+    rounds.
+    """
+    from ._multi_node_env import is_multi_node
+    if not is_multi_node():
+        return list(grid)
+
+    def _priority(v: GridVariant) -> int:
+        haystack = f"{v.name} {v.note or ''}".lower()
+        for i, tag in enumerate(priority_tags):
+            if tag.lower() in haystack:
+                return i
+        return len(priority_tags)
+
+    return sorted(grid, key=_priority)
+
+
 def apply_user_skip_list(
     grid: list["GridVariant"],
     *,
@@ -714,6 +850,11 @@ async def run_grid(
                 break
             continue
 
+        from ._multi_node_env import log_mn_banner
+        log_mn_banner(
+            "grid_runner", log,
+            variant=f"{i+1}/{len(grid)}:{variant.name}",
+        )
         log.info(
             "grid_runner: variant %d/%d name=%s args=%s",
             i + 1, len(grid), variant.name, variant.extra_sglang_args,
@@ -896,14 +1037,44 @@ async def run_grid(
     return results
 
 
+SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 1.0
+MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 2.0
+
+
 def pick_winners(
     results: list[VariantResult],
     baseline_tput: float,
     *,
-    keep_threshold_pct: float = 1.0,
+    keep_threshold_pct: float | None = None,
 ) -> list[VariantResult]:
-    """Filter the variants whose throughput beats ``baseline_tput`` by
-    ``keep_threshold_pct`` percent (marathon §params: > 1% = KEEP)."""
+    """Filter variants whose throughput beats ``baseline_tput`` by
+    ``keep_threshold_pct`` percent (marathon §params: > 1% = KEEP).
+
+    Resolution order for ``keep_threshold_pct``:
+
+    1. Explicit caller value (any float, including 0.5/1.0/3.0) wins.
+       This preserves legacy single-node behaviour bit-for-bit (callers
+       like the params executor still pass their own 0.5% default).
+    2. ``None`` (i.e. caller did not pass a value) falls back to:
+       * **multi-node**: ``MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT`` (2.0%).
+         Multi-node noise floor is empirically ~1-2% (jitter from
+         cross-node RDMA + Ray scheduling + GPU clock drift), so the
+         1.0% single-node default produced false positives that wasted
+         a ~40-min ``validate_stack`` round each.
+       * **single-node**: ``SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT``
+         (1.0%) — identical to the pre-multi-node-aware default.
+
+    Single-node call sites are bit-for-bit equivalent: ``is_multi_node()``
+    short-circuits to False without touching state, so the cutoff math
+    is unchanged.
+    """
+    if keep_threshold_pct is None:
+        from ._multi_node_env import is_multi_node
+        keep_threshold_pct = (
+            MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT
+            if is_multi_node()
+            else SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT
+        )
     cutoff = baseline_tput * (1.0 + keep_threshold_pct / 100.0)
     return [
         r for r in results
@@ -920,9 +1091,12 @@ def _safe(name: str) -> str:
 
 __all__ = [
     "GridVariant",
+    "MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
+    "SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "VariantResult",
     "apply_runtime_benchmark_overrides",
     "pick_winners",
+    "reorder_grid_for_multi_node",
     "run_grid",
     "sanitize_result_dir",
     "sanitize_script_name",
