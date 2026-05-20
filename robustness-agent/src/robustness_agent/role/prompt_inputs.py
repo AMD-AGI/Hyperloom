@@ -51,15 +51,31 @@ _INBOX_LINE_RE = re.compile(
 _SHARED_HEADER = "=== Shared session state ==="
 _INBOX_HEADER_PREFIX = "=== Inbox for "
 _KB_HEADER_PREFIX = "=== Knowledge base hints"
+_TIME_BUDGET_HEADER = "=== Time budget ==="
 
 # SharedState lines we care about for M1.
 _SCALAR_KEYS = {
     "session_id",
     "baseline_tput",
     "cumulative_gain",
+    "cumulative_gain_validated",
     "crash_count",
     "current_action",
+    "tick",
+    "stop_reason",
+    "optimization_stack",
 }
+
+# Pattern for the Coordinator's Time-budget body line, e.g.:
+#   ``elapsed=12.3min  remaining=347.7min  budget=360min  closing_phase=False``
+# ``budget=0min`` is the "no wall-clock budget" sentinel and surfaces as
+# :attr:`SharedStateSnapshot.budget_minutes = 0.0`.
+_TIME_BUDGET_LINE_RE = re.compile(
+    r"^\s*elapsed=(?P<elapsed>-?\d+(?:\.\d+)?)min\s+"
+    r"remaining=(?P<remaining>-?\d+(?:\.\d+)?)min\s+"
+    r"budget=(?P<budget>-?\d+(?:\.\d+)?)min\s+"
+    r"closing_phase=(?P<closing>True|False)\s*$"
+)
 
 
 @dataclass
@@ -79,8 +95,33 @@ class SharedStateSnapshot:
     model_class: str = ""
     baseline_tput: float = 0.0
     cumulative_gain: float = 0.0
+    cumulative_gain_validated: float = 0.0
     crash_count: int = 0
     current_action: str = ""
+    # Tick & stop_reason — used by progress-stagnation signals
+    # (``gain_plateau`` / ``no_levers_found``). ``tick`` is the
+    # Coordinator's monotonic per-pass counter (one increment per
+    # reactor tick across the 4 agents), not the per-agent backend
+    # turn counter. ``stop_reason`` is empty on a live run; we skip
+    # the progress signals when it is non-empty (the session is
+    # already winding down).
+    tick: int = 0
+    stop_reason: str = ""
+    # ``optimization_stack_size`` is the number of validated entries
+    # the Coordinator has accepted onto the stack. 0 + many ticks
+    # elapsed is the signature of ``no_levers_found`` (remain_issue.md
+    # #8). We parse the size from the rendered ``optimization_stack=``
+    # line by counting commas; an exact list is too noisy for a signal.
+    optimization_stack_size: int = 0
+    # Time-budget fields populated from the Coordinator's
+    # ``=== Time budget ===`` section. When the section is absent (legacy
+    # prompt or no wall-clock deadline configured) the three fields stay
+    # at ``0.0`` and ``closing_phase`` stays ``False`` so signals that
+    # consume them can short-circuit safely.
+    elapsed_minutes: float = 0.0
+    remaining_minutes: float = 0.0
+    budget_minutes: float = 0.0
+    closing_phase: bool = False
 
 
 @dataclass
@@ -122,6 +163,7 @@ def from_coordinator_prompt(
 
     sections = _split_sections(prompt)
     snapshot = _parse_shared_state(sections.get("shared_state", ""))
+    _parse_time_budget_into(snapshot, sections.get("time_budget", ""))
     inbox, warnings = _parse_inbox(sections.get("inbox", ""))
     if not sections:
         warnings.append("no recognised sections in prompt")
@@ -155,6 +197,10 @@ def _split_sections(prompt: str) -> dict[str, str]:
             continue
         if stripped.startswith(_INBOX_HEADER_PREFIX) and stripped.endswith("==="):
             current = "inbox"
+            sections.setdefault(current, [])
+            continue
+        if stripped == _TIME_BUDGET_HEADER:
+            current = "time_budget"
             sections.setdefault(current, [])
             continue
         if stripped.startswith(_KB_HEADER_PREFIX):
@@ -194,11 +240,78 @@ def _parse_shared_state(body: str) -> SharedStateSnapshot:
             snapshot.baseline_tput = _coerce_float(head)
         elif key == "cumulative_gain":
             snapshot.cumulative_gain = _coerce_float(head.rstrip("%"))
+        elif key == "cumulative_gain_validated":
+            # ``to_prompt_summary`` renders this as ``20.5% (stack_len_at_validation=...,...)``.
+            # ``_split_double_space`` already trimmed the trailing parens because the
+            # parens are joined by single spaces, not double; strip the
+            # ``%`` and any trailing parenthetical inline.
+            head_clean = head.rstrip("%")
+            # ``20.5%`` is the common shape; ``20.5% (stack_len_at_validation=2, ts=2026-...)``
+            # is the shape when validation has fired. Take the leading number.
+            for sep in (" ", "%"):
+                head_clean = head_clean.split(sep, 1)[0]
+            snapshot.cumulative_gain_validated = _coerce_float(head_clean)
         elif key == "crash_count":
             snapshot.crash_count = _coerce_int(head)
         elif key == "current_action":
             snapshot.current_action = "" if head == "(idle)" else head
+        elif key == "tick":
+            snapshot.tick = _coerce_int(head)
+        elif key == "stop_reason":
+            snapshot.stop_reason = "" if head == "(none)" else head
+        elif key == "optimization_stack":
+            snapshot.optimization_stack_size = _count_optimization_stack(head)
     return snapshot
+
+
+def _count_optimization_stack(head: str) -> int:
+    """Decode the size of the rendered ``optimization_stack`` value.
+
+    ``SharedState._format_optimization_stack`` emits one of:
+
+    * ``"(none)"`` when the stack is empty
+    * a Python list repr (e.g. ``['baseline:v1', 'integrate:v2']``) when
+      ``f"{parts}"`` formats a non-empty list inside the f-string
+
+    Both shapes survive ``_split_double_space`` because there are no
+    double spaces in either, so we only need to handle them here.
+    """
+    if not head or head == "(none)":
+        return 0
+    # Try Python literal first — covers the list-repr shape exactly.
+    try:
+        value = ast.literal_eval(head)
+    except (SyntaxError, ValueError):
+        # Fallback: comma-joined string (defensive against future
+        # format drift).
+        return len([part for part in head.split(",") if part.strip()])
+    if isinstance(value, (list, tuple)):
+        return len(value)
+    if isinstance(value, str):
+        return 0 if value == "(none)" else 1
+    return 0
+
+
+def _parse_time_budget_into(snapshot: SharedStateSnapshot, body: str) -> None:
+    """Decode the ``=== Time budget ===`` section in place onto ``snapshot``.
+
+    The Coordinator emits exactly one body line below the header (see
+    ``Coordinator._compose_prompt``). When the section is absent — older
+    prompts, agents that don't opt in, or runs without a wall-clock
+    budget — ``body`` is empty and ``snapshot`` keeps its defaults so
+    BudgetMonitor / deadline_imminent signals short-circuit cleanly.
+    """
+    if not body:
+        return
+    for raw in body.splitlines():
+        match = _TIME_BUDGET_LINE_RE.match(raw)
+        if not match:
+            continue
+        snapshot.elapsed_minutes = _coerce_float(match.group("elapsed"))
+        snapshot.remaining_minutes = _coerce_float(match.group("remaining"))
+        snapshot.budget_minutes = _coerce_float(match.group("budget"))
+        snapshot.closing_phase = match.group("closing") == "True"
+        return
 
 
 def _parse_model_line(line: str) -> tuple[str, str]:
