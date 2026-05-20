@@ -1265,11 +1265,11 @@ def test_sglang_e2e_manifest_admits_version_outside_default_allowlist(
 
 # ===========================================================================
 # TraceLens Hyperloom_integration_v0.3.1: per-version patch subdirs
-# (sglang_0_5_9/, sglang_0_5_11/, ...) replace the previous flat
-# sglang_roofline_patches/*.patch layout. Hyperloom must resolve the
-# correct subdir for the running sglang version and stop applying the
-# v0.3 ``optional_missing`` shim once the upstream per-version set is
-# in use (since the per-version set is authored against that release).
+# (sglang_0_5_9/, sglang_0_5_11/, ...) are the only layout Hyperloom
+# supports. The previous flat sglang_roofline_patches/*.patch v0.3
+# layout has been retired together with its legacy optional_missing
+# shim; the per-version subdir is authored against the matching sglang
+# release, so every patch in it is required.
 # ===========================================================================
 def _write_versioned_sglang_patches(
     tracelens_root: Path, subdir: str, *, count: int = 1,
@@ -1373,8 +1373,8 @@ def test_resolve_sglang_patches_dir_returns_none_when_subdir_empty(tmp_path):
 @_REQUIRES_GIT
 def test_sglang_e2e_versioned_layout_applies_from_subdir(tmp_path, monkeypatch):
     """End-to-end: sglang 0.5.11 + a TraceLens checkout that ships
-    ``sglang_roofline_patches/sglang_0_5_11/`` (no flat fallback). The
-    patcher must pick the versioned subdir and apply its patches."""
+    ``sglang_roofline_patches/sglang_0_5_11/``. The patcher must
+    resolve the per-version subdir and apply every patch in it."""
     tracelens_root = _make_fake_tracelens(tmp_path)
     apply_root = _make_fake_sglang_install(tmp_path)
     sgl_init = apply_root / "python" / "sglang" / "__init__.py"
@@ -1399,9 +1399,8 @@ def test_sglang_e2e_versioned_layout_applies_from_subdir(tmp_path, monkeypatch):
 
 def test_discover_sglang_plan_marks_versioned_layout(tmp_path, monkeypatch):
     """The discovered ``_PatchPlan``'s patches must point inside the
-    versioned subdir when that layout is present — guards against
-    accidentally regressing to flat resolution and double-checks that
-    versioned discovery short-circuits before flat is even consulted."""
+    per-version subdir — guards against any regression that would
+    resolve patches outside ``sglang_<minor>_<patch>/``."""
     tracelens_root = _make_fake_tracelens(tmp_path)
     apply_root = _make_fake_sglang_install(tmp_path)
     sgl_init = apply_root / "python" / "sglang" / "__init__.py"
