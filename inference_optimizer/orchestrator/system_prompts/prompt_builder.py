@@ -645,6 +645,30 @@ still hard-gates the obvious prerequisites (TODO 3/4 fires after a
 enforced only at the REQUEST layer for `run_optimization`, and explore
 actions are NEVER gated on it.
 
+### KERNEL-phase decision signals (KB_design §3.2 §5.3 / §3.9 §6)
+
+Pick the next kernel-owned REQUEST by reading facts in this order
+(no priority ranking — v0.8 §3.9 Inv-9.1):
+
+1. **`state.gaps[]`** (KB_gaps/Gap-09) — pick a `layer='kernel'` gap
+   whose `attempts` history still has room. Each gap row carries the
+   canonical_id / symptom / severity + per-attempt outcomes; routes
+   straight to the matching `kernel_id`.
+2. **`last_kernel_opt`** — never re-dispatch the same `kernel_id`.
+   `decision='KEEP'` → emit `integrate` next (TODO 3/4 makes this the
+   only allowed action). `decision='PARTIAL'` → re-try at most once
+   per `kernel_id` (cap `_DEFAULT_KERNEL_OPT_MAX_PARTIAL=2`); after
+   the second PARTIAL the Coordinator marks the kernel rejected.
+   `decision='REVERT'` → kernel is rejected immediately.
+3. **`rejected_kernel_ids` / `rejected_kernel_patches`** — skip every
+   kernel_id present here when walking
+   `last_select_kernels.reusable_native_kernel_ids`.
+4. **`last_action_failures`** — recent kernel_opt / integrate failures
+   carry `error_class` + `error_excerpt`; recover before re-emitting.
+5. **`plateau_kernel`** — when 3 consecutive REVERTs across distinct
+   `kernel_id`s land, the Coordinator auto-advances KERNEL → SWEEP;
+   stop proposing kernel_opt and let the phase transition fire.
+
 ### `select_kernels` — payload (Coordinator gates `run_optimization` until cache is fresh)
 
   request{target_agent: 'kernel', kind: 'select_kernels',
