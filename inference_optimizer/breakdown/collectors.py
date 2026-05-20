@@ -2999,6 +2999,7 @@ def collect_phase_segments(
     if not isinstance(history, list) or not history:
         return []
     segments: list[dict[str, Any]] = []
+    proxy_seen = False
     for idx, row in enumerate(history):
         if not isinstance(row, dict):
             continue
@@ -3034,6 +3035,11 @@ def collect_phase_segments(
             if exit_ts and ts >= exit_ts:
                 continue
             actions_in_window.append(ev)
+        evidence_dict = dict(row.get("evidence") or {})
+        if evidence_dict.get("r09_provisional") or (
+            str(evidence_dict.get("evidence") or "") == "m2_proxy"
+        ):
+            proxy_seen = True
         segments.append({
             "phase":           str(row.get("to_phase") or ""),
             "from_phase":      str(row.get("from_phase") or ""),
@@ -3041,10 +3047,19 @@ def collect_phase_segments(
             "entered_unix":    float(entered_unix) if entered_unix is not None else None,
             "exit_ts":         exit_ts,
             "exit_reason":     exit_reason,
-            "evidence":        dict(row.get("evidence") or {}),
+            "evidence":        evidence_dict,
             "actions":         actions_in_window,
             "elapsed_seconds": elapsed,
         })
+    if proxy_seen:
+        # KB_gaps/Gap-15 / KB_design §3.14 R-09 — surface a single
+        # session-level marker so dashboards can flag legacy-proxy
+        # exits without scraping per-segment evidence.
+        warnings.append(
+            "plateau_proxy_provisional: legacy params_no_promote_streak "
+            "proxy fired (R-09); set INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1 "
+            "once the fleet is fully v0.8 to fail closed"
+        )
     return segments
 
 
