@@ -54,12 +54,21 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "validate_stack",
     # finalize
     "report",
-    # support phase intentionally removed — comm_optimization /
-    # compiler_tuning / dream / re_explore / recover are all _noop_prep
-    # (cli._NOOP_KINDS_COMMON) and not in the Critic's default approve
-    # whitelist; surfacing them only produced silent "succeeded" spins
-    # and rejected proposals. Re-add when real executors land (see
-    # remain_todo.md sections C, I, M).
+    # support
+    #
+    # ``recover`` was re-enabled in 2026-05 alongside the robustness-agent
+    # ``gpu_memory_leaked`` signal. A real executor (see
+    # ``orchestrator/action_executors/recover.py``) now frees leaked
+    # VRAM and, when ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``, attempts
+    # ``rocm-smi --gpureset``. The Critic's default approve whitelist
+    # already includes ``recover``.
+    #
+    # ``comm_optimization`` / ``compiler_tuning`` / ``dream`` /
+    # ``re_explore`` remain disabled here — their executors are still
+    # ``_noop_prep`` stubs and would just produce silent "succeeded"
+    # spins. Re-add when real executors land (see remain_todo.md
+    # sections C, I, M).
+    "recover",
 )
 
 NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
@@ -71,8 +80,10 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     "validate_stack",
     # finalize
     "report",
-    # support phase (dream / re_explore) removed for the same reason
-    # as FULL_ENABLED_ACTIONS.
+    # support — recover is needed even without kernel-opt because GPU
+    # leaks from baseline / backends / params / sweep can still hang the
+    # session; the executor itself is kernel-agnostic.
+    "recover",
 )
 
 # Actions that the Kernel agent owns end-to-end (Plan A). Orchestration MUST
