@@ -79,7 +79,7 @@ VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
     "deep",        # kernel_opt / integrate / operator_tuning / vendor_kernel_config
     "validate",    # validate_stack — apply optimization_stack + rebench
     "finalize",    # report
-    "support",     # dream / re_explore / recover / comm_optimization / compiler_tuning
+    "support",     # recover (v0.8 KB_design §3.15 §2.3 retired the rest)
 })
 
 _REQUIRED_FIELDS: tuple[str, ...] = (
