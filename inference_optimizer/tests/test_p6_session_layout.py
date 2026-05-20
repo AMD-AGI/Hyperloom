@@ -144,6 +144,16 @@ def test_make_session_dir_sanitises_model_basename(tmp_path, monkeypatch):
     assert sd.parent.name == "Llama-3.1-70B-Instruct"
 
 
+def test_make_session_dir_accepts_path_object(tmp_path, monkeypatch):
+    """args.model is a Path() in the CLI (argparse with type=Path) — the
+    helper must accept any os.PathLike, not just str."""
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    sd = paths.make_session_dir(
+        model_name=Path("/wekafs/models/DeepSeek-R1-0528"),
+    )
+    assert sd.parent.name == "DeepSeek-R1-0528"
+
+
 def test_make_session_dir_flat_layout_via_env(tmp_path, monkeypatch):
     """Env override forces legacy flat layout even when model_name is set."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
