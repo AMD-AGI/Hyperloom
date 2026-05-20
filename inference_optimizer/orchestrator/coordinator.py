@@ -216,11 +216,33 @@ class PendingProposal:
     # ``session hypothesize`` (KB_design §3.6.6 / §3.13 M1 §5.2).
     # Empty when T2 failed sync and went to NDJSON; T3 then falls back
     # to ``propose-edge + late_verified`` rather than ``verify``.
+    #
+    # Back-compat surface: when the proposal is a multi-variant
+    # ``explore`` grid (KB_gaps/Gap-07), this field carries the
+    # *representative* edge_id (first variant) so the legacy T3 hook
+    # — which still verifies one edge per proposal — keeps working.
+    # The full per-variant map lives in :attr:`kb_edge_ids` below;
+    # Gap-08 will extend T3 to iterate that map.
     kb_edge_id: str = ""
     # The opt_canonical id minted at T2 (``opt.session-{sid}.proposal-{msg_id}``).
     # Stored on the proposal so the T3 verify path can still emit a
     # ``propose-edge`` even when the sync hypothesize failed.
     kb_opt_canonical: str = ""
+    # v0.8 M5 §5 step 6 / KB_gaps/Gap-07 — per-variant edge_ids minted
+    # by ``_cortex_t2_hook`` when the proposal is an ``explore``
+    # action with a non-empty ``params.grid``. Keyed by variant
+    # name; empty dict for non-grid proposals (kernel_opt / integrate
+    # / etc.). The explore executor reads each variant's
+    # ``kb_edge_id`` via :meth:`_materialize_approved_proposal`
+    # stamping, so cross-session KB queries can locate the exact
+    # variant that confirmed / refuted a hypothesis (instead of the
+    # M3 per-proposal aggregate).
+    kb_edge_ids: dict[str, str] = field(default_factory=dict)
+    # v0.8 M5 §5 step 6 / KB_gaps/Gap-07 — per-variant opt_canonical
+    # ids parallel to :attr:`kb_edge_ids`. Stored separately so the
+    # T3 hook can rebuild ``propose-edge`` fallbacks per variant
+    # (Gap-08) even when the synchronous T2 hypothesize failed.
+    kb_opt_canonicals: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -2927,24 +2949,64 @@ class Coordinator:
         self.state.pending_proposals[msg.msg_id] = pending
 
     async def _cortex_t2_hook(self, pending: PendingProposal) -> None:
-        """Mint optimization_node + hypothesize edge for a propose_action.
+        """Mint optimization_node + hypothesize edge(s) for a propose_action.
+
+        Two paths:
+
+        * **explore + grid** (v0.8 KB_gaps/Gap-07 + KB_design §3.13 M5
+          §5 step 6): mints one optimization_node + one hypothesize
+          edge **per variant**, populating :attr:`PendingProposal.kb_edge_ids`
+          + :attr:`kb_opt_canonicals` keyed by variant name. The
+          representative variant (first one with a non-empty edge_id)
+          also lands on the legacy :attr:`kb_edge_id` /
+          :attr:`kb_opt_canonical` fields so the existing T3 hook
+          (per-proposal) keeps working until Gap-08 upgrades it.
+        * **non-grid** (kernel_opt / integrate / sweep / profile /
+          legacy backends / params): single optimization_node + single
+          hypothesize edge — identical to the v0.8 M1 behaviour.
 
         Best-effort: every Cortex KB failure is downgraded to an NDJSON
-        enqueue by the client itself; the only thing we own here is the
-        ``tentative_edge_id`` plumb-through onto the PendingProposal.
+        enqueue by the client itself; partial failures within a
+        per-variant batch are logged but don't poison the other
+        variants in the same proposal.
 
-        Gap-anchor selection (M1 simplification): the workload_node
-        canonical id is used as the ``from`` side. M5 will replace it
-        with a real issue_node once the specialist framework can emit
-        gap-annotated proposals.
+        Gap-anchor selection (KB_gaps/Gap-07 + Gap-09):
+        :meth:`_resolve_issue_canonical` consults
+        ``payload.gap_canonical_id`` and ``payload.params.gap_canonical_id``
+        before falling back to the M1 ``workload_canonical_id``
+        anchor. Once Gap-09 lands the gaps[] ledger, the per-gap
+        canonical id will also be looked up here.
         """
         if self.cortex_kb is None or not self.cortex_kb.enabled:
             return
         sid = (self.shared_state.cortex_session_id or "").strip()
         if not sid:
             return
+
+        # Detect the per-variant path (v0.8 explore + grid).
+        params = pending.payload.get("params") or {}
+        grid = params.get("grid") if isinstance(params, dict) else None
+        if (
+            pending.action_name == "explore"
+            and isinstance(grid, list)
+            and grid
+        ):
+            await self._cortex_t2_hook_per_variant(pending, sid=sid, grid=grid)
+        else:
+            await self._cortex_t2_hook_single(pending, sid=sid)
+
+    async def _cortex_t2_hook_single(
+        self, pending: PendingProposal, *, sid: str,
+    ) -> None:
+        """Single optimization_node + single hypothesize edge.
+
+        v0.8 M1 path — preserved verbatim for non-grid proposals
+        (kernel_opt / integrate / sweep / profile / legacy
+        backends / params). Per-variant grid proposals route through
+        :meth:`_cortex_t2_hook_per_variant` instead.
+        """
         opt_canonical = optimization_canonical_id(sid, pending.proposal_msg_id)
-        gap_canonical = self._gap_anchor_canonical_id()
+        gap_canonical = self._resolve_issue_canonical(pending)
         try:
             self.cortex_kb.propose_point(
                 canonical_id=opt_canonical,
@@ -2984,8 +3046,7 @@ class Coordinator:
             outcome = {}
         edge_id = str(outcome.get("tentative_edge_id") or "").strip()
         pending.kb_edge_id = edge_id
-        pending_edges = list(self.shared_state.pending_kb_edges or [])
-        pending_edges.append({
+        self._append_pending_kb_edge_row({
             "proposal_msg_id": pending.proposal_msg_id,
             "opt_canonical":   opt_canonical,
             "gap_canonical":   gap_canonical,
@@ -2993,6 +3054,171 @@ class Coordinator:
             "action":          pending.action_name,
             "ts":              datetime.now(timezone.utc).isoformat(timespec="seconds"),
         })
+
+    async def _cortex_t2_hook_per_variant(
+        self,
+        pending: PendingProposal,
+        *,
+        sid: str,
+        grid: list[Any],
+    ) -> None:
+        """Per-variant T2: one optimization_node + one hypothesize edge
+        per ``grid[i]``.
+
+        KB_design §3.13 M5 §5 step 6 / KB_gaps/Gap-07.
+        ``pending.kb_edge_ids`` / ``kb_opt_canonicals`` are populated
+        keyed by variant name. The legacy single-id fields
+        (``kb_edge_id`` / ``kb_opt_canonical``) carry the
+        *representative* variant's ids so the existing per-proposal
+        T3 hook continues to work until Gap-08 ships the per-variant
+        verify path.
+
+        Partial failures: a per-variant exception is logged and that
+        variant is skipped — other variants in the same proposal
+        still mint successfully. Variants without a ``name`` are
+        skipped (canonical id requires one).
+        """
+        gap_canonical = self._resolve_issue_canonical(pending)
+        phase = (self.shared_state.phase or "").upper() or "UNKNOWN"
+        reason = str(pending.payload.get("reasoning") or "")[:512]
+        ts_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        variant_edges: dict[str, str] = {}
+        variant_canonicals: dict[str, str] = {}
+        for variant in grid:
+            if not isinstance(variant, dict):
+                continue
+            variant_name = str(variant.get("name") or "").strip()
+            if not variant_name:
+                # Skip nameless variants — the executor itself rejects
+                # them downstream, so we don't even mint a phantom edge.
+                continue
+            opt_canonical = (
+                f"opt.session-{sid}.proposal-{pending.proposal_msg_id}"
+                f".variant-{variant_name}"
+            )
+            # 1. optimization_node per variant.
+            try:
+                self.cortex_kb.propose_point(
+                    canonical_id=opt_canonical,
+                    kind="optimization_node",
+                    authority="HYPOTHESIZED",
+                    attrs={
+                        "action":              pending.action_name,
+                        "from_agent":          pending.from_agent,
+                        "predicted_gain_pct":  pending.predicted_gain_pct,
+                        "proposal_msg_id":     pending.proposal_msg_id,
+                        "variant_name":        variant_name,
+                        "extra_sglang_args":   str(
+                            variant.get("extra_sglang_args")
+                            or variant.get("extra_args") or ""
+                        ),
+                        "extra_envs":          dict(
+                            variant.get("extra_envs") or {}
+                        ),
+                        # ``provenance`` was stamped by explore.py's
+                        # parser (``default_grid`` / ``llm_direct`` /
+                        # ``specialist:<domain>``); record it so KB
+                        # consumers can answer "did this variant come
+                        # from a specialist?".
+                        "provenance":          str(
+                            variant.get("provenance") or "llm_direct"
+                        ),
+                    },
+                    evidence=[
+                        f"log:proposal-{pending.proposal_msg_id}",
+                        f"variant:{variant_name}",
+                    ],
+                )
+            except CortexKBError as exc:
+                log.warning(
+                    "cortex T2 propose_point failed for variant=%s: %s",
+                    variant_name, exc,
+                )
+            except Exception as exc:  # noqa: BLE001 — defensive
+                log.exception(
+                    "cortex T2 propose_point unexpected error for variant=%s: %r",
+                    variant_name, exc,
+                )
+            variant_canonicals[variant_name] = opt_canonical
+
+            # 2. hypothesize edge per variant.
+            try:
+                outcome = self.cortex_kb.hypothesize(
+                    sid=sid,
+                    from_canonical=gap_canonical,
+                    to_canonical=opt_canonical,
+                    edge_type="hypothetical",
+                    reason=reason,
+                    attrs={
+                        "role":             pending.from_agent,
+                        "action":           pending.action_name,
+                        "proposal_msg_id":  pending.proposal_msg_id,
+                        "variant_name":     variant_name,
+                        "provenance":       str(
+                            variant.get("provenance") or "llm_direct"
+                        ),
+                        "phase":            phase,
+                    },
+                    evidence=[
+                        f"log:proposal-{pending.proposal_msg_id}",
+                        f"variant:{variant_name}",
+                    ],
+                )
+            except CortexKBError as exc:
+                log.warning(
+                    "cortex T2 hypothesize failed for variant=%s: %s",
+                    variant_name, exc,
+                )
+                outcome = {}
+            except Exception as exc:  # noqa: BLE001 — defensive
+                log.exception(
+                    "cortex T2 hypothesize unexpected error for variant=%s: %r",
+                    variant_name, exc,
+                )
+                outcome = {}
+            edge_id = str(outcome.get("tentative_edge_id") or "").strip()
+            variant_edges[variant_name] = edge_id
+
+        # Stash on PendingProposal for downstream consumers
+        # (``_materialize_approved_proposal`` stamps these into the
+        # grid; Gap-08 T3 will iterate the map).
+        pending.kb_opt_canonicals = variant_canonicals
+        pending.kb_edge_ids = variant_edges
+        # Representative legacy fields — first variant with a non-empty
+        # edge_id wins. Falls back to first variant when every edge
+        # failed (legacy T3 path treats empty edge_id as "late propose-edge
+        # fallback" anyway).
+        rep_name = next(
+            (n for n, eid in variant_edges.items() if eid),
+            next(iter(variant_edges), ""),
+        )
+        if rep_name:
+            pending.kb_edge_id = variant_edges.get(rep_name, "")
+            pending.kb_opt_canonical = variant_canonicals.get(rep_name, "")
+
+        # Record a single pending_kb_edges row for back-compat with the
+        # existing T3 hook. The full per-variant maps live in the
+        # ``variant_edges`` / ``variant_canonicals`` extension fields
+        # so Gap-08 can iterate without a schema bump.
+        self._append_pending_kb_edge_row({
+            "proposal_msg_id":    pending.proposal_msg_id,
+            "opt_canonical":      pending.kb_opt_canonical,
+            "gap_canonical":      gap_canonical,
+            "edge_id":            pending.kb_edge_id,
+            "action":             pending.action_name,
+            "variant_edges":      dict(variant_edges),
+            "variant_canonicals": dict(variant_canonicals),
+            "ts":                 ts_iso,
+        })
+
+    def _append_pending_kb_edge_row(self, row: dict[str, Any]) -> None:
+        """Append to ``shared_state.pending_kb_edges`` + persist.
+
+        Centralised so both T2 paths (single + per-variant) share the
+        same capping / save-error semantics.
+        """
+        pending_edges = list(self.shared_state.pending_kb_edges or [])
+        pending_edges.append(row)
         # Cap to a reasonable size so resume doesn't pay quadratic costs.
         if len(pending_edges) > 256:
             pending_edges = pending_edges[-256:]
@@ -3001,6 +3227,33 @@ class Coordinator:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive; T2 must not crash.
             log.exception("cortex T2 SharedState.save failed")
+
+    def _resolve_issue_canonical(self, pending: PendingProposal) -> str:
+        """Find the issue_node canonical_id this proposal addresses.
+
+        Priority (KB_gaps/Gap-07 + Gap-09 contract):
+
+        1. ``pending.payload['gap_canonical_id']`` — explicit
+           top-level gap reference (set by Orchestration when it
+           routes a specialist proposal to a known gap).
+        2. ``pending.payload['params']['gap_canonical_id']`` — same
+           thing under ``params`` (where most other proposal fields
+           live).
+        3. Fallback: :meth:`_gap_anchor_canonical_id` — the M1
+           ``workload.<model>.<gpu>`` anchor. Gap-09 will plug
+           ``SharedState.gaps[i].canonical_id`` (matched by domain
+           / phase) into this fallback once the field lands.
+        """
+        payload = pending.payload or {}
+        explicit_top = str(payload.get("gap_canonical_id") or "").strip()
+        if explicit_top:
+            return explicit_top
+        params = payload.get("params") or {}
+        if isinstance(params, dict):
+            explicit_params = str(params.get("gap_canonical_id") or "").strip()
+            if explicit_params:
+                return explicit_params
+        return self._gap_anchor_canonical_id()
 
     def _gap_anchor_canonical_id(self) -> str:
         """M1 placeholder for the gap anchor.
@@ -3072,6 +3325,29 @@ class Coordinator:
         best_gain_pct uninformative (DESIGN §16 baseline_tput parameter).
         """
         params = dict(pending.payload.get("params") or {})
+        # v0.8 KB_gaps/Gap-07 — stamp per-variant kb_edge_id into the
+        # grid so the explore executor (which already reads
+        # ``variant.get("kb_edge_id")``) can carry the id through to
+        # the result rows the ledger writer + T3 hook will consume.
+        # No-op when the proposal isn't ``explore`` or when the T2
+        # hook didn't populate the map (e.g. ``--no-cortex`` runs).
+        if (
+            pending.action_name == "explore"
+            and pending.kb_edge_ids
+            and isinstance(params.get("grid"), list)
+        ):
+            stamped_grid: list[dict[str, Any]] = []
+            for variant in params["grid"]:
+                if not isinstance(variant, dict):
+                    stamped_grid.append(variant)
+                    continue
+                variant_copy = dict(variant)
+                vname = str(variant_copy.get("name") or "").strip()
+                edge_id = pending.kb_edge_ids.get(vname, "")
+                if edge_id and not variant_copy.get("kb_edge_id"):
+                    variant_copy["kb_edge_id"] = edge_id
+                stamped_grid.append(variant_copy)
+            params["grid"] = stamped_grid
         cb = self.shared_state.current_best or {}
         cb_args = (
             str(cb.get("extra_sglang_args") or "")
