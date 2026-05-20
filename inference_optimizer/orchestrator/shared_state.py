@@ -80,6 +80,14 @@ _DEFAULT_LAST_FAILURES = 10
 # in :meth:`SharedState.record_phase_transition`.
 _PHASE_HISTORY_CAP = 100
 
+# v0.8 KB_gaps/Gap-09 — gap ledger caps. ``_GAPS_MAX_ENTRIES`` bounds the
+# total list so a pathological session can't blow up state.json;
+# ``_GAPS_ATTEMPTS_HISTORY`` bounds the per-gap ``attempts`` list so even
+# a hot gap with 200 KEEP/REVERT events stays cheap to render. Both caps
+# are enforced inside :meth:`SharedState.upsert_gap`.
+_GAPS_MAX_ENTRIES = 50
+_GAPS_ATTEMPTS_HISTORY = 20
+
 # Set of action kinds that participate in the kernel-equivalent per-action
 # audit trail (Plan: SharedState audit-trail). Kernel-owned actions are
 # intentionally excluded — they already have richer dedicated structures
@@ -536,6 +544,44 @@ class SharedState:
     # Iso UTC timestamp of the T0 snapshot. Empty when Cortex was
     # bypassed (``--no-cortex``) or T0 failed.
     warm_start_ts: str = ""
+
+    # ------------------------------------------------------------------
+    # v0.8 KB_gaps/Gap-09 — structured gaps ledger (KB_design §3.3 /
+    # §3.5 / §3.9 §6). Replaces the v0.6 proxy block (which derived
+    # decision input from ``last_action_failures`` +
+    # ``explore_search.winners_history``) with a structured, dedup'd
+    # list of unresolved bottlenecks. Coordinator is the sole writer
+    # (:meth:`Coordinator._refresh_gaps`); LLM agents read via
+    # prompt injection. Listed in :data:`policy.CORE_STATE_FIELDS` so
+    # any LLM ``update_state{changes={gaps: ...}}`` intent is denied.
+    #
+    # Refresh entry points (KB_gaps/Gap-09 §5.4):
+    #   1. baseline completion           — initial gap extraction
+    #   2. EXPLORE round KEEP/REVERT     — append to gap.attempts
+    #   3. Cortex traverse(issue_node)   — merge cross-session priors
+    #   4. specialist_done bookkeeping   — gap.attempts ← specialist
+    #
+    # Schema (per entry, KB_design §3.3 §4.2 / §3.5 §11):
+    #
+    #   {
+    #     "canonical_id": str,        # issue_node canonical from Cortex
+    #     "symptom":      str,        # human-readable: "MoE comm overhead"
+    #     "layer":        str,        # comm / kernel / framework / param
+    #     "severity":     str,        # high / medium / low
+    #     "domain_hint":  str,        # which specialist domain best fits
+    #     "source":       str,        # baseline / attempts / cortex
+    #     "first_seen_ts":     iso,
+    #     "last_updated_ts":   iso,
+    #     "attempts": [
+    #       {action, variant_name, outcome, gain_pct?, ts},
+    #       ...
+    #     ],
+    #   }
+    #
+    # ``attempts`` is capped at the most recent 20 per gap; the whole
+    # list is capped at :data:`_GAPS_MAX_ENTRIES` so a long session
+    # can't blow up state.json. Dedup is keyed by ``canonical_id``.
+    gaps: list[dict[str, Any]] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Persistence
@@ -1998,6 +2044,150 @@ class SharedState:
             self.specialist_domain_empty_streak[d] = 0
         return self.specialist_domain_empty_streak[d]
 
+    # ------------------------------------------------------------------
+    # v0.8 KB_gaps/Gap-09 — gaps ledger helpers (KB_design §3.3 / §3.5)
+    # ------------------------------------------------------------------
+    def find_gap(self, canonical_id: str) -> dict[str, Any] | None:
+        """Return the gap entry matching ``canonical_id`` (or ``None``).
+
+        Coordinator's :meth:`_warm_specialist_params` calls this to
+        attach ``gap_symptom`` / ``gap_layer`` / ``gap_attempts`` onto
+        a specialist task before dispatch.
+        """
+        if not canonical_id:
+            return None
+        cid = str(canonical_id)
+        for gap in self.gaps:
+            if isinstance(gap, dict) and str(gap.get("canonical_id") or "") == cid:
+                return gap
+        return None
+
+    def upsert_gap(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """Insert or update one gap row, keyed by ``canonical_id``.
+
+        Merges ``attempts`` (existing + incoming, capped at the most
+        recent :data:`_GAPS_ATTEMPTS_HISTORY` rows by ``ts``). Updates
+        ``last_updated_ts`` to ``now``; preserves the original
+        ``first_seen_ts`` when present.
+
+        Coordinator-only writer (Inv-1 single-writer + PolicyGate
+        ``CORE_STATE_FIELDS`` lock). Returns the merged entry so the
+        caller can keep working with the canonical row.
+        """
+        if not isinstance(entry, dict):
+            return {}
+        cid = str(entry.get("canonical_id") or "").strip()
+        if not cid:
+            return {}
+        now = _now_iso()
+        existing = self.find_gap(cid)
+        if existing is None:
+            merged: dict[str, Any] = {
+                "canonical_id":    cid,
+                "symptom":         str(entry.get("symptom") or ""),
+                "layer":           str(entry.get("layer") or ""),
+                "severity":        str(entry.get("severity") or "medium"),
+                "domain_hint":     str(entry.get("domain_hint") or ""),
+                "source":          str(entry.get("source") or ""),
+                "first_seen_ts":   str(entry.get("first_seen_ts") or now),
+                "last_updated_ts": now,
+                "attempts":        list(entry.get("attempts") or []),
+            }
+            # Trim attempts to the cap to be safe.
+            if len(merged["attempts"]) > _GAPS_ATTEMPTS_HISTORY:
+                merged["attempts"] = merged["attempts"][-_GAPS_ATTEMPTS_HISTORY:]
+            self.gaps.append(merged)
+        else:
+            # Field-wise merge: incoming non-empty values win except
+            # for ``first_seen_ts`` (preserve oldest).
+            for key in ("symptom", "layer", "severity", "domain_hint", "source"):
+                incoming = entry.get(key)
+                if incoming:
+                    existing[key] = str(incoming)
+            existing.setdefault("first_seen_ts", str(entry.get("first_seen_ts") or now))
+            existing["last_updated_ts"] = now
+            incoming_attempts = list(entry.get("attempts") or [])
+            if incoming_attempts:
+                merged_attempts = list(existing.get("attempts") or []) + incoming_attempts
+                # Capped tail; the cap dominates ordering — callers
+                # supply newest-last lists which is the convention used
+                # everywhere else (e.g. ``last_action_failures``).
+                if len(merged_attempts) > _GAPS_ATTEMPTS_HISTORY:
+                    merged_attempts = merged_attempts[-_GAPS_ATTEMPTS_HISTORY:]
+                existing["attempts"] = merged_attempts
+            merged = existing
+        # Enforce the global cap. We trim oldest (by last_updated_ts when
+        # available, falling back to insertion order). Trimming runs after
+        # the upsert so the just-touched gap is always retained.
+        if len(self.gaps) > _GAPS_MAX_ENTRIES:
+            keep_cid = cid
+            others = [g for g in self.gaps if g is not merged]
+
+            def _sort_key(g: dict[str, Any]) -> str:
+                return str(g.get("last_updated_ts") or g.get("first_seen_ts") or "")
+
+            others.sort(key=_sort_key)
+            keep_count = _GAPS_MAX_ENTRIES - 1
+            others = others[-keep_count:] if keep_count > 0 else []
+            self.gaps = others + [merged]
+            del keep_cid  # silence linters when the local isn't used elsewhere
+        return merged
+
+    def append_gap_attempt(
+        self,
+        canonical_id: str,
+        attempt: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Append one attempt row to an existing gap.
+
+        Returns the updated gap entry or ``None`` when the gap is not
+        known yet (caller may decide to ``upsert_gap`` with a freshly
+        synthesised symptom in that case).
+        """
+        gap = self.find_gap(canonical_id)
+        if gap is None:
+            return None
+        attempts = list(gap.get("attempts") or [])
+        attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or _now_iso())})
+        if len(attempts) > _GAPS_ATTEMPTS_HISTORY:
+            attempts = attempts[-_GAPS_ATTEMPTS_HISTORY:]
+        gap["attempts"] = attempts
+        gap["last_updated_ts"] = _now_iso()
+        return gap
+
+    def replace_gaps(self, entries: list[dict[str, Any]]) -> None:
+        """Bulk-replace ``gaps`` with a fresh dedup'd list.
+
+        Used by :meth:`Coordinator._refresh_gaps` when the rebuild
+        wants to discard stale rows wholesale (e.g. after a Cortex
+        traverse returned a new canonical set). Idempotent.
+        """
+        if not isinstance(entries, list):
+            return
+        dedup: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            cid = str(entry.get("canonical_id") or "").strip()
+            if not cid:
+                continue
+            if cid not in dedup:
+                order.append(cid)
+            dedup[cid] = dict(entry)
+        # Apply the per-entry cap on attempts.
+        new_list: list[dict[str, Any]] = []
+        for cid in order:
+            row = dedup[cid]
+            attempts = list(row.get("attempts") or [])
+            if len(attempts) > _GAPS_ATTEMPTS_HISTORY:
+                attempts = attempts[-_GAPS_ATTEMPTS_HISTORY:]
+            row["attempts"] = attempts
+            new_list.append(row)
+        if len(new_list) > _GAPS_MAX_ENTRIES:
+            new_list = new_list[-_GAPS_MAX_ENTRIES:]
+        self.gaps = new_list
+
     def update_last_specialist(self, snapshot: dict[str, Any]) -> None:
         """Snapshot the most recent specialist task (parity with last_*)."""
         if isinstance(snapshot, dict):
@@ -2604,6 +2794,66 @@ class SharedState:
             out.append(f"  · (truncated to {max_lines} lines; "
                        f"see runtime/cortex/.kb_warm.json for full snapshot)")
         return "\n".join(out)
+
+    def to_gaps_summary(self, *, max_entries: int = 10) -> str:
+        """Render :attr:`gaps` for Orchestration / specialist prompt injection.
+
+        KB_design §3.3 / §3.5: surfaces the structured gap list that
+        replaced the v0.6 ``last_action_failures`` proxy. Returns an
+        empty string when ``gaps`` is empty so callers can skip the
+        whole section header on cold-start sessions.
+
+        Format (per row):
+
+            - <canonical_id> [<layer>/<severity>] <symptom>
+                attempts=N last=<action:outcome>
+
+        Capped at ``max_entries`` newest rows (sorted by
+        ``last_updated_ts``) to keep the prompt section bounded —
+        long sessions occasionally accumulate dozens of gaps; the
+        full list still lives in ``state.json`` for resume.
+        """
+        if not self.gaps:
+            return ""
+        # Newest first by last_updated_ts (falling back to first_seen_ts
+        # / insertion order to keep deterministic for tests).
+        ordered = list(self.gaps)
+        ordered.sort(
+            key=lambda g: str(
+                g.get("last_updated_ts") or g.get("first_seen_ts") or "",
+            ),
+            reverse=True,
+        )
+        rows: list[str] = []
+        for gap in ordered[:max_entries]:
+            if not isinstance(gap, dict):
+                continue
+            cid = str(gap.get("canonical_id") or "?")
+            layer = str(gap.get("layer") or "?")
+            severity = str(gap.get("severity") or "?")
+            symptom = str(gap.get("symptom") or "").replace("\n", " ").strip()
+            if len(symptom) > 200:
+                symptom = symptom[:197] + "..."
+            attempts = gap.get("attempts") or []
+            attempt_n = len(attempts) if isinstance(attempts, list) else 0
+            last_tag = ""
+            if isinstance(attempts, list) and attempts:
+                last = attempts[-1]
+                if isinstance(last, dict):
+                    last_tag = (
+                        f" last={last.get('action','?')}:"
+                        f"{last.get('outcome','?')}"
+                    )
+            rows.append(
+                f"  - {cid} [{layer}/{severity}] {symptom}\n"
+                f"      attempts={attempt_n}{last_tag}"
+            )
+        if len(ordered) > max_entries:
+            rows.append(
+                f"  · (+{len(ordered) - max_entries} older gaps elided; "
+                f"see state.json `gaps[]`)"
+            )
+        return "\n".join(rows)
 
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection (DESIGN §8.3)."""
