@@ -259,12 +259,16 @@ def test_required_next_step_validate_stack_after_unvalidated_keep(session_dir):
     }
     # No KEEPs yet — no TODO
     assert coord._required_next_step() == ""
-    # New KEEP appears, validated_at_len still 0 → TODO fires
-    s.optimization_stack = [{"action": "backends", "variant_name": "aiter"}]
+    # New KEEP appears, validated_at_len still 0 → TODO fires.
+    # v0.8 M3 + KB_gaps/Gap-10: the TODO now points at the merged
+    # ``explore`` action (which inlines the per-KEEP stack rebench)
+    # instead of the deprecated ``validate_stack``.
+    s.optimization_stack = [{"action": "explore", "variant_name": "aiter"}]
     todo = coord._required_next_step()
-    assert "validate_stack required" in todo
+    assert "stack rebench required" in todo
     assert "stack_len=1" in todo
     assert "validated_at_len=0" in todo
+    assert "explore" in todo
     # Validate caught up → TODO clears
     s.cumulative_gain_validated_stack_len = 1
     assert coord._required_next_step() == ""
@@ -283,26 +287,35 @@ def test_required_next_step_no_kernel_skips_profile_select(tmp_path, monkeypatch
     s.baseline_tput = 100.0
     # No-kernel mode: profile/select_kernels should not be required.
     assert coord._required_next_step() == ""
-    # validate_stack TODO still fires once a KEEP lands.
-    s.optimization_stack = [{"action": "backends", "variant_name": "aiter"}]
-    assert "validate_stack required" in coord._required_next_step()
+    # v0.8 M3 + KB_gaps/Gap-10: the stack-rebench TODO fires once a
+    # KEEP lands, pointing at the merged ``explore`` action.
+    s.optimization_stack = [{"action": "explore", "variant_name": "aiter"}]
+    assert "stack rebench required" in coord._required_next_step()
 
 
 def test_required_next_step_baseline_still_first(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_target_analysis_marker(session_dir)
     s = coord.shared_state
-    s.optimization_stack = [{"action": "backends", "variant_name": "aiter"}]
+    s.optimization_stack = [{"action": "explore", "variant_name": "aiter"}]
     # baseline_tput == 0 — baseline TODO must take precedence
     todo = coord._required_next_step()
     assert "baseline is required now" in todo
-    assert "validate_stack required" not in todo
+    assert "stack rebench required" not in todo
 
 
 # ===========================================================================
 # Coordinator._sequence_denial_for_action — validate_stack guard
 # ===========================================================================
 def test_sequence_denial_blocks_explore_after_unvalidated_keep(session_dir):
+    """v0.8 M3 + KB_gaps/Gap-10: the post-KEEP gate now requires the
+    merged ``explore`` action (with its inlined stack rebench) or the
+    wind-down (``baseline`` / ``report``). The deprecated
+    ``validate_stack`` / ``backends`` / ``params`` names are now
+    rejected at the PolicyGate boundary with
+    ``rule='action_deprecated'``, so they never reach
+    ``_sequence_denial_for_action`` in a fresh session — we drop them
+    from the matrix here and pivot to the v0.8 canonical actions."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_target_analysis_marker(session_dir)
     s = coord.shared_state
@@ -312,17 +325,14 @@ def test_sequence_denial_blocks_explore_after_unvalidated_keep(session_dir):
     s.last_select_kernels = {
         "trace_input": "/tmp/profile.tar.gz", "candidates_path": "/tmp/x.json",
     }
-    s.optimization_stack = [{"action": "backends", "variant_name": "aiter"}]
-    # backends/params/sweep/report are denied
-    for action in ("backends", "params", "sweep", "report"):
-        denied = coord._sequence_denial_for_action(action)
-        assert isinstance(denied, PolicyDenied), (
-            f"{action!r} should be denied while validate_stack is required"
-        )
-        assert denied.rule == "validate_stack_required"
-    # validate_stack itself is allowed
-    assert coord._sequence_denial_for_action("validate_stack") is None
-    # baseline still allowed (rare ad-hoc rebench)
+    s.optimization_stack = [{"action": "explore", "variant_name": "aiter"}]
+    # sweep is denied until the rebench clears the stack.
+    denied = coord._sequence_denial_for_action("sweep")
+    assert isinstance(denied, PolicyDenied)
+    assert denied.rule == "stack_rebench_required"
+    # ``explore`` itself is allowed — it carries the inlined rebench.
+    assert coord._sequence_denial_for_action("explore") is None
+    # baseline + report still pass (wind-down + ad-hoc rebench).
     assert coord._sequence_denial_for_action("baseline") is None
 
 
@@ -336,8 +346,8 @@ def test_sequence_denial_clears_after_validation(session_dir):
     s.last_select_kernels = {
         "trace_input": "/tmp/profile.tar.gz", "candidates_path": "/tmp/x.json",
     }
-    s.optimization_stack = [{"action": "backends", "variant_name": "aiter"}]
+    s.optimization_stack = [{"action": "explore", "variant_name": "aiter"}]
     s.cumulative_gain_validated_stack_len = 1
-    # Now backends should be allowed again
-    assert coord._sequence_denial_for_action("backends") is None
-    assert coord._sequence_denial_for_action("params") is None
+    # Now sweep should be allowed again (the rebench cleared the gate).
+    assert coord._sequence_denial_for_action("sweep") is None
+    assert coord._sequence_denial_for_action("explore") is None
