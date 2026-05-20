@@ -1,11 +1,22 @@
-"""Flattened session_dir layout regression tests.
+"""Session_dir layout regression tests (N17 per-model/ts default).
 
 Locks the contract:
 
 * ``paths.session_dir()`` returns ``/workspace/hyperloom`` by default;
-  ``$USER_DATA_PATH`` overrides.
+  ``$USER_DATA_PATH`` overrides (when no make_session_dir pin is set).
+* ``paths.workspace_root()`` returns ``$USER_DATA_PATH`` regardless of
+  layout mode (used by runtime/, logs/, install.sh).
+* ``paths.make_session_dir(model_name=...)`` creates
+  ``<workspace_root>/<model>/<UTC ts>/`` and pins
+  ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` so every subsequent
+  ``session_dir()`` call agrees.
+* ``paths.make_session_dir()`` with no model_name (or with
+  ``INFERENCE_OPTIMIZER_SESSION_LAYOUT=flat``) falls back to the legacy
+  flat layout (session_dir == workspace_root) for tests / CI.
 * ``paths.make_session_dir()`` is idempotent and creates the full
-  skeleton (storage / agents / runs / logs / patches / ...).
+  per-session skeleton (storage / agents / runs / patches / ...).
+* ``runtime_dir()`` / ``magpie_dir()`` / ``source_mirrors_dir()`` are
+  workspace-shared, not session-scoped.
 * ``manifest.write_manifest()`` writes ``manifest.json`` atomically
   with the v1 schema.
 * ``manifest.load_manifest()`` raises ``FileNotFoundError`` when the
@@ -70,13 +81,100 @@ def test_session_dir_user_data_path_overrides_default(tmp_path, monkeypatch):
 def test_make_session_dir_creates_full_skeleton(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
+    # No model_name -> flat layout (legacy), session_dir == workspace_root
     assert sd == tmp_path
-    # Every entry in _SESSION_SKELETON must exist after the first call.
+    # Every per-session skeleton entry must exist
     for sub in paths._SESSION_SKELETON:
-        assert (sd / sub).is_dir(), f"missing skeleton subdir: {sub}"
+        assert (sd / sub).is_dir(), f"missing per-session skeleton subdir: {sub}"
+    # Workspace-shared skeleton must also exist (sibling of session_dir
+    # under workspace_root, which here happens to BE session_dir).
+    for sub in paths._WORKSPACE_SKELETON:
+        assert (paths.workspace_root() / sub).is_dir(), (
+            f"missing workspace skeleton subdir: {sub}"
+        )
     # Re-running must be a no-op (idempotent).
     sd2 = paths.make_session_dir()
     assert sd2 == sd
+
+
+# ---------------------------------------------------------------------------
+# N17 per-model/ts layout
+# ---------------------------------------------------------------------------
+def test_workspace_root_returns_user_data_path(tmp_path, monkeypatch):
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    assert paths.workspace_root() == tmp_path
+
+
+def test_workspace_root_independent_of_session_pin(tmp_path, monkeypatch):
+    """workspace_root() never consults the session pin; runtime/ etc.
+    are workspace-scoped regardless of which session is active."""
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    monkeypatch.setenv(paths.ENV_CURRENT_SESSION_DIR, str(tmp_path / "x/y/z"))
+    assert paths.workspace_root() == tmp_path
+
+
+def test_make_session_dir_per_model_ts_layout(tmp_path, monkeypatch):
+    """N17 default: per-model/per-launch subdir + pin propagation."""
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    sd = paths.make_session_dir(model_name="/wekafs/models/DeepSeek-R1-0528")
+    # Layout: <ws>/DeepSeek-R1-0528/<UTC ts>/
+    assert sd.parent.parent == tmp_path
+    assert sd.parent.name == "DeepSeek-R1-0528"
+    # Timestamp shape: YYYYMMDDTHHMMSSZ
+    assert len(sd.name) == 16 and sd.name.endswith("Z") and "T" in sd.name
+    # Pin propagated for downstream callers + subprocesses
+    import os as _os
+    assert _os.environ[paths.ENV_CURRENT_SESSION_DIR] == str(sd)
+    assert paths.session_dir() == sd
+    # Per-session skeleton landed under sd
+    for sub in paths._SESSION_SKELETON:
+        assert (sd / sub).is_dir()
+    # Workspace skeleton landed under ws, not under sd
+    for sub in paths._WORKSPACE_SKELETON:
+        assert (tmp_path / sub).is_dir()
+        assert not (sd / sub).exists()
+
+
+def test_make_session_dir_sanitises_model_basename(tmp_path, monkeypatch):
+    """HF-style ids ('org/model'), absolute paths, and chars unsafe for
+    bash/Magpie scripts must all reduce to a filename-safe basename."""
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    # HF id
+    sd = paths.make_session_dir(model_name="meta-llama/Llama-3.1-70B-Instruct")
+    assert sd.parent.name == "Llama-3.1-70B-Instruct"
+
+
+def test_make_session_dir_flat_layout_via_env(tmp_path, monkeypatch):
+    """Env override forces legacy flat layout even when model_name is set."""
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    monkeypatch.setenv(paths.ENV_SESSION_LAYOUT, "flat")
+    sd = paths.make_session_dir(model_name="DeepSeek-R1-0528")
+    assert sd == tmp_path
+
+
+def test_make_session_dir_overwrites_stale_pin(tmp_path, monkeypatch):
+    """Subsequent make_session_dir() calls (e.g. a second test in the
+    same process) overwrite the pin so cross-test pollution is
+    impossible."""
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    sd1 = paths.make_session_dir(model_name="A")
+    sd2 = paths.make_session_dir(model_name="B")
+    assert sd1 != sd2
+    import os as _os
+    assert _os.environ[paths.ENV_CURRENT_SESSION_DIR] == str(sd2)
+    assert paths.session_dir() == sd2
+
+
+def test_runtime_dir_is_workspace_shared(tmp_path, monkeypatch):
+    """N17: runtime/ + Magpie/ + source-mirrors/ live under
+    workspace_root, NOT under per-session subdir."""
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    sd = paths.make_session_dir(model_name="DeepSeek-R1-0528")
+    assert paths.runtime_dir(sd) == tmp_path / "runtime"
+    assert paths.magpie_dir(sd) == tmp_path / "runtime" / "Magpie"
+    assert paths.source_mirrors_dir(sd) == tmp_path / "runtime" / "source-mirrors"
+    # Also true when caller passes the historical no-arg form (back-compat)
+    assert paths.runtime_dir() == tmp_path / "runtime"
 
 
 # ---------------------------------------------------------------------------
