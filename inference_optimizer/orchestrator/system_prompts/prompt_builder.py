@@ -44,8 +44,16 @@ from ..action_registry import (
 FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
-    # analysis
-    "profile", "pmc_roofline", "deep_kernel_analysis",
+    # analysis — `roofline` is the composite action (profile + trace_analyze
+    # in one shot), replacing the standalone `profile` + `pmc_roofline`
+    # actions per roofline-v2 D1/N2. The latter two executors remain
+    # registered for stale-state.json resume compatibility (cli.py
+    # _REAL_EXECUTORS_KERNEL_ONLY) and to let RooflineExecutor invoke
+    # `profile` internally, but they MUST NOT be proposed directly by
+    # the LLM — surface only `roofline` in the catalogue + critic
+    # approve list + scoring priors so the orchestration loop has a
+    # single canonical entry point.
+    "roofline", "deep_kernel_analysis",
     # explore
     "backends", "params", "sweep",
     # deep — kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
@@ -65,7 +73,10 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
 NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
-    # explore (no profile — it only feeds kernel-opt)
+    # analysis — roofline is still useful in no-kernel mode for the
+    # snapshot it provides (cheap actions consume it via discovered_flags)
+    "roofline",
+    # explore
     "backends", "params", "sweep",
     # validate (still useful — bench the stacked backends/params)
     "validate_stack",
@@ -510,26 +521,22 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "An explore round that produces zero new ideas is a bug — heartbeat",
         "with body_md='idea-pipeline-empty' so Robustness can intervene.",
         "",
-        "### PMC roofline (dual mode)",
+        "### Roofline analysis (composite action)",
         "",
-        "Use `pmc_roofline` after `profile` when you need hardware counters /",
-        "roofline charts. Two deployment modes:",
+        "Propose `roofline` whenever you need a fresh TraceLens snapshot:",
+        "right after baseline (snapshot #1), then between every interleaved",
+        "round of cheap exploration (backends + params) so kernel_opt sees",
+        "the post-exploration hot-kernel distribution rather than the",
+        "baseline one. The executor internally runs `profile` + `trace_analyze`",
+        "in one shot; do NOT propose `profile` or the legacy `pmc_roofline`",
+        "directly — they are kept registered for back-compat only and the",
+        "PolicyGate hard-blocks direct profile proposals (N9, see",
+        "design/roofline-v2.md §6.5/§6.5.1 for the full enforcement chain).",
         "",
-        "**RayJob mode (production)** — omit `server_cmd`; Coordinator derives",
-        "it from `baseline_config_path` / materialized Magpie YAML. Set",
-        "`params.ray_worker=true` inside the Ray job so GPU allocation is",
-        "owned by Ray.",
-        "",
-        "    delegate{action_name='pmc_roofline',",
-        "        params={ray_worker: true,",
-        "                config_path: <SharedState.baseline_config_path>,",
-        "                output_dir: '<SESSION_DIR>/runs/pmc_roofline/<round>'},",
+        "    delegate{action_name='roofline',",
+        "        params={notes: 'baseline snapshot' | 'post-backends-N snapshot' | ...},",
         "        predicted_gain_pct: 0,",
-        "        notes: 'PMC roofline via Ray — server_cmd auto-derived'}",
-        "",
-        "**Local debug mode** — set `allow_direct_gpu=true` (or export",
-        "`HYPERLOOM_ALLOW_DIRECT_PMC_ROOFLINE=1`) and pass explicit",
-        "`server_cmd` + `health_url` when no Ray worker is available.",
+        "        notes: 'TraceLens analysis.md will appear in shared_state.last_trace_analyze'}",
     ])
     return lines
 
