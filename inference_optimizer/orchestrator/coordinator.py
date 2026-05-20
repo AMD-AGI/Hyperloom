@@ -811,11 +811,13 @@ class Coordinator:
           (KB_design §3.2 §5.3 step 1 + KB_gaps/Gap-04). Idempotent
           via a fixed-suffix idempotency_key; skipped on resume when
           a trace already exists or when ``--no-kernel``.
+        * ``SWEEP`` — auto-enqueue ``sweep`` with a recipe-driven
+          (or defaults-driven) grid so SWEEP doesn't degrade to
+          "LLM 自觉发 sweep" (KB_design §3.2 §5.4 + KB_gaps/Gap-05).
+          Same idempotency contract as KERNEL.
 
         Future:
 
-        * ``SWEEP`` — auto-enqueue ``sweep`` with recipe-driven grid
-          (KB_gaps/Gap-05).
         * ``CLOSE`` — 5-step sequencer (KB_gaps/Gap-06).
         """
         target = (to_phase or "").upper()
@@ -823,7 +825,9 @@ class Coordinator:
             await self._on_enter_explore(from_phase=from_phase)
         elif target == _phase_state.PHASE_KERNEL:
             await self._on_enter_kernel(from_phase=from_phase)
-        # SWEEP / CLOSE land here without effects until KB_gaps/Gap-05/06.
+        elif target == _phase_state.PHASE_SWEEP:
+            await self._on_enter_sweep(from_phase=from_phase)
+        # CLOSE lands here without effects until KB_gaps/Gap-06.
 
     async def _on_enter_explore(self, *, from_phase: str) -> None:
         """KB_gaps/Gap-02 PR 5.4 — warm the PR feed across every
@@ -1024,6 +1028,247 @@ class Coordinator:
                 "phase entry evidence: SharedState.save failed for kvs=%r",
                 kvs,
             )
+
+    # ------------------------------------------------------------------
+    # v0.8 §3.2 §5.4 + KB_gaps/Gap-05 — SWEEP phase auto-dispatch
+    # ------------------------------------------------------------------
+    async def _on_enter_sweep(self, *, from_phase: str) -> None:
+        """Auto-enqueue a ``sweep`` task on SWEEP entry.
+
+        KB_design §3.2 §5.4: SWEEP must "自动构造 sweep grid (来自
+        SKILL.md 默认 grid + Cortex ``recipe.sweep_grid`` 字段, 后者
+        优先), 自动 enqueue ``sweep`` action". Without this hook the
+        phase degrades to "LLM 自觉发 sweep" — and if ``max_minutes``
+        runs out before the LLM proposes, ``_enter_closing_phase``
+        force-enqueues report and the run finishes with zero sweep
+        coverage. Operators lose the cross-workload validation that
+        SWEEP exists to provide (§3.2 §5.4 first paragraph).
+
+        Idempotent via ``idempotency_key='internal-sweep-phase_entry'``:
+        a re-entry (defended against by Inv-2.1 in production, but
+        possible in tests / operator scripts) reuses the existing
+        task instead of duplicating.
+
+        After enqueue, stamps ``phase_history[-1].evidence`` with
+        ``auto_sweep_enqueued=True`` + ``auto_sweep_task_id`` +
+        ``auto_sweep_grid_source`` + ``auto_sweep_combos`` so the
+        breakdown collector (KB_design §3.12) can verify the hook
+        fired and which grid source was used.
+
+        LLM remains free to ``propose_action='sweep'`` after this hook
+        runs — duplicate proposals will collide with their own
+        ``idempotency_key`` derived from the proposal_msg_id (a
+        different key from the internal one), so the LLM-emitted
+        sweep would create a second task. PolicyGate's phase
+        allowlist still permits sweep in SWEEP phase; the auto-hook
+        only guarantees a sweep runs at all.
+        """
+        state = self.shared_state
+        try:
+            task = await self._enqueue_internal_sweep_task(
+                reason="phase_entry",
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception(
+                "SWEEP entry hook: failed to enqueue auto-sweep: %r", exc,
+            )
+            self._record_phase_entry_evidence(auto_sweep_error=repr(exc)[:240])
+            return
+        # The params dict carries the chosen grid + source so we can
+        # mirror them onto the phase_history evidence without
+        # re-running the recipe lookup.
+        grid_source = str(task.params.get("source") or "")
+        isl_osl = task.params.get("isl_osl_configs") or []
+        conc_values = task.params.get("conc_values") or []
+        # Combos = |conc_values| × |isl_osl_configs| (sweep executor
+        # fans out CONC × (ISL,OSL)).
+        combos = int(len(conc_values)) * int(len(isl_osl)) if (
+            conc_values and isl_osl
+        ) else 0
+        log.info(
+            "SWEEP entry (from=%s): auto-enqueued sweep task=%s "
+            "(grid_source=%s, combos=%d)",
+            from_phase or "<unknown>", task.task_id, grid_source, combos,
+        )
+        self._record_phase_entry_evidence(
+            auto_sweep_enqueued=True,
+            auto_sweep_task_id=task.task_id,
+            auto_sweep_grid_source=grid_source,
+            auto_sweep_combos=combos,
+        )
+
+    async def _enqueue_internal_sweep_task(
+        self, *, reason: str,
+    ) -> Task:
+        """Build + enqueue a Coordinator-internal ``sweep`` task.
+
+        Mirrors the Gap-04 :meth:`_enqueue_internal_profile_task`
+        contract: ``source='coordinator_internal'``, ``reason``
+        verbatim into the idempotency_key suffix, ``config_path`` /
+        ``base_extra_args`` inherited from SharedState so the sweep
+        executor honours the workload contract + current_best
+        configuration.
+
+        Grid source priority (KB_design §3.2 §5.4 step 1):
+
+        1. ``state.warm_start_recipe.sweep_grid`` — Cortex-recorded
+           grid from a prior session for this (model, gpu) combo.
+        2. SKILL.md defaults (``sweep.DEFAULT_CONC_VALUES`` /
+           ``DEFAULT_ISL_OSL`` / ``DEFAULT_NUM_PROMPTS_FACTOR``).
+
+        Idempotency key: ``internal-sweep-<reason>``.
+
+        Returns the freshly-created (or returned-existing) Task. The
+        caller reads ``task.task_id`` + ``task.params['source']`` for
+        logging / evidence stamping.
+        """
+        state = self.shared_state
+        grid_params = self._build_sweep_params_from_recipe(state)
+        params: dict[str, Any] = {
+            "source": grid_params["source"],
+            "reason": str(reason),
+            "conc_values":      list(grid_params["conc_values"]),
+            "isl_osl_configs":  list(grid_params["isl_osl_configs"]),
+            "num_prompts_factor": int(grid_params["num_prompts_factor"]),
+        }
+        if state.baseline_config_path:
+            params["config_path"] = state.baseline_config_path
+        cb = state.current_best or {}
+        if isinstance(cb, dict):
+            cb_args = str(cb.get("extra_sglang_args") or "")
+            if cb_args:
+                params["base_extra_args"] = cb_args
+        # Mirror the last-baseline benchmark_script when present so a
+        # sweep run that re-launches sglang/vllm uses the same shell
+        # wrapper as baseline (matches Gap-04 _enqueue_internal_profile_task).
+        last_bl = state.last_baseline or {}
+        if isinstance(last_bl, dict):
+            bs = str(last_bl.get("benchmark_script") or "").strip()
+            if bs:
+                params["benchmark_script"] = bs
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="sweep",
+            params=params,
+            idempotency_key=f"internal-sweep-{reason}",
+        )
+        if was_existing:
+            log.info(
+                "internal-sweep task already exists (idempotent: "
+                "task_id=%s, state=%s)", task.task_id, task.state,
+            )
+        return task
+
+    @staticmethod
+    def _build_sweep_params_from_recipe(state: SharedState) -> dict[str, Any]:
+        """Pick a sweep grid: Cortex recipe first, defaults fallback.
+
+        KB_design §3.2 §5.4: "来自 SKILL.md 默认 grid + Cortex
+        ``recipe.sweep_grid`` 字段, 后者优先". The recipe lookup is
+        defensive — at the time of writing the Cortex T0 response is
+        still free-text under ``warm_start_recipe.raw``; a future
+        Cortex schema PR (§3.14 R-13) will add a structured
+        ``sweep_grid`` field. This helper accepts either:
+
+        * ``warm_start_recipe['sweep_grid'] = {conc_values: [...],
+          isl_osl_configs: [...], num_prompts_factor: int}`` — direct
+          structured form (preferred when it arrives).
+        * Anything else → defaults.
+
+        Returns a dict with keys ``source`` / ``conc_values`` /
+        ``isl_osl_configs`` / ``num_prompts_factor``. ``source`` is
+        one of ``cortex_recipe`` / ``skill_md_default`` so downstream
+        observability (breakdown.sweep.grid_source) can tell which
+        path won.
+
+        Defensive against malformed recipe entries:
+
+        * Non-dict ``warm_start_recipe`` → defaults.
+        * Non-dict ``sweep_grid`` → defaults.
+        * ``conc_values`` not a non-empty list → fall back to the
+          SKILL.md default for that single field.
+        * Same for ``isl_osl_configs``.
+        * ``num_prompts_factor`` not a positive int → default.
+
+        (Per-field fallback rather than all-or-nothing lets a recipe
+        that only overrides one dimension still benefit from the
+        defaults for the others.)
+        """
+        from .action_executors.sweep import (
+            DEFAULT_CONC_VALUES,
+            DEFAULT_ISL_OSL,
+            DEFAULT_NUM_PROMPTS_FACTOR,
+        )
+
+        recipe = getattr(state, "warm_start_recipe", None)
+        sweep_grid = None
+        if isinstance(recipe, dict):
+            sg = recipe.get("sweep_grid")
+            if isinstance(sg, dict):
+                sweep_grid = sg
+
+        def _coerce_int_list(value: Any) -> list[int] | None:
+            if not isinstance(value, list) or not value:
+                return None
+            out: list[int] = []
+            for v in value:
+                try:
+                    out.append(int(v))
+                except (TypeError, ValueError):
+                    return None
+            return out if out else None
+
+        def _coerce_isl_osl_list(value: Any) -> list[str] | None:
+            if not isinstance(value, list) or not value:
+                return None
+            out: list[str] = []
+            for v in value:
+                # Accept either "<ISL>:<OSL>" strings or [isl, osl] pairs.
+                if isinstance(v, str) and ":" in v:
+                    out.append(v)
+                    continue
+                if (
+                    isinstance(v, (list, tuple)) and len(v) == 2
+                    and all(isinstance(x, (int, str)) for x in v)
+                ):
+                    out.append(f"{int(v[0])}:{int(v[1])}")
+                    continue
+                return None
+            return out if out else None
+
+        conc_values: list[int] = list(DEFAULT_CONC_VALUES)
+        isl_osl_configs: list[str] = list(DEFAULT_ISL_OSL)
+        num_prompts_factor: int = int(DEFAULT_NUM_PROMPTS_FACTOR)
+        used_recipe = False
+
+        if sweep_grid is not None:
+            cv = _coerce_int_list(sweep_grid.get("conc_values"))
+            if cv is not None:
+                conc_values = cv
+                used_recipe = True
+            io = _coerce_isl_osl_list(sweep_grid.get("isl_osl_configs"))
+            if io is not None:
+                isl_osl_configs = io
+                used_recipe = True
+            npf_raw = sweep_grid.get("num_prompts_factor")
+            try:
+                npf = int(npf_raw) if npf_raw is not None else None
+            except (TypeError, ValueError):
+                npf = None
+            if npf is not None and npf > 0:
+                num_prompts_factor = npf
+                used_recipe = True
+            if not used_recipe:
+                log.warning(
+                    "sweep recipe present but unusable (no recognisable "
+                    "fields); falling back to SKILL.md defaults"
+                )
+
+        return {
+            "source": "cortex_recipe" if used_recipe else "skill_md_default",
+            "conc_values":        conc_values,
+            "isl_osl_configs":    isl_osl_configs,
+            "num_prompts_factor": num_prompts_factor,
+        }
 
     def _ensure_action_scores_seeded(self) -> None:
         """v0.8 §3.9 — no-op stub.
