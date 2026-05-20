@@ -22,8 +22,13 @@ objective progress.
 
 The CLI starts a Python Coordinator that coordinates:
 
-- Orchestration: decides next actions (`baseline`, `profile`, `backends`, `params`, `sweep`, Kernel requests, `report`).
+- Orchestration: decides next actions (`baseline`, `profile`, `backends`, `params`, `sweep`, Kernel requests, Framework requests, `report`).
 - Kernel: responder path for `select_kernels`, `run_optimization`, `integrate`.
+- Framework (5th role, opt-in via `--framework-agent` / `--framework-mock` /
+  `--framework-codex-bare`): responder path for `framework_optimize` (AST scan
+  vllm/sglang source + propose patch) and `framework_integrate` (apply patch
+  + bench + accuracy gate). Off by default in P1 dead-path; ships handlers
+  + mock backend in PR-B. See "Framework Backend Selection" section.
 - Critic: proposal review (default: `--critic-agent` — drives the
   `critic-agent/` skill runtime with KB priors / session memory /
   `review_constraints`-gated verdicts). `--critic-mock` for offline /
@@ -55,7 +60,12 @@ in `.env.template`).
 │   ├── params/<task_id>/{variant_NN_*/, combo/, result.json}
 │   ├── sweep/<task_id>/
 │   ├── integrate/<task_id>/
-│   └── kernel_opt/<kernel_id>/<task_id>/
+│   ├── kernel_opt/<kernel_id>/<task_id>/
+│   └── framework/<task_id>/                 # 5th-role artefacts (PR-B+)
+│       ├── ast_findings.json
+│       ├── proposal.diff
+│       ├── envelope.json
+│       └── stage_log.jsonl
 ├── kernel-agent-workspace/<kernel_id>/   # cross-task GEAK/OOB artefacts
 ├── kernel-agent/runs/<session_id>/       # kernel-agent CLI tool outputs
 ├── patches/<kernel_id>/                  # KEEP'd patches + backup
@@ -546,6 +556,47 @@ with `runtime/cli.py`, then runs `python -m runtime.cli --help` (5s
 timeout) before the Coordinator boots. Missing or broken runtime
 aborts the run with a clear error pointing at `--critic-mock` /
 `--critic-codex-bare` as bypasses.
+
+## Framework Backend Selection
+
+The 5th Framework role (vllm/sglang source-layer optimisation) has
+three opt-in backend modes (mutually exclusive) plus a default "off"
+state. PR-A1/A2/B ship the protocol mesh + mock backend; PR-F lands the
+real subprocess bridge; PR-G ships real patch propose; PR-H ships real
+patch apply + bench + accuracy gate.
+
+| Flag | Backend class | When to use |
+|---|---|---|
+| (none) | -- | Off (dead-path). Coordinator drops `framework` from `role_registry`; `framework_optimize` / `framework_integrate` actions stripped from orchestration prompt. |
+| `--framework-agent` | `FrameworkAgentBackend` | Production: real `framework-agent/agent/cli.py` subprocess bridge (PR-F+). |
+| `--framework-mock` | `FrameworkMockBackend` | CI / 5-role smoke without API keys or vllm/sglang source mounts. Handler returns canned `OptimizeSuccess` / `IntegrateSuccess(KEEP)` envelopes. |
+| `--framework-codex-bare` | `CodexBackend` (Codex no-tools) | Fallback when Claude is rate-limited. |
+
+The three `--framework-*` flags are argparse-mutually-exclusive among
+themselves; `--no-framework` cross-checks against the trio and exits
+rc=2 if both are set.
+
+### AST scan controls (P2+)
+
+| Flag | Effect |
+|---|---|
+| (default) | AST scan ON for **the session's `--framework` value only** (e.g. `--framework sglang` -> scan sglang). `discovered_flags` written to SharedState; consumed by `params` next round. |
+| `--no-framework-ast` | Skip AST scan; LLM patch propose still runs using KB priors only; `discovered_flags` stays empty. |
+| `--framework-ast-frameworks vllm,sglang` | Force cross-framework scan (rarely needed; useful when running a sglang session but wanting vllm flag discovery as priors). |
+
+Default behaviour aligns to `--framework` so a typical `--framework
+sglang` run does not waste 30s-2min scanning vllm sources that won't
+be patched. P1 only plumbs the flags through to SharedState; P2 PR-E
+short-circuits the AST scanner; P2 PR-F threads the value into
+`ExploreRequest`.
+
+### Required env when `--framework-agent` is active (PR-F+)
+
+| Var | Purpose | Default |
+|---|---|---|
+| `FRAMEWORK_AGENT_ROOT` | Path to the `framework-agent/` install. | sibling `$REPO_ROOT/framework-agent/` |
+| `VLLM_SOURCE_ROOT` / `SGLANG_SOURCE_ROOT` | Framework source roots for AST scan. | Probes `/sgl-workspace/{vllm,sglang}` then site-packages. |
+| `ANTHROPIC_API_KEY` | Claude credentials. | -- |
 
 ### Per-turn artefacts (audit trail)
 

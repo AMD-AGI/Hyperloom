@@ -1,128 +1,90 @@
----
-name: framework-agent
-description: |
-  Explores serving framework PRs and refs for Hyperloom inference runs.
-  Discovers candidate PRs from Primus Cortex (internal) + GitHub (public),
-  runs them in isolated git worktrees + venvs, and contributes findings
-  back to a 4-file KB. Operates standalone - does NOT integrate with
-  inference_optimizer's 5-role mesh. Use when testing vLLM, SGLang, ROCm
-  fork, or upstream performance PRs before handing a winner to operator.
-globs:
-  - "**/framework*"
-  - "**/vllm*"
-  - "**/sglang*"
-  - "**/scheduler*"
-  - "**/engine_args*"
----
+# Framework Agent — Sibling Skill (v0.7)
 
-# Framework Agent
+> **Purpose**: vllm/sglang source-layer optimisation companion for
+> `inference_optimizer`. Two protocols co-exist in this package:
+>
+> 1. **`fa candidates` / `fa explore`** — legacy PR exploration tool
+>    (PR discovery via Primus Cortex + GitHub Search, applied as
+>    bandit-arm imports). Used by `inference_optimizer`'s
+>    `framework_pr` arm.
+> 2. **`fa agent` (PR-D+)** — new sibling-skill protocol for the 5th
+>    Framework role in `inference_optimizer`. Two-stage subprocess
+>    bridge (`prepare-task` / `commit-result`) used by
+>    `FrameworkAgentBackend`. PR-D ships the skeleton; PR-E adds AST
+>    scanner; PR-F wires the IO handler.
+>
+> Both share the same Python package (`framework_agent`) and
+> `fa` / `framework-agent` console entry points.
 
-Framework Agent is a **standalone** PR/ref exploration agent for serving
-frameworks. It does NOT bring up broken model/backend triplets, does NOT
-patch vendor files, does NOT optimize kernels. It does NOT mutate the
-active environment; promotion is manual-only.
+## Co-existing layouts
 
-## Architecture choice
+```
+framework-agent/
+├── src/framework_agent/        # python package
+│   ├── runtime/cli.py          # legacy: fa candidates / fa explore / fa kb
+│   ├── explorer.py             # legacy: explore loop (libcst-free)
+│   ├── isolation.py            # legacy: per-candidate worktree+venv
+│   ├── decision.py             # legacy: 3-gate winner decision
+│   ├── logging_setup.py        # shared: structured logging
+│   ├── sources/                # legacy: primus_cortex + github
+│   └── agent/                  # NEW (PR-D+): sibling-skill cli + envelope + scanner
+├── kb/
+│   └── framework_optimization/ # NEW (PR-I): KB partition seeds + lessons
+├── scripts/install.sh          # NEW (PR-D): idempotent installer
+├── pyproject.toml              # libcst, patch-ng, jsonschema deps land in PR-D
+└── tests/                      # legacy + agent/ tests
+```
 
-This skill is **NOT** part of the inference_optimizer 5-role mesh. It is
-a sibling skill that can be invoked by:
+## Lifecycle by PR
 
-1. Operators (via `fa explore --request request.json`)
-2. CI pipelines (same CLI)
-3. LLM specialists in Arbor/TBO/Hyperloom (via `from framework_agent.runtime.tools_api import ...`)
-
-Compared to inference_optimizer's kernel-agent / critic-agent /
-robustness-agent, framework-agent does NOT emit Coordinator intents,
-does NOT participate in REQUEST/RESPONSE protocol, does NOT have a
-PolicyGate-enforced role. It's a pure tool, not a protocol agent.
-
-## Setup
-
-This skill is two commands:
-
-    export REPO_ROOT="$(pwd)"
-    bash $WORKSPACE_PATH/framework-agent/scripts/install.sh
-    . $WORKSPACE_PATH/framework-agent/runtime/env.sh
-
-`install.sh` is idempotent and prepares:
-
-- `pip install -e .` of this package
-- optional `ast` extra can install libcst for future AST scanning; base install does not need it
-- detect /sgl-workspace/{vllm,sglang} availability (WARN-only)
-- inherit auth aliases (GITHUB_TOKEN, PRIMUS_CORTEX_PR_API)
-- write framework-agent.env.sh with FRAMEWORK_AGENT_ROOT, default KB dir
-
-## CLI subcommands
-
-| Subcommand | Purpose | Reads | Writes |
-|---|---|---|---|
-| `fa explore` | Full pipeline: enumerate -> enrich -> filter -> isolate -> execute -> decide -> kb | request.json | summary.json + work_dir/ |
-| `fa candidates` | Enumerate + filter only (no execute) | request.json | candidates.json |
-| `fa schema` | Print request schema summary | - | stdout |
-| `fa kb {list,show,search,synthesize}` | KB operations | - | various |
-
-Use `--execute` only when the request contains trusted command templates
-and the node is ready for GPU work.
-
-## Allowed tools (per-stage)
-
-| Stage | Tools |
+| PR | What this skill grows |
 |---|---|
-| keyword extraction | Read (local), pure-Python |
-| enumeration | urllib (Primus Cortex + GitHub API) |
-| enrichment | urllib (Primus Cortex pr_get + pr_files) |
-| filter | pure-Python |
-| audit dump | urllib + file write |
-| isolation | git, python -m venv |
-| execute | Bash (template render + subprocess) |
-| decide | pure-Python |
-| kb | file append |
+| PR-A1/A2/B (IO) | Coordinator side only — handlers + mock backend land in `inference_optimizer`. This skill is unchanged. |
+| **PR-D** | `agent/cli.py` (`prepare-task` / `commit-result`), `agent/envelope.py` (jsonschema), `scripts/install.sh`. |
+| **PR-E** | `agent/source_resolver.py` + `agent/ast_scanner.py` (libcst) + `agent/grep_scanner.py` (fallback) + `agent/flag_discovery.py`. |
+| **PR-F** | `FrameworkAgentBackend` (IO side) wires to `fa agent` via subprocess; `discovered_flags` start flowing into `SharedState`. |
+| **PR-G** | `agent/patch_proposer.py` + `agent/kb_priors.py` — real LLM-loop diff generation. |
+| **PR-H** | Coordinator-side `framework_integrate_handler` real impl (lives in `inference_optimizer`, not this skill). |
+| **PR-I** | `kb/framework_optimization/` seeds + robustness recover wiring. |
 
-## Output
+## Operation Protocol (PR-D+ vision)
 
-A single `summary.json` per `explore` run (schema in references/).
+`fa agent` exposes two subcommands matching design §9.1:
 
-`work_dir/` layout (one dir per candidate, with per-stage logs + audit
-material + KB partition writes).
+```bash
+# Stage A: LLM bundle preparation. inputs come from the IO Coordinator
+# (target_framework, session_dir, kb_partition, ast_scan_enabled,
+# ast_frameworks). Outputs a JSON bundle the LLM (Claude / Codex) consumes.
+fa agent prepare-task \
+  --task /path/to/task.json \
+  --output-bundle /path/to/bundle.json
 
-## Operation Protocol (for LLM specialists)
+# Stage B: envelope validation + persistence. LLM-generated envelope is
+# validated against the §4.6 jsonschema, persisted to
+# runs/framework/<task_id>/envelope.json, and echoed to stdout for the
+# Coordinator to consume.
+fa agent commit-result \
+  --envelope /path/to/envelope.json \
+  --task-id <task_id>
+```
 
-If invoked via `tools_api.py`:
+The four `RESPONSE` envelopes (`OptimizeSuccess` / `OptimizeFailure` /
+`IntegrateSuccess` / `IntegrateFailure`) live in
+`src/framework_agent/agent/envelope.py` (PR-D).
 
-    from framework_agent.runtime.tools_api import (
-        find_relevant_prs_smart,
-        fetch_pr_audit_material,
-        evaluate_candidate_outcome,
-    )
+## Smoke (PR-D+)
 
-LLM may freely call these - they wrap the same internal modules as the
-CLI. No two-phase prepare/commit dance is required (unlike critic-agent).
+```bash
+fa agent --help                # rc=0, lists subcommands
+fa agent prepare-task --help   # rc=0, lists --task / --output-bundle
+fa agent commit-result --help  # rc=0
+```
 
-## Safety Rules
+## KB partition (PR-I)
 
-- Never edit `inference_optimizer/` from this agent.
-- Never install candidate packages into the main environment.
-- Each candidate gets its own git worktree and virtualenv.
-- Candidate promotion is manual-only.
-- A winner must pass throughput + accuracy gates before `winner=true`.
-- Primus Cortex transport / parse error is a hard fail, NOT a silent fallback.
-
-## Failure handling
-
-| Symptom | Recovery |
-|---|---|
-| FRAMEWORK_AGENT_ROOT not set | install.sh re-run, source env.sh |
-| Primus Cortex unreachable when configured | rc=2 hard-fail |
-| GitHub rate-limit (best-effort path) | return empty, log WARN, continue |
-| Single candidate git fetch fails | per-candidate skip, continue rest |
-| disk_preflight: < 20 GiB free | rc=2 hard-fail |
-| AST scanner dependency missing | base install does not include AST; install `.[ast]` to enable |
-
-## KB partitions
-
-This skill writes to `${FRAMEWORK_AGENT_KB_DIR}/<domain>/empirical_kb.md`.
-Default domain mapping: see references/kb_4file_schema.md (delivered in a
-follow-up PR).
-
-Ingest happens at end of every `fa explore` run, including failures
-(category=pitfall when revert).
+Read priors before generating a patch; write lessons only after a KEEP
+verdict from `framework_integrate`. Path:
+`kb/framework_optimization/`. Seeds shipped in PR-I cover 8 known
+patterns (vllm chunked prefill, sglang radix tree, PagedAttention
+block size, sampler / KV quant / FP8 boundaries, block_manager OOM
+pitfall, scheduler.py token loss pitfall).

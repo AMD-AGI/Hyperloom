@@ -388,6 +388,14 @@ class SharedState:
         filtered["backends_search"] = cls._migrate_search_ledger(
             filtered.get("backends_search"), schema_target=1,
         )
+        # tuple-typed fields need explicit re-coercion since json.load
+        # decodes them as list, breaking dataclass type hints +
+        # downstream identity checks.
+        ast_frameworks = filtered.get("framework_ast_frameworks")
+        if isinstance(ast_frameworks, list):
+            filtered["framework_ast_frameworks"] = tuple(
+                str(x) for x in ast_frameworks
+            )
         return cls(**filtered)
 
     @staticmethod
