@@ -3157,8 +3157,31 @@ def collect_kb_provenance(
     # canonical_id qualify; we surface kind/authority/source so the
     # ``pr_node`` rows (M4) are distinguishable from
     # ``optimization_node`` / ``workload_node`` / ``issue_node``.
+    #
+    # KB_gaps/Gap-08 — same walk also aggregates verify outcomes into
+    # ``edges_promoted`` / ``edges_negated`` lists so the breakdown
+    # reader can answer "which edges did this session promote /
+    # refute?" without re-parsing NDJSON. We look for both async
+    # (``op=enqueue, envelope_op=verify``) and sync
+    # (``op=cli, args=['session','verify',...]``) rows; dedup by edge_id
+    # so a flushed enqueue + its later sync replay don't double-count.
     points_created: list[dict[str, Any]] = []
     points_by_kind: dict[str, int] = {}
+    edges_promoted: list[str] = []
+    edges_negated: list[str] = []
+    _seen_verify_edges: set[str] = set()
+
+    def _record_verify(edge_id: str, outcome: str) -> None:
+        if not edge_id or edge_id in _seen_verify_edges:
+            return
+        outcome_l = (outcome or "").strip().lower()
+        if outcome_l == "confirmed":
+            edges_promoted.append(edge_id)
+            _seen_verify_edges.add(edge_id)
+        elif outcome_l == "refuted":
+            edges_negated.append(edge_id)
+            _seen_verify_edges.add(edge_id)
+
     try:
         if audit_path.exists():
             seen: set[tuple[str, str]] = set()
@@ -3173,25 +3196,54 @@ def collect_kb_provenance(
                         continue
                     if not isinstance(row, dict):
                         continue
-                    if str(row.get("op") or "") != "propose_point":
-                        continue
-                    canonical = str(row.get("canonical_id") or "").strip()
-                    kind = str(row.get("kind") or "").strip()
-                    if not canonical or not kind:
-                        continue
-                    key = (canonical, kind)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    points_created.append({
-                        "canonical_id": canonical,
-                        "kind":         kind,
-                        "authority":    str(row.get("authority") or ""),
-                        "source":       str(row.get("source") or ""),
-                        "status":       str(row.get("status") or ""),
-                        "ts":           str(row.get("ts") or ""),
-                    })
-                    points_by_kind[kind] = points_by_kind.get(kind, 0) + 1
+                    op_name = str(row.get("op") or "")
+                    if op_name == "propose_point":
+                        canonical = str(row.get("canonical_id") or "").strip()
+                        kind = str(row.get("kind") or "").strip()
+                        if not canonical or not kind:
+                            continue
+                        key = (canonical, kind)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        points_created.append({
+                            "canonical_id": canonical,
+                            "kind":         kind,
+                            "authority":    str(row.get("authority") or ""),
+                            "source":       str(row.get("source") or ""),
+                            "status":       str(row.get("status") or ""),
+                            "ts":           str(row.get("ts") or ""),
+                        })
+                        points_by_kind[kind] = points_by_kind.get(kind, 0) + 1
+                    elif (
+                        op_name == "enqueue"
+                        and str(row.get("envelope_op") or "") == "verify"
+                    ):
+                        _record_verify(
+                            str(row.get("payload_edge") or ""),
+                            str(row.get("payload_outcome") or ""),
+                        )
+                    elif op_name == "cli":
+                        args = row.get("args") or []
+                        if (
+                            isinstance(args, list)
+                            and len(args) >= 4
+                            and args[0] == "session"
+                            and args[1] == "verify"
+                        ):
+                            edge_id = ""
+                            outcome = ""
+                            i = 2
+                            while i < len(args) - 1:
+                                if args[i] == "--edge":
+                                    edge_id = str(args[i + 1] or "")
+                                    i += 2
+                                elif args[i] == "--outcome":
+                                    outcome = str(args[i + 1] or "")
+                                    i += 2
+                                else:
+                                    i += 1
+                            _record_verify(edge_id, outcome)
     except OSError as exc:
         warnings.append(f"kb_provenance: failed to scan {audit_path}: {exc!r}")
 
@@ -3235,6 +3287,10 @@ def collect_kb_provenance(
             points_created, key=lambda r: r.get("canonical_id", ""),
         ),
         "points_by_kind":        points_by_kind,
+        # KB_gaps/Gap-08 / KB_design §3.12 §4.4 — per-edge T3
+        # verify roll-up. Sorted for stable diffing.
+        "edges_promoted":        sorted(edges_promoted),
+        "edges_negated":         sorted(edges_negated),
         "commit_summary": {
             "status":             str(commit_summary.get("status") or "")
                 if isinstance(commit_summary, dict) else "",
