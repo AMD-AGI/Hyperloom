@@ -112,7 +112,16 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.ALERT:           ("severity", "summary"),
     IntentType.REQUEST:         ("target_agent", "kind"),
     IntentType.RESPONSE:        ("in_reply_to", "kind"),
-    IntentType.REVIEW_VERDICT:  ("target_proposal_msg_id", "verdict"),
+    # v0.8 KB_gaps/Gap-11 (KB_design §3.5 §5 / M5 §5 step 5): the
+    # ``verdict`` / ``verdict_map`` choice is mutually exclusive but
+    # one of them must be present. We require only the structural
+    # ``target_proposal_msg_id`` field here; the
+    # ``verdict``/``verdict_map`` mutual exclusion is enforced by
+    # :func:`_validate_review_verdict_payload` below (called from
+    # :func:`validate_envelope`) so the per-variant variant_name
+    # schema can be validated in one place alongside the v0.6 single-
+    # verdict shape.
+    IntentType.REVIEW_VERDICT:  ("target_proposal_msg_id",),
     IntentType.KILL_TASK:       ("task_id", "reason"),
     IntentType.FORCE_DISPATCH:  ("task_id", "reason"),
     IntentType.PRUNE_BRANCH:    ("family", "reason"),
@@ -156,7 +165,11 @@ EMIT_INTENT_TOOL_SCHEMA: dict[str, Any] = {
                     "reason?}; response: {in_reply_to, kind, status?, "
                     "result?}; review_verdict: {target_proposal_msg_id, "
                     "verdict ∈ approve/reject/redirect/advise/needs_review, "
-                    "reasoning, kb_evidence?} — Critic-only; "
+                    "reasoning, kb_evidence?} for single-proposal review, "
+                    "OR {target_proposal_msg_id, verdict_map: "
+                    "{variant_name: {verdict, rationale?}}} for batch "
+                    "explore review (v0.8 KB_gaps/Gap-11); the two "
+                    "shapes are mutually exclusive — Critic-only; "
                     "kill_task / force_dispatch / prune_branch / "
                     "escalate_strategy_change — Robustness-only (PolicyGate); "
                     "specialist_done: {gap_canonical_id, domain, "
@@ -229,8 +242,72 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
                     f"intents[{i}] (type={it.value}) missing required "
                     f"payload field: {required!r}"
                 )
+        # v0.8 KB_gaps/Gap-11 — REVIEW_VERDICT shape branch.
+        if it is IntentType.REVIEW_VERDICT:
+            _validate_review_verdict_payload(payload, index=i)
         validated.append(Intent(type=it, payload=dict(payload)))
     return validated
+
+
+def _validate_review_verdict_payload(
+    payload: dict[str, Any], *, index: int,
+) -> None:
+    """Enforce the v0.8 REVIEW_VERDICT envelope schema.
+
+    KB_design §3.5 §5 / M5 §5 step 5 — Critic Review returns one of:
+
+    * ``verdict``: legacy v0.6 single-verdict shape for one-proposal
+      reviews (kernel_opt / integrate / report / specialist dispatch
+      etc.). Free-form string; PolicyGate later checks it against
+      :data:`policy.REVIEW_VERDICTS`.
+    * ``verdict_map``: v0.8 batch shape — ``{variant_name:
+      {verdict: ..., rationale?: ...}}``. Required when the parent
+      proposal is a multi-variant ``explore`` grid (KB_gaps/Gap-11
+      §5.2). Per-variant verdict strings are also vetted by
+      PolicyGate.
+
+    The two fields are mutually exclusive; exactly one must be
+    present. PolicyGate handles the *content* validation (verdict
+    string vocab, variant_name vs original grid). This validator
+    only enforces structural shape so callers downstream (resume
+    rebuild + policy) can rely on at-most-one-present.
+    """
+    has_single = "verdict" in payload
+    has_map = "verdict_map" in payload
+    if not has_single and not has_map:
+        raise IntentValidationError(
+            f"intents[{index}] (type=review_verdict) must include either "
+            f"'verdict' (single) or 'verdict_map' (per-variant); both missing"
+        )
+    if has_single and has_map:
+        raise IntentValidationError(
+            f"intents[{index}] (type=review_verdict): 'verdict' and "
+            f"'verdict_map' are mutually exclusive (KB_design §3.5 §5)"
+        )
+    if has_map:
+        vm = payload["verdict_map"]
+        if not isinstance(vm, dict) or not vm:
+            raise IntentValidationError(
+                f"intents[{index}] (type=review_verdict).verdict_map must "
+                f"be a non-empty object keyed by variant_name"
+            )
+        for vname, entry in vm.items():
+            if not isinstance(vname, str) or not vname.strip():
+                raise IntentValidationError(
+                    f"intents[{index}] (type=review_verdict).verdict_map "
+                    f"keys must be non-empty variant names, got {vname!r}"
+                )
+            if not isinstance(entry, dict):
+                raise IntentValidationError(
+                    f"intents[{index}] (type=review_verdict).verdict_map"
+                    f"[{vname!r}] must be an object with at least a "
+                    f"'verdict' key, got {type(entry).__name__}"
+                )
+            if "verdict" not in entry:
+                raise IntentValidationError(
+                    f"intents[{index}] (type=review_verdict).verdict_map"
+                    f"[{vname!r}] missing required 'verdict' key"
+                )
 
 
 def parse_codex_validated_json(raw: str) -> list[Intent]:
