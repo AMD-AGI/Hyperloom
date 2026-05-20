@@ -164,24 +164,62 @@ sequence_actions = frozenset({
 
 ## 5. 验收口径
 
-- [ ] explore action 端到端工作: `_promote_to_shared_state` 走 explore
+- [x] explore action 端到端工作: `_promote_to_shared_state` 走 explore
       分支, `apply_explore_search_update` 调用计数 ≥ 1 per round
-- [ ] breakdown.capability_summary.explore.tested > 0 per fresh session
-- [ ] M3 验收清单第 1 条 (`breakdown.capability_summary` 只见 explore 行
-      作主行) 成立
-- [ ] backends / params / validate_stack yaml 物理删除
-- [ ] action_executors/backends.py / params.py / validate_stack.py 物理删除
-- [ ] `cli.py:_REAL_EXECUTORS_FULL` 不含三者
+      (Gap-10 落地了 A.5)
+- [x] breakdown.capability_summary.explore.tested > 0 per fresh session
+- [x] M3 验收清单第 1 条 (`breakdown.capability_summary` 只见 explore 行
+      作主行) 成立 — `_AUDIT_ACTIONS` 已收紧到
+      ``{baseline, profile, sweep, explore}``
+- [x] backends / params / validate_stack yaml 物理删除
+- [x] action_executors/backends.py / params.py / validate_stack.py 物理删除
+- [x] `cli.py:_REAL_EXECUTORS_FULL` 不含三者 (Gap-10 移除了注册)
 
-## 6. 风险 / 回退
+## 6. 实际落地 (2026-05-20, 合并 Dead-A.5 + Phase 1 + Phase 2)
 
-- **explore promote 失败**: A.5 修复后, fresh session 的所有 EXPLORE
-  收益走 explore 路径. 若 promote 函数有 bug, 整个 session 收益归零.
-  缓解: A.5 上线后跑双对比 session (一个 fresh v0.8 + 一个 legacy fallback).
-- **回退**: 仅回退 Phase 1 (保留 legacy) — A.5 修复可独立保留.
+* **A.5 (explore promote)** 由 Gap-10 落地, 本次复用.
+* **物理删除**: 3 yaml (`actions/_meta/{backends,params,validate_stack}.yaml`)
+  + 3 executor 模块 (`action_executors/{backends,params,validate_stack}.py`)
+  + 1 agent doc (`actions/validate_stack.md`) + 6 legacy 测试文件
+  (`test_{backends_search,params_search,p2_3_param_executors,
+  validate_stack,p2_5_grid_promotion,p3_search_space_expansion}.py`).
+* **coordinator.py 收紧**: `_promote_to_shared_state` 删除
+  `validate_stack` + 合并 ``("backends","params","sweep")`` 块为
+  sweep-only ~25 行 (原 ~280 行); `_materialize_approved_proposal` /
+  `_handle_delegate` 删除 backends/params 专属 plumbing;
+  `_params_grid_exhausted` / `_backends_grid_exhausted` 帮手 +
+  legacy imports 删除; `_has_no_more_leverage` 简化; `_AUDIT_ACTIONS`
+  收紧到 ``{baseline, profile, sweep, explore}``.
+* **action_executors/__init__.py** 删除 3 个 executor + 13 个
+  legacy 常量导出.
+* **prompt_builder.py** `_format_grid_injection_hint` 删除 backends /
+  params 分支; `GRID_INJECTABLE_ACTIONS` 收紧到
+  ``{explore, sweep}``; `DEPRECATED_ACTIONS` map 收紧为一行 hint
+  per 名 (PolicyGate `action_deprecated` 规则消费).
+* **shared_state.py** 收紧字段 docstring: `params_search` /
+  `backends_search` 说明改为 "v0.6 resume parity"; `_AUDIT_ACTIONS`
+  + `_KEY_METRIC_MAP` 收紧到 v0.8 set; `to_prompt_summary` 渲染
+  改 `last_explore=` / `last_sweep=` (不再渲染 last_backends 等).
+* **session_paths.py** `_RUNS_ACTIONS_FALLBACK` 删除 3 个 legacy 名.
+* **examples/p2_full_optimize_demo.py** 改注册 explore 取代
+  backends + params.
+* **tests** 调整: `test_p1_2_full_action_catalogue.py` 将 3 个名移到
+  `_REMOVED_LEGACY_ACTIONS` (反向锁); `test_p1_1_action_registry.py`
+  pin explore 取代 backends; `test_coordinator_audit_wiring.py` /
+  `test_coordinator_baseline_fingerprint.py` pivot 到 explore;
+  `test_p5_decision.py` 删除 A/B 段 (v0.6 阈值测试不再适用);
+  `test_shared_state_action_attempts.py` parametrise 改 v0.8 audit set.
 
-## 7. 关联
+## 7. 风险 / 回退
 
-- `Gap-10` (legacy actions still allowed) — 关闭 legacy 入口
-- `Dead-C` (validate_stack 死路径) — 同链, 独立条
-- `Dead-G` (测试反向锁死 deprecation) — 配对清理
+- **回退**: revert 本 commit. v0.6 dataclass 字段
+  (``backends_search`` / ``params_search`` / ``backends_attempts``
+  等) 仍保留在 SharedState 上, 所以 v0.6 state.json 仍能 load —
+  只是 fresh session 不会再有写入这些字段的代码路径.
+
+## 8. 关联
+
+- `Gap-10` (legacy actions still allowed) — 入口已关 (Gap-10 commit)
+- `Dead-C` (validate_stack 死路径) — 同链, 已在本次清理
+- `Dead-G` (测试反向锁死 deprecation) — 同链, 6 个 legacy 测试文件
+  已删除

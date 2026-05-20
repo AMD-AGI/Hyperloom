@@ -95,13 +95,7 @@ log = logging.getLogger(__name__)
 # stay outside this set — they have richer bespoke recorders
 # (record_kernel_opt / record_kernel_integrate_result).
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
-    "baseline", "profile", "backends", "params", "sweep", "validate_stack",
-    # v0.8 M3 — the merged ``explore`` action records the same uniform
-    # audit row as the legacy backends/params/validate_stack (KB_design
-    # §3.4). Coordinator's ``_promote_to_shared_state`` branch sets
-    # ``audit_decision`` so the bottom-of-function ``record_action_attempt``
-    # call fires for explore in addition to the legacy three.
-    "explore",
+    "baseline", "profile", "sweep", "explore",
 })
 
 # ---------------------------------------------------------------------------
@@ -1997,7 +1991,22 @@ class Coordinator:
         return self.shared_state.stop_reason
 
     async def _has_no_more_leverage(self) -> bool:
-        """Return True when automated params/backend/kernel levers are exhausted."""
+        """Return True when automated explore/kernel levers are exhausted.
+
+        v0.8 plateau judgment lives in :mod:`phase_state`; this helper
+        is the safety-net check the closing-phase path consults before
+        winding the session down. We require:
+
+        1. baseline + current_best present (otherwise we are still in
+           PRELUDE / never finished a round)
+        2. no pending proposals or queued / running tasks
+        3. ``params_no_promote_streak >= 5`` (v0.6 proxy still used as
+           the cross-phase plateau hint; see KB_gaps/Gap-15)
+        4. the action registry's top-of-scoreboard families are all
+           policy-locked (Inv-9.1 retired the scoreboard but the
+           per-family lock flag is still consulted)
+        5. every reusable kernel_id is rejected.
+        """
         if self.shared_state.baseline_tput <= 0:
             return False
         if not self.shared_state.current_best:
@@ -2006,17 +2015,7 @@ class Coordinator:
             return False
         if await self.tasks.queued() or await self.tasks.running():
             return False
-
-        if self.shared_state.params_no_promote_streak < 5 and not self._params_grid_exhausted():
-            return False
-        if not self._params_grid_exhausted():
-            return False
-        # Phase 4 of the dedup-by-fingerprint plan: backends has parity
-        # with params here. Don't switch off explore until BOTH ledgers
-        # have run out of fresh fingerprints — otherwise a brief params
-        # plateau prematurely shuts down the (still productive)
-        # backends search.
-        if not self._backends_grid_exhausted():
+        if self.shared_state.params_no_promote_streak < 5:
             return False
         if (
             self.action_registry is not None
@@ -2026,60 +2025,6 @@ class Coordinator:
         ):
             return True
         return self._all_reusable_kernels_rejected()
-
-    def _params_grid_exhausted(self) -> bool:
-        search = self.shared_state.params_search or {}
-        if not isinstance(search, dict) or not search:
-            return False
-        try:
-            from .action_executors.params import DEFAULT_PARAMS_GRID
-            grid_size = len(DEFAULT_PARAMS_GRID)
-        except Exception:  # noqa: BLE001
-            grid_size = 0
-        tested = search.get("tested") or {}
-        tested_count = len(tested) if isinstance(tested, dict) else 0
-        cursor = int(search.get("cursor") or 0)
-        rejected_count = len(search.get("rejected") or [])
-        if grid_size <= 0:
-            return bool(search.get("params_search_exhausted"))
-        return (
-            tested_count >= grid_size
-            or cursor >= grid_size
-            or rejected_count >= grid_size
-        )
-
-    def _backends_grid_exhausted(self) -> bool:
-        """Backends-side parity of :meth:`_params_grid_exhausted`.
-
-        Returns True when ``backends_search.tested`` has covered the
-        default seed grid (either by count or by the executor's own
-        ``backends_search_exhausted`` flag from the last round). An
-        unseeded ledger returns False — Orch hasn't run backends yet,
-        so it isn't "exhausted", it's simply unexplored.
-        """
-        search = self.shared_state.backends_search or {}
-        if not isinstance(search, dict) or not search:
-            return False
-        # The executor stamps this on its last round when no fresh
-        # fingerprint survived dedup — trust it when present.
-        if search.get("backends_search_exhausted"):
-            return True
-        try:
-            from .action_executors.backends import DEFAULT_BACKENDS_GRID
-            grid_size = len(DEFAULT_BACKENDS_GRID)
-        except Exception:  # noqa: BLE001
-            grid_size = 0
-        tested = search.get("tested") or {}
-        tested_count = len(tested) if isinstance(tested, dict) else 0
-        cursor = int(search.get("cursor") or 0)
-        rejected_count = len(search.get("rejected") or [])
-        if grid_size <= 0:
-            return False
-        return (
-            tested_count >= grid_size
-            or cursor >= grid_size
-            or rejected_count >= grid_size
-        )
 
     async def _enter_closing_phase(self, *, grace_sec: float) -> float:
         """Enter report-flush phase after the wall-clock deadline.
@@ -3790,49 +3735,16 @@ class Coordinator:
             # stamp it onto the task so the post-task promotion records the
             # server config that produced this trace.
             params.setdefault("base_extra_args", cb_args)
-        if pending.action_name in ("backends", "params", "sweep"):
+        if pending.action_name == "sweep":
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
             base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
                 else self.shared_state.baseline_tput
             params.setdefault("base_tput", float(base or 0.0))
             params.setdefault("base_extra_args", cb_args)
-            # Plumb baseline's materialized YAML so variant runs honor the
-            # same workload contract (CONC/ISL/OSL/TP/etc.) baseline ran.
-            # Without this each variant would re-render from the shipped
-            # YAML's smoke defaults and produce ~10x lower throughput.
-            # `setdefault` lets the proposer override (e.g. profile re-uses
-            # this path too, or a deliberate cross-workload sweep).
             if self.shared_state.baseline_config_path:
                 params.setdefault(
                     "config_path", self.shared_state.baseline_config_path
                 )
-            # T2 — pass the cumulative synergy_attempted set so backends
-            # phase-2 doesn't re-test the same combo across rounds, and
-            # cap each round at 5 phase-1 variants (parity with `params`).
-            # The ``backends_search`` ledger (Phase 2 of the dedup-by-
-            # fingerprint plan) covers everything ``tested_variant_names``
-            # used to provide and more: it records ALL tested variants
-            # (not just winners), and is consulted for both the default
-            # grid and LLM-supplied ``params.grid``.
-            if pending.action_name == "backends":
-                params.setdefault(
-                    "synergy_attempted",
-                    list(self.shared_state.synergy_attempted),
-                )
-                params.setdefault("max_candidates_per_round", 5)
-                params.setdefault("max_synergy_combos", 4)
-                params.setdefault(
-                    "backends_search", self.shared_state.backends_search,
-                )
-            if pending.action_name == "params":
-                params.setdefault("params_search", self.shared_state.params_search)
-                # Long runs should advance the search incrementally while
-                # still covering the params grid quickly enough to compete
-                # with kernel work. Direct runner calls/tests can still pass
-                # 0 to run the full grid.
-                params.setdefault("max_candidates_per_round", 5)
-                if isinstance(cb, dict) and cb.get("variant_name"):
-                    params.setdefault("base_variant_name", str(cb["variant_name"]))
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=pending.action_name,
             params=params,
@@ -3899,7 +3811,7 @@ class Coordinator:
         # ran. See `_materialize_approved_proposal` for the same logic on the
         # proposal/review path. `setdefault` lets the delegator override.
         if (
-            action_name in ("backends", "params", "sweep")
+            action_name in ("sweep", "explore")
             and self.shared_state.baseline_config_path
         ):
             params.setdefault(
@@ -3914,20 +3826,6 @@ class Coordinator:
         # supply values; we only fill the gaps.
         if action_name == "specialist":
             self._warm_specialist_params(params)
-        # T2 — same synergy-dedup + per-round cap plumbing as the
-        # proposal-review path. Dedup against previously-tested variants
-        # rides on the shared ``backends_search`` ledger (Phase 2 of the
-        # dedup-by-fingerprint plan).
-        if action_name == "backends":
-            params.setdefault(
-                "synergy_attempted",
-                list(self.shared_state.synergy_attempted),
-            )
-            params.setdefault("max_candidates_per_round", 5)
-            params.setdefault("max_synergy_combos", 4)
-            params.setdefault(
-                "backends_search", self.shared_state.backends_search,
-            )
         raw_key = intent.payload.get("idempotency_key")
         if not raw_key:
             content_fp = hashlib.sha1(
@@ -5160,9 +5058,9 @@ class Coordinator:
     def _is_promotable_result(self, task_kind: str, result: dict[str, Any]) -> bool:
         if not isinstance(result, dict):
             return False
-        if task_kind in ("baseline", "profile", "validate_stack"):
+        if task_kind in ("baseline", "profile"):
             return is_valid_measurement(result)
-        if task_kind in ("backends", "params", "sweep"):
+        if task_kind == "sweep":
             return result.get("status") == "succeeded"
         return result.get("status") != "failed"
 
@@ -6009,90 +5907,6 @@ class Coordinator:
             if result.get("kernel_breakdown_path"):
                 self.shared_state.last_profile_kernel_breakdown = str(result["kernel_breakdown_path"])
                 changed = True
-        elif task_kind == "validate_stack":
-            # Phase 3 — apply the rebenched throughput from the
-            # ValidateStackExecutor as the *only* source of truth for
-            # ``cumulative_gain_validated`` (CORE_STATE_FIELDS member).
-            # We deliberately DO NOT touch ``current_best`` /
-            # ``cumulative_gain`` / ``optimization_stack`` here because
-            # validate_stack is a measurement of an already-applied
-            # configuration, not a new modification.
-            tput = result.get("output_throughput")
-            stack_len_at_run = result.get("validated_stack_len")
-            if isinstance(tput, (int, float)) and tput > 0 and self.shared_state.baseline_tput > 0:
-                gain = (
-                    (float(tput) - self.shared_state.baseline_tput)
-                    / self.shared_state.baseline_tput * 100.0
-                )
-                # Validate-stack is a *measurement*, not a decision
-                # gate: even when the re-bench lands at or below the
-                # baseline we still record the number so the timeline /
-                # state.json reflects ground truth. The warning below
-                # flags the regression so an operator (or a future
-                # rollback policy) can react, but we deliberately leave
-                # ``optimization_stack`` / ``current_best`` /
-                # ``cumulative_gain`` untouched here.
-                VALIDATE_STACK_WARN_THRESHOLD_PCT = 0.0
-                if gain <= VALIDATE_STACK_WARN_THRESHOLD_PCT:
-                    log.warning(
-                        "validate_stack: cumulative_gain_validated=%.2f%% <= %.1f%% "
-                        "(tput=%.2f vs baseline=%.2f, stack_len=%d). Recording the "
-                        "measurement but NOT rolling back optimization_stack — "
-                        "validate_stack remains a measurement, not a decision gate.",
-                        gain, VALIDATE_STACK_WARN_THRESHOLD_PCT, float(tput),
-                        self.shared_state.baseline_tput,
-                        len(self.shared_state.optimization_stack),
-                    )
-                self.shared_state.cumulative_gain_validated = float(gain)
-                self.shared_state.cumulative_gain_validated_ts = (
-                    datetime.now(timezone.utc).isoformat()
-                )
-                # Pin the validation to the stack length the executor
-                # actually re-bench'd against. Falling back to the
-                # current stack length is dangerous: if a new KEEP
-                # sneaks in between the executor reading state.json and
-                # the Coordinator processing the result, the fallback
-                # would silently mark the new KEEP as validated. The
-                # executor surfaces validated_stack_len explicitly to
-                # avoid this race; if missing (defensive fallback for
-                # tests), we use the current length.
-                if isinstance(stack_len_at_run, int) and stack_len_at_run >= 0:
-                    self.shared_state.cumulative_gain_validated_stack_len = (
-                        stack_len_at_run
-                    )
-                else:
-                    self.shared_state.cumulative_gain_validated_stack_len = (
-                        len(self.shared_state.optimization_stack)
-                    )
-                changed = True
-                log.info(
-                    "validate_stack promoted: validated_gain=%.2f%% "
-                    "(tput=%.2f vs baseline=%.2f) at stack_len=%d",
-                    gain, float(tput), self.shared_state.baseline_tput,
-                    self.shared_state.cumulative_gain_validated_stack_len,
-                )
-                audit_decision = "promoted" if gain > 0 else "discarded"
-                audit_extras = {
-                    "validated_stack_len": (
-                        self.shared_state.cumulative_gain_validated_stack_len
-                    ),
-                    "gain_pct": float(gain),
-                    "baseline_tput_ref": float(self.shared_state.baseline_tput),
-                    "validated_tput": float(tput),
-                }
-            else:
-                # Record the failed-to-measure case as a discard so the
-                # audit trail still captures *why* the validation didn't
-                # produce a number (NaN tput, baseline_tput == 0, etc.).
-                audit_decision = "discarded"
-                audit_extras = {
-                    "validated_stack_len": stack_len_at_run,
-                    "gain_pct": None,
-                    "baseline_tput_ref": float(self.shared_state.baseline_tput),
-                    "validated_tput": (
-                        float(tput) if isinstance(tput, (int, float)) else None
-                    ),
-                }
         elif task_kind == "explore":
             # v0.8 M3 + KB_gaps/Dead-A.5 (prerequisite to Gap-10) —
             # ``explore`` is the merged grid runner (KB_design §3.4).
@@ -6221,286 +6035,31 @@ class Coordinator:
                     result.get("explore_grid_exhausted")
                 ),
             }
-        elif task_kind in ("backends", "params", "sweep"):
-            # backends/params content-fingerprint ledgers (Phase 4 of the
-            # dedup-by-fingerprint plan). Persist BEFORE the promotion
-            # logic below so a winner appended to ``accepted`` further
-            # down sees the latest ``tested`` / ``rejected`` already in
-            # place. ``apply_*_search_update`` preserves the existing
-            # ``accepted`` list (the executor never writes it) so the
-            # Coordinator remains the sole writer for promotion history.
-            if task_kind == "backends" and isinstance(
-                result.get("backends_search_update"), dict
-            ):
-                self.shared_state.apply_backends_search_update(
-                    result["backends_search_update"],
-                )
-                changed = True
-            # T1/T2 — persist discovered_flags + synergy_attempted +
-            # winners_history so the next Orchestration tick (and IR-26
-            # idea-generation prompt section) sees the full search-space
-            # context. These are independent of the promotion path below
-            # so they always run, even when no winner crossed the gate.
-            disc_update = result.get("discovered_flags_update")
-            if isinstance(disc_update, dict):
-                self.shared_state.record_discovered_flags(
-                    framework=str(disc_update.get("framework") or ""),
-                    backend_flags=disc_update.get("backend_flags"),
-                    param_flags=disc_update.get("param_flags"),
-                    source_path=str(disc_update.get("source_path") or ""),
-                )
-                err = disc_update.get("discovery_error")
-                if err:
-                    self.shared_state.discovered_flags_error = str(err)
-                changed = True
-            new_attempts = result.get("synergy_attempted_new") or []
-            for combo in new_attempts:
-                if isinstance(combo, list):
-                    self.shared_state.mark_synergy_attempted(
-                        [str(x) for x in combo],
-                    )
-                    changed = True
-            winners_for_history = result.get("winners") or []
-            if winners_for_history and task_kind != "sweep":
-                self.shared_state.push_backend_winners_round(
-                    action=task_kind,
-                    base_tput=float(result.get("base_tput") or 0.0),
-                    base_extra_args=str(
-                        (task.params or {}).get("base_extra_args", "")
-                        if task is not None else ""
+        elif task_kind == "sweep":
+            pareto = result.get("pareto_front") or []
+            self.shared_state.record_action_attempt(
+                action="sweep",
+                task_id=getattr(task, "task_id", "") if task is not None else "",
+                status="succeeded",
+                decision="discarded",
+                result=result,
+                extras={
+                    "grid_size": result.get("grid_size"),
+                    "best_overall": result.get("best_overall"),
+                    "best_for_each_conc": result.get("best_for_each_conc"),
+                    "pareto_front_size": (
+                        len(pareto) if isinstance(pareto, list) else None
                     ),
-                    winners=winners_for_history,
-                    best=result.get("best_variant"),
-                )
-                changed = True
-            if task_kind == "sweep":
-                # Audit trail (sweep is in _AUDIT_ACTIONS even though it
-                # never promotes a current_best — Orchestration still
-                # benefits from seeing what the sweep grid produced).
-                # Recorded FIRST so the subsequent ``record_sweep`` call
-                # gets the final word on ``last_sweep`` (which is a
-                # richer grid-summary payload than the uniform audit
-                # entry; see ``_format_last_sweep`` and
-                # test_p2_5_grid_promotion). ``sweep_attempts`` still
-                # captures the audit row.
-                pareto = result.get("pareto_front") or []
-                self.shared_state.record_action_attempt(
-                    action="sweep",
-                    task_id=getattr(task, "task_id", "") if task is not None else "",
-                    status="succeeded",
-                    decision="discarded",
-                    result=result,
-                    extras={
-                        "grid_size": result.get("grid_size"),
-                        "best_overall": result.get("best_overall"),
-                        "best_for_each_conc": result.get("best_for_each_conc"),
-                        "pareto_front_size": (
-                            len(pareto) if isinstance(pareto, list) else None
-                        ),
-                    },
-                )
-                self.shared_state.record_sweep(result)
-                changed = True
-                # Sweep maps the current stack across workloads; it is not
-                # itself a new serving config, so don't overwrite current_best.
-                self.shared_state.params_no_promote_streak += 1
-                # Treat sweep as a DISCARD-shaped score update: it records the
-                # run + sets a cooldown but does not register a KEEP because
-                # sweep itself never promotes a new current_best.
-                self._apply_action_score_update(
-                    "sweep", result, promoted=False, gain_vs_cb=0.0,
-                )
-                self.shared_state.save(self.session_dir)
-                return
-            # Promote a grid-runner winner if it actually beat the
-            # current best by a meaningful margin. We use 0.2% as the
-            # 1-shot KEEP threshold — relaxed from marathon's original
-            # 1.0% per the resume5 9h finding (35/38 winners landed in
-            # the 0.3–0.84% band but never promoted because each
-            # individual run sat under 1.0%), but kept above the
-            # session-to-session noise floor (~0.1%) so a single noisy
-            # round doesn't lock in a non-improvement. AND, as a
-            # separate path, promote ANY consistent winner that wins
-            # ≥ 2 of last 3 rounds with average gain ≥ 0.1% — that's
-            # the cross-round signal-vs-noise check; rounds individually
-            # under 0.2% still stack up when the same variant keeps
-            # winning, so we don't lose real but small gains.
-            PROMOTE_THRESHOLD_PCT = 0.2
-            CROSS_ROUND_LOOKBACK = 3
-            CROSS_ROUND_MIN_APPEARANCES = 2
-            # The cross-round bar must stay strictly under
-            # PROMOTE_THRESHOLD_PCT, otherwise the path is mathematically
-            # unreachable (any 2 sub-threshold rounds whose average
-            # crosses the cross-round bar would also have at least one
-            # round above the 1-shot bar, triggering single-shot promote
-            # first). 0.1% gives us a real cross-round signal between
-            # the noise floor and the 1-shot bar.
-            CROSS_ROUND_MIN_AVG_GAIN_PCT = 0.1
-            best_tput = result.get("output_throughput")
-            bv = result.get("best_variant") or {}
-            best_gain = result.get("best_gain_pct")
-            if task_kind == "params" and isinstance(result.get("params_search_update"), dict):
-                self.shared_state.apply_params_search_update(
-                    result["params_search_update"],
-                )
-                changed = True
-            cb = self.shared_state.current_best or {}
-            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            cur_best = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
-                else float(self.shared_state.baseline_tput or 0.0)
-            # Compute gain vs current_best (different from result.best_gain_pct
-            # which is gain vs base_tput injected at materialize time).
-            gain_vs_cb = (
-                (best_tput - cur_best) / cur_best * 100.0
-                if isinstance(best_tput, (int, float)) and best_tput > 0 and cur_best > 0
-                else None
+                },
             )
-            # Always record this round to the rolling history regardless
-            # of whether it promotes — `consistent_winner` consults it.
-            if isinstance(bv, dict) and bv.get("name") and gain_vs_cb is not None:
-                self.shared_state.push_params_winner(
-                    action=task_kind,
-                    variant_name=bv.get("name"),
-                    tput=best_tput,
-                    gain_pct=gain_vs_cb,
-                    extra_sglang_args=str(
-                        bv.get("candidate_extra_sglang_args")
-                        or bv.get("extra_sglang_args") or ""
-                    ),
-                    extra_envs=dict(bv.get("extra_envs") or {}),
-                )
-            promoted = False
-            if gain_vs_cb is not None and gain_vs_cb >= PROMOTE_THRESHOLD_PCT:
-                # Accuracy gate: if the winner touches precision-affecting
-                # flags, verify its GSM8K accuracy didn't drop > 5%.
-                # The eval ran during the benchmark (RUN_EVAL=true) so we
-                # check the result that came back.
-                from .action_executors._accuracy_gate import (
-                    accuracy_passed,
-                    is_high_accuracy_risk,
-                )
-                winner_args = str(bv.get("extra_sglang_args") or "")
-                winner_envs = dict(bv.get("extra_envs") or {})
-                accuracy_ok = True
-                if is_high_accuracy_risk(winner_args, winner_envs):
-                    new_acc = result.get("accuracy")
-                    base_acc = self.shared_state.baseline_accuracy
-                    if isinstance(new_acc, (int, float)) and base_acc > 0:
-                        accuracy_ok = accuracy_passed(base_acc, new_acc)
-                        if not accuracy_ok:
-                            log.warning(
-                                "accuracy gate FAILED for %s variant=%s: "
-                                "baseline=%.4f new=%.4f (drop=%.4f > 0.05)",
-                                task_kind, bv.get("name"),
-                                base_acc, new_acc, base_acc - new_acc,
-                            )
-                    elif base_acc <= 0:
-                        log.info(
-                            "accuracy gate skipped (no baseline_accuracy yet) "
-                            "for high-risk variant=%s", bv.get("name"),
-                        )
-                if accuracy_ok:
-                    self._lift_to_current_best(task_kind, best_tput, bv)
-                    promoted = True
-                else:
-                    log.info("accuracy gate blocked promotion of %s/%s",
-                             task_kind, bv.get("name"))
-            else:
-                # Cross-round signal: same variant winning consistently
-                # at sub-threshold but real gains.
-                consistent = self.shared_state.consistent_winner(
-                    lookback=CROSS_ROUND_LOOKBACK,
-                    min_appearances=CROSS_ROUND_MIN_APPEARANCES,
-                    min_avg_gain_pct=CROSS_ROUND_MIN_AVG_GAIN_PCT,
-                )
-                if consistent and consistent.get("tput", 0) > cur_best:
-                    # Lift the consistent winner — synthesise a best_variant
-                    # from the history record (we don't have its full
-                    # extra_sglang_args here, so leave that blank; Orch
-                    # consults `params_winner_history` if it needs to know
-                    # which variant_name is the consistent one).
-                    self._lift_to_current_best(
-                        consistent["action"], consistent["tput"],
-                        {"name": consistent["variant_name"]},
-                    )
-                    log.info(
-                        "promoted consistent winner: variant=%s avg_gain=%.2f%% (%d rounds)",
-                        consistent["variant_name"],
-                        consistent["gain_pct"],
-                        CROSS_ROUND_LOOKBACK,
-                    )
-                    promoted = True
-            if promoted:
-                self.shared_state.params_no_promote_streak = 0
-                # Phase 4 of the dedup-by-fingerprint plan: Coordinator
-                # is the sole writer to ``backends_search.accepted``. On
-                # a backends promote, stamp the winner so the next round
-                # filter treats this variant as accepted, not rejected.
-                if task_kind == "backends" and isinstance(bv, dict) and bv:
-                    promote_entry = dict(bv)
-                    promote_entry.setdefault(
-                        "gain_pct",
-                        float(gain_vs_cb) if isinstance(
-                            gain_vs_cb, (int, float)
-                        ) else None,
-                    )
-                    self.shared_state.record_backends_accepted(promote_entry)
-                changed = True
-            else:
-                # Plateau detection: count consecutive grid runs that
-                # didn't move current_best. Prompt summary surfaces this
-                # so Orch knows when to switch to kernel-opt.
-                self.shared_state.params_no_promote_streak += 1
-                changed = True  # streak counter changed → save state.json
-            # Mirror the promoted decision into per-action scoring so
-            # cooldown + diminishing-returns decay (or DISCARD dampening)
-            # surface in the prompt scoreboard. Always runs for backends /
-            # params so an LLM stuck in the explore loop sees the row
-            # decay deterministically.
+            self.shared_state.record_sweep(result)
+            self.shared_state.params_no_promote_streak += 1
             self._apply_action_score_update(
-                task_kind, result,
-                promoted=bool(promoted),
-                gain_vs_cb=(
-                    float(gain_vs_cb) if isinstance(gain_vs_cb, (int, float)) else 0.0
-                ),
+                "sweep", result, promoted=False, gain_vs_cb=0.0,
             )
-            changed = True
-            # Audit-trail for backends / params. Sweep already recorded
-            # above (it short-circuits with ``return``).
-            audit_decision = "promoted" if promoted else "discarded"
-            audit_extras = {
-                "round_id": (
-                    self.shared_state.backend_winners_history[-1].get("round_id")
-                    if self.shared_state.backend_winners_history
-                    and isinstance(
-                        self.shared_state.backend_winners_history[-1], dict,
-                    )
-                    else None
-                ),
-                "best_variant_name": (
-                    bv.get("name") if isinstance(bv, dict) else None
-                ),
-                "candidate_extra_sglang_args": (
-                    bv.get("extra_sglang_args")
-                    if isinstance(bv, dict) else None
-                ),
-                "extra_envs": (
-                    dict(bv.get("extra_envs") or {})
-                    if isinstance(bv, dict) else {}
-                ),
-                "best_gain_pct_vs_base": best_gain,
-                "gain_vs_cb": (
-                    float(gain_vs_cb)
-                    if isinstance(gain_vs_cb, (int, float)) else None
-                ),
-            }
-        # Out-of-band score updates for the task_kinds that don't have a
-        # promoted-vs-discard notion (profile / pmc_roofline / validate_stack
-        # bump runs + cooldown; baseline is treated as a gate and skipped
-        # inside the helper). Sweep + backends/params/kernel branches above
-        # already called the helper themselves, so we filter to the
-        # measurement-style kinds here.
-        if task_kind in {"profile", "pmc_roofline", "validate_stack"}:
+            self.shared_state.save(self.session_dir)
+            return
+        if task_kind in {"profile", "pmc_roofline"}:
             self._apply_action_score_update(task_kind, result)
             changed = True
         # Audit trail (kernel-parity) for the 6 non-kernel actions: one
