@@ -1480,6 +1480,18 @@ class Coordinator:
             denied = self._proposal_denial_for_roofline()
             if denied is not None:
                 return denied
+        # Roofline-v2 N22 (May 2026): non-blocking keyword-implied
+        # variant check. When the LLM proposes backends/params with a
+        # variants subset (N20-A surface), compare the proposed list
+        # against the variants implied by analysis.md keywords (e.g.
+        # mentioning "torch.compile" implies torch_compile_on). If
+        # any implied variant is missing, RECORD an advisory into
+        # shared_state.last_proposal_advice (the next-tick prompt will
+        # render it). DO NOT deny — the LLM keeps agency; the advisory
+        # surfaces in the audit log + next prompt so the LLM corrects
+        # on the follow-up cheap-action propose.
+        if action in {"backends", "params"} and proposed_params:
+            self._record_keyword_implied_advice(action, proposed_params)
         # Profile / integrate guards only apply when kernel agent is in
         # the role registry — no-kernel mode skips them. Two related gates
         # are intentionally NOT enforced at the action layer:
@@ -1794,6 +1806,104 @@ class Coordinator:
         return os.environ.get(
             "INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "",
         ).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _record_keyword_implied_advice(
+        self,
+        action_name: str,
+        proposed_params: dict[str, Any],
+    ) -> None:
+        """N22: advisory-only check that the LLM's proposed `variants`
+        list includes every variant implied by analysis.md keywords.
+
+        Non-blocking: missing variants are surfaced as an advisory
+        appended to `shared_state.last_proposal_advice` (rendered into
+        the next-tick orchestration prompt). The LLM keeps agency and
+        the proposal still goes through.
+
+        Skipped when:
+        * `variants` field is absent / empty (LLM chose full default
+          grid — the catalogue intent is to be inclusive, no advisory
+          needed).
+        * analysis.md cached text is missing (no snapshot yet, or
+          using legacy code path).
+        * `available_variants` cannot be resolved (e.g. test fixture
+          without registered grids).
+        """
+        from ._analysis_keyword_map import (
+            extract_required_variants_from_analysis,
+            format_missing_variants_advice,
+        )
+        proposed_variants = proposed_params.get("variants") or []
+        if not isinstance(proposed_variants, list) or not proposed_variants:
+            return
+        proposed_str = [str(v).strip() for v in proposed_variants
+                        if isinstance(v, str) and str(v).strip()]
+        if not proposed_str:
+            return
+        analysis_text = (
+            (self.shared_state.last_trace_analyze or {}).get(
+                "analysis_md_text", ""
+            )
+            or ""
+        )
+        if not analysis_text:
+            return
+        # Resolve the registered grid for the current framework so we
+        # narrow keyword-implied variants to ones the executor can
+        # actually run (an SGLang-only variant shouldn't surface on a
+        # vLLM session).
+        available = self._registered_variants_for(action_name)
+        if not available:
+            return
+        required, matches = extract_required_variants_from_analysis(
+            analysis_text, available,
+        )
+        advice = format_missing_variants_advice(
+            proposed_str, required, matches, action_name=action_name,
+        )
+        if advice:
+            # Cap FIFO at 5 most-recent advisories so a long session
+            # doesn't grow this list unbounded; the prompt only
+            # renders the latest few anyway.
+            history = list(self.shared_state.last_proposal_advice or [])
+            history.append(advice)
+            if len(history) > 5:
+                history = history[-5:]
+            self.shared_state.last_proposal_advice = history
+
+    def _registered_variants_for(self, action_name: str) -> list[str]:
+        """Return the names of the registered grid variants for the
+        given action + current framework. Used by the N22 keyword
+        advisory to narrow keyword-implied variants to ones the
+        executor can actually run. Returns [] when the framework can't
+        be resolved (defensive — N22 advisory will skip)."""
+        try:
+            framework = (
+                os.environ.get("FRAMEWORK", "") or "sglang"
+            ).strip().lower()
+            if action_name == "backends":
+                from .action_executors.backends import (
+                    DEFAULT_BACKENDS_GRID,
+                    DEFAULT_VLLM_BACKENDS_GRID,
+                )
+                grid = (
+                    DEFAULT_VLLM_BACKENDS_GRID if "vllm" in framework
+                    else DEFAULT_BACKENDS_GRID
+                )
+            elif action_name == "params":
+                from .action_executors.params import (
+                    DEFAULT_PARAMS_GRID,
+                    DEFAULT_VLLM_PARAMS_GRID,
+                )
+                grid = (
+                    DEFAULT_VLLM_PARAMS_GRID if "vllm" in framework
+                    else DEFAULT_PARAMS_GRID
+                )
+            else:
+                return []
+            return [v.name for v in grid]
+        except Exception:  # noqa: BLE001 - defensive, advisory is best-effort
+            return []
 
     def _proposal_denial_for_roofline(self) -> PolicyDenied | None:
         """N21: deny re-running roofline when discovered_flags hasn't
