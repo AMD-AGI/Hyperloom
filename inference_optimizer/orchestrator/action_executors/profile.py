@@ -172,6 +172,17 @@ class ProfileExecutor(BaselineExecutor):
         import time as _time
         task_started_unix = _time.time()
 
+        # Multi-node banner: silent for single-node. Surfaces head pod /
+        # service_url + the round's trace dir so an operator tailing the
+        # log can tell apart a multi-node profile round (uses shared
+        # wekafs trace base) from a single-node one (uses workspace-local
+        # torch_trace/).
+        from ._multi_node_env import log_mn_banner
+        log_mn_banner(
+            "profile_executor", log,
+            trace_dir=self._resolve_mn_round_trace_root(ctx),
+        )
+
         # Multi-node only: pre-restart the inference server with this
         # round's profiler dir so sglang launches with
         # ``--torch-profiler-dir <round_path>`` and writes traces to a

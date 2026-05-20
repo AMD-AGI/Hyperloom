@@ -92,6 +92,18 @@ _TERMINAL_OK_PHASES = {"Running"}
 _TERMINAL_FAIL_STATUSES = {"FAILED", "STOPPED"}
 _TERMINAL_OK_STATUSES = {"SUCCEEDED"}
 
+
+def _normalize_extra_args(s: str | None) -> str:
+    """Normalize sglang/vllm ``--extra-args`` for equality comparison.
+
+    Collapses arbitrary whitespace (leading/trailing/multi-space) to single
+    spaces so semantically-identical arg strings produced by different
+    callers compare equal. Order-sensitive — argv order may matter to the
+    framework (e.g. last-wins for repeated flags) so we deliberately do
+    NOT sort.
+    """
+    return " ".join((s or "").split())
+
 # Exit codes the hyperloom main controller can switch on. Keep these
 # stable; they are part of the CLI's contract with the agent.
 EXIT_OK = 0
@@ -1031,6 +1043,337 @@ def _build_multinode_router_entrypoint(
     )
 
 
+def _build_multinode_apply_patch_entrypoint(
+    target_path: str,
+    patch_b64: str,
+    backup_dir: str,
+    kernel_id: str,
+    timeout_sec: int,
+) -> str:
+    """Compose the Ray Dashboard entrypoint that fans out a kernel patch
+    to every pod via kernel_patch_multinode.py (heredoc-embedded).
+
+    Sends 1 entrypoint to the head pod; the in-pod script enumerates
+    Ray nodes and spawns per-node actors that write the same patch to
+    target_path on each pod (head + workers). See module
+    kernel_patch_multinode.py for the algorithm.
+
+    Why heredoc embedding: same reason as launch_multinode.py — keeps
+    the pod-side script versioned in this repo and updatable without
+    rebuilding the RayJob image.
+    """
+    py = _read_pod_script("kernel_patch_multinode.py")
+    return (
+        f"{_MN_ENTRYPOINT_PREAMBLE}"
+        f"cat > \"$WORK_DIR/kernel_patch_multinode.py\" "
+        f"<<'__MN_KPATCH_PY_EOF__'\n"
+        f"{py}__MN_KPATCH_PY_EOF__\n"
+        f"python3 \"$WORK_DIR/kernel_patch_multinode.py\" apply "
+        f"--target-path {target_path!r} "
+        f"--patch-b64 {patch_b64!r} "
+        f"--backup-dir {backup_dir!r} "
+        f"--kernel-id {kernel_id!r} "
+        f"--timeout-sec {int(timeout_sec)}"
+    )
+
+
+def _build_multinode_revert_patch_entrypoint(
+    target_path: str,
+    backup_map_json: str,
+    timeout_sec: int,
+) -> str:
+    """Compose the Ray Dashboard entrypoint that fans out a revert call
+    to every pod via kernel_patch_multinode.py revert (heredoc-embedded).
+
+    ``backup_map_json`` is the per-host map of backup file paths that
+    was returned by the matching ``apply`` call; callers MUST persist
+    it (we recommend the kernel-agent manifest) so revert can reach
+    the same pods even after a sandbox restart.
+    """
+    py = _read_pod_script("kernel_patch_multinode.py")
+    return (
+        f"{_MN_ENTRYPOINT_PREAMBLE}"
+        f"cat > \"$WORK_DIR/kernel_patch_multinode.py\" "
+        f"<<'__MN_KPATCH_PY_EOF__'\n"
+        f"{py}__MN_KPATCH_PY_EOF__\n"
+        f"python3 \"$WORK_DIR/kernel_patch_multinode.py\" revert "
+        f"--target-path {target_path!r} "
+        f"--backup-map-json {backup_map_json!r} "
+        f"--timeout-sec {int(timeout_sec)}"
+    )
+
+
+def _build_multinode_kernel_bench_entrypoint(
+    workspace: str,
+    bench_command: str,
+    files_b64_json: str,
+    result_glob: str,
+    timeout_sec: int,
+) -> str:
+    """Compose the Ray Dashboard entrypoint that runs a kernel micro-
+    benchmark on a GPU-bearing pod via kernel_bench_multinode.py
+    (heredoc-embedded).
+
+    Unlike apply/revert which fan out to every node, the bench runs on
+    a SINGLE GPU-bearing node (the head). Multi-rank micro-benchmark
+    isn't a sandbox-side concern — the per-kernel optimization loop
+    scales by parallel candidate count at a higher layer.
+    """
+    py = _read_pod_script("kernel_bench_multinode.py")
+    return (
+        f"{_MN_ENTRYPOINT_PREAMBLE}"
+        f"cat > \"$WORK_DIR/kernel_bench_multinode.py\" "
+        f"<<'__MN_KBENCH_PY_EOF__'\n"
+        f"{py}__MN_KBENCH_PY_EOF__\n"
+        f"python3 \"$WORK_DIR/kernel_bench_multinode.py\" bench "
+        f"--workspace {workspace!r} "
+        f"--bench-command {bench_command!r} "
+        f"--files-b64-json {files_b64_json!r} "
+        f"--result-glob {result_glob!r} "
+        f"--timeout-sec {int(timeout_sec)}"
+    )
+
+
+def _extract_pod_json(logs: str) -> dict | None:
+    """Parse the last top-level JSON document from a Ray Dashboard
+    job_logs blob. kernel_patch_multinode.py / kernel_bench_multinode.py
+    emit exactly one ``json.dumps(payload, indent=2)`` document on
+    stdout; the dashboard interleaves stderr (timestamped log lines
+    prefixed ``[kernel_..._multinode TS]``) so we isolate the JSON by
+    finding the last ``{`` whose matching ``}`` reaches end-of-text
+    after stripping trailing whitespace.
+    """
+    if not logs:
+        return None
+    text = logs.rstrip()
+    end = text.rfind("}")
+    if end == -1:
+        return None
+    # Scan backward for the matching open brace at depth 0.
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(end, -1, -1):
+        ch = text[i]
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "}":
+            depth += 1
+        elif ch == "{":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[i:end + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def _submit_and_collect_pod_json(
+    head_ip: str,
+    entrypoint: str,
+    *,
+    label: str,
+    poll_interval: int,
+    poll_timeout: int,
+) -> tuple[int, dict | None, str]:
+    """Submit ``entrypoint`` to the head dashboard, poll until terminal,
+    parse the per-pod JSON payload from stdout, and return
+    ``(returncode, parsed_dict_or_None, full_logs)``.
+
+    Used by cmd_apply_patch / cmd_revert_patch / cmd_kernel_bench. Keeps
+    the dashboard plumbing in one place so the three commands stay
+    short and parallel in shape.
+    """
+    with ray_dashboard.RayDashboardClient(head_ip) as ray:
+        sub_id = ray.submit_job(_wrap_for_dash(entrypoint))
+        info(f"{label} submission_id={sub_id}")
+
+        def _fetch():
+            j = ray.get_job(sub_id)
+            return j, f"{label} status={j.get('status', '?')}"
+
+        result = _short_poll(
+            label=label,
+            fetch=_fetch,
+            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
+            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
+            interval_s=poll_interval,
+            timeout_s=poll_timeout,
+        )
+        status = str(result.get("status", "")).upper()
+        logs = ray.get_job_logs(sub_id)
+        parsed = _extract_pod_json(logs)
+        if status in _TERMINAL_FAIL_STATUSES:
+            return EXIT_TRANSIENT, parsed, logs
+        if status not in _TERMINAL_OK_STATUSES:
+            return EXIT_TRANSIENT, parsed, logs
+        # SUCCEEDED on the dashboard side. Sub-script's own ``status``
+        # field tells us whether the per-pod fan-out actually worked.
+        if parsed is None:
+            return EXIT_TRANSIENT, None, logs
+        sub_status = str(parsed.get("status", "")).lower()
+        return (EXIT_OK if sub_status == "ok" else EXIT_TRANSIENT), parsed, logs
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: apply-patch / revert-patch / kernel-bench (multi-node only)
+
+
+def cmd_apply_patch(args: argparse.Namespace) -> int:
+    """Fan out a kernel patch to every pod (head + workers).
+
+    Read the patch file from sandbox, base64-encode it, submit a Ray
+    Dashboard entrypoint that runs kernel_patch_multinode.py apply on
+    the head pod; that script spawns per-node actors to write the same
+    patch to ``--target-path`` on each pod.
+
+    Multi-node only. Single-node falls back to ``apply_kernel_patch.py``
+    in the sandbox (no Ray dispatch needed).
+
+    Stdout: the same JSON document kernel_patch_multinode.py emits,
+    re-printed verbatim so sandbox-side callers (apply_kernel_patch.py
+    multi-node dispatch) can parse it deterministically.
+    """
+    state = _load_state()
+    head_ip = (state.get("head_pod_ip") or "").strip()
+    if not head_ip:
+        err("apply-patch requires head_pod_ip in state file; run create-rayjob first")
+        return EXIT_CONFIG_ERROR
+
+    patch_path = Path(args.patch_file)
+    if not patch_path.is_file():
+        err(f"patch_file does not exist: {patch_path}")
+        return EXIT_CONFIG_ERROR
+    try:
+        patch_bytes = patch_path.read_bytes()
+    except OSError as exc:
+        err(f"failed to read patch_file {patch_path}: {exc}")
+        return EXIT_CONFIG_ERROR
+    patch_b64 = base64.b64encode(patch_bytes).decode("ascii")
+
+    info(
+        f"apply-patch: target={args.target_path} kernel_id={args.kernel_id!r} "
+        f"backup_dir={args.backup_dir} bytes={len(patch_bytes)}"
+    )
+
+    entrypoint = _build_multinode_apply_patch_entrypoint(
+        args.target_path, patch_b64, args.backup_dir, args.kernel_id,
+        args.timeout_sec,
+    )
+    rc, parsed, logs = _submit_and_collect_pod_json(
+        head_ip, entrypoint, label="apply-patch",
+        poll_interval=args.poll_interval, poll_timeout=args.poll_timeout,
+    )
+    if parsed is None:
+        err("apply-patch: could not parse per-pod JSON from dashboard logs")
+        if args.print_logs:
+            print(logs)
+        return EXIT_TRANSIENT
+    print(json.dumps(parsed, indent=2, sort_keys=True))
+    return rc
+
+
+def cmd_revert_patch(args: argparse.Namespace) -> int:
+    """Fan out a kernel patch revert across the pods that originally
+    received it. ``--backup-map-json`` is the per-host map returned by
+    the matching ``apply-patch`` call; callers MUST pass it through
+    unchanged so the right backups are read on each pod.
+    """
+    state = _load_state()
+    head_ip = (state.get("head_pod_ip") or "").strip()
+    if not head_ip:
+        err("revert-patch requires head_pod_ip in state file; run create-rayjob first")
+        return EXIT_CONFIG_ERROR
+
+    try:
+        decoded_map = json.loads(args.backup_map_json or "{}")
+    except json.JSONDecodeError as exc:
+        err(f"--backup-map-json is not valid JSON: {exc}")
+        return EXIT_CONFIG_ERROR
+    if not decoded_map:
+        err("--backup-map-json must be a non-empty {host: backup_path} object")
+        return EXIT_CONFIG_ERROR
+
+    info(
+        f"revert-patch: target={args.target_path} "
+        f"backup_hosts={list(decoded_map.keys())}"
+    )
+
+    entrypoint = _build_multinode_revert_patch_entrypoint(
+        args.target_path, args.backup_map_json, args.timeout_sec,
+    )
+    rc, parsed, logs = _submit_and_collect_pod_json(
+        head_ip, entrypoint, label="revert-patch",
+        poll_interval=args.poll_interval, poll_timeout=args.poll_timeout,
+    )
+    if parsed is None:
+        err("revert-patch: could not parse per-pod JSON from dashboard logs")
+        if args.print_logs:
+            print(logs)
+        return EXIT_TRANSIENT
+    print(json.dumps(parsed, indent=2, sort_keys=True))
+    return rc
+
+
+def cmd_kernel_bench(args: argparse.Namespace) -> int:
+    """Run a kernel micro-benchmark on a GPU-bearing pod.
+
+    Stages an optional bundle of helper files into ``--workspace``,
+    invokes ``--bench-command`` under that workspace with GPU
+    acceleration, and reads back result artifacts matching
+    ``--result-glob``.
+
+    The sandbox calls this when ``is_multi_node()`` is True and the
+    kernel-agent micro-benchmark step would otherwise try to compile +
+    run on the sandbox (which lacks GPUs in multi-node mode).
+    """
+    state = _load_state()
+    head_ip = (state.get("head_pod_ip") or "").strip()
+    if not head_ip:
+        err("kernel-bench requires head_pod_ip in state file; run create-rayjob first")
+        return EXIT_CONFIG_ERROR
+
+    # Validate the optional files-b64 JSON early so a malformed input
+    # fails before we hit the dashboard.
+    if args.files_b64_json:
+        try:
+            json.loads(args.files_b64_json)
+        except json.JSONDecodeError as exc:
+            err(f"--files-b64-json is not valid JSON: {exc}")
+            return EXIT_CONFIG_ERROR
+
+    info(
+        f"kernel-bench: workspace={args.workspace} "
+        f"cmd={args.bench_command!r} result_glob={args.result_glob}"
+    )
+
+    entrypoint = _build_multinode_kernel_bench_entrypoint(
+        args.workspace, args.bench_command, args.files_b64_json or "{}",
+        args.result_glob, args.timeout_sec,
+    )
+    rc, parsed, logs = _submit_and_collect_pod_json(
+        head_ip, entrypoint, label="kernel-bench",
+        poll_interval=args.poll_interval, poll_timeout=args.poll_timeout,
+    )
+    if parsed is None:
+        err("kernel-bench: could not parse pod JSON from dashboard logs")
+        if args.print_logs:
+            print(logs)
+        return EXIT_TRANSIENT
+    print(json.dumps(parsed, indent=2, sort_keys=True))
+    return rc
+
+
 def cmd_restart_server(args: argparse.Namespace) -> int:
     """Kill any prior vllm/sglang server and launch a new one.
 
@@ -1081,6 +1424,15 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             not in ("0", "false", "no", "off")
         )
         prev_sub = str(state.get("last_restart_submission_id") or "").strip()
+        # ``last_restart_extra_args`` is normalized at write time; do the
+        # same to the live args here so whitespace differences don't make
+        # an otherwise-identical restart miss the resume fast path.
+        # CRITICAL: extra_args carries every backend / params variant flag
+        # (--attention-backend, --cuda-graph-max-bs, --moe-runner-backend,
+        # etc.); a resume that ignores it leaves sglang running with the
+        # PREVIOUS variant's args, so every benchmark measurement after
+        # the first variant reflects stale flags instead of the round's
+        # intended config.
         prev_match = bool(prev_sub) and (
             str(state.get("last_restart_framework") or "") == str(args.framework)
             and str(state.get("last_restart_model") or "") == str(args.model)
@@ -1088,6 +1440,8 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             and int(state.get("last_restart_ep") or 1) == int(getattr(args, "ep", 1) or 1)
             and str(state.get("last_restart_pd_mode") or "colocated")
                 == (getattr(args, "pd_mode", "") or "colocated").lower()
+            and _normalize_extra_args(state.get("last_restart_extra_args"))
+                == _normalize_extra_args(getattr(args, "extra_args", ""))
         )
         if resume_enabled and prev_match:
             _prev_status = ""
@@ -1145,6 +1499,9 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             state["last_restart_pd_mode"] = (
                 getattr(args, "pd_mode", "") or "colocated"
             ).lower()
+            state["last_restart_extra_args"] = _normalize_extra_args(
+                getattr(args, "extra_args", "")
+            )
             _save_state(state)
 
             def _fetch_launch():
@@ -1573,6 +1930,58 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--clear-state", action="store_true",
                     help="remove /tmp/multi_node_state.json on success")
     sp.set_defaults(func=cmd_stop_rayjob)
+
+    # apply-patch (multi-node only)
+    sp = sub.add_parser(
+        "apply-patch",
+        help="fan-out a kernel patch to every pod (head + workers); multi-node only",
+    )
+    sp.add_argument("--patch-file", required=True,
+                    help="path to the patch source on sandbox filesystem; contents will be base64-encoded into the dashboard entrypoint")
+    sp.add_argument("--target-path", required=True,
+                    help="absolute file path on each pod to overwrite (e.g. /sgl-workspace/aiter/aiter/ops/gemm.py)")
+    sp.add_argument("--backup-dir", required=True,
+                    help="directory on each pod where the pre-patch original is saved (e.g. /var/kernel_patch_backups)")
+    sp.add_argument("--kernel-id", default="",
+                    help="optional id used to construct backup filename")
+    sp.add_argument("--timeout-sec", type=int, default=120,
+                    help="per-actor timeout (default 120s)")
+    sp.add_argument("--print-logs", action="store_true",
+                    help="dump full dashboard job_logs on parse failure")
+    _add_common_poll_flags(sp)
+    sp.set_defaults(func=cmd_apply_patch)
+
+    # revert-patch (multi-node only)
+    sp = sub.add_parser(
+        "revert-patch",
+        help="fan-out a kernel patch revert; multi-node only",
+    )
+    sp.add_argument("--target-path", required=True)
+    sp.add_argument("--backup-map-json", required=True,
+                    help='JSON object {hostname: backup_path} from the matching apply-patch result')
+    sp.add_argument("--timeout-sec", type=int, default=60)
+    sp.add_argument("--print-logs", action="store_true")
+    _add_common_poll_flags(sp)
+    sp.set_defaults(func=cmd_revert_patch)
+
+    # kernel-bench (multi-node only)
+    sp = sub.add_parser(
+        "kernel-bench",
+        help="run a kernel micro-benchmark on a GPU-bearing pod; multi-node only",
+    )
+    sp.add_argument("--workspace", required=True,
+                    help="absolute dir on pod that will be CWD for the bench")
+    sp.add_argument("--bench-command", required=True,
+                    help="shell command to invoke (passed to 'bash -lc')")
+    sp.add_argument("--files-b64-json", default="{}",
+                    help='JSON {rel_path: base64_content} of helper files to stage into workspace before the bench')
+    sp.add_argument("--result-glob", default="*.json",
+                    help="glob (relative to workspace) of result artifacts to read back after the bench")
+    sp.add_argument("--timeout-sec", type=int, default=600,
+                    help="hard timeout for the bench command (default 600s)")
+    sp.add_argument("--print-logs", action="store_true")
+    _add_common_poll_flags(sp)
+    sp.set_defaults(func=cmd_kernel_bench)
 
     return p
 
