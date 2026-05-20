@@ -88,9 +88,11 @@ def test_critic_prompt_includes_phase_review_contract(registry):
         max_minutes=120,
     )
     assert "PHASE REVIEW CONTRACT" in text
-    # Per-variant verdict shape for specialist packets.
+    # v0.8 KB_gaps/Gap-11 — per-variant verdict_map for specialist
+    # / multi-variant explore packets. The prompt advertises both
+    # the canonical batch shape and the legacy single-verdict path.
     assert "proposal_set" in text
-    assert "one verdict per variant" in text.lower()
+    assert "verdict_map" in text.lower()
 
 
 def test_role_md_files_carry_phase_awareness():
