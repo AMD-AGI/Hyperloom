@@ -16,8 +16,8 @@ The Coordinator is the **protocol manager** (not a decision-maker). It owns:
 * persists / routes intents (REQUEST/RESPONSE/REVIEW_VERDICT/etc.)
 * for delegated tasks: enqueues into TaskRegistry and pumps SubAgentRunner
 
-Everything else (real backends, accuracy gate, scheduler scoring,
-checkpoint cadence) lands in P0-5 and beyond.
+Everything else (real backends, accuracy gate, phase machine, checkpoint
+cadence) lands in P0-5 and beyond.
 """
 
 from __future__ import annotations
@@ -76,9 +76,6 @@ from .shared_state import SharedState
 from .sub_agent_runner import SubAgentResult, SubAgentRunner
 from .task_registry import Task, TaskRegistry
 from .action_executors.benchmark_result import is_valid_measurement
-# v0.8 §3.9 — orchestrator.scoring is retired; the legacy
-# ``_scoring`` alias is gone. Action-scoring methods on Coordinator
-# are now no-op stubs (KB_design §3.9 Inv-9.1).
 from .system_prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
     NO_KERNEL_ENABLED_ACTIONS,
@@ -450,17 +447,14 @@ class Coordinator:
             r for r in _CANONICAL_ORDER if r in self.role_registry
         )
 
-        # Action registry + per-action scoring (see orchestrator/scoring.py
-        # and the plan ``action-scoring-in-shared-state``). The registry is
-        # cheap to load — a handful of small yaml files — so we eagerly load
-        # it once and use the in-memory copy to both seed scores and render
-        # the per-tick scoreboard. A load failure falls back to ``None``;
-        # downstream callers handle a missing registry gracefully.
+        # Action registry — small yaml catalogue used by PolicyGate /
+        # prompt rendering to map action_name → metadata (phase, family,
+        # pipeline_phase). A load failure falls back to ``None``; downstream
+        # callers handle a missing registry gracefully.
         try:
             self.action_registry: ActionRegistry | None = ActionRegistry().load()
         except Exception:  # noqa: BLE001 — defensive; missing yaml shouldn't kill the run.
-            log.exception("Coordinator: failed to load ActionRegistry; "
-                          "scoring will be disabled this session.")
+            log.exception("Coordinator: failed to load ActionRegistry.")
             self.action_registry = None
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: float | None = None
@@ -468,15 +462,10 @@ class Coordinator:
         # Latest objective wired by ``Coordinator.run()``. Used by
         # ``_compose_prompt`` to refresh ``shared_state.target_gap_pct`` on
         # every Orchestration tick. None outside a run (e.g. bounded tick()
-        # tests) and the scoreboard renderer falls back to multiplier=1.0.
+        # tests).
         self._current_objective: Objective | None = None
 
-        # Resume detection runs BEFORE we seed action_scores so a fresh
-        # session is not misdetected as a resume (seeding writes state.json
-        # which the resume probe treats as evidence of an existing session).
         self._resumed_from = self._detect_resume_state()
-        # Seed per-action scoring now that resume status is locked in.
-        self._ensure_action_scores_seeded()
         # v0.8 M2 — initialise phase machine. Fresh session enters
         # PRELUDE; resume from v0.6 (no phase field) infers a phase via
         # :func:`phase_state.infer_phase_from_state`.  Always idempotent:
@@ -680,49 +669,6 @@ class Coordinator:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
             log.exception("cortex T4 SharedState.save after commit failed")
-
-    # ==================================================================
-    # v0.8 §3.9 — scoreboard retired (KB_design §3.9 Inv-9.1)
-    # ==================================================================
-    # The v0.6 ``_score_action_*`` / ``_apply_action_score_update``
-    # surface was deleted. The Coordinator no longer maintains a
-    # per-action numeric priority; the LLM decides by reading facts
-    # (phase / gaps / KB sub-graphs / specialist proposal_set / recent
-    # winners). The stubs below keep the *callable surface* so the
-    # existing in-tree call sites (and tests) compile without a
-    # rewrite, but every method is a no-op. New code should not call
-    # them at all.
-    def _score_action_keep(self, action_name: str, *, gain_pct: float = 0.0) -> None:
-        return None
-
-    def _score_action_discard(self, action_name: str) -> None:
-        return None
-
-    def _score_action_failure(self, action_name: str) -> None:
-        return None
-
-    def _score_action_no_promote(self, action_name: str) -> None:
-        return None
-
-    def _score_action_lock(self, action_name: str, reason: str) -> None:
-        return None
-
-    def _apply_action_score_update(
-        self,
-        task_kind: str,
-        result: dict[str, Any],
-        *,
-        promoted: bool | None = None,
-        gain_vs_cb: float | None = None,
-    ) -> None:
-        """No-op stub retained for back-compat with v0.6 call sites.
-
-        Real ``params_grid_exhausted`` / ``backends_search_exhausted``
-        signals still flow through ``explore_search`` / breakdown —
-        the LLM consumes those facts directly without a scoreboard
-        intermediary (KB_design §3.9 §6).
-        """
-        return None
 
     # ==================================================================
     # v0.8 M2 — phase state machine
@@ -1773,15 +1719,6 @@ class Coordinator:
                 "close_step save failed for step=%r status=%r", step, status,
             )
 
-    def _ensure_action_scores_seeded(self) -> None:
-        """v0.8 §3.9 — no-op stub.
-
-        The Coordinator no longer maintains a scoreboard. Kept as a
-        callable so the boot path (which used to invoke it) doesn't
-        need a separate guard.
-        """
-        return None
-
     # ==================================================================
     # Bounded test interface
     # ==================================================================
@@ -1878,9 +1815,9 @@ class Coordinator:
         try:
             while not stop_reason:
                 tick_n += 1
-                # Bump the persistent tick counter — drives cooldown / aging
-                # math in orchestrator/scoring.py. Persisted on the next
-                # save() (after _promote_to_shared_state or stop).
+                # Bump the persistent tick counter — drives phase / plateau
+                # math. Persisted on the next save() (after
+                # _promote_to_shared_state or stop).
                 self.shared_state.increment_tick()
                 in_closing = self.shared_state.closing_phase
                 # Run one reactor + dispatcher pass. During closing, skip
@@ -2002,10 +1939,7 @@ class Coordinator:
         2. no pending proposals or queued / running tasks
         3. ``params_no_promote_streak >= 5`` (v0.6 proxy still used as
            the cross-phase plateau hint; see KB_gaps/Gap-15)
-        4. the action registry's top-of-scoreboard families are all
-           policy-locked (Inv-9.1 retired the scoreboard but the
-           per-family lock flag is still consulted)
-        5. every reusable kernel_id is rejected.
+        4. every reusable kernel_id is rejected.
         """
         if self.shared_state.baseline_tput <= 0:
             return False
@@ -2017,13 +1951,6 @@ class Coordinator:
             return False
         if self.shared_state.params_no_promote_streak < 5:
             return False
-        if (
-            self.action_registry is not None
-            and self.shared_state.all_top_actions_policy_locked(
-                self.action_registry,
-            )
-        ):
-            return True
         return self._all_reusable_kernels_rejected()
 
     async def _enter_closing_phase(self, *, grace_sec: float) -> float:
@@ -2351,12 +2278,9 @@ class Coordinator:
         sections.append("=== Shared session state ===")
         sections.append(self.shared_state.to_prompt_summary())
         if agent_name == "orchestration":
-            # v0.8 §3.9 — ``target_gap_pct`` is a *fact* (how much
-            # gain is still needed for ``--target-gain``), not a
-            # scoring multiplier. Keep refreshing it so the prompt's
-            # Mission-progress line stays current. The Action-scores
-            # block has been retired (Inv-9.1); the LLM consumes
-            # phase / gaps / KB / specialist_rounds instead.
+            # ``target_gap_pct`` is a *fact* (how much gain is still
+            # needed for ``--target-gain``). Refresh so the prompt's
+            # Mission-progress line stays current.
             obj = getattr(self, "_current_objective", None)
             obj_kind = getattr(obj, "kind", "") if obj is not None else ""
             if obj_kind == "gain_pct":
@@ -3790,7 +3714,8 @@ class Coordinator:
                     rule="family_pruned",
                     hint=(
                         f"{action_name!r} is in pruned_families; pick another "
-                        f"action from Action scores"
+                        f"phase-allowed action (see the `=== Phase-allowed "
+                        f"actions ===` block)"
                     ),
                 ),
                 action_name=action_name,
@@ -4661,63 +4586,13 @@ class Coordinator:
                 # doesn't re-dispatch the same kernel_id forever.
                 if kind == "run_optimization":
                     self.shared_state.record_kernel_opt(result)
-                    # Wire run_optimization decision (KEEP / REVERT / PARTIAL)
-                    # into the per-action scoring for kernel_opt. KEEP uses
-                    # the micro_speedup if it surfaces a percentage-shaped
-                    # number; otherwise we record a zero-gain KEEP (still
-                    # bumps runs + sets cooldown).
-                    verification = (
-                        result.get("verification")
-                        if isinstance(result, dict)
-                        else None
-                    ) or {}
-                    proposal = (
-                        result.get("proposal")
-                        if isinstance(result, dict)
-                        else None
-                    ) or {}
-                    decision = str(proposal.get("decision", "")).upper()
-                    if decision == "KEEP":
-                        speedup = verification.get("micro_speedup")
-                        gain = 0.0
-                        if isinstance(speedup, (int, float)) and speedup > 1.0:
-                            gain = float(speedup - 1.0) * 100.0
-                        self._score_action_keep("kernel_opt", gain_pct=gain)
-                    elif decision in {"REVERT", "PARTIAL"}:
-                        # Ran but did not promote — count toward the
-                        # no-promote streak rather than the failure
-                        # streak (the optimization itself didn't crash).
-                        self._score_action_no_promote("kernel_opt")
-                    else:
-                        # Unknown decision — treat as a measurement: bump
-                        # runs without rewarding or penalising the action.
-                        self._score_action_keep("kernel_opt", gain_pct=0.0)
                     self.shared_state.save(self.session_dir)
                 if kind == "integrate":
                     if result.get("status") != "skipped":
                         self.shared_state.record_kernel_integrate_result(result)
                     decision = str(result.get("decision", "")).upper()
-                    int_status = str(result.get("status") or "")
-                    int_failed = int_status in {"failed", "error"} or bool(
-                        result.get("error_class")
-                    )
                     if decision == "KEEP":
                         self._record_integrate_keep(result)
-                        gain = result.get("gain_pct")
-                        gain_f = (
-                            float(gain) if isinstance(gain, (int, float)) else 0.0
-                        )
-                        self._score_action_keep("integrate", gain_pct=max(0.0, gain_f))
-                    elif decision in {"REVERT", "NEEDS_REVIEW"}:
-                        if int_failed:
-                            self._score_action_failure("integrate")
-                        else:
-                            self._score_action_no_promote("integrate")
-                    elif int_status != "skipped":
-                        if int_failed:
-                            self._score_action_failure("integrate")
-                        else:
-                            self._score_action_keep("integrate", gain_pct=0.0)
                     self.shared_state.save(self.session_dir)
                 # Bug B fix: the request was just answered programmatically,
                 # so the LLM-backed kernel agent should NOT see the request
@@ -6054,14 +5929,8 @@ class Coordinator:
             )
             self.shared_state.record_sweep(result)
             self.shared_state.params_no_promote_streak += 1
-            self._apply_action_score_update(
-                "sweep", result, promoted=False, gain_vs_cb=0.0,
-            )
             self.shared_state.save(self.session_dir)
             return
-        if task_kind in {"profile", "pmc_roofline"}:
-            self._apply_action_score_update(task_kind, result)
-            changed = True
         # Audit trail (kernel-parity) for the 6 non-kernel actions: one
         # record per attempt with status="succeeded" + branch-supplied
         # decision/extras. The sweep branch records its own attempt

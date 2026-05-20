@@ -10,9 +10,11 @@ Covers KB_design/3.9_drop_scoreboard/README.md:
 * ``params_no_promote_streak`` is preserved as a *fact* (LLM reads
   it; the system no longer derives a *priority* from it).
 * ``orchestrator.scoring`` module is gone.
-* ``Coordinator`` no-op stubs for the v0.6 scoring helpers stay
-  callable so existing call sites compile.
+* ``Coordinator`` no longer carries any ``_score_action_*`` /
+  ``_apply_action_score_update`` / ``_ensure_action_scores_seeded`` stubs
+  (KB_gaps/Dead-B): both the methods and their call sites are deleted.
 * The Orchestration prompt no longer carries ``Action scores`` block.
+* PolicyGate ``family_pruned`` denial hint never mentions "Action scores".
 """
 
 from __future__ import annotations
@@ -76,11 +78,12 @@ def test_shared_state_keeps_tick_and_target_gap_pct():
     assert s.target_gap_pct == 0.0
 
 
-def test_shared_state_all_top_actions_policy_locked_stub_returns_false():
-    """v0.8 §3.9 stub: the scoreboard-based "everything's locked"
-    helper now always returns False (plateau judges took over)."""
+def test_shared_state_all_top_actions_policy_locked_removed():
+    """KB_gaps/Dead-B — the scoreboard-based "everything's locked" stub
+    is deleted (plateau judges took over). The attribute must not exist
+    on ``SharedState`` at all."""
     s = SharedState()
-    assert s.all_top_actions_policy_locked(registry=None) is False
+    assert not hasattr(s, "all_top_actions_policy_locked")
 
 
 # ===========================================================================
@@ -172,20 +175,54 @@ def test_scoring_module_was_retired():
 
 
 # ===========================================================================
-# 4. Coordinator scoring stubs
+# 4. Coordinator scoring surface fully removed (KB_gaps/Dead-B)
 # ===========================================================================
-def test_coordinator_scoring_helpers_are_noop_stubs():
-    """The v0.6 ``_score_action_*`` / ``_apply_action_score_update``
-    surface stays callable (so existing call sites compile) but every
-    method is a no-op now. We assert by inspection — the body is
-    just ``return None`` after the refactor."""
+def test_coordinator_has_no_scoring_methods():
+    """KB_gaps/Dead-B — every v0.6 scoreboard hook on Coordinator is
+    physically removed (methods + their callers)."""
+    from inference_optimizer.orchestrator.coordinator import Coordinator
+
+    for name in (
+        "_score_action_keep",
+        "_score_action_discard",
+        "_score_action_failure",
+        "_score_action_no_promote",
+        "_score_action_lock",
+        "_apply_action_score_update",
+        "_ensure_action_scores_seeded",
+    ):
+        assert not hasattr(Coordinator, name), (
+            f"{name!r} must be deleted (KB_gaps/Dead-B §4.1-§4.3)"
+        )
+
+
+def test_coordinator_source_has_no_scoreboard_callers():
+    """Defense in depth: no call sites remain in the coordinator body."""
     from inference_optimizer.orchestrator import coordinator as _c
+
     src = Path(_c.__file__).read_text(encoding="utf-8")
-    # Spot-check the stub markers we added.
-    assert "v0.8 §3.9 — scoreboard retired" in src
-    assert "v0.8 §3.9 — no-op stub" in src
-    # And confirm the dynamic scoreboard injection is gone.
-    assert "to_action_scores_summary(" not in src
+    for needle in (
+        "_score_action_",
+        "_apply_action_score_update(",
+        "_ensure_action_scores_seeded(",
+        "to_action_scores_summary(",
+    ):
+        assert needle not in src, (
+            f"coordinator still references retired symbol {needle!r}"
+        )
+
+
+def test_family_pruned_denial_hint_has_no_scoreboard_vocab():
+    """KB_gaps/Dead-B §B.4 — the ``family_pruned`` denial hint string
+    must not mention "Action scores" any more."""
+    from inference_optimizer.orchestrator import coordinator as _c
+
+    src = Path(_c.__file__).read_text(encoding="utf-8")
+    family_pruned_block_idx = src.find('rule="family_pruned"')
+    assert family_pruned_block_idx >= 0
+    window = src[family_pruned_block_idx : family_pruned_block_idx + 800]
+    assert "Action scores" not in window
+    assert "pick another" in window  # the replacement phrasing is present
 
 
 # ===========================================================================

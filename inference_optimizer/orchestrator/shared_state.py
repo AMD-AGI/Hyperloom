@@ -1385,16 +1385,6 @@ class SharedState:
             )
         return "\n".join(lines)
 
-    def all_top_actions_policy_locked(self, registry: Any, *, top_k: int = 12) -> bool:
-        """v0.8 §3.9 — always returns False (scoreboard retired).
-
-        Kept as a stub for back-compat with callers that used to gate
-        on "everything is locked"; the v0.8 LLM is given facts not
-        priorities, so a "nothing left to try" signal comes from
-        plateau detection (``compute_plateau_explore``) instead.
-        """
-        return False
-
     def increment_crash_count(self, by: int = 1) -> int:
         self.crash_count += by
         return self.crash_count
