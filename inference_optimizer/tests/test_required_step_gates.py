@@ -193,7 +193,10 @@ def test_target_analysis_denial_clears_after_baseline_json_written(session_dir):
     _write_baseline_json(session_dir)
     # baseline gate now applies (baseline_tput is 0). target_analysis no
     # longer blocks; the next gate down (baseline) is what speaks up.
-    denied = coord._sequence_denial_for_action("backends")
+    # KB_gaps/Dead-C — exercise the gate via the v0.8 canonical
+    # ``explore`` action (the legacy ``backends`` name is denied earlier
+    # at PolicyGate ``action_deprecated`` and never reaches this layer).
+    denied = coord._sequence_denial_for_action("explore")
     assert isinstance(denied, PolicyDenied)
     assert "baseline must run first" in str(denied)
     # target_analysis -> the gate has just been satisfied so it should
@@ -233,8 +236,7 @@ def test_pmc_roofline_gate_does_not_block_explore_actions(session_dir):
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
-    for action in ("backends", "params", "sweep", "report", "profile",
-                   "pmc_roofline", "validate_stack"):
+    for action in ("explore", "sweep", "report", "profile", "pmc_roofline"):
         denied = coord._sequence_denial_for_action(action)
         if denied is None:
             continue
@@ -283,7 +285,7 @@ def test_pmc_roofline_gate_skipped_in_no_kernel_mode(session_dir):
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     assert coord._required_next_step() == ""
-    assert coord._sequence_denial_for_action("backends") is None
+    assert coord._sequence_denial_for_action("explore") is None
 
 
 # ===========================================================================
@@ -356,8 +358,12 @@ def test_integrate_denial_blocks_explore_but_allows_safe_actions(session_dir):
     coord.shared_state.last_kernel_opt = {
         "kernel_id": "k-rmsnorm", "decision": "KEEP",
     }
-    # Explore actions denied
-    for action in ("backends", "params", "sweep"):
+    # v0.8 M3 / KB_gaps/Dead-C — the canonical EXPLORE-phase actions
+    # (``explore`` + ``sweep``) must be denied while ``integrate`` is
+    # required. Legacy ``backends`` / ``params`` / ``validate_stack`` are
+    # already denied earlier at the PolicyGate ``action_deprecated`` rule
+    # so they never reach this sequence gate.
+    for action in ("explore", "sweep"):
         denied = coord._sequence_denial_for_action(action)
         assert isinstance(denied, PolicyDenied), (
             f"{action!r} should be denied while integrate is required"
@@ -365,10 +371,11 @@ def test_integrate_denial_blocks_explore_but_allows_safe_actions(session_dir):
         assert denied.rule == "execution_order"
         assert "integrate must run first" in str(denied)
         assert "k-rmsnorm" in (denied.hint or "")
-    # integrate / validate_stack / report bypass the gate
+    # integrate / report bypass the gate; legacy ``validate_stack`` no
+    # longer appears in ``sequence_actions`` and short-circuits early.
     assert coord._sequence_denial_for_action("integrate") is None
-    assert coord._sequence_denial_for_action("validate_stack") is None
     assert coord._sequence_denial_for_action("report") is None
+    assert coord._sequence_denial_for_action("validate_stack") is None
 
 
 # ===========================================================================
@@ -388,8 +395,7 @@ def test_select_kernels_gate_does_not_block_explore_actions(session_dir):
     s.last_profile_trace = "/tmp/profile.tar.gz"
     # Cache deliberately empty; would have triggered the old gate.
     s.last_select_kernels = {}
-    for action in ("backends", "params", "sweep", "report", "profile",
-                   "pmc_roofline", "validate_stack"):
+    for action in ("explore", "sweep", "report", "profile", "pmc_roofline"):
         denied = coord._sequence_denial_for_action(action)
         if denied is None:
             continue
