@@ -425,6 +425,51 @@ async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
 
 
 @pytest.mark.asyncio
+async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
+    """LLM sometimes puts idempotency_key under params.
+
+    Coordinator must treat that as the delegate key, remove it from executor
+    params, and avoid reusing the auto-generated source:action:N key.
+
+    Uses ``explore`` because v0.8 M3 / KB_gaps/Gap-10 merged the legacy
+    ``backends`` / ``params`` / ``validate_stack`` actions into it; the
+    nested-key plumbing the test guards is identical across kinds.
+    """
+    delegate = Intent(type=IntentType.DELEGATE, payload={
+        "action_name": "explore",
+        "params": {
+            "grid": [{"name": "round2", "extra_sglang_args": "--x"}],
+            "idempotency_key": "explore-round-2",
+        },
+    })
+    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
+    c = Coordinator(session_dir, backends=_build_backends(plans))
+    captured: dict[str, object] = {}
+
+    async def _runner(ctx):
+        captured["params"] = dict(ctx.task.params)
+        captured["idempotency_key"] = ctx.task.idempotency_key
+        return {"status": "succeeded", "tput": 1.0}
+
+    c.sub.register_executor("explore", _runner)
+    try:
+        c.shared_state.baseline_tput = 100.0
+        c.shared_state.baseline_config_path = "/tmp/baseline.yaml"
+        c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
+        c.shared_state.save(session_dir)
+        await c.tick(1)
+        assert captured["idempotency_key"] == "explore-round-2"
+        assert "idempotency_key" not in captured["params"]
+        denied = await c.bus.tail(topic="observation")
+        assert not any(
+            m.payload.get("rule") == "duplicate_idempotency_key"
+            for m in denied
+        )
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_coordinator_request_routes_to_kernel(session_dir):
     req = Intent(type=IntentType.REQUEST, payload={
         "target_agent": "kernel", "kind": "select_kernels",

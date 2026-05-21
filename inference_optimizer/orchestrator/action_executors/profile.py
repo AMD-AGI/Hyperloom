@@ -31,6 +31,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from ...paths import asset_root
 from ._inferencex_patcher import (
     ensure_benchmark_lib_patched,
@@ -60,6 +62,20 @@ def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
     evolves.
     """
     return sorted(trace_dir.rglob("*.trace.json.gz"))
+
+
+def _preferred_main_trace_path(trace_dir: Path, trace_files: list[Path]) -> Path:
+    """Trace path to pass downstream to TraceLens.
+
+    The old `sorted(...)[0]` behaviour picked `TP-0-DECODE.trace.json.gz`
+    before `merged-*.trace.json.gz`, which hands TraceLens a tiny single-rank
+    decode slice instead of the large annotated trace its splitter expects.
+    Prefer the merged trace when Magpie produced one; otherwise pass the trace
+    directory so kernel-agent can apply its own ordering instead of pinning a
+    single staged file.
+    """
+    merged = sorted(p for p in trace_files if p.name.startswith("merged-"))
+    return merged[0] if merged else trace_dir
 
 
 def _candidate_trace_dirs(workspace: Path) -> list[Path]:
@@ -102,6 +118,70 @@ class ProfileExecutor(BaselineExecutor):
         """Override BaselineExecutor's resolver to pick the profile yaml."""
         return _default_profile_config()
 
+    def _after_materialize_config(
+        self, config_path: Path, output_dir: Path,
+    ) -> dict[str, Any] | None:
+        """Patch the exact InferenceX checkout Magpie will execute.
+
+        `$INFERENCEX_PATH` alone is not enough: Magpie resolves an empty
+        `benchmark.inferencex_path` to its own sibling checkout. Read the
+        materialized YAML and patch that resolved path, so NUM_PROMPTS and
+        PROFILE_EXTRA_BODY cannot be applied to one checkout while Magpie runs
+        another.
+        """
+        try:
+            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "status": "failed",
+                "error_class": "profile_config_unreadable",
+                "error": f"cannot read materialized profile config {config_path}: {exc}",
+            }
+        bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
+        inferencex_path = ""
+        if isinstance(bench, dict):
+            inferencex_path = str(bench.get("inferencex_path") or "").strip()
+        if not inferencex_path:
+            inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+        if not inferencex_path:
+            log.warning(
+                "profile_executor: no benchmark.inferencex_path / "
+                "INFERENCEX_PATH configured; skipping InferenceX profile "
+                "patch validation"
+            )
+            return None
+
+        ix_root = Path(inferencex_path)
+        lib_ok = ensure_benchmark_lib_patched(ix_root)
+        serving_ok = ensure_benchmark_serving_patched(ix_root)
+        lib_path = ix_root / "benchmarks" / "benchmark_lib.sh"
+        serving_path = ix_root / "utils" / "bench_serving" / "benchmark_serving.py"
+
+        def _contains(path: Path, needle: str) -> bool:
+            try:
+                return needle in path.read_text(encoding="utf-8")
+            except OSError:
+                return False
+
+        lib_valid = _contains(lib_path, '${NUM_PROMPTS:-$max_concurrency}')
+        serving_valid = _contains(serving_path, "PROFILE_EXTRA_BODY")
+        if not (lib_ok and serving_ok and lib_valid and serving_valid):
+            return {
+                "status": "failed",
+                "error_class": "profile_inferencex_patch_failed",
+                "error": (
+                    "profile requires InferenceX to honour NUM_PROMPTS and "
+                    "PROFILE_EXTRA_BODY, but the checkout Magpie will use is "
+                    f"not patched: inferencex_path={ix_root}, "
+                    f"benchmark_lib_ok={lib_ok}/{lib_valid}, "
+                    f"benchmark_serving_ok={serving_ok}/{serving_valid}"
+                ),
+                "inferencex_path": str(ix_root),
+                "benchmark_lib": str(lib_path),
+                "benchmark_serving": str(serving_path),
+            }
+        return None
+
     async def __call__(self, ctx) -> dict[str, Any]:
         # Override action label so per-task output lands under runs/profile/
         # rather than runs/baseline/ when the runner derives the path.
@@ -115,23 +195,6 @@ class ProfileExecutor(BaselineExecutor):
                 ctx.extra = {"workspace": str(output_dir)}
             else:
                 extra["workspace"] = str(output_dir)
-        # Issue #194 §2: ensure InferenceX's benchmark_lib.sh honours
-        # $NUM_PROMPTS. _workload_envs computes a NUM_PROMPTS large
-        # enough to reach the steady-state window, but unpatched
-        # upstream stomps it on every PROFILE=1 run — silently
-        # producing empty traces. The patch is backward-compatible
-        # (no-op when NUM_PROMPTS is unset) and idempotent, so calling
-        # this on every profile launch costs ~1 file read after the
-        # first success.
-        ensure_benchmark_lib_patched()
-        # PR-D §2: ensure InferenceX `benchmark_serving.py` reads our
-        # `PROFILE_EXTRA_BODY` env var. Without this patch the
-        # `/start_profile` request bakes in upstream's hardcoded
-        # `extra_body={"num_steps": 1, ...}` and silently drops
-        # shape_discovery / roofline_annotations / the steady-state
-        # start_step computed by `_workload_envs.py`. Same idempotent
-        # atomic-replace shape as `ensure_benchmark_lib_patched`.
-        ensure_benchmark_serving_patched()
         result = await super().__call__(ctx)
         # Augment with trace_dir if the workspace produced one.
         workspace_str = result.get("workspace")
@@ -153,7 +216,15 @@ class ProfileExecutor(BaselineExecutor):
             if selected_trace_dir is not None:
                 result["trace_dir"] = str(selected_trace_dir)
                 result["trace_files"] = [str(p) for p in selected_trace_files]
-                result["main_trace_path"] = str(selected_trace_files[0])
+                main_trace = _preferred_main_trace_path(
+                    selected_trace_dir, selected_trace_files,
+                )
+                result["main_trace_path"] = str(main_trace)
+                result["profile_trace_selection_reason"] = (
+                    "merged_trace_preferred"
+                    if main_trace.name.startswith("merged-")
+                    else "trace_dir_preferred"
+                )
             else:
                 result["trace_dir"] = None
                 result["trace_files"] = []

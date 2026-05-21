@@ -587,6 +587,13 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "'try a different value', and a sub-threshold `+0.4%` reject is a",
         "candidate for a synergy combo with another winner.",
         "",
+        "**Use the numeric `gain_pct` on every row.** The `*_search` and",
+        "`backend_winners_history` blocks now render `±x.xx%` per variant.",
+        "Read them as ranking signal: a `-2%` reject means the flag itself is",
+        "bad on this workload (don't retry the same value), `-0.3%` is",
+        "'try a different value', and a sub-threshold `+0.4%` reject is a",
+        "candidate for a synergy combo with another winner.",
+        "",
         "1. **Sub-actions** — sibling flags. If `--max-num-seqs 256` won, also",
         "   try `--max-num-seqs 128` / `512` / `1024`; if `VLLM_ROCM_USE_AITER=1`",
         "   won, sweep the related `VLLM_ROCM_USE_AITER_*` boolean family.",
@@ -680,7 +687,10 @@ Pick the next kernel-owned REQUEST by reading facts in this order
   Coordinator denies kernel_opt requests with `select_kernels must run
   first` when the cache is stale, but `params` / `backends` / `sweep` /
   `report` are NEVER gated on it. Re-emit only after a fresh `profile`
-  action invalidates the cache.
+  action invalidates the cache.  TODO 3/5 surfaces in
+  `_required_next_step` as guidance whenever `last_profile_trace` is
+  fresh but the cache is still stale — emit the REQUEST yourself
+  before kernel_opt / integrate cycles.
 
 ### `kernel_opt` — payload for `run_optimization`
 
@@ -716,10 +726,10 @@ HARD RULES (applied at REQUEST build time, NOT at action-selection time):
   exact regression that closed #144's last comment Layer 2. Omit the field
   and let auto-pick fire.
 
-### `integrate` — payload (TODO 3/4 forces this immediately after a KEEP)
+### `integrate` — payload (TODO 4/5 forces this immediately after a KEEP)
 
 When `run_optimization_done` arrives with `result.proposal.decision='KEEP'`,
-the Coordinator's TODO 3/4 makes `integrate` the only allowed action
+the Coordinator's TODO 4/5 makes `integrate` the only allowed action
 until the patch lands on `optimization_stack`. Payload:
 
   request{target_agent: 'kernel', kind: 'integrate',
