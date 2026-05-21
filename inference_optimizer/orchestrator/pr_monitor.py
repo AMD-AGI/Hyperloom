@@ -249,7 +249,16 @@ class PRMonitorClient:
             return False
 
     def list_repos(self) -> list[str]:
-        """Return the list of repo names PR Monitor knows about."""
+        """Return the list of active repo names PR Monitor knows about.
+
+        The REST ``/repos`` endpoint returns a top-level JSON array
+        whose entries carry ``repo_name`` (canonical ``owner/name``)
+        and ``is_active``; older / test fixtures may wrap the array in
+        ``{"items": [...]}`` and use the legacy ``name`` field, so we
+        accept either shape. Entries with ``is_active=False`` are
+        skipped because PR Monitor stops polling them and they return
+        empty PR lists.
+        """
         try:
             data = self._get_json("/repos")
         except PRMonitorError as exc:
@@ -261,7 +270,11 @@ class PRMonitorClient:
         names: list[str] = []
         for entry in items:
             if isinstance(entry, dict):
-                name = str(entry.get("name") or "").strip()
+                if entry.get("is_active") is False:
+                    continue
+                name = str(
+                    entry.get("repo_name") or entry.get("name") or ""
+                ).strip()
             else:
                 name = str(entry).strip()
             if name:
