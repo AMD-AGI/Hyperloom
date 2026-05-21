@@ -643,11 +643,10 @@ Discover vs Kernel role boundary:
 | Hand-off | git checkout sglang to PR head + auto-rollback on DISCARD | `apply_kernel_patch.py` per-kernel |
 | Cooldown | Bandit streak counter (`consecutive_no_promote`) | Per-kernel `kernel_opt_attempts` |
 
-The legacy CLI flags (`--framework-pr` / `--framework-pr-discover` /
-`--framework-gap` / `--framework-keywords`) are **deprecated**: the
-flags still parse for backward compat but no longer perform a
-pre-stage. Passing any of them prints a deprecation notice and
-otherwise has no effect. Use the bandit arm instead.
+Gap / keywords for each tick are auto-composed from SharedState
+(`framework`, `gpu_type`, `model_class`, `precision`, optional profile
+bottleneck). Override per tick via `proposal.params.gap_override` /
+`proposal.params.keyword_override` from the Orchestration prompt.
 
 ## Framework Selection
 
