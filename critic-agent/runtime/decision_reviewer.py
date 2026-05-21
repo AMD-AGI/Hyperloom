@@ -26,10 +26,16 @@ This module hosts the deterministic logic for both phases.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+
+log = logging.getLogger(__name__)
 
 from .errors import (
     InboxParseError,
@@ -70,6 +76,113 @@ def _now_iso() -> str:
 
 
 # ---------------------------------------------------------------------------
+# L4 helpers — Robustness finding discovery / load
+# ---------------------------------------------------------------------------
+
+# Severity rank: high > medium > low. Used by the "min_severity" filter
+# so callers can request "high or above" without enumerating strings.
+_SEVERITY_RANK: dict[str, int] = {"high": 3, "medium": 2, "low": 1}
+
+# Subdirectory under a Robustness ``session_dir`` where the findings
+# sink writes its JSONL. Kept in sync with
+# ``robustness_agent.findings.sink.FindingSinkConfig.subdir``; if that
+# layout ever moves we'd update both ends in lockstep.
+_ROBUSTNESS_FINDINGS_SUBDIR: str = "agents/robustness/findings"
+
+
+def _discover_robustness_findings_path(session_id: str) -> Path | None:
+    """Locate ``<session>.jsonl`` written by the Robustness FindingSink.
+
+    Resolution order:
+
+    1. ``$CRITIC_ROBUSTNESS_FINDINGS_DIR`` — explicit override; the
+       value is treated as the directory containing ``<session>.jsonl``.
+    2. ``$ROBUSTNESS_AGENT_SESSION_DIR`` — the Robustness factory sets
+       this to its ``config.session_dir`` so co-deployed Critic +
+       Robustness pick up each other automatically.
+
+    Returns ``None`` when neither env is set or the file does not exist.
+    """
+    explicit = os.environ.get("CRITIC_ROBUSTNESS_FINDINGS_DIR", "").strip()
+    if explicit:
+        candidate = Path(explicit) / f"{session_id or 'default'}.jsonl"
+        return candidate if candidate.is_file() else None
+    session_dir = os.environ.get(
+        "ROBUSTNESS_AGENT_SESSION_DIR", ""
+    ).strip()
+    if not session_dir:
+        return None
+    candidate = (
+        Path(session_dir)
+        / _ROBUSTNESS_FINDINGS_SUBDIR
+        / f"{session_id or 'default'}.jsonl"
+    )
+    return candidate if candidate.is_file() else None
+
+
+def _load_robustness_priors(
+    path: Path,
+    *,
+    limit: int,
+    min_severity: str,
+) -> list[dict[str, Any]]:
+    """Tail the JSONL and return up to ``limit`` priors matching severity.
+
+    The JSONL grows append-only, so the most recent priors live at the
+    end of the file. We read the entire file (capped) and filter — a
+    full session is in the low-MB range so this is cheap.
+    """
+    min_rank = _SEVERITY_RANK.get(min_severity, _SEVERITY_RANK["high"])
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.warning(
+            "critic: cannot read robustness findings %s: %s", path, exc,
+        )
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        sev = str(obj.get("severity") or "").lower()
+        if _SEVERITY_RANK.get(sev, 0) < min_rank:
+            continue
+        rows.append(obj)
+    if not rows:
+        return []
+    # Most recent N (the writer appends in time order).
+    selected = rows[-limit:]
+    # Project a narrow view — the Critic SKILL doesn't need the full
+    # evidence blob, just enough to reason about the prior failure.
+    out: list[dict[str, Any]] = []
+    for row in selected:
+        out.append({
+            "symptom_name": row.get("symptom_name"),
+            "severity": row.get("severity"),
+            "tick_index": row.get("tick_index"),
+            "timestamp_unix": row.get("timestamp_unix"),
+            "summary": row.get("summary"),
+            "rca_text": row.get("rca_text"),
+            "intents": [
+                {
+                    "intent_type": (i or {}).get("intent_type"),
+                    "payload": (i or {}).get("payload"),
+                }
+                for i in (row.get("intents") or [])
+                if isinstance(i, dict)
+            ],
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
 @dataclass
 class JudgeBundle:
     """Phase-1 output. The SKILL prompts read this to produce review JSON."""
@@ -85,6 +198,13 @@ class JudgeBundle:
     decision: dict[str, Any] = field(default_factory=dict)
     kb_priors_by_proposal: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     kb_priors_for_decision: list[dict[str, Any]] = field(default_factory=list)
+    # L4 (2026-05-19): recent Robustness findings injected as priors so
+    # the Critic SKILL prompt can factor in "what's already gone wrong
+    # this session". Populated from
+    # ``$ROBUSTNESS_FINDINGS_DIR/<session>.jsonl`` (or auto-discovered
+    # from ``$ROBUSTNESS_AGENT_SESSION_DIR``); empty when no findings
+    # exist or the lookup is disabled.
+    robustness_priors: list[dict[str, Any]] = field(default_factory=list)
     kb_read_skipped_reason: str | None = None
     review_constraints: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
@@ -104,6 +224,7 @@ class JudgeBundle:
                 k: [dict(p) for p in v] for k, v in self.kb_priors_by_proposal.items()
             },
             "kb_priors_for_decision": [dict(p) for p in self.kb_priors_for_decision],
+            "robustness_priors": [dict(p) for p in self.robustness_priors],
             "kb_read_skipped_reason": self.kb_read_skipped_reason,
             "review_constraints": dict(self.review_constraints),
             "notes": list(self.notes),
@@ -231,6 +352,11 @@ class DecisionReviewer:
         bundle.messages = list(req.messages)
         bundle.decision = dict(req.decision)
         bundle.review_constraints = self._review_constraints()
+        known = req.options.get("known_actions")
+        if isinstance(known, list) and known:
+            bundle.review_constraints["known_actions"] = sorted(
+                str(a) for a in known if isinstance(a, str)
+            )
 
         # Hard requirement: if model/framework still unknown, KB reads must be
         # skipped and the Critic should fall back to needs_review.
@@ -342,7 +468,58 @@ class DecisionReviewer:
         if scope.get("model") == "unknown" or scope.get("framework") == "unknown":
             bundle.notes.append("scope partially unknown — proceed with caution")
         bundle.notes.append(f"scope_cache_key={scope_cache_key(scope_filter)}")
+
+        # L4 — Robustness findings injection (last-N high-severity).
+        # Best-effort: a missing file or unparseable line never blocks
+        # the review; we only set the field when at least one row is
+        # picked up. Disabled wholesale via
+        # ``CRITIC_ROBUSTNESS_PRIORS_DISABLED=1``.
+        self._inject_robustness_priors(bundle)
         return bundle
+
+    # ------------------------------------------------------------------
+    # L4 helper: pull recent HIGH-severity Robustness findings into the
+    # bundle so the SKILL prompt can warn the LLM about "what already
+    # broke this session" before it produces a fresh proposal.
+    # ------------------------------------------------------------------
+    def _inject_robustness_priors(self, bundle: JudgeBundle) -> None:
+        if os.environ.get(
+            "CRITIC_ROBUSTNESS_PRIORS_DISABLED", ""
+        ).lower() in {"1", "true", "yes"}:
+            return
+        findings_path = _discover_robustness_findings_path(bundle.session_id)
+        if findings_path is None:
+            return
+        try:
+            limit = int(
+                os.environ.get("CRITIC_ROBUSTNESS_PRIORS_LIMIT", "5")
+            )
+        except ValueError:
+            limit = 5
+        # Severity floor: HIGH by default to keep the prompt focused on
+        # actionable priors. Operators with quiet sessions can drop the
+        # bar to MEDIUM via the env knob.
+        min_severity = os.environ.get(
+            "CRITIC_ROBUSTNESS_PRIORS_MIN_SEVERITY", "high"
+        ).lower()
+        try:
+            priors = _load_robustness_priors(
+                findings_path,
+                limit=max(1, limit),
+                min_severity=min_severity,
+            )
+        except Exception:  # noqa: BLE001 — best-effort injection
+            log.exception(
+                "critic: failed to load robustness priors from %s",
+                findings_path,
+            )
+            return
+        if priors:
+            bundle.robustness_priors = priors
+            bundle.notes.append(
+                f"robustness_priors_injected count={len(priors)} "
+                f"path={findings_path}"
+            )
 
     # ------------------------------------------------------------------
     # Phase 2: commit-review

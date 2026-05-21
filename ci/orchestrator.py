@@ -344,7 +344,15 @@ def run_model(
     # No sleep here — sandbox is already gone after session ends; download immediately.
     report_content = None
     os.makedirs(result_dir, exist_ok=True)
-    download_suffixes = ("optimization_report.md", "ci_metrics.json")
+    # session_breakdown.json is the V2 dashboard contract emitted by
+    # inference_optimizer/cli.py's finally block (or manually written by the
+    # agent when running a non-cli pipeline). claw-stats-service prefers it
+    # over ci_metrics.json, so we pull it back here when present.
+    download_suffixes = (
+        "optimization_report.md",
+        "ci_metrics.json",
+        "session_breakdown.json",
+    )
 
     # 3a. Try Claw file API (sandbox /workspace)
     try:
