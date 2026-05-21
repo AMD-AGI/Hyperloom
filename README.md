@@ -132,6 +132,10 @@ Edit `.env`:
 ```env
 SAFE_API_KEY=ak-your-safe-apikey
 OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
+
+# Optional, only set if you want the Cursor kernel-opt backend:
+# CURSOR_API_KEY=crsr_xxxxxxxxxxxx
+# CURSOR_DEFAULT_MODEL=claude-opus-4-7
 ```
 
 | Variable | Description | Example |
