@@ -71,6 +71,7 @@ from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
 from .orchestrator.framework_paths import resolve_source_file_allowlist
+from .orchestrator.framework_request_handlers import set_framework_backend
 from .orchestrator.objective import Objective, build_objective
 from .orchestrator.shared_state import SharedState
 from .orchestrator.system_prompts.prompt_builder import (
@@ -493,7 +494,6 @@ def _build_backends(
     # framework_request_handlers module-level singleton so the P2 real
     # handler path picks them up (mock backend not registered so the
     # P1 mock branch keeps returning canned envelopes).
-    from .framework_request_handlers import set_framework_backend
     fw_backend: Any = None
     if framework_choice == "mock":
         fw_backend = FrameworkMockBackend(session_dir=session_dir)

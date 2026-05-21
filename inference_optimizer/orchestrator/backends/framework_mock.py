@@ -35,21 +35,23 @@ class FrameworkMockBackend(Backend):
     def __init__(self, *, session_dir: Path | None = None) -> None:
         self._session_dir = Path(session_dir) if session_dir is not None else None
 
-    async def run_turn(self, *args: Any, **kwargs: Any) -> BackendTurnResult:
-        """Heartbeat-only turn loop.
+    async def run(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        max_turns: int = 1,
+    ) -> BackendTurnResult:
+        """Heartbeat-only turn (no intents).
 
         Framework role is responder-only and its handlers are
-        programmatic, so the backend never actually emits intents on a
+        programmatic, so the backend never actually emits intents in a
         normal P1 run. We return an empty BackendTurnResult so callers
         that probe the backend liveness (e.g. ``_preflight``) get a
         consistent shape.
         """
-        return BackendTurnResult(
-            intents=[],
-            raw_assistant_text="",
-            stop_reason="end_turn",
-            usage={},
-        )
+        return BackendTurnResult(intents=[], raw_text="", metadata={})
 
     def run_optimize(
         self,
