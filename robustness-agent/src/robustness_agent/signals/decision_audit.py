@@ -30,7 +30,6 @@ owns the fix.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,8 +37,6 @@ from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
 
-
-log = logging.getLogger(__name__)
 
 
 # Canonical ci_metrics field set the report_back pipeline must produce.
