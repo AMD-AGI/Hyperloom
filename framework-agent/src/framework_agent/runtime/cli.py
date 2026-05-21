@@ -248,8 +248,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Sibling-skill `fa agent` subcommand -- P2 PR-D. Used by
     # inference_optimizer's FrameworkAgentBackend.
-    from ..agent.cli import register_subparser as _register_agent_subparser
-    _register_agent_subparser(sub)
+    # NOTE: ``framework_agent.agent`` is not always shipped (e.g. PR branch
+    # ``framework-agent-pr`` ships runtime/ but not agent/). Tolerate the
+    # missing module so the core ``fa candidates`` / ``fa explore`` verbs
+    # (used by the inference_optimizer ``framework_pr`` bandit arm) still
+    # work; the ``fa agent`` subcommand simply becomes unavailable.
+    try:
+        from ..agent.cli import register_subparser as _register_agent_subparser
+        _register_agent_subparser(sub)
+    except ModuleNotFoundError as _exc:
+        import logging as _logging
+        _logging.getLogger(__name__).debug(
+            "framework_agent.agent not installed; skipping 'fa agent' subcommand (%s)",
+            _exc,
+        )
 
     cand_p = sub.add_parser(
         "candidates",

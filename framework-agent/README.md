@@ -42,36 +42,30 @@ pytest -q tests/test_logging_setup.py tests/test_isolation.py \
           tests/test_decision.py tests/test_explore_modes.py
 ```
 
-## Used by inference_optimizer as a pre-stage
+## Used by inference_optimizer as a bandit arm
 
-`inference_optimizer` can drive `fa explore` as a one-shot
-*before-baseline* step via `--framework-pr-discover` (or apply an
-explicit ref via `--framework-pr PR:N`). The IO side handles the
-hand-off (resolve PR `head_sha`, `git checkout` sglang, `pip install
--e python/`); framework-agent itself stays standalone and only
-produces the winner record:
+`inference_optimizer` drives PR discovery via the `framework_pr` bandit
+arm (not startup CLI flags). After `baseline` completes, the
+Orchestration agent proposes `framework_pr`; the executor calls `fa
+candidates`, applies the winning PR to sglang, runs a sub-baseline, and
+KEEP/DISCARDs based on throughput gain.
+
+Gap / keywords are auto-composed from SharedState (`framework`,
+`gpu_type`, `model_class`, `precision`). Override per tick via
+`proposal.params.gap_override` from the Orchestration prompt.
 
 ```bash
-# Auto-discover via fa (Primus Cortex + GitHub) and apply before baseline
 inference_optimizer optimize \
     --model "$MODEL_PATH" \
     --framework sglang \
-    --framework-pr-discover \
-    --framework-gap "improve sglang fp8 MoE on MI300X" \
-    --max-hours 2
-
-# Or explicit PR ref - skips fa, jumps straight to git checkout + pip install
-inference_optimizer optimize \
-    --model "$MODEL_PATH" \
-    --framework sglang \
-    --framework-pr PR:25748 \
+    --model-class dense \
+    --gpu-type mi300x \
+    --no-kernel \
     --max-hours 2
 ```
 
-See `inference_optimizer/SKILL.md` "Optional: Framework-Agent
-Pre-stage" for the full IO-side contract and
-`inference_optimizer/orchestrator/framework_pr_discover.py` for the
-implementation.
+See `inference_optimizer/SKILL.md` "Framework-Agent as Bandit Arm"
+and `inference_optimizer/orchestrator/action_executors/framework_pr.py`.
 
 ## Design references
 
