@@ -50,7 +50,6 @@ from pathlib import Path
 from typing import Any
 
 from .cortex_kb_client import (
-    CortexBinaryNotFound,
     CortexKBClient,
     CortexKBError,
 )
@@ -1289,6 +1288,7 @@ def _emit_preflight_diagnostics(
     *,
     magpie_python: str,
     proxy_anthropic: str | None,
+    args: argparse.Namespace | None = None,
 ) -> None:
     """One canonical diagnostics block at the end of preflight.
 
@@ -1341,6 +1341,17 @@ def _emit_preflight_diagnostics(
             "  proxy URLs          = DIRECT — auth-proxy unavailable; "
             "Claude SDK may 401"
         )
+    if args is not None:
+        kb_enabled = bool(getattr(args, "cortex_enabled", True))
+        pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
+        kb_reason = getattr(args, "kb_degraded_reason", None) or "-"
+        pr_reason = getattr(args, "pr_degraded_reason", None) or "-"
+        kb_status = "OK" if kb_enabled else f"DEGRADED ({kb_reason})"
+        pr_status = "OK" if pr_enabled else f"DEGRADED ({pr_reason})"
+        print(f"  kb_status           = {kb_status}")
+        print(f"  pr_monitor_status   = {pr_status}")
+        print(f"  kb_degraded_reason  = {kb_reason}")
+        print(f"  pr_degraded_reason  = {pr_reason}")
 
 
 def _probe_llm_catalog(
@@ -1551,7 +1562,9 @@ def _smoke_test_codex_model(
     )
 
 
-def _preflight() -> tuple[str, str] | None:
+def _preflight(
+    args: argparse.Namespace | None = None,
+) -> tuple[str, str] | None:
     """Auto-install missing runtime deps and export auth aliases.
 
     1. Credentials fallback: env > $REPO_ROOT/.env (env always wins).
@@ -1738,13 +1751,94 @@ def _preflight() -> tuple[str, str] | None:
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()
 
+    # --- IR-3: Cortex KB + PR Monitor reachability (soft degrade) ---
+    if args is not None:
+        _run_ir3_preflight(args)
+
     # --- Single canonical diagnostics block ---
     _emit_preflight_diagnostics(
         magpie_python=magpie_python,
         proxy_anthropic=(proxy_urls[0] if proxy_urls is not None else None),
+        args=args,
     )
 
     return proxy_urls
+
+
+def _run_ir3_preflight(args: argparse.Namespace) -> None:
+    """IR-3 — Cortex KB + PR Monitor reachability probe (soft degrade).
+
+    Mutates ``args``:
+    * ``cortex_enabled`` / ``pr_monitor_enabled`` (bool) — final
+      enablement after applying explicit flag + IR-3 marker.
+    * ``kb_degraded_reason`` / ``pr_degraded_reason`` —
+      ``None | "explicit_flag" | "ir3_auto"``.
+
+    Never raises and never ``sys.exit``s — KB/PR outages downgrade to
+    NDJSON fallback / specialist no-op, not an aborted launch.
+    """
+    explicit_kb = bool(getattr(args, "degraded_kb", False))
+    explicit_pr = bool(getattr(args, "degraded_pr", False))
+
+    args.cortex_enabled = True
+    args.pr_monitor_enabled = True
+    args.kb_degraded_reason = None
+    args.pr_degraded_reason = None
+
+    if explicit_kb and explicit_pr:
+        args.cortex_enabled = False
+        args.kb_degraded_reason = "explicit_flag"
+        args.pr_monitor_enabled = False
+        args.pr_degraded_reason = "explicit_flag"
+        return
+
+    user_data = Path(os.environ.get("USER_DATA_PATH", "/workspace/hyperloom"))
+    marker_path = user_data / "runtime" / "cortex" / ".kb_preflight.json"
+    script = (
+        Path(__file__).resolve().parent / "scripts" / "preflight_kb.sh"
+    )
+    env = os.environ.copy()
+    if explicit_kb:
+        env["SKIP_KB_PROBE"] = "1"
+    if explicit_pr:
+        env["SKIP_PR_PROBE"] = "1"
+
+    try:
+        subprocess.run(
+            ["bash", str(script)], env=env,
+            check=False, timeout=60,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        # The script itself died — treat both branches as unreachable
+        # so soft-degrade kicks in (unless explicit flag overrides).
+        log.warning("IR-3 preflight script error: %s", exc)
+        marker: dict[str, Any] = {
+            "kb_reachable": False, "pr_reachable": False,
+            "kb_skipped": explicit_kb, "pr_skipped": explicit_pr,
+        }
+    else:
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("IR-3 marker unreadable: %s", exc)
+            marker = {
+                "kb_reachable": False, "pr_reachable": False,
+                "kb_skipped": explicit_kb, "pr_skipped": explicit_pr,
+            }
+
+    if explicit_kb:
+        args.cortex_enabled = False
+        args.kb_degraded_reason = "explicit_flag"
+    elif not marker.get("kb_reachable", False) and not marker.get("kb_skipped", False):
+        args.cortex_enabled = False
+        args.kb_degraded_reason = "ir3_auto"
+
+    if explicit_pr:
+        args.pr_monitor_enabled = False
+        args.pr_degraded_reason = "explicit_flag"
+    elif not marker.get("pr_reachable", False) and not marker.get("pr_skipped", False):
+        args.pr_monitor_enabled = False
+        args.pr_degraded_reason = "ir3_auto"
 
 
 # ---------------------------------------------------------------------------
@@ -1842,7 +1936,7 @@ def _bootstrap_cortex_kb(
 
     T0 (PRELUDE entry) sequence per KB_design §3.13 M1 §5.1:
 
-    1. ``session begin`` (sync, must succeed unless ``--no-cortex``).
+    1. ``session begin`` (sync, must succeed unless ``--degraded-kb``).
     2. ``propose-point workload_node`` (canonical: ``workload.<model>.<hw>``)
        — idempotent across sessions for the same pair.
     3. ``find-recipe`` snapshot to ``.kb_warm.json`` (M5 will consume).
@@ -1855,7 +1949,7 @@ def _bootstrap_cortex_kb(
 
     Failure handling:
 
-    - ``--no-cortex`` → returns a disabled client; never raises.
+    - ``--degraded-kb`` → returns a disabled client; never raises.
     - sync ``session begin`` failure → ``sys.exit(2)``; resume can pick
       up the partial session_dir once Cortex comes back.
     - propose_point / find_recipe / traps failures fall through to NDJSON
@@ -1872,7 +1966,7 @@ def _bootstrap_cortex_kb(
         enabled=enabled,
     )
     if not enabled:
-        print("Cortex KB        : DISABLED (--no-cortex)")
+        print("Cortex KB        : DISABLED (--degraded-kb)")
         return client
 
     # v0.8 KB_gaps/Gap-12 — the cli is the *canonical* T0 entry point
@@ -1891,10 +1985,6 @@ def _bootstrap_cortex_kb(
     hw = state.gpu_type or manifest.get("gpu_type", "") or "unknown_gpu"
     stack_fp = manifest.get("stack_fingerprint") or {}
     image_digest = manifest.get("image") or ""
-    task_text = (
-        f"hyperloom marathon {workload} on {hw} "
-        f"(dispatch={manifest.get('session_id', '')})"
-    )
     extra_attrs = {
         "marathon_dispatch_id": manifest.get("session_id", ""),
         "framework":            state.framework or manifest.get("framework", ""),
@@ -1910,27 +2000,17 @@ def _bootstrap_cortex_kb(
             image_digest=image_digest,
             stack_fingerprint=stack_fp,
             extra_attrs=extra_attrs,
-            task_text=task_text,
             resume=resume,
             fail_fast=True,
             on_status=print,
             session_dir=session_dir,
             save_state=True,
         )
-    except CortexBinaryNotFound as exc:
-        print(
-            f"ERROR: Cortex KB requested but cortex-kb binary missing: "
-            f"{exc}.\nPass --no-cortex to skip KB integration, or "
-            f"install the cortex-kb CLI (see "
-            f"/wekafs/haiskong/cortex-for-hyperloom-2026-05-18.md §2.2).",
-            file=sys.stderr,
-        )
-        sys.exit(2)
     except CortexKBError as exc:
         print(
             f"ERROR: T0 Cortex `session begin` failed: {exc}\n"
             f"This is fail-fast per KB_design §3.13 M1. Pass "
-            f"--no-cortex to skip KB integration this run.",
+            f"--degraded-kb to skip KB integration this run.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -1953,7 +2033,7 @@ def _maybe_spawn_kb_flusher(
     daemon code existed but the cli never launched it; this helper is
     the missing link.
 
-    Returns ``(None, pid_path)`` when spawn is skipped (``--no-cortex``,
+    Returns ``(None, pid_path)`` when spawn is skipped (``--degraded-kb``,
     ``--no-kb-flusher``, or a healthy prior daemon is still bound to
     ``pid_path``). A status marker is always written so the breakdown
     collector can surface the boot-time decision.
@@ -2005,7 +2085,7 @@ def _maybe_spawn_kb_flusher(
 
     if not cortex_enabled:
         _write_status(spawned=False, pid=None, cmd=[], reason="cortex_disabled")
-        print("Cortex KB flusher: SKIPPED (--no-cortex)")
+        print("Cortex KB flusher: SKIPPED (--degraded-kb)")
         return None, pid_path
     if not flusher_enabled:
         _write_status(spawned=False, pid=None, cmd=[], reason="flag_disabled")
@@ -2032,7 +2112,6 @@ def _maybe_spawn_kb_flusher(
         sys.executable, "-m", "inference_optimizer.scripts.cortex_kb_flusher",
         "--session-dir", str(session_dir),
         "--interval-sec", str(interval_sec),
-        "--batch-size",   str(batch_size),
     ]
     if cortex_kb_url:
         cmd.extend(["--cortex-kb-url", cortex_kb_url])
@@ -2117,7 +2196,7 @@ def _bootstrap_knowledge_plane(
     returns empty / disabled-status responses so prompt assembly +
     breakdown collectors don't have to branch on availability.
 
-    ``--no-pr-monitor`` short-circuits the REST probe and yields a
+    ``--degraded-pr`` short-circuits the REST probe and yields a
     disabled :class:`PRMonitorClient` (which also strips the
     ``mcp__pr_monitor__*`` tool block on the specialist side via
     :meth:`SpecialistRunner._resolve_tools`).
@@ -2144,21 +2223,14 @@ def _bootstrap_knowledge_plane(
     )
 
     pr_client = PRMonitorClient.from_args(url=pr_url, enabled=pr_enabled)
-    pr_reachable = True
+    # IR-3 (``_preflight()`` step 13) already probed ``/healthz`` and
+    # set ``args.pr_monitor_enabled`` + ``args.pr_degraded_reason``.
+    # We trust that result here — runtime drift falls back to the
+    # specialist-side empty PR feed surface.
     if not pr_enabled:
-        status_text = "disabled (--no-pr-monitor)"
-        print(f"PR Monitor       : DISABLED (--no-pr-monitor)")
-        pr_reachable = False
-    elif not pr_client.healthz():
-        # Fail-soft: keep the client around (the specialist tool list
-        # already accommodates the MCP layer staying up even when REST
-        # is flaky), but warn so the operator sees the diagnostic.
-        status_text = f"unreachable at {pr_client.base_url}"
-        print(
-            f"PR Monitor       : REST unreachable at {pr_client.base_url} "
-            f"(continuing; prompt PR feed section will render "
-            f"(unavailable))"
-        )
+        reason = getattr(args, "pr_degraded_reason", None) or "explicit_flag"
+        status_text = f"disabled ({reason})"
+        print(f"PR Monitor       : DISABLED ({reason})")
         pr_reachable = False
     else:
         status_text = f"REST {pr_client.base_url} (window={window_days}d)"
@@ -2166,6 +2238,7 @@ def _bootstrap_knowledge_plane(
             f"PR Monitor       : REST {pr_client.base_url} (window="
             f"{window_days}d, mcp={pr_mcp_url})"
         )
+        pr_reachable = True
 
     # v0.8 §3.6 + KB_gaps/Gap-02 — record a one-shot status marker so
     # ``breakdown.warnings`` can surface ``pr_monitor:disabled`` /
@@ -2234,7 +2307,7 @@ def _reset_state_file(session_dir: Path) -> None:
 
 
 async def _run_optimize(args: argparse.Namespace) -> int:
-    proxy_urls = _preflight()
+    proxy_urls = _preflight(args)
 
     # Hard-gate Claude model BEFORE any session work. Mutates args.claude_model
     # in-place when falling back to opus-4-6; aborts with sys.exit(2) if the
@@ -2339,9 +2412,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # PR Monitor + KB readonly tools wired into specialist dispatch.
         # Returns a plane that fail-soft degrades when PR Monitor or
         # Cortex is unreachable; specialists then see empty pr_feed /
-        # kb_subgraph and continue. ``None`` only when --no-cortex.
+        # kb_subgraph and continue. ``None`` only when --degraded-kb.
         knowledge_plane = (
-            None if getattr(args, "no_cortex", False)
+            None if not getattr(args, "cortex_enabled", True)
             else _bootstrap_knowledge_plane(
                 args,
                 cortex_client=cortex_client,
@@ -2433,9 +2506,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
         # v0.8 M1 — Cortex KB T0 anchor. Must run after the SharedState
         # seed (so model_name / gpu_type / framework are populated for
-        # workload_canonical_id derivation) but before Coordinator is
+        # recipe_canonical_id derivation) but before Coordinator is
         # constructed (the Coordinator stores the client + threads it
-        # into T2/T3/T4 hooks). Fails fast unless --no-cortex.
+        # into T2/T3/T4 hooks). Fails fast unless --degraded-kb.
         cortex_client = _bootstrap_cortex_kb(
             args, session_dir=session_dir, manifest=manifest, resume=False,
         )
@@ -2447,7 +2520,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # PR Monitor REST client; fail-soft on either side so specialist
         # dispatch always has a non-None plane to consult.
         knowledge_plane = (
-            None if getattr(args, "no_cortex", False)
+            None if not getattr(args, "cortex_enabled", True)
             else _bootstrap_knowledge_plane(
                 args,
                 cortex_client=cortex_client,
@@ -2636,7 +2709,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         cortex_kb=cortex_client,
         phase_budget_pct=phase_budget_pct or None,
         # v0.8 §3.5 + KB_gaps/Gap-01/Gap-02 — KnowledgePlane facade.
-        # ``None`` when --no-cortex; otherwise wraps Cortex KB +
+        # ``None`` when --degraded-kb; otherwise wraps Cortex KB +
         # PR Monitor for specialist prompt assembly.
         knowledge_plane=knowledge_plane,
     )
@@ -2994,7 +3067,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # v0.8 M1 — Cortex KB integration flags (KB_design §3.13 M1, §3.6)
     # ------------------------------------------------------------------
     # The defaults wire Cortex *on* (matches the "Loop 1" expectation in
-    # the cortex hand-off doc). ``--no-cortex`` is a debug escape hatch
+    # the cortex hand-off doc). ``--degraded-kb`` is a debug escape hatch
     # that fully bypasses T0/T2/T3/T4 so a fresh sandbox can reproduce
     # the v0.6 behaviour without any KB writes. ``--cortex-kb-url``
     # overrides the env value (``CORTEX_KB_URL``) without exporting one
@@ -3010,13 +3083,15 @@ def _build_parser() -> argparse.ArgumentParser:
              "http://kb-service.primus-cortex.svc.cluster.local).",
     )
     opt.add_argument(
-        "--no-cortex",
-        dest="cortex_enabled",
-        action="store_false",
-        default=True,
+        "--degraded-kb",
+        dest="degraded_kb",
+        action="store_true",
+        default=False,
         help="Skip the Cortex KB integration entirely (T0/T2/T3/T4 become "
-             "no-ops). Use only for offline smoke tests / debugging the "
-             "v0.6 path in isolation.",
+             "no-ops). Also short-circuits the IR-3 KB probe. IR-3 sets "
+             "this automatically when kb-service is unreachable (soft "
+             "degrade); manifest records the reason as ``explicit_flag`` "
+             "vs ``ir3_auto``.",
     )
     opt.add_argument(
         "--cortex-strict-fingerprint",
@@ -3043,7 +3118,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "pending queue still accumulates but only drains on the "
              "next session start (or via manual ``python -m "
              "inference_optimizer.scripts.cortex_kb_flusher`` run). "
-             "Implied by --no-cortex.",
+             "Implied by --degraded-kb.",
     )
     opt.add_argument(
         "--kb-flusher-interval-sec",
@@ -3068,7 +3143,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # marathon pod is typically in a different cluster from
     # primus-cortex, so an operator running outside the primus-cortex
     # k8s namespace must port-forward + pass a localhost URL.
-    # ``--no-pr-monitor`` switches the KnowledgePlane.pr_feed_warm
+    # ``--degraded-pr`` switches the KnowledgePlane.pr_feed_warm
     # path to a no-op and strips ``mcp__pr_monitor__*`` from the
     # specialist tool whitelist (Inv-6.3 degrade-to-empty).
     opt.add_argument(
@@ -3091,14 +3166,15 @@ def _build_parser() -> argparse.ArgumentParser:
              "suffix; the trailing slash is mandatory.",
     )
     opt.add_argument(
-        "--no-pr-monitor",
-        dest="pr_monitor_enabled",
-        action="store_false",
-        default=True,
+        "--degraded-pr",
+        dest="degraded_pr",
+        action="store_true",
+        default=False,
         help="Disable the PR Monitor integration entirely. "
              "pr_feed_warm returns empty; the specialist tool "
-             "whitelist drops mcp__pr_monitor__* tools. Useful for "
-             "offline / debug runs (KB_design §3.13 M4 §10).",
+             "whitelist drops mcp__pr_monitor__* tools. Short-circuits "
+             "the IR-3 PR Monitor probe; IR-3 sets this automatically "
+             "when PR Monitor is unreachable (soft degrade).",
     )
     opt.add_argument(
         "--pr-feed-window-days",

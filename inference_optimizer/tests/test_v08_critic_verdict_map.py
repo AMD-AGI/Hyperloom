@@ -471,7 +471,7 @@ async def test_verdict_map_rejected_variants_fire_kb_refuted(coord):
 
 @pytest.mark.asyncio
 async def test_verdict_map_skip_kb_refuted_when_no_edge_id(coord):
-    """No T2 edge (e.g. --no-cortex run) → silently skip the refute
+    """No T2 edge (e.g. --degraded-kb run) → silently skip the refute
     so the verdict_map path still works end-to-end."""
     pending = _seed_explore_proposal(coord, kb_edge_ids={})
     intent = Intent(

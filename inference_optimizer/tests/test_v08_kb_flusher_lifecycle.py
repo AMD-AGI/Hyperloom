@@ -9,7 +9,7 @@ so the suite stays hermetic).
 
 Acceptance criteria covered (Dead-E §6):
 
-* ``--no-cortex``: spawn is skipped, marker reason=``cortex_disabled``.
+* ``--degraded-kb``: spawn is skipped, marker reason=``cortex_disabled``.
 * ``--no-kb-flusher``: spawn is skipped, marker reason=``flag_disabled``.
 * Fresh session: spawn fires, pid path holds the launched pid, marker
   reason=``spawned``, breakdown surfaces ``flusher_status.alive``.
@@ -152,7 +152,8 @@ def test_spawn_fires_for_fresh_session(session_dir, monkeypatch):
     assert "inference_optimizer.scripts.cortex_kb_flusher" in cmd
     assert "--session-dir" in cmd and str(session_dir) in cmd
     assert "--interval-sec" in cmd and "5.0" in cmd
-    assert "--batch-size" in cmd and "50" in cmd
+    # --batch-size flag was removed from the daemon; cli no longer forwards.
+    assert "--batch-size" not in cmd
     assert "--cortex-kb-url" in cmd and "http://kb-mock" in cmd
     marker = json.loads(
         cortex_flusher_status_json(session_dir).read_text(encoding="utf-8")

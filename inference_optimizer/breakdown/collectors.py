@@ -3087,7 +3087,7 @@ def collect_kb_provenance(
        Cortex CLI call status. Useful for diagnosing T0 / T4 sync
        failures from the breakdown JSON alone.
 
-    Returns a stable shape (always the same keys, even on a `--no-cortex`
+    Returns a stable shape (always the same keys, even on a `--degraded-kb`
     session) so downstream readers (claw-stats-service) don't have to
     branch.
     """
@@ -3322,6 +3322,8 @@ def collect_kb_provenance(
             pid_path=_flusher_pid_path(session_dir),
             warnings=warnings,
         ),
+        "kb_degraded_reason": (manifest.get("kb_degraded_reason") or "") or None,
+        "pr_degraded_reason": (manifest.get("pr_degraded_reason") or "") or None,
     }
     fs = out["flusher_status"]
     # Only emit a warning when a boot marker was written (i.e. cli ran
