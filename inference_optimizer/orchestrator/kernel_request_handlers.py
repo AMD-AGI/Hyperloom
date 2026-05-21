@@ -151,6 +151,7 @@ _CANDIDATE_ENV_PREFIXES = (
     "VLLM_",
     "AITER_",
     "TRITON_",
+    "FLYDSL_",
     "HIPBLASLT_",
     "PYTORCH_TUNABLEOP_",
 )

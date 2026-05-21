@@ -291,6 +291,33 @@ class TestGEAKKernelTypeMapping(unittest.TestCase):
         self.assertEqual(self.mod._GEAK_KERNEL_TYPE["unknown"], "other")
 
 
+class TestCandidateEnvForwarding(unittest.TestCase):
+    """``FLYDSL_*`` env vars must be forwarded to GEAK candidate metadata."""
+
+    def setUp(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        sys.path.insert(0, str(repo_root))
+        from inference_optimizer.orchestrator import kernel_request_handlers
+        self.h = kernel_request_handlers
+
+    def test_flydsl_prefix_allowed(self) -> None:
+        self.assertIn("FLYDSL_", self.h._CANDIDATE_ENV_PREFIXES)
+        self.assertTrue(self.h._candidate_env_allowed("FLYDSL_AUTOTUNE_CACHE_DIR"))
+        self.assertTrue(self.h._candidate_env_allowed("FLYDSL_RUNTIME_ENABLE_CACHE"))
+
+    def test_existing_prefixes_preserved(self) -> None:
+        self.assertTrue(self.h._candidate_env_allowed("SGLANG_FOO"))
+        self.assertTrue(self.h._candidate_env_allowed("TRITON_BAR"))
+
+    def test_sensitive_keys_still_blocked(self) -> None:
+        self.assertFalse(self.h._candidate_env_allowed("FLYDSL_API_KEY"))
+        self.assertFalse(self.h._candidate_env_allowed("FLYDSL_SECRET_TOKEN"))
+
+    def test_unrelated_envs_still_rejected(self) -> None:
+        self.assertFalse(self.h._candidate_env_allowed("HOME"))
+        self.assertFalse(self.h._candidate_env_allowed("PATH"))
+
+
 class TestOrchestratorReusableRootsInSync(unittest.TestCase):
     """Orchestrator-side allowlist must stay in sync with the classifier."""
 
