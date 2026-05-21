@@ -308,7 +308,7 @@ def cortex_sid_file(session_dir: Path) -> Path:
 
     Used by resume to skip re-begin and continue draining
     :func:`cortex_pending` / committing the existing session. Absent file
-    means either ``--no-cortex`` was selected or T0 has not yet run.
+    means either ``--degraded-kb`` was selected or T0 has not yet run.
     """
     return cortex_dir(session_dir) / ".kb_sid"
 
@@ -367,7 +367,7 @@ def pr_monitor_status_json(session_dir: Path) -> Path:
     the boot-time PR Monitor reachability snapshot. Breakdown collector
     reads it to emit ``warnings`` entries like ``pr_monitor:disabled``
     or ``pr_monitor:unreachable`` so dashboards can light up on
-    --no-pr-monitor / cross-cluster failures without scraping logs.
+    --degraded-pr / cross-cluster failures without scraping logs.
 
     Schema (JSON):
 

@@ -451,6 +451,11 @@ class SharedState:
     # ``Coordinator.run()`` / ``Coordinator.tick(n)`` iteration; kept
     # so plateau / phase budget math has a stable monotonic anchor.
     tick: int = 0
+    # Monotonic per-session experiment counter. Bumped once per
+    # ``propose_action`` (T2) so :func:`experiment_canonical_id`
+    # produces a stable ``exp:{sid}:{iter:04d}`` aligned with the KB
+    # ``experiment`` kind schema (KB_design_continue §3.5).
+    session_iter_index: int = 0
     # Remaining gain-pct target gap (0.0 means "no target"). Coordinator
     # refreshes this when the run objective is ``gain_pct=N``. Kept
     # because the prompt builder + breakdown rely on it for the
@@ -497,7 +502,7 @@ class SharedState:
     #
     # ``cortex_session_id`` is the sid returned by the Cortex
     # ``session begin`` call at T0. Empty string means either
-    # ``--no-cortex`` was selected for this run or the session has not
+    # ``--degraded-kb`` was selected for this run or the session has not
     # yet reached T0. Written **once** in PRELUDE; never overwritten.
     cortex_session_id: str = ""
     # T4 ``session commit`` payload snapshot: ``{"status": "committed",
@@ -526,7 +531,7 @@ class SharedState:
     # injection-deferral story as ``warm_start_recipe``.
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
     # Iso UTC timestamp of the T0 snapshot. Empty when Cortex was
-    # bypassed (``--no-cortex``) or T0 failed.
+    # bypassed (``--degraded-kb``) or T0 failed.
     warm_start_ts: str = ""
 
     # ------------------------------------------------------------------
@@ -2496,6 +2501,11 @@ class SharedState:
         self.tick = int(self.tick or 0) + 1
         return self.tick
 
+    def increment_session_iter_index(self) -> int:
+        """Bump the per-session experiment iter counter and return it."""
+        self.session_iter_index = int(self.session_iter_index or 0) + 1
+        return self.session_iter_index
+
     def seed_stack_from_current_best(self) -> None:
         """Backfill stack for old sessions that only had current_best."""
         if self.optimization_stack or not isinstance(self.current_best, dict):
@@ -2726,7 +2736,7 @@ class SharedState:
         Produces a compact block fed into ``Coordinator._compose_prompt``'s
         ``=== Warm start ===`` section (v0.8 §3.3 §4.1). Returns empty
         string when both ``warm_start_recipe`` and ``warm_start_pitfalls``
-        are absent (M1 ``--no-cortex`` mode / first-ever session for a
+        are absent (M1 ``--degraded-kb`` mode / first-ever session for a
         (workload, hw) pair).
 
         Lines are capped so a recipe blob never bloats the prompt; the

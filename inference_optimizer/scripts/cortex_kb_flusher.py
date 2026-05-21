@@ -1,11 +1,10 @@
-"""Cortex KB NDJSON flusher daemon (v0.8 M1).
+"""Cortex KB NDJSON flusher daemon.
 
 Drains ``<session_dir>/runtime/cortex/.kb_pending.ndjson`` to the Cortex
-KB service every ``--interval-sec`` (default 5s) or as soon as the queue
-reaches ``--batch-size`` entries (default 50). On success the row is
-appended to ``.kb_flushed.ndjson``; on permanent failure (>``--max-retries``
-attempts) the row moves to ``.kb_dead_letter.ndjson`` and a structured
-audit log entry is written.
+KB service every ``--interval-sec`` (default 5s). On success the row is
+appended to ``.kb_flushed.ndjson``; on permanent failure the row moves
+to ``.kb_dead_letter.ndjson`` and a structured audit log entry is
+written.
 
 Lifetime
 --------
@@ -14,7 +13,7 @@ KB_design §3.13 M1 §8) with::
 
     python -m inference_optimizer.scripts.cortex_kb_flusher \\
         --session-dir $USER_DATA_PATH \\
-        [--interval-sec 5] [--batch-size 50] [--max-retries 6] \\
+        [--interval-sec 5] \\
         [--cortex-kb-url http://kb-service.primus-cortex.svc.cluster.local]
 
 It writes its PID to ``.kb_flusher.pid`` so robustness can ping it
@@ -32,6 +31,10 @@ Design notes
 * Restart safety: opening the pid file in exclusive mode prevents
   double-launch; on detected stale pid (process gone) we overwrite.
 * No persistent in-memory state — the on-disk NDJSON is the authority.
+* Each pending row is replayed via a single ``POST /v1/points/propose``
+  (or ``/v1/sessions/.../{hypothesize,verify}``). The KB
+  ``/v1/bulk/ingest`` endpoint is reserved for ``offline_pipeline``
+  source only, so the daemon never uses it.
 """
 from __future__ import annotations
 
@@ -165,13 +168,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Seconds between drain rounds (default 5.0).",
     )
     p.add_argument(
-        "--batch-size", type=int, default=50,
-        help="Force an immediate drain when the pending queue grows past "
-             "this many rows (default 50).",
-    )
-    p.add_argument(
         "--max-retries", type=int, default=6,
-        help="Reserved for the dead-letter promotion threshold (M2 polish).",
+        help="Reserved for the dead-letter promotion threshold.",
     )
     p.add_argument(
         "--once", action="store_true", default=False,
