@@ -553,15 +553,16 @@ _probe_framework_source_roots
 # under the ``framework_pr_scout`` sub_kind. It owns its own python deps
 # and venv layout; we only need to invoke its installer.
 #
-# Gated on the env var so the F0 / F1 install path stays byte-identical
-# until an operator opts in. ``--framework-agent-enabled`` (F0-10 CLI
-# flag) is what flips the orchestrator-side dispatch validation; the
-# install gate is the SAME env var so an operator who turned the CLI
-# flag on automatically gets the install too.
+# Install is ON by default to match the orchestrator-side defaults
+# (``SharedState.framework_agent_enabled = True`` and the ``--framework-
+# agent-enabled`` CLI flag's ``_env_default_on`` semantics). Opt out by
+# exporting ``INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0`` before
+# install (the runtime CLI flag obeys the same env knob with the same
+# semantics, so flipping it to ``0`` keeps install + runtime aligned).
 # ---------------------------------------------------------------------------
 ensure_framework_agent() {
-  if [ "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED:-0}" != "1" ]; then
-    log "framework-agent: skipped (set INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=1 to enable)"
+  if [ "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED:-1}" = "0" ]; then
+    log "framework-agent: skipped (INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0)"
     return 0
   fi
   local fa_dir="${INFERENCE_OPTIMIZER_REPO:-$(pwd)}/framework-agent"

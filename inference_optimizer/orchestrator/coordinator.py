@@ -6668,6 +6668,26 @@ class Coordinator:
                 )
             else:
                 await self._handle_unpromotable_result(task, result.result)
+            # N34 Bug #4 (May 2026): a successful ``report`` task is the
+            # canonical terminal signal — ``final.md`` / ``final.json``
+            # are already on disk, so any further LLM-driven exploration
+            # is waste. Set ``stop_reason='report_emitted'`` so the next
+            # run-loop iteration breaks out. Skip when ``stop_reason``
+            # is already set (signal / other terminal already won) so
+            # we don't paper over an earlier failure.
+            if (
+                task.kind == "report"
+                and result.state == "succeeded"
+                and not (self.shared_state.stop_reason or "").strip()
+            ):
+                log.info(
+                    "Coordinator: report task %s succeeded; setting "
+                    "stop_reason='report_emitted' to terminate the run "
+                    "loop (N34 Bug #4 fix).",
+                    task.task_id,
+                )
+                self.shared_state.stop_reason = "report_emitted"
+                self.shared_state.save(self.session_dir)
             # v0.8 M1 — T3 anchor (KB_design §3.13 M1 §5.3). Always called
             # so KEEP / REVERT each get a corresponding ingest-attempt +
             # verify pair. Best-effort: failures are absorbed into the
