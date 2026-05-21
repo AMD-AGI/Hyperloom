@@ -77,7 +77,6 @@ Minimal Docker example for your own GPU machine:
 ```bash
 docker run -d \
   --name hyperloom-local \
-  --network host \
   --shm-size 64g \
   --device /dev/kfd \
   --device /dev/dri \
@@ -146,6 +145,8 @@ OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
 | `SAFE_API_KEY` | LLM gateway auth key | `ak-your-safe-apikey` |
 | `OPENAI_BASE_URL` | LLM gateway endpoint | `https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1` |
 
+> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway). GEAK and OOB (claude/codex) inherit their API key and base URL from `SAFE_API_KEY` / `OPENAI_BASE_URL` automatically — no separate GEAK, OOB, InferenceX, or TraceLens configuration is needed.
+
 Then run the Local Mode bootstrap:
 
 ```bash
@@ -207,8 +208,6 @@ Follow the script output. In the default flow, users do not need to manually con
 |----------|-------------|---------|
 | `CURSOR_API_KEY` | Cursor SDK key for the OOB cursor backend; independent issuer (Cursor account, prefix `crsr_...`). When unset, Hyperloom auto-skips cursor from default backend selection and only races claude/codex/geak. | `crsr_xxxxxxxxxxxx` |
 | `CURSOR_DEFAULT_MODEL` | Override the default Cursor model id. | `claude-opus-4-7` (default) |
-
-> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway). GEAK and OOB (claude/codex) API Key / Base URL are automatically inherited from `SAFE_API_KEY` / `OPENAI_BASE_URL`. You can place these values in `$REPO_ROOT/.env`; no separate GEAK, OOB, InferenceX, or TraceLens configuration is needed. The OOB **cursor** backend is the exception: it talks to Cursor's own gateway and requires a separate `CURSOR_API_KEY`. If `CURSOR_API_KEY` is unset, cursor is silently skipped from default kernel-opt selection.
 
 ### Launch Inference Optimization
 
