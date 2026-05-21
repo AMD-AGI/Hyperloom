@@ -1,40 +1,47 @@
 # ROCm Hyperloom
 
-An agentic system that autonomously optimizes LLM inference on AMD GPUs. Hyperloom treats optimization as a **search problem**: given a workload, it builds a tree of candidate optimizations — backend swaps, server parameters, GEMM tuning, kernel rewrites, parallelism configs — scores each by expected gain and cost, then explores depth-first, always measuring against the real workload. Simply provide your workload and the agent delivers a fully optimized codebase — profiling against peak hardware potential, identifying bottlenecks, and iteratively rewriting code to maximize throughput on AMD GPUs, so the team gets production-ready optimized code.
+An agentic system that autonomously optimizes LLM inference on AMD GPUs. Hyperloom treats optimization as a **search problem**: given a workload, it builds a tree of candidate optimizations ΓÇö backend swaps, server parameters, GEMM tuning, kernel rewrites, parallelism configs ΓÇö scores each by expected gain and cost, then explores depth-first, always measuring against the real workload. Simply provide your workload and the agent delivers a fully optimized codebase ΓÇö profiling against peak hardware potential, identifying bottlenecks, and iteratively rewriting code to maximize throughput on AMD GPUs, so the team gets production-ready optimized code.
 
 <p align="center"><img width="600" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" /></p>
 
 Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens-internal/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets.
 
-Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scored tree of candidates — config overrides, code patches, backend switches, kernel rewrites — and explores depth-first, one change at a time: **Think → Implement → Benchmark → Decide**. Each result re-scores the remaining tree. 
+Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scored tree of candidates ΓÇö config overrides, code patches, backend switches, kernel rewrites ΓÇö and explores depth-first, one change at a time: **Think ΓåÆ Implement ΓåÆ Benchmark ΓåÆ Decide**. Each result re-scores the remaining tree. 
 
 In parallel, hot kernels are asynchronously optimized via external backends ([GEAK](https://github.com/AMD-AGI/GEAK/tree/main), and OOB kernel optimization via Claude Code and OpenAI Codex relying on kernel optimization flow of [Apex](https://github.com/AMD-AGI/Apex)). Kernel profiling and validation is powered by [Magpie](https://github.com/AMD-AGI/Magpie), which relies on [IntelliKit](https://github.com/AMDResearch/intellikit) for some of low-level GPU profiling tools.
 
-Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintaining accuracy — every change is correctness-gated before acceptance. Once the loop exits, the agent packages the optimized code, submits a PR to your repo, and merges into your codebase, completing the full loop.
+Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintaining accuracy ΓÇö every change is correctness-gated before acceptance. Once the loop exits, the agent packages the optimized code, submits a PR to your repo, and merges into your codebase, completing the full loop.
 
 ### Learn More
 
 | | |
 |---|---|
 | **[How the Optimization Loop Works](docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md)** | Scoring heuristics, stack mechanics, dynamic branching, and the self-evolving knowledge base |
-| **[GLM-5 — Discovering Optimizations Hard to Spot Manually](docs/CASE_STUDY_GLM5.md)** | Hidden GEMM configs, cross-repo kernel patches, +193% throughput |
-| **[DeepSeek-R1 — Fast Scale-Up on a New Workload](docs/CASE_STUDY_DEEPSEEK_R1.md)** | 7 configs to optimal in one session, MTP scheduling fix, +97% over B200 |
+| **[GLM-5 ΓÇö Discovering Optimizations Hard to Spot Manually](docs/CASE_STUDY_GLM5.md)** | Hidden GEMM configs, cross-repo kernel patches, +193% throughput |
+| **[DeepSeek-R1 ΓÇö Fast Scale-Up on a New Workload](docs/CASE_STUDY_DEEPSEEK_R1.md)** | 7 configs to optimal in one session, MTP scheduling fix, +97% over B200 |
+| **[Auth & Environment Guide](docs/ENV_AND_AUTH.md)** | Single authoritative auth/env reference; the inline tables in this README are a convenience excerpt |
+| **[Configuration Reference](docs/CONFIGURATION_REFERENCE.md)** | Every environment variable read by the runtime |
+| **[Knowledge-Base Guide](docs/KB_GUIDE.md)** | How to obtain or skip `INFERENCE_OPTIMIZER_KB_ROOT` and the marathon KB |
+| **[`session_breakdown.json` Integration](docs/INTEGRATION_SESSION_BREAKDOWN.md)** | Stable contract for downstream consumers (`claw-stats-service`, dashboards) |
+| **[Operations & Self-Host Runbook](docs/OPERATIONS.md)** | k8s sizing, `USER_DATA_PATH` backup, disaster recovery |
+| **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Auth-proxy 401, Ray `--num-gpus`, VRAM IR-1, and other recurring failures |
+| **[Upgrading](docs/UPGRADING.md)** | Per-version migration steps (companion to [`CHANGELOG.md`](CHANGELOG.md)) |
 
 ---
 
 ## Prerequisites
 
-Bind your **[LLM Gateway](https://llm.amd.com/)** key to **[Hyperloom](https://core42.example-internal-host.invalid/hyperloom/)** to obtain your `AK_YOUR_API_KEY`. This key is required for both the Hyperloom UI and the local optimization workflow — it provides access to TraceLens, GEAK, and OOB services.
+Bind your **[LLM Gateway](https://llm.amd.com/)** key to **[Hyperloom](https://core42.example-internal-host.invalid/hyperloom/)** to obtain your `AK_YOUR_API_KEY`. This key is required for both the Hyperloom UI and the local optimization workflow ΓÇö it provides access to TraceLens, GEAK, and OOB services.
 
 ---
 
-## Quickstart — Hyperloom UI (PrimusClaw)
+## Quickstart ΓÇö Hyperloom UI (PrimusClaw)
 
-The fastest way to start is through the hosted **AMD Hyperloom** web interface — powered by **[PrimusClaw](https://github.com/AMD-AGI/Primus-Claw)**, the hosted online mode designed for **large-scale reachability**. Any team member can launch an optimization through the browser without local GPU setup or environment configuration.
+The fastest way to start is through the hosted **AMD Hyperloom** web interface ΓÇö powered by **[PrimusClaw](https://github.com/AMD-AGI/Primus-Claw)**, the hosted online mode designed for **large-scale reachability**. Any team member can launch an optimization through the browser without local GPU setup or environment configuration.
 
-- **Easy to scale** — each job runs in isolated sandboxed containers (GPU or CPU). Single-node optimizations run in-sandbox; multi-node workloads fan out via RayJob for distributed benchmarking.
-- **Data flywheel** — every optimization run feeds results back through Minio storage and Langfuse observability, creating a closed feedback loop that continuously improves the agent's knowledge base and scoring heuristics.
-- **Full Skills support** — sandboxes load optimization Skills on demand, giving the agent the same profiling, kernel-rewrite, and domain-specific capabilities at cloud scale.
+- **Easy to scale** ΓÇö each job runs in isolated sandboxed containers (GPU or CPU). Single-node optimizations run in-sandbox; multi-node workloads fan out via RayJob for distributed benchmarking.
+- **Data flywheel** ΓÇö every optimization run feeds results back through Minio storage and Langfuse observability, creating a closed feedback loop that continuously improves the agent's knowledge base and scoring heuristics.
+- **Full Skills support** ΓÇö sandboxes load optimization Skills on demand, giving the agent the same profiling, kernel-rewrite, and domain-specific capabilities at cloud scale.
 
 1. Go to **[core42.example-internal-host.invalid/hyperloom](https://core42.example-internal-host.invalid/hyperloom/)**
 2. Select **Claw Agent** or **Get Started** from the landing page to enter PrimusClaw
@@ -48,7 +55,7 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 
 ---
 
-## Quickstart — Local Mode (Cursor)
+## Quickstart ΓÇö Local Mode (Cursor)
 
 ### Environment Setup
 
@@ -69,7 +76,7 @@ You need an AMD GPU machine that supports MI300X or MI355X, using an SGLang or v
 
 Choose one environment:
 
-- **Recommended — SaFE Authoring Pod**: create an Authoring Pod on [Primus-SaFE Authoring](https://core42.example-internal-host.invalid/authoring), select one of the SGLang or vLLM images above, and wait for the Pod to become ready.
+- **Recommended ΓÇö SaFE Authoring Pod**: create an Authoring Pod on [Primus-SaFE Authoring](https://core42.example-internal-host.invalid/authoring), select one of the SGLang or vLLM images above, and wait for the Pod to become ready.
 - **Your own GPU machine**: start a long-running ROCm inference container that can access the GPU. The container name, workspace path, model path, and image version in the example below can all be changed for your environment.
 
 Minimal Docker example for your own GPU machine:
@@ -145,7 +152,7 @@ OPENAI_BASE_URL=https://core42.example-internal-host.invalid/api/v1/llm-proxy/v1
 | `CURSOR_API_KEY` (optional) | Cursor SDK key for the OOB cursor kernel-opt backend (independent issuer, prefix `crsr_...`). Leave blank to skip cursor and only use claude/codex/geak. | `crsr_xxxxxxxxxxxx` |
 | `CURSOR_DEFAULT_MODEL` (optional) | Override the default Cursor model id | `claude-opus-4-7` |
 
-> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.example-internal-host.invalid/litellm-gateway). GEAK and OOB (claude/codex) inherit their API key and base URL from `SAFE_API_KEY` / `OPENAI_BASE_URL` automatically — no separate GEAK, OOB, InferenceX, or TraceLens configuration is needed.
+> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.example-internal-host.invalid/litellm-gateway). GEAK and OOB (claude/codex) inherit their API key and base URL from `SAFE_API_KEY` / `OPENAI_BASE_URL` automatically ΓÇö no separate GEAK, OOB, InferenceX, or TraceLens configuration is needed.
 
 > If HTTPS requests to `core42.example-internal-host.invalid` or the AMD LLM Gateway fail with a certificate verification error inside the container, install the AMD certificate bundle manually. This is most common when running on your own GPU server or a custom container image:
 >
@@ -241,7 +248,7 @@ Prompt field reference:
 | `Kernel optimization` | `--no-kernel` | Kernel optimization is enabled by default; ask to skip it if you only want parameter/backend search. | enabled |
 | `Resume` | `--resume` | Resume an existing session; requires `manifest.json` and `state.json`. | disabled |
 
-For first-launch errors, see `inference_optimizer/SKILL.md` §"Failure Handling".
+For first-launch errors, see `inference_optimizer/SKILL.md` ┬º"Failure Handling".
 
 > Training and MLPerf-training skills have been retired from this repo. Only inference optimization is supported here.
 
@@ -249,37 +256,65 @@ For first-launch errors, see `inference_optimizer/SKILL.md` §"Failure Handling"
 
 1. **Session directory env renamed.** Set `USER_DATA_PATH` instead of `INFERENCE_OPTIMIZER_SESSION_DIR`. The legacy variable is no longer read.
 2. **`setup` and `classify` actions removed.** If your launcher relied on them being in the action graph, supply the equivalents on the CLI:
-   - `--model-class <…>` for what `classify` used to derive.
-   - `--compare-against-gpu <…>` to opt into InferenceX reference fetching (otherwise `target_analysis` writes a `no_target_gpu_configured` marker and the run proceeds).
-3. **Magpie benchmark script is now generic-pinned by default.** When `--gpu-type` is set, the YAML renderer pins `benchmark_script=<framework>_<gpu_type>.sh` to stop InferenceX-native scripts from silently leaking `result.json` outside the session dir. If you intentionally use a model-specific script (e.g. `dsr1_fp8_mi300x.sh`), keep passing `benchmark_script=` explicitly — operator overrides still win against the generic-script pin. You may additionally want to set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` so the harvest step can recover leaked `result.json` files written to hardcoded `--result-dir` locations.
+   - `--model-class <ΓÇª>` for what `classify` used to derive.
+   - `--compare-against-gpu <ΓÇª>` to opt into InferenceX reference fetching (otherwise `target_analysis` writes a `no_target_gpu_configured` marker and the run proceeds).
+3. **Magpie benchmark script is now generic-pinned by default.** When `--gpu-type` is set, the YAML renderer pins `benchmark_script=<framework>_<gpu_type>.sh` to stop InferenceX-native scripts from silently leaking `result.json` outside the session dir. If you intentionally use a model-specific script (e.g. `dsr1_fp8_mi300x.sh`), keep passing `benchmark_script=` explicitly ΓÇö operator overrides still win against the generic-script pin. You may additionally want to set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` so the harvest step can recover leaked `result.json` files written to hardcoded `--result-dir` locations.
 
 ---
 
 ## Key Results
 
-### Inference Optimization — InferenceX Challenge
+### Inference Optimization ΓÇö InferenceX Challenge
 
 Hyperloom optimized 4 flagship models for the [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) benchmark on AMD Instinct MI355X, matching or comparing with reference GPU on 3 out of 4 models.
 
 | Model | Best tok/s/GPU | vs MI355X Baseline | vs NVIDIA B200 |
 |-------|---------------:|:------------------:|:--------------:|
-| DeepSeek-R1-0528 (671B MoE) | **1,476** | — | **+97% ahead** |
+| DeepSeek-R1-0528 (671B MoE) | **1,476** | ΓÇö | **+97% ahead** |
 | GLM-5-FP8 (756B MoE+NSA) | **509** | **+193%** | **+27% ahead** |
 | Qwen3.5-397B (397B MoE) | **350** | **+40%** | **+2.5% ahead** |
 | MiniMax-M2.5 (MoE 256E) | **2,276** | **+6.5%** | **+5.7% ahead** |
-| gpt-oss-120b (120B MoE, mxfp4) | **11,643** | — | **+34% ahead** |
+| gpt-oss-120b (120B MoE, mxfp4) | **11,643** | ΓÇö | **+34% ahead** |
 
 All benchmarks: ISL=1024, OSL=1024 on MI355X (gfx950). "vs B200" shows best concurrency point. Full concurrency/ISL/OSL sweeps, patches, configs, and reproduction scripts: **[Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX)**.
 
+## Hosted Tier ΓÇö Limits & Pricing
+
+The hosted [Hyperloom UI / PrimusClaw](https://core42.example-internal-host.invalid/hyperloom/)
+is operated by AMD on shared infrastructure. Defaults for the public
+PrimusClaw tier:
+
+| Resource                          | Hosted default                                                                 |
+|-----------------------------------|---------------------------------------------------------------------------------|
+| Per-session GPU budget            | 1 ├ù MI300X / MI325X / MI355X for single-node runs; 2ΓÇô8 GPUs via RayJob for multi-node |
+| Concurrent sessions per account   | 2                                                                               |
+| Session wall-clock                | 24 hours (extensible on request)                                                |
+| `USER_DATA_PATH` quota            | 200 GB per session, with daily snapshots                                        |
+| LLM-gateway request rate          | Bound to your `SAFE_API_KEY` quota (see [LLM Gateway](https://llm.amd.com/))     |
+| Outbound network                  | Allowlisted (model registries, HuggingFace, GitHub)                             |
+
+Pricing for the hosted tier is currently **free for AMD-internal users
+and approved AMD partners** via Primus-SaFE. Public / enterprise
+pricing is under active definition by the BRAIN team; reach out via
+the [Hyperloom support form](https://core42.example-internal-host.invalid/hyperloom/)
+or open an issue if your organization needs a quote.
+
+For higher limits, dedicated capacity, or air-gapped deployment, self-host
+Hyperloom in your own cluster following [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+Self-hosted Hyperloom is Apache-2.0 licensed (see
+[Licensing](#licensing)); there is no per-seat or per-session fee.
+
+---
+
 ## Detailed Skill Documentation
 
-The repo ships a single skill — `inference_optimizer/` — with the full optimization protocol, examples, and a knowledge base of lessons learned from prior runs:
+The repo ships a single skill ΓÇö `inference_optimizer/` ΓÇö with the full optimization protocol, examples, and a knowledge base of lessons learned from prior runs:
 
 | Domain | Skill | Description |
 |--------|-------|-------------|
 | **Inference** | [SKILL.md](inference_optimizer/SKILL.md) | Multi-agent system, CLI-driven, fully automated |
 
-The skill file is the agent's instructions. It encodes the full optimization methodology — setup, profiling protocol, what to try, how to measure, when to stop, and how to report. The knowledge base sections are updated live during runs with new pitfalls and validated results.
+The skill file is the agent's instructions. It encodes the full optimization methodology ΓÇö setup, profiling protocol, what to try, how to measure, when to stop, and how to report. The knowledge base sections are updated live during runs with new pitfalls and validated results.
 
 ---
 
@@ -310,6 +345,25 @@ Hyperloom/
 ├── docs/                                 # Architecture docs, case studies, and Mermaid diagrams
 ├── scripts/                              # Repo-level helper scripts
 ├── .env.template                         # Environment variables
+├── CHANGELOG.md                          # Per-release notes
+├── CONTRIBUTING.md                       # Contribution guidelines
+├── LICENSE                               # Apache-2.0
+├── SECURITY.md                           # Vulnerability disclosure policy
 └── README.md
 ```
+
+---
+
+## Licensing
+
+Hyperloom is released under the **Apache License 2.0**. The full
+license text is in [`LICENSE`](LICENSE); the same license is asserted
+in [`pyproject.toml`](pyproject.toml) for PyPI / sdist consumers.
+
+You may use Hyperloom commercially, modify it, and distribute it under
+the terms of Apache-2.0. Patent grants and NOTICE handling follow the
+standard Apache-2.0 rules.
+
+For security-relevant issues, see [`SECURITY.md`](SECURITY.md). For
+contribution conventions, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
