@@ -35,6 +35,7 @@ EXPLORE is configuration-only by design.
 
 ### When to deviate from the default verdict
 
+
 * `judge_bundle.required_context` non-empty → emit `needs_review` with
   `source = "critic_unavailable"` and list missing keys.
 * `judge_bundle.kb_read_skipped_reason` set → prefer `advise` /
