@@ -842,9 +842,9 @@ For HIP/C++ sources (`.cu` / `.cuh` / `.hip` / selected headers), the harness
 wraps the TraceLens-discovered benchmark command instead of importing Python:
 the generated `task_runner.py` temporarily overlays `source/<kernel>` onto the
 live framework source path, invalidates likely aiter JIT modules, runs the
-captured benchmark, and restores the live tree. Generation-time correctness is
-deferred for HIP because the existing benchmarks can take minutes; GEAK runs the
-generated correctness command during its baseline/patch loop.
+captured benchmark, and restores the live tree. Hyperloom runs this correctness
+command before GEAK handoff; only a HIP/C++ harness with passing compile and
+correctness self-verify is marked `ok` and passed as GEAK's `--test-command`.
 
 The generator self-verifies (compile + correctness MUST pass on the
 unmodified source) before declaring success. The artefact tree lives at:
