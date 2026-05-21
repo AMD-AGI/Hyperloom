@@ -328,6 +328,108 @@ Regression checklist — if `Test command timed out` reappears:
    a fresh per-prompt `*.geak-config.yaml`; never edit `local.yaml` by
    hand from a tight loop — Hyperloom rewrites it per attempt.
 
+#### Overlay no-op fast path (mirror==live)
+
+The first GEAK round always runs against `mirror == live` (the candidate
+hasn't been edited yet; the harness performs a baseline `save` against the
+unmodified live tree and then a `compare` against an untouched mirror).
+Before the 2026-05-21 fix the runner still unlinked every matched
+`module_*.so` and `shutil.copy2`'d the mirror over the live source on each
+overlay, which invalidated ninja's mtime cache and triggered a fresh
+~60–90s/module aiter+CK-Tile JIT recompile on **both** the save and the
+compare phases. That added 3-6 minutes of pure recompile per correctness
+gate on top of GEAK's existing budget.
+
+`_OverlayLiveSource.__enter__` now:
+
+1. Acquires the per-`LIVE_SOURCE.name` fcntl lock (unchanged).
+2. Calls `_purge_stale_aiter_batons()` (unchanged — needed even on the
+   fast path because the baton might be stale from a SIGKILL'd sibling).
+3. **NEW**: SHA-1 hashes `LIVE_SOURCE` and `self.overlay_source`. If they
+   are byte-identical, sets `self.skipped_overlay = True`, prints
+   `[unittest_agent] overlay no-op (mirror==live, sha1=...); skipping JIT
+   invalidate + copy`, and returns without touching `.so` files or the
+   live source. `__exit__` short-circuits the restore branch too.
+
+The slow path (`mirror != live`, i.e. GEAK produced an actual patch)
+still backs up live + the matching `.so` files, unlinks them, and copies
+the mirror in place — that's required so the next `import
+aiter.jit.module_<name>` re-runs ninja against the patched source.
+
+Regression checklist — if you suspect the no-op path is no longer firing:
+1. Run `python3 <harness>/scripts/task_runner.py correctness` with
+   `mirror == live` and grep stderr for `overlay no-op (mirror==live`.
+   No match = fast path is broken, every correctness gate will pay the
+   JIT recompile cost again.
+2. `sha1sum <harness>/source/<kernel> /sgl-workspace/.../<kernel>` and
+   confirm they are equal on a fresh harness.
+3. The unit test `OverlayLockTests::test_template_skips_jit_invalidate_when_overlay_matches_live`
+   pins the marker strings; failures there indicate template drift.
+
+#### Orphan task_runner / stale-baton recovery
+
+When a GEAK run is SIGTERM/SIGKILL'd mid-correctness (timeout, OOM, the
+user killed it, the pod was restarted, ...), three artefacts can persist
+across sessions and silently hang the **next** harness invocation:
+
+1. **Orphan `task_runner.py` subprocesses** still holding the overlay
+   fcntl lock. Symptom: `_OverlayLiveSource.__enter__` blocks forever in
+   `fcntl.flock(LOCK_EX)`.
+   - Detect: `pgrep -af task_runner.py`; check `lsof /tmp/hl_overlay_*.lock`.
+   - Recover: `kill -TERM <pid>` (the existing `__exit__` finally-block
+     releases the lock); if it ignores TERM after 5s, `kill -KILL`.
+2. **Stale aiter `FileBaton`** at
+   `/sgl-workspace/aiter/aiter/jit/build/lock_module_<name>`. Symptom:
+   `import aiter.jit.module_<name>` spins forever (no timeout) inside
+   `baton.wait()`. Happens when the compile that created the baton died
+   before `baton.release()` ran.
+   - Detect: `find /sgl-workspace/aiter/aiter/jit/build/lock_module_*
+     -mmin +1` returns hits while no `hipcc` / `ninja` / `amdclang` /
+     `clang++` is targeting the matching module name in
+     `/proc/*/cmdline`.
+   - Recover: the generated runner calls `_purge_stale_aiter_batons()`
+     from inside `_OverlayLiveSource.__enter__` once it holds the overlay
+     lock; if you're running outside the harness, replicate the same
+     guard (only purge when no live builder process owns the module) and
+     `rm` the lock file. Also drop the inner per-build lock at
+     `.../build/<module>/build/lock` if it's in the same stale window.
+3. **Mirror drift** — `<harness>/source/<kernel>` left holding a
+   half-written GEAK patch from a previous run, so the next correctness
+   gate compares a corrupt overlay against the baseline snapshot and
+   reports a false failure.
+   - Detect: `sha1sum <harness>/source/<kernel>
+     <harness>/source/_baseline_snapshot/<kernel>` differ but
+     `unittest_meta.json["status"]` says `ok` (i.e. the harness was
+     generated against an unmodified live tree).
+   - Recover: `cp <harness>/source/_baseline_snapshot/<kernel>
+     <harness>/source/<kernel>` to restore the baseline mirror, then
+     re-launch GEAK.
+
+A reusable cleanup snippet for the wrapper scripts (see
+`kernel_agnet/geakwith_unittest/run_all_geak_safe.sh`):
+
+```bash
+# Kill any orphan task_runner from previous attempts.
+pkill -TERM -f 'task_runner\.py' || true; sleep 3
+pkill -KILL -f 'task_runner\.py' || true
+
+# Purge stale aiter batons older than 60s with no live builder.
+for lock in /sgl-workspace/aiter/aiter/jit/build/lock_module_*; do
+  [ -e "$lock" ] || continue
+  stem=$(basename "${lock#*lock_}")
+  pgrep -af "$stem" | grep -E 'hipcc|ninja|amdclang|clang\+\+' && continue
+  find "$lock" -mmin +1 -delete
+done
+
+# Restore baseline mirror so first overlay round hits the no-op path.
+for d in deps/unittests/*/source; do
+  for f in "$d"/_baseline_snapshot/*; do
+    [ -e "$f" ] || continue
+    cp -p "$f" "$d/$(basename "$f")"
+  done
+done
+```
+
 ## TraceLens Requirements
 
 TraceLens runs through its CLI and its own skill.
