@@ -1223,47 +1223,79 @@ def _load_dotenv_fallback() -> None:
 def _load_kernel_agent_env_fallback() -> None:
     """If ``HYPERLOOM_KERNEL_AGENT_ROOT`` is unset, auto-source the
     kernel-agent env file produced by ``inference_optimizer/scripts/
-    install.sh`` (default location ``$USER_DATA_PATH/runtime/
-    kernel-agent.env.sh``, overridable via ``$KERNEL_AGENT_ENV``).
+    install.sh`` at ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``
+    (overridable via ``$KERNEL_AGENT_ENV``).
 
     Background: the May 2026 R1 N14 run stalled for 1h 12min because
     the launcher only sourced the user's basic ``.env`` (3 vars) and
     missed kernel-agent.env.sh. ``RooflineExecutor``'s trace_analyze
-    sub-step imports
-    ``kernel_request_handlers.HYPERLOOM_KERNEL_AGENT_ROOT`` at module
-    load — that read happens before any user code can fix the env, so
-    the only way to recover without a restart is to source the file
-    here, before any orchestrator import. Setting the env in this
+    sub-step imports ``kernel_request_handlers.HYPERLOOM_KERNEL_AGENT_ROOT``
+    at module load — that read happens before any user code can fix the
+    env, so the only way to recover without a restart is to source the
+    file here, before any orchestrator import. Setting the env in this
     process also propagates to all subprocesses launched by Magpie /
     TraceLens / GEAK runners.
 
-    The function is best-effort: missing file or unparseable lines do
-    NOT abort preflight; they're WARN-only so a barebones dev sandbox
-    (no install.sh yet) can still boot. Env always wins over file.
+    Hard-fail contract (revised after the May 2026 Qwen1.5-7B 10h
+    silent-stall: env file at the wrong path -> silent WARN-only ->
+    5 rooflines all profile-success / trace_analyze-fail / snapshot
+    stays None / LLM heartbeat-only 7.5h). The function now:
+
+    * Looks ONLY at ``$KERNEL_AGENT_ENV`` (if set) or
+      ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``. USER_DATA_PATH
+      MUST be the workspace root (per N17 split: ``runtime/`` is
+      workspace-shared, not per-session). No parent-dir fallback.
+    * If the file is missing OR parses 0 vars OR
+      HYPERLOOM_KERNEL_AGENT_ROOT is still unset after sourcing,
+      ``sys.exit(2)`` with a clear actionable message instead of
+      silently warning and letting trace_analyze fail later. Fail
+      early, fail loud: the operator sees the problem in the first
+      30 seconds, not 10 hours in.
+    * Skip entirely when HYPERLOOM_KERNEL_AGENT_ROOT is already set
+      (operator pre-sourced manually, or running from a sandbox that
+      injected it — both fine).
     """
     if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
         return
     candidate = os.environ.get("KERNEL_AGENT_ENV")
     if not candidate:
         user_data = os.environ.get("USER_DATA_PATH")
-        if user_data:
-            candidate = str(Path(user_data) / "runtime" / "kernel-agent.env.sh")
-    if not candidate:
-        return
+        if not user_data:
+            print(
+                "Preflight: ERROR — neither $HYPERLOOM_KERNEL_AGENT_ROOT "
+                "nor $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
+                "resolve kernel-agent.env.sh. Run "
+                "inference_optimizer/scripts/install.sh and export "
+                "USER_DATA_PATH=/path/to/sessions first.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        candidate = str(Path(user_data) / "runtime" / "kernel-agent.env.sh")
     env_path = Path(candidate)
     if not env_path.is_file():
         print(
-            f"Preflight: kernel-agent env file not found at {env_path}; "
-            "trace_analyze will fail until inference_optimizer/scripts/"
-            "install.sh has been run"
+            f"Preflight: ERROR — kernel-agent env file not found at "
+            f"{env_path}. USER_DATA_PATH must be the workspace root "
+            f"(parent of <model>/<ts>/ per-session subdirs); runtime/ "
+            f"is workspace-shared, not per-session. Either "
+            f"(a) re-run inference_optimizer/scripts/install.sh under "
+            f"USER_DATA_PATH={os.environ.get('USER_DATA_PATH','?')}, "
+            f"(b) set $KERNEL_AGENT_ENV to point at an existing file, or "
+            f"(c) set $HYPERLOOM_KERNEL_AGENT_ROOT directly to skip this "
+            f"fallback entirely. Aborting now (was: silently warning and "
+            f"letting trace_analyze fail 10h in).",
+            file=sys.stderr,
         )
-        return
+        sys.exit(2)
     loaded = 0
     try:
         text = env_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        print(f"Preflight: WARNING — failed to read {env_path}: {exc}")
-        return
+        print(
+            f"Preflight: ERROR — failed to read {env_path}: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -1282,18 +1314,20 @@ def _load_kernel_agent_env_fallback() -> None:
         if key not in os.environ:
             os.environ[key] = value
             loaded += 1
-    if loaded:
+    if "HYPERLOOM_KERNEL_AGENT_ROOT" not in os.environ:
         print(
-            f"Preflight: loaded {loaded} kernel-agent var(s) from "
-            f"{env_path} (env wins, HYPERLOOM_KERNEL_AGENT_ROOT="
-            f"{os.environ.get('HYPERLOOM_KERNEL_AGENT_ROOT', '<still unset>')})"
+            f"Preflight: ERROR — sourced {env_path} ({loaded} vars) but "
+            f"HYPERLOOM_KERNEL_AGENT_ROOT is still unset. The env file is "
+            f"malformed or stale. Re-run inference_optimizer/scripts/"
+            f"install.sh to regenerate it.",
+            file=sys.stderr,
         )
-    elif "HYPERLOOM_KERNEL_AGENT_ROOT" not in os.environ:
-        print(
-            f"Preflight: WARNING — {env_path} parsed 0 vars and "
-            "HYPERLOOM_KERNEL_AGENT_ROOT is still unset; re-run "
-            "inference_optimizer/scripts/install.sh"
-        )
+        sys.exit(2)
+    print(
+        f"Preflight: loaded {loaded} kernel-agent var(s) from "
+        f"{env_path} (env wins, HYPERLOOM_KERNEL_AGENT_ROOT="
+        f"{os.environ['HYPERLOOM_KERNEL_AGENT_ROOT']})"
+    )
 
 
 def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
@@ -3178,12 +3212,77 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     catalog_ids = _validate_and_resolve_claude_model(args, proxy_urls)
     _smoke_test_codex_model(args, catalog_ids)
 
+    # `--resume-from <path>` implies `--resume` (operator convenience).
+    if args.resume_from and not args.resume:
+        args.resume = True
+
     if args.resume:
-        # Resume mode: session_dir is fixed at /workspace/hyperloom (or
-        # $USER_DATA_PATH). We re-mkdir the skeleton (idempotent) so a
-        # partially-initialised previous run is healed before we touch
-        # state.
-        session_dir = make_session_dir()
+        # Resume mode (N17-aware): USER_DATA_PATH stays at workspace
+        # level so runtime/ + logs/ resolution doesn't break (N15
+        # `_load_kernel_agent_env_fallback` looks at $USER_DATA_PATH/
+        # runtime/kernel-agent.env.sh, which only exists at workspace
+        # level after install.sh ran). We then pick the per-session
+        # subdir to resume from via either:
+        #
+        # * --resume-from <path>  : explicit operator choice
+        # * --resume alone        : auto-pick LATEST per-session subdir
+        #                            under workspace_root/<model>/<ts>/.
+        #                            Falls back to workspace_root itself
+        #                            (legacy flat layout) when no
+        #                            per-session subdir exists.
+        #
+        # We pin INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR to the picked
+        # subdir so every paths.session_dir() call later (and every
+        # subprocess that inherits env) resolves consistently.
+        from .paths import (
+            ENV_CURRENT_SESSION_DIR, find_latest_per_session_dir,
+            workspace_root,
+        )
+        ws = workspace_root()
+        if args.resume_from:
+            session_dir = Path(args.resume_from).expanduser().resolve()
+            try:
+                session_dir.relative_to(ws.resolve())
+            except ValueError:
+                print(
+                    f"ERROR: --resume-from {session_dir!r} is not under "
+                    f"$USER_DATA_PATH={ws}. Move USER_DATA_PATH to the "
+                    f"workspace root (the parent of the per-session subdirs) "
+                    f"and pass the per-session subdir via --resume-from.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            if not session_dir.is_dir():
+                print(
+                    f"ERROR: --resume-from {session_dir!r} does not exist.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+        else:
+            picked = find_latest_per_session_dir()
+            if picked is not None:
+                session_dir = picked
+                print(f"  --resume: auto-picked latest per-session subdir")
+            else:
+                # Legacy flat layout — workspace_root itself is the
+                # session_dir. Validate it has manifest.json + state.json
+                # the same way the per-session branch does below.
+                session_dir = ws
+                print(
+                    f"  --resume: no per-session subdir found under "
+                    f"{ws}/<model>/<ts>/; falling back to flat layout "
+                    f"({ws})"
+                )
+        # Pin so every paths.session_dir() / subprocess inherits the
+        # resolved location BEFORE Coordinator/SharedState load.
+        os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
+        # Make sure per-session skeleton exists (mkdir -p semantics,
+        # idempotent; doesn't disturb existing files).
+        for sub in __import__(
+            "inference_optimizer.paths", fromlist=["_SESSION_SKELETON"]
+        )._SESSION_SKELETON:
+            (session_dir / sub).mkdir(parents=True, exist_ok=True)
+
         try:
             manifest = load_manifest(session_dir)
         except FileNotFoundError as exc:
@@ -3987,13 +4086,21 @@ def _build_parser() -> argparse.ArgumentParser:
     grp.add_argument("--target-baseline-dir", type=str, default=None,
                       help="Stop when current best matches the baseline in DIR")
     opt.add_argument("--resume", action="store_true", default=False,
-                      help="Resume the session at the canonical session_dir "
-                           "(/workspace/hyperloom by default, or "
-                           "$USER_DATA_PATH). "
-                           "Skips the SharedState seed and lets the "
-                           "Coordinator replay the prior event log + "
-                           "state.json. Refuses to start if manifest.json or "
-                           "state.json is missing.")
+                      help="Resume an existing session. Without --resume-from, "
+                           "auto-picks the latest per-session subdir under "
+                           "$USER_DATA_PATH/<model>/<UTC ts>/ (N17 layout) or "
+                           "falls back to $USER_DATA_PATH (legacy flat layout). "
+                           "USER_DATA_PATH MUST stay at workspace level "
+                           "(/wekafs/.../sessions/, not the per-session subdir) "
+                           "so runtime/ resolution works. Skips the SharedState "
+                           "seed and lets the Coordinator replay the prior "
+                           "event log + state.json.")
+    opt.add_argument("--resume-from", type=str, default=None,
+                      help="Explicit per-session subdir to resume from. Use "
+                           "when multiple per-launch ts dirs exist under the "
+                           "same model and the latest is not what you want. "
+                           "Must be an absolute path under $USER_DATA_PATH "
+                           "(workspace_root). Implies --resume.")
     opt.add_argument(
         "--force-resume", action="store_true", default=False,
         help=(
