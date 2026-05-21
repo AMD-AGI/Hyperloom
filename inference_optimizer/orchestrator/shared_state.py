@@ -127,6 +127,32 @@ class SharedState:
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
     baseline_failure_streak: int = 0
+    # N27 (May 2026): consecutive roofline-action failures since the
+    # last successful roofline. Bumped by Coordinator's
+    # ``_promote_to_shared_state`` (roofline branch) whenever the
+    # executor returns ``status=failed`` (covers profile sub-step
+    # failures, trace_analyze sub-step failures, and N26 auto-retry
+    # exhausted). Reset to 0 the moment a roofline succeeds (i.e.
+    # ``last_trace_analyze.analysis_md_text`` gets re-populated by
+    # the C1 recorder).
+    #
+    # Read by ``_sequence_denial_for_action``: once this reaches
+    # ``INFERENCE_OPTIMIZER_ROOFLINE_FAILURE_FALLBACK_THRESHOLD``
+    # (default 2), the roofline-required gate on
+    # ``backends`` / ``params`` / ``comm_optimization`` downgrades
+    # from PolicyDenied to PASS-with-advisory. That lets the LLM
+    # fall back to the pre-roofline default-grid behaviour rather
+    # than hard-looping on roofline forever (the empirical case is
+    # rocprofiler-sdk corner cases or splitter chunk-quality
+    # failures that can't be auto-recovered by N26).
+    #
+    # IMPORTANT: streak only bumps on the OUTER roofline action
+    # status -- N26 inner retry attempts are NOT counted here
+    # because they live inside a single roofline action's
+    # execution. Two outer roofline failures imply at least
+    # 3-4 trace_analyze attempts already happened (each outer call
+    # tried mixed -> retry to alternate mode via N26).
+    roofline_failure_streak: int = 0
     # Path to the YAML the baseline executor materialized with the operator's
     # workload envs (CONC/ISL/OSL/TP/MAX_MODEL_LEN/PRECISION/RUN_EVAL/...).
     # Coordinator injects this into params/backends/sweep tasks as
@@ -2235,6 +2261,33 @@ class SharedState:
         cached = self.last_trace_analyze or {}
         md_text = cached.get("analysis_md_text") or ""
         if not md_text:
+            # N27: when the coordinator's roofline-required gate has
+            # already downgraded to fallback (roofline failed >= N
+            # consecutive times and the gate stamped
+            # ``fallback_mode_active=True`` on the otherwise-empty
+            # last_trace_analyze), tell the LLM it's in degraded
+            # mode and grid-tuning actions are unlocked WITHOUT
+            # analysis.md guidance. The LLM should still re-propose
+            # `roofline` when it suspects the upstream issue cleared
+            # (success resets the streak), but in the meantime
+            # backends/params/comm_optimization will pass-through and
+            # use the executor's default full grid (i.e. pre-roofline
+            # behaviour).
+            if cached.get("fallback_mode_active"):
+                streak = cached.get("fallback_after_failures", "?")
+                threshold = cached.get("fallback_threshold", "?")
+                return (
+                    f"(no TraceLens snapshot yet — N27 FALLBACK MODE: "
+                    f"roofline failed {streak} consecutive times "
+                    f"(>= threshold {threshold}); "
+                    "`backends` / `params` / `comm_optimization` are "
+                    "UNLOCKED and will run the executor's full default "
+                    "grid without analysis.md-driven N20-A subset / N22 "
+                    "advisory. Re-propose `roofline` whenever you think "
+                    "the upstream profile/trace issue may have cleared — "
+                    "success resets the streak and restores roofline-"
+                    "driven variant selection.)"
+                )
             return (
                 "(no TraceLens snapshot yet — propose `roofline` to "
                 "produce one; roofline is a composite action that "
