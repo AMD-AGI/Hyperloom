@@ -127,16 +127,18 @@ class TestFlyDSLClassification(unittest.TestCase):
 class TestReusableSourceRoots(unittest.TestCase):
     """Issue #211: FlyDSL / mori install paths must pass the patchability gate.
 
-    Tests isolate the path-allowlist check by using ``source_type="python"``
-    (which is admitted today). The ``source_type="flydsl"`` admission is
-    item 3 of the integration plan; tests are flipped once that lands.
+    Uses ``source_type="flydsl"`` to exercise the full post-issue-#211
+    routing path: content-sniff (item 1) → reusable-root allowlist
+    (item 2) → ``source_type`` allowlist (item 3, the entry asserted
+    below). All three gates must pass for a FlyDSL kernel to reach
+    backend dispatch.
     """
 
     def _flydsl_candidate(self, source_file: str) -> dict:
         return {
             "name": "flydsl_indexed_pv_kernel",
             "source_file": source_file,
-            "source_type": "python",
+            "source_type": "flydsl",
         }
 
     def test_flydsl_sgl_workspace_root_is_reusable(self) -> None:
@@ -211,6 +213,54 @@ class TestReusableSourceRoots(unittest.TestCase):
         env.pop("HYPERLOOM_EXTRA_REUSABLE_ROOTS", None)
         with mock.patch.dict(os.environ, env, clear=True):
             self.assertEqual(_extra_reusable_roots_from_env(), ())
+
+
+class TestSourceTypeAdmission(unittest.TestCase):
+    """Issue #211: ``source_type='flydsl'`` must pass the patchability gate."""
+
+    _BASE = "/sgl-workspace/flydsl/python/flydsl/ops/k.py"
+
+    def test_flydsl_source_type_admitted(self) -> None:
+        cand = {"name": "k", "source_file": self._BASE, "source_type": "flydsl"}
+        reusable, skip = classify_patchability(cand)
+        self.assertTrue(reusable, msg=skip)
+        self.assertEqual(skip, "")
+
+    def test_triton_source_type_still_admitted(self) -> None:
+        cand = {
+            "name": "k",
+            "source_file": "/sgl-workspace/aiter/aiter/ops/triton/k.py",
+            "source_type": "triton",
+        }
+        self.assertTrue(classify_patchability(cand)[0])
+
+    def test_python_source_type_still_admitted(self) -> None:
+        cand = {
+            "name": "k",
+            "source_file": "/sgl-workspace/aiter/aiter/ops/k.py",
+            "source_type": "python",
+        }
+        self.assertTrue(classify_patchability(cand)[0])
+
+    def test_hip_cpp_source_type_still_admitted(self) -> None:
+        cand = {
+            "name": "k",
+            "source_file": "/sgl-workspace/aiter/csrc/k.cu",
+            "source_type": "hip_cpp",
+        }
+        self.assertTrue(classify_patchability(cand)[0])
+
+    def test_unknown_source_type_still_rejected(self) -> None:
+        cand = {
+            "name": "k",
+            "source_file": "/sgl-workspace/aiter/k.bin",
+            "source_type": "unknown",
+        }
+        reusable, skip = classify_patchability(cand)
+        self.assertFalse(reusable)
+        self.assertIn("source_type=", skip)
+        # Reason string is updated to include "flydsl" in the admitted set.
+        self.assertIn("flydsl", skip)
 
 
 class TestOrchestratorReusableRootsInSync(unittest.TestCase):

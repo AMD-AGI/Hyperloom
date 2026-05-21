@@ -546,9 +546,17 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
             f"source not under a reusable framework root: {source_file}"
         )
     source_type = candidate.get("source_type")
-    if source_type not in {"hip_cpp", "triton", "python"}:
+    # ``flydsl`` joined the allowlist per issue #211: FlyDSL kernels are
+    # plain ``.py`` sources detected by content-sniff in
+    # :func:`source_type_for`, sit under the FlyDSL / mori / user-local
+    # roots admitted in :func:`_reusable_source_roots`, and GEAK has
+    # first-class support for ``kernel_type="flydsl"`` upstream
+    # (``minisweagent/run/utils/task_parser.py``). Without this entry the
+    # gate rejects FlyDSL with ``source_type='flydsl' not in {...}`` even
+    # after the path and content checks pass.
+    if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
         return False, (
-            f"source_type={source_type!r} not in {{hip_cpp, triton, python}}"
+            f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}"
         )
     return True, ""
 
