@@ -3556,6 +3556,32 @@ class Coordinator:
                 )
             else:
                 await self._handle_unpromotable_result(task, result.result)
+            # N34 (May 2026) Bug #4: a successful ``report`` task is
+            # the canonical terminal signal -- the operator-facing
+            # ``final.md`` / ``final.json`` are already on disk.
+            # Without this guard the main loop kept iterating after
+            # the report was written, the LLM kept proposing fresh
+            # params/backends rounds, and the session burned the
+            # rest of its wall-clock budget producing data nobody
+            # would read. Set ``stop_reason`` immediately so the
+            # next iteration's stop check breaks the loop and the
+            # launcher gets a clean exit. Skip when ``stop_reason``
+            # is already set (signal / other terminal already won)
+            # so we don't paper over an earlier failure with the
+            # cheery "report_emitted" reason.
+            if (
+                task.kind == "report"
+                and result.state == "succeeded"
+                and not (self.shared_state.stop_reason or "").strip()
+            ):
+                log.info(
+                    "Coordinator: report task %s succeeded; setting "
+                    "stop_reason='report_emitted' to terminate the run "
+                    "loop (N34 Bug #4 fix).",
+                    task.task_id,
+                )
+                self.shared_state.stop_reason = "report_emitted"
+                self.shared_state.save(self.session_dir)
 
     def _lift_to_current_best(
         self, task_kind: str, best_tput: float, bv: dict[str, Any],
