@@ -8,7 +8,14 @@
 #
 # Env vars:
 #   FRAMEWORK_AGENT_ROOT   default: this script's parent (computed below)
-#   PIP                    default: pip via $VENV_PYTHON if set, else `pip`
+#   VENV_PYTHON            preferred Python interpreter. Auto-detects
+#                          /opt/venv/bin/python on hyperloom/sgl-workspace
+#                          containers (canonical ROCm stack). Set
+#                          FRAMEWORK_AGENT_FORCE_PYTHON=1 to opt out of the
+#                          auto-detect when VENV_PYTHON is explicitly set
+#                          elsewhere.
+#   PIP                    explicit override (ignored when VENV_PYTHON is set).
+#                          Default: `pip` on PATH.
 #   FRAMEWORK_AGENT_EXTRAS comma-separated extras to install; default 'ast,test'
 #                          (libcst + patch-ng + pytest + jsonschema)
 set -euo pipefail
@@ -18,6 +25,19 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${PROJECT_ROOT}}"
 KB_DIR="${FRAMEWORK_AGENT_KB_DIR:-${FRAMEWORK_AGENT_ROOT}/kb}"
 EXTRAS="${FRAMEWORK_AGENT_EXTRAS:-ast,test}"
+
+# Prefer /opt/venv/bin/python on hyperloom/sgl-workspace containers. The
+# system /usr/bin/pip is too old (22.0.2 on Ubuntu 22.04) to honour the
+# PEP 660 build_editable hook our pyproject declares, so editable install
+# fails with "build backend is missing the 'build_editable' hook". Mirror
+# inference_optimizer/scripts/install.sh::resolve_python.
+if [ -x "/opt/venv/bin/python" ] && [ "${FRAMEWORK_AGENT_FORCE_PYTHON:-0}" != "1" ]; then
+    if [ -n "${VENV_PYTHON:-}" ] && [ "${VENV_PYTHON}" != "/opt/venv/bin/python" ]; then
+        echo "[framework-agent/install.sh] preferring /opt/venv/bin/python over VENV_PYTHON=${VENV_PYTHON} (canonical ROCm stack)"
+        echo "[framework-agent/install.sh]   set FRAMEWORK_AGENT_FORCE_PYTHON=1 to honour VENV_PYTHON verbatim"
+    fi
+    VENV_PYTHON="/opt/venv/bin/python"
+fi
 
 if [ -n "${VENV_PYTHON:-}" ] && [ -x "${VENV_PYTHON}" ]; then
     PIP="${VENV_PYTHON} -m pip"
