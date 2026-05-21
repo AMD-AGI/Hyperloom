@@ -11,7 +11,7 @@ phase-entry warmup + breakdown signal"):
 
 * :meth:`KnowledgePlane.pr_feed_warm_all_domains` batch warmer.
 * Coordinator ``_on_enter_explore`` hook that fires on EXPLORE entry.
-* ``--no-pr-monitor`` → ``pr_monitor:disabled`` warning in
+* ``--degraded-pr`` → ``pr_monitor:disabled`` warning in
   ``breakdown.warnings``.
 * ``--pr-monitor-url`` unreachable → ``pr_monitor:unreachable:<url>``
   warning.
@@ -41,7 +41,7 @@ class _StubPRClient:
 
     Implements only the surface KnowledgePlane reaches for. Behaviour
     is parameterised by the ``healthz_ok`` + ``enabled`` flags so tests
-    can flip between ``--no-pr-monitor``, ``REST unreachable``, and the
+    can flip between ``--degraded-pr``, ``REST unreachable``, and the
     happy path.
     """
 
@@ -201,7 +201,7 @@ async def test_on_enter_explore_warms_pr_feed(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_on_enter_explore_graceful_when_plane_is_none(tmp_path: Path):
-    """``--no-cortex`` runs have plane=None; the hook must short-circuit
+    """``--degraded-kb`` runs have plane=None; the hook must short-circuit
     instead of raising."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
@@ -316,13 +316,15 @@ def _build_args(**overrides) -> argparse.Namespace:
         pr_monitor_url=None,
         pr_monitor_mcp_url=None,
         pr_feed_window_days=30,
+        pr_degraded_reason=None,
+        kb_degraded_reason=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
 
 
 def test_bootstrap_writes_status_marker_when_disabled(tmp_path: Path):
-    """``--no-pr-monitor`` path: marker must declare enabled=False so
+    """``--degraded-pr`` path: marker must declare enabled=False so
     the breakdown collector surfaces ``pr_monitor:disabled``."""
     from inference_optimizer.cli import _bootstrap_knowledge_plane
     from inference_optimizer.session_paths import pr_monitor_status_json
@@ -338,17 +340,18 @@ def test_bootstrap_writes_status_marker_when_disabled(tmp_path: Path):
     assert payload["reachable"] is False
 
 
-def test_bootstrap_writes_status_marker_when_unreachable(
+def test_bootstrap_marker_records_ir3_auto_degrade(
     tmp_path: Path, monkeypatch,
 ):
-    """PR Monitor REST returns non-200: marker reflects reachable=False
-    but enabled=True (so downstream knows the operator wanted PR
-    Monitor on, just can't reach it)."""
+    """IR-3 (in ``_preflight``) sets ``args.pr_monitor_enabled=False`` +
+    ``args.pr_degraded_reason="ir3_auto"`` when PR Monitor is
+    unreachable. The bootstrap honours that — marker shows
+    ``enabled=False`` + the explanatory reason in ``status_text``."""
     from inference_optimizer.cli import _bootstrap_knowledge_plane
     from inference_optimizer.session_paths import pr_monitor_status_json
     from inference_optimizer.orchestrator import pr_monitor as pr_mod
 
-    class _UnreachableClient:
+    class _Stub:
         def __init__(self, url: str, enabled: bool):
             self.base_url = url or "https://example.test"
             self.enabled = enabled
@@ -363,13 +366,14 @@ def test_bootstrap_writes_status_marker_when_unreachable(
         pr_mod.PRMonitorClient,
         "from_args",
         classmethod(
-            lambda cls, **kw: _UnreachableClient(
+            lambda cls, **kw: _Stub(
                 url=kw.get("url") or "", enabled=kw.get("enabled", True),
             ),
         ),
     )
     args = _build_args(
-        pr_monitor_enabled=True,
+        pr_monitor_enabled=False,
+        pr_degraded_reason="ir3_auto",
         pr_monitor_url="https://pr-monitor.test",
     )
     _bootstrap_knowledge_plane(
@@ -377,9 +381,9 @@ def test_bootstrap_writes_status_marker_when_unreachable(
     )
     marker = pr_monitor_status_json(tmp_path)
     payload = json.loads(marker.read_text())
-    assert payload["enabled"] is True
+    assert payload["enabled"] is False
     assert payload["reachable"] is False
-    assert "pr-monitor.test" in str(payload.get("url"))
+    assert "ir3_auto" in payload.get("status_text", "")
 
 
 def test_collect_kb_provenance_surfaces_pr_monitor_disabled_warning(
@@ -398,7 +402,7 @@ def test_collect_kb_provenance_surfaces_pr_monitor_disabled_warning(
         "reachable": False,
         "mcp_url": "",
         "window_days": 30,
-        "status_text": "disabled (--no-pr-monitor)",
+        "status_text": "disabled (--degraded-pr)",
     }))
 
     warnings_list: list = []
@@ -494,26 +498,28 @@ def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:
     can pin the dest-name + default contract the bootstrap reads."""
     from inference_optimizer.cli import _build_parser
     parser = _build_parser()
-    return parser.parse_args(["optimize", "--no-cortex", *extra])
+    return parser.parse_args(["optimize", "--degraded-kb", *extra])
 
 
 def test_cli_pr_monitor_flags_have_expected_dest_and_defaults():
-    """KB_gaps/Gap-16 — ``--pr-monitor-url`` / ``--no-pr-monitor`` /
+    """KB_gaps/Gap-16 — ``--pr-monitor-url`` / ``--degraded-pr`` /
     ``--pr-monitor-mcp-url`` / ``--pr-feed-window-days`` MUST land
     under the dest names that :func:`_bootstrap_knowledge_plane`
     reads. A regression that renames the dest would silently
     decouple the help text from runtime behaviour."""
     args = _parse_optimize_args([])
-    assert args.pr_monitor_enabled is True
+    # IR-3 sets pr_monitor_enabled at runtime, not argparse. The dest
+    # is ``degraded_pr`` (store_true, default False).
+    assert args.degraded_pr is False
     assert args.pr_monitor_url is None
     assert args.pr_monitor_mcp_url is None
     assert isinstance(args.pr_feed_window_days, int)
     assert args.pr_feed_window_days > 0
 
 
-def test_cli_no_pr_monitor_sets_enabled_false():
-    args = _parse_optimize_args(["--no-pr-monitor"])
-    assert args.pr_monitor_enabled is False
+def test_cli_degraded_pr_sets_flag_true():
+    args = _parse_optimize_args(["--degraded-pr"])
+    assert args.degraded_pr is True
 
 
 def test_cli_pr_monitor_url_override_reaches_namespace():

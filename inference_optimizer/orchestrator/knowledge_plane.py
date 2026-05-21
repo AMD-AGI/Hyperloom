@@ -291,7 +291,7 @@ class KnowledgePlane:
 
         Failure semantics (KB_design §3.13 M4 §10):
 
-        - PR Monitor disabled (``--no-pr-monitor``) → ``([],
+        - PR Monitor disabled (``--degraded-pr``) → ``([],
           ["pr_monitor:disabled"])``.
         - Unknown domain → ``([], ["pr_monitor:unknown_domain:<d>"])``.
         - Per-repo unreachability is folded into ``warnings`` (PRs
@@ -356,7 +356,7 @@ class KnowledgePlane:
 
         Returns ``{"status": "skip_disabled"}`` when Cortex is
         disabled so callers can branchlessly handle the
-        ``--no-cortex`` case.
+        ``--degraded-kb`` case.
         """
         if not self.cortex_enabled:
             return {"status": "skip_disabled"}
