@@ -19,10 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from inference_optimizer.cli import (
-    _build_orchestration_prompt,
-    _load_critic_prompt,
-)
+from inference_optimizer.cli import _build_orchestration_prompt
 from inference_optimizer.orchestrator.action_registry import ActionRegistry
 from inference_optimizer.orchestrator.objective import (
     TargetGainObjective,
@@ -61,10 +58,19 @@ def test_orchestration_no_kernel_md_was_removed():
     )
 
 
-def test_critic_md_exists_on_disk():
+def test_critic_md_is_rules_fragment():
+    """``critic.md`` is a small rules fragment, not a full system prompt."""
     p = asset_system_prompts_dir() / "critic.md"
-    assert p.is_file(), f"missing critic prompt: {p}"
-    assert "Critic" in p.read_text(encoding="utf-8")
+    assert p.is_file(), f"missing critic rules fragment: {p}"
+    text = p.read_text(encoding="utf-8")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    assert len(lines) <= 30, (
+        f"critic.md should be a concise fragment, got {len(lines)} non-empty lines"
+    )
+    assert "judge_bundle" in text
+    assert "Hard rules" in text
+    assert "target_proposal_msg_id" not in text
+    assert "baseline / profile / target_analysis" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -195,9 +201,3 @@ def test_build_includes_validate_stack_in_both_modes(registry):
             f"validate phase header missing (no_kernel={no_kernel})"
         )
 
-
-def test_critic_loader_contains_payload_contract():
-    text = _load_critic_prompt()
-    assert "Critic" in text
-    assert "review_verdict" in text or "verdict" in text
-    assert "target_proposal_msg_id" in text
