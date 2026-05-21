@@ -91,11 +91,7 @@ _REUSABLE_SOURCE_ROOTS_STATIC = (
     # this in sync with ``kernel-agent/tools/tracelens_analysis.py`` so
     # both the kernel-agent classifier and the orchestrator-side gate
     # in ``run_optimization_handler`` agree on what counts as a
-    # reusable framework source. ``flydsl/`` + ``mori/`` were added per
-    # issue #211 so FlyDSL kernels in production workloads (helios-demo
-    # MLA decode, AITER FlyDSL ops, user-local kernels) pass the gate
-    # instead of being skipped with ``source not under a reusable
-    # framework root``.
+    # reusable framework source.
     "/usr/local/lib/python3.12/dist-packages/aiter/",
     "/usr/local/lib/python3.12/dist-packages/sglang/",
     "/usr/local/lib/python3.12/dist-packages/vllm/",
@@ -110,14 +106,11 @@ _REUSABLE_SOURCE_ROOTS_STATIC = (
 
 
 def _extra_reusable_roots_from_env() -> tuple[str, ...]:
-    """User-supplied reusable source roots from ``HYPERLOOM_EXTRA_REUSABLE_ROOTS``.
+    """Extra reusable roots from ``HYPERLOOM_EXTRA_REUSABLE_ROOTS``.
 
     Mirrors the helper in ``kernel-agent/tools/tracelens_analysis.py``
-    so the orchestrator-side guard in ``run_optimization_handler``
-    (``_validate_reusable_native_kernel``) honours the same operator
-    override the classifier honours. Issue #211 motivates this for
-    "user's local FlyDSL kernels" that don't ship under one of the
-    hard-coded framework roots.
+    so the orchestrator-side guard honours the same operator override
+    the classifier honours.
     """
     raw = os.environ.get("HYPERLOOM_EXTRA_REUSABLE_ROOTS", "")
     if not raw:

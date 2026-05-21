@@ -332,14 +332,10 @@ _FLYDSL_SCAN_BYTES = 4096
 def _looks_like_flydsl_source(source_file: str) -> bool:
     """Return True when ``source_file`` is a FlyDSL kernel source.
 
-    Detection is content-based (not extension or path) because FlyDSL
-    kernels are plain ``.py`` files that live anywhere from the FlyDSL
-    site-packages install to per-product checkouts (e.g. helios-demo's
-    ``app/helios_demo/flydsl_mla_decode/``). We sniff the first 4 KiB
-    for FlyDSL import / decorator markers — the same signals GEAK's
-    ``task_generator._infer_kernel_type`` already uses upstream, kept in
-    sync so a candidate Hyperloom classifies as ``flydsl`` will be
-    re-classified the same way by GEAK on the receiving side.
+    Detection is content-based: FlyDSL kernels are plain ``.py`` files
+    so neither extension nor path is reliable. Sniff the first 4 KiB
+    for FlyDSL import / decorator markers — same signals GEAK's
+    ``task_generator._infer_kernel_type`` uses upstream.
     """
     if not source_file or not source_file.endswith(".py"):
         return False
@@ -399,11 +395,7 @@ _REUSABLE_SOURCE_ROOTS_STATIC = (
     # ``/usr/local/lib/python3.12/dist-packages/vllm/`` rather than the
     # editable ``/sgl-workspace/vllm/`` checkout the legacy entries
     # assumed. The python3.10 fallback covers older images where the
-    # interpreter has not yet been bumped. ``flydsl/`` + ``mori/`` were
-    # added per issue #211 so FlyDSL kernels in production workloads
-    # (helios-demo MLA decode, AITER FlyDSL ops, user-local kernels)
-    # pass ``classify_patchability`` instead of being skipped with
-    # ``source not under a reusable framework root``.
+    # interpreter has not yet been bumped.
     "/usr/local/lib/python3.12/dist-packages/aiter/",
     "/usr/local/lib/python3.12/dist-packages/sglang/",
     "/usr/local/lib/python3.12/dist-packages/vllm/",
@@ -418,16 +410,11 @@ _REUSABLE_SOURCE_ROOTS_STATIC = (
 
 
 def _extra_reusable_roots_from_env() -> tuple[str, ...]:
-    """Read user-supplied reusable source roots from the environment.
+    """Extra reusable roots from ``HYPERLOOM_EXTRA_REUSABLE_ROOTS``.
 
-    Issue #211 calls out "user's local FlyDSL kernels" as a first-class
-    optimization target alongside aiter / mori. Hard-coding every
-    customer checkout in :data:`_REUSABLE_SOURCE_ROOTS_STATIC` is not
-    feasible, so operators can extend the allowlist at runtime via the
-    ``HYPERLOOM_EXTRA_REUSABLE_ROOTS`` env var (``:``-separated, same
-    convention as ``$PATH``). Trailing slashes are normalized so callers
-    don't have to remember the ``classify_patchability`` substring-match
-    quirk.
+    ``:``-separated (PATH convention). Trailing slashes are appended
+    and case is lowered so callers can substring-match the same way
+    they do against :data:`_REUSABLE_SOURCE_ROOTS_STATIC`.
     """
     raw = os.environ.get("HYPERLOOM_EXTRA_REUSABLE_ROOTS", "")
     if not raw:
@@ -444,18 +431,11 @@ def _extra_reusable_roots_from_env() -> tuple[str, ...]:
 
 
 def _reusable_source_roots() -> tuple[str, ...]:
-    """All reusable framework roots, static + env-extended.
-
-    Recomputed on each call rather than cached: tests and the CI
-    harness flip ``HYPERLOOM_EXTRA_REUSABLE_ROOTS`` per case to exercise
-    the override path. Cost is negligible (tuple of <30 strings).
-    """
+    """Static roots + env-extended roots. Recomputed per call."""
     return _REUSABLE_SOURCE_ROOTS_STATIC + _extra_reusable_roots_from_env()
 
 
-# Back-compat alias. Older call sites read the constant directly; keep
-# the name pointing at the static tuple so they continue to work without
-# the env-driven extension (which is opt-in via the helpers above).
+# Back-compat alias for callers that read the constant directly.
 _REUSABLE_SOURCE_ROOTS = _REUSABLE_SOURCE_ROOTS_STATIC
 # Kernel-name substrings that mark an operation as non-patchable regardless
 # of source-file resolution: vendor BLAS routines, RCCL/NCCL collectives,
@@ -546,14 +526,6 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
             f"source not under a reusable framework root: {source_file}"
         )
     source_type = candidate.get("source_type")
-    # ``flydsl`` joined the allowlist per issue #211: FlyDSL kernels are
-    # plain ``.py`` sources detected by content-sniff in
-    # :func:`source_type_for`, sit under the FlyDSL / mori / user-local
-    # roots admitted in :func:`_reusable_source_roots`, and GEAK has
-    # first-class support for ``kernel_type="flydsl"`` upstream
-    # (``minisweagent/run/utils/task_parser.py``). Without this entry the
-    # gate rejects FlyDSL with ``source_type='flydsl' not in {...}`` even
-    # after the path and content checks pass.
     if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
         return False, (
             f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}"

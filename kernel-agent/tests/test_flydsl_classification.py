@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for FlyDSL kernel classification in tracelens_analysis.
-
-Issue #211: ``source_type_for()`` must recognize FlyDSL kernels by
-content-sniffing the ``.py`` source (looking for ``@flyc.kernel`` /
-``flydsl.compiler`` / ``flydsl.expr`` markers). Without this, FlyDSL
-kernels fall through to ``source_type='python'`` and get mis-routed by
-the downstream GEAK kernel_type mapping.
-"""
+"""Unit tests for FlyDSL kernel classification in tracelens_analysis."""
 
 from __future__ import annotations
 
@@ -69,11 +62,7 @@ class TestFlyDSLClassification(unittest.TestCase):
         self.assertEqual(source_type_for("f", path), "flydsl")
 
     def test_detects_helios_demo_kernel(self) -> None:
-        """End-to-end fixture: real helios-demo FlyDSL kernel.
-
-        Skipped when the helios-demo checkout is not on disk; the
-        local Python-snippet fixtures above cover the same code path.
-        """
+        """Real helios-demo FlyDSL kernel; skipped when checkout is absent."""
         if not HELIOS_FLYDSL_KERNEL.exists():
             self.skipTest(f"fixture missing: {HELIOS_FLYDSL_KERNEL}")
         self.assertTrue(_looks_like_flydsl_source(str(HELIOS_FLYDSL_KERNEL)))
@@ -93,13 +82,7 @@ class TestFlyDSLClassification(unittest.TestCase):
         self.assertEqual(source_type_for("add", path), "python")
 
     def test_triton_still_wins_over_flydsl(self) -> None:
-        """Triton classification has priority when both signals exist.
-
-        A file named with the ``triton`` substring and a ``.py`` suffix
-        should keep its ``triton`` source_type even if (hypothetically)
-        it also imported flydsl — the kernel-name signal is more stable
-        than first-4KiB content sniffing.
-        """
+        """Triton classification has priority when both signals exist."""
         path = self._write(
             "import triton\n"
             "import triton.language as tl\n"
@@ -125,14 +108,7 @@ class TestFlyDSLClassification(unittest.TestCase):
 
 
 class TestReusableSourceRoots(unittest.TestCase):
-    """Issue #211: FlyDSL / mori install paths must pass the patchability gate.
-
-    Uses ``source_type="flydsl"`` to exercise the full post-issue-#211
-    routing path: content-sniff (item 1) → reusable-root allowlist
-    (item 2) → ``source_type`` allowlist (item 3, the entry asserted
-    below). All three gates must pass for a FlyDSL kernel to reach
-    backend dispatch.
-    """
+    """FlyDSL / mori install paths must pass the patchability gate."""
 
     def _flydsl_candidate(self, source_file: str) -> dict:
         return {
@@ -216,7 +192,7 @@ class TestReusableSourceRoots(unittest.TestCase):
 
 
 class TestSourceTypeAdmission(unittest.TestCase):
-    """Issue #211: ``source_type='flydsl'`` must pass the patchability gate."""
+    """``source_type='flydsl'`` must pass the patchability gate."""
 
     _BASE = "/sgl-workspace/flydsl/python/flydsl/ops/k.py"
 
@@ -259,16 +235,11 @@ class TestSourceTypeAdmission(unittest.TestCase):
         reusable, skip = classify_patchability(cand)
         self.assertFalse(reusable)
         self.assertIn("source_type=", skip)
-        # Reason string is updated to include "flydsl" in the admitted set.
         self.assertIn("flydsl", skip)
 
 
 class TestOrchestratorReusableRootsInSync(unittest.TestCase):
-    """The reusable-root allowlist is duplicated in two files on purpose
-    (kernel-agent side vs orchestrator-side guard). Both lists must
-    advertise FlyDSL / mori roots and honour ``HYPERLOOM_EXTRA_REUSABLE_ROOTS``
-    so callers see identical routing behaviour from either entry point.
-    """
+    """Orchestrator-side allowlist must stay in sync with the classifier."""
 
     def setUp(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
