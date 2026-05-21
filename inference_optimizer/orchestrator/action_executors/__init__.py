@@ -38,6 +38,7 @@ from .sweep import (
     sweep_executor,
 )
 from .target_analysis import TargetAnalysisExecutor
+from .recover import RecoverExecutor, recover_executor
 
 __all__ = [
     "BASELINE_DEFAULT_CONFIG",
@@ -49,6 +50,7 @@ __all__ = [
     "ExploreExecutor",
     "PROFILE_DEFAULT_CONFIG",
     "ProfileExecutor",
+    "RecoverExecutor",
     "ReportExecutor",
     "SessionBreakdownExecutor",
     "SweepExecutor",
@@ -56,6 +58,7 @@ __all__ = [
     "baseline_executor",
     "explore_executor",
     "profile_executor",
+    "recover_executor",
     "report_executor",
     "session_breakdown_executor",
     "sweep_executor",
