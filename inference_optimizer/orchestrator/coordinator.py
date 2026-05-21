@@ -155,6 +155,31 @@ def effective_closing_grace_sec(
     return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
 
 
+def _resolve_silent_ticks_closing_threshold() -> int:
+    """N33: how many consecutive idle ticks must elapse before the
+    Coordinator force-enters closing phase.
+
+    "Idle" = ``shared_state.consecutive_silent_ticks`` was bumped
+    because the tick had no queued tasks, no running tasks, no pending
+    proposals and no ``current_action``. Default 120 ticks; with the
+    prod ``tick_interval_sec=5.0`` that is ~10 minutes of total LLM
+    silence before we short-circuit. Override via the env knob; ``0``
+    disables the early-close (legacy behaviour: idle until the wall-
+    clock deadline). Negative / non-numeric values fall back to the
+    default.
+    """
+    raw = os.environ.get(
+        "INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "",
+    ).strip()
+    if not raw:
+        return 120
+    try:
+        v = int(raw)
+    except ValueError:
+        return 120
+    return v if v >= 0 else 120
+
+
 def _parse_iso_unix(ts: str) -> float:
     """Parse an ISO 8601 UTC timestamp into unix seconds.
 
@@ -2300,6 +2325,7 @@ class Coordinator:
         # Stash so ``_compose_prompt`` can update target_gap_pct.
         self._current_objective = objective
         grace_sec = effective_closing_grace_sec(max_minutes, closing_grace_sec)
+        idle_close_ticks_threshold = _resolve_silent_ticks_closing_threshold()
         deadline = (
             time.monotonic() + max_minutes * 60.0 if max_minutes else None
         )
@@ -2354,6 +2380,31 @@ class Coordinator:
                 # writer transitions us in.
                 await self._advance_phase_if_needed()
 
+                # N33: bump ``consecutive_silent_ticks`` when the post-
+                # tick state shows nothing in flight (no queued / running
+                # task, no pending proposal, no ``current_action``). Any
+                # non-empty signal means the run is still making forward
+                # progress (LLM proposed, executor running, critic
+                # reviewing, etc.) so we reset the counter to 0. Skipped
+                # while we're already in closing to avoid double-firing
+                # the closing-phase trigger below.
+                if not in_closing:
+                    try:
+                        queued_now = len(await self.tasks.queued())
+                        running_now = len(await self.tasks.running())
+                    except Exception:  # noqa: BLE001
+                        queued_now = running_now = 0
+                    tick_is_idle = (
+                        queued_now == 0
+                        and running_now == 0
+                        and not self.state.pending_proposals
+                        and not (self.shared_state.current_action or "").strip()
+                    )
+                    if tick_is_idle:
+                        self.shared_state.consecutive_silent_ticks += 1
+                    else:
+                        self.shared_state.consecutive_silent_ticks = 0
+
                 # ---- check stop conditions ----
                 if self._stop.is_set():
                     stop_reason = "signal"
@@ -2378,6 +2429,39 @@ class Coordinator:
                     closing_deadline = await self._enter_closing_phase(
                         grace_sec=grace_sec,
                     )
+                    continue
+                # N33: if the run has been silent for
+                # ``idle_close_ticks_threshold`` consecutive ticks (LLM
+                # has stopped proposing anything actionable, no tasks in
+                # flight, no pending proposals), short-circuit to closing
+                # phase NOW instead of idling until the wall-clock
+                # deadline. This is the common failure mode where the
+                # LLM keeps re-proposing rejected ``report`` actions (or
+                # no actions at all) and would otherwise burn the
+                # remaining budget for nothing. ``threshold <= 0``
+                # disables the early-close (legacy behaviour).
+                if (
+                    idle_close_ticks_threshold > 0
+                    and not in_closing
+                    and self.shared_state.consecutive_silent_ticks
+                        >= idle_close_ticks_threshold
+                ):
+                    log.warning(
+                        "Coordinator: idle for %d consecutive ticks "
+                        "(threshold=%d); entering closing phase early "
+                        "to flush final report instead of waiting for "
+                        "wall-clock deadline (max_minutes=%.0f).",
+                        self.shared_state.consecutive_silent_ticks,
+                        idle_close_ticks_threshold,
+                        max_minutes_value,
+                    )
+                    if grace_sec <= 0:
+                        stop_reason = "idle_timeout"
+                        break
+                    closing_deadline = await self._enter_closing_phase(
+                        grace_sec=grace_sec,
+                    )
+                    self.shared_state.consecutive_silent_ticks = 0
                     continue
                 if in_closing:
                     report_terminal = await self._closing_report_terminal()
