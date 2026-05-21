@@ -1130,6 +1130,7 @@ def _append_unittest_context_to_prompt(
     test_cmd = manifest.get("test_command") or ""
     perf_cmd = manifest.get("performance_command") or ""
     source = manifest.get("source_file") or ""
+    live_source = manifest.get("live_source_file") or ""
     snapshot = manifest.get("baseline_snapshot") or ""
     status = manifest.get("status") or "unknown"
     sv = manifest.get("self_verify") or {}
@@ -1142,6 +1143,7 @@ def _append_unittest_context_to_prompt(
         f"correctness={sv.get('correctness')!r}).",
         f"- Workspace dir: `{manifest.get('out_dir')}`",
         f"- Unittest source mirror: `{source}`",
+        *([f"- Live source under test: `{live_source}`"] if live_source else []),
         f"- Frozen baseline kept at: `{snapshot}` "
         "(this is the golden reference your optimized version is compared "
         "against; DO NOT touch).",
@@ -1160,7 +1162,10 @@ def _append_unittest_context_to_prompt(
         f"2. After each edit, copy the edited `kernel_url` file over `{source}` "
         "so the unittest harness imports the same optimized code you want to "
         "submit.",
-        "3. Run the correctness command above; iterate until it returns 0.",
+        "3. Run the correctness command above; for HIP/C++ harnesses this "
+        "command temporarily overlays the unittest source mirror onto the live "
+        "source path, invalidates likely aiter JIT modules, runs the captured "
+        "benchmark, and restores the live tree.",
         "4. Run the performance command above to measure speedup.",
         "5. Report `[CORRECTNESS] PASS/FAIL` + `[MICRO_SPEEDUP] X.XXx` at the "
         "end of `optimization_report.md` as usual.",
@@ -1195,8 +1200,19 @@ def _maybe_generate_unittest(
     """
     if candidate is None:
         return None
-    if os.environ.get("HYPERLOOM_DISABLE_UNITTEST_AGENT", "").strip() in ("1", "true", "yes"):
+    mode = (
+        str(getattr(args, "unittest_agent", "") or "")
+        or os.environ.get("HYPERLOOM_UNITTEST_AGENT", "auto")
+    ).strip().lower()
+    if os.environ.get("HYPERLOOM_DISABLE_UNITTEST_AGENT", "").strip().lower() in ("1", "true", "yes"):
+        mode = "off"
+    if mode in ("0", "false", "no", "off", "disabled", "disable"):
+        if log_path is not None:
+            append_log(log_path, "[unittest_agent] disabled by control parameter")
         return None
+    if mode not in ("auto", "force", "on", "true", "1"):
+        if log_path is not None:
+            append_log(log_path, f"[unittest_agent] unknown mode={mode!r}; falling back to auto")
     tools_dir = Path(__file__).resolve().parent
     if str(tools_dir) not in sys.path:
         sys.path.insert(0, str(tools_dir))
@@ -1277,24 +1293,165 @@ def _set_yaml_tools_rag(text: str, enabled: bool) -> str:
     return "\n".join(out) + "\n"
 
 
-def _geak_config_for_run(args: argparse.Namespace, prompt_file: Path) -> str:
-    """Create a per-run GEAK config only when runtime overrides need it."""
+_DEFAULT_HARNESS_OUTER_BUFFER_SEC = 300
+_DEFAULT_GEAK_FALLBACK_TIMEOUT_SEC = 3600
+
+
+def _harness_outer_timeout(manifest: dict | None) -> int | None:
+    """Return the GEAK outer ``env.timeout`` budget that the unittest harness
+    needs to actually finish a single ``--test-command`` invocation.
+
+    The unittest_agent harness owns *both* halves of the test contract:
+    it picks the ``test_command`` and it declares how long that command
+    needs to run. Without this glue, a perfectly-generated harness ships
+    a ``task_runner.py`` whose aiter JIT recompile (~51s) + multi-shape
+    benchmark routinely takes minutes, while GEAK still inherits the
+    mini-swe-agent ``LocalEnvironmentConfig.timeout = 30s`` default and
+    SIGKILLs every patch test inside the first 30 seconds.
+
+    Required harness budget (max of correctness/performance, defensively
+    floored, plus a small buffer for process startup + result IO):
+
+        outer = max(harness_timeout_correctness_sec,
+                    harness_timeout_performance_sec) + buffer
+
+    Returns ``None`` when the manifest does not advertise a timeout
+    (e.g. ``status != "ok"`` or older harness layouts); the caller falls
+    back to a static safety value (``_DEFAULT_GEAK_FALLBACK_TIMEOUT_SEC``).
+    """
+    if not isinstance(manifest, dict) or manifest.get("status") != "ok":
+        return None
+    candidates = [
+        manifest.get("harness_timeout_correctness_sec"),
+        manifest.get("harness_timeout_performance_sec"),
+    ]
+    values = [int(v) for v in candidates if isinstance(v, int) and v > 0]
+    if not values:
+        return None
+    return max(values) + _DEFAULT_HARNESS_OUTER_BUFFER_SEC
+
+
+def _ensure_yaml_env_timeout(text: str, *, timeout: int = _DEFAULT_GEAK_FALLBACK_TIMEOUT_SEC) -> str:
+    """Inject ``env.timeout`` if the GEAK config doesn't already define one.
+
+    mini-swe-agent's ``LocalEnvironmentConfig.timeout`` defaults to 30 seconds.
+    Without an explicit override every patch-test in a Hyperloom-generated
+    unittest harness silently dies with ``Test command timed out`` after 30s,
+    which causes select_patch to fall back to the unmodified baseline. The
+    bundled ``geak.yaml`` ships ``env.timeout: 3600`` but custom user configs
+    (e.g. the ``install.sh`` generated ``local.yaml``) are loaded *instead of*
+    the bundled defaults, so a Hyperloom local.yaml without an ``env`` block
+    silently inherits the 30s default.
+
+    Two semantics layered on top of that fallback:
+
+    * When a unittest manifest declares its own ``harness_timeout_*_sec``,
+      the caller should pass the matching ``timeout`` so the GEAK outer
+      budget is the **same number** unittest_agent already pinned for
+      ``task_runner.py``. The unittest_agent then owns the entire
+      test-command contract end-to-end.
+
+    * When the source config *already* defines an ``env:`` block, this
+      helper still rewrites ``env.timeout`` upward so a too-small explicit
+      value (e.g. the historical 30s default someone copied into their
+      config) does not silently neutralise the harness budget. Anything
+      already >= the requested timeout is left untouched.
+    """
+    timeout = max(60, int(timeout))
+    has_env = re.search(r"^env\s*:\s*(?:#.*)?$", text, flags=re.MULTILINE)
+    if has_env:
+        # Only mutate the timeout line; leave the rest of the env block alone.
+        m = re.search(
+            r"^(env\s*:\s*(?:#.*)?\n(?:[ \t]+.*\n)*)",
+            text,
+            flags=re.MULTILINE,
+        )
+        if not m:
+            return text
+        block = m.group(1)
+        timeout_re = re.compile(r"^([ \t]+)timeout\s*:\s*(\d+)\s*$", flags=re.MULTILINE)
+        existing = timeout_re.search(block)
+        if existing:
+            current = int(existing.group(2))
+            if current >= timeout:
+                return text
+            new_block = timeout_re.sub(f"{existing.group(1)}timeout: {timeout}", block, count=1)
+        else:
+            indent = "  "
+            for line in block.splitlines()[1:]:
+                stripped = line.lstrip(" \t")
+                if stripped and not stripped.startswith("#"):
+                    indent = line[: len(line) - len(stripped)] or indent
+                    break
+            new_block = block.rstrip("\n") + f"\n{indent}timeout: {timeout}\n"
+        return text.replace(block, new_block, 1)
+    addition = (
+        "\n"
+        "# Injected by Hyperloom kernel_optimization: mini-swe-agent\n"
+        "# LocalEnvironmentConfig defaults timeout=30 which kills every\n"
+        "# patch test inside the auto-generated unittest harness.\n"
+        "env:\n"
+        "  env:\n"
+        "    PAGER: cat\n"
+        "    MANPAGER: cat\n"
+        "    LESS: -R\n"
+        "    PIP_PROGRESS_BAR: 'off'\n"
+        "    TQDM_DISABLE: '1'\n"
+        f"  timeout: {timeout}\n"
+    )
+    if not text.endswith("\n"):
+        text += "\n"
+    return text + addition
+
+
+def _geak_config_for_run(
+    args: argparse.Namespace,
+    prompt_file: Path,
+    *,
+    unittest_manifest: dict | None = None,
+) -> str:
+    """Create a per-run GEAK config only when runtime overrides need it.
+
+    When the unittest_agent produced a harness for this attempt, the
+    config is rewritten so its ``env.timeout`` matches the harness's own
+    advertised budget (``harness_timeout_*_sec`` + small buffer). That
+    makes unittest_agent the single source of truth for both halves of
+    the GEAK ``--test-command`` contract (the command itself *and* how
+    long GEAK should wait for it) and stops the historical 30s-default
+    failure mode dead.
+    """
     base_config = os.environ.get("GEAK_CONFIG", "")
-    if not getattr(args, "disable_rag", False):
-        return base_config
     if not base_config or not Path(base_config).is_file():
         return base_config
-    override = prompt_file.parent / f"{prompt_file.stem}.geak-config.yaml"
     text = Path(base_config).read_text(encoding="utf-8", errors="replace")
-    override.write_text(_set_yaml_tools_rag(text, enabled=False), encoding="utf-8")
+    new_text = text
+    if getattr(args, "disable_rag", False):
+        new_text = _set_yaml_tools_rag(new_text, enabled=False)
+    timeout = _harness_outer_timeout(unittest_manifest) or _DEFAULT_GEAK_FALLBACK_TIMEOUT_SEC
+    new_text = _ensure_yaml_env_timeout(new_text, timeout=timeout)
+    if new_text == text:
+        return base_config
+    override = prompt_file.parent / f"{prompt_file.stem}.geak-config.yaml"
+    override.write_text(new_text, encoding="utf-8")
     return str(override)
 
 
-def _apply_geak_env_overrides(args: argparse.Namespace, prompt_file: Path) -> dict[str, str | None]:
-    """Temporarily tune GEAK env for this attempt; caller must restore."""
+def _apply_geak_env_overrides(
+    args: argparse.Namespace,
+    prompt_file: Path,
+    *,
+    unittest_manifest: dict | None = None,
+) -> dict[str, str | None]:
+    """Temporarily tune GEAK env for this attempt; caller must restore.
+
+    Threads ``unittest_manifest`` down to ``_geak_config_for_run`` so the
+    GEAK ``env.timeout`` override is driven by the same numbers
+    unittest_agent embedded into ``task_runner.py`` (no more silent skew
+    between harness budget and outer GEAK timeout).
+    """
     keys = ("GEAK_CONFIG", "GEAK_USE_KNOWLEDGE_BASE", "GEAK_SAVE_TO_KNOWLEDGE_BASE")
     previous = {key: os.environ.get(key) for key in keys}
-    config = _geak_config_for_run(args, prompt_file)
+    config = _geak_config_for_run(args, prompt_file, unittest_manifest=unittest_manifest)
     if config:
         os.environ["GEAK_CONFIG"] = config
     if getattr(args, "disable_xs_memory", False):
@@ -1429,6 +1586,13 @@ def invoke_backend(
                 unittest_test_cmd = str(unittest_manifest.get("test_command") or "")
                 if unittest_test_cmd:
                     test_command = unittest_test_cmd
+            elif unittest_manifest is not None and log_path is not None:
+                append_log(
+                    log_path,
+                    "[unittest_agent] generated harness is not usable as "
+                    f"GEAK --test-command (status={unittest_manifest.get('status')!r}); "
+                    "falling back to legacy benchmark_files/test_harness_path mode",
+                )
 
             if not test_command and is_multigpu and num_gpus >= 2:
                 for bf in bench_files:
@@ -1449,9 +1613,35 @@ def invoke_backend(
             # generated harness so the agent knows where to land its
             # optimized version. We append rather than rewrite to avoid
             # disturbing the rest of the prompt rendered by build_prompt().
-            if unittest_manifest is not None and unittest_manifest.get("status") in ("ok", "degraded"):
+            if unittest_manifest is not None and unittest_manifest.get("status") == "ok":
                 _append_unittest_context_to_prompt(prompt_file, unittest_manifest)
-            previous_env = _apply_geak_env_overrides(args, prompt_file)
+            previous_env = _apply_geak_env_overrides(
+                args, prompt_file, unittest_manifest=unittest_manifest,
+            )
+            # Inject harness-derived timeouts into GEAK's child env so the
+            # generated task_runner respects the same per-run budget the
+            # manifest advertises. Without this, GEAK can spawn a default
+            # 900s child timeout while the harness internally needs 1800s
+            # (baseline + JIT recompile + N shape benchmarks), causing
+            # patch_*_test.txt = "Test command timed out" and select_agent
+            # to fall back to the unmodified baseline (observed on k010
+            # silu_and_mul, 2026-05-20).
+            unittest_env_keys = (
+                "UNITTEST_HIP_CORRECTNESS_TIMEOUT_SEC",
+                "UNITTEST_HIP_PERFORMANCE_TIMEOUT_SEC",
+                "UNITTEST_HIP_PER_SHAPE_TIMEOUT_SEC",
+            )
+            previous_unittest_env = {k: os.environ.get(k) for k in unittest_env_keys}
+            if unittest_manifest is not None and unittest_manifest.get("status") == "ok":
+                t_corr = unittest_manifest.get("harness_timeout_correctness_sec")
+                t_perf = unittest_manifest.get("harness_timeout_performance_sec")
+                t_per = unittest_manifest.get("harness_per_shape_timeout_sec")
+                if isinstance(t_corr, int) and t_corr > 0:
+                    os.environ["UNITTEST_HIP_CORRECTNESS_TIMEOUT_SEC"] = str(t_corr)
+                if isinstance(t_perf, int) and t_perf > 0:
+                    os.environ["UNITTEST_HIP_PERFORMANCE_TIMEOUT_SEC"] = str(t_perf)
+                if isinstance(t_per, int) and t_per > 0:
+                    os.environ["UNITTEST_HIP_PER_SHAPE_TIMEOUT_SEC"] = str(t_per)
             try:
                 result = geak.submit(
                     prompt_file=prompt_file,
@@ -1466,6 +1656,7 @@ def invoke_backend(
                 )
             finally:
                 _restore_env(previous_env)
+                _restore_env(previous_unittest_env)
             result["stdout"] = result.get("stdout_tail", "")
             result["output_dir"] = str(out_dir)
             if unittest_manifest is not None:
@@ -1581,7 +1772,33 @@ def run_attempt(
     append_log(log_path, f"[attempt {attempt_id}] backend={backend}")
 
     source_suffix = Path(source_file).suffix if source_file else ".txt"
-    optimized_path = run_dir / "optimized" / f"{attempt_id}_optimized{source_suffix or '.txt'}"
+    # In dry-run we still emit a synthetic source-suffixed placeholder so the
+    # downstream verification path can pick it up as a real artifact (preserved
+    # for back-compat with the dry-run smoke tests). For real backend runs we
+    # capture the raw subprocess stdout to a `.log` file instead of pretending
+    # it is the optimized CU/PY source: GEAK / claude / codex stdout is the
+    # mini-swe-agent / OOB conversation log, not a kernel source. Writing it
+    # with a `.cu` suffix and then handing it to `_select_source_artifact`
+    # made `_source_text_looks_complete` false-positive match generic
+    # English text containing markers like "void " or "extern " and report
+    # the log file as `artifact_source=source_file` (observed on Qwen3-8B
+    # k007 rmsnorm_quant and k013 silu_and_mul, 2026-05-20). The new `.log`
+    # suffix routes the stdout through `_extract_source_block` instead — that
+    # path scans for fenced code blocks (Claude/Codex sometimes emit the full
+    # optimized CU as ```cuda```) and only returns a real artifact when one
+    # exists, otherwise verification falls back cleanly to GEAK patches /
+    # `optimized_versions/` artefacts via the canonical backend_paths keys.
+    #
+    # Downstream-consumer contract: see ``kernel-agent/SKILL.md`` § *Per-
+    # attempt stdout file naming* — external scripts (dashboards, breakdown
+    # collector, etc.) MUST either read ``attempt["optimized_path"]`` from
+    # ``optimization_attempts.jsonl`` or glob ``<attempt_id>*`` under
+    # ``runs/<sid>/optimized/`` so both legacy ``_optimized.<suffix>`` and the
+    # new ``_stdout.log`` are picked up transparently.
+    if args.dry_run:
+        optimized_path = run_dir / "optimized" / f"{attempt_id}_optimized{source_suffix or '.txt'}"
+    else:
+        optimized_path = run_dir / "optimized" / f"{attempt_id}_stdout.log"
     optimized_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.dry_run:
@@ -1608,7 +1825,10 @@ def run_attempt(
             status = "timeout"
         else:
             status = "failed"
-        if returncode == 0 and full_stdout.strip():
+        # Always materialise the stdout `.log` (even on non-zero returncode);
+        # this is the durable audit trail for the attempt and the source for
+        # the code-fence extraction fallback.
+        if full_stdout.strip():
             optimized_path.write_text(full_stdout, encoding="utf-8")
         append_log(log_path, stdout_tail)
 
@@ -2268,6 +2488,12 @@ def main() -> int:
                         help="Run GEAK with tools.rag disabled for this request.")
     parser.add_argument("--disable-xs-memory", action="store_true",
                         help="Disable GEAK cross-session memory retrieval/write-back for this request.")
+    parser.add_argument("--unittest-agent", choices=["auto", "off", "force"],
+                        default=os.environ.get("HYPERLOOM_UNITTEST_AGENT", "auto"),
+                        help="Control pre-GEAK unittest generation. 'auto' "
+                             "(default) generates a harness when possible, "
+                             "'off' disables it, and 'force' attempts generation "
+                             "even for best-effort HIP/C++ wrappers.")
     parser.add_argument("--num-gpus", type=int,
                         default=int(os.environ.get("KERNEL_AGENT_NUM_GPUS", "0")),
                         help="Per-task GPU reservation; 0 means follow the "

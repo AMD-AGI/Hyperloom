@@ -41,6 +41,7 @@ from ._grid_runner import (
     GridVariant,
     VariantResult,
     _resolve_session_dir,
+    coerce_extra_envs,
     pick_winners,
     run_grid,
     sanitize_result_dir,
@@ -606,7 +607,7 @@ class BackendsExecutor:
             grid = [
                 GridVariant(name=v["name"],
                             extra_sglang_args=v.get("extra_sglang_args", ""),
-                            extra_envs=v.get("extra_envs", {}) or {},
+                            extra_envs=coerce_extra_envs(v.get("extra_envs")),
                             note=v.get("note", ""))
                 for v in grid_override
             ]
