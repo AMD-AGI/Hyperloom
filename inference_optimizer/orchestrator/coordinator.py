@@ -40,7 +40,7 @@ from ..cortex_kb_client import (
     CortexKBClient,
     CortexKBError,
     attempt_canonical_id,
-    optimization_canonical_id,
+    experiment_canonical_id,
 )
 from . import phase_state as _phase_state
 from ..paths import db_path_for, make_session_dir
@@ -221,10 +221,15 @@ class PendingProposal:
     # The full per-variant map lives in :attr:`kb_edge_ids` below;
     # Gap-08 will extend T3 to iterate that map.
     kb_edge_id: str = ""
-    # The opt_canonical id minted at T2 (``opt.session-{sid}.proposal-{msg_id}``).
-    # Stored on the proposal so the T3 verify path can still emit a
-    # ``propose-edge`` even when the sync hypothesize failed.
+    # The experiment canonical_id minted at T2
+    # (``exp:{sid}:{session_iter_index:04d}``). Stored on the proposal
+    # so the T3 verify path can still emit a ``propose-edge`` even when
+    # the sync hypothesize failed.
     kb_opt_canonical: str = ""
+    # Monotonic experiment iter index assigned at T2 (mirrors
+    # ``SharedState.session_iter_index``). Per-variant grids reuse this
+    # parent iter and append ``.variant-{name}`` to the canonical_id.
+    experiment_iter_index: int = 0
     # v0.8 M5 §5 step 6 / KB_gaps/Gap-07 — per-variant edge_ids minted
     # by ``_cortex_t2_hook`` when the proposal is an ``explore``
     # action with a non-empty ``params.grid``. Keyed by variant
@@ -289,7 +294,7 @@ class Coordinator:
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
         # v0.8 M1 — Cortex KB client (KB_design §3.6 + §3.13 M1).  When
-        # ``None`` (legacy v0.6 cli path or ``--no-cortex``) all T2/T3/T4
+        # ``None`` (legacy v0.6 cli path or ``--degraded-kb``) all T2/T3/T4
         # hooks become no-ops; the rest of the Coordinator behaves
         # identically to v0.6.  The client itself is stateless apart
         # from the per-session NDJSON queue, so it can be shared across
@@ -732,7 +737,7 @@ class Coordinator:
 
         * Skip when ``cortex_kb`` is ``None`` (legacy v0.6 callers
           who don't even pass a client).
-        * Skip when ``cortex_kb.enabled is False`` (``--no-cortex``).
+        * Skip when ``cortex_kb.enabled is False`` (``--degraded-kb``).
         * Skip when ``shared_state.cortex_session_id`` is already
           non-empty (the cli already ran T0, or a resume picked up
           the prior sid).
@@ -2310,7 +2315,7 @@ class Coordinator:
                 sections.append("=== Knowledge base hints ===")
                 sections.append(kb_text)
             # v0.8 §3.3 §4.1 — Cortex T0 warm-start snapshot. Empty when
-            # `--no-cortex` was set or it's the first session for this
+            # `--degraded-kb` was set or it's the first session for this
             # (workload, hw) pair. The full JSON snapshot remains on disk
             # at runtime/cortex/.kb_warm.json for Read-tool access.
             try:
@@ -2983,7 +2988,7 @@ class Coordinator:
         Gap-anchor selection (KB_gaps/Gap-07 + Gap-09):
         :meth:`_resolve_issue_canonical` consults
         ``payload.gap_canonical_id`` and ``payload.params.gap_canonical_id``
-        before falling back to the M1 ``workload_canonical_id``
+        before falling back to the M1 ``recipe_canonical_id``
         anchor. Once Gap-09 lands the gaps[] ledger, the per-gap
         canonical id will also be looked up here.
         """
@@ -3015,14 +3020,18 @@ class Coordinator:
         backends / params). Per-variant grid proposals route through
         :meth:`_cortex_t2_hook_per_variant` instead.
         """
-        opt_canonical = optimization_canonical_id(sid, pending.proposal_msg_id)
+        iter_idx = self.shared_state.increment_session_iter_index()
+        pending.experiment_iter_index = iter_idx
+        opt_canonical = experiment_canonical_id(sid, iter_idx)
         gap_canonical = self._resolve_issue_canonical(pending)
         try:
             self.cortex_kb.propose_point(
                 canonical_id=opt_canonical,
-                kind="optimization_node",
+                kind="experiment",
                 authority="HYPOTHESIZED",
                 attrs={
+                    "session_id":          sid,
+                    "iter_index":          iter_idx,
                     "action":              pending.action_name,
                     "from_agent":          pending.from_agent,
                     "predicted_gain_pct":  pending.predicted_gain_pct,
@@ -3094,6 +3103,35 @@ class Coordinator:
         ts_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
         variant_edges: dict[str, str] = {}
         variant_canonicals: dict[str, str] = {}
+        if pending.experiment_iter_index <= 0:
+            pending.experiment_iter_index = (
+                self.shared_state.increment_session_iter_index()
+            )
+        parent_exp_canonical = experiment_canonical_id(
+            sid, pending.experiment_iter_index,
+        )
+        # Anchor the registered ``experiment`` parent once (idempotent).
+        # Variants below pin to it via ``.variant-{name}`` canonical
+        # suffix on the unregistered ``optimization_node`` kind.
+        try:
+            self.cortex_kb.propose_point(
+                canonical_id=parent_exp_canonical,
+                kind="experiment",
+                authority="HYPOTHESIZED",
+                attrs={
+                    "session_id":         sid,
+                    "iter_index":         pending.experiment_iter_index,
+                    "action":             pending.action_name,
+                    "from_agent":         pending.from_agent,
+                    "predicted_gain_pct": pending.predicted_gain_pct,
+                    "proposal_msg_id":    pending.proposal_msg_id,
+                    "phase":              phase,
+                    "variants":           len(grid),
+                },
+                evidence=[f"log:proposal-{pending.proposal_msg_id}"],
+            )
+        except CortexKBError as exc:
+            log.warning("propose_point parent experiment failed: %s", exc)
         for variant in grid:
             if not isinstance(variant, dict):
                 continue
@@ -3102,10 +3140,7 @@ class Coordinator:
                 # Skip nameless variants — the executor itself rejects
                 # them downstream, so we don't even mint a phantom edge.
                 continue
-            opt_canonical = (
-                f"opt.session-{sid}.proposal-{pending.proposal_msg_id}"
-                f".variant-{variant_name}"
-            )
+            opt_canonical = f"{parent_exp_canonical}.variant-{variant_name}"
             # 1. optimization_node per variant.
             try:
                 self.cortex_kb.propose_point(
@@ -3275,10 +3310,10 @@ class Coordinator:
         the derivation here keeps the migration to M5 a single-line
         change.
         """
-        from ..cortex_kb_client import workload_canonical_id
+        from ..cortex_kb_client import recipe_canonical_id
         workload = self.shared_state.model_name or "unknown_model"
         hw = self.shared_state.gpu_type or "unknown_gpu"
-        return workload_canonical_id(workload, hw)
+        return recipe_canonical_id(workload, hw)
 
     def _pop_pending_kb_edge(self, proposal_msg_id: str) -> dict[str, Any] | None:
         """Remove + return the pending edge entry for a proposal_msg_id.
@@ -3599,7 +3634,7 @@ class Coordinator:
         # ``variant.get("kb_edge_id")``) can carry the id through to
         # the result rows the ledger writer + T3 hook will consume.
         # No-op when the proposal isn't ``explore`` or when the T2
-        # hook didn't populate the map (e.g. ``--no-cortex`` runs).
+        # hook didn't populate the map (e.g. ``--degraded-kb`` runs).
         if (
             pending.action_name == "explore"
             and isinstance(params.get("grid"), list)
@@ -5394,7 +5429,7 @@ class Coordinator:
                     str(k): str(v or "") for k, v in raw.items()
                 }
         if not edge_entry and not variant_edges_map:
-            # T2 hook never ran (e.g. --no-cortex during materialize) or
+            # T2 hook never ran (e.g. --degraded-kb during materialize) or
             # the row was already popped on a resume — fall back to the
             # per-variant ``kb_edge_id`` stamped on the executor's
             # result, which mirrors the same map.

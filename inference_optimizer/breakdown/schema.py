@@ -539,10 +539,10 @@ class KBFlusherStatus(TypedDict, total=False):
 
     Merge of the cli boot marker (``.kb_flusher_status.json``) and a
     live ``kill -0 $pid`` probe at breakdown emit time. Populated even
-    for ``--no-cortex`` / ``--no-kb-flusher`` sessions so operators can
-    grep a single key.
+    for ``--degraded-kb`` / ``--no-kb-flusher`` sessions so operators
+    can grep a single key.
     """
-    enabled: bool                  # cli flag (false when --no-kb-flusher or --no-cortex)
+    enabled: bool                  # cli flag (false when --no-kb-flusher or --degraded-kb)
     spawned: bool                  # daemon was actually subprocess.Popen'd this boot
     alive: bool                    # live pid probe at breakdown emit time
     pid: int | None
@@ -570,6 +570,12 @@ class KBProvenance(TypedDict, total=False):
     commit_summary: KBCommitSummary
     # v0.8 KB_gaps/Dead-E — Cortex KB flusher daemon lifecycle marker.
     flusher_status: KBFlusherStatus
+    # KB_design_continue §3.3 — IR-3 soft-degrade audit. Values:
+    # ``None`` (KB / PR Monitor reachable, no degrade), ``"explicit_flag"``
+    # (operator passed ``--degraded-{kb,pr}``), or ``"ir3_auto"`` (IR-3
+    # probe failed and cli auto-enabled the corresponding degrade).
+    kb_degraded_reason: str
+    pr_degraded_reason: str
 
 
 # ---------------------------------------------------------------------------
