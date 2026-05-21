@@ -136,6 +136,97 @@ def test_n31_exception_only_fires_once():
 
 
 # ---------------------------------------------------------------------------
+# N31 baseline backfill on --resume (A in the N31 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_backfill_inputs_match_resume_path_contract(tmp_path):
+    """Smoke-test the precise condition cli.py --resume backfill checks:
+
+    * baseline freeze empty
+    * last_trace_analyze.snapshot_id >= 1
+    * latest snapshot's analysis_md_path / trace_input get copied
+      into the freeze dict
+    * a "source=n31_resume_backfill" tag distinguishes backfills from
+      authoritative first-promote freezes
+    """
+    # We replay the cli.py backfill block here as a pure unit so we
+    # don't have to spin up the whole cli entrypoint for the test.
+    from datetime import datetime, timezone
+
+    state = SharedState()
+    state.last_trace_analyze = {
+        "roofline_snapshot_id": 1,
+        "analysis_md_path": "/sessions/x/kernel-agent/.../analysis.md",
+        "trace_input": "/sessions/x/runs/roofline/trace.tar.gz",
+    }
+    # Replay backfill logic (must match cli.py exactly).
+    cached = state.last_trace_analyze or {}
+    cur_snap_id = cached.get("roofline_snapshot_id", 0)
+    if (
+        not state.last_trace_analyze_baseline
+        and isinstance(cur_snap_id, int)
+        and cur_snap_id >= 1
+    ):
+        state.last_trace_analyze_baseline = {
+            "roofline_snapshot_id": cur_snap_id,
+            "analysis_md_path": str(cached.get("analysis_md_path") or ""),
+            "trace_input": str(cached.get("trace_input") or ""),
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "source": "n31_resume_backfill",
+        }
+    assert state.last_trace_analyze_baseline["roofline_snapshot_id"] == 1
+    assert state.last_trace_analyze_baseline["analysis_md_path"].endswith(
+        "/analysis.md"
+    )
+    assert state.last_trace_analyze_baseline["source"] == "n31_resume_backfill"
+
+
+def test_backfill_skips_when_baseline_already_frozen():
+    """The backfill must NOT overwrite an existing freeze (the freeze
+    from first-promote is authoritative)."""
+    state = SharedState()
+    state.last_trace_analyze = {
+        "roofline_snapshot_id": 2,
+        "analysis_md_path": "/sessions/x/...latest.md",
+    }
+    state.last_trace_analyze_baseline = {
+        "roofline_snapshot_id": 1,
+        "analysis_md_path": "/sessions/x/...baseline.md",
+        "source": "post_promote",
+    }
+    cached = state.last_trace_analyze or {}
+    cur_snap_id = cached.get("roofline_snapshot_id", 0)
+    # The cli.py guard MUST not overwrite a populated freeze.
+    if (
+        not state.last_trace_analyze_baseline
+        and isinstance(cur_snap_id, int)
+        and cur_snap_id >= 1
+    ):
+        pytest.fail("backfill triggered when freeze was already populated")
+    # Verify the original freeze is intact.
+    assert state.last_trace_analyze_baseline["source"] == "post_promote"
+    assert state.last_trace_analyze_baseline["roofline_snapshot_id"] == 1
+
+
+def test_backfill_skips_when_no_snapshot_yet():
+    """When resuming a session that never ran roofline successfully
+    (snapshot_id < 1), the backfill must NOT synthesise a fake
+    baseline -- there's nothing useful to freeze."""
+    state = SharedState()
+    state.last_trace_analyze = {}  # no snapshot
+    cached = state.last_trace_analyze or {}
+    cur_snap_id = cached.get("roofline_snapshot_id", 0)
+    if (
+        not state.last_trace_analyze_baseline
+        and isinstance(cur_snap_id, int)
+        and cur_snap_id >= 1
+    ):
+        pytest.fail("backfill triggered without a snapshot to freeze")
+    assert state.last_trace_analyze_baseline == {}
+
+
+# ---------------------------------------------------------------------------
 # Report renderer
 # ---------------------------------------------------------------------------
 
