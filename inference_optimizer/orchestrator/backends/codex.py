@@ -28,6 +28,7 @@ Test seam:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -123,6 +124,13 @@ class CodexBackend:
     base_url_env: str = "ANTHROPIC_BASE_URL"
     max_completion_tokens: int = 2000
     name: str = "codex"
+    # Wall-clock cap for one ``run()`` call. Mirrors ClaudeBackend's
+    # ``call_timeout_s``: the AsyncOpenAI client honours per-request
+    # timeouts internally but a stalled auth proxy can still block the
+    # ``await create(...)`` for the full TCP timeout. Bounding it at
+    # asyncio level guarantees the orchestrator reactor never sits idle
+    # past this budget.
+    call_timeout_s: float = 120.0
 
     # Test seam — set to bypass real OpenAI client construction.
     client_factory: Callable[[], Any] | None = None
@@ -174,11 +182,19 @@ class CodexBackend:
         messages.append({"role": "user", "content": full_prompt})
 
         try:
-            resp = await self._client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_completion_tokens=self.max_completion_tokens,
+            resp = await asyncio.wait_for(
+                self._client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    max_completion_tokens=self.max_completion_tokens,
+                ),
+                timeout=self.call_timeout_s,
             )
+        except asyncio.TimeoutError as exc:
+            raise BackendError(
+                f"Codex API call timed out after {self.call_timeout_s:.0f}s "
+                "(likely upstream proxy stall)"
+            ) from exc
         except Exception as exc:  # noqa: BLE001
             raise BackendError(f"Codex API call failed: {exc!r}") from exc
 

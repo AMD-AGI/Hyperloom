@@ -135,11 +135,25 @@ async def test_local_probe_unavailable_when_no_data(monkeypatch, tmp_path: Path)
         disk_mountpoints=(),
         process_patterns=(),
         server_log_path=None,
+        # All optional probes neutralised so we exercise the
+        # SourceUnavailable path with no data anywhere. Each new probe
+        # generation has to be added here as it's introduced.
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
+        decision_audit_enabled=False,
+        preflight_enabled=False,
+        critic_health_enabled=False,
+        state_integrity_enabled=False,
+        external_deps_enabled=False,
     )
 
-    # Force GPU sampler to return empty
+    # Force samplers that read the local host to return empty.
     monkeypatch.setattr(
         "robustness_agent.sources.local_probe._sample_gpu", lambda: {}
+    )
+    monkeypatch.setattr(
+        "robustness_agent.sources.local_probe._sample_aiter_jit",
+        lambda _jit_dir: {},
     )
 
     probe = LocalProbeSource(cfg)
