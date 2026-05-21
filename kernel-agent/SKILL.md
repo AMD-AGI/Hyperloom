@@ -260,19 +260,19 @@ natural fp tolerance (`fp8 -> 5e-2`, `bf16/fp16 -> 1e-2`, `fp32 -> 1e-4`).
 After generation we **self-verify** on the unmodified source (compile +
 correctness MUST both pass). The manifest's `status` field reports:
 
-* `ok` — both passed; harness becomes GEAK's `--test-command`
-  (single-GPU compute kernels only; multi-GPU collectives still take the
-  legacy `torchrun` path because the in-process harness can't drive
-  `init_process_group`).
+* `ok` — compile and correctness both passed inside Hyperloom before GEAK
+  handoff; the harness becomes GEAK's `--test-command` (single-GPU compute
+  kernels only; multi-GPU collectives still take the legacy `torchrun` path
+  because the in-process harness can't drive `init_process_group`).
 * `degraded` — compile passed but correctness was skipped unexpectedly
   (e.g. shapes were not captured) OR self-verify failed; Hyperloom records
   `unittest_status=degraded` but does NOT use the harness in GEAK. It falls
   back to the previous `candidate.benchmark_files` / `test_harness_path` mode.
-* `ok` for HIP/C++ — compile precheck passed and at least one existing
-  `benchmark_file` was captured. Correctness is intentionally deferred to
-  GEAK runtime because HIP tests can take minutes; the generated runner will
-  overlay `source/<kernel>` onto the live source, invalidate likely aiter JIT
-  `.so` files, run the benchmark, then restore the live tree.
+  For HIP/C++, correctness is also run in Hyperloom before handoff: the
+  generated runner overlays `source/<kernel>` onto the live source, invalidates
+  likely aiter JIT `.so` files, runs the captured benchmark or TraceLens shape
+  cases, then restores the live tree. A HIP/C++ harness that has only compile
+  precheck, or whose correctness was skipped, must remain `degraded`.
 * `skipped` — unsupported source suffix with no runner strategy.
 * `failed` — missing source file or unparseable; fall through without a
   harness. Import errors, generation exceptions, and non-`ok` manifests must
