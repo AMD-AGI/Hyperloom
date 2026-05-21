@@ -81,8 +81,23 @@ class CortexKBError(RuntimeError):
 # Canonical id derivation (aligned with KB registered kinds — §5)
 # ---------------------------------------------------------------------------
 def _slug(value: str, default: str) -> str:
-    """Lowercase + collapse to ``[A-Za-z0-9_-]`` snake-ish slug."""
-    cleaned = (value or "").strip().replace("/", "_").replace(" ", "_")
+    """Lowercase + collapse to ``[a-z0-9_-]`` snake-ish slug.
+
+    PR-A10 (Arbor-into-Hyperloom): KB canonical_ids are case-sensitive
+    and the corpus convention is **all-lowercase** (e.g.
+    ``recipe:deepseek-r1-0528:mi300x``). Earlier behaviour preserved
+    model-name case which silently missed every existing
+    ``recipe:deepseek-r1-0528:mi300x`` lookup. We also basename any
+    path-style input so a CLI ``--model /wekafs/models/DeepSeek-R1-0528``
+    does not produce a junk slug like ``_wekafs_models_deepseek-r1-0528``.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return default
+    # Path-style → basename (last path component, then forward-slash fallback).
+    if "/" in raw:
+        raw = raw.rstrip("/").rsplit("/", 1)[-1] or raw
+    cleaned = raw.replace(" ", "_").lower()
     return cleaned or default
 
 
@@ -91,8 +106,57 @@ def recipe_canonical_id(model_name: str, hardware: str) -> str:
 
     Replaces the legacy ``workload.<slug>.<gpu>`` name; aligns with
     ``shared/kinds/recipe.py`` so kb-explorer + warm-start can index it.
+
+    Both slug components are lowercased (PR-A10) so the canonical_id
+    matches the KB corpus convention regardless of how the operator
+    typed the CLI ``--model`` arg.
     """
-    return f"recipe:{_slug(model_name, 'unknown_model')}:{_slug(hardware, 'unknown_hw').lower()}"
+    return f"recipe:{_slug(model_name, 'unknown_model')}:{_slug(hardware, 'unknown_hw')}"
+
+
+# ---------------------------------------------------------------------------
+# Model-family taxonomy (PR-A10 — drives find_recipe_with_fallback T3)
+#
+# Map a model slug → a coarse family key. Used by the fallback ladder so a
+# DeepSeek-R1 cold-start can reuse a DeepSeek-V3.1 recipe (same architecture
+# family, both MoE+MLA). Heuristic-only; lower-cased substring match.
+# Adding a new family is a one-line append.
+# ---------------------------------------------------------------------------
+_MODEL_FAMILY_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("deepseek",  ("deepseek",)),
+    ("qwen3",     ("qwen3",)),
+    ("qwen2",     ("qwen2",)),
+    ("qwen",      ("qwen",)),
+    ("llama3",    ("llama-3", "llama3", "meta-llama_llama-3", "meta-llama_meta-llama-3")),
+    ("llama2",    ("llama-2", "llama2")),
+    ("llama",     ("llama",)),
+    ("mixtral",   ("mixtral",)),
+    ("mistral",   ("mistral",)),
+    ("minimax",   ("minimax",)),
+    ("kimi",      ("kimi",)),
+    ("glm",       ("glm",)),
+    ("phi",       ("phi-", "phi3", "phi4")),
+    ("gemma",     ("gemma",)),
+    ("yi",        ("01-ai_yi", "yi-")),
+)
+
+
+def model_family(model_name: str) -> str:
+    """Return a coarse model-family key for fallback lookups.
+
+    Empty string when no prefix matches (caller can decide to skip the
+    family-tier fallback). The match is **lowercase-substring**, not
+    regex, so it survives small naming variations (``deepseek-r1-0528``,
+    ``deepseek-v3.1``, ``deepseek-coder-v2`` all → ``"deepseek"``).
+    """
+    s = _slug(model_name, "")
+    if not s:
+        return ""
+    for family, prefixes in _MODEL_FAMILY_PREFIXES:
+        for prefix in prefixes:
+            if s.startswith(prefix) or prefix in s:
+                return family
+    return ""
 
 
 def experiment_canonical_id(cortex_session_id: str, iter_index: int) -> str:
@@ -600,7 +664,10 @@ class CortexKBClient:
         the (workload, hw) anchor.
 
         Failures are non-fatal in M1 (warm_start is consumed by M5);
-        callers should swallow :class:`CortexKBError`.
+        callers should swallow :class:`CortexKBError`. Kept as the
+        narrow exact-match T1 lookup; new callers should prefer
+        :meth:`find_recipe_with_fallback` which adds the same-family /
+        same-class / same-hw / cross-hw fallback tiers (PR-A10).
         """
         if not self.enabled:
             return ""
@@ -615,6 +682,170 @@ class CortexKBClient:
         except CortexKBError:
             return ""
         return json.dumps(resp, sort_keys=True)
+
+    def find_recipe_with_fallback(
+        self,
+        *,
+        workload: str,
+        hw: str,
+        model_class: str | None = None,
+        framework: str | None = None,
+    ) -> tuple[dict[str, Any], str, float]:
+        """PR-A10 (Arbor-into-Hyperloom) — graceful warm-start fallback.
+
+        Returns ``(recipe_dict, tier, tier_confidence)`` so the caller
+        can render "we matched a related recipe at confidence X" into
+        the specialist prompt instead of silently giving them nothing.
+
+        Tiers (from precise → coarse, confidence stamped accordingly):
+
+        =====  =====  ============================================================
+        Tier   Conf   Lookup
+        =====  =====  ============================================================
+        T1     0.85   ``canonical_id == recipe:<model_slug>:<hw_slug>`` + has
+                      non-empty ``best_config_args`` (i.e. real recipe, not a
+                      smoke / seed record)
+        T3     0.55   any ``kind=recipe`` with ``model_family(attrs.model) ==
+                      model_family(workload)`` AND ``hardware == hw`` — same
+                      architecture family, same GPU
+        T4     0.40   any ``kind=recipe`` with ``attrs.model_class ==
+                      model_class`` AND ``hardware == hw`` — same coarse
+                      taxonomy (moe_mla / dense / ...), same GPU
+        T5     0.25   any ``kind=recipe`` with ``hardware == hw`` — only
+                      hw-level ROCm defaults are reusable
+        T6     0.20   any ``kind=recipe`` with ``attrs.model == workload``
+                      across hardware — cross-GPU port with caveats
+        miss   0.00   nothing found
+        =====  =====  ============================================================
+
+        On a hit, the returned dict carries the full Cortex point:
+        ``{id, canonical_id, kind, entity_type, attrs, authority,
+        confidence, ...}``. ``tier_confidence`` is the *prior* the
+        fallback ladder assigns; the caller is free to multiply it by
+        ``point["confidence"]`` from the KB record itself.
+
+        Failures (network / 5xx / disabled) are non-fatal: returns the
+        ``("", "miss", 0.0)`` triple so cortex_t0 just renders an empty
+        warm-start.
+        """
+        empty: tuple[dict[str, Any], str, float] = ({}, "miss", 0.0)
+        if not self.enabled:
+            return empty
+
+        slug_model = _slug(workload, "unknown_model")
+        slug_hw = _slug(hw, "unknown_hw")
+        family = model_family(workload)
+
+        def _has_real_config(p: dict[str, Any]) -> bool:
+            """Distinguish a usable warm-start recipe from a smoke seed.
+
+            Two known shapes count as "real":
+
+            * Arbor-replay shape — ``attrs.best_config_args`` /
+              ``best_config_envs`` populated (e.g. the MiniMax-M2.7
+              recipe).
+            * analogy_seed shape — ``attrs._provenance.details``
+              carries ``decomposition_pct`` (per-knob gain prior) or
+              ``runtime_shape`` (e.g. the DeepSeek-V3.1 transplant).
+
+            Smoke / offline seed records (just
+            ``{model, hardware, _provenance, _evidence_refs}``) miss
+            both shapes and are skipped by the fallback ladder so we
+            don't surface empty warm-start to specialists.
+            """
+            attrs = (p or {}).get("attrs") or {}
+            if attrs.get("best_config_args") or attrs.get("best_config_envs"):
+                return True
+            prov = attrs.get("_provenance") or {}
+            details = prov.get("details") if isinstance(prov, dict) else None
+            if isinstance(details, dict):
+                if details.get("decomposition_pct") or details.get("runtime_shape"):
+                    return True
+            return False
+
+        def _query(body: Mapping[str, Any]) -> list[dict[str, Any]]:
+            try:
+                resp = self._post(C.PATH_QUERY_POINT, dict(body))
+            except CortexKBError as exc:
+                log.info("find_recipe_with_fallback: query failed: %s", exc)
+                return []
+            points = resp.get(C.F_POINTS) or resp.get("points") or []
+            return list(points) if isinstance(points, list) else []
+
+        # ── T1: exact canonical_id ───────────────────────────────────
+        t1 = _query({
+            C.F_CANONICAL_ID:     recipe_canonical_id(workload, hw),
+            C.F_KIND:             C.KIND_RECIPE,
+            C.F_NEIGHBOR_PREVIEW: True,
+            C.F_LIMIT:            1,
+        })
+        for p in t1:
+            if _has_real_config(p):
+                return p, "T1_exact", 0.85
+        # T1 hit but empty attrs (smoke / seed record) → keep walking
+        t1_seed = t1[0] if t1 else None
+
+        # ── T3: same family, same hardware ───────────────────────────
+        if family:
+            cand = _query({
+                C.F_KIND:             C.KIND_RECIPE,
+                C.F_ATTRS_FILTER:     {"hardware": slug_hw},
+                C.F_LIMIT:            20,
+                C.F_NEIGHBOR_PREVIEW: False,
+            })
+            cand = [p for p in cand
+                    if model_family(((p.get("attrs") or {}).get("model") or "")) == family
+                    and _has_real_config(p)]
+            cand.sort(key=lambda p: float(p.get("confidence") or 0.0), reverse=True)
+            if cand:
+                return cand[0], "T3_same_family", 0.55
+
+        # ── T4: same model_class, same hardware ──────────────────────
+        if model_class:
+            cand = _query({
+                C.F_KIND:             C.KIND_RECIPE,
+                C.F_ATTRS_FILTER:     {
+                    "model_class": model_class,
+                    "hardware":    slug_hw,
+                },
+                C.F_LIMIT:            20,
+                C.F_NEIGHBOR_PREVIEW: False,
+            })
+            cand = [p for p in cand if _has_real_config(p)]
+            cand.sort(key=lambda p: float(p.get("confidence") or 0.0), reverse=True)
+            if cand:
+                return cand[0], "T4_same_class", 0.40
+
+        # ── T5: any recipe on this hardware ──────────────────────────
+        cand = _query({
+            C.F_KIND:             C.KIND_RECIPE,
+            C.F_ATTRS_FILTER:     {"hardware": slug_hw},
+            C.F_LIMIT:            10,
+            C.F_NEIGHBOR_PREVIEW: False,
+        })
+        cand = [p for p in cand if _has_real_config(p)]
+        cand.sort(key=lambda p: float(p.get("confidence") or 0.0), reverse=True)
+        if cand:
+            return cand[0], "T5_same_hw_any", 0.25
+
+        # ── T6: same model name across hardware ──────────────────────
+        cand = _query({
+            C.F_KIND:             C.KIND_RECIPE,
+            C.F_ATTRS_FILTER:     {"model": workload},
+            C.F_LIMIT:            5,
+            C.F_NEIGHBOR_PREVIEW: False,
+        })
+        cand = [p for p in cand if _has_real_config(p)]
+        cand.sort(key=lambda p: float(p.get("confidence") or 0.0), reverse=True)
+        if cand:
+            return cand[0], "T6_cross_hw", 0.20
+
+        # ── miss: surface the T1 seed (if any) so the caller can at
+        # least show the canonical_id was minted, with confidence 0
+        # so prompt rendering tags it clearly.
+        if t1_seed is not None:
+            return t1_seed, "T1_seed_only", 0.0
+        return empty
 
     def traps(self, *, symptom: str) -> str:
         """T0 — query ``kind=pitfall`` filtered by symptom.

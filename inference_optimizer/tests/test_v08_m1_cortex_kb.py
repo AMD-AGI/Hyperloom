@@ -63,10 +63,15 @@ def test_make_session_dir_creates_runtime_cortex(session_dir):
 
 
 def test_canonical_id_derivations_are_idempotent():
+    # PR-A10: slugs are all-lowercase and path-style inputs get basenamed,
+    # so the canonical_id matches the KB corpus convention regardless of
+    # CLI casing or whether the operator passed a full model path.
     a = recipe_canonical_id("meta-llama/Llama-3.1-8B-Instruct", "mi300x")
     b = recipe_canonical_id("meta-llama/Llama-3.1-8B-Instruct", "MI300x")
     assert a == b
-    assert a == "recipe:meta-llama_Llama-3.1-8B-Instruct:mi300x"
+    assert a == "recipe:llama-3.1-8b-instruct:mi300x"
+    c = recipe_canonical_id("/wekafs/models/DeepSeek-R1-0528", "MI300X")
+    assert c == "recipe:deepseek-r1-0528:mi300x"
     assert recipe_canonical_id("", "") == "recipe:unknown_model:unknown_hw"
 
     assert experiment_canonical_id("36", 1) == "exp:36:0001"
