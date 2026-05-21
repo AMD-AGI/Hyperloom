@@ -300,7 +300,10 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
         kernel_id = payload["kernel_id"]
         backend = payload["backends"]
         calls.append((kernel_id, backend))
-        keep = kernel_id == "k006" and backend == "codex"
+        # k006 wins on Claude (second slot in the GEAK-first ladder), which
+        # exercises the short-circuit-after-KEEP behaviour without skipping
+        # GEAK. k003 keeps producing PARTIAL so it exhausts the full ladder.
+        keep = kernel_id == "k006" and backend == "claude"
         speedup = 1.31 if keep else 1.0
         return {
             "status": "ok",
@@ -331,7 +334,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
 
     assert result["batch_mode"] is True
     assert result["batch_kernel_ids"] == ["k003", "k006"]
-    assert result["backend_order"] == ["claude", "codex", "geak"]
+    assert result["backend_order"] == ["geak", "claude", "codex"]
     assert result["kernel_id"] == "k006"
     assert result["proposal"]["decision"] == "KEEP"
     assert result["verification"]["micro_speedup"] == pytest.approx(1.31)
@@ -339,8 +342,8 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     by_kernel: dict[str, list[str]] = {}
     for kernel_id, backend in calls:
         by_kernel.setdefault(kernel_id, []).append(backend)
-    assert by_kernel["k003"] == ["claude", "codex", "geak"]
-    assert by_kernel["k006"] == ["claude", "codex"]
+    assert by_kernel["k003"] == ["geak", "claude", "codex"]
+    assert by_kernel["k006"] == ["geak", "claude"]
 
 
 # ===========================================================================

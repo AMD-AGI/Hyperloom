@@ -1333,6 +1333,21 @@ def invoke_backend(
                         result["geak_per_task_best_task"] = best_task
                         if best_patch_path:
                             result["geak_per_task_best_patch"] = best_patch_path
+                        # Surface the worktree directory holding the actual
+                        # rewritten files that produced this best patch.
+                        # GEAK's homogeneous orchestrator lays out each
+                        # sub-agent's slot as
+                        # ``results/round_<R>/parallel_<M>/`` for patches +
+                        # ``results/round_<R>/worktrees/slot_<M>/`` for the
+                        # checked-out repo it edited. Without this surface
+                        # the downstream artifact extractor only sees the
+                        # ``.patch`` (unified diff, often mixed with JIT
+                        # cache binary deltas) and fails to recover a real
+                        # ``.py`` source — see _select_source_artifact /
+                        # _candidate_artifact_paths for the consumer.
+                        wt = _geak_best_worktree(best_patch_path)
+                        if wt:
+                            result["geak_per_task_best_worktree"] = str(wt)
             return result
         if backend in {"claude", "codex", "cursor"}:
             oob = _import_backend("oob_submit")
@@ -1509,6 +1524,14 @@ def run_attempt(
                 bp = result.get("geak_per_task_best_patch")
                 if bp:
                     backend_paths["geak_per_task_best_patch"] = str(bp)
+                wt = result.get("geak_per_task_best_worktree")
+                if wt:
+                    # Forward the worktree directory so build_verification's
+                    # _candidate_artifact_paths can recover the rewritten
+                    # ``.py`` (or ``.cu``) file under it instead of trying
+                    # to scrape source out of GEAK's diff-with-binary-blobs
+                    # ``.patch``.
+                    backend_paths["geak_per_task_best_worktree"] = str(wt)
             # Promote any timed-out / failed attempt that left artifacts on
             # disk to "partial" so build_verification + make_proposal can
             # distinguish "killed but useful" from "truly empty failure".
@@ -1793,9 +1816,106 @@ def _extract_source_block(text_path: Path, target_suffix: str, output_path: Path
     return str(output_path)
 
 
-def _candidate_artifact_paths(attempt: dict[str, Any], target_suffix: str) -> list[Path]:
+def _geak_best_worktree(best_patch_path: str) -> Path | None:
+    """Map a GEAK best-patch file path to the worktree slot it edited.
+
+    GEAK's homogeneous orchestrator lays out::
+
+        <patch_output_dir>/results/round_<R>/parallel_<M>/patch_<N>.patch
+        <patch_output_dir>/results/round_<R>/worktrees/slot_<M>/<repo files>
+
+    The ``parallel_<M>`` directory holding the patch and the
+    ``worktrees/slot_<M>`` directory holding the actual rewritten
+    files share their integer suffix ``M``. Recover the worktree
+    directory from the patch path so callers can pick up the real
+    source file instead of trying to scrape ``.py`` out of a unified
+    diff. Returns ``None`` when the layout doesn't match the expected
+    shape (e.g. a fixture / future GEAK reorg) so callers can fail
+    soft and fall back to existing patch-based recovery.
+    """
+    if not best_patch_path:
+        return None
+    parent = Path(best_patch_path).parent
+    parallel_name = parent.name
+    if not parallel_name.startswith("parallel_"):
+        return None
+    slot_id = parallel_name[len("parallel_"):]
+    if not slot_id:
+        return None
+    worktree = parent.parent / "worktrees" / f"slot_{slot_id}"
+    if not worktree.is_dir():
+        return None
+    return worktree
+
+
+def _worktree_source_paths(
+    worktree: Path,
+    *,
+    source_file: str,
+    kernel_repo: str,
+) -> list[Path]:
+    """Return concrete files under ``worktree`` that mirror ``source_file``.
+
+    Resolution order (most precise first):
+
+    1. ``source_file`` relative to ``kernel_repo`` → join with ``worktree``.
+       This is the canonical mapping for kernels Hyperloom dispatched
+       via TraceLens (we always have both the absolute source path and
+       the repo root).
+    2. Same file basename as ``source_file`` reachable anywhere within
+       ``worktree`` (bounded recursive search). Defends against minor
+       layout shifts when the source path has multiple plausible repo
+       roots (e.g. aiter's ``aiter/ops/rmsnorm.py`` could also live at
+       ``aiter/ops/triton/normalization/rmsnorm.py``).
+
+    Each returned path is verified to exist on disk. Empty list when
+    no match is found so the caller falls back to its other candidate
+    sources.
+    """
+    if not worktree.is_dir() or not source_file:
+        return []
+    out: list[Path] = []
+    if kernel_repo:
+        try:
+            rel = Path(source_file).resolve().relative_to(Path(kernel_repo).resolve())
+        except (OSError, ValueError):
+            rel = None
+        if rel is not None:
+            cand = worktree / rel
+            if cand.is_file():
+                out.append(cand)
+    basename = Path(source_file).name
+    if basename:
+        for match in sorted(worktree.rglob(basename)):
+            if match.is_file() and match not in out:
+                out.append(match)
+    return out
+
+
+def _candidate_artifact_paths(
+    attempt: dict[str, Any],
+    target_suffix: str,
+    *,
+    source_file: str = "",
+    kernel_repo: str = "",
+) -> list[Path]:
     paths: list[Path] = []
     bp = attempt.get("backend_paths") or {}
+    # GEAK worktree files first: when we have the worktree slot from
+    # ``geak_per_task_best_worktree`` plus the original source path +
+    # repo root, those rewritten files are the ground-truth artifact
+    # the LLM actually edited. They precede ``.patch`` candidates so
+    # the first-pass (suffix-match + compile) succeeds without ever
+    # falling back to fence extraction on a diff-with-binary blobs.
+    worktree_dir = bp.get("geak_per_task_best_worktree")
+    if worktree_dir:
+        paths.extend(
+            _worktree_source_paths(
+                Path(worktree_dir),
+                source_file=source_file,
+                kernel_repo=kernel_repo,
+            )
+        )
     for key in (
         "partial_latest_optimized",
         "geak_per_task_best_patch",
@@ -1845,13 +1965,19 @@ def _select_source_artifact(
     *,
     target_file: str,
     run_dir: Path | None = None,
+    kernel_repo: str = "",
 ) -> tuple[str, str, str]:
     """Return (artifact_path, source, error) for a complete source artifact."""
     target_suffix = Path(target_file).suffix.lower()
     if target_suffix not in _SOURCE_SUFFIXES:
         return "", "unsupported", f"unsupported target suffix: {target_suffix or '<none>'}"
 
-    candidates = _candidate_artifact_paths(attempt, target_suffix)
+    candidates = _candidate_artifact_paths(
+        attempt,
+        target_suffix,
+        source_file=target_file,
+        kernel_repo=kernel_repo,
+    )
     for path in candidates:
         suffix = path.suffix.lower()
         if suffix == target_suffix and _source_text_looks_complete(
@@ -1917,6 +2043,14 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
     artifact_error = "no usable backend attempt"
     if best is not None:
         target_file = str(getattr(args, "source_file", "") or "")
+        # kernel_repo lets the worktree-recovery branch in
+        # _candidate_artifact_paths map a TraceLens-style absolute
+        # source path back to the relative path GEAK actually edited.
+        kernel_repo = str(
+            getattr(args, "kernel_repo", "")
+            or getattr(args, "repo", "")
+            or ""
+        )
         run_dir = None
         optimized_path = best.get("optimized_path")
         if optimized_path:
@@ -1925,13 +2059,11 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
             best,
             target_file=target_file,
             run_dir=run_dir,
+            kernel_repo=kernel_repo,
         )
     artifact_valid = bool(best_artifact_path)
     correctness_signal = getattr(args, "correctness_passed", None)
     correctness_source = "cli_override" if correctness_signal is not None else "missing"
-    if correctness_signal is None and getattr(args, "accuracy_passed", None) is True:
-        correctness_signal = True
-        correctness_source = "accuracy_override"
     if correctness_signal is None and best is not None:
         bp = best.get("backend_paths") or {}
         correctness_signal = _extract_correctness_from_report(
@@ -1946,6 +2078,9 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
         )
         if correctness_signal is not None:
             correctness_source = "geak_report"
+    if correctness_signal is None and getattr(args, "accuracy_passed", None) is True:
+        correctness_signal = True
+        correctness_source = "accuracy_override"
     correctness_passed = bool(best and correctness_signal is True)
     if args.micro_speedup is not None:
         micro_speedup = float(args.micro_speedup)
@@ -2071,7 +2206,33 @@ def main() -> int:
     parser.add_argument("--correctness-passed", choices=["true", "false", "unknown"], default="unknown")
     parser.add_argument("--accuracy-passed", choices=["true", "false", "unknown"], default="unknown")
     parser.add_argument("--oob-max-turns", type=int, default=int(os.environ.get("KERNEL_AGENT_OOB_MAX_TURNS", "100")))
-    parser.add_argument("--geak-cost-limit", type=float, default=None)
+    # GEAK cost limit semantics:
+    #   * GEAK's bundled ``config/geak.yaml`` declares ``cost_limit: 0.``
+    #     (= unlimited) — that is the design contract the GEAK team picked.
+    #   * GEAK's sub-agent spawn path (``parallel_agent`` → ``DefaultAgent``)
+    #     does NOT honour that yaml entry; it falls back to
+    #     ``AgentConfig.cost_limit = 3.0`` (``minisweagent/agents/default.py``).
+    #     Observed 2026-05-15 on Qwen3-32B: every sub-agent died at $3.08
+    #     after ~50 steps, well before producing a real optimisation.
+    #   * The only externally addressable lever is GEAK's ``-l/--cost-limit``
+    #     CLI option (``minisweagent/run/mini.py:194``) which writes
+    #     ``config["agent"]["cost_limit"]`` and is honoured by every child
+    #     agent spawned from that config.
+    # We therefore default to ``0.0`` so Hyperloom matches GEAK's stated
+    # geak.yaml contract instead of inheriting the dataclass-default $3
+    # via the sub-agent fallback path. Operators can pin a finite cap with
+    # ``HYPERLOOM_GEAK_COST_LIMIT`` or ``--geak-cost-limit`` when they want
+    # a budget guardrail (e.g. CI smoke runs).
+    parser.add_argument(
+        "--geak-cost-limit",
+        type=float,
+        default=float(os.environ.get("HYPERLOOM_GEAK_COST_LIMIT", "0.0")),
+        help=(
+            "Per-attempt GEAK cost cap in USD; 0 means unlimited (mirrors "
+            "GEAK's geak.yaml `cost_limit: 0.`). Set via "
+            "$HYPERLOOM_GEAK_COST_LIMIT or this flag for CI budgets."
+        ),
+    )
     parser.add_argument("--disable-rag", action="store_true",
                         help="Run GEAK with tools.rag disabled for this request.")
     parser.add_argument("--disable-xs-memory", action="store_true",
@@ -2101,6 +2262,15 @@ def main() -> int:
         candidate = find_candidate(load_candidates(candidates_path), args.kernel_id)
         resolved_source = args.source_file or str(candidate.get("source_file") or "")
         args.source_file = resolved_source
+        # Forward the candidate's repo root onto args so build_verification's
+        # GEAK-worktree artifact recovery can map ``source_file`` (an
+        # absolute path produced by the TraceLens resolver) back to the
+        # repo-relative path GEAK edited inside its worktree slot.
+        # Empty when the candidate didn't carry a repo (e.g. legacy
+        # CSV-only fixtures); the worktree recovery falls back to a
+        # basename-based rglob in that case.
+        if not getattr(args, "kernel_repo", None):
+            args.kernel_repo = str(candidate.get("kernel_repo") or "")
         if not args.dry_run and not resolved_source:
             raise RuntimeError(
                 f"source file not resolved for kernel {args.kernel_id}; "

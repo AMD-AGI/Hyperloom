@@ -134,7 +134,10 @@ def build_reactor_components(
 
     # Auto-include the auth-proxy health endpoint so F3 has something
     # to probe even if the operator forgot to configure
-    # ``health_probe_targets``.
+    # ``health_probe_targets``. Same auto-probe story for the inference
+    # server (sglang/vLLM/Magpie) — without it, an SGLang SIGSTOP fires
+    # no symptom because the default ``health_probe_targets`` list is
+    # empty and operators routinely forget to populate it.
     probe_targets = list(config.health_probe_targets)
     if (
         config.auto_probe_auth_proxy
@@ -142,11 +145,21 @@ def build_reactor_components(
         and config.auth_proxy_health_url not in probe_targets
     ):
         probe_targets.append(config.auth_proxy_health_url)
+    if (
+        config.auto_probe_inference_server
+        and config.inference_server_health_url
+        and config.inference_server_health_url not in probe_targets
+    ):
+        probe_targets.append(config.inference_server_health_url)
 
     extra_log_globs: tuple[str, ...] = (
         "runs/*/*/server.log",
         "runs/*/*/server_log",
         "runs/*/server.log",
+        # Mirrors ``LocalProbeConfig.extra_server_log_globs`` defaults —
+        # see that field for the rationale (grid_runner variant layout).
+        "runs/*/*/*/server.log",
+        "runs/*/*/*/*/server.log",
     )
     if config.server_log_extra_globs:
         extra_log_globs = (
