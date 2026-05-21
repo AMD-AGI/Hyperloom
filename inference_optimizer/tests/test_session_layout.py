@@ -175,6 +175,80 @@ def test_make_session_dir_overwrites_stale_pin(tmp_path, monkeypatch):
     assert paths.session_dir() == sd2
 
 
+def test_find_latest_per_session_dir_returns_none_on_empty(
+    tmp_path, monkeypatch,
+):
+    """No per-session subdir under workspace_root -> None (caller falls
+    back to flat layout or errors out)."""
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    assert paths.find_latest_per_session_dir() is None
+    assert paths.find_latest_per_session_dir(model_name="DSR1") is None
+
+
+def test_find_latest_per_session_dir_picks_lex_latest_ts(
+    tmp_path, monkeypatch,
+):
+    """When multiple per-launch ts dirs exist under one model,
+    lex-sort on the YYYYMMDDTHHMMSSZ name picks the latest in
+    chronological order — robust to mtime touches."""
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    (tmp_path / "MyModel").mkdir()
+    (tmp_path / "MyModel" / "20260101T000000Z").mkdir()
+    (tmp_path / "MyModel" / "20260520T120000Z").mkdir()
+    (tmp_path / "MyModel" / "20260315T080000Z").mkdir()
+    picked = paths.find_latest_per_session_dir(model_name="MyModel")
+    assert picked is not None
+    assert picked.name == "20260520T120000Z"
+
+
+def test_find_latest_per_session_dir_no_model_scans_all(
+    tmp_path, monkeypatch,
+):
+    """No model_name -> scan all model_basename subdirs for the
+    latest per-launch ts across the entire workspace."""
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    (tmp_path / "Qwen-7B").mkdir()
+    (tmp_path / "Qwen-7B" / "20260101T000000Z").mkdir()
+    (tmp_path / "DSR1").mkdir()
+    (tmp_path / "DSR1" / "20260520T120000Z").mkdir()
+    picked = paths.find_latest_per_session_dir()
+    assert picked is not None
+    assert picked.name == "20260520T120000Z"
+    assert picked.parent.name == "DSR1"
+
+
+def test_find_latest_per_session_dir_skips_workspace_shared(
+    tmp_path, monkeypatch,
+):
+    """workspace-shared subdirs (runtime/, logs/) must not be mistaken
+    for model_basename subdirs."""
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "runtime" / "20260520T120000Z").mkdir()  # decoy
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "MyModel").mkdir()
+    (tmp_path / "MyModel" / "20260518T100000Z").mkdir()
+    picked = paths.find_latest_per_session_dir()
+    assert picked is not None
+    assert picked.parent.name == "MyModel"
+    assert "runtime" not in str(picked)
+
+
+def test_find_latest_per_session_dir_ignores_non_ts_dirs(
+    tmp_path, monkeypatch,
+):
+    """Only YYYYMMDDTHHMMSSZ-shaped dir names count as ts subdirs;
+    other accidental dirs are ignored."""
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    (tmp_path / "MyModel").mkdir()
+    (tmp_path / "MyModel" / "scratch").mkdir()  # ignored
+    (tmp_path / "MyModel" / "backup-2026").mkdir()  # ignored
+    (tmp_path / "MyModel" / "20260520T120000Z").mkdir()  # picked
+    picked = paths.find_latest_per_session_dir(model_name="MyModel")
+    assert picked is not None
+    assert picked.name == "20260520T120000Z"
+
+
 def test_runtime_dir_is_workspace_shared(tmp_path, monkeypatch):
     """N17: runtime/ + Magpie/ + source-mirrors/ live under
     workspace_root, NOT under per-session subdir."""
