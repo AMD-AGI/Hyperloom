@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from ..specialist_domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
@@ -36,6 +36,176 @@ from ..specialist_domains import (
 
 
 _NONE_PLACEHOLDER = "(none)"
+
+
+# ---------------------------------------------------------------------------
+# PR-A6 (Arbor-into-Hyperloom) — per-domain focus templates
+#
+# Each entry produces the body that the prompt builder injects into
+# Section 1 under "### Domain focus — <key>". The shape mirrors
+# Arbor's ``agent expertise`` table (launcher/orchestrator.md):
+# - "What you read" (which sub-trees of the KB / which framework
+#   directories to grep first).
+# - "Winning techniques" (concrete patterns the specialist should
+#   sanity-check against the gap before proposing).
+# - "Pitfalls" (anti-patterns that historically reverted on this
+#   domain — sourced from KB_design lessons + Arbor's lessons table).
+#
+# When a domain key is missing from this map, ``_section_identity``
+# falls back to the generic body (the v0.8 M5 default).
+# ---------------------------------------------------------------------------
+
+
+def _focus_framework_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    return [
+        "You target **vLLM / SGLang scheduler / cuda_graph / kv_cache** code.",
+        "",
+        "**What to read first**",
+        "- `vllm/v1/engine/` and `vllm/v1/worker/` (scheduler, model_runner).",
+        "- `sglang/python/sglang/srt/scheduler/` and `sglang/python/sglang/srt/managers/`.",
+        "- KB anchor `framework.*` (cuda_graph / batching / chunked_prefill / kv_cache).",
+        "",
+        "**Winning techniques to consider**",
+        "- `--enable-chunked-prefill` + matched `--max-num-batched-tokens`.",
+        "- `--enforce-eager=false` + cuda graph capture for stable batch sizes.",
+        "- `--kv-cache-dtype fp8_e4m3` when the gap is HBM-bound (gate accuracy!).",
+        "- `--max-num-seqs` tuning at concurrency boundaries.",
+        "",
+        "**Pitfalls (historical REVERTs)**",
+        "- Raising `--max-num-seqs` past 512 on MI300X → OOM on 671B MoE models.",
+        "- `cuda_graph` + dynamic batch sizes → silent recapture cost > savings.",
+        "- Chunked prefill without `--max-num-batched-tokens` → tail latency",
+        "  regressions invisible to throughput-only benches.",
+    ]
+
+
+def _focus_kernel_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    return [
+        "You target **aiter / SGLang kernels / triton** code (attention,",
+        "MoE, GEMM, fused-attention paths).",
+        "",
+        "**What to read first**",
+        "- `aiter/csrc/` and `aiter/aiter/ops/` (CK / hipBLASLt wrappers).",
+        "- `sglang/python/sglang/srt/layers/attention/` (backend selection).",
+        "- KB anchor `kernel.*` (CDNA3 tiling / MoE / attention / GEMM).",
+        "",
+        "**Winning techniques to consider**",
+        "- Switch attention backend (`ROCM_AITER_MLA` ↔ `TRITON_MLA` ↔",
+        "  `ROCM_AITER_TRITON_MLA`) at the workload's prefill/decode mix.",
+        "- `VLLM_ROCM_USE_AITER=1` umbrella + per-op overrides for MoE / RMSNorm.",
+        "- Tile-size tuning for `M < 256` GEMMs (hipBLASLt vs Triton).",
+        "- Fused-attention enable flags for prefill chunks.",
+        "",
+        "**Pitfalls**",
+        "- Forcing AITER MLA on workloads with short OSL — kernel selection",
+        "  cost dominates the saving.",
+        "- Mixing `--attention-backend` with `--enforce-eager=true` invalidates",
+        "  cuda graphs silently.",
+        "- Trying triton fp4 paths on CDNA3 without `AMDGCN_USE_BUFFER_OPS=1`.",
+    ]
+
+
+def _focus_comm_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    return [
+        "You target **RCCL / NCCL / QuickReduce / AllReduce** code and tuning.",
+        "",
+        "**What to read first**",
+        "- `vllm/distributed/`, `vllm/distributed/parallel_state.py`.",
+        "- `aiter/csrc/quick_reduce/` and RCCL plugin paths.",
+        "- KB anchor `communication.*` (allreduce / QuickReduce / topology).",
+        "",
+        "**Winning techniques to consider**",
+        "- `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4` when message size > 1MiB.",
+        "- `NCCL_MIN_NCHANNELS` / `NCCL_MAX_NCHANNELS` tuning per topology.",
+        "- TP allreduce vs PP collective trade-offs at high concurrency.",
+        "",
+        "**Pitfalls**",
+        "- INT4 QuickReduce at TP=2 — overhead dominates the bandwidth savings.",
+        "- Tuning NCCL env vars without confirming `rocm-smi --showtopo` shows",
+        "  the expected XGMI / PCIe topology.",
+    ]
+
+
+def _focus_compiler_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    return [
+        "You target **torch.compile / inductor / triton / AMDGCN** codegen",
+        "and register-pressure tuning.",
+        "",
+        "**What to read first**",
+        "- `triton/python/triton/runtime/` and `triton/lib/Conversion/`.",
+        "- `torch/_inductor/codegen/triton.py` and `torch/_inductor/scheduler.py`.",
+        "- KB anchor `compiler.*` (inductor / triton / AMDGCN).",
+        "",
+        "**Winning techniques to consider**",
+        "- `--compilation-config '{\"level\": 3, ...}'` with surgical level=2",
+        "  fallback for kernels that don't quantise cleanly.",
+        "- `torch._inductor.config.triton.unique_kernel_names` + per-kernel",
+        "  autotune cache pinning.",
+        "- VGPR-budget tuning via `num_warps` / `num_stages` in @triton.autotune.",
+        "",
+        "**Pitfalls**",
+        "- Raising level=3 globally — some kernels recompile on every batch",
+        "  size, wiping the gain.",
+        "- VGPR > 256 spills to scratch on CDNA3; profile occupancy first.",
+    ]
+
+
+def _focus_system_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    return [
+        "You target **KFD driver / ROCm runtime / memory / dispatch overhead**.",
+        "",
+        "**What to read first**",
+        "- `/sys/class/kfd/kfd/` (read-only probes via Bash).",
+        "- `rocm-smi --showmeminfo VRAM` / `rocm-smi --showtopo`.",
+        "- KB anchor `systems.*` (KFD / dispatch / memory).",
+        "",
+        "**Winning techniques to consider**",
+        "- `HSA_ENABLE_SDMA=0` when host↔device dispatch dominates.",
+        "- `HIP_HIDDEN_FREE_MEM` to expose hidden VRAM headroom for large MoE.",
+        "- `numactl --cpunodebind` pinning at high concurrency.",
+        "",
+        "**Pitfalls**",
+        "- `HSA_ENABLE_SDMA=0` on small-message decode workloads → latency up.",
+        "- Disabling `--gpu-memory-utilization` headroom past 0.95 → OOM on",
+        "  prefill chunks for long-context workloads.",
+    ]
+
+
+def _focus_pr_intel_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    return [
+        "You are a **cross-repo PR researcher**. Your role is NOT to propose",
+        "configuration knobs — it is to surface PRs / commits / issues from",
+        "(ROCm/aiter, sgl-project/sglang, ROCm/vllm, triton-lang/triton,",
+        "ROCm/rccl) that other specialists should follow up on.",
+        "",
+        "**What to do**",
+        "- Use ``mcp__pr_monitor__*`` + ``WebSearch`` to find recent PRs",
+        "  related to the gap.",
+        "- For each PR, extract: (repo, number, title, summary, files",
+        "  touched, NVIDIA equivalent if any).",
+        "- Surface as ``proposal_set`` entries where ``provenance`` = research",
+        "  and ``pr_evidence`` is non-empty. Do NOT propose source patches",
+        "  yourself — that's the kernel / framework specialist's job once",
+        "  they read your PR list.",
+        "",
+        "**Pitfalls**",
+        "- Citing a PR without verifying its target framework matches the",
+        "  current install.",
+        "- Spending more than one round; PR intel is best dispatched once",
+        "  per gap and used as input to other specialists.",
+    ]
+
+
+_DOMAIN_FOCUS_TEMPLATES: dict[
+    str, "Callable[[SpecialistPromptInputs], list[str]]"
+] = {
+    "framework_specialist": _focus_framework_specialist,
+    "kernel_specialist":    _focus_kernel_specialist,
+    "comm_specialist":      _focus_comm_specialist,
+    "compiler_specialist":  _focus_compiler_specialist,
+    "system_specialist":    _focus_system_specialist,
+    "pr_intel_specialist":  _focus_pr_intel_specialist,
+}
 
 
 @dataclass(frozen=True)
@@ -86,7 +256,7 @@ class SpecialistPromptInputs:
 # Section 1 — Identity & autonomy
 # ---------------------------------------------------------------------------
 def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
-    return [
+    body: list[str] = [
         "## 1. IDENTITY & AUTONOMY",
         "",
         f"You are a **{inp.domain.key}** specialist sub-agent (KB_design §3.5).",
@@ -95,12 +265,24 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "",
         f"Description: {inp.domain.description or '(generic)'}",
         "",
-        "Your single mission is to **produce proposals + evidence**, not to",
-        "run benchmarks, write patches, or touch the serving GPU. The",
-        "Hyperloom Coordinator owns all KEEP/REVERT decisions and KB",
-        "writes; you participate by emitting ONE final ``specialist_done``",
-        "intent carrying your proposal_set.",
+        "Your single mission is to **produce proposals + evidence**, and",
+        "optionally author source patches into your isolated worktree.",
+        "The Hyperloom Coordinator owns all KEEP/REVERT decisions, server",
+        "benchmarks, accuracy gates, and KB writes; you participate by",
+        "emitting ONE final ``specialist_done`` (intent OR done-file per",
+        "Section 8) carrying your proposal_set and ``patches_written``.",
     ]
+    # PR-A6 (Arbor-into-Hyperloom): per-domain expertise + focus
+    # paragraph. Each domain template emphasises the surface area the
+    # specialist should reason about + the typical winning techniques
+    # (lifted from Arbor's orchestrator.md "agent expertise" table).
+    focus = _DOMAIN_FOCUS_TEMPLATES.get(inp.domain.key)
+    if focus is not None:
+        body.append("")
+        body.append(f"### Domain focus — {inp.domain.key}")
+        body.append("")
+        body.extend(focus(inp))
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -241,11 +423,27 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
 # Section 8 — Output protocol
 # ---------------------------------------------------------------------------
 def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
+    workspace = inp.workspace_path or "<workspace>"
     return [
         "## 8. OUTPUT PROTOCOL",
         "",
-        "You MUST end your run by emitting **exactly one** intent of type",
-        "``specialist_done`` via the ``emit_intent`` tool. The envelope:",
+        "Your run terminates by producing **exactly one** specialist_done",
+        "record. The Hyperloom runner accepts either of two equivalent",
+        "exit channels — use whichever your tool surface supports:",
+        "",
+        "**Channel A — ``emit_intent`` tool (in-process / SDK runtime):**",
+        "Call the ``emit_intent`` tool exactly once with an intent of type",
+        "``specialist_done`` and the payload schema below.",
+        "",
+        "**Channel B — file write (subprocess / production runtime,",
+        "PR-A2 Arbor-into-Hyperloom):** When ``emit_intent`` is not in",
+        "your tool list, write the same payload to",
+        f"``{workspace}/specialist_done.json`` via the ``Write`` tool as",
+        "your **absolute last action**. The Hyperloom dispatcher polls",
+        "for that file and treats its appearance as the run's exit",
+        "signal. After writing it, stop — do not call any further tools.",
+        "",
+        "Payload schema (identical for both channels):",
         "",
         "```json",
         json.dumps({
@@ -264,6 +462,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                         "source_evidence": []
                     }
                 ],
+                "patches_written": [],
                 "empty": False,
                 "summary": "≤ 500 char overview of what you tried this round",
                 "confidence": 0.6,
@@ -273,15 +472,25 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         }, sort_keys=True, indent=2),
         "```",
         "",
-        "Field contract (KB_design §3.5 §7):",
+        "Field contract (KB_design §3.5 §7 + PR-A2 Arbor extensions):",
         "",
         "- ``proposal_set`` items reuse the §3.4 explore variant schema.",
+        "- ``patches_written`` (PR-A2) lists paths (relative to your",
+        "  workspace or worktree) of any unified-diff patch files you",
+        "  authored this round. Empty list = no patches; downstream",
+        "  ``integrate_patch`` action skips when empty.",
         "- ``empty=true`` is legitimate when you have no actionable proposals;",
         "  in that case ``proposal_set=[]`` and you must put the reason in",
         "  ``summary``.",
         "- ``new_findings`` becomes HYPOTHESIZED KB edges at T4 commit even",
         "  when not KEEP'd this round — surface anything you learned.",
         "- ``residual_questions`` carries to the next specialist round.",
+        "",
+        "**Heartbeat (Channel B only):** When running in subprocess mode,",
+        f"write ``{workspace}/heartbeat.json`` periodically (≤5 min apart)",
+        "via Bash so the dispatcher knows you are still alive. Format:",
+        "``{\"ts\": \"<iso8601>\", \"status\": \"running\", \"note\": \"<short>\"}``.",
+        "Going silent past 5 minutes kills your subprocess.",
         "",
         (
             f"Hard cap: at most **{inp.max_turns}** LLM turns. Silence past "
@@ -300,10 +509,22 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "",
         "1. **NEVER** touch the serving GPU (no Magpie / no benchmark / no",
         "   server restart / no vllm or sglang process control). The",
-        "   Coordinator runs benchmarks; you only propose what to try.",
-        "2. **NEVER** write patches, edit framework source, or invoke build",
-        "   tools. PolicyGate R4 + the tool whitelist enforce this; any",
-        "   such tool call will be denied.",
+        "   Coordinator runs benchmarks; you only propose what to try and",
+        "   optionally author patches.",
+        "2. **You MAY** write source patches, but ONLY into your own",
+        f"   worktree at ``{workspace}/`` (a git checkout branched off",
+        "   the framework HEAD just for this task). Concretely:",
+        "   - Edit files inside the worktree.",
+        "   - ``git diff > patches/NNN_<slug>.patch`` from inside the",
+        "     worktree to produce a unified-diff patch file.",
+        "   - List patch paths in ``patches_written`` in your",
+        "     ``specialist_done`` payload (relative to the worktree).",
+        "   You **MUST NEVER** ``git apply``, ``git commit``, restart a",
+        "   server, or otherwise mutate the main ``framework_source_roots``",
+        "   directly — the orchestrator's ``integrate_patch`` action is",
+        "   the single integration point that applies your patches with",
+        "   the throughput + accuracy gate. (PR-A2, Arbor-into-Hyperloom:",
+        "   Inv-5.1 updated.)",
         "3. **NEVER** call ``cortex-kb`` write endpoints (propose-point /",
         "   propose-edge / hypothesize / ingest-attempt / verify / commit)",
         "   directly. The Coordinator owns KB writes (PolicyGate R4); your",
@@ -313,12 +534,15 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "   ``send_message`` (heartbeat), or ``alert``. Any other intent",
         "   type triggers PolicyGate R3 ``specialist_done_source``.",
         "5. You **MUST** finish within ``max_turns`` LLM turns and end with",
-        "   a single ``specialist_done`` intent.  Sub-agent silence past",
-        "   the cap is treated as stale (an empty ``specialist_done`` is",
-        "   synthesized for you so the EXPLORE round still progresses).",
-        f"6. Write working notes to {workspace} (transcript / heartbeat /",
-        "   tool_calls files are managed by the runner — you do NOT need",
-        "   to create them yourself), not to stdout.",
+        "   a single ``specialist_done`` exit signal (intent OR",
+        "   ``specialist_done.json`` file write per Section 8). Sub-agent",
+        "   silence past the cap is treated as stale (an empty",
+        "   ``specialist_done`` is synthesized for you so the EXPLORE",
+        "   round still progresses).",
+        f"6. Use ``{workspace}/`` for ALL writes (patches, transcript notes,",
+        "   heartbeat). Do not write anywhere else in the filesystem; the",
+        "   dispatcher only exposes this directory + read-only access to",
+        "   ``framework_source_roots`` and SESSION_DIR.",
         "7. If you hit a tool error or run out of useful actions, emit",
         "   ``specialist_done{empty=true, summary='<why>'}`` rather than",
         "   stalling.",

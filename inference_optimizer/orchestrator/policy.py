@@ -104,6 +104,33 @@ KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 SPECIALIST_ACTION_NAME: str = "specialist"
 
+# PR-A7 (Arbor-into-Hyperloom): the orchestrator-side patch
+# integration step. Lives in the EXPLORE phase, gated by a Critic
+# verdict before bench (Inv-5.1 / Inv-3 single-tenant GPU preserved).
+INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
+
+# PR-A9 (Arbor-into-Hyperloom): the merged explore action — kept
+# as a named constant alongside SPECIALIST_ACTION_NAME so the
+# explore-provenance gate has a single source of truth.
+EXPLORE_ACTION_NAME: str = "explore"
+
+# PR-A9: provenance values that survive the explore-provenance gate.
+# Every other value (``llm_direct``, missing, unknown) is denied.
+EXPLORE_PERMISSIVE_PROVENANCE_PREFIXES: tuple[str, ...] = (
+    "specialist:",
+)
+EXPLORE_PERMISSIVE_PROVENANCE_LITERALS: frozenset[str] = frozenset({
+    "default_grid",
+})
+
+# Verdicts that allow ``integrate_patch`` to proceed without an
+# explicit operator override. ``advise`` is treated as a soft
+# approval (Critic provided guidance but didn't block); ``approve``
+# is the canonical green light.
+INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset({
+    "approve", "advise",
+})
+
 # Source roles allowed to dispatch a specialist via
 # ``delegate{action='specialist'}``. KB_design §3.5 §11 / §3.11 §4.2.
 SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration"})
@@ -639,6 +666,26 @@ class PolicyGate:
             self._validate_specialist_dispatch(role, payload)
             self._validate_phase_action(role, action_name, intent_kind="delegate")
             return
+        # PR-A7 (Arbor-into-Hyperloom) — ``integrate_patch`` requires a
+        # non-reject Critic verdict on the specialist's patches before
+        # the orchestrator can apply them to framework_source_roots.
+        # See SharedState.specialist_patch_verdicts /
+        # record_specialist_patch_verdict; ``bypass_critic=True`` lets
+        # an operator override the gate (rare, audit-trail visible
+        # via the policy_denied → bypass override pattern).
+        if action_name == INTEGRATE_PATCH_ACTION_NAME:
+            self._validate_integrate_patch_critic_gate(payload)
+            # Continue into the standard registry + phase checks below.
+        # PR-A9 (Arbor-into-Hyperloom) — single-agent explore is retired.
+        # Every explore grid variant must trace to either a specialist
+        # (provenance='specialist:<domain>') or the cold-start default
+        # grid (provenance='default_grid'). The legacy 'llm_direct'
+        # provenance — where the orchestration LLM authored the grid
+        # from a single prompt window without any specialist research —
+        # is denied here so the EXPLORE phase becomes specialist-first
+        # for every round, matching Arbor's optimization loop.
+        if action_name == EXPLORE_ACTION_NAME:
+            self._validate_explore_provenance(payload)
         # If an ActionRegistry is wired, refuse delegate for unknown action names.
         # No registry → fall through (P0 / dev-mode where registry isn't loaded).
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
@@ -1128,6 +1175,162 @@ class PolicyGate:
     # ------------------------------------------------------------------
     # v0.8 M5 — R2 ``specialist_dispatch_source`` (KB_design §3.11 §4.2)
     # ------------------------------------------------------------------
+    def _validate_explore_provenance(
+        self, payload: dict[str, Any],
+    ) -> None:
+        """PR-A9 (Arbor-into-Hyperloom): retire single-agent explore.
+
+        Every explore-variant must trace to either:
+
+        * a specialist's ``proposal_set`` entry
+          (``provenance='specialist:<domain>'``); OR
+        * the cold-start default grid
+          (``provenance='default_grid'``).
+
+        The legacy ``provenance='llm_direct'`` — where the Orchestration
+        LLM authored the variant from a single prompt window without
+        any specialist research — is denied. The denial hint instructs
+        the LLM to dispatch a specialist first OR stamp the variant as
+        ``default_grid`` for the cold-start path. This keeps every
+        EXPLORE round specialist-first while still letting cold-start
+        rounds proceed when no specialist proposal_set exists yet.
+
+        Empty grid (or grid omitted) is NOT denied here — the executor
+        surfaces a structured ``empty_grid`` failure instead.
+        """
+        params = payload.get("params") or {}
+        if not isinstance(params, dict):
+            return
+        grid = params.get("grid")
+        if not isinstance(grid, list) or not grid:
+            return
+        permitted_count = 0
+        denied_examples: list[str] = []
+        for v in grid:
+            if not isinstance(v, dict):
+                continue
+            prov = str(v.get("provenance") or "").strip()
+            if (
+                prov in EXPLORE_PERMISSIVE_PROVENANCE_LITERALS
+                or any(
+                    prov.startswith(p)
+                    for p in EXPLORE_PERMISSIVE_PROVENANCE_PREFIXES
+                )
+            ):
+                permitted_count += 1
+            else:
+                denied_examples.append(
+                    f"{v.get('name', '?')}={prov or '<missing>'}"
+                )
+        if permitted_count == 0:
+            raise PolicyDenied(
+                "explore: every grid variant carries the legacy "
+                "provenance='llm_direct' (or no provenance at all, "
+                "which defaults to 'llm_direct'). PR-A9 retired the "
+                "single-agent explore path; EXPLORE rounds must "
+                "trace each variant to a specialist proposal_set "
+                "or the cold-start default_grid.",
+                rule="explore_requires_specialist_provenance",
+                hint=(
+                    "Either:\n"
+                    "  1. delegate{action_name='specialist', "
+                    "params={domain, gap_canonical_id, ...}} first, "
+                    "wait for the specialist_done, then re-emit "
+                    "explore with grid variants stamped "
+                    "provenance='specialist:<domain>'; OR\n"
+                    "  2. stamp every cold-start variant with "
+                    "provenance='default_grid' (signals 'no specialist "
+                    "yet — use the executor's built-in grid')."
+                ),
+            )
+
+    def _validate_integrate_patch_critic_gate(
+        self, payload: dict[str, Any],
+    ) -> None:
+        """PR-A7: enforce ``integrate_patch_requires_critic_verdict``.
+
+        Reject when:
+
+        * ``params.specialist_task_id`` is missing (cannot identify the
+          patch source).
+        * SharedState has no recorded critic verdict for the task and
+          ``params.bypass_critic`` is not truthy.
+        * The recorded verdict is ``reject`` (Critic asked to abort).
+        * The recorded verdict is ``needs_review`` / ``redirect`` and
+          ``params.bypass_critic`` is not set (the operator must
+          consciously override these terminal states).
+
+        ``params.bypass_critic=True`` always wins so the operator can
+        force-integrate (the policy_denial event will still surface
+        the override on the next tick for audit).
+        """
+        params = payload.get("params") or {}
+        if not isinstance(params, dict):
+            raise PolicyDenied(
+                "integrate_patch: params must be a dict",
+                rule="integrate_patch_requires_critic_verdict",
+                hint=(
+                    "pass params={specialist_task_id: <id>, ...}; "
+                    "see actions/integrate_patch.md"
+                ),
+            )
+        sid = str(params.get("specialist_task_id") or "").strip()
+        if not sid:
+            raise PolicyDenied(
+                "integrate_patch.params.specialist_task_id is required",
+                rule="integrate_patch_requires_critic_verdict",
+                hint=(
+                    "set params.specialist_task_id to the task_id of "
+                    "the completed specialist whose worktree carries "
+                    "the patches you want to apply."
+                ),
+            )
+        bypass = bool(params.get("bypass_critic"))
+        if bypass:
+            return
+        # SharedState lookup — every PolicyGate instance carries a
+        # reference; defensive None check covers tests that build
+        # PolicyGate without a SharedState.
+        ss = getattr(self, "shared_state", None)
+        verdict = ""
+        if ss is not None:
+            try:
+                verdict = ss.get_specialist_patch_verdict(sid)
+            except AttributeError:
+                # Older SharedState (no PR-A7 field). Treat as no
+                # verdict on record.
+                verdict = ""
+        if not verdict:
+            raise PolicyDenied(
+                f"integrate_patch: no Critic verdict on record for "
+                f"specialist_task_id={sid!r}",
+                rule="integrate_patch_requires_critic_verdict",
+                hint=(
+                    "Wait for the Critic to emit a "
+                    "review_verdict{target_proposal_msg_id=<patch "
+                    "proposal>, verdict=approve|reject|...} for this "
+                    "specialist, or override with "
+                    "params.bypass_critic=True. The Critic verdict "
+                    "is recorded on SharedState.specialist_patch_verdicts."
+                ),
+            )
+        if verdict.lower() not in INTEGRATE_PATCH_PERMISSIVE_VERDICTS:
+            raise PolicyDenied(
+                f"integrate_patch: Critic verdict for specialist "
+                f"task {sid!r} is {verdict!r}; integrate_patch only "
+                f"runs on "
+                f"{sorted(INTEGRATE_PATCH_PERMISSIVE_VERDICTS)!r}",
+                rule="integrate_patch_requires_critic_verdict",
+                hint=(
+                    "Either ask the Critic to re-review (next "
+                    "review_verdict overwrites this one), drop the "
+                    "patch (specialist_done.patches_written=[]), or "
+                    "set params.bypass_critic=True to force "
+                    "integration with an explicit operator audit "
+                    "trail."
+                ),
+            )
+
     def _validate_specialist_dispatch(
         self, role: "AgentRole", payload: dict[str, Any],
     ) -> None:

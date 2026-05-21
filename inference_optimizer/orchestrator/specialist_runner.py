@@ -50,6 +50,13 @@ from .specialist_domains import (
     SpecialistDomain,
     get_domain,
 )
+from .specialist_subprocess import (
+    SpecialistSubprocessConfig,
+    SpecialistSubprocessDispatcher,
+    SpecialistSubprocessResult,
+    _pick_worktree_base,
+    _setup_worktree,
+)
 from .sub_agent_runner import RunnerContext, SubAgentResult
 from .system_prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
@@ -81,28 +88,38 @@ PR_MONITOR_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_PR_MONITOR))
 CORTEX_KB_READONLY_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_CORTEX_KB_READ))
 
 
-# Default tool whitelist for specialists (KB_design §3.5 §10 / §3.11 R5).
-# These tool names follow the Claude / Cursor convention; the actual MCP
-# server names depend on operator config. The set is intentionally
-# read-only (no Edit / Write / Bash apply commands).
+# Default tool whitelist for specialists (KB_design §3.5 §10 / §3.11 R5;
+# PR-A2 (Arbor-into-Hyperloom) added Edit / Write / MultiEdit so specialists
+# can produce source patches into their per-task git worktree under
+# ``runs/specialist/<task_id>/worktree/``. The subprocess dispatcher's
+# ``--add-dir <worktree>`` scoping keeps them out of the main
+# framework_source_roots; the orchestrator's ``integrate_patch`` action
+# is the only place where worktree patches are physically applied.
+#
+# Note these tool names follow the Claude / Cursor convention; the actual MCP
+# server names depend on operator config.
 DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
     "emit_intent",
     "Read", "Grep", "Glob",
+    # PR-A2: write tools for patch authoring. Confined to the
+    # worktree via ``--add-dir`` at subprocess spawn time.
+    "Edit", "Write", "MultiEdit",
     # Restricted Bash — runners may further filter via a callback. Keeping
-    # ``Bash`` in the whitelist lets the LLM run rocm-smi / pgrep / cat;
-    # the runner's per-call hook (TODO M6) will block destructive
-    # invocations.
+    # ``Bash`` in the whitelist lets the LLM run rocm-smi / pgrep / cat /
+    # git diff > patches/<file>.patch; the runner's per-call hook (TODO M6)
+    # will block destructive invocations.
     "Bash",
 ) + tuple(sorted(_WEB)) + PR_MONITOR_MCP_TOOLS + CORTEX_KB_READONLY_MCP_TOOLS
 
 
-# Tools explicitly denied even if the operator extends the whitelist —
-# guard against accidental inclusion of write paths. The Cortex write
-# surfaces are sourced from :data:`policy.KB_WRITE_TOOL_NAMES` so we
-# never drift between the policy and runner layers.
-SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset({
-    "Edit", "Write", "MultiEdit",
-}) | _KB_WRITE
+# Tools explicitly denied even if the operator extends the whitelist.
+# PR-A2 lifted Edit / Write / MultiEdit out of the denylist (see
+# DEFAULT_SPECIALIST_TOOLS above); only the Cortex KB write surfaces
+# remain blocked because the KB lifecycle is Coordinator-owned (Inv-2
+# / Inv-6.1). The KB write set is sourced from
+# :data:`policy.KB_WRITE_TOOL_NAMES` so we never drift between the
+# policy and runner layers.
+SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE)
 
 
 def _now_iso() -> str:
@@ -118,6 +135,26 @@ def _safe_redact(s: str) -> str:
             # logged as KEY=...). Conservative regex-less replacement.
             out = out.replace(needle, f"{needle}[REDACTED]")
     return out
+
+
+@dataclass
+class _PreparedRun:
+    """Shared setup-phase output threaded into both the in-process and
+    subprocess execution paths. Internal to :class:`SpecialistRunner`."""
+
+    domain: SpecialistDomain | None = None
+    gap: str = ""
+    max_turns: int = 0
+    workspace: Path | None = None
+    worktree: Path | None = None
+    worktree_base: Path | None = None
+    system_prompt: str = ""
+    user_prompt: str = ""
+    notes: list[str] = field(default_factory=list)
+    resolved_tools: tuple[str, ...] = ()
+    # When set, the caller skips the execute phase and returns this
+    # result verbatim (e.g. unknown domain / missing workspace).
+    early_return: "SpecialistRunResult | None" = None
 
 
 @dataclass
@@ -183,8 +220,9 @@ class SpecialistRunner:
 
     def __init__(
         self,
-        backend_factory,
+        backend_factory=None,
         *,
+        subprocess_config: SpecialistSubprocessConfig | None = None,
         session_dir: Path | None = None,
         default_tools: tuple[str, ...] = DEFAULT_SPECIALIST_TOOLS,
         default_max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS,
@@ -193,10 +231,19 @@ class SpecialistRunner:
     ):
         """Create a runner.
 
-        ``backend_factory`` is a callable ``(domain: SpecialistDomain) ->
-        Backend``. The factory pattern lets the CLI inject a per-domain
-        Claude / Codex / Mock backend without baking the choice into the
-        runner itself.
+        Exactly one of ``backend_factory`` / ``subprocess_config`` must
+        be supplied:
+
+        * ``backend_factory`` (legacy, v0.8 M5) is a callable
+          ``(domain: SpecialistDomain) -> Backend``. The factory pattern
+          lets the CLI inject a per-domain Claude / Codex / Mock backend
+          without baking the choice into the runner itself. The
+          specialist runs **in-process** via :meth:`Backend.run`.
+        * ``subprocess_config`` (PR-A2, Arbor-into-Hyperloom) configures
+          a :class:`SpecialistSubprocessDispatcher` that spawns a fresh
+          ``claude`` subprocess per task with ``--add-dir <worktree>``
+          isolation. Production cli boot uses this path; tests keep the
+          in-process backend for speed.
 
         ``knowledge_plane`` (optional, v0.8 M4) lets the runner consult
         the :class:`KnowledgePlane` at task dispatch to gate the
@@ -207,7 +254,23 @@ class SpecialistRunner:
         list untouched (back-compat for callers / tests that don't
         wire a plane yet).
         """
+        if backend_factory is None and subprocess_config is None:
+            raise ValueError(
+                "SpecialistRunner: pass exactly one of "
+                "backend_factory / subprocess_config"
+            )
+        if backend_factory is not None and subprocess_config is not None:
+            raise ValueError(
+                "SpecialistRunner: backend_factory and subprocess_config "
+                "are mutually exclusive — pick one path"
+            )
         self.backend_factory = backend_factory
+        self.subprocess_config = subprocess_config
+        self.subprocess_dispatcher = (
+            SpecialistSubprocessDispatcher(subprocess_config)
+            if subprocess_config is not None
+            else None
+        )
         self.session_dir = Path(session_dir) if session_dir else None
         self.default_tools = tuple(default_tools)
         self.default_max_turns = int(default_max_turns)
@@ -251,7 +314,7 @@ class SpecialistRunner:
         return tuple(tools)
 
     # ------------------------------------------------------------------
-    # Public entry point
+    # Public entry point — dispatches to in-process or subprocess path
     # ------------------------------------------------------------------
     async def run(
         self,
@@ -266,7 +329,33 @@ class SpecialistRunner:
         TaskRegistry. The runner never raises a Backend error past the
         function boundary — every failure ends with a valid
         specialist_done payload (Inv-5.3 single exit protocol).
+
+        Two execution paths share the setup + finalize halves:
+
+        * ``subprocess_dispatcher`` is configured (PR-A2 production
+          path) — spawn a ``claude`` subprocess in an isolated git
+          worktree.
+        * ``backend_factory`` is configured (v0.8 M5 in-process path,
+          retained for tests + the MockBackend path) — drive
+          ``Backend.run`` in the same process via a per-turn loop.
         """
+        prep = await self._prepare(ctx, prompt_inputs=prompt_inputs)
+        if prep.early_return is not None:
+            return prep.early_return
+
+        if self.subprocess_dispatcher is not None:
+            return await self._run_via_subprocess(ctx, prep)
+        return await self._run_via_backend(ctx, prep)
+
+    # ------------------------------------------------------------------
+    # Setup phase (shared)
+    # ------------------------------------------------------------------
+    async def _prepare(
+        self,
+        ctx: RunnerContext,
+        *,
+        prompt_inputs: SpecialistPromptInputs | None,
+    ) -> "_PreparedRun":
         params = ctx.task.params or {}
         domain_key = str(params.get("domain") or "").strip()
         gap = str(
@@ -284,16 +373,18 @@ class SpecialistRunner:
                 reason=f"unknown specialist domain={domain_key!r}",
             )
             self._write_specialist_done(workspace, done)
-            return SpecialistRunResult(
-                task_id=ctx.task.task_id,
-                domain=domain_key,
-                gap_canonical_id=gap,
-                status="empty_synthesised",
-                specialist_done=done,
-                turns_used=0,
-                workspace=str(workspace) if workspace else "",
-                error="unknown_domain",
-                notes=[f"unknown_domain:{domain_key!r}"],
+            return _PreparedRun(
+                early_return=SpecialistRunResult(
+                    task_id=ctx.task.task_id,
+                    domain=domain_key,
+                    gap_canonical_id=gap,
+                    status="empty_synthesised",
+                    specialist_done=done,
+                    turns_used=0,
+                    workspace=str(workspace) if workspace else "",
+                    error="unknown_domain",
+                    notes=[f"unknown_domain:{domain_key!r}"],
+                )
             )
 
         # M5 scope guard: domains outside the M5 active set still get
@@ -306,10 +397,17 @@ class SpecialistRunner:
                 f"{domain.available_in!r}); using generic prompt template"
             )
 
-        # Assemble prompts (system / user). Operators may pre-build
-        # ``prompt_inputs`` to inject KB / PR / source-hint context; we
-        # default to a minimal version that still passes the M5
-        # validators.
+        # Worktree — created only when subprocess dispatch is wired.
+        # The worktree path is surfaced via ``workspace_path`` in the
+        # prompt so the agent learns where to write patches.
+        worktree, worktree_base, worktree_err = self._maybe_setup_worktree(
+            ctx, workspace=workspace,
+        )
+        if worktree_err:
+            notes.append(f"worktree_setup_failed:{worktree_err}")
+        workspace_for_prompt = worktree or workspace
+
+        # Assemble prompts.
         if prompt_inputs is None:
             prompt_inputs = SpecialistPromptInputs(
                 task_id=ctx.task.task_id,
@@ -339,7 +437,9 @@ class SpecialistRunner:
                 hbm_gb=float(params.get("hbm_gb") or 0.0),
                 peak_tflops=float(params.get("peak_tflops") or 0.0),
                 arch_notes=str(params.get("arch_notes") or ""),
-                workspace_path=str(workspace) if workspace else "",
+                workspace_path=(
+                    str(workspace_for_prompt) if workspace_for_prompt else ""
+                ),
                 notes=str(params.get("notes") or ""),
             )
 
@@ -348,6 +448,35 @@ class SpecialistRunner:
         self._write_heartbeat(
             workspace, turn=0, max_turns=max_turns, status="starting",
         )
+
+        return _PreparedRun(
+            domain=domain,
+            gap=gap,
+            max_turns=max_turns,
+            workspace=workspace,
+            worktree=worktree,
+            worktree_base=worktree_base,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            notes=notes,
+            resolved_tools=self._resolve_tools(),
+        )
+
+    # ------------------------------------------------------------------
+    # In-process Backend path (v0.8 M5 / test path)
+    # ------------------------------------------------------------------
+    async def _run_via_backend(
+        self, ctx: RunnerContext, prep: "_PreparedRun",
+    ) -> SpecialistRunResult:
+        """Drive ``Backend.run`` in the same Python process, one turn at
+        a time, until a specialist_done intent shows up. Used by tests +
+        the MockBackend fast path."""
+        assert self.backend_factory is not None  # narrowed by run()
+        domain = prep.domain
+        gap = prep.gap
+        workspace = prep.workspace
+        max_turns = prep.max_turns
+        notes = list(prep.notes)
 
         try:
             backend = self.backend_factory(domain)
@@ -374,14 +503,13 @@ class SpecialistRunner:
         # a separate field still see the system content inline. The
         # Backend protocol's ``system_prompt`` parameter takes precedence
         # when present.
-        combined_prompt = system_prompt + "\n---\n" + user_prompt
+        combined_prompt = prep.system_prompt + "\n---\n" + prep.user_prompt
 
         specialist_done_intent: Intent | None = None
         tool_violations: list[str] = []
         turns_used = 0
         backend_error: str = ""
 
-        resolved_tools = self._resolve_tools()
         for turn_idx in range(1, max_turns + 1):
             turns_used = turn_idx
             try:
@@ -390,9 +518,9 @@ class SpecialistRunner:
                     status="running",
                 )
                 turn_result = await backend.run(
-                    prompt=user_prompt if turn_idx == 1 else combined_prompt,
-                    system_prompt=system_prompt,
-                    tools=list(resolved_tools),
+                    prompt=prep.user_prompt if turn_idx == 1 else combined_prompt,
+                    system_prompt=prep.system_prompt,
+                    tools=list(prep.resolved_tools),
                     max_turns=1,
                 )
             except BackendError as exc:
@@ -426,9 +554,6 @@ class SpecialistRunner:
             for intent in turn_result.intents:
                 if intent.type == IntentType.SPECIALIST_DONE:
                     specialist_done_intent = intent
-                    # Don't break — capture the LAST done in a turn so
-                    # any auxiliary intents (alerts) earlier in the same
-                    # turn still log.
                 elif intent.type in (
                     IntentType.SEND_MESSAGE, IntentType.ALERT,
                 ):
@@ -444,9 +569,128 @@ class SpecialistRunner:
             workspace, turn=turns_used, max_turns=max_turns, status="finished",
         )
 
-        if specialist_done_intent is None:
+        return self._finalize(
+            ctx=ctx,
+            prep=prep,
+            specialist_done_payload=(
+                dict(specialist_done_intent.payload or {})
+                if specialist_done_intent is not None else None
+            ),
+            turns_used=turns_used,
+            tool_violations=tool_violations,
+            backend_error=backend_error,
+            extra_notes=notes,
+            patches_written=[],
+        )
+
+    # ------------------------------------------------------------------
+    # Subprocess path (PR-A2 production)
+    # ------------------------------------------------------------------
+    async def _run_via_subprocess(
+        self, ctx: RunnerContext, prep: "_PreparedRun",
+    ) -> SpecialistRunResult:
+        """Spawn a per-task ``claude`` subprocess inside the worktree
+        and reap its ``specialist_done.json`` / ``patches/`` output."""
+        assert self.subprocess_dispatcher is not None  # narrowed by run()
+        domain = prep.domain
+        gap = prep.gap
+        workspace = prep.workspace
+        notes = list(prep.notes)
+
+        if workspace is None:
+            done = build_empty_specialist_done(
+                gap_canonical_id=gap,
+                domain=domain.key,
+                reason="subprocess dispatch requires a workspace",
+            )
+            return SpecialistRunResult(
+                task_id=ctx.task.task_id,
+                domain=domain.key,
+                gap_canonical_id=gap,
+                status="empty_synthesised",
+                specialist_done=done,
+                turns_used=0,
+                workspace="",
+                error="no_workspace",
+                notes=notes + ["no_workspace"],
+            )
+
+        self._write_heartbeat(
+            workspace, turn=1, max_turns=prep.max_turns, status="subprocess_starting",
+        )
+        sub_result: SpecialistSubprocessResult = (
+            await self.subprocess_dispatcher.run(
+                task_id=ctx.task.task_id,
+                workspace=workspace,
+                worktree=prep.worktree,
+                worktree_base=prep.worktree_base,
+                system_prompt=prep.system_prompt,
+                user_prompt=prep.user_prompt,
+                allowed_tools=prep.resolved_tools,
+                max_turns=prep.max_turns,
+            )
+        )
+        self._append_transcript(workspace, 1, {
+            "type": "subprocess_result",
+            "exit_code": sub_result.exit_code,
+            "elapsed_seconds": sub_result.elapsed_seconds,
+            "timed_out": sub_result.timed_out,
+            "stale_heartbeat": sub_result.stale_heartbeat,
+            "process_log_path": sub_result.process_log_path,
+            "patch_count": len(sub_result.patches),
+            "error": sub_result.error,
+        })
+        self._write_heartbeat(
+            workspace, turn=1, max_turns=prep.max_turns, status="finished",
+        )
+
+        # Decode the subprocess error into either a backend_error
+        # (sets ``status='stale'``) or a clean miss (sets
+        # ``empty_synthesised``).
+        backend_error = ""
+        if sub_result.timed_out:
+            backend_error = "subprocess_timeout"
+        elif sub_result.stale_heartbeat:
+            backend_error = "subprocess_stale_heartbeat"
+        elif sub_result.error:
+            backend_error = f"subprocess_error:{sub_result.error}"
+        elif sub_result.exit_code not in (None, 0) and sub_result.done_payload is None:
+            backend_error = f"subprocess_exit_code:{sub_result.exit_code}"
+
+        return self._finalize(
+            ctx=ctx,
+            prep=prep,
+            specialist_done_payload=sub_result.done_payload,
+            turns_used=1,
+            tool_violations=[],
+            backend_error=backend_error,
+            extra_notes=notes,
+            patches_written=list(sub_result.patches),
+        )
+
+    # ------------------------------------------------------------------
+    # Finalize phase (shared)
+    # ------------------------------------------------------------------
+    def _finalize(
+        self,
+        *,
+        ctx: RunnerContext,
+        prep: "_PreparedRun",
+        specialist_done_payload: dict[str, Any] | None,
+        turns_used: int,
+        tool_violations: list[str],
+        backend_error: str,
+        extra_notes: list[str],
+        patches_written: list[str],
+    ) -> SpecialistRunResult:
+        domain = prep.domain
+        gap = prep.gap
+        workspace = prep.workspace
+        notes = list(extra_notes)
+
+        if specialist_done_payload is None:
             reason = backend_error or (
-                "max_turns_exhausted" if turns_used >= max_turns
+                "max_turns_exhausted" if turns_used >= prep.max_turns
                 else "no_specialist_done_emitted"
             )
             done_payload = build_empty_specialist_done(
@@ -469,8 +713,8 @@ class SpecialistRunner:
                 ] if tool_violations else []),
             )
 
-        # Have a specialist_done — sanitise and persist.
-        done_payload = dict(specialist_done_intent.payload or {})
+        # Have a specialist_done payload — sanitise and persist.
+        done_payload = dict(specialist_done_payload)
         # Defensive: ensure gap_canonical_id/domain match dispatch
         # (PolicyGate R3 enforces this on the inbox side; we re-stamp here
         # so the on-disk artifact is authoritative).
@@ -486,6 +730,17 @@ class SpecialistRunner:
             done_payload["summary"] = (
                 "specialist emitted done without summary"[:480]
             )
+        # PR-A2: Merge subprocess-discovered patches into
+        # ``patches_written`` so downstream Coordinator bookkeeping +
+        # IntegratePatchExecutor see them. If the agent already filled
+        # ``patches_written`` from inside Bash, prefer its list over the
+        # filesystem scan (the agent may carry intent about which
+        # patches to apply in which order via numeric prefix).
+        existing_patches = done_payload.get("patches_written") or []
+        if not (
+            isinstance(existing_patches, list) and existing_patches
+        ) and patches_written:
+            done_payload["patches_written"] = patches_written
 
         self._write_specialist_done(workspace, done_payload)
         status = "succeeded"
@@ -506,6 +761,40 @@ class SpecialistRunner:
             done_path=str(self._done_path(workspace)) if workspace else "",
             notes=notes,
         )
+
+    # ------------------------------------------------------------------
+    # Worktree helpers
+    # ------------------------------------------------------------------
+    def _maybe_setup_worktree(
+        self, ctx: RunnerContext, *, workspace: Path | None,
+    ) -> tuple[Path | None, Path | None, str]:
+        """Provision a per-task git worktree when in subprocess mode.
+
+        Returns ``(worktree_dir, worktree_base, error)``. All three are
+        empty / None when:
+
+        * the runner is in in-process Backend mode (worktree is not
+          needed), OR
+        * the configured ``framework_source_roots`` don't contain a
+          git checkout, OR
+        * ``git worktree add`` fails.
+
+        Failures are best-effort: the runner still dispatches the
+        specialist, only without worktree isolation. The reason ends
+        up in the ``notes`` of the returned SpecialistRunResult so
+        downstream collectors can surface it.
+        """
+        if self.subprocess_config is None or workspace is None:
+            return None, None, ""
+        base = _pick_worktree_base(self.subprocess_config.framework_source_roots)
+        if base is None:
+            return None, None, "no_git_framework_source_root"
+        worktree_path = workspace / "worktree"
+        branch = f"specialist-{ctx.task.task_id}"
+        wt, err = _setup_worktree(base, worktree_path, branch)
+        if wt is None:
+            return None, base, err
+        return wt, base, ""
 
     # ------------------------------------------------------------------
     # Coordinator-facing convenience: produce a SubAgentResult shape.
@@ -631,5 +920,6 @@ __all__ = [
     "SPECIALIST_TOOL_DENYLIST",
     "SpecialistRunResult",
     "SpecialistRunner",
+    "SpecialistSubprocessConfig",
     "build_empty_specialist_done",
 ]

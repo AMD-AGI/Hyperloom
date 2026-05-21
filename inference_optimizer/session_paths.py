@@ -74,6 +74,12 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "baseline", "profile", "pmc_roofline", "sweep",
     "explore",
     "specialist",
+    # PR-A1 (Arbor-into-Hyperloom): ``integrate_patch`` is an
+    # EXPLORE-phase deterministic Python executor that consumes
+    # ``runs/specialist/<task_id>/worktree/`` patches; pipeline_phase
+    # ``explore`` already includes it in the registry-derived set, the
+    # fallback only matters when the yaml can't be loaded.
+    "integrate_patch",
     "integrate", "kernel_opt", "deep_kernel_analysis",
     "operator_tuning", "vendor_kernel_config",
     "recover",

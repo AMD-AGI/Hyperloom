@@ -404,6 +404,41 @@ class SharedState:
     # ``last_<action>`` mirrors; useful for the orchestration prompt
     # to surface "last round's specialist outcome").
     last_specialist: dict[str, Any] = field(default_factory=dict)
+    # PR-A7 (Arbor-into-Hyperloom) — per-specialist patch verdict
+    # ledger keyed by specialist task_id. The Critic role reviews a
+    # specialist's worktree patches before ``integrate_patch`` runs;
+    # values are entries from REVIEW_VERDICTS
+    # (``approve`` / ``reject`` / ``needs_review`` / ``advise`` /
+    # ``redirect``). PolicyGate's
+    # ``integrate_patch_requires_critic_verdict`` rule denies an
+    # integrate_patch delegate whose specialist_task_id is missing
+    # from this map OR carries a ``reject`` verdict — so a hostile
+    # / regressive patch never reaches the serving GPU. ``approve`` /
+    # ``advise`` allow integrate; ``needs_review`` / ``redirect``
+    # require explicit operator override via
+    # ``params.bypass_critic=True``.
+    specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
+    # PR-A8 (Arbor-into-Hyperloom) — intervention-mix ledger.
+    #
+    # Each entry: ``{change_type, action, task_id, ts, delta_pct}``.
+    # ``change_type`` ∈ {"config", "code_patch"}:
+    #   * "config"     — env-var / CLI-flag tweaks via the merged
+    #                    ``explore`` action (Arbor's "config agent").
+    #   * "code_patch" — specialist-authored source patch promoted via
+    #                    ``integrate_patch`` (Arbor's "code agent").
+    # The Robustness role consumes this ledger to detect consecutive
+    # config-only rounds and recommend escalating to a patch-authoring
+    # specialist next round.
+    intervention_mix: list[dict[str, Any]] = field(default_factory=list)
+    # PR-A8 — counts the *current* run of contiguous KEEPs whose
+    # change_type is ``config``. Resets to 0 every time a ``code_patch``
+    # KEEP lands. Robustness reads this via the per-tick prompt.
+    consecutive_config_only_rounds: int = 0
+    # PR-A8 — total specialist dispatches in the current EXPLORE entry.
+    # Reset on phase transition into a fresh EXPLORE. Robustness's
+    # storm detector fires when this crosses the configured cap
+    # without a single non-empty proposal_set in the same window.
+    explore_specialist_dispatched_count: int = 0
     # v0.8 M5 — research_lane capacity locked at session start
     # (KB_design §3.7 §4.4). M5 default is 1 (single-specialist series);
     # M6 raises to 6 (concurrent). PolicyGate denies mid-session
@@ -2226,6 +2261,88 @@ class SharedState:
         if len(new_list) > _GAPS_MAX_ENTRIES:
             new_list = new_list[-_GAPS_MAX_ENTRIES:]
         self.gaps = new_list
+
+    def record_intervention(
+        self,
+        *,
+        change_type: str,
+        action: str,
+        task_id: str = "",
+        delta_pct: float | None = None,
+    ) -> None:
+        """PR-A8 (Arbor-into-Hyperloom): append one entry to the
+        intervention-mix ledger and update ``consecutive_config_only_rounds``.
+
+        ``change_type`` is normalised to lowercase. Unknown values
+        ("kernel", "noop", ...) are still appended (the ledger is
+        descriptive); the consecutive-config counter only advances on
+        explicit ``"config"`` values and resets on ``"code_patch"``.
+        """
+        ct = str(change_type or "").strip().lower()
+        entry = {
+            "change_type": ct,
+            "action": str(action or ""),
+            "task_id": str(task_id or ""),
+            "delta_pct": delta_pct,
+            "ts": _now_iso(),
+        }
+        self.intervention_mix.append(entry)
+        if ct == "config":
+            self.consecutive_config_only_rounds = (
+                int(self.consecutive_config_only_rounds or 0) + 1
+            )
+        elif ct == "code_patch":
+            self.consecutive_config_only_rounds = 0
+
+    def bump_specialist_dispatched(self, n: int = 1) -> int:
+        """PR-A8: increment the per-EXPLORE specialist dispatch counter.
+
+        Returns the post-increment value so callers can act on it
+        inline (e.g. a robustness storm threshold).
+        """
+        self.explore_specialist_dispatched_count = (
+            int(self.explore_specialist_dispatched_count or 0) + int(n)
+        )
+        return self.explore_specialist_dispatched_count
+
+    def reset_specialist_dispatched(self) -> None:
+        """PR-A8: zero the per-EXPLORE specialist dispatch counter.
+
+        Called by Coordinator on phase transition into a fresh
+        EXPLORE entry.
+        """
+        self.explore_specialist_dispatched_count = 0
+
+    def record_specialist_patch_verdict(
+        self, specialist_task_id: str, verdict: str,
+    ) -> None:
+        """PR-A7 (Arbor-into-Hyperloom): record the Critic's verdict on a
+        specialist's worktree patches.
+
+        Idempotent: a later verdict overwrites an earlier one (the
+        Critic may produce a revised verdict after a needs_review
+        round-trip). Empty / falsy ``verdict`` clears the entry; this
+        is how an operator forces a re-review by deleting the prior
+        decision.
+        """
+        sid = str(specialist_task_id or "").strip()
+        if not sid:
+            return
+        v = str(verdict or "").strip().lower()
+        if not v:
+            self.specialist_patch_verdicts.pop(sid, None)
+            return
+        self.specialist_patch_verdicts[sid] = v
+
+    def get_specialist_patch_verdict(
+        self, specialist_task_id: str,
+    ) -> str:
+        """PR-A7: return the recorded patch verdict, or empty string
+        when no critic decision is on record yet."""
+        sid = str(specialist_task_id or "").strip()
+        if not sid:
+            return ""
+        return self.specialist_patch_verdicts.get(sid, "") or ""
 
     def update_last_specialist(self, snapshot: dict[str, Any]) -> None:
         """Snapshot the most recent specialist task (parity with last_*)."""
