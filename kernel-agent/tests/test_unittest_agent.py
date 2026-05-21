@@ -560,6 +560,54 @@ class OverlayLockTests(unittest.TestCase):
         self.assertIn("_overlay_lockfile", text)
         ast.parse(text)
 
+    def test_template_skips_jit_invalidate_when_overlay_matches_live(self):
+        """``_OverlayLiveSource.__enter__`` must hash-compare the overlay
+        candidate to the live source and short-circuit the JIT ``.so``
+        unlink + ``shutil.copy2`` when they are byte-identical.
+
+        Without this no-op skip every correctness/perf call still pays the
+        ~60–90s/module aiter+CK-Tile JIT recompile cost — observed twice per
+        shape on the 2026-05-21 k009 / k008 runs where mirror==live for the
+        whole first GEAK round and yet Step 5/7 still hit two full rebuilds.
+        """
+        budget = ua._compute_hip_timeout_budget([{}])
+        text = ua._HIP_TASK_RUNNER_TEMPLATE.format(
+            kernel_name="foo", task_name="t/k", source_basename="x.cu",
+            live_source="/x", kernel_repo="/r",
+            benchmark_commands=["python /x.py"], target_kernels=["foo"],
+            env_vars={}, jit_roots=["/jit"], jit_match_tokens=["foo"],
+            shape_cases=[],
+            default_correctness_timeout=budget["correctness"],
+            default_performance_timeout=budget["performance"],
+            default_per_shape_timeout=budget["per_shape"],
+        )
+        for marker in (
+            "skipped_overlay = False",
+            "_sha1(LIVE_SOURCE)",
+            "_sha1(self.overlay_source)",
+            "overlay no-op (mirror==live",
+            "if not self.skipped_overlay:",
+        ):
+            self.assertIn(
+                marker, text,
+                f"HIP task_runner template missing no-op skip marker: {marker!r}",
+            )
+        ast.parse(text)
+        # The no-op skip must live INSIDE __enter__ (after lock acquisition
+        # and after the baton purge), not at module-import time, otherwise
+        # we'd race with a sibling overlay holding the lock.
+        enter_idx = text.find("def __enter__(self):")
+        flock_idx = text.find("fcntl.flock", enter_idx)
+        purge_idx = text.find("_purge_stale_aiter_batons()", enter_idx)
+        skip_idx = text.find("overlay no-op (mirror==live", enter_idx)
+        self.assertGreater(enter_idx, 0)
+        self.assertGreater(flock_idx, enter_idx)
+        self.assertGreater(purge_idx, flock_idx)
+        self.assertGreater(
+            skip_idx, purge_idx,
+            "no-op skip must come after baton purge so stale locks still get cleared",
+        )
+
     def test_template_embeds_stale_aiter_baton_purge(self):
         """Without this purge, a SIGKILL'd compile leaves
         ``/sgl-workspace/aiter/aiter/jit/build/lock_module_<name>`` on disk and
@@ -595,6 +643,36 @@ class OverlayLockTests(unittest.TestCase):
         )
         # The helper itself must compile under f-string template substitution.
         ast.parse(text)
+
+    def test_baton_purge_globs_locks_not_so_files(self):
+        """``_purge_stale_aiter_batons`` must enumerate by globbing
+        ``build/lock_module_*`` rather than deriving lock paths from existing
+        ``<jit_root>/*.so`` files. The 2026-05-21 ``module_rmsnorm_quant``
+        hang showed why: that kernel's first compile was SIGKILL'd before
+        the ``.so`` ever materialised, so the previous "derive lock from
+        .so" logic skipped the very baton that was deadlocking every
+        subsequent ``aiter`` import. Pinning the new behaviour here
+        prevents a silent regression.
+        """
+        budget = ua._compute_hip_timeout_budget([{}])
+        text = ua._HIP_TASK_RUNNER_TEMPLATE.format(
+            kernel_name="foo", task_name="t/k", source_basename="x.cu",
+            live_source="/x", kernel_repo="/r",
+            benchmark_commands=["python /x.py"], target_kernels=["foo"],
+            env_vars={}, jit_roots=["/jit"], jit_match_tokens=["foo"],
+            shape_cases=[],
+            default_correctness_timeout=budget["correctness"],
+            default_performance_timeout=budget["performance"],
+            default_per_shape_timeout=budget["per_shape"],
+        )
+        self.assertIn('glob("lock_module_*")', text)
+        # The old "derive from _candidate_jit_files" gate (which only
+        # looked at locks whose .so already exists) must be gone.
+        self.assertNotIn(
+            "for jit in _candidate_jit_files():\n        stem = jit.stem  # module_xxxx",
+            text,
+            "purge must enumerate locks directly, not derive from existing .so files",
+        )
 
 
 class EnvSubsetDeviceSelectionTests(unittest.TestCase):
