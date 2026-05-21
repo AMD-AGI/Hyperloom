@@ -2628,6 +2628,52 @@ def _action_family(action: str) -> str:
     return "other"
 
 
+def _promote_legacy_gain_entries(
+    state_entries: list[Any],
+    state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Lift a pre-v0.7 ``list[float | None]`` gain ledger into the V1 schema.
+
+    State written by older Coordinator versions stored per-entry
+    ``cum_gain_after`` floats only. Cross-reference the parallel
+    ``state.optimization_stack`` to recover action / variant_name / ts /
+    extra_sglang_args, and compute ``delta_pct`` as the diff against the
+    prior entry's ``cum_gain_after``. Entries the legacy ledger left as
+    ``None`` (seeded / resumed sessions) become objects with
+    ``cum_gain_after = delta_pct = None`` so index-alignment with
+    ``optimization_stack`` is preserved.
+    """
+    stack = state.get("optimization_stack") or []
+    out: list[dict[str, Any]] = []
+    prev_cum = 0.0
+    for i, val in enumerate(state_entries):
+        cum_after: float | None
+        if isinstance(val, (int, float)):
+            cum_after = float(val)
+        else:
+            cum_after = None
+        delta = (cum_after - prev_cum) if cum_after is not None else None
+        se = stack[i] if i < len(stack) and isinstance(stack[i], dict) else {}
+        out.append({
+            "ts": str(se.get("ts") or ""),
+            "action": str(se.get("action") or ""),
+            "variant_name": se.get("variant_name") or se.get("kernel_id"),
+            "stack_len_before": i,
+            "stack_len_after": i + 1,
+            "cum_gain_before": prev_cum,
+            "cum_gain_after": cum_after,
+            "delta_pct": delta,
+            "extra_sglang_args": str(
+                se.get("extra_sglang_args")
+                or se.get("candidate_extra_sglang_args")
+                or ""
+            ),
+        })
+        if cum_after is not None:
+            prev_cum = cum_after
+    return out
+
+
 def collect_attribution(
     state: dict[str, Any],
     geak_invocations: list[dict[str, Any]],
@@ -2640,7 +2686,13 @@ def collect_attribution(
     # best-effort approximation from optimization_stack alone.
     state_entries = state.get("gain_per_stack_entry")
     state_provided = isinstance(state_entries, list) and len(state_entries) > 0
-    if state_provided:
+    promoted_from_legacy = False
+    if state_provided and any(not isinstance(e, dict) for e in state_entries):
+        # Pre-v0.7 state: bare numeric ledger. Promote into V1 schema
+        # so source_breakdown bucketing + dashboards see rich entries.
+        entries = _promote_legacy_gain_entries(state_entries, state)
+        promoted_from_legacy = True
+    elif state_provided:
         entries = list(state_entries)
     else:
         entries = _reconstruct_gain_ledger(state, warnings)
@@ -2652,11 +2704,16 @@ def collect_attribution(
     stack_len = len(stack) if isinstance(stack, list) else 0
     method: str
     if state_provided:
-        all_deltas_set = all(
-            isinstance(e, dict) and e.get("delta_pct") is not None
-            for e in state_entries
-        )
-        method = "validated" if all_deltas_set else "reconstructed"
+        if promoted_from_legacy:
+            # Numbers lifted post-hoc to dicts — fields are honest but
+            # the ledger itself isn't a per-event capture by Coordinator.
+            method = "reconstructed"
+        else:
+            all_deltas_set = all(
+                isinstance(e, dict) and e.get("delta_pct") is not None
+                for e in state_entries
+            )
+            method = "validated" if all_deltas_set else "reconstructed"
     elif stack_len == 1:
         # Single-entry stack: ``final.action_path`` unambiguously
         # identifies the one source of gain.
@@ -2707,6 +2764,13 @@ def collect_attribution(
         notes.append(
             "gain_per_stack_entry not written by Coordinator; "
             "attribution reconstructed best-effort from optimization_stack."
+        )
+    elif promoted_from_legacy:
+        notes.append(
+            "gain_per_stack_entry was a pre-v0.7 numeric ledger; "
+            "promoted to V1 StackGainEntry shape using parallel data from "
+            "optimization_stack (delta_pct computed as diff vs prior entry's "
+            "cum_gain_after)."
         )
 
     # v0.8 M7 (KB_design §3.12 §4.6 + §3.13 M7 §6) — per-phase gain
