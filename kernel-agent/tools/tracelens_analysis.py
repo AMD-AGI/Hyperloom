@@ -384,12 +384,10 @@ _REUSABLE_SOURCE_ROOTS_STATIC = (
     "/sgl-workspace/sglang/",
     "/sgl-workspace/vllm/",
     "/sgl-workspace/flydsl/",
-    "/sgl-workspace/mori/",
     "/opt/venv/lib/python3.10/site-packages/aiter/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
     "/opt/venv/lib/python3.10/site-packages/flydsl/",
-    "/opt/venv/lib/python3.10/site-packages/mori/",
     # Production vLLM wheel install layout (system dist-packages).
     # Required since vLLM in the current image ships under
     # ``/usr/local/lib/python3.12/dist-packages/vllm/`` rather than the
@@ -400,12 +398,10 @@ _REUSABLE_SOURCE_ROOTS_STATIC = (
     "/usr/local/lib/python3.12/dist-packages/sglang/",
     "/usr/local/lib/python3.12/dist-packages/vllm/",
     "/usr/local/lib/python3.12/dist-packages/flydsl/",
-    "/usr/local/lib/python3.12/dist-packages/mori/",
     "/usr/local/lib/python3.10/dist-packages/aiter/",
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
     "/usr/local/lib/python3.10/dist-packages/flydsl/",
-    "/usr/local/lib/python3.10/dist-packages/mori/",
 )
 
 

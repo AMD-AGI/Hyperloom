@@ -28,12 +28,6 @@ from tracelens_skill_runner import (  # noqa: E402
 )
 
 
-HELIOS_FLYDSL_KERNEL = Path(
-    "/wekafs/yunkai/helios-demo/app/helios_demo/flydsl_mla_decode/"
-    "flydsl_indexed_pv_kernel.py"
-)
-
-
 class TestFlyDSLClassification(unittest.TestCase):
     def _write(self, body: str) -> str:
         tmp = tempfile.NamedTemporaryFile(
@@ -65,18 +59,6 @@ class TestFlyDSLClassification(unittest.TestCase):
         )
         self.assertTrue(_looks_like_flydsl_source(path))
         self.assertEqual(source_type_for("f", path), "flydsl")
-
-    def test_detects_helios_demo_kernel(self) -> None:
-        """Real helios-demo FlyDSL kernel; skipped when checkout is absent."""
-        if not HELIOS_FLYDSL_KERNEL.exists():
-            self.skipTest(f"fixture missing: {HELIOS_FLYDSL_KERNEL}")
-        self.assertTrue(_looks_like_flydsl_source(str(HELIOS_FLYDSL_KERNEL)))
-        self.assertEqual(
-            source_type_for(
-                "flydsl_indexed_pv_kernel", str(HELIOS_FLYDSL_KERNEL),
-            ),
-            "flydsl",
-        )
 
     def test_plain_python_is_not_flydsl(self) -> None:
         path = self._write(
@@ -113,11 +95,11 @@ class TestFlyDSLClassification(unittest.TestCase):
 
 
 class TestReusableSourceRoots(unittest.TestCase):
-    """FlyDSL / mori install paths must pass the patchability gate."""
+    """FlyDSL install paths must pass the patchability gate."""
 
     def _flydsl_candidate(self, source_file: str) -> dict:
         return {
-            "name": "flydsl_indexed_pv_kernel",
+            "name": "flydsl_kernel",
             "source_file": source_file,
             "source_type": "flydsl",
         }
@@ -139,15 +121,6 @@ class TestReusableSourceRoots(unittest.TestCase):
         reusable, skip = classify_patchability(cand)
         self.assertTrue(reusable, msg=skip)
 
-    def test_mori_root_is_reusable(self) -> None:
-        cand = {
-            "name": "mori_kernel",
-            "source_file": "/sgl-workspace/mori/ops/k.py",
-            "source_type": "python",
-        }
-        reusable, skip = classify_patchability(cand)
-        self.assertTrue(reusable, msg=skip)
-
     def test_random_path_still_rejected(self) -> None:
         cand = self._flydsl_candidate("/wekafs/random/user/checkout/k.py")
         reusable, skip = classify_patchability(cand)
@@ -155,21 +128,13 @@ class TestReusableSourceRoots(unittest.TestCase):
         self.assertIn("reusable framework root", skip)
 
     def test_env_extension_admits_extra_root(self) -> None:
+        extra = "/wekafs/user-local/flydsl-kernels/"
         with mock.patch.dict(
-            os.environ,
-            {"HYPERLOOM_EXTRA_REUSABLE_ROOTS": "/wekafs/yunkai/helios-demo/app/"},
+            os.environ, {"HYPERLOOM_EXTRA_REUSABLE_ROOTS": extra},
         ):
-            self.assertIn(
-                "/wekafs/yunkai/helios-demo/app/",
-                _extra_reusable_roots_from_env(),
-            )
-            self.assertIn(
-                "/wekafs/yunkai/helios-demo/app/", _reusable_source_roots(),
-            )
-            cand = self._flydsl_candidate(
-                "/wekafs/yunkai/helios-demo/app/helios_demo/flydsl_mla_decode/"
-                "flydsl_indexed_pv_kernel.py",
-            )
+            self.assertIn(extra, _extra_reusable_roots_from_env())
+            self.assertIn(extra, _reusable_source_roots())
+            cand = self._flydsl_candidate(f"{extra}my_kernel.py")
             reusable, skip = classify_patchability(cand)
             self.assertTrue(reusable, msg=skip)
 
@@ -336,18 +301,12 @@ class TestOrchestratorReusableRootsInSync(unittest.TestCase):
             self.handlers._REUSABLE_SOURCE_ROOTS_STATIC,
         )
 
-    def test_orchestrator_allowlist_has_mori(self) -> None:
-        self.assertIn(
-            "/sgl-workspace/mori/", self.handlers._REUSABLE_SOURCE_ROOTS_STATIC,
-        )
-
     def test_orchestrator_honours_env_override(self) -> None:
+        extra = "/wekafs/user-local/flydsl-kernels/"
         with mock.patch.dict(
-            os.environ,
-            {"HYPERLOOM_EXTRA_REUSABLE_ROOTS": "/wekafs/yunkai/helios-demo/app/"},
+            os.environ, {"HYPERLOOM_EXTRA_REUSABLE_ROOTS": extra},
         ):
-            roots = self.handlers._reusable_source_roots()
-            self.assertIn("/wekafs/yunkai/helios-demo/app/", roots)
+            self.assertIn(extra, self.handlers._reusable_source_roots())
 
 
 if __name__ == "__main__":
