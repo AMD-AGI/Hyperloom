@@ -131,16 +131,22 @@ def test_select_kb_for_domain_unknown_domain():
 
 
 def test_select_kb_for_domain_anchor_not_found():
+    # PR-A10: anchor-not-found now triggers a per-domain content
+    # fallback (entity_type / kind / attrs_filter queries). When the
+    # KB has nothing matching the strategy either, the result stays
+    # empty + the anchor_not_found warning still fires for back-compat.
     cortex = _FakeCortexKBClient(
         enabled=True,
         responses={"/v1/points/query": {"points": []}},
     )
     plane = _make_plane(cortex)
     result = plane.select_kb_for_domain("kernel_specialist")
-    assert "anchor_not_found" in result["warnings"][0]
+    assert any("anchor_not_found" in w for w in result["warnings"])
     assert result["points"] == []
-    # No traverse call made.
-    assert len(cortex.posts) == 1
+    # The legacy anchor query still happens first; fallback adds
+    # additional /v1/points/query calls but never reaches /v1/traverse.
+    assert len(cortex.posts) >= 1
+    assert all(p[0] == "/v1/points/query" for p in cortex.posts)
 
 
 def test_select_kb_for_domain_anchor_query_raises():
