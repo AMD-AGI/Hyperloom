@@ -5,7 +5,7 @@ Decision rule (smoke-grade — keep it simple):
   * baseline / profile / target_analysis / report /
     roofline / backends / params / sweep / dream / pmc_roofline / re_explore /
     recover / operator_tuning / vendor_kernel_config / comm_optimization /
-    compiler_tuning  → approve
+    compiler_tuning / validate_stack  → approve
   * kernel_opt / integrate / operator_tuning / vendor_kernel_config /
     deep_kernel_analysis  → approve (Orchestration sends them via
     REQUEST anyway, you just OK the proposal flow)
