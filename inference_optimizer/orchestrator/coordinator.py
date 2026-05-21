@@ -3638,6 +3638,16 @@ class Coordinator:
         Used for one-proposal reviews (kernel_opt / integrate /
         report / specialist dispatch / any non-grid action). The
         ``approve`` branch materialises the whole proposal as-is.
+
+        PR-A7 (Arbor-into-Hyperloom) adds the integrate_patch critic
+        gate: when the pending proposal is an ``integrate_patch`` for
+        a specialist whose patches the Critic just reviewed, the
+        verdict is mirrored onto ``SharedState.specialist_patch_verdicts``
+        so PolicyGate's ``integrate_patch_requires_critic_verdict``
+        rule can read it on the next delegate. Same mirror runs for a
+        verdict targeting the specialist itself, so an orchestrator
+        can review a specialist's patches by proposing the underlying
+        ``specialist`` action and reading the resulting verdict.
         """
         pending.decided = True
         pending.verdict = verdict
@@ -3651,6 +3661,35 @@ class Coordinator:
             priority=0 if verdict == "reject" else 1,
             in_reply_to=pending.proposal_msg_id,
         ))
+        # PR-A7: mirror specialist / integrate_patch verdicts onto
+        # SharedState so PolicyGate's integrate_patch gate can
+        # consult them on the next tick.
+        try:
+            pa_params = pending.payload.get("params") or {}
+        except AttributeError:
+            pa_params = {}
+        sid_candidate = ""
+        if pending.action_name == "integrate_patch":
+            sid_candidate = str(
+                pa_params.get("specialist_task_id") or ""
+            ).strip()
+        elif pending.action_name == "specialist":
+            # A critic verdict on the specialist proposal itself is
+            # treated as the verdict on the patches that specialist
+            # will (or did) produce — the specialist's task_id is the
+            # natural key.
+            sid_candidate = str(pending.task_id or "").strip()
+        if sid_candidate and verdict:
+            try:
+                self.shared_state.record_specialist_patch_verdict(
+                    sid_candidate, verdict,
+                )
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — best-effort mirror
+                log.exception(
+                    "PR-A7: failed to mirror critic verdict for "
+                    "specialist task=%s", sid_candidate,
+                )
         if verdict == "approve":
             await self._materialize_approved_proposal(pending)
 
@@ -4187,6 +4226,29 @@ class Coordinator:
             params["pr_monitor_available"] = bool(
                 plane is not None and getattr(plane, "pr_monitor_enabled", True)
             )
+
+        # PR-A5 (Arbor-into-Hyperloom): KB sub-graph traverse warmup.
+        # The plain ``pr_feed`` covers PR Monitor; this fills the
+        # specialist prompt's ``## 4. KB SUB-GRAPH`` section so the LLM
+        # starts with the Cortex KB anchor expanded rather than having
+        # to call ``mcp__cortex_kb__traverse`` itself.
+        if (
+            plane is not None
+            and getattr(plane, "cortex_enabled", False)
+            and "kb_subgraph" not in params
+        ):
+            try:
+                subgraph = plane.select_kb_for_domain(domain)
+                params["kb_subgraph"] = subgraph or {}
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "specialist warmup: select_kb_for_domain(domain=%r) "
+                    "failed: %r",
+                    domain, exc,
+                )
+                params.setdefault("kb_subgraph", {})
+        else:
+            params.setdefault("kb_subgraph", {})
 
         # Warm-start recipe + pitfalls from T0 anchor (KB_design §3.6).
         if state.warm_start_recipe and "warm_start_recipe" not in params:
@@ -5235,6 +5297,56 @@ class Coordinator:
             return result.get("status") == "succeeded"
         return result.get("status") != "failed"
 
+    def _record_intervention_for_task(
+        self, task: "Task", result: Any,
+    ) -> None:
+        """PR-A8 (Arbor-into-Hyperloom): log the change_type of a
+        completed task into ``SharedState.intervention_mix``.
+
+        Mapping:
+        * ``task.kind == "explore"``       → ``change_type = "config"``
+          (every explore KEEP is a config tweak per v0.8 M3).
+        * ``task.kind == "integrate_patch"`` AND the executor reported
+          ``status == "kept"`` → ``change_type = "code_patch"``.
+        * ``integrate_patch`` with any other status (reverted /
+          apply_failed / rejected_by_critic / applied_no_bench) →
+          NOT recorded; only successful KEEPs roll the counter.
+
+        Best-effort: the caller wraps in try/except so any field
+        access failure is non-fatal.
+        """
+        if not isinstance(result, dict):
+            return
+        kind = (task.kind or "").strip()
+        if kind == "explore":
+            # explore advances ``optimization_stack`` only when at
+            # least one variant survived the KEEP gate AND the inlined
+            # stack rebench. Use the ledger surrogate: a winner is
+            # present in ``result.winners`` OR ``best_variant`` is set.
+            winners = result.get("winners") or []
+            best = result.get("best_variant")
+            if not winners and not best:
+                return
+            delta_pct = None
+            if isinstance(best, dict):
+                delta_pct = best.get("gain_pct")
+            self.shared_state.record_intervention(
+                change_type="config",
+                action="explore",
+                task_id=task.task_id,
+                delta_pct=delta_pct if isinstance(delta_pct, (int, float)) else None,
+            )
+            return
+        if kind == "integrate_patch":
+            if str(result.get("status") or "") != "kept":
+                return
+            self.shared_state.record_intervention(
+                change_type="code_patch",
+                action="integrate_patch",
+                task_id=task.task_id,
+                delta_pct=result.get("delta_pct"),
+            )
+
     async def _handle_unpromotable_result(
         self, task: Task, result: dict[str, Any] | None,
     ) -> None:
@@ -5437,6 +5549,27 @@ class Coordinator:
                             "specialist bookkeeping hook failed for task=%s",
                             task.task_id,
                         )
+                # PR-A8 (Arbor-into-Hyperloom): bump the per-EXPLORE
+                # specialist dispatch counter. Robustness reads this
+                # in its prompt context to detect storms (many
+                # specialists dispatched with no winning proposal).
+                try:
+                    self.shared_state.bump_specialist_dispatched()
+                except Exception:  # noqa: BLE001
+                    log.exception("PR-A8: bump_specialist_dispatched failed")
+            # PR-A8 — intervention-mix ledger: when an explore or
+            # integrate_patch task succeeds with a kept variant, log
+            # the change_type so Robustness can see config-only
+            # streaks. ``explore`` carries config-shaped KEEPs;
+            # ``integrate_patch`` carries code_patch KEEPs.
+            if task.kind in ("explore", "integrate_patch"):
+                try:
+                    self._record_intervention_for_task(task, result.result)
+                except Exception:  # noqa: BLE001
+                    log.exception(
+                        "PR-A8: intervention ledger update failed for task=%s",
+                        task.task_id,
+                    )
             # Auto-promote certain succeeded results into SharedState core
             # fields (Coordinator is the only writer of CORE_STATE_FIELDS;
             # see DESIGN §14.5 / §17.2).

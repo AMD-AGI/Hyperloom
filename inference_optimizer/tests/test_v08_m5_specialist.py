@@ -121,12 +121,14 @@ def test_specialist_domains_catalogue_has_six_entries():
 
 
 def test_framework_specialist_is_M5_active():
+    """PR-A6 (Arbor-into-Hyperloom) widened ``SPECIALIST_DOMAINS_M5``
+    to cover all six domains because each now has a per-domain prompt
+    template (``_DOMAIN_FOCUS_TEMPLATES``). framework_specialist
+    remains active; the other five are now also active.
+    """
     assert "framework_specialist" in SPECIALIST_DOMAINS_M5
-    other = SPECIALIST_DOMAIN_KEYS - SPECIALIST_DOMAINS_M5
-    assert other == {
-        "kernel_specialist", "comm_specialist", "compiler_specialist",
-        "system_specialist", "pr_intel_specialist",
-    }
+    # PR-A6: M5 active set now equals the full catalogue.
+    assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
 
 
 def test_get_domain_returns_none_for_unknown():
@@ -604,11 +606,19 @@ async def test_specialist_runner_unknown_domain_synthesises_empty(tmp_path):
     assert "unknown specialist domain" in result.specialist_done["reason"]
 
 
-def test_specialist_tool_denylist_excludes_write_paths():
-    """Sanity: the denylist captures every cortex_kb write surface
-    listed in KB_design §3.11 R4."""
+def test_specialist_tool_denylist_excludes_kb_write_paths():
+    """The denylist must still capture every cortex_kb write surface
+    listed in KB_design §3.11 R4 — the Coordinator is the sole writer
+    of the KB (Inv-2 / Inv-6.1).
+
+    PR-A2 (Arbor-into-Hyperloom) lifted Edit/Write/MultiEdit out of the
+    denylist so EXPLORE specialists can write source patches into their
+    per-task ``runs/specialist/<task_id>/worktree/`` (the worktree
+    isolation + ``--add-dir`` scoping in the subprocess dispatcher
+    keeps them out of the main framework_source_roots). KB writes
+    remain blocked because the KB lifecycle is Coordinator-owned.
+    """
     for forbidden in (
-        "Edit", "Write",
         "mcp__cortex_kb__hypothesize",
         "mcp__cortex_kb__ingest_attempt",
         "mcp__cortex_kb__verify",
@@ -616,6 +626,11 @@ def test_specialist_tool_denylist_excludes_write_paths():
     ):
         assert forbidden in SPECIALIST_TOOL_DENYLIST
         assert forbidden not in DEFAULT_SPECIALIST_TOOLS
+    # PR-A2: write tools are now part of the default whitelist; they
+    # are NOT in the denylist.
+    for write_tool in ("Edit", "Write", "MultiEdit"):
+        assert write_tool not in SPECIALIST_TOOL_DENYLIST
+        assert write_tool in DEFAULT_SPECIALIST_TOOLS
 
 
 def test_build_empty_specialist_done_is_R3_valid():

@@ -173,6 +173,32 @@ corresponding probe (one round-trip saved); `manifest.json` then
 records `reason=explicit_flag`. Both flags together short-circuit the
 entire IR-3 step.
 
+### IR-4 — EXPLORE is specialist-first (PR-A9 Arbor-into-Hyperloom)
+
+PolicyGate's `explore_requires_specialist_provenance` rule denies any
+`delegate{action_name='explore'}` whose grid is entirely the legacy
+`provenance='llm_direct'`. Every EXPLORE round must trace its variants
+to one of:
+
+- `provenance='specialist:<domain>'` — variant came from a
+  `specialist_done.proposal_set` entry. The canonical path.
+- `provenance='default_grid'` — cold-start fallback when no specialist
+  has produced a proposal_set yet. The executor uses its built-in grid.
+
+The orchestration LLM is taught the specialist-first contract via
+`actions/_meta/specialist.yaml` (PR-A1) plus the orchestration prompt's
+EXPLORE section. Inv-5.1 (`specialist 不出 patch`) was relaxed by PR-A2 +
+PR-A4: specialists MAY author source patches into their isolated
+worktree (`runs/specialist/<task_id>/worktree/`), but the actual
+`git apply` against `framework_source_roots` is the sole job of the
+`integrate_patch` action (PR-A4) which holds the serving lanes and
+runs the throughput + accuracy gate.
+
+This rule is the final shape of the Arbor-into-Hyperloom porting
+effort (see `Agent-deligate-gap.MD` and the `arbor-dispatch-into-hyperloom`
+plan). Cold-start sessions can still proceed via `default_grid`; every
+subsequent round should be specialist-derived for Arbor-grade gains.
+
 ## Setup
 
 Two commands: Step 1 implements **IR-2** (install gate), Step 2 launches.
