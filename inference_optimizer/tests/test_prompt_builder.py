@@ -65,17 +65,23 @@ def test_full_enabled_actions_match_registry_minus_pmc_optional(registry):
         assert registry.get(name) is not None
 
 
-# The 5 noop-prep actions below were removed from the enabled sets so the
-# Orchestration LLM no longer proposes them (see remain_todo.md sections
-# C / I / M for the missing executor work). The metadata yamls still live
-# in actions/_meta so future executors don't need to re-introduce the
-# action names; pin both halves of the contract here.
+# The 4 noop-prep actions below remain suppressed from the enabled sets
+# so the Orchestration LLM no longer proposes them (see remain_todo.md
+# sections C / I / M for the missing executor work). The metadata yamls
+# still live in actions/_meta so future executors don't need to
+# re-introduce the action names; pin both halves of the contract here.
+#
+# ``recover`` was removed from this list in 2026-05 alongside the real
+# :class:`RecoverExecutor` (Change C of the gpu-leak-robustness-fix
+# plan); the dedicated regression at the bottom of this file
+# (``test_recover_is_enabled_and_has_real_executor``) now pins its
+# presence in both FULL/NO_KERNEL enabled sets and in
+# ``_REAL_EXECUTORS_FULL``.
 _REMOVED_NOOP_ACTIONS: tuple[str, ...] = (
     "comm_optimization",
     "compiler_tuning",
     "dream",
     "re_explore",
-    "recover",
 )
 
 
@@ -117,6 +123,33 @@ def test_removed_noop_actions_absent_from_default_catalogue(registry, rules_path
         assert f"**{name}**" not in text, (
             f"{name!r} should not appear as an action bullet in the prompt"
         )
+
+
+def test_recover_is_enabled_and_has_real_executor(registry):
+    """``recover`` was re-enabled in 2026-05 alongside RecoverExecutor.
+
+    Pin all three legs of the contract so a future drift makes this
+    test fire instead of silently regressing to the old ``no_executor``
+    failure mode:
+
+    * registry metadata still loads (covered by parametrized check).
+    * ``recover`` appears in both enabled-action sets so the
+      Orchestration prompt offers it as a delegatable action.
+    * ``cli._REAL_EXECUTORS_FULL`` binds it to a real callable
+      (:data:`recover_executor`) rather than ``_noop_prep``.
+    """
+    from inference_optimizer.cli import _REAL_EXECUTORS_FULL
+    from inference_optimizer.orchestrator.action_executors.recover import (
+        RecoverExecutor,
+        recover_executor,
+    )
+
+    assert "recover" in FULL_ENABLED_ACTIONS
+    assert "recover" in NO_KERNEL_ENABLED_ACTIONS
+    assert registry.get("recover") is not None
+    assert "recover" in _REAL_EXECUTORS_FULL
+    assert _REAL_EXECUTORS_FULL["recover"] is recover_executor
+    assert isinstance(recover_executor, RecoverExecutor)
 
 
 # ---------------------------------------------------------------------------

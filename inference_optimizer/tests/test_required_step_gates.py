@@ -90,7 +90,10 @@ def _seed_post_baseline(coord: Coordinator) -> None:
 
     Includes writing the target_baseline.json marker — the
     ``target_analysis`` gate now fires unconditionally and would otherwise
-    mask the downstream gates these tests target.
+    mask the downstream gates these tests target. Also populates
+    ``last_trace_analyze`` matching the trace so the P3 analyze gate
+    (TODO 3/5) is open by default; tests targeting integrate / validate_stack
+    don't care about the analyze gate and would otherwise be masked by it.
     """
     _write_baseline_json(coord.session_dir)
     s = coord.shared_state
@@ -101,6 +104,7 @@ def _seed_post_baseline(coord: Coordinator) -> None:
         "trace_input": "/tmp/profile.tar.gz",
         "candidates_path": "/tmp/x.json",
     }
+    s.last_profile_pmc_summary = "/tmp/pmc.json"
 
 
 # ===========================================================================
@@ -112,7 +116,7 @@ def test_target_analysis_gate_fires_when_compare_unset_and_json_missing(session_
     writes a 'no_target_gpu_configured' marker JSON."""
     coord = Coordinator(session_dir, backends=_backends_full())
     todo = coord._required_next_step()
-    assert "TODO 0/4" in todo
+    assert "TODO 0/5" in todo
     assert "target_analysis is required now" in todo
     assert "no_target_gpu_configured" in todo
     assert "baseline is required now" not in todo
@@ -124,7 +128,7 @@ def test_target_analysis_gate_fires_when_compare_set_and_json_missing(session_di
         compare_against_gpu="b300",
     )
     todo = coord._required_next_step()
-    assert "TODO 0/4" in todo
+    assert "TODO 0/5" in todo
     assert "target_analysis is required now" in todo
     assert "b300" in todo
 
@@ -211,12 +215,20 @@ def test_pmc_roofline_gate_does_not_fire_when_pmc_missing(session_dir):
     empty, ``_required_next_step()`` must NOT mention ``pmc_roofline``.
     The PMC hard-gate has been removed. With no ``kernel_opt`` KEEP
     pending and no unvalidated stack KEEPs, the chain has reached its
-    end and the required step is empty."""
+    end and the required step is empty.
+
+    P3 note: also populate last_trace_analyze so the analyze gate is
+    open; this test is about PMC and should not be coupled to analyze.
+    """
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_trace_analyze = {
+        "trace_input": "/tmp/profile.tar.gz",
+        "candidates_path": "/tmp/x.json",
+    }
     todo = coord._required_next_step()
     assert "pmc_roofline" not in todo
     assert "trace_analyze" not in todo
@@ -246,12 +258,20 @@ def test_pmc_roofline_gate_does_not_block_explore_actions(session_dir):
 def test_pmc_summary_present_does_not_change_required_next_step(session_dir):
     """Sanity: setting ``last_profile_pmc_summary`` to a value must NOT
     change ``_required_next_step()`` because PMC is no longer part of
-    the TODO chain. The chain is empty either way."""
+    the TODO chain. The chain is empty either way.
+
+    P3 note: also populate last_trace_analyze so the analyze gate is
+    open; this test is about PMC and should not be coupled to analyze.
+    """
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_trace_analyze = {
+        "trace_input": "/tmp/profile.tar.gz",
+        "candidates_path": "/tmp/x.json",
+    }
     todo_without_pmc = coord._required_next_step()
     s.last_profile_pmc_summary = "/tmp/pmc.json"
     todo_with_pmc = coord._required_next_step()
@@ -319,7 +339,10 @@ def test_integrate_gate_fires_when_keep_pending(session_dir):
     }
     assert coord._kernel_opt_keep_pending() == "k-rmsnorm"
     todo = coord._required_next_step()
-    assert "TODO 3/4" in todo
+    # P3 renumbered the integrate gate from 3/4 to 4/5 (analyze is the
+    # new 3/5). `_seed_post_baseline` populates last_trace_analyze so
+    # the analyze gate is satisfied; the integrate gate is what fires.
+    assert "TODO 4/5" in todo
     assert "integrate is required now" in todo
     assert "k-rmsnorm" in todo
 
@@ -403,15 +426,38 @@ def test_trace_analyze_gate_does_not_block_explore_actions(session_dir):
 
 def test_trace_analyze_gate_does_not_appear_in_required_next_step(session_dir):
     """``_required_next_step()`` must not surface a trace_analyze TODO
-    even when ``last_trace_analyze`` is stale."""
+    even when ``last_trace_analyze`` is stale. v2 architecture: the
+    standalone ``analyze`` / ``select_kernels`` step from main has been
+    folded into the ``roofline`` composite action; the
+    ``_required_next_step`` surface only enforces
+    target_analysis/baseline/profile/integrate/validate_stack, never
+    trace_analyze as a standalone TODO."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_trace_analyze = {}
+    # v2 invariant: RooflineExecutor always syncs last_profile_trace and
+    # last_trace_analyze.trace_input atomically, so a "trace set but
+    # cache empty" state can only happen if an operator manually
+    # advanced last_profile_trace (e.g. test fixtures). Sync them here
+    # to honor the v2 invariant.
+    s.last_trace_analyze = {
+        "trace_input": "/tmp/profile.tar.gz",
+        "analysis_md_text": "# Stub analysis",
+        "roofline_snapshot_id": 1,
+    }
     todo = coord._required_next_step()
-    assert "trace_analyze" not in todo
+    assert "TODO 3/5" not in todo, (
+        f"v2 should not surface a standalone analyze TODO when the "
+        f"roofline cache is in sync; got: {todo!r}"
+    )
+    # v2 architecture: no standalone `analyze`/`select_kernels` TODO --
+    # the action has been folded into the `roofline` composite. The
+    # main-branch tests `test_analyze_gate_surfaces_select_kernels_*`
+    # and `test_analyze_gate_clears_when_cache_matches_trace` were
+    # intentionally dropped during merge -- they assert the existence
+    # of a standalone analyze TODO that this branch does not produce.
     # No other gate is open in this state, so the chain is empty.
     assert todo == ""
 

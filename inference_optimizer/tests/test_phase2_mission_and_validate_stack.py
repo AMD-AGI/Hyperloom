@@ -299,6 +299,62 @@ def test_required_next_step_baseline_still_first(session_dir):
     assert "validate_stack required" not in todo
 
 
+def test_required_next_step_validate_stack_when_current_best_advanced_no_stack(
+    tmp_path, monkeypatch,
+):
+    """Params/backends advanced ``current_best`` without populating opt_stack.
+
+    The unvalidated-KEEPs TODO doesn't fire (stack is empty), but the final
+    report otherwise quotes ``cumulative_gain_validated=0.0%`` with no
+    measurement on record. Surface a guidance TODO so Orchestration can
+    fire one ``validate_stack`` and get an honest number into the report.
+    """
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    sd = make_session_dir()
+    coord = Coordinator(
+        sd,
+        backends=_backends_no_kernel(),
+        role_registry=_no_kernel_role_registry(),
+    )
+    _seed_target_analysis_marker(sd)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    # current_best advanced to +1.26% via params, opt_stack empty,
+    # never validated — exactly the session shape that motivated this.
+    s.current_best = {"action": "params", "tput": 101.26}
+    s.cumulative_gain = 1.26
+    assert s.optimization_stack == []
+    assert s.cumulative_gain_validated_ts == ""
+
+    todo = coord._required_next_step()
+    assert "validate_stack recommended" in todo
+    assert "+1.26%" in todo
+    assert "'params'" in todo
+
+    # After a validate_stack measurement lands, the recommendation clears
+    # (cumulative_gain_validated_ts is the freshness signal).
+    s.cumulative_gain_validated_ts = "2026-05-19T00:00:00+00:00"
+    assert coord._required_next_step() == ""
+
+
+def test_required_next_step_no_validate_recommend_below_threshold(
+    tmp_path, monkeypatch,
+):
+    """+0.2% gain is within noise — should NOT trigger the recommendation."""
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    sd = make_session_dir()
+    coord = Coordinator(
+        sd,
+        backends=_backends_no_kernel(),
+        role_registry=_no_kernel_role_registry(),
+    )
+    _seed_target_analysis_marker(sd)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.cumulative_gain = 0.2  # below 0.5% threshold
+    assert coord._required_next_step() == ""
+
+
 # ===========================================================================
 # Coordinator._sequence_denial_for_action — validate_stack guard
 # ===========================================================================
