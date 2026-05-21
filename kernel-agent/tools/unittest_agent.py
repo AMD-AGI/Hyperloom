@@ -1951,15 +1951,16 @@ def _generate_hip_unittest(
         instructions_block=instructions,
     ), encoding="utf-8")
 
-    self_verify_res: dict[str, Any] = {"compile": "skipped", "correctness": "skipped"}
+    self_verify_res: dict[str, Any] = {
+        "compile": "skipped",
+        "correctness": "skipped",
+        "correctness_reason": "self_verify disabled",
+    }
     if self_verify:
-        # Keep generation light by default: correctness can trigger 2 × JIT
-        # recompile (~120s) plus N shape benchmarks (>10min for test_pa.py at
-        # Qwen3-8B). GEAK runs full correctness during its own save_and_test
-        # loop, so the generator's responsibility is just to prove the
-        # task_runner imports/loads. Opt-in deeper smoke verification with
-        # ``HYPERLOOM_UNITTEST_HIP_SMOKE=1`` — useful for harness-debugging
-        # but adds ~3 min/kernel to generation time.
+        # Run the full HIP/C++ correctness gate before GEAK sees the harness.
+        # This can trigger two overlay-induced JIT rebuilds plus every captured
+        # shape benchmark, but it prevents GEAK from spending hours on a
+        # generated harness that cannot pass its own baseline correctness test.
         rc, out, err = 1, "", ""
         try:
             proc = subprocess.run(
@@ -1974,42 +1975,41 @@ def _generate_hip_unittest(
             "compile_rc": rc,
             "compile_tail": (out or err)[-800:],
             "correctness": "skipped",
-            "correctness_reason": "deferred to GEAK --test-command for HIP/C++ benchmarks",
+            "correctness_reason": "compile failed; correctness not attempted",
         }
-        if rc == 0 and os.environ.get("HYPERLOOM_UNITTEST_HIP_SMOKE", "").strip() in ("1", "true", "yes"):
-            smoke_timeout = max(300, timeout_budget["correctness"] // 2)
+        if rc == 0:
+            correctness_timeout = timeout_budget["correctness"] + 60
             srcc, sout, serr = 1, "", ""
             try:
                 proc = subprocess.run(
                     [sys.executable, str(task_runner), "correctness"],
-                    capture_output=True, text=True, timeout=smoke_timeout,
+                    capture_output=True, text=True, timeout=correctness_timeout,
                     cwd=str(out_dir),
                 )
                 srcc, sout, serr = proc.returncode, proc.stdout, proc.stderr
             except subprocess.TimeoutExpired as exc:
                 srcc = 124
                 sout = exc.stdout or ""
-                serr = exc.stderr or f"smoke correctness timed out after {smoke_timeout}s"
+                serr = exc.stderr or f"correctness timed out after {correctness_timeout}s"
             except Exception as exc:  # noqa: BLE001
                 serr = f"{type(exc).__name__}: {exc}"
             self_verify_res["correctness"] = "ok" if srcc == 0 else "fail"
             self_verify_res["correctness_rc"] = srcc
             self_verify_res["correctness_tail"] = (sout or serr)[-1500:]
             self_verify_res["correctness_reason"] = (
-                "HYPERLOOM_UNITTEST_HIP_SMOKE: overlay+baseline shape run"
+                "Hyperloom pre-GEAK full correctness validation"
             )
         if log:
             log(f"[self_verify] HIP compile rc={rc} tail={self_verify_res['compile_tail'][:200]!r}")
             if "correctness_rc" in self_verify_res:
-                log(f"[self_verify] HIP smoke correctness rc={self_verify_res['correctness_rc']}")
+                log(f"[self_verify] HIP correctness rc={self_verify_res['correctness_rc']}")
 
-    # The harness is "ok" iff a benchmark command is available AND the
-    # generator's lightweight checks all passed: compile must be ok/skipped,
-    # and if the (opt-in) HYPERLOOM_UNITTEST_HIP_SMOKE smoke test ran it must
-    # also be ok/skipped — a fail there means the overlay/JIT plumbing is
-    # broken and the harness shouldn't be promoted to GEAK's --test-command.
-    compile_ok = self_verify_res.get("compile") in ("ok", "skipped")
-    corr_ok = self_verify_res.get("correctness") in ("ok", "skipped")
+    # The harness is "ok" iff Hyperloom has already proven the generated
+    # correctness command passes on the unmodified baseline. Anything else
+    # stays degraded and falls back to legacy benchmark_files/test_harness_path
+    # instead of being promoted to GEAK's --test-command.
+    compile_ok = self_verify_res.get("compile") == "ok"
+    corr_ok = self_verify_res.get("correctness") == "ok"
     status = "ok" if (commands and compile_ok and corr_ok) else "degraded"
     test_command = f"python3 {task_runner}"
     captured_shapes = _collect_input_shapes(candidate)[0]
@@ -2057,7 +2057,8 @@ def _generate_hip_unittest(
     manifest["unittest_meta_path"] = str(meta_path)
     if log:
         log(f"[unittest_agent] generated {status} HIP unittest at {out_dir} "
-            f"(benchmarks={len(commands)}, self_verify={self_verify_res.get('compile')}/deferred)")
+            f"(benchmarks={len(commands)}, "
+            f"self_verify={self_verify_res.get('compile')}/{self_verify_res.get('correctness')})")
     return manifest
 
 
