@@ -12,9 +12,8 @@ Covers:
     execution_time_ms + params).
   * Degraded path when ``input_shapes`` is empty (no CUDA execution).
 
-These tests use the same kernel fixtures the Hyperloom optimizer hands
-to GEAK (real Triton from sgl-workspace / AgentKernelArena), and only
-exercise GPU-dependent paths when CUDA is actually available.
+These tests generate all portable fixtures at runtime and only exercise
+GPU-dependent paths when CUDA is actually available.
 """
 
 from __future__ import annotations
@@ -38,14 +37,26 @@ sys.path.insert(0, str(TOOLS_DIR))
 import unittest_agent as ua  # noqa: E402
 
 
-# Pick a fixture: the AgentKernelArena triton_bmm kernel is self-contained
-# (single host launcher + single jit body), small enough to compile in
-# < 5s, and exercises the most common shape pattern. If the AgentKernelArena
-# checkout is not mounted, we skip everything that needs the fixture.
-AKA_BMM = Path(
-    "/wekafs/zihao/2026/geak_cc/AgentKernelArena/tasks/triton2triton/vllm"
-    "/triton_bmm/source/triton_bmm.py"
-)
+def _write_bmm_fixture(path: Path) -> None:
+    """Write a tiny self-contained launcher fixture for unittest generation.
+
+    The dummy ``triton.jit`` decorator gives the host-entry picker the same AST
+    shape as a real Triton source without requiring a local AgentKernelArena
+    checkout or importing Triton during self-verify.
+    """
+    path.write_text(
+        "import torch\n\n"
+        "class _DummyTriton:\n"
+        "    def jit(self, fn):\n"
+        "        return fn\n\n"
+        "triton = _DummyTriton()\n\n"
+        "@triton.jit\n"
+        "def bmm_kernel(a, b, c):\n"
+        "    return c\n\n"
+        "def bmm_triton(a, b):\n"
+        "    return torch.bmm(a, b)\n",
+        encoding="utf-8",
+    )
 
 
 def _has_cuda() -> bool:
@@ -56,17 +67,18 @@ def _has_cuda() -> bool:
         return False
 
 
-@unittest.skipUnless(AKA_BMM.is_file(), "AgentKernelArena bmm fixture not mounted")
 class UnittestAgentGenerationTests(unittest.TestCase):
     """Pure-Python generation paths (no CUDA required)."""
 
-    def _bmm_candidate(self) -> dict:
+    def _bmm_candidate(self, root: Path) -> dict:
+        source = root / "triton_bmm.py"
+        _write_bmm_fixture(source)
         return {
             "kernel_id": "triton_bmm_kernel",
             "name": "bmm_kernel",
             "kernel_name": "bmm_kernel",
-            "source_file": str(AKA_BMM),
-            "kernel_url": str(AKA_BMM),
+            "source_file": str(source),
+            "kernel_url": str(source),
             "input_shapes": [[2, 64, 32], [2, 32, 64]],
             "input_dtypes": ["float16", "float16"],
             "env_vars": {"TRITON_PRINT_AUTOTUNING": "0"},
@@ -76,8 +88,8 @@ class UnittestAgentGenerationTests(unittest.TestCase):
         }
 
     def test_generates_aka_layout(self):
-        cand = self._bmm_candidate()
         with tempfile.TemporaryDirectory(prefix="ua_layout_") as td:
+            cand = self._bmm_candidate(Path(td))
             out = Path(td) / "task"
             m = ua.generate_unittest(cand, out_dir=out, self_verify=False)
             self.assertIn(m["status"], ("ok", "degraded"))
@@ -97,8 +109,8 @@ class UnittestAgentGenerationTests(unittest.TestCase):
             ast.parse((out / "scripts" / "task_runner.py").read_text())
 
     def test_host_entry_resolution_prefers_launcher_over_jit(self):
-        cand = self._bmm_candidate()
         with tempfile.TemporaryDirectory(prefix="ua_entry_") as td:
+            cand = self._bmm_candidate(Path(td))
             m = ua.generate_unittest(cand, out_dir=Path(td) / "task", self_verify=False)
             # bmm_kernel is the @triton.jit body; bmm_triton is the host
             # launcher — the latter is the only one callable from torch
@@ -142,14 +154,14 @@ class UnittestAgentGenerationTests(unittest.TestCase):
                              f"picker missed the 3-arg launcher; chose {m['host_entry']!r}")
 
     def test_env_vars_redact_secrets(self):
-        cand = self._bmm_candidate()
-        cand["env_vars"] = {
-            "SGLANG_OPT_USE_TILELANG_INDEXER": "true",
-            "MY_API_KEY": "should-not-appear",
-            "AUTH_TOKEN": "should-not-appear",
-            "AITER_USE_TRITON": "1",
-        }
         with tempfile.TemporaryDirectory(prefix="ua_secret_") as td:
+            cand = self._bmm_candidate(Path(td))
+            cand["env_vars"] = {
+                "SGLANG_OPT_USE_TILELANG_INDEXER": "true",
+                "MY_API_KEY": "should-not-appear",
+                "AUTH_TOKEN": "should-not-appear",
+                "AITER_USE_TRITON": "1",
+            }
             out = Path(td) / "task"
             ua.generate_unittest(cand, out_dir=out, self_verify=False)
             runner_text = (out / "scripts" / "task_runner.py").read_text()
@@ -160,9 +172,9 @@ class UnittestAgentGenerationTests(unittest.TestCase):
             self.assertNotIn("AUTH_TOKEN", runner_text)
 
     def test_degraded_when_no_shapes(self):
-        cand = self._bmm_candidate()
-        cand.pop("input_shapes")
         with tempfile.TemporaryDirectory(prefix="ua_noshape_") as td:
+            cand = self._bmm_candidate(Path(td))
+            cand.pop("input_shapes")
             m = ua.generate_unittest(cand, out_dir=Path(td) / "task", self_verify=False)
             self.assertEqual(m["num_shapes"], 0)
             self.assertTrue(any("no input shapes" in w for w in m["warnings"]))
@@ -314,17 +326,18 @@ class UnittestAgentLiveAiterTests(unittest.TestCase):
                             "expected warning about auto-filled epsilon")
 
 
-@unittest.skipUnless(AKA_BMM.is_file() and _has_cuda(),
-                     "needs AgentKernelArena fixture + CUDA-capable GPU")
+@unittest.skipUnless(_has_cuda(), "needs CUDA-capable GPU")
 class UnittestAgentSelfVerifyTests(unittest.TestCase):
     """End-to-end self-verify paths (require GPU)."""
 
-    def _bmm_candidate(self) -> dict:
+    def _bmm_candidate(self, root: Path) -> dict:
+        source = root / "triton_bmm.py"
+        _write_bmm_fixture(source)
         return {
             "kernel_id": "triton_bmm_kernel",
             "name": "bmm_kernel",
             "kernel_name": "bmm_kernel",
-            "source_file": str(AKA_BMM),
+            "source_file": str(source),
             "input_shapes": [[2, 64, 32], [2, 32, 64]],
             "input_dtypes": ["float16", "float16"],
             "env_vars": {},
@@ -334,7 +347,7 @@ class UnittestAgentSelfVerifyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="ua_sv_ok_") as td:
             out = Path(td) / "task"
             m = ua.generate_unittest(
-                self._bmm_candidate(), out_dir=out, self_verify=True,
+                self._bmm_candidate(Path(td)), out_dir=out, self_verify=True,
             )
             self.assertEqual(m["status"], "ok",
                              f"unexpected status {m['status']}: {m['self_verify']}")
@@ -345,7 +358,7 @@ class UnittestAgentSelfVerifyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="ua_sv_mut_") as td:
             out = Path(td) / "task"
             m = ua.generate_unittest(
-                self._bmm_candidate(), out_dir=out, self_verify=False,
+                self._bmm_candidate(Path(td)), out_dir=out, self_verify=False,
             )
             runner = Path(m["task_runner"])
             live = Path(m["source_file"])
@@ -357,8 +370,8 @@ class UnittestAgentSelfVerifyTests(unittest.TestCase):
                 shutil.copy2(actual, live)
             text = live.read_text()
             broken = text.replace(
-                "tl.store(c_ptrs, c, mask=c_mask)",
-                "tl.store(c_ptrs, c + 1.0, mask=c_mask)",
+                "return torch.bmm(a, b)",
+                "return torch.bmm(a, b) + 1.0",
             )
             self.assertNotEqual(broken, text, "could not inject regression")
             live.write_text(broken)
@@ -375,7 +388,7 @@ class UnittestAgentSelfVerifyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="ua_sv_perf_") as td:
             out = Path(td) / "task"
             m = ua.generate_unittest(
-                self._bmm_candidate(), out_dir=out, self_verify=False,
+                self._bmm_candidate(Path(td)), out_dir=out, self_verify=False,
             )
             runner = Path(m["task_runner"])
             proc = subprocess.run(
