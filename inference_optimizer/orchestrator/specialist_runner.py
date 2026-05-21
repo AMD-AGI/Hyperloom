@@ -201,7 +201,7 @@ class SpecialistRunner:
         ``knowledge_plane`` (optional, v0.8 M4) lets the runner consult
         the :class:`KnowledgePlane` at task dispatch to gate the
         ``mcp__pr_monitor__*`` tool block — when PR Monitor is
-        disabled (``--no-pr-monitor``) the runner strips those tool
+        disabled (``--degraded-pr``) the runner strips those tool
         names from the per-task whitelist so the LLM doesn't get
         offered an absent endpoint. ``None`` leaves the default tool
         list untouched (back-compat for callers / tests that don't
