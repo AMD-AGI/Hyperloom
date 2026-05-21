@@ -185,6 +185,22 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn("echo \"export MAGPIE_PYTHON='${MAGPIE_PYTHON}'\"", install_text)
         self.assertIn("echo \"export PYTHONPATH='${PYTHONPATH}'\"", install_text)
 
+    def test_unittest_agent_skill_is_self_contained(self) -> None:
+        kernel_skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        inference_skill = (ROOT.parent / "inference_optimizer" / "SKILL.md").read_text(
+            encoding="utf-8",
+        )
+        combined = kernel_skill + "\n" + inference_skill
+        normalized = " ".join(combined.split())
+
+        self.assertIn("AgentKernelArena-compatible", combined)
+        self.assertIn("developer-local AgentKernelArena checkout", normalized)
+        self.assertIn("compile_command", kernel_skill)
+        self.assertIn("correctness_command", kernel_skill)
+        self.assertIn("performance_command", kernel_skill)
+        self.assertNotIn("/wekafs/" + "zihao", combined)
+        self.assertNotIn("geak_cc/" + "AgentKernelArena", combined)
+
     def test_trace_file_analysis_writes_report_logs_and_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

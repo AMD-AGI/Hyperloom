@@ -222,9 +222,11 @@ and report it instead of crashing the resident session.
 
 Before each `backend=geak` attempt, `invoke_backend` calls
 `tools/unittest_agent.py::generate_unittest(candidate, ...)` to materialise
-an [AgentKernelArena](/wekafs/zihao/2026/geak_cc/AgentKernelArena)-style
-unittest task right next to the GEAK run dir. The harness reflects the
-**live vLLM/SGLang runtime** the kernel was profiled in:
+an AgentKernelArena-compatible unittest task right next to the GEAK run dir.
+This repo carries the full contract below; do not read or depend on a
+developer-local AgentKernelArena checkout when generating or reviewing these
+harnesses. The harness reflects the **live vLLM/SGLang runtime** the kernel was
+profiled in:
 
 | Field                | Source                                                                                  |
 |----------------------|-----------------------------------------------------------------------------------------|
@@ -237,12 +239,23 @@ unittest task right next to the GEAK run dir. The harness reflects the
 
 The harness lands at
 `$USER_DATA_PATH/kernel-agent/unittests/<session_id>/<prompt_stem>/` with the
-canonical AgentKernelArena layout (`config.yaml`, `scripts/task_runner.py`,
-`source/`, `source/_baseline_snapshot/`, `unittest_meta.json`). The runner
-exposes `compile` / `correctness` / `performance` modes; correctness imports
-*both* the live source and the snapshot under distinct module names and
-asserts tensor equality within natural fp tolerance
-(`fp8 → 5e-2`, `bf16/fp16 → 1e-2`, `fp32 → 1e-4`).
+canonical layout:
+
+```text
+<out_dir>/
+├── config.yaml
+├── scripts/task_runner.py
+├── source/<kernel>
+├── source/_baseline_snapshot/<kernel>
+└── unittest_meta.json
+```
+
+`config.yaml` must name the target kernel and contain `compile_command`,
+`correctness_command`, and `performance_command` entries that call
+`python3 scripts/task_runner.py <mode>`. The runner exposes `compile` /
+`correctness` / `performance` modes; correctness imports *both* the live source
+and the snapshot under distinct module names and asserts tensor equality within
+natural fp tolerance (`fp8 -> 5e-2`, `bf16/fp16 -> 1e-2`, `fp32 -> 1e-4`).
 
 After generation we **self-verify** on the unmodified source (compile +
 correctness MUST both pass). The manifest's `status` field reports:
