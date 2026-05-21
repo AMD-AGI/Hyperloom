@@ -370,7 +370,7 @@ async def test_close_sequencer_report_before_session_breakdown(coord):
 
 @pytest.mark.asyncio
 async def test_close_sequencer_skips_cortex_steps_when_no_cortex(coord):
-    """``--no-cortex`` runs have cortex_kb=None: steps 3 + 4 must be
+    """``--degraded-kb`` runs have cortex_kb=None: steps 3 + 4 must be
     explicitly recorded as 'skipped' (not silent no-ops, so operators
     can see the run was Cortex-less)."""
     coord.shared_state.phase_history = [_close_phase_history_row()]

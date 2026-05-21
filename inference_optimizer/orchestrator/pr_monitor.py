@@ -136,7 +136,7 @@ class PRMonitorClient:
     """Stdlib-only REST client for the PR Monitor surface.
 
     Instantiated once by the CLI / Coordinator. ``enabled=False``
-    (``--no-pr-monitor``) turns every call into a no-op returning
+    (``--degraded-pr``) turns every call into a no-op returning
     empty data — KB_design §3.13 M4 §9 verification 5.
     """
 
@@ -196,7 +196,7 @@ class PRMonitorClient:
         endpoint can't hang a marathon pod by streaming gigabytes.
         """
         if not self.enabled:
-            raise PRMonitorError("PR Monitor client disabled (--no-pr-monitor)")
+            raise PRMonitorError("PR Monitor client disabled (--degraded-pr)")
         query = ""
         if params:
             # Drop None / empty values so we don't send ``?state=&label=``.
