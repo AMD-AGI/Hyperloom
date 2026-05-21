@@ -301,6 +301,13 @@ def build_manifest(
         "research_lane_capacity": int(
             getattr(args, "research_lane_capacity", 1) or 1
         ) if args is not None else 1,
+        # KB_design_continue §3.3 — IR-3 soft-degrade audit.
+        "kb_degraded_reason": (
+            getattr(args, "kb_degraded_reason", None) if args is not None else None
+        ),
+        "pr_degraded_reason": (
+            getattr(args, "pr_degraded_reason", None) if args is not None else None
+        ),
     }
 
 

@@ -87,7 +87,7 @@ _SESSION_SKELETON: tuple[str, ...] = (
     # ``.kb_flushed.ndjson`` / ``.kb_dead_letter.ndjson`` / ``.kb_audit.jsonl``
     # / ``.kb_flusher.pid`` files described in KB_design §3.6 + §3.13 M1.
     # Created up-front so the CortexKBClient never has to ``mkdir -p`` on
-    # the hot path; absent files imply ``--no-cortex`` or pre-T0 state.
+    # the hot path; absent files imply ``--degraded-kb`` or pre-T0 state.
     "runtime/cortex",
 )
 
