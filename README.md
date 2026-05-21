@@ -138,6 +138,8 @@ OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
 |----------|-------------|---------|
 | `SAFE_API_KEY` | LLM gateway auth key | `ak-your-safe-apikey` |
 | `OPENAI_BASE_URL` | LLM gateway endpoint | `https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1` |
+| `CURSOR_API_KEY` (optional) | Cursor SDK key for the OOB cursor kernel-opt backend (independent issuer, prefix `crsr_...`). Leave blank to skip cursor and only use claude/codex/geak. | `crsr_xxxxxxxxxxxx` |
+| `CURSOR_DEFAULT_MODEL` (optional) | Override the default Cursor model id | `claude-opus-4-7` |
 
 > `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway). GEAK and OOB (claude/codex) inherit their API key and base URL from `SAFE_API_KEY` / `OPENAI_BASE_URL` automatically — no separate GEAK, OOB, InferenceX, or TraceLens configuration is needed.
 
@@ -194,13 +196,6 @@ Requirements:
 ````
 
 Follow the script output. In the default flow, users do not need to manually configure GEAK, OOB, InferenceX, or TraceLens.
-
-**Optional (Cursor kernel-opt backend):** add these to the same `$REPO_ROOT/.env` if you want Hyperloom to use the Cursor SDK as one of the kernel-opt backends. Leave them blank to keep using claude/codex/geak only.
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `CURSOR_API_KEY` | Cursor SDK key for the OOB cursor backend; independent issuer (Cursor account, prefix `crsr_...`). When unset, Hyperloom auto-skips cursor from default backend selection and only races claude/codex/geak. | `crsr_xxxxxxxxxxxx` |
-| `CURSOR_DEFAULT_MODEL` | Override the default Cursor model id. | `claude-opus-4-7` (default) |
 
 ### Launch Inference Optimization
 
