@@ -295,6 +295,52 @@ ensure_patch_tools() {
   command -v patch >/dev/null 2>&1 || warn "patch still missing after apt-get install"
 }
 
+# Pin `ts` (from the `moreutils` Debian/Ubuntu package) so timestamp-prefixed
+# logging in downstream benchmark wrappers (Magpie's `*_mi*.sh` and any
+# `cmd 2>&1 | ts '[%H:%M:%S]'` shim the optimizer fork-execs) doesn't blow
+# up with `ts: command not found`.
+#
+# Background: stripped runtime images (e.g. `lmsysorg/sglang:v0.5.9-rocm700-mi30x`
+# and the minimal vLLM serving images) ship without moreutils. When a wrapper
+# pipes its stdout/stderr through `ts` for per-line timestamps and `ts` is
+# missing, bash propagates exit code 127 up through the pipeline. The driving
+# inference_optimizer validate_stack executor sees `subprocess_nonzero`,
+# classifies the run as a baseline failure, and loops — burning minutes per
+# iteration on a one-line apt fix. moreutils itself is a tiny perl-only
+# package (<1 MB with deps), so this is a strict win over the retry cost.
+#
+# Same shape as ensure_patch_tools(): cheap apt-install with dry-run /
+# check-only / no-apt-get fail-soft semantics. fail-soft on install error
+# rather than die so that operators on truly air-gapped hosts can still get
+# the rest of the toolchain up (the wrapper's `| ts` is a logging nicety,
+# not a correctness requirement; the run itself can still produce results).
+ensure_moreutils() {
+  log "ensuring moreutils (provides \`ts\`; required by benchmark wrappers' timestamped logging shims)"
+  if command -v ts >/dev/null 2>&1; then
+    log "ts: $(command -v ts)"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "ts missing; benchmark wrappers that pipe through \`| ts\` will fail with exit 127 (\`ts: command not found\`)"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would apt-get install moreutils because ts is missing"
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    warn "ts missing and apt-get unavailable; install \`moreutils\` manually (apt-get install moreutils, or distro equivalent)"
+    return 0
+  fi
+  log "apt-get installing: moreutils"
+  apt-get update >/dev/null 2>&1 || warn "apt-get update failed; install may pull stale package indices"
+  if ! apt-get -y install moreutils >/dev/null; then
+    warn "apt-get install of moreutils failed; benchmark wrappers' \`| ts\` timestamping will fail-soft on this host"
+    return 0
+  fi
+  command -v ts >/dev/null 2>&1 || warn "ts still missing after apt-get install moreutils"
+}
+
 ensure_node() {
   log "ensuring Node.js/npm for claude/codex CLIs and @cursor/sdk"
   if command -v node >/dev/null 2>&1 && npm --version >/dev/null 2>&1; then
@@ -821,6 +867,7 @@ main() {
   ensure_python
   ensure_node
   ensure_patch_tools
+  ensure_moreutils
   ensure_ray
   ensure_ray_started
   ensure_tracelens
