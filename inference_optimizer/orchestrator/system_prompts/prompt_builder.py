@@ -54,12 +54,21 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "validate_stack",
     # finalize
     "report",
-    # support phase intentionally removed — comm_optimization /
-    # compiler_tuning / dream / re_explore / recover are all _noop_prep
-    # (cli._NOOP_KINDS_COMMON) and not in the Critic's default approve
-    # whitelist; surfacing them only produced silent "succeeded" spins
-    # and rejected proposals. Re-add when real executors land (see
-    # remain_todo.md sections C, I, M).
+    # support
+    #
+    # ``recover`` was re-enabled in 2026-05 alongside the robustness-agent
+    # ``gpu_memory_leaked`` signal. A real executor (see
+    # ``orchestrator/action_executors/recover.py``) now frees leaked
+    # VRAM and, when ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``, attempts
+    # ``rocm-smi --gpureset``. The Critic's default approve whitelist
+    # already includes ``recover``.
+    #
+    # ``comm_optimization`` / ``compiler_tuning`` / ``dream`` /
+    # ``re_explore`` remain disabled here — their executors are still
+    # ``_noop_prep`` stubs and would just produce silent "succeeded"
+    # spins. Re-add when real executors land (see remain_todo.md
+    # sections C, I, M).
+    "recover",
 )
 
 NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
@@ -71,8 +80,10 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     "validate_stack",
     # finalize
     "report",
-    # support phase (dream / re_explore) removed for the same reason
-    # as FULL_ENABLED_ACTIONS.
+    # support — recover is needed even without kernel-opt because GPU
+    # leaks from baseline / backends / params / sweep can still hang the
+    # session; the executor itself is kernel-agnostic.
+    "recover",
 )
 
 # Actions that the Kernel agent owns end-to-end (Plan A). Orchestration MUST
@@ -162,6 +173,11 @@ def _section_session_context(
         "Per-tick dynamic context (Mission progress, Time budget, Shared",
         "session state, Coordinator checklist, KB hints, inbox tail) is",
         "appended below the system prompt every tick by the Coordinator.",
+        "The Time-budget block carries `remaining=X.Xmin`. When `remaining` is",
+        "smaller than `report.typical_runtime_min` * 3 you SHOULD propose",
+        "`report` as the next action — the Coordinator will also auto-flush a",
+        "deterministic report at the deadline, but proposing it earlier",
+        "captures any LLM narrative you want surfaced.",
     ]
 
 
@@ -233,6 +249,10 @@ def _section_pipeline_and_budget(
         "KEEP'd entry in optimization_stack, you MUST run `validate_stack` before",
         "the next explore round or before `report`. The Coordinator surfaces a",
         "TODO in the per-tick checklist when this trigger is active.",
+        "",
+        "At the wall-clock deadline the Coordinator auto-enqueues a deterministic",
+        "`report` (no LLM) during closing phase — do not waste ticks re-proposing",
+        "it unless you want an earlier narrative version before time runs out.",
     ])
     return lines
 
@@ -474,6 +494,13 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "authoritative dedup ledgers and filter BOTH default grids and",
         "LLM-supplied `params.grid` uniformly.",
         "",
+        "**Use the numeric `gain_pct` on every row.** The `*_search` and",
+        "`backend_winners_history` blocks now render `±x.xx%` per variant.",
+        "Read them as ranking signal: a `-2%` reject means the flag itself is",
+        "bad on this workload (don't retry the same value), `-0.3%` is",
+        "'try a different value', and a sub-threshold `+0.4%` reject is a",
+        "candidate for a synergy combo with another winner.",
+        "",
         "1. **Sub-actions** — sibling flags. If `--max-num-seqs 256` won, also",
         "   try `--max-num-seqs 128` / `512` / `1024`; if `VLLM_ROCM_USE_AITER=1`",
         "   won, sweep the related `VLLM_ROCM_USE_AITER_*` boolean family.",
@@ -526,11 +553,13 @@ The three kernel-owned actions (`select_kernels`, `kernel_opt`,
 action. Pick them by `eff_score` per the DECISION FRAMEWORK; the blocks
 below are only **payload templates** describing how to build the REQUEST
 once you have selected the action. The Coordinator hard-gates the
-obvious prerequisites (TODO 3/4 fires after a `kernel_opt` KEEP forces
-`integrate`); `select_kernels` itself is enforced only at the REQUEST
-layer for `run_optimization`, and explore actions like `params` /
-`backends` / `sweep` are NEVER gated on it. Everything else flows
-through the scoreboard.
+obvious prerequisites (TODO 3/5 surfaces as guidance after a fresh
+`profile` until `select_kernels` populates the cache so TraceLens writes
+`analysis.md`; TODO 4/5 fires after a `kernel_opt` KEEP forces
+`integrate`). Explore actions like `params` / `backends` / `sweep` are
+NEVER gated on `select_kernels` at the action layer (only
+`run_optimization` REQUESTs are gated, by
+`_sequence_denial_for_request`).
 
 ### `select_kernels` — payload (Coordinator gates `run_optimization` until cache is fresh)
 
@@ -543,7 +572,10 @@ through the scoreboard.
   Coordinator denies kernel_opt requests with `select_kernels must run
   first` when the cache is stale, but `params` / `backends` / `sweep` /
   `report` are NEVER gated on it. Re-emit only after a fresh `profile`
-  action invalidates the cache.
+  action invalidates the cache.  TODO 3/5 surfaces in
+  `_required_next_step` as guidance whenever `last_profile_trace` is
+  fresh but the cache is still stale — emit the REQUEST yourself
+  before kernel_opt / integrate cycles.
 
 ### `kernel_opt` — payload for `run_optimization`
 
@@ -579,10 +611,10 @@ HARD RULES (applied at REQUEST build time, NOT at action-selection time):
   exact regression that closed #144's last comment Layer 2. Omit the field
   and let auto-pick fire.
 
-### `integrate` — payload (TODO 3/4 forces this immediately after a KEEP)
+### `integrate` — payload (TODO 4/5 forces this immediately after a KEEP)
 
 When `run_optimization_done` arrives with `result.proposal.decision='KEEP'`,
-the Coordinator's TODO 3/4 makes `integrate` the only allowed action
+the Coordinator's TODO 4/5 makes `integrate` the only allowed action
 until the patch lands on `optimization_stack`. Payload:
 
   request{target_agent: 'kernel', kind: 'integrate',
@@ -597,7 +629,7 @@ the previous KEEP/REVERT decayed only that kernel_id's branch), but is
 not required — the scoreboard decides.
 
 After every successful `integrate` (KEEP), the Coordinator records a
-new entry on `optimization_stack` and the TODO 4/4 `validate_stack`
+new entry on `optimization_stack` and the TODO 5/5 `validate_stack`
 gate fires; obey it before resuming any explore / deep round.
 
 ### KERNEL TARGETING (native vs torch.compile)
