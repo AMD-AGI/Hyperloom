@@ -64,6 +64,11 @@ _resolve_magpie_python() {
 MAGPIE_PYTHON="$(_resolve_magpie_python)"
 PYTHONPATH="${MAGPIE_DIR}:${PYTHONPATH:-}"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
+# TraceLens checkout root. MUST point at a checkout of the
+# AMD-AGI/TraceLens-internal repo at tag `Hyperloom_integration_v0.3.1`
+# or newer (release/hyperloom_integration_v0.3.1 branch). The per-version
+# sglang_roofline_patches/sglang_<minor>_<patch>/ layout is required by
+# _server_patcher; pre-v0.3.1 flat checkouts are no longer supported.
 TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 # Writable mirror for TraceLens when $TRACELENS_ROOT is on a read-only mount
 # (e.g. /wekafs/...). Mirrors the OOB pattern: cp -r the read-only source into
@@ -305,6 +310,52 @@ ensure_patch_tools() {
   command -v patch >/dev/null 2>&1 || warn "patch still missing after apt-get install"
 }
 
+# Pin `ts` (from the `moreutils` Debian/Ubuntu package) so timestamp-prefixed
+# logging in downstream benchmark wrappers (Magpie's `*_mi*.sh` and any
+# `cmd 2>&1 | ts '[%H:%M:%S]'` shim the optimizer fork-execs) doesn't blow
+# up with `ts: command not found`.
+#
+# Background: stripped runtime images (e.g. `lmsysorg/sglang:v0.5.9-rocm700-mi30x`
+# and the minimal vLLM serving images) ship without moreutils. When a wrapper
+# pipes its stdout/stderr through `ts` for per-line timestamps and `ts` is
+# missing, bash propagates exit code 127 up through the pipeline. The driving
+# inference_optimizer validate_stack executor sees `subprocess_nonzero`,
+# classifies the run as a baseline failure, and loops — burning minutes per
+# iteration on a one-line apt fix. moreutils itself is a tiny perl-only
+# package (<1 MB with deps), so this is a strict win over the retry cost.
+#
+# Same shape as ensure_patch_tools(): cheap apt-install with dry-run /
+# check-only / no-apt-get fail-soft semantics. fail-soft on install error
+# rather than die so that operators on truly air-gapped hosts can still get
+# the rest of the toolchain up (the wrapper's `| ts` is a logging nicety,
+# not a correctness requirement; the run itself can still produce results).
+ensure_moreutils() {
+  log "ensuring moreutils (provides \`ts\`; required by benchmark wrappers' timestamped logging shims)"
+  if command -v ts >/dev/null 2>&1; then
+    log "ts: $(command -v ts)"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "ts missing; benchmark wrappers that pipe through \`| ts\` will fail with exit 127 (\`ts: command not found\`)"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would apt-get install moreutils because ts is missing"
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    warn "ts missing and apt-get unavailable; install \`moreutils\` manually (apt-get install moreutils, or distro equivalent)"
+    return 0
+  fi
+  log "apt-get installing: moreutils"
+  apt-get update >/dev/null 2>&1 || warn "apt-get update failed; install may pull stale package indices"
+  if ! apt-get -y install moreutils >/dev/null; then
+    warn "apt-get install of moreutils failed; benchmark wrappers' \`| ts\` timestamping will fail-soft on this host"
+    return 0
+  fi
+  command -v ts >/dev/null 2>&1 || warn "ts still missing after apt-get install moreutils"
+}
+
 ensure_node() {
   log "ensuring Node.js/npm for claude/codex CLIs and @cursor/sdk"
   if command -v node >/dev/null 2>&1 && npm --version >/dev/null 2>&1; then
@@ -446,16 +497,15 @@ ensure_tracelens() {
     run bash -lc "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir -e ."
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    # TraceLens #124: prefer the inference variant (correct entry for
-    # vLLM/SGLang traces). Fall back to the legacy CLI for older builds.
+    # TraceLens #124: only the inference variant is accepted (the correct
+    # entry for vLLM/SGLang traces). Hyperloom is inference-only since
+    # v0.4; the legacy training-mode CLI was removed to keep install /
+    # runtime in lockstep.
     if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
       TraceLens_generate_perf_report_pytorch_inference --help >/dev/null
       log "TraceLens perf CLI verified: TraceLens_generate_perf_report_pytorch_inference (#124)"
-    elif command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
-      TraceLens_generate_perf_report_pytorch --help >/dev/null
-      warn "TraceLens_generate_perf_report_pytorch_inference not found; using legacy TraceLens_generate_perf_report_pytorch"
     else
-      verify_die "Neither TraceLens_generate_perf_report_pytorch_inference nor TraceLens_generate_perf_report_pytorch found after install"
+      verify_die "TraceLens_generate_perf_report_pytorch_inference not found after install (Hyperloom is inference-only since v0.4; bump TraceLens-internal)"
     fi
   fi
 }
@@ -472,9 +522,38 @@ ensure_geak() {
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
     run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"
-    run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"
+    # GEAK v3.1.0 ships 5 MCP tools under mcp_tools/; all of them are
+    # imported by the bundled ``minisweagent`` at preprocess time:
+    #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
+    #   * profiler-mcp               — Metrix instrumented profiling
+    #                                  (preprocessor.py:1073 import)
+    #   * metrix-mcp                 — backend for profiler-mcp
+    #   * cross-session-memory-mcp   — GEAK_MEMORY_STORE_PATH retriever
+    #   * automated-test-discovery   — pre-fills eval_command harness
+    # Installing only rag-mcp (the historical default) leaves the
+    # other four ``ModuleNotFoundError`` at runtime — observed on the
+    # 2026-05-15 Qwen3-32B GEAK attempts where ``profiler_mcp`` was
+    # missing and every GEAK attempt aborted in ~4 minutes with a
+    # zero-byte baseline. Install all five together.
+    for _geak_mcp in rag-mcp profiler-mcp metrix-mcp \
+                    cross-session-memory-mcp automated-test-discovery; do
+      run python3 -m pip install -q --no-cache-dir \
+        "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"
+    done
+    # Patch GEAK's bundled prompt YAML to remove the misleading
+    # ``task_runner.py performance`` example that causes sub-agent
+    # LLMs to burn budget on ``find /`` for a non-existent script.
+    # Idempotent and fail-soft — see kernel-agent/tools/geak_prompt_patcher.py
+    # for the full rationale. Always best-effort; only blocking when
+    # the operator explicitly opts in via HYPERLOOM_GEAK_PROMPT_PATCH_REQUIRED=1.
+    _geak_patcher="${KERNEL_AGENT_ROOT}/tools/geak_prompt_patcher.py"
+    if [ -f "$_geak_patcher" ]; then
+      run python3 "$_geak_patcher"
+    else
+      warn "geak prompt patcher missing at $_geak_patcher; skip"
+    fi
   else
-    log "check-only: skipping GEAK and rag-mcp installation"
+    log "check-only: skipping GEAK and mcp_tools installation"
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
     if [ "$DRY_RUN" -eq 0 ]; then
@@ -882,15 +961,14 @@ except Exception:
     raise SystemExit(1)
 PY
 )"
-  # TraceLens perf-report CLI: report whichever variant is available
-  # (#124 prefers the _inference suffix; the legacy CLI is acceptable as
-  # a fallback, the dispatcher in tools/tracelens_analysis.py picks at runtime).
+  # TraceLens perf-report CLI: only the inference variant is accepted
+  # (#124). Hyperloom is inference-only since v0.4; the legacy
+  # training-mode CLI was removed because its output shape silently
+  # breaks downstream fusion / roofline analysis.
   if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
     log "found TraceLens_generate_perf_report_pytorch_inference: $(command -v TraceLens_generate_perf_report_pytorch_inference)"
-  elif command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
-    warn "TraceLens_generate_perf_report_pytorch_inference not found; using legacy TraceLens_generate_perf_report_pytorch: $(command -v TraceLens_generate_perf_report_pytorch)"
   else
-    warn "TraceLens perf-report CLI not found (looked for both _inference and legacy)"
+    warn "TraceLens_generate_perf_report_pytorch_inference not found (Hyperloom is inference-only since v0.4)"
   fi
   for tool in geak oob claude codex; do
     if command -v "$tool" >/dev/null 2>&1; then
@@ -954,6 +1032,7 @@ main() {
   ensure_python
   ensure_node
   ensure_patch_tools
+  ensure_moreutils
   ensure_ray
   ensure_ray_started
   ensure_tracelens

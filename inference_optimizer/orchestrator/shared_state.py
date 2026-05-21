@@ -131,16 +131,36 @@ class SharedState:
     # records the incremental candidate that was accepted; current_best keeps
     # the materialized full args/env for execution.
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
-    # Parallel to ``optimization_stack``: per-entry incremental gain in
-    # percent (current_best vs. baseline at the moment that stack entry
-    # was promoted). Index ``i`` here aligns with index ``i`` in
-    # ``optimization_stack``. session_breakdown's capability_summary uses
-    # this to attribute "how much of the validated cumulative gain came
-    # from this action / capability" without re-walking the event log.
-    # Coordinator appends to this list at the same time it appends to
-    # ``optimization_stack`` (see ``_lift_to_current_best``); missing
-    # entries (e.g. on resumed sessions) are treated as ``None``.
-    gain_per_stack_entry: list[float | None] = field(default_factory=list)
+    # Parallel ledger to ``optimization_stack``: one rich entry per KEEP
+    # event with both the cumulative gain (vs baseline) AT the moment the
+    # entry was promoted AND the incremental contribution this entry alone
+    # added (``delta_pct = cum_gain_after - cum_gain_after_of_prev``).
+    # Index ``i`` aligns with index ``i`` in ``optimization_stack``.
+    #
+    # Each entry conforms to ``breakdown.schema.StackGainEntry``::
+    #     {
+    #       "ts": iso8601,
+    #       "action": "params" | "backends" | "integrate" | "validate_stack",
+    #       "variant_name": str | None,
+    #       "stack_len_before": int,
+    #       "stack_len_after": int,
+    #       "cum_gain_before": float,
+    #       "cum_gain_after": float | None,
+    #       "delta_pct": float | None,        # None on resumed/seeded entries
+    #       "extra_sglang_args": str,
+    #     }
+    #
+    # Coordinator appends here at the same time it appends to
+    # ``optimization_stack`` via :meth:`append_stack_gain_entry`; the
+    # helper computes cum_gain_after + delta_pct from
+    # ``self.baseline_tput`` and the previous entry's ``cum_gain_after``
+    # so call sites only pass action / variant_name / new_tput.
+    #
+    # Pre-v0.7 sessions wrote ``list[float | None]`` (the cum_gain_after
+    # number only); ``breakdown/collectors.py:collect_attribution`` has a
+    # promotion shim that lifts the old shape into this rich one when it
+    # detects non-dict entries.
+    gain_per_stack_entry: list[dict[str, Any]] = field(default_factory=list)
     cumulative_gain: float = 0.0
     # Cumulative gain measured by the `validate_stack` action — i.e. by
     # actually re-baselining a fresh server with EVERY KEEP'd entry of
@@ -156,6 +176,12 @@ class SharedState:
     # re-validation is required after new KEEPs landed.
     cumulative_gain_validated_stack_len: int = 0
     stop_reason: str = ""
+    # Closing phase — set when the wall-clock deadline fires. While True,
+    # Coordinator skips reactor passes and only pumps the dispatcher to
+    # drain a Coordinator-enqueued ``report`` task. Cleared on resume.
+    closing_phase: bool = False
+    closing_started_unix: float = 0.0
+    closing_report_task_id: str = ""
     current_action: str = ""
     crash_count: int = 0
     pruned_families: list[str] = field(default_factory=list)
@@ -1022,6 +1048,26 @@ class SharedState:
         Orchestration still sees lower-ranked but **reusable native** entries
         (e.g. AITER RMSNorm) and can dispatch ``run_optimization`` against
         them instead of looping on rejected ones.
+
+        We also persist ``trace_health_warnings`` so Orchestration's prompt
+        surfaces the structured routing signals produced by the TraceLens
+        analyzer (Hyperloom v0.4 finishing-touches T3 / T4):
+
+        * ``high_gpu_idle_pct`` — Executive Summary's ``Idle %`` exceeded
+          the gate threshold; per Report_Interfacing.docx §2 (idle-gate
+          sanity check) the LLM should pivot to parameter optimization
+          rather than kernel rewriting in this regime.
+        * ``tracelens_analysis_failed`` — the TraceLens subprocess crashed
+          permanently (perf-CLI missing, ``analysis.md`` not produced,
+          timeout, …); Coordinator already demoted this to ``status=ok``
+          + empty ``hot_kernels`` at the handler boundary, but the LLM
+          still needs to *see* the failure so it picks parameter
+          optimization explicitly instead of inferring "TraceLens is
+          still running" from the empty list.
+
+        Without this pass-through the warnings produced upstream are
+        dropped at the SharedState boundary and Orchestration cannot
+        ground its routing decisions on them.
         """
         if not isinstance(result, dict):
             return
@@ -1056,11 +1102,26 @@ class SharedState:
             })
             if reusable and kid:
                 reusable_ids.append(str(kid))
+
+        # T3 / T4: keep the structured warning list verbatim — handler
+        # already shaped each entry into the documented form (code,
+        # severity, message, plus code-specific extras like idle_pct or
+        # returncode). We filter to ``dict`` to be defensive against a
+        # buggy tool emitting non-dict junk, but otherwise pass through
+        # untouched so the LLM sees the full diagnostic.
+        raw_warnings = result.get("trace_health_warnings") or []
+        warnings_cleaned: list[dict[str, Any]] = []
+        if isinstance(raw_warnings, list):
+            for entry in raw_warnings:
+                if isinstance(entry, dict) and entry.get("code"):
+                    warnings_cleaned.append(dict(entry))
+
         self.last_select_kernels = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
             "hot_kernels_top15": summary,
             "reusable_native_kernel_ids": reusable_ids,
+            "trace_health_warnings": warnings_cleaned,
             "ts": _now_iso(),
         }
 
@@ -1456,12 +1517,88 @@ class SharedState:
             "workspace": self.current_best.get("workspace"),
             "source": "seeded_from_current_best",
         }]
-        # Keep ``gain_per_stack_entry`` aligned with ``optimization_stack``
-        # (None == we don't know the per-entry gain for seeded entries).
+        # Keep ``gain_per_stack_entry`` aligned with ``optimization_stack``.
+        # Seeded entries carry ``cum_gain_after = delta_pct = None`` so
+        # ``breakdown.attribution.method`` correctly classifies as
+        # ``reconstructed`` rather than ``validated``.
         if len(self.gain_per_stack_entry) < len(self.optimization_stack):
-            self.gain_per_stack_entry.extend(
-                [None] * (len(self.optimization_stack) - len(self.gain_per_stack_entry))
-            )
+            for i in range(len(self.gain_per_stack_entry), len(self.optimization_stack)):
+                stk = self.optimization_stack[i] if i < len(self.optimization_stack) else {}
+                if not isinstance(stk, dict):
+                    stk = {}
+                self.gain_per_stack_entry.append({
+                    "ts": stk.get("ts") or "",
+                    "action": stk.get("action") or "unknown",
+                    "variant_name": stk.get("variant_name"),
+                    "stack_len_before": i,
+                    "stack_len_after": i + 1,
+                    "cum_gain_before": None,
+                    "cum_gain_after": None,
+                    "delta_pct": None,
+                    "extra_sglang_args": (
+                        stk.get("extra_sglang_args")
+                        or stk.get("candidate_extra_sglang_args")
+                        or ""
+                    ),
+                })
+
+    def append_stack_gain_entry(
+        self,
+        *,
+        action: str,
+        variant_name: str | None,
+        new_tput: float | int | None,
+        extra_sglang_args: str = "",
+        ts: str | None = None,
+    ) -> None:
+        """Append one V1-schema :class:`StackGainEntry` aligned with the
+        last ``optimization_stack`` push.
+
+        Computes ``cum_gain_after = (new_tput - baseline_tput) / baseline_tput * 100``
+        and ``delta_pct = cum_gain_after - prev_cum_gain_after`` so call
+        sites only need to pass action / variant_name / new_tput. Falls
+        back to ``None`` (for both cum_gain_after and delta_pct) when
+        ``baseline_tput`` is missing or ``new_tput`` isn't a finite
+        number; the entry is still emitted so index-alignment with
+        ``optimization_stack`` is preserved.
+        """
+        cum_after: float | None = None
+        try:
+            bt = float(self.baseline_tput or 0.0)
+            nt = float(new_tput) if new_tput is not None else None
+            if bt > 0 and nt is not None:
+                cum_after = (nt - bt) / bt * 100.0
+        except (TypeError, ValueError):
+            cum_after = None
+
+        # Find the previous entry's cum_gain_after to compute this entry's
+        # incremental delta. Skip seeded / unknown entries (cum_after=None).
+        prev_cum: float = 0.0
+        for prev in reversed(self.gain_per_stack_entry):
+            if not isinstance(prev, dict):
+                # legacy [float, ...] state: treat the number itself as
+                # the prior cum_gain_after.
+                if isinstance(prev, (int, float)):
+                    prev_cum = float(prev)
+                break
+            prior = prev.get("cum_gain_after")
+            if isinstance(prior, (int, float)):
+                prev_cum = float(prior)
+                break
+
+        delta = (cum_after - prev_cum) if cum_after is not None else None
+        stack_len_after = len(self.optimization_stack)
+        self.gain_per_stack_entry.append({
+            "ts": ts or datetime.now(timezone.utc).isoformat(),
+            "action": action,
+            "variant_name": variant_name,
+            "stack_len_before": stack_len_after - 1,
+            "stack_len_after": stack_len_after,
+            "cum_gain_before": prev_cum,
+            "cum_gain_after": cum_after,
+            "delta_pct": delta,
+            "extra_sglang_args": extra_sglang_args,
+        })
 
     # ------------------------------------------------------------------
     # Time-budget helpers (Phase 2 — consumed by Coordinator._compose_prompt)
@@ -1597,6 +1734,9 @@ class SharedState:
             f"tick={int(self.tick or 0)}  "
             f"target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
             f"stop_reason={self.stop_reason or '(none)'}",
+            f"closing_phase={self.closing_phase}  "
+            f"closing_started_unix={self.closing_started_unix or 0.0}  "
+            f"closing_report_task_id={self.closing_report_task_id or '(none)'}",
         ]
         return "\n".join(lines)
 
@@ -1703,29 +1843,113 @@ class SharedState:
             parts.append(f"{fw}:backend={n_b}/param={n_p}")
         return ", ".join(parts) or "(none)"
 
+    @staticmethod
+    def _format_variant_line(entry: dict[str, Any]) -> str:
+        """One-line render of a search variant for prompt blocks.
+
+        Format: ``{name:28s} {±gain%:>9} (tput=...) <flags> <K=V envs>``.
+        Used by :meth:`_format_backend_winners_history` and
+        :meth:`_format_search_state` so the LLM sees the same numerical
+        signal everywhere the explore ledger surfaces.
+        """
+        name = str(entry.get("name") or "?")
+        gain = entry.get("gain_pct")
+        tput = entry.get("tput") or entry.get("output_throughput")
+        gain_s = (
+            f"{gain:+.2f}%" if isinstance(gain, (int, float)) else " no_meas"
+        )
+        tput_s = (
+            f" (tput={tput:.1f})"
+            if isinstance(tput, (int, float)) and tput > 0
+            else ""
+        )
+        args = (
+            str(entry.get("extra_sglang_args") or "").strip()
+            or "(no-flag)"
+        )
+        envs = entry.get("extra_envs") or {}
+        envs_s = (
+            " " + " ".join(f"{k}={v}" for k, v in sorted(envs.items()))
+            if envs else ""
+        )
+        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}"
+
+    @staticmethod
+    def _enrich_with_tested_gain(
+        entry: dict[str, Any], tested: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Backfill ``gain_pct``/``tput`` from the matching ``tested[fp]``.
+
+        ``params_search.accepted`` is built from ``_variant_to_dict()`` and
+        does NOT persist ``gain_pct``; the matching ``tested[fingerprint]``
+        entry does. ``backends_search.accepted`` already stamps gain on
+        promote (see :meth:`record_backends_accepted`), so this is a no-op
+        there. Pulling the value across at render time keeps the renderer
+        symmetric and avoids a second writer for accepted entries.
+        """
+        if (
+            entry.get("gain_pct") is not None
+            and entry.get("tput") is not None
+        ):
+            return entry
+        fp = str(entry.get("fingerprint") or "")
+        snap = tested.get(fp) if fp else None
+        if not isinstance(snap, dict):
+            return entry
+        out = dict(entry)
+        if out.get("gain_pct") is None:
+            out["gain_pct"] = snap.get("gain_pct")
+        if out.get("tput") is None:
+            result = (
+                snap.get("result")
+                if isinstance(snap.get("result"), dict) else {}
+            )
+            out["tput"] = (
+                snap.get("tput") or (result or {}).get("output_throughput")
+            )
+        return out
+
     def _format_backend_winners_history(self) -> str:
+        """Multi-line render of the explore-round winners history.
+
+        Surfaces per-winner ``gain_pct`` + ``tput`` + resolved flags/envs
+        for the last 5 rounds so the IDEA GENERATION step (SKILL.md) has
+        real signal to rank retries / synergy combos by, not just names.
+        Older rounds collapse to a ``[+N earlier rounds elided]`` line.
+        """
         if not self.backend_winners_history:
             return "(no explore rounds completed)"
-        last = self.backend_winners_history[-3:]
-        parts: list[str] = []
+        last = self.backend_winners_history[-5:]
+        out: list[str] = [""]
         for r in last:
             if not isinstance(r, dict):
                 continue
-            wn = [w.get("name") for w in (r.get("winners") or [])
-                  if isinstance(w, dict)]
-            best = r.get("best") or {}
-            best_name = (
-                best.get("name") if isinstance(best, dict) else None
+            best = r.get("best") if isinstance(r.get("best"), dict) else None
+            best_gain = best.get("gain_pct") if best else None
+            gain_tag = (
+                f" {best_gain:+.2f}%"
+                if isinstance(best_gain, (int, float)) else ""
             )
-            parts.append(
-                f"{r.get('round_id','?')}({r.get('action','?')}): "
-                f"winners={wn or []} best={best_name or '(none)'}"
+            base = float(r.get("base_tput", 0.0) or 0.0)
+            out.append(
+                f"    {r.get('round_id','?')} ({r.get('action','?')}): "
+                f"base_tput={base:.1f}  "
+                f"best={(best.get('name') if best else '(none)')}{gain_tag}"
             )
-        suffix = (
-            f" [+{len(self.backend_winners_history) - 3} earlier rounds]"
-            if len(self.backend_winners_history) > 3 else ""
-        )
-        return " | ".join(parts) + suffix
+            winners = [
+                w for w in (r.get("winners") or []) if isinstance(w, dict)
+            ]
+            if not winners:
+                out.append("      (no winners this round)")
+                continue
+            for w in winners:
+                out.append("      • " + SharedState._format_variant_line(w))
+        if len(self.backend_winners_history) > 5:
+            out.append(
+                f"    [+{len(self.backend_winners_history) - 5} "
+                f"earlier rounds elided]"
+            )
+        return "\n".join(out)
 
     def _format_params_search(self) -> str:
         return self._format_search_state(self.params_search)
@@ -1735,21 +1959,42 @@ class SharedState:
 
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:
-        """Compact one-liner for a *_search dedup ledger (prompt-friendly)."""
+        """Multi-line render of a ``*_search`` dedup ledger.
+
+        Each accepted/rejected entry surfaces its real ``gain_pct`` so the
+        LLM ranks retries by observed impact instead of guessing from
+        names alone. Counts go on the head line; bodies show only the
+        most recent 5 entries per bucket (older rows are still in the
+        ledger; only the prompt body is truncated).
+        """
         if not search:
             return "(none)"
-        accepted = search.get("accepted") or []
-        rejected = search.get("rejected") or []
+        accepted = list(search.get("accepted") or [])
+        rejected = list(search.get("rejected") or [])
         tested = search.get("tested") or {}
         cursor = search.get("cursor", 0)
-        acc_names = [
-            str(v.get("name", "")) for v in accepted
-            if isinstance(v, dict) and v.get("name")
+        out: list[str] = [
+            "",
+            f"    cursor={cursor}  accepted={len(accepted)}  "
+            f"rejected={len(rejected)}  tested={len(tested)}",
         ]
-        return (
-            f"accepted={acc_names or []} rejected={len(rejected)} "
-            f"tested={len(tested)} cursor={cursor}"
-        )
+        if accepted:
+            out.append("    accepted:")
+            for entry in accepted[-5:]:
+                if not isinstance(entry, dict):
+                    continue
+                out.append("      • " + SharedState._format_variant_line(
+                    SharedState._enrich_with_tested_gain(entry, tested)
+                ))
+        if rejected:
+            out.append("    rejected (last 5):")
+            for entry in rejected[-5:]:
+                if not isinstance(entry, dict):
+                    continue
+                out.append("      • " + SharedState._format_variant_line(
+                    entry
+                ))
+        return "\n".join(out)
 
     def _format_optimization_stack(self) -> str:
         if not self.optimization_stack:
@@ -1774,11 +2019,40 @@ class SharedState:
         reusable = list(
             self.last_select_kernels.get("reusable_native_kernel_ids", [])
         )
-        return (
+        base = (
             f"trace={self.last_select_kernels.get('trace_input','?')} "
             f"candidates_path={self.last_select_kernels.get('candidates_path','?')} "
             f"top={ids or []} reusable_native={reusable or []}"
         )
+        # T3 / T4 finishing-touches: when TraceLens emitted a routing
+        # signal (high GPU idle → prefer params; permanent failure →
+        # don't keep waiting on kernel candidates), surface it inline
+        # so the Orchestration LLM grounds the next ACTION on this
+        # signal rather than re-trying TraceLens or guessing why
+        # ``top=[]``. We render compactly:
+        #   warnings=[high_gpu_idle_pct(idle=35.0%,threshold=20.0%); …]
+        # and omit the suffix entirely in the steady-state (no
+        # warnings) so existing prompt-format-stable tests don't see
+        # gratuitous additions.
+        warnings = self.last_select_kernels.get("trace_health_warnings") or []
+        if not warnings:
+            return base
+        rendered: list[str] = []
+        for w in warnings:
+            if not isinstance(w, dict):
+                continue
+            code = str(w.get("code") or "unknown")
+            extras: list[str] = []
+            if "idle_pct" in w and "threshold_pct" in w:
+                extras.append(f"idle={w['idle_pct']}%")
+                extras.append(f"threshold={w['threshold_pct']}%")
+            if "returncode" in w:
+                extras.append(f"rc={w['returncode']}")
+            if extras:
+                rendered.append(f"{code}({','.join(extras)})")
+            else:
+                rendered.append(code)
+        return f"{base} warnings=[{'; '.join(rendered)}]"
 
     def _format_last_sweep(self) -> str:
         if not self.last_sweep:
