@@ -212,6 +212,40 @@ class CoordinatorState:
     pending_proposals: dict[str, PendingProposal] = field(default_factory=dict)
 
 
+# Default for N27 roofline-failure fallback. Two consecutive OUTER
+# roofline failures (= 3-4 inner trace_analyze attempts thanks to
+# N26 retry) before the gate downgrades. Tuned conservatively so a
+# transient rocprofiler-sdk / network blip doesn't immediately drop
+# the LLM into the no-analysis-md grid; raise via env to be more
+# tolerant of flaky upstream profilers, lower to 1 when operating
+# in a known-broken environment.
+_ROOFLINE_FALLBACK_THRESHOLD_DEFAULT = 2
+_ROOFLINE_FALLBACK_THRESHOLD_ENV = (
+    "INFERENCE_OPTIMIZER_ROOFLINE_FAILURE_FALLBACK_THRESHOLD"
+)
+
+
+def _resolve_roofline_fallback_threshold() -> int:
+    """Read N27 fallback threshold from env, with safe defaulting.
+
+    Negative / zero / unparseable values fall back to the default
+    (2). The threshold is read on every gate check rather than
+    cached because operator tools sometimes mutate env between
+    ticks (e.g. ``recover`` action twiddling INFERENCE_OPTIMIZER_*
+    knobs); the cost is one env lookup per denied propose.
+    """
+    raw = os.environ.get(_ROOFLINE_FALLBACK_THRESHOLD_ENV, "").strip()
+    if not raw:
+        return _ROOFLINE_FALLBACK_THRESHOLD_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        return _ROOFLINE_FALLBACK_THRESHOLD_DEFAULT
+    if value < 1:
+        return _ROOFLINE_FALLBACK_THRESHOLD_DEFAULT
+    return value
+
+
 class Coordinator:
     """The single Coordinator instance per session.
 
@@ -1632,6 +1666,70 @@ class Coordinator:
         if action in _ROOFLINE_REQUIRED_ACTIONS:
             cached = self.shared_state.last_trace_analyze or {}
             if not cached.get("analysis_md_text"):
+                # N27: when roofline has failed enough consecutive
+                # times that retrying is unlikely to help (default
+                # threshold = 2 outer failures; each outer call
+                # already exhausted N26's inner retry, so streak=2
+                # means roughly 3-4 trace_analyze attempts already
+                # happened), downgrade the gate from PolicyDenied to
+                # PASS-with-advisory. The LLM falls back to the
+                # pre-roofline default grid behaviour rather than
+                # hard-looping on roofline forever.
+                #
+                # Design intent (operator):
+                #   "有roofline依赖roofline去选参数, roofline如果异常,
+                #    就回到之前的选择方式, 不会导致程序完全跑不了"
+                #
+                # The threshold is env-overridable so operators with
+                # a known-broken rocprofiler can lower it to 1 (fall
+                # back after the very first failure) and operators
+                # with flaky upstream profilers can raise it.
+                fallback_threshold = _resolve_roofline_fallback_threshold()
+                streak = int(
+                    getattr(self.shared_state, "roofline_failure_streak", 0)
+                    or 0
+                )
+                if streak >= fallback_threshold:
+                    # Stamp the LAST trace_analyze (which may be empty
+                    # dict pre-first-attempt) with a fallback marker
+                    # the prompt builder reads to swap the "propose
+                    # roofline first" line for "roofline failed N
+                    # times -- running without analysis.md guidance".
+                    last_ta = self.shared_state.last_trace_analyze or {}
+                    last_ta["fallback_mode_active"] = True
+                    last_ta["fallback_after_failures"] = streak
+                    last_ta["fallback_threshold"] = fallback_threshold
+                    self.shared_state.last_trace_analyze = last_ta
+                    # Push a one-shot advisory the LLM will see on the
+                    # NEXT tick so it knows it's in degraded mode.
+                    # FIFO cap (5) is enforced by SharedState.
+                    advice = (
+                        f"[N27 fallback] roofline failed "
+                        f"{streak} consecutive times (>= threshold "
+                        f"{fallback_threshold}); unlocking "
+                        f"{sorted(_ROOFLINE_REQUIRED_ACTIONS)!r} so "
+                        "the run can make progress without "
+                        "analysis.md guidance. N20-A variants subset "
+                        "advice + N22 keyword advisory are NATURALLY "
+                        "degraded (no analysis.md keyword to match), "
+                        "so falling through to the executor's default "
+                        "full grid is correct here. Re-propose "
+                        "`roofline` whenever you think the upstream "
+                        "issue may have cleared -- success resets the "
+                        "streak and restores roofline-driven "
+                        "variant selection."
+                    )
+                    existing_advice = (
+                        getattr(self.shared_state, "last_proposal_advice", [])
+                        or []
+                    )
+                    if advice not in existing_advice:
+                        existing_advice = list(existing_advice) + [advice]
+                        # FIFO cap matches SharedState (max 5 entries).
+                        self.shared_state.last_proposal_advice = (
+                            existing_advice[-5:]
+                        )
+                    return None  # fallthrough -- gate downgraded
                 return PolicyDenied(
                     f"action={action!r} denied: roofline must run first "
                     "(no cached TraceLens analysis.md)",
@@ -1642,7 +1740,13 @@ class Coordinator:
                         "call profile / trace_analyze separately — roofline "
                         "atomically produces the snapshot all 4 optimisation "
                         f"actions ({sorted(_ROOFLINE_REQUIRED_ACTIONS)!r}) "
-                        "depend on."
+                        "depend on. After "
+                        f"{_resolve_roofline_fallback_threshold()} "
+                        "consecutive roofline failures the N27 fallback "
+                        "kicks in and these actions unlock automatically; "
+                        "you've had "
+                        f"{int(getattr(self.shared_state, 'roofline_failure_streak', 0) or 0)} "
+                        "so far."
                     ),
                 )
         return None
@@ -2921,6 +3025,17 @@ class Coordinator:
                 "error_class": result_payload.get("error_class"),
             }
             any_changed = True
+        # N27: roofline-failure streak. Bump on every failed roofline
+        # action (the RooflineExecutor returns status=failed only after
+        # N26 inner auto-retry is exhausted, so this counter is the
+        # OUTER attempt counter -- each tick = at least one trace_analyze
+        # attempt, often two with N26). Reset is handled in the success
+        # promotion path (search for "roofline_failure_streak = 0"
+        # below) so we don't have to detect success from a failed
+        # event payload here.
+        if task.kind == "roofline":
+            self.shared_state.roofline_failure_streak += 1
+            any_changed = True
         if any_changed:
             self.shared_state.save(self.session_dir)
         if baseline_event_payload is not None:
@@ -3145,6 +3260,15 @@ class Coordinator:
                 "trace_path": self.shared_state.last_profile_trace or None,
                 "profile_workspace": result.get("profile_workspace"),
             }
+            # N27: roofline succeeded -> reset the failure streak so
+            # the next failure gets the full retry budget (2 outer
+            # attempts) before falling back to the no-analysis-md
+            # grid behaviour. Note `_record_action_failure` bumps
+            # the streak for FAILED roofline runs (status=failed
+            # after N26 inner retry exhausted); the success path
+            # is the symmetric reset.
+            self.shared_state.roofline_failure_streak = 0
+            changed = True
             # N21 / N19c: freeze current discovered_flags into
             # `discovered_flags_at_last_snapshot` so the next-tick
             # `_proposal_denial_for_roofline` gate can compare and
