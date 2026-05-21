@@ -57,7 +57,14 @@ async def test_run_tick_emits_heartbeat_envelope(tmp_path: Path):
     from robustness_agent.runtime.cli import _coerce_request, _run_tick
 
     request = _coerce_request(
-        {**_REQUEST_HEARTBEAT, "options": {"session_dir": str(tmp_path)}}
+        {
+            **_REQUEST_HEARTBEAT,
+            "options": {
+                "session_dir": str(tmp_path),
+                "auto_probe_auth_proxy": False,
+                "auto_probe_inference_server": False,
+            },
+        }
     )
     emit = await _run_tick(request)
     assert emit["session_id"] == "sess-runtime-1"
@@ -162,7 +169,11 @@ def test_subprocess_tick_emits_heartbeat(tmp_path: Path):
     out_path = tmp_path / "emit.json"
     request = {
         **_REQUEST_HEARTBEAT,
-        "options": {"session_dir": str(tmp_path / "sess")},
+        "options": {
+            "session_dir": str(tmp_path / "sess"),
+            "auto_probe_auth_proxy": False,
+            "auto_probe_inference_server": False,
+        },
     }
     proc = _run_subprocess(request, request_path, out_path)
     assert proc.returncode == 0, f"stderr={proc.stderr}"
