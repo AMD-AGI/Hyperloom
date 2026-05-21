@@ -65,6 +65,11 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 # ``tests/test_p1_2_full_action_catalogue.py`` enforces alignment.
 # ``specialist`` is yaml-less (v0.8 M5, parameterised by
 # ``params.domain``) so it is added explicitly.
+# ``support`` was added in 2026-05 alongside the real ``recover``
+# executor (Change C of the gpu-leak-robustness-fix plan); the v0.8
+# stub-action purge (Gap-13) removed the dream / re_explore /
+# comm_optimization / compiler_tuning yamls, so ``recover`` is the
+# only fallback ``support`` entry.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "baseline", "profile", "pmc_roofline", "sweep",
     "explore",
