@@ -190,6 +190,310 @@ def test_cli_correctness_override(tmp_path):
     assert ko.make_proposal(verification)["decision"] == "KEEP"
 
 
+# ---------------------------------------------------------------------------
+# GEAK worktree artifact recovery (TraceLens-resolver follow-up).
+#
+# Background: GEAK's homogeneous orchestrator lays out per-sub-agent
+# artifacts as
+#
+#   <patch_output_dir>/results/round_<R>/parallel_<M>/patch_<N>.patch
+#   <patch_output_dir>/results/round_<R>/worktrees/slot_<M>/<repo files>
+#
+# The ``.patch`` file is a unified diff that frequently includes
+# multi-MB binary deltas from the aiter JIT cache, so the existing
+# fence-extraction fallback in ``_select_source_artifact`` cannot
+# recover a real ``.py``. The actual rewritten source lives in the
+# worktree slot directory; this set of tests pins the path-mapping
+# helper, the worktree-aware candidate collector, and the end-to-end
+# ``build_verification`` path so future GEAK reorgs surface as a
+# concrete unit-test failure.
+# ---------------------------------------------------------------------------
+
+
+def test_geak_best_worktree_maps_parallel_slot(tmp_path):
+    """``parallel_<M>/patch.patch`` MUST resolve to
+    ``worktrees/slot_<M>/`` under the same round dir."""
+    round_dir = tmp_path / "results" / "round_1"
+    slot_dir = round_dir / "worktrees" / "slot_3"
+    slot_dir.mkdir(parents=True)
+    patch = round_dir / "parallel_3" / "patch_1.patch"
+    patch.parent.mkdir(parents=True)
+    patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
+
+    assert ko._geak_best_worktree(str(patch)) == slot_dir
+
+
+def test_geak_best_worktree_returns_none_for_unexpected_layout(tmp_path):
+    """Layouts that don't match the ``parallel_<M>`` convention must
+    fail soft so the caller falls back to ``.patch``-based recovery
+    instead of fabricating a worktree path."""
+    other = tmp_path / "results" / "round_1" / "weird_dir" / "patch.patch"
+    other.parent.mkdir(parents=True)
+    other.write_text("", encoding="utf-8")
+    assert ko._geak_best_worktree(str(other)) is None
+    assert ko._geak_best_worktree("") is None
+
+
+def test_geak_best_worktree_returns_none_when_slot_dir_missing(tmp_path):
+    """Even with a correct ``parallel_<M>`` parent, when the matching
+    ``worktrees/slot_<M>/`` doesn't exist on disk the helper refuses to
+    return a non-existent path (avoids handing GEAK an invalid dir to
+    rglob into)."""
+    parallel = tmp_path / "results" / "round_1" / "parallel_0"
+    parallel.mkdir(parents=True)
+    patch = parallel / "patch_0.patch"
+    patch.write_text("", encoding="utf-8")
+    assert ko._geak_best_worktree(str(patch)) is None
+
+
+def test_worktree_source_paths_prefers_repo_relative_join(tmp_path):
+    """When ``kernel_repo`` is set, the helper MUST resolve via
+    ``source_file - kernel_repo`` first (the canonical mapping for
+    TraceLens-resolved candidates) before falling back to basename
+    rglob. This guards against an editable checkout shipping a
+    same-named stub at multiple paths (e.g. aiter's ``ops/rmsnorm.py``
+    vs ``ops/triton/normalization/rmsnorm.py``)."""
+    repo = tmp_path / "repo"
+    src = repo / "aiter" / "ops" / "rmsnorm.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("def f(): pass\n", encoding="utf-8")
+
+    worktree = tmp_path / "worktree"
+    canonical = worktree / "aiter" / "ops" / "rmsnorm.py"
+    decoy = worktree / "aiter" / "ops" / "triton" / "normalization" / "rmsnorm.py"
+    canonical.parent.mkdir(parents=True)
+    decoy.parent.mkdir(parents=True)
+    canonical.write_text("def f(): return 'canonical'\n", encoding="utf-8")
+    decoy.write_text("def f(): return 'decoy'\n", encoding="utf-8")
+
+    paths = ko._worktree_source_paths(
+        worktree, source_file=str(src), kernel_repo=str(repo),
+    )
+    assert paths
+    # Canonical mapping fires first; the decoy is also collected (for
+    # broader retrieval) but never as the primary candidate.
+    assert paths[0] == canonical
+
+
+def test_worktree_source_paths_falls_back_to_basename_when_no_repo(tmp_path):
+    """When ``kernel_repo`` is empty the canonical join can't fire;
+    the helper must still return matching files via bounded
+    ``worktree.rglob(basename)`` so the recovery path still works in
+    legacy CSV-only fixtures that don't carry ``kernel_repo`` on the
+    candidate."""
+    worktree = tmp_path / "worktree"
+    hit = worktree / "deep" / "nested" / "rmsnorm.py"
+    hit.parent.mkdir(parents=True)
+    hit.write_text("def f(): pass\n", encoding="utf-8")
+
+    paths = ko._worktree_source_paths(
+        worktree, source_file="/anywhere/rmsnorm.py", kernel_repo="",
+    )
+    assert paths == [hit]
+
+
+def test_candidate_artifact_paths_prefers_worktree_over_patch(tmp_path):
+    """When both a worktree ``.py`` AND a ``.patch`` are advertised,
+    the worktree file MUST appear first in the candidate list so
+    ``_select_source_artifact``'s first-pass suffix check picks it up
+    instead of falling back to fence extraction on a unified diff
+    (the regression this PR is fixing — GEAK ``.patch`` files routinely
+    embed binary JIT-cache deltas, so the fallback fails)."""
+    repo = tmp_path / "repo"
+    src = repo / "aiter" / "ops" / "rmsnorm.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("def f(): pass\n", encoding="utf-8")
+
+    worktree = tmp_path / "results" / "round_1" / "worktrees" / "slot_0"
+    wt_file = worktree / "aiter" / "ops" / "rmsnorm.py"
+    wt_file.parent.mkdir(parents=True)
+    wt_file.write_text("def f(): return 'patched'\n", encoding="utf-8")
+
+    patch = tmp_path / "results" / "round_1" / "parallel_0" / "patch_0.patch"
+    patch.parent.mkdir(parents=True)
+    patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
+
+    attempt = {
+        "status": "completed",
+        "attempt_id": "geak0",
+        "backend": "geak",
+        "optimized_path": str(patch),
+        "backend_paths": {
+            "geak_per_task_best_patch": str(patch),
+            "geak_per_task_best_worktree": str(worktree),
+        },
+    }
+    paths = ko._candidate_artifact_paths(
+        attempt, ".py",
+        source_file=str(src),
+        kernel_repo=str(repo),
+    )
+    assert paths
+    assert paths[0] == wt_file
+    # The patch is still in the candidate list as a defense-in-depth
+    # fallback — just not first.
+    assert any(p == patch for p in paths)
+
+
+def test_build_verification_recovers_py_from_worktree(tmp_path):
+    """Pin the end-to-end fix: a GEAK attempt that left ``.patch`` +
+    a worktree slot containing a real ``.py`` must produce
+    ``artifact_valid=True`` with ``artifact_source='source_file'`` —
+    not the historical ``artifact_source='missing'`` that resulted
+    from only seeing the patch."""
+    repo = tmp_path / "repo"
+    src = repo / "aiter" / "ops" / "rmsnorm.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("def rmsnorm2d_fwd():\n    pass\n", encoding="utf-8")
+
+    worktree = tmp_path / "results" / "round_1" / "worktrees" / "slot_0"
+    wt_file = worktree / "aiter" / "ops" / "rmsnorm.py"
+    wt_file.parent.mkdir(parents=True)
+    wt_file.write_text(
+        "def rmsnorm2d_fwd():\n    return 'optimized'\n", encoding="utf-8",
+    )
+
+    patch = tmp_path / "results" / "round_1" / "parallel_0" / "patch_1.patch"
+    patch.parent.mkdir(parents=True)
+    patch.write_text(
+        "diff --git a/aiter/ops/rmsnorm.py b/aiter/ops/rmsnorm.py\n",
+        encoding="utf-8",
+    )
+
+    attempt = {
+        "status": "completed",
+        "attempt_id": "geak0",
+        "backend": "geak",
+        "optimized_path": str(patch),
+        "backend_paths": {
+            "geak_per_task_best_patch": str(patch),
+            "geak_per_task_best_worktree": str(worktree),
+        },
+    }
+    verification = ko.build_verification(
+        _args(source_file=str(src), kernel_repo=str(repo)),
+        [attempt],
+        benchmark_available=True,
+    )
+    assert verification["artifact_valid"] is True
+    assert verification["artifact_source"] == "source_file"
+    assert verification["best_artifact_path"] == str(wt_file)
+
+
+# ---------------------------------------------------------------------------
+# GEAK prompt yaml patcher.
+#
+# Hyperloom installs GEAK (which carries the bundled ``minisweagent``
+# package). One of the system-prompt YAMLs ships a hard-coded
+# ``task_runner.py performance`` example that mislead the sub-agent
+# LLM into running ``find /`` for a non-existent file (burning the
+# entire kernel-opt budget on WekaFS scans). The patcher rewrites
+# those three lines to abstract placeholders. Pin the idempotency +
+# fail-soft behaviour so a GEAK upstream wording change shows up as a
+# real test failure instead of silently mis-patching the YAML.
+# ---------------------------------------------------------------------------
+
+
+def _seed_yaml(tmp_path):
+    """Create a minimal copy of the relevant block from the real
+    upstream YAML so the patcher has something concrete to work on
+    even when the test interpreter doesn't have minisweagent
+    installed."""
+    yaml = tmp_path / "config" / "mini_kernel_strategy_list.yaml"
+    yaml.parent.mkdir(parents=True)
+    yaml.write_text(
+        "system_prompt: |\n"
+        "    profile_kernel:\n"
+        "    - Forbidden in `command`: `&&`, `cd`\n"
+        '    - Good example: `command="python3 scripts/task_runner.py performance",'
+        ' workdir="/path/to/project"`\n'
+        '    - Also ok: `command="python3 /absolute/path/to/scripts/task_runner.py'
+        ' performance"`\n'
+        '    - Bad example: `command="cd /path && python3 scripts/task_runner.py'
+        ' performance"`\n'
+        "    other_tool:\n"
+        "    - keep\n",
+        encoding="utf-8",
+    )
+    return yaml
+
+
+def test_geak_prompt_patcher_replaces_misleading_example(tmp_path, monkeypatch):
+    import geak_prompt_patcher as gpp
+
+    yaml = _seed_yaml(tmp_path)
+    monkeypatch.setenv("HYPERLOOM_GEAK_PROMPT_YAML", str(yaml))
+
+    ok, msg = gpp.ensure_geak_prompt_patched()
+    assert ok is True
+    assert "patched" in msg
+    text = yaml.read_text(encoding="utf-8")
+    assert "task_runner.py performance" not in text
+    assert "<your_benchmark.py>" in text
+    # Forbidden-rules / other tool sections must not be touched.
+    assert "Forbidden in `command`" in text
+    assert "other_tool" in text
+
+
+def test_geak_prompt_patcher_idempotent(tmp_path, monkeypatch):
+    import geak_prompt_patcher as gpp
+
+    yaml = _seed_yaml(tmp_path)
+    monkeypatch.setenv("HYPERLOOM_GEAK_PROMPT_YAML", str(yaml))
+
+    ok1, _ = gpp.ensure_geak_prompt_patched()
+    text1 = yaml.read_text(encoding="utf-8")
+    assert ok1 is True
+
+    ok2, msg2 = gpp.ensure_geak_prompt_patched()
+    text2 = yaml.read_text(encoding="utf-8")
+    assert ok2 is True
+    assert "already patched" in msg2
+    # Bit-for-bit identical: idempotent rerun must not touch the file.
+    assert text1 == text2
+
+
+def test_geak_prompt_patcher_fails_soft_when_yaml_missing(tmp_path, monkeypatch):
+    """The patcher is a UX hardening, not a correctness gate; when
+    the YAML is missing (e.g. install ran with check-only and skipped
+    the GEAK pip install) ``ensure_geak_prompt_patched`` returns
+    ``(False, …)`` so the install script can continue. The
+    ``HYPERLOOM_GEAK_PROMPT_PATCH_REQUIRED`` knob is the operator's
+    opt-in for treating this as fatal — covered separately in the CLI
+    entrypoint test."""
+    import geak_prompt_patcher as gpp
+
+    monkeypatch.setenv(
+        "HYPERLOOM_GEAK_PROMPT_YAML", str(tmp_path / "does_not_exist.yaml"),
+    )
+    ok, msg = gpp.ensure_geak_prompt_patched()
+    assert ok is False
+    assert "minisweagent not installed" in msg
+
+
+def test_geak_prompt_patcher_refuses_to_guess_on_drift(tmp_path, monkeypatch):
+    """When upstream changes the example wording the patcher MUST
+    refuse rather than partially-match and garble the YAML. Pin this
+    so a GEAK upgrade that renames the example surfaces as a clear
+    failure, not a half-patched file."""
+    import geak_prompt_patcher as gpp
+
+    yaml = tmp_path / "drifted.yaml"
+    yaml.write_text(
+        "system_prompt: |\n"
+        "    profile_kernel:\n"
+        '    - Good example: `command="python3 different_runner.py", workdir="/x"`\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HYPERLOOM_GEAK_PROMPT_YAML", str(yaml))
+
+    ok, msg = gpp.ensure_geak_prompt_patched()
+    assert ok is False
+    assert "upstream example block changed" in msg
+    # File was NOT touched.
+    assert "different_runner.py" in yaml.read_text(encoding="utf-8")
+
+
 def test_benchmark_files_list_counts_as_benchmark(tmp_path):
     bench = tmp_path / "bench.py"
     bench.write_text("print('ok')\n", encoding="utf-8")

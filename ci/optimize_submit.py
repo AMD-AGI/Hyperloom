@@ -89,11 +89,50 @@ DEFAULT_VOLUME = "/wekafs"
 DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
 # Cluster-aware defaults: SaFE backend's NormalizePromptConfig uses MI355X /
 # /hyperloom/InferenceX which are wrong for core42 (it's MI300X and the
-# InferenceX checkout actually lives on /wekafs). Without overriding here the
-# generated prompt sends the agent on a 5-10 min wild goose chase looking for
+# canonical hyperloom-managed InferenceX checkout lives at
+# /wekafs/hyperloom/InferenceX). Without overriding here the generated prompt
+# sends the agent on a 5-10 min wild goose chase looking for
 # /hyperloom/InferenceX, and it picks GPU-architecture-wrong heuristics later.
+#
+# /wekafs/hyperloom/InferenceX is the same priority path that:
+#   - inference_optimizer/cli.py:1586          uses as the V2 skill default
+#   - inference_optimizer/scripts/install.sh   bootstraps into
+#   - .github/workflows/inference-optimization-ci.yml lists FIRST after
+#     ${NFS_ROOT}/InferenceX in the config-file probe loop
+# Keeping this aligned avoids the agent landing on a stale /wekafs/InferenceX
+# checkout (left over from earlier non-hyperloom layouts on some sandboxes).
 DEFAULT_GPU_TYPE = "MI300X"
-DEFAULT_INFERENCEX_PATH = "/wekafs/InferenceX"
+DEFAULT_INFERENCEX_PATH = "/wekafs/hyperloom/InferenceX"
+
+# Canonical prompt prefix lives in ci/prompt_prefix.txt next to this script.
+# Single source of truth — same file is read by the GitHub workflow Submit
+# step (.github/workflows/optimize-submit.yml) as the schedule-trigger
+# fallback, and also serves as the argparse default here so any direct
+# CLI invocation (manual debugging, peer scripts, etc.) gets the same
+# prefix without having to set $SAFE_OPTIMIZE_PROMPT_PREFIX every time.
+_PROMPT_PREFIX_FILE = Path(__file__).resolve().parent / "prompt_prefix.txt"
+
+
+def _load_default_prompt_prefix() -> str:
+    """Resolve the default prompt prefix for ``--prompt-prefix``.
+
+    Resolution order:
+      1. ``$SAFE_OPTIMIZE_PROMPT_PREFIX`` (lets ops override per-run without
+         editing the file or argparse call)
+      2. ``ci/prompt_prefix.txt`` next to this script (canonical content)
+      3. empty string (caller is responsible — submit then refuses to ship
+         an empty prefix)
+    """
+
+    env_value = os.environ.get("SAFE_OPTIMIZE_PROMPT_PREFIX", "")
+    if env_value:
+        return env_value
+    try:
+        if _PROMPT_PREFIX_FILE.is_file():
+            return _PROMPT_PREFIX_FILE.read_text(encoding="utf-8")
+    except OSError:
+        pass
+    return ""
 
 # Architectures well-supported by SGLang on ROCm 7.x.
 SGLANG_ARCHS: set[str] = {
@@ -1125,6 +1164,12 @@ def process_model(
 DEFAULT_ARTIFACT_PATTERNS = (
     "optimization_report",   # matches optimization_report.md / *-optimization_report.md / etc.
     "ci_metrics.json",
+    # Optional but recommended audit artifact emitted by inference_optimizer
+    # (and consumed by claw-stats-service / the dashboard). Not part of the
+    # key-results gate in ``_KEY_RESULT_SUFFIXES`` — missing it must not
+    # trigger NFS fallback or retries — but we still want it copied when
+    # the agent / skill emits it.
+    "session_breakdown.json",
     "baseline_summary.json",
     "sweep_results.csv",
     "sweep_results.txt",
@@ -1425,6 +1470,14 @@ def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
         if os.path.isfile(cand):
             targets.append(cand)
             break
+    # Optional audit artifact — pull it back when the agent emitted it.
+    for cand in [
+        os.path.join(best_sess, "session_breakdown.json"),
+        os.path.join(best_sess, "phase10_report", "session_breakdown.json"),
+    ]:
+        if os.path.isfile(cand):
+            targets.append(cand)
+            break
 
     for src in targets:
         dst_name = ("optimization_report.md"
@@ -1705,11 +1758,11 @@ def _build_parser() -> argparse.ArgumentParser:
                              f"'{DEFAULT_INFERENCEX_PATH}'). SaFE backend default is "
                              f"/hyperloom/InferenceX which doesn't exist on core42.")
     parser.add_argument("--prompt-prefix",
-                        default=os.environ.get("SAFE_OPTIMIZE_PROMPT_PREFIX", ""),
-                        help="Optional free-form prefix prepended to the SaFE-generated "
-                             "Hyperloom prompt. The CI batch uses this to point the skill "
-                             "at /wekafs/HyperloomV2/inference_optimizer/SKILL.md before "
-                             "the auto-generated body. (env: $SAFE_OPTIMIZE_PROMPT_PREFIX)")
+                        default=_load_default_prompt_prefix(),
+                        help="Free-form prefix prepended to the SaFE-generated "
+                             "Hyperloom prompt. Default resolves to "
+                             "$SAFE_OPTIMIZE_PROMPT_PREFIX -> ci/prompt_prefix.txt "
+                             "-> empty. Pass an empty string explicitly to suppress.")
     parser.add_argument("--prompt-suffix",
                         default=os.environ.get("SAFE_OPTIMIZE_PROMPT_SUFFIX", ""),
                         help="Optional free-form suffix appended to the SaFE-generated "
