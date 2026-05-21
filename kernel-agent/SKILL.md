@@ -211,7 +211,7 @@ unittest task right next to the GEAK run dir. The harness reflects the
 
 | Field                | Source                                                                                  |
 |----------------------|-----------------------------------------------------------------------------------------|
-| `source/<kernel>.py` | Symlink to the live `/sgl-workspace/{aiter,sglang,vllm}/...` source GEAK will rewrite. |
+| `source/<kernel>` | Python/Triton: symlink/copy of the live source. HIP/C++: writable mirror copied from the live source; the runner overlays it onto the live path only while tests run. |
 | `_baseline_snapshot/`| Frozen copy of the original bytes — the **golden reference** for `correctness`.        |
 | `TEST_SHAPES`        | `candidate["input_shapes"]` (TraceLens-resolved per-arg shapes from real traffic).      |
 | `TEST_DTYPES`        | `candidate["input_dtypes"]` with `float16` fallback (warned in `unittest_meta.json`).   |
@@ -234,25 +234,69 @@ correctness MUST both pass). The manifest's `status` field reports:
   (single-GPU compute kernels only; multi-GPU collectives still take the
   legacy `torchrun` path because the in-process harness can't drive
   `init_process_group`).
-* `degraded` — compile passed but correctness was skipped (e.g. shapes
-  weren't captured) OR self-verify failed; the manifest is still pasted
-  into the GEAK prompt so the agent knows the workspace + golden snapshot
-  paths, but `--test-command` falls back to `candidate.benchmark_files`.
-* `skipped` — non-Python source (HIP `.cu` / `.cuh`); GEAK takes its
-  legacy in-house harness path.
+* `degraded` — compile passed but correctness was skipped unexpectedly
+  (e.g. shapes were not captured) OR self-verify failed; Hyperloom records
+  `unittest_status=degraded` but does NOT use the harness in GEAK. It falls
+  back to the previous `candidate.benchmark_files` / `test_harness_path` mode.
+* `ok` for HIP/C++ — compile precheck passed and at least one existing
+  `benchmark_file` was captured. Correctness is intentionally deferred to
+  GEAK runtime because HIP tests can take minutes; the generated runner will
+  overlay `source/<kernel>` onto the live source, invalidate likely aiter JIT
+  `.so` files, run the benchmark, then restore the live tree.
+* `skipped` — unsupported source suffix with no runner strategy.
 * `failed` — missing source file or unparseable; fall through without a
-  harness.
+  harness. Import errors, generation exceptions, and non-`ok` manifests must
+  never block GEAK dispatch; they always fall back to the legacy benchmark path.
 
-Env override: set `HYPERLOOM_DISABLE_UNITTEST_AGENT=1` to bypass the whole
-pre-step (debugging only — GEAK then reverts to inventing its own
-`bench_<kernel>.py` shim, which historically wastes the first 10 min of
-the budget on `torchrun exit 2`).
+Control: set `HYPERLOOM_UNITTEST_AGENT=off` or pass
+`--unittest-agent off` to bypass the whole pre-step (debugging only — GEAK then
+reverts to its legacy benchmark path). `auto` is the default; `force` attempts
+best-effort generation whenever a source file and benchmark surface exist. The
+older `HYPERLOOM_DISABLE_UNITTEST_AGENT=1` remains a compatibility alias for
+`off`.
 
 Result surfaces (visible in `optimization_attempts.jsonl[].backend_paths`):
 
 * `unittest_status`        — `ok` / `degraded` / `skipped` / `failed`.
 * `unittest_out_dir`       — the harness workspace (inspect on debug).
 * `unittest_test_command`  — the exact `correctness` command GEAK ran.
+
+#### Outer-timeout contract (do NOT skip)
+
+When a unittest harness is in play, GEAK's `--test-command` stops being a
+fast `python bench_<kernel>.py` (seconds) and becomes
+`python3 scripts/task_runner.py correctness`, which transparently
+triggers an aiter JIT recompile (~51s) + a multi-shape benchmark and
+routinely takes minutes. mini-swe-agent's `LocalEnvironmentConfig.timeout`
+defaults to **30 seconds**, so a custom `local.yaml` that omits the `env`
+block — or copies an old `timeout: 30` — silently SIGKILLs every patch
+test with `"Test command timed out"`. select_patch then falls back to
+the unmodified baseline and the whole GEAK attempt looks like a no-op.
+
+`unittest_agent` owns BOTH halves of the test-command contract:
+
+| Knob                            | Where it lives                       | Wired by                                   |
+|---------------------------------|--------------------------------------|--------------------------------------------|
+| `--test-command`                | `unittest_test_command`              | `_append_unittest_context_to_prompt`       |
+| Outer `env.timeout` (GEAK side) | `harness_timeout_*_sec` in manifest  | `_geak_config_for_run(unittest_manifest=)` |
+
+`tools/kernel_optimization.py::_harness_outer_timeout(manifest)` returns
+`max(harness_timeout_correctness_sec, harness_timeout_performance_sec) +
+buffer` (buffer = 300s) whenever `status == "ok"`; the caller writes the
+result into the per-run GEAK config so mini-swe-agent sees a matching
+`env.timeout`. The fallback path (no manifest) still injects 3600s so a
+config without an `env` block never silently inherits the 30s default.
+
+Regression checklist — if `Test command timed out` reappears:
+1. Read `patch_*_test.txt` under `<session>/geak/run-*/` — confirm it's a
+   process-killed timeout, not a Python `pytest` failure.
+2. `grep -A4 '^env:' $GEAK_CONFIG` — confirm `env.timeout` >= the
+   manifest's `harness_timeout_correctness_sec`.
+3. Inspect `<harness>/unittest_meta.json` — confirm `status: ok` and that
+   `harness_timeout_*_sec` is in the manifest.
+4. Re-run `kernel_optimization.py` so `_apply_geak_env_overrides` writes
+   a fresh per-prompt `*.geak-config.yaml`; never edit `local.yaml` by
+   hand from a tight loop — Hyperloom rewrites it per attempt.
 
 ## TraceLens Requirements
 
@@ -409,10 +453,44 @@ writes:
 - `runs/<session_id>/tracelens/system_findings/`
 - `runs/<session_id>/tracelens/category_findings/`
 - `runs/<session_id>/optimization_attempts.jsonl`
+- `runs/<session_id>/prompts/<attempt_id>.md` (one per attempt; the GEAK/OOB prompt that was actually sent)
+- `runs/<session_id>/optimized/<attempt_id>_stdout.log` (real backend runs; see "Per-attempt stdout file naming" below)
+- `runs/<session_id>/optimized/<attempt_id>_optimized<source_suffix>` (dry-run only; synthetic placeholder for smoke tests)
 - `runs/<session_id>/verification/<kernel_id>.json`
 - `runs/<session_id>/results/<kernel_id>.json`
 - `runs/<session_id>/logs/<tool>/<run_id>.log`
 - `runs/<session_id>/status/<tool>/<run_id>.json`
+
+### Per-attempt stdout file naming
+
+`run_attempt` (in `kernel-agent/tools/kernel_optimization.py`) materialises
+one file per attempt under `runs/<session_id>/optimized/`:
+
+| Mode             | Filename                                                  | Contents                                                                 |
+|------------------|-----------------------------------------------------------|--------------------------------------------------------------------------|
+| Real backend run | `<attempt_id>_stdout.log`                                 | The raw subprocess stdout (mini-swe-agent / OOB / GEAK conversation log) |
+| `--dry-run`      | `<attempt_id>_optimized<source_suffix>` (e.g. `.cu`/`.py`) | A small synthetic placeholder kernel (smoke-test only)                   |
+
+**Backward compatibility note**: prior to 2026-05 the real-backend file was
+also named `<attempt_id>_optimized<source_suffix>` and contained subprocess
+stdout. That caused `_source_text_looks_complete` to false-positive match
+generic English (e.g. transcripts containing `"void "` / `"extern "`) and
+promote the conversation log to `artifact_source = source_file` — observed
+on Qwen3-8B k007 rmsnorm_quant and k013 silu_and_mul. The `.log` rename
+routes the stdout through `_extract_source_block` (which only returns an
+artifact when a real fenced code block is present) and never lets a
+transcript impersonate a `.cu` / `.py` source.
+
+Downstream consumers (`breakdown/collectors.py`, dashboards, etc.) should
+either:
+1. read `attempt["optimized_path"]` from `optimization_attempts.jsonl`
+   (already the canonical pointer — it tracks whichever name was used), or
+2. glob `runs/<session_id>/optimized/<attempt_id>*` to pick up both
+   historical `_optimized.<suffix>` files and the new `_stdout.log`
+   (`breakdown/collectors.py` does this — older session dirs keep working).
+
+Never assume a fixed `_optimized.cu` / `_optimized.py` suffix on
+real-backend runs after 2026-05.
 
 Cross-task GEAK/OOB work artefacts keyed by `kernel_id` live in the
 sibling tree `$USER_DATA_PATH/kernel-agent-workspace/<kernel_id>/`

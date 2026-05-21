@@ -808,6 +808,14 @@ env vars, golden-bytes snapshot under `source/_baseline_snapshot/`) so
 GEAK can iterate against a real correctness gate instead of inventing
 its own surrogate `bench_<kernel>.py`.
 
+For HIP/C++ sources (`.cu` / `.cuh` / `.hip` / selected headers), the harness
+wraps the TraceLens-discovered benchmark command instead of importing Python:
+the generated `task_runner.py` temporarily overlays `source/<kernel>` onto the
+live framework source path, invalidates likely aiter JIT modules, runs the
+captured benchmark, and restores the live tree. Generation-time correctness is
+deferred for HIP because the existing benchmarks can take minutes; GEAK runs the
+generated correctness command during its baseline/patch loop.
+
 The generator self-verifies (compile + correctness MUST pass on the
 unmodified source) before declaring success. The artefact tree lives at:
 
@@ -826,10 +834,25 @@ inside `invoke_backend(backend="geak", ...)`. Observability shows up as
 `optimization_attempts.jsonl[].backend_paths`; full audit lives in
 `unittest_meta.json` per harness.
 
-Bypass with `HYPERLOOM_DISABLE_UNITTEST_AGENT=1` only when debugging
-GEAK behaviour against its legacy in-house harness; production runs
-should leave it on. See `kernel-agent/SKILL.md` § *Auto-generated unittest
-harness (GEAK pre-step)* for the full manifest schema and status semantics.
+Control with `HYPERLOOM_UNITTEST_AGENT=auto|off|force` or
+`kernel_optimization.py --unittest-agent auto|off|force`. The default is
+`auto`; `HYPERLOOM_DISABLE_UNITTEST_AGENT=1` remains a backward-compatible
+alias for `off`. See `kernel-agent/SKILL.md` § *Auto-generated unittest harness
+(GEAK pre-step)* for the full manifest schema and status semantics.
+
+The unittest_agent owns the GEAK outer-timeout contract too: every
+manifest declares `harness_timeout_correctness_sec` /
+`harness_timeout_performance_sec`, and
+`kernel_optimization._geak_config_for_run` writes a per-attempt GEAK
+config whose `env.timeout` matches that budget (+300s buffer). Without
+this, mini-swe-agent's `LocalEnvironment.timeout` defaults to 30s and
+every `save_and_test` patch gets SIGKILLed inside the JIT recompile —
+the failure mode looks like GEAK silently rejecting every candidate
+patch (`patch_*_test.txt = "Test command timed out"`). If you bypass
+`_geak_config_for_run` (e.g. handcrafted GEAK runs), copy the matching
+`env.timeout` from the harness's `unittest_meta.json` into your config
+or you will reproduce the 30s-default failure. See `kernel-agent/SKILL.md`
+§ *Outer-timeout contract* for the regression checklist.
 
 ## Kernel Apply Safety
 
