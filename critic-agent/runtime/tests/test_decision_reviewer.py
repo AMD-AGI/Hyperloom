@@ -53,6 +53,27 @@ def test_prepare_review_for_coordinator_inbox_extracts_proposals(reviewer):
     assert "active_path_proof_when_relevant" in bundle.review_constraints["approve_requires"]
 
 
+def test_prepare_review_propagates_known_actions(reviewer):
+    rev, kb, sm = reviewer
+    bundle = rev.prepare_review({
+        "kind": "coordinator_inbox",
+        "session_id": "sess_known",
+        "raw_prompt": _PROMPT_WITH_TWO_PROPOSALS,
+        "options": {"known_actions": ["sweep", "baseline", "validate_stack"]},
+    })
+    assert bundle.review_constraints["known_actions"] == [
+        "baseline",
+        "sweep",
+        "validate_stack",
+    ]
+
+
+def test_prepare_review_omits_known_actions_when_absent(reviewer):
+    rev, kb, sm = reviewer
+    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS))
+    assert "known_actions" not in bundle.review_constraints
+
+
 def test_prepare_review_skips_kb_when_critical_context_missing(reviewer):
     rev, kb, sm = reviewer
     bundle = rev.prepare_review({
