@@ -60,6 +60,10 @@ from .validate_stack import (
     combine_optimization_stack,
     validate_stack_executor,
 )
+from .recover import (
+    RecoverExecutor,
+    recover_executor,
+)
 
 __all__ = [
     "BASELINE_DEFAULT_CONFIG",
@@ -77,6 +81,7 @@ __all__ = [
     "ParamsExecutor",
     "PMCRooflineExecutor",
     "ProfileExecutor",
+    "RecoverExecutor",
     "ReportExecutor",
     "RooflineExecutor",
     "RooflineStubExecutor",
@@ -96,6 +101,7 @@ __all__ = [
     "params_executor",
     "pmc_roofline_executor",
     "profile_executor",
+    "recover_executor",
     "report_executor",
     "session_breakdown_executor",
     "sweep_executor",
