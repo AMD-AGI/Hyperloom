@@ -119,7 +119,7 @@ Prepare the source trees from the corresponding repositories:
 - Hyperloom: this repository; clone it and point `REPO_ROOT` at the repo root.
 - OOB: clone the [AMD-AGI/Primus-Claw](https://github.com/AMD-AGI/Primus-Claw) repository, then point `OOB_SRC` at its `OOB/` subdirectory.
 - InferenceX: [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX); point `INFERENCEX_PATH` at the local repo root.
-- TraceLens-internal: [AMD-AGI/TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal/); checkout `release/hyperloom_integration_v0.3` and point `TRACELENS_ROOT` at that checkout.
+- TraceLens-internal: [AMD-AGI/TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal/); checkout `release/hyperloom_integration_v0.3.1` (or the matching `Hyperloom_integration_v0.3.1` tag) and point `TRACELENS_ROOT` at that checkout. The per-version `sglang_roofline_patches/sglang_<minor>_<patch>/` layout is required; pre-v0.3.1 flat checkouts are no longer supported.
 
 > `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway). GEAK and OOB (claude/codex) API Key / Base URL are automatically inherited from `SAFE_API_KEY` / `OPENAI_BASE_URL`. You can place these values in `$REPO_ROOT/.env`; no separate GEAK or OOB configuration is needed. The OOB **cursor** backend is the exception: it talks to Cursor's own gateway and requires a separate `CURSOR_API_KEY`. If `CURSOR_API_KEY` is unset, cursor is silently skipped from default kernel-opt selection.
 
