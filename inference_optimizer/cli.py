@@ -3003,95 +3003,6 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Override Orchestration system prompt (file path or inline)")
     opt.add_argument("--kernel-prompt", type=str, default=None,
                       help="Override Kernel system prompt")
-    # ----- framework-agent pre-stage (c-light-auto integration) -------
-    # Optional one-shot: discover or apply a framework PR before baseline.
-    # See inference_optimizer/orchestrator/framework_pr_discover.py and
-    # SKILL.md "Framework-Agent Pre-stage" for the contract.
-    opt.add_argument(
-        "--framework-pr-discover",
-        action="store_true",
-        default=False,
-        help="Run framework-agent (`fa explore`) before baseline to pick "
-             "an upstream PR, then checkout sglang to that PR head + pip "
-             "install -e python/ so IO baseline runs the patched source. "
-             "Requires --framework-gap and a reachable Primus Cortex / "
-             "GitHub. Mutually exclusive with --framework-pr.",
-    )
-    opt.add_argument(
-        "--framework-pr",
-        type=str,
-        default="",
-        help="Explicit `PR:N` ref to apply before baseline (bypass fa "
-             "discover). Resolves head_sha via `git ls-remote` then "
-             "checkout + pip install -e in the sglang source dir. "
-             "Mutually exclusive with --framework-pr-discover.",
-    )
-    opt.add_argument(
-        "--framework-gap",
-        type=str,
-        default="",
-        help="Free-form perf gap description passed to fa keyword "
-             "extraction (e.g. 'improve sglang fp8 MoE on MI300X'). "
-             "Required when --framework-pr-discover is set.",
-    )
-    opt.add_argument(
-        "--framework-repo-url",
-        type=str,
-        default="",
-        help="Upstream repo URL queried by fa. Defaults to the sglang "
-             "upstream when omitted.",
-    )
-    opt.add_argument(
-        "--framework-primus-url",
-        type=str,
-        default="",
-        help="Override the Primus Cortex base URL used by fa discover. "
-             "Defaults to the in-cluster service URL.",
-    )
-    opt.add_argument(
-        "--framework-sglang-path",
-        type=str,
-        default="/sgl-workspace/sglang",
-        help="sglang source directory to apply the PR head to. Must be "
-             "a git checkout. Defaults to /sgl-workspace/sglang (the "
-             "Claw sandbox layout).",
-    )
-    opt.add_argument(
-        "--framework-pip-reinstall",
-        action="store_true",
-        default=False,
-        help="Run `pip install -e python/ --no-deps --no-build-isolation` "
-             "in the sglang source dir after checkout. Default: off, "
-             "because the standard sandbox image already ships sglang "
-             "in editable mode (git checkout alone is enough). Enable "
-             "when the PR head changes pyproject.toml in a way the "
-             "editable install cannot pick up automatically (note: "
-             "the full build needs a Rust toolchain for sgl-kernel).",
-    )
-    opt.add_argument(
-        "--framework-no-auto-stash",
-        action="store_true",
-        default=False,
-        help="Disable the default `git stash push -u` before checkout. "
-             "The sandbox sglang worktree typically ships dirty "
-             "(modified pyproject.toml, extra quant configs); without "
-             "the stash, `git checkout` aborts. Use this flag to fail "
-             "fast on a dirty tree instead.",
-    )
-    opt.add_argument(
-        "--framework-keywords",
-        type=str,
-        default="",
-        help="Comma- or space-separated keywords to override fa's automatic "
-             "extract_keywords() from --framework-gap. Use when (a) the "
-             "auto-extractor drops critical terms (e.g. 'MI300X', "
-             "'throughput') that Primus Cortex word-AND search needs, "
-             "(b) the auto-extracted set AND-matches too tightly and "
-             "returns 0 candidates - widen to fewer keywords, or (c) you "
-             "need a domain-specific term outside fa's curated whitelist. "
-             "Examples: 'moe' / 'fp8,moe' / 'attention rope kvcache'. "
-             "When this flag is set, --framework-gap becomes optional.",
-    )
 
     return p
 
@@ -3110,36 +3021,6 @@ def main(argv: list[str] | None = None) -> int:
             v = getattr(args, attr)
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))
-        # Framework-agent legacy pre-stage hook: REMOVED (plan
-        # ``fa-as-io-arm-design``). PR discovery + apply now runs as a
-        # regular bandit arm (``framework_pr`` action executor) so PR
-        # selection participates in the Coordinator's cooldown / streak /
-        # observability machinery instead of mutating sglang source
-        # before the first tick. Operators who still pass the legacy
-        # flags get a deprecation notice; the values are dropped because
-        # the new arm composes its own gap from SharedState (model_class
-        # + gpu_type + framework + last_profile_kernel_breakdown) and
-        # picks candidates per tick.
-        deprecated_used = (
-            bool(getattr(args, "framework_pr", ""))
-            or bool(getattr(args, "framework_pr_discover", False))
-            or bool(getattr(args, "framework_gap", ""))
-            or bool(getattr(args, "framework_keywords", ""))
-        )
-        if deprecated_used:
-            print(
-                "WARNING: --framework-pr / --framework-pr-discover / "
-                "--framework-gap / --framework-keywords are DEPRECATED and "
-                "will be removed in a future release. PR discovery + apply "
-                "now runs as a regular ``framework_pr`` bandit arm (see "
-                "inference_optimizer/actions/_meta/framework_pr.yaml); the "
-                "Orchestration agent decides when to propose it and the "
-                "Coordinator manages cooldown / rollback. To override the "
-                "auto-composed gap or keywords for a specific arm tick, "
-                "use ``proposal.params.gap_override`` / "
-                "``proposal.params.keyword_override`` from the prompt.",
-                file=sys.stderr,
-            )
         return asyncio.run(_run_optimize(args))
     parser.print_help()
     return 2
