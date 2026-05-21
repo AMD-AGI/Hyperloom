@@ -318,6 +318,39 @@ def extract_source_file(event: dict[str, Any]) -> str:
     return ""
 
 
+_FLYDSL_SOURCE_MARKERS = (
+    "import flydsl",
+    "from flydsl",
+    "@flyc.kernel",
+    "@flyc.jit",
+    "flydsl.compiler",
+    "flydsl.expr",
+)
+_FLYDSL_SCAN_BYTES = 4096
+
+
+def _looks_like_flydsl_source(source_file: str) -> bool:
+    """Return True when ``source_file`` is a FlyDSL kernel source.
+
+    Detection is content-based (not extension or path) because FlyDSL
+    kernels are plain ``.py`` files that live anywhere from the FlyDSL
+    site-packages install to per-product checkouts (e.g. helios-demo's
+    ``app/helios_demo/flydsl_mla_decode/``). We sniff the first 4 KiB
+    for FlyDSL import / decorator markers — the same signals GEAK's
+    ``task_generator._infer_kernel_type`` already uses upstream, kept in
+    sync so a candidate Hyperloom classifies as ``flydsl`` will be
+    re-classified the same way by GEAK on the receiving side.
+    """
+    if not source_file or not source_file.endswith(".py"):
+        return False
+    try:
+        with open(source_file, "r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(_FLYDSL_SCAN_BYTES)
+    except OSError:
+        return False
+    return any(marker in head for marker in _FLYDSL_SOURCE_MARKERS)
+
+
 def source_type_for(name: str, source_file: str) -> str:
     lower_name = name.lower()
     lower_file = source_file.lower()
@@ -327,6 +360,8 @@ def source_type_for(name: str, source_file: str) -> str:
         return "hip_cpp"
     if "triton" in lower_name and source_file.endswith(".py"):
         return "triton"
+    if _looks_like_flydsl_source(source_file):
+        return "flydsl"
     if source_file.endswith(".py"):
         return "python"
     if "hipblas" in lower_name or "rocblas" in lower_name:
