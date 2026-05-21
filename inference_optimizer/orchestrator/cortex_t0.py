@@ -5,10 +5,10 @@ run before EXPLORE starts:
 
 1. ``session begin`` (sync) — mints the Cortex ``session_id``;
    reused across resume via ``.kb_sid`` + ``SharedState.cortex_session_id``.
-2. ``propose_point workload_node`` (canonical id
-   ``workload.<model>.<hw>``) — idempotent across sessions for the
-   same workload/hw pair.
-3. ``find-recipe`` snapshot → ``.kb_warm.json`` +
+2. ``propose_point`` of the registered ``recipe`` kind (canonical id
+   ``recipe:{slug(model)}:{slug(hw)}``) — idempotent across sessions
+   for the same workload/hw pair; KB-explorer / warm-start can index it.
+3. ``find_recipe`` snapshot → ``.kb_warm.json`` +
    ``SharedState.warm_start_recipe``.
 4. ``traps`` snapshot → ``.kb_pitfalls.json`` +
    ``SharedState.warm_start_pitfalls``.
@@ -49,11 +49,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .. import cortex_kb_constants as C
 from ..cortex_kb_client import (
-    CortexBinaryNotFound,
     CortexKBClient,
     CortexKBError,
-    workload_canonical_id,
+    recipe_canonical_id,
 )
 
 
@@ -67,7 +67,7 @@ class T0Result:
     ``status`` ∈ {``"ok"``, ``"resumed"``, ``"skipped_disabled"``,
     ``"skipped_already"``, ``"failed_session_begin"``}. The two
     ``skipped_*`` outcomes are the no-op paths: ``skipped_disabled``
-    when the client is disabled (``--no-cortex`` / SDK without
+    when the client is disabled (``--degraded-kb`` / SDK without
     Cortex), ``skipped_already`` when ``cortex_session_id`` was
     already non-empty on entry (e.g. the cli T0 ran and the
     Coordinator's fallback finds nothing to do).
@@ -96,7 +96,6 @@ def run_t0_anchor(
     image_digest: str = "",
     stack_fingerprint: Mapping[str, str] | None = None,
     extra_attrs: Mapping[str, Any] | None = None,
-    task_text: str = "",
     resume: bool = False,
     fail_fast: bool = False,
     on_status: Callable[[str], None] | None = None,
@@ -119,8 +118,7 @@ def run_t0_anchor(
       keep the existing warm_start fields. Resume callers that
       *want* to refresh the warm_start surface should set
       ``shared_state.cortex_session_id = ""`` before invoking us.
-    * :class:`CortexBinaryNotFound` / :class:`CortexKBError` on
-      ``session_begin``:
+    * :class:`CortexKBError` on ``session_begin``:
         - ``fail_fast=True``: re-raise so cli can ``sys.exit(2)``.
         - ``fail_fast=False``: log warning + return
           ``failed_session_begin``; downstream stays workable with
@@ -139,15 +137,11 @@ def run_t0_anchor(
         The live :class:`SharedState` whose ``cortex_session_id`` /
         ``warm_start_*`` fields we write.
     workload / hw:
-        Identifiers used for ``workload_canonical_id`` + ``find-recipe``
+        Identifiers used for ``recipe_canonical_id`` + ``find_recipe``
         + ``traps`` lookup. Mandatory; callers fall back to manifest
         keys (cli) or shared_state attributes (Coordinator).
     image_digest, stack_fingerprint, extra_attrs:
-        Pass-through fields for ``session begin`` ``--attrs``.
-    task_text:
-        ``--task`` for ``session begin``. Defaults to
-        ``"hyperloom marathon <workload> on <hw>"`` when blank so an
-        SDK caller doesn't have to thread the marathon-id everywhere.
+        Pass-through fields for ``session begin`` ``attrs``.
     resume:
         ``True`` when we are picking up a pre-existing session
         (``.kb_sid`` on disk or non-empty
@@ -173,7 +167,7 @@ def run_t0_anchor(
     sd = session_dir or client.session_dir
 
     if not client.enabled:
-        emit("Cortex KB        : DISABLED (--no-cortex)")
+        emit("Cortex KB        : DISABLED (--degraded-kb)")
         return T0Result(status="skipped_disabled", workload=workload, hw=hw)
 
     sid = (getattr(shared_state, "cortex_session_id", "") or "").strip()
@@ -186,34 +180,17 @@ def run_t0_anchor(
 
     workload = (workload or "").strip() or "unknown_model"
     hw = (hw or "").strip() or "unknown_gpu"
-    canonical = workload_canonical_id(workload, hw)
+    canonical = recipe_canonical_id(workload, hw)
 
     began_now = False
     if not sid:
-        task = (
-            task_text
-            or f"hyperloom marathon {workload} on {hw}"
-        )
         try:
             sid = client.session_begin(
-                task=task,
                 workload=workload,
                 hw=hw,
                 image_digest=image_digest,
                 stack_fingerprint=stack_fingerprint,
                 extra_attrs=extra_attrs,
-            )
-        except CortexBinaryNotFound:
-            if fail_fast:
-                raise
-            log.warning(
-                "Cortex T0 skipped: cortex-kb binary missing; "
-                "warm_start will stay empty for this session.",
-            )
-            return T0Result(
-                status="failed_session_begin",
-                workload=workload, hw=hw,
-                error="cortex_binary_not_found",
             )
         except CortexKBError as exc:
             if fail_fast:
@@ -241,25 +218,26 @@ def run_t0_anchor(
         if resume:
             emit(f"Cortex KB        : resumed session_id={sid}")
 
-    # Mint the workload_node — best-effort; falls through to NDJSON
-    # when the cli returns non-zero (e.g. duplicate canonical_id
-    # error is recovered by the client and treated as success).
+    # Mint the recipe anchor — best-effort; KB validates canonical_id
+    # against the registered ``recipe`` kind schema, so this is the
+    # idempotent (model, hardware) anchor downstream warm-start /
+    # kb-explorer rely on.
     try:
         client.propose_point(
             canonical_id=canonical,
-            kind="workload_node",
-            authority="EXPERIENTIAL",
+            kind=C.KIND_RECIPE,
+            authority=C.AUTHORITY_EXPERIENTIAL,
             attrs={
-                "model": workload,
-                "hw":    hw,
-                "isl":   getattr(shared_state, "last_profile_args", "") or None,
+                "model":    workload,
+                "hardware": hw,
+                "isl":      getattr(shared_state, "last_profile_args", "") or None,
             },
             evidence=[
                 f"log:hyperloom-session-{getattr(shared_state, 'session_id', '')}",
             ],
         )
-    except CortexKBError as exc:  # propose_point catches its own; defensive
-        log.warning("propose_point workload_node failed: %s", exc)
+    except CortexKBError as exc:
+        log.warning("propose_point recipe anchor failed: %s", exc)
 
     # warm_start_recipe — non-fatal.
     warm_text = ""

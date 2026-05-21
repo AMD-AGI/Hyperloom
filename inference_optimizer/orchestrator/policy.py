@@ -424,6 +424,12 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # against an arbitrary update_state that would inject fake gaps
     # to bias specialist domain selection (Inv-1 / Inv-10.2).
     "gaps",
+    # KB_design_continue §3.5 — monotonic experiment counter feeding
+    # ``experiment_canonical_id(sid, iter)``. Coordinator's T2 hook is
+    # the sole writer (via ``SharedState.increment_session_iter_index``);
+    # LLM update_state must not rewrite the index or duplicate KB
+    # ``exp:{sid}:{iter:04d}`` anchors would collide.
+    "session_iter_index",
 })
 
 
