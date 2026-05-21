@@ -19,7 +19,12 @@ from tracelens_analysis import (  # noqa: E402
     _looks_like_flydsl_source,
     _reusable_source_roots,
     classify_patchability,
+    derive_kernel_category,
     source_type_for,
+)
+from tracelens_skill_runner import (  # noqa: E402
+    UPSTREAM_CATEGORY_TO_GEAK,
+    normalize_upstream_category,
 )
 
 
@@ -236,6 +241,35 @@ class TestSourceTypeAdmission(unittest.TestCase):
         self.assertFalse(reusable)
         self.assertIn("source_type=", skip)
         self.assertIn("flydsl", skip)
+
+
+class TestKernelCategoryDerivation(unittest.TestCase):
+    """FlyDSL must surface as ``kernel_category="FlyDSL"``."""
+
+    def test_upstream_tracelens_flydsl_mapped(self) -> None:
+        self.assertEqual(UPSTREAM_CATEGORY_TO_GEAK["flydsl"], "FlyDSL")
+        self.assertEqual(normalize_upstream_category("flydsl"), "FlyDSL")
+        self.assertEqual(normalize_upstream_category("FlyDSL"), "FlyDSL")
+
+    def test_derive_uses_tracelens_category_when_present(self) -> None:
+        cand = {
+            "name": "some_op",
+            "source_type": "flydsl",
+            "tracelens_category": "flydsl",
+        }
+        self.assertEqual(derive_kernel_category(cand), "FlyDSL")
+
+    def test_derive_falls_back_to_source_type(self) -> None:
+        cand = {"name": "some_op", "source_type": "flydsl"}
+        self.assertEqual(derive_kernel_category(cand), "FlyDSL")
+
+    def test_derive_existing_categories_unchanged(self) -> None:
+        self.assertEqual(
+            derive_kernel_category({"name": "fused_moe_kernel"}), "MoE",
+        )
+        self.assertEqual(
+            derive_kernel_category({"name": "gemm_a16w16"}), "GEMM",
+        )
 
 
 class TestGEAKKernelTypeMapping(unittest.TestCase):

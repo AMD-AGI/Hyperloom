@@ -1007,6 +1007,8 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
     cat = (candidate.get("tracelens_category") or "").strip()
     if cat:
         return normalize_upstream_category(cat)
+    if candidate.get("source_type") == "flydsl":
+        return "FlyDSL"
     name = str(candidate.get("name") or "").lower()
     if any(t in name for t in ("gemm", "matmul", "rocblas", "hipblas",
                                 "cijk", "sgemm", "hgemm")):
