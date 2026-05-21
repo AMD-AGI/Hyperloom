@@ -60,6 +60,7 @@ from .orchestrator.action_executors import (
     session_breakdown_executor,
     sweep_executor,
 )
+from .orchestrator.action_executors.integrate_patch import IntegratePatchExecutor
 from .orchestrator.action_executors.recover import recover_executor
 from .orchestrator.backends import (
     ClaudeBackend,
@@ -670,14 +671,22 @@ def _build_specialist_executor(
     session_dir: Path,
     knowledge_plane: Any,
 ) -> "Callable[[Any], Awaitable[dict]]":
-    """v0.8 §3.5 / §3.13 M5 + KB_gaps/Gap-01 — build the specialist
-    executor adapter.
+    """v0.8 §3.5 / §3.13 M5 + PR-A2 (Arbor-into-Hyperloom) — build the
+    specialist executor adapter.
 
     Returns an ``async fn(ctx: RunnerContext) -> dict`` compatible with
     :data:`SubAgentRunner.ExecutorFn`. The adapter wraps a
     :class:`SpecialistRunner` and translates its
     :class:`SpecialistRunResult` dataclass into the dict the dispatcher
     expects to publish onto the bus.
+
+    Dispatch mode (PR-A2): production wires the
+    :class:`SpecialistSubprocessDispatcher` so each specialist runs in
+    a fresh ``claude`` subprocess inside a per-task git worktree
+    (``runs/specialist/<task_id>/worktree/``). The
+    ``--specialist-dispatch-mode`` flag can fall back to the v0.8 M5
+    in-process :class:`ClaudeBackend` path (used by tests + when the
+    ``claude`` binary is missing from $PATH).
 
     Backend choice: every specialist runs on Claude (matching the
     orchestration role). The CLI flag ``--specialist-model`` overrides
@@ -689,10 +698,13 @@ def _build_specialist_executor(
     cli boot; the same runner instance handles every specialist task
     for the session.
     """
+    import shutil
+
     from .orchestrator.specialist_runner import (
         DEFAULT_SPECIALIST_TOOLS,
         SpecialistRunner,
     )
+    from .orchestrator.specialist_subprocess import SpecialistSubprocessConfig
     from .orchestrator.sub_agent_runner import SubAgentResult
 
     claude_model = (
@@ -703,22 +715,61 @@ def _build_specialist_executor(
     per_turn_max_seconds = float(
         getattr(args, "specialist_per_turn_max_seconds", 600.0) or 600.0
     )
-
-    def _backend_factory(domain: Any) -> Any:
-        # KB_design §3.5 §6 — specialist backend protocol is identical to
-        # orchestration (Claude). ``domain`` is the resolved
-        # ``SpecialistDomain`` object; runners may use it to pick a
-        # per-domain model in the future, but M5 uses one model for all.
-        return ClaudeBackend(model=claude_model, max_turns_default=max_turns)
-
-    runner = SpecialistRunner(
-        backend_factory=_backend_factory,
-        session_dir=session_dir,
-        default_tools=DEFAULT_SPECIALIST_TOOLS,
-        default_max_turns=max_turns,
-        per_turn_max_seconds=per_turn_max_seconds,
-        knowledge_plane=knowledge_plane,
+    dispatch_mode = (
+        str(getattr(args, "specialist_dispatch_mode", "subprocess") or "subprocess")
+        .strip().lower()
     )
+
+    # PR-A2: subprocess dispatch is the production default. We fall
+    # back to in-process when (a) the operator picks ``inprocess`` or
+    # (b) the ``claude`` binary is not on $PATH (e.g. dev environments
+    # using only the in-process SDK). The fallback is logged so it's
+    # visible in the manifest.
+    # PR-A2: derive framework_source_roots from the canonical resolver so
+    # the specialist worktree is rooted at the same set the orchestration
+    # prompt + PolicyGate path-validator already trust.
+    framework_source_roots = tuple(resolve_source_file_allowlist())
+    claude_bin = shutil.which("claude") or ""
+    use_subprocess = dispatch_mode != "inprocess" and bool(claude_bin)
+    if dispatch_mode == "subprocess" and not claude_bin:
+        log.warning(
+            "specialist_dispatch_mode=subprocess requested but `claude` "
+            "binary not found on PATH; falling back to in-process backend",
+        )
+
+    if use_subprocess:
+        sub_config = SpecialistSubprocessConfig(
+            claude_executable=claude_bin or "claude",
+            model=claude_model,
+            framework_source_roots=framework_source_roots,
+            mcp_config_path=str(
+                getattr(args, "specialist_mcp_config", "") or ""
+            ) or None,
+            per_turn_max_seconds=per_turn_max_seconds,
+        )
+        runner = SpecialistRunner(
+            subprocess_config=sub_config,
+            session_dir=session_dir,
+            default_tools=DEFAULT_SPECIALIST_TOOLS,
+            default_max_turns=max_turns,
+            per_turn_max_seconds=per_turn_max_seconds,
+            knowledge_plane=knowledge_plane,
+        )
+    else:
+        def _backend_factory(domain: Any) -> Any:
+            # KB_design §3.5 §6 — in-process Claude path (fallback).
+            return ClaudeBackend(
+                model=claude_model, max_turns_default=max_turns,
+            )
+
+        runner = SpecialistRunner(
+            backend_factory=_backend_factory,
+            session_dir=session_dir,
+            default_tools=DEFAULT_SPECIALIST_TOOLS,
+            default_max_turns=max_turns,
+            per_turn_max_seconds=per_turn_max_seconds,
+            knowledge_plane=knowledge_plane,
+        )
 
     async def _executor(ctx: Any) -> dict:
         """Adapter: SubAgentRunner.run_task → SpecialistRunner.run.
@@ -802,6 +853,19 @@ def _register_executors(
     # (cli only passes a non-None executor when capacity > 0).
     if specialist_executor is not None:
         coordinator.sub.register_executor("specialist", specialist_executor)
+
+    # PR-A4 (Arbor-into-Hyperloom): wire the real IntegratePatchExecutor.
+    # The executor reads the specialist's worktree patches, applies them
+    # to framework_source_roots via ``git apply``, runs a Magpie bench,
+    # and decides KEEP / REVERT. It is the single integration point —
+    # specialists never apply patches themselves (Inv-5.1 updated by
+    # PR-A2; the worktree authorisation gives them write capability,
+    # but the orchestrator-side ``integrate_patch`` is what makes those
+    # patches visible to the serving framework).
+    coordinator.sub.register_executor(
+        "integrate_patch",
+        IntegratePatchExecutor(session_dir=session_dir),
+    )
 
     if no_kernel:
         return
@@ -3191,8 +3255,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # that may run concurrently on the research_lane:
     #   * 0   → degrade to M3 (no specialist dispatch; EXPLORE uses the
     #           default_grid path).
-    #   * 1   → M5 default (single specialist at a time).
-    #   * 6   → M6 default (six concurrent specialists across domains).
+    #   * 1   → v0.8 M5 default (single specialist at a time).
+    #   * 4   → PR-A3 (Arbor-into-Hyperloom) default — enough headroom
+    #           for the Orchestration LLM to fan out one specialist per
+    #           top-K gap inside one tick (multi-emit shape) and have
+    #           the dispatcher actually run them in parallel.
+    #   * 6   → M6 ceiling that matches Arbor's "six specialists across
+    #           domains" pattern.
     #   * 32  → hard upper bound; CLI warns but accepts.
     # Locked at session start (mirrored into manifest + SharedState);
     # PolicyGate denies mid-flight mutation via CORE_STATE_FIELDS.
@@ -3201,14 +3270,14 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="research_lane_capacity",
         type=int,
         default=int(
-            os.environ.get("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", "1")
-            or "1"
+            os.environ.get("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", "4")
+            or "4"
         ),
         help="Max concurrent LLM specialist sub-agents on the "
              "research_lane (KB_design §3.7). 0 disables specialist "
-             "dispatch entirely (degrades to M3 LLM-direct grid); 1 is "
-             "the M5 default; 6 is the M6 default. Range [0, 32]. "
-             "Locked at session start.",
+             "dispatch entirely (degrades to M3 LLM-direct grid); 4 is "
+             "the PR-A3 default (Arbor-into-Hyperloom); 6 is the M6 "
+             "default. Range [0, 32]. Locked at session start.",
     )
     # ------------------------------------------------------------------
     # v0.8 §3.5 / §3.13 M5 + KB_gaps/Gap-01 — specialist sub-agent
@@ -3250,6 +3319,34 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Wall-clock cap per specialist turn (default 600s). Used "
              "by the robustness stale-scan to detect stuck specialists "
              "(KB_design §3.5 §9 / §3.13 M5 §4).",
+    )
+    # ------------------------------------------------------------------
+    # PR-A2 (Arbor-into-Hyperloom): specialist dispatch shape.
+    # ------------------------------------------------------------------
+    opt.add_argument(
+        "--specialist-dispatch-mode",
+        dest="specialist_dispatch_mode",
+        type=str,
+        choices=("subprocess", "inprocess"),
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_SPECIALIST_DISPATCH_MODE", "subprocess",
+        ).strip() or "subprocess",
+        help="Specialist execution shape. 'subprocess' (default) spawns "
+             "a fresh `claude` CLI per task inside a per-task git worktree "
+             "for isolation (PR-A2). 'inprocess' keeps the v0.8 M5 path "
+             "(claude-agent-sdk in the orchestrator process) for tests / "
+             "environments without the claude binary.",
+    )
+    opt.add_argument(
+        "--specialist-mcp-config",
+        dest="specialist_mcp_config",
+        type=str,
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_SPECIALIST_MCP_CONFIG", "",
+        ).strip() or None,
+        help="Optional path to an MCP config JSON forwarded to the "
+             "subprocess claude (`--mcp-config`). Used to wire kb / pr "
+             "MCP servers into specialists. Default: None.",
     )
     # ------------------------------------------------------------------
     # v0.8 §3.9 — drop scoreboard (KB_design §3.9 §7)

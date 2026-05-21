@@ -128,12 +128,15 @@ SPECIALIST_DOMAIN_KEYS: frozenset[str] = frozenset(
     d.key for d in SPECIALIST_DOMAINS
 )
 
-# M5 active set — only the domain whose ``available_in == 'M5'``. Used
-# by the default Orchestration prompt + SpecialistRunner template
-# resolver. M6 will widen this to the full catalogue once per-domain
-# prompts are written.
+# M5 active set — domains whose prompt templates are fully wired
+# in the specialist_prompt_builder. PR-A6 (Arbor-into-Hyperloom)
+# added per-domain focus templates for ``kernel_specialist`` /
+# ``comm_specialist`` / ``compiler_specialist`` / ``system_specialist`` /
+# ``pr_intel_specialist`` (previously M6-only fallbacks), so the M5
+# active set now matches the catalogue and Orchestration can dispatch
+# any of the six without falling through to the generic template.
 SPECIALIST_DOMAINS_M5: frozenset[str] = frozenset(
-    d.key for d in SPECIALIST_DOMAINS if d.available_in == "M5"
+    d.key for d in SPECIALIST_DOMAINS
 )
 
 
