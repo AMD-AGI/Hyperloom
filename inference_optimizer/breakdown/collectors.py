@@ -699,6 +699,76 @@ def collect_workload(
 # ---------------------------------------------------------------------------
 # §3 Baseline
 # ---------------------------------------------------------------------------
+def _build_invocation_for_workspace(
+    session_dir: Path,
+    workspace_str: str | None,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Best-effort BenchmarkInvocation for an arbitrary task workspace."""
+    workspace = _resolve_under_session(session_dir, workspace_str) if workspace_str else None
+    if workspace is None:
+        return {
+            "framework_args": "",
+            "framework_args_source": "unknown",
+            "extra_envs": {},
+            "config_path": None,
+            "server_log_path": None,
+        }
+    report_path = _find_benchmark_report(workspace)
+    server_log_path: Path | None = None
+    if report_path is not None:
+        candidate_log = report_path.parent / "server.log"
+        if candidate_log.exists():
+            server_log_path = candidate_log
+    if server_log_path is None:
+        bench_dirs = sorted(
+            workspace.glob("benchmark_*/server.log"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if bench_dirs:
+            server_log_path = bench_dirs[0]
+    config_resolved: Path | None = None
+    for candidate in (
+        workspace / "baseline_config.with_envs.yaml",
+        workspace / "params_base.with_envs.yaml",
+        workspace.parent / "baseline_config.with_envs.yaml",
+    ):
+        if candidate.exists():
+            config_resolved = candidate
+            break
+    if config_resolved is None and report_path is not None:
+        for candidate in (
+            report_path.parent / "baseline_config.with_envs.yaml",
+            report_path.parent.parent / "baseline_config.with_envs.yaml",
+        ):
+            if candidate.exists():
+                config_resolved = candidate
+                break
+    args_str, args_source = _extract_framework_args(
+        server_log_path, config_yaml=config_resolved,
+    )
+    return {
+        "framework_args":        args_str,
+        "framework_args_source": args_source,
+        "extra_envs":            _read_invocation_envs(config_resolved),
+        "config_path":           _rel(config_resolved, session_dir) if config_resolved else None,
+        "server_log_path":       _rel(server_log_path, session_dir) if server_log_path else None,
+    }
+
+
+def _load_workload_dims(session_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
+    manifest = _load_json_safe(session_dir / "manifest.json", []) or {}
+    wl = manifest.get("workload") or {}
+    return {
+        "conc":      _to_int(wl.get("conc")),
+        "isl":       _to_int(wl.get("isl")),
+        "osl":       _to_int(wl.get("osl")),
+        "tp":        _to_int(manifest.get("tp")),
+        "precision": str(wl.get("precision") or ""),
+    }
+
+
 def collect_baseline(
     session_dir: Path,
     state: dict[str, Any],
@@ -767,6 +837,9 @@ def collect_baseline(
             "key_metric":    _to_float(a.get("key_metric")),
             "workspace":     a.get("workspace"),
             "error_class":   a.get("error_class"),
+            "invocation":    _build_invocation_for_workspace(
+                session_dir, a.get("workspace"), warnings,
+            ),
         })
 
     # Disk-walking fallback: state.baseline_attempts is empty in many
@@ -848,6 +921,7 @@ def collect_baseline(
         "attempts_history":         history,
         "failure_streak":           int(state.get("baseline_failure_streak") or 0),
         "invocation":               invocation,
+        "workload_dims":            _load_workload_dims(session_dir, state),
     }
 
 
@@ -1385,11 +1459,14 @@ def _parse_invocation_attempt(
         "verification_path": _rel(verification_path, session_dir) if verification_path and verification_path.exists() else None,
         "decision":        decision,
         "micro_speedup":   micro_speedup,
+        "status":          str(attempt.get("status") or ""),
         # compile_passed / correctness_passed are kernel-level (in verification.json);
         # stamped later if this attempt is the BEST one for the kernel.
         "compile_passed":  None,
         "correctness_passed": None,
         "best_artifact_path": None,
+        "proposal_reasons": [],
+        "verification_summary": {},
         "error":           attempt.get("error"),
         "cli_log_path":    None,
     }
@@ -1464,6 +1541,18 @@ def _stamp_kernel_level_decisions(
             )
         if isinstance(result, dict) and result.get("cli_log_path"):
             best["cli_log_path"] = result["cli_log_path"]
+        proposal = result.get("proposal") if isinstance(result, dict) else None
+        if isinstance(proposal, dict):
+            reasons = proposal.get("reasons")
+            if isinstance(reasons, list):
+                best["proposal_reasons"] = [str(r) for r in reasons if r]
+        if isinstance(verification, dict):
+            best["verification_summary"] = {
+                "micro_speedup": _to_float(verification.get("micro_speedup")),
+                "compile_passed": verification.get("compile_passed"),
+                "correctness_passed": verification.get("correctness_passed"),
+                "best_artifact_path": verification.get("best_artifact_path"),
+            }
         # Refresh kernel metadata from the (richer) result file
         best["kernel_metadata"] = _shape_kernel_metadata(result, {
             "name": best.get("kernel_metadata", {}).get("name"),
@@ -2635,14 +2724,522 @@ def collect_source_files(
     return out
 
 
+# ---------------------------------------------------------------------------
+# v1.1 — decision journal + kernel profiling
+# ---------------------------------------------------------------------------
+_DECISION_JOURNAL_STANDARD_VARIANT_CAP = 30
+
+
+def _search_entry_fp(entry: Any) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    fp = entry.get("fingerprint")
+    if fp:
+        return str(fp)
+    args = str(entry.get("extra_sglang_args") or "")
+    envs = dict(entry.get("extra_envs") or {})
+    return _params_entry_fp({"extra_sglang_args": args, "extra_envs": envs})
+
+
+def _find_audit_attempt(
+    state: dict[str, Any],
+    action: str,
+    *,
+    round_id: str | None,
+    ts: str | None,
+) -> dict[str, Any] | None:
+    attempts = state.get(f"{action}_attempts") or []
+    if not isinstance(attempts, list):
+        return None
+    for entry in reversed(attempts):
+        if not isinstance(entry, dict):
+            continue
+        extras = entry.get("extras") or {}
+        if round_id and extras.get("round_id") == round_id:
+            return entry
+    if ts:
+        for entry in reversed(attempts):
+            if isinstance(entry, dict) and entry.get("ts") == ts:
+                return entry
+    return attempts[-1] if attempts else None
+
+
+def _variant_benchmark_report_path(
+    session_dir: Path,
+    workspace_str: str | None,
+    variant_name: str | None,
+    warnings: list[str],
+) -> str | None:
+    workspace = _resolve_under_session(session_dir, workspace_str) if workspace_str else None
+    if workspace is None or not variant_name:
+        report = _find_benchmark_report(workspace)
+        return _rel(report, session_dir) if report else None
+    for pattern in (
+        f"*{variant_name}*/benchmark_*/benchmark_report.json",
+        f"variant_*{variant_name}*/benchmark_*/benchmark_report.json",
+        "benchmark_*/benchmark_report.json",
+    ):
+        matches = sorted(workspace.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+        if matches:
+            return _rel(matches[0], session_dir)
+    report = _find_benchmark_report(workspace)
+    return _rel(report, session_dir) if report else None
+
+
+def _shape_variant_decision(
+    *,
+    session_dir: Path,
+    name: str,
+    fingerprint: str,
+    extra_sglang_args: str,
+    extra_envs: dict[str, Any] | None,
+    status: str,
+    output_throughput: float | None,
+    gain_pct_vs_base: float | None,
+    outcome: str,
+    reject_reason: str | None,
+    workspace_str: str | None,
+    warnings: list[str],
+) -> dict[str, Any]:
+    envs = _filter_envs(extra_envs or {})
+    return {
+        "name":                    str(name or ""),
+        "fingerprint":             str(fingerprint or ""),
+        "extra_sglang_args":       str(extra_sglang_args or ""),
+        "extra_envs":              envs,
+        "status":                  str(status or ""),
+        "output_throughput":       output_throughput,
+        "gain_pct_vs_base":        gain_pct_vs_base,
+        "gain_pct_vs_current_best": None,
+        "outcome":                 outcome,
+        "reject_reason":           reject_reason,
+        "benchmark_report_path":   _variant_benchmark_report_path(
+            session_dir, workspace_str, name, warnings,
+        ),
+        "invocation":              _build_invocation_for_workspace(
+            session_dir, workspace_str, warnings,
+        ),
+    }
+
+
+def _variants_from_search_last_round(
+    session_dir: Path,
+    phase: str,
+    search: dict[str, Any],
+    *,
+    workspace_str: str | None,
+    selected_new: set[str],
+    round_winners: set[str],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    lr = search.get("last_round") or {}
+    if not isinstance(lr, dict) or not lr:
+        return []
+    tested = search.get("tested") or {}
+    if not isinstance(tested, dict):
+        tested = {}
+    rejected_by_fp: dict[str, dict[str, Any]] = {}
+    for row in search.get("rejected") or []:
+        if isinstance(row, dict):
+            fp = _search_entry_fp(row)
+            if fp:
+                rejected_by_fp[fp] = row
+    fps = lr.get("tested_fp")
+    if not isinstance(fps, list) or not fps:
+        fps = list(tested.keys())
+    variants: list[dict[str, Any]] = []
+    seen_fps: set[str] = set()
+    for fp in fps:
+        fp = str(fp)
+        if not fp or fp in seen_fps:
+            continue
+        seen_fps.add(fp)
+        entry = tested.get(fp) if isinstance(tested.get(fp), dict) else {}
+        name = str(entry.get("name") or rejected_by_fp.get(fp, {}).get("name") or "")
+        result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+        gain = _to_float(entry.get("gain_pct"))
+        if gain is None:
+            gain = _to_float(rejected_by_fp.get(fp, {}).get("gain_pct"))
+        tput = _to_float(
+            entry.get("output_throughput")
+            or result.get("output_throughput")
+            or rejected_by_fp.get(fp, {}).get("tput")
+        )
+        ws = str(result.get("workspace") or workspace_str or "")
+        if name in selected_new:
+            outcome = "promoted"
+        elif name in round_winners:
+            outcome = "round_winner"
+        elif fp in rejected_by_fp:
+            outcome = "rejected"
+        else:
+            outcome = "tested"
+        reject_reason = None
+        if outcome == "rejected":
+            reject_reason = str(rejected_by_fp.get(fp, {}).get("reason") or "")
+        variants.append(_shape_variant_decision(
+            session_dir=session_dir,
+            name=name,
+            fingerprint=fp,
+            extra_sglang_args=str(entry.get("extra_sglang_args") or ""),
+            extra_envs=dict(entry.get("extra_envs") or {}),
+            status=str(result.get("status") or "succeeded"),
+            output_throughput=tput,
+            gain_pct_vs_base=gain,
+            outcome=outcome,
+            reject_reason=reject_reason or None,
+            workspace_str=ws or workspace_str,
+            warnings=warnings,
+        ))
+    for fp, row in rejected_by_fp.items():
+        if fp in seen_fps:
+            continue
+        variants.append(_shape_variant_decision(
+            session_dir=session_dir,
+            name=str(row.get("name") or ""),
+            fingerprint=fp,
+            extra_sglang_args=str(row.get("extra_sglang_args") or ""),
+            extra_envs=dict(row.get("extra_envs") or {}),
+            status="succeeded",
+            output_throughput=_to_float(row.get("tput")),
+            gain_pct_vs_base=_to_float(row.get("gain_pct")),
+            outcome="rejected",
+            reject_reason=str(row.get("reason") or "") or None,
+            workspace_str=workspace_str,
+            warnings=warnings,
+        ))
+    return variants
+
+
+def _round_decision_from_attempt(attempt: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(attempt, dict):
+        return {}
+    extras = attempt.get("extras") or {}
+    return {
+        "outcome": str(attempt.get("decision") or ""),
+        "best_variant_name": extras.get("best_variant_name"),
+        "gain_vs_cb_pct": _to_float(extras.get("gain_vs_cb")),
+        "best_gain_pct_vs_base": _to_float(extras.get("best_gain_pct_vs_base")),
+        "promotion_rule": extras.get("promotion_rule"),
+        "promotion_rule_detail": extras.get("promotion_rule_detail"),
+        "keep_threshold_pct": _to_float(extras.get("keep_threshold_pct")),
+        "accuracy_gate_passed": extras.get("accuracy_gate_passed"),
+        "variants_tested_count": _to_int(extras.get("variants_tested_count")),
+    }
+
+
+def _cap_variants(
+    variants: list[dict[str, Any]],
+    *,
+    detail_level: str,
+) -> list[dict[str, Any]]:
+    if detail_level == "verbose" or len(variants) <= _DECISION_JOURNAL_STANDARD_VARIANT_CAP:
+        return variants
+    promoted = [v for v in variants if v.get("outcome") in ("promoted", "round_winner")]
+    rejected = [v for v in variants if v.get("outcome") == "rejected"]
+    tested = [v for v in variants if v.get("outcome") == "tested"]
+    tested.sort(
+        key=lambda v: abs(_to_float(v.get("gain_pct_vs_base")) or 0.0),
+        reverse=True,
+    )
+    cap = max(0, _DECISION_JOURNAL_STANDARD_VARIANT_CAP - len(promoted) - len(rejected))
+    kept_fps = {v.get("fingerprint") for v in promoted + rejected}
+    out = list(promoted)
+    for v in rejected:
+        if v.get("fingerprint") not in kept_fps:
+            out.append(v)
+    for v in tested[:cap]:
+        out.append(v)
+    return out
+
+
+def collect_decision_journal(
+    session_dir: Path,
+    state: dict[str, Any],
+    warnings: list[str],
+    *,
+    detail_level: str = "standard",
+) -> list[dict[str, Any]]:
+    journal: list[dict[str, Any]] = []
+    seen_round_ids: set[str] = set()
+
+    for round_row in state.get("backend_winners_history") or []:
+        if not isinstance(round_row, dict):
+            continue
+        phase = str(round_row.get("action") or "params")
+        round_id = str(round_row.get("round_id") or "")
+        if round_id:
+            seen_round_ids.add(round_id)
+        attempt = _find_audit_attempt(
+            state, phase, round_id=round_id or None, ts=round_row.get("ts"),
+        )
+        workspace = attempt.get("workspace") if attempt else None
+        variants: list[dict[str, Any]] = []
+        winner_names = set()
+        for w in round_row.get("winners") or []:
+            if not isinstance(w, dict):
+                continue
+            name = str(w.get("name") or "")
+            winner_names.add(name)
+            variants.append(_shape_variant_decision(
+                session_dir=session_dir,
+                name=name,
+                fingerprint=_search_entry_fp(w),
+                extra_sglang_args=str(w.get("extra_sglang_args") or ""),
+                extra_envs=dict(w.get("extra_envs") or {}),
+                status="succeeded",
+                output_throughput=_to_float(w.get("tput")),
+                gain_pct_vs_base=_to_float(w.get("gain_pct")),
+                outcome="round_winner",
+                reject_reason=None,
+                workspace_str=workspace,
+                warnings=warnings,
+            ))
+        search = state.get(f"{phase}_search") or {}
+        lr = search.get("last_round") if isinstance(search, dict) else {}
+        history_for_phase = [
+            r for r in (state.get("backend_winners_history") or [])
+            if isinstance(r, dict) and str(r.get("action") or "") == phase
+        ]
+        is_latest_for_phase = (
+            bool(history_for_phase)
+            and str(history_for_phase[-1].get("round_id") or "") == round_id
+        )
+        use_full_last_round = (
+            isinstance(lr, dict)
+            and bool(lr.get("tested_fp"))
+            and (
+                str(lr.get("round_id") or "") == round_id
+                or (is_latest_for_phase and not lr.get("round_id"))
+            )
+        )
+        if use_full_last_round and isinstance(search, dict):
+            variants = _variants_from_search_last_round(
+                session_dir, phase, search,
+                workspace_str=workspace,
+                selected_new=set(lr.get("selected_new") or []),
+                round_winners=set(lr.get("round_winners") or winner_names),
+                warnings=warnings,
+            )
+        elif not variants:
+            pass
+        journal.append({
+            "ts":                 str(round_row.get("ts") or (attempt or {}).get("ts") or ""),
+            "phase":              phase,
+            "round_id":           round_id or None,
+            "task_id":            str((attempt or {}).get("task_id") or ""),
+            "workspace":          workspace,
+            "baseline_ref_tput":  _to_float(round_row.get("base_tput")),
+            "current_best_tput":  _to_float((state.get("current_best") or {}).get("tput")),
+            "keep_threshold_pct": None,
+            "variants":           _cap_variants(variants, detail_level=detail_level),
+            "round_decision":     _round_decision_from_attempt(attempt),
+        })
+
+    for phase in ("params", "backends"):
+        search = state.get(f"{phase}_search") or {}
+        if not isinstance(search, dict):
+            continue
+        lr = search.get("last_round") or {}
+        if not isinstance(lr, dict) or not lr:
+            continue
+        round_id = str(lr.get("round_id") or f"{phase}-last")
+        if round_id in seen_round_ids:
+            continue
+        attempt = _find_audit_attempt(state, phase, round_id=round_id, ts=None)
+        workspace = attempt.get("workspace") if attempt else None
+        variants = _variants_from_search_last_round(
+            session_dir, phase, search,
+            workspace_str=workspace,
+            selected_new=set(lr.get("selected_new") or []),
+            round_winners=set(lr.get("round_winners") or []),
+            warnings=warnings,
+        )
+        if not variants:
+            continue
+        journal.append({
+            "ts":                 str((attempt or {}).get("ts") or ""),
+            "phase":              phase,
+            "round_id":           round_id,
+            "task_id":            str((attempt or {}).get("task_id") or ""),
+            "workspace":          workspace,
+            "baseline_ref_tput":  _to_float(lr.get("base_tput")),
+            "current_best_tput":  _to_float((state.get("current_best") or {}).get("tput")),
+            "keep_threshold_pct": None,
+            "variants":           _cap_variants(variants, detail_level=detail_level),
+            "round_decision":     _round_decision_from_attempt(attempt),
+        })
+
+    journal.sort(key=lambda e: e.get("ts") or "")
+    return journal
+
+
+def _parse_kernel_summary_csv(path: Path, warnings: list[str]) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    import csv
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if not row:
+                    continue
+                rows.append({
+                    "kernel_id":  row.get("kernel_id") or row.get("name") or "",
+                    "name":       row.get("name") or row.get("kernel_name") or "",
+                    "gpu_pct":    _to_float(row.get("gpu_pct") or row.get("gpu_time_pct")),
+                    "duration_us": _to_float(row.get("duration_us") or row.get("duration")),
+                    "bottleneck": row.get("bottleneck") or "",
+                })
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"kernel_summary.csv parse failed ({path}): {exc!r}")
+    return rows[:25]
+
+
+def _parse_tracelens_status(path: Path, warnings: list[str]) -> dict[str, Any]:
+    data = _load_json_safe(path, warnings)
+    if not isinstance(data, dict):
+        return {}
+    summary = data.get("summary") or data.get("analysis_summary") or ""
+    if not summary and data.get("status"):
+        summary = str(data.get("status"))
+    return {
+        "tool": "tracelens_analysis",
+        "analysis_summary": str(summary) if summary else None,
+        "top_kernels": list(data.get("top_kernels") or data.get("kernels") or [])[:25],
+    }
+
+
+def collect_kernel_profiling(
+    session_dir: Path,
+    state: dict[str, Any],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    runs: list[dict[str, Any]] = []
+    profile_root = session_dir / "runs" / "profile"
+    attempt_by_task: dict[str, dict[str, Any]] = {}
+    for entry in state.get("profile_attempts") or []:
+        if isinstance(entry, dict) and entry.get("task_id"):
+            attempt_by_task[str(entry["task_id"])] = entry
+
+    if profile_root.exists():
+        for task_dir in sorted(p for p in profile_root.iterdir() if p.is_dir()):
+            task_id = task_dir.name
+            attempt = attempt_by_task.get(task_id) or {}
+            extras = attempt.get("extras") or {}
+            report = _find_benchmark_report(task_dir)
+            report_data = _load_json_safe(report, warnings) if report else None
+            top_kernels: list[dict[str, Any]] = []
+            if isinstance(report_data, dict):
+                for k in report_data.get("kernel_summary") or []:
+                    if isinstance(k, dict):
+                        top_kernels.append({
+                            "kernel_id": k.get("kernel_id") or k.get("name") or "",
+                            "name":      k.get("name") or "",
+                            "gpu_pct":   _to_float(k.get("gpu_pct")),
+                            "duration_us": _to_float(k.get("time_ms")),
+                            "bottleneck": k.get("bottleneck") or "",
+                        })
+            trace_paths: list[str] = []
+            for sub in ("torch_trace", "capture_traces"):
+                troot = task_dir / sub
+                if not troot.exists():
+                    for bench in task_dir.glob("benchmark_*"):
+                        candidate = bench / sub
+                        if candidate.exists():
+                            troot = candidate
+                            break
+                if troot.exists():
+                    for tp in sorted(troot.rglob("*.trace.json.gz"))[:20]:
+                        rel = _rel(tp, session_dir)
+                        if rel:
+                            trace_paths.append(rel)
+            kernel_summary_csv: Path | None = None
+            for candidate in task_dir.rglob("kernel_summary.csv"):
+                kernel_summary_csv = candidate
+                break
+            if kernel_summary_csv and not top_kernels:
+                top_kernels = _parse_kernel_summary_csv(kernel_summary_csv, warnings)
+            candidates_json = task_dir / "kernel_candidates.json"
+            if not candidates_json.exists():
+                for candidate in task_dir.rglob("kernel_candidates.json"):
+                    candidates_json = candidate
+                    break
+            launch = _build_invocation_for_workspace(
+                session_dir, str(task_dir), warnings,
+            )
+            if extras.get("profile_args"):
+                launch["framework_args"] = str(extras["profile_args"])
+                launch["framework_args_source"] = "profile_attempt_extras"
+            runs.append({
+                "run_id":              task_id,
+                "ts":                  str(attempt.get("ts") or ""),
+                "task_id":             task_id,
+                "framework":           str(state.get("framework") or ""),
+                "profile_config_path": extras.get("config_path"),
+                "launch":              launch,
+                "artifacts": {
+                    "benchmark_report_path": _rel(report, session_dir) if report else None,
+                    "trace_paths":           trace_paths,
+                    "kernel_summary_csv":    _rel(kernel_summary_csv, session_dir)
+                        if kernel_summary_csv else None,
+                    "kernel_candidates_json": _rel(candidates_json, session_dir)
+                        if candidates_json.exists() else None,
+                    "tracelens_status_json": None,
+                    "tracelens_log":         None,
+                },
+                "outputs": {
+                    "tool": "magpie_torch_profiler",
+                    "top_kernels": top_kernels[:25],
+                    "analysis_summary": None,
+                },
+            })
+
+    for run_dir in _kernel_agent_run_dirs(session_dir):
+        status_root = run_dir / "status" / "tracelens_analysis"
+        if not status_root.exists():
+            continue
+        for status_path in sorted(status_root.glob("*.json")):
+            parsed = _parse_tracelens_status(status_path, warnings)
+            log_path = run_dir / "logs" / "tracelens_analysis" / f"{status_path.stem}.log"
+            runs.append({
+                "run_id":              status_path.stem,
+                "ts":                  "",
+                "task_id":             run_dir.name,
+                "framework":           str(state.get("framework") or ""),
+                "profile_config_path": None,
+                "launch":              {},
+                "artifacts": {
+                    "benchmark_report_path": None,
+                    "trace_paths":           [],
+                    "kernel_summary_csv":    None,
+                    "kernel_candidates_json": None,
+                    "tracelens_status_json": _rel(status_path, session_dir),
+                    "tracelens_log":         _rel(log_path, session_dir)
+                        if log_path.exists() else None,
+                },
+                "outputs": parsed or {
+                    "tool": "tracelens_analysis",
+                    "top_kernels": [],
+                    "analysis_summary": None,
+                },
+            })
+
+    runs.sort(key=lambda r: r.get("ts") or r.get("run_id") or "")
+    return runs
+
+
 __all__ = [
     "collect_attribution",
     "collect_baseline",
     "collect_capability_summary",
     "collect_critic_robustness",
+    "collect_decision_journal",
     "collect_final",
     "collect_kernel_invocations",
     "collect_kernel_lifecycle",
+    "collect_kernel_profiling",
     "collect_param_search",
     "collect_phase_timeline",
     "collect_session",

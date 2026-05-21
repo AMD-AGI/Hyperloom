@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-SCHEMA_VERSION = "hyperloom.session_breakdown.v1"
+SCHEMA_VERSION = "hyperloom.session_breakdown.v1.1"
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +78,7 @@ class BaselineAttemptSummary(TypedDict, total=False):
     key_metric: float | None
     workspace: str | None
     error_class: str | None
+    invocation: BenchmarkInvocation
 
 
 class BenchmarkInvocation(TypedDict, total=False):
@@ -101,6 +102,14 @@ class BenchmarkInvocation(TypedDict, total=False):
     server_log_path: str | None   # for debug
 
 
+class WorkloadDims(TypedDict, total=False):
+    conc: int | None
+    isl: int | None
+    osl: int | None
+    tp: int | None
+    precision: str
+
+
 class Baseline(TypedDict, total=False):
     throughput_tok_s_per_gpu: float
     accuracy: float
@@ -112,6 +121,7 @@ class Baseline(TypedDict, total=False):
     attempts_history: list[BaselineAttemptSummary]
     failure_streak: int
     invocation: BenchmarkInvocation
+    workload_dims: WorkloadDims
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +195,13 @@ class KernelMetadata(TypedDict, total=False):
     arithmetic_intensity: float | None
 
 
+class VerificationSummary(TypedDict, total=False):
+    micro_speedup: float | None
+    compile_passed: bool | None
+    correctness_passed: bool | None
+    best_artifact_path: str | None
+
+
 class Invocation(TypedDict, total=False):
     """One backend invocation for one kernel.
 
@@ -196,6 +213,7 @@ class Invocation(TypedDict, total=False):
     ts: str
     backend: str                  # geak / claude / codex
     model: str | None
+    status: str                   # succeeded / failed / error (per-attempt)
     kernel_metadata: KernelMetadata
     prompt_path: str | None
     optimized_files: list[str]
@@ -206,6 +224,8 @@ class Invocation(TypedDict, total=False):
     compile_passed: bool | None
     correctness_passed: bool | None
     best_artifact_path: str | None
+    proposal_reasons: list[str]
+    verification_summary: VerificationSummary
     error: str | None
     cli_log_path: str | None
 
@@ -430,10 +450,87 @@ class SourceFiles(TypedDict, total=False):
     robustness_workdir: str | None
 
 
+# ---------------------------------------------------------------------------
+# v1.1 — decision journal + kernel profiling
+# ---------------------------------------------------------------------------
+class VariantDecision(TypedDict, total=False):
+    name: str
+    fingerprint: str
+    extra_sglang_args: str
+    extra_envs: dict[str, str]
+    status: str                   # succeeded / failed / skipped
+    output_throughput: float | None
+    gain_pct_vs_base: float | None
+    gain_pct_vs_current_best: float | None
+    outcome: str                  # tested / round_winner / promoted / rejected
+    reject_reason: str | None     # not_keep / combo_conflict / ...
+    benchmark_report_path: str | None
+    invocation: BenchmarkInvocation
+
+
+class RoundDecision(TypedDict, total=False):
+    outcome: str                    # promoted / discarded
+    best_variant_name: str | None
+    gain_vs_cb_pct: float | None
+    best_gain_pct_vs_base: float | None
+    promotion_rule: str | None      # single_shot / cross_round_consistent / accuracy_blocked / below_threshold
+    promotion_rule_detail: str | None
+    keep_threshold_pct: float | None
+    accuracy_gate_passed: bool | None
+    variants_tested_count: int | None
+
+
+class DecisionJournalEntry(TypedDict, total=False):
+    ts: str
+    phase: str                      # params / backends
+    round_id: str | None
+    task_id: str | None
+    workspace: str | None
+    baseline_ref_tput: float | None
+    current_best_tput: float | None
+    keep_threshold_pct: float | None
+    variants: list[VariantDecision]
+    round_decision: RoundDecision
+
+
+class KernelProfilingLaunch(TypedDict, total=False):
+    framework_args: str
+    framework_args_source: str
+    extra_envs: dict[str, str]
+    tracelens_patched: bool | None
+
+
+class KernelProfilingArtifacts(TypedDict, total=False):
+    benchmark_report_path: str | None
+    trace_paths: list[str]
+    kernel_summary_csv: str | None
+    kernel_candidates_json: str | None
+    tracelens_status_json: str | None
+    tracelens_log: str | None
+
+
+class KernelProfilingOutputs(TypedDict, total=False):
+    tool: str                       # tracelens_analysis / magpie_torch_profiler
+    top_kernels: list[dict[str, Any]]
+    analysis_summary: str | None
+
+
+class KernelProfilingRun(TypedDict, total=False):
+    run_id: str
+    ts: str
+    task_id: str
+    framework: str | None
+    profile_config_path: str | None
+    launch: KernelProfilingLaunch
+    artifacts: KernelProfilingArtifacts
+    outputs: KernelProfilingOutputs
+
+
 class SessionBreakdown(TypedDict, total=False):
     schema_version: str
     exported_at_utc: str
     exporter_version: str
+    detail_level: str               # standard / verbose
 
     session: SessionMeta
     workload: Workload
@@ -450,6 +547,9 @@ class SessionBreakdown(TypedDict, total=False):
     telemetry: Telemetry
     attribution: Attribution
 
+    decision_journal: list[DecisionJournalEntry]
+    kernel_profiling: list[KernelProfilingRun]
+
     warnings: list[str]
     source_files: SourceFiles
 
@@ -457,6 +557,7 @@ class SessionBreakdown(TypedDict, total=False):
 __all__ = [
     "SCHEMA_VERSION",
     "AdoptedKernel",
+    "DecisionJournalEntry",
     "Attribution",
     "Baseline",
     "BaselineAttemptSummary",
@@ -470,6 +571,10 @@ __all__ = [
     "GpuMonitorAggregate",
     "Invocation",
     "KernelLifecycle",
+    "KernelProfilingArtifacts",
+    "KernelProfilingLaunch",
+    "KernelProfilingOutputs",
+    "KernelProfilingRun",
     "KernelMetadata",
     "OptimizedKernel",
     "ParamSearch",
@@ -479,6 +584,10 @@ __all__ = [
     "RecommendedKernel",
     "RejectedKernel",
     "RobustnessSignal",
+    "RoundDecision",
+    "VariantDecision",
+    "VerificationSummary",
+    "WorkloadDims",
     "SessionBreakdown",
     "SessionMeta",
     "SourceBreakdown",

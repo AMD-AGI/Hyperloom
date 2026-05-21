@@ -3254,6 +3254,14 @@ class Coordinator:
                     extra_envs=dict(bv.get("extra_envs") or {}),
                 )
             promoted = False
+            promotion_rule: str | None = None
+            promotion_rule_detail = ""
+            accuracy_gate_passed: bool | None = None
+            variants_tested_count = int(result.get("grid_size") or 0)
+            if not variants_tested_count:
+                tested = result.get("single_results") or result.get("all_results") or []
+                if isinstance(tested, list):
+                    variants_tested_count = len(tested)
             if gain_vs_cb is not None and gain_vs_cb >= PROMOTE_THRESHOLD_PCT:
                 # Accuracy gate: if the winner touches precision-affecting
                 # flags, verify its GSM8K accuracy didn't drop > 5%.
@@ -3271,6 +3279,7 @@ class Coordinator:
                     base_acc = self.shared_state.baseline_accuracy
                     if isinstance(new_acc, (int, float)) and base_acc > 0:
                         accuracy_ok = accuracy_passed(base_acc, new_acc)
+                        accuracy_gate_passed = accuracy_ok
                         if not accuracy_ok:
                             log.warning(
                                 "accuracy gate FAILED for %s variant=%s: "
@@ -3286,9 +3295,22 @@ class Coordinator:
                 if accuracy_ok:
                     self._lift_to_current_best(task_kind, best_tput, bv)
                     promoted = True
+                    promotion_rule = "single_shot"
+                    promotion_rule_detail = (
+                        f"gain_vs_cb={float(gain_vs_cb):.2f}% >= "
+                        f"single_shot_threshold={PROMOTE_THRESHOLD_PCT}%"
+                    )
                 else:
-                    log.info("accuracy gate blocked promotion of %s/%s",
-                             task_kind, bv.get("name"))
+                    log.info(
+                        "accuracy gate blocked promotion of %s/%s",
+                        task_kind, bv.get("name"),
+                    )
+                    promotion_rule = "accuracy_blocked"
+                    promotion_rule_detail = (
+                        f"gain_vs_cb={float(gain_vs_cb):.2f}% met "
+                        f"single_shot_threshold={PROMOTE_THRESHOLD_PCT}% "
+                        f"but accuracy gate failed"
+                    )
             else:
                 # Cross-round signal: same variant winning consistently
                 # at sub-threshold but real gains.
@@ -3314,6 +3336,26 @@ class Coordinator:
                         CROSS_ROUND_LOOKBACK,
                     )
                     promoted = True
+                    promotion_rule = "cross_round_consistent"
+                    promotion_rule_detail = (
+                        f"variant={consistent['variant_name']} appeared "
+                        f">={CROSS_ROUND_MIN_APPEARANCES} of last "
+                        f"{CROSS_ROUND_LOOKBACK} rounds with "
+                        f"avg_gain={float(consistent['gain_pct']):.2f}% "
+                        f"(min_avg={CROSS_ROUND_MIN_AVG_GAIN_PCT}%)"
+                    )
+                else:
+                    promotion_rule = "below_threshold"
+                    if gain_vs_cb is None:
+                        promotion_rule_detail = (
+                            "no measurable output_throughput vs current_best"
+                        )
+                    else:
+                        promotion_rule_detail = (
+                            f"gain_vs_cb={float(gain_vs_cb):.2f}% < "
+                            f"single_shot_threshold={PROMOTE_THRESHOLD_PCT}% "
+                            f"and no cross_round_consistent winner"
+                        )
             if promoted:
                 self.shared_state.params_no_promote_streak = 0
                 # Phase 4 of the dedup-by-fingerprint plan: Coordinator
@@ -3377,6 +3419,11 @@ class Coordinator:
                     float(gain_vs_cb)
                     if isinstance(gain_vs_cb, (int, float)) else None
                 ),
+                "promotion_rule": promotion_rule,
+                "promotion_rule_detail": promotion_rule_detail or None,
+                "keep_threshold_pct": PROMOTE_THRESHOLD_PCT,
+                "accuracy_gate_passed": accuracy_gate_passed,
+                "variants_tested_count": variants_tested_count,
             }
         # Out-of-band score updates for the task_kinds that don't have a
         # promoted-vs-discard notion (profile / pmc_roofline / validate_stack
