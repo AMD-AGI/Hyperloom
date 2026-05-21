@@ -402,6 +402,7 @@ def _clear_workload_env(monkeypatch):
     for k in (
         "CONC", "ISL", "OSL", "TP", "MAX_MODEL_LEN",
         "RANDOM_RANGE_RATIO", "ROCR_VISIBLE_DEVICES", "FRAMEWORK",
+        "INFERENCEX_PATH",
     ):
         monkeypatch.delenv(k, raising=False)
 
@@ -452,6 +453,24 @@ def test_materialize_profile_window_sglang_skill_formula(
     body = json.loads(rendered["benchmark"]["envs"]["PROFILE_EXTRA_BODY"])
     assert body["start_step"] == 5888
     assert body["num_steps"] == 512
+
+
+def test_materialize_persists_inferencex_path_for_magpie(
+    tmp_path, monkeypatch,
+):
+    """$INFERENCEX_PATH must be written into benchmark.inferencex_path.
+
+    Otherwise Magpie resolves an empty value to its sibling checkout
+    ($MAGPIE_DIR/InferenceX), while Hyperloom's profile patcher may have
+    patched a different checkout.
+    """
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("INFERENCEX_PATH", "/wekafs/InferenceX")
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    assert rendered["benchmark"]["inferencex_path"] == "/wekafs/InferenceX"
 
 
 def test_materialize_profile_window_clamps_to_skill_floor(
@@ -738,27 +757,36 @@ def test_materialize_profile_sglang_does_not_duplicate_shape_discovery(
 
 
 def test_profile_executor_calls_benchmark_lib_patcher():
-    """ProfileExecutor must call ensure_benchmark_lib_patched before
-    launching Magpie, or the steady-state NUM_PROMPTS we just
-    computed gets stomped by upstream `benchmark_lib.sh` and the
-    trace is silently empty.
+    """ProfileExecutor must patch the materialized InferenceX checkout before
+    launching Magpie, or the steady-state NUM_PROMPTS / PROFILE_EXTRA_BODY we
+    just computed gets stomped by upstream InferenceX and the trace is
+    silently empty.
 
     We don't run the full subprocess machinery — that's gated by
     BaselineExecutor.__call__ which already has its own coverage.
-    Here we just lock down the seam: the symbol is imported by name
-    in profile.py and invoked unconditionally inside __call__.
+    Here we just lock down the seam: the symbols are imported by name
+    in profile.py and invoked from the post-materialization hook.
     """
     import inference_optimizer.orchestrator.action_executors.profile as profile_mod
     # The symbol must be re-exportable from the module (so monkey-
     # patching in tests / integration sites is straightforward).
     assert profile_mod.ensure_benchmark_lib_patched is not None
-    # And the source of __call__ must reference it; this is a cheap
-    # regression guard against silent removal during refactors.
+    assert profile_mod.ensure_benchmark_serving_patched is not None
+    # And the source of the hook must reference both patchers; this is a cheap
+    # regression guard against silent removal during refactors. The hook runs
+    # after YAML materialization so it can patch the exact
+    # benchmark.inferencex_path that Magpie will execute.
     import inspect
-    src = inspect.getsource(profile_mod.ProfileExecutor.__call__)
+    src = inspect.getsource(profile_mod.ProfileExecutor._after_materialize_config)
     assert "ensure_benchmark_lib_patched" in src, (
-        "ProfileExecutor.__call__ must invoke ensure_benchmark_lib_patched "
-        "before super().__call__ — otherwise issue #194 §2 regresses."
+        "ProfileExecutor._after_materialize_config must invoke "
+        "ensure_benchmark_lib_patched on the materialized InferenceX path — "
+        "otherwise issue #194 §2 regresses."
+    )
+    assert "ensure_benchmark_serving_patched" in src, (
+        "ProfileExecutor._after_materialize_config must invoke "
+        "ensure_benchmark_serving_patched so PROFILE_EXTRA_BODY reaches "
+        "SGLang's /start_profile request."
     )
 
 
@@ -908,8 +936,9 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     }))
     trace_dir = workspace / "torch_trace"
     trace_dir.mkdir()
-    (trace_dir / "TP-0_main.trace.json.gz").write_bytes(b"fake-trace")
-    (trace_dir / "TP-0_aux.trace.json.gz").write_bytes(b"fake-trace")
+    (trace_dir / "177-TP-0-DECODE.trace.json.gz").write_bytes(b"fake-trace")
+    merged_trace = trace_dir / "merged-177.trace.json.gz"
+    merged_trace.write_bytes(b"fake-trace")
 
     # Stub subprocess.run so we don't actually launch sglang.
     fake_completed = subprocess.CompletedProcess(
@@ -931,7 +960,74 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     assert res.result["framework"] == "sglang"
     assert res.result["trace_dir"] == str(trace_dir)
     assert len(res.result["trace_files"]) == 2
-    assert "main_trace_path" in res.result
+    assert res.result["main_trace_path"] == str(merged_trace)
+    assert res.result["profile_trace_selection_reason"] == "merged_trace_preferred"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_executor_patches_configured_inferencex_path(
+    tmp_path, monkeypatch,
+):
+    """ProfileExecutor must patch the InferenceX checkout Magpie will use.
+
+    Regression for the Qwen3-32B TraceLens run where $INFERENCEX_PATH pointed
+    at /wekafs/InferenceX but Magpie's rendered YAML had an empty
+    benchmark.inferencex_path, so Magpie used $MAGPIE_DIR/InferenceX and lost
+    NUM_PROMPTS / PROFILE_EXTRA_BODY.
+    """
+    fake_ix = tmp_path / "InferenceX"
+    (fake_ix / "benchmarks").mkdir(parents=True)
+    (fake_ix / "utils" / "bench_serving").mkdir(parents=True)
+    (fake_ix / "benchmarks" / "benchmark_lib.sh").write_text(
+        'num_prompts="${NUM_PROMPTS:-$max_concurrency}"\n',
+        encoding="utf-8",
+    )
+    (fake_ix / "utils" / "bench_serving" / "benchmark_serving.py").write_text(
+        "# already patched\nPROFILE_EXTRA_BODY\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("INFERENCEX_PATH", str(fake_ix))
+
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    output_dir = tmp_path / "out"
+    workspace = output_dir / "benchmark_sglang_20260501_001122"
+    workspace.mkdir(parents=True)
+    (workspace / "benchmark_report.json").write_text(json.dumps({
+        "success": True,
+        "framework": "sglang",
+        "model": "/wekafs/models/Qwen-Qwen3-8B",
+        "throughput": {
+            "request_throughput": 3.2, "output_throughput": 800.0,
+            "total_token_throughput": 1600.0, "completed_requests": 80,
+            "duration_seconds": 25.0,
+        },
+        "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158},
+                    "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
+    }))
+
+    fake_completed = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="ok", stderr="",
+    )
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-inferencex-path",
+    )
+    sub.register_executor("profile", pe)
+    with patch("subprocess.run", return_value=fake_completed):
+        res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    materialized = Path(res.result["materialized_config"])
+    import yaml
+    rendered = yaml.safe_load(materialized.read_text())
+    assert rendered["benchmark"]["inferencex_path"] == str(fake_ix)
     db.close()
 
 
@@ -1313,6 +1409,400 @@ async def test_select_kernels_handler_requires_kernel_agent_root(session_dir, mo
     assert res["status"] == "failed"
     assert res["error_class"] == "kernel_agent_root_missing"
     assert "HYPERLOOM_KERNEL_AGENT_ROOT is not set" in res["error"]
+
+
+# ===========================================================================
+# T4 — TraceLens permanent failure stays failed (no fallback)
+# ===========================================================================
+# A failed TraceLens run must not be rewritten into ok+empty kernels. That
+# fallback hid split/annotation problems as a valid "no candidates" result and
+# let Orchestration continue down params/backends. The handler now preserves
+# ``status=failed`` and only appends structured diagnostics so operators can
+# see the upstream rc / error / stderr.
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_t4_keeps_tool_failure_failed(
+    session_dir, monkeypatch,
+):
+    """When tracelens_analysis.py returns ``status=failed`` the handler must
+    keep the failure status. Older code demoted this to ok+empty kernels, which
+    let Orchestration keep walking params/backends as if TraceLens had
+    completed. We still clear stale candidates and append a diagnostic warning.
+    """
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "failed",
+            "tool": "tracelens_analysis",
+            "error": "RuntimeError: TraceLens perf CLI crashed",
+            "returncode": 1,
+            "stderr_tail": "RuntimeError: graph capture folder missing",
+            # The tool also emits an empty hot_kernels[] on failure in
+            # some paths — we explicitly seed a non-empty list here to
+            # prove the handler clears it.
+            "hot_kernels": [{"kernel_id": "stale_1"}],
+        }
+        return 1, json.dumps(payload), "stderr noise"
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "failed"
+    assert res["hot_kernels"] == [], (
+        "stale hot_kernels must be cleared on tool failure"
+    )
+    warnings = res.get("trace_health_warnings") or []
+    assert any(w.get("code") == "tracelens_analysis_failed" for w in warnings), (
+        "operator must see WHY hot_kernels[] is empty"
+    )
+    failure_w = next(w for w in warnings if w["code"] == "tracelens_analysis_failed")
+    assert failure_w["severity"] == "warning"
+    assert "TraceLens perf CLI crashed" in failure_w.get("error", "")
+    assert failure_w.get("returncode") == 1
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_t4_passes_through_idle_warning(
+    session_dir, monkeypatch,
+):
+    """When tracelens_analysis emits a ``trace_health_warnings`` from
+    the T3 idle gate (status=ok, empty hot_kernels), the handler must
+    pass it through verbatim. No de-duplication, no rewriting — that
+    warning is the routing signal the Coordinator reads."""
+    idle_warning = {
+        "code": "high_gpu_idle_pct",
+        "severity": "warning",
+        "idle_pct": 35.0,
+        "threshold_pct": 20.0,
+        "source": "/tmp/runs/abc/tracelens/analysis.md",
+        "message": "GPU was idle 35.00% …",
+    }
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "ok",
+            "tool": "tracelens_analysis",
+            "hot_kernels": [],
+            "trace_health_warnings": [idle_warning],
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    assert res["hot_kernels"] == []
+    assert res["trace_health_warnings"] == [idle_warning]
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_t4_defaults_warnings_to_empty_list(
+    session_dir, monkeypatch,
+):
+    """When the tool emits no ``trace_health_warnings`` (steady state),
+    the handler still surfaces an empty list — downstream code (the
+    Coordinator's branching, the prompt-summary renderer) can iterate
+    without a ``None`` guard."""
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "ok",
+            "tool": "tracelens_analysis",
+            "hot_kernels": [{"kernel_id": "fake_1"}],
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    assert res["trace_health_warnings"] == []
+
+
+# ===========================================================================
+# T5 (this PR) — trace_health_warnings must reach the Orchestration LLM
+# ===========================================================================
+# Handler-boundary plumbing alone is not enough: the Orchestration LLM
+# only sees what ``SharedState._format_*`` renders into its prompt. Pin
+# that record_select_kernels keeps the warning list AND that
+# _format_last_select_kernels surfaces it inline so the LLM grounds its
+# next ACTION on the routing signal (params vs kernel-opt vs re-profile).
+
+def test_record_select_kernels_persists_trace_health_warnings(session_dir):
+    """``record_select_kernels`` must keep ``trace_health_warnings`` from
+    the handler result verbatim in ``last_select_kernels`` so prompt
+    rendering can see it on the next tick."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    warning = {
+        "code": "high_gpu_idle_pct",
+        "severity": "warning",
+        "idle_pct": 35.0,
+        "threshold_pct": 20.0,
+        "source": "/tmp/x/analysis.md",
+        "message": "high idle",
+    }
+    state.record_select_kernels(
+        {"trace_input": "/tmp/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [],
+            "trace_health_warnings": [warning],
+        },
+    )
+    assert state.last_select_kernels["trace_health_warnings"] == [warning]
+
+
+def test_record_select_kernels_defaults_warnings_to_empty_list(session_dir):
+    """Steady-state (no warnings emitted) — the cached entry must still
+    expose ``trace_health_warnings`` as an empty list rather than the
+    field being absent, so iteration code in renderers / consumers
+    doesn't need a ``KeyError`` guard."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.record_select_kernels(
+        {"trace_input": "/tmp/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [{"kernel_id": "k1", "reusable_native_kernel": True}],
+        },
+    )
+    assert state.last_select_kernels["trace_health_warnings"] == []
+
+
+def test_record_select_kernels_filters_invalid_warning_entries(session_dir):
+    """Defensive: a buggy tool emitting non-dict entries or dicts
+    missing the ``code`` field shouldn't poison ``last_select_kernels``.
+    We accept only well-formed dicts with at least a ``code`` key so
+    the prompt renderer never has to defensively coerce types."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.record_select_kernels(
+        {"trace_input": "/tmp/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [],
+            "trace_health_warnings": [
+                "not-a-dict",
+                {"severity": "warning"},  # missing 'code'
+                {"code": "high_gpu_idle_pct", "idle_pct": 30.0,
+                 "threshold_pct": 20.0},
+                None,
+            ],
+        },
+    )
+    warnings = state.last_select_kernels["trace_health_warnings"]
+    assert len(warnings) == 1
+    assert warnings[0]["code"] == "high_gpu_idle_pct"
+
+
+def test_format_last_select_kernels_renders_idle_warning_inline(session_dir):
+    """Prompt rendering: when an idle warning was persisted, the
+    Orchestration prompt line must surface it with the numeric context
+    so the LLM can ground its routing on the actual percentages."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.record_select_kernels(
+        {"trace_input": "/tmp/trace.json.gz"},
+        {
+            "status": "ok",
+            "hot_kernels": [],
+            "trace_health_warnings": [
+                {
+                    "code": "high_gpu_idle_pct",
+                    "severity": "warning",
+                    "idle_pct": 60.5,
+                    "threshold_pct": 20.0,
+                    "source": "/tmp/x/analysis.md",
+                    "message": "high idle",
+                }
+            ],
+        },
+    )
+    rendered = state._format_last_select_kernels()
+    assert "high_gpu_idle_pct" in rendered
+    assert "60.5%" in rendered
+    assert "20.0%" in rendered
+    assert "warnings=[" in rendered
+
+
+def test_format_last_select_kernels_renders_failure_warning_with_rc(session_dir):
+    """Tool-failure warning carries ``returncode``; the prompt must
+    surface that too so an operator-or-LLM can distinguish 'TraceLens
+    crashed' (rc=1) from a benign skip."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.record_select_kernels(
+        {"trace_input": "/tmp/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [],
+            "trace_health_warnings": [
+                {
+                    "code": "tracelens_analysis_failed",
+                    "severity": "warning",
+                    "returncode": 1,
+                    "error": "RuntimeError: …",
+                    "message": "TraceLens failed",
+                }
+            ],
+        },
+    )
+    rendered = state._format_last_select_kernels()
+    assert "tracelens_analysis_failed" in rendered
+    assert "rc=1" in rendered
+
+
+def test_format_last_select_kernels_omits_warnings_suffix_in_steady_state(session_dir):
+    """Format-stability guard: when no warnings were recorded (the
+    common case), the prompt line MUST NOT gain a gratuitous
+    ``warnings=[]`` suffix. Prompt format stability matters because
+    we have downstream prompt-snapshot tests pinned to the legacy
+    format; growing the line in the steady state would break them."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.record_select_kernels(
+        {"trace_input": "/tmp/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [{"kernel_id": "k1", "reusable_native_kernel": True}],
+        },
+    )
+    rendered = state._format_last_select_kernels()
+    assert "warnings=" not in rendered, (
+        "no warnings → no warnings= suffix; this keeps existing prompt "
+        "snapshots stable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_t5_handler_to_sharedstate_e2e_idle_warning_reaches_prompt(
+    session_dir, monkeypatch,
+):
+    """End-to-end pinning of the routing signal path:
+       tracelens_analysis (T3)  →  handler result.trace_health_warnings
+                                →  SharedState.last_select_kernels (this PR)
+                                →  Orchestration prompt line  (this PR)
+    Without ALL three steps the LLM cannot route on idle %, and the
+    upstream T3 work is wasted."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "ok",
+            "tool": "tracelens_analysis",
+            "hot_kernels": [],
+            "trace_health_warnings": [
+                {
+                    "code": "high_gpu_idle_pct",
+                    "severity": "warning",
+                    "idle_pct": 42.0,
+                    "threshold_pct": 20.0,
+                    "source": "/tmp/runs/abc/tracelens/analysis.md",
+                    "message": "high idle",
+                }
+            ],
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    # Step 1: handler boundary carries the warning.
+    assert res["trace_health_warnings"][0]["code"] == "high_gpu_idle_pct"
+
+    # Step 2: SharedState persists it.
+    state = SharedState.load_or_init(session_dir)
+    state.record_select_kernels({"trace_input": str(session_dir)}, res)
+    assert state.last_select_kernels["trace_health_warnings"][0]["code"] == "high_gpu_idle_pct"
+
+    # Step 3: prompt rendering surfaces it.
+    rendered = state._format_last_select_kernels()
+    assert "high_gpu_idle_pct" in rendered
+    assert "42.0%" in rendered
+
+
+@pytest.mark.asyncio
+async def test_t5_handler_to_sharedstate_e2e_failure_warning_reaches_prompt(
+    session_dir, monkeypatch,
+):
+    """Same path for T4: when TraceLens fails permanently, the
+    failure warning must reach the Orchestration prompt so the LLM
+    doesn't keep re-trying TraceLens or guessing why ``hot_kernels=[]``."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "failed",
+            "tool": "tracelens_analysis",
+            "error": "RuntimeError: TraceLens crashed",
+            "returncode": 1,
+            "hot_kernels": [],
+        }
+        return 1, json.dumps(payload), "stderr"
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    state = SharedState.load_or_init(session_dir)
+    state.record_select_kernels({"trace_input": str(session_dir)}, res)
+    rendered = state._format_last_select_kernels()
+    assert "tracelens_analysis_failed" in rendered
+    assert "rc=1" in rendered
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_handler_t4_failure_appends_to_existing_warnings(
+    session_dir, monkeypatch,
+):
+    """Edge case: the tool emits BOTH ``status=failed`` AND a pre-
+    existing ``trace_health_warnings`` list (e.g. the idle gate fired
+    AND then a later step crashed). The handler must preserve the
+    existing entries and APPEND the failure warning, not overwrite."""
+    pre_existing = {
+        "code": "high_gpu_idle_pct",
+        "severity": "warning",
+        "idle_pct": 60.0,
+        "threshold_pct": 20.0,
+        "source": "/tmp/x/analysis.md",
+        "message": "high idle",
+    }
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "failed",
+            "tool": "tracelens_analysis",
+            "error": "RuntimeError: ran out of disk",
+            "returncode": 2,
+            "hot_kernels": [],
+            "trace_health_warnings": [pre_existing],
+        }
+        return 2, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "failed"
+    warnings = res["trace_health_warnings"]
+    assert len(warnings) == 2, "must preserve pre-existing + append failure"
+    assert warnings[0] == pre_existing
+    assert warnings[1]["code"] == "tracelens_analysis_failed"
 
 
 @pytest.mark.asyncio

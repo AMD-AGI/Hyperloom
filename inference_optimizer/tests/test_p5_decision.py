@@ -13,8 +13,8 @@ A. ``_promote_to_shared_state`` for grid actions now uses a 0.2%
    consistent winner that wins ≥ 2 of last 3 rounds with avg gain ≥
    0.1% — the cross-round signal-vs-noise check.
 B. ``params_no_promote_streak`` increments on every grid round that
-   doesn't promote and resets on promotion. The prompt summary
-   surfaces the streak so Orch can switch to kernel-opt at >= 5.
+   doesn't promote and resets on promotion. The prompt summary surfaces
+   the streak so Orch can switch to kernel-opt at >= 5.
 C. ``_handle_request`` for ``run_optimization`` mirrors the handler's
    result into ``shared_state.last_kernel_opt`` so subsequent Orch
    turns see decision/speedup and don't re-dispatch the same kernel_id.
@@ -77,14 +77,16 @@ def _baseline_state(c: Coordinator, base: float = 800.0, current: float = 833.6)
 
 
 # ===========================================================================
-# A1 — 0.5% threshold (relaxed from 1.0)
+# A1 — 0.1% single-shot KEEP threshold (relaxed from 1.0% → 0.5% → 0.1%).
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_promote_at_half_pct_threshold(session_dir):
+async def test_promote_at_one_tenth_pct_threshold(session_dir):
+    """+0.6% over current_best is far above the 0.1% bar — MUST promote.
+    Same behaviour as the historical 0.5%-bar test; kept under the new
+    threshold to lock that the bar didn't accidentally tighten."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         _baseline_state(c, base=800.0, current=833.6)
-        # +0.6% over current_best — would NOT have promoted at 1.0%, MUST at 0.5%.
         result = {
             "status": "succeeded",
             "output_throughput": 838.6,  # +0.6% over 833.6
@@ -118,7 +120,7 @@ async def test_no_promote_below_one_tenth_pct(session_dir):
                              "extra_sglang_args": "--mem-fraction-static 0.85"},
         }
         await c._promote_to_shared_state("params", result)
-        # current_best unchanged
+        # current_best unchanged (still the prior backends winner).
         assert c.shared_state.current_best["action"] == "backends"
         # but the run was recorded to history + streak ticked
         assert len(c.shared_state.params_winner_history) == 1
@@ -128,7 +130,7 @@ async def test_no_promote_below_one_tenth_pct(session_dir):
 
 
 # ===========================================================================
-# A2 — Cross-round consistent winner (resume5 9h scenario)
+# A2 — Cross-round consistent winner detector
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_consistent_winner_promoted_below_threshold(session_dir):
@@ -427,6 +429,9 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
 ):
     from inference_optimizer.orchestrator import kernel_request_handlers as krh
 
+    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+
     candidates = tmp_path / "kernel_candidates.json"
     candidates.write_text(
         """
@@ -456,6 +461,9 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
         kernel_id = payload["kernel_id"]
         backend = payload["backends"]
         calls.append((kernel_id, backend))
+        # k006 wins on Claude (second slot in the GEAK-first ladder), which
+        # exercises the short-circuit-after-KEEP behaviour without skipping
+        # GEAK. k003 keeps producing PARTIAL so it exhausts the full ladder.
         keep = kernel_id == "k006" and backend == "claude"
         speedup = 1.31 if keep else 1.0
         return {

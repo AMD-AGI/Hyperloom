@@ -10,10 +10,11 @@ Design (see plan ``action-scoring-in-shared-state``):
 * Each enabled action has one ``ActionScore`` record.
 * ``base_score`` is seeded once at session start. Default is auto-computed
   from :class:`ActionMetadata` (expected_gain midpoint / cost_p50, discounted
-  by accuracy & crash risks). When the model_class has a marathon prior
-  (table from ``/wekafs/zgong/TBO/inference_optimization/marathon/skills/SKILL.md``
-  L832–839) we use that instead — marathon's priors encode lessons from
-  past long-run experiments.
+  by accuracy & crash risks). When the model_class has a curated prior in
+  :data:`MODEL_CLASS_ACTION_PRIORS` we use that instead — those priors
+  encode lessons distilled from past long-run inference-optimization
+  experiments. The values are inlined here and have no external
+  dependency.
 * ``score_mult`` evolves as the Coordinator processes KEEP/DISCARD outcomes.
 * ``effective_score`` combines ``base_score * score_mult * risk_discounts *
   target_gap_multiplier`` plus a UCB-style exploration bonus and a linear
@@ -102,22 +103,25 @@ COOLDOWN_TICKS: dict[str, int] = {
 }
 
 
-# Marathon priors per model_class. Originally mirrored the table at
-# ``/wekafs/zgong/TBO/inference_optimization/marathon/skills/SKILL.md`` L832-839
-# (the six deep/operator-family rows). Extended here with the three explore
-# actions (``backends`` / ``params`` / ``sweep``) so they share the same
-# 1-10 curated-prior scale instead of falling through to
-# ``compute_initial_priors_from_metadata`` (which produces ~0.4-1.0 numbers
-# in gain%/min units that don't compete with the 6-9 marathon rows).
-# ``backends`` and ``params`` are seeded at 10x their auto-computed value
-# (8.4 and 9.5 respectively) — empirical evidence from GLM-5 / DeepSeek-R1
-# shows these are first-class levers on MoE; ``sweep`` is a validation
-# action and stays low at 1.0 so it doesn't crowd out real exploration.
+# Curated per-(model_class, action) base scores. The values were distilled
+# from past long-run inference-optimization experiments and inlined here so
+# Hyperloom no longer depends on any external skill / KB tree. The table
+# covers:
 #
-# Marathon names use kebab-case (deep-kernel-analysis); inference_optimizer
-# uses snake_case (deep_kernel_analysis). The mapping below uses the
-# snake_case names so seed_action_scores can look them up directly.
-MARATHON_PRIORS: dict[str, dict[str, float]] = {
+# * the six deep/operator-family actions on the 1-10 curated scale, and
+# * the three explore actions (``backends`` / ``params`` / ``sweep``) at
+#   matching scale — ``backends`` and ``params`` are seeded at roughly
+#   10x their auto-computed value (8.4 and 9.5) because empirical evidence
+#   from GLM-5 / DeepSeek-R1 shows they are first-class levers on MoE;
+#   ``sweep`` stays low at 1.0 because it is a validation action and
+#   should not crowd out real exploration.
+#
+# Any action not in the curated table falls back to
+# :func:`compute_initial_priors_from_metadata`, which produces ~0.4-1.0
+# numbers in gain%/min units and doesn't compete with the 6-9 curated
+# rows. Keys are snake_case so :func:`seed_action_scores` can look them up
+# directly against ``ActionRegistry`` names.
+MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
     "dense": {
         "deep_kernel_analysis": 2.0,
         "operator_tuning": 4.0,
@@ -243,7 +247,7 @@ class ActionScore:
 def compute_initial_priors_from_metadata(meta: ActionMetadata) -> float:
     """Auto-compute a base score from :class:`ActionMetadata`.
 
-    Formula mirrors marathon's per-action heuristic:
+    Formula:
 
         ((gain_lo + gain_hi) / 2) / max(cost_p50, 1.0)
             * (1 - accuracy_risk) * (1 - crash_risk)
@@ -283,24 +287,26 @@ def seed_action_scores(
 
     For each enabled action:
 
-    * if the model_class has a marathon prior for the action, that wins;
-    * otherwise we fall back to the auto-computed prior from registry metadata.
+    * if the model_class has a curated prior in
+      :data:`MODEL_CLASS_ACTION_PRIORS`, that wins;
+    * otherwise we fall back to the auto-computed prior from registry
+      metadata.
 
     The returned dict is plain JSON-roundtrippable; the caller is expected
     to drop it into ``SharedState.action_scores``.
     """
     mc = _normalize_model_class(model_class)
-    marathon = MARATHON_PRIORS.get(mc, {}) if mc else {}
+    priors = MODEL_CLASS_ACTION_PRIORS.get(mc, {}) if mc else {}
     out: dict[str, dict[str, Any]] = {}
     for name in enabled:
         meta = registry.get(name)
         if meta is None:
             continue
         auto = compute_initial_priors_from_metadata(meta)
-        marathon_prior = marathon.get(name)
+        curated_prior = priors.get(name)
         base = (
-            float(marathon_prior)
-            if marathon_prior is not None
+            float(curated_prior)
+            if curated_prior is not None
             else auto
         )
         out[name] = ActionScore(base_score=base).to_dict()
@@ -600,7 +606,7 @@ __all__ = [
     "DISCARD_MULT",
     "KEEP_DECAY_FLOOR",
     "KEEP_DECAY_RATE",
-    "MARATHON_PRIORS",
+    "MODEL_CLASS_ACTION_PRIORS",
     "STREAK_PENALTY_FLOOR",
     "STREAK_PENALTY_MULT",
     "STREAK_THRESHOLD",
