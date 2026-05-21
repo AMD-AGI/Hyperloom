@@ -111,6 +111,7 @@ _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
     "disable_run_eval",
 )
 _BASELINE_SELF_LOOP_THRESHOLD: int = 2
+_VALIDATE_STACK_FAIL_THRESHOLD: int = 10
 
 
 def effective_closing_grace_sec(
@@ -159,6 +160,68 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
         value = params.get(key)
         out[key] = None if value is None else str(value)
     return out
+
+
+def _dedupe_extra_sglang_args(args_str: str) -> str:
+    """Collapse repeated ``--flag value`` pairs into a unique launch string.
+
+    SGLang / vLLM argparse uses ``action="store"`` for almost every
+    knob, so if ``--cuda-graph-max-bs 32 --cuda-graph-max-bs 128
+    --cuda-graph-max-bs 256`` end up on the same command line, only the
+    last value is honored. The original cmdline still works, but
+    ``final.extra_sglang_args`` exists for dashboard / replay use and
+    looking at it with the same flag repeated 3-15 times is misleading
+    (it reads as "this run actually used N values" when really only the
+    last won).
+
+    Promote / validate_stack rounds previously fed each ``candidate_args``
+    block into ``previous + candidate`` concatenation; when the next
+    round's candidate kept the same multi-value combo, the whole block
+    was re-appended verbatim. Dedupe is a sane normalization: keep each
+    flag once, with the value of its last occurrence — same semantics
+    argparse would have applied at launch.
+
+    Bare flags (no value, e.g. ``--enable-prefix-caching``) are also
+    deduped (kept once, position preserved by first appearance).
+
+    Args:
+        args_str: space-separated ``--flag value`` pairs.
+
+    Returns:
+        Deduped equivalent. Empty input → empty output.
+    """
+    if not args_str:
+        return ""
+    tokens = args_str.split()
+    # Track each flag's last-seen pair, plus its first-seen position so
+    # we emit in stable order (last-wins-for-value, first-wins-for-order).
+    pair_by_flag: dict[str, list[str]] = {}
+    order: list[str] = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t.startswith("--"):
+            flag = t
+            if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                pair = [flag, tokens[i + 1]]
+                i += 2
+            else:
+                pair = [flag]
+                i += 1
+            if flag not in pair_by_flag:
+                order.append(flag)
+            pair_by_flag[flag] = pair
+        else:
+            # Stray positional token; preserve as-is, in order. Use a
+            # synthetic key so it doesn't collide with anything.
+            key = f"__positional_{len(order)}__"
+            order.append(key)
+            pair_by_flag[key] = [t]
+            i += 1
+    out: list[str] = []
+    for k in order:
+        out.extend(pair_by_flag[k])
+    return " ".join(out)
 
 
 @dataclass
@@ -268,6 +331,35 @@ class Coordinator:
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
+        self._validate_stack_gate_skip_warned: bool = False
+
+        # Per-agent consecutive ``BackendError`` streak. Successful turns
+        # reset the counter for that agent; a streak crossing
+        # ``_backend_error_streak_threshold`` records a single
+        # ``backend_unhealthy`` observation so operators (and the
+        # robustness reactor, which tails Coordinator events) notice the
+        # subprocess transport is degraded — particularly relevant for
+        # the robustness-agent / critic-agent subprocess backends whose
+        # in-loop failures otherwise would only show up as scattered
+        # ``backend_error`` events. The escalation observation fires once
+        # per crossing, then the counter must reset and re-arm before it
+        # can fire again, so we never spam the inbox.
+        self._backend_error_streak: dict[str, int] = {
+            name: 0 for name in self.role_registry
+        }
+        self._backend_error_alarm_armed: dict[str, bool] = {
+            name: True for name in self.role_registry
+        }
+        try:
+            self._backend_error_streak_threshold: int = max(
+                1,
+                int(os.environ.get(
+                    "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
+                    "5",
+                )),
+            )
+        except ValueError:
+            self._backend_error_streak_threshold = 5
 
         # Per-agent consecutive ``BackendError`` streak. Successful turns
         # reset the counter for that agent; a streak crossing
@@ -1402,6 +1494,20 @@ class Coordinator:
                     "explore."
                 )
         if self.shared_state.optimization_stack_has_unvalidated_keeps():
+            if self._validate_stack_gate_skipped():
+                return (
+                    "TODO 5/5: validate_stack RECOMMENDED but not required. "
+                    f"The last {_VALIDATE_STACK_FAIL_THRESHOLD} validate_stack "
+                    "attempts failed in a row, so the mandatory gate is "
+                    "dropped and other actions are unlocked. "
+                    "cumulative_gain_validated will stay stale "
+                    f"(validated_at_len="
+                    f"{self.shared_state.cumulative_gain_validated_stack_len} "
+                    f"vs stack_len={len(self.shared_state.optimization_stack)}) "
+                    "until a validate_stack succeeds — fix the underlying "
+                    "failure (check workload_envs / TP / GPU visibility) and "
+                    "re-emit `validate_stack` when ready."
+                )
             return (
                 "TODO 5/5: validate_stack required. New KEEP'd entries have "
                 "landed on optimization_stack since the last validate_stack run "
@@ -1521,6 +1627,44 @@ class Coordinator:
             rule="baseline_self_loop",
             hint=hint,
         )
+
+    def _validate_stack_gate_skipped(self) -> bool:
+        """Drop the mandatory ``validate_stack`` gate after
+        ``_VALIDATE_STACK_FAIL_THRESHOLD`` consecutive failures.
+
+        Walks ``validate_stack_attempts`` from the tail; a single
+        ``status="succeeded"`` resets the streak. Returns ``True`` once
+        the threshold is reached, emitting one ``log.warning`` on the
+        transition (subsequent ticks return ``True`` silently).
+        """
+        attempts = list(self.shared_state.validate_stack_attempts or [])
+        consecutive_failures = 0
+        last_failure: dict[str, Any] | None = None
+        for entry in reversed(attempts):
+            if not isinstance(entry, dict):
+                break
+            if entry.get("status") == "succeeded":
+                break
+            consecutive_failures += 1
+            if last_failure is None:
+                last_failure = entry
+        if consecutive_failures < _VALIDATE_STACK_FAIL_THRESHOLD:
+            self._validate_stack_gate_skip_warned = False
+            return False
+        if not self._validate_stack_gate_skip_warned:
+            err_class = (last_failure or {}).get("error_class") or "unknown"
+            err_excerpt = (last_failure or {}).get("error_excerpt") or ""
+            log.warning(
+                "validate_stack gate SKIPPED after %d consecutive failures "
+                "(>= threshold %d). Other actions are now allowed; "
+                "cumulative_gain_validated will remain stale until a "
+                "validate_stack succeeds. Last failure: "
+                "error_class=%r error_excerpt=%r.",
+                consecutive_failures, _VALIDATE_STACK_FAIL_THRESHOLD,
+                err_class, err_excerpt,
+            )
+            self._validate_stack_gate_skip_warned = True
+        return True
 
     def _sequence_denial_for_action(
         self,
@@ -1642,10 +1786,12 @@ class Coordinator:
         # rebench before any further explore / report. We allow:
         #   - validate_stack itself
         #   - baseline (ad-hoc re-baseline is still okay; rare)
-        # and deny the rest.
+        # and deny the rest, unless validate_stack has hit its consecutive
+        # failure cap (``_validate_stack_gate_skipped``).
         if (
             self.shared_state.optimization_stack_has_unvalidated_keeps()
             and action not in {"validate_stack", "baseline"}
+            and not self._validate_stack_gate_skipped()
         ):
             return PolicyDenied(
                 f"action={action!r} denied: validate_stack required first",
@@ -2512,19 +2658,19 @@ class Coordinator:
         }
         if key not in existing:
             self.shared_state.optimization_stack.append(entry)
-            # Per-entry incremental gain (current_best vs. baseline at the
-            # moment this integrate KEEP landed). Keeps
-            # ``gain_per_stack_entry`` index-aligned with
-            # ``optimization_stack`` for session_breakdown's
-            # capability_summary attribution.
-            gain_pct_entry: float | None = None
-            try:
-                bt = float(self.shared_state.baseline_tput or 0.0)
-                if bt > 0:
-                    gain_pct_entry = (float(new_tput) - bt) / bt * 100.0
-            except (TypeError, ValueError):
-                gain_pct_entry = None
-            self.shared_state.gain_per_stack_entry.append(gain_pct_entry)
+            # Mirror ``optimization_stack`` into the V1-schema
+            # ``gain_per_stack_entry`` ledger so session_breakdown's
+            # attribution + capability_summary can attribute "how much of
+            # the validated cumulative gain came from this entry" without
+            # re-walking the event log. Helper computes cum_gain_after
+            # (vs baseline) + delta_pct (vs previous entry) internally.
+            self.shared_state.append_stack_gain_entry(
+                action="integrate",
+                variant_name=entry.get("kernel_id"),
+                new_tput=new_tput,
+                extra_sglang_args=extra_args,
+                ts=entry["ts"],
+            )
 
         self.shared_state.current_best = {
             "action": "integrate",
@@ -2696,6 +2842,15 @@ class Coordinator:
             full_args = " ".join(
                 part for part in (base_args, candidate_args) if part
             )
+        # Dedupe repeated ``--flag value`` pairs so the cumulative
+        # extra_sglang_args reflects what argparse will actually honor
+        # (last value wins). Without this, every promote that re-applies
+        # a multi-value combo candidate (e.g.
+        # ``--cuda-graph-max-bs 32 --cuda-graph-max-bs 128 --cuda-graph-max-bs 256``)
+        # leaves multiple copies of the same flag in the final args
+        # string, which breaks reproduce-launch dashboards and the
+        # final.extra_sglang_args field surfaced by session_breakdown.
+        full_args = _dedupe_extra_sglang_args(full_args)
 
         variant_name = bv.get("name") if isinstance(bv, dict) else None
         if candidate_args or variant_name:
@@ -2722,15 +2877,13 @@ class Coordinator:
                 })
                 # Mirror append into ``gain_per_stack_entry`` so indexes
                 # stay aligned across the two parallel lists. See the
-                # SharedState docstring for the contract.
-                gain_pct_entry: float | None = None
-                try:
-                    bt = float(self.shared_state.baseline_tput or 0.0)
-                    if bt > 0:
-                        gain_pct_entry = (float(best_tput) - bt) / bt * 100.0
-                except (TypeError, ValueError):
-                    gain_pct_entry = None
-                self.shared_state.gain_per_stack_entry.append(gain_pct_entry)
+                # SharedState docstring for the V1 StackGainEntry contract.
+                self.shared_state.append_stack_gain_entry(
+                    action=task_kind,
+                    variant_name=variant_name,
+                    new_tput=best_tput,
+                    extra_sglang_args=full_args,
+                )
 
         self.shared_state.current_best = {
             "action": task_kind,
