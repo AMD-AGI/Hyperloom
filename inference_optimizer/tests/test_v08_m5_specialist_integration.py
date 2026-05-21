@@ -269,7 +269,7 @@ def test_warm_specialist_params_fills_pr_feed_from_plane(tmp_path: Path):
 
 
 def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path):
-    """``--no-cortex`` path: knowledge_plane is None. The helper must
+    """``--degraded-kb`` path: knowledge_plane is None. The helper must
     still leave a valid ``pr_feed`` list (empty) so the prompt builder
     can render the section without crashing."""
     from inference_optimizer.orchestrator.coordinator import Coordinator

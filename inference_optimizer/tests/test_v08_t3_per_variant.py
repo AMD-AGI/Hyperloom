@@ -210,7 +210,7 @@ async def test_t3_hook_dispatches_non_explore_to_per_task(coord):
 @pytest.mark.asyncio
 async def test_t3_hook_explore_without_outcomes_falls_back_to_per_task(coord):
     """explore action whose result is missing per_variant_outcomes goes
-    back through the per-task path (covers --no-cortex resume + older
+    back through the per-task path (covers --degraded-kb resume + older
     explore executors that pre-date Gap-08)."""
     _seed_pending_edge_row(coord, single_edge_id="edge-legacy")
     await coord._cortex_t3_hook(
@@ -384,7 +384,7 @@ async def test_edge_lookup_prefers_pending_row_variant_edges(coord):
 
 @pytest.mark.asyncio
 async def test_edge_lookup_falls_back_to_result_kb_edge_id(coord):
-    """When pending_kb_edges has no row (e.g. --no-cortex T2 path), the
+    """When pending_kb_edges has no row (e.g. --degraded-kb T2 path), the
     per-variant ``kb_edge_id`` stamped on the result dict is used."""
     # No _seed_pending_edge_row — pending_kb_edges stays empty.
     await coord._cortex_t3_hook(

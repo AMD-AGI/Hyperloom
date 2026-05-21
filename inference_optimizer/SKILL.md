@@ -149,6 +149,26 @@ failure → treat as fresh launch and re-run `install.sh`.
 > The in-loop equivalent is `_preflight()` steps 1–12 (drift repair, not
 > a substitute for this outer gate).
 
+### IR-3 — KB + PR Monitor reachability (in-loop, soft degrade)
+
+`_preflight()` invokes:
+
+```
+bash "$REPO_ROOT/inference_optimizer/scripts/preflight_kb.sh"
+```
+
+Exit codes (soft degrade — IR-3 never aborts launch):
+
+- `0` → KB + PR Monitor both reachable. `cortex_enabled` / `pr_monitor_enabled` stay `True`.
+- `1` → at least one branch unreachable. The cli automatically enables the
+  matching `--degraded-*` and continues; `manifest.json` records
+  `kb_degraded_reason=ir3_auto` (or `pr_degraded_reason=ir3_auto`).
+
+Operator opt-out: pass `--degraded-kb` / `--degraded-pr` to skip the
+corresponding probe (one round-trip saved); `manifest.json` then
+records `reason=explicit_flag`. Both flags together short-circuit the
+entire IR-3 step.
+
 ## Setup
 
 Two commands: Step 1 implements **IR-2** (install gate), Step 2 launches.

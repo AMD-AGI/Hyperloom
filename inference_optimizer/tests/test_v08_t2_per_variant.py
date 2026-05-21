@@ -68,6 +68,7 @@ class _BareState:
     pruned_families: list = field(default_factory=list)
 
     save_count: int = 0
+    session_iter_index: int = 0
 
     def save(self, _session_dir: Path | None) -> None:
         self.save_count += 1
@@ -77,6 +78,10 @@ class _BareState:
 
     def reset_policy_denial_streak(self, _action: str) -> None:
         return None
+
+    def increment_session_iter_index(self) -> int:
+        self.session_iter_index += 1
+        return self.session_iter_index
 
 
 class _StubCortexKB:
@@ -200,11 +205,11 @@ def test_resolve_issue_canonical_falls_back_to_params_gap_id(coord):
 
 
 def test_resolve_issue_canonical_workload_anchor_fallback(coord):
-    """No explicit gap_canonical_id → fall back to
-    ``workload.<model>.<gpu>`` anchor (M1 default)."""
+    """No explicit gap_canonical_id → fall back to the registered
+    ``recipe:{slug(model)}:{slug(hw)}`` anchor."""
     pending = _pending()  # no gap_canonical_id anywhere
     out = coord._resolve_issue_canonical(pending)
-    assert out.startswith("workload.")
+    assert out.startswith("recipe:")
     # ``llama-3-70b`` / ``MI300X`` from _BareState defaults.
     assert "llama-3-70b" in out
     assert "mi300x" in out
@@ -252,7 +257,7 @@ async def test_t2_hook_non_explore_action_uses_single_path(coord):
     assert pending.kb_edge_ids == {}
     # Legacy fields populated.
     assert pending.kb_edge_id == "edge-1"
-    assert pending.kb_opt_canonical.startswith("opt.session-")
+    assert pending.kb_opt_canonical.startswith("exp:")
 
 
 @pytest.mark.asyncio
@@ -280,15 +285,26 @@ async def test_t2_hook_per_variant_mints_one_per_variant(coord):
     ]
     pending = _pending(grid=grid)
     await coord._cortex_t2_hook(pending)
-    # 4 propose_point + 4 hypothesize calls.
-    assert len(coord.cortex_kb.propose_point_calls) == 4
+    # 1 parent ``experiment`` anchor + 4 variant propose_point calls;
+    # 4 hypothesize calls (one per variant; parent is anchor-only).
+    assert len(coord.cortex_kb.propose_point_calls) == 5
     assert len(coord.cortex_kb.hypothesize_calls) == 4
-    # Each canonical_id encodes the variant name.
-    canonicals = [
-        call["canonical_id"] for call in coord.cortex_kb.propose_point_calls
+    # Variant canonical_ids encode the variant name (parent does not).
+    variant_calls = [
+        call for call in coord.cortex_kb.propose_point_calls
+        if ".variant-" in call["canonical_id"]
     ]
-    assert all(".variant-v" in c for c in canonicals)
+    assert len(variant_calls) == 4
+    canonicals = [call["canonical_id"] for call in variant_calls]
     assert {c.split(".variant-")[1] for c in canonicals} == {"v1", "v2", "v3", "v4"}
+    # Parent canonical is exp:{sid}:{iter:04d} (no .variant- suffix).
+    parent_calls = [
+        call for call in coord.cortex_kb.propose_point_calls
+        if ".variant-" not in call["canonical_id"]
+    ]
+    assert len(parent_calls) == 1
+    assert parent_calls[0]["canonical_id"].startswith("exp:")
+    assert parent_calls[0]["kind"] == "experiment"
     # PendingProposal per-variant maps populated.
     assert set(pending.kb_edge_ids.keys()) == {"v1", "v2", "v3", "v4"}
     assert set(pending.kb_opt_canonicals.keys()) == {"v1", "v2", "v3", "v4"}
@@ -308,7 +324,8 @@ async def test_t2_hook_per_variant_carries_variant_attrs(coord):
     ]
     pending = _pending(grid=grid)
     await coord._cortex_t2_hook(pending)
-    pp_call = coord.cortex_kb.propose_point_calls[0]
+    # Index 0 is the parent ``experiment`` anchor; variant call is index 1.
+    pp_call = coord.cortex_kb.propose_point_calls[1]
     attrs = pp_call["attrs"]
     assert attrs["variant_name"] == "vA"
     assert attrs["extra_sglang_args"] == "--mla 1"
@@ -338,7 +355,8 @@ async def test_t2_hook_per_variant_skips_nameless_variants(coord):
     ]
     pending = _pending(grid=grid)
     await coord._cortex_t2_hook(pending)
-    assert len(coord.cortex_kb.propose_point_calls) == 2  # v1 + v4
+    # 1 parent anchor + 2 named variants (nameless / empty-name skipped).
+    assert len(coord.cortex_kb.propose_point_calls) == 3
     assert set(pending.kb_edge_ids.keys()) == {"v1", "v4"}
 
 
@@ -355,9 +373,10 @@ async def test_t2_hook_per_variant_isolates_propose_point_failure(coord):
     pending = _pending(grid=grid)
     await coord._cortex_t2_hook(pending)
     assert {"v1", "v2", "v3"} <= set(pending.kb_opt_canonicals.keys())
-    # 3 propose_point calls attempted (v2 raised); 3 hypothesize calls
-    # because hypothesize still runs even when propose_point fails.
-    assert len(coord.cortex_kb.propose_point_calls) == 3
+    # 1 parent anchor + 3 variant propose_point calls attempted (v2 raised);
+    # 3 hypothesize calls because hypothesize still runs even when
+    # propose_point fails.
+    assert len(coord.cortex_kb.propose_point_calls) == 4
     assert len(coord.cortex_kb.hypothesize_calls) == 3
     # All three hypothesize calls succeeded → all three edge_ids set.
     assert all(eid for eid in pending.kb_edge_ids.values())
@@ -498,8 +517,8 @@ async def test_materialize_stamps_per_variant_kb_edge_id(coord, monkeypatch):
     # Pretend T2 already populated the maps:
     pending.kb_edge_ids = {"v1": "edge-v1", "v2": "edge-v2"}
     pending.kb_opt_canonicals = {
-        "v1": "opt.session-sid.proposal-msg-1.variant-v1",
-        "v2": "opt.session-sid.proposal-msg-1.variant-v2",
+        "v1": "exp:sid:0001.variant-v1",
+        "v2": "exp:sid:0001.variant-v2",
     }
     await coord._materialize_approved_proposal(pending)
 
@@ -513,7 +532,7 @@ async def test_materialize_stamps_per_variant_kb_edge_id(coord, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_materialize_no_stamp_when_kb_edge_ids_empty(coord):
-    """When the T2 hook didn't populate kb_edge_ids (e.g. --no-cortex
+    """When the T2 hook didn't populate kb_edge_ids (e.g. --degraded-kb
     runs), the grid stays unchanged — no spurious 'kb_edge_id=""'
     fields injected."""
     @dataclass
@@ -547,7 +566,7 @@ async def test_materialize_no_stamp_when_kb_edge_ids_empty(coord):
     coord._record_observation = _noop_observation  # type: ignore[method-assign]
 
     pending = _pending(grid=[{"name": "v1", "extra_sglang_args": "--mla 1"}])
-    # kb_edge_ids intentionally empty (e.g. --no-cortex).
+    # kb_edge_ids intentionally empty (e.g. --degraded-kb).
     await coord._materialize_approved_proposal(pending)
     stamped_grid = coord.tasks.last_params["grid"]
     assert "kb_edge_id" not in stamped_grid[0]
