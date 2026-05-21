@@ -57,7 +57,7 @@ def _load_manifest(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
         return {}
 
 
-def build(session_dir: Path | str) -> dict[str, Any]:
+def build(session_dir: Path | str, *, detail_level: str = "standard") -> dict[str, Any]:
     """Build a complete :class:`SessionBreakdown` for ``session_dir``.
 
     Pure function — reads from disk, never mutates state.
@@ -131,6 +131,20 @@ def build(session_dir: Path | str) -> dict[str, Any]:
                                             warnings,
                                         ),
                                         warnings)
+    decision_journal     = _safe_collect(
+        "decision_journal",
+        lambda: collectors.collect_decision_journal(
+            sd, state, warnings, detail_level=detail_level,
+        ),
+        warnings,
+        default=[],
+    )
+    kernel_profiling     = _safe_collect(
+        "kernel_profiling",
+        lambda: collectors.collect_kernel_profiling(sd, state, warnings),
+        warnings,
+        default=[],
+    )
 
     source_files = collectors.collect_source_files(
         sd,
@@ -144,6 +158,7 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         "schema_version":      SCHEMA_VERSION,
         "exported_at_utc":     exported_at,
         "exporter_version":    EXPORTER_VERSION,
+        "detail_level":        detail_level,
 
         "session":             session_meta,
         "workload":            workload,
@@ -159,6 +174,8 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         "critic_robustness":   critic_robustness,
         "telemetry":           telemetry,
         "attribution":         attribution,
+        "decision_journal":    decision_journal,
+        "kernel_profiling":    kernel_profiling,
 
         "warnings":            warnings,
         "source_files":        source_files,
@@ -192,6 +209,7 @@ def write_breakdown_json(
     session_dir: Path | str,
     *,
     output_path: Path | str | None = None,
+    detail_level: str = "standard",
 ) -> Path:
     """Build + atomically write ``session_breakdown.json``.
 
@@ -207,7 +225,7 @@ def write_breakdown_json(
     target = Path(output_path).resolve() if output_path else sd / BREAKDOWN_FILENAME
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    breakdown = build(sd)
+    breakdown = build(sd, detail_level=detail_level)
     payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
 
     fd, tmp = tempfile.mkstemp(

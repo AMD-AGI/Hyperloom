@@ -108,7 +108,22 @@ def _build_fixture(sd: Path) -> None:
         ],
         "params_attempts": [
             {"ts": "2026-05-14T07:30:00+00:00", "task_id": "pa1",
-             "status": "succeeded", "decision": "promoted", "key_metric": 7.8},
+             "status": "succeeded", "decision": "promoted", "key_metric": 7.8,
+             "workspace": None,
+             "extras": {
+                 "round_id": "params-001",
+                 "best_variant_name": "nccl_Y",
+                 "gain_vs_cb": 7.8,
+                 "best_gain_pct_vs_base": 7.8,
+             }},
+        ],
+        "backend_winners_history": [
+            {"action": "params", "round_id": "params-001",
+             "base_tput": 421.5, "ts": "2026-05-14T07:30:00+00:00",
+             "winners": [{"name": "nccl_Y", "fingerprint": "f1", "gain_pct": 7.8,
+                          "tput": 454.3, "extra_sglang_args": "--nccl-Y"}],
+             "best": {"name": "nccl_Y", "fingerprint": "f1", "gain_pct": 7.8,
+                      "tput": 454.3, "extra_sglang_args": "--nccl-Y"}},
         ],
         "sweep_attempts": [
             {"ts": "2026-05-14T08:20:00+00:00", "task_id": "s1",
@@ -171,13 +186,24 @@ def _build_fixture(sd: Path) -> None:
                            "extra_sglang_args": "--nccl-Y", "extra_envs": {},
                            "output_throughput": 454.3, "gain_pct": 7.8,
                            "ts": "2026-05-14T07:30:00+00:00"}],
-            "rejected": [{"name": "bad_x", "fingerprint": "f2", "gain_pct": -2.5}],
+            "rejected": [{"name": "bad_x", "fingerprint": "f2", "gain_pct": -2.5,
+                          "reason": "not_keep", "extra_sglang_args": "--bad-x"}],
             "tested": {
-                "f1": {"name": "nccl_Y",  "fingerprint": "f1", "gain_pct":  7.8},
-                "f2": {"name": "bad_x",   "fingerprint": "f2", "gain_pct": -2.5},
-                "f3": {"name": "neutral", "fingerprint": "f3", "gain_pct":  0.1},
+                "f1": {"name": "nccl_Y",  "fingerprint": "f1", "gain_pct":  7.8,
+                       "extra_sglang_args": "--nccl-Y", "extra_envs": {},
+                       "result": {"status": "succeeded", "output_throughput": 454.3}},
+                "f2": {"name": "bad_x",   "fingerprint": "f2", "gain_pct": -2.5,
+                       "extra_sglang_args": "--bad-x"},
+                "f3": {"name": "neutral", "fingerprint": "f3", "gain_pct":  0.1,
+                       "extra_sglang_args": "--neutral"},
             },
             "name_index": {}, "cursor": 3,
+            "last_round": {
+                "base_tput": 421.5,
+                "tested_fp": ["f1", "f2", "f3"],
+                "round_winners": ["nccl_Y"],
+                "selected_new": ["nccl_Y"],
+            },
         },
         "backends_search": {
             "schema_version": 1,
@@ -297,7 +323,8 @@ def test_envelope(fixture_session: Path) -> None:
         "session", "workload", "baseline", "final", "phase_timeline",
         "capability_summary", "geak_invocations", "oob_invocations",
         "kernel_lifecycle", "param_search", "sweep", "critic_robustness",
-        "telemetry", "attribution", "warnings", "source_files",
+        "telemetry", "attribution", "decision_journal", "kernel_profiling",
+        "warnings", "source_files",
     ):
         assert key in b, f"missing top-level: {key}"
 
@@ -331,6 +358,8 @@ def test_keep_stamping_only_best_attempt(fixture_session: Path) -> None:
     assert keeps[0]["micro_speedup"] == 1.27
     assert keeps[0]["compile_passed"] is True
     assert keeps[0]["correctness_passed"] is True
+    assert keeps[0]["proposal_reasons"] == ["compile_pass"]
+    assert keeps[0]["verification_summary"]["micro_speedup"] == pytest.approx(1.27)
     assert all(o["decision"] == "" for o in others)
 
 
