@@ -20,6 +20,7 @@ exercise GPU-dependent paths when CUDA is actually available.
 from __future__ import annotations
 
 import ast
+import gzip
 import json
 import os
 import shutil
@@ -166,18 +167,95 @@ class UnittestAgentGenerationTests(unittest.TestCase):
             self.assertEqual(m["num_shapes"], 0)
             self.assertTrue(any("no input shapes" in w for w in m["warnings"]))
 
-    def test_skips_hip_kernel(self):
-        # Make a tiny fake .cu source so we don't need to ship one
+    def test_generates_hip_harness_for_existing_benchmark(self):
+        # Make a tiny fake .cu source and a tiny benchmark so we do not need
+        # hipcc/GPU for the generation path.  Correctness is deferred to GEAK
+        # runtime for HIP/C++ kernels, but the harness should still be created
+        # and exposed as a test command.
         with tempfile.TemporaryDirectory(prefix="ua_hip_") as td:
             src = Path(td) / "kernel.cu"
             src.write_text("__global__ void k() {}\n")
+            bench = Path(td) / "bench.py"
+            bench.write_text("print('Correctness: PASS')\n")
             cand = {
                 "kernel_id": "k", "name": "k", "kernel_name": "k",
                 "source_file": str(src), "input_shapes": [[8]],
+                "benchmark_files": [str(bench)], "kernel_repo": str(Path(td)),
             }
             m = ua.generate_unittest(cand, out_dir=Path(td) / "task", self_verify=False)
-            self.assertEqual(m["status"], "skipped")
-            self.assertIn("only generates Python/Triton", m["error"])
+            self.assertEqual(m["status"], "ok")
+            self.assertEqual(m["task_type"], "hip2hip")
+            self.assertTrue(Path(m["task_runner"]).is_file())
+            self.assertIn("bench.py", m["benchmark_commands"][0])
+            ast.parse(Path(m["task_runner"]).read_text())
+
+    def test_hip_harness_compile_self_verify_is_lightweight(self):
+        with tempfile.TemporaryDirectory(prefix="ua_hip_sv_") as td:
+            src = Path(td) / "kernel.cu"
+            src.write_text("__global__ void k() {}\n")
+            bench = Path(td) / "bench.py"
+            bench.write_text("raise SystemExit(0)\n")
+            cand = {
+                "kernel_id": "k", "name": "k", "kernel_name": "k",
+                "source_file": str(src), "input_shapes": [[8]],
+                "benchmark_files": [str(bench)], "kernel_repo": str(Path(td)),
+            }
+            m = ua.generate_unittest(cand, out_dir=Path(td) / "task", self_verify=True)
+            self.assertEqual(m["status"], "ok")
+            self.assertEqual(m["self_verify"]["compile"], "ok")
+            self.assertEqual(m["self_verify"]["correctness"], "skipped")
+
+    def test_hip_shape_cases_fall_back_to_profile_trace(self):
+        with tempfile.TemporaryDirectory(prefix="ua_hip_profile_") as td:
+            root = Path(td)
+            src = root / "rmsnorm_quant_kernels.cu"
+            src.write_text("__global__ void k() {}\n")
+            bench = root / "bench.py"
+            bench.write_text("raise SystemExit(0)\n")
+            trace_dir = root / "runs" / "profile" / "task" / "torch_trace"
+            trace_dir.mkdir(parents=True)
+            trace = trace_dir / "merged.trace.json.gz"
+            payload = {
+                "traceEvents": [
+                    {
+                        "name": "aiter::rmsnorm",
+                        "args": {
+                            "Input Dims": [[1024, 4096], [1024, 4096], [4096], []],
+                            "Input type": ["c10::BFloat16", "c10::BFloat16", "c10::BFloat16", "Scalar"],
+                        },
+                    },
+                    {
+                        "name": "aiter::rmsnorm",
+                        "args": {
+                            "Input Dims": [[32768, 128], [32768, 128], [128], []],
+                            "Input type": ["c10::BFloat16", "c10::BFloat16", "c10::BFloat16", "Scalar"],
+                        },
+                    },
+                ]
+            }
+            with gzip.open(trace, "wt") as fh:
+                json.dump(payload, fh)
+            old_user_data = os.environ.get("USER_DATA_PATH")
+            os.environ["USER_DATA_PATH"] = str(root)
+            try:
+                cand = {
+                    "kernel_id": "k009",
+                    "name": "add_rmsnorm_quant_kernel",
+                    "kernel_name": "add_rmsnorm_quant_kernel",
+                    "source_file": str(src),
+                    "benchmark_files": [str(bench)],
+                    "kernel_repo": str(root),
+                    "kernel_params": {"HEAD_SIZE": 128},
+                }
+                m = ua.generate_unittest(cand, out_dir=root / "task", self_verify=False)
+            finally:
+                if old_user_data is None:
+                    os.environ.pop("USER_DATA_PATH", None)
+                else:
+                    os.environ["USER_DATA_PATH"] = old_user_data
+            self.assertEqual(m["status"], "ok")
+            self.assertEqual(m["shape_cases"][0]["input_dims"], [[32768, 128], [32768, 128], [128], []])
+            self.assertNotIn([1024, 4096], m["shapes"])
 
     def test_missing_source_file(self):
         cand = {"kernel_id": "x", "name": "x",
@@ -314,6 +392,299 @@ class UnittestAgentSelfVerifyTests(unittest.TestCase):
                 self.assertIn("test_case_id", case)
                 self.assertIn("execution_time_ms", case)
                 self.assertIn("params", case)
+
+
+class TimeoutBudgetTests(unittest.TestCase):
+    """Regression coverage for ``_compute_hip_timeout_budget``.
+
+    Anchors the 2026-05-20 silu_and_mul k010 incident where the inner
+    900s default tripped on baseline JIT recompile + 4 shape benchmarks
+    and forced GEAK's select_agent to fall back to the unmodified baseline.
+    """
+
+    def test_budget_floor_at_30_minutes(self):
+        b = ua._compute_hip_timeout_budget([])
+        self.assertGreaterEqual(b["correctness"], 1800)
+        self.assertGreaterEqual(b["performance"], 1800)
+        self.assertGreaterEqual(b["per_shape"], 300)
+
+    def test_budget_scales_with_shape_count(self):
+        small = ua._compute_hip_timeout_budget([{}, {}])
+        large = ua._compute_hip_timeout_budget([{} for _ in range(8)])
+        self.assertGreaterEqual(large["correctness"], small["correctness"])
+        self.assertGreater(large["correctness"], 1800)
+
+    def test_budget_respects_env_override(self):
+        old = os.environ.get("UNITTEST_HIP_PER_SHAPE_TIMEOUT_SEC")
+        try:
+            os.environ["UNITTEST_HIP_PER_SHAPE_TIMEOUT_SEC"] = "600"
+            b = ua._compute_hip_timeout_budget([{}, {}])
+            self.assertEqual(b["per_shape"], 600)
+            self.assertGreaterEqual(b["correctness"], 2 * 600)
+        finally:
+            if old is None:
+                os.environ.pop("UNITTEST_HIP_PER_SHAPE_TIMEOUT_SEC", None)
+            else:
+                os.environ["UNITTEST_HIP_PER_SHAPE_TIMEOUT_SEC"] = old
+
+
+class HipManifestTimeoutTests(unittest.TestCase):
+    """The HIP harness must write timeouts to ``unittest_meta.json`` so the
+    orchestrator + GEAK env injector can mirror them, and must hardcode the
+    same defaults into the generated task_runner.py (still env-overridable)."""
+
+    def test_meta_carries_harness_timeouts(self):
+        with tempfile.TemporaryDirectory(prefix="ua_hip_tmo_") as td:
+            src = Path(td) / "kernel.cu"
+            src.write_text("__global__ void k() {}\n")
+            bench = Path(td) / "bench.py"
+            bench.write_text("raise SystemExit(0)\n")
+            m = ua.generate_unittest(
+                {"kernel_id": "k", "name": "k", "kernel_name": "k",
+                 "source_file": str(src), "benchmark_files": [str(bench)],
+                 "kernel_repo": str(Path(td))},
+                out_dir=Path(td) / "task", self_verify=False,
+            )
+            self.assertGreaterEqual(m["harness_timeout_correctness_sec"], 1800)
+            self.assertGreaterEqual(m["harness_timeout_performance_sec"], 1800)
+            self.assertGreaterEqual(m["harness_per_shape_timeout_sec"], 300)
+            runner_text = Path(m["task_runner"]).read_text()
+            self.assertIn("_DEFAULT_CORRECTNESS_TIMEOUT_SEC", runner_text)
+            self.assertIn(str(m["harness_timeout_correctness_sec"]), runner_text)
+
+
+class HipPerformanceExitCodeTests(unittest.TestCase):
+    """``performance`` must return non-zero when every shape errors out so
+    GEAK select_agent can distinguish a real measurement from a silent fail.
+
+    Without this fix (which was the case before 2026-05-20), a harness that
+    failed every shape still returned exit 0 with ``-1.0`` ms values,
+    making patches look "successful" to GEAK's per-task parser.
+    """
+
+    def test_zero_good_cases_exits_nonzero(self):
+        # Isolate the harness from any USER_DATA_PATH the surrounding pytest
+        # process inherited (otherwise ``_shape_cases`` finds a real trace
+        # and the runner ends up exercising whatever live shape was last
+        # captured by the optimizer — see 2026-05-20 silu_and_mul k010).
+        with tempfile.TemporaryDirectory(prefix="ua_hip_exit_") as td:
+            src = Path(td) / "kernel.cu"
+            src.write_text("__global__ void k() {}\n")
+            bench = Path(td) / "bench.py"
+            bench.write_text("import sys; sys.exit(7)\n")
+            sandbox_data = Path(td) / "data"
+            sandbox_data.mkdir()
+            saved_udp = os.environ.get("USER_DATA_PATH")
+            os.environ["USER_DATA_PATH"] = str(sandbox_data)
+            try:
+                m = ua.generate_unittest(
+                    {"kernel_id": "k", "name": "k", "kernel_name": "k",
+                     "source_file": str(src), "benchmark_files": [str(bench)],
+                     "kernel_repo": str(Path(td))},
+                    out_dir=Path(td) / "task", self_verify=False,
+                )
+                self.assertEqual(
+                    m.get("shape_cases"), [],
+                    "USER_DATA_PATH leaked real shapes into the harness",
+                )
+                proc = subprocess.run(
+                    [sys.executable, m["task_runner"], "performance"],
+                    capture_output=True, text=True, timeout=120,
+                )
+            finally:
+                if saved_udp is None:
+                    os.environ.pop("USER_DATA_PATH", None)
+                else:
+                    os.environ["USER_DATA_PATH"] = saved_udp
+            self.assertNotEqual(
+                proc.returncode, 0,
+                f"perf with no good case must exit non-zero; got rc=0 stdout={proc.stdout!r}",
+            )
+
+
+class OverlayLockTests(unittest.TestCase):
+    """``_OverlayLiveSource`` acquires an fcntl lock so two parallel
+    kernel_opt runs don't race on the shared aiter JIT cache.
+
+    The template embeds a small helper, ``_overlay_lockfile``, that we
+    smoke-test by rendering the HIP template and parsing it back as AST
+    plus a string-presence check.
+    """
+
+    def test_template_embeds_fcntl_lock(self):
+        budget = ua._compute_hip_timeout_budget([{}])
+        text = ua._HIP_TASK_RUNNER_TEMPLATE.format(
+            kernel_name="foo", task_name="t/k", source_basename="x.cu",
+            live_source="/x", kernel_repo="/r",
+            benchmark_commands=["python /x.py"], target_kernels=["foo"],
+            env_vars={}, jit_roots=["/jit"], jit_match_tokens=["foo"],
+            shape_cases=[],
+            default_correctness_timeout=budget["correctness"],
+            default_performance_timeout=budget["performance"],
+            default_per_shape_timeout=budget["per_shape"],
+        )
+        self.assertIn("fcntl.flock", text)
+        self.assertIn("_overlay_lockfile", text)
+        ast.parse(text)
+
+    def test_template_embeds_stale_aiter_baton_purge(self):
+        """Without this purge, a SIGKILL'd compile leaves
+        ``/sgl-workspace/aiter/aiter/jit/build/lock_module_<name>`` on disk and
+        the next ``import aiter.jit.module_<name>`` spins forever in
+        ``FileBaton.wait()`` (no timeout, no detection). We embed
+        ``_purge_stale_aiter_batons`` in the generated runner and call it
+        from inside ``_OverlayLiveSource.__enter__`` after the overlay
+        file-lock is held — so every fresh GEAK attempt has a clean slate.
+        """
+        budget = ua._compute_hip_timeout_budget([{}])
+        text = ua._HIP_TASK_RUNNER_TEMPLATE.format(
+            kernel_name="foo", task_name="t/k", source_basename="x.cu",
+            live_source="/x", kernel_repo="/r",
+            benchmark_commands=["python /x.py"], target_kernels=["foo"],
+            env_vars={}, jit_roots=["/jit"], jit_match_tokens=["foo"],
+            shape_cases=[],
+            default_correctness_timeout=budget["correctness"],
+            default_performance_timeout=budget["performance"],
+            default_per_shape_timeout=budget["per_shape"],
+        )
+        self.assertIn("_purge_stale_aiter_batons", text)
+        # The purge is gated on overlay-lock ownership; verify the call
+        # happens after fcntl.flock acquisition rather than at module import
+        # time (where it would race with a still-alive sibling compile).
+        flock_idx = text.find("fcntl.flock")
+        purge_idx = text.find("_purge_stale_aiter_batons()")
+        self.assertGreater(
+            flock_idx, 0, "fcntl.flock acquisition must appear in template"
+        )
+        self.assertGreater(
+            purge_idx, flock_idx,
+            "_purge_stale_aiter_batons must be invoked after overlay lock is held",
+        )
+        # The helper itself must compile under f-string template substitution.
+        ast.parse(text)
+
+
+class EnvSubsetDeviceSelectionTests(unittest.TestCase):
+    """Profile traces capture ``ROCR_VISIBLE_DEVICES`` / ``HIP_VISIBLE_DEVICES``
+    that were valid at trace time on physical GPU0. The generated harness must
+    NOT bake those into RUNTIME_ENV — when GEAK later runs the harness on
+    GPU2/3 (manual handoff or multi-tenant ray scheduling), the embedded
+    ``ROCR=0`` overrides the caller's ``HIP=2`` and torch reports ``No HIP
+    GPUs are available`` (every patch is then incorrectly rejected as
+    failing baseline).
+    """
+
+    def test_device_selection_vars_stripped_from_candidate(self):
+        cand = {"env_vars": {
+            "ROCR_VISIBLE_DEVICES": "0",
+            "HIP_VISIBLE_DEVICES": "0",
+            "CUDA_VISIBLE_DEVICES": "0",
+            "AMD_VISIBLE_DEVICES": "0",
+            "GPU_DEVICE_ORDINAL": "0",
+            "NVIDIA_VISIBLE_DEVICES": "0",
+            "SGLANG_USE_AITER": "1",
+            "AITER_COMMIT": "v0.1.10",
+        }}
+        result = ua._env_subset_for_runtime(cand)
+        for var in (
+            "ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES",
+            "CUDA_VISIBLE_DEVICES", "AMD_VISIBLE_DEVICES",
+            "GPU_DEVICE_ORDINAL", "NVIDIA_VISIBLE_DEVICES",
+        ):
+            self.assertNotIn(
+                var, result,
+                f"{var} must not leak into harness RUNTIME_ENV from "
+                f"candidate env (got {result.get(var)!r})",
+            )
+        # Workload prefix vars should still pass through.
+        self.assertEqual(result.get("SGLANG_USE_AITER"), "1")
+        self.assertEqual(result.get("AITER_COMMIT"), "v0.1.10")
+
+    def test_device_selection_vars_stripped_from_os_environ(self):
+        cand = {"env_vars": {}}
+        saved = {}
+        for var in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+            saved[var] = os.environ.get(var)
+            os.environ[var] = "0"
+        try:
+            result = ua._env_subset_for_runtime(cand)
+            self.assertNotIn("HIP_VISIBLE_DEVICES", result)
+            self.assertNotIn("ROCR_VISIBLE_DEVICES", result)
+        finally:
+            for var, val in saved.items():
+                if val is None:
+                    os.environ.pop(var, None)
+                else:
+                    os.environ[var] = val
+
+
+class HipShapeSubprocessBudgetTests(unittest.TestCase):
+    """``_shape_subprocess_budget`` divides the outer correctness timeout
+    across the inner ``save`` / ``compare`` subprocesses; it must respect
+    the caller's cap (so we never starve the remaining work) while still
+    giving each shape a non-trivial floor.
+    """
+
+    def test_budget_helper_visible_in_runner(self):
+        budget = ua._compute_hip_timeout_budget([{}])
+        text = ua._HIP_TASK_RUNNER_TEMPLATE.format(
+            kernel_name="foo", task_name="t/k", source_basename="x.cu",
+            live_source="/x", kernel_repo="/r",
+            benchmark_commands=["python /x.py"], target_kernels=["foo"],
+            env_vars={}, jit_roots=["/jit"], jit_match_tokens=["foo"],
+            shape_cases=[],
+            default_correctness_timeout=budget["correctness"],
+            default_performance_timeout=budget["performance"],
+            default_per_shape_timeout=budget["per_shape"],
+        )
+        self.assertIn("_shape_subprocess_budget", text)
+        # The compare phase must reuse the remaining budget so a slow save
+        # doesn't starve compare. Pin the contract through a substring.
+        self.assertIn("Recompute remaining budget", text)
+
+
+class HipShapeScriptPerCaseTests(unittest.TestCase):
+    """The compare-mode shape sub-script must emit per-case diagnostics
+    instead of aborting on the first failure (without these, GEAK only ever
+    sees the first failing shape and can't tell whether others would have
+    regressed too).
+    """
+
+    def test_compare_emits_per_case_records(self):
+        # ``_shape_case_script`` is defined inside the HIP task_runner
+        # template (it runs in the worker subprocess, not in the agent),
+        # so we render the template once and assert against its source.
+        budget = ua._compute_hip_timeout_budget([{}])
+        text = ua._HIP_TASK_RUNNER_TEMPLATE.format(
+            kernel_name="foo", task_name="t/k", source_basename="x.cu",
+            live_source="/x", kernel_repo="/r",
+            benchmark_commands=["python /x.py"], target_kernels=["foo"],
+            env_vars={}, jit_roots=["/jit"], jit_match_tokens=["foo"],
+            shape_cases=[{"op": "silu_and_mul", "input_dims": [[1, 8]]}],
+            default_correctness_timeout=budget["correctness"],
+            default_performance_timeout=budget["performance"],
+            default_per_shape_timeout=budget["per_shape"],
+        )
+        self.assertIn("per_case", text)
+        self.assertIn("case_idx", text)
+        self.assertIn("torch.cuda.empty_cache", text)
+
+
+class PythonCorrectnessSummaryTests(unittest.TestCase):
+    """``run_correctness`` for Python/Triton harnesses now collects per-shape
+    results instead of bailing out on the first failure."""
+
+    def test_python_runner_template_collects_per_shape(self):
+        text = ua._TASK_RUNNER_TEMPLATE
+        self.assertIn("per_shape", text)
+        self.assertIn("num_pass", text)
+        self.assertIn("num_fail", text)
+        # Per-shape ``(shape): X ms`` lines for GEAK select_agent's
+        # parse_shape_latencies_ms regex. The template uses doubled braces
+        # (``{{...}}``) because it's a ``.format`` string, so we match
+        # against the post-format-escaping marker instead.
+        self.assertIn("({{list(shape)}}): {{c['execution_time_ms']:.4f}} ms",
+                      text)
 
 
 if __name__ == "__main__":
