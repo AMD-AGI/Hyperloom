@@ -238,6 +238,25 @@ class TestSourceTypeAdmission(unittest.TestCase):
         self.assertIn("flydsl", skip)
 
 
+class TestGEAKKernelTypeMapping(unittest.TestCase):
+    """``source_type=flydsl`` must map to GEAK's ``kernel_type="flydsl"``."""
+
+    def setUp(self) -> None:
+        sys.path.insert(0, str(ROOT / "tools"))
+        import kernel_optimization
+        self.mod = kernel_optimization
+
+    def test_flydsl_source_type_maps_to_flydsl(self) -> None:
+        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["flydsl"], "flydsl")
+
+    def test_existing_mappings_preserved(self) -> None:
+        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["triton"], "triton")
+        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["hip_cpp"], "hip")
+        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["python"], "other")
+        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["vendor_binary"], "other")
+        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["unknown"], "other")
+
+
 class TestOrchestratorReusableRootsInSync(unittest.TestCase):
     """Orchestrator-side allowlist must stay in sync with the classifier."""
 

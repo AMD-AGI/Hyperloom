@@ -201,6 +201,7 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
 _GEAK_KERNEL_TYPE = {
     "triton": "triton",
     "hip_cpp": "hip",
+    "flydsl": "flydsl",
     "python": "other",
     "vendor_binary": "other",
     "unknown": "other",
@@ -844,7 +845,7 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0)
                    or int(candidate.get("num_gpus_recommended") or 1))
     # Map our source_type to GEAK's kernel_type vocabulary so its task_parser
-    # can route to the right agent (hip / triton / other).
+    # can route to the right agent (hip / triton / flydsl / other).
     geak_kernel_type = _GEAK_KERNEL_TYPE.get(str(candidate.get("source_type", "unknown")), "other")
     kernel_name = str(candidate.get("name", args.kernel_id))
     kernel_metadata = build_kernel_metadata(candidate, args)
