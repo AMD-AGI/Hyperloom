@@ -124,7 +124,15 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('GEAK_REF="${GEAK_REF:-v3.1.0}"', install_text)
         self.assertIn('python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"', install_text)
         self.assertIn('python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"', install_text)
-        self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cuda}"', install_text)
+        # GEAK_RAG_INDEX_DEVICE_VAL is now auto-detected: cuda when rocm-smi
+        # or torch.cuda.is_available() succeeds, else cpu. The explicit env
+        # override still wins. Regression guard against accidental removal of
+        # either branch (a CPU-only fallback caused 1.5h+ embedder builds and
+        # zombie installers in pre-fix runs — observed 2026-05-20).
+        self.assertIn('if [ -z "${GEAK_RAG_INDEX_DEVICE:-}" ]; then', install_text)
+        self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="cuda"', install_text)
+        self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="cpu"', install_text)
+        self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE}"', install_text)
         self.assertIn("python3 scripts/build_index.py --force --device", install_text)
         self.assertIn("ensure_node()", install_text)
         self.assertIn("installing Node.js 20 from NodeSource", install_text)
@@ -478,6 +486,182 @@ class AuthFailureDetectionTests(unittest.TestCase):
             "Primus.00009 token not present\n"
         )
         self.assertEqual(ko._count_auth_failures(log), 3)
+
+
+class GeakConfigEnvTimeoutInjectionTests(unittest.TestCase):
+    """A custom GEAK config (e.g. install.sh-generated ``local.yaml``)
+    must end up with ``env.timeout`` >= the unittest harness's own
+    advertised budget before it reaches mini-swe-agent, or every
+    ``save_and_test`` call inside the auto-generated unittest harness
+    silently dies at the 30s default ``LocalEnvironmentConfig.timeout``
+    with ``Test command timed out``.
+
+    Before ``unittest_agent`` was added, GEAK's ``--test-command`` was a
+    fast ``python bench_<kernel>.py`` script that finished in seconds and
+    the 30s default was fine. After ``unittest_agent`` started writing
+    ``task_runner.py correctness`` test commands (which trigger an aiter
+    JIT recompile + multi-shape benchmark and routinely take minutes),
+    nothing was propagating the new budget to GEAK's outer timeout, so
+    every patch silently fell back to baseline.
+
+    Hyperloom kernel_optimization fixes this at three layers:
+      * ``scripts/install.sh`` writes ``env.timeout: 3600`` into newly
+        generated ``local.yaml`` files (covered by the install.sh diff).
+      * ``_geak_config_for_run`` defensively rewrites any pre-existing
+        config to a timeout no smaller than the unittest_agent's own
+        ``harness_timeout_*_sec`` advertisement (or 3600s when no
+        manifest is available).
+      * ``_harness_outer_timeout`` is the single source of truth that
+        ties the harness's internal budget to GEAK's outer
+        ``subprocess.run(timeout=...)``.
+    """
+
+    def _import_ko(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            import kernel_optimization as ko  # type: ignore[import-not-found]
+            return ko
+        finally:
+            sys.path.pop(0)
+
+    def test_injects_env_timeout_when_missing(self) -> None:
+        ko = self._import_ko()
+        base = "model:\n  model_class: litellm\ntools:\n  rag: true\n"
+        injected = ko._ensure_yaml_env_timeout(base)
+        self.assertIn("env:", injected)
+        self.assertRegex(injected, r"timeout:\s*3600")
+        # Idempotent: applying twice does not stack duplicate env blocks.
+        self.assertEqual(injected, ko._ensure_yaml_env_timeout(injected))
+
+    def test_preserves_existing_env_block_when_already_large_enough(self) -> None:
+        ko = self._import_ko()
+        base = (
+            "model:\n  model_class: litellm\n"
+            "env:\n"
+            "  env:\n    PAGER: cat\n"
+            "  timeout: 7200\n"  # already >= the 3600s default
+            "tools:\n  rag: true\n"
+        )
+        self.assertEqual(ko._ensure_yaml_env_timeout(base), base)
+
+    def test_upgrades_too_small_explicit_timeout(self) -> None:
+        """A copy-pasted ``env.timeout: 30`` (or any value < harness budget)
+        must be rewritten to the harness budget rather than silently
+        defeating the entire safety net."""
+        ko = self._import_ko()
+        base = (
+            "model:\n  model_class: litellm\n"
+            "env:\n"
+            "  env:\n    PAGER: cat\n"
+            "  timeout: 30\n"
+            "tools:\n  rag: true\n"
+        )
+        out = ko._ensure_yaml_env_timeout(base, timeout=2100)
+        self.assertRegex(out, r"timeout:\s*2100")
+        self.assertNotRegex(out, r"timeout:\s*30\b")
+        # Still only one env block / one timeout line.
+        self.assertEqual(out.count("\nenv:\n"), 1)
+        self.assertEqual(out.count("timeout:"), 1)
+
+    def test_appends_timeout_to_existing_env_without_one(self) -> None:
+        ko = self._import_ko()
+        base = (
+            "model:\n  model_class: litellm\n"
+            "env:\n"
+            "  env:\n    PAGER: cat\n"
+            "tools:\n  rag: true\n"
+        )
+        out = ko._ensure_yaml_env_timeout(base, timeout=2100)
+        self.assertRegex(out, r"timeout:\s*2100")
+        # Did not duplicate the env block.
+        self.assertEqual(out.count("\nenv:\n"), 1)
+
+    def test_harness_outer_timeout_uses_manifest_budget_plus_buffer(self) -> None:
+        ko = self._import_ko()
+        manifest = {
+            "status": "ok",
+            "harness_timeout_correctness_sec": 1800,
+            "harness_timeout_performance_sec": 1800,
+            "harness_per_shape_timeout_sec": 300,
+        }
+        expected = 1800 + ko._DEFAULT_HARNESS_OUTER_BUFFER_SEC
+        self.assertEqual(ko._harness_outer_timeout(manifest), expected)
+
+    def test_harness_outer_timeout_returns_none_for_bad_manifest(self) -> None:
+        ko = self._import_ko()
+        self.assertIsNone(ko._harness_outer_timeout(None))
+        self.assertIsNone(ko._harness_outer_timeout({"status": "degraded"}))
+        self.assertIsNone(ko._harness_outer_timeout({"status": "ok"}))
+
+    def test_geak_config_for_run_uses_manifest_timeout(self) -> None:
+        """End-to-end glue: when a unittest manifest declares its own
+        budget, the rewritten GEAK config must adopt it (the root-cause
+        fix the user spotted: previously *only* ``--test-command``
+        flowed through, ``env.timeout`` did not)."""
+        ko = self._import_ko()
+        import tempfile, argparse
+
+        manifest = {
+            "status": "ok",
+            "harness_timeout_correctness_sec": 1800,
+            "harness_timeout_performance_sec": 1800,
+            "harness_per_shape_timeout_sec": 300,
+        }
+        expected = 1800 + ko._DEFAULT_HARNESS_OUTER_BUFFER_SEC
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            base = tmp / "local.yaml"
+            base.write_text(
+                "model:\n  model_class: litellm\ntools:\n  rag: true\n",
+                encoding="utf-8",
+            )
+            prompt = tmp / "prompt.md"
+            prompt.write_text("placeholder", encoding="utf-8")
+            previous = os.environ.get("GEAK_CONFIG")
+            os.environ["GEAK_CONFIG"] = str(base)
+            try:
+                args = argparse.Namespace(disable_rag=False)
+                override = ko._geak_config_for_run(
+                    args, prompt, unittest_manifest=manifest,
+                )
+            finally:
+                if previous is None:
+                    os.environ.pop("GEAK_CONFIG", None)
+                else:
+                    os.environ["GEAK_CONFIG"] = previous
+
+            self.assertNotEqual(override, str(base))
+            text = Path(override).read_text(encoding="utf-8")
+            self.assertRegex(text, rf"timeout:\s*{expected}")
+            self.assertIn("model_class: litellm", text)
+
+    def test_geak_config_for_run_falls_back_to_3600_without_manifest(self) -> None:
+        ko = self._import_ko()
+        import tempfile, argparse
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            base = tmp / "local.yaml"
+            base.write_text(
+                "model:\n  model_class: litellm\ntools:\n  rag: true\n",
+                encoding="utf-8",
+            )
+            prompt = tmp / "prompt.md"
+            prompt.write_text("placeholder", encoding="utf-8")
+            previous = os.environ.get("GEAK_CONFIG")
+            os.environ["GEAK_CONFIG"] = str(base)
+            try:
+                args = argparse.Namespace(disable_rag=False)
+                override = ko._geak_config_for_run(args, prompt)
+            finally:
+                if previous is None:
+                    os.environ.pop("GEAK_CONFIG", None)
+                else:
+                    os.environ["GEAK_CONFIG"] = previous
+
+            text = Path(override).read_text(encoding="utf-8")
+            self.assertRegex(text, r"timeout:\s*3600")
 
 
 if __name__ == "__main__":

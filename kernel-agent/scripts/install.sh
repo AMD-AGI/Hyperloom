@@ -491,6 +491,20 @@ model:
     max_tokens: 16384
 tools:
   rag: true
+# Hyperloom requires a generous LocalEnvironment.timeout because the auto-generated
+# unittest harness runs aiter JIT recompiles + multi-shape correctness/perf passes
+# inside save_and_test. The mini-swe-agent default (30s) silently kills every
+# patch test with "Test command timed out", which causes select_patch to fall
+# back to the unmodified baseline and the whole GEAK attempt to look like a no-op.
+# (Observed end-to-end on Qwen3-8B k008/k010 manual runs, 2026-05-20.)
+env:
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  timeout: 3600
 EOF
       chmod 600 "$GEAK_CONFIG"
       grep -Eq '^[[:space:]]*model_class:[[:space:]]*litellm[[:space:]]*$' "$GEAK_CONFIG" \
