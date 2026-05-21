@@ -83,6 +83,17 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/aiter/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
+    # Production vLLM wheel install layout (system dist-packages). Keep
+    # this in sync with ``kernel-agent/tools/tracelens_analysis.py`` so
+    # both the kernel-agent classifier and the orchestrator-side gate
+    # in ``run_optimization_handler`` agree on what counts as a
+    # reusable framework source.
+    "/usr/local/lib/python3.12/dist-packages/aiter/",
+    "/usr/local/lib/python3.12/dist-packages/sglang/",
+    "/usr/local/lib/python3.12/dist-packages/vllm/",
+    "/usr/local/lib/python3.10/dist-packages/aiter/",
+    "/usr/local/lib/python3.10/dist-packages/sglang/",
+    "/usr/local/lib/python3.10/dist-packages/vllm/",
 )
 _APPLY_TOOL_MODULE: Any | None = None
 # GEAK is FIRST per SKILL.md "high-priority handoff" contract: every kernel
@@ -665,6 +676,40 @@ async def select_kernels_handler(
         # offered the kernels they expected.
         if isinstance(artifacts, dict) and artifacts.get("tracelens_summary"):
             result["tracelens_summary_path"] = str(artifacts["tracelens_summary"])
+
+        # A failed TraceLens run is a hard trace-quality / integration
+        # failure, not a valid "empty candidates" signal. Keep
+        # ``status=failed`` so the Coordinator does not continue down a
+        # misleading params/backends path as if kernel analysis had
+        # completed. Still attach a structured warning so operators can
+        # inspect the root cause from SharedState / event logs.
+        if (
+            result.get("status") == "failed"
+            and "trace_split_no_steady_state" not in str(result.get("error") or "")
+        ):
+            failure_warning: dict[str, Any] = {
+                "code": "tracelens_analysis_failed",
+                "severity": "warning",
+                "message": (
+                    "TraceLens analysis failed; refusing to treat this as a "
+                    "successful empty-kernel result. See ``stderr_tail`` / "
+                    "``error`` for the upstream failure."
+                ),
+            }
+            for key in ("returncode", "rc", "error", "stderr_tail", "raw_stdout_tail"):
+                if key in result and result[key] not in (None, ""):
+                    failure_warning[key] = result[key]
+            health = list(result.get("trace_health_warnings") or [])
+            health.append(failure_warning)
+            result["trace_health_warnings"] = health
+            result["hot_kernels"] = []
+            result.setdefault("orchestrator_error", failure_warning.get("error", ""))
+
+        # T3 / T4: guarantee ``trace_health_warnings`` is always a list
+        # at the handler boundary so downstream code can iterate without
+        # a ``None``-guard. Empty list = steady-state ("nothing wrong").
+        result.setdefault("trace_health_warnings", [])
+
         metadata = _load_materialized_workload_metadata(state.baseline_config_path)
         _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
         candidates_path = result.get("candidates_path")
@@ -708,7 +753,12 @@ def _backend_order(payload: dict) -> list[str]:
     else:
         # Ignore legacy payload["backends"] here. Older Orchestration prompts
         # often send backends="claude"; batch scheduling must still exercise
-        # the full fallback ladder.
+        # the full fallback ladder. The default ladder mirrors
+        # ``kernel_optimization.choose_backends`` so single-kernel and batch
+        # paths agree on the policy (GEAK FIRST per #144 last comment Layer 1
+        # — high-priority handoff, Claude/Codex follow as fallbacks if GEAK
+        # times out or rejects). Cursor only joins the ladder when the
+        # operator has provisioned ``CURSOR_API_KEY``; see filter below.
         order = list(_DEFAULT_KERNEL_BACKEND_ORDER)
         explicit = False
     allowed = {"claude", "codex", "cursor", "geak"}

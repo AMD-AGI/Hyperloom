@@ -10,8 +10,11 @@ from robustness_agent.role.prompt_inputs import (
 )
 
 
-def _prompt(shared: str, inbox: str) -> str:
-    parts = ["=== Shared session state ===", shared.rstrip(), inbox.rstrip()]
+def _prompt(shared: str, inbox: str, *, time_budget: str | None = None) -> str:
+    parts = ["=== Shared session state ===", shared.rstrip()]
+    if time_budget is not None:
+        parts.extend(["=== Time budget ===", time_budget.rstrip()])
+    parts.append(inbox.rstrip())
     return "\n".join(p for p in parts if p)
 
 
@@ -171,3 +174,112 @@ def test_payload_with_topic_substring_does_not_break_topic_field():
     item = ctx.inbox[0]
     assert item.topic == "alert"
     assert item.payload["summary"] == "oops topic=alert again"
+
+
+# ---------------------------------------------------------------------------
+# Time-budget section (consumed by signals/budget.py)
+# ---------------------------------------------------------------------------
+
+def test_time_budget_section_parses_into_snapshot():
+    prompt = _prompt(
+        "session_id=sess-tb\ncrash_count=0\ncumulative_gain_validated=2.5%\n",
+        "=== Inbox for robustness ===\n(no new messages)\n",
+        time_budget="elapsed=120.5min  remaining=239.5min  budget=360min  closing_phase=False\n",
+    )
+    ctx = from_coordinator_prompt(prompt)
+    snap = ctx.shared_state
+    assert snap.elapsed_minutes == 120.5
+    assert snap.remaining_minutes == 239.5
+    assert snap.budget_minutes == 360.0
+    assert snap.closing_phase is False
+    assert snap.cumulative_gain_validated == 2.5
+
+
+def test_time_budget_section_handles_closing_phase_true():
+    prompt = _prompt(
+        "session_id=sess-tb2\ncrash_count=0\n",
+        "=== Inbox for robustness ===\n(no new messages)\n",
+        time_budget="elapsed=355.0min  remaining=5.0min  budget=360min  closing_phase=True\n",
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.shared_state.closing_phase is True
+    assert ctx.shared_state.remaining_minutes == 5.0
+
+
+def test_time_budget_section_absent_leaves_defaults():
+    prompt = _prompt(
+        "session_id=sess-no-budget\ncrash_count=0\n",
+        "=== Inbox for robustness ===\n(no new messages)\n",
+    )
+    ctx = from_coordinator_prompt(prompt)
+    snap = ctx.shared_state
+    assert snap.elapsed_minutes == 0.0
+    assert snap.remaining_minutes == 0.0
+    assert snap.budget_minutes == 0.0
+    assert snap.closing_phase is False
+
+
+def test_time_budget_section_malformed_line_keeps_defaults():
+    prompt = _prompt(
+        "session_id=sess-tb-bad\ncrash_count=0\n",
+        "=== Inbox for robustness ===\n(no new messages)\n",
+        time_budget="elapsed=??? min closing_phase=Yes\n",
+    )
+    ctx = from_coordinator_prompt(prompt)
+    snap = ctx.shared_state
+    assert snap.elapsed_minutes == 0.0
+    assert snap.budget_minutes == 0.0
+    assert snap.closing_phase is False
+
+
+def test_cumulative_gain_validated_strips_parenthetical():
+    prompt = _prompt(
+        "session_id=s\ncumulative_gain_validated=8.65% (stack_len_at_validation=2, ts=2026-05-18T03:46:00)\ncrash_count=0\n",
+        "=== Inbox for robustness ===\n(no new messages)\n",
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.shared_state.cumulative_gain_validated == 8.65
+
+
+def test_tick_and_stop_reason_parse_into_snapshot():
+    prompt = _prompt(
+        textwrap.dedent(
+            """\
+            session_id=s
+            tick=42  target_gap_pct=12.50
+            stop_reason=(none)
+            crash_count=0
+            """
+        ),
+        "=== Inbox for robustness ===\n(no new messages)\n",
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.shared_state.tick == 42
+    assert ctx.shared_state.stop_reason == ""
+
+
+def test_stop_reason_real_value_parses():
+    prompt = _prompt(
+        "session_id=s\ntick=10  target_gap_pct=0.0\nstop_reason=time_exhausted\ncrash_count=0\n",
+        "=== Inbox for robustness ===\n(no new messages)\n",
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.shared_state.stop_reason == "time_exhausted"
+
+
+def test_optimization_stack_size_counts_list_repr():
+    prompt = _prompt(
+        "session_id=s\noptimization_stack=['baseline:v1', 'integrate:k7']\ncrash_count=0\n",
+        "=== Inbox for robustness ===\n(no new messages)\n",
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.shared_state.optimization_stack_size == 2
+
+
+def test_optimization_stack_size_zero_when_none():
+    prompt = _prompt(
+        "session_id=s\noptimization_stack=(none)\ncrash_count=0\n",
+        "=== Inbox for robustness ===\n(no new messages)\n",
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.shared_state.optimization_stack_size == 0
