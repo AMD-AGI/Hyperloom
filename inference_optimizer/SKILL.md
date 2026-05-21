@@ -828,9 +828,10 @@ COLD_START repeats across retries, JIT was killed mid-`hipcc`; bump
 
 Before every `backend=geak` attempt, `kernel-agent/tools/kernel_optimization.py`
 calls `tools/unittest_agent.py::generate_unittest()` to materialise an
-[AgentKernelArena](/wekafs/zihao/2026/geak_cc/AgentKernelArena)-style
-unittest right next to the GEAK run dir. The harness pins the
-**live vLLM/SGLang runtime context** the kernel was profiled in
+AgentKernelArena-compatible unittest right next to the GEAK run dir. The
+portable contract lives in `kernel-agent/SKILL.md`; do not depend on a
+developer-local AgentKernelArena checkout or copied task files. The harness
+pins the **live vLLM/SGLang runtime context** the kernel was profiled in
 (source-file symlink into `/sgl-workspace/...`, captured
 TraceLens input shapes/dtypes, `SGLANG_* / VLLM_* / AITER_* / TRITON_*`
 env vars, golden-bytes snapshot under `source/_baseline_snapshot/`) so
@@ -850,7 +851,7 @@ unmodified source) before declaring success. The artefact tree lives at:
 
 ```text
 $USER_DATA_PATH/kernel-agent/unittests/<session_id>/<prompt_stem>/
-├── config.yaml                       # AgentKernelArena task config
+├── config.yaml                       # compile/correctness/performance commands
 ├── scripts/task_runner.py            # compile / correctness / performance
 ├── source/<kernel_name>.py           # symlink to the live framework src
 ├── source/_baseline_snapshot/<kernel_name>.py   # frozen golden bytes
