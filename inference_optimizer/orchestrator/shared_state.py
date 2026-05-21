@@ -235,6 +235,21 @@ class SharedState:
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
     baseline_failure_streak: int = 0
+    # N33 (May 2026): consecutive coordinator ticks in which nothing
+    # happened that would advance the run -- i.e. no queued tasks, no
+    # running tasks, no pending proposals (so no LLM proposal landed
+    # this tick either) and ``current_action`` is empty. The Coordinator
+    # tick loop bumps this when its end-of-tick snapshot matches the
+    # "idle" definition above; any change (new proposal, new task,
+    # stack growth) resets it back to 0.
+    #
+    # Read by the tick loop after the wall-clock-deadline check: once
+    # this exceeds ``INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS`` (default
+    # 120 -- ~10 min at the 5s sleep used in prod), the loop calls
+    # ``_enter_closing_phase`` to enqueue the final report instead of
+    # idling until the wall-clock deadline. Reset to 0 the moment we
+    # actually enter closing.
+    consecutive_silent_ticks: int = 0
     # Path to the YAML the baseline executor materialized with the operator's
     # workload envs (CONC/ISL/OSL/TP/MAX_MODEL_LEN/PRECISION/RUN_EVAL/...).
     # Coordinator injects this into params/backends/sweep tasks as
