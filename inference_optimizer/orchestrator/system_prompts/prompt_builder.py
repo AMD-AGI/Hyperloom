@@ -56,6 +56,12 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # §PR7). The executor modules stay in the tree so v0.6 resume
     # paths still find their per-action audit fields (Inv-10.1).
     "explore",
+    # PR-A1 (Arbor-into-Hyperloom): ``specialist`` is the LLM sub-agent
+    # dispatch surface; ``integrate_patch`` is the orchestrator-side
+    # apply+restart+gate that consumes specialist worktree patches.
+    # Both live under pipeline_phase=explore in the registry.
+    "specialist",
+    "integrate_patch",
     "sweep",
     # deep — kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
     "kernel_opt", "integrate", "operator_tuning", "vendor_kernel_config",
@@ -79,6 +85,10 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # KB_gaps/Gap-10; merged into ``explore`` which carries an
     # inlined per-KEEP stack rebench.
     "explore",
+    # PR-A1 (Arbor-into-Hyperloom): specialist + integrate_patch are
+    # always-on; they are EXPLORE-phase actions and unrelated to kernel mode.
+    "specialist",
+    "integrate_patch",
     "sweep",
     # finalize
     "report",
@@ -344,6 +354,33 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
         )
     if meta.name == "report":
         return "propose_action{action_name='report', predicted_gain_pct=0.0}"
+    # PR-A1 (Arbor-into-Hyperloom): ``specialist`` is a synthetic LLM
+    # sub-agent dispatch (no propose_action wrapper — go straight to
+    # delegate with the per-payload contract enforced by PolicyGate's
+    # ``specialist_dispatch_source``). ``integrate_patch`` is the
+    # serving-lane-locked follow-up that consumes a specialist's worktree
+    # patches; expose it as a direct delegate too so the LLM does not
+    # waste a tick proposing it first.
+    if meta.name == "specialist":
+        return (
+            "delegate{action_name='specialist', params={"
+            "domain=<one of framework_specialist|kernel_specialist|"
+            "comm_specialist|compiler_specialist|system_specialist|"
+            "pr_intel_specialist>, "
+            "gap_canonical_id=<stable gap id>, "
+            "gap_symptom?=<str>, gap_layer?=<str>, "
+            "gap_evidence?={profile_trace:..., ...}, "
+            "max_turns?=<int<=16>}}"
+        )
+    if meta.name == "integrate_patch":
+        return (
+            "delegate{action_name='integrate_patch', params={"
+            "specialist_task_id=<completed specialist task_id>, "
+            "patches?=[<patch paths from specialist_done>], "
+            "config_changes?={ENV_VAR: value}, "
+            "keep_threshold_pct?=0.2, "
+            "accuracy_baseline?={task: {metric: score}}}}"
+        )
     return (
         f"propose_action{{action_name='{meta.name}', "
         f"predicted_gain_pct=<your estimate>}}"
@@ -354,19 +391,27 @@ def _format_grid_injection_hint(name: str) -> str | None:
     """Return a per-action one-liner showing the LLM how to override grid."""
     if name == "explore":
         return (
-            "GRID INPUT (v0.8 M3, REQUIRED): emit "
+            "GRID INPUT (v0.8 M3 + PR-A9 Arbor-into-Hyperloom, "
+            "REQUIRED): emit "
             "`delegate{action_name='explore', params={grid: [{name, "
             "extra_args, extra_envs, provenance, kb_evidence?, "
             "pr_evidence?, source_evidence?}, ...], "
             "base_extra_args?, base_tput?, accuracy_baseline?, "
             "keep_threshold_pct?: 0.2, stack_stable_threshold_pct?: 0.5}}`. "
             "Variants run serially; each KEEP triggers an inlined "
-            "stack rebench (replaces validate_stack). Provenance is "
-            "one of 'default_grid' / 'llm_direct' / 'specialist:<domain>' "
-            "(specialist arrives in M5). The executor dedups against "
-            "SharedState.explore_search by canonical_fingerprint, so a "
-            "rename of an already-tested (args, envs) collapses to the "
-            "same row."
+            "stack rebench (replaces validate_stack). "
+            "**Provenance is now restricted (PR-A9):** every variant "
+            "MUST carry provenance='specialist:<domain>' (a derived "
+            "row from a specialist_done.proposal_set) OR "
+            "provenance='default_grid' (cold-start fallback when "
+            "no specialist has run yet). The legacy 'llm_direct' "
+            "value — orchestration LLM authored the grid from one "
+            "prompt window without any specialist research — is now "
+            "DENIED by PolicyGate (rule "
+            "'explore_requires_specialist_provenance'). The executor "
+            "dedups against SharedState.explore_search by "
+            "canonical_fingerprint, so a rename of an already-tested "
+            "(args, envs) collapses to the same row."
         )
     if name == "sweep":
         return (

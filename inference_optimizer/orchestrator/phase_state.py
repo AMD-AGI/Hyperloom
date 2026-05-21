@@ -104,6 +104,13 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_EXPLORE: frozenset({
         # v0.8 canonical: merged grid runner + LLM specialist dispatch.
         "explore", "specialist",
+        # PR-A1 (Arbor-into-Hyperloom): specialists in EXPLORE may write
+        # source patches into ``runs/specialist/<task_id>/worktree/``;
+        # ``integrate_patch`` is the orchestrator-side serving-lane-locked
+        # apply+restart+gate step that consumes those patches. The action
+        # is deterministic (Python executor, no LLM) and bound to EXPLORE
+        # only — KERNEL still uses the ``integrate`` (kernel-owned) path.
+        "integrate_patch",
         "recover",
     }),
     PHASE_KERNEL: frozenset({

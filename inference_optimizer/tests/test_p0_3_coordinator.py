@@ -435,10 +435,18 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
     ``backends`` / ``params`` / ``validate_stack`` actions into it; the
     nested-key plumbing the test guards is identical across kinds.
     """
+    # PR-A9 (Arbor-into-Hyperloom): explore grid variants must carry
+    # provenance ∈ {default_grid, specialist:<domain>}. This test is
+    # about idempotency-key plumbing, not provenance semantics, so we
+    # use the cold-start ``default_grid`` value.
     delegate = Intent(type=IntentType.DELEGATE, payload={
         "action_name": "explore",
         "params": {
-            "grid": [{"name": "round2", "extra_sglang_args": "--x"}],
+            "grid": [{
+                "name": "round2",
+                "extra_sglang_args": "--x",
+                "provenance": "default_grid",
+            }],
             "idempotency_key": "explore-round-2",
         },
     })
