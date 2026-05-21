@@ -217,12 +217,25 @@ class SpecialistPromptInputs:
     domain: SpecialistDomain
     max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS
 
-    # Hardware context (§3.5 §6 part 2)
+    # Hardware context (§3.5 §6 part 2). ``tp`` defaults to 0
+    # (sentinel for "unspecified"), NOT 1 — a silent default of 1
+    # would make comm_specialist veto its own proposals on
+    # tensor-parallel sessions where the Coordinator forgot to
+    # plumb ``params['tp']`` from SharedState.
     gpu_type: str = ""
-    tp: int = 1
+    tp: int = 0
     hbm_gb: float = 0.0
     peak_tflops: float = 0.0
     arch_notes: str = ""
+    # Workload context (mirrored from SharedState by
+    # Coordinator._warm_specialist_params; renders in section 2 so
+    # the specialist sees the actual benchmark workload instead of
+    # the dataclass default).
+    precision: str = ""
+    conc: int = 0
+    isl: int = 0
+    osl: int = 0
+    max_model_len: int = 0
 
     # Gap statement (§3.5 §6 part 3)
     gap_canonical_id: str = ""
@@ -259,18 +272,26 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
     body: list[str] = [
         "## 1. IDENTITY & AUTONOMY",
         "",
-        f"You are a **{inp.domain.key}** specialist sub-agent (KB_design §3.5).",
-        f"Layer: {inp.domain.layer}.",
+        f"You are a fully autonomous **{inp.domain.key}** dispatched by the",
+        f"Hyperloom Coordinator (KB_design §3.5). Layer: {inp.domain.layer}.",
         f"KB anchor: {inp.domain.kb_anchor}.",
         "",
         f"Description: {inp.domain.description or '(generic)'}",
         "",
-        "Your single mission is to **produce proposals + evidence**, and",
-        "optionally author source patches into your isolated worktree.",
-        "The Hyperloom Coordinator owns all KEEP/REVERT decisions, server",
-        "benchmarks, accuracy gates, and KB writes; you participate by",
-        "emitting ONE final ``specialist_done`` (intent OR done-file per",
-        "Section 8) carrying your proposal_set and ``patches_written``.",
+        "You operate **autonomously** inside your domain — no per-step approval",
+        "is needed. You have full authority to read any code under the framework",
+        "source roots (Section 7), search any public GitHub repo or NVIDIA PR,",
+        "probe the host via Bash, **author source patches into your isolated",
+        "worktree**, and use as many of your ``max_turns`` LLM turns as you need",
+        "to be thorough. Be creative. Investigate deeply. One-turn shortcuts",
+        "are discouraged when a real bottleneck is on the table.",
+        "",
+        "Division of labour: the Coordinator owns the serving GPU, runs the E2E",
+        "benchmark, and decides KEEP/REVERT — you do not have to validate final",
+        "throughput yourself. Your single deliverable is ONE final ``specialist_done``",
+        "(Section 8) carrying ``proposal_set`` + ``patches_written``. The hard",
+        "capability boundary is fixed by Section 9 Iron Rules; everything inside",
+        "it is yours.",
     ]
     # PR-A6 (Arbor-into-Hyperloom): per-domain expertise + focus
     # paragraph. Each domain template emphasises the surface area the
@@ -294,11 +315,32 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(f"- gpu_type: {inp.gpu_type}")
     else:
         rows.append(f"- gpu_type: {_NONE_PLACEHOLDER}")
-    rows.append(f"- TP: {inp.tp}")
+    if inp.tp > 0:
+        rows.append(f"- TP: {inp.tp}")
+    else:
+        rows.append(f"- TP: {_NONE_PLACEHOLDER}")
     if inp.hbm_gb > 0:
         rows.append(f"- HBM per GPU: {inp.hbm_gb:.1f} GB")
     if inp.peak_tflops > 0:
         rows.append(f"- Peak TFLOPs (declared): {inp.peak_tflops:.1f}")
+    # Workload context — surfacing concrete numbers prevents the
+    # specialist from guessing (or assuming defaults) when reasoning
+    # about whether a given knob is reachable for this run.
+    workload_rows: list[str] = []
+    if inp.precision:
+        workload_rows.append(f"- precision: {inp.precision}")
+    if inp.conc > 0:
+        workload_rows.append(f"- concurrency: {inp.conc}")
+    if inp.isl > 0:
+        workload_rows.append(f"- ISL (input seq len): {inp.isl}")
+    if inp.osl > 0:
+        workload_rows.append(f"- OSL (output seq len): {inp.osl}")
+    if inp.max_model_len > 0:
+        workload_rows.append(f"- max_model_len: {inp.max_model_len}")
+    if workload_rows:
+        rows.append("")
+        rows.append("Workload:")
+        rows.extend(workload_rows)
     if inp.arch_notes:
         rows.append("")
         rows.append(f"Architecture notes: {inp.arch_notes}")
@@ -336,10 +378,13 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
         rows.extend([
             _NONE_PLACEHOLDER,
             "",
-            "(No KB sub-graph supplied; this is the M5 default when "
-            "Cortex T1 traverse hasn't been wired up for the specialist's "
-            "anchor yet. Use mcp__cortex_kb__traverse tool calls to "
-            "navigate the KB if needed.)",
+            "(No KB sub-graph supplied. The Coordinator pre-warms this "
+            "section via select_kb_for_domain before dispatch; an empty "
+            "block means the anchor has no committed entries yet (cold "
+            "start) or the warmup hit a soft failure. The specialist "
+            "subprocess has no live KB connection — surface what you "
+            "need in ``residual_questions`` so a future round can "
+            "re-warm with a richer anchor.)",
         ])
         return rows
     rows.append("```json")
@@ -527,9 +572,9 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "   Inv-5.1 updated.)",
         "3. **NEVER** call ``cortex-kb`` write endpoints (propose-point /",
         "   propose-edge / hypothesize / ingest-attempt / verify / commit)",
-        "   directly. The Coordinator owns KB writes (PolicyGate R4); your",
-        "   only KB read paths are ``mcp__cortex_kb__traverse`` /",
-        "   ``find_recipe`` / ``query``.",
+        "   directly. The Coordinator owns KB writes (PolicyGate R4). KB",
+        "   read context is pre-warmed into Section 4 of this prompt; the",
+        "   specialist subprocess has no live KB connection.",
         "4. **NEVER** emit any intent other than ``specialist_done``,",
         "   ``send_message`` (heartbeat), or ``alert``. Any other intent",
         "   type triggers PolicyGate R3 ``specialist_done_source``.",

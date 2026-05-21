@@ -283,19 +283,28 @@ def test_delegate_with_websearch_action_name_denied():
 # ===========================================================================
 def test_specialist_runner_constants_derive_from_policy():
     """Specialist runner re-exports the canonical tool sets via
-    :mod:`policy` — verify they round-trip without drift."""
+    :mod:`policy` — verify they round-trip without drift.
+
+    Note: ``CORTEX_KB_READONLY_MCP_TOOLS`` is kept as an importable
+    constant (PolicyGate uses ``CORTEX_KB_READ_TOOL_NAMES`` for read
+    vs. write differentiation) but those names are intentionally NOT
+    in the default specialist whitelist: Cortex KB has no MCP surface
+    (REST only), and listing dead ``mcp__cortex_kb__*`` tool names in
+    ``--allowedTools`` caused specialists to fall back to WebSearch
+    after the orphan calls failed.
+    """
     from inference_optimizer.orchestrator import specialist_runner as sr
 
     assert set(sr.PR_MONITOR_MCP_TOOLS) == PR_MONITOR_TOOL_NAMES
     assert set(sr.CORTEX_KB_READONLY_MCP_TOOLS) == CORTEX_KB_READ_TOOL_NAMES
     # Default whitelist must include emit_intent / Read / Grep / Glob /
-    # Bash + the web + readonly external tools, and must NOT include
-    # any KB write surface (defense in depth).
+    # Bash + the web + PR Monitor MCP, and must NOT include any KB
+    # write surface OR the orphan Cortex KB read MCP names.
     default_set = set(sr.DEFAULT_SPECIALIST_TOOLS)
     assert "emit_intent" in default_set
     assert WEB_TOOL_NAMES <= default_set
     assert PR_MONITOR_TOOL_NAMES <= default_set
-    assert CORTEX_KB_READ_TOOL_NAMES <= default_set
+    assert not (default_set & CORTEX_KB_READ_TOOL_NAMES)
     assert not (default_set & KB_WRITE_TOOL_NAMES)
     # Denylist must contain every KB write surface.
     assert KB_WRITE_TOOL_NAMES <= sr.SPECIALIST_TOOL_DENYLIST
