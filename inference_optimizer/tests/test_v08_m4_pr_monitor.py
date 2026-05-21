@@ -103,6 +103,8 @@ def test_pr_monitor_healthz_handles_network_error(monkeypatch):
 
 
 def test_pr_monitor_list_repos_parses_items(monkeypatch):
+    """Legacy mock shape: dict-wrapped ``{items: [{name: ...}]}``.
+    Kept supported for back-compat with old test fixtures."""
     c = PRMonitorClient.from_args()
     payload = {"items": [
         {"name": "ROCm/aiter"},
@@ -114,6 +116,36 @@ def test_pr_monitor_list_repos_parses_items(monkeypatch):
     )
     repos = c.list_repos()
     assert repos == ["ROCm/aiter", "sgl-project/sglang"]
+
+
+def test_pr_monitor_list_repos_parses_real_rest_shape(monkeypatch):
+    """Production PR Monitor returns a top-level JSON array whose
+    entries carry ``repo_name`` + ``is_active``. Reading ``name``
+    silently dropped every entry (pr_intel_specialist wildcard
+    expansion bug). Inactive repos must be skipped."""
+    c = PRMonitorClient.from_args()
+    payload = [
+        {
+            "repo_name": "ROCm/aiter",
+            "url": "https://github.com/ROCm/aiter.git",
+            "is_active": True,
+        },
+        {
+            "repo_name": "ROCm/sglang",
+            "url": "https://github.com/ROCm/sglang.git",
+            "is_active": False,        # ← inactive: must be skipped
+        },
+        {
+            "repo_name": "ROCm/vllm",
+            "is_active": True,
+        },
+    ]
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.pr_monitor.urllib.request.urlopen",
+        lambda *_a, **_kw: _make_response(payload),
+    )
+    repos = c.list_repos()
+    assert repos == ["ROCm/aiter", "ROCm/vllm"]
 
 
 def test_pr_monitor_list_prs_parses_summary(monkeypatch):
@@ -416,9 +448,17 @@ def test_default_specialist_tools_include_all_pr_monitor_mcp_tools():
     assert len(PR_MONITOR_MCP_TOOLS) == 12
 
 
-def test_default_specialist_tools_include_cortex_kb_readonly():
+def test_default_specialist_tools_exclude_orphan_cortex_kb_readonly():
+    """Cortex KB has no MCP surface (REST only); KB read context is
+    pre-warmed into the specialist prompt by
+    ``Coordinator._warm_specialist_params``. Advertising
+    ``mcp__cortex_kb__{traverse,find_recipe,query}`` in the
+    ``--allowedTools`` list caused specialists to attempt orphan
+    tool calls and silently fall back to ``WebSearch``. The names
+    remain importable for PolicyGate (denial validation) but are NOT
+    in the default specialist whitelist."""
     for t in CORTEX_KB_READONLY_MCP_TOOLS:
-        assert t in DEFAULT_SPECIALIST_TOOLS
+        assert t not in DEFAULT_SPECIALIST_TOOLS
 
 
 def test_specialist_runner_strips_pr_monitor_when_plane_disabled():

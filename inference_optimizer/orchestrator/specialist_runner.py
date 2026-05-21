@@ -98,6 +98,15 @@ CORTEX_KB_READONLY_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_CORTEX_KB_READ))
 #
 # Note these tool names follow the Claude / Cursor convention; the actual MCP
 # server names depend on operator config.
+#
+# Cortex KB has no MCP surface (REST only); its read context is
+# pre-warmed into Section 4 of the specialist prompt by
+# ``Coordinator._warm_specialist_params`` → ``select_kb_for_domain``.
+# The ``mcp__cortex_kb__{traverse,find_recipe,query}`` names therefore
+# stay out of the default whitelist — advertising tool names that no
+# MCP server backs caused specialists to attempt orphan calls and
+# silently fall back to ``WebSearch``. ``CORTEX_KB_READONLY_MCP_TOOLS``
+# remains importable for PolicyGate (denial validation) and tests.
 DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
     "emit_intent",
     "Read", "Grep", "Glob",
@@ -109,7 +118,7 @@ DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
     # git diff > patches/<file>.patch; the runner's per-call hook (TODO M6)
     # will block destructive invocations.
     "Bash",
-) + tuple(sorted(_WEB)) + PR_MONITOR_MCP_TOOLS + CORTEX_KB_READONLY_MCP_TOOLS
+) + tuple(sorted(_WEB)) + PR_MONITOR_MCP_TOOLS
 
 
 # Tools explicitly denied even if the operator extends the whitelist.
@@ -433,10 +442,20 @@ class SpecialistRunner:
                     params.get("source_hint_directories") or ()
                 ),
                 gpu_type=str(params.get("gpu_type") or ""),
-                tp=int(params.get("tp") or 1),
+                tp=int(params.get("tp") or 0),
                 hbm_gb=float(params.get("hbm_gb") or 0.0),
                 peak_tflops=float(params.get("peak_tflops") or 0.0),
                 arch_notes=str(params.get("arch_notes") or ""),
+                # Workload context — populated by
+                # Coordinator._warm_specialist_params from SharedState.
+                # Zero/empty means "Coordinator did not plumb this
+                # field"; the prompt section 2 renderer treats those
+                # as "(none)" rather than fabricating a default.
+                precision=str(params.get("precision") or ""),
+                conc=int(params.get("conc") or 0),
+                isl=int(params.get("isl") or 0),
+                osl=int(params.get("osl") or 0),
+                max_model_len=int(params.get("max_model_len") or 0),
                 workspace_path=(
                     str(workspace_for_prompt) if workspace_for_prompt else ""
                 ),
