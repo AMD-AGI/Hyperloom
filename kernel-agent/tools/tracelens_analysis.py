@@ -1360,16 +1360,64 @@ def load_model_kernel_params(model_name: str) -> dict[str, Any]:
     return {}
 
 
+_FLYDSL_TARGET_ARCH_BY_PLATFORM = {
+    "mi300x": "gfx942",
+    "mi325x": "gfx942",
+    "mi355x": "gfx950",
+}
+_FLYDSL_SMEM_MARKERS = ("SmemAllocator", "SmemPtr", "smem_alloc")
+_FLYDSL_BUFFER_LOAD_MARKERS = (
+    "make_buffer_tensor", "BufferCopy", "rocdl", "buffer_load",
+)
+
+
+def _flydsl_kernel_params(
+    source_file: str, target_platform: str,
+) -> dict[str, Any]:
+    """Return FlyDSL-specific kernel_params for prompt construction.
+
+    Mirrors the metadata GEAK's ``skills/flydsl/`` cheatsheet keys off:
+    JIT cache state, MLIR target arch, and whether the source uses
+    SmemAllocator / buffer-load intrinsics. Best-effort — missing fields
+    just omit; never raise.
+    """
+    params: dict[str, Any] = {}
+    arch = _FLYDSL_TARGET_ARCH_BY_PLATFORM.get(
+        (target_platform or "").strip().lower(),
+    )
+    if arch:
+        params["FLYDSL_TARGET_ARCH"] = arch
+    cache_dir = os.environ.get("FLYDSL_AUTOTUNE_CACHE_DIR", "").strip()
+    if cache_dir:
+        params["FLYDSL_AUTOTUNE_CACHE_DIR"] = cache_dir
+    enable_cache = os.environ.get("FLYDSL_RUNTIME_ENABLE_CACHE", "").strip()
+    if enable_cache:
+        params["FLYDSL_RUNTIME_ENABLE_CACHE"] = enable_cache
+    if source_file:
+        try:
+            with open(source_file, "r", encoding="utf-8", errors="replace") as fh:
+                head = fh.read(_FLYDSL_SCAN_BYTES)
+        except OSError:
+            head = ""
+        if head:
+            if any(m in head for m in _FLYDSL_SMEM_MARKERS):
+                params["FLYDSL_USES_SMEM"] = True
+            if any(m in head for m in _FLYDSL_BUFFER_LOAD_MARKERS):
+                params["FLYDSL_USES_BUFFER_LOAD"] = True
+    return params
+
+
 def enrich_candidates_with_runtime_metadata(
     candidates: list[dict[str, Any]], args: argparse.Namespace,
 ) -> None:
     """Attach stable runtime metadata fields before GEAK prompt generation."""
     framework = str(getattr(args, "framework", "") or "").strip()
     model_params = load_model_kernel_params(str(getattr(args, "model_name", "") or ""))
+    target_platform = str(getattr(args, "target_platform", "") or "")
     runtime_flags = {
         "analysis_mode": getattr(args, "analysis_mode", ""),
         "runtime_env": getattr(args, "runtime_env", ""),
-        "target_platform": getattr(args, "target_platform", ""),
+        "target_platform": target_platform,
     }
     for item in candidates:
         if not isinstance(item, dict):
@@ -1391,6 +1439,14 @@ def enrich_candidates_with_runtime_metadata(
             params = item["kernel_params"]
             if isinstance(params, dict):
                 for key, value in model_params.items():
+                    params.setdefault(key, value)
+        if item.get("source_type") == "flydsl":
+            flydsl_params = _flydsl_kernel_params(
+                str(item.get("source_file") or ""), target_platform,
+            )
+            params = item["kernel_params"]
+            if isinstance(params, dict):
+                for key, value in flydsl_params.items():
                     params.setdefault(key, value)
         flags = item.get("runtime_flags")
         if not isinstance(flags, dict):

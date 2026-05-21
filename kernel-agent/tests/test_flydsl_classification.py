@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import tempfile
@@ -16,10 +17,12 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from tracelens_analysis import (  # noqa: E402
     _extra_reusable_roots_from_env,
+    _flydsl_kernel_params,
     _looks_like_flydsl_source,
     _reusable_source_roots,
     classify_patchability,
     derive_kernel_category,
+    enrich_candidates_with_runtime_metadata,
     source_type_for,
 )
 from tracelens_skill_runner import (  # noqa: E402
@@ -254,6 +257,105 @@ class TestGEAKKernelTypeMapping(unittest.TestCase):
         self.assertEqual(self.mod._GEAK_KERNEL_TYPE["python"], "other")
         self.assertEqual(self.mod._GEAK_KERNEL_TYPE["vendor_binary"], "other")
         self.assertEqual(self.mod._GEAK_KERNEL_TYPE["unknown"], "other")
+
+
+class TestFlyDSLKernelParams(unittest.TestCase):
+    """FlyDSL-specific metadata enrichment for GEAK prompt construction."""
+
+    def _write_source(self, body: str) -> str:
+        tmp = tempfile.NamedTemporaryFile(
+            "w", suffix=".py", delete=False, encoding="utf-8",
+        )
+        tmp.write(body)
+        tmp.flush()
+        tmp.close()
+        return tmp.name
+
+    def test_target_arch_mapping(self) -> None:
+        params = _flydsl_kernel_params("", "mi300x")
+        self.assertEqual(params["FLYDSL_TARGET_ARCH"], "gfx942")
+        params = _flydsl_kernel_params("", "MI355X")
+        self.assertEqual(params["FLYDSL_TARGET_ARCH"], "gfx950")
+        params = _flydsl_kernel_params("", "")
+        self.assertNotIn("FLYDSL_TARGET_ARCH", params)
+
+    def test_env_passthrough(self) -> None:
+        env = {
+            "FLYDSL_AUTOTUNE_CACHE_DIR": "/tmp/flydsl-cache",
+            "FLYDSL_RUNTIME_ENABLE_CACHE": "1",
+        }
+        with mock.patch.dict(os.environ, env):
+            params = _flydsl_kernel_params("", "mi355x")
+            self.assertEqual(params["FLYDSL_AUTOTUNE_CACHE_DIR"], "/tmp/flydsl-cache")
+            self.assertEqual(params["FLYDSL_RUNTIME_ENABLE_CACHE"], "1")
+
+    def test_source_smem_marker_detected(self) -> None:
+        path = self._write_source(
+            "import flydsl.compiler as flyc\n"
+            "from flydsl.utils.smem_allocator import SmemAllocator\n"
+            "@flyc.kernel\n"
+            "def k(): pass\n"
+        )
+        params = _flydsl_kernel_params(path, "mi355x")
+        self.assertTrue(params.get("FLYDSL_USES_SMEM"))
+
+    def test_source_buffer_load_marker_detected(self) -> None:
+        path = self._write_source(
+            "import flydsl.expr as fx\n"
+            "from flydsl.expr import rocdl\n"
+            "x = fx.rocdl.make_buffer_tensor(In)\n"
+        )
+        params = _flydsl_kernel_params(path, "mi355x")
+        self.assertTrue(params.get("FLYDSL_USES_BUFFER_LOAD"))
+
+    def test_source_without_markers_omits_fields(self) -> None:
+        path = self._write_source(
+            "import flydsl.compiler as flyc\n"
+            "@flyc.kernel\n"
+            "def k(): pass\n"
+        )
+        params = _flydsl_kernel_params(path, "mi355x")
+        self.assertNotIn("FLYDSL_USES_SMEM", params)
+        self.assertNotIn("FLYDSL_USES_BUFFER_LOAD", params)
+
+    def test_missing_source_does_not_raise(self) -> None:
+        params = _flydsl_kernel_params("/no/such/path.py", "mi355x")
+        self.assertEqual(params.get("FLYDSL_TARGET_ARCH"), "gfx950")
+        self.assertNotIn("FLYDSL_USES_SMEM", params)
+
+    def test_enrich_attaches_flydsl_params_only_for_flydsl(self) -> None:
+        path = self._write_source(
+            "import flydsl.compiler as flyc\n"
+            "from flydsl.utils.smem_allocator import SmemAllocator\n"
+            "@flyc.kernel\n"
+            "def k(): pass\n"
+        )
+        args = argparse.Namespace(
+            framework="sglang",
+            model_name="",
+            analysis_mode="inference",
+            runtime_env="local",
+            target_platform="mi355x",
+        )
+        flydsl_cand = {
+            "name": "k",
+            "source_file": path,
+            "source_type": "flydsl",
+        }
+        triton_cand = {
+            "name": "t",
+            "source_file": path,
+            "source_type": "triton",
+        }
+        enrich_candidates_with_runtime_metadata([flydsl_cand, triton_cand], args)
+        self.assertEqual(
+            flydsl_cand["kernel_params"]["FLYDSL_TARGET_ARCH"], "gfx950",
+        )
+        self.assertTrue(flydsl_cand["kernel_params"]["FLYDSL_USES_SMEM"])
+        # Triton candidate must NOT get any FLYDSL_* fields.
+        self.assertFalse(
+            any(k.startswith("FLYDSL_") for k in triton_cand["kernel_params"]),
+        )
 
 
 class TestCandidateEnvForwarding(unittest.TestCase):
