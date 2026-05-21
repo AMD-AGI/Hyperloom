@@ -181,9 +181,9 @@ class UnittestAgentGenerationTests(unittest.TestCase):
 
     def test_generates_hip_harness_for_existing_benchmark(self):
         # Make a tiny fake .cu source and a tiny benchmark so we do not need
-        # hipcc/GPU for the generation path.  Correctness is deferred to GEAK
-        # runtime for HIP/C++ kernels, but the harness should still be created
-        # and exposed as a test command.
+        # hipcc/GPU for the generation path.  With self_verify disabled the
+        # harness should be created, but it must stay degraded so it will not
+        # be used as GEAK's --test-command without correctness passing first.
         with tempfile.TemporaryDirectory(prefix="ua_hip_") as td:
             src = Path(td) / "kernel.cu"
             src.write_text("__global__ void k() {}\n")
@@ -195,13 +195,13 @@ class UnittestAgentGenerationTests(unittest.TestCase):
                 "benchmark_files": [str(bench)], "kernel_repo": str(Path(td)),
             }
             m = ua.generate_unittest(cand, out_dir=Path(td) / "task", self_verify=False)
-            self.assertEqual(m["status"], "ok")
+            self.assertEqual(m["status"], "degraded")
             self.assertEqual(m["task_type"], "hip2hip")
             self.assertTrue(Path(m["task_runner"]).is_file())
             self.assertIn("bench.py", m["benchmark_commands"][0])
             ast.parse(Path(m["task_runner"]).read_text())
 
-    def test_hip_harness_compile_self_verify_is_lightweight(self):
+    def test_hip_harness_self_verify_runs_correctness_before_ok(self):
         with tempfile.TemporaryDirectory(prefix="ua_hip_sv_") as td:
             src = Path(td) / "kernel.cu"
             src.write_text("__global__ void k() {}\n")
@@ -215,7 +215,27 @@ class UnittestAgentGenerationTests(unittest.TestCase):
             m = ua.generate_unittest(cand, out_dir=Path(td) / "task", self_verify=True)
             self.assertEqual(m["status"], "ok")
             self.assertEqual(m["self_verify"]["compile"], "ok")
-            self.assertEqual(m["self_verify"]["correctness"], "skipped")
+            self.assertEqual(m["self_verify"]["correctness"], "ok")
+            self.assertIn(
+                "pre-GEAK full correctness",
+                m["self_verify"]["correctness_reason"],
+            )
+
+    def test_hip_harness_correctness_failure_is_degraded(self):
+        with tempfile.TemporaryDirectory(prefix="ua_hip_sv_fail_") as td:
+            src = Path(td) / "kernel.cu"
+            src.write_text("__global__ void k() {}\n")
+            bench = Path(td) / "bench.py"
+            bench.write_text("raise SystemExit(7)\n")
+            cand = {
+                "kernel_id": "k", "name": "k", "kernel_name": "k",
+                "source_file": str(src), "input_shapes": [[8]],
+                "benchmark_files": [str(bench)], "kernel_repo": str(Path(td)),
+            }
+            m = ua.generate_unittest(cand, out_dir=Path(td) / "task", self_verify=True)
+            self.assertEqual(m["status"], "degraded")
+            self.assertEqual(m["self_verify"]["compile"], "ok")
+            self.assertEqual(m["self_verify"]["correctness"], "fail")
 
     def test_hip_shape_cases_fall_back_to_profile_trace(self):
         with tempfile.TemporaryDirectory(prefix="ua_hip_profile_") as td:
@@ -265,7 +285,7 @@ class UnittestAgentGenerationTests(unittest.TestCase):
                     os.environ.pop("USER_DATA_PATH", None)
                 else:
                     os.environ["USER_DATA_PATH"] = old_user_data
-            self.assertEqual(m["status"], "ok")
+            self.assertEqual(m["status"], "degraded")
             self.assertEqual(m["shape_cases"][0]["input_dims"], [[32768, 128], [32768, 128], [128], []])
             self.assertNotIn([1024, 4096], m["shapes"])
 
